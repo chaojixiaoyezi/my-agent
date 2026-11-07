@@ -4,9 +4,11 @@ from __future__ import annotations
 
 """Derived search index for owner-scoped authoritative conversation messages."""
 
+import json
 from typing import TYPE_CHECKING
 
 from ..local_storage.records import LocalRecordInput
+from ..local_storage.schema import _read_local_state, _write_local_state
 from .channels import project_user_reply
 from .models import MessageLogEntry
 
@@ -15,8 +17,7 @@ if TYPE_CHECKING:
     from .store import ConversationStore
 
 
-# LLM: 同agent/thread首次索引仍沿原两遍坏行检查；连接限同线程本批次，不延长事务或跳过错误，失败不记已索引。
-# 函数用途: 逐条同步线程索引，一次批次只开一个SQLite连接。
+# 水位保存在派生索引所在的 local.db；代理回收后继续增量读取，失败不推进，也不标记本轮完成。
 def ensure_thread_history_indexed(
     agent: SimpleAgent,
     store: ConversationStore,
@@ -28,11 +29,28 @@ def ensure_thread_history_indexed(
         agent._conversation_indexed_threads = indexed
     if thread_id in indexed:
         return
-    # 逐条流式建索引，不一次物化全量行；有任何坏行时与原实现一样一条都不索引。
-    with agent.local_store.connection_batch():
-        errors = store.messages.visit_all_report(thread_id, lambda row: index_conversation_message(agent, store, row))
-    if errors:
-        raise OSError("conversation transcript could not be indexed reliably")
+    local = agent.local_store
+    key = "conversation_history_indexed:" + thread_id
+    with local.connection_batch():
+        with local._connection() as conn:
+            value = _read_local_state(conn, key)
+        try:
+            watermark = json.loads(value) if value is not None else None
+        except (ValueError, TypeError):
+            watermark = None
+        errors, watermark = store.messages.visit_from_report(
+            thread_id, watermark, lambda row: index_conversation_message(agent, store, row),
+        )
+        if errors:
+            raise OSError("conversation transcript could not be indexed reliably")
+        value = json.dumps(watermark, sort_keys=True)
+        if local.coordinator_io:
+            # 整笔 DML/commit 消费当次 _local_write 写门，不把读取连接带到门外写入。
+            local._coordinator_transaction(lambda conn: _write_local_state(conn, key, value))
+        else:
+            with local._connection() as conn:
+                _write_local_state(conn, key, value)
+                conn.commit()
     indexed.add(thread_id)
 
 

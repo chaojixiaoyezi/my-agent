@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
 import logging
 import os
@@ -285,6 +286,72 @@ def _reader_layout_is_current(reader):
     opened, current = os.fstat(reader.hot.fileno()), reader.path.stat()
     return ((opened.st_dev, opened.st_ino) == (current.st_dev, current.st_ino)
             and reader.manifest == transcript_manifest(reader.path))
+
+
+def _history_watermark(reader: TranscriptReader | None = None) -> dict:
+    """冻结已覆盖的完整行字节水位；position 使用转录的逻辑字节坐标。"""
+    manifest = (reader.manifest or {}) if reader is not None else {}
+    segments = manifest.get("segment_count", 0)
+    identity = _file_identity(reader.hot) if reader is not None else (0, 0)
+    return {
+        "schema": "conversation_history_watermark.v1",
+        "position": reader.complete_end if reader is not None else 0,
+        "cold_count": manifest.get("cold_message_count", 0),
+        "cold_segments": segments,
+        "last_segment": f"seg-{segments:020d}.jsonl" if segments else "",
+        "hot_dev": identity[0], "hot_ino": identity[1],
+        "hot_offset": reader.complete_end - reader.base if reader is not None else 0,
+    }
+
+
+def _history_watermark_valid(watermark, current: dict) -> bool:
+    """只接受当前水位协议及仍存在的冷段前缀，不按旧状态别名猜测进度。"""
+    if not isinstance(watermark, dict) or watermark.get("schema") != current["schema"]:
+        return False
+    numbers = ("position", "cold_count", "cold_segments", "hot_dev", "hot_ino", "hot_offset")
+    if any(type(watermark.get(key)) is not int or watermark[key] < 0 for key in numbers):
+        return False
+    segments = watermark["cold_segments"]
+    last = f"seg-{segments:020d}.jsonl" if segments else ""
+    return (segments <= current["cold_segments"] and watermark.get("last_segment") == last
+            and watermark["cold_count"] <= current["cold_count"])
+
+
+def _history_range_lines(reader: TranscriptReader, start: int) -> Iterator[tuple[int, str]]:
+    """复用全量读取的通用换行与坏行判定，读取范围固定，不追赶迟到追加。"""
+    def lines():
+        reader.seek(start)
+        while reader.tell() < reader.end:
+            yield from io.StringIO(reader.readline().decode("utf-8"), newline=None)
+
+    yield from _forward_lines(lines())
+
+
+def _history_range_entries(reader: TranscriptReader, start: int) -> Iterator[MessageLogEntry]:
+    if reader.manifest is None:
+        for _line_number, text in _history_range_lines(reader, start):
+            yield MessageLogEntry.from_dict(json.loads(text))
+        return
+    # 冷热布局沿原 bytes JSON 解析合同；不把 Unicode 空白行误当作可跳过的 ASCII 空行。
+    reader.seek(start)
+    while reader.tell() < reader.end:
+        raw = reader.readline()
+        if raw.strip():
+            yield MessageLogEntry.from_dict(json.loads(raw))
+
+
+def _history_range_errors(reader: TranscriptReader, start: int) -> list[dict]:
+    validation = _Validation(reader.path)
+    try:
+        if reader.manifest is not None:
+            for _entry in _history_range_entries(reader, start):
+                pass
+        else:
+            for line_number, text in _history_range_lines(reader, start):
+                validation.check(line_number, text)
+    except Exception as exc:
+        return [jsonl_error(exc, _READ_CONTEXT, path=reader.path)]
+    return [*validation.json_errors, *validation.parse_errors]
 
 
 # LLM: 复用canonical完整前缀验证及首ID地址；只报告目标前的JSON错误和目标自身解析错误，不受目标后的坏行影响。
@@ -588,20 +655,12 @@ class MessageStore:
             except Exception as exc:
                 return [jsonl_error(exc, _READ_CONTEXT, path=path)]
             with reader:
-                try:
-                    while reader.tell() < reader.end:
-                        raw = reader.readline()
-                        if raw.strip():
-                            MessageLogEntry.from_dict(json.loads(raw))
-                except Exception as exc:
-                    return [jsonl_error(exc, _READ_CONTEXT, path=path)]
-                reader.seek(0)
-                while reader.tell() < reader.end:
-                    raw = reader.readline()
-                    if raw.strip():
-                        entry = MessageLogEntry.from_dict(json.loads(raw))
-                        if not is_display_checkpoint(entry):
-                            visitor(entry)
+                errors = _history_range_errors(reader, 0)
+                if errors:
+                    return errors
+                for entry in _history_range_entries(reader, 0):
+                    if not is_display_checkpoint(entry):
+                        visitor(entry)
             return []
         try:
             errors, last_line, identity = _validate_all(path)
@@ -613,6 +672,62 @@ class MessageStore:
             if not is_display_checkpoint(entry):
                 visitor(entry)
         return []
+
+    def visit_from_report(
+        self, thread_id: str, watermark: dict | None, visitor: Callable[[MessageLogEntry], object],
+    ) -> tuple[list[dict], dict]:
+        """先校验再访问水位之后的消息；失败保留旧水位，业务回调异常原样传播。"""
+        path = self.storage.message_path(thread_id)
+        # 用户删除转录后视为新的空历史；不创建文件，也不保留指向旧文件的偏移。
+        if not path.exists():
+            return [], _history_watermark()
+        try:
+            reader = TranscriptReader(path, complete_only=False)
+        except Exception as exc:
+            return [jsonl_error(exc, _READ_CONTEXT, path=path)], watermark
+        with reader:
+            current = _history_watermark(reader)
+            valid = _history_watermark_valid(watermark, current)
+            start = reader.base
+            if valid:
+                previous_segments = watermark["cold_segments"]
+                if previous_segments < current["cold_segments"]:
+                    # 段描述符按序号寻址，禁止遍历旧段目录；新增段与整个热文件允许重复投影。
+                    start = 0
+                    if previous_segments:
+                        try:
+                            descriptor = reader.index.get(reader.manifest["index"], f"segment:{previous_segments}")
+                            start = descriptor["end"]
+                            if type(start) is not int or not 0 <= start <= reader.base:
+                                raise DataCorruptionError("canonical transcript segment boundary is invalid")
+                        except Exception as exc:
+                            return [jsonl_error(exc, _READ_CONTEXT, path=path)], watermark
+                elif ((watermark["hot_dev"], watermark["hot_ino"])
+                      == (current["hot_dev"], current["hot_ino"])
+                      and watermark["hot_offset"] <= reader.end - reader.base):
+                    offset = watermark["hot_offset"]
+                    reader.hot.seek(max(0, offset - 1))
+                    valid = (watermark["position"] == reader.base + offset
+                             and (offset == 0 or reader.hot.read(1) == b"\n"))
+                    start = reader.base + offset
+            if not valid:
+                # 先冻结水位，再沿原全量入口扫描；扫描期间追加的消息最多被重读，绝不被跳过。
+                errors = self.visit_all_report(thread_id, visitor)
+            else:
+                errors = _history_range_errors(reader, start)
+                if not errors:
+                    for entry in _history_range_entries(reader, start):
+                        if not is_display_checkpoint(entry):
+                            visitor(entry)
+            if errors:
+                return errors, watermark
+            try:
+                if (not _reader_layout_is_current(reader)
+                        or os.fstat(reader.hot.fileno()).st_size < reader.end - reader.base):
+                    raise DataCorruptionError("canonical transcript changed during history indexing")
+            except Exception as exc:
+                return [jsonl_error(exc, _READ_CONTEXT, path=path)], watermark
+            return [], current
 
     # LLM: 固定完整LF尾界供多页共享；只读、不产生Compact覆盖证明，半行和后续追加留待下次快照。
     # 函数用途: 获取原消息文件的完整行结束位置，失败时返回结构化错误，不把坏读当成空历史。
