@@ -16,6 +16,7 @@ tests, and runtime entrypoints all target the same command surface.
 
 import argparse
 import faulthandler
+import gc
 import json
 import logging
 import os
@@ -858,19 +859,24 @@ def _run_gateway_service_loop(context: GatewayRunContext) -> object:
     records, so the service thread only waits for the explicit stop record.
     """
     process_identity = _gateway_context_process_identity(context)
-    while True:
-        if context.paths.stop_request.exists():
-            payload = read_json_file(context.paths.stop_request)
-            if stop_request_targets_process(
-                payload,
-                process_identity,
-                process_started_at=context.process_started_at,
-            ):
-                return {"summary": "stop requested", "stop_request": payload}
-        restart_report = drain_for_requested_restart(context, process_identity)
-        if restart_report is not None:
-            return restart_report
-        time.sleep(0.25)
+    # 启动阶段的常驻对象移入永久代，第 2 代回收不再反复扫描它们；引用计数照常释放对象。
+    gc.freeze()
+    try:
+        while True:
+            if context.paths.stop_request.exists():
+                payload = read_json_file(context.paths.stop_request)
+                if stop_request_targets_process(
+                    payload,
+                    process_identity,
+                    process_started_at=context.process_started_at,
+                ):
+                    return {"summary": "stop requested", "stop_request": payload}
+            restart_report = drain_for_requested_restart(context, process_identity)
+            if restart_report is not None:
+                return restart_report
+            time.sleep(0.25)
+    finally:
+        gc.unfreeze()
 
 
 # LLM: 仅进程内保存原handler及同代公告目标，兼容原字典调用方；不增加持久生命周期权威。
