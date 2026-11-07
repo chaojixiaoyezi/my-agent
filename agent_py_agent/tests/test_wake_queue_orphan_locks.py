@@ -41,21 +41,24 @@ def test_first_pending_report_discards_history_before_bounded_scans(tmp_path, mo
     scans = []
     sweeps = []
     original_scan = store_index._scan_dir_match_names
-    original_glob = Path.glob
-
-    def measured_scan(path, pattern):
-        if path == directory:
-            with os.scandir(path) as entries:
-                scans.append(sum(1 for _ in entries))
-        return original_scan(path, pattern)
-
-    def measured_glob(path, pattern, **kwargs):
-        if pattern == "*.json.lock":
+    def measured_scan(path, pattern, on_entry=None):
+        if on_entry is not None:
             sweeps.append(path)
-        return original_glob(path, pattern, **kwargs)
+        if path != directory:
+            return original_scan(path, pattern, on_entry)
+        count = 0
+
+        def measured_entry(entry):
+            nonlocal count
+            count += 1
+            if on_entry is not None:
+                on_entry(entry)
+
+        names = original_scan(path, pattern, measured_entry)
+        scans.append(count)
+        return names
 
     monkeypatch.setattr(store_index, "_scan_dir_match_names", measured_scan)
-    monkeypatch.setattr(Path, "glob", measured_glob)
     held_path = directory / "held.json"
     with locked_json_path(held_path):
         for _ in range(3):
@@ -65,7 +68,8 @@ def test_first_pending_report_discards_history_before_bounded_scans(tmp_path, mo
             assert {path.name for path in directory.iterdir()} == {
                 *(f"wake-{number}.json" for number in range(6)), "held.json.lock",
             }
-    assert scans == [7, 7, 7]
+    # 首轮顺带回收 2000 个旧锁；目录变代必须再核对一次，后续热轮只枚举七个活跃入口。
+    assert scans == [2007, 7, 7, 7]
     assert sweeps == [store.storage.wake_queue_dir / "urgent", directory]
 
 

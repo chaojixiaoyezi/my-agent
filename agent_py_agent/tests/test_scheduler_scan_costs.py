@@ -127,8 +127,11 @@ def _age_path(path: Path, *, seconds: float = 3.0) -> None:
 # LLM: 隔离新旧两套模块级投影和诊断计数，测试前后均复位，不改生产缓存策略。
 # 函数用途: 防止等待行用例互相借缓存或统计而空转通过。
 @pytest.fixture
-def waiting_projection():
+def waiting_projection(monkeypatch):
     """投影缓存是模块级:用例前后清空,避免跨用例统计串味。"""
+    # 容量登记也属于进程级状态；测试四项 LRU 时隔离别的 owner 池登记，生产扩容策略不变。
+    capacity = repository_module.cache_capacity
+    monkeypatch.setattr(capacity, "_SLOTS", dict.fromkeys(capacity._SLOTS, 0))
     caches = (repository_module._WAITING_PROJECTION_CACHE, repository_module._STORE_PROJECTION_CACHE)
     stats = (repository_module._WAITING_PROJECTION_STATS, repository_module._STORE_PROJECTION_STATS)
     for cache in caches:

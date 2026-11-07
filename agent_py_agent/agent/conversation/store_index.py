@@ -95,13 +95,18 @@ def _canonical_scan_name(name: str, pattern: str) -> bool:
 # 非规范名不属于记录；禁止类型过滤，规范 wake-*.json 的断链、目录或坏账仍须产生 load_error。
 # 函数用途: 列出目录下匹配单段 fnmatch 模式的规范名字，目录不存在
 # 或不是目录视为空集合,目录不可列出返回 None。
-def _scan_dir_match_names(directory: Path, pattern: str) -> frozenset[str] | None:
+def _scan_dir_match_names(
+    directory: Path, pattern: str, on_entry: Callable[[Path], None] | None = None,
+) -> frozenset[str] | None:
     try:
         with os.scandir(directory) as items:
-            return frozenset(
-                item.name for item in items
-                if fnmatchcase(item.name, pattern) and _canonical_scan_name(item.name, pattern)
-            )
+            names = set()
+            for item in items:
+                if on_entry is not None:
+                    on_entry(directory / item.name)
+                if fnmatchcase(item.name, pattern) and _canonical_scan_name(item.name, pattern):
+                    names.add(item.name)
+            return frozenset(names)
     except FileNotFoundError:
         # 目录还没建 = 权威空集合,与旧 glob 的行为一致(不算不可读,不误清)。
         return frozenset()
@@ -146,9 +151,13 @@ class ScanIndex:
     # 目录列不出来时退回旧的 glob 口径继续枚举:枚举失败绝不能让调用方少看一批文件,清不清理
     # 是 ScanIndexes.usable 的事,与"本次能看到哪些路径"无关。
     # 函数用途: 返回目录下匹配 pattern 的路径,按旧实现的 canonical 顺序排列;返回值只读。
-    def ordered_paths(self, directory: Path, pattern: str) -> list[Path]:
+    def ordered_paths(
+        self, directory: Path, pattern: str, *, on_entry: Callable[[Path], None] | None = None,
+    ) -> list[Path]:
         stamp = _directory_fingerprint(directory)
-        names = _scan_dir_match_names(directory, pattern)
+        # 枚举观察者复用同一轮目录读取；观察者若清理侧车导致目录变代，usable 仍须重新核对。
+        names = (_scan_dir_match_names(directory, pattern) if on_entry is None
+                 else _scan_dir_match_names(directory, pattern, on_entry))
         with self._lock:
             self._last_scan = (
                 (directory, stamp, pattern, names, threading.current_thread())
