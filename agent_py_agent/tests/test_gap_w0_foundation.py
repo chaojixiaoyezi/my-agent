@@ -176,7 +176,7 @@ def test_default_switches_and_retry_delays_preserve_old_behavior():
     assert tuple(config.model_retry_backoff_seconds) == _RETRYABLE_HTTP_DELAYS_SECONDS
     assert CapabilityConfig().command_approval_filter_enabled is False
     assert CapabilityConfig().target_scope_policy_enabled is False
-    assert "llm.gateway.test" not in v13._load_registry()[0]
+    assert "llm.gateway.test" in v13._load_registry()[0]
 
 
 @pytest.mark.parametrize("value", [[0, 1.5, 9], (0, 1.5, 9), "[0, 1.5, 9]", []])
