@@ -10,10 +10,18 @@ from ..common.json_io import read_jsonl_objects_report
 # LLM: 启动复用旧来源迁移与原 scheduler 恢复，不代结 RuntimeDB attempt，也不把来源缺证据猜成当前 actor。
 # 函数用途: 组合根准备旧调度账本，使服务第一次读取就有准确归属和已死运行结算。
 def prepare_repository(repository, conversation_store, *, now: float) -> None:
+    from ..user_space.owner_quota import OwnerQuotaUnavailable
     from .creator_migration import migrate_monitor_creators
+    from .repository import SchedulerStateError
 
-    migrate_monitor_creators(repository, conversation_store, now=now)
-    repository.recover_interrupted_executions(now=now)
+    try:
+        migrate_monitor_creators(repository, conversation_store, now=now)
+        repository.recover_interrupted_executions(now=now)
+    except (SchedulerStateError, OwnerQuotaUnavailable) as exc:
+        logging.getLogger(__name__).warning(
+            "SCHEDULER_STARTUP_MIGRATION_DEFERRED phase=prepare error=%s code=%s",
+            type(exc).__name__, getattr(exc, "error_code", "") or getattr(exc, "reason_code", "") or "-",
+        )
 
 
 # LLM: 开始前失败仍先领取原 claim 再关闭精确 TaskLink，终态只走原 repository CAS；不能代替已开跑死亡的 unknown。

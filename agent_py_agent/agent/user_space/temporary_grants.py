@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,7 +10,10 @@ from typing import Any
 from uuid import uuid4
 
 from ..common.json_io import read_json_object_report
+from ..common.opaque_id import OpaqueIdError, validate_opaque_id
 from .home_layout import MyAgentHomePaths
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -77,9 +81,16 @@ def grants_report_for_dir(directory: Path, *, status: str = "") -> TemporaryGran
     grants: list[OwnerTemporaryGrant] = []
     load_errors: list[dict[str, object]] = []
     for path in sorted(directory.glob("*.json")):
+        try:
+            validate_opaque_id(path.stem, kind="grant_id")
+        except OpaqueIdError:
+            logger.debug("Skipping non-canonical grant path=%s", path)
+            continue
         report = _read_payload_report(path)
         if report.load_error is not None:
             load_errors.append(report.load_error)
+            continue
+        if report.payload == {}:
             continue
         row = _grant_from_payload(path, report.payload)
         if not wanted or row.status == wanted:
@@ -121,6 +132,11 @@ def expire_temporary_grants(home: MyAgentHomePaths, *, now: str | None = None) -
     current = _parse_time(now or _now_iso())
     expired: list[OwnerTemporaryGrant] = []
     for path in sorted(home.owner_temporary_grants_dir.glob("*.json")):
+        try:
+            validate_opaque_id(path.stem, kind="grant_id")
+        except OpaqueIdError:
+            logger.debug("Skipping non-canonical grant path=%s", path)
+            continue
         report = _read_payload_report(path)
         if report.load_error is not None:
             continue
