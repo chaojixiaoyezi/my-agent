@@ -7881,7 +7881,7 @@
       "value": 64,
       "unit": "个",
       "category": "上限预算",
-      "description": "owner 下次整读，只变慢不出错。"
+      "description": "单条投影只含 waiting 完整行、queued 轻量键与 due 键；行数和单条字节预算独立保持有界。"
     },
     {
       "name": "_STORE_PROJECTION_MAX_ROWS_COUNT",
@@ -7897,7 +7897,7 @@
       "value": 4,
       "unit": "个",
       "category": "上限预算",
-      "description": "waiting 投影缓存最多缓存 4 个 owner 账本快照：每次对账只重解析未变化的文件，够日常并发又防缓存膨胀。"
+      "description": "waiting 投影缓存以 4 个 owner 快照为下限，随已登记的常驻用户容量推导上限。"
     },
     {
       "name": "_WAITING_PROJECTION_MAX_ROWS_COUNT",

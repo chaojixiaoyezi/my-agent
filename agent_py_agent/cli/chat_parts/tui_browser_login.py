@@ -127,11 +127,11 @@ class _CallbackHTTPServer(ThreadingHTTPServer):
 
     # LLM: 连接集合只归本次监听所有；不保存授权码或账号，不创建额外服务。
     # 函数用途: 初始化活动连接的短锁和关闭状态。
-    def __init__(self, *args, **kwargs):
+    def __init__(self, server_address, RequestHandlerClass, bind_and_activate: bool = True):
         self._active_connections: set[socket.socket] = set()
         self._active_lock = threading.Lock()
         self._closing = False
-        super().__init__(*args, **kwargs)
+        super().__init__(server_address, RequestHandlerClass, bind_and_activate=bind_and_activate)
 
     # LLM: 每次accept只登记一个连接，设置失败或达到本机回调上限时立即关掉它。
     # 函数用途: 对回调连接设置有界读写与并发数。
