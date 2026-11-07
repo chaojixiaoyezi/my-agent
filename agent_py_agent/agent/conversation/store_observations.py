@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import threading
 import time
@@ -12,9 +13,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import append_private_jsonl_records
+from ..common.json_io import append_private_jsonl_records_unlocked, locked_json_path
 from ..gateway_parts.io import read_json_file_report
 from ..runtime_errors import runtime_error_report
+from ..user_space.storage_lanes import STORAGE_LANE_SLICE_BYTES
 from .models import (
     ConversationThread,
     ObservationEvent,
@@ -28,6 +30,14 @@ from .store_io import (
     read_jsonl_tail_report,
 )
 from .store_layout import ConversationStorage
+from .thread_ledger_segments import (
+    archive_dir_for,
+    file_stamp,
+    read_manifest,
+    read_manifest_header,
+    recover_pending,
+    seal_if_due,
+)
 
 _SHARD_MAIN_EVENTS_CACHE_MAX_ENTRIES_COUNT = 512
 
@@ -187,12 +197,18 @@ class ObservationStore:
     # LLM: Observation append owns its ledger row and activity time only; other thread fields are
     # preserved by the atomic latest-record updater.
     # 函数用途: 追加后台观察事件，并安全刷新活动时间而不覆盖任务、压缩或通道状态。
-    def append(self, request: dict) -> ObservationEvent:
+    def append(self, request: dict, *, max_bytes: int = STORAGE_LANE_SLICE_BYTES) -> ObservationEvent:
         thread_id = str(request.get("thread_id") or "")
         thread = self._require_thread(thread_id)
         event, current = observation_from_request(thread.thread_id, request)
         # 私有追加：0600/0700，存量宽权限观察账本下次写入即收紧；内容逐字节不变。
-        append_private_jsonl_records(self.storage.observation_path(thread_id), [event.to_dict()], sort_keys=True)
+        path = self.storage.observation_path(thread_id)
+        with locked_json_path(path):
+            recover_pending(path)
+            append_private_jsonl_records_unlocked(path, [event.to_dict()], sort_keys=True)
+            if path.stat().st_size >= max_bytes:
+                prefix = self._sealable_prefix_end(path)
+                seal_if_due(path, max_bytes=max_bytes, sealable_prefix_end=prefix)
         self._update_thread_atomic(
             thread.thread_id,
             lambda latest: replace(
@@ -201,6 +217,38 @@ class ObservationStore:
             ),
         )
         return event
+
+    def _sealable_prefix_end(self, path):
+        """只查询原 ack 索引；未知或坏行留在活动账中，绝不借封存签发处理确认。"""
+        with path.open("rb") as handle:
+            while True:
+                batch, consumed = [], 0
+                for _ in range(128):
+                    start = handle.tell()
+                    raw = handle.readline(STORAGE_LANE_SLICE_BYTES + 1)
+                    if not raw:
+                        break
+                    if not raw.endswith(b"\n"):
+                        return batch[0][0] if batch else start
+                    consumed += len(raw)
+                    if raw.strip():
+                        try:
+                            event = ObservationEvent.from_dict(json.loads(raw))
+                        except (ValueError, TypeError, KeyError):
+                            return batch[0][0] if batch else start
+                        batch.append((start, event))
+                    if consumed >= 65536:
+                        break
+                if batch:
+                    try:
+                        handled = self._index.handled([event.observation_id for _, event in batch])
+                    except ObservationIndexError:
+                        return batch[0][0]
+                    for start, event in batch:
+                        if event.handled_at <= 0 and handled.get(event.observation_id, 0) <= 0:
+                            return start
+                if not raw:
+                    return None
 
     # LLM: 保留近期选择的原 include_handled/limit 语义，严格调用方使用 report 接口。
     # 函数用途: 读取指定线程的近期观察，不标记为已处理。
@@ -224,8 +272,49 @@ class ObservationStore:
         include_handled: bool = True,
     ) -> tuple[list[ObservationEvent], list[dict[str, Any]]]:
         path = self.storage.observation_path(thread_id)
-        if not path.exists():
+        directory = archive_dir_for(path)
+        if not path.exists() and not directory.exists():
             return [], []
+        with locked_json_path(path):
+            recover_pending(path)
+            events, errors = self._recent_path_report(path, limit=limit, include_handled=include_handled) if path.exists() else ([], [])
+            # 未处理观察按合同始终留在活动账；常规待处理查询不能反扫全部已处理归档。
+            if not include_handled or (limit > 0 and len(events) >= limit) or not directory.exists():
+                return events, errors
+            header = read_manifest_header(directory) if limit > 0 else None
+            # 有限窗口从首行序号倒读，最多探测固定数量或本次显式请求数量的段；不解析历史段列表。
+            if header is not None:
+                last = header["last_seq"]
+                lower = max(0, last - max(128, limit))
+                paths = (directory / f"seg-{sequence:06d}.jsonl" for sequence in range(last, lower, -1))
+                manifest = header
+            else:
+                manifest = read_manifest(directory)
+                paths = (directory / entry["file"] for entry in reversed(manifest["segments"]))
+                lower = 0
+            errors.extend(manifest.get("load_errors", []))
+            if manifest["coverage"] == "partial" and not manifest.get("load_errors"):
+                errors.append({"coverage": "partial", "path": str(directory / "manifest.json"),
+                               "message": "thread ledger manifest was rebuilt"})
+            chunks = [events]
+            count = len(events)
+            for segment in paths:
+                if file_stamp(segment) is None:
+                    errors.append({"coverage": "partial", "path": str(segment), "message": "thread ledger segment is missing"})
+                    continue
+                older, load_errors = self._recent_path_report(segment, limit=max(0, limit - count), include_handled=True)
+                errors.extend(load_errors)
+                chunks.append(older)
+                count += len(older)
+                if limit > 0 and count >= limit:
+                    break
+            if lower and count < limit:
+                errors.append({"coverage": "partial", "path": str(directory),
+                               "message": "thread ledger recent window exceeds bounded archive probe"})
+            return [event for chunk in reversed(chunks) for event in chunk], errors
+
+    def _recent_path_report(self, path, *, limit, include_handled):
+        """保留原单文件尾窗和坏行回退语义；跨段只在当前窗口不足时继续。"""
         if include_handled and limit > 0:
             report = read_jsonl_tail_report(
                 path, context="conversation.observations.read", limit=limit

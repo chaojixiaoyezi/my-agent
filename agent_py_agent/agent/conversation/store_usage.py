@@ -11,12 +11,21 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import append_private_jsonl_records
+from ..common.json_io import append_private_jsonl_records_unlocked, locked_json_path
 from ..contracts.model_call_latency import MODEL_LATENCY_FIELDS
 from ..gateway_parts.io import locked_file_transition
 from ..runtime_errors import DataCorruptionError
+from ..user_space.storage_lanes import STORAGE_LANE_SLICE_BYTES
 from .models import ConversationThread, ThreadModelUsageEvent
-from .store_io import jsonl_error, now, read_jsonl_report, safe_file_stem
+from .observation_index import _reader
+from .store_io import json_row, jsonl_error, now, safe_file_stem
+from .thread_ledger_segments import (
+    archive_dir_for,
+    archive_stamp,
+    read_manifest,
+    recover_pending,
+    seal_if_due,
+)
 
 _PURPOSE_SCHEMA = "model_call_purpose_breakdown.v1"
 # LLM: 用途桶必须与 model_call_ledger._PURPOSE_BUCKETS 保持同一集合；探测调用独立成桶，持久账校验按同一集合放行。
@@ -130,8 +139,11 @@ class ModelUsageStore:
         try:
             stat = self._path(thread_id).stat()
         except FileNotFoundError:
-            return ()
-        return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+            active = ()
+        else:
+            active = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        archive = archive_stamp(self._path(thread_id))
+        return (*active, *(archive[0] or ()), *(archive[1] or ()))
 
     # LLM: 统计仅保存数字投影，不改活跃时间或历史；延迟到达的旧帧不得覆盖新采样。
     # 函数用途: 原子保存本代理最近模型统计，供重新打开会话读取，不作计费依据。
@@ -199,33 +211,49 @@ class ModelUsageStore:
 
     # LLM: canonical先提交，投影后提交；中间失败的字节后缀会在下一次prepare精确重放。
     # 函数用途: 在原锁内选择完整索引热路或迁移期间单线程精确回退。
-    def _append_indexed(self, snapshot, *, snapshot_request=None):
+    def _append_indexed(self, snapshot, *, snapshot_request=None, max_bytes=STORAGE_LANE_SLICE_BYTES):
         path = self._path(snapshot.thread_id)
         transition = path.with_name(f".{path.name}.append-once")
-        with locked_file_transition(transition):
+        with locked_file_transition(transition), locked_json_path(path):
+            recover_pending(path)
             index = self._index(snapshot.thread_id)
             with index._connection() as conn:
                 complete = index.prepare(conn)
-                if complete:
+                if complete and index._get(conn, "coverage", "complete") == "complete":
                     existing = index.event(conn, snapshot.event_id)
                     if existing is not None:
                         return self._replay(existing, snapshot, snapshot_request is not None)
                     prior = index.prior(conn, snapshot) if snapshot_request is not None else []
                     event = self._delta_event(snapshot, snapshot_request, prior)
                     offset = path.stat().st_size if path.exists() else 0
-                    append_private_jsonl_records(path, [event.to_dict()], sort_keys=True)
+                    append_private_jsonl_records_unlocked(path, [event.to_dict()], sort_keys=True)
                     index.committed(conn, event, offset)
+                    self._seal_indexed(path, index, conn, max_bytes)
                     return event
             # 未完整的投影绝不能输出partial费用；只回退当前会话的既有精确逻辑。
-            events = self._exact_events(snapshot.thread_id)
-            existing = next((item for item in events if item.event_id == snapshot.event_id), None)
+            existing, prior = None, {}
+            scope = _model_usage_scope(snapshot.to_dict())
+            for item in self._exact_events(snapshot.thread_id):
+                if item.event_id == snapshot.event_id:
+                    existing = item
+                if snapshot_request is not None and _model_usage_scope(item.to_dict()) == scope:
+                    prior = _sum_model_call_summaries([prior, item.model_calls], count_unknown=False)
             if existing is not None:
                 return self._replay(existing, snapshot, snapshot_request is not None)
-            prior = [item.model_calls for item in events
-                     if _model_usage_scope(item.to_dict()) == _model_usage_scope(snapshot.to_dict())]
-            event = self._delta_event(snapshot, snapshot_request, prior)
-            append_private_jsonl_records(path, [event.to_dict()], sort_keys=True)
+            event = self._delta_event(snapshot, snapshot_request, [prior])
+            append_private_jsonl_records_unlocked(path, [event.to_dict()], sort_keys=True)
+            with index._connection() as conn:
+                # 旧账按原 128 行预算续跑；投影未完整不能签发 carry，也不扩大单拍扫描。
+                if path.stat().st_size >= max_bytes and index.prepare(conn, with_events=False):
+                    self._seal_indexed(path, index, conn, max_bytes)
             return event
+
+    def _seal_indexed(self, path, index, conn, max_bytes):
+        if path.stat().st_size < max_bytes:
+            return
+        entry = seal_if_due(path, max_bytes=max_bytes, carry=index.carry(conn))
+        if entry is not None:
+            index.sealed(conn, entry)
 
     # LLM: 快照和加法事件保留各自原冲突合同，created_at沿首次原账。
     # 函数用途: 严格核验重复事件并返回首次提交结果。
@@ -254,38 +282,96 @@ class ModelUsageStore:
     # LLM: 仅迁移未完整时使用，不能把坏账当作空用量。
     # 函数用途: 读取本线程完整事件供过渡期精确计算。
     def _exact_events(self, thread_id):
-        events, errors = self.events_report(thread_id)
-        if errors:
-            raise DataCorruptionError(f"conversation model usage ledger is unreadable: {thread_id}")
-        return events
+        for event, error in self._event_records(thread_id):
+            if error is not None:
+                raise DataCorruptionError(f"conversation model usage ledger is unreadable: {thread_id}; coverage=partial")
+            if event is not None:
+                yield event
 
     # LLM: A corrupt row remains an explicit load error; consumers must never
     # convert missing or unreadable provider usage into a zero-cost turn.
-    # 函数用途: 读取指定会话的全部模型用量事件及损坏记录。
+    # 函数用途: 读取用量事件及损坏记录；limit<=0 全量，after 为跨段稳定的完整行逻辑字节偏移。
     def events_report(
         self,
         thread_id: str,
+        *,
+        limit: int = 0,
+        after: int = 0,
     ) -> tuple[list[ThreadModelUsageEvent], list[dict[str, Any]]]:
         normalized = str(thread_id or "").strip()
         if not normalized:
             raise ValueError("thread_id is required")
-        path = self._path(normalized)
-        if not path.exists():
-            return [], []
-        report = read_jsonl_report(path, context="conversation.model_usage")
         events: list[ThreadModelUsageEvent] = []
-        errors = list(report.load_errors)
-        for row in report.rows:
+        errors = []
+        path = self._path(normalized)
+        with locked_file_transition(path.with_name(f".{path.name}.append-once")), locked_json_path(path):
+            recover_pending(path)
+            records = self._event_records(normalized, after=after)
             try:
-                event = ThreadModelUsageEvent.from_dict(row)
-                if event.thread_id != normalized:
-                    raise ValueError("thread model usage scope mismatch")
-                events.append(event)
-            except Exception as exc:
-                errors.append(
-                    jsonl_error(exc, "conversation.model_usage", path=path)
-                )
+                for event, error in records:
+                    if error is not None:
+                        errors.append(error)
+                    elif event is not None:
+                        events.append(event)
+                        if limit > 0 and len(events) >= limit:
+                            break
+            finally:
+                records.close()
         return events, errors
+
+    def _event_records(self, thread_id, *, after=0):
+        """按逻辑字节游标流读封存段和活动尾巴；只物化调用方请求的事件页。"""
+        if type(after) is not int or after < 0:
+            raise ValueError("after must be a non-negative logical byte offset")
+        active = self._path(thread_id)
+        directory = archive_dir_for(active)
+        manifest = read_manifest(directory)
+        for error in manifest.get("load_errors", []):
+            yield None, error
+        if manifest["coverage"] != "complete" and not manifest.get("load_errors"):
+            # 重建清单仍可读出原行；用量缺少结转来源时必须显式保留未知。
+            yield None, {"coverage": "partial", "path": str(directory / "manifest.json"),
+                         "message": "thread ledger manifest was rebuilt without carried totals"}
+        base = 0
+        entries = [*( (directory / entry["file"], entry) for entry in manifest["segments"]), (active, None)]
+        for path, entry in entries:
+            size = entry["bytes"] if entry else (path.stat().st_size if path.exists() else 0)
+            if (entry is None and not size) or base + size <= after:
+                base += size
+                continue
+            start = max(0, after - base)
+            try:
+                with _reader(path) as handle:
+                    if start:
+                        handle.seek(start - 1)
+                        if handle.read(1) != b"\n":
+                            raise ValueError("model usage cursor is not a complete row boundary")
+                    digest = hashlib.sha256()
+                    handle.seek(start)
+                    for line_number, raw in enumerate(handle, start=1):
+                        digest.update(raw)
+                        if not raw.strip():
+                            continue
+                        row, error = json_row(raw.decode("utf-8", errors="replace"),
+                                              context="conversation.model_usage", path=path, line_number=line_number)
+                        if error is not None:
+                            yield None, error
+                            continue
+                        try:
+                            event = ThreadModelUsageEvent.from_dict(row)
+                            if event.thread_id != thread_id:
+                                raise ValueError("thread model usage scope mismatch")
+                        except Exception as exc:
+                            yield None, jsonl_error(exc, "conversation.model_usage", path=path)
+                        else:
+                            yield event, None
+                    if entry and not start and digest.hexdigest() != entry["sha256"]:
+                        yield None, {"coverage": "partial", "path": str(path), "message": "thread ledger segment digest mismatch"}
+            except OSError as exc:
+                yield None, {**jsonl_error(exc, "conversation.model_usage", path=path), "coverage": "partial"}
+            base += size
+        if after > base:
+            raise ValueError("model usage cursor exceeds canonical ledger")
 
     # LLM: 完整投影输出精确数字；旧账迁移未完成仅回退该线程，不发布partial总量。
     # 函数用途: 读取累计用量，正常热路不再扫描JSONL。
@@ -294,17 +380,17 @@ class ModelUsageStore:
         if not normalized:
             raise ValueError("thread_id is required")
         path = self._path(normalized)
-        with locked_file_transition(path.with_name(f".{path.name}.append-once")):
+        with locked_file_transition(path.with_name(f".{path.name}.append-once")), locked_json_path(path):
+            recover_pending(path)
             index = self._index(normalized)
             with index._connection() as conn:
-                if index.prepare(conn):
+                if index.prepare(conn, with_events=False):
                     return index.summary(conn)
             return self._exact_summary(normalized)
 
     # LLM: 原求和口径仅用于未迁移的当前线程，保持未知用途和旧账语义。
     # 函数用途: 在迁移期间完整重算当前线程数字。
     def _exact_summary(self, thread_id):
-        events = self._exact_events(thread_id)
         provider = {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -314,20 +400,25 @@ class ModelUsageStore:
         }
         estimated = {"input_tokens": 0, "output_tokens": 0, "call_count": 0,
                      "unfinished_input_tokens": 0, "unfinished_call_count": 0}
-        for event in events:
+        calls, count, known = {}, 0, True
+        for event in self._exact_events(thread_id):
             breakdown = event.model_calls.get("usage_breakdown")
             breakdown = breakdown if isinstance(breakdown, dict) else {}
             _sum_usage_partition(provider, breakdown.get("provider"))
             _sum_usage_partition(estimated, breakdown.get("estimated"))
-        purposes = _sum_purpose_breakdowns([event.model_calls for event in events])
+            calls = _sum_model_call_summaries([calls, event.model_calls], count_unknown=False)
+            _count_unknown_purpose_keys(_purpose_rows(event.model_calls))
+            count += 1
+            known = known and "purpose_breakdown" in event.model_calls
+        purposes = calls.get("purpose_breakdown")
         return {
             "schema": "thread_model_usage_summary.v1",
             "thread_id": str(thread_id or "").strip(),
-            "event_count": len(events),
+            "event_count": count,
             "provider": provider,
             "estimated": estimated,
             **({"purpose_breakdown": purposes,
-                "purpose_totals_known": all("purpose_breakdown" in event.model_calls for event in events)} if purposes else {}),
+                "purpose_totals_known": known} if purposes else {}),
         }
 
 
