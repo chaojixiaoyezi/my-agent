@@ -22,6 +22,15 @@ dependencies = [
   "lark-oapi>=1.4",  # 飞书默认长连接与密码/人格确认卡片回调
   "websockets>=15,<16",  # Responses 与飞书 WS 共用；15 起提供显式 HTTP/SOCKS 代理及系统/环境代理发现
   "python-socks[asyncio]>=2.7.2,<3",  # WebSocket 显式/系统 SOCKS 代理的上游实现；随包安装，不新增运行外网服务
+  "cryptography>=42.0",  # 内置凭据卡加密与通道回调验签；固化为默认内置依赖
+  "mcp>=1.30.0",  # 内置 MCP 服务（workspace-peek / computer_use）协议底座；固化为默认内置依赖
+  "mss>=10.2.0",  # 内置屏幕观察跨平台截图底座；固化为默认内置依赖
+  "pyobjc-framework-Quartz>=12.2.2; sys_platform == 'darwin'",  # macOS 内置屏幕观察窗口与事件底座
+  "pyobjc-framework-ScreenCaptureKit>=12.2.2; sys_platform == 'darwin'",  # macOS 14+ 单窗口截图底座
+  "pyobjc-framework-ApplicationServices>=12.2.2; sys_platform == 'darwin'",  # macOS 无障碍控件树读取底座
+  "pyobjc-framework-Vision>=12.2.2; sys_platform == 'darwin'",  # macOS 原生 Vision OCR 底座（兼容 Python 3.14t）
+  "python-xlib>=0.33; sys_platform == 'linux'",  # Linux X11 窗口几何与栈序观察底座
+  "rapidocr-onnxruntime==1.2.3; (sys_platform == 'darwin' or sys_platform == 'linux') and python_version < '3.13'",  # Python 3.11/3.12 跨平台离线 OCR
 ]
 
 [project.urls]

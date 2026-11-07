@@ -19,10 +19,14 @@ class RapidOcrReader:
 
     # 函数用途: 识别截图里的文字区域，返回 TextRegion 列表（文字 + 截图像素外框）。
     def read(self, buffer: PixelBuffer) -> list[TextRegion]:
-        import numpy
+        try:
+            import numpy
 
+            engine = self._ocr_engine()
+        except ImportError:
+            return _macos_vision_ocr(buffer)
         image = numpy.frombuffer(buffer.rgb, dtype=numpy.uint8).reshape(buffer.height, buffer.width, 3)[:, :, ::-1]
-        result, _elapsed = self._ocr_engine()(numpy.ascontiguousarray(image))
+        result, _elapsed = engine(numpy.ascontiguousarray(image))
         regions = []
         for box, text, _score in result or []:
             xs, ys = [float(point[0]) for point in box], [float(point[1]) for point in box]
@@ -36,6 +40,42 @@ class RapidOcrReader:
 
             self._engine = RapidOCR()
         return self._engine
+
+
+# 函数用途: 在未安装 onnxruntime 的自由线程 Python 3.14t macOS 环境下，使用系统原生 Vision 框架提取文字与像素外框。
+def _macos_vision_ocr(buffer: PixelBuffer) -> list[TextRegion]:
+    if buffer.width <= 0 or buffer.height <= 0 or not buffer.rgb:
+        return []
+    try:
+        import io
+
+        from PIL import Image
+        import Vision
+    except ImportError:
+        return []
+    png_bytes = io.BytesIO()
+    Image.frombytes("RGB", (buffer.width, buffer.height), buffer.rgb).save(png_bytes, format="PNG")
+    request = Vision.VNRecognizeTextRequest.alloc().init()
+    request.setRecognitionLanguages_(["zh-Hans", "zh-Hant", "en-US"])
+    handler = Vision.VNImageRequestHandler.alloc().initWithData_options_(png_bytes.getvalue(), None)
+    ok, _error = handler.performRequests_error_([request], None)
+    if not ok:
+        return []
+    regions: list[TextRegion] = []
+    for observation in request.results() or ():
+        candidates = observation.topCandidates_(1)
+        if not candidates:
+            continue
+        text = str(candidates[0].string() or "").strip()
+        if not text:
+            continue
+        bbox = observation.boundingBox()
+        x = round(float(bbox.origin.x) * buffer.width)
+        y = round((1.0 - float(bbox.origin.y) - float(bbox.size.height)) * buffer.height)
+        w = max(1, round(float(bbox.size.width) * buffer.width))
+        h = max(1, round(float(bbox.size.height) * buffer.height))
+        regions.append(TextRegion(text, (x, y, w, h)))
+    return regions
 
 
 __all__ = ["RapidOcrReader"]

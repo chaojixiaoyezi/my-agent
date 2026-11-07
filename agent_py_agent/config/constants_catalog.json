@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1404,
+  "count": 1406,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -4082,6 +4082,22 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "会话目标正文最多 4000 字符：限制单目标描述长度。"
+    },
+    {
+      "name": "_ACK_READ_BYTES",
+      "file": "agent_py_agent/agent/conversation/observation_index.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "其它",
+      "description": "单次同步确认追加日志的最大读取字节数"
+    },
+    {
+      "name": "_DISCOVER_ENTRIES_COUNT",
+      "file": "agent_py_agent/agent/conversation/observation_index.py",
+      "value": 1024,
+      "unit": "个",
+      "category": "其它",
+      "description": "单次目录增量扫描最多发现的观察文件条目数"
     },
     {
       "name": "_PROCESS_COMPLETION_PRUNE_INTERVAL_SECONDS",

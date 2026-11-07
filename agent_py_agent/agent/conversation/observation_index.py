@@ -22,8 +22,10 @@ from .models import ObservationEvent
 
 _INSTALLED: set[tuple[str, int, int]] = set()
 _INSTALLED_LOCK = threading.Lock()
+# 单次同步确认追加日志的最大读取字节数
 _ACK_READ_BYTES = 65536
-_DISCOVER_ENTRIES = 1024
+# 单次目录增量扫描最多发现的观察文件条目数
+_DISCOVER_ENTRIES_COUNT = 1024
 
 
 def _directory_stamp(path):
@@ -542,12 +544,12 @@ class ObservationIndex:
             selected = []
             if stamp != "missing":
                 with os.scandir(directory) as iterator:
-                    selected = list(itertools.islice(iterator, offset, offset + _DISCOVER_ENTRIES + 1))
-                for entry in selected[:_DISCOVER_ENTRIES]:
+                    selected = list(itertools.islice(iterator, offset, offset + _DISCOVER_ENTRIES_COUNT + 1))
+                for entry in selected[:_DISCOVER_ENTRIES_COUNT]:
                     if entry.name.endswith(".jsonl") and entry.is_file(follow_symlinks=False):
                         self._source(conn, Path(entry.path))
-            self._put(conn, "directory_offset", offset + min(len(selected), _DISCOVER_ENTRIES))
-            self._put(conn, "directory_complete", int(len(selected) <= _DISCOVER_ENTRIES))
+            self._put(conn, "directory_offset", offset + min(len(selected), _DISCOVER_ENTRIES_COUNT))
+            self._put(conn, "directory_complete", int(len(selected) <= _DISCOVER_ENTRIES_COUNT))
         after = self._probe_after
         rows = conn.execute("SELECT path FROM sources WHERE path>? ORDER BY path LIMIT 2", (after,)).fetchall()
         if not rows:
