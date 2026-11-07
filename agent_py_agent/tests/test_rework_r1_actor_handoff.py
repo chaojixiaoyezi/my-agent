@@ -1,4 +1,5 @@
 """真实队列交接只释放已完成的精确 actor 身份，不把让出执行当成终态。"""
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -8,6 +9,8 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.conversation import conversation_actor as actor
+from agent_py_agent.agent.gateway_parts import control_service as control
+from agent_py_agent.agent.gateway_parts import recovery
 from agent_py_agent.agent.gateway_parts import request_worker as worker
 from agent_py_agent.agent.gateway_parts.io import read_json_file, update_json_file_atomic
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
@@ -455,3 +458,463 @@ def test_disabled_actor_unfinished_exits_keep_claim_binding(lane, monkeypatch, o
     assert exact in worker._CLAIM_EPOCHS
     assert claim.path.read_bytes() == before
     assert not (lane.paths.terminal / claim.name).exists()
+
+
+def _resource_count():
+    if os.name == "nt":
+        import ctypes
+        count = ctypes.c_ulong()
+        kernel = ctypes.windll.kernel32
+        assert kernel.GetProcessHandleCount(kernel.GetCurrentProcess(), ctypes.byref(count))
+        return count.value
+    root = "/proc/self/fd" if Path("/proc/self/fd").is_dir() else "/dev/fd"
+    return len(os.listdir(root))
+
+
+@contextmanager
+def _no_resource_growth():
+    before = _resource_count()
+    try:
+        yield
+    finally:
+        assert _resource_count() - before == 0, "request operation leaked descriptors/handles"
+
+
+def _control_scope(payload):
+    conversation = payload["conversation"]
+    return control.GatewayControlScope(
+        payload.get("user_id") or conversation["channel_user_id"],
+        conversation["channel"], conversation["channel_conversation_id"],
+    )
+
+
+def _stop_entry(lane, record, scope, entry):
+    if entry == "mark":
+        return control._mark_request_stopping(record, scope)[0]
+    return control._stop_live_window_request(lane.agent, lane.paths, record, scope, interrupt_only=True).ok
+
+
+@pytest.mark.parametrize("lane", [4, 0], indirect=True)
+@pytest.mark.parametrize("sealed", [False, True])
+def test_projection_recovery_hands_off_exact_actor_after_one_io_error(lane, monkeypatch, sealed):
+    enqueue(lane)
+    claim, user, key = dispatch(lane)
+    if lane.scheduler is not None:
+        _, key, exact, other = bind(lane, claim)
+    else:
+        exact = worker._claim_epoch_key(claim.path, claim.request_id, claim.execution_attempt_id)
+        other = worker._claim_epoch_key(claim.path, claim.request_id, "later-attempt")
+        binding = (None, 7, lane.agent.config)
+        worker._CLAIM_EPOCHS.update({exact: binding, other: binding})
+    original_write = recovery.write_json_file_atomic
+    failures = []
+
+    def write(path, payload, **kwargs):
+        if Path(path) == lane.paths.done / claim.name and not failures:
+            failures.append(True)
+            raise OSError("simulated done projection I/O error")
+        return original_write(path, payload, **kwargs)
+
+    monkeypatch.setattr(recovery, "write_json_file_atomic", write)
+    response = {"id": claim.request_id, "status": "done", "ok": True, "output": "original answer"}
+    with _no_resource_growth():
+        before_failure_resources = _resource_count()
+        if sealed:
+            original_write(claim.path, recovery._terminal_gateway_request_payload(
+                claim.request_id, read_json_file(claim.path), response,
+            ))
+            first = recovery.recover_gateway_processing_requests_report(lane.paths, agent=None)
+            assert first.load_errors
+        else:
+            finish(lane, claim, response)
+        assert _resource_count() == before_failure_resources
+        assert failures == [True]
+        assert exact in worker._CLAIM_EPOCHS
+        canonical = lane.paths.terminal / claim.name
+        before = canonical.read_bytes()
+        repairs = [recovery.repair_gateway_terminal_projections(lane.paths, agent=None) for _ in range(2)]
+        assert repairs == [(1, []), (0, [])]
+        assert canonical.read_bytes() == before
+        assert read_json_file(lane.paths.responses / claim.name) == response
+        if lane.scheduler is not None:
+            drain(lane, key)
+            assert lane.scheduler.sequencer.snapshot(key)["active"] is None
+        assert exact not in worker._CLAIM_EPOCHS
+        assert other in worker._CLAIM_EPOCHS
+        worker.admission.release(user, conversation_key=key)
+        next_id, _, _ = enqueue(lane)
+        following, _, _ = dispatch(lane)
+        assert following.request_id == next_id
+
+
+@pytest.mark.parametrize("lane", [4], indirect=True)
+@pytest.mark.parametrize("entry", ["mark", "live_window"])
+def test_stale_stop_after_owner_requeue_does_not_block_readmission(lane, monkeypatch, entry):
+    enqueue(lane)
+    claim, user, _ = dispatch(lane)
+    payload, key, exact, _ = bind(lane, claim)
+    scope = _control_scope(payload)
+    record = control._GatewayRequestRecord(claim.path, payload)
+    selected, resume = threading.Event(), threading.Event()
+    original_decision = control._control_command_decision
+
+    def decide(paths, command_scope, kind, turn_id, **kwargs):
+        if kind == "stop":
+            selected.set()
+            assert resume.wait(5)
+        return original_decision(paths, command_scope, kind, turn_id, **kwargs)
+
+    monkeypatch.setattr(control, "_control_command_decision", decide)
+    with _no_resource_growth(), ThreadPoolExecutor(max_workers=1) as pool:
+        pending_stop = pool.submit(_stop_entry, lane, record, scope, entry)
+        try:
+            assert selected.wait(5)
+            assert worker._requeue_owner_capacity(lane.paths, claim.path, payload)
+            drain(lane, key)
+            assert exact not in worker._CLAIM_EPOCHS
+            worker.admission.release(user, conversation_key=key)
+            pending_path = lane.paths.inbox / claim.name
+            before = pending_path.read_bytes()
+        finally:
+            resume.set()
+        assert pending_stop.result(timeout=5) is False
+        assert pending_path.read_bytes() == before
+        assert not read_json_file(pending_path).get("cancel_requested")
+        assert not (lane.paths.terminal / claim.name).exists()
+        stopped = claim.request_id in lane.scheduler.sequencer._box(key).stopped
+        submitted = []
+        counts = [worker.dispatch_pending_requests(
+            lane.paths, worker.AdmissionLimits(5, 5), lambda *args: submitted.append(args),
+        ) for _ in range(3)]
+        assert (stopped, counts) == (False, [1, 0, 0])
+        assert len(submitted) == 1
+        assert submitted[0][0].request_id == claim.request_id
+        assert submitted[0][0].execution_attempt_id != claim.execution_attempt_id
+
+
+@pytest.mark.parametrize("lane", [4], indirect=True)
+def test_fresh_stop_binding_read_has_no_stop_side_effect(lane):
+    enqueue(lane)
+    claim, _, _ = dispatch(lane)
+    payload, key, exact, _ = bind(lane, claim)
+    before = claim.path.read_bytes()
+    active = lane.scheduler.sequencer.snapshot(key)["active"]
+    with _no_resource_growth():
+        assert control._fresh_stop_runtime_binding(
+            control._GatewayRequestRecord(claim.path, payload), _control_scope(payload),
+        ) == {}
+    assert claim.path.read_bytes() == before
+    assert lane.scheduler.sequencer.snapshot(key)["active"] == active
+    assert lane.scheduler.sequencer.snapshot(key)["state"] == "running"
+    assert claim.request_id not in lane.scheduler.sequencer._box(key).stopped
+    assert exact in worker._CLAIM_EPOCHS
+
+
+@pytest.mark.parametrize("lane", [4], indirect=True)
+@pytest.mark.parametrize("entry", ["mark", "live_window"])
+def test_accepted_stop_publishes_only_after_durable_cancel(lane, monkeypatch, entry):
+    enqueue(lane)
+    claim, user, _ = dispatch(lane)
+    payload, key, exact, _ = bind(lane, claim)
+    original_write = control.update_json_file_atomic
+    observed = []
+
+    def write(path, updater, **kwargs):
+        assert claim.request_id not in lane.scheduler.sequencer._box(key).stopped
+        result = original_write(path, updater, **kwargs)
+        observed.append(read_json_file(path)["cancel_requested"])
+        assert claim.request_id not in lane.scheduler.sequencer._box(key).stopped
+        return result
+
+    monkeypatch.setattr(control, "update_json_file_atomic", write)
+    with _no_resource_growth():
+        assert _stop_entry(lane, control._GatewayRequestRecord(claim.path, payload), _control_scope(payload), entry)
+    assert observed == [True]
+    assert read_json_file(claim.path)["cancel_requested"] is True
+    assert claim.request_id in lane.scheduler.sequencer._box(key).stopped
+    assert lane.scheduler.sequencer.decide(actor.Admit(user, key, claim.request_id, "later", 7)).action == "rejected"
+    assert exact in worker._CLAIM_EPOCHS
+    with _no_resource_growth():
+        finish(lane, claim, {"id": claim.request_id, "status": "interrupted", "ok": False})
+        drain(lane, key)
+    assert lane.scheduler.sequencer.snapshot(key)["active"] is None
+    assert exact not in worker._CLAIM_EPOCHS
+    assert claim.request_id not in lane.scheduler.sequencer._box(key).stopped
+    assert read_json_file(lane.paths.terminal / claim.name)["terminal_response"]["status"] == "interrupted"
+
+
+@pytest.mark.parametrize("lane", [4], indirect=True)
+@pytest.mark.parametrize("outcome", ["requeued", "failed"])
+@pytest.mark.parametrize("stopped", [False, True])
+def test_verified_stale_processing_recovery_handoff(lane, outcome, stopped):
+    enqueue(lane)
+    claim, user, _ = dispatch(lane)
+    _, key, exact, other = bind(lane, claim)
+    if stopped:
+        lane.scheduler.sequencer.decide(actor.Stop(user, key, claim.request_id))
+    context = recovery._RecoveryContext(
+        worker.time.time() + 1000, 2 if outcome == "requeued" else 1, 1, False, None, 1,
+    )
+    with _no_resource_growth():
+        report = recovery.recover_gateway_processing_requests_report(lane.paths, params=context)
+        assert report.load_errors == []
+        assert report.summary[outcome] == 1
+        drain(lane, key)
+    assert lane.scheduler.sequencer.snapshot(key)["active"] is None
+    assert exact not in worker._CLAIM_EPOCHS
+    assert other in worker._CLAIM_EPOCHS
+    assert not claim.path.exists()
+    if outcome == "requeued":
+        assert read_json_file(lane.paths.inbox / claim.name)["status"] == "pending"
+        assert (claim.request_id in lane.scheduler.sequencer._box(key).stopped) is stopped
+        assert not (lane.paths.terminal / claim.name).exists()
+    else:
+        assert read_json_file(lane.paths.terminal / claim.name)["terminal_response"]["status"] == "failed"
+        assert claim.request_id not in lane.scheduler.sequencer._box(key).stopped
+
+
+@pytest.mark.parametrize("lane", [4], indirect=True)
+def test_unproven_recovery_source_retains_actor_and_claim(lane):
+    from agent_py_agent.agent.common.request_execution_ports import (
+        RequestExecutionOutcomeUncertainError,
+    )
+    from agent_py_agent.agent.gateway_parts.multiprocess_processing_recovery import (
+        recover_stale_processing,
+    )
+
+    enqueue(lane)
+    claim, _, _ = dispatch(lane)
+    payload, key, exact, _ = bind(lane, claim)
+    before = claim.path.read_bytes()
+    context = recovery._RecoveryContext(worker.time.time(), 2, 1, False, lane.agent, 1, admission_gate=object())
+    with _no_resource_growth(), pytest.raises(RequestExecutionOutcomeUncertainError):
+        recover_stale_processing(lane.paths, claim.path, payload, context, recovery._settle_stale_processing)
+    assert claim.path.read_bytes() == before
+    assert lane.scheduler.sequencer.snapshot(key)["active"] == (claim.request_id, claim.execution_attempt_id, 7)
+    assert exact in worker._CLAIM_EPOCHS
+
+
+@pytest.mark.parametrize("lane", [4], indirect=True)
+@pytest.mark.parametrize("target", ["new_attempt", "new_epoch", "other_request"])
+def test_terminal_recovery_keeps_a_newer_active_tuple(lane, target):
+    enqueue(lane)
+    claim, user, _ = dispatch(lane)
+    payload, key, exact, other = bind(lane, claim)
+    recovery.write_json_file_atomic(claim.path, recovery._terminal_gateway_request_payload(
+        claim.request_id, payload, {"id": claim.request_id, "status": "done", "ok": True},
+    ))
+    targets = {
+        "new_attempt": (claim.request_id, "later-attempt", 7),
+        "new_epoch": (claim.request_id, claim.execution_attempt_id, 8),
+        "other_request": ("other-request", "other-attempt", 7),
+    }
+    current = targets[target]
+    assert lane.scheduler.sequencer.decide(actor.Recover(
+        user, key, *current, exit_proof=True, previous_attempt=(claim.request_id, claim.execution_attempt_id, 7),
+    )).action == "admit"
+    with _no_resource_growth():
+        report = recovery.recover_gateway_processing_requests_report(lane.paths, agent=None)
+        assert report.load_errors == []
+        assert report.summary["archived"] == 1
+        drain(lane, key)
+    assert lane.scheduler.sequencer.snapshot(key)["active"] == current
+    assert exact not in worker._CLAIM_EPOCHS
+    assert other in worker._CLAIM_EPOCHS
+
+
+@pytest.mark.parametrize("lane", [4], indirect=True)
+@pytest.mark.parametrize("entry", ["mark", "live_window"])
+@pytest.mark.parametrize("rejection", ["io", "new_attempt", "wrong_scope", "terminal"])
+def test_rejected_stop_leaves_no_uncommitted_tombstone(lane, monkeypatch, entry, rejection):
+    enqueue(lane)
+    claim, user, _ = dispatch(lane)
+    payload, key, exact, _ = bind(lane, claim)
+    record, scope = control._GatewayRequestRecord(claim.path, payload), _control_scope(payload)
+    if rejection == "io":
+        def unavailable(*_args, **_kwargs):
+            raise OSError("simulated cancellation write I/O error")
+        monkeypatch.setattr(control, "update_json_file_atomic", unavailable)
+    elif rejection == "new_attempt":
+        update_json_file_atomic(claim.path, lambda current: dict(
+            current, execution_attempt_id="later-attempt", lease_epoch=claim.lease_epoch + 1,
+        ))
+        assert lane.scheduler.sequencer.decide(actor.Recover(
+            user, key, claim.request_id, "later-attempt", 8, exit_proof=True,
+            previous_attempt=(claim.request_id, claim.execution_attempt_id, 7),
+        )).action == "admit"
+    elif rejection == "wrong_scope":
+        update_json_file_atomic(claim.path, lambda current: dict(current, user_id="another-owner"))
+    else:
+        finish(lane, claim, {"id": claim.request_id, "status": "done", "ok": True})
+        drain(lane, key)
+    selected_path = lane.paths.terminal / claim.name if rejection == "terminal" else claim.path
+    before = selected_path.read_bytes()
+    active = lane.scheduler.sequencer.snapshot(key)["active"]
+    with _no_resource_growth():
+        assert _stop_entry(lane, record, scope, entry) is False
+    assert selected_path.read_bytes() == before
+    assert not read_json_file(selected_path).get("cancel_requested")
+    assert lane.scheduler.sequencer.snapshot(key)["active"] == active
+    assert claim.request_id not in lane.scheduler.sequencer._box(key).stopped
+    assert (exact in worker._CLAIM_EPOCHS) is (rejection != "terminal")
+
+
+@pytest.mark.parametrize("lane", [4], indirect=True)
+@pytest.mark.parametrize("entry", ["mark", "live_window"])
+def test_committed_stop_contention_keeps_durable_cancel_authoritative(lane, monkeypatch, entry):
+    enqueue(lane)
+    claim, _, _ = dispatch(lane)
+    payload, key, exact, _ = bind(lane, claim)
+    held, release = threading.Event(), threading.Event()
+    original_write = control.update_json_file_atomic
+    original_decision = control._control_command_decision
+    memory_results = []
+
+    def decide(paths, scope, kind, request_id, **kwargs):
+        result = original_decision(paths, scope, kind, request_id, **kwargs)
+        if kind == "stop_committed":
+            memory_results.append(result[2].action)
+        return result
+
+    def hold():
+        with lane.scheduler.sequencer._lock:
+            held.set()
+            assert release.wait(5)
+
+    with _no_resource_growth(), ThreadPoolExecutor(max_workers=1) as pool:
+        waiting = []
+
+        def write(path, updater, **kwargs):
+            result = original_write(path, updater, **kwargs)
+            waiting.append(pool.submit(hold))
+            assert held.wait(5)
+            return result
+
+        monkeypatch.setattr(control, "update_json_file_atomic", write)
+        monkeypatch.setattr(control, "_control_command_decision", decide)
+        try:
+            assert _stop_entry(lane, control._GatewayRequestRecord(claim.path, payload), _control_scope(payload), entry)
+            assert read_json_file(claim.path)["cancel_requested"] is True
+        finally:
+            release.set()
+        for future in waiting:
+            future.result(timeout=5)
+    assert memory_results == ["retry"]
+    assert exact in worker._CLAIM_EPOCHS
+    assert claim.request_id not in lane.scheduler.sequencer._box(key).stopped
+    handled = []
+
+    def interrupted(*_args, **kwargs):
+        handled.append(kwargs["refresh_lease"])
+        return {"id": claim.request_id, "status": "interrupted", "ok": False}
+
+    monkeypatch.setattr(worker, "_handle_gateway_request", interrupted)
+    with _no_resource_growth():
+        assert worker._process_claimed_gateway_request_path(
+            lane.agent, lane.paths, claim.path, "worker", claim=claim,
+        )
+        drain(lane, key)
+    assert handled == [False]
+    assert lane.scheduler.sequencer.snapshot(key)["active"] is None
+    assert exact not in worker._CLAIM_EPOCHS
+    assert read_json_file(lane.paths.terminal / claim.name)["terminal_response"]["status"] == "interrupted"
+
+
+@pytest.mark.parametrize("lane", [4], indirect=True)
+@pytest.mark.parametrize("change", ["new_attempt", "new_epoch", "move_error"])
+def test_unsuccessful_recovery_preserves_old_responsibility(lane, monkeypatch, capsys, change):
+    from agent_py_agent.agent.gateway_parts.multiprocess_processing_recovery import (
+        recover_stale_processing,
+    )
+
+    enqueue(lane)
+    claim, _, _ = dispatch(lane)
+    payload, key, exact, other = bind(lane, claim)
+    lane.scheduler.sequencer.decide(actor.Stop(worker.request_user_key(payload), key, claim.request_id))
+    context = recovery._RecoveryContext(worker.time.time() + 1000, 2, 1, False, None, 1)
+    errors = []
+    if change == "new_attempt":
+        update_json_file_atomic(claim.path, lambda current: dict(current, execution_attempt_id="replacement"))
+    elif change == "new_epoch":
+        update_json_file_atomic(claim.path, lambda current: dict(current, lease_epoch=claim.lease_epoch + 1))
+    else:
+        original_replace = Path.replace
+
+        def move(path, target):
+            if path == claim.path:
+                error = OSError("simulated recovery move I/O error")
+                errors.append(error)
+                raise error
+            return original_replace(path, target)
+
+        monkeypatch.setattr(Path, "replace", move)
+    with _no_resource_growth():
+        assert recover_stale_processing(
+            lane.paths, claim.path, payload, context, recovery._settle_stale_processing,
+        ) == ""
+    if change == "move_error":
+        assert len(errors) == 1 and errors[0].__cause__ is None
+        stderr = capsys.readouterr().err
+        assert '"operation": "requeue_gateway_request"' in stderr
+        assert '"category": "io"' in stderr
+        assert str(errors[0]) in stderr
+    assert claim.path.exists()
+    assert not (lane.paths.terminal / claim.name).exists()
+    assert lane.scheduler.sequencer.snapshot(key)["active"] == (claim.request_id, claim.execution_attempt_id, 7)
+    assert claim.request_id in lane.scheduler.sequencer._box(key).stopped
+    assert exact in worker._CLAIM_EPOCHS and other in worker._CLAIM_EPOCHS
+
+
+@pytest.mark.parametrize("lane", [4], indirect=True)
+@pytest.mark.parametrize("outcome", ["archived", "failed", "requeued"])
+def test_recovery_notifies_actor_after_original_transition_exit(lane, monkeypatch, outcome):
+    from agent_py_agent.agent.gateway_parts import multiprocess_processing_recovery as metadata
+
+    enqueue(lane)
+    claim, _, _ = dispatch(lane)
+    payload, key, exact, _ = bind(lane, claim)
+    if outcome == "archived":
+        recovery.write_json_file_atomic(claim.path, recovery._terminal_gateway_request_payload(
+            claim.request_id, payload, {"id": claim.request_id, "status": "done", "ok": True},
+        ))
+    entered, notifications, trace = [], [], []
+    original_scope = metadata.gateway_turn_transition
+    original_post = lane.scheduler.post
+
+    @contextmanager
+    def scope(*args, **kwargs):
+        acquired = False
+        try:
+            with original_scope(*args, **kwargs):
+                acquired = True
+                entered.append(True)
+                trace.append("enter")
+                yield
+        finally:
+            if acquired:
+                entered.pop()
+                trace.append("exit")
+
+    def post(command, **kwargs):
+        assert not entered, "recovery must release T before notifying the actor"
+        if command.request_id == claim.request_id:
+            assert trace and trace[-1] == "exit", "the real recovery transition must have been observed"
+            trace.append("notify")
+            notifications.append(command)
+        return original_post(command, **kwargs)
+
+    monkeypatch.setattr(metadata, "gateway_turn_transition", scope)
+    monkeypatch.setattr(lane.scheduler, "post", post)
+    context = recovery._RecoveryContext(
+        worker.time.time() + 1000, 2 if outcome == "requeued" else 1, 1, False, None, 1,
+    )
+    with _no_resource_growth():
+        report = recovery.recover_gateway_processing_requests_report(lane.paths, params=context)
+        assert report.load_errors == []
+        assert report.summary[outcome] == 1
+        drain(lane, key)
+    assert len(notifications) == 1
+    assert trace.count("enter") == trace.count("exit") > 0
+    assert trace[trace.index("notify") - 1] == "exit"
+    assert lane.scheduler.sequencer.snapshot(key)["active"] is None
+    assert exact not in worker._CLAIM_EPOCHS

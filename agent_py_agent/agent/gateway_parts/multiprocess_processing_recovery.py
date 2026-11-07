@@ -98,11 +98,17 @@ def _rejection(payload, phase):
     return RequestExecutionContextUnavailable("original_processing_recovery_source_required")
 
 
-# LLM: 长P2观察在原controller内且T外；无P3旧请求只在判死后终结，Count0惰性印记仅在实际生命周期锁内回原链；有P3仍核原issued/政策。
+# LLM: 长P2观察在原controller内且T外；Count0仅在原恢复确认归档/失败/回队并退出提交锁后交还精确Actor；有P3仍核原issued/政策。
 # 函数用途: 为旧processing选择原恢复或无路由收口，不剥标签、不重放旧请求。
 def recover_stale_processing(paths, request_path, payload, context, operation):
     if not processing_recovery_required(context, payload):
-        return operation(paths, request_path, payload, context)
+        outcome = operation(paths, request_path, payload, context)
+        if outcome in ("archived", "failed", "requeued"):
+            from .request_worker import _release_claimed_gateway_actor
+
+            _release_claimed_gateway_actor(paths, paths.processing / request_path.name, payload,
+                str(payload.get("execution_attempt_id") or ""), terminal=(outcome != "requeued"))
+        return outcome
     gate = context.admission_gate
     from .multiprocess_unroutable_closeout import (
         close_out_unroutable_processing,
