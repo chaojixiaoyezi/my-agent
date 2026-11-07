@@ -331,8 +331,9 @@ def _write_manifest(archive, manifest):
 
 
 # LLM: 源父与目标父均固定nofollow FD，同盘os.replace后刷盘；已被其它进程flock的sidecar留原地，不移动锁到新inode。
+# LLM: 可选观察口只同步记录迁移intent/commit，不提供死亡或执行权；未传时原Count0路径与顺序保持。
 # 函数用途: 按固定顺序搬走全部设施，并在每步之后更新清单。
-def _move_sources(root, archive, manifest):
+def _move_sources(root, archive, manifest, *, observe=None):
     import fcntl
 
     for parts in _source_paths(root):
@@ -348,11 +349,15 @@ def _move_sources(root, archive, manifest):
                     continue
             destination = open_directory_beneath(archive, parts[:-1], create=True, require_dir_fd=True)
             stack.callback(os.close, destination)
+            if observe is not None:
+                observe(parts, False)
             os.replace(parts[-1], parts[-1], src_dir_fd=source, dst_dir_fd=destination)
             os.fsync(source)
             os.fsync(destination)
             manifest['moved'].append('/'.join(parts))
             _write_manifest(archive, manifest)
+            if observe is not None:
+                observe(parts, True)
     _write_manifest(archive, manifest)
 
 
