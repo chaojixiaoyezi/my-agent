@@ -294,6 +294,8 @@ def _native_response(call, entry, decision, reason):
         raise HostAPIError('STATE_CONFLICT', 409) from error
 
 
+# LLM: Delegate only this pending permission through the original approval authority; the local ticket dies on return.
+# 函数用途: 把这一次审批交给原审批链，临时票据不留给后续调用复用。
 def _delegate(call, entry):
     """显式宿主票据优先；r3 内部票据只在本栈使用，不能被 JSON、模型或其它 owner 兑换。"""
     foundation = _foundation()
@@ -329,7 +331,9 @@ def _delegate(call, entry):
     bridge_context = bind_business_context(call.context.host, authorize=authorize, subject_id=call.subject_id,
         actor=call.context.actor, business_context=call.context.business_context)
 
-    def invoke(action, payload, context, **kwargs):
+    # LLM: Match the frozen service signature explicitly; extra service arguments must not be silently accepted.
+    # 函数用途: 只接收原审批端口明确声明的参数，不吞掉多余参数。
+    def invoke(action, payload, context, *, request_id='', idempotency_key=None, expected_revision=None):
         if (not active or action != 'approvals.decide' or context is not bridge_context
                 or not hmac.compare_digest(payload.get('response_ticket', ''), token)
                 or {key: payload.get(key) for key in params} != params):
