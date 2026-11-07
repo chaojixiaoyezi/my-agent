@@ -7,6 +7,8 @@
 # 模块用途: 给用户与模型提供受控、可校验、能报告来源与生效时机的配置读写能力。
 from __future__ import annotations
 
+import json
+import math
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -119,9 +121,32 @@ def _pool_capacity_within(maximum: int) -> Callable[[object], tuple[bool, str, o
     return validate
 
 
+# LLM: 数字序列仅表示非负有限间隔；拒绝布尔、文本元素及嵌套结构，不把它变成命令或地址配置。
+# 函数用途: 归一列表、元组或JSON数字数组；仅正式YAML及原历史回滚可解析旧加载器留下的数字标量文本。
+def _non_negative_numbers(value: object, *, yaml_scalars: bool = False) -> tuple[bool, str, object]:
+    try:
+        if isinstance(value, str):
+            value = json.loads(value)
+        if yaml_scalars and isinstance(value, (list, tuple)):
+            value = [json.loads(number) if isinstance(number, str) else number for number in value]
+        if not isinstance(value, (list, tuple)) or any(
+            type(number) not in (int, float) or not math.isfinite(number) or number < 0 for number in value
+        ):
+            raise ValueError
+        return True, "", list(value)
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        return False, "必须是非负有限数字列表，不能含布尔、文本或嵌套结构", []
+
+
 # LLM: 白名单宁窄勿宽：新池只调整已存在执行器的有界容量，不扩大认证、路径或模型路由权限。
 # 常量用途: 声明可自助修改的配置项。
 TUNABLE_KEYS: dict[str, TunableSpec] = {
+    "model_retry_backoff_seconds": TunableSpec(
+        key="model_retry_backoff_seconds",
+        describe="可重试模型HTTP错误的退避秒数列表，默认[2.0, 5.0, 15.0]，空列表不增加退避",
+        validate=_non_negative_numbers,
+        effect=EFFECT_GATEWAY_RESTART,
+    ),
     "gateway_http_control_lane_workers": TunableSpec(
         key="gateway_http_control_lane_workers",
         describe="控制请求VIP车道的独立线程数，0关闭独立车道（默认10，范围0~128）",

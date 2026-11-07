@@ -348,6 +348,20 @@ _BASE_RUNTIME_SQL = (
         processed_at REAL NOT NULL DEFAULT 0
     )
     """,
+    # 只新增终态模型调用记录及有界查询索引；不改写旧表，仍由原schema事务逐条安装。
+    "CREATE TABLE IF NOT EXISTS llm_call_records ("
+    "record_id TEXT PRIMARY KEY, call_id TEXT NOT NULL UNIQUE, owner_id TEXT NOT NULL, "
+    "request_id TEXT NOT NULL DEFAULT '', run_id TEXT NOT NULL DEFAULT '', task_id TEXT NOT NULL DEFAULT '', "
+    "role TEXT NOT NULL DEFAULT '', thread_id TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', "
+    "backend TEXT NOT NULL DEFAULT '', profile_id TEXT NOT NULL DEFAULT '', purpose TEXT NOT NULL DEFAULT '', "
+    "status TEXT NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, "
+    "cached_tokens INTEGER NOT NULL DEFAULT 0, latency_ms INTEGER NOT NULL DEFAULT 0, "
+    "error_code TEXT NOT NULL DEFAULT '', metadata_json TEXT NOT NULL DEFAULT '{}', "
+    "started_at REAL NOT NULL, finished_at REAL, created_at REAL NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS idx_llm_records_owner_created ON llm_call_records(owner_id, created_at DESC, record_id DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_llm_records_owner_task ON llm_call_records(owner_id, task_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_llm_records_owner_model ON llm_call_records(owner_id, model, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_outbox_scope_owner ON outbox_entries(scope, owner_id, created_at, outbox_id)",
 )
 
 

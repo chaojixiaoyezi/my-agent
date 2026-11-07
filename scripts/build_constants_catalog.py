@@ -70,6 +70,38 @@ _UNIT_SUFFIXES = (
     ("_GB", "GB"),
 )
 
+# 跨业务共享合同不能为展示单位改名；只为这些明确量纲的名字补单位，不豁免目录完整性或中文说明。
+_UNIT_OVERRIDES = {
+    "LLM_RECORDS_AGGREGATE_MAX_MODELS": "个模型",
+    "OPENAI_COMPAT_MAX_MESSAGES": "条消息",
+    "POLICY_RULES_MAX_PER_OWNER": "条规则",
+    "POLICY_PENDING_MAX_PER_OWNER": "条",
+    "POLICY_HISTORY_MAX_SEGMENTS": "个分段",
+    "SCOPE_RULES_MAX_PER_OWNER": "条规则",
+    "SCOPE_TASK_RULES_MAX_PER_TASK": "条规则",
+    "POLICY_JUDGE_WORKERS": "个线程",
+    "SIDE_QUESTIONS_MAX_PER_CONVERSATION": "个问题",
+    "SIDE_QUESTIONS_MAX_CONCURRENT_PER_OWNER": "个问题",
+    "SIDE_QUESTION_WORKERS": "个线程",
+    "SIDE_QUESTION_CONTEXT_MAX_MESSAGES": "条消息",
+    "AGENT_PROMPT_HISTORY_MAX_PER_ROLE": "个版本",
+    "PROMPT_TRIGGERS_MAX_PER_ROLE": "条规则",
+    "SKILL_ZIP_MAX_COMPRESSION_RATIO": "倍",
+    "CUSTOM_TOOLS_MAX_PER_OWNER": "个工具",
+    "NOTIFY_CHANNELS_MAX_PER_OWNER": "个渠道",
+    "NOTIFY_DRAIN_BATCH": "条",
+    "NOTIFY_WORKERS": "个线程",
+    "OPS_UPDATE_LOG_RING": "条",
+    "FS_WATCH_MAX_SUBSCRIPTIONS_PER_OWNER": "个订阅",
+    "FS_WATCH_MAX_ENTRIES_PER_SCAN": "个目录项",
+    "FS_SEARCH_MAX_CONCURRENT": "个查询",
+    "SCM_MAX_SUBSCRIPTIONS_PER_OWNER": "个订阅",
+    "SCM_MAX_PATHS_PER_ACTION": "条路径",
+    "ACP_MAX_SESSIONS_PER_OWNER": "个会话",
+    "WEB_TERMINAL_MAX_SESSIONS_PER_OWNER": "个会话",
+    "PRESENCE_MAX_MEMBERS_PER_DOC": "个成员",
+}
+
 # 类别判定：按顺序命中第一条关键字（只读常数名，纯展示用，不参与守卫）。重试在超时前（_MAX_RETRIES 算重试），
 # 超时在上限前（名字带 TIMEOUT 的按超时归类更贴切），比例阈值在上限前（_MAX_PERCENT 算比例）。
 _CATEGORY_RULES = (
@@ -131,13 +163,15 @@ def _is_protocol_constant(name: str) -> bool:
     return any(marker in upper for marker in _PROTOCOL_MARKERS) or upper.endswith("_TYPE")
 
 
-# LLM: 按明确量纲后缀匹配，字节预算优先；INT64_MAX 标为整数类型边界，不作字节或数量阈值猜测。
+# LLM: 明确合同名字优先取量纲，其余按后缀匹配；未知名字继续为空，不用通用单位掩盖缺失。
 #   未注明量纲的普通 BUDGET 仍返回空串；目录只是展示投影，不改变运行时常数或协议排除规则。
 # 函数用途: 从常数名后缀推导单位（秒/毫秒/字符/字节/tokens/百分比等）。
 def unit_for_name(name: str) -> str:
     stripped = str(name or "").lstrip("_")
     if stripped == "INT64_MAX":
         return "整数"
+    if stripped in _UNIT_OVERRIDES:
+        return _UNIT_OVERRIDES[stripped]
     for suffix, unit in _UNIT_SUFFIXES:
         if stripped.endswith(suffix):
             return unit

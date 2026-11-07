@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1353,
+  "count": 1405,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -1418,6 +1418,422 @@
       "unit": "个",
       "category": "重试",
       "description": "看图探测最多试 2 次：一次失败可能是偶发，再多会拖慢探测；证据以成功回包为准。"
+    },
+    {
+      "name": "ACP_MAX_SESSIONS_PER_OWNER",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 4,
+      "unit": "个会话",
+      "category": "上限预算",
+      "description": "每个本人空间最多同时保留的外部代理桥接会话数量。"
+    },
+    {
+      "name": "ACP_PROBE_TIMEOUT_SECONDS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 15,
+      "unit": "秒",
+      "category": "超时",
+      "description": "外部代理桥接探测允许的最大等待秒数。"
+    },
+    {
+      "name": "ACP_TERMINATE_GRACE_SECONDS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 3.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "外部代理桥接结束时允许的正常退出宽限秒数。"
+    },
+    {
+      "name": "AGENT_PROMPT_HISTORY_MAX_PER_ROLE",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 20,
+      "unit": "个版本",
+      "category": "上限预算",
+      "description": "每个角色最多保留的提示词历史版本条数。"
+    },
+    {
+      "name": "CUSTOM_TOOLS_MAX_PER_OWNER",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 50,
+      "unit": "个工具",
+      "category": "上限预算",
+      "description": "每个本人空间最多登记的自定义工具数量。"
+    },
+    {
+      "name": "CUSTOM_TOOLS_PROBE_TIMEOUT_SECONDS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 5,
+      "unit": "秒",
+      "category": "超时",
+      "description": "自定义工具探测允许的最大执行秒数。"
+    },
+    {
+      "name": "DOC_STATE_MAX_BYTES",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 262144,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单份协作文档状态允许占用的最大字节数。"
+    },
+    {
+      "name": "FS_SEARCH_MAX_CONCURRENT",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 2,
+      "unit": "个查询",
+      "category": "上限预算",
+      "description": "文件搜索允许同时运行的最大查询数量。"
+    },
+    {
+      "name": "FS_SEARCH_MAX_FILE_BYTES",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "文件搜索允许读取的单文件最大字节数。"
+    },
+    {
+      "name": "FS_WATCH_IDLE_EXPIRY_SECONDS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 900,
+      "unit": "秒",
+      "category": "其它",
+      "description": "文件观察订阅闲置后自动过期的秒数。"
+    },
+    {
+      "name": "FS_WATCH_MAX_ENTRIES_PER_SCAN",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 5000,
+      "unit": "个目录项",
+      "category": "上限预算",
+      "description": "文件观察每次扫描最多检查的目录条目数。"
+    },
+    {
+      "name": "FS_WATCH_MAX_SUBSCRIPTIONS_PER_OWNER",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 8,
+      "unit": "个订阅",
+      "category": "上限预算",
+      "description": "每个本人空间最多登记的文件观察订阅数量。"
+    },
+    {
+      "name": "FS_WATCH_MIN_SCAN_INTERVAL_SECONDS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 1.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "文件观察两次扫描之间的最小间隔秒数。"
+    },
+    {
+      "name": "LLM_GATEWAY_TEST_MAX_OUTPUT_TOKENS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 16,
+      "unit": "tokens",
+      "category": "上限预算",
+      "description": "模型网关诊断调用最多生成的输出令牌数。"
+    },
+    {
+      "name": "LLM_RECORDS_AGGREGATE_DEFAULT_WINDOW_SECONDS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 604800,
+      "unit": "秒",
+      "category": "其它",
+      "description": "模型调用聚合查询默认覆盖的时间窗口秒数。"
+    },
+    {
+      "name": "LLM_RECORDS_AGGREGATE_MAX_MODELS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 200,
+      "unit": "个模型",
+      "category": "上限预算",
+      "description": "一次模型调用聚合查询最多返回的模型数量。"
+    },
+    {
+      "name": "LLM_RECORDS_AGGREGATE_MAX_WINDOW_SECONDS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 2678400,
+      "unit": "秒",
+      "category": "上限预算",
+      "description": "模型调用聚合查询允许的最大时间窗口秒数。"
+    },
+    {
+      "name": "LLM_RECORDS_METADATA_MAX_BYTES",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 4096,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单条模型调用元数据允许保存的最大字节数。"
+    },
+    {
+      "name": "LLM_RECORDS_PRUNE_BATCH_ROWS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 500,
+      "unit": "行",
+      "category": "其它",
+      "description": "模型调用记录每批最多清理的旧记录行数。"
+    },
+    {
+      "name": "NOTIFY_CHANNELS_MAX_PER_OWNER",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 50,
+      "unit": "个渠道",
+      "category": "上限预算",
+      "description": "每个本人空间最多配置的通知渠道数量。"
+    },
+    {
+      "name": "NOTIFY_DRAIN_BATCH",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 20,
+      "unit": "条",
+      "category": "其它",
+      "description": "通知投递队列每批最多领取的条目数。"
+    },
+    {
+      "name": "NOTIFY_WORKERS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 2,
+      "unit": "个线程",
+      "category": "其它",
+      "description": "通知投递执行器共享的工作线程数量。"
+    },
+    {
+      "name": "OPENAI_COMPAT_MAX_MESSAGES",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 512,
+      "unit": "条消息",
+      "category": "上限预算",
+      "description": "单次兼容模型请求允许包含的最大消息条数。"
+    },
+    {
+      "name": "OPENAI_COMPAT_STREAM_CHUNK_CHARS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 2048,
+      "unit": "字符",
+      "category": "其它",
+      "description": "兼容模型流式输出每片最多承载的字符数。"
+    },
+    {
+      "name": "OPS_UPDATE_LOG_RING",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 2000,
+      "unit": "条",
+      "category": "其它",
+      "description": "单次运维更新最多保留的诊断日志条数。"
+    },
+    {
+      "name": "POLICY_HISTORY_MAX_SEGMENTS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 8,
+      "unit": "个分段",
+      "category": "上限预算",
+      "description": "策略历史日志最多保留的分段数量。"
+    },
+    {
+      "name": "POLICY_HISTORY_SCAN_MAX_RECORDS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 5000,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "策略历史单次查询最多读取的记录条数。"
+    },
+    {
+      "name": "POLICY_HISTORY_SEGMENT_BYTES",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 4194304,
+      "unit": "字节",
+      "category": "其它",
+      "description": "策略历史日志每个分段允许占用的最大字节数。"
+    },
+    {
+      "name": "POLICY_JUDGE_WORKERS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 2,
+      "unit": "个线程",
+      "category": "其它",
+      "description": "策略判断任务共享的工作线程数量。"
+    },
+    {
+      "name": "POLICY_PENDING_MAX_PER_OWNER",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 200,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "每个本人空间最多保留的待审批条目数。"
+    },
+    {
+      "name": "POLICY_RULES_MAX_PER_OWNER",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 500,
+      "unit": "条规则",
+      "category": "上限预算",
+      "description": "每个本人空间最多保存的策略规则条数。"
+    },
+    {
+      "name": "POLICY_TASK_SUMMARY_SCAN_RECORDS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 2000,
+      "unit": "条",
+      "category": "其它",
+      "description": "策略任务摘要单次最多读取的历史记录条数。"
+    },
+    {
+      "name": "PRESENCE_MAX_MEMBERS_PER_DOC",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 50,
+      "unit": "个成员",
+      "category": "上限预算",
+      "description": "单个文档最多保留的在线成员数量。"
+    },
+    {
+      "name": "PRESENCE_TTL_SECONDS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 30,
+      "unit": "秒",
+      "category": "其它",
+      "description": "文档成员在线状态的有效秒数。"
+    },
+    {
+      "name": "PROMPT_TRIGGERS_MAX_PER_ROLE",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 32,
+      "unit": "条规则",
+      "category": "上限预算",
+      "description": "每个角色最多登记的提示词触发规则条数。"
+    },
+    {
+      "name": "SCM_GIT_TIMEOUT_SECONDS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 15,
+      "unit": "秒",
+      "category": "超时",
+      "description": "版本库命令执行允许的最大等待秒数。"
+    },
+    {
+      "name": "SCM_MAX_LOG_ENTRIES",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 50,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "版本库历史查询最多返回的提交条数。"
+    },
+    {
+      "name": "SCM_MAX_PATHS_PER_ACTION",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 200,
+      "unit": "条路径",
+      "category": "上限预算",
+      "description": "单次版本库操作最多提交的路径条数。"
+    },
+    {
+      "name": "SCM_MAX_SUBSCRIPTIONS_PER_OWNER",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 8,
+      "unit": "个订阅",
+      "category": "上限预算",
+      "description": "每个本人空间最多登记的版本库观察订阅数量。"
+    },
+    {
+      "name": "SCM_MIN_REFRESH_INTERVAL_SECONDS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 1.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "版本库观察两次刷新之间的最小间隔秒数。"
+    },
+    {
+      "name": "SCOPE_RULES_MAX_PER_OWNER",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 500,
+      "unit": "条规则",
+      "category": "上限预算",
+      "description": "每个本人空间最多保存的目标范围规则条数。"
+    },
+    {
+      "name": "SCOPE_TASK_RULES_MAX_PER_TASK",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 100,
+      "unit": "条规则",
+      "category": "上限预算",
+      "description": "单个任务最多叠加的目标范围规则条数。"
+    },
+    {
+      "name": "SIDE_QUESTIONS_MAX_CONCURRENT_PER_OWNER",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 2,
+      "unit": "个问题",
+      "category": "上限预算",
+      "description": "每个本人空间最多同时执行的旁问数量。"
+    },
+    {
+      "name": "SIDE_QUESTIONS_MAX_PER_CONVERSATION",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 50,
+      "unit": "个问题",
+      "category": "上限预算",
+      "description": "单个会话最多创建的旁问数量。"
+    },
+    {
+      "name": "SIDE_QUESTION_CONTEXT_MAX_CHARS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 120000,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "旁问上下文最多携带的字符数。"
+    },
+    {
+      "name": "SIDE_QUESTION_CONTEXT_MAX_MESSAGES",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 40,
+      "unit": "条消息",
+      "category": "上限预算",
+      "description": "旁问最多携带的原会话上下文消息条数。"
+    },
+    {
+      "name": "SIDE_QUESTION_WORKERS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 4,
+      "unit": "个线程",
+      "category": "其它",
+      "description": "旁问执行器最多使用的工作线程数量。"
+    },
+    {
+      "name": "SKILL_PACKAGE_FILE_MAX_BYTES",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "技能归档中单个文件允许的最大字节数。"
+    },
+    {
+      "name": "SKILL_ZIP_MAX_COMPRESSION_RATIO",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 100,
+      "unit": "倍",
+      "category": "比例阈值",
+      "description": "技能归档条目允许的最大解压大小与压缩大小倍数。"
+    },
+    {
+      "name": "WEB_TERMINAL_GRANT_TTL_SECONDS",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 120,
+      "unit": "秒",
+      "category": "其它",
+      "description": "浏览器终端访问授权的有效秒数。"
+    },
+    {
+      "name": "WEB_TERMINAL_MAX_SESSIONS_PER_OWNER",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 4,
+      "unit": "个会话",
+      "category": "上限预算",
+      "description": "每个本人空间最多同时保留的浏览器终端会话数量。"
+    },
+    {
+      "name": "WEB_TERMINAL_READ_MAX_BYTES",
+      "file": "agent_py_agent/agent/business_spaces/gap158_limits.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "浏览器终端单次读取最多返回的字节数。"
     },
     {
       "name": "AGENTS_CONTROL_MAX_BYTES",

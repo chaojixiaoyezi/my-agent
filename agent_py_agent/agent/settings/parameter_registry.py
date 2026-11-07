@@ -14,6 +14,7 @@
 # 模块用途: 回答“有哪些参数、各是什么意思、谁能改、改了什么时候生效、实际用的是多少”，是参数中心的唯一登记来源。
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import MISSING, dataclass, fields
 from functools import lru_cache
@@ -54,6 +55,8 @@ _HOST_CAPACITY_KEYS = frozenset({
     "memory_reference_pin_chunk_bytes",
 })
 DEPLOYMENT_ONLY_KEYS = _HOST_CAPACITY_KEYS | frozenset({
+    # 持久记录容量与可执行命令目录仅由部署者配置，不向模型开放资源或进程边界。
+    "llm_call_records_max_rows", "acp_bridge_agents",
     "model_http_max_idle_connections", "scale_owner_snapshot_mode", "gateway_edge_identity_required",
     "gateway_event_hub_ring_events", "gateway_event_fallback_poll_seconds", "conversation_actor_workers",
     "owner_epoch_fence_enabled", "background_owner_wake_rescan_seconds",
@@ -110,6 +113,10 @@ _TARGET_TOKENS = frozenset({
 # 或桌面控制的键，以及加载器写入的内部元数据（不是用户参数）。
 # 收紧超时是整数，不会命中 plugin 指向记号；显式登记才能防止模型自行放大征询预算。
 _BOUNDARY_NAMES = _HOST_CAPACITY_KEYS | frozenset({
+    # 会新增模型请求、持久写入、工具执行或出站操作的开关不得由模型自行开启。
+    "openai_compat_gateway_enabled", "llm_call_records_enabled", "side_questions_enabled",
+    "custom_tools_enabled", "notify_delivery_enabled", "ops_remote_update_enabled",
+    "acp_bridge_enabled", "web_terminal_enabled",
     "max_background_agents",
     "api_base", "api_key", "model_backend", "computer_use_enabled", "computer_use_observation_enabled", "execution_mode",
     "user_id", "system_prompt",
@@ -198,8 +205,8 @@ class ParameterSpec:
             return "deployment"
         return "common" if self.common else "advanced"
 
-    # LLM: 仅映射本模块与 parameter_changes 实际实现的路由；其它结构和部署来源没有普通参数 writer。
-    # 函数用途: 返回实际支持的标量或结构化写路线。
+    # LLM: 仅声明了非空纯数字默认序列的列表可走数字writer；空列表、命令、地址及部署项仍无写权。
+    # 函数用途: 返回正式支持的标量、数字序列或显式结构化写路线，不按键名扩大能力。
     @property
     def writer(self) -> str:
         if self.source == SOURCE_MODEL_PROFILE:
@@ -208,6 +215,10 @@ class ParameterSpec:
             return ""
         if self.key in STRUCTURED_PARAMETER_KEYS:
             return "structured"
+        if self.value_type == "list" and isinstance(self.default, (list, tuple)) and self.default and all(
+            type(value) in (int, float) and math.isfinite(value) for value in self.default
+        ):
+            return "numeric_sequence"
         return "scalar" if self.value_type in {"str", "int", "float", "bool"} else ""
 
     # LLM: 认证用户范围仍只限旧显式白名单，部署层和缺 writer 的值不能用认证作用域绕过。
