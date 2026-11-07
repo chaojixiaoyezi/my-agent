@@ -6,12 +6,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import stat
 import threading
+from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from ..common.cache_freshness import cache_entry_trustworthy
 from ..contracts.gates.skill_guard import SkillGuardRequest, evaluate_skill_guard_gate
 from ..user_space.owner_policy import EffectiveOwnerPolicy
 from .package_snapshot import CapabilityPackageSnapshot
@@ -50,6 +53,8 @@ _PROCESS_SKILL_CACHE_MAX_BYTES = 16 * 1024 * 1024
 _PROCESS_ROOT_CACHE_MAX_ENTRIES = 128
 # 进程内内置技能根树状态缓存允许记录的最大路径总数上限。
 _PROCESS_ROOT_CACHE_MAX_PATHS = 65536
+# 每个技能服务按根集合/工作区保留的清单与快照缓存条目上限；多工作区轮换时互不挤掉，超出按最久未用淘汰。
+_SERVICE_CACHE_MAX_ENTRIES = 32
 
 
 # LLM: 根路径与来源共同参与发现优先级和缓存身份；该值对象不自行解析路径或授予读取权限。
@@ -74,11 +79,13 @@ class SkillManifestItem:
 
 
 # LLM: stat包含全部guard资源及目录；命中仍逐项复核，不能仅信根mtime来忽略后代改写。
-# 类用途: 缓存builtin目录清单与摘要，省去重复rglob而不省略变更检测。
+#   settled=列名时每个目录mtime都已离开2秒窗口(读前冻结)；只有这种清单才能给可编辑根复用。
+# 类用途: 缓存目录清单与摘要，省去重复rglob/列目录而不省略变更检测。
 @dataclass(frozen=True)
 class _SkillTreeState:
     stats: tuple[tuple, ...]
     digest: str
+    settled: bool = False
 
 
 # LLM: 一个服务是 prompt、工具与子代理的唯一快照来源；能力包提供者只给原安装事实的投影，不给私有扫描根。
@@ -106,8 +113,10 @@ class SkillsService:
         self.workspace_root = Path(workspace_root).expanduser().resolve(strict=False)
         self.policy_provider = policy_provider
         self._extra_roots: tuple[Path, ...] = ()
-        self._cache: dict[tuple[str, str], SkillSnapshot] = {}
+        self._cache: OrderedDict[tuple[str, str], SkillSnapshot] = OrderedDict()
+        # _manifest_cache 是最近一次使用的 (roots, signature, manifest, errors)；_manifests 按根集合有界保存全部近期清单。
         self._manifest_cache: tuple | None = None
+        self._manifests: OrderedDict[tuple[SkillRoot, ...], tuple] = OrderedDict()
         self._force_manifest_reload = False
         self._lock = threading.RLock()
 
@@ -123,6 +132,7 @@ class SkillsService:
             self._extra_roots = normalized
             self._cache.clear()
             self._manifest_cache = None
+            self._manifests.clear()
 
     # LLM: 显式clear使下一次发现绕过公开进程结果，不影响其它Owner策略或主动扫描磁盘。
     # 函数用途: 清空当前服务缓存并安排下一次重新读取正文与guard。
@@ -130,6 +140,7 @@ class SkillsService:
         with self._lock:
             self._cache.clear()
             self._manifest_cache = None
+            self._manifests.clear()
             self._force_manifest_reload = True
 
     # LLM: 只有stat命中才复用旧快照；目录/guard资源变化即使正文hash相同也须重建，包/策略仍逐次核对。
@@ -155,6 +166,8 @@ class SkillsService:
         if not force_reload and manifest_unchanged:
             with self._lock:
                 cached = self._cache.get(cache_key)
+                if cached is not None:
+                    self._cache.move_to_end(cache_key)
             if cached is not None and cached.fingerprint == fingerprint:
                 return cached
         snapshot = _build_snapshot(manifest, discovery_errors, policy, workspace, packages)
@@ -163,22 +176,34 @@ class SkillsService:
         snapshot = replace(snapshot,fingerprint=fingerprint)
         with self._lock:
             self._cache[cache_key] = snapshot
+            self._cache.move_to_end(cache_key)
+            while len(self._cache) > _SERVICE_CACHE_MAX_ENTRIES:
+                self._cache.popitem(last=False)
         return snapshot
 
     # LLM: 仅宿主显式承诺不可变的公开根可按generation热命中；默认可编辑根仍核全部guard资源，force/clear必重扫。
+    #   清单按根集合有界LRU保存：同一Owner在默认工作区、任务工作区与多个worktree间轮换时互不挤掉重建；
+    #   每次仍先算完整签名再命中。force/clear清空全部根集合，保持"下一次各工作区都重读正文与guard"。
     # 函数用途: 保留Owner独立策略，按可信代次或完整目录签名失效manifest，不读取正文里的缓存指令。
     def _manifest_for(self, roots: tuple[SkillRoot, ...], *, force_reload: bool):
         generations = getattr(self.home_paths, 'immutable_skill_root_generations', {})
         signature = _roots_signature(roots, immutable_generations=generations)
         with self._lock:
             force_reload = force_reload or self._force_manifest_reload
-            cached = self._manifest_cache
-            if not force_reload and cached is not None and cached[:2] == (roots, signature):
+            cached = self._manifests.get(roots)
+            if not force_reload and cached is not None and cached[1] == signature:
+                self._manifests.move_to_end(roots)
+                self._manifest_cache = cached
                 return cached[2], list(cached[3]), True
             if force_reload:
                 _invalidate_public_skill_cache(roots)
+                self._manifests.clear()
             manifest, errors = _build_manifest(roots)
             self._manifest_cache = (roots, signature, manifest, tuple(errors))
+            self._manifests[roots] = self._manifest_cache
+            self._manifests.move_to_end(roots)
+            while len(self._manifests) > _SERVICE_CACHE_MAX_ENTRIES:
+                self._manifests.popitem(last=False)
             self._force_manifest_reload = False
             return manifest, errors, False
 
@@ -238,13 +263,19 @@ def _roots_signature(roots: tuple[SkillRoot, ...], *, immutable_generations=None
 
 
 # LLM: 文件/链接两种身份、权限及纳秒时间参与指纹；读不到时保留errno，中断不吞掉。
+#   POSIX先lstat：非链接时stat与lstat描述同一inode，直接复用省一次系统调用；链接才再跟随取目标。
+#   Windows的目录联接lstat不报链接，仍保持先stat后lstat的原顺序。
 # 函数用途: 获取不读正文的文件状态，区分不存在、不可读和符号链接目标变化。
 def _path_stat_signature(path: Path) -> tuple:
     try:
-        stat = path.stat()
-        link = path.lstat()
-        return (str(path), stat.st_mtime_ns, stat.st_size, stat.st_ctime_ns,
-                stat.st_dev, stat.st_ino, stat.st_mode,
+        if os.name == "nt":
+            target = path.stat()
+            link = path.lstat()
+        else:
+            link = path.lstat()
+            target = path.stat() if stat.S_ISLNK(link.st_mode) else link
+        return (str(path), target.st_mtime_ns, target.st_size, target.st_ctime_ns,
+                target.st_dev, target.st_ino, target.st_mode,
                 link.st_ino, link.st_ctime_ns, link.st_mode)
     except InterruptedError:
         raise
@@ -253,22 +284,26 @@ def _path_stat_signature(path: Path) -> tuple:
 
 
 # LLM: 命中复核全部stat；未命中逐目录稳定枚举，最多三次重试，不能发表漏项但带新目录stat的清单。
-# 函数用途: 复用builtin目录清单，检测子文件改写和枚举期间增删，不无限重试。
+#   builtin沿原规则缓存；可编辑根(owner/workspace/shared/plugin)只缓存settled清单：同片时间戳内的
+#   追加不会改目录mtime，列名时已离开2秒窗口的目录之后任何增删必改stat，命中复核即可发现。
+# 函数用途: 复用目录清单，检测子文件改写和枚举期间增删，不无限重试。
 def _skill_tree_state(path: Path, *, builtin: bool = False) -> _SkillTreeState:
     first = _path_stat_signature(path)
     key = (str(path), first[5], first[1]) if len(first) >= 7 else None
     with _PROCESS_SKILL_CACHE_LOCK:
-        cached = _PROCESS_BUILTIN_ROOT_CACHE.get(key) if builtin and key is not None else None
-    if cached is not None and all(_path_stat_signature(Path(row[0])) == row for row in cached.stats):
+        cached = _PROCESS_BUILTIN_ROOT_CACHE.get(key) if key is not None else None
+    if (cached is not None and (builtin or cached.settled)
+            and all(_path_stat_signature(Path(row[0])) == row for row in cached.stats)):
         return cached
     for _ in range(3):
-        stats = _scan_skill_tree_stats(path)
-        if stats is not None:
+        scanned = _scan_skill_tree_stats(path)
+        if scanned is not None:
             break
     else:
         raise OSError("skill directory changed during stat scan")
-    state = _SkillTreeState(stats, hashlib.sha256(repr(stats).encode()).hexdigest())
-    if builtin and key is not None and len(stats) <= _PROCESS_ROOT_CACHE_MAX_PATHS:
+    stats, settled = scanned
+    state = _SkillTreeState(stats, hashlib.sha256(repr(stats).encode()).hexdigest(), settled)
+    if (builtin or settled) and key is not None and len(stats) <= _PROCESS_ROOT_CACHE_MAX_PATHS:
         with _PROCESS_SKILL_CACHE_LOCK:
             _PROCESS_BUILTIN_ROOT_CACHE[key] = state
             while (len(_PROCESS_BUILTIN_ROOT_CACHE) > _PROCESS_ROOT_CACHE_MAX_ENTRIES
@@ -278,20 +313,22 @@ def _skill_tree_state(path: Path, *, builtin: bool = False) -> _SkillTreeState:
 
 
 # LLM: 每个目录在列名首末核同一stat；之后再变会使缓存下一次复核失效，不跟随目录符号链接。
+#   第二项在列名之前逐目录冻结：全部目录mtime已离开2秒窗口才为True，不能在使用时再判。
 # 函数用途: 获取不会把新增文件永久遗漏的确定性全目录元数据，变化时返回None供有界重扫。
-def _scan_skill_tree_stats(root: Path) -> tuple[tuple, ...] | None:
-    pending, signatures = [root], []
+def _scan_skill_tree_stats(root: Path) -> tuple[tuple[tuple, ...], bool] | None:
+    pending, signatures, settled = [root], [], True
     while pending:
         path = pending.pop()
         before = _path_stat_signature(path)
         signatures.append(before)
         if len(before) < 7 or not stat.S_ISDIR(before[6]) or stat.S_ISLNK(before[-1]):
             continue
+        settled = settled and cache_entry_trustworthy(before[1])
         children = tuple(sorted(path.iterdir()))
         if _path_stat_signature(path) != before:
             return None
         pending.extend(reversed(children))
-    return tuple(signatures)
+    return tuple(signatures), settled
 
 
 # LLM: 清理的只是可重建公开投影，不影响其它Owner私有根或现有快照；下一次guard必须重核。

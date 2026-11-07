@@ -16,7 +16,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from ..common.cache_freshness import cache_entry_trustworthy
+from ..common.cache_freshness import cache_entry_trustworthy, cache_stat_signature
 from ..common.directory_lock import locked_private_directory
 from ..common.json_io import (
     append_private_jsonl_records_unlocked,
@@ -66,6 +66,12 @@ _PROCESS_RECORDS_PROJECTION_MAX_ENTRIES_COUNT = 64
 _PROCESS_RECORDS_PROJECTION_FULL_READ_INTERVAL_SECONDS = 60.0
 _PROCESS_RECORDS_PROJECTION_CACHE: OrderedDict[str, _ProcessRecordsProjection] = OrderedDict()
 _PROCESS_RECORDS_PROJECTION_LOCK = threading.Lock()
+# LLM: 逐文件解析缓存，只供只读投影未命中时的持锁扫描使用：按根保存"文件名 → (文件代次指纹, 已校验记录)"。
+#   多会话持续写入时目录 mtime 常驻 2 秒窗口，目录级投影永不可信，但绝大多数历史终态文件早已不变；
+#   指纹一致且该文件 mtime 已离开 2 秒窗口才复用(cache_freshness 唯一实现)，读前冻结可信、读后复核指纹
+#   未变才登记；每次完整扫描整体替换该根映射，删除的文件随之消失。记录对象与目录投影共享、只读使用，
+#   公开读口仍逐条深拷贝；改写/停止/裁剪事务从不借用，仍逐条新读。根数沿用投影的 LRU 上限。
+_PROCESS_RECORD_FILES_CACHE: OrderedDict[str, dict[str, tuple[tuple[int, ...], dict[str, object]]]] = OrderedDict()
 
 # 进程记录默认扫描的基础毫秒额度。
 _PROCESS_SESSION_SCAN_BASE_MS = 1000
@@ -140,6 +146,60 @@ def _store_process_records_projection(
             _PROCESS_RECORDS_PROJECTION_CACHE.popitem(last=False)
 
 
+# LLM: 映射发布后只整体替换、从不原地修改，调用方可直接只读引用；未登记的根返回空表(全部按新读处理)。
+# 函数用途: 取某根上一次完整扫描登记的逐文件解析结果，并提级 LRU。
+def _process_record_files(root: Path) -> dict[str, tuple[tuple[int, ...], dict[str, object]]]:
+    key = str(root)
+    with _PROCESS_RECORDS_PROJECTION_LOCK:
+        files = _PROCESS_RECORD_FILES_CACHE.get(key)
+        if files is None:
+            return {}
+        _PROCESS_RECORD_FILES_CACHE.move_to_end(key)
+        return files
+
+
+# LLM: 只由完整走完的持锁扫描发布；预算超限或异常中断的扫描不发布，旧映射仍要逐文件核指纹才会被复用。
+# 函数用途: 用本次扫描的逐文件结果整体替换该根映射，按投影根数上限做 LRU 淘汰。
+def _store_process_record_files(root: Path, files: dict[str, tuple[tuple[int, ...], dict[str, object]]]) -> None:
+    key = str(root)
+    with _PROCESS_RECORDS_PROJECTION_LOCK:
+        _PROCESS_RECORD_FILES_CACHE[key] = files
+        _PROCESS_RECORD_FILES_CACHE.move_to_end(key)
+        while len(_PROCESS_RECORD_FILES_CACHE) > _PROCESS_RECORDS_PROJECTION_MAX_ENTRIES_COUNT:
+            _PROCESS_RECORD_FILES_CACHE.popitem(last=False)
+
+
+# LLM: 指纹取自跟随链接的 stat，与 read_text 解析同一目标；读前冻结可信，窗口内、读写交错或读失败都只返回不登记。
+#   缺失文件与原逐条读取一样返回 None；其余 OSError/校验错误原样上抛，由扫描循环记为该文件的读取错误。
+# 函数用途: 持锁扫描时按文件代次复用已校验记录，未变文件不再读取、解析与校验。
+def _read_listed_record(
+    root: Path,
+    name: str,
+    previous: dict[str, tuple[tuple[int, ...], dict[str, object]]],
+    current: dict[str, tuple[tuple[int, ...], dict[str, object]]],
+) -> dict[str, object] | None:
+    path = os.path.join(root, name)  # 千级文件逐个 stat，避免每项构造 Path
+    try:
+        before = os.stat(path)
+    except FileNotFoundError:
+        return None
+    signature = cache_stat_signature(before)
+    trusted = cache_entry_trustworthy(before.st_mtime_ns)
+    cached = previous.get(name)
+    if trusted and cached is not None and cached[0] == signature:
+        current[name] = cached
+        return cached[1]
+    record = read_process_record(root, name[:-len(".json")])
+    if trusted and record is not None:
+        try:
+            unchanged = cache_stat_signature(os.stat(path)) == signature
+        except OSError:
+            unchanged = False
+        if unchanged:
+            current[name] = (signature, record)
+    return record
+
+
 # LLM: 读取损坏与记录不存在必须区分；异常不能暴露原始命令、环境或记录内容。
 # 类用途: 返回一条可信记录或结构化读取错误，供查询层判断能否继续使用该句柄。
 @dataclass(frozen=True)
@@ -182,6 +242,9 @@ class ProcessSessionTransaction:
     def __init__(self, root: Path) -> None:
         self.root = root
         self.active = True
+        # 只读投影专用：置 True 时 list_records 复用代次未变文件的已校验记录(与投影共享的只读对象)；
+        # 改写、停止、裁剪等事务保持 False，逐条新读并独占返回值。
+        self.reuse_listed_records = False
 
     # LLM: 离开目录锁后必须失败，防止把一次临界区对象保存在长寿命缓存里继续写。
     # 函数用途: 检查当前事务是否仍处于持锁上下文。
@@ -219,16 +282,20 @@ class ProcessSessionTransaction:
                     names.append(entry.name)
         # deadline 保留最终目录项计数的额度，读取阶段不能继续无限延长。
         records, errors = [], []
+        previous = _process_record_files(self.root) if self.reuse_listed_records else None
+        current: dict[str, tuple[tuple[int, ...], dict[str, object]]] = {}
         for name in sorted(names):
             if clock() >= deadline:
                 raise RuntimeError("process_session_scan_budget_exceeded")
-            path = self.root / name
             try:
-                record = self.load(path.stem)
+                record = (self.load(Path(name).stem) if previous is None
+                          else _read_listed_record(self.root, name, previous, current))
                 if record is not None:
                     records.append(record)
             except (OSError, TypeError, ValueError) as exc:
-                errors.append(process_session_error_report(exc, "process_session_store.validate", path=path))
+                errors.append(process_session_error_report(exc, "process_session_store.validate", path=self.root / name))
+        if previous is not None:
+            _store_process_record_files(self.root, current)
         return records, errors
 
     # LLM: v1 沿原逐记录锁，v2/v3/v4 共用 revision CAS 和 redo；旧版本原样更新，不能迁移或覆盖坏记录。
@@ -545,8 +612,9 @@ class ProcessSessionStore:
     def list_pending_completion_records(self, *, owner_key: str = "", task_id: str = "", cheap_checks: bool = True) -> list[dict[str, object]]:
         return self.list_pending_completion_records_report(owner_key=owner_key, task_id=task_id, cheap_checks=True).records
 
-    # LLM: 私有只读底座永远是全量记录和错误，冷读直接移交新对象；公开API负责复制，兼容参数不再选分支。
+    # LLM: 私有只读底座永远是全量记录和错误，冷读移交新对象或逐文件缓存中的共享只读对象；公开API负责复制，兼容参数不再选分支。
     #   信任在读前冻结，发布时只核目录身份；不因慢读跨过保护窗口而将旧视图变可信。
+    #   目录未命中仍原事务持锁扫描(先恢复redo)，但只重读代次变化或仍在2秒窗口内的文件。
     # 函数用途: 复用目录内容投影，不缓存通知结论或暴露可变对象给外部。
     def _load_records_projection_cached(self, *, cheap_checks: bool = True, scan_budget: dict | None = None):
         hit = _lookup_process_records_projection(self.root)
@@ -561,6 +629,7 @@ class ProcessSessionStore:
             if not self.root.exists():
                 return [], []
             with self.transaction() as transaction:
+                transaction.reuse_listed_records = True
                 records, errors = transaction.list_records(**(scan_budget or {}))
         except (OSError, TypeError, ValueError, RuntimeError) as exc:
             return [], [process_session_error_report(exc, "process_session_store.list", path=self.root)]
