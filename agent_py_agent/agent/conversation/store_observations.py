@@ -25,6 +25,7 @@ from .store_index import _file_fingerprint
 from .store_io import (
     now,
     read_jsonl_report,
+    read_jsonl_tail_report,
 )
 from .store_layout import ConversationStorage
 
@@ -213,8 +214,8 @@ class ObservationStore:
         )
         return events
 
-    # LLM: 近期历史是显式全账读取口；ack 仍仅查本线程实际行的精确 ID，坏行错误不能被投影隐藏。
-    # 函数用途: 读取会话观察并叠加持久处理时间，保持原 load_errors 和缺失文件语义。
+    # 近期有限窗口优先读尾；全量与未处理筛选仍读全账，ack 仅查询实际读到的精确 ID。
+    # 尾窗没有覆盖范围信息，事件不足时保守回退，避免坏行或空白块遮住较早的有效事件。
     def recent_report(
         self,
         thread_id: str,
@@ -225,6 +226,14 @@ class ObservationStore:
         path = self.storage.observation_path(thread_id)
         if not path.exists():
             return [], []
+        if include_handled and limit > 0:
+            report = read_jsonl_tail_report(
+                path, context="conversation.observations.read", limit=limit
+            )
+            handled = self._read_handled([str(row.get("observation_id") or "") for row in report.rows])
+            events, parse_errors = _observation_events(report.rows, handled)
+            if len(events) >= limit:
+                return events[-limit:], [*report.load_errors, *parse_errors]
         report = read_jsonl_report(
             path,
             context="conversation.observations.read",
