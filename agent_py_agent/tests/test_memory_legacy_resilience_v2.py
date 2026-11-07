@@ -266,7 +266,8 @@ def test_lessons_list_fails_closed_after_migration_marker(tmp_path: Path):
         ),
         encoding="utf-8",
     )
-    (home.owner_memory_lessons_dir / "orphan.md").write_text(
+    # 规范名让损坏内容进入 fail-closed 校验；操作员的非规范副本按设计跳过（RES-W6）。
+    (home.owner_memory_lessons_dir / "orphan-0123abcd.md").write_text(
         "# 损坏正式 lesson\n\n正文。\n",
         encoding="utf-8",
     )

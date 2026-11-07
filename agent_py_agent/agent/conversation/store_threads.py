@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import logging
+import stat
 import threading
 import time
 from collections import OrderedDict
@@ -12,6 +14,8 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
+from ..common.json_io import locked_json_path
+from ..common.opaque_id import validate_opaque_id
 from ..gateway_parts.io import (
     locked_file_transition,
     update_json_file_atomic,
@@ -26,10 +30,14 @@ from .models import (
 )
 from .store_index import _file_fingerprint
 from .store_io import (
+    LEDGER_ARCHIVE_DIR,
+    archive_ledger_file,
     now,
     read_json_object_report,
 )
 from .store_layout import ConversationStorage
+
+logger = logging.getLogger(__name__)
 
 # 会话线程元数据进程内缓存的最大条目数。
 _THREAD_RECORD_CACHE_MAX_ENTRIES_COUNT = 16384
@@ -231,25 +239,78 @@ def _replace_binding(
     return (*old, binding)
 
 
-# LLM: C首次模型元数据仅显式blocking=False透传原锁链；默认True不改调用形状、规范路径、创建/绑定次序或CAS。
-# LLM: 仅由持有同通道绑定事务锁的 store 入口调用；显式 reuse_latest 保留原语义，不按模型名猜会话。
+# LLM: 原JSON锁内重验才归档；已隔离的普通缺失可重绑，身份/权限/链接仍拒绝，兄弟已修复绑定则返回False重读。
+# 函数用途: 保存确认不可解析的坏记录及锁，不让迟到错误隔离刚修好的绑定索引。
+def _quarantine_thread_resolution_error(store, error, *, blocking=True):
+    context, thread_id = error.get("context"), error.get("thread_id")
+    if context == "conversation.thread.read" and thread_id:
+        path = store.storage.thread_path(thread_id)
+        archive = store.storage.threads_dir / LEDGER_ARCHIVE_DIR
+    elif context == "conversation.bindings.read":
+        path = store.storage.bindings_path
+        archive = path.parent / LEDGER_ARCHIVE_DIR
+    else:
+        raise DataCorruptionError(str(error))
+    with locked_json_path(path, **({} if blocking else {"blocking": False})):
+        _, current_error = read_json_object_report(path, context=context)
+        if current_error is None and context == "conversation.bindings.read":
+            return False
+        if current_error is None and not path.exists() and not path.is_symlink():
+            _drop_cached_thread(path)
+            return True
+        if (path.is_symlink() or current_error is None
+                or current_error.get("error_type") not in {"JSONDecodeError", "UnicodeDecodeError", "DataCorruptionError"}
+                or not archive_ledger_file(path, archive)):
+            raise DataCorruptionError(str(error))
+        _drop_cached_thread(path)
+        logger.warning("THREAD_RECORD_QUARANTINED thread=%s path=%s", thread_id or "-", path)
+        return True
+
+
+# LLM: bound/latest共用；每候选至多两次不跟随链接的stat，无正文读取；悬链拒绝而非删除，新空线程仍可无正文。
+# 函数用途: 拒绝不安全的正文路径，过滤已丢历史正文的候选，不改旧记录。
+def _usable_thread(store, thread):
+    if thread is None:
+        return False
+    path = store.storage.message_path(thread.thread_id)
+    try:
+        hot = path.lstat()
+    except FileNotFoundError:
+        hot = None
+    if hot is not None and not stat.S_ISREG(hot.st_mode) or path.with_suffix(".manifest.json").is_symlink():
+        raise DataCorruptionError(f"conversation transcript backing path is invalid: {thread.thread_id}")
+    if hot is None and (thread.compact_generation > 0 or thread.compacted_through_byte_offset > 0
+                        or thread.compacted_through_message_id or thread.model_context_usage):
+        logger.warning("THREAD_REBOUND_AFTER_DELETION old=%s reason=transcript_missing", thread.thread_id)
+        return False
+    return True
+
+
+# LLM: C首次模型元数据仅显式blocking=False透传原锁链；删除/坏账只沿原_create绑定新线程，旧可读记录不改。
+# LLM: 仅由同通道事务入口调用；已修复绑定只重读一次，bound/latest均过可用性校验，显式复用健康候选不变。
 # 函数用途: 在短事务内查找、显式复用或创建会话并提交索引，不持有模型执行锁。
 def _get_or_create_bound_thread(store, request: dict, *, blocking: bool = True) -> ConversationThread:
-    existing, binding_error = store.resolve_report(
-        channel=request.get("channel", ""),
-        channel_conversation_id=request.get("channel_conversation_id", ""),
-        channel_user_id=request.get("channel_user_id", ""),
-    )
+    identity = {key: request.get(key, "") for key in ("channel", "channel_conversation_id", "channel_user_id")}
+    existing, binding_error = store.resolve_report(**identity)
     if binding_error is not None:
-        raise DataCorruptionError(str(binding_error))
+        if _quarantine_thread_resolution_error(store, binding_error, **({} if blocking else {"blocking": False})):
+            recovered = store._create(request, **({} if blocking else {"blocking": False}))
+            logger.warning("CONVERSATION_THREAD_REBOUND thread=%s reason=%s", recovered.thread_id, binding_error["context"])
+            return recovered
+        existing, binding_error = store.resolve_report(**identity)
+        if binding_error is not None:
+            raise DataCorruptionError(str(binding_error))
     if existing is not None:
+        if not _usable_thread(store, existing):
+            return store._create(request, **({} if blocking else {"blocking": False}))
         return store._bind_existing(existing.thread_id, request, **({} if blocking else {"blocking": False}))
     latest = None
     if request.get("reuse_latest_for_user"):
         latest, latest_error = store.latest_for_user_report(request.get("canonical_user_id", ""))
         if latest_error is not None:
-            raise DataCorruptionError(str(latest_error))
-    if latest is not None:
+            _quarantine_thread_resolution_error(store, latest_error, **({} if blocking else {"blocking": False}))
+            latest = None
+    if _usable_thread(store, latest):
         return store._bind_existing(latest.thread_id, request, **({} if blocking else {"blocking": False}))
     return store._create(request, **({} if blocking else {"blocking": False}))
 
@@ -999,6 +1060,11 @@ def _succeed_thread(threads, thread_id, *, title, binding, validate=None):
                 reasoning_effort=latest.reasoning_effort, verbose_level=latest.verbose_level,
                 decision_settings=copy.deepcopy(latest.decision_settings), learning_source=copy.deepcopy(latest.learning_source),
                 metadata=metadata, created_at=stamp, updated_at=stamp)
+            if latest.model_profile_id == "default" and latest.model_selection_source in {"default", "inherited"}:
+                # 前任只有建档时的"default"占位（从未选过模型）：继任是新会话，按_create取owner当前默认；显式/自动选择原样继承。
+                initial = threads.model_default() if threads.model_default is not None else ""
+                if initial and initial != "default":
+                    created = replace(created, model_profile_id=initial, model_selection_source="default")
             if selected is not None:
                 created = replace(created, channel_bindings=(replace(selected, thread_id=created.thread_id, last_active_at=stamp),))
             create_thread_atomic(threads, created)
@@ -1029,7 +1095,7 @@ def _succeed_thread(threads, thread_id, *, title, binding, validate=None):
         return current
 
 
-# LLM: 缓存对象只读筛选排序，最终切片才深拷贝；目录过滤先于limit，全部坏账照旧报告。
+# LLM: 非规范副本名只记DEBUG且不读取；合法名称的坏账仍报告，目录过滤先于limit，最终切片才深拷贝。
 # 函数用途: 扫描原目录并筛选同目录线程，只克隆实际返回的记录。
 def _workspace_thread_report(threads: ThreadStore, *, limit: int,
                              workspace_dir: str | None) -> tuple[list[ConversationThread], list[dict[str, Any]]]:
@@ -1037,6 +1103,11 @@ def _workspace_thread_report(threads: ThreadStore, *, limit: int,
     load_errors: list[dict[str, Any]] = []
     root = str(Path(workspace_dir).expanduser().resolve(strict=False)) if workspace_dir is not None else None
     for path in sorted(threads.storage.threads_dir.glob("*.json")):
+        try:
+            validate_opaque_id(path.stem, kind="thread_id")
+        except ValueError:
+            logger.debug("Ignoring noncanonical thread record path=%s", path)
+            continue
         thread, error = threads._load_path_report(path, clone=False)
         if thread is not None and (root is None or (thread.workspace_root
                 and str(Path(thread.workspace_root).expanduser().resolve(strict=False)) == root)):

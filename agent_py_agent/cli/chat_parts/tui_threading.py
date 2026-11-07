@@ -334,11 +334,12 @@ class _NoticeRefreshWake:
                 self.previous_callback = navigation._view_change
                 navigation._view_change = self.view_changed
 
-    # LLM: 仅比较typed阶段、reset代次和末尾用户输入/队列；不扫描大历史或把思考delta当用户操作。
+    # LLM: 仅比较typed阶段、活动谓词、reset代次和末尾输入/队列；活动结束立即唤醒，流式delta仍不增加网络查询。
     # 函数用途: 生成控制交互的有界显示签名。
     def signature(self, runtime, snapshot):
         tail = snapshot.stable_blocks[-1] if snapshot.stable_blocks else None
         return (getattr(runtime, "conversation_reset_generation", 0), snapshot.status.phase,
+                snapshot.has_active_work,
                 (tail.block_id, tail.updated_seq) if tail is not None and tail.role == "user" else None,
                 snapshot.queued_inputs)
 

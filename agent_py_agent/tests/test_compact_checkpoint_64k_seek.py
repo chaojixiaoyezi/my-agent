@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
+from agent_py_agent.agent.conversation import compact_checkpoint_scan as scan
 from agent_py_agent.agent.conversation.compact_checkpoint_scan import checkpoint_row_lookup
 
 
-# LLM: 100条记录超过64KiB，首字节不在上次尾锚中；追加行完全合法。
-# 函数用途: 保证增量缓存不会遗漏旧账本头损坏。
-def test_warm_checkpoint_head_corruption_plus_append_is_rejected(tmp_path):
+# LLM: 100条记录超过64KiB，D-1允许垃圾头行告警跳过；head-digest核验仍强制从头重扫。
+# 函数用途: 验证坏头行不返回陈旧缓存地址，幸存旧行与合法追加行仍可读取。
+def test_warm_checkpoint_head_corruption_plus_append_skips_row_and_rescans(tmp_path, caplog):
     path = tmp_path / 'ledger.jsonl'
     path.write_text(''.join(json.dumps({'checkpoint_id': str(i), 'padding': 'x' * 2048}) + '\n'
                             for i in range(100)))
@@ -21,6 +23,9 @@ def test_warm_checkpoint_head_corruption_plus_append_is_rejected(tmp_path):
         handle.write(b'!')
         handle.seek(0, 2)
         handle.write(b'{"checkpoint_id":"100"}\n')
-    with pytest.raises(OSError, match='unreadable'):
+    with caplog.at_level(logging.WARNING, logger=scan.__name__):
         with checkpoint_row_lookup(path) as lookup:
-            lookup('100')
+            assert lookup('0') is None
+            assert lookup('100')['checkpoint_id'] == '100'
+            assert lookup('99')['checkpoint_id'] == '99'
+    assert sum('COMPACT_LEDGER_ROW_SKIPPED' in r.getMessage() for r in caplog.records) == 1

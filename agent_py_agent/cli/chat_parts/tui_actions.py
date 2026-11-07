@@ -209,7 +209,7 @@ def _tui_attach_gateway_job(
     except Exception:
         with params.state_lock:
             params.pending_jobs_ref_for_enqueue[0] -= 1
-        runtime.release_gateway_request(request_id)
+        runtime.release_gateway_request(request_id, completed=False)
         runtime.release_gateway_job_attachment(request_id)
         raise
 
@@ -582,7 +582,7 @@ def _ensure_control_operation_reconciler(
     return reconciler
 
 
-# LLM: 前后台共用稳定输入ID与持久回执；仅在真实目标完全缺失时用durable请求ID兜底，不覆盖Gateway目标、不伪造claim。
+# LLM: 前后台共用稳定输入ID与持久回执；仅缺目标时用durable请求ID，已知完成前台不送插话；不以本地空闲否定远端活动。
 # 函数用途: 普通 Enter 进入当前主代理的安全点；只在明确拒绝或已排队时回到原任务队列。
 def _tui_submit_active_turn_input(
     params: TuiCreateKeybindingsParams,
@@ -608,6 +608,10 @@ def _tui_submit_active_turn_input(
         # 本地running可能只是等待准入；已发布目标优先，缺失时才交请求ID给宿主复核。
         expected_turn_id, expected_execution = request_id, None
     if not expected_turn_id:
+        return False
+    if ((expected_execution is None or expected_execution.get("kind") == "request")
+            and runtime.clear_completed_execution_target(expected_turn_id)):
+        # 完成可能先于worker清running refs；两种快照都不能把下一条消息送给已结束的前台。
         return False
     if not callable(getattr(params.agent, "request_active_turn_input", None)):
         return False

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -16,6 +17,8 @@ from threading import Lock
 
 from ..common.nofollow_fs import ensure_private_dir
 from ..settings.config import AgentConfig
+
+logger = logging.getLogger(__name__)
 
 # 单条输入媒体默认最大 16 MiB：超出拒绝，防超大附件拖垮请求。
 DEFAULT_MEDIA_BYTES = AgentConfig.input_media_max_bytes
@@ -77,7 +80,7 @@ def evicted_input_media_hashes(delivery: _InputMediaDelivery | None = None) -> f
         return delivery.evicted
 
 
-# LLM: 媒体错误是确定的输入失败，不可丢掉附件继续文本请求或作为瞬时模型故障重试。
+# LLM: 当前回合媒体错误仍是确定输入失败；历史不可用引用只能在投影层显式降级，不能作为瞬时模型故障重试。
 # 类用途: 标记无效、超限、损坏或跨用户的媒体输入。
 class InputMediaError(ValueError):
     error_code = "INPUT_MEDIA_INVALID"
@@ -255,8 +258,42 @@ def provider_media_messages(messages: list[dict]) -> list[dict]:
             for row in messages]
 
 
-# LLM: 投影在同次句柄内重置小集合，不替换worker/caller共享引用；预算排除项供ACK拒绝误消费，canonical不变。
-# 函数用途: 在编码前从新到旧选择预算内附件，避免长图片/视频历史一次性展开到内存。
+# LLM: 沿供应商相同的路径、标识和长度校验，不读取正文；只供历史投影判断，当前回合仍在编码时严格校验。
+# 函数用途: 判断一条历史附件是否仍可读取，返回固定原因码而非异常正文。
+def _history_media_available(source: dict) -> tuple[bool, str]:
+    try:
+        # 先让原验证器拒绝非整数长度，避免历史坏元数据在类型转换时跳过降级。
+        ref = validate_input_media([source], max_bytes=source.get("size_bytes", 0), max_files=1)[0]
+        if not os.access(ref["path"], os.R_OK):
+            return False, "unreadable"
+    except (InputMediaError, OSError, ValueError) as exc:
+        return False, type(exc).__name__
+    return True, ""
+
+
+# LLM: 只替换不可用的历史块并在同次句柄标淘汰，不改原消息、磁盘或其它块；锁内只更新不可变小集合。
+# 函数用途: 将已失去原件的历史附件替换为统一文本占位符。
+def _history_media_content(content: list[dict], delivery: _InputMediaDelivery) -> list[dict]:
+    result = []
+    for block in content:
+        source = block.get("source")
+        if not isinstance(source, dict) or source.get("type") != "local_file":
+            result.append(block)
+            continue
+        available, reason = _history_media_available(source)
+        if available:
+            result.append(block)
+            continue
+        sha = str(source.get("sha256") or "")
+        with delivery.lock:
+            delivery.evicted |= {sha}
+        logger.warning("HISTORY_MEDIA_UNAVAILABLE sha256=%s reason=%s", sha, reason)
+        result.append({"type": "text", "text": f"[历史附件不可用或已清理：{source.get('name') or sha}]"})
+    return result
+
+
+# LLM: 投影在同次句柄内重置小集合；当前回合保持严格，历史缺失降级且预算只计可用附件，canonical不变。
+# 函数用途: 在编码前从新到旧选择预算内附件，历史原件丢失不再阻塞后续回合。
 def project_input_media(messages: list[dict] | None, max_bytes: int) -> list[dict] | None:
     delivery = _input_media_delivery()
     with delivery.lock:
@@ -264,6 +301,8 @@ def project_input_media(messages: list[dict] | None, max_bytes: int) -> list[dic
     if messages is None:
         return None
     result = list(messages)
+    incoming = next((index + 1 for index in range(len(result) - 1, -1, -1)
+                     if result[index].get("role") == "assistant"), 0)
     remaining = max_bytes
     newest = True
     for index in range(len(result) - 1, -1, -1):
@@ -271,12 +310,15 @@ def project_input_media(messages: list[dict] | None, max_bytes: int) -> list[dic
         content = row.get("content")
         if row.get("role") != "user" or not isinstance(content, list):
             continue
+        if index < incoming:
+            content = _history_media_content(content, delivery)
+            row = result[index] = {**row, "content": content}
         media = [block for block in content if isinstance(block.get("source"), dict)
                  and block["source"].get("type") == "local_file"]
         if not media:
             continue
         size = sum(int(block["source"].get("size_bytes") or 0) for block in media)
-        if newest and size > max_bytes:
+        if newest and index >= incoming and size > max_bytes:
             raise InputMediaError("最近一条消息的附件超过当前媒体预算，请提高限制或重新添加较小附件。")
         newest = False
         if size <= remaining:

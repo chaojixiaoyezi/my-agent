@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import threading
 from collections import OrderedDict
@@ -16,7 +17,9 @@ from ..io.cursor_cache import note_seen
 from ..runtime_errors import DataCorruptionError, RecoverableRuntimeError
 from .display_checkpoint import is_display_checkpoint
 from .models import MessageLogEntry
-from .store_io import complete_jsonl_end
+from .store_io import ImmutableIndexNodeMissing, complete_jsonl_end
+
+logger = logging.getLogger(__name__)
 
 # 活动会话转录中可冷转前缀达到此字节数时触发轮转。
 TRANSCRIPT_ROTATE_BYTES = 1024 * 1024
@@ -288,13 +291,17 @@ def _scan_dedupe_tail(handle: BinaryIO, end: int, key: str, key_offsets: Ordered
     return existing
 
 
-# LLM: 原append-once锁仍是跨进程幂等权威；全局锁仅保护有界LRU字典，单路径锁保护本文件增量扫描，不阻塞其他文件。
+# LLM: 原锁与热去重不变；仅确认丢失的冷段/索引允许热查找，digest或身份错误仍原样失败。
 #   缓存只省略已验证前缀；先恢复其首匹配再扫描新尾，避免迟到同键覆盖首条；空key保持原全扫行为。
 # 函数用途: 校验水位、尾锚及前缀字节后增量解析新尾，Bloom命中历史时按原文件核实首匹配。
 def find_message_dedupe(path: Path, key: str) -> MessageLogEntry | None:
     cache_key = str(path)
     with _dedupe_file_lock(cache_key):
-        cold = cold_message_lookup(path, f'dedupe:{key}') if key else None
+        try:
+            cold = cold_message_lookup(path, f'dedupe:{key}') if key else None
+        except (ImmutableIndexNodeMissing, TranscriptColdSegmentMissing):
+            cold = None
+            logger.warning('TRANSCRIPT_COLD_LAYER_MISSING thread=%s op=dedupe', path.stem)
         hot = _find_message_dedupe_locked(path, cache_key, key)
         return cold[0] if cold is not None else hot
 
@@ -572,6 +579,16 @@ def recover_transcript_transition(path: Path):
         write_text_atomic_beneath(path.parent, (name,), json.dumps(selected, sort_keys=True) + '\n')
 
 
+# LLM: 仅原段字节缺失时携带已封印的结束位置；不为损坏、缺热文件或错身份提供跳过信号。
+# 类用途: 允许模型选源精确跳过丢失冷段，显式历史仍按DataCorruptionError拒绝。
+class TranscriptColdSegmentMissing(DataCorruptionError):
+    # LLM: end只来自原已验证段描述符，不来自调用方输入或目录推测。
+    # 函数用途: 保存原逻辑段末地址，不创建状态或修复文件。
+    def __init__(self, end):
+        super().__init__('canonical transcript cold segment is missing')
+        self.end = end
+
+
 # LLM: 句柄冻结同次清单、完整尾界及热FD；冷热物理位置对外统一为从会话开始的虚拟字节坐标。
 # 类用途: 为显式历史/分页/来源查询提供可seek的完整会话，不让模型热选源打开冷段。
 class TranscriptReader:
@@ -638,7 +655,7 @@ class TranscriptReader:
         self.position = position
         return position
 
-    # LLM: 元数据来自清单封印的不可变根；二分仅服务显式冷查询，不进入热选源。
+    # LLM: 清单封印段边界与SHA；仅段字节不存在时给出可跳过的end，索引或内容损坏不放宽。
     # 函数用途: 按虚拟偏移查找包含该字节的冷段。
     def _segment(self):
         if self.cached is not None and self.cached[0]['start'] <= self.position < self.cached[0]['end']:
@@ -661,7 +678,9 @@ class TranscriptReader:
                     raise DataCorruptionError('canonical transcript segment exceeds byte budget')
                 raw = read_bytes_beneath(self._base, (*self._parts, 'archive', self.manifest['thread_id'], f'seg-{sequence:020d}.jsonl'),
                                          max_bytes=size, require_dir_fd=self.root is not None)
-                if raw is None or len(raw) != size or hashlib.sha256(raw).hexdigest() != descriptor['sha256']:
+                if raw is None:
+                    raise TranscriptColdSegmentMissing(descriptor['end'])
+                if len(raw) != size or hashlib.sha256(raw).hexdigest() != descriptor['sha256']:
                     raise DataCorruptionError('canonical transcript segment digest or length mismatches')
                 self.cached = descriptor, raw
                 return self.cached
@@ -738,10 +757,12 @@ def cold_message_lookup(path: Path, key: str, *, reader=None):
     return entry, address
 
 
-# LLM: 仅原线程CAS成功后、持消息锁调用；先核边界与阈值，再核冷副本；prepared封印旧/新前缀和逻辑代次，设备号仅作观察。
+# LLM: 仅原线程CAS成功后、持消息锁调用；先核边界与阈值，再仅核冷副本（禁热回退）；prepared封印旧/新前缀和逻辑代次。
 # 对非终态、活动索引或未知任务保守pin；终态任务仍须被本次thread摘要精确覆盖，原字节保存在冷段。
 # 函数用途: 将已覆盖且无活跃任务pin的前缀冷存，保留边界本行及全部迟到尾部。
 def rotate_committed_transcript(storage, thread, *, compact_root: str | Path | None = None):
+    from inspect import signature
+
     from ..common.nofollow_fs import write_bytes_atomic_beneath, write_text_atomic_beneath
     from .compact_checkpoint import _cold_checkpoint
     from .compact_scope import THREAD_COMPACT_SCOPE, CompactScope
@@ -767,7 +788,14 @@ def rotate_committed_transcript(storage, thread, *, compact_root: str | Path | N
         return
     compact_root = storage.resolve_compact_root(compact_root)
     try:
-        row = _cold_checkpoint(compact_root, thread.thread_id, thread.compact_checkpoint_id)
+        args = (compact_root, thread.thread_id, thread.compact_checkpoint_id)
+        # 只对参数绑定失败走旧接口；读取内部TypeError仍由外层按冷副本无效处理，不重试。
+        try:
+            signature(_cold_checkpoint).bind(*args, fallback_hot=False)
+        except TypeError:
+            row = _cold_checkpoint(*args)
+        else:
+            row = _cold_checkpoint(*args, fallback_hot=False)
         if (row is None or row.get('schema') != 'conversation_compact_checkpoint.v3'
                 or CompactScope.from_dict(row['scope']) != THREAD_COMPACT_SCOPE
                 or row.get('source_kind') not in {'transcript', 'transcript_and_tool_archive'}

@@ -9,6 +9,7 @@ from __future__ import annotations
 建表、打开连接、启用 WAL/外键、处理 FTS5 是否可用，都在这里集中处理。
 """
 
+import logging
 import os
 import sqlite3
 import stat
@@ -22,6 +23,8 @@ from ..common.nofollow_fs import ensure_private_dir
 from ..io.sqlite_connection import sqlite_error_details
 from ..io.sqlite_schema import schema_fingerprint, schema_is_current, stamp_schema
 from ..io.sqlite_scope import scoped_connection, sqlite_connection_factory
+
+logger = logging.getLogger(__name__)
 
 # 串行化本进程的新库出生，硬链接被拒时也只对尚未发表的库创建并关闭 FD。
 _SQLITE_BIRTH_LOCK = threading.Lock()
@@ -354,14 +357,15 @@ class LocalStoreSchemaMixin:
                 # 回填失败不能让 store 起不来:LIKE 兜底仍可用,下次 rebuild_fts 再补。
                 pass
 
-    # LLM: 未命中时持写锁再次核对避免并发重复迁移；异常靠连接出口回滚，不盖失败的结构摘要。
+    # LLM: 写锁内复查命中需结束本初始化事务；仅实际安装者返回True，避免重复迁移或报警。
     # 函数用途: 在同一事务完成需要的建表与迁移，或者只恢复 FTS 实例状态。
-    def _ensure_schema(self, conn: sqlite3.Connection, fingerprint: str) -> None:
+    def _ensure_schema(self, conn: sqlite3.Connection, fingerprint: str) -> bool:
         if schema_is_current(conn, fingerprint) and self._restore_fts_state(conn):
-            return
+            return False
         conn.execute("BEGIN IMMEDIATE")
         if schema_is_current(conn, fingerprint) and self._restore_fts_state(conn):
-            return
+            conn.rollback()
+            return False
         self._execute_schema(conn, _BASE_SCHEMA_SQL)
         self._migrate_legacy_agent_runs_rename(conn)
         self._execute_schema(conn, _TASK_REGISTRY_SQL)
@@ -382,6 +386,7 @@ class LocalStoreSchemaMixin:
         if fts_initialized:
             stamp_schema(conn, fingerprint)
         conn.commit()
+        return True
 
     # LLM: 即使 DDL 已完成也独立读取虚表及待回填键，避免吞掉上次初始化后的回填失败。
     # 函数用途: 恢复三个独立事实：配置开启、索引可读、正文待回填。
@@ -459,12 +464,17 @@ class LocalStoreSchemaMixin:
         if not _newer_fts_version(_read_local_state(conn, _FTS_SCHEMA_VERSION_KEY)):
             _write_local_state(conn, _FTS_SCHEMA_VERSION_KEY, _FTS_SCHEMA_VERSION)
 
-    # LLM: 新连接才设 PRAGMA；仅显式作用域用游标跟踪子类，作用域外保持标准库短连接。
+    # LLM: 新连接才设PRAGMA；缺records表同空库重装，仅实际安装者报警；作用域外仍为标准短连接。
     # LLM: 默认仍30秒/原缓存工厂；C只用当前scope内独立timeout0短连接，不混入F1连接池。
     # 函数用途: 按实例IO策略打开原库，C出生与WAL均经实际末门。
     def _connect(self) -> sqlite3.Connection:
         if self.coordinator_io:
             return self._local_write(self._connect_coordinator)
+        # 只修复缺失的存储根；协调器分支及仍存活的正文/事件文件不变。
+        if not self.root.is_dir():
+            ensure_private_dir(self.root)
+            ensure_private_dir(self.files_dir)
+            ensure_private_dir(self.events_path.parent)
         _private_sqlite_files(self.db_path, create=True)
         fresh = os.stat(self.db_path).st_size == 0
         conn = sqlite3.connect(self.db_path, timeout=30.0, factory=sqlite_connection_factory())
@@ -480,6 +490,11 @@ class LocalStoreSchemaMixin:
                 if sqlite_error_details(exc).get("category") not in {"busy", "locked"}:
                     raise
             conn.execute("PRAGMA foreign_keys=ON")
+            if fresh or not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='records'"
+            ).fetchone():
+                if self._ensure_schema(conn, _local_schema_fingerprint(self.enable_fts)):
+                    logger.warning("SQLITE_SCHEMA_REINSTALLED store=local_store path=%s", self.db_path)
             _private_sqlite_files(self.db_path)
             return conn
         except BaseException as exc:

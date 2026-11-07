@@ -125,6 +125,7 @@ from .runtime_context import ThreadLocalAgentAttribute, current_subagent_run_id
 from .runtime_db.operation_store_selector import select_operation_store
 from .scheduler import SchedulerDueIndex, SchedulerRepository, SchedulerService, ScheduleTool
 from .scheduler.active_run_closeout import SchedulerFollowUpPolicy, waiting_grace_seconds
+from .scheduler.repository import SchedulerStateError
 from .settings import AgentConfig
 from .settings.model_scope import ModelScopedAttribute
 from .settings.runtime_guard_config import runtime_guard_policy
@@ -153,7 +154,7 @@ from .user_space.owner_access import (
     resolve_owner_scope_and_access,
 )
 from .user_space.owner_policy import resolve_effective_owner_policy
-from .user_space.owner_quota import OwnerQuotaEnforcer
+from .user_space.owner_quota import OwnerQuotaEnforcer, OwnerQuotaUnavailable
 from .user_space.owner_resolver import (
     ensure_owner_home,
     home_paths_with_owner,
@@ -575,7 +576,13 @@ class SimpleAgent(
             quota_enforcer=self.owner_quota,
             due_index=_build_scheduler_due_index(self.home_paths, worker_bootstrap),
         )
-        self.scheduler_repository.migrate_monitor_aliases()
+        try:
+            self.scheduler_repository.migrate_monitor_aliases()
+        except (SchedulerStateError, OwnerQuotaUnavailable) as exc:
+            logging.getLogger(__name__).warning(
+                "SCHEDULER_STARTUP_MIGRATION_DEFERRED phase=aliases error=%s code=%s",
+                type(exc).__name__, getattr(exc, "error_code", "") or getattr(exc, "reason_code", "") or "-",
+            )
         # 定时执行收口只凭结构化后续工作事实决定 waiting 还是结算；查询在调用时才读 subagents 等属性，宽限期从配置推出。
         from .scheduler.control import cancel_scheduled_task
 

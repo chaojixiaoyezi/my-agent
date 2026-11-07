@@ -12,16 +12,20 @@ HTTP、请求 worker 与后台调度共用同一池；只读状态使用 peek，
 from __future__ import annotations
 
 import dataclasses
+import logging
 import threading
 import time
 from collections import OrderedDict
 from concurrent.futures import Future
 from contextlib import contextmanager
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 from .delivery import RuntimeHealthProvider
 from .settings.config import AgentConfig
+
+logger = logging.getLogger(__name__)
 
 # 池的总实例容量沿唯一配置默认；显式max_agents及运行时config仍按原优先级覆盖。
 _DEFAULT_MAX_AGENT_COUNT = AgentConfig.owner_agent_pool_max_agents
@@ -237,6 +241,34 @@ def _maybe_seed_feishu_call_name(base_config: Any, owner: Any, agent: Any) -> No
         pass  # 绝不因 auto-name 失败影响 agent 创建
 
 
+# LLM: Only inspect the two concrete cached roots; no scans, writes or worker materialization.
+# 函数用途: 分别检查用户家和会话根，外置会话目录不能遮住家目录丢失。
+def _missing_owner_home(agent: Any) -> Path | None:
+    home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
+    storage = getattr(getattr(agent, "conversation_store", None), "storage", None)
+    root = getattr(storage, "root", None)
+    if isinstance(home, Path) and not home.is_dir():
+        return home
+    if isinstance(root, Path) and not root.is_dir():
+        return home if isinstance(home, Path) else root
+    return None
+
+
+# LLM: Recovery is limited to a validated cached owner; W shared resources and frozen paths remain read-only prerequisites.
+# 函数用途: 沿唯一owner初始化入口修复已缓存实例的目录，不赋予冷worker创建新用户或共享资源的能力。
+def _restore_cached_owner_home(pool, owner: Any, agent: Any) -> None:
+    from .user_space.owner_resolver import ensure_owner_home
+
+    pool._require_worker_owner(owner, agent)
+    if pool._worker_bootstrap is not None:
+        from .user_space.worker_home import _require_owner_path, require_worker_shared_home
+
+        require_worker_shared_home(pool._worker_bootstrap, agent.home_paths)
+        _require_owner_path(pool._worker_bootstrap, owner)
+    ensure_owner_home(agent.home_paths.root, owner)
+    agent.conversation_store.storage.ensure_dirs()
+
+
 # LLM: 同owner合流及缓存寿命不变；已登记本地账号冷读闸门，W另核原bootstrap与实际home。
 # 类用途: 复用用户智能体，减少并发首次访问重复初始化和历史用户常驻。
 class OwnerScopedAgentPool:
@@ -290,22 +322,48 @@ class OwnerScopedAgentPool:
     def get(self, owner: Any, *, hard: bool = True, touch: bool = True, force_reload: bool = False) -> Any | None:
         return self._get(owner, hard=hard, touch=touch, force_reload=force_reload, pin=False)
 
-    # LLM: Shared lookup/build path; pin=True transfers one lease from the locked cache/publication boundary, including waiters.
-    # 函数用途: 统一有界取得实例；请求租用在返回前已登记，归属后核失败也必须归还租用。
+    # LLM: Normal hits pin at the original mutex boundary; recovery releases its temporary lease before reload and cleans up all errors.
+    # 函数用途: 原子租用后检查目录；有容量则合流重建，在途满池按续作要求原地修复且不泄漏租用。
     def _get(self, owner: Any, *, hard: bool, touch: bool, force_reload: bool, pin: bool) -> Any | None:
         self._require_worker_owner(owner)
         key = (owner.provider, owner.owner_kind, owner.owner_id)
         if force_reload:
-            _pool_reload_owner(self, key, hard=hard)
+            with self._mcp_lifecycle_lock:
+                # 显式刷新也不能先丢掉唯一的已验证W实例，再让只读构造面对缺失目录。
+                if self._worker_bootstrap is not None:
+                    current = self.peek(owner)
+                    missing_path = _missing_owner_home(current)
+                    if missing_path is not None:
+                        logger.warning("OWNER_HOME_RECREATED owner=%s path=%s", key, missing_path)
+                        _restore_cached_owner_home(self, owner, current)
+                _pool_reload_owner(self, key, hard=hard)
         hit = self._get_cached(key, hard=hard, pin=pin)
-        if hit is None:
-            if not hard and not self._room_for_soft():
-                return None
-            hit = self._build_once(key, owner, hard=hard, pin=pin)
-        with self._lock:
-            if hit is not None and touch:
-                self._last_used[key] = time.monotonic()
         try:
+            if hit is not None and _missing_owner_home(hit) is not None:
+                if pin:
+                    self._unpin(hit, touch=False)
+                hit = None
+                with self._mcp_lifecycle_lock:
+                    with self._lock:
+                        current = self._hard_agents.get(key) or self._soft_agents.get(key)
+                    missing_path = _missing_owner_home(current)
+                    if missing_path is not None:
+                        force_reload = True
+                        logger.warning("OWNER_HOME_RECREATED owner=%s path=%s", key, missing_path)
+                        # W构造只读消费C资源；先修复已验证的旧owner，随后仍走原合流构造。
+                        if self._worker_bootstrap is not None:
+                            _restore_cached_owner_home(self, owner, current)
+                        _pool_reload_owner(self, key, hard=hard)
+                    hit = self._get_cached(key, hard=hard, pin=pin)
+                    if hit is not None and _missing_owner_home(hit) is not None:
+                        _restore_cached_owner_home(self, owner, hit)
+            if hit is None:
+                if not hard and not self._room_for_soft():
+                    return None
+                hit = self._build_once(key, owner, hard=hard, pin=pin)
+            with self._lock:
+                if hit is not None and touch:
+                    self._last_used[key] = time.monotonic()
             self._require_worker_owner(owner, hit)
         except BaseException:
             if pin and hit is not None:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import shutil
 from contextlib import ExitStack, contextmanager
 from copy import deepcopy
@@ -68,6 +69,7 @@ from .daily import (
 )
 
 CURATOR_TRANSACTION_SCHEMA_VERSION = "my-agent.memory-curator-transaction.v1"
+logger = logging.getLogger(__name__)
 
 
 # LLM: 原整批类型/目标/版本校验先执行；按指纹和每线程独立消息数扣广播重复票，保留单线程真实重复。
@@ -557,11 +559,30 @@ def _discover_manifest(directory: Path, memory_root: Path):
         return None
 
 
+# LLM: 两次扫描共用写入器命名规则；缺目录只补原路径，规范坏类型和符号链接仍拒绝，不重放副本。
+# 函数用途: 为发现和锁内恢复提供相同的规范事务目录，每次接管只在发现时报告杂项。
+def _transaction_directories(committer: CuratorBatchCommitter, *, warn: bool = True) -> list[Path]:
+    ensure_private_dir(committer.transactions_dir)
+    directories = []
+    for directory in sorted(committer.transactions_dir.iterdir()):
+        try:
+            canonical = _safe_run_name(directory.name) == directory.name
+        except ValueError:
+            canonical = False
+        if directory.is_symlink() or (canonical and not directory.is_dir()):
+            raise CuratorCommitRecoveryError("curator transaction root contains non-directory")
+        if canonical:
+            directories.append(directory)
+        elif warn:
+            logger.warning("CURATOR_TRANSACTION_STRAY_SKIPPED name=%s", directory.name)
+    return directories
+
+
 # LLM: candidates 是每个成功提交都会持有的规范锁；与 state、实际日期审计及全部旧目标一起排序取锁。
 # 函数用途: 在锁前仅发现完整目标集合；恢复审计绝不采用回放的未来时间。
 def _recovery_plan(committer: CuratorBatchCommitter, now: datetime | None):
     manifests = {directory: _discover_manifest(directory, committer.memory_root)
-                 for directory in sorted(committer.transactions_dir.iterdir())}
+                 for directory in _transaction_directories(committer)}
     audit = run_log_path(committer.run_log.runs_dir, datetime.now(timezone.utc).isoformat())
     paths = {committer.candidates.path, committer.state.path, audit}
     for manifest in manifests.values():
@@ -599,7 +620,7 @@ def _recovery_section(committer: CuratorBatchCommitter, plan: _RecoveryPlan):
 # LLM: 发现后若又出现未锁住的事务则退出重试；等待者只处理锁内仍存在且已严格复核的清单。
 # 函数用途: 持完整锁集合后重新枚举权威事务目录并恢复尚未处理的事务。
 def _recover_locked(committer: CuratorBatchCommitter, plan: _RecoveryPlan) -> int:
-    directories = sorted(committer.transactions_dir.iterdir())
+    directories = _transaction_directories(committer, warn=False)
     if set(directories) - plan.manifests.keys():
         raise _CuratorRecoveryBusy("curator recovery discovery changed")
     return sum(_recover_directory(committer, directory, plan) for directory in directories)

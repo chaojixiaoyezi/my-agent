@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,8 +10,11 @@ from typing import Any
 from uuid import uuid4
 
 from ..common.json_io import read_json_object_report
+from ..common.opaque_id import OpaqueIdError, validate_opaque_id
 from ..common.safe_id import safe_id
 from .home_layout import MyAgentHomePaths
+
+logger = logging.getLogger(__name__)
 
 CAPABILITY_REQUEST_STATUSES = frozenset({"open", "approved", "denied", "expired", "cancelled", "closed"})
 
@@ -84,9 +88,16 @@ def list_capability_requests_report(home: MyAgentHomePaths, *, status: str = "")
     if not home.owner_capability_requests_dir.exists():
         return CapabilityRequestsReport(rows, load_errors)
     for path in sorted(home.owner_capability_requests_dir.glob("*.json")):
+        try:
+            validate_opaque_id(path.stem, kind="request_id")
+        except OpaqueIdError:
+            logger.debug("Skipping non-canonical capability request path=%s", path)
+            continue
         payload, load_error = _read_payload_report(path)
         if load_error is not None:
             load_errors.append(load_error)
+            continue
+        if payload == {}:
             continue
         item = _request_from_payload(path, payload)
         if not wanted or item.status == wanted:
@@ -100,6 +111,11 @@ def expire_capability_requests(home: MyAgentHomePaths, *, now: str | None = None
     if not home.owner_capability_requests_dir.exists():
         return expired
     for path in sorted(home.owner_capability_requests_dir.glob("*.json")):
+        try:
+            validate_opaque_id(path.stem, kind="request_id")
+        except OpaqueIdError:
+            logger.debug("Skipping non-canonical capability request path=%s", path)
+            continue
         payload, load_error = _read_payload_report(path)
         if load_error is not None:
             continue

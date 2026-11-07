@@ -1151,13 +1151,15 @@ class _TuiConversationBoundaryRuntimeMixin:
 # LLM: 只存 Gateway 执行绑定投影和本地观察 job 去重；二者不授予运行权限、不从展示事件改写。
 # 类用途: 为 TuiRuntime 保存用户发出操作时的执行快照，并防止重复接回同一个观察任务。
 class _TuiExecutionBindingRuntimeMixin:
-    # LLM: 只缓存原claim DTO；request精确匹配时确认显示thread，不从activity/job猜目标，不增加控制权。
+    # LLM: 只缓存原claim DTO；已收口前台ID拒绝迟到投影且保留其他目标，不从activity/job猜目标或增加控制权。
     # 函数用途: 更新当前执行目标投影，空目标清除旧绑定；返回是否变化。
     def publish_execution_target(self, payload: object) -> bool:
         from ...agent.gateway_parts.execution_target import GatewayExecutionTarget
 
         target = GatewayExecutionTarget.from_dict(payload)
         with self._lock:
+            if target is not None and target.kind == "request" and target.turn_id in self._completed_gateway_requests:
+                return False
             changed = target != self._execution_target
             self._execution_target = target
             if target is not None and target.kind == "request":
@@ -1186,6 +1188,17 @@ class _TuiExecutionBindingRuntimeMixin:
     def execution_target(self) -> dict | None:
         with self._lock:
             return self._execution_target.to_dict() if self._execution_target is not None else None
+
+    # LLM: 完成窗口只否定本页近期收口的前台ID；同锁只清精确request，不能清并发换入的目标或取消服务端工作。
+    # 函数用途: 拒用已完成前台快照，并在它仍是当前绑定时撤下；未见完成的后台/远端目标不受影响。
+    def clear_completed_execution_target(self, request_id: str) -> bool:
+        with self._lock:
+            if request_id not in self._completed_gateway_requests:
+                return False
+            target = self._execution_target
+            if target is not None and target.kind == "request" and target.turn_id == request_id:
+                self._execution_target = None
+            return True
 
     # LLM: 此窗口只防回执重复接回本地观察 job，无模型、控制或持久执行权限。
     # 函数用途: 原子判断同一 Gateway 请求是否已进入本页观察队列。
@@ -1255,11 +1268,16 @@ class _TuiBackgroundActivityRuntimeMixin:
             request_id=observation_id,
         )
 
-    # LLM: 共用显示锁交接有界副本；显示观察独立收口，实际提交身份及来源thread/代次仍约束重放。
+    # LLM: 共用显示锁交接有界副本；已完成前台无正文也退休目标，观察未知/入队回滚不伪造完成，不改变服务端状态。
     # 函数用途: 释放前台显示所有权，补回完成缝隙中已经消费但尚未显示的canonical输出。
-    def release_gateway_request(self, request_id: str, *, replay_deferred: bool = True) -> None:
+    def release_gateway_request(
+        self, request_id: str, *, replay_deferred: bool = True, completed: bool = True,
+    ) -> None:
         normalized = _required_request_id(request_id)
         with self._lock:
+            if completed:
+                self._completed_gateway_requests.add(normalized)
+                self.clear_completed_execution_target(normalized)
             if normalized not in self._owned_gateway_requests:
                 return
             adapter = next((value for local_id, value in self._completing_turns.items()
@@ -1624,6 +1642,7 @@ class _TuiSessionRuntimeMixin(
 
         self.completions = TurnCompletionLedger()
         self._owned_gateway_requests = TuiIdentityWindow()
+        self._completed_gateway_requests = TuiIdentityWindow()
         self._delivered_foreground_requests = TuiIdentityWindow()
         self._deferred_background_events: dict[tuple[str, int], tuple[int, str, dict]] = {}
         self._deferred_background_responses: dict[tuple[str, str, str], tuple[int, str, tuple]] = {}
@@ -2018,7 +2037,7 @@ class TuiRuntime(_TuiSessionRuntimeMixin):
             adapter.start()
             return adapter
 
-    # LLM: finalize不持runtime锁；当前代显示观察必收口（含无Gateway ownership的Direct），后台重放取决于实际正文提交。
+    # LLM: finalize不持runtime锁；已知完成先同锁退休双ID，失败/中断亦同；outcome_unknown只结束观察，不否定服务端活动。
     # 函数用途: 收口原回合、释放观察并清全部完成引用；旧代不重放，未知编号仍抛出。
     def complete_turn(self, request_id: str, summary: TuiTurnSummary) -> None:
         normalized = _required_request_id(request_id)
@@ -2026,6 +2045,11 @@ class TuiRuntime(_TuiSessionRuntimeMixin):
             adapter = self._turns.pop(normalized, None) or self._retired_turns.pop(normalized, None)
             if adapter is not None:
                 self._completing_turns[normalized] = adapter
+                gateway_id = self._foreground_gateway_bindings.get(normalized, normalized)
+                if not summary.outcome_unknown:
+                    for completed_id in (normalized, gateway_id):
+                        self._completed_gateway_requests.add(completed_id)
+                        self.clear_completed_execution_target(completed_id)
         if adapter is None:
             raise KeyError(f"TUI turn not started: {normalized}")
         try:
@@ -2039,7 +2063,8 @@ class TuiRuntime(_TuiSessionRuntimeMixin):
                             self._publish_foreground_observation_released(gateway_id, adapter)
                         displayed = bool(summary.response_text) and (
                             str(summary.response_text).strip() == adapter._displayed_response_text)
-                        self.release_gateway_request(gateway_id, replay_deferred=not (summary.ok and displayed))
+                        self.release_gateway_request(gateway_id, replay_deferred=not (summary.ok and displayed),
+                                                     completed=not summary.outcome_unknown)
                     else:
                         self._owned_gateway_requests.discard(gateway_id)
                         for pending in (self._deferred_background_events, self._deferred_background_responses):

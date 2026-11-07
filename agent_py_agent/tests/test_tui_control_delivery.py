@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import threading
 import time
+from queue import Queue
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,7 +16,7 @@ from agent_py_agent.cli.chat_parts.tui_control_delivery import (
     TuiControlOperationReconciler,
     tui_control_operation_outbox_path,
 )
-from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime, TuiTurnSummary
 
 
 def _reconciler(tmp_path, *, submit, status, callbacks=None):
@@ -456,3 +458,245 @@ def test_control_outbox_path_does_not_embed_session_text(tmp_path) -> None:
     assert path.parent == tmp_path / "client_outbox"
     assert path.name.startswith("tui-control-")
     assert "session" not in path.name
+
+
+def _request_target(turn_id="gwreq-turn-1", *, kind="request"):
+    from agent_py_agent.agent.gateway_parts.execution_target import GatewayExecutionTarget
+
+    return GatewayExecutionTarget("thread-1", kind, turn_id, "claim-1").to_dict()
+
+
+def _post_turn_params(runtime, entries):
+    return SimpleNamespace(
+        use_gateway=True, tui_runtime=runtime, state_lock=threading.RLock(),
+        is_running_ref=[True], running_request_id_ref=["gwreq-turn-1"],
+        local_run_ref=[None], running_prompt_ref=["上一轮"], running_started_at_ref=[1.0],
+        runtime_inject=[], prompt_files=[], args=SimpleNamespace(no_save=False, resume_context=None),
+        current_session_id=runtime.session_id, jobs=Queue(), pending_jobs_ref_for_enqueue=[0],
+        agent=SimpleNamespace(request_active_turn_input=lambda *_args, **_kwargs: pytest.fail("不应直接调用运输")),
+        active_input_reconciler=SimpleNamespace(enqueue=entries.append),
+    )
+
+
+@pytest.mark.parametrize("late_poll", [False, True])
+@pytest.mark.parametrize("reset_refs", [False, True])
+@pytest.mark.parametrize("summary", [
+    TuiTurnSummary(response_text="上一轮完成"),
+    TuiTurnSummary(ok=False, error="执行失败"),
+    TuiTurnSummary(ok=False, interrupted=True),
+])
+def test_post_turn_prompt_is_fresh_without_waiting_for_notice_poll(summary, late_poll, reset_refs):
+    from agent_py_agent.cli.chat_parts import tui_actions
+    from agent_py_agent.cli.chat_parts.tui_worker import _reset_worker_refs
+
+    runtime, entries = TuiRuntime("post-turn-prompt"), []
+    params = _post_turn_params(runtime, entries)
+    runtime.register_gateway_request("gwreq-turn-1")
+    runtime.begin_turn("chat-turn-1", task_progress_generation_id="gwreq-turn-1")
+    polled_target = _request_target()
+    runtime.publish_execution_target(polled_target)
+
+    runtime.complete_turn("chat-turn-1", summary)
+    if reset_refs:
+        _reset_worker_refs(params)
+    if late_poll:
+        # 载荷在完成前已取得，完成后才发表；不推进时钟，也不等待下一次轮询。
+        runtime.publish_execution_target(polled_target)
+    text = "看下现在几点了"
+    assert tui_actions._tui_submit_active_turn_input(params, text, display_text=text) is False
+    assert entries == [] and runtime.store.snapshot().pending_steers == ()
+    assert runtime.execution_target() is None
+    tui_actions._tui_enqueue_job(params, text)
+    job = params.jobs.get_nowait()
+    assert job.user == text and job.request_id not in {"chat-turn-1", "gwreq-turn-1"}
+    assert params.pending_jobs_ref_for_enqueue == [1]
+
+
+def test_released_foreground_target_cannot_be_republished_without_response():
+    runtime = TuiRuntime("released-target")
+    target = _request_target()
+    runtime.register_gateway_request("gwreq-turn-1")
+    runtime.publish_execution_target(target)
+
+    runtime.release_gateway_request("gwreq-turn-1")
+
+    assert runtime.execution_target() is None
+    assert runtime.publish_execution_target(target) is False
+    assert runtime.execution_target() is None
+
+
+@pytest.mark.parametrize("turn_id", ["chat-turn-1", "gwreq-turn-1"])
+def test_complete_turn_retires_local_and_gateway_ids_without_ownership(turn_id):
+    runtime = TuiRuntime("complete-without-ownership")
+    runtime.begin_turn("chat-turn-1", task_progress_generation_id="gwreq-turn-1")
+    target = _request_target(turn_id)
+    runtime.publish_execution_target(target)
+
+    runtime.complete_turn("chat-turn-1", TuiTurnSummary(ok=False, interrupted=True))
+
+    assert runtime.execution_target() is None
+    assert runtime.publish_execution_target(target) is False
+
+
+@pytest.mark.parametrize("successor", [None, "request", "task"])
+def test_enter_rechecks_completed_id_after_execution_snapshot_read(monkeypatch, successor):
+    from agent_py_agent.cli.chat_parts import tui_actions
+    from agent_py_agent.cli.chat_parts.tui_worker import _reset_worker_refs
+
+    runtime, entries = TuiRuntime("enter-completion-race"), []
+    params = _post_turn_params(runtime, entries)
+    runtime.register_gateway_request("gwreq-turn-1")
+    runtime.begin_turn("chat-turn-1", task_progress_generation_id="gwreq-turn-1")
+    runtime.publish_execution_target(_request_target())
+    read_target = runtime.execution_target
+    replacement = _request_target("server-still-running", kind=successor) if successor else None
+
+    def read_then_complete():
+        captured = read_target()
+        runtime.complete_turn("chat-turn-1", TuiTurnSummary(response_text="完成"))
+        _reset_worker_refs(params)
+        if replacement:
+            runtime.publish_execution_target(replacement)
+        return captured
+
+    monkeypatch.setattr(runtime, "execution_target", read_then_complete)
+    assert tui_actions._tui_submit_active_turn_input(params, "新消息", display_text="新消息") is False
+    assert entries == [] and runtime.store.snapshot().pending_steers == ()
+    assert read_target() == replacement, "清旧目标不能误清并发发表的新目标"
+
+
+@pytest.mark.parametrize("kind", ["request", "task"])
+def test_late_finished_request_does_not_replace_another_execution_target(kind):
+    runtime = TuiRuntime("late-target-preserves-current")
+    stale = _request_target()
+    runtime.register_gateway_request("gwreq-turn-1")
+    runtime.release_gateway_request("gwreq-turn-1")
+    current = _request_target("remote-request" if kind == "request" else "gwreq-turn-1", kind=kind)
+    runtime.publish_execution_target(current)
+
+    assert runtime.publish_execution_target(stale) is False
+    assert runtime.execution_target() == current
+
+
+@pytest.mark.parametrize("kind", ["request", "task"])
+def test_idle_local_worker_keeps_unfinished_server_target_steerable(kind):
+    from agent_py_agent.cli.chat_parts import tui_actions
+
+    runtime, entries = TuiRuntime("idle-server-target"), []
+    params = _post_turn_params(runtime, entries)
+    params.is_running_ref[0], params.running_request_id_ref[0] = False, ""
+    runtime.register_gateway_request("gwreq-turn-1")
+    runtime.release_gateway_request("gwreq-turn-1")
+    current = _request_target("remote-request" if kind == "request" else "gwreq-turn-1", kind=kind)
+    runtime.publish_execution_target(current)
+
+    assert tui_actions._tui_submit_active_turn_input(params, "补充消息", display_text="补充消息") is True
+    assert len(entries) == 1 and entries[0].expected_execution == current
+    assert entries[0].expected_turn_id == current["turn_id"]
+    assert [entry.text for entry in runtime.store.snapshot().pending_steers] == ["补充消息"]
+    assert params.jobs.empty()
+
+
+def test_completed_foreground_identity_window_is_bounded():
+    from agent_py_agent.cli.chat_parts.tui_identity_window import TuiIdentityWindow
+
+    runtime = TuiRuntime("bounded-completed-targets")
+    assert isinstance(getattr(runtime, "_completed_gateway_requests", None), TuiIdentityWindow)
+    runtime._completed_gateway_requests = TuiIdentityWindow(maximum=2)
+    for turn_id in ("gwreq-one", "gwreq-two", "gwreq-three"):
+        runtime.register_gateway_request(turn_id)
+        runtime.release_gateway_request(turn_id)
+    assert tuple(runtime._completed_gateway_requests) == ("gwreq-two", "gwreq-three")
+    assert runtime.publish_execution_target(_request_target("gwreq-three")) is False
+
+
+def test_notice_refresh_wakes_when_active_work_ends_without_phase_change():
+    from agent_py_agent.cli.chat_parts.tui_threading import _NoticeRefreshWake
+
+    runtime = TuiRuntime("completion-notice-wake")
+    runtime.update_background_activity(1)
+    before = runtime.store.snapshot()
+    assert before.has_active_work
+    wake = _NoticeRefreshWake(runtime, None)
+    try:
+        runtime.update_background_activity(0)
+        after = runtime.store.snapshot()
+        assert not after.has_active_work and after.status.phase == before.status.phase
+        assert wake.event.is_set(), "活动结束必须打断通知等待，而非继续睡满空闲间隔"
+    finally:
+        wake.close()
+
+
+def test_unknown_foreground_observation_does_not_retire_live_server_request():
+    from agent_py_agent.cli.chat_parts import tui_actions
+    from agent_py_agent.cli.chat_parts.tui_worker import _reset_worker_refs
+
+    runtime, entries = TuiRuntime("unknown-foreground-observation"), []
+    params = _post_turn_params(runtime, entries)
+    runtime.register_gateway_request("gwreq-turn-1")
+    runtime.begin_turn("chat-turn-1", task_progress_generation_id="gwreq-turn-1")
+    target = _request_target()
+    runtime.publish_execution_target(target)
+    runtime.complete_turn("chat-turn-1", TuiTurnSummary(ok=False, outcome_unknown=True))
+    _reset_worker_refs(params)
+
+    runtime.publish_execution_target(target)
+    assert tui_actions._tui_submit_active_turn_input(params, "继续核对", display_text="继续核对") is True
+    assert len(entries) == 1 and entries[0].expected_execution == target
+    assert runtime.execution_target() == target
+
+
+def test_gateway_attachment_rollback_does_not_retire_live_server_request():
+    from agent_py_agent.cli.chat_parts import tui_actions
+
+    runtime, entries = TuiRuntime("attachment-rollback"), []
+    params = _post_turn_params(runtime, entries)
+    params.is_running_ref[0], params.running_request_id_ref[0] = False, ""
+    target = _request_target()
+    runtime.publish_execution_target(target)
+
+    def reject_queue(_job):
+        raise RuntimeError("local observer queue unavailable")
+
+    params.jobs = SimpleNamespace(put=reject_queue)
+    with pytest.raises(RuntimeError, match="local observer queue unavailable"):
+        tui_actions._tui_attach_gateway_job(params, "已入队消息", display_text="已入队消息",
+            gateway_request_id="gwreq-turn-1", client_message_id="input-1")
+    assert params.pending_jobs_ref_for_enqueue == [0]
+    runtime.publish_execution_target(target)
+    assert tui_actions._tui_submit_active_turn_input(params, "继续核对", display_text="继续核对") is True
+    assert len(entries) == 1 and entries[0].expected_execution == target
+    params.jobs = Queue()
+    tui_actions._tui_attach_gateway_job(params, "已入队消息", display_text="已入队消息",
+        gateway_request_id="gwreq-turn-1", client_message_id="input-1")
+    assert params.jobs.get_nowait().gateway_request_id == "gwreq-turn-1"
+
+
+def test_steer_stop_new_then_next_prompt_has_no_stale_foreground_target():
+    from agent_py_agent.cli.chat_parts import tui_actions
+    from agent_py_agent.cli.chat_parts.tui_worker import _reset_worker_refs
+
+    runtime, steers, controls = TuiRuntime("steer-stop-new-sequence"), [], []
+    params = _post_turn_params(runtime, steers)
+    params.control_operation_reconciler = SimpleNamespace(enqueue_background=controls.append)
+    runtime.register_gateway_request("gwreq-turn-1")
+    runtime.begin_turn("chat-turn-1", task_progress_generation_id="gwreq-turn-1")
+    runtime.publish_execution_target(_request_target())
+    assert tui_actions._tui_submit_active_turn_input(params, "补充证据", display_text="补充证据") is True
+    assert len(steers) == 1 and steers[0].expected_turn_id == "gwreq-turn-1"
+    assert tui_actions._tui_submit_control_operation(params, "/stop") is True
+    assert len(controls) == 1 and controls[0].expected_turn_id == "gwreq-turn-1"
+    assert controls[0].command_kind == "stop" and runtime.request_interrupt()
+    runtime.complete_turn("chat-turn-1", TuiTurnSummary(ok=False, interrupted=True))
+    _reset_worker_refs(params)
+    # 模拟宿主已确认/new后的原显示入口，不以本地显示动作证明服务端真的执行了/new。
+    runtime.publish_conversation_reset("thread-next")
+    assert runtime.publish_execution_target(_request_target()) is False
+    assert tui_actions._tui_submit_active_turn_input(params, "下一轮对话", display_text="下一轮对话") is False
+    tui_actions._tui_enqueue_job(params, "下一轮对话")
+    assert params.jobs.get_nowait().user == "下一轮对话"
+    snapshot = runtime.store.snapshot()
+    assert snapshot.pending_steers == () and not snapshot.has_active_work
+    assert runtime.execution_target() is None
+    assert not runtime._turns and not runtime._completing_turns
+    assert not runtime._foreground_gateway_bindings and not runtime._owned_gateway_requests

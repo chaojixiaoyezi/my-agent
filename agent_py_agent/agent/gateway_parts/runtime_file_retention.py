@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
+import secrets
 import sqlite3
+import stat
 import threading
 import time
 from collections import OrderedDict
@@ -21,6 +24,8 @@ from ..common.nofollow_fs import (
 )
 from ..runtime_errors import DataCorruptionError
 from .io import locked_file_transition, try_gateway_turn_transition
+
+logger = logging.getLogger(__name__)
 
 
 class _RuntimeScans:
@@ -58,8 +63,158 @@ def _close_scan(key):
         iterator.close()
 
 
-# 索引只定位已fsync发布的原字节；发布标记或旧版冷目录存在时丢索引必须失败关闭，不能重建空权威。
-# 只检查固定锚点，不在热路径遍历月份；lstat的IO失败不能被exists吞成首次输入。
+# LLM: 冷目录必须是真目录；链接不能参与读侧降级或写侧重建，缺失与非目录由调用方按存在性处理。
+# 函数用途: 返回归档冷目录，缺失或非目录返回None，符号链接按损坏拒绝。
+def _cold_directory(paths, directory):
+    folder = paths.root / 'archive' / directory
+    try:
+        mode = folder.lstat().st_mode
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(mode):
+        raise DataCorruptionError('runtime_archive_symlink')
+    return folder if stat.S_ISDIR(mode) else None
+
+
+# LLM: 读侧返回和写侧发布前重核资格检查时绑定的目录；消失、替换或父链链接均拒绝。
+# 函数用途: 验证冷目录仍是最初观察到的同一真实目录。
+def _verify_cold_bindings(paths, bindings):
+    for folder, before in bindings:
+        if _cold_directory(paths, folder.name) is None:
+            raise DataCorruptionError('runtime_archive_directory_changed')
+        descriptor = open_directory_beneath(paths.root, ('archive', folder.name), require_dir_fd=True)
+        try:
+            if not os.path.samestat(before, os.fstat(descriptor)):
+                raise DataCorruptionError('runtime_archive_directory_changed')
+        finally:
+            os.close(descriptor)
+
+
+# LLM: 降级只经no-follow目录FD枚举月份并携带inode身份；月份打开时须核此身份，不能换成另一个真空目录。
+# 函数用途: 按最新优先列出YYYYMM月份及其最初元数据。
+def _cold_months(paths, directory):
+    folder = _cold_directory(paths, directory)
+    if folder is None:
+        return []
+    months = []
+    descriptor = open_directory_beneath(paths.root, ('archive', directory), require_dir_fd=True)
+    try:
+        with os.scandir(descriptor) as entries:
+            for entry in entries:
+                if len(entry.name) == 6 and entry.name.isascii() and entry.name.isdigit():
+                    if entry.is_symlink():
+                        raise DataCorruptionError('runtime_archive_symlink')
+                    if entry.is_dir(follow_symlinks=False):
+                        months.append((entry.name, entry.stat(follow_symlinks=False)))
+        _cold_directory(paths, directory)
+        if not os.path.samestat(os.fstat(descriptor), folder.lstat()):
+            raise DataCorruptionError('runtime_archive_directory_changed')
+    finally:
+        os.close(descriptor)
+    return sorted(months, reverse=True)
+
+
+# LLM: 降级读取绑定枚举时的月份身份；只读指定名字且不枚举月份内文件，目录替换不能变成不存在。
+# 函数用途: 从最新月份开始定位指定运行时文件的冷副本。
+def _cold_copy(paths, directory, name):
+    for month, before in _cold_months(paths, directory):
+        with _cold_month_guard(paths, directory, month, before):
+            raw = read_bytes_beneath(
+                paths.root, ('archive', directory, month, name),
+                max_bytes=_RuntimeScans.max_file_bytes, require_dir_fd=True,
+            )
+        if raw is not None:
+            return paths.root / 'archive' / directory / month / name
+    return None
+
+
+# LLM: 月份首次打开须等于枚举时身份，退出前完整no-follow重开再核；本函数不扫描文件且必关FD。
+# 函数用途: 为降级读取和维护重建绑定同一月份目录，并拒绝前后替换。
+@contextmanager
+def _cold_month_guard(paths, directory, month, before):
+    parts = ('archive', directory, month)
+    descriptor = open_directory_beneath(paths.root, parts, require_dir_fd=True)
+    try:
+        if not os.path.samestat(before, os.fstat(descriptor)):
+            raise DataCorruptionError('runtime_archive_directory_changed')
+        yield descriptor
+        current = open_directory_beneath(paths.root, parts, require_dir_fd=True)
+        try:
+            if not os.path.samestat(os.fstat(descriptor), os.fstat(current)):
+                raise DataCorruptionError('runtime_archive_directory_changed')
+        finally:
+            os.close(current)
+    finally:
+        os.close(descriptor)
+
+
+# LLM: 维护重建仅投影原写者允许的非隐藏JSON名；锁与临时旁件不入库，重复键不被旧月份覆盖。
+# 函数用途: 把两类运行时冷副本投影进一个私有SQLite并返回唯一行数。
+def _populate_rebuilt_index(paths, connection):
+    connection.execute(
+        'CREATE TABLE IF NOT EXISTS files(directory TEXT, name TEXT, month TEXT, digest TEXT, '
+        'PRIMARY KEY(directory,name))',
+    )
+    rows = 0
+    with connection:
+        for directory in ('input_receipts', 'client_outbox'):
+            for month, before in _cold_months(paths, directory):
+                with _cold_month_guard(paths, directory, month, before) as descriptor, os.scandir(descriptor) as entries:
+                    for entry in entries:
+                        if entry.name.startswith('.') or not entry.name.endswith('.json'):
+                            continue
+                        if entry.is_symlink():
+                            raise DataCorruptionError('runtime_archive_symlink')
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        raw = read_bytes_beneath(
+                            paths.root, ('archive', directory, month, entry.name),
+                            max_bytes=_RuntimeScans.max_file_bytes, require_dir_fd=True,
+                        )
+                        if raw is None:
+                            raise DataCorruptionError('runtime_archive_bytes_missing_or_changed')
+                        cursor = connection.execute(
+                            'INSERT OR IGNORE INTO files VALUES(?,?,?,?)',
+                            (directory, entry.name, month, hashlib.sha256(raw).hexdigest()),
+                        )
+                        rows += cursor.rowcount
+    return rows
+
+
+# LLM: 私有投影发布前重核最初冷目录，硬链接发布且只以rw重开；丢失或危险赢家不能变成空库或成功日志。
+# 函数用途: 一次性重建丢失的运行时归档定位器并返回可写连接。
+def _rebuild_index(paths, path, bindings):
+    temporary = path.with_name(f'.{path.name}.rebuild-{secrets.token_hex(8)}')
+    fd = os.open(
+        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600,
+    )
+    os.close(fd)
+    try:
+        connection = sqlite3.connect(temporary, timeout=0.01)
+        try:
+            rows = _populate_rebuilt_index(paths, connection)
+        finally:
+            connection.close()
+        _verify_cold_bindings(paths, bindings)
+        published = False
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            pass
+        else:
+            published = True
+    finally:
+        temporary.unlink(missing_ok=True)
+    if path.is_symlink():
+        raise DataCorruptionError('runtime_archive_index_symlink')
+    connection = sqlite3.connect(path.absolute().as_uri() + '?mode=rw', uri=True, timeout=0.01)
+    if published:
+        logger.warning('GATEWAY_ARCHIVE_INDEX_REBUILT root=%s rows=%s', paths.root, rows)
+    return connection
+
+
+# LLM: 索引正常时保持原SQLite权威；仅维护写者可从真实冷目录重建，marker-only仍失败关闭。
+# 函数用途: 打开运行时归档索引，或为维护写者创建/重建它。
 def _index(paths, *, writable=False):
     archive = paths.root / 'archive'
     if archive.is_symlink():
@@ -72,12 +227,22 @@ def _index(paths, *, writable=False):
     try:
         path.lstat()
     except FileNotFoundError:
-        for published in (archive / 'runtime-files-published.json', archive / 'input_receipts', archive / 'client_outbox'):
+        has_publication = False
+        for published in (
+                archive / 'runtime-files-published.json', archive / 'input_receipts', archive / 'client_outbox'):
             try:
                 published.lstat()
             except FileNotFoundError:
                 continue
-            raise DataCorruptionError('runtime_archive_index_missing') from None
+            has_publication = True
+            break
+        if has_publication:
+            cold_directories = [_cold_directory(paths, directory)
+                                for directory in ('input_receipts', 'client_outbox')]
+            if not writable or not any(folder is not None for folder in cold_directories):
+                raise DataCorruptionError('runtime_archive_index_missing') from None
+            bindings = [(folder, folder.lstat()) for folder in cold_directories if folder is not None]
+            return _rebuild_index(paths, path, bindings)
         if not writable:
             return None
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
@@ -89,10 +254,24 @@ def _index(paths, *, writable=False):
     return connection
 
 
+# LLM: 降级查找须绑定资格检查时的冷目录身份；目录消失或替换不能把已消费输入变成首次请求。
+# 函数用途: 通过索引或丢索引时的冷副本查找一个运行时归档文件。
 def lookup_runtime_file(paths, directory: str, name: str) -> Path | None:
     if directory not in {'input_receipts', 'client_outbox'} or Path(name).name != name:
         raise ValueError('invalid_runtime_archive_key')
-    connection = _index(paths)
+    try:
+        connection = _index(paths)
+    except DataCorruptionError as exc:
+        if str(exc) != 'runtime_archive_index_missing':
+            raise
+        cold_directories = [_cold_directory(paths, candidate)
+                            for candidate in ('input_receipts', 'client_outbox')]
+        if not any(folder is not None for folder in cold_directories):
+            raise
+        bindings = [(folder, folder.lstat()) for folder in cold_directories if folder is not None]
+        copy = _cold_copy(paths, directory, name)
+        _verify_cold_bindings(paths, bindings)
+        return copy
     if connection is None:
         return None
     try:
@@ -208,6 +387,8 @@ def _archive_one(paths, directory, path, *, before, max_bytes, deadline):
         return len(raw), False
 
 
+# LLM: 维护锁内先修复缺失冷索引，即使没有新终态；修复失败保留源文件并按原报告协议返回错误。
+# 函数用途: 有界封存旧运行时文件，并在维护路径修复丢失的归档定位器。
 def archive_terminal_slice(paths, *, directory: str, before: float, max_entries: int = 128,
                            max_ms: float = 50, retention_days: float = 7,
                            max_bytes: int = 4 * 1048576) -> dict:
@@ -231,6 +412,15 @@ def archive_terminal_slice(paths, *, directory: str, before: float, max_entries:
     deadline = time.monotonic() + max_ms / 1000
     key = str(folder.absolute())
     with _RuntimeScans.lock, locked_json_path(paths.root / 'archive' / f'{directory}-maintenance', blocking=False):
+        try:
+            if not (paths.root / 'archive/runtime-files.sqlite3').exists() and any(
+                    _cold_directory(paths, candidate) is not None
+                    for candidate in ('input_receipts', 'client_outbox')):
+                _index(paths, writable=True).close()
+        except (OSError, ValueError, DataCorruptionError, sqlite3.Error) as exc:
+            _close_scan(key)
+            result['errors'].append({'name': 'runtime-files.sqlite3', 'error_type': type(exc).__name__})
+            return {**result, 'complete': True}
         iterator = _RuntimeScans.entries.get(key)
         if iterator is None:
             iterator = _RuntimeIterator(folder)

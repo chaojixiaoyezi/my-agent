@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import os
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
@@ -38,6 +39,7 @@ from .models import (
     new_id,
 )
 from .store_io import (
+    complete_jsonl_end,
     iter_jsonl_tail_lines,
     json_row,
     jsonl_error,
@@ -49,6 +51,53 @@ from .store_layout import ConversationStorage
 _Projected = TypeVar("_Projected")
 _READ_CONTEXT = "conversation.messages.read"
 _PARSE_CONTEXT = "conversation.messages.parse"
+logger = logging.getLogger(__name__)
+
+
+# LLM: Caller holds the transcript writer lock; exclusive private sidecar is durable before truncation.
+# 函数用途: 原样保存坏尾字节，留档失败时不裁剪原账本。
+def _quarantine_torn_tail(path: Path, tail: bytes) -> Path:
+    sidecar = path.with_name(f".{path.name}.torn-{int(now() * 1000)}")
+    with os.fdopen(os.open(sidecar, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as handle:
+        handle.write(tail)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return sidecar
+
+
+# LLM: Caller owns locked_json_path; inspect only the unfinished tail, preserving committed bytes and offsets.
+# 函数用途: 完整对象补换行，坏尾先私有留档再裁剪，缺失和完整文件不动。
+def _seal_torn_jsonl_tail(path: Path) -> str:
+    try:
+        handle = path.open("r+b")
+    except FileNotFoundError:
+        return ""
+    with handle:
+        size = os.fstat(handle.fileno()).st_size
+        if not size:
+            return ""
+        handle.seek(size - 1)
+        if handle.read(1) == b"\n":
+            return ""
+        end = complete_jsonl_end(handle, size)
+        handle.seek(end)
+        tail = handle.read(size - end)
+        try:
+            completed = isinstance(json.loads(tail.decode("utf-8")), dict)
+        except (ValueError, UnicodeError):
+            completed = False
+        sidecar = "-"
+        if completed:
+            handle.seek(size)
+            handle.write(b"\n")
+        else:
+            sidecar = str(_quarantine_torn_tail(path, tail))
+            handle.truncate(end)
+        handle.flush()
+        os.fsync(handle.fileno())
+    action = "completed" if completed else "quarantined"
+    logger.warning("TRANSCRIPT_TORN_TAIL_SEALED path=%s action=%s bytes=%s sidecar=%s", path, action, len(tail), sidecar)
+    return action
 
 
 # LLM: 只读canonical JSONL，逐行校验并流式哈希，含display/同长改写；首末文件签名变化或坏读拒绝，不新建锁/索引。
@@ -334,13 +383,21 @@ class MessageStore:
             self.storage.message_path(thread_id), thread_id, before=before, limit=limit
         )
 
-    # LLM: 会话记录只追加；账本写入后的活动投影必须合并到最新线程，不能回写较早读取的线程快照。
+    # LLM: 会话记录锁内先恢复布局并封口坏尾；追加后活动投影合并到最新线程，不回写旧快照。
     # 函数用途: 追加一条对话记录，并只刷新会话活动时间，避免迟到消息把新任务目录改回旧目录。
     def append(self, request: dict) -> MessageLogEntry:
         path = self.storage.message_path(str(request.get('thread_id') or ''))
         with locked_json_path(path):
             recover_transcript_transition(path)
+            _seal_torn_jsonl_tail(path)
             return self._append_unlocked(request)
+
+    # LLM: Gateway turn-start repair uses the same writer lock; missing files remain absent, thread state is untouched.
+    # 函数用途: 在读上下文前收口当前线程半行，不扫描其他账本。
+    def seal_torn_tail(self, thread_id: str) -> str:
+        path = self.storage.message_path(thread_id)
+        with locked_json_path(path):
+            return _seal_torn_jsonl_tail(path)
 
     # LLM: 仅供已持原消息锁的普通/幂等入口调用；消息写入与活动合并使用原方向，不递归获取非重入消息锁。
     # 函数用途: 创建并追加真实消息，再合并当前线程活动时间。
@@ -368,7 +425,7 @@ class MessageStore:
         )
         return entry
 
-    # LLM: typed display只能进入本thread canonical账本；不更新updated_at、不索引Memory、不触及执行或Compact状态。
+    # LLM: typed display在原锁内恢复布局并封口后写本thread账本；不更新活动、Memory、执行或Compact状态。
     # 函数用途: 逐块保存已公开过程；失败向上报告，不能把这类记录当助手回复或用来凑最近对话条数。
     def append_display_checkpoint(self, thread_id: str, metadata: dict) -> MessageLogEntry:
         thread = self._require_thread(thread_id)
@@ -386,10 +443,11 @@ class MessageStore:
         path = self.storage.message_path(thread.thread_id)
         with locked_json_path(path):
             recover_transcript_transition(path)
+            _seal_torn_jsonl_tail(path)
             append_private_jsonl_records_unlocked(path, [entry.to_dict()], sort_keys=True)
         return entry
 
-    # LLM: 原幂等锁内逐行核对完整历史、dedupe_key与内容；命中不跳过后续坏行，内存随最大行而非历史总量增长。
+    # LLM: 原幂等锁内先恢复布局并封口，再核完整历史、dedupe_key与内容；完整行损坏仍拒绝，不放宽身份核对。
     # 函数用途: 在原幂等锁内核对 dedupe_key 与输入内容，只首次追加消息并刷新活动时间。
     def append_once(self, request: dict, *, dedupe_key: str) -> MessageLogEntry:
         """Append one transcript event exactly once across retries and process restarts."""
@@ -401,6 +459,7 @@ class MessageStore:
         transition = path.with_name(f".{path.name}.append-once")
         with locked_file_transition(transition), locked_json_path(path):
             recover_transcript_transition(path)
+            _seal_torn_jsonl_tail(path)
             try:
                 existing = find_message_dedupe(path, key)
             except Exception as exc:
@@ -429,7 +488,7 @@ class MessageStore:
         entries, _errors = self.recent_report(thread_id, limit=limit)
         return entries
 
-    # LLM: 模型/记忆读取排除display；逐步扩大尾读窗口，不能让大量过程块挤掉真正用户/助手消息。
+    # LLM: 模型/记忆读取排除display；行级错误保留并计入物理窗口，只有文件级错误阻止翻倍，不让展示突发挤掉真实消息。
     # 函数用途: 读取最近对话及损坏报告；完整显示分页使用独立原文件游标，不复用模型消息条数。
     def recent_report(
         self,
@@ -481,11 +540,13 @@ class MessageStore:
             entries, parse_errors = _message_entries(report.rows)
             selected = [entry for entry in entries if not is_display_checkpoint(entry)]
             errors = [*report.load_errors, *parse_errors]
-            if errors or limit <= 0 or len(selected) >= limit or len(report.rows) < read_limit:
+            fatal = any("line_number" not in error and "row_index" not in error for error in errors)
+            physical_rows = len(report.rows) + sum("line_number" in error for error in errors)
+            if fatal or limit <= 0 or len(selected) >= limit or physical_rows < read_limit:
                 return (selected if limit <= 0 else selected[-limit:]), errors
             read_limit *= 2
 
-    # LLM: 与 recent_report(limit) 同窗同错：同样的起始窗口与翻倍、同样的坏行与 row_index、同样只选最新 limit 条非 display；
+    # LLM: 与 recent_report(limit) 同窗同错：行级错误不阻止满物理窗口翻倍；坏JSON计入窗口，解析失败已计入rows，不重复计数；
     # 只把选中条目交给纯投影 project，返回投影值（新到旧）与错误，不驻留正文。修改须同步 recent_report 等价测试。
     # 函数用途: 给只要元数据的调用方（近期产物、追加与补写去重）读取最近消息，避免整块物化尾部正文。
     def recent_projection_report(
@@ -508,7 +569,9 @@ class MessageStore:
             projected, errors, rows, selected = _project_tail_window(
                 path, read_limit=read_limit, limit=limit, project=project,
             )
-            if errors or selected >= limit or rows < read_limit:
+            fatal = any("line_number" not in error and "row_index" not in error for error in errors)
+            physical_rows = rows + sum("line_number" in error for error in errors)
+            if fatal or selected >= limit or physical_rows < read_limit:
                 return projected, errors
             read_limit *= 2
 

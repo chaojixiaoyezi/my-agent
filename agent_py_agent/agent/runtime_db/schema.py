@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 from collections.abc import Callable, Iterator
@@ -30,6 +31,8 @@ from types import EllipsisType
 from ..contracts.optimization_contracts import require_schema_generation
 from ..io.sqlite_schema import schema_fingerprint, schema_is_current, stamp_schema
 from ..io.sqlite_scope import scoped_connection, sqlite_connection_factory
+
+logger = logging.getLogger(__name__)
 
 #: 每个 owner 的权威库文件名，位于 owner home 根（A.1 唯一 runtime.db）。
 RUNTIME_DB_FILENAME = "runtime.db"
@@ -428,8 +431,10 @@ def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool
 
 # LLM: metadata是原runtime.db唯一header；只查询，不建表，不将忙或坏库当代际0。先发R1到所有写者后才允许提升代际。
 # 函数用途: 每次借用可写连接前拒绝较新存储，旧库缺header按0处理。
-def require_runtime_schema_generation(conn: sqlite3.Connection) -> None:
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'").fetchone() is None:
+def require_runtime_schema_generation(conn: sqlite3.Connection, *, metadata_present: bool | None = None) -> None:
+    if metadata_present is None:
+        metadata_present = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'").fetchone() is not None
+    if not metadata_present:
         return
     row = conn.execute("SELECT value FROM metadata WHERE key='schema_generation'").fetchone()
     if row is not None:
@@ -616,17 +621,24 @@ class RuntimeSchemaMixin:
     # 函数用途: 新库或旧副本才建表迁移，正常重复构造只查询一次结构摘要。
     def _init_runtime_schema(self) -> None:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        fingerprint = schema_fingerprint((_BASE_RUNTIME_SQL, _RUNTIME_MIGRATIONS, _RUNTIME_MIGRATION_SQL))
         with self._runtime_connection() as conn:
-            if schema_is_current(conn, fingerprint):
-                return
-            conn.execute("BEGIN IMMEDIATE")
-            if schema_is_current(conn, fingerprint):
-                return
-            self._execute_runtime_schema(conn, _BASE_RUNTIME_SQL)
-            self._apply_runtime_migrations(conn)
-            stamp_schema(conn, fingerprint)
-            conn.commit()
+            self._install_runtime_schema(conn)
+
+    # LLM: 调用者持有同一物理连接；既有指纹和写事务双查只让真正安装者盖章，绝不删除存量表。
+    # 函数用途: 在新建或丢失的库上原子安装原schema，返回本次是否实际安装。
+    def _install_runtime_schema(self, conn) -> bool:
+        fingerprint = schema_fingerprint((_BASE_RUNTIME_SQL, _RUNTIME_MIGRATIONS, _RUNTIME_MIGRATION_SQL))
+        if schema_is_current(conn, fingerprint):
+            return False
+        conn.execute("BEGIN IMMEDIATE")
+        if schema_is_current(conn, fingerprint):
+            conn.rollback()
+            return False
+        self._execute_runtime_schema(conn, _BASE_RUNTIME_SQL)
+        self._apply_runtime_migrations(conn)
+        stamp_schema(conn, fingerprint)
+        conn.commit()
+        return True
 
     # LLM: 迁移只补当前代码仍消费的列；旧功能残表保留为惰性历史，不能在
     # 启动时做破坏性清库；迁移后索引也由声明 SQL 执行并进入完成摘要。
@@ -677,7 +689,13 @@ class RuntimeSchemaMixin:
         conn.row_factory = sqlite3.Row
         if not read_only:
             try:
-                require_runtime_schema_generation(conn)
+                if existing_only:
+                    require_runtime_schema_generation(conn)
+                else:
+                    present = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'").fetchone() is not None
+                    if not present and self._install_runtime_schema(conn):
+                        logger.warning("SQLITE_SCHEMA_REINSTALLED store=runtime_db path=%s", self.db_path)
+                    require_runtime_schema_generation(conn, metadata_present=True)
             except BaseException:
                 conn.close()
                 raise

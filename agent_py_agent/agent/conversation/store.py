@@ -2,6 +2,7 @@
 # 模块用途: 连接会话持久能力并提供跨领域上下文和旧账维护，不承载插话、任务或消息的底层实现。
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -25,6 +26,8 @@ from .store_threads import ThreadStore
 from .store_usage import ModelUsageStore
 from .store_wake_quarantine_archive import archive_stale_wake_quarantine
 from .store_wakes import WakeStore
+
+logger = logging.getLogger(__name__)
 
 # 策略与已结束租约沿同一维护周期保留七天后归档，文件移动到原账本归档目录，便于诊断和恢复。
 _LEDGER_GC_RETENTION_SECONDS = 7 * 24 * 3600
@@ -121,7 +124,7 @@ class ConversationStore:
         return bundle
 
     # LLM: 模型上下文只投影运行事实；include_messages=False只延后正文读取，调用方须同次按任务范围补齐，不能当空历史。
-    #   线程字段按 models.MODEL_HIDDEN_THREAD_FIELDS 剔除（展示遥测、待送达的宿主提示），模型看不到只给用户的提示。
+    #   线程字段按 models.MODEL_HIDDEN_THREAD_FIELDS 剔除；历史坏链和缺失活跃链接只告警，不从读路径修索引。
     # 函数用途: 读取会话上下文及加载错误，排除展示遥测与宿主提示，原持久 thread 完整保留。
     def context_bundle_report(
         self,
@@ -134,7 +137,21 @@ class ConversationStore:
         messages, message_errors = (
             self.messages.recent_report(thread_id, limit=recent_limit) if include_messages else ([], [])
         )
-        tasks, task_errors = self.tasks.list_report(thread_id)
+        tasks, task_errors, task_warnings = self.tasks.list_report(thread_id, classify_missing=True)
+        active_task_ids = set(thread.active_task_ids)
+        degraded_ids = {str(row.get("task_id") or row.get("id")) for row in task_warnings
+                        if row.get("task_id") or row.get("id")}
+        blocking_errors = []
+        for error in task_errors:
+            task_id = error.get("task_id")
+            if task_id and (task_id not in active_task_ids or error.get("error_type") == "FileNotFoundError"):
+                degraded_ids.add(str(task_id))
+            else:
+                blocking_errors.append(error)
+        task_errors = blocking_errors
+        if degraded_ids or task_warnings:
+            logger.warning("TASK_LINK_DEGRADED context=conversation.context_bundle thread=%s tasks=%s",
+                           thread_id, ",".join(sorted(degraded_ids)))
         observations, observation_errors = self.observations.recent_report(
             thread_id, limit=recent_limit
         )

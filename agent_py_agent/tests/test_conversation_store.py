@@ -58,10 +58,10 @@ def test_opt7_dedupe_append_once_uses_incremental_watermark(tmp_path, monkeypatc
     assert len(parsed) == before
 
 
-# LLM: 缓存必须先实际建立；中段改写位于尾锚之外，等长改写也不能让旧成功结果盖住损坏。
-# 函数用途: 从append_once入口核对原地截断和中段损坏仍拒绝写入并返回DataCorruptionError。
+# LLM: 缓存先实际建立；W1可封印完整JSON缺换行，旧版仍拒绝；中段改写位于尾锚之外，任何版本均不得吞错。
+# 函数用途: 兼容尾部封印，同时核对原三条消息完整保留、中段损坏继续拒绝写入。
 @pytest.mark.parametrize("change", ["truncate", "middle"])
-def test_opt7_dedupe_rejects_in_place_corruption(tmp_path, change):
+def test_opt7_dedupe_rejects_in_place_corruption(tmp_path, change, caplog):
     store = ConversationStore(tmp_path / "conversations")
     thread = store.threads.get_or_create({"canonical_user_id": "owner-opt7"})
     rows = [store.messages.append_once({"thread_id": thread.thread_id, "role": "user", "content": "x" * 9000},
@@ -79,9 +79,20 @@ def test_opt7_dedupe_rejects_in_place_corruption(tmp_path, change):
             handle.write(b"!")
     if change == "middle":
         assert path.read_bytes()[-4096:] == data[-4096:]
-    with pytest.raises(DataCorruptionError):
-        store.messages.append_once({"thread_id": thread.thread_id, "role": "user", "content": "新消息"},
-                                   dedupe_key="new-key")
+    request = {"thread_id": thread.thread_id, "role": "user", "content": "新消息"}
+    # W1当前提供MessageStore入口；同时兼容规格中给出的message_scan能力标记。
+    can_seal_tail = (hasattr(message_scan, "seal_or_quarantine_torn_message_tail")
+                     or hasattr(store.messages, "seal_torn_tail"))
+    if change == "truncate" and can_seal_tail:
+        appended = store.messages.append_once(request, dedupe_key="new-key")
+        assert store.messages.recent(thread.thread_id, limit=10) == [*rows, appended]
+        assert appended not in rows and appended.content == "新消息"
+        assert path.read_bytes().startswith(data)
+        assert any(record.getMessage().startswith("TRANSCRIPT_TORN_TAIL_SEALED ")
+                   and "action=completed " in record.getMessage() for record in caplog.records)
+    else:
+        with pytest.raises(DataCorruptionError):
+            store.messages.append_once(request, dedupe_key="new-key")
 
 
 # LLM: 命中已有键后仍须验证新增字节，不包装原始UTF8/JSON/model异常；append_once的外层包装保持原合同。
@@ -1723,17 +1734,30 @@ def test_latest_thread_for_user_report_reports_corrupt_latest_index(tmp_path) ->
     assert error["path"] == str(store.storage.user_latest_path)
 
 
-def test_get_or_create_thread_does_not_duplicate_when_bindings_index_is_corrupt(tmp_path) -> None:
+# LLM: 绑定坏JSON按C-RES-T3-REBIND隔离；重复get_or_create不得继续分叉，旧线程和归档字节须保留。
+# 函数用途: 验证损坏绑定索引只恢复一次，并留下可核对的重绑警告。
+def test_get_or_create_thread_does_not_duplicate_when_bindings_index_is_corrupt(tmp_path, caplog) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 1.0})
+    request = {'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1"}
+    old = store.threads.get_or_create({**request, 'now': 1.0})
+    original = store.storage.thread_path(old.thread_id).read_bytes()
     store.storage.bindings_path.write_text("{bad-json", encoding="utf-8")
 
-    with pytest.raises(DataCorruptionError):
-        store.threads.get_or_create({'canonical_user_id': "user-1", 'channel': "internal", 'channel_conversation_id': "thread-1", 'channel_user_id': "user-1", 'now': 2.0})
+    with caplog.at_level("WARNING", logger="agent_py_agent.agent.conversation.store_threads"):
+        recovered = store.threads.get_or_create({**request, 'now': 2.0})
+        again = store.threads.get_or_create({**request, 'now': 3.0})
 
     threads, errors = store.threads.list_report()
-    assert len(threads) == 1
+    assert recovered.thread_id != old.thread_id and again.thread_id == recovered.thread_id
+    assert {thread.thread_id for thread in threads} == {old.thread_id, recovered.thread_id}
     assert errors == []
+    assert store.threads.resolve(channel="internal", channel_conversation_id="thread-1", channel_user_id="user-1").thread_id == recovered.thread_id
+    assert store.storage.thread_path(old.thread_id).read_bytes() == original
+    archive = store.storage.root / ".ledger_archive"
+    assert (archive / "channel_bindings.json").read_bytes() == b"{bad-json"
+    assert (archive / "channel_bindings.json.lock").is_file()
+    assert "THREAD_RECORD_QUARANTINED" in caplog.text
+    assert f"CONVERSATION_THREAD_REBOUND thread={recovered.thread_id}" in caplog.text
 
 
 def test_get_or_create_thread_does_not_duplicate_when_latest_index_is_corrupt(tmp_path) -> None:

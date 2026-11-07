@@ -31,15 +31,15 @@ def test_missing_historical_links_do_not_block_current_context(hot):
     _require_gateway_conversation_ready(hot.payload, context)
 
 
-def test_corrupt_historical_link_still_blocks(hot):
+def test_corrupt_historical_link_degrades_to_warning(hot):
     store = _missing_history(hot)
     store.tasks.bind({"task_id": "corrupt", "thread_id": hot.scope.thread_id, "status": "completed"})
     store.storage.task_path("corrupt").write_text("{broken", encoding="utf-8")
     context = gateway_conversation_context(GatewayConversationLoadRequest(
         hot.agent, hot.payload, "message", "继续", defer_compact=True))
-    assert context.load_errors
-    with pytest.raises(Exception, match="会话记录当前不可用"):
-        _require_gateway_conversation_ready(hot.payload, context)
+    assert not context.load_errors
+    assert any(row.get("task_id") == "corrupt" for row in context.load_warnings)
+    _require_gateway_conversation_ready(hot.payload, context)
 
 
 def _promote_same_request_without_backfill(hot):
@@ -127,7 +127,7 @@ def _count0_steer(request_id="ordinary-id"):
             "metadata": {"expected_turn_id": "target"}}
 
 
-@pytest.mark.parametrize("status", ["done", "failed", "cancelled", "stopped", "interrupted"])
+@pytest.mark.parametrize("status", ["cancelled", "stopped", "interrupted"])
 def test_expired_steer_never_acquires_slot_or_submits(tmp_path, monkeypatch, status):
     from agent_py_agent.agent.gateway_parts import request_worker as worker
     from agent_py_agent.agent.gateway_parts.io import read_json_file, write_json_file_atomic

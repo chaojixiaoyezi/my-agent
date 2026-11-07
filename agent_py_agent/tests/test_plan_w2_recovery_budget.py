@@ -111,7 +111,9 @@ def test_scheduler_quota_storage_wait_is_bounded_and_preserves_due(tmp_path, mon
             scheduler._enqueue_scheduler_runs(now=10.0 + tick / 10)
         assert service.due == ["original-due"]
         assert service.attempts <= 5
-        assert len(caplog.records) == 1 and caplog.records[0].exc_info is None
+        backoff = [r for r in caplog.records if "SCHEDULER_ENQUEUE_BACKOFF" in r.getMessage()]
+        assert len(backoff) == 1 and backoff[0].exc_info is None
+        assert all("SQLITE_SCHEMA_REINSTALLED" in r.getMessage() for r in caplog.records if r not in backoff)
         wait = scheduler._scheduler_storage_wait.snapshot()
         assert wait["status"] == "storage_wait" and wait["next_check_at"] > 19
         assert wait["wait_count"] == service.attempts

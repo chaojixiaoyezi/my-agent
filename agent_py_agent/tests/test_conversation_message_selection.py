@@ -103,7 +103,7 @@ def test_rewrite_between_scans_is_not_returned_as_frozen_source(conversation):
 
 
 @pytest.mark.parametrize("bad", ["broken", "duplicate", "foreign"])
-def test_filter_and_coverage_cannot_hide_bad_rows(conversation, bad):
+def test_filter_and_coverage_cannot_hide_bad_rows(conversation, bad, caplog):
     store, tid = conversation
     first = _append(store, tid, "有效")
     path = store.storage.message_path(tid)
@@ -112,6 +112,11 @@ def test_filter_and_coverage_cannot_hide_bad_rows(conversation, bad):
         value["thread_id"] = "other"
     with path.open("ab") as handle:
         handle.write(b"broken\n" if bad == "broken" else json.dumps(value).encode() + b"\n")
+    if bad == "broken":
+        assert tuple(select_message_snapshot(store.messages, tid, selector_factory=lambda _: lambda row: False,
+                                            exclude_message_ids=frozenset({first.message_id}))) == ()
+        assert "JSONL_ROW_SKIPPED" in caplog.text and f"thread={tid}" in caplog.text
+        return
     with pytest.raises(DataCorruptionError):
         select_message_snapshot(store.messages, tid, selector_factory=lambda _: lambda row: False,
                                 exclude_message_ids=frozenset({first.message_id}))

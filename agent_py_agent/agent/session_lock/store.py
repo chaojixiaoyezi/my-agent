@@ -8,10 +8,13 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS private_chat_locks (
@@ -56,15 +59,28 @@ class SessionLockStore:
     # LLM: 密码与输入卡状态共用原用户行；迁移只加UI nonce字段，不改旧hash/活跃事实。
     # 函数用途: 初始化原数据库并迁移卡片生命周期字段，会写数据库。
     def _init(self) -> None:
-        with self._init_lock, self._connect() as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.executescript(_SCHEMA)
-            from .card_control import initialize_card_columns
-            initialize_card_columns(conn)
+        # 连接中的缺库修复也使用同一把锁，先连接再持锁避免首次创建时重入死锁。
+        with self._connect() as conn, self._init_lock:
+            self._install(conn)
 
-    # LLM: 只读URI不创建缺库且锁忙立即拒绝；Count0仍原10秒/同一表，with块退出时由_ClosingConnection立即关闭连接。
+    # LLM: 只补原密码表及卡片字段，丢失的密码保持未设置，不能据此解锁用户。
+    # 函数用途: 在调用者提供的同一连接上安装原schema及幂等迁移。
+    def _install(self, conn) -> None:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.executescript(_SCHEMA)
+        from .card_control import initialize_card_columns
+        initialize_card_columns(conn)
+
+    # LLM: 只读不创建或探测安装；写连接缺表时在原锁内复查安装，不恢复丢失密码，退出即关闭。
     # 函数用途: 为原状态方法打开对应模式且退出即关闭的SQLite连接。
     def _connect(self) -> sqlite3.Connection:
+        fresh = False
+        if not self._read_only:
+            try:
+                fresh = Path(self._path).stat().st_size == 0
+            except FileNotFoundError:
+                Path(self._path).parent.mkdir(parents=True, exist_ok=True)
+                fresh = True
         address = Path(self._path).resolve().as_uri() + '?mode=ro' if self._read_only else self._path
         conn = sqlite3.connect(
             address,
@@ -73,6 +89,17 @@ class SessionLockStore:
             factory=_ClosingConnection,
         )
         conn.row_factory = sqlite3.Row
+        try:
+            if not self._read_only and (fresh or conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='private_chat_locks'"
+            ).fetchone() is None):
+                with self._init_lock:
+                    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='private_chat_locks'").fetchone() is None:
+                        self._install(conn)
+                        logger.warning("SQLITE_SCHEMA_REINSTALLED store=session_lock path=%s", self._path)
+        except BaseException:
+            conn.close()
+            raise
         return conn
 
     # -- 私聊活跃时间 ------------------------------------------------------------

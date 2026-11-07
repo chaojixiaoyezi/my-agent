@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import threading
 from collections import OrderedDict
@@ -13,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..common.cache_freshness import cache_stat_signature
+
+logger = logging.getLogger(__name__)
 
 _CHECKPOINT_OFFSETS = OrderedDict()
 _CHECKPOINT_OFFSETS_LOCK = threading.Lock()
@@ -54,8 +57,8 @@ def _cache_offsets(path, index) -> None:
             _CHECKPOINT_OFFSETS.popitem(last=False)
 
 
-# LLM: 保留原JSON对象/UTF8/Unicode空白语义；无LF的完整末行有效，坏orphan也拒绝，不用宽松解码修补。
-# 函数用途: 将一条物理LF记录解析为原对象或空行标记，失败只报告账本不可读。
+# LLM: 仅非对象JSON/UTF8行沿空行语义跳过；合法对象仍由原model/身份验证，冷副本None仍被拒绝。
+# 函数用途: 解析物理记录，损失无身份坏行时只记录字节长度和指纹，不回显正文。
 def _parse_row(raw: bytes) -> dict | None:
     try:
         text = raw.decode('utf-8')
@@ -65,8 +68,9 @@ def _parse_row(raw: bytes) -> dict | None:
         if not isinstance(row, dict):
             raise ValueError('checkpoint row must be an object')
         return row
-    except (ValueError, UnicodeError) as exc:
-        raise OSError('conversation compact checkpoint ledger is unreadable') from exc
+    except (ValueError, UnicodeError):
+        logger.warning('COMPACT_LEDGER_ROW_SKIPPED bytes=%s sha256=%s', len(raw), hashlib.sha256(raw).hexdigest()[:16])
+        return None
 
 
 # LLM: 只沿物理LF分行，UTF8/JSON由原严格解析器验证；读取量受固定through约束，缓冲及单记录分别有硬预算。

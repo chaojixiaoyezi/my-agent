@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 import stat
@@ -11,6 +12,8 @@ from pathlib import Path
 
 from ..common.json_io import append_private_jsonl_records_unlocked, locked_json_path
 from ..common.nofollow_fs import ensure_private_dir, open_readonly_file_beneath
+
+logger = logging.getLogger(__name__)
 
 
 # LLM: 文件身份和首尾有界锚点只证明投影来源，不签发调度或投递权限。
@@ -45,6 +48,11 @@ class SchedulerHistoryIndex:
     def __init__(self, source: Path, owner: dict, parser):
         self.source, self.owner, self.parser = Path(source), dict(owner), parser
         self.path = self.source.with_suffix(".index.sqlite3")
+        self._install()
+
+    # LLM: 安装只补齐本owner缺失的投影文件和既有schema，不读取、删除或改写规范历史。
+    # 函数用途: 用构造器原有流程创建私有SQLite文件及全部表索引。
+    def _install(self):
         ensure_private_dir(self.source.parent)
         try:
             descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -65,7 +73,14 @@ class SchedulerHistoryIndex:
     # LLM: 只读查询不能建缺库、迁移或修改源；写者由同一history文件锁串行。
     # 函数用途: 打开并由调用者关闭一个原生SQLite连接。
     def _connect(self, *, read_only=False):
-        info = self.path.lstat()
+        try:
+            info = self.path.lstat()
+        except FileNotFoundError:
+            if read_only:
+                raise
+            self._install()
+            logger.warning("SQLITE_SCHEMA_REINSTALLED store=scheduler_history path=%s", self.path)
+            info = self.path.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise OSError("invalid history index file")
         conn = sqlite3.connect(self.path.as_uri() + ("?mode=ro" if read_only else "?mode=rw"), uri=True, timeout=5)
