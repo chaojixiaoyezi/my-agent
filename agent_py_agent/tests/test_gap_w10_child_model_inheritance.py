@@ -53,6 +53,23 @@ def child(host, attrs, name="child"):
     return task, ensure_subagent_thread(manager, task)
 
 
+@pytest.fixture
+def scheduler_fd_balance():
+    directory = "/dev/fd" if os.path.isdir("/dev/fd") else "/proc/self/fd"
+
+    def count():
+        if not os.path.isdir(directory):
+            return None
+        with os.scandir(directory) as entries:
+            return len(list(entries))
+
+    before = count()
+    yield
+    if before is not None:
+        fd_delta = count() - before
+        assert fd_delta == 0
+
+
 @pytest.mark.parametrize("binding", ["unbound", "bound", "distinct"])
 def test_create_inherits_canonical_parent_across_default_drift(family, binding):
     host, tid, explicit, default, later = family
@@ -182,23 +199,33 @@ def canonical_child(host, profile_id, stale_profile_id, source, name):
 
 @pytest.mark.parametrize("identity", ["scoped", "legacy"])
 @pytest.mark.parametrize("source", ["inherited", "explicit", "automatic"])
-def test_recursive_spawn_uses_registered_direct_parent_not_root_link(family, identity, source):
+@pytest.mark.parametrize("binding", ["unbound", "scheduler_fixed", "scheduler_inherit"])
+def test_recursive_spawn_uses_registered_direct_parent_not_root_link(family, identity, source, binding):
     from agent_py_agent.agent.runtime_context import (
         restore_current_subagent_context,
         set_current_subagent_context,
     )
+    from agent_py_agent.agent.settings.model_scope import model_selection_snapshot
 
     host, root_tid, root_profile, parent_profile, _ = family
     parent, parent_thread = canonical_child(host, parent_profile, root_profile, source, "recursive-parent")
     # 根会话链接只拥有工作目录；即使暂存线程字段或模型引用过时，也不能覆盖直接父线程。
     host._current_run_params.task_attributes["agent_thread_id"] = root_tid
+    scope = nullcontext()
+    if binding != "unbound":
+        config = selected_model_config(host, profile_id=root_profile)
+        snapshot = replace(model_selection_snapshot(host.conversation_store.threads.require(root_tid), config),
+                           selection_source=binding, selection_thread_id=root_tid)
+        dependencies = replace(prepare_model_dependencies(host, config, inherited=True), selection=snapshot)
+        scope = model_dependencies_scope(host, dependencies)
     previous = None
     if identity == "scoped":
         previous = set_current_subagent_context(host, run_id=parent.id, task_attributes=host._current_run_params.task_attributes)
     else:
         host._current_subagent_run_id = parent.id
     try:
-        attrs = create_task_attributes({}, host)
+        with scope:
+            attrs = create_task_attributes({}, host)
         assert attrs["host_model_profile.v1"] == {"profile_id": parent_profile}
         assert host.conversation_store.threads.require(parent_thread.thread_id).model_profile_id == parent_profile
     finally:
@@ -274,3 +301,75 @@ def test_detached_scheduler_fixed_binding_keeps_frozen_profile(family, caplog):
     assert thread.model_profile_id == later
     assert inherited_model_config(host, task).model_name == "later"
     assert not [record for record in caplog.records if "MODEL_INHERITANCE_LABEL_MISMATCH" in record.getMessage()]
+
+
+@pytest.mark.parametrize("mode", ["isolated", "followup"])
+@pytest.mark.parametrize("policy", ["fixed", "inherit"])
+def test_scheduled_main_runparams_inherit_policy_without_initializing_execution_thread(
+    family, tmp_path, scheduler_fd_balance, mode, policy,
+):
+    from agent_py_agent.agent.conversation.runtime import _run_params, _run_request
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.scheduler.execution import scheduled_model_scope
+    from agent_py_agent.agent.scheduler.repository import (
+        SchedulerJobCreateRequest,
+        SchedulerRepository,
+    )
+    from agent_py_agent.agent.scheduler.service import SchedulerService
+    from agent_py_agent.agent.settings.model_scope import current_model_selection
+
+    host, origin_id, origin_profile, owner_default, fixed_profile = family
+    store = host.conversation_store
+    repository = SchedulerRepository(tmp_path / "scheduler", owner_provider="local", owner_kind="user", owner_id="alice")
+    host.scheduler_repository = repository
+    service = SchedulerService(repository, conversation_store=store)
+    execution = {"mode": mode, "model_policy": policy, "profile_id": fixed_profile if policy == "fixed" else ""}
+    job = repository.create_job(SchedulerJobCreateRequest(
+        name="检查定时继承", prompt="检查自己的资料", thread_id=origin_id, execution=execution,
+        schedule={"kind": "every", "every_seconds": 600, "anchor_at": 1000, "timezone": "UTC"}, now=900,
+    ))[0]
+    wake_ids = service.enqueue_ready_runs(now=1000)
+    assert len(wake_ids) == 1
+    signal = store.wakes.pending_one(wake_ids[0])
+    claim = service.claim_wake(signal, now=1000).claim
+    assert claim is not None
+    run = repository.get_active_run(signal.root_task_id)
+    assert run["job_id"] == job["job_id"] and run["execution"] == execution
+    execution_thread = store.threads.require(run["thread_id"])
+    if mode == "isolated":
+        assert execution_thread.thread_id != origin_id and execution_thread.model_profile_id == ""
+    else:
+        assert execution_thread.thread_id == origin_id and execution_thread.model_profile_id == origin_profile
+    request = _run_request({"thread_id": signal.thread_id, "task_id": signal.root_task_id,
+                            "reason": signal.reason, "wake_signal": signal.to_dict(), "now": 1000})
+    expected = fixed_profile if policy == "fixed" else origin_profile
+    assert expected != owner_default
+    original_params = host._current_run_params
+    with selected_model_scope(host, thread_id=origin_id):
+        outer_config, outer_selection = host.config, current_model_selection(host)
+        try:
+            with scheduled_model_scope(host, execution_thread, request):
+                selection = current_model_selection(host)
+                assert selection.selection_source == "scheduler_" + policy
+                assert selection.profile_id == expected
+                host._current_run_params = _run_params(signal.thread_id, request, host, thread=execution_thread)
+                assert host._current_run_params.task_attributes["conversation_thread_id"] == signal.thread_id
+                assert host._current_run_params.task_id == run["run_id"]
+                attrs = create_task_attributes({}, host)
+                task, thread = child(host, attrs, "scheduled-child")
+                assert attrs["host_model_profile.v1"] == {"profile_id": expected}
+                assert thread.model_profile_id == expected
+                assert inherited_model_config(host, task).model_name == ("later" if policy == "fixed" else "parent")
+                explicit_attrs = create_task_attributes({"model": "default"}, host)
+                assert explicit_attrs["host_model_profile.v1"] == {"profile_id": owner_default}
+                persisted = ConversationStore(store.storage.root)
+                assert persisted.threads.require(thread.thread_id).model_profile_id == expected
+                persisted_execution = persisted.threads.require(execution_thread.thread_id)
+                assert persisted_execution.model_profile_id == execution_thread.model_profile_id
+                assert persisted_execution.model_selection_revision == execution_thread.model_selection_revision
+                assert persisted_execution.model_selection_source == execution_thread.model_selection_source
+        finally:
+            host._current_run_params = original_params
+            assert service.release(claim, now=1001)
+        assert host.config is outer_config and current_model_selection(host) is outer_selection
+    assert current_model_selection(host) is None

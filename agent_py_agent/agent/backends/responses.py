@@ -123,10 +123,15 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
             payload["input"] = [item for item in payload["input"] if item.get("role") != "system"]
             from ..settings.model_oauth_schema import SIWC_BASE
 
-            if self.api_base == SIWC_BASE and payload.get("tools"):
-                payload["tools"] = [{"type": "namespace", "name": "my_agent", "tools": payload["tools"]}]
-                if isinstance(payload.get("tool_choice"), dict):
-                    payload["tool_choice"]["namespace"] = "my_agent"
+            if self.api_base == SIWC_BASE:
+                # 历史调用身份与工具声明一致；即使本轮不再提供工具，也须保留 namespace。
+                for item in payload["input"]:
+                    if item.get("type") == "function_call":
+                        item["namespace"] = "my_agent"
+                if payload.get("tools"):
+                    payload["tools"] = [{"type": "namespace", "name": "my_agent", "tools": payload["tools"]}]
+                    if isinstance(payload.get("tool_choice"), dict):
+                        payload["tool_choice"]["namespace"] = "my_agent"
         validate_responses_input(payload["input"])
         # 服务端压缩：触发项放在 input 最末（压缩链保证此时没有压缩指令这条动态 user 消息），前缀逐字不变。
         if getattr(request, "compaction_trigger", False):
