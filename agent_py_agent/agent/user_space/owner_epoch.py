@@ -7,8 +7,10 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
+from ..io.sqlite_scope import _file_identity
+
 _ACTIVATION_LOCK = threading.Lock()
-_ACTIVATED: dict[tuple[int, str], int] = {}
+_ACTIVATED: dict[tuple[int, str], tuple[tuple[int, int] | None, int]] = {}
 _WRITE_CONTEXT: ContextVar[tuple | None] = ContextVar("owner_epoch_write_context", default=None)
 
 
@@ -27,29 +29,38 @@ def read_owner_epoch(repo) -> int:
         return int(row[0]) if row is not None else 0
 
 
-def activate_owner_epoch(repo) -> int:
-    """BEGIN IMMEDIATE 的同一提交点分配唯一连续代次，不更改 schema。"""
+# LLM: 显式激活者在原写事务内分配高于持久值和 minimum 的代次；不更改 schema。
+# 函数用途: 给新执行域或重建后的库分配不倒退的 epoch。
+def activate_owner_epoch(repo, *, minimum: int = 0) -> int:
+    """BEGIN IMMEDIATE 的同一提交点分配 max(current_epoch, minimum) + 1。"""
     from ..concurrency.lock_order import LockLevel, note_acquired, note_released
 
     with repo.transaction() as conn:
         conn.execute("BEGIN IMMEDIATE")
         note_acquired(LockLevel.SQLITE, id(conn), try_acquire=False)
         try:
-            conn.execute("INSERT INTO metadata(key, value) VALUES('owner_epoch', '1') "
-                         "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1")
+            conn.execute("INSERT INTO metadata(key, value) VALUES('owner_epoch', ?) "
+                         "ON CONFLICT(key) DO UPDATE SET value = MAX(CAST(value AS INTEGER), ?) + 1",
+                         (max(0, minimum) + 1, minimum))
             value = int(conn.execute("SELECT value FROM metadata WHERE key = 'owner_epoch'").fetchone()[0])
         finally:
             note_released(id(conn))
     return value
 
 
+# LLM: 缓存只因物理换库或零 epoch 重新激活；原库的非零新代次不能授给旧执行域。
+# 函数用途: 复用本进程的激活代次，库自愈后则跨过旧代号。
 def ensure_process_owner_epoch_activated(repo) -> int:
-    """集合按进程与规范DB路径去重，并保留本执行域最初的代次而非重读新代次。"""
-    key = (os.getpid(), str(Path(repo.db_path).resolve()))
+    """按进程、规范路径和物理库关联原代次；零 epoch 兼容 inode 复用。"""
+    path = Path(repo.db_path).resolve()
+    key = (os.getpid(), str(path))
     with _ACTIVATION_LOCK:
-        if key not in _ACTIVATED:
-            _ACTIVATED[key] = activate_owner_epoch(repo)
-        return _ACTIVATED[key]
+        cached = _ACTIVATED.get(key)
+        if cached is None or cached[0] != _file_identity(path) or read_owner_epoch(repo) == 0:
+            value = activate_owner_epoch(repo, minimum=cached[1] if cached else 0)
+            # 激活事务可能刚刚重建缺失的库，因此在提交后采样物理身份。
+            _ACTIVATED[key] = (_file_identity(path), value)
+        return _ACTIVATED[key][1]
 
 
 def require_current(repo, expected: int) -> None:
