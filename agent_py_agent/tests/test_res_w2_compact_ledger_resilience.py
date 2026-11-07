@@ -1,15 +1,20 @@
 """RES-W2: real v3 commits survive ledger damage without hiding identity faults."""
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import os
 import shutil
 import sys
 from contextlib import contextmanager
 from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.common import json_io, nofollow_fs
 from agent_py_agent.agent.common.json_io import locked_json_path
 from agent_py_agent.agent.conversation import compact_checkpoint as checkpoints
 from agent_py_agent.agent.conversation import compact_checkpoint_scan as scan
@@ -162,7 +167,8 @@ def test_compaction_seals_torn_tail_before_append(compact_case, caplog):
     assert path.read_bytes().startswith(prefix)
     sidecars = list(path.parent.glob(f'.{path.name}.torn-*'))
     assert len(sidecars) == 1 and sidecars[0].read_bytes() == b'{'
-    assert sidecars[0].stat().st_mode & 0o777 == 0o600
+    if os.name == 'posix':
+        assert sidecars[0].stat().st_mode & 0o777 == 0o600
     assert 'COMPACT_LEDGER_TORN_TAIL_SEALED' in caplog.text
 
 
@@ -254,7 +260,8 @@ def test_tail_seal_preserves_committed_prefix(compact_case, tail, action):
     assert len(sidecars) == (1 if action == 'quarantined' else 0)
     if sidecars:
         assert sidecars[0].read_bytes() == tail
-        assert sidecars[0].stat().st_mode & 0o777 == 0o600
+        if os.name == 'posix':
+            assert sidecars[0].stat().st_mode & 0o777 == 0o600
 
 
 # LLM: No ledger is a normal first write, and an empty ledger requires no repair or sidecar.
@@ -407,7 +414,8 @@ def test_depth_exhausted_tail_is_preserved_before_quarantine(compact_case, shape
         assert lookup(head.compact_checkpoint_id)['summary'] == 'first committed checkpoint'
     sidecars = list(path.parent.glob(f'.{path.name}.torn-*'))
     assert len(sidecars) == 1 and sidecars[0].read_bytes() == tail
-    assert sidecars[0].stat().st_mode & 0o777 == 0o600
+    if os.name == 'posix':
+        assert sidecars[0].stat().st_mode & 0o777 == 0o600
 
 
 # LLM: Missing-hot warnings are emitted only after a successful cold read; an entry warning must not be repeated.
@@ -442,3 +450,158 @@ def test_cold_fallback_warning_covers_missing_hot_without_duplicates(compact_cas
         reason = 'missing_hot_row' if mode == 'missing' else 'conversation compact checkpoint ledger is unreadable'
         assert warnings == [f'COMPACT_LEDGER_COLD_FALLBACK thread={case.thread_id} reason={reason}']
     assert path.read_bytes() == before
+
+
+# 只替换被测模块的能力表，不删除进程级 os 属性；原 portable 分支仍执行真实文件操作。
+@contextmanager
+def _portable_checkpoint_io(monkeypatch):
+    descriptors, handles, opened_paths = set(), [], {}
+
+    def tracked_open(path, *args, **kwargs):
+        descriptor = os.open(path, *args, **kwargs)
+        descriptors.add(descriptor)
+        opened_paths[descriptor] = Path(path)
+        return descriptor
+
+    def tracked_fdopen(descriptor, *args, **kwargs):
+        handle = os.fdopen(descriptor, *args, **kwargs)
+        handles.append(handle)
+        return handle
+
+    portable = SimpleNamespace(**{key: value for key, value in vars(os).items()
+                                 if key not in {'O_NOFOLLOW', 'O_DIRECTORY'}})
+    portable.supports_dir_fd = set()
+    portable.open, portable.fdopen = tracked_open, tracked_fdopen
+    portable.opened_paths = opened_paths
+    with monkeypatch.context() as patch:
+        for module in (checkpoints, nofollow_fs, json_io):
+            patch.setattr(module, 'os', portable)
+        try:
+            yield portable
+        finally:
+            fd_delta = 0
+            for descriptor in descriptors:
+                try:
+                    os.fstat(descriptor)
+                except OSError as error:
+                    assert error.errno == errno.EBADF
+                else:
+                    fd_delta += 1
+            assert fd_delta == 0
+            assert all(handle.closed for handle in handles)
+
+
+# 与现有 scoped fixture 共用真实 writer/CAS；live 请求使用四元来源身份，不伪造 checkpoint 行。
+def _commit_portable_writer(case, writer, label):
+    if writer == 'transcript':
+        return _commit(case, label)
+    from agent_py_agent.agent.conversation.live_tool_compact import (
+        LiveToolCompactBinding,
+        LiveToolCompactCommitRequest,
+        commit_live_tool_compact,
+    )
+
+    case.clock[0] += 1
+    thread = case.store.threads.require(case.thread_id)
+    return commit_live_tool_compact(
+        case.agent, LiveToolCompactBinding(store=case.store, thread=thread),
+        LiveToolCompactCommitRequest(
+            summary=label, source_tool_call_ids=(label,), retained_tool_call_ids=(),
+            projected_tokens_before=900, projected_tokens_after=300, policy=case.policy,
+            request_id='summary-request', attempt_id='summary-attempt',
+            source_tool_refs=({'run_id': 'run', 'attempt_id': 'source-attempt',
+                               'turn_id': 'turn', 'call_id': label},),
+        ),
+    )
+
+
+@pytest.mark.parametrize('writer', ['transcript', 'live'])
+@pytest.mark.parametrize('state', ['missing', 'empty', 'healthy', 'no_lf', 'torn'])
+def test_portable_public_writers_preserve_ledger_and_close_resources(compact_case, monkeypatch, writer, state):
+    case = compact_case
+    path = _checkpoint_path(case)
+    prefix, tail = b'', b'{"unfinished":"private'
+    if state in {'healthy', 'no_lf', 'torn'}:
+        _commit(case, 'base')
+        prefix = path.read_bytes()
+        if state == 'no_lf':
+            path.write_bytes(prefix[:-1])
+        elif state == 'torn':
+            path.write_bytes(prefix + tail)
+    elif state == 'empty':
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    inode = path.stat().st_ino if path.exists() else None
+    before = case.store.threads.require(case.thread_id)
+    with _portable_checkpoint_io(monkeypatch):
+        assert not nofollow_fs._supports_dir_fd()
+        if state == 'missing':
+            with locked_json_path(path):
+                assert checkpoints._seal_torn_ledger_tail(path) == ''
+            assert not path.exists()
+        head = _commit_portable_writer(case, writer, 'portable')
+        chain = checkpoints.committed_compact_checkpoint_chain(case.agent, head)
+        assert chain[-1]['checkpoint_id'] == head.compact_checkpoint_id
+        assert chain[-1]['source_kind'] == ('transcript' if writer == 'transcript' else 'live_tool_ir')
+        assert chain[-1]['previous_checkpoint_id'] == before.compact_checkpoint_id
+        assert resolve_compact_summary_view(case.agent, head, THREAD_COMPACT_SCOPE).summary == 'portable'
+    raw = path.read_bytes()
+    assert raw.startswith(prefix) and raw.endswith(b'\n')
+    assert len(raw.splitlines()) == (2 if prefix else 1)
+    assert head.compact_generation == before.compact_generation + 1
+    assert case.store.threads.require(case.thread_id) == head
+    if inode is not None:
+        assert path.stat().st_ino == inode
+    sidecars = list(path.parent.glob(f'.{path.name}.torn-*'))
+    assert len(sidecars) == (1 if state == 'torn' else 0)
+    if sidecars:
+        assert sidecars[0].read_bytes() == tail
+
+
+# 成功与单次 I/O 报错都核对全部所观察 FD/handle；失败只能留下冷候选，不能获得 head 权威。
+@pytest.mark.parametrize('writer', ['transcript', 'live'])
+@pytest.mark.parametrize('failure', ['evidence_fsync', 'parent_sync'])
+def test_portable_seal_failure_preserves_head_and_closes_resources(compact_case, monkeypatch, writer, failure):
+    case = compact_case
+    head = _commit(case, 'base')
+    path = _checkpoint_path(case)
+    tail = b'{"unfinished":"private'
+    damaged = path.read_bytes() + tail
+    path.write_bytes(damaged)
+    original = OSError(errno.EIO, 'simulated evidence sync error')
+    calls = []
+    with _portable_checkpoint_io(monkeypatch) as portable:
+        def fail_evidence_sync(descriptor):
+            target = portable.opened_paths[descriptor]
+            if target.name.startswith(f'.{path.name}.torn-'):
+                assert target.read_bytes() == tail and path.read_bytes() == damaged
+                calls.append(target)
+                raise original
+            return os.fsync(descriptor)
+
+        def fail_parent_sync(sidecar):
+            assert sidecar.read_bytes() == tail and path.read_bytes() == damaged
+            calls.append(sidecar)
+            if os.name == 'nt':
+                # Windows 原 helper 没有目录 FD；仍验证调用边界的原异常透传。
+                raise original
+            with monkeypatch.context() as sync_patch:
+                def fail_directory_fsync(_descriptor):
+                    raise original
+                sync_patch.setattr(portable, 'fsync', fail_directory_fsync)
+                json_io._sync_parent_directory(sidecar)
+
+        if failure == 'evidence_fsync':
+            portable.fsync = fail_evidence_sync
+        else:
+            monkeypatch.setattr(checkpoints, '_sync_parent_directory', fail_parent_sync, raising=False)
+        with pytest.raises(OSError) as caught:
+            _commit_portable_writer(case, writer, 'uncommitted')
+        assert caught.value is original and len(calls) == 1
+        current = case.store.threads.require(case.thread_id)
+        assert replace(current, updated_at=head.updated_at) == head
+        assert [row['checkpoint_id'] for row in checkpoints.committed_compact_checkpoint_chain(case.agent, current)] == [head.compact_checkpoint_id]
+    assert path.read_bytes() == damaged
+    sidecars = list(path.parent.glob(f'.{path.name}.torn-*'))
+    assert len(sidecars) == 1 and sidecars[0].read_bytes() == tail
+    assert len(list(_copy_path(case, head.compact_checkpoint_id).parent.glob('*.checkpoint.json'))) == 2

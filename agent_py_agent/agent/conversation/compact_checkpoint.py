@@ -15,8 +15,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..common.json_io import append_private_jsonl_records_unlocked, locked_json_path
+from ..common.json_io import (
+    _sync_parent_directory,
+    append_private_jsonl_records_unlocked,
+    locked_json_path,
+)
 from ..common.nofollow_fs import (
+    create_private_file_beneath,
+    open_private_lock_beneath,
     read_bytes_beneath,
     write_bytes_atomic_beneath,
     write_text_atomic_beneath,
@@ -237,15 +243,11 @@ def _checkpoint_payload(agent, request) -> dict[str, object]:
 # 函数用途: 先耐久保留残尾字节，不覆盖既有取证文件。
 def _save_torn_ledger_tail(path, tail):
     sidecar = path.with_name(f'.{path.name}.torn-{int(time.time() * 1000)}')
-    with os.fdopen(os.open(sidecar, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), 'wb') as saved:
+    with os.fdopen(create_private_file_beneath(path.parent, (sidecar.name,)), 'wb') as saved:
         saved.write(tail)
         saved.flush()
         os.fsync(saved.fileno())
-    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+    _sync_parent_directory(sidecar)
     return sidecar
 
 
@@ -253,7 +255,8 @@ def _save_torn_ledger_tail(path, tail):
 # 函数用途: 封闭断电残尾以保护下一次追加，不改任何完整行的字节或偏移。
 def _seal_torn_ledger_tail(path: Path) -> str:
     try:
-        handle = os.fdopen(os.open(path, os.O_RDWR | os.O_NOFOLLOW), 'r+b')
+        path.lstat()
+        handle = os.fdopen(open_private_lock_beneath(path.parent, (path.name,)), 'r+b')
     except FileNotFoundError:
         return ''
     with handle:
