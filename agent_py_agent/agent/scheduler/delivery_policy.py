@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 
 from .schedule import ScheduleValidationError
+
+logger = logging.getLogger(__name__)
 
 TARGET_DELIVERY_MODES = frozenset({"bound", "multi", "primary_only", "dual_deliver", "fallback_on_failure", "severity_routed"})
 _SEVERITY_RANK = {"debug": 0, "info": 1, "informational": 1, "normal": 1, "notice": 2, "low": 2,
@@ -127,10 +130,15 @@ def available_delivery_targets(agent):
     home = agent.home_paths
     threads = agent.conversation_store.threads
     rows, errors = threads.list_report(limit=0)
-    if errors:
+    if any(not error.get('thread_id') for error in errors):
         raise ScheduleDeliveryTargetUnauthorized()
+    skipped_thread_ids = {str(error['thread_id']) for error in errors}
+    for thread_id in skipped_thread_ids:
+        logger.warning("SCHEDULE_TARGET_THREAD_SKIPPED thread_id=%s", thread_id)
     result = {}
     for thread in rows:
+        if thread.thread_id in skipped_thread_ids:
+            continue
         if thread.owner_id != home.owner_id or thread.owner_home != str(home.owner_home_dir):
             continue
         for binding in thread.channel_bindings:
