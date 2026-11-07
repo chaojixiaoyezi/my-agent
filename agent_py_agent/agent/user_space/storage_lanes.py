@@ -44,17 +44,19 @@ LANE_BINDINGS: dict[str, str] = {
     "session_task_payloads": "conversation.session_task_retention:maintain_session_task_payloads_lane",
     "tool_outputs": "memory_archive.tool_output_retention:maintain_owner_tool_outputs_lane",
     "asset_auxiliary": "assets.revision_history:maintain_asset_auxiliary_lane",
+    "runtime_history": "runtime_db.history_retention:maintain_runtime_history_lane",
+    "gateway_history": "gateway_parts.gateway_history_index:maintain_gateway_history_lane",
 }
 # 压力只调整既有合格候选的通道次序，不缩短保留期。
 LANE_EVICTION_ORDER = (
     "display_archives", "conversation_messages", "compact_checkpoints", "local_events",
     "conversation_ledgers", "tool_outputs", "subagents", "asset_auxiliary",
-    "session_task_payloads", "process_sessions",
+    "session_task_payloads", "process_sessions", "runtime_history", "gateway_history",
 )
 # 回执必须提供的计量和续点字段。
 _RECEIPT_REQUIRED = ("cursor", "complete", "items", "bytes")
 # 可选的非负整数计量字段，不将检查量冒充物理释放量。
-_RECEIPT_OPTIONAL_INT = ("deleted_items", "freed_bytes", "backlog")
+_RECEIPT_OPTIONAL_INT = ("deleted_items", "freed_bytes", "backlog", "slimmed", "deleted_events", "deleted_llm_records")
 
 
 # LLM: 预算不可变；单调时钟仅描述本片剩余额度，不改变领域策略。
