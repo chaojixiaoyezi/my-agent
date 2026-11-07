@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -9,6 +10,7 @@ import stat
 from contextlib import ExitStack, contextmanager
 from itertools import islice
 from pathlib import Path
+from sqlite3 import OperationalError
 from types import SimpleNamespace
 
 from ....common import nofollow_fs
@@ -34,6 +36,8 @@ from ..contract_identity import (
     repair_contract_identity_from_context_packs,
 )
 
+logger = logging.getLogger(__name__)
+
 
 # LLM: 新索引只登记规范写者提交的标量；pending 先于文件发表耐久提交，未知覆盖不得当作零占用。
 # 函数用途: 为容量、派工身份和请求定位保存按行索引，不在热查询中枚举历史文件。
@@ -45,7 +49,12 @@ class SubagentRunIndex:
         self.path = self.workspace / ".run-index.sqlite3"
         with locked_json_path(self.workspace / ".run-index-init.guard"):
             with self.connect() as db:
-                db.executescript("""
+                self._install(db)
+
+    # LLM: 只复用原DDL和八项旧源采样，原始运行目录保留且partial不得冒充完整覆盖。
+    # 函数用途: 在当前连接重装查找表与原覆盖元数据，不同步扫描历史。
+    def _install(self, db):
+        db.executescript("""
                     CREATE TABLE IF NOT EXISTS runs (
                         run_id TEXT PRIMARY KEY, active INTEGER NOT NULL,
                         audit_epoch INTEGER, updated REAL NOT NULL, pending INTEGER NOT NULL DEFAULT 0
@@ -87,17 +96,29 @@ class SubagentRunIndex:
                     CREATE TABLE IF NOT EXISTS pending_commits (
                         run_id TEXT PRIMARY KEY, recovery TEXT NOT NULL, was_published INTEGER NOT NULL
                     );
-                """)
-                if db.execute("SELECT value FROM meta WHERE key='schema'").fetchone() != (2,):
-                    with os.scandir(self.workspace) as entries:
-                        sampled = list(islice(entries, 8))
-                    legacy = (bool(db.execute("SELECT 1 FROM runs LIMIT 1").fetchone())
-                              or len(sampled) == 8 or any(entry.is_dir(follow_symlinks=False) or entry.is_symlink() for entry in sampled))
-                    db.executemany("INSERT OR REPLACE INTO meta VALUES (?,?)",
-                                   [("complete", int(not legacy)), ("offset", 0),
-                                    ("inventory_ready", int(not legacy)), ("schema", 2)])
+        """)
+        if db.execute("SELECT value FROM meta WHERE key='schema'").fetchone() != (2,):
+            with os.scandir(self.workspace) as entries:
+                sampled = list(islice(entries, 8))
+            legacy = (bool(db.execute("SELECT 1 FROM runs LIMIT 1").fetchone())
+                      or len(sampled) == 8 or any(entry.is_dir(follow_symlinks=False) or entry.is_symlink() for entry in sampled))
+            db.executemany("INSERT OR REPLACE INTO meta VALUES (?,?)",
+                           [("complete", int(not legacy)), ("offset", 0),
+                            ("inventory_ready", int(not legacy)), ("schema", 2)])
 
-    # LLM: no-follow 私有种子先于 mode=rw 打开；访问锁串行化同库连接，避免关闭预检 FD 释放同进程另一个 SQLite 锁。
+    # LLM: 每连接只点查schema键；缺表或未完成种子复用原安装器，异常不能伪装成空库存。
+    # 函数用途: 补未初始化的表及元数据，返回是否实际重装，由调用者复核身份后提交。
+    def _ensure_schema(self, db):
+        try:
+            if db.execute("SELECT 1 FROM meta WHERE key='schema'").fetchone():
+                return False
+        except OperationalError as exc:
+            if str(exc) != "no such table: meta":
+                raise
+        self._install(db)
+        return True
+
+    # LLM: no-follow种子和访问锁保持；重装提交先于业务BEGIN，业务回滚不能撤销覆盖种子。
     # 函数用途: 为一次查询或固定批次提供私有短连接，先关 SQLite 再关预检 FD，异常完整回滚。
     @contextmanager
     def connect(self):
@@ -127,12 +148,16 @@ class SubagentRunIndex:
                 try:
                     _verify_sqlite_files(self.workspace, root_fd, pinned)
                     with db:
+                        if self._ensure_schema(db):
+                            _verify_sqlite_files(self.workspace, root_fd, pinned)
+                            db.commit()
+                            logger.warning("SQLITE_SCHEMA_REINSTALLED store=subagent_run_index path=%s", self.path)
                         yield db
                         _verify_sqlite_files(self.workspace, root_fd, pinned)
                 finally:
                     db.close()
 
-    # LLM: 便携分支沿原访问锁和路径预检；种子FD先关再开SQLite，不声称具备POSIX目录FD的竞态强度。
+    # LLM: 便携分支沿原访问锁和路径预检；初始化先提交，种子FD先关再开SQLite，不外推POSIX竞态强度。
     # 函数用途: 在无dir_fd平台提供真实提交、回滚及确定性关闭的短连接。
     @contextmanager
     def _connect_portable(self):
@@ -157,6 +182,10 @@ class SubagentRunIndex:
         try:
             _verify_sqlite_files(self.workspace, root_info, pinned)
             with db:
+                if self._ensure_schema(db):
+                    _verify_sqlite_files(self.workspace, root_info, pinned)
+                    db.commit()
+                    logger.warning("SQLITE_SCHEMA_REINSTALLED store=subagent_run_index path=%s", self.path)
                 yield db
                 _verify_sqlite_files(self.workspace, root_info, pinned)
         finally:

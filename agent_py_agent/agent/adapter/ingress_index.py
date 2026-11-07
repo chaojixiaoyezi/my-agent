@@ -1,22 +1,30 @@
 """入站查找投影；规范 JSON 才是执行、租约与保留期的权威。"""
 from __future__ import annotations
 
+import logging
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
 from ..gateway_parts.recovery_pending_index import private_projection_connection
 
+logger = logging.getLogger(__name__)
+
 
 # LLM: 每个 spool 独立建库，不缓存正文或长期持有 SQLite 连接。
 # 类用途: 管理有界候选查询、写前责任标记和可重放的维护位置。
 class IngressIndex:
-    # LLM: 初始化只建立表与索引，旧文件由维护批次逐步发现。
+    # LLM: 首次安装沿用调用方的legacy判断，旧文件由维护批次逐步发现。
     # 函数用途: 创建私有 SQLite 投影及部分索引。
     def __init__(self, directory: Path, *, legacy: bool) -> None:
         self.path = directory / "index.sqlite3"
-        with self.connect() as db:
-            db.executescript("""
+        with self.connect(legacy=legacy) as db:
+            self._install(db, legacy=legacy)
+
+    # LLM: 规范入站文件仍负责去重与责任，重装投影只恢复legacy标记供原有界维护重投影。
+    # 函数用途: 在当前连接安装原入站DDL及旧源覆盖标记。
+    def _install(self, db, *, legacy):
+        db.executescript("""
                 CREATE TABLE IF NOT EXISTS ingress (
                     ingress_id TEXT PRIMARY KEY, state TEXT NOT NULL,
                     created_at REAL NOT NULL, due_at REAL NOT NULL, expires_at REAL);
@@ -30,15 +38,19 @@ class IngressIndex:
                 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS quarantine (name TEXT PRIMARY KEY, expires_at REAL NOT NULL);
                 CREATE INDEX IF NOT EXISTS quarantine_expires ON quarantine(expires_at, name);
-            """)
-            db.execute("INSERT OR IGNORE INTO meta VALUES ('legacy', ?)", ("1" if legacy else "0",))
+        """)
+        db.execute("INSERT OR IGNORE INTO meta VALUES ('legacy', ?)", ("1" if legacy else "0",))
 
-    # LLM: 显式 close 覆盖成功、提交失败和调用者异常，不能依赖连接析构释放 FD。
+    # LLM: 首次传入legacy；缺meta表默认重建回填责任，每连接一次header探针，显式close合同不变。
     # 函数用途: 以耐久事务打开一个短生命周期连接。
     @contextmanager
-    def connect(self):
+    def connect(self, *, legacy: bool = True):
         try:
             with private_projection_connection(self.path) as db:
+                if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone() is None:
+                    self._install(db, legacy=legacy)
+                    db.commit()
+                    logger.warning("SQLITE_SCHEMA_REINSTALLED store=gateway_ingress path=%s", self.path)
                 yield db
         except sqlite3.Error as exc:
             raise OSError(f"ingress index unavailable: {exc}") from exc
