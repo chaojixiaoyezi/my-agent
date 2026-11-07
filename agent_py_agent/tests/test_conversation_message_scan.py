@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tracemalloc
 from dataclasses import replace
 
@@ -226,7 +227,8 @@ def test_dedupe_match_does_not_hide_later_corruption(conversation, bad_suffix):
         assert path.read_bytes() == before[:-len(bad_suffix)]
         sidecars = list(path.parent.glob(f".{path.name}.torn-*"))
         assert len(sidecars) == 1 and sidecars[0].read_bytes() == bad_suffix
-        assert sidecars[0].stat().st_mode & 0o777 == 0o600
+        if os.name == 'posix':
+            assert sidecars[0].stat().st_mode & 0o777 == 0o600
     else:
         with pytest.raises(DataCorruptionError, match="unreadable"):
             store.messages.append_once(request, dedupe_key="same")
@@ -272,7 +274,8 @@ def test_dedupe_seals_uncommitted_tail_before_any_append(conversation, ending, s
     sidecars = list(path.parent.glob(f".{path.name}.torn-*"))
     if ending == "whitespace":
         assert len(sidecars) == 1 and sidecars[0].read_bytes() == tail
-        assert sidecars[0].stat().st_mode & 0o777 == 0o600
+        if os.name == 'posix':
+            assert sidecars[0].stat().st_mode & 0o777 == 0o600
     else:
         assert not sidecars
     after = path.read_bytes()

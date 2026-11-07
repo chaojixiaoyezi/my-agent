@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import stat
 from pathlib import Path
@@ -68,7 +69,8 @@ def test_torn_tail_is_quarantined_without_rewriting_prefix(session, caplog, tail
     assert len(sidecars) == 1
     assert re.fullmatch(rf"\.{re.escape(path.name)}\.torn-\d+", sidecars[0].name)
     assert sidecars[0].read_bytes() == tail
-    assert stat.S_IMODE(sidecars[0].stat().st_mode) == 0o600
+    if os.name == 'posix':
+        assert stat.S_IMODE(sidecars[0].stat().st_mode) == 0o600
     assert path.read_bytes() == prefix and path.stat().st_ino == inode
     assert store.messages.recent_projection_report(thread_id, limit=80, project=lambda row: row.message_id) == ([first.message_id], [])
     assert "TRANSCRIPT_TORN_TAIL_SEALED" in caplog.text and "action=quarantined" in caplog.text
