@@ -17,13 +17,14 @@ import uuid
 import zlib
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
 
+from ..common import cache_capacity
 from ..common.cancellation import ToolCancelled, cancellation_requested, current_cancellation_token
 from ..common.global_write_commit import GlobalWriteCommitUnavailable, execute_global_write
 from ..common.global_write_guard import GlobalWriteInWorkerError
@@ -822,7 +823,7 @@ def _directory_usage_bytes(owner_root: Path, base: Path, names: list[str], *, ca
         with _DISPLAY_USAGE_LOCK:
             _DISPLAY_USAGE_CACHE[base] = (key, now, total)
             _DISPLAY_USAGE_CACHE.move_to_end(base)
-            while len(_DISPLAY_USAGE_CACHE) > _DISPLAY_USAGE_CACHE_MAX_ENTRIES:
+            while len(_DISPLAY_USAGE_CACHE) > cache_capacity.resident_owners(_DISPLAY_USAGE_CACHE_MAX_ENTRIES):
                 _DISPLAY_USAGE_CACHE.popitem(last=False)
     return total
 
@@ -1073,7 +1074,7 @@ def _write_quota_ledger(root, ledger):
             _QUOTA_ROOT_STAMPS[str(root)] = (
                 ledger['revision'], [info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns])
             _QUOTA_ROOT_STAMPS.move_to_end(str(root))
-            while len(_QUOTA_ROOT_STAMPS) > _QUOTA_ROOT_STAMP_CACHE_SIZE:
+            while len(_QUOTA_ROOT_STAMPS) > cache_capacity.resident_owners(_QUOTA_ROOT_STAMP_CACHE_SIZE):
                 _QUOTA_ROOT_STAMPS.popitem(last=False)
     return _quota_ledger_identity(root)
 
@@ -1944,7 +1945,7 @@ def _scan_new_quota_subtree(root, rel):
     return used, inodes, state.get('dir_stamps') or {}
 
 
-# LLM: 后台账仍是观察而非准入证明；最多16个LRU扫描，每个暂停扫描至多持一个目录流及绑定FD，重启沿路径合计恢复。
+# LLM: 后台账仍是观察而非准入证明；续扫缓存以16个owner为下限按常驻容量扩展，每个暂停扫描至多持一个目录流及绑定FD。
 #   受控写由结算并入持久游标，进程内扫描器见到新revision即改从持久游标续扫；root身份变化、游标闲置超期或本轮开始后
 #   出现未结算的新预留（准入后崩溃的孤儿）即从头重扫，异常不得发布complete或清孤儿预留。
 #   同revision的热续扫只核epoch、root身份与闲置期限，不再逐行校验本进程上一片刚写下的目录表。
@@ -1957,20 +1958,22 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
             or type(max_ms) not in (int, float) or not math.isfinite(max_ms) or max_ms <= 0):
         raise ValueError('invalid quota reconciliation budget')
     root = Path(owner_root).expanduser().resolve(strict=False)
-    with _locked_quota_scan_cache(blocking=blocking), _locked_owner_quota(root / _QUOTA_LOCK_BASENAME, blocking=blocking):
+    with _locked_owner_quota(root / _QUOTA_LOCK_BASENAME, blocking=blocking), ExitStack() as scan_cleanup:
         ledger = _read_quota_ledger(root)
         # 本片对账本只整键替换顶层字段、不原地改嵌套值：浅拷贝即锁内可靠前像（原预留、计数与游标），
         #   供最终checkpoint失败且恢复读也失败时保守落盘，不必每片深拷贝整张目录表。
         preimage = dict(ledger)
         key = (os.getpid(), str(root))
-        scan = _QUOTA_SCANS.get(key)
+        # 先持owner锁再取出扫描器；活跃生成器不留在LRU中，避免其它owner淘汰并关闭它。
+        with _locked_quota_scan_cache(blocking=blocking):
+            scan = _QUOTA_SCANS.pop(key, None)
+        scan_cleanup.callback(lambda: scan['iterator'].close() if scan is not None else None)
         previous = ledger.get('reconcile_cursor')
         if scan is not None and not (
                 scan['revision'] == ledger['revision'] and isinstance(previous, dict)
                 and previous.get('complete') is False and previous.get('epoch') == scan['epoch']
                 and _quota_cursor_active(previous) and _quota_root_matches(root, previous)):
             scan['iterator'].close()
-            del _QUOTA_SCANS[key]
             scan = None
         replay_skip = 0
         if scan is None:
@@ -1990,17 +1993,12 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
             # 枚举已走完、正在清点漂移的一轮直接续清点，不再重放已走完的枚举。
             scan['iterator'] = (_settle_quota_pass_drift(root, scan) if scan['settling'] else
                                 _sorted_quota_entries(root, after=scan['last_relpath'], state=state))
-            _QUOTA_SCANS[key] = scan
         else:
             if isinstance(previous, dict) and previous.get('metadata_complete') is False:
                 _drop_quota_metadata(scan['state'], invalidated=bool(previous.get('metadata_invalidated')))
                 if previous.get('metadata_invalidated'):
                     scan['dirty'] = True
             _quota_scan_root_clean(root, scan)
-        _QUOTA_SCANS.move_to_end(key)
-        while len(_QUOTA_SCANS) > _QUOTA_SCAN_CACHE_SIZE:
-            _, expired = _QUOTA_SCANS.popitem(last=False)
-            expired['iterator'].close()
         complete, scanned, enumerated, settled = False, 0, 0, 0
         enumeration_budget = max(1024, max_entries * 4)
         # 重放也计入枚举；旧前缀吃满普通预算时，额外只给该持久前缀一次重放额度。
@@ -2089,8 +2087,7 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
                               dirty_since=time.time() if scan.get('dirty') else None, reservations={}, reserved_bytes=0)
                 if not scan.get('dirty'):
                     ledger['permanent_pending_growth_bytes'] = 0
-                scan['iterator'].close()
-                _QUOTA_SCANS.pop(key, None)
+                scan_cleanup.close()
             else:
                 if scan.get('dirty'):
                     ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
@@ -2098,8 +2095,7 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
                 _quota_scan_root_clean(root, scan)
             ledger['reconcile_cursor'] = cursor_payload
         except BaseException:
-            scan['iterator'].close()
-            _QUOTA_SCANS.pop(key, None)
+            scan_cleanup.close()
             if scan['state'].get('metadata_invalidated') or scan.get('dirty'):
                 ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
                 if isinstance(ledger.get('reconcile_cursor'), dict):
@@ -2120,8 +2116,7 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
                 info = root.stat(follow_symlinks=False)
                 scan['root_stamp'] = [info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns]
         except BaseException:
-            scan['iterator'].close()
-            _QUOTA_SCANS.pop(key, None)
+            scan_cleanup.close()
             if not ledger_written and (scan['state'].get('metadata_invalidated') or scan.get('dirty')):
                 # checkpoint报错不证明未替换：先读回盘上实际账本标脏；读回也失败时回退锁内前像（保留原预留），失效不随异常丢失。
                 try:
@@ -2138,6 +2133,15 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
                 except BaseException:
                     _write_quota_ledger(root, fallback)
             raise
+        if not complete:
+            # 只在短锁内交换引用；迭代器关闭可能执行清理IO，留到释放全进程锁以后。
+            with ExitStack() as expired_cleanup:
+                with _locked_quota_scan_cache(blocking=blocking):
+                    _QUOTA_SCANS[key] = scan
+                    while len(_QUOTA_SCANS) > cache_capacity.resident_owners(_QUOTA_SCAN_CACHE_SIZE):
+                        _, expired = _QUOTA_SCANS.popitem(last=False)
+                        expired_cleanup.callback(expired['iterator'].close)
+                scan_cleanup.pop_all()
         return {'complete': complete, 'scanned_entries': scanned, 'enumerated_entries': enumerated,
                 'settled_entries': settled, 'replay_allowance': replay_allowance,
                 'used_bytes': ledger['used_bytes'],
@@ -2185,7 +2189,7 @@ def _remember_quota_finite_root(root: Path) -> None:
     with _QUOTA_ROOT_STAMPS_LOCK:
         _QUOTA_FINITE_ROOTS[root] = (info.st_dev, info.st_ino)
         _QUOTA_FINITE_ROOTS.move_to_end(root)
-        while len(_QUOTA_FINITE_ROOTS) > _QUOTA_ROOT_STAMP_CACHE_SIZE:
+        while len(_QUOTA_FINITE_ROOTS) > cache_capacity.resident_owners(_QUOTA_ROOT_STAMP_CACHE_SIZE):
             _QUOTA_FINITE_ROOTS.popitem(last=False)
 
 
@@ -2721,8 +2725,8 @@ def _sorted_quota_entries(root, parts=(), *, after='', state=None, descriptor=No
             os.close(descriptor)
 
 
-# LLM: 必须先于各owner锁，所有后台扫描共享同一短片；非阻塞获取失败不接触扫描器和持久账。
-# 函数用途: 防不同owner线程同时推进或关闭同一个缓存生成器。
+# LLM: 对账先持owner锁；全进程锁只保护扫描器字典交换，扫描及迭代器清理均在锁外。
+# 函数用途: 串行交换缓存引用，非阻塞竞争时保留原领域异常。
 @contextmanager
 def _locked_quota_scan_cache(*, blocking, poll_seconds=0.05):
     while True:

@@ -34,6 +34,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..common import cache_capacity
 from ..concurrency.interrupt import register_interruptible
 from ..conversation.control_commands import (
     conversation_request_interrupt_name,
@@ -821,12 +822,14 @@ def _cache_verified_pending_payload(request_path: Path, payload: dict[str, Any])
         saved = copy.deepcopy(payload)
     except (ValueError, RecursionError):
         return
+    max_entries = cache_capacity.global_inflight(_PENDING_SCAN_CACHE_MAX_ENTRIES)
+    max_bytes = _PENDING_SCAN_CACHE_MAX_BYTES * max_entries // _PENDING_SCAN_CACHE_MAX_ENTRIES
     with _PENDING_SCAN_CACHE_LOCK:
         _PENDING_SCAN_CACHE[key] = saved
         _PENDING_SCAN_CACHE.move_to_end(key)
         cached_bytes = sum(len(entry[-1]) for entry in _PENDING_SCAN_CACHE)
-        while _PENDING_SCAN_CACHE and (len(_PENDING_SCAN_CACHE) > _PENDING_SCAN_CACHE_MAX_ENTRIES
-                                      or cached_bytes > _PENDING_SCAN_CACHE_MAX_BYTES):
+        while _PENDING_SCAN_CACHE and (len(_PENDING_SCAN_CACHE) > max_entries
+                                      or cached_bytes > max_bytes):
             oldest, _payload = _PENDING_SCAN_CACHE.popitem(last=False)
             cached_bytes -= len(oldest[-1])
 
@@ -856,7 +859,7 @@ def _read_pending_request_payload(request_path: Path, *, context: str) -> dict[s
     return report.payload
 
 
-# LLM: 只清本inbox路径分量内未见项，不按字符串前缀误伤相邻队列；锁内删除最多1024条，不做文件IO。
+# LLM: 只清本inbox路径分量内未见项，不按字符串前缀误伤相邻队列；锁内只遍历推导容量内的缓存，不做文件IO。
 # 函数用途: 每轮扫描后移除已消失/认领/取消的缓存记录，不串工作区。
 def _prune_pending_scan_cache(inbox: Path, seen_paths: set[str]) -> None:
     with _PENDING_SCAN_CACHE_LOCK:
