@@ -58,6 +58,15 @@ def responses_replay_server():
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             state.calls.append((self.path, body, dict(self.headers)))
+            if any(tool.get("type") == "namespace" and not tool.get("description")
+                   for tool in body.get("tools", [])):
+                raw = json.dumps({"error": {"type": "invalid_request_error", "code": "missing_required_parameter",
+                    "param": "tools[0].description", "message": "namespace 工具声明缺少 description"}}).encode()
+                self.send_response(400)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                return
             calls = [item for item in body["input"] if item.get("type") == "function_call"]
             if any(item.get("namespace") != state.namespace for item in calls):
                 raw = json.dumps({"error": {"type": "invalid_request_error", "code": "invalid_value",
@@ -495,6 +504,7 @@ def test_direct_responses_omits_sampling_and_uses_http_sse(tmp_path, identity_se
     assert body["instructions"] == "my-agent 指令" and all(item.get("role") != "system" for item in body["input"])
     if with_tools:
         assert body["tools"][0]["type"] == "namespace" and body["tools"][0]["name"] == "my_agent"
+        assert body["tools"][0]["description"] == "my-agent runtime tools"
         assert body["tools"][0]["tools"][0]["name"] == "local_echo"
         assert body["tool_choice"] == {"type": "function", "name": "local_echo", "namespace": "my_agent"}
     assert backend.supports_remote_compaction() is False
@@ -575,6 +585,7 @@ def test_function_call_history_roundtrip_keeps_route_identity(
     if route == "siwc":
         assert call["namespace"] == "my_agent"
         assert first_body["tools"][0]["type"] == "namespace" and first_body["tools"][0]["name"] == "my_agent"
+        assert first_body["tools"][0]["description"] == "my-agent runtime tools"
         assert first_body["tool_choice"] == {"type": "function", "name": "local_echo", "namespace": "my_agent"}
         if with_tools:
             assert replay["tools"] == first_body["tools"]
@@ -652,6 +663,48 @@ def test_tui_new_account_uses_own_name_official_route_and_transparent_label(monk
     assert saved[0]["provider"]["api_base"] == API
     labels = " ".join(label for _value, label in selected)
     assert "Continue with ChatGPT" in labels and "my-agent" in labels
+
+
+@pytest.mark.parametrize("operation", ["select", "set_default"])
+def test_tui_same_named_models_show_provider_names(tmp_path, identity_server, monkeypatch, operation):
+    import asyncio
+
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.settings.thread_model_selection import default_model_profile_id
+    from agent_py_agent.cli.chat_parts import tui_model_menu as menu
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+
+    owner, subscription_key = _new_owner(tmp_path)
+    _connect(owner, identity_server)
+    owner.conversation_store = ConversationStore(tmp_path / "conversations",
+        model_default=lambda: default_model_profile_id(owner))
+    assert execute_model_profile_operation(owner, "save_provider", {"provider_id": "openai-api", "provider": {
+        "display_name": "OpenAI API", "api_base": API, "api_key": "test-api-key"}})["ok"]
+    api_key = str(uuid4())
+    for key, provider in ((subscription_key, "account"), (api_key, "openai-api")):
+        assert execute_model_profile_operation(owner, "save_model", {"profile_id": key,
+            "editing": key == subscription_key, "profile": {
+            "provider_id": provider, "model_name": "gpt-6.1-sol", "model_backend": "openai_responses",
+            "model_context_window_tokens": 128000}})["ok"]
+    labels = {}
+
+    async def request(_app, agent, session, action):
+        return await menu._request_data(agent, session, action, {})
+
+    async def dialog(_app, _title, _body, _actions, *, focus):
+        labels.update(focus.values)
+        return None
+
+    # 仅省去忙碌浮层和退出按键；列表仍走真实模型目录与会话投影。
+    monkeypatch.setattr(menu, "_request", request)
+    monkeypatch.setattr(menu, "_dialog", dialog)
+    runtime = TuiRuntime("provider-labels")
+    assert asyncio.run(menu._select_model(None, owner, "provider-labels", runtime, operation=operation)) == ""
+    assert "gpt-6.1-sol" in labels[api_key] and "gpt-6.1-sol" in labels[subscription_key]
+    assert API in labels[api_key] and API in labels[subscription_key]
+    assert "OpenAI API" in labels[api_key] and "my-agent 本人ChatGPT" in labels[subscription_key]
+    assert "my-agent 本人ChatGPT" not in labels[api_key] and "OpenAI API" not in labels[subscription_key]
+    assert all("None" not in label for label in labels.values())
 
 
 def test_id_token_is_included_in_provider_diagnostic_redaction():

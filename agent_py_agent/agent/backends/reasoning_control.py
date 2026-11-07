@@ -57,6 +57,7 @@ _KNOWN_CONTROLS = {
     ("api.deepseek.com", "openai"): "effort",
     ("api.deepseek.com", "anthropic"): "budget",
     ("chatgpt.com", "responses"): "effort",
+    ("api.openai.com", "responses"): "effort",
 }
 _PROTOCOLS = {"anthropic_compatible": "anthropic", "anthropic": "anthropic",
               "openai_compatible": "openai", "openai": "openai", "openai_responses": "responses"}
