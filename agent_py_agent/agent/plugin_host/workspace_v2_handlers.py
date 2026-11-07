@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import codecs
+import hashlib
 import os
 import re
+import secrets
 import select
 import stat
 import subprocess
@@ -15,10 +17,11 @@ from contextlib import contextmanager
 from os import stat as _stat
 from pathlib import Path
 
+from ..common.directory_lock import locked_private_directory
 from ..common.nofollow_fs import (
+    NoFollowPathError,
     open_directory_beneath,
     open_readonly_file_beneath,
-    write_bytes_atomic_beneath,
 )
 from ..conversation.workspace_context import validate_workspace_directory
 from ..path_access_policy import HOST_STATE_OWNER_DIRS
@@ -133,15 +136,17 @@ def read_workspace_file(context, payload):
                 raise UnicodeError
         except UnicodeError:
             return {"path": payload["path"], "is_binary": True, "content": base64.b64encode(raw).decode(),
-                    "total_lines": None, "start_line": None, "end_line": None, "size_bytes": size, "truncated": truncated}
+                    "total_lines": None, "start_line": None, "end_line": None, "size_bytes": size, "truncated": truncated, "sha256": hashlib.sha256(raw).hexdigest()}
         lines = content.splitlines(keepends=True)
         start = _limit(payload.get("start_line", 1), 2**31 - 1)
         end = _limit(payload.get("end_line", max(start, len(lines))), 2**31 - 1)
         if end < start:
             raise HostAPIError("INVALID_SCHEMA")
-        return {"path": payload["path"], "is_binary": False, "content": "".join(lines[start - 1:end]),
+        selected = "".join(lines[start - 1:end])
+        return {"path": payload["path"], "is_binary": False, "content": selected,
                 "total_lines": None if truncated else len(lines), "start_line": start, "end_line": min(end, len(lines)),
-                "size_bytes": size, "truncated": truncated}
+                "size_bytes": size, "truncated": truncated,
+                "sha256": hashlib.sha256(selected.encode("utf-8")).hexdigest()}
 # LLM: 上传固定在uploads且拒绝内部控制目标；解码前后都限额，原子nofollow写提交后故障保持unknown。
 # 函数用途: 保存通用模板或媒体，不按扩展名另造领域接口。
 def upload_workspace_file(context, payload):
@@ -156,13 +161,26 @@ def upload_workspace_file(context, payload):
         raise HostAPIError("INVALID_SCHEMA") from None
     if len(raw) > _MAX:
         raise HostAPIError("PAYLOAD_TOO_LARGE", 413)
-    with _directory(context, payload) as (root, prefix, _):
+    revision = payload.get("expected_revision")
+    if revision is not None and (type(revision) is not int or revision < 0):
+        raise HostAPIError("INVALID_SCHEMA")
+    # 历史整数版本采用文件 mtime_ns，0 表示缺失；检查和发表共用同一 owner 锁。
+    with _owner_file_lock(context), _directory(context, payload) as (root, prefix, _):
         _forbid_internal(context.owner_home.home_dir, root.joinpath(*parts))
+        parent = open_directory_beneath(root.anchor, (*prefix, *parts[:-1]), create=True, require_dir_fd=True)
         try:
-            write_bytes_atomic_beneath(root.anchor, (*prefix, *parts), raw)
-        except OSError:
-            raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown") from None
-    return {"path": "/".join(parts), "size_bytes": len(raw)}
+            current, current_revision = _entry_state(parent, parts[-1])
+            if current == "dir" or revision is not None and revision != current_revision:
+                raise _FileConflict(current_revision=current_revision)
+            try:
+                write_bytes_atomic_beneath(root.anchor, (*prefix, *parts), raw,
+                    parent_fd=parent, expected_state=(current, current_revision))
+                saved_revision = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False).st_mtime_ns
+            except OSError:
+                raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown") from None
+        finally:
+            os.close(parent)
+    return {"path": "/".join(parts), "size_bytes": len(raw), "revision": saved_revision}
 # LLM: 下载目标经过同一控制目录门，不默默截断大文件，20MiB上限按原字节计算。
 # 函数用途: 下载完整通用文件。
 def download_workspace_file(context, payload):
@@ -283,3 +301,283 @@ def inspect_workspace_git(context, payload):
         branch, changed, diff = _git_filter(home, root, status, diff)
         return {"branch": branch, "clean": not changed and not diff and not limited and not truncated,
                 "changed_files": changed, "diff": diff, "truncated": limited or truncated}
+
+
+class _FileConflict(HostAPIError):
+    """冲突只公开当前内容标识，不回显路径、正文或异常链。"""
+
+    # LLM: 公开值只能由领域显式提供，不解析异常文案，也不接受开放式错误字段。
+    # 函数用途: 保存当前内容哈希或上传整数版本，供调用方重新读取后重试。
+    def __init__(self, *, current_sha256=None, current_revision=None):
+        super().__init__("REVISION_CONFLICT", 409)
+        self.details = {key: value for key, value in
+            (("current_sha256", current_sha256), ("current_revision", current_revision)) if value is not None}
+
+    # LLM: 只在原错误字段之外加结构化当前值，不泄露底层路径或正文。
+    # 函数用途: 把冲突的当前标识带到原门户错误信封。
+    def to_payload(self):
+        return {**super().to_payload(), "details": self.details}
+
+
+# LLM: 词法拒绝先于I/O，内部门的错误不能通过新动作换成成功。
+# 函数用途: 检查新文件动作的相对路径。
+def _write_parts(value):
+    """在打开目录前拒绝字面越界；不把 resolve 的结果当作新授权。"""
+    try:
+        parts = _parts(value)
+        if any(part.startswith("-") for part in parts):
+            raise ValueError("option-like path")
+        return parts
+    except (HostAPIError, ValueError, TypeError):
+        raise HostAPIError("PATH_OUTSIDE_WORKSPACE", 403) from None
+
+
+@contextmanager
+# LLM: 同一owner所有门户写共享跨进程锁；锁不能代替对非合作文件写者的父FD复核。
+# 函数用途: 串行处理本人门户文件写入。
+def _owner_file_lock(context):
+    """跨进程共用同一 owner 锁，使读取 CAS 到原子发表之间不夹入另一门户写。"""
+    with locked_private_directory(context.owner_home.home_dir, relative_parts=("tmp",),
+                                  lock_name=".workspace-files.lock"):
+        yield
+
+
+@contextmanager
+# LLM: 默认工作根取认证owner事实，新动作参数不能指定owner或任意工作根。
+# 函数用途: 经原目录授权门取得新文件动作的安全根。
+def _write_directory(context, payload, parts):
+    """新接口默认使用认证 owner 的工作区；显式目录仍只走原授权门。"""
+    selected = {"workspace_dir": str(context.owner_home.workspace_dir), **payload}
+    try:
+        with _directory(context, selected) as opened:
+            _forbid_internal(context.owner_home.home_dir, opened[0].joinpath(*parts))
+            yield opened
+    except HostAPIError as error:
+        if error.code.startswith("WORKSPACE_"):
+            raise HostAPIError("PATH_OUTSIDE_WORKSPACE", 403) from None
+        raise
+    except (NoFollowPathError, NotADirectoryError):
+        raise HostAPIError("PATH_OUTSIDE_WORKSPACE", 403) from None
+
+
+# LLM: 路径由上层词法核验，元数据仅相对已持有的父FD读取。
+# 函数用途: 不跟随链接地读取叶条目状态。
+def _entry_stat(parent, name):
+    """固定父 FD 的元数据读取；不修改全局 os.stat 的平台能力语义。"""
+    return os.stat(name, dir_fd=parent, follow_symlinks=False)
+
+
+# LLM: 内容读取前后必须包含类型、链接数及变更时间，不能只比较大小。
+# 函数用途: 提取文件一致性检查所需的元数据指纹。
+def _entry_identity(item):
+    return (item.st_dev, item.st_ino, item.st_mode, item.st_nlink,
+            item.st_size, item.st_mtime_ns, item.st_ctime_ns)
+
+
+# LLM: 整叶读取按最初字节数有界，前后指纹不一致时不能签出有效CAS标识。
+# 函数用途: 从固定父FD读取普通单链接文件的完整哈希与上传版本。
+def _entry_state(parent, name):
+    """只从固定父 FD 读取单链接普通文件；按首次 size 读取，增长不能制造无限循环。"""
+    try:
+        before = _entry_stat(parent, name)
+    except FileNotFoundError:
+        return "absent", 0
+    if stat.S_ISDIR(before.st_mode):
+        return "dir", before.st_mtime_ns
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise HostAPIError("PATH_OUTSIDE_WORKSPACE", 403)
+    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=parent)
+    try:
+        opened = os.fstat(descriptor)
+        if _entry_identity(opened) != _entry_identity(before):
+            raise _FileConflict(current_sha256="unknown")
+        digest, remaining = hashlib.sha256(), before.st_size
+        while remaining:
+            chunk = os.read(descriptor, min(65536, remaining))
+            if not chunk:
+                raise _FileConflict(current_sha256="unknown")
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if (_entry_identity(os.fstat(descriptor)) != _entry_identity(before)
+                or _entry_identity(_entry_stat(parent, name)) != _entry_identity(before)):
+            raise _FileConflict(current_sha256="unknown")
+        return digest.hexdigest(), before.st_mtime_ns
+    finally:
+        os.close(descriptor)
+
+
+# LLM: FD 是 CAS 所检查的父目录；字面父链被换名时拒绝，不把新路径当作原授权对象。
+# 函数用途: 发表前确认当前路径仍然指向一直持有的父目录。
+def _verify_write_parent(root, relative_parts, parent_fd):
+    observed = open_directory_beneath(root, relative_parts[:-1], require_dir_fd=True)
+    try:
+        wanted, current = os.fstat(parent_fd), os.fstat(observed)
+        if (wanted.st_dev, wanted.st_ino) != (current.st_dev, current.st_ino):
+            raise HostAPIError("PATH_OUTSIDE_WORKSPACE", 403)
+    finally:
+        os.close(observed)
+
+
+# LLM: 本地发表接缝保留原故障注入口；CAS、临时叶和rename全用调用者持有的同一父FD。
+# 函数用途: 刷盘后复查父目录与叶内容，再原子替换文件，发表后故障始终返回unknown。
+def write_bytes_atomic_beneath(root, relative_parts, payload, *, parent_fd, expected_state):
+    _verify_write_parent(root, relative_parts, parent_fd)
+    name = relative_parts[-1]
+    temporary = "." + name + ".tmp-" + secrets.token_hex(16)
+    descriptor, committed = -1, False
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=parent_fd)
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("文件未完整写入")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        _verify_write_parent(root, relative_parts, parent_fd)
+        observed = _entry_state(parent_fd, name)
+        if observed != expected_state:
+            raise _FileConflict(current_sha256=observed[0], current_revision=observed[1])
+        os.replace(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        committed = True
+        os.fsync(parent_fd)
+        _verify_write_parent(root, relative_parts, parent_fd)
+    except (OSError, HostAPIError):
+        if committed:
+            raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown") from None
+        raise
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+
+
+# LLM: 调用方持有owner锁且已读取整叶状态；不允许缺失CAS条件的无条件覆盖。
+# 函数用途: 验证内容版本或仅创建的显式前置条件。
+def _file_cas(payload, current):
+    """写入必须显式选择内容 CAS 或仅创建，不能默默覆盖。"""
+    expected = payload.get("expected_sha256")
+    if payload.get("create_only") is True:
+        if current != "absent":
+            raise _FileConflict(current_sha256=current)
+        if expected not in (None, "absent"):
+            raise HostAPIError("INVALID_SCHEMA")
+    elif not isinstance(expected, str) or (expected != "absent" and re.fullmatch(r"[0-9a-f]{64}", expected) is None):
+        raise HostAPIError("INVALID_SCHEMA")
+    elif current != expected:
+        raise _FileConflict(current_sha256=current)
+
+
+# LLM: 仅有界创建指定父链和叶目录，发表前后复核父FD；创建后异常不能冒充未执行。
+# 函数用途: 在本人工作区创建目录，不递归删除或扩大工作根。
+def mkdir_workspace_file(context, payload):
+    """只创建指定目录或有限父链；文件占位和链接都不转成目录。"""
+    parts = _write_parts(payload.get("path"))
+    with _owner_file_lock(context), _write_directory(context, payload, parts) as (root, prefix, _):
+        try:
+            parent = open_directory_beneath(root.anchor, (*prefix, *parts[:-1]),
+                                            create=payload.get("parents", False), require_dir_fd=True)
+            try:
+                _verify_write_parent(root.anchor, (*prefix, *parts), parent)
+                try:
+                    existing = _entry_stat(parent, parts[-1])
+                except FileNotFoundError:
+                    existing = None
+                if existing is not None:
+                    if stat.S_ISLNK(existing.st_mode) or stat.S_ISREG(existing.st_mode) and existing.st_nlink != 1:
+                        raise HostAPIError("PATH_OUTSIDE_WORKSPACE", 403)
+                    if not stat.S_ISDIR(existing.st_mode):
+                        raise HostAPIError("STATE_CONFLICT", 409)
+                    return {"path": "/".join(parts), "created": False}
+                _verify_write_parent(root.anchor, (*prefix, *parts), parent)
+                os.mkdir(parts[-1], 0o700, dir_fd=parent)
+                try:
+                    os.fsync(parent)
+                    _verify_write_parent(root.anchor, (*prefix, *parts), parent)
+                except (OSError, HostAPIError):
+                    raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown") from None
+                return {"path": "/".join(parts), "created": True}
+            finally:
+                os.close(parent)
+        except (FileNotFoundError, FileExistsError):
+            raise HostAPIError("STATE_CONFLICT", 409) from None
+
+
+# LLM: 同一父FD贯穿整叶CAS、临时写与发表，原子替换前重核父链和叶内容，失败不盲重试。
+# 函数用途: 以内容哈希前置条件写入有界文件。
+def write_workspace_file(context, payload):
+    """在原 owner 锁内验证整文件 sha256，并由既有 nofollow 原子写叶发表。"""
+    parts = _write_parts(payload.get("path"))
+    encoded = payload.get("content_b64")
+    if not isinstance(encoded, str):
+        raise HostAPIError("INVALID_SCHEMA")
+    if len(encoded) > 4 * ((_MAX + 2) // 3):
+        raise HostAPIError("LIMIT_EXCEEDED")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except ValueError:
+        raise HostAPIError("INVALID_SCHEMA") from None
+    if len(raw) > _MAX:
+        raise HostAPIError("LIMIT_EXCEEDED")
+    with _owner_file_lock(context), _write_directory(context, payload, parts) as (root, prefix, _):
+        parent = open_directory_beneath(root.anchor, (*prefix, *parts[:-1]), require_dir_fd=True)
+        try:
+            current, revision = _entry_state(parent, parts[-1])
+            _file_cas(payload, current)
+            try:
+                write_bytes_atomic_beneath(root.anchor, (*prefix, *parts), raw,
+                    parent_fd=parent, expected_state=(current, revision))
+            except NoFollowPathError:
+                raise HostAPIError("PATH_OUTSIDE_WORKSPACE", 403) from None
+            except OSError:
+                raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown") from None
+        finally:
+            os.close(parent)
+    return {"path": "/".join(parts), "sha256": hashlib.sha256(raw).hexdigest(),
+            "size": len(raw), "created": current == "absent"}
+
+
+# LLM: 只删除匹配整叶CAS的文件或空目录，父链变更拒绝；删除后刷盘错误是未知结果。
+# 函数用途: 删除当前版本的单个工作区条目。
+def delete_workspace_file(context, payload):
+    """删除只接受整文件 CAS 或空目录标识，不提供递归删除。"""
+    parts = _write_parts(payload.get("path"))
+    expected = payload.get("expected_sha256")
+    if not isinstance(expected, str) or (expected not in {"dir", "absent"} and re.fullmatch(r"[0-9a-f]{64}", expected) is None):
+        raise HostAPIError("INVALID_SCHEMA")
+    with _owner_file_lock(context), _write_directory(context, payload, parts) as (root, prefix, _):
+        try:
+            parent = open_directory_beneath(root.anchor, (*prefix, *parts[:-1]), require_dir_fd=True)
+        except FileNotFoundError:
+            raise HostAPIError("RESOURCE_NOT_FOUND", 404) from None
+        try:
+            current, revision = _entry_state(parent, parts[-1])
+            if current == "absent":
+                raise HostAPIError("RESOURCE_NOT_FOUND", 404)
+            if current != expected:
+                raise _FileConflict(current_sha256=current)
+            _verify_write_parent(root.anchor, (*prefix, *parts), parent)
+            observed = _entry_state(parent, parts[-1])
+            if observed != (current, revision):
+                raise _FileConflict(current_sha256=observed[0])
+            try:
+                if current == "dir":
+                    os.rmdir(parts[-1], dir_fd=parent)
+                else:
+                    os.unlink(parts[-1], dir_fd=parent)
+            except OSError:
+                raise _FileConflict(current_sha256=current) from None
+            try:
+                os.fsync(parent)
+                _verify_write_parent(root.anchor, (*prefix, *parts), parent)
+            except (OSError, HostAPIError):
+                raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown") from None
+            return {"deleted": True}
+        finally:
+            os.close(parent)

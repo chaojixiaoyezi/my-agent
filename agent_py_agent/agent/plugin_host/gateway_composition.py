@@ -169,7 +169,9 @@ def portal_target(action):
     routes.update({"conversations.threads." + key: ("thread_settings_v2", value) for key, value in thread.items()})
     routes.update({"workspace." + key: ("workspace_v2_handlers", value) for key, value in {
         "files.list": "list_workspace_files", "files.read": "read_workspace_file", "files.upload": "upload_workspace_file",
-        "files.download": "download_workspace_file", "git.diff": "inspect_workspace_git", "git.inspect": "inspect_workspace_git"}.items()})
+        "files.download": "download_workspace_file", "files.mkdir": "mkdir_workspace_file",
+        "files.write": "write_workspace_file", "files.delete": "delete_workspace_file",
+        "git.diff": "inspect_workspace_git", "git.inspect": "inspect_workspace_git"}.items()})
     if action not in routes:
         return None
     module_name, method = routes[action]
@@ -330,6 +332,7 @@ class GatewayPortalDomain:
         if authorized.call.action == "workspace.files.upload" and "content" in payload:
             if "data_base64" in payload:
                 raise HostAPIError("INVALID_SCHEMA", 400)
+            # 只转换上传正文；原 expected_revision 必须原样保留给文件 CAS。
             payload = {**payload, "data_base64": base64.b64encode(payload["content"].encode("utf-8")).decode("ascii")}
         params = signature(target)
         store = self.resources.store_for(context)

@@ -101,6 +101,12 @@ def _workspace_specs():
         _spec("workspace.files.upload", "write", "write", closed(file, {
             "content": text(65536), "data_base64": text(65536), "expected_revision": integer(2**63 - 1, 0)})),
         _spec("workspace.files.download", "read", "read", closed(file, {"max_bytes": integer(20 * 1024 * 1024, 1)})),
+        _spec("workspace.files.mkdir", "write", "write", closed({"path": text(4096, 1)}, {
+            "parents": {"type": "boolean"}})),
+        _spec("workspace.files.write", "write", "write", closed({"path": text(4096, 1),
+            "content_b64": text(27962028, 1)}, {"expected_sha256": text(64), "create_only": {"type": "boolean"}})),
+        _spec("workspace.files.delete", "write", "write", closed({"path": text(4096, 1),
+            "expected_sha256": text(64, 1)})),
         *[_spec("workspace.git." + name, "read", "read", closed(workspace, {"path": text(4096)}))
           for name in ("diff", "inspect")],
     ]
