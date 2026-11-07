@@ -24,7 +24,15 @@
 {"section":"tools","cursor":"<上一页返回的游标>"}
 ```
 
-合法编号由领域注册表生成 schema。无参总览仍精确为 `directories`、`permissions`、`tools`、`skills`、`packages`、`plugins`、`mcp`、`memory`、`models`、`config`、`work`、`context` 十二领域；完整登记与schema另含下述四个按需专项。新增领域由所属模块登记reader，不在工具中维护第二份能力或权限清单。
+合法编号由领域注册表生成 schema。无参总览包含 `directories`、`permissions`、`tools`、`business`、`skills`、`packages`、`plugins`、`mcp`、`memory`、`models`、`config`、`work`、`context` 十三领域；完整登记与 schema 另含下述四个按需专项。新增领域由所属模块登记 reader，不在工具中维护第二份能力或权限清单。
+
+## 2026-11-07 业务空间与后台代理发现
+
+`business` 分块从同次授权工具快照介绍业务空间（`spaces`、`/space`）与常驻后台代理（`background_agents`、`/team`），详情提供 `tool_search` 导航；不枚举业务记录、不创建执行宿主或线程。`route`、工具搜索与目录共用内置 `business_spaces_*`、`business_background_agents_*` 工具的中英文关键词。列出、读取、创建、发消息及生命周期操作仍进入原业务服务和工具权限门，不能借命令沙箱绕行。
+
+`business_spaces_enabled` 的 YAML 与 Python 默认值现为 `true`；显式 `false` 继续拒绝业务调用，目录如实显示禁用。既有配置文件的显式值不会被覆盖。工作流的 `workflows.*` / `workflow_runs.*` 动作逐次从当前 owner 的宿主组合获取原服务与实时身份，本地 TUI 来源从规范会话读取，外部通道仍沿原冻结身份核验。
+
+TUI 的 `workflows`、`read_artifact` 工具卡使用结构化短摘要，展示名称、范围、状态或归档窗口；机器引用和完整 JSON 保留在原工具结果及可展开原文中。
 
 ## 2026-10-28 Wave9：Level0与Level1渐进寻址
 

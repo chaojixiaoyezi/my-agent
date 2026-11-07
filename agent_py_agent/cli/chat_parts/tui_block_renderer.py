@@ -2266,7 +2266,9 @@ def _render_tool(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedL
         return (*lines, *_render_tool_patch(public_display, context))
     if display_kind == "command":
         return (*lines, *_render_tool_command(block, public_display, context))
-    status_text = _tool_status_text(block)
+    status_text = (str(public_display.get('summary') or '')
+                   if display_kind == 'summary' and block.phase not in {'started', 'delta', 'running'}
+                   else _tool_status_text(block))
     child_style = "class:tui-error" if block.phase == "failed" else "class:tui-muted"
     detail_lines = status_text.splitlines()
     # R2-1: show_all 也不能全量渲染(工具输出洪水时展开=崩溃); 超上限头尾保留+折叠提示。
@@ -3383,6 +3385,8 @@ def _tool_display_name(name: str) -> str:
         "apply_patch": "Update",
         "web_fetch": "WebFetch",
         "web_search": "WebSearch",
+        "workflows": "工作流",
+        "read_artifact": "读取归档",
     }.get(normalized, normalized)
 
 

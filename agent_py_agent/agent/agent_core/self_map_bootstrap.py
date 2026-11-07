@@ -299,6 +299,14 @@ def _agent_im_notifier(agent, notice):
     return 'queued' if getattr(receipt, 'delivery_status', '') == 'sent' else 'unavailable'
 
 
+def _workflow_business_binding(agent):
+    """每次从同一 owner 宿主取服务和实时身份，不保存上一回合的授权。"""
+    from ..gateway_parts.business_api import local_business_context
+
+    context, services = local_business_context(agent, model=True)
+    return services.workflows, services.actor(context)
+
+
 # LLM: main/user脚本、数据源与工作流统一动态读取当前经校验工作区与受限快照；治理仍只给可信管理员，目录开关不扩授权。
 # 函数用途: 登记Owner与项目工作区脚本/数据源/工作流、管理员治理与目录入口，不刷新或启动领域服务。
 def register_self_map(agent):
@@ -315,6 +323,7 @@ def register_self_map(agent):
                 workspace_root_provider=ws_provider,
                 skill_snapshot_provider=lambda: agent.current_skill_snapshot(),
                 analysis_handler=_workflow_analysis_handler(agent),
+                business_binding_provider=functools.partial(_workflow_business_binding, agent),
                 run_params_provider=lambda: getattr(agent, '_current_run_params', None),
                 im_notifier=im_notifier, runner_options_provider=runner_options))
             if is_permission_admin(getattr(agent, 'home_paths', None)):

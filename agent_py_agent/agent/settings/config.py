@@ -171,8 +171,8 @@ class _HomeProviderConfigFields:
     workspace_task_path_template: str = "tasks/{date}/{task_slug}"
     home_context_enabled: bool = True
     thread_prompt_prefix_freeze_enabled: bool = True
-    # 业务空间合同总开关；默认关闭保留旧owner路径，开启也不授予空间或插件权限。
-    business_spaces_enabled: bool = field(default=False, kw_only=True)
+    # 业务空间默认可用；显式关闭仍拒绝业务操作，开启不授予空间或插件权限。
+    business_spaces_enabled: bool = field(default=True, kw_only=True)
     # 运行时快照投影默认开启；关闭恢复旧粗粒度文本，消费方须按单次请求冻结值。
     prompt_runtime_snapshots_enabled: bool = field(default=True, kw_only=True)
     # 显式来源允许读取用户选择的规则；仍服从当前owner路径许可，不替代正式修改确认。

@@ -78,8 +78,8 @@ home_context_enabled: true
 # 在线程内冻结系统提示里的 AGENTS/SOUL/USER 三份人格文件（目前不冻结其它提示来源）。
 # 期间的安全行变化放动态尾巴；已提交压缩或换模型后下一次准备刷新。关闭后恢复每次现读。
 thread_prompt_prefix_freeze_enabled: true
-# 业务空间合同总开关；默认关闭保留旧owner路径，开启也不授予空间或插件权限。
-business_spaces_enabled: false
+# 业务空间默认可用；显式关闭仍拒绝业务操作，开启不授予空间或插件权限。
+business_spaces_enabled: true
 # OpenAI 兼容网关与诊断模型调用入口；默认关闭，不增加路由或模型用量，只允许用户显式启用。
 openai_compat_gateway_enabled: false
 # 是否将模型终态调用记录保存到本人 runtime.db；默认关闭，不改变现有运行记录。

@@ -549,6 +549,9 @@ agent_py_agent/
 |   `-- telemetry_ledger.py # 每个工具调用耗时账本与 P50/P95/Max 统计聚合
 |-- agent_py_agent/agent/tooling/scripts_tool.py # Agent 固化脚本管理、候选源评估与单次运行工具
 |-- agent_py_agent/agent/tooling/workflows_tool.py # Agent 工作流管理、动态 Skill 绑定与断点续跑工具
+|-- agent_py_agent/agent/tooling/result_display.py # 工作流与归档读取结果的有界展示摘要，保留原机器结果
+|-- agent_py_agent/tests/test_business_model_tools.py # 普通回合业务工具发现、宿主身份、空间与后台代理真实服务回归
+|-- agent_py_agent/tests/test_business_tool_display.py # 工具结果经进度与 TUI 渲染的摘要及完整归档回归
 |-- agent_py_agent/agent/gateway_parts/plugin_broker_api.py # 插件宿主资产/遥测/受控执行统一封装服务
 |-- agent_py_agent/agent/plugin_host_broker_topics.py # 插件宿主只读主题投影与同 Owner 资产适配
 |-- agent_py_agent/tests/test_asset_descriptors_and_stores.py # 标准提取键、脚本/工作流存储与拓扑单测
@@ -1627,6 +1630,12 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 ```
 
 ## 关键文件说明
+
+### 普通回合业务工具与展示（2026-11-07）
+
+- `agent_py_agent/agent/tooling/result_display.py`：工作流及归档读取的有界摘要，不改机器结果和原文归档。
+- `agent_py_agent/tests/test_business_model_tools.py`：通过真实注册工具验证业务发现、当前宿主身份、空间与后台代理操作。
+- `agent_py_agent/tests/test_business_tool_display.py`：验证工具进度、TUI 展示和完整原文归档的往返一致性。
 
 ### v13 动作声明与冷启动回归（2026-11-07）
 
