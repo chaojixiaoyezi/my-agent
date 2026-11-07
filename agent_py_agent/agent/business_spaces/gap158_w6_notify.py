@@ -13,6 +13,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
@@ -24,12 +25,18 @@ from urllib.request import (
     build_opener,
 )
 
+from ..common.request_execution_ports import RequestExecutionOutcomeUncertainError
 from ..contracts.gates.network_safety import (
     GatewayEndpointConfig,
     NetworkSafetySettings,
     _canonical_ip,
 )
+from ..conversation.background_process_owner import canonical_observation_owner_id
 from ..conversation.business_access import BusinessError
+from ..gateway_parts.multiprocess_background_execution import (
+    background_short_operation,
+    require_background_model_admission,
+)
 from ..plugin_host.errors import HostAPIError
 from ..runtime_db.operations import RuntimeConflictError
 from ..runtime_db.repository import RuntimeRepository
@@ -304,10 +311,13 @@ def _attempt(repo, row, channels, config, clock):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError('delivery deadline')
+        require_background_model_admission()
         status = _send_webhook(url, body=body, headers=headers, timeout=remaining, pin_ip=resolved[0])
         evidence.update(ok=200 <= status < 300, http_status=status)
         if not evidence['ok']:
             evidence['error_code'] = 'NETWORK_REQUEST_FAILED'
+    except RequestExecutionOutcomeUncertainError:
+        raise
     except (BusinessError, HostAPIError) as error:
         evidence['error_code'] = error.code
     except TimeoutError:
@@ -316,8 +326,9 @@ def _attempt(repo, row, channels, config, clock):
         # 外部传输可抛任意库异常；只记结构化类别，不保存 URL、密钥或远端回显。
         evidence['error_code'] = 'NETWORK_REQUEST_FAILED'
     evidence['latency_ms'] = max(0, int((time.monotonic() - started) * 1000))
-    return repo.settle_outbox_for_claim(claim=row, status='ACKED' if evidence['ok'] else 'FAILED',
-        provider_evidence=evidence, next_retry_at=0 if evidence['ok'] else clock() + max(1.0, _timeout(config)))
+    return background_short_operation('notify_settlement', lambda: repo.settle_outbox_for_claim(
+        claim=row, status='ACKED' if evidence['ok'] else 'FAILED', provider_evidence=evidence,
+        next_retry_at=0 if evidence['ok'] else clock() + max(1.0, _timeout(config))))
 
 
 def _submit(function, args=()):
@@ -347,31 +358,86 @@ def _read_channels(home, owner_id):
 
 
 def _recover_expired(repo, owner_id, config, clock):
-    """只在入队/显式重试时回收一片过期领取；副作用不明仍保持至少一次语义。"""
-    return repo.recover_outbox_for_scope(scope='notify', owner_id=owner_id, now=clock(),
-        lease_seconds=max(1.0, 2 * _timeout(config)), limit=min(100, _limit('NOTIFY_DRAIN_BATCH')))
+    """每次消费只回收一片过期领取；副作用不明仍保持至少一次语义。"""
+    return background_short_operation('notify_recovery', lambda: repo.recover_outbox_for_scope(
+        scope='notify', owner_id=owner_id, now=clock(), lease_seconds=max(1.0, 2 * _timeout(config)),
+        limit=min(100, _limit('NOTIFY_DRAIN_BATCH'))))
 
 
-def _drain(repo, home, owner_id, config, clock):
+def notification_deadline(home, config=None):
+    """只读原 owner 的自动通知责任；分别走状态/期限索引，不读 ACKED 历史。"""
+    from ..owner_wake_discovery import _quiescent_probe_connection
+
+    owner_id = canonical_observation_owner_id(Path(home))
+    if (not owner_id or not runtime_db_path(home).is_file()
+            or config is not None and not getattr(config, 'notify_delivery_enabled', False)):
+        return None
+    deadlines = []
+    with _quiescent_probe_connection(Path(home)) as conn:
+        if conn is None:
+            return 0.0
+        for status in ('PENDING', 'FAILED', 'IN_FLIGHT'):
+            column = 'claimed_at' if status == 'IN_FLIGHT' else 'next_retry_at'
+            ordering = 'claimed_at,outbox_id' if status == 'IN_FLIGHT' else 'next_retry_at,created_at,outbox_id'
+            row = conn.execute(f'SELECT {column} FROM outbox_entries WHERE scope=? AND owner_id=? '
+                'AND status=? AND json_extract(payload_json,\'$.event\')=\'scheduler_delivery\' '
+                f'ORDER BY {ordering} LIMIT 1', ('notify', owner_id, status)).fetchone()
+            if row is not None:
+                deadlines.append(row[0] + (max(1.0, 2 * _timeout(config)) if status == 'IN_FLIGHT' else 0))
+    return min(deadlines) if deadlines else None
+
+
+def resume_notifications(agent, *, now=None):
+    """由既有调度 tick 重试一片责任；满载保留 outbox，不另建 owner 队列或定时器。"""
+    config, paths = agent.config, agent.home_paths
+    if not getattr(config, 'notify_delivery_enabled', False):
+        return None
+    home, owner_id = paths.owner_home_dir, paths.owner_id
+    if canonical_observation_owner_id(Path(home)) != owner_id:
+        raise BusinessError('RESOURCE_NOT_FOUND')
+    clock = getattr(agent, 'business_v13_clock', time.time)
+    deadline = notification_deadline(home, config)
+    if deadline is None or deadline > (clock() if now is None else now):
+        return None
+    repo = background_short_operation('notify_prepare', lambda: _runtime(home))
+    return _kick(repo, home, owner_id, config, clock, True)
+
+
+def _drain(repo, home, owner_id, config, clock, automatic_only=False):
     if not getattr(config, 'notify_delivery_enabled', False):
         return []
     _recover_expired(repo, owner_id, config, clock)
     # 集合有自然上限，一批只读一次；逐条领取避免结算失败时把未开始的整批锁死。
     channels = _read_channels(home, owner_id)
     results = []
+
+    def claim():
+        outbox_id = ''
+        if automatic_only:
+            # 原入队触发保持通用事件语义；周期续跑只消费已完成调度的自动通知。
+            with repo._runtime_connection() as conn:
+                row = conn.execute("SELECT outbox_id FROM outbox_entries WHERE scope=? AND owner_id=? "
+                    "AND status IN ('PENDING','FAILED') AND next_retry_at<=? "
+                    "AND json_extract(payload_json,'$.event')='scheduler_delivery' "
+                    "ORDER BY next_retry_at,created_at,outbox_id LIMIT 1", ('notify', owner_id, clock())).fetchone()
+            if row is None:
+                return []
+            outbox_id = row[0]
+        return repo.claim_outbox_for_scope(scope='notify', owner_id=owner_id,
+            claimed_by='notify-' + uuid.uuid4().hex, batch_size=1, now=clock(), outbox_id=outbox_id)
+
     for _ in range(min(100, _limit('NOTIFY_DRAIN_BATCH'))):
         if not getattr(config, 'notify_delivery_enabled', False):
             break
-        rows = repo.claim_outbox_for_scope(scope='notify', owner_id=owner_id,
-            claimed_by='notify-' + uuid.uuid4().hex, batch_size=1, now=clock())
+        rows = background_short_operation('notify_claim', claim)
         if not rows:
             break
         results.append(_attempt(repo, rows[0], channels, config, clock))
     return results
 
 
-def _kick(repo, home, owner_id, config, clock):
-    return _submit(_drain, (repo, home, owner_id, config, clock))
+def _kick(repo, home, owner_id, config, clock, automatic_only=False):
+    return _submit(copy_context().run, (_drain, repo, home, owner_id, config, clock, automatic_only))
 
 
 def _target_once(repo, owner_id, outbox_id, channels, config, clock):

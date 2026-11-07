@@ -4,10 +4,15 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import socket
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing, contextmanager
 from dataclasses import replace
+from http.client import HTTPConnection
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from urllib.error import HTTPError
 
@@ -22,6 +27,7 @@ from agent_py_agent.agent.gateway_parts.business_api_v13 import V13Call
 
 @pytest.fixture
 def world(tmp_path, monkeypatch):
+    raw_socket = socket.getaddrinfo, socket.create_connection
     home = tmp_path / 'root/owners/local/main'
     config = SimpleNamespace(business_spaces_enabled=True, notify_delivery_enabled=True,
         allowed_private_hosts=[], tool_http_timeout=7)
@@ -52,7 +58,7 @@ def world(tmp_path, monkeypatch):
     raw_kick = notify._kick
     monkeypatch.setattr(notify, '_kick', lambda *_args: None)
     yield SimpleNamespace(home=home, config=config, agent=host, call=call, sent=sent,
-        raw_send=raw_send, raw_kick=raw_kick)
+        raw_send=raw_send, raw_kick=raw_kick, raw_socket=raw_socket)
     if notify._executor is not None:
         notify._executor.shutdown(wait=True)
         notify._executor = notify._worker_slots = None
@@ -632,8 +638,8 @@ def test_v13_slice_real_dispatch_schema_cas_and_ready_gates(world, monkeypatch):
     from agent_py_agent.agent.gateway_parts import business_api_v13_gap158_w6 as slice_module
     from agent_py_agent.agent.plugin_host.errors import HostAPIError
 
-    registered = v13._load_registry((*v13.V13_SLICE_MODULES,
-        'agent_py_agent.agent.gateway_parts.business_api_v13_gap158_w6'))
+    assert 'agent_py_agent.agent.gateway_parts.business_api_v13_gap158_w6' in v13.V13_SLICE_MODULES
+    registered = v13._load_registry()
     for name, value in zip(('_ACTIONS', 'ALIASES', 'V13_DEFS', 'JOB_KINDS', 'COLLECTIONS'), registered):
         monkeypatch.setattr(v13, name, value)
     services = SimpleNamespace(owner_id=world.agent.home_paths.owner_id,
@@ -817,3 +823,485 @@ def test_expired_recovery_100k_inflight_uses_index_and_bounded_vm_work(world, mo
         detail = ' '.join(str(tuple(row)) for row in plans)
         assert 'idx_outbox_scope_lease' in detail and 'TEMP B-TREE' not in detail
         assert connection.execute("SELECT count(*) FROM outbox_entries WHERE status='FAILED'").fetchone()[0] == 2
+
+
+def _notification_agent(root, workspace):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    return SimpleAgent(AgentConfig(my_agent_home=str(root), model_backend='echo',
+        business_spaces_enabled=True, notify_delivery_enabled=True, tool_http_timeout=7,
+        memory_curator_enabled=False, enable_self_learning=False,
+        owner_maintenance_scan_interval_seconds=0), workspace)
+
+
+def _completed_one_shot(agent, now):
+    from agent_py_agent.agent.scheduler.repository import (
+        SchedulerJobCreateRequest,
+        SchedulerRunFinish,
+    )
+
+    now = float(int(now))
+    thread = agent.conversation_store.threads.get_or_create({
+        'canonical_user_id': 'notify-regression', 'channel': 'internal',
+        'channel_conversation_id': 'notify-regression'})
+    repo = agent.scheduler_repository
+    job, _ = repo.create_job(SchedulerJobCreateRequest(name='一次通知', prompt='检查合成材料',
+        thread_id=thread.thread_id, schedule={'kind': 'at', 'at': now, 'timezone': 'UTC'}, now=now - 1))
+    [run] = repo.reserve_due_runs(now=now)
+    claim = repo.claim_run(run['run_id'], lease_seconds=60, now=now)
+    completed = repo.finish_run(run['run_id'], claim['claim_id'], SchedulerRunFinish(status='done', now=now))
+    assert completed['status'] == 'done' and repo.get_job(job['job_id'])['next_run_at'] == 0.0
+    return completed
+
+
+def _notification_channels(agent, count):
+    context = bind_business_context(agent, authorize=lambda _action, _facts: True, subject_id='tester')
+    for index in range(count):
+        notify.handle_notify(V13Call('notify.channels.create', {'kind': 'webhook', 'name': f'通道-{index}',
+            'url': 'https://hooks.example/continuation', 'events': ['scheduler_delivery']}, 'request',
+            agent.home_paths.owner_id, 'tester', context, SimpleNamespace(owner_id=agent.home_paths.owner_id),
+            agent.home_paths.owner_home_dir, f'continuation_channel_{index:04}', None, time.time))
+
+
+def _publish_completed(agent, run):
+    from agent_py_agent.agent.scheduler.notification_binding import enqueue_completed_notification
+
+    enqueue_completed_notification(agent, owner_id=agent.home_paths.owner_id,
+        event_kind='scheduler_delivery', event_id=run['run_id'],
+        payload={'job_id': run['job_id'], 'run_id': run['run_id']})
+
+
+def _notification_states(agent):
+    rows, after = notify._runtime(agent.home_paths.owner_home_dir, read_only=True).list_outbox_page(
+        scope='notify', owner_id=agent.home_paths.owner_id, limit=100)
+    assert after is None
+    return {state: sum(row['status'] == state for row in rows)
+        for state in ('PENDING', 'FAILED', 'IN_FLIGHT', 'ACKED', 'DEAD_LETTER')}
+
+
+def _notification_fd_count():
+    return len(os.listdir('/dev/fd')) if os.path.isdir('/dev/fd') else None
+
+
+@pytest.mark.parametrize('scenario', ['backlog', 'capacity', 'retry'])
+def test_completed_one_shot_local_tick_continues_21_channels(world, tmp_path, monkeypatch, scenario):
+    from agent_py_agent.agent.conversation.runtime import _BackgroundSchedulerTickMixin
+
+    agent = _notification_agent(world.agent.home_paths.root, tmp_path / 'workspace')
+    clock = [1000.0]
+    agent.business_v13_clock = lambda: clock[0]
+    assert (notify._limit('NOTIFY_CHANNELS_MAX_PER_OWNER'), notify._limit('NOTIFY_DRAIN_BATCH'),
+        notify._limit('NOTIFY_WORKERS')) == (50, 20, 2)
+    _notification_channels(agent, 21)
+    completed = _completed_one_shot(agent, clock[0])
+    attempts = []
+
+    def send(*_args, **_kwargs):
+        attempts.append(True)
+        return 503 if scenario == 'retry' and len(attempts) == 1 else 204
+
+    monkeypatch.setattr(notify, '_send_webhook', send)
+    _publish_completed(agent, completed)
+    repo = notify._runtime(agent.home_paths.owner_home_dir)
+    if scenario != 'capacity':
+        assert len(world.raw_kick(repo, agent.home_paths.owner_home_dir, 'local/main', agent.config,
+            agent.business_v13_clock).result(timeout=5)) == 20
+        states = _notification_states(agent)
+        assert states['PENDING'] == 1 and states['ACKED'] == (19 if scenario == 'retry' else 20)
+        assert states['FAILED'] == (1 if scenario == 'retry' else 0)
+    release, entered = threading.Event(), threading.Barrier(3)
+    occupied = []
+    if scenario == 'capacity':
+        def block():
+            entered.wait(timeout=5)
+            assert release.wait(timeout=5)
+        occupied = [notify._submit(block) for _ in range(2)]
+        entered.wait(timeout=5)
+    futures = []
+
+    def kick(*args):
+        future = world.raw_kick(*args)
+        futures.append(future)
+        return future
+
+    monkeypatch.setattr(notify, '_kick', kick)
+    tick = SimpleNamespace(scheduler_service=agent.scheduler_service, runtime=SimpleNamespace(agent=agent))
+    try:
+        if scenario == 'capacity':
+            _publish_completed(agent, completed)
+            assert futures == [None] and _notification_states(agent)['PENDING'] == 21
+            _BackgroundSchedulerTickMixin._enqueue_scheduler_runs(tick, now=clock[0])
+            assert futures[-1] is None
+    finally:
+        release.set()
+        for future in occupied:
+            done = threading.Event()
+            future.add_done_callback(lambda _future, event=done: event.set())
+            future.result(timeout=5)
+            assert done.wait(timeout=5)
+    for _ in range(3):
+        _BackgroundSchedulerTickMixin._enqueue_scheduler_runs(tick, now=clock[0])
+        if futures[-1] is not None:
+            futures[-1].result(timeout=5)
+        if _notification_states(agent)['ACKED'] == 21:
+            break
+        assert scenario == 'retry' or scenario == 'capacity'
+        clock[0] += agent.config.tool_http_timeout
+    assert _notification_states(agent)['ACKED'] == 21
+    assert len(attempts) == (22 if scenario == 'retry' else 21)
+    assert notify.notification_deadline(agent.home_paths.owner_home_dir, agent.config) is None
+
+
+def test_notification_probe_is_readonly_scoped_and_distinguishes_future_claims(world, monkeypatch):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    create(world)
+    receipt = event(world)[0]
+    repo = notify._runtime(world.home)
+    claim = repo.claim_outbox_for_scope(scope='notify', owner_id='local/main', claimed_by='probe', now=1000.0)[0]
+    assert notify.notification_deadline(world.home, world.config) == 1014.0
+    repo.settle_outbox_for_claim(claim=claim, status='FAILED', next_retry_at=1007.0)
+    before = {path.name: path.read_bytes() for path in world.home.glob('runtime.db*')}
+    deadlines = []
+    assert discovery._owner_has_hard_facts(world.home, deadline_out=deadlines)
+    assert 1007.0 in deadlines
+    assert notify.notification_deadline(world.home, world.config) == 1007.0
+    assert before == {path.name: path.read_bytes() for path in world.home.glob('runtime.db*')}
+    world.config.notify_delivery_enabled = False
+    assert notify.notification_deadline(world.home, world.config) is None
+    assert notify.resume_notifications(world.agent) is None
+    world.config.notify_delivery_enabled = True
+    current = repo.claim_outbox_for_scope(scope='notify', owner_id='local/main', claimed_by='current', now=1007.0)[0]
+    repo.settle_outbox_for_claim(claim=current, status='ACKED')
+    manual = repo.enqueue_outbox(scope='notify', owner_id='local/main', effect_key='manual-test',
+        payload={'event': 'test', 'channel_id': 'manual', 'test': True})
+    repo.enqueue_outbox(scope='notify', owner_id='local/foreign', effect_key='foreign-automatic',
+        payload={'event': 'scheduler_delivery'})
+    assert notify.notification_deadline(world.home, world.config) is None
+    assert notify.resume_notifications(world.agent) is None
+    assert repo.outbox_entry(manual['outbox_id'])['status'] == 'PENDING'
+    assert repo.outbox_entry(receipt['outbox_id'])['status'] == 'ACKED'
+    assert notify.notification_deadline(world.home / 'not-an-owner', world.config) is None
+
+
+def test_initial_kick_preserves_other_structured_event_delivery(world, monkeypatch):
+    create(world, events=['custom_event'])
+    futures = []
+
+    def kick(*args):
+        future = world.raw_kick(*args)
+        futures.append(future)
+        return future
+
+    monkeypatch.setattr(notify, '_kick', kick)
+    receipt = notify.enqueue_event(world.agent, owner_id='local/main', event_kind='custom_event',
+        event_id='custom-1', payload={})[0]
+    assert futures[0].result(timeout=5)[0]['status'] == 'ACKED'
+    assert notify._runtime(world.home).outbox_entry(receipt['outbox_id'])['status'] == 'ACKED'
+    assert notify.notification_deadline(world.home, world.config) is None
+
+
+def test_notification_probe_100k_acked_history_keeps_index_work_bounded(world, monkeypatch):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    create(world)
+    repo = notify._runtime(world.home)
+    payload = json.dumps({'event': 'scheduler_delivery'})
+    with repo.transaction() as connection:
+        connection.executemany('INSERT INTO outbox_entries(outbox_id,effect_key,owner_id,scope,'
+            'payload_json,status,attempts,next_retry_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+            ((f'acked-{index:06}', f'acked-effect-{index}', 'local/main', 'notify', payload,
+              'ACKED', 1, 0, index, index) for index in range(100000)))
+    original, statements, callbacks = discovery._quiescent_probe_connection, [], [0]
+
+    @contextmanager
+    def bounded(home):
+        with original(home) as connection:
+            def progress():
+                callbacks[0] += 1
+                return int(callbacks[0] > 200)
+            connection.set_progress_handler(progress, 100)
+            connection.set_trace_callback(statements.append)
+            yield connection
+
+    monkeypatch.setattr(discovery, '_quiescent_probe_connection', bounded)
+    fd_before = _notification_fd_count()
+    assert notify.notification_deadline(world.home, world.config) is None
+    repo.enqueue_outbox(scope='notify', owner_id='local/main', effect_key='future-automatic',
+        payload={'event': 'scheduler_delivery'})
+    claim = repo.claim_outbox_for_scope(scope='notify', owner_id='local/main', claimed_by='future', now=1000.0)[0]
+    repo.settle_outbox_for_claim(claim=claim, status='FAILED', next_retry_at=2000.0)
+    assert notify.notification_deadline(world.home, world.config) == 2000.0
+    assert callbacks[0] <= 200
+    with original(world.home) as connection:
+        queries = [sql for sql in statements if 'FROM outbox_entries' in sql]
+        assert len(queries) == 6
+        for sql in queries:
+            plan = ' '.join(row[3] for row in connection.execute('EXPLAIN QUERY PLAN ' + sql))
+            assert 'idx_outbox_scope_' in plan and 'SCAN outbox_entries' not in plan
+    if fd_before is not None:
+        fd_delta = _notification_fd_count() - fd_before
+        assert fd_delta == 0
+
+
+@contextmanager
+def _notification_gateway(tmp_path, monkeypatch, *, retain_claim=False):
+    from agent_py_agent.agent.gateway_parts import multiprocess_mode as mode
+    from agent_py_agent.agent.gateway_parts.control_plane import GatewayControlPlane
+    from agent_py_agent.agent.gateway_parts.multiprocess_admission import (
+        CoordinatorAdmissionScope,
+        PersistentAdmission,
+    )
+    from agent_py_agent.agent.gateway_parts.multiprocess_background_discovery import (
+        CoordinatorBackgroundRequests,
+    )
+    from agent_py_agent.agent.gateway_parts.multiprocess_coordinator import coordinator_guard
+    from agent_py_agent.agent.gateway_parts.multiprocess_drain_runtime import GatewayDrainRuntime
+    from agent_py_agent.agent.gateway_parts.multiprocess_takeover_runtime import (
+        prepare_coordinator_takeover,
+    )
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths
+    from agent_py_agent.agent.gateway_parts.queue_service import ensure_gateway_folders
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+
+    monkeypatch.setattr(mode, '_WORKER_PARTITION', None)
+    agent = _notification_agent(tmp_path / 'mp-home', tmp_path / 'mp-workspace')
+    clock = [time.time()]
+    agent.business_v13_clock = lambda: clock[0]
+    _notification_channels(agent, 21)
+    completed = _completed_one_shot(agent, clock[0])
+    _publish_completed(agent, completed)
+    old_claim = None
+    if retain_claim:
+        old_claim = notify._runtime(agent.home_paths.owner_home_dir).claim_outbox_for_scope(
+            scope='notify', owner_id='local/main', claimed_by='disconnected', batch_size=1, now=clock[0])[0]
+    paths = gateway_paths(agent)
+    ensure_gateway_folders(paths)
+    gate = PersistentAdmission(paths, agent, CoordinatorAdmissionScope(2, 'notify-C'))
+    guard = coordinator_guard(paths.root, gate.count)
+    guard.__enter__()
+    closed = []
+    producer = None
+
+    def close():
+        if not closed:
+            closed.append(True)
+            guard.__exit__(None, None, None)
+
+    try:
+        controller = prepare_coordinator_takeover(paths, gate.count, gate.c_run_id)
+        gate._runtime_takeover, gate._runtime_takeover_required = controller, True
+        control = GatewayControlPlane(agent.config, agent.home_paths.root, paths,
+            gate.count, gate.c_run_id, agent_root=agent.root)
+        runtime = GatewayDrainRuntime(control)
+        runtime.retain_admission(gate)
+        producer = CoordinatorBackgroundRequests(control, drain_runtime=runtime)
+        fd_before = _notification_fd_count()
+        target = SimpleNamespace(identity=OwnerIdentity.local_main(), home_dir=agent.home_paths.owner_home_dir)
+        # 冷发现只用只读配置和仓库，不能重新构造执行宿主或发送通知。
+        with monkeypatch.context() as readonly:
+            readonly.setattr(type(agent), '__init__', lambda *_a, **_k: pytest.fail('冷发现不能构造 Agent'))
+            refs = [ref for ref in producer._owner_sources(target) if ref['kind'] == 'scheduler']
+        assert len(refs) == 1
+        ref = refs[0]
+        assert producer._submit(ref)
+        yield SimpleNamespace(agent=agent, gate=gate, producer=producer, target=target,
+            ref=ref, clock=clock, close=close, fd_before=fd_before, old_claim=old_claim)
+    finally:
+        for cursor in getattr(producer, '_source_cursors', {}).values():
+            cursor.close()
+        if notify._executor is not None:
+            notify._executor.shutdown(wait=True)
+            notify._executor = notify._worker_slots = None
+        close()
+
+
+def _admit_notification(case):
+    from agent_py_agent.agent.gateway_parts.io import read_json_file
+    from agent_py_agent.agent.gateway_parts.multiprocess_admission import session_scope_for_request
+    from agent_py_agent.agent.gateway_parts.multiprocess_background_request import source_digest
+    from agent_py_agent.agent.gateway_parts.multiprocess_coordinator_claim import (
+        freeze_coordinator_claim,
+    )
+    from agent_py_agent.agent.gateway_parts.queue_service import claim_request
+    from agent_py_agent.agent.gateway_parts.request_worker import AdmissionLimits
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+
+    path = case.gate.paths.inbox / ('background-' + source_digest(case.ref) + '.json')
+    request = read_json_file(path)
+    delay = max(0, request.get('not_before_at', 0) - time.time())
+    if delay:
+        assert delay <= 1.0
+        threading.Event().wait(delay + 0.01)
+    decision = case.gate.admit(path, (OwnerIdentity.local_main(), session_scope_for_request(request)), AdmissionLimits(8, 8))
+    assert decision['status'] == 'admitted', decision
+    claim = claim_request(case.gate.paths, path, coordinator_snapshot=freeze_coordinator_claim(case.gate, decision))
+    assert claim is not None
+    return claim
+
+
+@contextmanager
+def _local_webhook(world, monkeypatch, *, fail_first=False):
+    received = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            received.append((json.loads(self.rfile.read(int(self.headers['Content-Length']))),
+                self.headers['Idempotency-Key']))
+            self.send_response(503 if fail_first and len(received) == 1 else 204)
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    monkeypatch.setattr(socket, 'getaddrinfo', world.raw_socket[0])
+    monkeypatch.setattr(socket, 'create_connection', world.raw_socket[1])
+    monkeypatch.setattr(socket, 'getfqdn', lambda host: host)
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01))
+    thread.start()
+
+    def transport(_url, *, body, headers, timeout, pin_ip):
+        # 只替换 HTTPS 外部 I/O 边界；请求正文、幂等键、路由与结算均由生产入口生成。
+        assert pin_ip == '93.184.216.34'
+        with closing(HTTPConnection('127.0.0.1', server.server_port, timeout=timeout)) as connection:
+            connection.request('POST', '/hook', body=body, headers=headers)
+            with connection.getresponse() as response:
+                response.read()
+                return response.status
+
+    monkeypatch.setattr(notify, '_send_webhook', transport)
+    try:
+        yield received
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+@pytest.mark.parametrize('scenario', ['backlog', 'retry', 'claim'])
+def test_cold_mp_scheduler_source_stays_pending_until_real_webhook_acks(world, tmp_path, monkeypatch, scenario):
+    from agent_py_agent.agent.gateway_parts import request_worker as worker
+    from agent_py_agent.agent.gateway_parts.io import read_json_file
+    from agent_py_agent.agent.gateway_parts.multiprocess_admission import reservation_file
+    from agent_py_agent.agent.gateway_parts.multiprocess_background_execution import (
+        requeue_pending_background_request,
+    )
+    from agent_py_agent.agent.gateway_parts.multiprocess_coordinator_execution import (
+        coordinator_execution_scope,
+    )
+
+    with _notification_gateway(tmp_path, monkeypatch, retain_claim=scenario == 'claim') as case:
+        assert _notification_states(case.agent)['PENDING'] == (20 if scenario == 'claim' else 21)
+        fd_before = case.fd_before
+        responses = []
+        original = worker._handle_gateway_request
+
+        def observe(*args, **kwargs):
+            response = original(*args, **kwargs)
+            responses.append(response)
+            if response.get('background_result', {}).get('outcome') == 'pending':
+                wrong = {**response, 'background_result': {**response['background_result'], 'source_id': 'wrong-source'}}
+                with pytest.raises(ValueError, match='background_source_identity_changed'):
+                    requeue_pending_background_request(wrong, case.agent)
+            return response
+
+        monkeypatch.setattr(worker, '_handle_gateway_request', observe)
+        monkeypatch.setattr(notify, '_kick', world.raw_kick)
+        with _local_webhook(world, monkeypatch, fail_first=scenario == 'retry') as received:
+            claims = []
+            for turn in range(5):
+                claim = _admit_notification(case)
+                claims.append(claim)
+                with coordinator_execution_scope(case.gate, claim, case.agent):
+                    assert worker._process_claimed_gateway_request_path(case.agent, case.gate.paths,
+                        claim.path, 'original-C', claim=claim)
+                result = responses[-1]['background_result']
+                assert result['source_kind'] == 'scheduler' and result['source_id'] == case.ref['source_id']
+                if result['outcome'] == 'handled':
+                    break
+                assert result['outcome'] == 'pending'
+                pending = read_json_file(case.gate.paths.inbox / claim.name)
+                assert pending['not_before_at'] > time.time()
+                assert reservation_file(case.gate.paths, claim.request_id).is_file()
+                assert not case.producer._submit(case.ref), '原 pending 来源不能创建第二个请求'
+                if scenario != 'backlog' and turn in (1, 2):
+                    states = _notification_states(case.agent)
+                    assert states['ACKED'] == 20
+                    assert states['FAILED' if scenario == 'retry' else 'IN_FLIGHT'] == 1
+                    assert len(received) == (21 if scenario == 'retry' else 20)
+                    assert notify.notification_deadline(case.target.home_dir, case.agent.config) > case.clock[0]
+                if turn == 2:
+                    case.clock[0] += 2 * case.agent.config.tool_http_timeout
+            assert result['outcome'] == 'handled'
+            assert len(claims) >= 2 and len({claim.request_id for claim in claims}) == 1
+            assert _notification_states(case.agent)['ACKED'] == 21
+            assert len(received) == (22 if scenario == 'retry' else 21)
+            assert len({key for _body, key in received}) == 21
+            assert all(body['event'] == 'scheduler_delivery' for body, _key in received)
+            assert all(response['background_result']['wake_count'] == 0 for response in responses)
+            assert not [ref for ref in case.producer._owner_sources(case.target) if ref['kind'] == 'scheduler']
+            assert not case.producer._submit(case.ref), '原终态来源不能因未变化的 digest 重建请求'
+            if case.old_claim is not None:
+                repo = notify._runtime(case.target.home_dir, read_only=True)
+                recovered = repo.outbox_entry(case.old_claim['outbox_id'])
+                assert recovered['attempts'] == 2
+                assert recovered['provider_evidence']['attempt_1']['error_code'] == 'OUTCOME_UNKNOWN'
+        notify._executor.shutdown(wait=True)
+        notify._executor = notify._worker_slots = None
+        for cursor in case.producer._source_cursors.values():
+            cursor.close()
+        case.producer._source_cursors.clear()
+        if fd_before is not None:
+            fd_delta = _notification_fd_count() - fd_before
+            assert fd_delta == 0
+
+
+@pytest.mark.parametrize('revocation', ['stop', 'generation'])
+def test_mp_notify_rechecks_admission_after_dns_wait_without_new_http(world, tmp_path, monkeypatch, revocation):
+    from agent_py_agent.agent.gateway_parts.io import (
+        gateway_turn_transition,
+        update_json_file_atomic,
+    )
+    from agent_py_agent.agent.gateway_parts.multiprocess_admission import reservation_file
+    from agent_py_agent.agent.gateway_parts.request_errors import (
+        RequestExecutionOutcomeUncertainError,
+    )
+    from agent_py_agent.tests.test_gateway_background_curator_transactions import run_original
+
+    with _notification_gateway(tmp_path, monkeypatch) as case:
+        claim = _admit_notification(case)
+        proof = reservation_file(case.gate.paths, claim.request_id)
+        before = proof.read_bytes()
+        entered, release = threading.Event(), threading.Event()
+        original = notify._validate_url
+
+        def wait_for_dns(*args, **kwargs):
+            result = original(*args, **kwargs)
+            entered.set()
+            assert release.wait(timeout=5)
+            return result
+
+        monkeypatch.setattr(notify, '_validate_url', wait_for_dns)
+        monkeypatch.setattr(notify, '_kick', world.raw_kick)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(run_original, case.agent, case.gate, claim)
+            try:
+                assert entered.wait(timeout=5)
+                if revocation == 'stop':
+                    with gateway_turn_transition(case.gate.paths, claim.request_id):
+                        update_json_file_atomic(claim.path, lambda row: {**row,
+                            'cancel_requested': True, 'turn_phase': 'closing'})
+                else:
+                    case.close()
+            finally:
+                release.set()
+            with pytest.raises(RequestExecutionOutcomeUncertainError):
+                future.result(timeout=5)
+        assert not world.sent
+        states = _notification_states(case.agent)
+        assert states['IN_FLIGHT'] == 1 and states['PENDING'] == 20
+        assert proof.read_bytes() == before

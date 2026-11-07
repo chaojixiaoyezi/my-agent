@@ -362,8 +362,18 @@ def execute_background_request(context):
         if ref["kind"] in {"wake", "policy", "observation"}:
             return _execute_wake(agent, ref)
         if ref["kind"] == "scheduler":
+            from ..business_spaces.gap158_w6_notify import (
+                notification_deadline,
+                resume_notifications,
+            )
+
             wake_ids = background_short_operation("scheduler_due_publication", agent.scheduler_service.enqueue_ready_runs)
-            return {"source_kind": "scheduler", "source_id": ref["source_id"], "outcome": "handled", "wake_count": len(wake_ids)}
+            future = resume_notifications(agent)
+            if future is not None:
+                future.result()
+            pending = notification_deadline(home.owner_home_dir, agent.config) is not None
+            return {"source_kind": "scheduler", "source_id": ref["source_id"],
+                    "outcome": "pending" if pending else "handled", "wake_count": len(wake_ids)}
         if ref["kind"] == "learning":
             return _execute_learning(agent, ref)
         if ref["kind"] == "maintenance":
