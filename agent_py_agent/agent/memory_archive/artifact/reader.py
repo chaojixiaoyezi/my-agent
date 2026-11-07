@@ -22,7 +22,10 @@ from typing import Any
 
 from ...artifacts.registry_projection_cache import _retained_tree_bytes
 from ...common.nofollow_fs import open_directory_beneath, open_readonly_file_beneath
-from ...common.tool_index_stream import iter_decoded_tool_index_objects
+from ...common.tool_index_stream import (
+    iter_decoded_tool_index_objects,
+    tool_index_prescreen_pattern,
+)
 from ...common.tool_output_paths import (
     tool_output_index_paths_for_lookup,
 )
@@ -974,13 +977,17 @@ def _parsed_artifact_index(source, *, literal_ref: str | None = None):
         cached = _ARTIFACT_INDEX_CACHE.get(key)
         if cached is not None:
             return cached
-        rows = tuple(row for _, row in iter_decoded_tool_index_objects(_OpenArtifactIndex(handle)))
+        # 原文字节已超缓存预算时解析树必然入不了缓存：字面查找只解码预筛命中行（转义行仍保留），并跳过驻留体积遍历。
+        oversized = before[2] > _ARTIFACT_INDEX_CACHE.max_bytes
+        prescreen = tool_index_prescreen_pattern((literal_ref,)) if oversized and literal_ref else None
+        rows = tuple(row for _, row in iter_decoded_tool_index_objects(_OpenArtifactIndex(handle), prescreen))
         by_literal: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
             for ref in {str(row.get(field, "") or "") for field in _INDEX_LITERAL_FIELDS}:
                 by_literal.setdefault(ref, []).append(row)
         result = rows, by_literal
-        if _blob_stat_signature(os.fstat(handle.fileno())) == before and (literal_ref is None or literal_ref in by_literal):
+        if (not oversized and _blob_stat_signature(os.fstat(handle.fileno())) == before
+                and (literal_ref is None or literal_ref in by_literal)):
             _ARTIFACT_INDEX_CACHE.put(key, result)
         return result
 
