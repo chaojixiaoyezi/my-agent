@@ -25,6 +25,7 @@ from ..user_space.storage_lanes import (
 from .process_session_records import PROCESS_TERMINAL_STATUSES, validate_session_id
 from .process_session_store import (
     ProcessSessionStore,
+    ProcessSessionTransaction,
     _activation_exit_confirmed,
     _completion_obligation_finished,
     _record_ttl_expired,
@@ -48,14 +49,6 @@ def _bounded_wait(deadline):
         if time.monotonic() >= deadline:
             raise BlockingIOError("process_session_lock_busy")
     return check
-
-
-# LLM: 公共 list_records 不接收 wait_check；只在本通道适配其原 transaction，不改全局 Store 合同或缓存。
-# 类用途: 让便宜投影未命中后的真实读取也使用有界目录锁。
-class _LaneStore(ProcessSessionStore):
-    def transaction(self, *, wait_check=None):
-        return super().transaction(wait_check=wait_check or _bounded_wait(
-            time.monotonic() + _PROCESS_SESSION_LANE_LOCK_WAIT_MS / 1000))
 
 
 # LLM: 从绝对锚逐层 lstat，拒绝链接、父级穿越及非目录；从不创建路径。
@@ -192,12 +185,21 @@ class _Pass:
         return ProcessSessionStore(self.root).transaction(wait_check=_bounded_wait(deadline))
 
 
-# LLM: 初读在协调写门外；仅合格 TTL 候选触发原 prune，通知目标缺消费读口时保留。
-# 函数用途: 每小时通过原目录事务清理已结清的终态记录。
+# 初读只枚举已完成的历史，归档位置证明通知义务此前已结清；实际删除仍在原根目录事务中重读。
+# 函数用途: 每小时通过原目录事务清理 finished/ 中安全过期的终态记录。
 def _prune(p):
     if p.request.now < p.result["cursor"]["next_prune_at"]:
         return True
-    records, errors = _LaneStore(p.root).list_records(cheap_checks=True)
+    history = p.root / "finished"
+    try:
+        if not _real_directories(history):
+            p.skip("unsafe_path")
+            return False
+    except FileNotFoundError:
+        records, errors = [], []
+    else:
+        # 冷维护不占用按 owner 定界的热缓存，也不为历史读口创建第二把目录锁。
+        records, errors = ProcessSessionTransaction(history).list_records()
     if errors:
         for error in errors:
             if error.get("error_type") == "BlockingIOError":
@@ -211,20 +213,20 @@ def _prune(p):
                   and not row.get("retain_until_consumed")
                   and (row.get("activation_scope") is None or (
                       not row.get("stop_requested") and _activation_exit_confirmed(row)))
-                  and _completion_obligation_finished(row, None)
+                  and _completion_obligation_finished(row, lambda _notice: True)
                   and _record_ttl_expired(row, 86400.0, p.request.now)]
     if candidates:
         # 阶段已在扫描前准入；原 prune 不能拆分，不能在慢扫后反复放弃而永久无法清积压。
         sizes = {}
         for row in candidates:
             try:
-                sizes[row["session_id"]] = os.lstat(p.root / (row["session_id"] + ".json")).st_size
+                sizes[row["session_id"]] = os.lstat(history / (row["session_id"] + ".json")).st_size
             except FileNotFoundError:
                 continue
 
         def operation():
             with p.transaction() as transaction:
-                return transaction.prune_finished(None, max_age_seconds=86400.0, now=p.request.now)
+                return transaction.prune_finished(None, max_age_seconds=86400.0, now=p.request.now, finished_only=True)
 
         removed = p.request.run_write(operation)
         p.result["deleted_items"] += len(removed)
