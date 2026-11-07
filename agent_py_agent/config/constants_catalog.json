@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1353,
+  "count": 1354,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -2290,6 +2290,14 @@
       "unit": "条",
       "category": "上限预算",
       "description": "进程内单技能目录元数据缓存的最大条目数上限。"
+    },
+    {
+      "name": "_SERVICE_CACHE_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/capability/skill_service.py",
+      "value": 32,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "每个技能服务按根集合/工作区保留的清单与快照缓存条目上限；多工作区轮换时互不挤掉，超出按最久未用淘汰。"
     },
     {
       "name": "MAX_TRANSFER_BYTES",
