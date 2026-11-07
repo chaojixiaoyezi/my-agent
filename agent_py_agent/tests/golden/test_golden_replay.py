@@ -20,6 +20,7 @@ SCENARIOS = [json.loads(path.read_text()) for path in sorted((HERE / "scenarios"
 # LLM: Capabilities use the existing root marker; no local try/skip or expected-failure path masks a golden failure.
 # 函数用途: Build one collected test per declared scenario with its exact capability requirements.
 def scenario_parameters():
+    fixture = json.loads((HERE.parent / "slo" / "slo_targets.json").read_text())["fixture"]
     rows = []
     for scenario in SCENARIOS:
         capabilities = list(scenario["required_capabilities"])
@@ -28,6 +29,8 @@ def scenario_parameters():
                 and "linux_bwrap" not in capabilities):
             capabilities.append("linux_bwrap")
         marks = [pytest.mark.sandbox_capability(*capabilities)] if capabilities else []
+        # 用例预算只有场景声明一份权威；pytest 总门另留既有清理余量，覆盖 CLI 的默认 60 秒。
+        marks.append(pytest.mark.timeout(scenario["deadline_seconds"] + fixture["teardown_seconds"]))
         rows.append(pytest.param(scenario, id=scenario["id"], marks=marks))
     return rows
 

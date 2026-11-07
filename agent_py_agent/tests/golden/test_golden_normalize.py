@@ -383,18 +383,47 @@ def test_scenario_capability_marker_matches_platform_without_mutating_source(mon
 
     from . import test_golden_replay as replay_module
 
-    scenario = {"id": "capability-fixture", "required_capabilities": list(capabilities)}
+    bounds = local_fixture_bounds()
+    scenario = {"id": "capability-fixture", "required_capabilities": list(capabilities),
+                "deadline_seconds": bounds["startup_seconds"]}
     monkeypatch.setattr(replay_module, "SCENARIOS", [scenario])
     # 只替换被测模块的引用，不改全局 sys.platform，避免影响宿主和其它测试的能力检测。
     monkeypatch.setattr(replay_module, "sys", SimpleNamespace(platform=platform), raising=False)
     [parameter] = replay_module.scenario_parameters()
     assert parameter.values == (scenario,) and parameter.id == scenario["id"]
+    capability_marks = [mark for mark in parameter.marks if mark.name == "sandbox_capability"]
     if expected:
-        [marker] = parameter.marks
+        [marker] = capability_marks
         assert marker.name == "sandbox_capability" and marker.args == tuple(expected)
     else:
-        assert parameter.marks == []
+        assert capability_marks == []
+    [timeout] = [mark for mark in parameter.marks if mark.name == "timeout"]
+    assert timeout.args == (scenario["deadline_seconds"] + bounds["teardown_seconds"],)
     assert scenario["required_capabilities"] == capabilities
+
+
+@pytest.mark.parametrize("requested", [1, 100])
+def test_replay_observation_and_phase_deadlines_share_fixture_bounds(tmp_path, monkeypatch, requested):
+    from types import SimpleNamespace
+
+    from . import replayer
+
+    captured = []
+
+    def provider(root, *, script, teardown_seconds):
+        captured.extend(script)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(replayer, "FakeProvider", provider)
+    bounds = {**local_fixture_bounds(), "condition_seconds": requested}
+    scenario = {"fake_model_script": [{"wait_for_release": True, "deadline_seconds": 1}, {}]}
+    original = copy.deepcopy(scenario)
+    runner = replayer.Replayer(tmp_path, scenario, bounds)
+    assert runner.bounds["condition_seconds"] >= requested
+    assert runner.bounds["condition_seconds"] >= bounds["startup_seconds"] + bounds["teardown_seconds"]
+    assert runner.bounds["poll_seconds"] == bounds["poll_seconds"]
+    assert captured[0]["deadline_seconds"] >= runner.bounds["condition_seconds"] + bounds["teardown_seconds"]
+    assert captured[1] == {} and scenario == original
 
 
 # LLM: A duration-looking business string is not host execution metadata, even inside a tool payload.

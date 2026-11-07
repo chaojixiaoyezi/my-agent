@@ -14,20 +14,20 @@ from agent_py_agent.tests.slo.load import GatewayProcess, durable_receipt, json_
 from .normalize import normalize
 from .recorder import Recorder
 
-# A held provider phase is released only after the replayer's own observable-condition waits (each floored at
-# 25 s) see it blocked; under CI batch concurrency the scripted 10 s gate expired first. Floor it above them.
-_PHASE_GATE_TIMEOUT_SECONDS = 30.0
-
 
 class Replayer:
     # LLM: Scenario roots are exclusive test directories; no installed or live user Gateway is used.
     # 函数用途: Bind the scenario, real isolated process, fake provider and evidence recorder.
     def __init__(self, root, scenario, fixture_parameters):
         self.root, self.scenario = Path(root), scenario
-        self.bounds = {**fixture_parameters, "condition_seconds": max(fixture_parameters["condition_seconds"], 25)}
+        # 并行 CI 的进程就绪观察覆盖一次完整启动及清理余量；轮询频率仍沿用原配置。
+        self.bounds = {**fixture_parameters, "condition_seconds": max(fixture_parameters["condition_seconds"],
+            fixture_parameters["startup_seconds"] + fixture_parameters["teardown_seconds"])}
         self.recorder = Recorder(self.root / "evidence")
         self.requests, self.aliases, self.last_stopped, self.delivered = {}, {}, None, set()
-        script = [{**entry, "deadline_seconds": max(float(entry.get("deadline_seconds", 10)), _PHASE_GATE_TIMEOUT_SECONDS)}
+        # 持有的 provider 阶段必须晚于观察超时，不能在被测状态尚未观察到时自行结束。
+        script = [{**entry, "deadline_seconds": max(float(entry.get("deadline_seconds", 0)),
+            self.bounds["condition_seconds"] + self.bounds["teardown_seconds"])}
                   if entry.get("wait_for_release") else entry for entry in scenario["fake_model_script"]]
         self.provider = FakeProvider(self.root / "provider", script=script,
                                      teardown_seconds=self.bounds["teardown_seconds"])

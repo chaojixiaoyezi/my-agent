@@ -55,5 +55,5 @@
     "background_launcher_identity"
   ],
   "repetitions": 3,
-  "deadline_seconds": 55
+  "deadline_seconds": 90
 }
