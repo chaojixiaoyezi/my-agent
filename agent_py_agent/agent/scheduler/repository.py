@@ -110,10 +110,11 @@ def _history_fd_stamp(info: os.stat_result) -> tuple[int, int, int, int, int]:
     return info.st_mtime_ns, info.st_size, info.st_ino, info.st_dev, info.st_ctime_ns
 
 
-# LLM: 完整只读扫描后才能给负结果，只保留本批命中；不保存lifetime行或ID。
-# 函数用途: 流式应用原dict/run_id谓词，保留坏行诊断，读取失败阻止去重决策。
+# LLM: 完整扫描后才能给负结果；可选谓词仅收紧本批匹配，不保存lifetime行或ID。
+# 函数用途: 流式查询历史身份或合法终态，保留坏行诊断与读取失败关闭。
 def _history_membership_fallback(
     path: Path, requested: frozenset[str], *, allow_missing: bool,
+    accept: Callable[[dict[str, Any]], bool] | None = None,
 ) -> frozenset[str]:
     try:
         try:
@@ -143,7 +144,7 @@ def _history_membership_fallback(
                     })
                     continue
                 identity = str(row.get("run_id") or "")
-                if identity in requested:
+                if identity in requested and (accept is None or accept(row)):
                     found.add(identity)
             held = os.fstat(handle.fileno())
             if held.st_nlink != 1 or _history_fd_stamp(held) != before:
@@ -547,14 +548,15 @@ class _SchedulerJobOperations:
 class _SchedulerReservationOperations:
     """Public durable manual and due run reservation operations."""
 
-    # LLM: 手动运行准确 rule_id，原活动 run 和状态检查不绕过。
-    # 函数用途: 手动运行准确 rule_id，原活动 run 和状态检查不绕过。 修改需同步原控制、恢复或权限测试。
+    # LLM: job状态检查后在原锁内对账终态，再沿原rule/活动运行检查预留；失败不提交清理。
+    # 函数用途: 手动预约前清掉已完成的旧副本，不绕过任务状态与活动车道。
     def reserve_manual_run(self, job_id: str, *, rule_id: str = "", now: float | None = None) -> dict[str, object]:
         current = _now(now)
         with self._mutation_scope() as (store, admission):
             job = self._require_job(store, job_id)
             if job["status"] == "deleted":
                 raise SchedulerNotFoundError(f"scheduler job not found: {job_id}")
+            self._reconcile_history_runs_unlocked(store, job_id=job_id)
             if job.get("rules"):
                 from .monitor_state import manual_rule
                 job = manual_rule(job, rule_id, current)
@@ -571,8 +573,8 @@ class _SchedulerReservationOperations:
             self._write_store_unlocked(store, admission)
         return deepcopy(run)
 
-    # LLM: 投影及无锁快照只排除无候选空轮；退避、独立规则和活动运行仍在原 quota→owner 锁内实时重核。
-    # 函数用途: 为真正可预约的到期计划预留运行，不为已有在途任务或未来周期持写锁空转。
+    # LLM: 先在原事务对账旧副本终态，再用投影排除空轮；退避、规则与活动运行仍在原锁内实时重核。
+    # 函数用途: 清掉历史已完成的旧活动副本后预约到期计划，无变化不重写账本。
     def reserve_due_runs(
         self,
         *,
@@ -582,13 +584,13 @@ class _SchedulerReservationOperations:
     ) -> list[dict[str, object]]:
         self.maintain_history_index()
         current = _now(now)
-        if not self._cheap_due_candidates_exist(now=current):
-            return []
-        if not _snapshot_due_candidates_exist(self, now=current):
-            return []
+        if not self._cheap_due_candidates_exist(now=current) or not _snapshot_due_candidates_exist(self, now=current):
+            if not self._history_terminal_runs(self._store_snapshot(readonly=True)):
+                return []
         reserved: list[dict[str, object]] = []
         skipped: list[dict[str, object]] = []
         with self._mutation_scope() as (store, admission):
+            reconciled = self._reconcile_history_runs_unlocked(store)
             jobs, _errors = self._valid_jobs(store)
             due = sorted(
                 (
@@ -644,7 +646,7 @@ class _SchedulerReservationOperations:
             # here used to refresh ``updated_at``, resync the due projection,
             # and run a full owner-quota scan on every background owner tick.
             # Large owner homes therefore consumed a CPU core while idle.
-            if reserved or skipped:
+            if reserved or skipped or reconciled:
                 self._write_store_unlocked(store, admission, history_records=skipped)
         return deepcopy(reserved)
 
@@ -730,8 +732,8 @@ class _SchedulerRunOperations:
             }
             self._write_store_unlocked(store, admission)
 
-    # LLM: 原owner事务内复核同job在途者；租约过期仍须PID死亡证明，不因另一rule或旧queued副本授第二份执行权。
-    # 函数用途: 原子领取job唯一执行权，并沿原恢复协议处理已证实死亡的领取者。
+    # LLM: 原owner事务先复核本run已持久终态；未命中仍按原job/claim/PID合同领取，不授第二份执行权。
+    # 函数用途: 拒绝历史已完成的旧副本，再原子领取任务唯一执行权。
     def claim_run(
         self,
         run_id: str,
@@ -741,6 +743,9 @@ class _SchedulerRunOperations:
     ) -> dict[str, object] | None:
         current = _now(now)
         with self._mutation_scope() as (store, admission):
+            if self._reconcile_history_runs_unlocked(store, run_id=run_id):
+                self._write_store_unlocked(store, admission)
+                return None
             raw = store["runs"].get(run_id)
             run, _error = self._parse_run(raw)
             if run is None:
@@ -1468,13 +1473,23 @@ class _SchedulerStoreSupport:
             "corrupt": bool(job_errors or run_errors),
         }
 
-    # LLM: 与 claim_run 共用过期与死亡判定；已开跑只记 unknown，恢复沿原终态/history 提交，不自动重放副作用。
-    # 函数用途: 启动或周期清理明确死亡的领取，显式控制可只复核准确 job；迁移旧版误留活动账本的 unknown。
+    # LLM: 先对账已持久终态，再沿原死亡判定迁移unknown；不重放副作用，不追加已有历史。
+    # 函数用途: 启动或周期清理旧备份和明确死亡的领取，显式控制仍沿原job版本校验。
     def recover_interrupted_executions(self, *, now: float | None = None, job_id: str = '', expected_version: int | None = None) -> list[str]:
         from .recovery import recover_runs
 
         self.maintain_history_index()
-        return recover_runs(self, current=_now(now), job_id=job_id, expected_version=expected_version)
+        reconciled = []
+        if self._history_terminal_runs(self._store_snapshot(readonly=True), job_id=job_id):
+            with self._mutation_scope() as (store, admission):
+                if job_id:
+                    self._require_mutable_job(store, job_id, expected_version)
+                reconciled = self._reconcile_history_runs_unlocked(store, job_id=job_id)
+                if reconciled:
+                    self._write_store_unlocked(store, admission)
+                    if job_id:
+                        expected_version = int(store['jobs'][job_id]['version'])
+        return reconciled + recover_runs(self, current=_now(now), job_id=job_id, expected_version=expected_version)
 
     def _valid_runs(self, store: dict[str, Any]) -> tuple[list[dict[str, object]], list[str]]:
         """逐条解析 runs: 坏记录跳过并收集错误(与 _valid_jobs 同容错模式)。"""
@@ -1623,6 +1638,50 @@ class _SchedulerStoreSupport:
         if _history_file_stamp(self.history_path) is not None:
             self._history_source_seen = True
         return found
+
+    # LLM: 无锁命中只允许进入原事务，写前须重读；只留候选合法终态，兼容已验证的来源线程兜底链。
+    # 函数用途: 流式找出旧活动副本对应的真实完成回执，不把普通run_id命中当终态。
+    def _history_terminal_runs(self, store, *, job_id: str = '', run_id: str = '') -> dict[str, dict]:
+        runs = {str(run['run_id']): run for run in self._valid_runs(store)[0]
+            if (not job_id or run['job_id'] == job_id) and (not run_id or run['run_id'] == run_id)}
+        if not runs:
+            return {}
+        seen = self._history_membership_unlocked(frozenset(runs))
+        if not seen:
+            return {}
+        terminals = {}
+
+        # LLM: 同owner/job及原线程或合法fallback链才收集；扫描/来源复核成功前不改store。
+        # 函数用途: 验证一条候选终态并保留本批命中。
+        def accept(raw):
+            terminal, _error = self._parse_run(raw, terminal=True)
+            original = runs.get(str(raw.get('run_id') or ''))
+            if terminal is None or original is None or terminal['job_id'] != original['job_id']:
+                return False
+            if terminal.get('thread_id') != original.get('thread_id') and terminal.get('thread_fallback') != {
+                'reason': 'source_thread_unavailable', 'original_thread_id': original.get('origin_thread_id'),
+                'fallback_thread_id': terminal.get('thread_id'),
+            }:
+                return False
+            terminals[str(terminal['run_id'])] = terminal
+            return True
+
+        _history_membership_fallback(self.history_path, seen, allow_missing=False, accept=accept)
+        return terminals
+
+    # LLM: 调用方持原写锁且已验证控制前提；不追加历史，复用原终态策略但不覆盖更晚的job结果。
+    # 函数用途: 结算旧活动副本并返回准确运行编号，落盘仍由调用方原事务负责。
+    def _reconcile_history_runs_unlocked(self, store, *, job_id: str = '', run_id: str = '') -> list[str]:
+        terminals = self._history_terminal_runs(store, job_id=job_id, run_id=run_id)
+        for identifier, terminal in terminals.items():
+            run = store['runs'][identifier]
+            job, _error = self._parse_job(store['jobs'].get(str(run['job_id'])))
+            ended = float(terminal.get('ended_at') or terminal.get('updated_at') or 0.0)
+            if job is not None and float(job.get('last_run_at') or 0.0) <= ended:
+                self._record_terminal_unlocked(store, run, terminal, now=ended)
+            else:
+                store['runs'].pop(identifier, None)
+        return list(terminals)
 
     # LLM: 保留原dict谓词与同批重复语义，不复制lifetime集合，不推断终态或授权。
     # 函数用途: 仅请求本批run_id并剔除规范历史已持久化的记录。
