@@ -17,6 +17,7 @@ from agent_py_agent.agent.scheduler.repository import (
     SchedulerStateError,
 )
 from agent_py_agent.agent.scheduler.service import SchedulerService
+from agent_py_agent.agent.settings import defaults as settings_defaults
 from agent_py_agent.agent.tooling import process_session_store as process_store_module
 from agent_py_agent.agent.tooling.process_session_store import ProcessSessionStore
 from agent_py_agent.tests.test_background_tick_cheap_checks import (
@@ -112,7 +113,9 @@ def test_waiting_reads_keep_main_lock_free_snapshot_path(tmp_path, projections, 
     assert _wanting_ids(first[0]) == ["srun_000"]
 
 
-def test_process_projection_lru_evicts_oldest_owner_and_hit_moves_entry(tmp_path, process_projections):
+def test_process_projection_lru_evicts_oldest_owner_and_hit_moves_entry(tmp_path, process_projections, monkeypatch):
+    # 上限随 owner 池登记的常驻容量(owner_agent_pool_max_agents)，这里按 64 登记。
+    monkeypatch.setattr(settings_defaults, "_RESIDENT_OWNER_CAPACITIES", [64])
     stores = []
     for index in range(65):
         store = ProcessSessionStore(tmp_path / f"owner-{index}")

@@ -14,6 +14,10 @@ from agent_py_agent.tests.slo.load import GatewayProcess, durable_receipt, json_
 from .normalize import normalize
 from .recorder import Recorder
 
+# A held provider phase is released only after the replayer's own observable-condition waits (each floored at
+# 25 s) see it blocked; under CI batch concurrency the scripted 10 s gate expired first. Floor it above them.
+_PHASE_GATE_TIMEOUT_SECONDS = 30.0
+
 
 class Replayer:
     # LLM: Scenario roots are exclusive test directories; no installed or live user Gateway is used.
@@ -23,7 +27,9 @@ class Replayer:
         self.bounds = {**fixture_parameters, "condition_seconds": max(fixture_parameters["condition_seconds"], 25)}
         self.recorder = Recorder(self.root / "evidence")
         self.requests, self.aliases, self.last_stopped, self.delivered = {}, {}, None, set()
-        self.provider = FakeProvider(self.root / "provider", script=scenario["fake_model_script"],
+        script = [{**entry, "deadline_seconds": max(float(entry.get("deadline_seconds", 10)), _PHASE_GATE_TIMEOUT_SECONDS)}
+                  if entry.get("wait_for_release") else entry for entry in scenario["fake_model_script"]]
+        self.provider = FakeProvider(self.root / "provider", script=script,
                                      teardown_seconds=self.bounds["teardown_seconds"])
         self.gateway = None
 

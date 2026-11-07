@@ -127,6 +127,7 @@ from .scheduler import SchedulerDueIndex, SchedulerRepository, SchedulerService,
 from .scheduler.active_run_closeout import SchedulerFollowUpPolicy, waiting_grace_seconds
 from .scheduler.repository import SchedulerStateError
 from .settings import AgentConfig
+from .settings.defaults import owner_agent_slot_count
 from .settings.model_scope import ModelScopedAttribute
 from .settings.runtime_guard_config import runtime_guard_policy
 from .subagents.manager import SubAgentManager
@@ -550,6 +551,7 @@ class SimpleAgent(
             plugin_roots=self._plugin_skill_roots,
             package_provider=self._capability_packages,
             learning_recommended_limit_provider=lambda: config.self_learning_recommended_limit,
+            cache_entries=owner_agent_slot_count(config),
         )
         self.capability_router = CapabilityRouter(
             config=config,

@@ -24,6 +24,7 @@ from typing import Any
 
 from .delivery import RuntimeHealthProvider
 from .settings.config import AgentConfig
+from .settings.defaults import register_resident_owner_capacity
 
 logger = logging.getLogger(__name__)
 
@@ -300,6 +301,8 @@ class OwnerScopedAgentPool:
         if max_agents is None:
             max_agents = getattr(base_config, "owner_agent_pool_max_agents", _DEFAULT_MAX_AGENT_COUNT)
         self._max_agents = _resolved_max_agents(max_agents)
+        # 按 owner 分条目的进程级派生缓存（进程记录投影等）跟随本池常驻容量定界。
+        register_resident_owner_capacity(self._max_agents)
         # Runtime health is process-scoped and read-only.  Keep the builder's four positional
         # arguments stable for test doubles while injecting that one shared provider explicitly.
         self._builder = partial(

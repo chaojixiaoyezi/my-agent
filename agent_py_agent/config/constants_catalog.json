@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1353,
+  "count": 1352,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -8714,14 +8714,6 @@
       "unit": "秒",
       "category": "其它",
       "description": "防时间戳精度与极端竞态。命中复用不会刷新这个时间。"
-    },
-    {
-      "name": "_PROCESS_RECORDS_PROJECTION_MAX_ENTRIES_COUNT",
-      "file": "agent_py_agent/agent/tooling/process_session_store.py",
-      "value": 64,
-      "unit": "个",
-      "category": "上限预算",
-      "description": "进程记录投影缓存最多缓存 64 个 owner 快照（按 owner 数 LRU）；被逐出的 owner 下次全读，只变慢不出错。"
     },
     {
       "name": "_PROCESS_SESSION_SCAN_BASE_MS",

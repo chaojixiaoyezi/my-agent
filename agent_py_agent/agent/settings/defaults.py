@@ -2,6 +2,7 @@
 # 模块用途: 提供配置默认值读取、输出上限与上下文窗口的换算函数。
 from __future__ import annotations
 
+import threading
 from functools import lru_cache
 from typing import Any
 
@@ -101,6 +102,40 @@ def default_config_bool(key: str) -> bool:
     return bool(default_config_value(key))
 
 
+# 本进程各 owner 池登记过的常驻 owner 容量（只保留最大值）；未登记时为空。
+_RESIDENT_OWNER_CAPACITIES: list[int] = []
+_RESIDENT_OWNER_CAPACITY_LOCK = threading.Lock()
+
+
+# LLM: owner 池构造时登记已解析的 owner_agent_pool_max_agents；按 owner 分条目的进程级派生缓存据此定界，
+#   配置内常驻的 owner 互不挤掉。只升不降：多个池并存时取最大，非正数忽略。不新增配置键。
+# 函数用途: 登记本进程 owner 池的常驻容量。
+def register_resident_owner_capacity(count: object) -> None:
+    if type(count) is not int or count < 1:
+        return
+    with _RESIDENT_OWNER_CAPACITY_LOCK:
+        _RESIDENT_OWNER_CAPACITIES[:] = [max([count, *_RESIDENT_OWNER_CAPACITIES])]
+
+
+# LLM: 未登记（CLI、单测、轻量宿主）回落同一配置键的默认值，不另设数字。
+# 函数用途: 返回按常驻 owner 数定界的进程级缓存条目数。
+def resident_owner_capacity() -> int:
+    registered = _RESIDENT_OWNER_CAPACITIES
+    return registered[0] if registered else default_config_int("owner_agent_pool_max_agents", minimum=1)
+
+
+# LLM: 单个 owner 同时在跑的代理上限：前台在途请求 + 后台主代理线程（普通/管理员取大），每个根会话树再带满
+#   max_subagents 个子代理；按 owner、按工作区保存的派生缓存以此为上限，配置内的并发工作区互不挤掉。
+# 函数用途: 由现有并发配置推出单个 owner 的并发代理槽位数，非法值回落各键默认值。
+def owner_agent_slot_count(config: Any) -> int:
+    def value(key: str, minimum: int) -> int:
+        raw = getattr(config, key, None)
+        return raw if type(raw) is int and raw >= minimum else default_config_int(key, minimum=minimum)
+
+    background = max(value("background_threads_per_owner", 1), value("background_admin_threads_per_owner", 1))
+    return (value("gateway_user_inflight_limit", 1) + background) * (1 + value("max_subagents", 0))
+
+
 __all__ = [
     "DEFAULT_COMMAND_ACCESS_MODE",
     "DEFAULT_MODEL_MAX_TOKENS",
@@ -113,4 +148,7 @@ __all__ = [
     "default_config_float",
     "default_config_int",
     "default_config_value",
+    "owner_agent_slot_count",
+    "register_resident_owner_capacity",
+    "resident_owner_capacity",
 ]
