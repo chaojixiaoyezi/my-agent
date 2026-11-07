@@ -49,8 +49,8 @@ def _macos_vision_ocr(buffer: PixelBuffer) -> list[TextRegion]:
     try:
         import io
 
-        from PIL import Image
         import Vision
+        from PIL import Image
     except ImportError:
         return []
     png_bytes = io.BytesIO()
