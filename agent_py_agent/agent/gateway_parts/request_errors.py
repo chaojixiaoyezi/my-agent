@@ -251,6 +251,7 @@ def gateway_client_error_message(error_code: object) -> str:
             "请查看压缩诊断；切换更大上下文的模型后可继续原会话。"
         )
     messages = {
+        "EXPIRED_TARGET_TURN": "目标回合已被停止，这条补充消息没有送入，也没有开始新回合；如仍需要，请重新发送。",
         "MODEL_NOT_CONFIGURED": (
             "尚未配置模型。请发送 /model 查看并选择可用模型；新增模型需在终端 TUI 的 /model 里操作。"
             "系统不会自动使用其它模型。"

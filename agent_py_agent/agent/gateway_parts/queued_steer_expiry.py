@@ -39,6 +39,9 @@ def queued_steer_expiry_response(paths: GatewayPaths, request: dict) -> dict | N
     if (report.payload.get("turn_phase") != "closed" or report.payload.get("status") != status
             or status not in {"done", "failed", "cancelled", "stopped", "interrupted"}):
         raise DataCorruptionError("target_terminal_state_conflict")
+    if status in {"done", "failed"}:
+        # 目标自行收口不是用户放弃：入口idle/closing、finish未见输入与拒收重排都已承诺下一轮，只有停止族过期。
+        return None
     return {"id": request["id"], "ok": False, "status": "cancelled", "response": "",
             "error_code": "EXPIRED_TARGET_TURN", "expected_turn_id": target, "ended_at": time.time()}
 

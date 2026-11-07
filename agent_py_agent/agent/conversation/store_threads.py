@@ -1060,6 +1060,11 @@ def _succeed_thread(threads, thread_id, *, title, binding, validate=None):
                 reasoning_effort=latest.reasoning_effort, verbose_level=latest.verbose_level,
                 decision_settings=copy.deepcopy(latest.decision_settings), learning_source=copy.deepcopy(latest.learning_source),
                 metadata=metadata, created_at=stamp, updated_at=stamp)
+            if latest.model_profile_id == "default" and latest.model_selection_source in {"default", "inherited"}:
+                # 前任只有建档时的"default"占位（从未选过模型）：继任是新会话，按_create取owner当前默认；显式/自动选择原样继承。
+                initial = threads.model_default() if threads.model_default is not None else ""
+                if initial and initial != "default":
+                    created = replace(created, model_profile_id=initial, model_selection_source="default")
             if selected is not None:
                 created = replace(created, channel_bindings=(replace(selected, thread_id=created.thread_id, last_active_at=stamp),))
             create_thread_atomic(threads, created)
