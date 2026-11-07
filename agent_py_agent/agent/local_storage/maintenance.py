@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 # LLM: FTS只属可重建投影；持久影子任务分批推进，换表、完成键和事件同事务提交。
-# LLM: C只消费当次scope；事件删除与pending同事务，JSONL成功后才清账，联验events锁序与partial恢复。
-# 模块用途: 提供索引维护、C完整重建和可恢复的流式事件裁剪，不决定owner权限。
+# LLM: C只消费当次scope；事件按seq前缀有界删除，封存段独立过期，旧逐行恢复账只做迁移清理。
+# 模块用途: 提供索引维护、C完整重建和有界事件/封存段维护，不决定owner权限。
 
 """implements LocalStore maintenance, statistics, reset, FTS rebuild, and integrity checks.
 
@@ -37,6 +37,8 @@ from ..common.json_io import (
 )
 from ..common.nofollow_fs import ensure_private_dir
 from ..io.sqlite_connection import sqlite_error_details
+from .events import iter_event_jsonl_paths
+from .search import FTS_ROWID_ALIGNED_KEY, fts_rowid_aligned
 
 if TYPE_CHECKING:
     from ..user_space.storage_lanes import StorageLaneRequest
@@ -48,8 +50,6 @@ STEADY_STATE_EVENTS_MAX_DELETE = 5000
 
 # 积压追平时单拍最多执行的事件裁剪步数。
 LOCAL_STORE_CATCHUP_MAX_STEPS_COUNT = 16
-# 事件积压追平期间单批登记删除的最多事件行数。
-LOCAL_STORE_CATCHUP_BATCH_ROWS = 50000
 # 单次增量回收最多释放的数据库页数。
 LOCAL_STORE_INCREMENTAL_VACUUM_PAGES_COUNT = 2048
 # 空闲页占比达到该百分比才执行页回收。
@@ -93,6 +93,9 @@ class LocalStoreMaintenanceMixin:
                 with self._connection() as conn:
                     conn.execute("PRAGMA auto_vacuum=INCREMENTAL").fetchall()
                     conn.execute("VACUUM").fetchall()
+                    conn.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES(?, 'false')",
+                                 (FTS_ROWID_ALIGNED_KEY,))
+                    conn.commit()
                 mode_name = "converted"
             elif due:
                 statement = f"PRAGMA incremental_vacuum({int(max_pages)})"
@@ -142,13 +145,13 @@ class LocalStoreMaintenanceMixin:
                 return {"performed": False, "deferred_reason": "busy"}
             raise
 
-    # LLM: 原SQL删除/pending先提交，JSONL按字节推进后才清账；原文件换代重启扫描，重启不丢游标或删除责任。
-    # 函数用途: 后台只推进一拍事件维护，不同步重写无界JSONL，也不执行VACUUM。
+    # LLM: SQL每事务至多五千行；只按封存段尾事件检查过期，活动文件及其追加者互不干涉。
+    # 函数用途: 后台推进一拍事件及段级维护，消化旧游标，不执行VACUUM。
     def prune_events_step(self, *, before: float, keep_last: int = 1000, max_delete: int = 256,
                           max_bytes: int = 256 * 1024):
         if type(max_bytes) is not int or max_bytes <= 0:
             raise ValueError("event scan byte budget must be positive")
-        options = (float(before), max(0, int(keep_last)), max(1, int(max_delete)))
+        options = (float(before), max(0, int(keep_last)), min(STEADY_STATE_EVENTS_MAX_DELETE, max(1, int(max_delete))))
         # 同类step串行，但不反向持JSONL锁等待SQLite；旧append/显式维护仍用原锁。
         step_lock = (self._coordinator_events_lock() if self.coordinator_io else
                      locked_json_path(self.events_path.with_name(self.events_path.name + ".prune")))
@@ -158,41 +161,31 @@ class LocalStoreMaintenanceMixin:
         with self._connection() as conn:
             free = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
             pages = int(conn.execute("PRAGMA page_count").fetchone()[0])
-        return {**_event_prune_result(selected, deleted, progress["removed"]),
+        return {**_event_prune_result(selected, deleted, progress["removed_segments"]),
                 "partial": not progress["complete"], "cursor": progress["cursor"],
                 "scanned_bytes": progress["scanned_bytes"], "expired_rows": {"deleted": len(deleted)},
+                "removed_segments": progress["removed_segments"], "removed_bytes": progress["removed_bytes"],
+                "errors": progress["errors"],
                 "free_page_reuse": {"available_pages": free, "page_count": pages},
                 "physical_shrink": {"performed": False, "reason_code": "explicit_maintenance_required"}}
 
-    # LLM: 满额pending先恢复且不选新批；删除与pending同事务，原锁序及成功后按ID清账合同不变。
-    # 函数用途: 裁剪一批旧事件并恢复上次未完成的JSONL清理，预演不写、失败留下准确恢复ID。
+    # LLM: 只选seq连续前缀，SQL提交后独立过期封存段；预演不触碰文件或旧恢复账。
+    # 函数用途: 裁剪一批旧事件并消化旧pending，不再逐行重写JSONL。
     def prune_events(self, *, before: float, keep_last: int = 1000, max_delete: int = 5000,
                      dry_run: bool = False) -> dict[str, int | bool]:
-        options = (float(before), max(0, int(keep_last)), max(1, int(max_delete)))
+        options = (float(before), max(0, int(keep_last)), min(STEADY_STATE_EVENTS_MAX_DELETE, max(1, int(max_delete))))
         with self._connection() as conn:
-            pending = _read_pending_event_ids(conn)
-            selected = (set() if _event_prune_pending_is_full(pending, options[2])
-                        else _select_prunable_event_ids(conn, *options))
-        if dry_run or not (selected or pending):
+            _read_pending_event_ids(conn)
+            selected = _select_prunable_event_ids(conn, *options)
+        if dry_run:
             return _event_prune_result(len(selected), set(), 0, dry_run=bool(dry_run))
-        if self.coordinator_io:
-            with self._coordinator_events_lock():
-                selected_count, deleted, targets = self._coordinator_transaction(
-                    lambda conn: _prepare_event_prune(conn, options))
-                removed = self._prune_event_jsonl(set(targets))
-            if targets:
-                self._coordinator_transaction(lambda conn: _clear_pending_event_ids(conn, targets))
-        else:
-            with self._connection() as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                # 普通writer先取得SQLite写锁，再取JSONL锁，不能反向拿锁造成相互等待。
-                with locked_json_path(self.events_path):
-                    selected_count, deleted, targets = _prepare_event_prune(conn, options)
-                    conn.commit()
-                    removed = self._prune_event_jsonl(set(targets))
-            # 先释放文件锁再申请清账写事务，避免与持DB锁等待追加的writer互锁。
-            if targets:
-                _clear_pending_events_transaction(self, targets)
+        step_lock = (self._coordinator_events_lock() if self.coordinator_io else
+                     locked_json_path(self.events_path.with_name(self.events_path.name + ".prune")))
+        with step_lock:
+            selected_count, deleted, targets = _event_step_transaction(
+                self, lambda conn: _prepare_event_prune(conn, options))
+            # SQL 已提交；封存段 unlink 不持 SQLite 写锁，也不改活动文件。
+            removed = self._prune_event_jsonl(set(targets))
         return _event_prune_result(selected_count, deleted, removed)
 
     # LLM: 只由显式/后台维护周期调用，每次至多max_delete；不在单事件热路径扫描，不VACUUM或清理records正文。
@@ -203,18 +196,20 @@ class LocalStoreMaintenanceMixin:
         return self.prune_events(before=time.time() if before is None else before,
                                  keep_last=keep_last, max_delete=max_delete, dry_run=dry_run)
 
-    # LLM: 调用方已持同events_path锁且SQL/pending已提交；文件读/解析门外，只有最后发表沿C原_local_write。
-    # 函数用途: 以逐行私有临时文件保留无关和坏行原字节，成功才返回，失败由pending供下次重试。
+    # LLM: SQL已提交；段尾只读在门外，封存段unlink沿C原_local_write，活动文件永不改写。
+    # 函数用途: 保留原整数接口，返回本拍整段删除数。
     def _prune_event_jsonl(self, target_ids: set[str]) -> int:
-        if not target_ids or not self.events_path.exists():
-            return 0
-        return _stream_prune_event_jsonl(self, target_ids)
+        from ..user_space.storage_lanes import STORAGE_LANE_SLICE_BYTES
+        return _event_jsonl_step(self, target_ids, STORAGE_LANE_SLICE_BYTES)["removed_segments"]
 
     # LLM: 原钩子只在真正准备时消耗；大单文档仅一次有上限单行重试，不跳过正文或CAS。
     # 函数用途: 保留原无参整数接口并恢复或开始一次完整重建。
     def rebuild_fts(self) -> int:
         if not self.fts_available:
             return 0
+        if _FTS_BATCH_LIMITS.get() is not None:
+            # 有界调用中的 schema 初始化不得暗中同步跑完整个重建；原 pending 留给分步口。
+            raise _FtsRebuildDeferred('fts rebuild deferred to bounded step')
         start_new = True
         original_prepare = self._prepare_fts_rebuild
         prepare_called = False
@@ -475,15 +470,49 @@ def _local_events_precheck(db_path):
         conn.close()
 
 
+def _local_events_alignment_needed(conn):
+    """只读预检复用 R2 的证明；空索引缺标记时不在只读连接中盖章。"""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='records_fts'").fetchone() is None:
+        return False
+    metadata = dict(conn.execute("SELECT key,value FROM metadata WHERE key IN (?, 'records_fts_rebuild_pending')",
+                                 (FTS_ROWID_ALIGNED_KEY,)).fetchall())
+    if (FTS_ROWID_ALIGNED_KEY not in metadata and metadata.get('records_fts_rebuild_pending') != 'true'
+            and conn.execute('SELECT 1 FROM records_fts LIMIT 1').fetchone() is None):
+        return False
+    return not fts_rowid_aligned(conn)
+
+
+def _local_events_extra_work(db_path, max_bytes):
+    """空 SQL 积压仍可有段过期或旧 FTS 对齐工作；只读最旧段的有界尾窗。"""
+    conn = sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True, timeout=0.0)
+    try:
+        alignment = _local_events_alignment_needed(conn)
+        active = db_path.parent / 'events.jsonl'
+        segments = [path for path in iter_event_jsonl_paths(active) if path != active]
+        if not segments:
+            return alignment, False, 0, []
+        path = segments[0]
+        try:
+            event_id, _size, scanned = _event_segment_tail(path, max_bytes)
+        except (OSError, ValueError, RecursionError) as error:
+            return alignment, True, getattr(error, 'scanned_bytes', 0), [
+                {'code': 'event_segment_tail_unreadable', 'path': path.name}]
+        due = event_id is None or conn.execute('SELECT 1 FROM events WHERE event_id=?', (event_id,)).fetchone() is None
+        return alignment, due, scanned, []
+    finally:
+        conn.close()
+
+
 # LLM: 只驱动原冻结裁剪step；最多16拍，后续拍受累计JSONL字节和协作时间限制，首拍即使过期也推进。
 # 函数用途: 追赶一个Store并在事件阶段后执行一次独立页回收。
-def _local_events_advance(store, request, snapshot, budget, receipt):
+def _local_events_advance(store, request, snapshot, budget, receipt, *, segments_due=False):
     if snapshot is None:
         with store._connection() as conn:
             snapshot = _local_events_snapshot(conn, store.db_path)
     backlog, resumable = snapshot[:2]
-    deleted_db = deleted_jsonl = scanned_bytes = 0
-    if backlog or resumable:
+    deleted_db = deleted_jsonl = 0
+    scanned_bytes = receipt['bytes']
+    if backlog or resumable or segments_due:
         for step in range(LOCAL_STORE_CATCHUP_MAX_STEPS_COUNT):
             if step and (budget.remaining_ms() <= 0 or budget.exhausted(size=scanned_bytes)):
                 break
@@ -492,13 +521,16 @@ def _local_events_advance(store, request, snapshot, budget, receipt):
                 break
             result = store.prune_events_step(
                 before=request.now, keep_last=STEADY_STATE_EVENTS_KEEP_LAST,
-                max_delete=(LOCAL_STORE_CATCHUP_BATCH_ROWS if backlog > STEADY_STATE_EVENTS_MAX_DELETE
-                            else STEADY_STATE_EVENTS_MAX_DELETE), max_bytes=remaining)
+                max_delete=STEADY_STATE_EVENTS_MAX_DELETE, max_bytes=remaining)
             deleted_db += result["deleted_db"]
             deleted_jsonl += result["deleted_jsonl"]
             scanned_bytes += result["scanned_bytes"]
             backlog = max(0, backlog - result["deleted_db"])
             receipt.update(deleted_items=deleted_db, bytes=scanned_bytes, backlog=backlog)
+            if result.get('errors'):
+                from ..user_space.storage_lanes import STORAGE_LANE_RECEIPT_MAX_ERRORS_COUNT
+                receipt['errors'] = (receipt['errors'] + result['errors'])[:STORAGE_LANE_RECEIPT_MAX_ERRORS_COUNT]
+                break
             if not result["partial"] and result["deleted_db"] == 0:
                 break
     if budget.exhausted(size=scanned_bytes):
@@ -579,6 +611,13 @@ def maintain_local_events_lane(request: StorageLaneRequest) -> dict:
     try:
         snapshot = _local_events_precheck(db_path)
         event_work = snapshot is not None and bool(snapshot[0] or snapshot[1])
+        alignment_work = segment_work = False
+        if snapshot is not None:
+            read_budget = min(request.budget.max_bytes if request.budget.max_bytes is not None else STORAGE_LANE_SLICE_BYTES,
+                              STORAGE_LANE_SLICE_BYTES)
+            alignment_work, segment_work, scanned, errors = _local_events_extra_work(db_path, read_budget)
+            receipt['bytes'] = scanned
+            receipt['errors'] = (receipt['errors'] + errors)[:STORAGE_LANE_RECEIPT_MAX_ERRORS_COUNT]
         vacuum = {"performed": False, "deferred_reason": "below_threshold"}
         vacuum_work = snapshot is not None and bool(snapshot[3] or _local_store_vacuum_due(snapshot[2]))
         if vacuum_work and snapshot[2][0] == 0:
@@ -587,7 +626,7 @@ def maintain_local_events_lane(request: StorageLaneRequest) -> dict:
             if reason is not None:
                 vacuum_work = False
                 vacuum["deferred_reason"] = reason
-        initial_work = snapshot is None or event_work or vacuum_work
+        initial_work = snapshot is None or event_work or vacuum_work or alignment_work or segment_work
         if initial_work:
             budget = request.budget.capped(items=STORAGE_LANE_SLICE_ENTRIES,
                                           size=STORAGE_LANE_SLICE_BYTES, ms=STORAGE_LANE_SLICE_MS)
@@ -597,9 +636,24 @@ def maintain_local_events_lane(request: StorageLaneRequest) -> dict:
                 return {**receipt, "cursor": dict(cursor), "deferred_reason": "budget_exhausted"}
             scope = global_write_commit_scope(commit) if request.coordinator else nullcontext()
             with scope:
-                store = LocalStore(db_path, **({"coordinator_io": True} if request.coordinator else {}))
+                # schema 恢复 pending 时只保留原责任，不在有界通道构造中同步跑完整库。
+                token = _FTS_BATCH_LIMITS.set((budget.max_items, budget.max_bytes, budget.deadline))
+                try:
+                    store = LocalStore(db_path, **({"coordinator_io": True} if request.coordinator else {}))
+                finally:
+                    _FTS_BATCH_LIMITS.reset(token)
                 deleted, mirrored, scanned, vacuum, after = _local_events_advance(
-                    store, request, snapshot, budget, receipt)
+                    store, request, snapshot, budget, receipt, segments_due=segment_work)
+                if store.fts_available and budget.remaining_ms() > 0 and scanned < budget.max_bytes:
+                    with store._connection() as conn:
+                        alignment_work = _local_events_alignment_needed(conn)
+                        job = _fts_job(conn) if alignment_work else None
+                    if alignment_work:
+                        alignment = store.rebuild_fts_step(max_rows=budget.max_items,
+                            max_bytes=budget.max_bytes - scanned, max_ms=budget.remaining_ms(),
+                            start_new=job is None or job['phase'] == 'complete')
+                        # 通道顶层是冻结 schema；开放 cursor 只展示进度，重建权威仍在原 SQLite job。
+                        receipt['cursor']['fts_alignment'] = {key: alignment[key] for key in ('status', 'copied')}
                 if source_failure:
                     raise source_failure[0]
             receipt.update(deleted_items=deleted, bytes=scanned,
@@ -655,16 +709,13 @@ def _event_prune_pending_is_full(pending, max_delete):
     return len(pending) >= min(max_delete, STEADY_STATE_EVENTS_MAX_DELETE)
 
 
-# LLM: 调用方已BEGIN；满额旧账不再删除新行，其余先删再核实际消失ID，与pending同事务提交。
-# 函数用途: 准备可恢复且不持续扩张的清理批次，触发器忽略的行不进入待擦除集。
+# LLM: 旧pending仅供消化；本拍按seq前缀删除，触发器保留的行不计入已删集。
+# 函数用途: 准备有界SQL删除批次，不再新增逐行重写责任。
 def _prepare_event_prune(conn, options):
     pending = _read_pending_event_ids(conn)
-    if _event_prune_pending_is_full(pending, options[2]):
-        return 0, set(), pending
     selected, deleted = _delete_prunable_events(conn, *options)
     targets = list(dict.fromkeys([*pending, *sorted(deleted)]))
-    if targets:
-        _write_pending_event_ids(conn, targets)
+    # Cat3-R4：旧 pending 只迁移消化，新的 SQL 删除不再登记逐行重写责任。
     return selected, deleted, targets
 
 
@@ -752,10 +803,18 @@ def _discard_event_temp(temporary, primary):
 # LLM: 只读当前事务中的events；时间相等时沿原timeline的seq定序，不以JSONL、显示时间或条数猜删除集合。
 # 函数用途: 选出不在最新保护窗口内、严格过期且至多max_delete条的事件ID。
 def _select_prunable_event_ids(conn, before: float, keep_last: int, max_delete: int) -> set[str]:
-    return {row[0] for row in conn.execute(
-        "SELECT event_id FROM events WHERE created_at < ? AND seq NOT IN "
-        "(SELECT seq FROM events ORDER BY created_at DESC, seq DESC LIMIT ?) "
-        "ORDER BY created_at ASC, seq ASC LIMIT ?", (before, keep_last, max_delete))}
+    # 保护窗口沿 seq，与 JSONL 追加次序一致；时间相等不再改变窗口或删除次序。
+    boundary = conn.execute("SELECT seq FROM events ORDER BY seq DESC LIMIT 1 OFFSET ?", (keep_last,)).fetchone()
+    if boundary is None:
+        return set()
+    selected = set()
+    for event_id, created_at in conn.execute(
+            "SELECT event_id, created_at FROM events WHERE seq <= ? ORDER BY seq ASC LIMIT ?",
+            (boundary[0], max_delete)):
+        if created_at >= before:
+            break
+        selected.add(event_id)
+    return selected
 
 
 # LLM: 同一维护事务端口，不另开写者；C已持events锁，普通模式仍按DB→JSONL锁序。
@@ -778,12 +837,6 @@ _EVENT_STEP_TEMP_NAME = re.compile(r"\.events-prune-[a-zA-Z0-9_-]+\.step")
 # LLM: 有效游标沿用其原登记目标，不扩大或改换集合；并发新登记的pending留给下一批，SQL删除与原pending同事务。
 # 函数用途: 仅在没有未完成流式批次时选择新的一批旧事件，续扫批次保持原目标归属。
 def _event_step_prepare(conn, options):
-    pending = _read_pending_event_ids(conn)
-    job = _read_event_step_job(conn)
-    if job is not None and _event_step_job_valid(job):
-        return 0, set(), list(job["targets"])
-    if job is not None or pending:
-        return 0, set(), pending
     return _prepare_event_prune(conn, options)
 
 
@@ -851,60 +904,78 @@ def _event_step_temp(store, job):
     return path, descriptor
 
 
-# LLM: 续扫只认同dev/ino、size不小于已提交offset且前缀样本一致；正常追加不重置，换代/截断/前缀改写才从0重扫并保留原pending。
-# LLM: 读取与过滤在JSONL锁外；扫到EOF才持原锁复核锁内EOF，在本拍剩余预算内读完新尾后原子发表，释放锁后才清SQLite账。
-# 函数用途: 分拍复制原JSONL，保持无关/坏行的原始字节，发表成功后才清除准确pending与游标。
+# LLM: 只检查封存段尾，活动JSONL不参与；旧游标只清理其校验过的字面临时路径。
+# 函数用途: 过期整段并消化旧pending/游标，保留原分步回执结构。
 def _event_jsonl_step(store, targets, max_bytes):
-    result = {"removed": 0, "scanned_bytes": 0, "complete": True, "cursor": {}}
     with store._connection() as conn:
         job = _read_event_step_job(conn)
-    write = store._local_write if store.coordinator_io else lambda operation: operation()
-    if not targets or not store.events_path.exists():
-        if job is not None:
-            _drop_event_step_temp(store, job, write)
+        pending = conn.execute("SELECT 1 FROM metadata WHERE key=?", (_EVENTS_PRUNE_PENDING_KEY,)).fetchone()
+    result = _expire_event_segments(store, max_bytes)
+    if job is not None:
+        write = store._local_write if store.coordinator_io else lambda operation: operation()
+        # 只删除游标中通过原 basename 校验的那个临时文件，绝不按模式批量清理。
+        _drop_event_step_temp(store, job, write)
+    if job is not None or pending is not None:
         _event_step_transaction(store, lambda conn: _event_step_save(conn, None, targets))
-        return result
-    created = None
+    return result
+
+
+def _event_segment_tail(path, max_bytes):
+    """只读封存段最后至多 64KiB；不完整、过长或损坏的末行均保守保留。"""
+    amount = 0
     try:
-        with ExitStack() as handles:
-            source = handles.enter_context(store.events_path.open("rb"))
-            identity, size = _event_file_revision(source.fileno())
-            windows = _event_step_resume(job, targets, source, identity, size)
-            opened = None if windows is None else _event_step_open_temp(store, job, write)
-            if opened is None:
-                if job is not None:
-                    _drop_event_step_temp(store, job, write)
-                job = created = _event_step_new_job(store, targets, identity, write)
-                windows = (b"", b"")
-                opened = write(lambda: _event_step_temp(store, job))
-            temporary, descriptor = opened
-            retained = handles.enter_context(os.fdopen(descriptor, "r+b"))
-            source.seek(job["offset"])
-            chunk = source.read(min(max_bytes, size - job["offset"]))
-            windows = _event_step_consume(write, retained, job, windows, chunk, result, final=False)
-            complete = False
-            if job["offset"] == size:
-                with nullcontext() if store.coordinator_io else locked_json_path(store.events_path):
-                    size = _event_step_locked_eof(store, source, job, windows)
-                    remaining = size - job["offset"]
-                    if remaining <= max_bytes - result["scanned_bytes"]:
-                        source.seek(job["offset"])
-                        tail = source.read(remaining)
-                        if len(tail) != remaining:
-                            raise ValueError("event source changed during bounded scan")
-                        _event_step_consume(write, retained, job, windows, tail, result, final=True)
-                        # 先关闭来源与暂存FD再替换，仍在原锁内；新尾已完整进入暂存，不丢不重。
-                        handles.close()
-                        _publish_pruned_event_file(store, temporary)
-                        write(lambda: _sync_parent_directory(store.events_path))
-                        complete = True
-        result.update(complete=complete, cursor={"offset": job["offset"], "source_bytes": size})
-        # 释放原JSONL锁后才申请SQLite写锁；断在此处仍由旧pending/游标幂等恢复。
-        _event_step_transaction(store, lambda conn: _event_step_save(conn, None if complete else job, targets))
-    except BaseException as exc:
-        if created is not None:
-            _discard_new_event_temp(store, created, write, exc)
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValueError('invalid event segment shape')
+            amount = min(info.st_size, 64 * 1024)
+            if amount > max_bytes:
+                return None, info.st_size, 0
+            offset = info.st_size - amount
+            handle.seek(offset)
+            tail = handle.read(amount)
+        end = tail.rfind(b'\n')
+        start = tail.rfind(b'\n', 0, end) + 1
+        if end < 0 or end != len(tail) - 1 or (offset and start == 0):
+            raise ValueError('incomplete event segment tail')
+        row = json.loads(tail[start:end])
+        if not isinstance(row, dict) or not isinstance(row.get('event_id'), str) or not row['event_id']:
+            raise ValueError('invalid event segment tail')
+        return row['event_id'], info.st_size, amount
+    except (OSError, ValueError, RecursionError) as error:
+        # 坏尾行也保留本次有界读取量，不把解析失败当作零成本继续下一拍。
+        error.scanned_bytes = amount
         raise
+
+
+def _expire_event_segments(store, max_bytes) -> dict:
+    """SQL 已删掉封存段末事件才整段过期；活动文件从不打开、截断或替换。"""
+    result = {"removed": 0, "removed_segments": 0, "removed_bytes": 0, "scanned_bytes": 0,
+              "complete": True, "cursor": {}, "errors": []}
+    paths = [path for path in iter_event_jsonl_paths(store.events_path) if path != store.events_path]
+    if not paths:
+        return result
+    write = store._local_write if store.coordinator_io else lambda operation: operation()
+    with store._connection() as conn:
+        for path in paths:
+            try:
+                event_id, size, scanned = _event_segment_tail(path, max_bytes - result['scanned_bytes'])
+            except (OSError, ValueError, RecursionError) as error:
+                result['scanned_bytes'] += getattr(error, 'scanned_bytes', 0)
+                result.update(complete=False, errors=[{'code': 'event_segment_tail_unreadable', 'path': path.name}])
+                break
+            result['scanned_bytes'] += scanned
+            if event_id is None:
+                result['complete'] = False
+                break
+            if conn.execute('SELECT 1 FROM events WHERE event_id=?', (event_id,)).fetchone() is not None:
+                break
+            # 连接只执行 SELECT；先关闭段 FD，再沿原写门 unlink，未持 SQLite 写锁。
+            write(path.unlink)
+            write(partial(_sync_parent_directory, path))
+            result['removed_segments'] += 1
+            result['removed_bytes'] += size
     return result
 
 
@@ -1014,8 +1085,7 @@ def _event_step_locked_eof(store, source, job, windows):
 # 函数用途: 在短SQL事务里发布本拍流式位置或完成确认，不清并发新增目标。
 def _event_step_save(conn, job, targets):
     if job is None:
-        _clear_pending_event_ids(conn, targets)
-        conn.execute("DELETE FROM metadata WHERE key='events_prune_cursor'")
+        conn.execute("DELETE FROM metadata WHERE key IN ('events_prune_cursor', ?)", (_EVENTS_PRUNE_PENDING_KEY,))
     else:
         conn.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('events_prune_cursor',?)", (json.dumps(job),))
 
@@ -1047,7 +1117,7 @@ def _pruned_event_line(line: bytes, target_ids: set[str]) -> bool:
     return isinstance(row, dict) and isinstance(row.get("event_id"), str) and row["event_id"] in target_ids
 
 
-# LLM: 只汇报实际选择、提交删除与JSONL过滤数量，不把跨介质partial伪装成全事务回滚。
+# LLM: deleted_jsonl沿旧键返回封存段数，不再代表行数；不把跨介质partial伪装成全事务回滚。
 # 函数用途: 生成有界事件裁剪的稳定公开回执。
 def _event_prune_result(selected: int, deleted: set[str], removed: int, *, dry_run: bool = False) -> dict[str, int | bool]:
     return {"ok": True, "dry_run": dry_run, "selected": selected, "deleted_db": len(deleted), "deleted_jsonl": removed}
@@ -1522,6 +1592,7 @@ def _fts_start(store, expected):
             conn.execute(statement)
         conn.execute("INSERT INTO metadata(key,value) VALUES('records_fts_rebuild_pending','true') "
                      'ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+        conn.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES(?, 'false')", (FTS_ROWID_ALIGNED_KEY,))
         conn.execute('UPDATE maintenance_fts_job SET state=? WHERE slot=1',
                      (_fts_pack(_read_rebuild_state(conn)),))
     _fts_transaction(store, operation)
@@ -1922,6 +1993,7 @@ def _fts_publish(store, conn, snapshot):
     store._record_event(conn, 'fts_rebuilt', '', {'count': job['copied']},
         **({'append_records': store._append_coordinator_event_records} if store.coordinator_io else {}))
     store._record_fts_rebuild_complete(conn)
+    conn.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES(?, 'true')", (FTS_ROWID_ALIGNED_KEY,))
     _fts_update(conn, phase='complete', verify_cursor=snapshot.advance, verified_count=job['copied'])
     if _fts_directory(store) != snapshot.directory:
         raise BlockingIOError('local_store_rebuild_content_directory_changed')

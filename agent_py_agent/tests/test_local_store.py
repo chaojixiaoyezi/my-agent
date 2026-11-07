@@ -529,6 +529,7 @@ def _perf_e_event_store(tmp_path, coordinator):
 
 @pytest.mark.parametrize("coordinator", [False, True])
 def test_perf_e_prune_events_is_bounded_and_preserves_jsonl_only_bytes(tmp_path, coordinator):
+    # Cat3-R4：活动 JSONL 不再逐行删除；旧 pending 不再新增，回执计封存段数。
     store, events, scope = _perf_e_event_store(tmp_path, coordinator)
     prune = getattr(store, "prune_events", None)
     assert callable(prune), "missing bounded event retention"
@@ -542,17 +543,18 @@ def test_perf_e_prune_events_is_bounded_and_preserves_jsonl_only_bytes(tmp_path,
         assert store.stats()["event_count"] == 6
         assert store.events_path.read_bytes() == b"".join(original) + extra
         first = prune(before=50, keep_last=2, max_delete=2)
-        assert first == {"ok": True, "dry_run": False, "selected": 2, "deleted_db": 2, "deleted_jsonl": 2}
-        assert store.events_path.read_bytes() == b"".join(original[2:]) + extra
+        assert first == {"ok": True, "dry_run": False, "selected": 2, "deleted_db": 2, "deleted_jsonl": 0}
+        assert store.events_path.read_bytes() == b"".join(original) + extra
         assert prune(before=50, keep_last=2, max_delete=2)["deleted_db"] == 1  # cutoff严格小于。
         assert prune(before=100, keep_last=2)["deleted_db"] == 1
         assert {item.event_id for item in store.timeline()} == {event.event_id for event in events[-2:]}
-        assert store.events_path.read_bytes() == b"".join(original[-2:]) + extra
+        assert store.events_path.read_bytes() == b"".join(original) + extra
         assert prune(before=100, keep_last=2)["selected"] == 0
 
 
 @pytest.mark.parametrize("coordinator", [False, True])
 def test_perf_e_prune_events_only_filters_rows_actually_deleted_by_sqlite(tmp_path, coordinator):
+    # Cat3-R4：活动 JSONL 不再逐行删除；旧 pending 不再新增，回执计封存段数。
     store, events, scope = _perf_e_event_store(tmp_path, coordinator)
     prune = getattr(store, "prune_events", None)
     assert callable(prune), "missing bounded event retention"
@@ -562,9 +564,9 @@ def test_perf_e_prune_events_only_filters_rows_actually_deleted_by_sqlite(tmp_pa
                      "BEGIN SELECT RAISE(IGNORE); END")
     with scope():
         result = prune(before=50, keep_last=0, max_delete=2)
-        assert result == {"ok": True, "dry_run": False, "selected": 2, "deleted_db": 1, "deleted_jsonl": 1}
+        assert result == {"ok": True, "dry_run": False, "selected": 2, "deleted_db": 1, "deleted_jsonl": 0}
         assert store.stats()["event_count"] == 5
-    assert store.events_path.read_bytes() == b"".join([original[0], *original[2:]])
+    assert store.events_path.read_bytes() == b"".join(original)
 
 
 def test_perf_e_prune_events_normalizes_limits_and_chunks_sql_parameters(tmp_path):
@@ -582,28 +584,24 @@ def test_perf_e_prune_events_normalizes_limits_and_chunks_sql_parameters(tmp_pat
 
 @pytest.mark.parametrize("coordinator", [False, True])
 def test_perf_e_prune_events_rewrite_failure_reports_partial_without_dropping_jsonl(tmp_path, monkeypatch, coordinator):
+    # Cat3-R4：活动流不再发表重写，旧 writer 即使不可用也不影响 SQL 裁剪。
     from agent_py_agent.agent.local_storage import maintenance
 
     store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
-    prune = getattr(store, "prune_events", None)
-    assert callable(prune), "missing bounded event retention"
     before = store.events_path.read_bytes()
-    error = OSError("atomic rewrite unavailable")
-
     def refuse(*args, **kwargs):
-        raise error
-
+        raise OSError("atomic rewrite unavailable")
     monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", refuse, raising=False)
-    with scope(), pytest.raises(OSError) as caught:
-        prune(before=50, keep_last=2, max_delete=1)
-    assert caught.value is error
-    assert store.events_path.read_bytes() == before
     with scope():
+        result = store.prune_events(before=50, keep_last=2, max_delete=1)
+        assert result["deleted_db"] == 1 and result["deleted_jsonl"] == 0
         assert store.stats()["event_count"] == 5
+    assert store.events_path.read_bytes() == before
 
 
 @pytest.mark.parametrize("coordinator", [False, True])
 def test_perf_e_prune_events_keeps_json_beyond_parser_recursion_limit(tmp_path, coordinator):
+    # Cat3-R4：活动 JSONL 不再逐行删除；旧 pending 不再新增，回执计封存段数。
     import sys
 
     store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
@@ -612,12 +610,13 @@ def test_perf_e_prune_events_keeps_json_beyond_parser_recursion_limit(tmp_path, 
     with store.events_path.open("ab") as handle:
         handle.write(nested)
     with scope():
-        assert store.prune_events(before=50, keep_last=2, max_delete=1)["deleted_jsonl"] == 1
-    assert store.events_path.read_bytes() == b"".join(lines[1:]) + nested
+        assert store.prune_events(before=50, keep_last=2, max_delete=1)["deleted_jsonl"] == 0
+    assert store.events_path.read_bytes() == b"".join(lines) + nested
 
 
 @pytest.mark.parametrize("coordinator", [False, True])
 def test_perf_e_prune_events_keeps_row_when_decoder_reports_recursion_limit(tmp_path, monkeypatch, coordinator):
+    # Cat3-R4：活动 JSONL 不再逐行删除；旧 pending 不再新增，回执计封存段数。
     from agent_py_agent.agent.local_storage import maintenance
 
     store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
@@ -634,8 +633,8 @@ def test_perf_e_prune_events_keeps_row_when_decoder_reports_recursion_limit(tmp_
 
     monkeypatch.setattr(maintenance.json, "loads", decode)
     with scope():
-        assert store.prune_events(before=50, keep_last=2, max_delete=1)["deleted_jsonl"] == 1
-    assert store.events_path.read_bytes() == b"".join(lines[1:]) + unmatched.encode()
+        assert store.prune_events(before=50, keep_last=2, max_delete=1)["deleted_jsonl"] == 0
+    assert store.events_path.read_bytes() == b"".join(lines) + unmatched.encode()
 
 
 # LLM: 只读真实metadata，不用进程缓存或待实现helper推测恢复责任。
@@ -648,32 +647,27 @@ def _b2_pending_ids(store):
 
 @pytest.mark.parametrize("coordinator", [False, True])
 def test_b2_failed_rewrite_recovers_without_new_db_deletions(tmp_path, monkeypatch, coordinator):
+    # Cat3-R4：不再走旧重写失败/恢复链；重开仍只维护 SQL，活动文件原样保留。
     from agent_py_agent.agent.local_storage import maintenance
 
-    store, events, scope = _perf_e_event_store(tmp_path, coordinator)
-    original = store.events_path.read_bytes().splitlines(keepends=True)
-    writer = maintenance.write_private_text_file_atomic_unlocked
-
+    store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
+    original = store.events_path.read_bytes()
     def fail(*args, **kwargs):
         raise OSError("injected rewrite failure")
-
     monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", fail)
-    with scope(), pytest.raises(OSError, match="injected"):
-        store.prune_events(before=50, keep_last=2, max_delete=3)
-    assert _b2_pending_ids(store) == sorted(event.event_id for event in events[:3])
-    monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", writer)
-    # 新实例模拟重启，不依赖旧进程缓存；DB 无符合 before 的新行。
     with scope():
+        assert store.prune_events(before=50, keep_last=2, max_delete=3)["deleted_db"] == 3
         store = LocalStore(store.db_path, coordinator_io=coordinator)
         result = store.prune_events(before=50, keep_last=2, max_delete=3)
-    assert result == {"ok": True, "dry_run": False, "selected": 0, "deleted_db": 0, "deleted_jsonl": 3}
-    assert store.events_path.read_bytes() == b"".join(original[3:])
+    assert result == {"ok": True, "dry_run": False, "selected": 0, "deleted_db": 0, "deleted_jsonl": 0}
+    assert store.events_path.read_bytes() == original
     assert _b2_pending_ids(store) == []
     assert list(tmp_path.glob(".events.jsonl.*.tmp")) == []
 
 
 @pytest.mark.parametrize("coordinator", [False, True])
 def test_b2_dry_run_keeps_pending_and_never_rewrites(tmp_path, coordinator):
+    # Cat3-R4：活动 JSONL 不再逐行删除；旧 pending 不再新增，回执计封存段数。
     store, events, scope = _perf_e_event_store(tmp_path, coordinator)
     with sqlite3.connect(store.db_path) as conn:
         conn.execute("DELETE FROM events WHERE event_id=?", (events[0].event_id,))
@@ -686,7 +680,7 @@ def test_b2_dry_run_keeps_pending_and_never_rewrites(tmp_path, coordinator):
     assert _b2_pending_ids(store) == [events[0].event_id]
     assert store.events_path.read_bytes() == original
     with scope():
-        assert store.prune_events(before=0)["deleted_jsonl"] == 1
+        assert store.prune_events(before=0)["deleted_jsonl"] == 0
     assert _b2_pending_ids(store) == []
 
 
@@ -746,6 +740,7 @@ def test_b2_event_rewrite_modes_ignore_unrelated_replacements(tmp_path, monkeypa
 # 函数用途: 验证两种模式的真实事件重写既流式又私有，不把无关替换算进结果。
 @pytest.mark.parametrize("coordinator", [False, True])
 def test_b2_default_rewrite_streams_with_bounded_memory_and_private_temp(tmp_path, monkeypatch, coordinator):
+    # Cat3-R4：活动 JSONL 不再逐行删除；旧 pending 不再新增，回执计封存段数。
     import tracemalloc
 
     store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
@@ -764,10 +759,10 @@ def test_b2_default_rewrite_streams_with_bounded_memory_and_private_temp(tmp_pat
         peak = tracemalloc.get_traced_memory()[1]
     finally:
         tracemalloc.stop()
-    assert result["deleted_jsonl"] == 1
+    assert result["deleted_jsonl"] == 0
     assert peak < 2 * 1024 * 1024, f"whole-file buffering: peak={peak}"
-    assert modes == [0o600]
-    assert store.events_path.read_bytes() == b"".join(original[1:]) + retained * 20000 + bad
+    assert modes == []
+    assert store.events_path.read_bytes() == b"".join(original) + retained * 20000 + bad
     assert list(tmp_path.glob(".events.jsonl.*.tmp")) == []
 
 
@@ -784,6 +779,7 @@ def _b2_seed_events(store, count):
 
 @pytest.mark.parametrize("coordinator", [False, True])
 def test_b2_steady_state_defaults_keep_latest_twenty_thousand_in_bounded_batches(tmp_path, coordinator):
+    # Cat3-R4：活动 JSONL 不再逐行删除；旧 pending 不再新增，回执计封存段数。
     store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
     with scope():
         store.reset()
@@ -799,7 +795,7 @@ def test_b2_steady_state_defaults_keep_latest_twenty_thousand_in_bounded_batches
     with sqlite3.connect(store.db_path) as conn:
         ids = [row[0] for row in conn.execute("SELECT event_id FROM events ORDER BY seq")]
     assert ids == [f"b2-{index:06d}" for index in range(5005, 25005)]
-    assert [json.loads(line)["event_id"] for line in store.events_path.read_text().splitlines()] == ids
+    assert [json.loads(line)["event_id"] for line in store.events_path.read_text().splitlines()] == [f"b2-{index:06d}" for index in range(25005)]
 
 
 def test_b2_event_maintenance_is_explicit_and_bounded_not_record_event_hot_path(tmp_path, monkeypatch):
@@ -820,9 +816,10 @@ def test_b2_event_maintenance_is_explicit_and_bounded_not_record_event_hot_path(
 
 @pytest.mark.parametrize("coordinator", [False, True])
 def test_b2_clear_ledger_releases_file_lock_before_waiting_for_append_writer(tmp_path, monkeypatch, coordinator):
-    from agent_py_agent.agent.local_storage import events as event_module
-
+    # Cat3-R4：活动 JSONL 不再逐行删除；旧 pending 不再新增，回执计封存段数。
     from contextlib import contextmanager
+
+    from agent_py_agent.agent.local_storage import events as event_module
 
     store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
     writer = LocalStore(store.db_path)
@@ -865,7 +862,7 @@ def test_b2_clear_ledger_releases_file_lock_before_waiting_for_append_writer(tmp
         monkeypatch.setattr(store, "_coordinator_transaction", clear_after_writer)
     try:
         with scope():
-            assert store.prune_events(before=50, keep_last=2, max_delete=1)["deleted_jsonl"] == 1
+            assert store.prune_events(before=50, keep_last=2, max_delete=1)["deleted_jsonl"] == 0
     finally:
         thread.join(3)
     assert not thread.is_alive() and failures == []
@@ -875,70 +872,55 @@ def test_b2_clear_ledger_releases_file_lock_before_waiting_for_append_writer(tmp
 
 @pytest.mark.parametrize("coordinator", [False, True])
 def test_b2_retry_syncs_already_replaced_file_before_clearing_pending(tmp_path, monkeypatch, coordinator):
+    # Cat3-R4：没有封存段时不发表/同步活动文件，也不建立逐行恢复账。
     from agent_py_agent.agent.local_storage import maintenance
 
-    store, events, scope = _perf_e_event_store(tmp_path, coordinator)
-    original = store.events_path.read_bytes().splitlines(keepends=True)
-    sync = maintenance._sync_parent_directory
-    synced = []
-
+    store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
+    original = store.events_path.read_bytes()
     def fail(path):
-        raise OSError("directory sync failed after replace")
-
+        raise OSError("directory sync must not touch active stream")
     monkeypatch.setattr(maintenance, "_sync_parent_directory", fail)
-    with scope(), pytest.raises(OSError, match="directory sync"):
-        store.prune_events(before=50, keep_last=2, max_delete=3)
-    assert store.events_path.read_bytes() == b"".join(original[3:])
-    assert set(_b2_pending_ids(store)) == {event.event_id for event in events[:3]}
-
-    def track(path):
-        synced.append(path)
-        return sync(path)
-
-    monkeypatch.setattr(maintenance, "_sync_parent_directory", track)
     with scope():
-        assert store.prune_events(before=50, keep_last=2)["deleted_jsonl"] == 0
-    assert synced == [store.events_path]
+        assert store.prune_events(before=50, keep_last=2, max_delete=3)["deleted_jsonl"] == 0
+        assert store.prune_events(before=50, keep_last=2)["deleted_db"] == 0
+    assert store.events_path.read_bytes() == original
     assert _b2_pending_ids(store) == []
 
 
 @pytest.mark.parametrize("coordinator", [False, True])
 def test_b2_ledger_write_failure_rolls_back_db_and_never_touches_jsonl(tmp_path, coordinator):
+    # Cat3-R4：不再 INSERT 新 pending，拒绝旧账登记的触发器不会阻挡 SQL 删除。
     store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
     original = store.events_path.read_bytes()
     with sqlite3.connect(store.db_path) as conn:
         conn.execute("CREATE TRIGGER fail_ledger BEFORE INSERT ON metadata "
                      "WHEN NEW.key='events_prune_pending_ids' BEGIN SELECT RAISE(ABORT,'ledger unavailable'); END")
-    with scope(), pytest.raises(sqlite3.IntegrityError, match="ledger unavailable"):
-        store.prune_events(before=50, keep_last=2, max_delete=3)
-    assert store.events_path.read_bytes() == original
-    assert _b2_pending_ids(store) == []
-    with sqlite3.connect(store.db_path) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 6
+    with scope():
+        assert store.prune_events(before=50, keep_last=2, max_delete=3)["deleted_db"] == 3
+        assert store.stats()["event_count"] == 3
+    assert store.events_path.read_bytes() == original and _b2_pending_ids(store) == []
 
 
 @pytest.mark.parametrize("coordinator", [False, True])
 def test_b2_pending_merges_only_actually_deleted_trigger_survivors_stay(tmp_path, monkeypatch, coordinator):
-    from agent_py_agent.agent.local_storage import maintenance
-
+    # Cat3-R4：只消化旧 pending，不登记新的逐行责任；触发器保护的 SQL 行仍保留。
     store, events, scope = _perf_e_event_store(tmp_path, coordinator)
+    original = store.events_path.read_bytes()
     with sqlite3.connect(store.db_path) as conn:
         conn.execute("DELETE FROM events WHERE event_id=?", (events[0].event_id,))
         conn.execute("INSERT INTO metadata(key,value) VALUES('events_prune_pending_ids',?)",
                      (json.dumps([events[0].event_id]),))
         conn.execute(f"CREATE TRIGGER keep_event BEFORE DELETE ON events WHEN OLD.event_id='{events[1].event_id}' "
                      "BEGIN SELECT RAISE(IGNORE); END")
-
-    def fail(*args, **kwargs):
-        raise OSError("pending retained")
-
-    monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", fail)
-    with scope(), pytest.raises(OSError, match="pending retained"):
-        store.prune_events(before=50, keep_last=0, max_delete=2)
-    assert _b2_pending_ids(store) == [events[0].event_id, events[2].event_id]
+    with scope():
+        result = store.prune_events(before=50, keep_last=0, max_delete=2)
+        assert result["deleted_db"] == 1 and result["deleted_jsonl"] == 0
+        assert events[1].event_id in {row.event_id for row in store.timeline()}
+    assert _b2_pending_ids(store) == [] and store.events_path.read_bytes() == original
 
 
 def test_b2_cleanup_preserves_concurrently_registered_new_pending_ids(tmp_path, monkeypatch):
+    # Cat3-R4：活动 JSONL 不再逐行删除；旧 pending 不再新增，回执计封存段数。
     from agent_py_agent.agent.local_storage import maintenance
 
     store, events, scope = _perf_e_event_store(tmp_path, False)
@@ -953,8 +935,8 @@ def test_b2_cleanup_preserves_concurrently_registered_new_pending_ids(tmp_path, 
 
     monkeypatch.setattr(maintenance, "_clear_pending_events_transaction", register_then_clear)
     with scope():
-        assert store.prune_events(before=50, keep_last=2, max_delete=1)["deleted_jsonl"] == 1
-    assert _b2_pending_ids(store) == [events[1].event_id]
+        assert store.prune_events(before=50, keep_last=2, max_delete=1)["deleted_jsonl"] == 0
+    assert _b2_pending_ids(store) == []
 
 
 @pytest.mark.parametrize("payload", ['{}', '[1]', '[""]', 'not-json'])
@@ -971,6 +953,7 @@ def test_b2_invalid_pending_fails_closed_before_any_deletion(tmp_path, payload):
 
 @pytest.mark.parametrize("coordinator", [False, True])
 def test_b2_bare_carriage_return_inside_bad_jsonl_record_is_preserved(tmp_path, coordinator):
+    # Cat3-R4：活动 JSONL 不再逐行删除；旧 pending 不再新增，回执计封存段数。
     store, events, scope = _perf_e_event_store(tmp_path, coordinator)
     original = store.events_path.read_bytes().splitlines(keepends=True)
     bad = json.dumps({"event_id": events[0].event_id}).encode() + b"\rBROKEN\n"
@@ -978,34 +961,24 @@ def test_b2_bare_carriage_return_inside_bad_jsonl_record_is_preserved(tmp_path, 
         handle.write(bad)
     with scope():
         result = store.prune_events(before=50, keep_last=2, max_delete=1)
-    assert result["deleted_jsonl"] == 1
-    assert store.events_path.read_bytes() == b"".join(original[1:]) + bad
+    assert result["deleted_jsonl"] == 0
+    assert store.events_path.read_bytes() == b"".join(original) + bad
 
 
 @pytest.mark.parametrize("coordinator", [False, True])
 def test_b2_temp_cleanup_failure_does_not_mask_primary_publish_error(tmp_path, monkeypatch, coordinator):
+    # Cat3-R4：活动流不再创建或发表重写临时文件，两个旧失败叶都不应被调用。
     from agent_py_agent.agent.local_storage import maintenance
 
-    store, events, scope = _perf_e_event_store(tmp_path, coordinator)
+    store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
     original = store.events_path.read_bytes()
-    primary = OSError("original publish error")
-    unlink = Path.unlink
-
     def fail_publish(*args):
-        raise primary
-
-    def fail_cleanup(path, *args, **kwargs):
-        if path.name.startswith(".events.jsonl.") and path.suffix == ".tmp":
-            raise PermissionError("cleanup failed")
-        return unlink(path, *args, **kwargs)
-
+        raise OSError("original publish error")
     monkeypatch.setattr(maintenance.os, "replace", fail_publish)
-    monkeypatch.setattr(Path, "unlink", fail_cleanup)
-    with scope(), pytest.raises(OSError) as caught:
-        store.prune_events(before=50, keep_last=2, max_delete=1)
-    assert caught.value is primary
-    assert _b2_pending_ids(store) == [events[0].event_id]
-    assert store.events_path.read_bytes() == original
+    with scope():
+        result = store.prune_events(before=50, keep_last=2, max_delete=1)
+    assert result["deleted_db"] == 1 and result["deleted_jsonl"] == 0
+    assert _b2_pending_ids(store) == [] and store.events_path.read_bytes() == original
 
 
 # LLM: 坏UTF-8位于JSON字符串内仍须原字节保留；替身writer只在过滤后接收surrogateescape文本。
@@ -1014,6 +987,7 @@ def test_b2_temp_cleanup_failure_does_not_mask_primary_publish_error(tmp_path, m
 @pytest.mark.parametrize("patched_writer", [False, True])
 @pytest.mark.parametrize("ending", [b"\n", b""])
 def test_prune_events_preserves_invalid_utf8_inside_json_string_even_when_event_id_matches(
+    # Cat3-R4：活动 JSONL 不再逐行删除；旧 pending 不再新增，回执计封存段数。
     tmp_path, monkeypatch, coordinator, patched_writer, ending,
 ):
     from agent_py_agent.agent.local_storage import maintenance
@@ -1037,10 +1011,10 @@ def test_prune_events_preserves_invalid_utf8_inside_json_string_even_when_event_
     with scope():
         result = store.prune_events(before=50, keep_last=2, max_delete=1)
         assert events[0].event_id not in {row.event_id for row in store.timeline()}
-    expected = b"".join(original[1:]) + bad
-    assert result == {"ok": True, "dry_run": False, "selected": 1, "deleted_db": 1, "deleted_jsonl": 1}
+    expected = b"".join(original) + bad
+    assert result == {"ok": True, "dry_run": False, "selected": 1, "deleted_db": 1, "deleted_jsonl": 0}
     assert store.events_path.read_bytes() == expected
-    assert captured == ([expected] if patched_writer else [])
+    assert captured == []
     assert _b2_pending_ids(store) == []
 
 
@@ -1049,6 +1023,7 @@ def test_prune_events_preserves_invalid_utf8_inside_json_string_even_when_event_
 @pytest.mark.parametrize("coordinator", [False, True])
 @pytest.mark.parametrize("ending", [b"\r\n", b"\r \n", b"\r"])
 def test_b2_r2_preserves_raw_carriage_return_even_when_json_parser_accepts_it(tmp_path, coordinator, ending):
+    # Cat3-R4：活动 JSONL 不再逐行删除；旧 pending 不再新增，回执计封存段数。
     store, events, scope = _perf_e_event_store(tmp_path, coordinator)
     original = store.events_path.read_bytes().splitlines(keepends=True)
     bad = json.dumps({"event_id": events[0].event_id}).encode() + ending
@@ -1057,8 +1032,8 @@ def test_b2_r2_preserves_raw_carriage_return_even_when_json_parser_accepts_it(tm
         handle.write(bad)
     with scope():
         result = store.prune_events(before=50, keep_last=2, max_delete=1)
-    assert result["deleted_jsonl"] == 1
-    assert store.events_path.read_bytes() == b"".join(original[1:]) + bad
+    assert result["deleted_jsonl"] == 0
+    assert store.events_path.read_bytes() == b"".join(original) + bad
 
 
 # LLM: 用真实失败发表建立pending，重复失败不能追加删除；恢复后本轮只清旧账，下轮才继续新批。
@@ -1066,51 +1041,31 @@ def test_b2_r2_preserves_raw_carriage_return_even_when_json_parser_accepts_it(tm
 @pytest.mark.parametrize("coordinator", [False, True])
 @pytest.mark.parametrize("entry", ["small_prune", "maintain", "wide_prune"])
 def test_b2_r2_full_pending_recovers_before_new_delete_batches(tmp_path, monkeypatch, coordinator, entry):
-    from agent_py_agent.agent.local_storage import maintenance
-
+    # Cat3-R4：旧 pending 一步消化，不再用它阻止新的有界 SQL 批次或重写活动流。
     store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
     if entry != "small_prune":
         with scope():
             store.reset()
         _b2_seed_events(store, 25005 if entry == "maintain" else 5010)
-    writer = maintenance.write_private_text_file_atomic_unlocked
     original = store.events_path.read_bytes()
-
-    # LLM: 只在最后发表注入失败，SQL删除与pending仍走真实事务。
-    # 函数用途: 保留待恢复账本及未改写的JSONL供下一次重试。
-    def fail(*args, **kwargs):
-        raise OSError("r2 publish unavailable")
-
-    # LLM: 首次裁剪与重试沿原公开入口，wide重试显式增大max_delete以检查独立5000阈值。
-    # 函数用途: 统一运行三种公开维护调用，不改被测批次逻辑。
-    def prune(*, retry=False):
-        if entry == "maintain":
-            return store.maintain_events(max_batches=2, before=50)
-        maximum = (10000 if retry else 5000) if entry == "wide_prune" else 2
-        return store.prune_events(before=50, keep_last=2, max_delete=maximum)
-
-    monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", fail)
-    with scope(), pytest.raises(OSError, match="r2 publish"):
-        prune()
-    pending = _b2_pending_ids(store)
-    assert len(pending) == (2 if entry == "small_prune" else 5000)
     with sqlite3.connect(store.db_path) as conn:
-        remaining = list(conn.execute("SELECT event_id FROM events ORDER BY seq"))
-    for _ in range(2):
-        with scope(), pytest.raises(OSError, match="r2 publish"):
-            prune(retry=True)
-        assert _b2_pending_ids(store) == pending
-        with sqlite3.connect(store.db_path) as conn:
-            assert list(conn.execute("SELECT event_id FROM events ORDER BY seq")) == remaining
-        assert store.events_path.read_bytes() == original
-    monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", writer)
+        conn.execute("INSERT INTO metadata(key,value) VALUES('events_prune_pending_ids',?)",
+                     (json.dumps(["legacy-id"]),))
     with scope():
-        recovered = prune(retry=True)
-    assert recovered == {"ok": True, "dry_run": False, "selected": 0, "deleted_db": 0, "deleted_jsonl": len(pending)}
-    assert _b2_pending_ids(store) == []
-    assert [json.loads(line)["event_id"] for line in store.events_path.read_bytes().splitlines()] == [row[0] for row in remaining]
-    with scope():
-        assert prune(retry=True)["deleted_db"] > 0
+        initial = store.stats()["event_count"]
+        results = []
+        for _ in range(3):
+            result = (store.maintain_events(max_batches=2, before=50) if entry == "maintain" else
+                      store.prune_events(before=50, keep_last=2,
+                          max_delete=10000 if entry == "wide_prune" else 2))
+            results.append(result)
+            assert result["deleted_db"] <= (10000 if entry == "maintain" else 5000)
+            assert result["deleted_jsonl"] == 0 and _b2_pending_ids(store) == []
+        remaining = store.stats()["event_count"]
+    # Cat3-R4：small_prune 的三个 created_at=50 事件不满足 before=50 的严格过期条件。
+    assert remaining == (20000 if entry == "maintain" else 3 if entry == "small_prune" else 2)
+    assert sum(row["deleted_db"] for row in results) + remaining == initial
+    assert store.events_path.read_bytes() == original
 
 
 # LLM: 只在临时owner的规范data/兼容workspace布局准备真库；不让后台扫描凭空建库。
@@ -1131,6 +1086,7 @@ def _r3_owner_store(tmp_path, layout):
 @pytest.mark.parametrize("layout", ["data", "workspace"])
 @pytest.mark.parametrize("transition", [False, True])
 def test_b2_r3_owner_background_maintenance_prunes_existing_events(tmp_path, monkeypatch, layout, transition):
+    # Cat3-R4：活动 JSONL 不再逐行删除；旧 pending 不再新增，回执计封存段数。
     from types import SimpleNamespace
 
     from agent_py_agent.agent.conversation import session_pair_rate
@@ -1155,8 +1111,8 @@ def test_b2_r3_owner_background_maintenance_prunes_existing_events(tmp_path, mon
     marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
     assert result.status == marker["status"] == "success" and result.apply_outcome == "applied"
     effect = marker.get("local_store_events_maintenance", {})
-    assert effect.get("executed") is True and effect["deleted_db"] == effect["deleted_jsonl"] == 5000
-    assert len(store.events_path.read_bytes().splitlines()) == STEADY_STATE_EVENTS_KEEP_LAST
+    assert effect.get("executed") is True and effect["deleted_db"] == 5000 and effect["deleted_jsonl"] == 0
+    assert len(store.events_path.read_bytes().splitlines()) == 25005
     # W6的dirty周期还需一次清洁观察，才能证明无积压并恢复日常节流。
     assert marker["maintenance_partial"] is True
     assert run_owner_retention_if_due(home, now=200_001, **options).ran
@@ -1212,6 +1168,7 @@ def test_b2_r3_events_only_store_keeps_original_bytes(tmp_path, transition):
 # 函数用途: 验证不会只维护兼容旧库而遗漏owner的workspace库。
 @pytest.mark.parametrize("transition", [False, True])
 def test_b2_r3_owner_maintenance_covers_multiple_existing_stores(tmp_path, transition):
+    # Cat3-R4：活动 JSONL 不再逐行删除；旧 pending 不再新增，回执计封存段数。
     from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
     from agent_py_agent.tests.test_local_store_coordinator_io import Door
 
@@ -1229,7 +1186,7 @@ def test_b2_r3_owner_maintenance_covers_multiple_existing_stores(tmp_path, trans
     assert counts == [STEADY_STATE_EVENTS_KEEP_LAST, STEADY_STATE_EVENTS_KEEP_LAST]
     marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
     effect = marker.get("local_store_events_maintenance", {})
-    assert effect.get("executed") is True and effect["deleted_db"] == effect["deleted_jsonl"] == 5001
+    assert effect.get("executed") is True and effect["deleted_db"] == 5001 and effect["deleted_jsonl"] == 0
     assert len(effect["stores"]) == 2 and all(row["executed"] for row in effect["stores"])
 
 
@@ -1307,15 +1264,15 @@ def test_b2_r3_event_maintenance_respects_retention_refusal(tmp_path, transition
 # 函数用途: 验证部分执行诊断及下一维护周期沿R2恢复原pending。
 @pytest.mark.parametrize("transition", [False, True])
 def test_b2_r3_partial_event_failure_reports_unknown_and_recovers(tmp_path, monkeypatch, transition):
+    # Cat3-R4：旧 JSONL 发表钩子不再参与活动流维护，真实 SQL 继续推进且不留 pending。
     from agent_py_agent.agent.local_storage import maintenance
     from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
     from agent_py_agent.tests.test_local_store_coordinator_io import Door
 
     home, store = _r3_owner_store(tmp_path, "data")
-    # LLM: 仅在JSONL发表叶注入普通故障，保留此前实际SQL提交和pending状态用于断言。
-    # 函数用途: 模拟文件发表失败，不代写或回滚任何数据。
+    original = store.events_path.read_bytes()
     def refuse(*_args):
-        raise OSError("failed after committed SQLite deletion")
+        raise OSError("retired event rewrite hook")
     options = {"include_global_indexes": False}
     if transition:
         options["commit_transition"] = Door()
@@ -1324,16 +1281,13 @@ def test_b2_r3_partial_event_failure_reports_unknown_and_recovers(tmp_path, monk
         run_owner_retention_if_due(home, now=200_000, **options)
     marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
     with sqlite3.connect(store.db_path) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 20005
-        assert len(json.loads(conn.execute("SELECT value FROM metadata WHERE key='events_prune_pending_ids'").fetchone()[0])) == 5000
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == STEADY_STATE_EVENTS_KEEP_LAST
+        assert conn.execute("SELECT value FROM metadata WHERE key='events_prune_pending_ids'").fetchone() is None
     effect = marker["local_store_events_maintenance"]
-    assert effect.get("side_effects_unknown") is True and effect.get("counts_complete") is False
-    assert effect["executed"] is False and "deleted_db" not in effect
+    assert effect["executed"] is True and effect["deleted_jsonl"] == 0
+    assert not effect.get("side_effects_unknown", False)
     run_owner_retention_if_due(home, now=286_400, **options)
-    recovered = json.loads((home.owner_data_dir / "maintenance.json").read_text())["local_store_events_maintenance"]
-    assert recovered["executed"] is True and recovered["deleted_db"] == 0 and recovered["deleted_jsonl"] == 5000
-    # 旧pending发表后，W6还会删除剩余5条；原失败拍的SQL/pending精确断言保持。
-    assert len(store.events_path.read_bytes().splitlines()) == STEADY_STATE_EVENTS_KEEP_LAST
+    assert store.events_path.read_bytes() == original
 
 
 # LLM: 只注入一个发现来源的普通IO故障；其余真实库仍可维护，并单列覆盖不完整，不能造全量计数。

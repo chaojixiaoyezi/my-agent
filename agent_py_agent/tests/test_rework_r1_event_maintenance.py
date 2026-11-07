@@ -82,6 +82,7 @@ def _append(store: LocalStore, appended: list[str], tag: str) -> None:
 
 @pytest.mark.parametrize("coordinator", [False, True], ids=["local", "coordinator"])
 def test_owner_event_maintenance_completes_with_one_append_per_tick(tmp_path, coordinator):
+    # Cat3-R4：活动文件不逐行扫描，SQL 有界推进后原字节留待轮转。
     from agent_py_agent.tests.test_local_store_coordinator_io import Door
 
     directory = tmp_path / "local_store"
@@ -110,19 +111,20 @@ def test_owner_event_maintenance_completes_with_one_append_per_tick(tmp_path, co
     assert sum(report["deleted_db"] for report in reports) == 500
     expected = [f"seed-{index:06d}" for index in range(500, 20_500)] + appended
     assert _db_ids(store) == expected
-    assert _jsonl_ids(store) == expected
-    assert store.events_path.read_bytes().startswith(b"".join(lines[500:]))
+    assert _jsonl_ids(store) == [f"seed-{index:06d}" for index in range(20_500)] + appended
+    assert store.events_path.read_bytes().startswith(b"".join(lines))
     _assert_settled(store)
 
 
 @pytest.mark.parametrize("change", ["replace", "truncate", "regrow", "rewrite_prefix"])
 def test_source_change_restarts_scan_without_reusing_stale_output(tmp_path, change):
+    # Cat3-R4：没有重写游标或旧输出；外部替换/截断的活动流完整保留。
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     lines = _seed_tail_targets(store)
     for _ in range(3):
-        assert _step(store)["partial"]
-    assert _metadata(store, "events_prune_cursor")["offset"] == 3 * _STEP_BUDGET
-    [stale] = _step_temps(store)
+        assert not _step(store)["partial"]
+    assert _metadata(store, "events_prune_cursor") is None
+    assert _step_temps(store) == []
     if change == "replace":
         # 第40行位于文件头样本与边界样本之间，只能靠dev/ino身份识别换代。
         current = [*lines[:40], lines[40].replace(b"p" * 100, b"q" * 100), *lines[41:]]
@@ -143,75 +145,40 @@ def test_source_change_restarts_scan_without_reusing_stale_output(tmp_path, chan
         with store.events_path.open("r+b") as handle:
             handle.write(current[0])
     first = _step(store)
-    assert first["partial"] and first["cursor"]["offset"] == _STEP_BUDGET
-    assert stale not in _step_temps(store)
+    assert not first["partial"] and first["cursor"] == {}
+    assert _step_temps(store) == []
     for _ in range(64):
         if not _step(store)["partial"]:
             break
     else:
         pytest.fail("event maintenance did not finish after the source change")
-    assert store.events_path.read_bytes() == b"".join(
-        line for line in current if json.loads(line)["event_id"] not in _TAIL_TARGETS)
-    assert not _TAIL_TARGETS & set(_db_ids(store))
+    assert store.events_path.read_bytes() == b"".join(current)
+    assert _db_ids(store) == [f"seed-{index:06d}" for index in range(100, _TAIL_COUNT)]
     _assert_settled(store)
 
 
 @pytest.mark.parametrize("fault", ["publish", "final_save", "partial_save"])
 def test_simulated_io_error_during_step_publication_recovers(tmp_path, monkeypatch, fault):
+    # Cat3-R4：逐行发表及部分游标已退役，旧错误叶不得再被触发。
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     lines = _seed_tail_targets(store)
-    original_save = maintenance._event_step_save
-    appended, failures = [], []
-
-    def failing_writer(*_args, **_kwargs):
+    failures = []
+    def failing(*args, **kwargs):
         failures.append(fault)
-        raise OSError("simulated I/O error during publication")
-
-    def failing_save(conn, job, targets):
-        due = (job is None and targets) if fault == "final_save" else (job is not None and job["offset"] >= 2 * _STEP_BUDGET)
-        if due and not failures:
-            failures.append(fault)
-            raise OSError("simulated I/O error during cursor save")
-        return original_save(conn, job, targets)
-
-    if fault == "publish":
-        monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", failing_writer)
-    else:
-        monkeypatch.setattr(maintenance, "_event_step_save", failing_save)
-    for tick in range(64):
-        try:
-            report = _step(store)
-        except OSError:
-            break
-        assert report["partial"] and report["scanned_bytes"] <= _STEP_BUDGET
-        _append(store, appended, f"before-{tick}")
-    else:
-        pytest.fail("simulated I/O error was never reached")
-    assert failures == [fault]
-    assert len(_metadata(store, "events_prune_pending_ids")) == _TAIL_COUNT - _TAIL_KEPT
-    assert not _TAIL_TARGETS & set(_db_ids(store))
-    if fault == "publish":
-        assert store.events_path.read_bytes().startswith(b"".join(lines))
-        with pytest.raises(OSError, match="simulated I/O error"):
-            _step(store)
-        assert len(_step_temps(store)) == 1
-        monkeypatch.undo()
-    _append(store, appended, "after-fault")
-    for _ in range(64):
-        report = _step(store)
-        assert report["scanned_bytes"] <= _STEP_BUDGET
-        if not report["partial"]:
-            break
-        _append(store, appended, "recovery")
-    else:
-        pytest.fail("event maintenance did not recover after the simulated I/O error")
-    expected = [f"seed-{index:06d}" for index in range(_TAIL_KEPT)] + appended
-    assert _jsonl_ids(store) == expected
-    assert _db_ids(store) == expected
+        raise OSError("retired event rewrite")
+    monkeypatch.setattr(maintenance,
+        "write_private_text_file_atomic_unlocked" if fault == "publish" else "_event_step_save", failing)
+    report = _step(store)
+    assert report["deleted_db"] == 100 and report["deleted_jsonl"] == 0
+    assert not report["partial"] and report["scanned_bytes"] == 0
+    assert failures == []
+    assert _db_ids(store) == [f"seed-{index:06d}" for index in range(100, _TAIL_COUNT)]
+    assert store.events_path.read_bytes() == b"".join(lines)
     _assert_settled(store)
 
 
 def test_append_during_unlocked_scan_is_not_blocked_and_kept_once(tmp_path, monkeypatch):
+    # Cat3-R4：追加不等待活动流重写；只在原维护旁锁前交错，活动流全量保留。
     store = LocalStore(tmp_path / "local.db", enable_fts=False)
     _seed_tail_targets(store)
     original_lock = maintenance.locked_json_path
@@ -221,7 +188,7 @@ def test_append_during_unlocked_scan_is_not_blocked_and_kept_once(tmp_path, monk
 
     # 函数用途: 扫描已到达锁外EOF、尚未取JSONL锁时，从另一线程写入一条真实事件。
     def locked(path, **kwargs):
-        if path == store.events_path and not raced:
+        if path == store.events_path.with_name(store.events_path.name + ".prune") and not raced:
             worker = threading.Thread(target=_append, args=(store, raced, "racing"))
             worker.start()
             worker.join(10)
@@ -240,8 +207,8 @@ def test_append_during_unlocked_scan_is_not_blocked_and_kept_once(tmp_path, monk
     # 新尾在同一拍剩余预算内于锁内读入，并随该拍发表完整保留一次。
     final = reports[-1]
     assert raced_tick == [len(reports) - 1]
-    assert final["cursor"]["offset"] == final["cursor"]["source_bytes"]
-    expected = [f"seed-{index:06d}" for index in range(_TAIL_KEPT)] + raced
-    assert _jsonl_ids(store) == expected
+    assert final["cursor"] == {}
+    expected = [f"seed-{index:06d}" for index in range(100, _TAIL_COUNT)] + raced
+    assert _jsonl_ids(store) == [f"seed-{index:06d}" for index in range(_TAIL_COUNT)] + raced
     assert _db_ids(store) == expected
     _assert_settled(store)

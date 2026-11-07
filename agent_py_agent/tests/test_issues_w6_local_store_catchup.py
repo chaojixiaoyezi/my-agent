@@ -67,7 +67,8 @@ def test_fresh_store_is_incremental_and_existing_none_is_unchanged(tmp_path):
 def test_catchup_real_public_events_and_jsonl_converge(tmp_path, monkeypatch):
     assert callable(getattr(maintenance, "maintain_local_events_lane", None))
     monkeypatch.setattr(maintenance, "STEADY_STATE_EVENTS_KEEP_LAST", 200)
-    monkeypatch.setattr(maintenance, "LOCAL_STORE_CATCHUP_BATCH_ROWS", 500)
+    # Cat3-R4：追平也沿同一个稳态批次上限，不再使用 50000 行旁路。
+    monkeypatch.setattr(maintenance, "STEADY_STATE_EVENTS_MAX_DELETE", 500)
     home = home_paths(tmp_path / "home")
     store = _store(home)
     appended = []
@@ -90,7 +91,8 @@ def test_catchup_real_public_events_and_jsonl_converge(tmp_path, monkeypatch):
     assert all(report["complete"] is False for report in reports[:-1])
     assert sum(report.get("deleted_items", 0) for report in reports) == 12_000
     assert _db_ids(store) == appended[-200:]
-    assert _jsonl_ids(store) == appended[-200:]
+    # Cat3-R4：SQL 收敛至保留窗口，活动 JSONL 原样保留到 R3 轮转。
+    assert _jsonl_ids(store) == appended
     with store._connection() as conn:
         lo, hi = conn.execute("SELECT MIN(seq),MAX(seq) FROM events").fetchone()
         assert hi - lo + 1 == 200
@@ -178,7 +180,9 @@ def test_pending_ledger_without_cursor_is_resumed(tmp_path, monkeypatch):
         if report["complete"]:
             break
     assert report["complete"] is True
-    assert _db_ids(store) == _jsonl_ids(store) == ids[-1:]
+    # Cat3-R4：旧 pending 只清账，不再逐行改写活动流。
+    assert _db_ids(store) == ids[-1:]
+    assert _jsonl_ids(store) == ids
 
 
 def test_legacy_prune_step_still_requires_explicit_maintenance(tmp_path):
@@ -251,7 +255,9 @@ def test_byte_limited_lane_resumes_jsonl_across_real_append(tmp_path, monkeypatc
         if report["complete"]:
             break
     assert report["complete"] is True
-    assert _db_ids(store) == _jsonl_ids(store) == ids[-19:] + appended
+    # Cat3-R4：追加仍只发生一次，SQL 保留窗口与未轮转活动流不再逐行相等。
+    assert _db_ids(store) == ids[-19:] + appended
+    assert _jsonl_ids(store) == ids + appended
 
 
 def test_dirty_cycle_cannot_complete_on_next_idle_database(tmp_path, monkeypatch):
@@ -296,7 +302,8 @@ def test_confirmed_prune_counts_survive_later_vacuum_io_error(tmp_path, monkeypa
     report = _lane(_request(home))
     assert report["complete"] is False
     assert report["deleted_items"] == 2
-    assert report["bytes"] > 0
+    # Cat3-R4：只有活动文件时没有 JSONL 扫描字节。
+    assert report["bytes"] == 0
     assert report["errors"][0]["code"] == "local_store_maintenance"
     assert len(_db_ids(store)) == 1
 
