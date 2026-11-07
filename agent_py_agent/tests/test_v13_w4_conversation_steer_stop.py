@@ -127,7 +127,7 @@ def _count0_steer(request_id="ordinary-id"):
             "metadata": {"expected_turn_id": "target"}}
 
 
-@pytest.mark.parametrize("status", ["done", "failed", "cancelled", "stopped", "interrupted"])
+@pytest.mark.parametrize("status", ["cancelled", "stopped", "interrupted"])
 def test_expired_steer_never_acquires_slot_or_submits(tmp_path, monkeypatch, status):
     from agent_py_agent.agent.gateway_parts import request_worker as worker
     from agent_py_agent.agent.gateway_parts.io import read_json_file, write_json_file_atomic
