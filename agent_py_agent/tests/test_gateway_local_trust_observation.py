@@ -4,6 +4,7 @@ from __future__ import annotations
 import http.client
 import importlib
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -22,6 +23,10 @@ from agent_py_agent.agent.gateway_parts.local_client_token import (
 )
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
 from agent_py_agent.agent.user_space.home_layout import home_paths
+from agent_py_agent.cli.chat_parts.gateway_client import (
+    GatewayChunkPollRequest,
+    NetworkGatewayObserver,
+)
 
 
 def _request(port, method, path, headers=None):
@@ -160,14 +165,19 @@ def test_auth_disabled_keeps_explicit_single_machine_behavior(tmp_path, monkeypa
 
 
 # LLM: 直接遍历规范路由表并经真实HTTP分发逐条验证；固定数量、唯一性与安全档位，不运行真实业务处理器。
-# 函数用途: 确认36条已审路由共用唯一注册表，业务和产物入口仍要求宿主凭据。
+# 函数用途: 确认40条已审路由共用唯一注册表，业务、产物和请求事件入口仍要求宿主凭据。
 def test_dispatch_registry_is_single_source_and_tiers_match_review(tmp_path, monkeypatch):
     routes = getattr(http_service, "GATEWAY_HTTP_ROUTES", None)
     assert routes is not None, "分发和观察须复用同一张结构化路由表"
     pairs = [(method, route.template, route.access_tier) for method, group in routes.items() for route in group]
-    assert len(pairs) == 38 and len({(method, template) for method, template, _ in pairs}) == 38
+    assert len(pairs) == 40 and len({(method, template) for method, template, _ in pairs}) == 40
     assert ("POST", "/client/goal", "credential") in pairs
     assert ("POST", "/channel-observations", "credential") in pairs
+    assert {(method, path, tier) for method, path, tier in pairs
+            if path in {"/client/requests/*/events", "/v1/requests/*/events"}} == {
+        ("GET", "/client/requests/*/events", "credential"),
+        ("GET", "/v1/requests/*/events", "credential"),
+    }
     assert {(method, path, tier) for method, path, tier in pairs if path.startswith("/client/business")} == {
         ("GET", "/client/business/artifacts/*/content", "credential"),
         ("POST", "/client/business", "credential"),
@@ -184,20 +194,26 @@ def test_dispatch_registry_is_single_source_and_tiers_match_review(tmp_path, mon
     assert {path for _, path, tier in pairs if tier == "admin"} == {"/sessions/*/channels", "/admin/summary", "/stop", "/sessions/*/bind", "/api/admin/*"}
     # 所有路由真正经过 do_GET/do_POST，未知路径404；只替换业务处理，不并排造观察路由表。
     called = []
+    handlers = {}
     for method, group in routes.items():
         for route in group:
-            def echo(handler, _server=None, label=route.template):
-                called.append(label)
-                handler._send_json(200, {"route": label})
             target = importlib.import_module(route.handler_module, http_service.__package__) if route.handler_module else http_service.GatewayHTTPHandler
-            monkeypatch.setattr(target, route.handler_name, echo)
+            labels = handlers.setdefault((target, route.handler_name), {})
+            labels[(method, route.template.replace("*", "fixture-id"))] = route.template
+    # 别名共用处理函数，只安装一次替身；只认该处理器登记的路径，误分发不能借请求路径冒充命中。
+    for (target, handler_name), labels in handlers.items():
+        def echo(handler, _server=None, labels=labels):
+            label = labels.get((handler.command, handler.path))
+            called.append(label)
+            handler._send_json(200, {"route": label})
+        monkeypatch.setattr(target, handler_name, echo)
     server = GatewayHTTPServer(0, gateway_paths_from_root(tmp_path / "gateway"))
     server.start()
     try:
         port = server.server.server_address[1]
         for method, template, _tier in pairs:
             assert _request(port, method, template.replace("*", "fixture-id")) == (200, {"route": template})
-        assert len(called) == len(pairs) == 38
+        assert len(called) == len(pairs) == 40
         assert _request(port, "GET", "/no-route")[0] == 404
     finally:
         server.stop()
@@ -216,3 +232,64 @@ def test_empty_credentials_never_match_absent_or_empty_token(tmp_path):
     assert empty.has_gateway_credential({}) is False
     assert empty.extract_identity({}, "192.0.2.1") == ("anonymous", "external")
     assert bound.has_gateway_credential({"X-Gateway-Token": "wrong-token"}) is False
+
+
+@pytest.fixture
+def network_transport(listener, monkeypatch):
+    """保留真实认证HTTP往返，只记录交给底层运输的超时值。"""
+    from agent_py_agent.agent.common import authenticated_http
+
+    server, port, _root = listener
+    agent = SimpleNamespace(
+        config=SimpleNamespace(gateway_request_timeout=7),
+        gateway_network_headers=lambda: {"X-Gateway-Token": server.auth_middleware.auth_token},
+    )
+    observer = NetworkGatewayObserver(agent, f"http://127.0.0.1:{port}")
+    calls = []
+    original = authenticated_http.open_authenticated_request
+
+    def record(request, *, timeout):
+        calls.append((request.get_method(), request.full_url, timeout))
+        return original(request, timeout=timeout)
+
+    monkeypatch.setattr(authenticated_http, "open_authenticated_request", record)
+    return observer, calls
+
+
+@pytest.mark.parametrize(("budget", "expected"), [(None, 7.0), (0, 0.1), (-1, 0.1), (0.25, 0.25)])
+def test_network_json_deadline_preserves_transport_timeout(network_transport, budget, expected):
+    observer, calls = network_transport
+    status, body = observer.request_json(
+        "GET", "/result/fixture-request", total_deadline_seconds=budget,
+    )
+    assert (status, body) == (200, {"identity": ["local-agent", "chat"]})
+    assert calls == [("GET", observer.base_url + "/result/fixture-request", expected)]
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_network_bound_client_keeps_public_timeout_keyword(network_transport, method):
+    observer, calls = network_transport
+    observer.bind_client_transport()
+    if method == "GET":
+        status, body = observer.agent.get_gateway_json("/result/fixture-request", timeout=0.5)
+        path = "/result/fixture-request"
+    else:
+        status, body = observer.agent.post_gateway_json("/ask", {}, timeout=0.5)
+        path = "/ask"
+    assert (status, body) == (200, {"identity": ["local-agent", "chat"]})
+    assert calls == [(method, observer.base_url + path, 0.5)]
+
+
+def test_network_fallback_uses_real_json_transport_and_remaining_budget(network_transport, tmp_path):
+    observer, calls = network_transport
+    observer._http_only = True
+    result = observer(GatewayChunkPollRequest(
+        tmp_path / "fixture-request.chunks.jsonl", tmp_path / "fixture-request.json",
+        time.time() + 30, lambda _text: None, [0],
+    ))
+    assert result == {"identity": ["local-agent", "chat"]}
+    assert len(calls) == 2
+    assert calls[0][0] == calls[1][0] == "GET"
+    assert calls[0][1].startswith(observer.base_url + "/progress/fixture-request?since=0&include=")
+    assert calls[1][1] == observer.base_url + "/result/fixture-request"
+    assert all(0.1 <= timeout <= 30 for _method, _url, timeout in calls)
