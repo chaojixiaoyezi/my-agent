@@ -1,12 +1,15 @@
 """R4 contracts through disposable authenticated loopback listeners (not LAN proof)."""
 from __future__ import annotations
 
+import gc
 import json
+import os
 import secrets
 import threading
 import time
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import replace
 from functools import partial
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -43,7 +46,11 @@ from agent_py_agent.cli.chat_parts.gateway_client import (
     GatewayChunkPollRequest,
     NetworkGatewayObserver,
 )
-from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime, TuiTurnEventAdapter
+from agent_py_agent.cli.chat_parts.tui_runtime import (
+    TuiRuntime,
+    TuiTurnEventAdapter,
+    TuiTurnSummary,
+)
 
 
 # LLM: Each test owns an authenticated real listener, disposable queue and random in-memory token; no existing daemon or G1 client credential is used.
@@ -189,11 +196,11 @@ def test_tail_appended_and_terminal_committed_between_reads_is_emitted(gateway, 
 
 # LLM: Build a canonical request from the same ToolCall contract as the executor; labels and parameters cannot select authorization.
 # 函数用途: 生成带完整 binding 与有限选项的真实前台审批 DTO。
-def approval_request(record):
-    return build_tool_approval_request(ToolCall(call_id="call-r4", tool_name="controlled_exec",
+def approval_request(record, *, call_id="call-r4", call_index=1):
+    return build_tool_approval_request(ToolCall(call_id=call_id, tool_name="controlled_exec",
         arguments={"command": ["python3", "-V"]}, source_protocol="native", schema_hash="sha256:r4",
         run_id="run-r4", turn_id=record.request_id, attempt_id="attempt-a"), request_id=record.request_id,
-        round_number=1, call_index=1, description="Inspect /private/tmp/r4-example.txt",
+        round_number=1, call_index=call_index, description="Inspect /private/tmp/r4-example.txt",
         grant_key="controlled_exec:read")
 
 
@@ -229,7 +236,7 @@ def waiting_approval(gateway, *, channel="tui"):
         assert len(pending) == 1
         assert pending[0].request == request
         yield SimpleNamespace(record=record, request=request, writer=writer, result=result,
-            finished=finished, thread=thread)
+            finished=finished, thread=thread, cancelled=cancelled)
     finally:
         cancelled.set()
         thread.join(5)
@@ -347,3 +354,305 @@ def test_invalid_permission_dto_is_not_exposed_to_private_viewer(gateway):
     status, batch = client(gateway).request_json("GET", "/progress/r")
     assert status == 200
     assert all("permission" not in event for event in batch["events"])
+
+
+# LLM: Measure only resources owned by this listener after libc resolver initialization; failures still execute teardown and the zero-delta assertion.
+# 函数用途: 对成功、断连和畸形输入用例统一核对文件描述符没有净增。
+@pytest.fixture
+def measured_gateway(tmp_path):
+    """原认证监听器完整退出后核对描述符，包含断连与失败用例的 finally。"""
+    import socket
+
+    # macOS 的 libc 首次反查会保留进程级 mDNS 连接；先初始化，再测本用例拥有的资源。
+    socket.getfqdn("127.0.0.1")
+    fd_root = "/proc/self/fd" if os.path.isdir("/proc/self/fd") else "/dev/fd"
+    if not os.path.isdir(fd_root):
+        pytest.skip("descriptor census requires procfs or devfs")
+    gc.collect()
+    before = len(os.listdir(fd_root))
+    fixture = gateway.__wrapped__(tmp_path)
+    try:
+        yield next(fixture)
+    finally:
+        fixture.close()
+        gc.collect()
+        delta = len(os.listdir(fd_root)) - before
+        print(f"resource_check fd_delta={delta} teardown_complete=true")
+        assert delta == 0
+
+
+# LLM: One production writer has at most one sequential waiter; finally cancels and joins it even on the pre-fix callback failure.
+# 函数用途: 建立同一前台请求的两个审批，测试失败也不遗留等待线程。
+@contextmanager
+def sequential_approvals(gateway):
+    """同一前台 writer 顺序等待两份规范审批，退出必取消并回收原线程。"""
+    record = hot_request(gateway)
+    requests = (approval_request(record), approval_request(record, call_id="call-r3-b", call_index=2))
+    writer = BufferedChunkStreamWriter(record.chunk, interactive_approvals=True, rich_transcript=True,
+        delivery_channel="tui")
+    cancelled, finished = threading.Event(), threading.Event()
+    results, errors = [], []
+
+    def wait():
+        try:
+            for request in requests:
+                results.append(writer.request_permission(request.to_dict(),
+                    cancellation_token=SimpleNamespace(is_cancelled=cancelled.is_set)))
+                if cancelled.is_set():
+                    return
+            finish(gateway, record)
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=wait)
+    thread.start()
+    try:
+        until = time.monotonic() + 5
+        while time.monotonic() < until and not pending_tool_approvals(gateway.agent, gateway.paths, record.scope):
+            assert not errors, errors
+            assert not finished.is_set()
+            finished.wait(0.01)
+        assert [pending.request for pending in pending_tool_approvals(
+            gateway.agent, gateway.paths, record.scope)] == [requests[0]]
+        yield SimpleNamespace(record=record, requests=requests, writer=writer, results=results,
+            finished=finished, thread=thread)
+    finally:
+        cancelled.set()
+        thread.join(5)
+        writer.close()
+        assert not thread.is_alive()
+        assert not errors, errors
+
+
+# LLM: The peer resolves A through the actual HTTP sink; only the delivered durable resolution may let the foreground adapter open B.
+# 函数用途: 在两种真实网络运输及一次重连下复现并阻止审批弹窗卡死。
+@pytest.mark.parametrize(("transport", "disconnect"), [("sse", False), ("http", False), ("sse", True)])
+def test_peer_resolution_preserves_next_foreground_approval(measured_gateway, monkeypatch, transport, disconnect):
+    import agent_py_agent.agent.common.authenticated_http as network
+
+    gateway = measured_gateway
+    with sequential_approvals(gateway) as waiting:
+        first, second = waiting.requests
+        observer, peer = client(gateway), client(gateway)
+        observer._http_only = transport == "http"
+        runtime = TuiRuntime("session-a")
+        adapter = TuiTurnEventAdapter(runtime, waiting.record.request_id)
+        adapter.configure_gateway_permission_sink(partial(observer.permission_sink, conversation_id="session-a"))
+        emitted, closed, actionable, approved, errors, pending_counts, streams = [], [], [], [], [], [], []
+        aborted = threading.Event()
+        actual_open = network.open_authenticated_request
+
+        class DisconnectAfterResolution:
+            def __init__(self, raw):
+                self.raw, self.target_frame, self.close_next = raw, False, False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.raw.close()
+
+            def readline(self, size):
+                if self.close_next:
+                    self.raw.close()
+                    return b""
+                line = self.raw.readline(size)
+                if line.startswith(b"data:"):
+                    event = json.loads(line[5:]).get("event", {})
+                    self.target_frame = event.get("kind") == "permission_resolved" and event.get("permission_id") == first.permission_id
+                if line in (b"\n", b"\r\n") and self.target_frame:
+                    self.close_next = True
+                return line
+
+        def open_request(request, *, timeout):
+            raw = actual_open(request, timeout=timeout)
+            if urlsplit(request.full_url).path.endswith("/events"):
+                streams.append(request.get_header("Last-event-id"))
+                if disconnect and len(streams) == 1:
+                    return DisconnectAfterResolution(raw)
+            return raw
+
+        monkeypatch.setattr(network, "open_authenticated_request", open_request)
+
+        def consume(event):
+            emitted.append(event)
+            try:
+                consumed = adapter.on_gateway_event(event)
+                if event.get("kind") == "permission_requested":
+                    overlay = runtime.store.snapshot().permission
+                    pending_counts.append(len(pending_tool_approvals(gateway.agent, gateway.paths, waiting.record.scope)))
+                    if event["permission"]["permission_id"] == first.permission_id:
+                        assert overlay is not None and overlay.permission_id == first.permission_id
+                        peer.permission_sink(first, ToolApprovalDecision(first.permission_id, "approved"),
+                            conversation_id="session-a")
+                    else:
+                        actionable.append(overlay is not None and overlay.permission_id == second.permission_id)
+                        approved.append(adapter.resolve_permission(second.permission_id, "approved"))
+                elif event.get("kind") == "permission_resolved" and event.get("permission_id") == first.permission_id:
+                    closed.append(runtime.store.snapshot().permission is None)
+                return consumed
+            except Exception as exc:
+                errors.append((type(exc).__name__, str(exc), exc.__cause__))
+                aborted.set()
+                raise
+
+        request = replace(poll_request(gateway, waiting.record, consume), is_wait_cancelled=aborted.is_set)
+        result = observer(request)
+        rows = [json.loads(line) for line in waiting.record.chunk.read_text().splitlines()]
+        durable = [row for row in rows if row.get("kind") == "permission_resolved"
+                   and row.get("permission_id") == first.permission_id]
+        resolutions = [event for event in emitted if event.get("kind") == "permission_resolved"
+                       and event.get("permission_id") == first.permission_id]
+        overlay = runtime.store.snapshot().permission
+        trace = {"transport": transport, "disconnect": disconnect, "durable_a": len(durable),
+            "delivered_a": len(resolutions), "a_pending": overlay is not None and overlay.permission_id == first.permission_id,
+            "b_actionable": actionable, "b_waiter_completed": len(waiting.results) == 2,
+            "consumer_errors": [(name, text, cause is None) for name, text, cause in errors]}
+        print("permission_trace " + json.dumps(trace, sort_keys=True))
+        assert len(durable) == 1
+        assert len(resolutions) == 1, trace
+        assert closed == [True] and actionable == [True] and approved == [True], trace
+        assert not errors, trace
+        assert waiting.finished.wait(3) and len(waiting.results) == 2
+        assert all(row["decision"] == "approved" for row in waiting.results)
+        assert result["ok"] is True and runtime.store.snapshot().permission is None
+        assert not pending_tool_approvals(gateway.agent, gateway.paths, waiting.record.scope)
+        assert pending_counts and max(pending_counts) <= 1
+        assert [(event["kind"], event.get("permission_id", event.get("permission", {}).get("permission_id")))
+                for event in emitted if event["kind"] in {"permission_requested", "permission_resolved"}] == [
+            ("permission_requested", first.permission_id), ("permission_resolved", first.permission_id),
+            ("permission_requested", second.permission_id), ("permission_resolved", second.permission_id)]
+        assert observer._http_only is (transport == "http")
+        assert len(streams) == (2 if disconnect else 0 if transport == "http" else 1)
+        if disconnect:
+            assert streams[1] and streams[1].startswith("v1:r:attempt-a:")
+        adapter.finalize(TuiTurnSummary(response_text="finished"))
+        _headless_followup_after_approvals(runtime, gateway)
+
+
+# LLM: Derive negative rows from a real writer resolution, preserving DTO authority and both transport boundaries rather than inventing a parallel wire contract.
+# 函数用途: 验证坏决议被丢弃、额外字段不下发且后续有效行仍能到达。
+@pytest.mark.parametrize("transport", ["sse", "http"])
+@pytest.mark.parametrize(("field", "value"), [
+    ("permission_id", ""), ("decision", "unknown"), ("decided_at", [1]),
+    ("decided_at", "invalid-time"), ("reason_code", "unknown-reason"),
+    pytest.param("decided_at", 10**1000, id="timestamp-overflow")])
+def test_resolution_projection_rejects_malformed_durable_dto(measured_gateway, transport, field, value):
+    gateway = measured_gateway
+    with waiting_approval(gateway) as waiting:
+        observer = client(gateway)
+        observer._http_only = transport == "http"
+        observer.permission_sink(waiting.request, ToolApprovalDecision(waiting.request.permission_id, "approved"),
+            conversation_id="session-a")
+        assert waiting.finished.wait(3)
+        rows = [json.loads(line) for line in waiting.record.chunk.read_text().splitlines()]
+        canonical = next(row for row in rows if row.get("kind") == "permission_resolved")
+        malformed = {**canonical, field: value}
+        # 负例从真实 writer 的规范行改坏一个字段，不另造客户端/服务端 Wire 合同。
+        write_chunk_event(waiting.record.chunk, malformed)
+        write_chunk_event(waiting.record.chunk, {**canonical, "private_extra": "not-a-dto-field"})
+        finish(gateway, waiting.record)
+        runtime = TuiRuntime("session-a")
+        adapter = TuiTurnEventAdapter(runtime, "r")
+        emitted = []
+
+        def consume(event):
+            emitted.append(event)
+            return adapter.on_gateway_event(event)
+
+        assert observer(poll_request(gateway, waiting.record, consume))["ok"] is True
+        resolutions = [event for event in emitted if event.get("kind") == "permission_resolved"]
+        expected = {"kind": "permission_resolved", **ToolApprovalDecision.from_mapping(canonical).to_dict()}
+        assert resolutions == [expected, expected]
+        assert runtime.store.snapshot().permission is None
+        assert not pending_tool_approvals(gateway.agent, gateway.paths, waiting.record.scope)
+        print(f"resolution_contract_trace transport={transport} malformed_rejected=true canonical_dto_only=true")
+
+
+# LLM: External viewers, including the admin identity, receive only the original request summary and never canonical resolution fields.
+# 函数用途: 核对普通用户和管理员都不能在外部通道获得完整审批决议。
+@pytest.mark.parametrize("transport", ["sse", "http"])
+def test_external_channels_do_not_disclose_canonical_resolution(measured_gateway, transport):
+    gateway = measured_gateway
+    with waiting_approval(gateway, channel="feishu") as waiting:
+        waiting.cancelled.set()
+        assert waiting.finished.wait(3)
+        rows = [json.loads(line) for line in waiting.record.chunk.read_text().splitlines()]
+        assert any(row.get("kind") == "permission_resolved" for row in rows)
+        finish(gateway, waiting.record)
+        for user in ("alice", "admin"):
+            observer = client(gateway, user=user, channel="feishu")
+            observer._http_only = transport == "http"
+            emitted = []
+            assert observer(poll_request(gateway, waiting.record, lambda event: emitted.append(event) or True))["ok"] is True
+            assert [event["kind"] for event in emitted] == ["permission_requested"]
+            assert set(emitted[0]) == {"kind", "tool", "summary"}
+        print(f"resolution_contract_trace transport={transport} external_resolution_hidden=true")
+
+
+# LLM: The shared projector reuses the existing DTO normalization; an empty timestamp does not justify a new validation policy in this slice.
+# 函数用途: 锁住原 DTO 的空值兼容行为，避免测试自造更严格的合同。
+def test_resolution_projection_keeps_existing_dto_empty_timestamp_default():
+    from agent_py_agent.agent.gateway_parts.http_handlers import _project_public_progress_rows
+
+    row = {"kind": "permission_resolved", **ToolApprovalDecision("approval-empty-time", "approved").to_dict()}
+    row["decided_at"] = []
+    expected = ToolApprovalDecision.from_mapping(row).to_dict()
+    assert expected["decided_at"] == 0.0
+    assert _project_public_progress_rows((json.dumps(row),), channel="tui", next_cursor=7) == (
+        [{"kind": "permission_resolved", **expected}], 7)
+
+
+# LLM: Stream/steer/stop use the original headless TUI control boundary; reset requires a completed real /new receipt and a new network result, not a synthetic reset alone.
+# 函数用途: 审批后连续走界面控制、真实新会话回执和下一轮，核对旧弹窗、目标及页脚状态全部释放。
+def _headless_followup_after_approvals(runtime, gateway):
+    """不以本地出箱证明服务端 steer/stop 或模型执行；/new 则核对真实 HTTP 回执。"""
+    from agent_py_agent.cli.chat_parts import tui_actions
+    from agent_py_agent.cli.chat_parts.tui_worker import _reset_worker_refs
+    from agent_py_agent.tests.test_tui_control_delivery import _post_turn_params, _request_target
+
+    steers, controls = [], []
+    params = _post_turn_params(runtime, steers)
+    params.control_operation_reconciler = SimpleNamespace(enqueue_background=controls.append)
+    runtime.register_gateway_request("gwreq-turn-1")
+    turn = runtime.begin_turn("chat-turn-1", task_progress_generation_id="gwreq-turn-1")
+    turn.write_model("正在生成第一段")
+    turn.write_model("继续生成下一段")
+    assert runtime.store.snapshot().has_active_work
+    runtime.publish_execution_target(_request_target())
+    assert tui_actions._tui_submit_active_turn_input(params, "补充证据", display_text="补充证据") is True
+    assert len(steers) == 1 and steers[0].expected_turn_id == "gwreq-turn-1"
+    assert tui_actions._tui_submit_control_operation(params, "/stop") is True
+    assert len(controls) == 1 and controls[0].expected_turn_id == "gwreq-turn-1"
+    assert controls[0].command_kind == "stop" and runtime.request_interrupt()
+    runtime.complete_turn("chat-turn-1", TuiTurnSummary(ok=False, interrupted=True))
+    _reset_worker_refs(params)
+    observer = client(gateway)
+    status, receipt = observer.agent.post_gateway_json("/control", {"command": "/new",
+        "conversation_id": runtime.session_id, "metadata": {"message_id": "r3-followup-new"}}, timeout=5)
+    assert status == 200 and receipt["control_state"] == "completed" and receipt["ok"] is True, receipt
+    assert receipt["kind"] == "new" and receipt["details"]["view_reset"] is True
+    status, replay = observer.agent.get_gateway_json("/control-status/" + receipt["operation_id"], timeout=5,
+        conversation_id=runtime.session_id)
+    assert status == 200 and replay == receipt
+    runtime.publish_conversation_reset(receipt["details"]["thread_id"])
+    assert runtime.publish_execution_target(_request_target()) is False
+    assert tui_actions._tui_submit_active_turn_input(params, "下一轮对话", display_text="下一轮对话") is False
+    tui_actions._tui_enqueue_job(params, "下一轮对话")
+    assert params.jobs.get_nowait().user == "下一轮对话"
+    record = hot_request(gateway, request_id="r3-next-turn")
+    finish(gateway, record)
+    status, result = observer.request_json("GET", "/result/" + record.request_id)
+    assert status == 200 and result["ok"] is True and result["request_id"] == record.request_id
+    next_turn = runtime.begin_turn("chat-turn-2")
+    next_turn.write_model("新的回答")
+    runtime.complete_turn("chat-turn-2", TuiTurnSummary(response_text="下一轮完成"))
+    snapshot = runtime.store.snapshot()
+    assert snapshot.permission is None and snapshot.pending_steers == () and not snapshot.has_active_work
+    assert runtime.execution_target() is None
+    assert not runtime._turns and not runtime._completing_turns
+    assert not runtime._foreground_gateway_bindings and not runtime._owned_gateway_requests
+    print("headless_sequence stream->steer->stop=tui_control_outbox new=real_completed_http_receipt "
+          "next_turn=real_http_result_and_tui clean=true")
