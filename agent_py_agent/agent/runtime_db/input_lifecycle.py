@@ -45,15 +45,44 @@ def _notify_wake_change(owner_key, row_or_none):
                 _wake_listener_failures += 1
 
 
+# LLM: 六个原写口各保留明确签名；原提交/连接上下文退出后才通知，不改变SQL、返回值或异常。
+# 函数用途: 为现有唤醒写口附加提交后的变更提示，不接受任意参数。
 def _notify_wake_writer(fn):
     """原方法先完整退出提交/连接上下文，再通知；不改变其SQL、返回值或异常。"""
-    @wraps(fn)
-    def committed(self, *args, **kwargs):
-        result = fn(self, *args, **kwargs)
+    def committed(self, result):
         if result:
             self._wake_changed()
         return result
-    return committed
+
+    def upsert(self, *, root_task_id, next_due_at, kind="sleep", root_run_id="", root_thread_id=""):
+        return committed(self, fn(self, root_task_id=root_task_id, next_due_at=next_due_at,
+            kind=kind, root_run_id=root_run_id, root_thread_id=root_thread_id))
+
+    def pop_due(self, *, now, limit=64):
+        return committed(self, fn(self, now=now, limit=limit))
+
+    def complete(self, wake_id):
+        return committed(self, fn(self, wake_id))
+
+    def release(self, wake_id, *, retry_after, last_error=""):
+        return committed(self, fn(self, wake_id, retry_after=retry_after, last_error=last_error))
+
+    def reclaim_expired(self, *, now):
+        return committed(self, fn(self, now=now))
+
+    def cancel_for_task(self, root_task_id):
+        return committed(self, fn(self, root_task_id))
+
+    # 六种参数合同来自原装饰点，不把可选参数拼成更宽的公共入口。
+    writers = {
+        "upsert_wake": upsert,
+        "pop_due_wakes": pop_due,
+        "complete_wake": complete,
+        "release_wake": release,
+        "reclaim_expired_wakes": reclaim_expired,
+        "cancel_wakes_for_task": cancel_for_task,
+    }
+    return wraps(fn)(writers[fn.__name__])
 
 
 # LLM: 比较整行，不用DB文件mtime/字节；必须在同一SQL事务里读取，回放不能把旧claim当新许可。

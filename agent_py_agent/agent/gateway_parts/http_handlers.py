@@ -1567,11 +1567,24 @@ def handle_control_status(handler, server) -> None:
 # 函数用途: 读取显式显示能力并投影消息/检查点/活动；旧客户端保持旧类型，控制授权仍独立。
 # 通知长轮询协议上限：单连接最多等25秒，不是可调业务策略。
 NOTICES_MAX_WAIT_SECONDS = 25
+_NOTICE_ARGUMENT_UNSET = object()
 
 
 # LLM: Optional wait changes no cursor/payload when absent. Subscribe before the first read; all owner resolution and I/O remain outside the hub lock.
 # 函数用途: 为原通知读口增加有界等候，收到提示后仍重新读取原权威通知。
-def _read_client_notices_with_wait(reader, agent, *, hub, wait=0, **kwargs):
+def _read_client_notices_with_wait(
+    reader, agent, *, hub, wait=0,
+    scope=_NOTICE_ARGUMENT_UNSET, after=_NOTICE_ARGUMENT_UNSET,
+    paths=_NOTICE_ARGUMENT_UNSET, event_after=_NOTICE_ARGUMENT_UNSET,
+    event_stream_id=_NOTICE_ARGUMENT_UNSET, interactive_approvals=_NOTICE_ARGUMENT_UNSET,
+    display=_NOTICE_ARGUMENT_UNSET,
+):
+    # 省略与显式None/False/0不同；只透传实际给出的原读口参数。
+    kwargs = {name: value for name, value in {
+        "scope": scope, "after": after, "paths": paths, "event_after": event_after,
+        "event_stream_id": event_stream_id, "interactive_approvals": interactive_approvals,
+        "display": display,
+    }.items() if value is not _NOTICE_ARGUMENT_UNSET}
     try:
         seconds = max(0, min(NOTICES_MAX_WAIT_SECONDS, float(wait)))
     except (TypeError, ValueError, OverflowError):
