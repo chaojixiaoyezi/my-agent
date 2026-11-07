@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
@@ -406,7 +407,28 @@ def prepare_conversation_context(
     return _execute_compact_request(prepared)
 
 
+# LLM: 进程内按 (线程, 检查点, 代次) 记同一压缩头的连续完整性失败；成功或重置即清，重启清零；不写盘。
+_compact_integrity_failures: dict[tuple[str, str, int], int] = {}
+_compact_integrity_lock = threading.Lock()
+
+
+# LLM: 完整性错误（身份/版本/摘要不符）单次仍 fail-closed、不写盘（RES-W3）；同一压缩头在本进程里连续失败达到
+#   runtime_compact_policy 的 failure_threshold（默认 DEFAULT_COMPACT_FAILURE_THRESHOLD_COUNT=3）次才放弃坏链并按原 CAS 重置；
+#   检查点文件留在磁盘供取证，下一次压缩从规范原始记录重建。threshold<=0 表示永不重置。
+# 函数用途: 记一次完整性失败，返回是否已达阈值（达到即清计数）。
+def _compact_integrity_failure_tripped(thread: ConversationThread, threshold: int) -> bool:
+    key = (thread.thread_id, str(thread.compact_checkpoint_id or ""), int(thread.compact_generation or 0))
+    with _compact_integrity_lock:
+        count = _compact_integrity_failures.get(key, 0) + 1
+        if threshold <= 0 or count < threshold:
+            _compact_integrity_failures[key] = count
+            return False
+        _compact_integrity_failures.pop(key, None)
+        return True
+
+
 # LLM: 显式scope沿固定尾界验证身份/锚点；只对已确认缺失的派生头做CAS重置并重试一次，完整性及取消错误仍传播。
+#   同一压缩头的完整性错误在本进程连续达到压缩熔断阈值后也按同一 CAS 重置（_compact_integrity_failure_tripped）。
 # 函数用途: 冻结历史地址及策略；缺失压缩头时保住原文，不调用摘要或覆盖并发提交。
 def load_conversation_compact_source(
     agent: SimpleAgent, store: ConversationStore, thread: ConversationThread, *, exclude_request_id: str = "",
@@ -440,9 +462,15 @@ def load_conversation_compact_source(
                 'conversation compact checkpoint chain is incomplete',
                 'conversation compact checkpoint chain ended early',
                 'conversation compact pointer is incomplete',
+            ) and not _compact_integrity_failure_tripped(
+                thread, runtime_compact_policy(agent, thread=thread).failure_threshold,
             )):
                 raise
             thread = _reset_unreachable_compact_head(store, thread, reason=str(exc))
+    if _compact_integrity_failures:
+        with _compact_integrity_lock:
+            _compact_integrity_failures.pop(
+                (thread.thread_id, str(thread.compact_checkpoint_id or ""), int(thread.compact_generation or 0)), None)
     pending = _without_current_request_suffix(selected, exclude_request_id)
     return ConversationCompactSource(
         thread, pending, runtime_compact_policy(agent, thread=thread), dict(_recent_operation_evidence(pending) or {}),
