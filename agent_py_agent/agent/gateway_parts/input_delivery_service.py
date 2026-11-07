@@ -32,6 +32,8 @@ from ..common.request_execution_ports import (
     RequestExecutionOutcomeUncertainError,
     raise_if_transport_uncertain,
 )
+from ..conversation.guidance_pending_index import GuidanceIndexIncomplete
+from ..conversation.observation_index import ObservationIndexIncomplete
 from ..conversation.store_guidance_recovery import (
     CLOSEOUT_REPLAY_QUEUED,
     CLOSEOUT_REPLAY_UNAVAILABLE,
@@ -675,6 +677,9 @@ def reconcile_gateway_input_request(
                     _write_active_turn_ref(paths, receipt)
         except Exception as exc:
             _raise_input_transport_uncertain(exc)
+            if not target_terminal and isinstance(exc, (ObservationIndexIncomplete, GuidanceIndexIncomplete)):
+                # 切片恢复尚未追平只表示本拍未知，保留原回执由下一拍继续，不提前终结活跃插话。
+                return receipt.state
             _write_terminal_unknown(paths, receipt, exc)
             return "terminal_unknown"
         if guidance is None:

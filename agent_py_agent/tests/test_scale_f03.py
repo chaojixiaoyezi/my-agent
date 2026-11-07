@@ -372,3 +372,224 @@ def test_large_legal_observation_resumes_with_fixed_read_budget(tmp_path):
     assert event.wake_signal_id == wake.wake_signal_id
     assert store.observations.mark_handled_for_wake(wake.wake_signal_id, now=10) == [event.observation_id]
     assert [entry.observation_id for entry in store.observations.unhandled_requiring_main(limit=0)] == [ordinary.observation_id]
+
+
+@pytest.mark.parametrize("domain", ["observations", "guidance"])
+def test_large_ack_journal_resumes_at_complete_record_boundaries(tmp_path, domain):
+    """两类确认日志共用恢复器，跨 64KiB 切片并重建实例仍须逐条恢复。"""
+    from agent_py_agent.agent.conversation.guidance_pending_index import GuidanceIndexIncomplete
+    from agent_py_agent.agent.conversation.observation_index import ObservationIndexIncomplete
+
+    store, _ = _store(tmp_path / "owner")
+
+    def index_for(current):
+        return (current.observations._index if domain == "observations"
+                else current.guidance.ledger.pending_index())
+
+    index = index_for(store)
+    pairs = [(f"ack-{number:03}-" + "x" * 900, 10.0) for number in range(180)]
+    end, _written = index._append(pairs)
+    raw = index.journal_path.read_bytes()
+    assert end == len(raw) > 128 * 1024
+    ids = [key for key, _at in pairs]
+    offsets, read_bytes = [], []
+    for _ in range(8):
+        index = index_for(ConversationStore(store.storage.root))
+        try:
+            found = (index.handled(ids, include_legacy=False) if domain == "observations"
+                     else index.delivered_many(ids))
+        except (ObservationIndexIncomplete, GuidanceIndexIncomplete):
+            found = None
+        read_bytes.append(index.last_work["bytes_read"])
+        assert 0 < read_bytes[-1] <= 128 * 1024
+        assert index.last_work["json_decodes"] <= 128
+        with sqlite3.connect(index.path) as conn:
+            offsets.append(int(conn.execute("SELECT value FROM meta WHERE key='journal_offset'").fetchone()[0]))
+        assert raw[:offsets[-1]].endswith(b"\n")
+        if found is not None:
+            assert found == dict(pairs)
+            break
+    else:
+        pytest.fail("large ack journal did not converge")
+    assert len(offsets) >= 3 and offsets == sorted(set(offsets)) and offsets[-1] == end
+    assert sum(read_bytes) == end
+    assert index.journal_path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("mutation", ["append", "chmod"])
+def test_observation_reader_accepts_concurrent_append_and_permission_refresh(tmp_path, monkeypatch, mutation):
+    """用事件固定 lstat/open 交错，正文和权限变更均由真实写线程完成。"""
+    from agent_py_agent.agent.conversation import observation_index as module
+
+    path = tmp_path / "journal.jsonl"
+    path.write_bytes(b"original\n")
+    sampled, written = threading.Event(), threading.Event()
+    original_identity = module._identity
+    errors = []
+
+    def writer():
+        try:
+            assert sampled.wait(5)
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND)
+            try:
+                os.fchmod(fd, 0o600)
+                if mutation == "append":
+                    os.write(fd, b"appended\n")
+            finally:
+                os.close(fd)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            written.set()
+
+    def identity(target):
+        expected = original_identity(target)
+        if target == path:
+            sampled.set()
+            assert written.wait(5)
+        return expected
+
+    thread = threading.Thread(target=writer)
+    thread.start()
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(module, "_identity", identity)
+            with module._reader(path) as handle:
+                assert handle.read() == b"original\n" + (b"appended\n" if mutation == "append" else b"")
+    finally:
+        sampled.set()
+        thread.join(5)
+    assert not thread.is_alive() and errors == []
+
+
+@pytest.mark.parametrize("mutation", ["truncate", "replace", "hardlink"])
+def test_observation_reader_still_rejects_unsafe_open_races(tmp_path, monkeypatch, mutation):
+    from agent_py_agent.agent.conversation import observation_index as module
+
+    path = tmp_path / "journal.jsonl"
+    path.write_bytes(b"original\n")
+    original_identity = module._identity
+
+    def identity(target):
+        expected = original_identity(target)
+        if mutation == "truncate":
+            path.write_bytes(b"x")
+        elif mutation == "replace":
+            replacement = tmp_path / "replacement"
+            replacement.write_bytes(b"replacement\n")
+            replacement.replace(path)
+        else:
+            os.link(path, tmp_path / "alias")
+        return expected
+
+    monkeypatch.setattr(module, "_identity", identity)
+    with pytest.raises(module.ObservationIndexError, match="changed while opening"):
+        with module._reader(path):
+            pytest.fail("unsafe source was accepted")
+
+
+def test_ack_sync_checkpoints_opened_inode_after_concurrent_append(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation import observation_index as module
+
+    store, _ = _store(tmp_path / "owner")
+    index = store.observations._index
+    index._append([("first", 10.0)])
+    original_open = os.open
+    appended = []
+
+    def append_before_open(path, flags, *args, **kwargs):
+        if path == index.journal_path and flags & os.O_ACCMODE == os.O_RDONLY and not appended:
+            fd = original_open(path, os.O_WRONLY | os.O_APPEND)
+            try:
+                os.fchmod(fd, 0o600)
+                os.write(fd, b'{"id":"second","at":20}\n')
+                appended.append(True)
+            finally:
+                os.close(fd)
+        return original_open(path, flags, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module.os, "open", append_before_open)
+        assert index.handled(["first", "second"], include_legacy=False) == {"first": 10, "second": 20}
+    assert appended == [True]
+    # 同长权限刷新只改变 ctime，下一次查询仍须认可刚提交的精确确认。
+    os.chmod(index.journal_path, 0o600)
+    assert index.handled(["first", "second"], include_legacy=False) == {"first": 10, "second": 20}
+    with index._connection() as conn:
+        assert index._journal_current(conn)
+
+
+def test_ack_sync_retries_concurrently_completed_tail_from_line_start(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation import observation_index as module
+
+    store, _ = _store(tmp_path / "owner")
+    index = store.observations._index
+    index._append([("first", 10.0)])
+    first_end = index.journal_path.stat().st_size
+    original_reader = module._reader
+
+    class AppendedTail:
+        def __init__(self, handle):
+            self.handle = handle
+            self.calls = 0
+
+        def __getattr__(self, name):
+            return getattr(self.handle, name)
+
+        def readline(self, size):
+            self.calls += 1
+            if self.calls != 2:
+                return self.handle.readline(size)
+            with index.journal_path.open("ab") as writer:
+                writer.write(b'{"id":"second",')
+            raw = self.handle.readline(size)
+            with index.journal_path.open("ab") as writer:
+                writer.write(b'"at":20}\n')
+            return raw
+
+    @contextmanager
+    def reader(path):
+        with original_reader(path) as handle:
+            yield AppendedTail(handle)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_reader", reader)
+        with pytest.raises(module.ObservationIndexIncomplete):
+            index.handled(["first", "second"], include_legacy=False)
+    with index._connection() as conn:
+        assert int(index._get(conn, "journal_offset")) == first_end
+        assert index._lookup(conn, ["first"]) == {"first": 10}
+    assert index.handled(["first", "second"], include_legacy=False) == {"first": 10, "second": 20}
+
+
+@pytest.mark.parametrize("raw", [b'{"id":"one","at":1}', b"x" * 65537, b"{broken\n"],
+                         ids=["incomplete", "oversized", "invalid-json"])
+def test_ack_sync_still_rejects_malformed_records(tmp_path, raw):
+    from agent_py_agent.agent.conversation.observation_index import ObservationIndexError
+
+    store, _ = _store(tmp_path / "owner")
+    index = store.observations._index
+    index.journal_path.write_bytes(raw)
+    with pytest.raises(ObservationIndexError) as error:
+        index.handled(["one"], include_legacy=False)
+    assert type(error.value) is ObservationIndexError
+    assert index.journal_path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("count", [129, 658])
+def test_observation_directory_changes_do_not_restart_small_discovery_slices(tmp_path, count):
+    store, thread = _store(tmp_path / "owner")
+    directory = store.storage.observations_dir
+    for number in range(count):
+        (directory / f"history-{number:04}.jsonl").touch()
+    _drain(store.observations._index)
+    expected = []
+    for number in range(6):
+        (directory / f"history-{number:04}.jsonl").unlink()
+        path = directory / f"fresh-{number}.jsonl"
+        event_id = f"fresh-{number}"
+        path.write_text(json.dumps({"observation_id": event_id, "thread_id": thread,
+            "requires_main_agent": True, "observed_at": number + 1}) + "\n")
+        expected.append(event_id)
+        pending = store.observations.unhandled_requiring_main(limit=0)
+        assert [event.observation_id for event in pending] == expected
