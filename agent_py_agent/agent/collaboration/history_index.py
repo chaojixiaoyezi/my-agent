@@ -153,7 +153,7 @@ class CollaborationHistoryIndex:
                 finally:
                     db.close()
 
-    # LLM: 便携路径先校验并关闭种子FD；重装先提交，避免业务BEGIN嵌套和回滚撤销种子。
+    # LLM: 便携路径仅POSIX收紧权限并先关闭种子FD；重装先提交，避免业务BEGIN嵌套和回滚撤销种子。
     # 函数用途: 为无dir_fd平台保留外键、提交、回滚与连接关闭合同。
     @contextmanager
     def _connect_portable(self):
@@ -168,7 +168,7 @@ class CollaborationHistoryIndex:
                     continue
             descriptor = open_private_lock_beneath(self.root, (path.name,))
             try:
-                if hasattr(os, "fchmod"):
+                if os.name != "nt" and hasattr(os, "fchmod"):
                     os.fchmod(descriptor, 0o600)
                 pinned.append((path, os.fstat(descriptor)))
             finally:
@@ -534,7 +534,7 @@ def _verify_files(root, root_fd, pinned):
             raise OSError("collaboration SQLite file identity changed")
 
 
-# LLM: 便携路径保留普通单链接、reparse及目录/文件身份检查；仅无fchmod的平台不判断POSIX权限位。
+# LLM: 便携路径保留普通单链接、reparse及目录/文件身份检查；仅POSIX且有fchmod时核权限位。
 # 函数用途: 不持外部SQLite文件FD地复核主库和正常增删的sidecar。
 def _verify_portable_files(root, root_info, pinned):
     current = nofollow_fs._portable_directory(root, (), create=False).lstat()
@@ -552,7 +552,7 @@ def _verify_portable_files(root, root_info, pinned):
             raise
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
                 or getattr(info, "st_file_attributes", 0) & 0x400
-                or hasattr(os, "fchmod") and stat.S_IMODE(info.st_mode) & 0o077):
+                or os.name != "nt" and hasattr(os, "fchmod") and stat.S_IMODE(info.st_mode) & 0o077):
             raise OSError("collaboration SQLite must be a private regular single-link file")
         opened = identities.get(path)
         if opened is not None and (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):

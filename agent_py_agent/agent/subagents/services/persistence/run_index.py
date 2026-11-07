@@ -157,7 +157,7 @@ class SubagentRunIndex:
                 finally:
                     db.close()
 
-    # LLM: 便携分支沿原访问锁和路径预检；初始化先提交，种子FD先关再开SQLite，不外推POSIX竞态强度。
+    # LLM: 便携分支沿原访问锁和路径预检；仅POSIX收紧权限，种子FD先关再开SQLite，不外推POSIX竞态强度。
     # 函数用途: 在无dir_fd平台提供真实提交、回滚及确定性关闭的短连接。
     @contextmanager
     def _connect_portable(self):
@@ -172,7 +172,7 @@ class SubagentRunIndex:
                     continue
             descriptor = open_private_lock_beneath(self.workspace, (path.name,))
             try:
-                if hasattr(os, "fchmod") and stat.S_IMODE(os.fstat(descriptor).st_mode) & 0o077:
+                if os.name != "nt" and hasattr(os, "fchmod") and stat.S_IMODE(os.fstat(descriptor).st_mode) & 0o077:
                     os.fchmod(descriptor, 0o600)
                 pinned.append((path, os.fstat(descriptor)))
             finally:
@@ -561,7 +561,7 @@ def _verify_sqlite_files(workspace, root_fd, pinned):
             raise OSError("private SQLite file identity changed")
 
 
-# LLM: 无FD平台只比较同源路径身份，仍拒绝目录/链接/reparse/多链接；没有fchmod时不套POSIX权限位。
+# LLM: 无FD平台只比较同源路径身份，仍拒绝目录/链接/reparse/多链接；仅POSIX且有fchmod时核权限位。
 # 函数用途: 在SQLite连接和提交前复核便携路径，不持有阻碍Windows删除journal的文件句柄。
 def _verify_portable_sqlite_files(workspace, root_info, pinned):
     current = nofollow_fs._portable_directory(workspace, (), create=False).lstat()
@@ -579,7 +579,7 @@ def _verify_portable_sqlite_files(workspace, root_info, pinned):
             raise
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
                 or getattr(info, "st_file_attributes", 0) & 0x400
-                or hasattr(os, "fchmod") and stat.S_IMODE(info.st_mode) & 0o077):
+                or os.name != "nt" and hasattr(os, "fchmod") and stat.S_IMODE(info.st_mode) & 0o077):
             raise OSError("SQLite index must be a private regular single-link file")
         opened = identities.get(path)
         if opened is not None and (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):

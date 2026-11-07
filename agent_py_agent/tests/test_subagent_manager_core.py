@@ -587,14 +587,18 @@ def test_refreeze_preserves_task_identity_and_never_changes_published_task(tmp_p
     assert _prepared_tree_snapshot(tmp_path) == before
 
 
+# LLM: 只代理被测模块的平台视图，真实SQLite提交/回滚和FD关闭仍须成立。
+# 函数用途: 覆盖Windows有无fchmod时均保留0666的情况，不修改全局os.name。
 @pytest.mark.parametrize("kind", ["runs", "collaboration"])
 @pytest.mark.parametrize("has_fchmod", [True, False])
-def test_private_indexes_work_without_directory_fds(tmp_path, monkeypatch, kind, has_fchmod):
+@pytest.mark.parametrize("simulate_windows", [False, True], ids=["native", "windows"])
+def test_private_indexes_work_without_directory_fds(tmp_path, monkeypatch, kind, has_fchmod, simulate_windows):
     """使用真实SQLite；模拟Windows权限位并确认种子FD在连接前已经关闭。"""
     import os
     import sqlite3
     import stat
     from types import SimpleNamespace
+    from unittest.mock import Mock
 
     from agent_py_agent.agent.collaboration import history_index
     from agent_py_agent.agent.collaboration.store import CollaborationStore
@@ -604,20 +608,28 @@ def test_private_indexes_work_without_directory_fds(tmp_path, monkeypatch, kind,
 
     module = run_index if kind == "runs" else history_index
     monkeypatch.setattr(nofollow_fs, "_supports_dir_fd", lambda: False)
-    if not has_fchmod:
-        monkeypatch.setattr(module, "os", SimpleNamespace(**{key: value for key, value in vars(os).items()
-                                                           if key != "fchmod"}))
+    platform_os = SimpleNamespace(**{key: value for key, value in vars(os).items()
+                                    if has_fchmod or key != "fchmod"})
+    if simulate_windows:
+        platform_os.name = "nt"
+        if has_fchmod:
+            # 新版Windows虽有fchmod，但调用它也不会清除POSIX组/其他用户权限位。
+            platform_os.fchmod = Mock()
+    monkeypatch.setattr(module, "os", platform_os)
+    if simulate_windows or not has_fchmod:
         real_lstat = Path.lstat
 
-        def windows_mode(path, *args, **kwargs):
-            info = real_lstat(path, *args, **kwargs)
-            if ".sqlite3" not in path.name:
-                return info
+        def windows_mode(info):
             values = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
             values["st_mode"] = stat.S_IFMT(info.st_mode) | 0o666
             return SimpleNamespace(**values)
 
-        monkeypatch.setattr(Path, "lstat", windows_mode)
+        def windows_lstat(path, *args, **kwargs):
+            info = real_lstat(path, *args, **kwargs)
+            return windows_mode(info) if ".sqlite3" in path.name else info
+
+        monkeypatch.setattr(Path, "lstat", windows_lstat)
+        monkeypatch.setattr(platform_os, "fstat", lambda fd: windows_mode(os.fstat(fd)))
     original_seed, original_connect = module.open_private_lock_beneath, sqlite3.connect
     descriptors = []
 
@@ -652,6 +664,46 @@ def test_private_indexes_work_without_directory_fds(tmp_path, monkeypatch, kind,
         assert db.execute("SELECT value FROM portable_probe").fetchall() == [("committed",)]
         if kind == "collaboration":
             assert db.execute("PRAGMA foreign_keys").fetchone() == (1,)
+    if simulate_windows and has_fchmod:
+        platform_os.fchmod.assert_not_called()
+
+
+# LLM: 使用真实锁FD及局部os视图，模拟0666且fchmod无POSIX效果；不修改宿主平台名。
+# 函数用途: Windows不按POSIX位收紧锁；POSIX有fchmod时仍尝试收紧，缺能力时安全跳过。
+@pytest.mark.parametrize("platform_name", ["nt", "posix"])
+@pytest.mark.parametrize("has_fchmod", [True, False])
+def test_private_lock_tightening_respects_platform(tmp_path, monkeypatch, platform_name, has_fchmod):
+    import os
+    import stat
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from agent_py_agent.agent.common import nofollow_fs
+
+    platform_os = SimpleNamespace(**{key: value for key, value in vars(os).items() if key != "fchmod"})
+    platform_os.name = platform_name
+    fchmod = Mock()
+    if has_fchmod:
+        platform_os.fchmod = fchmod
+
+    def windows_fstat(descriptor):
+        info = os.fstat(descriptor)
+        fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+        fields["st_mode"] = stat.S_IFMT(info.st_mode) | 0o666
+        return SimpleNamespace(**fields)
+
+    platform_os.fstat = windows_fstat
+    monkeypatch.setattr(nofollow_fs, "os", platform_os)
+    monkeypatch.setattr(nofollow_fs, "_supports_dir_fd", lambda: False)
+    descriptor = nofollow_fs.open_private_lock_beneath_tightened(tmp_path, ("private.lock",))
+    try:
+        assert stat.S_ISREG(os.fstat(descriptor).st_mode)
+        if platform_name == "posix" and has_fchmod:
+            fchmod.assert_called_once_with(descriptor, 0o600)
+        else:
+            fchmod.assert_not_called()
+    finally:
+        os.close(descriptor)
 
 
 def test_run_index_backfill_without_directory_fds(tmp_path, monkeypatch):
