@@ -219,11 +219,13 @@ def test_cas_rechecks_held_parent_and_leaf_before_publish(case, monkeypatch, ope
 
     monkeypatch.setattr(files, "write_bytes_atomic_beneath", pause_publish)
     if operation == "write":
-        invoke = lambda: files.write_workspace_file(case, {"path": "docs/item", "content_b64": encoded(b"new"),
-                                                           "expected_sha256": sha(b"checked-A")})
+        def invoke():
+            return files.write_workspace_file(case, {"path": "docs/item", "content_b64": encoded(b"new"),
+                                                                   "expected_sha256": sha(b"checked-A")})
     else:
-        invoke = lambda: files.upload_workspace_file(case, {"workspace_dir": str(root), "path": "item",
-                                                           "data_base64": encoded(b"new"), "expected_revision": revision})
+        def invoke():
+            return files.upload_workspace_file(case, {"workspace_dir": str(root), "path": "item",
+                                                                   "data_base64": encoded(b"new"), "expected_revision": revision})
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(invoke)
         try:
