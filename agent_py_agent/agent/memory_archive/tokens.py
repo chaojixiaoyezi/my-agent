@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +45,8 @@ _ITEM_LENGTH_CACHE_MAX_ENTRY_COUNT = 4096
 # 进程内单条长度缓存：指纹(int) → 打包长度(int)；有界 LRU，满了淘汰最久未用条目。
 # 上界：4096 条 × 每条（两个 int + 字典槽）约 200 字节 ≈ 800KB；实测 1200 条 2KB 消息约 0.2MB。
 _ITEM_LENGTH_CACHE: OrderedDict[int, int] = OrderedDict()
+# 叶子锁只保护 LRU 的复合操作；编码、指纹计算和 I/O 都不得持有它。
+_ITEM_LENGTH_CACHE_LOCK = threading.Lock()
 
 
 # LLM: 同一sort/default JSON序列按结构上界选择有界直接编码或流式累计；估算数值及异常回退不变，最大单值/字典排序仍需内存。
@@ -271,23 +274,25 @@ def _sequence_fingerprint(value: list | tuple) -> int | None:
 
 # LLM: 命中判断只做"取表 + 刷新 LRU 位置"，绝不改动统计值；未命中先纯计算再记账。记账范围是顶层容器的
 #   直接子项，以及顶层字典里列表值的元素（如 payload["messages"] 里的每条消息、schema 列表）；更深的子结构
-#   纯算不记账——避免每层节点挤爆上限引发反复淘汰。缓存无显式锁：依赖 CPython GIL 保证单次 dict 操作原子，
-#   并发时最坏是重复计算和淘汰顺序抖动，同指纹必得同一长度，数值不会错；改用无 GIL 解释器时这里要加锁。
+#   纯算不记账——避免每层节点挤爆上限引发反复淘汰。叶子锁保护命中刷新及发布/逐出，
+#   未命中的纯计算在锁外执行；并发重复计算允许，但绝不暴露半次 LRU 操作。
 # 函数用途: 取一个列表元素/字典值的（字符数、UTF8字节数）；指纹不可用或不能合成时返回 None。
 def _cached_element_lengths(item: Any) -> tuple[int, int] | None:
     fingerprint = _item_length_fingerprint(item)
     if fingerprint is None:
         return None
-    cached = _ITEM_LENGTH_CACHE.pop(fingerprint, None)
-    if cached is not None:
-        _ITEM_LENGTH_CACHE[fingerprint] = cached  # pop+重插即 LRU 刷新，且无并发 KeyError
-        return _unpack_lengths(cached)
+    with _ITEM_LENGTH_CACHE_LOCK:
+        cached = _ITEM_LENGTH_CACHE.pop(fingerprint, None)
+        if cached is not None:
+            _ITEM_LENGTH_CACHE[fingerprint] = cached
+            return _unpack_lengths(cached)
     lengths = _encode_element_lengths(item)
     if lengths is None:
         return None
-    _ITEM_LENGTH_CACHE[fingerprint] = _pack_lengths(lengths)
-    while len(_ITEM_LENGTH_CACHE) > _ITEM_LENGTH_CACHE_MAX_ENTRY_COUNT:
-        _ITEM_LENGTH_CACHE.popitem(last=False)
+    with _ITEM_LENGTH_CACHE_LOCK:
+        _ITEM_LENGTH_CACHE[fingerprint] = _pack_lengths(lengths)
+        while len(_ITEM_LENGTH_CACHE) > _ITEM_LENGTH_CACHE_MAX_ENTRY_COUNT:
+            _ITEM_LENGTH_CACHE.popitem(last=False)
     return lengths
 
 
