@@ -820,9 +820,9 @@ def test_b2_event_maintenance_is_explicit_and_bounded_not_record_event_hot_path(
 
 @pytest.mark.parametrize("coordinator", [False, True])
 def test_b2_clear_ledger_releases_file_lock_before_waiting_for_append_writer(tmp_path, monkeypatch, coordinator):
-    from agent_py_agent.agent.local_storage import events as event_module
-
     from contextlib import contextmanager
+
+    from agent_py_agent.agent.local_storage import events as event_module
 
     store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
     writer = LocalStore(store.db_path)

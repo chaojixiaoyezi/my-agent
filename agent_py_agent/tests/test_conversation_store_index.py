@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -64,9 +65,9 @@ def test_each_ledger_scan_enumerates_each_directory_once(tmp_path, monkeypatch, 
     index_scans = []
     original = store_index._scan_dir_match_names
 
-    def index_scan(directory, pattern):
+    def index_scan(directory, pattern, on_entry=None):
         index_scans.append(directory)
-        return original(directory, pattern)
+        return original(directory, pattern, on_entry)
 
     monkeypatch.setattr(store_index, "_scan_dir_match_names", index_scan)
     first = query()
@@ -110,6 +111,32 @@ def test_direct_usable_in_another_thread_does_not_borrow_listing(tmp_path, monke
     with ThreadPoolExecutor(max_workers=1) as pool:
         assert pool.submit(indexes.usable, index, key="test", directory=tmp_path, pattern="*.json").result(timeout=10)
     assert calls == [tmp_path]
+
+
+def test_enumeration_callback_cannot_hide_concurrent_membership_change(tmp_path, monkeypatch):
+    index = store_index.ScanIndex("test", max_entries=1)
+    indexes = store_index.ScanIndexes()
+    (tmp_path / "first.json").write_text("{}")
+    entered, published = threading.Event(), threading.Event()
+    calls = _scan_spy(monkeypatch)
+
+    def publish():
+        assert entered.wait(5)
+        (tmp_path / "second.json").write_text("{}")
+        published.set()
+
+    def visit(path):
+        if path.name == "first.json":
+            entered.set()
+            assert published.wait(5)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        writer = pool.submit(publish)
+        index.ordered_paths(tmp_path, "*.json", on_entry=visit)
+        writer.result(timeout=5)
+    assert not indexes.usable(index, key="test", directory=tmp_path, pattern="*.json")
+    assert calls == [tmp_path, tmp_path]
+    assert index.warnings[-1]["reason"] == "dir_too_large"
 
 
 # LLM: clear 是当前版本的失效接口；目录、模式或成员版本不匹配都必须丢弃一次性 listing。

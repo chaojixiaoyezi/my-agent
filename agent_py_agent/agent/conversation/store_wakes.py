@@ -95,6 +95,14 @@ def wake_evidence_refs(
     )
 
 
+def _discard_orphan_lock_entry(path: Path) -> None:
+    """借本轮目录枚举清理旧锁，互斥和身份复核仍归原孤儿锁协议。"""
+    if path.name.endswith(".json.lock"):
+        json_path = path.with_suffix("")
+        if not json_path.exists():
+            _discard_orphan_lock(json_path)
+
+
 # LLM: 信号归属来自已校验线程，观察仅补充原字段；构造不发布或授予执行权。
 # 函数用途: 构造待落盘的唤醒信号，保留观察链接、去重键和时间。
 def _wake_signal(thread_id: str, current: float, kwargs: dict[str, Any]) -> WakeSignal:
@@ -510,16 +518,15 @@ class WakeStore:
         signals: list[WakeSignal] = []
         load_errors: list[dict[str, Any]] = []
         directory = self.storage.wake_queue_dir / kind
+        index = self.storage.indexes.get(f"wake:{kind}")
+        paths = None
         # 旧锁只在本实例首次查询该目录时清扫；后续结案即时回收，热拍不重复扫描历史。
         with self._wake_obj_cache_lock:
             if directory not in self._orphan_lock_swept_dirs:
-                for lock_path in directory.glob("*.json.lock"):
-                    json_path = lock_path.with_suffix("")
-                    if not json_path.exists():
-                        _discard_orphan_lock(json_path)
+                paths = index.ordered_paths(directory, "*.json", on_entry=_discard_orphan_lock_entry)
                 self._orphan_lock_swept_dirs.add(directory)
-        index = self.storage.indexes.get(f"wake:{kind}")
-        paths = index.ordered_paths(directory, "*.json")
+        if paths is None:
+            paths = index.ordered_paths(directory, "*.json")
         use_index = self.storage.indexes.usable(
             index,
             key=f"wake:{kind}",

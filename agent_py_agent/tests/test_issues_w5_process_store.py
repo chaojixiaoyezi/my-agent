@@ -507,7 +507,10 @@ def test_exhausted_budget_never_commits(domain):
 
 def test_busy_store_lock_is_bounded_and_retryable(domain):
     home, store = domain
-    store.write(_running(output_file=""))
+    store.write(_running(status="exited", exit_code=0, finished_at=NOW - 2 * DAY, output_file=""))
+    # 维护只裁剪已归档历史；先沿原事务归档，再验证真正的删除候选遇锁可续跑。
+    assert store.prune_finished(max_age_seconds=None, now=NOW) == []
+    assert (store.root / "finished" / "bg-a.json").is_file()
     ready, release = threading.Event(), threading.Event()
     def holder():
         with store.transaction():
@@ -525,6 +528,7 @@ def test_busy_store_lock_is_bounded_and_retryable(domain):
         thread.join(5)
     assert not thread.is_alive()
     _finish(home)
+    assert not store.load("bg-a").record
 
 
 @pytest.mark.parametrize("damage", ["schema", "time", "json"])

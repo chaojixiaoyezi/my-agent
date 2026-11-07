@@ -177,6 +177,10 @@ def _process_log(home, now, *, session_id, terminal):
         'finished_at': now - 8 * 86400 if terminal else None, 'exit_code': 0 if terminal else None,
         'status': 'exited' if terminal else 'running', 'child_launch_started': True,
         'stop_requested': False, 'handoff_confirmed': False})
+    if terminal:
+        # 先按真实 Store 收尾协议搬入历史；过期删除和日志退役仍由受测维护车道执行。
+        assert store.prune_finished(max_age_seconds=None, now=now) == []
+        assert (store.root / 'finished' / (session_id + '.json')).is_file()
     return output
 
 

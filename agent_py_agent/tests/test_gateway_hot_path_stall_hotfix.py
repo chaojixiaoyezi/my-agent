@@ -259,40 +259,54 @@ def test_unverified_pending_scan_never_becomes_the_directory_projection(tmp_path
     assert counter.calls == 0
 
 
-def test_concurrent_misses_share_one_locked_scan(tmp_path, monkeypatch):
+@pytest.mark.parametrize("pending_only", [False, True])
+def test_concurrent_misses_share_one_scan(tmp_path, monkeypatch, pending_only):
     authority = _pending_and_settled(tmp_path, 3)
     _settle_files_keep_directory_hot(authority.root)
-    entered, release = threading.Event(), threading.Event()
-    original = process_store_module.ProcessSessionTransaction.list_records
+    entered, release, followers_ready = (threading.Event() for _ in range(3))
+    original = ProcessSessionStore._scan_records_projection
+    scans = []
 
     def gated(self, **budget):
-        if not entered.is_set():
-            entered.set()
-            release.wait(10)  # 第一位领头者持目录锁时停住
+        scans.append(self.root)
+        entered.set()
+        assert release.wait(10)  # 封批前等同模式调用加入，避免依赖文件锁和轮询时序。
         return original(self, **budget)
 
-    monkeypatch.setattr(process_store_module.ProcessSessionTransaction, "list_records", gated)
+    monkeypatch.setattr(ProcessSessionStore, "_scan_records_projection", gated)
     counter = _TransactionCounter()
     counter.install(monkeypatch)
-    results = []
-    threads = [threading.Thread(target=lambda: results.append(authority.list_pending_completion_records_report()))
-               for _ in range(7)]
-    threads[0].start()
-    assert entered.wait(10)
-    for thread in threads[1:]:
-        thread.start()
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:  # 后到的 6 个调用合成一批：1 个等锁，5 个只等结果
-        batch = process_store_module._PROCESS_RECORDS_SCAN_BATCHES.get(str(authority.root))
-        if batch is not None and batch.followers == 5:
-            break
-        time.sleep(0.01)
-    release.set()
-    for thread in threads:
-        thread.join(10)
-    assert counter.calls == 2
+    query = authority.list_pending_completion_records_report if pending_only else authority.list_records
+    arrivals, arrivals_lock = [], threading.Lock()
+    with ThreadPoolExecutor(max_workers=7) as pool:
+        futures = [pool.submit(query)]
+        try:
+            assert entered.wait(10)
+            batch = process_store_module._PROCESS_RECORDS_SCAN_BATCHES[(str(authority.root), pending_only)]
+            original_wait = batch.done.wait
+
+            def joined(timeout=None):
+                with arrivals_lock:
+                    arrivals.append(True)
+                    if len(arrivals) == 6:
+                        followers_ready.set()
+                return original_wait(timeout)
+
+            monkeypatch.setattr(batch.done, "wait", joined)
+            futures.extend(pool.submit(query) for _ in range(6))
+            assert followers_ready.wait(10)
+            assert batch.followers == 6
+        finally:
+            release.set()
+        results = [future.result(timeout=10) for future in futures]
+    assert scans == [authority.root]
+    assert counter.calls == (0 if pending_only else 1)
     assert len(results) == 7
-    assert all([row["session_id"] for row in report.records] == ["bg-test-notice"] for report in results)
+    for result in results:
+        records, errors = (result.records, result.load_errors) if pending_only else result
+        assert not errors
+        assert len(records) == (1 if pending_only else 4)
+        assert "bg-test-notice" in {row["session_id"] for row in records}
 
 
 def test_root_caches_follow_resident_owner_capacity(tmp_path, monkeypatch):
@@ -334,16 +348,19 @@ def test_reconcile_safe_points_do_not_reparse_settled_history(tmp_path, monkeypa
     payload = authority.load("bg-test-notice").record
     for index in range(5):
         authority.write({**payload, "session_id": f"bg-settled-{index}", "completion_notice_id": "explicit_stop"})
-    assert reconcile_process_completions(agent) == 1  # 发出唯一欠报通知，此后全部记录都已结清
+    assert reconcile_process_completions(agent) == 1  # 发出唯一欠报通知；明确结清的历史沿原事务归档。
+    assert {path.stem for path in (authority.root / "finished").glob("bg-*.json")} == {
+        f"bg-settled-{index}" for index in range(5)}
+    assert (authority.root / "bg-test-notice.json").is_file()  # 通知未消费前仍保留在活跃集。
     _settle_files_keep_directory_hot(authority.root)
     reads = _count_record_reads(monkeypatch)
 
     assert reconcile_process_completions(agent) == 0
-    assert len(reads) == 6  # 首次可信扫描逐文件解析一次
+    assert reads == ["bg-test-notice"]  # 热路只解析活跃记录，不重新打开归档历史。
     for _ in range(4):  # 每个模型轮前后、工具轮前的安全点
         os.utime(authority.root, None)
         assert reconcile_process_completions(agent) == 0
-    assert len(reads) == 6
+    assert reads == ["bg-test-notice"]
 
 
 # 函数用途: 构造一个 Owner 技能服务；builtin/shared 指向测试目录，策略固定全开。
