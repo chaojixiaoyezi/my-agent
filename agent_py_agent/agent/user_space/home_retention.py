@@ -89,12 +89,13 @@ _STORAGE_LIFECYCLES = (
     ('tool_outputs', 'owner', 'tool output manifests', 'task terminal retention', 'conversation/artifact/candidate', ('preserve', 'policy-delete')),
     ('local_records', 'workspace', 'LocalStore records/FTS', 'derived TTL', 'task_ref/protected records', ('rebuild', 'policy-delete')),
     ('local_events', 'workspace', 'LocalStore events/JSONL', 'existing event retention', 'pending recovery IDs/bad bytes', ('compact', 'policy-delete')),
-    ('runtime_events', 'owner', 'RuntimeRepository', 'entity lifecycle', 'attempt/UNKNOWN/lease/idempotency', ('preserve', 'archive')),
+    ('runtime_events', 'owner', 'RuntimeRepository', 'audit_days / tool_output_days_after_terminal after terminal',
+     'attempt/UNKNOWN/lease/idempotency', ('preserve', 'archive', 'policy-delete')),
     ('scheduler_history', 'owner', 'SchedulerRepository', 'scheduler lifecycle', 'active/waiting/unsettled runs', ('preserve', 'segment')),
     ('global_indexes', 'host', 'global_index projections', 'existing compaction policy', 'owner/task/agent/run locators', ('rebuild', 'compact')),
     ('gateway_active', 'gateway', 'Gateway queue and claims', 'original queue lifecycle', 'in-flight/exact claim/replay', ('preserve',)),
     ('gateway_terminal', 'gateway', 'Gateway receipt repository', 'terminal receipt lifecycle', 'pending replay/outbox/UNKNOWN/unconsumed', ('preserve', 'segment')),
-    ('gateway_logs', 'gateway', 'Gateway logger/history', 'original log policy', 'diagnostic/request association', ('preserve', 'seal')),
+    ('gateway_logs', 'gateway', 'Gateway logger/history', 'original log policy', 'diagnostic/request association', ('preserve', 'seal', 'policy-delete')),
     ('security_audit', 'owner', 'security audit authority', 'security_audit_days', 'operations/unknown/bad rows', ('preserve', 'seal')),
     ('skill_usage', 'owner', 'SkillLearningStore usage', 'usage coverage policy', 'sequence/day/skill/event', ('preserve', 'segment')),
     ('skill_registry', 'owner', 'SkillLearningStore registry', 'existing version policy', 'confirmation/hash/CAS/rollback', ('preserve', 'policy-delete')),
@@ -118,6 +119,11 @@ _STORAGE_LIFECYCLES = (
      'in-flight request/lease/committed versions', ('preserve', 'policy-delete')),
     ('session_task_payloads', 'workspace', 'conversation.session_tasks', 'terminal payload retention',
      'report/learning wake/cancel/dedupe', ('preserve', 'slim')),
+    # 维护调度按种类名解析通道；同名登记才能消费领域入口，旧种类仍保留原位置。
+    ('runtime_history', 'owner', 'runtime_db.history_retention', 'audit_days / tool_output_days_after_terminal after terminal',
+     'attempt/UNKNOWN/lease/idempotency', ('preserve', 'archive', 'policy-delete')),
+    ('gateway_history', 'gateway', 'gateway_parts.gateway_history_index', 'audit_days after terminal',
+     'pending/replay/UNKNOWN/current segment', ('preserve', 'seal', 'policy-delete')),
 )
 
 
@@ -146,6 +152,7 @@ _PRESERVATION_ANCHORS = {
     'process_sessions': 'owner_data_dir', 'legacy_layout': 'owner_home_dir',
     'display_archives': 'owner_workspace_dir', 'conversation_ledgers': 'owner_workspace_dir',
     'asset_auxiliary': 'owner_data_dir', 'session_task_payloads': 'owner_workspace_dir',
+    'runtime_history': 'owner_home_dir', 'gateway_history': 'owner_workspace_dir',
 }
 
 
