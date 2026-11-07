@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 import time
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -85,6 +87,90 @@ def test_tool_slimming_preserves_state_timestamp_and_exact_original_digest(datab
     assert conn.execute("SELECT outcome_json FROM tool_operations").fetchone()[0] == stored
 
 
+def test_tool_retention_revisits_recently_settled_rows_under_continuous_writes(
+    database, record_testsuite_property,
+):
+    from agent_py_agent.agent.memory_store.retention_scan_budget import RETENTION_SCAN_SLICE_ENTRIES
+
+    _, _, conn = database
+    day_seconds = 86400
+    days = MemoryRetentionPolicy().tool_output_days_after_terminal
+    now = 200 * day_seconds
+    cutoff = now - days * day_seconds
+    body = json.dumps({"output": "x" * (64 * 1024)})
+    _run(conn)
+    for number in range(1600):
+        _tool(conn, f"old-{number}", created=cutoff - 300, settled=cutoff + 300, outcome=body)
+    _tool(conn, "recent", created=now, settled=now + 1, outcome="{}")
+    conn.commit()
+    initial_rows, initial_bytes = conn.execute(
+        "SELECT count(*),sum(length(CAST(outcome_json AS BLOB))) FROM tool_operations "
+        "WHERE operation_id LIKE 'old-%'").fetchone()
+    inspected = []
+    for _ in range(20):
+        result = retention.slim_terminal_tool_outcomes_step(
+            conn, cutoff=cutoff, max_rows=RETENTION_SCAN_SLICE_ENTRIES)
+        inspected.append(result["items"])
+        assert result["items"] <= RETENTION_SCAN_SLICE_ENTRIES
+        assert result["slimmed"] == 0
+        if result["complete"]:
+            break
+    assert result["complete"]
+    first_cursor = result["cursor"]
+    for day in range(1, 121):
+        _tool(conn, f"tail-{day}", created=now + day * day_seconds,
+              settled=now + day * day_seconds + 1, outcome="{}")
+        conn.commit()
+        result = retention.slim_terminal_tool_outcomes_step(
+            conn, cutoff=cutoff + day * day_seconds, max_rows=RETENTION_SCAN_SLICE_ENTRIES)
+        inspected.append(result["items"])
+        assert result["items"] <= RETENTION_SCAN_SLICE_ENTRIES
+        assert result["slimmed"] <= result["items"]
+    retained_rows, retained_bytes = conn.execute(
+        "SELECT count(*),sum(length(CAST(outcome_json AS BLOB))) FROM tool_operations "
+        "WHERE operation_id LIKE 'old-%' "
+        "AND json_extract(outcome_json,'$.retention') IS NOT 'slimmed'").fetchone()
+    evidence = {"initial_rows": initial_rows, "initial_bytes": initial_bytes,
+                "first_cursor": first_cursor, "elapsed_days": 120, "retention_days": days,
+                "unreclaimed_rows": retained_rows, "unreclaimed_bytes": retained_bytes or 0,
+                "max_inspected": max(inspected), "batch_limit": RETENTION_SCAN_SLICE_ENTRIES}
+    record_testsuite_property("runtime_tool_revisit", json.dumps(evidence, sort_keys=True))
+    assert retained_rows == 0, evidence
+    assert conn.execute("SELECT count(*) FROM tool_operations WHERE status='SUCCEEDED' AND updated_at=201"
+                        ).fetchone()[0] == initial_rows + 121
+
+
+def test_runtime_events_revisit_runs_that_settle_after_first_scan(database, record_testsuite_property):
+    _, _, conn = database
+    day_seconds = 86400
+    now = 300 * day_seconds
+    cutoff = now - MemoryRetentionPolicy().audit_days * day_seconds
+    _run(conn, status="running", attempt="running")
+    _event(conn, "old", created=cutoff - 1)
+    _event(conn, "recent", created=now)
+    conn.commit()
+    first = retention.prune_terminal_runtime_events_step(conn, cutoff=cutoff, max_rows=128)
+    assert first["deleted_events"] == 0 and first["items"] <= 128
+    conn.execute("UPDATE agent_runs SET status='done' WHERE agent_run_id='run'")
+    conn.execute("UPDATE agent_attempts SET status='done' WHERE agent_run_id='run'")
+    conn.commit()
+    inspected = [first["items"]]
+    for day in range(1, 31):
+        _event(conn, f"tail-{day}", created=now + day * day_seconds)
+        conn.commit()
+        result = retention.prune_terminal_runtime_events_step(
+            conn, cutoff=cutoff + day * day_seconds, max_rows=128)
+        inspected.append(result["items"])
+        assert result["items"] <= 128 and result["deleted_events"] <= result["items"]
+    retained = conn.execute("SELECT count(*) FROM runtime_events WHERE event_id='old'").fetchone()[0]
+    evidence = {"first_cursor": first["cursor"], "eligible_old_event_retained": retained,
+                "subsequent_passes": 30, "max_inspected": max(inspected), "batch_limit": 128}
+    record_testsuite_property("runtime_event_revisit", json.dumps(evidence, sort_keys=True))
+    assert retained == 0, evidence
+    assert conn.execute("SELECT count(*) FROM runtime_events").fetchone()[0] == 31
+    assert conn.execute("SELECT status,updated_at FROM agent_runs").fetchone() == ("done", 101)
+
+
 @pytest.mark.parametrize("run_status", sorted(AGENT_RUN_TERMINAL_STATUSES))
 def test_each_canonical_terminal_run_can_be_slimmed(database, run_status):
     _, _, conn = database
@@ -146,11 +232,20 @@ def test_recent_row_stops_before_it_even_when_later_rows_are_old(database, table
     add(conn, "later-old")
     conn.commit()
     result = step(conn, cutoff=1000, max_rows=8)
-    assert (result["cursor"], result["complete"], result["items"]) == (1, True, 2)
+    assert (result["cursor"], result["complete"], result["items"]) == (0, True, 2)
     again = step(conn, cutoff=1000, max_rows=8)
-    assert (again["cursor"], again["items"]) == (1, 1)
+    assert (again["cursor"], again["complete"], again["items"]) == (
+        0, True, 2 if table == "tool_operations" else 1)
     column = "outcome_json" if table == "tool_operations" else "event_id"
     assert conn.execute(f"SELECT {column} FROM {table} WHERE rowid=3").fetchone() is not None
+    for _ in range(3):
+        result = step(conn, cutoff=2000, max_rows=2)
+        assert result["items"] <= 2
+        if result["complete"]:
+            break
+    assert result["complete"] and result["cursor"] == 0
+    remaining = conn.execute(f"SELECT {column} FROM {table} WHERE rowid=3").fetchone()
+    assert remaining is None if table == "runtime_events" else json.loads(remaining[0])["retention"] == "slimmed"
 
 
 def test_event_pruning_protects_active_attempts_unknown_ids_and_pending_recovery(database):
@@ -310,7 +405,7 @@ def test_lane_uses_v2_policy_separate_cutoffs_and_owner_under_write_gate(databas
     assert len(commits) == 3
     assert receipt["slimmed"] == receipt["deleted_events"] == receipt["deleted_llm_records"] == 1
     assert receipt["items"] == 5 and receipt["bytes"] > 0 and receipt["complete"]
-    assert receipt["cursor"] == {"tool_operations": 1, "runtime_events": 1, "llm_call_records": ""}
+    assert receipt["cursor"] == {"tool_operations": 0, "runtime_events": 0, "llm_call_records": ""}
     assert {row[0] for row in conn.execute("SELECT record_id FROM llm_call_records")} == {"recent-llm", "other-owner"}
 
 
@@ -471,3 +566,175 @@ def test_tool_cas_does_not_replace_a_changed_row(database, changed_column, chang
     result = retention.slim_terminal_tool_outcomes_step(ChangedConnection(), cutoff=1000, max_rows=8)
     assert result["slimmed"] == result["bytes"] == 0
     assert conn.execute("SELECT outcome_json FROM tool_operations").fetchone()[0] == original
+
+
+@pytest.mark.parametrize("table,step,counter", [
+    ("tool_operations", retention.slim_terminal_tool_outcomes_step, "slimmed"),
+    ("runtime_events", retention.prune_terminal_runtime_events_step, "deleted_events"),
+])
+def test_protected_head_does_not_block_later_rows_and_is_revisited(database, table, step, counter):
+    _, _, conn = database
+    _run(conn, "protected", status="running", task="protected-task", attempt="running")
+    _run(conn)
+    add = _tool if table == "tool_operations" else _event
+    add(conn, "protected", run="protected")
+    add(conn, "eligible")
+    add(conn, "recent", created=1000)
+    conn.commit()
+    first_cycle = [step(conn, cutoff=1000, max_rows=1) for _ in range(3)]
+    assert [result[counter] for result in first_cycle] == [0, 1, 0]
+    assert [result["items"] for result in first_cycle] == [1, 1, 1]
+    assert first_cycle[-1]["complete"] and first_cycle[-1]["cursor"] == 0
+    conn.execute("UPDATE agent_runs SET status='done' WHERE agent_run_id='protected'")
+    conn.execute("UPDATE agent_attempts SET status='done' WHERE agent_run_id='protected'")
+    conn.commit()
+    later = [step(conn, cutoff=1000, max_rows=1) for _ in range(3)]
+    assert sum(result[counter] for result in later) == 1
+    assert all(result["items"] <= 1 for result in later)
+    assert later[-1]["cursor"] == 0
+    assert conn.execute("SELECT status,updated_at FROM agent_runs WHERE agent_run_id='protected'"
+                        ).fetchone() == ("done", 101)
+
+
+@pytest.mark.parametrize("table,step", [
+    ("tool_operations", retention.slim_terminal_tool_outcomes_step),
+    ("runtime_events", retention.prune_terminal_runtime_events_step),
+])
+def test_recent_boundary_work_is_independent_of_history_size(database, table, step, record_testsuite_property):
+    _, _, conn = database
+    _run(conn)
+    add = _tool if table == "tool_operations" else _event
+    add(conn, "old")
+    add(conn, "recent", created=1000)
+    sizes, work = (128, 100000), []
+
+    def measure():
+        instructions, statements = [], []
+        conn.execute("BEGIN")
+        conn.set_progress_handler(lambda: instructions.append(1) and 0, 1)
+        conn.set_trace_callback(statements.append)
+        try:
+            result = step(conn, cutoff=1000, max_rows=8)
+        finally:
+            conn.set_progress_handler(None, 0)
+            conn.set_trace_callback(None)
+            conn.rollback()
+        assert result["complete"] and result["cursor"] == 0 and result["items"] == 2
+        return {"vm_steps": len(instructions), "statements": len(statements), "items": result["items"]}
+
+    for size in sizes:
+        existing = conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+        for index in range(existing, size):
+            add(conn, f"tail-{index}", created=1000)
+        conn.commit()
+        measure()  # 首次准备语句及已知进程资源不参与规模对照。
+        work.append(measure())
+    record_testsuite_property("runtime_boundary_work_" + table, json.dumps({"sizes": sizes, "work": work}))
+    assert work[0]["vm_steps"] > 0
+    assert work[1] == work[0]
+
+
+@pytest.mark.parametrize("step", [retention.slim_terminal_tool_outcomes_step,
+                                  retention.prune_terminal_runtime_events_step])
+@pytest.mark.parametrize("max_rows", [0, -1, True, 1.5, "1", None])
+def test_invalid_window_budget_keeps_value_error_and_cursor(database, step, max_rows):
+    _, _, conn = database
+    conn.execute("INSERT INTO metadata(key,value) VALUES('history_retention_cursor:tool_operations','7')")
+    conn.execute("INSERT INTO metadata(key,value) VALUES('history_retention_cursor:runtime_events','7')")
+    conn.commit()
+    with pytest.raises(ValueError, match="历史保留批次条数必须是正整数"):
+        step(conn, cutoff=1000, max_rows=max_rows)
+    assert not conn.in_transaction
+    assert conn.execute("SELECT value FROM metadata WHERE key LIKE 'history_retention_cursor:%'"
+                        ).fetchall() == [("7",), ("7",)]
+
+
+@pytest.mark.parametrize("table,step", [
+    ("tool_operations", retention.slim_terminal_tool_outcomes_step),
+    ("runtime_events", retention.prune_terminal_runtime_events_step),
+])
+@pytest.mark.parametrize("caller_owned", [False, True])
+def test_recent_boundary_sql_error_preserves_exception_and_transaction(database, table, step, caller_owned):
+    _, _, conn = database
+    _run(conn)
+    _tool(conn, "behind-cursor", outcome="{}")
+    _event(conn, "behind-cursor")
+    original = _tool(conn)
+    _event(conn, "old")
+    _tool(conn, "recent-tool", created=1000)
+    _event(conn, "recent-event", created=1000)
+    conn.execute("INSERT INTO metadata(key,value) VALUES(?, '1')", ("history_retention_cursor:" + table,))
+    conn.execute("CREATE TRIGGER reject_rewind BEFORE UPDATE ON metadata "
+                 "WHEN NEW.key LIKE 'history_retention_cursor:%' BEGIN SELECT RAISE(ABORT,'rewind rejected'); END")
+    conn.commit()
+    errors = []
+
+    class ObservedConnection:
+        def __getattr__(self, name):
+            return getattr(conn, name)
+
+        def execute(self, sql, parameters=()):
+            try:
+                return conn.execute(sql, parameters)
+            except sqlite3.Error as exc:
+                errors.append(exc)
+                raise
+
+    if caller_owned:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("INSERT INTO metadata(key,value) VALUES('caller-marker','pending')")
+    with pytest.raises(sqlite3.IntegrityError, match="rewind rejected") as caught:
+        step(ObservedConnection(), cutoff=1000, max_rows=8)
+    assert errors == [caught.value] and errors[0] is caught.value
+    assert caught.value.__cause__ is None
+    assert conn.in_transaction is caller_owned
+    assert conn.execute("SELECT value FROM metadata WHERE key=?",
+                        ("history_retention_cursor:" + table,)).fetchone() == ("1",)
+    if caller_owned:
+        assert conn.execute("SELECT value FROM metadata WHERE key='caller-marker'").fetchone() == ("pending",)
+        if table == "tool_operations":
+            assert json.loads(conn.execute("SELECT outcome_json FROM tool_operations WHERE operation_id='op'"
+                                           ).fetchone()[0])["retention"] == "slimmed"
+        else:
+            assert conn.execute("SELECT count(*) FROM runtime_events WHERE event_id='old'").fetchone()[0] == 0
+        conn.rollback()
+    assert conn.execute("SELECT outcome_json FROM tool_operations WHERE operation_id='op'").fetchone()[0] == original
+    assert conn.execute("SELECT count(*) FROM runtime_events WHERE event_id='old'").fetchone()[0] == 1
+    assert conn.execute("SELECT value FROM metadata WHERE key=?",
+                        ("history_retention_cursor:" + table,)).fetchone() == ("1",)
+    assert conn.execute("SELECT count(*) FROM metadata WHERE key='caller-marker'").fetchone()[0] == 0
+
+
+@pytest.mark.skipif(os.name != "posix", reason="需要 POSIX 原生 FD 目录")
+def test_repeated_lane_success_and_sql_error_release_all_descriptors(database, record_testsuite_property):
+    home, _, conn = database
+    _run(conn)
+    _tool(conn)
+    _event(conn, "old")
+    _tool(conn, "recent-tool", created=200 * 86400)
+    _event(conn, "recent-event", created=200 * 86400)
+    conn.commit()
+
+    def exercise():
+        result = retention.maintain_runtime_history_lane(_request(home, items=8))
+        assert result["items"] <= 8 and result["complete"]
+        assert result["cursor"]["tool_operations"] == result["cursor"]["runtime_events"] == 0
+        conn.execute("CREATE TRIGGER reject_lane_cursor BEFORE INSERT ON metadata "
+                     "WHEN NEW.key LIKE 'history_retention_cursor:%' "
+                     "BEGIN SELECT RAISE(ABORT,'lane cursor rejected'); END")
+        conn.commit()
+        try:
+            with pytest.raises(sqlite3.IntegrityError, match="lane cursor rejected"):
+                retention.maintain_runtime_history_lane(_request(home, items=8))
+        finally:
+            conn.execute("DROP TRIGGER reject_lane_cursor")
+            conn.commit()
+
+    exercise()
+    root = Path("/proc/self/fd") if Path("/proc/self/fd").is_dir() else Path("/dev/fd")
+    before = len(os.listdir(root))
+    for _ in range(30):
+        exercise()
+    fd_delta = len(os.listdir(root)) - before
+    record_testsuite_property("runtime_history_fd_delta", fd_delta)
+    assert fd_delta == 0

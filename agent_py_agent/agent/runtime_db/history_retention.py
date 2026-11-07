@@ -47,7 +47,7 @@ def _save_history_cursor(conn, table: str, cursor: int) -> None:
 
 
 def _history_window(conn, *, table: str, query: str, cutoff: float, max_rows: int, time_column: int):
-    """读取有界窗口，近期行之前停止；只有真正到尾才将持久续点归零。"""
+    """读取有界窗口，近期行或物理尾部均结束本轮并归零，以复访暂受保护的旧行。"""
     if type(max_rows) is not int or max_rows <= 0:
         raise ValueError("历史保留批次条数必须是正整数")
     cursor = _history_cursor(conn, table)
@@ -55,7 +55,7 @@ def _history_window(conn, *, table: str, query: str, cutoff: float, max_rows: in
     old = []
     for row in rows:
         if row[time_column] >= cutoff:
-            return old, cursor, True, len(old) + 1
+            return old, 0, True, len(old) + 1
         old.append(row)
         cursor = row[0]
     complete = len(rows) < max_rows
