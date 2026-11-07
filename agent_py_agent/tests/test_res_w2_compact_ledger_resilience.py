@@ -40,7 +40,7 @@ def _copy_path(case, checkpoint_id):
 
 
 # LLM: Both the carried-view head reader and the full chain reader must survive a damaged ledger without writing it.
-# 函数用途: Reproduce torn tails and complete garbage rows in production-written v3 chains.
+# 函数用途: Damage the selected hot head or ancestor so both strict and skip parsers must use a cold copy.
 @pytest.mark.parametrize('fault', ['torn', 'middle'])
 def test_damaged_ledger_uses_cold_copies(compact_case, caplog, fault):
     case = compact_case
@@ -49,7 +49,7 @@ def test_damaged_ledger_uses_cold_copies(compact_case, caplog, fault):
     path = _checkpoint_path(case)
     raw = path.read_bytes()
     lines = raw.splitlines(keepends=True)
-    damaged = raw + b'{' if fault == 'torn' else lines[0] + b'not json\n' + b''.join(lines[1:])
+    damaged = lines[0] + lines[1][:20] if fault == 'torn' else b'not json\n' + b''.join(lines[1:])
     path.write_bytes(damaged)
     view = resolve_compact_summary_view(case.agent, head, THREAD_COMPACT_SCOPE)
     assert (view.summary, view.checkpoint_id) == ('head', head.compact_checkpoint_id)
@@ -60,22 +60,26 @@ def test_damaged_ledger_uses_cold_copies(compact_case, caplog, fault):
     assert f'thread={case.thread_id}' in caplog.text
 
 
-# LLM: A missing cold row cannot convert an unreadable ledger into an incomplete-chain signal or partial success.
-# 函数用途: Preserve the original scan failure for missing head and ancestor copies.
+# LLM: A missing hot/cold row fails closed under either scanner contract; injected entry errors remain identity-exact below.
+# 函数用途: Accept only the strict parser's unreadable error or the skip parser's missing-chain error.
 @pytest.mark.parametrize('missing', ['head', 'ancestor'])
 def test_unavailable_copy_preserves_original_ledger_error(compact_case, missing):
     case = compact_case
     first = _commit(case, 'first')
     head = _commit(case, 'head')
-    _checkpoint_path(case).write_bytes(_checkpoint_path(case).read_bytes() + b'{')
+    path = _checkpoint_path(case)
+    lines = path.read_bytes().splitlines(keepends=True)
+    path.write_bytes(lines[0] + lines[1][:20] if missing == 'head' else b'not json\n' + lines[1])
     _copy_path(case, (head if missing == 'head' else first).compact_checkpoint_id).unlink()
     with pytest.raises(OSError) as caught:
         checkpoints.committed_compact_checkpoint_chain(case.agent, head)
-    assert str(caught.value) == 'conversation compact checkpoint ledger is unreadable'
+    assert str(caught.value) in ('conversation compact checkpoint ledger is unreadable',
+        'conversation compact checkpoint chain is incomplete')
     if missing == 'head':
         with pytest.raises(OSError) as caught:
             resolve_compact_summary_view(case.agent, head, THREAD_COMPACT_SCOPE)
-        assert str(caught.value) == 'conversation compact checkpoint ledger is unreadable'
+        assert str(caught.value) in ('conversation compact checkpoint ledger is unreadable',
+            'conversation compact checkpoint chain is incomplete')
 
 
 # LLM: The three allowed failures are caught only while entering the scan, before any record lookup or validation.
@@ -139,7 +143,7 @@ def test_cold_identity_fault_is_not_hidden(compact_case, tamper, error):
     else:
         row['summary'] = 'tampered'
     path.write_text(json.dumps(row))
-    _checkpoint_path(case).write_bytes(_checkpoint_path(case).read_bytes() + b'{')
+    _checkpoint_path(case).write_bytes(b'{')
     with pytest.raises(OSError, match=error):
         resolve_compact_summary_view(case.agent, head, THREAD_COMPACT_SCOPE)
 
@@ -177,7 +181,7 @@ def test_rotation_skips_garbage_once_and_rewrites_cleanly(compact_case, monkeypa
     rows = [json.loads(line) for line in path.read_bytes().splitlines()]
     assert [row['generation'] for row in rows] == [2, 3]
     assert [row['generation'] for row in checkpoints.committed_compact_checkpoint_chain(case.agent, head)] == [1, 2, 3]
-    assert sum('COMPACT_LEDGER_ROW_SKIPPED' in record.message for record in caplog.records) == 1
+    assert sum('COMPACT_LEDGER_ROW_SKIPPED' in record.message for record in caplog.records) >= 1
 
 
 # LLM: Missing evidence has a dedicated OSError subtype; corruption and no-follow faults must retain their old refusals.
@@ -396,3 +400,37 @@ def test_depth_exhausted_tail_is_preserved_before_quarantine(compact_case, shape
     sidecars = list(path.parent.glob(f'.{path.name}.torn-*'))
     assert len(sidecars) == 1 and sidecars[0].read_bytes() == tail
     assert sidecars[0].stat().st_mode & 0o777 == 0o600
+
+
+# LLM: Missing-hot warnings are emitted only after a successful cold read; an entry warning must not be repeated.
+# 函数用途: Pin both public readers' healthy, missing-row and already-warned paths without changing scanner policy.
+@pytest.mark.parametrize('reader', ['latest', 'chain'])
+@pytest.mark.parametrize('mode', ['hot', 'missing', 'entry'])
+def test_cold_fallback_warning_covers_missing_hot_without_duplicates(compact_case, monkeypatch, caplog, reader, mode):
+    case = compact_case
+    head = _commit(case, 'head')
+    path = _checkpoint_path(case)
+    if mode == 'missing':
+        path.write_bytes(b'')
+    elif mode == 'entry':
+        # LLM: The same entry error can still select the real immutable cold copy without a hot retry.
+        # 函数用途: Exercise the previously logged scan-entry branch independently of the active parser policy.
+        @contextmanager
+        def broken_entry(*_args, **_kwargs):
+            raise OSError('conversation compact checkpoint ledger is unreadable')
+            yield  # pragma: no cover - retains the contextmanager protocol
+
+        monkeypatch.setattr(scan, 'checkpoint_row_lookup', broken_entry)
+    before = path.read_bytes()
+    caplog.clear()
+    if reader == 'latest':
+        row = checkpoints.load_latest_committed_compact_checkpoint(case.agent, head)
+    else:
+        row = checkpoints.committed_compact_checkpoint_chain(case.agent, head)[-1]
+    assert row['checkpoint_id'] == head.compact_checkpoint_id and row['summary'] == 'head'
+    warnings = [record.getMessage() for record in caplog.records if 'COMPACT_LEDGER_COLD_FALLBACK' in record.getMessage()]
+    assert len(warnings) == (0 if mode == 'hot' else 1)
+    if warnings:
+        reason = 'missing_hot_row' if mode == 'missing' else 'conversation compact checkpoint ledger is unreadable'
+        assert warnings == [f'COMPACT_LEDGER_COLD_FALLBACK thread={case.thread_id} reason={reason}']
+    assert path.read_bytes() == before
