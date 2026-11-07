@@ -277,7 +277,9 @@ memory_compact_remote_enabled: true
 # 模型档案字段 model_reasoning_update_items 默认auto：合适的 Responses 请求优先在冻结历史后、摘要指令前追加低档项；
 # 仅新项类型的精确400结构化拒绝允许一次请求级低档回退，负能力只记本后端实例。off 直接请求级低档，on 严格拒绝不回退。
 # 该档案字段由 /model 管理，参数中心只读展示（writable/user_editable=false），普通 user_config 不改写模型档案。
-# 其它协议若能真实表示目标，也用请求级档位/预算；仅 thinking.enabled 不是降低预算的证据。
+# 其它协议（DeepSeek/Anthropic/OpenAI Chat）：复用主对话前缀的压缩请求（同工具+auto）保持会话档位，换档会换缓存分区、整段不命中；
+# 本来就不带工具且 tool_choice=none 的压缩请求（分段摘要、回合中无前缀摘要、闲置维护摘要）不复用任何前缀，目标能真实表示时用请求级档位/预算；
+# 会话档位已不高于目标或已关闭思考时保持原样；仅 thinking.enabled 不是降低预算的证据。
 # 不改会话原来的档位；后端/档案重建清除能力 memo，修改压缩档位按参数中心标注的重载时机生效。
 memory_compact_reasoning_level: "low"
 # compact 自动续跑深度硬顶已降为代码常量（finalization_compact_auto._DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH，2026-09-28 参数减量）。

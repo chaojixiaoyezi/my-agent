@@ -480,10 +480,10 @@ def test_carried_text_summary_uses_thread_reasoning_options(level):
     assert compact_payload["messages"][0]["role"] == "user"
 
 
-# LLM: Once the source is split, system/history differ; only the per-thread reasoning partition remains comparable.
-# 函数用途: 验证分段每次调用保持主线程 thinking/reasoning_effort，并确认它不是完整前缀缓存命中。
+# LLM: Once the source is split, system/history differ and no main-conversation prefix can hit, so a lower effort costs no cache.
+# 函数用途: 验证分段摘要按 memory_compact_reasoning_level 用请求级低档；会话已关闭思考时保持关闭，且不是完整前缀缓存命中。
 @pytest.mark.parametrize("level", ["max", "off"])
-def test_segmented_compact_keeps_thread_reasoning_options(monkeypatch, level):
+def test_segmented_compact_uses_compact_reasoning_level(monkeypatch, level):
     from agent_py_agent.agent.conversation import compact_request_budget as budget_module
 
     backend, agent, thread_id = _threaded_backend(level)
@@ -512,10 +512,39 @@ def test_segmented_compact_keeps_thread_reasoning_options(monkeypatch, level):
     segments = payloads[1:]
     assert len(segments) > 1
     assert all("tools" not in item and item.get("tool_choice") == "none" for item in segments)
-    assert all(item.get("reasoning_effort") == main_payload.get("reasoning_effort") for item in segments)
+    assert main_payload.get("reasoning_effort") == ("max" if level == "max" else None)
+    expected = "low" if level == "max" else main_payload.get("reasoning_effort")
+    assert all(item.get("reasoning_effort") == expected for item in segments)
     assert all(item.get("thinking") == main_payload.get("thinking") for item in segments)
     assert all(item["messages"][0]["role"] == "system" for item in segments)
     assert all(
         item["messages"][0]["content"] != main_payload["messages"][0]["content"]
         for item in segments
     )
+
+
+# LLM: 无前缀 = 不带工具且显式 tool_choice=none（分段、回合中无前缀、闲置老路径）；分叉请求总是同工具 + auto。
+# 函数用途: 档位矩阵——无前缀请求降到配置档并不再报 downshift_unavailable；分叉、未标 none、配置 auto、已关思考都保持会话档。
+def test_prefix_free_compact_downshift_matrix():
+    from dataclasses import replace
+
+    from agent_py_agent.agent.conversation import auxiliary_model_call as aux
+
+    backend, agent, thread_id = _threaded_backend("max")
+    none = ToolChoice.none("compact_summary_only")
+    fork_tools = [{"name": "read_file", "description": "", "input_schema": {"type": "object"}}]
+
+    def request(tools, choice, host=agent, thread=thread_id):
+        return AuxiliaryModelCallRequest(agent=host, prompt="源历史段。", thread_id=thread, tools=tools,
+                                         tool_choice=choice, purpose="conversation_compact_summary")
+
+    assert aux._compact_reasoning_options(request([], none), backend) == (False, "low")
+    assert aux._compact_reasoning_options(request(None, none), backend) == (False, "low")
+    assert aux._compact_downshift_reason(request([], none), backend) == ""
+    assert aux._compact_reasoning_options(request(fork_tools, None), backend) == (False, "max")
+    assert aux._compact_downshift_reason(request(fork_tools, None), backend) == "downshift_unavailable"
+    assert aux._compact_reasoning_options(request([], None), backend) == (False, "max")
+    agent.config = replace(agent.config, memory_compact_reasoning_level="auto")
+    assert aux._compact_reasoning_options(request([], none), backend) == (False, "max")
+    off_backend, off_agent, off_thread = _threaded_backend("off")
+    assert aux._compact_reasoning_options(request([], none, off_agent, off_thread), off_backend) == (True, "")
