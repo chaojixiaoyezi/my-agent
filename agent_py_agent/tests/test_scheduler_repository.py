@@ -952,9 +952,9 @@ def test_new_history_rows_passes_only_batch_to_membership(tmp_path, monkeypatch)
     assert observed == [frozenset({'present', 'fresh', ''})]
 
 
-# LLM: 读不出历史不能把本批运行当成未出现；首次缺失和曾见来源删除也不相同。
-# 函数用途: 验证后备路径对UTF8、nofollow及删除失败关闭。
-@pytest.mark.parametrize('fault', ['utf8', 'symlink', 'deletion'])
+# LLM: 不可读历史不能把本批运行当成未出现；无内容的缺失来源由独立恢复用例覆盖。
+# 函数用途: 验证后备路径对UTF8和nofollow故障继续失败关闭。
+@pytest.mark.parametrize('fault', ['utf8', 'symlink'])
 def test_history_read_failure_blocks_dedupe_decision(tmp_path, fault):
     repository = _repository(tmp_path)
     assert repository._new_history_rows_unlocked([{'run_id': 'fresh'}]) == [{'run_id': 'fresh'}]
@@ -967,11 +967,30 @@ def test_history_read_failure_blocks_dedupe_decision(tmp_path, fault):
         moved = repository.history_path.with_name('moved.jsonl')
         repository.history_path.rename(moved)
         repository.history_path.symlink_to(moved)
-    else:
-        repository.history_path.unlink()
     with pytest.raises(SchedulerStateError) as caught:
         repository._new_history_rows_unlocked([{'run_id': 'fresh'}])
     assert caught.value.error_code == 'SCHEDULER_HISTORY_READ_FAILED'
+
+
+# LLM: 删除后的来源没有可保留行；同一写事务只接受这次缺失并让现有私有追加器重建文件。
+# 函数用途: 验证曾见 history 被删除后按空历史继续，并只记录一次结构化告警。
+def test_history_deleted_after_seen_restarts_empty(tmp_path, caplog):
+    repository, _home = _indexed_history_repository(tmp_path)
+    assert repository._new_history_rows_unlocked([{'run_id': 'fresh'}]) == [{'run_id': 'fresh'}]
+    repository.history_path.write_text('{"run_id":"old"}\n')
+    assert repository._new_history_rows_unlocked([{'run_id': 'old'}]) == []
+    repository.history_path.unlink()
+    caplog.set_level('WARNING', logger=repository_module.__name__)
+
+    fresh = {'run_id': 'fresh'}
+    with repository._mutation_scope():
+        rows = repository._new_history_rows_unlocked([fresh])
+        assert rows == [fresh]
+        repository._history_index.append(rows)
+
+    assert repository.history_path.read_text(encoding='utf-8') == '{"run_id": "fresh"}\n'
+    messages = [record.getMessage() for record in caplog.records]
+    assert sum(message.startswith('SCHEDULER_HISTORY_SOURCE_MISSING ') for message in messages) == 1
 
 
 # LLM: 单条查询(get/locked_snapshot)命中缓存时只复制匹配项，避免大候选账本在晋升循环中每次深拷贝全量列表。
