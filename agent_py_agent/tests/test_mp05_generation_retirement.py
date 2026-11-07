@@ -318,15 +318,26 @@ def test_executor_alive_unknown_or_unreadable_refuses(tmp_path, monkeypatch, fau
         assert _files(paths.root) == before
 
 
-# LLM: 用原P1 ledger和死亡入口，移动整个旧分区目录，空executors目录须能通过原Count0来源门。
+# LLM: 用原P1 ledger和死亡入口，仅替换P2观测叶，完整核验和归档仍走真实实现。
 # 函数用途: 验证死亡执行者被完整归档而不留下阻塞来源的空子分区。
 def test_dead_executor_partition_is_archived_and_sources_pass(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import multiprocess_takeover as p2
+
     paths = _dead_home(tmp_path, monkeypatch)
-    _executor(paths)
+    _ledger, row = _executor(paths)
+    observed = []
+
+    # 合成PID没有对应宿主执行体；显式提供完整稳定观察，避免CI宿主枚举竞态影响归档单测。
+    def probe():
+        observed.append(row['reservation_id'])
+        return _executor_table(row)
+
+    monkeypatch.setattr(p2, 'observe_processes', probe)
     before = _files(paths.root / 'workers/executors/w0')
     with standalone_lifecycle_guard(paths.root) as lifecycle:
         manifest = retirement.retire_dead_multiprocess_generations(paths, target_count=0, lifecycle=lifecycle)
         require_standalone_sources(paths, lifecycle)
+    assert len(observed) >= 2
     assert 'workers/executors/w0' in manifest['moved']
     archive = next((paths.root / 'multiprocess_retired').iterdir())
     assert _files(archive / 'workers/executors/w0') == before
