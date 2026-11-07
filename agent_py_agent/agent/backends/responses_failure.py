@@ -26,11 +26,12 @@ from .gateway_helpers import (
 FAILED_EVENT_ERROR_CODE = "MODEL_RESPONSE_FAILED"
 # 已知的限流与服务端临时错误码（OpenAI/ChatGPT Responses 公开写法）；结构化码优先于消息全文判定，
 # 不在表里的码照样保留原文，只是不自动重试。上下文超限码（context_length_exceeded）由全文判定直接识别。
-_RATE_LIMIT_CODES = frozenset({"rate_limit_exceeded", "rate_limit_error", "too_many_requests"})
+_RATE_LIMIT_CODES = frozenset({"rate_limit_exceeded", "rate_limit_error", "too_many_requests", "subscription_sharing_usage_limit_exceeded"})
 _TRANSIENT_CODES = frozenset({
     "server_error", "internal_error", "internal_server_error", "server_is_overloaded", "overloaded",
     "overloaded_error", "service_unavailable", "slow_down", "timeout",
     "websocket_connection_limit_reached",
+    "subscription_sharing_usage_unavailable", "subscription_sharing_user_unavailable",
 })
 # 诊断里只留错误对象的这几个字段，并限长；不带请求正文或回复正文。
 _KEPT_FIELDS = {"code": 64, "type": 64, "param": 128, "message": 500, "request_id": 128}
@@ -103,9 +104,13 @@ def _error_for_code(code: str, message: str, details: dict) -> Exception | None:
     if code in _HARD_QUOTA_ERROR_CODES:
         return ProviderQuotaExhaustedError(message, details=details)
     if code in _RATE_LIMIT_CODES:
+        if code == "subscription_sharing_usage_limit_exceeded":
+            message += " 可在 ChatGPT 设置查看本人套餐或应用限额：https://chatgpt.com/settings/usage"
         return ProviderUsageLimitError(message, details=details)
     if code in _TRANSIENT_CODES:
         return ProviderTransientError(message, details=details)
+    if code.startswith(("subscription_sharing_", "chatpass_v2_")):
+        return ProviderResponseError(message, error_code=FAILED_EVENT_ERROR_CODE, details=details)
     return None
 
 

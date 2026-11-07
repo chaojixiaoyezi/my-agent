@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import html
 import os
+import socket
 import sys
 import threading
 import webbrowser
@@ -42,11 +44,14 @@ class LoginOutcome(NamedTuple):
 def _callback_outcome(path: str, params: dict, expected_state: str) -> tuple[int, str, dict | None]:
     if path != "/auth/callback":
         return 404, "找不到这个页面。", None
-    if not expected_state or params.get("state") != expected_state:
+    if not expected_state or not hmac.compare_digest(str(params.get("state") or "").encode(), expected_state.encode()):
         return 400, "这个登录回调不属于当前的登录，已忽略。请回到 my-agent 重新登录。", None
     if params.get("error"):
         return 200, "ChatGPT 没有完成授权。可以关闭此页，回到 my-agent 重试。", {"error": params["error"][:100]}
-    return 200, "登录已完成，可以关闭此页面，回到 my-agent。", {"code": params.get("code", ""), "state": params["state"]}
+    result = {"code": params.get("code", ""), "state": params["state"]}
+    if "client_id" in params:
+        result["client_id"] = params["client_id"]
+    return 200, "登录已完成，可以关闭此页面，回到 my-agent。", result
 
 
 # LLM: 不覆写 log_message 会把带授权码的请求行打到终端；响应只含固定中文提示，不回显任何参数。
@@ -115,17 +120,73 @@ class LoopbackCallback:
         self._server.server_close()
 
 
+# LLM: 接受的连接有界且有读写期限；取消先关闭它们再等待请求线程退出，不把半开连接留给后台守护线程。
+# 类用途: 让本次回环登录的监听和已接受连接一起回收。
+class _CallbackHTTPServer(ThreadingHTTPServer):
+    daemon_threads = False
+
+    # LLM: 连接集合只归本次监听所有；不保存授权码或账号，不创建额外服务。
+    # 函数用途: 初始化活动连接的短锁和关闭状态。
+    def __init__(self, *args, **kwargs):
+        self._active_connections: set[socket.socket] = set()
+        self._active_lock = threading.Lock()
+        self._closing = False
+        super().__init__(*args, **kwargs)
+
+    # LLM: 每次accept只登记一个连接，设置失败或达到本机回调上限时立即关掉它。
+    # 函数用途: 对回调连接设置有界读写与并发数。
+    def get_request(self):
+        request, address = super().get_request()
+        try:
+            request.settimeout(2)
+            with self._active_lock:
+                if self._closing or len(self._active_connections) >= 16:
+                    raise OSError("本机登录回调连接繁忙")
+                self._active_connections.add(request)
+            return request, address
+        except BaseException:
+            request.close()
+            raise
+
+    # LLM: 保留标准库关闭顺序，任何请求退出都移除本次登记。
+    # 函数用途: 关闭处理完成的连接并释放其登记。
+    def shutdown_request(self, request):
+        try:
+            super().shutdown_request(request)
+        finally:
+            with self._active_lock:
+                self._active_connections.discard(request)
+
+    # LLM: 主动关闭造成的读写错误不打印；其它错误沿原处理，不输出回调参数。
+    # 函数用途: 避免取消登录时把正常连接回收显示成后台异常。
+    def handle_error(self, request, client_address):
+        if not self._closing:
+            super().handle_error(request, client_address)
+
+    # LLM: shutdown唤醒半开连接的读取；非守护请求线程由标准库server_close统一等待回收。
+    # 函数用途: 先终止活动连接，再关闭监听和处理线程。
+    def server_close(self):
+        with self._active_lock:
+            self._closing = True
+            active = tuple(self._active_connections)
+        for request in active:
+            try:
+                request.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        super().server_close()
+
+
 # LLM: 端口顺序即优先级；SO_REUSEADDR 只帮助刚关闭的端口，不会和正在监听的程序共用端口。
 # 函数用途: 在登记端口里找一个能绑定的，都不行就抛 OSError。
 def _bind(ports: tuple[int, ...]) -> ThreadingHTTPServer:
     error: OSError | None = None
     for port in ports:
         try:
-            server = ThreadingHTTPServer(("127.0.0.1", port), _CallbackHandler)
+            server = _CallbackHTTPServer(("127.0.0.1", port), _CallbackHandler)
         except OSError as exc:
             error = exc
             continue
-        server.daemon_threads = True
         return server
     raise error or OSError("没有可用的本机回调端口")
 
@@ -154,7 +215,7 @@ def open_browser(url: str) -> bool:
 # 函数用途: TUI 里 ChatGPT 订阅的"浏览器登录"，登录中不需要用户复制任何东西。
 async def browser_login(app, agent, session: str, provider_id: str) -> LoginOutcome:
     try:
-        callback = await asyncio.to_thread(LoopbackCallback, CALLBACK_PORTS)
+        callback = await asyncio.to_thread(LoopbackCallback, (*CALLBACK_PORTS, 0))
     except OSError:
         return LoginOutcome("", use_device=True)
     flow = _BrowserLoginFlow(app, agent, session, callback)
@@ -194,7 +255,9 @@ class _BrowserLoginFlow:
         try:
             opened = await asyncio.to_thread(open_browser, started["authorize_url"])
             label = Label(("已经在浏览器里打开 ChatGPT 登录页。" if opened else "没能自动打开浏览器，请点「重新打开浏览器」。")
-                          + "\n在网页上登录并同意授权，完成后这里会自动继续，不用复制任何东西。")
+                          + "\nContinue with ChatGPT · my-agent：在官方网页登录并同意授权，完成后自动继续。"
+                          + "\n凭据仅保存在本机，供本人发起或明确授权的后台/定时任务使用，不与他人共享。"
+                          + "\n管理 ChatGPT 应用用量：https://chatgpt.com/settings/usage")
             choice = await self._show_once(outcome, label)
             while choice == "reopen":
                 await asyncio.to_thread(open_browser, started["authorize_url"])
@@ -215,7 +278,7 @@ class _BrowserLoginFlow:
 
         outcome.add_done_callback(forward)
         try:
-            return await _dialog(self.app, "用浏览器登录 ChatGPT", HSplit([label]), _ACTIONS, completion=shown)
+            return await _dialog(self.app, "my-agent · Continue with ChatGPT", HSplit([label]), _ACTIONS, completion=shown)
         finally:
             outcome.remove_done_callback(forward)
 
@@ -229,7 +292,7 @@ class _BrowserLoginFlow:
             if result.get("error"):
                 return {"ok": False, "message": f"ChatGPT 没有完成授权（{result['error']}），可以重新登录。"}
             return await _request_data(self.agent, self.session, "auth_browser_complete",
-                                       {**self.attempt, "code": result["code"], "state": result["state"]})
+                                       {**self.attempt, **{key: result[key] for key in ("code", "state", "client_id") if key in result}})
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 网络或 Gateway 异常只给出可重试提示，不泄漏授权码

@@ -1,5 +1,95 @@
 # 模型账号登录
 
+## 2026-11-07：官方 Sign in with ChatGPT（SIWC）
+
+新增账号使用 **Continue with ChatGPT · my-agent**，按 OpenAI 的 OSS 动态登记协议接入本人套餐。
+应用名始终是 `my-agent`，不冒充 OpenAI、Codex 或其它项目。旧 Codex 订阅档案保留原协议，读取时不会被偷偷迁移，
+也不会把已有账号的令牌发往另一条 API 路径。
+
+### 两条协议各守原账号
+
+| 档案 | 初始 Client ID | API / 目录 | 传输 |
+|---|---|---|---|
+| 新 SIWC | `dynamic_agent_client`，仅用于首次授权页 | `https://api.openai.com/v1`；`GET /models` | Responses HTTP/SSE；`store=false`、`stream=true` |
+| 已保存的 Codex 档案 | 保留原 `app_EMoamEEZ73f0CkXaXp7hrann` | `https://chatgpt.com/backend-api/codex`；`GET /models?client_version=...` | 保留原账号头与 WebSocket |
+
+SIWC 固定授权端点为 `https://auth.openai.com/api/accounts/authorize`，令牌与撤销端点分别为
+`https://auth.openai.com/api/accounts/oauth/token`、`https://auth.openai.com/api/accounts/oauth/revoke`。
+`resource` 固定为 `https://api.openai.com/v1`，申请范围为
+`openid profile email offline_access resource.invoke chatgpt.tokens.use.direct`；不需要应用密钥或其它项目的客户端身份。
+
+### 登记、回调与已验证身份
+
+1. 首次登录前，在当前 owner/provider 的唯一认证记录内保存 `ext_agent_host_id=urn:uuid:<uuid4>`。
+   同一记录后续登录、取消和退出继续使用这个值；读取到损坏值时明确拒绝，不自动换一个身份。
+2. 每次开始生成新的 `state`、OIDC `nonce` 与 PKCE S256 校验码。首次动态登记只在 `127.0.0.1:1455` 或 `1457`
+   的 `/auth/callback` 回调，并携带 `agent_name_hint=my-agent`；已签发 Client ID 的再授权可使用其它可用端口，
+   但主机必须是 `127.0.0.1`，不能替换为 `localhost`、其它路径或带额外查询的回调地址。
+3. 回调与 Gateway 均用常量时间比较核对 `state`。首次登记必须带已签发的 `client_id`，不能缺失或仍为
+   `dynamic_agent_client`；再授权可以省略它，但返回不同值时必须在兑换前拒绝。
+4. 用回调中的已签发 Client ID、原 `redirect_uri`、授权码、PKCE 校验码及 `resource` 进行一次 form 兑换。
+   从固定 issuer 的 OIDC 发现文档获取同源 JWKS，验证 RS256 签名及 `iss/aud/exp/nonce/sub`；再授权还须匹配
+   原已验证 `subject`。失败不覆盖原账号；取消、退出或配置变化后的迟到回调仍受原 CAS 拒绝。
+   首次兑换若明确返回 `invalid_grant`，用同一 CAS 只保留已签发的 Client ID 并丢弃该次 pending，供重新授权，
+   不采用任何未经验证的身份或令牌；取消后的旧响应不能把登记写回来。
+5. 通过原子保存，把已签发 Client ID、验证后的身份、ID/访问/刷新令牌、有效期和实际授予的 `scopes` 放回同一记录。
+   未授予 `chatgpt.tokens.use.direct` 时返回 `scope_not_granted` 和明确提示，保留身份供再次授权，但不能推理。
+6. 再授权复用已签发 Client ID 与 host ID，不再携带 `agent_name_hint`。同一账号可携带先前 ID token 作为
+   `id_token_hint`、已验证邮箱作为 `login_hint`；不自动要求重新同意、不以邮箱或展示名称识别账号。
+
+验签复用项目已有 `secrets` extra 中的 `cryptography`（Apache-2.0/BSD），不自行实现密码学算法，
+不为本片新增另一套令牌文件、守护线程、密钥缓存或依赖声明。缺少该组件时，在生成 pending 或打开授权页前明确提示
+安装 `my-agent[secrets]`，不消费授权码、不自动安装或降级验签。服务部署应包含该 extra；本轮验收使用已安装的项目环境。
+
+### 刷新、退出与使用边界
+
+- 刷新携带保存的已签发 Client ID、刷新令牌和相同 `resource`，成功后一次保存轮换后的令牌、有效期及 scopes。
+  暂时网络失败不清有效凭据；明确失效的刷新凭据沿同一账号 CAS 清理，不能改用其它账号、API Key 或模型。
+  清理只影响旧会话令牌，保留正在进行的授权尝试，不让迟到刷新删除用户后来发起的登录。
+- 退出先在模型档案锁外尝试 form 撤销刷新令牌，再核对原 Client/host 绑定、会话代次及 pending 编号，
+  清除访问/刷新/ID令牌和 pending，同时保留已签发 Client ID、host ID 和已验证身份。远端撤销未确认也清本地令牌，
+  并提示用户可在 ChatGPT 设置中断开；迟到退出不能删除后来发起的新登录。
+  HTTP 响应断流也按远端未确认处理，不阻断本地退出；签名资料断流同样归一为无秘密的明确错误。
+- 凭据只用于本人发起或明确授权的后台、定时任务，不与其它用户分享。新 SIWC 不借用其它项目的设备码登记；
+  本人的 API Key 仍可作为另一个明确配置的账号使用，不构成自动回退。
+- UI 明示本机存储和本人授权边界，并提供 `https://chatgpt.com/settings/usage` 管理应用用量；
+  此地址仅由用户选择打开，登录或打开菜单不自动访问用量页面。
+
+### 模型与 Responses 预览限制
+
+SIWC 目录接受 `models` 或 `data` 数组、保留服务器排序，不列 `visibility=hide` 的模型。
+目录没有报告容量时明确返回未报告，不猜上下文窗口；可在账号管理中手动填写型号与容量。
+旧 Codex 目录继续携带原 `client_version`，不混用两条目录。
+
+SIWC 推理只使用公开 `/responses` 的 HTTP/SSE，每次携带完整 `input` 数组；system 指令转为 `instructions`。
+省略 `temperature`、`top_p`、`max_output_tokens`、`truncation`、`user`、`metadata`、`max_tool_calls`、
+`background`、`conversation`、`prompt`、`prompt_cache_retention`、`safety_identifier`、`top_logprobs`、
+`moderation`、`multi_agent` 和 HTTP 不支持的 `previous_response_id`。函数工具归入 `my_agent` 命名空间；
+不把本地执行工具误报成托管工具，不对 SIWC 声明旧 Codex 专用远端压缩能力。
+
+只在收到 `response.completed` 后认定推理成功。`subscription_sharing_usage_limit_exceeded` 按用量限制提示，
+`subscription_sharing_usage_unavailable` / `subscription_sharing_user_unavailable` 按暂时不可用处理；
+其它 `subscription_sharing_*`、`chatpass_v2_*` 保留结构化错误码，不靠消息里的 quota/token 等单词误分类。
+
+### 本轮证据及适用边界
+
+`test_gap_w11_openai_siwc_compliance.py` 使用真实回环 HTTP/JWKS、RSA 签名与私有档案覆盖登记、身份校验、
+授权范围、轮换刷新、撤销、迟到 CAS、目录和回调监听器释放，并检查 Responses 最终请求信封。
+回调连接读写期限为 2 秒，同一监听最多登记 16 条活动连接；取消时先终止这些连接，再等待请求线程退出，
+正常请求与半开请求均核对 FD 释放。
+它与原七个 OAuth/TUI/失败分类文件共同验收；回环协议结果不代表已通过真实 OpenAI 网页、真实账号套餐或外部模型调用。
+下文带日期的 Codex 实测属于旧协议历史，不是新 SIWC 真实账号验证。
+
+官方依据（2026-11-04 生效条款及本轮保存的文档）：
+[条款](https://openai.com/zh-Hans-CN/policies/sign-in-with-chatgpt-terms/)、
+[OSS 总览](https://developers.openai.com/siwc/token-sharing-open-source.md)、
+[登记与登录](https://developers.openai.com/siwc/token-sharing-open-source/sign-in.md)、
+[账号与会话](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions.md)、
+[模型与推理](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference.md)、
+[预览限制](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations.md)、
+[错误恢复](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery.md)、
+[UI/UX](https://developers.openai.com/siwc/ui-ux-guidelines.md)。
+
 ## 支持范围
 
 新账号在 `/model → 新增模型 → 登录账号` 登录，已有账号在 `/model → 管理已有模型` 里重新登录、添加模型、退出或删除；模型目录仍是 provider/model v2。
@@ -7,7 +97,7 @@
 
 | 方式 | 配置和行为 | 边界 |
 |---|---|---|
-| ChatGPT 订阅登录 | TUI 默认浏览器登录（授权码 + PKCE，与官方命令行相同）：自动打开官方页面，登录并同意后自动跳回完成；环境不适合时退回内置设备码流程。登录后自动列出这个账号可用的模型，勾选（可多选）即可添加，之后在 /model 切换 | Plus/Pro 等套餐能否使用具体模型及设备码，由服务商账号权益和安全设置决定；不是把订阅当普通 API 余额 |
+| ChatGPT 套餐登录 | 新账号使用上述官方 SIWC 浏览器登记；旧 Codex 档案保留原浏览器/设备码协议。登录后列出所选账号的模型，再由用户添加或切换 | 具体权益由服务商决定，不能把套餐凭据跨用户共享；不是普通 API 余额 |
 | 通用 OAuth 2.0 | 填写模型 API 地址、Client ID、Device Authorization URL、Token URL，以及可选 Scope、Audience、Client Secret | 首版为 RFC 8628 设备码授权；客户端密钥用 form body；不支持仅授权码/PKCE、Basic client authentication、网页登录密码或任意 Cookie 导入 |
 
 填写后明确保存。编辑 Client Secret 留空保留旧值，勾选清除才删除；取消不保存草稿。
@@ -18,22 +108,21 @@
 
 ## 浏览器登录（ChatGPT 订阅）
 
-2026-09-30 起，TUI 里的 ChatGPT 订阅登录默认走浏览器，和官方命令行（Codex CLI）同一套授权码 + PKCE(S256) 流程，
-登录中不用复制网址或验证码：
+TUI 浏览器登录复用授权码 + PKCE(S256) 主链；新 SIWC 与旧 Codex 的端点和身份各按已保存档案选择，
+不得混用。登录中不用复制网址或验证码：
 
-1. TUI 在 `127.0.0.1:1455` 临时监听（被占用就用 `1457`；这两个是授权服务器登记过的回调端口），只在登录等待框存续期间开着。
+1. TUI 优先在 `127.0.0.1:1455` 临时监听，被占用就用 `1457`，监听只在登录等待框存续期间开着；其它可用端口只由已登记的 SIWC 档案接受。
 2. TUI 请 Gateway 执行 `auth_browser_start`：Gateway 生成 state 与 PKCE 校验码，校验码只写 owner 私有 pending，
    回执只含官方授权页地址与 state。回调地址逐字比对登记值。
-3. TUI 用系统默认浏览器打开授权页。用户登录并同意后，浏览器跳回本机回调；回调只收 state 与本次一致的第一次请求，
+3. TUI 用系统默认浏览器打开授权页。用户登录并同意后，浏览器跳回本机回调；回调只收 state 与本次一致的第一次请求，并保留 SIWC 已签发 Client ID，
    给浏览器回一个中文提示页，不写访问日志（请求行含授权码）。
 4. TUI 把授权码与 state 交给 Gateway 执行 `auth_browser_complete`：锁内核对请求编号、期限（10 分钟）与 state（常量时间比较，
    不符不清等待状态，伪造回调打断不了真实登录），锁外兑换一次令牌（不重试），再按配置绑定与请求编号 CAS 提交。
 5. 取消、Esc、超时或改用验证码都会关掉本机监听并撤销本次等待状态；迟到的回调不能恢复登录。
 6. 登录成功（按结构化的 connected，不看提示文字）后直接弹出这个账号可用模型的勾选框，见下节「订阅账号的模型目录」。
 
-不走浏览器、自动退回设备码的情况：SSH 会话、Linux 没有图形会话、两个回调端口都被占用，或用户在等待框里选"改用验证码登录"。
-设备码页也会自动打开确认页，只需在网页输入验证码。授权地址不带官方命令行的来源标识；通用 OAuth 服务商不支持浏览器方式；
-IM 没有登录入口。
+SSH 会话、Linux 没有图形会话或用户选择验证码时，旧 Codex 档案仍可走其原设备码入口；新 SIWC 会明确要求本人浏览器授权，
+不会借用旧应用的设备码身份。通用 OAuth 服务商仍只支持设备码；IM 没有登录入口。
 
 ## 唯一存储和权限
 
@@ -52,14 +141,14 @@ IM 没有登录入口。
 设备码按服务商 interval 轮询；`authorization_pending`、`slow_down`、到期和拒绝按结构化协议处理。
 验证码只在当前模态页轮询，不常驻后台。登录回调以请求编号和配置绑定 CAS 写回，取消后的迟到结果不能恢复账号。
 
-请求即将发送时，过期凭据用同 owner/provider 的跨进程锁串行刷新；文件锁不跨网络等待。
+请求即将发送时，过期凭据用同 owner/provider 的原刷新互斥锁串行刷新；模型档案锁不跨网络等待，刷新互斥锁仍覆盖当次刷新。
 refresh token 轮换原子保存，退出与刷新竞态再次核验授权代次。失败明确报错，不回退 API Key 或别的模型。
 令牌刷新不是模型调用，不计入模型轮次或 token 消耗。
 
 ## 原模型链路复用
 
 通用 OAuth Bearer 复用 Chat、Messages 或 Responses 后端；不另建 Agent、工具循环或 Compact。
-订阅模式固定使用专用 Responses 端点、账号头、流式请求及 `store=false`；system 指令转到 `instructions`，
+新 SIWC 使用公开 Responses HTTP/SSE；旧 Codex 档案继续使用其专用端点和账号头。两者均流式请求及 `store=false`；system 指令转到 `instructions`，
 不发送该接口不接受的 `max_output_tokens`。请求体在绑定宿主会话时带 `prompt_cache_key`（会话级提示缓存键，值与
 `provider_session_scope` 的会话编号一致，参考官方 Codex 的做法，让服务商把同一会话路由到同一份提示缓存）；
 未绑定会话时不带，且绝不生成随机键。订阅模式另带 `session-id` 请求头（ChatGPT 后端按它决定缓存亲和），值与
@@ -118,7 +207,7 @@ refresh token 轮换原子保存，退出与刷新竞态再次核验授权代次
 
 ### 订阅账号的模型目录（2026-09-30）
 
-- 订阅账号的 discover 读订阅接口自己的 `/models` 目录，不猜普通 `/v1/models`：带账号头与令牌、不跟随重定向，一次 GET，不调用模型。
+- 本节为旧 Codex 档案的目录合同；新 SIWC 走上文公开 `/v1/models`。两者都不跟随重定向，一次 GET，不调用模型。
 - 该接口必须带 `client_version`，并按它筛掉"需要更新客户端"的模型。本产品只用普通 Responses 调用、不用官方命令行的专用
   工具协议，声明版本 `1.0.0`（`CHATGPT_CATALOG_CLIENT_VERSION`）；它只决定列出哪些模型，不是身份凭据，也不影响计费。
 - 只列服务商标为可见（`visibility` 不是 `hide`）且上下文容量合法的条目；给出模型名、显示名与容量，接口固定 `openai_responses`。

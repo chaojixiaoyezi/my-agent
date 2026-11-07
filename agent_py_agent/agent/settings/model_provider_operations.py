@@ -41,6 +41,9 @@ def _save_provider(data: dict, payload: dict) -> None:
         from .model_oauth_schema import oauth_config
 
         requested = dict(value.get("auth") or previous["auth"])
+        if (requested.get("mode") == "chatgpt" and previous.get("api_base") == draft.get("api_base")
+                and previous.get("auth", {}).get("mode") == "chatgpt" and "client_id" not in requested):
+            requested["client_id"] = previous["auth"].get("client_id")
         if payload.get("clear_auth_secret") is True:
             requested["client_secret"] = ""
         elif not requested.get("client_secret"):
