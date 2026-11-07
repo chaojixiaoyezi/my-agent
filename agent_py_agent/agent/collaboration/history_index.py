@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import stat
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from sqlite3 import OperationalError
 
 from ..common import nofollow_fs
 from ..common.json_io import locked_json_path
@@ -19,6 +21,8 @@ from ..common.nofollow_fs import (
 from .identity import agent_identity_keys
 from .models import AGENT_CAPABILITY_STATUS_AVAILABLE, AgentCapability
 from .request_status import is_blocked_request_status, is_declined_request_status
+
+logger = logging.getLogger(__name__)
 
 
 # LLM: 新能力登记只在此按 agent_id 原子 upsert；历史身份永久保留，活跃投影及 pending 路由独立维护。
@@ -35,7 +39,12 @@ class CollaborationHistoryIndex:
         self.path = self.root / ".history-index.sqlite3"
         with locked_json_path(self.root / ".history-init"):
             with self.connect() as db:
-                db.executescript("""
+                self._install(db)
+
+    # LLM: 原case和名册不动，缺cases目录视为无旧case；尚有来源时保持partial并沿原后台回填。
+    # 函数用途: 在当前连接安装原投影表和覆盖标记。
+    def _install(self, db):
+        db.executescript("""
                     CREATE TABLE IF NOT EXISTS agents (
                         agent_id TEXT PRIMARY KEY, payload TEXT NOT NULL, source TEXT NOT NULL
                     );
@@ -83,14 +92,29 @@ class CollaborationHistoryIndex:
                     CREATE INDEX IF NOT EXISTS remaining_inventory ON inventory(done,seq);
                     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                     CREATE TABLE IF NOT EXISTS roster_seen (agent_id TEXT PRIMARY KEY);
-                """)
-                if not db.execute("SELECT 1 FROM meta WHERE key='cases_complete'").fetchone():
-                    with os.scandir(self.root / "cases") as entries:
-                        legacy = next(entries, None) is not None
-                    db.executemany("INSERT INTO meta VALUES (?,?)", [("cases_complete", str(int(not legacy))),
-                                   ("inventory_ready", str(int(not legacy)))])
+        """)
+        if not db.execute("SELECT 1 FROM meta WHERE key='cases_complete'").fetchone():
+            try:
+                with os.scandir(self.root / "cases") as entries:
+                    legacy = next(entries, None) is not None
+            except FileNotFoundError:
+                legacy = False
+            db.executemany("INSERT INTO meta VALUES (?,?)", [("cases_complete", str(int(not legacy))),
+                           ("inventory_ready", str(int(not legacy)))])
 
-    # LLM: no-follow 私有种子先于 SQLite；同库访问锁和词法关闭避免预检 FD 释放另一个连接的进程级锁。
+    # LLM: 每连接只点查覆盖header；缺表或种子未完成时重用原安装器，其他SQLite错误原样拒绝。
+    # 函数用途: 修复未初始化的schema，供调用者复核身份并在交给业务前提交。
+    def _ensure_schema(self, db):
+        try:
+            if db.execute("SELECT 1 FROM meta WHERE key='cases_complete'").fetchone():
+                return False
+        except OperationalError as exc:
+            if str(exc) != "no such table: meta":
+                raise
+        self._install(db)
+        return True
+
+    # LLM: 原no-follow及访问锁不变；重装种子先提交，随后业务BEGIN和回滚不影响初始化。
     # 函数用途: 提供一次原子事务，拒绝索引、sidecar 或父目录身份被替换。
     @contextmanager
     def connect(self):
@@ -120,12 +144,16 @@ class CollaborationHistoryIndex:
                     db.execute("PRAGMA foreign_keys=ON")
                     _verify_files(self.root, root_fd, pinned)
                     with db:
+                        if self._ensure_schema(db):
+                            _verify_files(self.root, root_fd, pinned)
+                            db.commit()
+                            logger.warning("SQLITE_SCHEMA_REINSTALLED store=collaboration_history path=%s", self.path)
                         yield db
                         _verify_files(self.root, root_fd, pinned)
                 finally:
                     db.close()
 
-    # LLM: 便携路径先校验并关闭种子FD，避免Windows因外部句柄无法删除journal；POSIX分支不变。
+    # LLM: 便携路径先校验并关闭种子FD；重装先提交，避免业务BEGIN嵌套和回滚撤销种子。
     # 函数用途: 为无dir_fd平台保留外键、提交、回滚与连接关闭合同。
     @contextmanager
     def _connect_portable(self):
@@ -151,6 +179,10 @@ class CollaborationHistoryIndex:
             db.execute("PRAGMA foreign_keys=ON")
             _verify_files(self.root, root_info, pinned)
             with db:
+                if self._ensure_schema(db):
+                    _verify_files(self.root, root_info, pinned)
+                    db.commit()
+                    logger.warning("SQLITE_SCHEMA_REINSTALLED store=collaboration_history path=%s", self.path)
                 yield db
                 _verify_files(self.root, root_info, pinned)
         finally:
