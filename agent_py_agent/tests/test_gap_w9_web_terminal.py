@@ -296,6 +296,9 @@ class _ControlledBackend:
     def get(self, identifier, *args):
         return self.sessions.get(identifier)
 
+    def list(self, scope):
+        return list(self.sessions.values())
+
     def resize(self, identifier, cols, rows, *args):
         if self.resize_error:
             raise OSError('受控尺寸故障')
@@ -467,3 +470,61 @@ def test_failed_new_open_does_not_close_older_session(env):
     assert error.value.code == 'EXTERNAL_PROCESS_FAILED'
     assert backend.sessions[first['session_id']].closed is False
     assert backend.closes == ['fake-2']
+
+
+def test_host_exclusive_paths_remain_unreadable_in_pty_policy(env):
+    backend = controlled(env)
+    shell = env.host.tools.tools['run_command']
+    secret = env.host.workspace / 'project' / 'host-only'
+    shell.host_exclusive_paths = (secret,)
+    opened(env)
+    assert str(secret) in backend.starts[0][1]['host_policy'].private_roots
+
+
+def test_start_raises_after_registration_is_unknown_and_replay_cannot_spawn(env, monkeypatch):
+    backend = controlled(env)
+    original = backend.start
+
+    def late_failure(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError('进程已登记，排空线程启动失败')
+
+    monkeypatch.setattr(backend, 'start', late_failure)
+    granted = grant(env)
+    request = call(env, 'web_terminal.open', {'ticket': granted['ticket'], 'cols': 80, 'rows': 24})
+    for _ in range(2):
+        with pytest.raises(HostAPIError) as error:
+            terminal.open_session(request)
+        assert error.value.code == 'OUTCOME_UNKNOWN'
+    assert len(backend.starts) == 1 and backend.closes == ['fake-1']
+    assert backend.sessions['fake-1'].closed
+
+
+def test_native_context_leases_exact_owner_host_and_releases_it(env, registered_slice, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import control_service, http_handlers
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+    owner = OwnerIdentity.local_main()
+    server = SimpleNamespace(agent=env.host, paths=gateway_paths_from_root(env.root / 'gateway'))
+    handler = SimpleNamespace(headers={}, client_address=('127.0.0.1', 12345))
+    monkeypatch.setattr(http_handlers, '_request_channel', lambda h: ('alice', 'local'))
+    monkeypatch.setattr(http_handlers, '_gateway_control_scope', lambda *args, **kwargs: object())
+    monkeypatch.setattr(control_service, 'resolve_gateway_scope_owner', lambda *args: owner)
+    events = []
+
+    def complete(server, actual, stack):
+        assert actual == owner
+        events.append('acquired')
+        stack.callback(events.append, 'released')
+        return env.host
+
+    monkeypatch.setattr(api, 'owner_complete_host', complete)
+    context, services = api.native_business_context(handler, server)
+    assert not hasattr(context.host, 'workspace') and not hasattr(context.host, 'tools')
+    request = {'action': 'web_terminal.grant', 'request_id': uuid4().hex,
+        'idempotency_key': 'native-' + uuid4().hex,
+        'params': {'workspace_root': 'project', 'capabilities': ['read']}}
+    status, body = api.execute_business(request, context, services)
+    assert status == 200, body
+    assert events == ['acquired', 'released']
+    assert not hasattr(services.host, 'workspace')

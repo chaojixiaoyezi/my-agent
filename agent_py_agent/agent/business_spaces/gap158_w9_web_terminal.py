@@ -9,6 +9,8 @@ import json
 import os
 import threading
 import time
+from contextlib import ExitStack
+from copy import copy
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
@@ -20,6 +22,7 @@ from ..tooling.pty_sessions import (
     PtyHostPolicy,
     PtySessionRegistry,
     PtyWriteError,
+    _pty_access_scope,
 )
 from ..tooling.shell import ShellTool
 from ..tooling.write_boundary import SandboxWriteProtection
@@ -48,7 +51,7 @@ def _failure(code='VERIFICATION_FAILED', status=403):
 
 def _launch_inputs(call, workspace):
     """只借可信宿主已有 Shell 的上界；缺失时拒绝，不另造宽松策略。"""
-    tools = getattr(getattr(call.context.host, 'tools', None), 'tools', {})
+    tools = getattr(getattr(call.services.host, 'tools', None), 'tools', {})
     shell = tools.get('run_command') if isinstance(tools, dict) else None
     owner = Path(call.owner_home).resolve()
     if (not isinstance(shell, ShellTool) or not shell.path_access_policy.owner_scope_root
@@ -60,7 +63,9 @@ def _launch_inputs(call, workspace):
     denied = tuple(getattr(shell, '_sandbox_forbidden_write_roots', ()))
     protected = tuple(dict.fromkeys([*(owner / name for name in ('AGENTS.md', 'SOUL.md', 'USER.md')),
                                     *shell.host_exclusive_paths]))
-    policy = PtyHostPolicy(private_roots=shell.host_private_roots,
+    # PTY 后端重建策略不会保留 Shell 的 hidden_paths 扩展；转为更严格的拒读根。
+    private = tuple(dict.fromkeys((*shell.host_private_roots, *(str(p) for p in shell.host_exclusive_paths))))
+    policy = PtyHostPolicy(private_roots=private,
         network_access=getattr(shell, '_sandbox_network_access', False),
         host_credential_env_names=shell.host_credential_env_names,
         protected_persona_root=shell.protected_persona_root or owner,
@@ -69,8 +74,30 @@ def _launch_inputs(call, workspace):
     return owner, (workspace,), (workspace,), SandboxWriteProtection(protected, denied), policy
 
 
+def _execute_with_host(registry, method, call):
+    """原生 HTTP 的只读宿主视图只在需要工作根时租用同 owner 完整宿主。"""
+    v13_require_access(call)
+    if method not in {'grant', 'open'} or hasattr(call.services.host, 'workspace'):
+        return registry._execute(method, call)
+    with ExitStack() as stack:
+        provider = call.context.host_provider
+        if not callable(provider):
+            raise _failure('HOST_NOT_READY', 503)
+        host = provider(stack)
+        paths = getattr(host, 'home_paths', None)
+        if (getattr(paths, 'owner_id', None) != call.owner_id
+                or Path(paths.owner_home_dir).resolve() != Path(call.owner_home).resolve()):
+            raise _failure('HOST_NOT_READY', 503)
+        # 只复制本次 service 视图，不改签发 context、共享服务或缓存宿主租约。
+        services = copy(call.services)
+        services.host = host
+        selected = replace(call, services=services)
+        v13_require_access(selected)
+        return registry._execute(method, selected)
+
+
 def _workspace(call):
-    root = getattr(call.context.host, 'workspace', None)
+    root = getattr(call.services.host, 'workspace', None)
     if root is None:
         raise _failure('HOST_NOT_READY', 503)
     root = Path(root).resolve(strict=True)
@@ -117,6 +144,9 @@ class WebTerminalRegistry:
         self.receipts = {}
 
     def execute(self, method, call):
+        return _execute_with_host(self, method, call)
+
+    def _execute(self, method, call):
         # 只在期限内保留有界回执；重放前仍重核授权，不以旧成功绕过撤权或到期。
         with self.lock:
             v13_require_access(call)
@@ -273,10 +303,15 @@ class WebTerminalRegistry:
             if grant.workspace.resolve(strict=True) != grant.workspace:
                 raise _failure()
             session = None
+            run_scope = {'owner_home': str(owner_home), 'thread_id': grant.grant_id, 'run_id': 'web-' + uuid4().hex}
+            scope = _pty_access_scope(owner_home, write_roots, read_roots, protection.absolute_paths, run_scope,
+                write_scope_denied_roots=protection.denied_roots, network_access=policy.network_access,
+                protected_persona_root=policy.protected_persona_root)
+            known = set(grant.sessions)
             try:
                 session = self.backend.start('/bin/sh', grant.workspace, owner_home,
                     write_roots, read_roots, protection,
-                    {'owner_home': str(owner_home), 'thread_id': grant.grant_id, 'run_id': grant.grant_id},
+                    run_scope,
                     host_policy=policy)
                 grant.sessions[session.session_id] = session
                 resized = self.backend.resize(session.session_id, call.params['cols'], call.params['rows'], session.access_scope)
@@ -284,7 +319,14 @@ class WebTerminalRegistry:
                     raise OSError('PTY 没有返回尺寸读回值')
                 cols, rows = resized.resize_readback
             except (OSError, ValueError, RuntimeError) as error:
-                if session is not None:
+                if session is None:
+                    # start 未返回不是未启动证明；原注册表中可能已有本次出生的会话。
+                    for late in self.backend.list(scope):
+                        if late.session_id not in known:
+                            grant.sessions[late.session_id] = late
+                            self._close_session(late)
+                    raise _failure('OUTCOME_UNKNOWN', 503) from error
+                else:
                     self._close_session(session)
                     if not (session.closed and session.termination is not None and session.termination.confirmed):
                         raise _failure('OUTCOME_UNKNOWN', 503) from error
@@ -408,7 +450,10 @@ _registry = WebTerminalRegistry()
 def terminal_ready(call):
     # readiness 只观察开关与 PTY 平台，不触发启动或修改授权。
     # 能力目录的探针没有签发 context；宿主只能从原 services 取得。
-    return os.name != 'nt' and bool(getattr(call.services.host.config, 'web_terminal_enabled', False))
+    host = call.services.host
+    wired = (hasattr(host, 'workspace') and getattr(host, 'tools', None) is not None
+             or getattr(host, 'business_complete_host_wired', False) is True)
+    return os.name != 'nt' and wired and bool(getattr(host.config, 'web_terminal_enabled', False))
 
 
 def grant(call):
