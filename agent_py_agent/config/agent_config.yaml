@@ -519,6 +519,9 @@ model_speed_profile_path: ""
 # 后继只接受准确旧实例已死及稳定已结责任；缺birth/未知native/混MP应沿原入口恢复，不能删标记或补闭封。
 # MP→0与MP改数量仍不支持；配置保存不等于拓扑已经生效。
 gateway_worker_process_count: 0
+
+# 规模 worker 的 owner 快照模式。full 为原有整目录恢复与整表替换；delta_compat 在保留 PG advisory 锁的同时启用租约行与增量清单（滚动升级期间新旧 Pod 混跑用）；delta 只用租约行与增量清单。只能按 full→delta_compat→delta 顺序升级。
+scale_owner_snapshot_mode: full
 # Gateway运行目录；留空使用当前owner规范工作区，显式相对路径也按该工作区解析。
 gateway_workspace: ""
 # 停止后台服务时最多等它多久自己退出，超时就强制结束。
@@ -643,6 +646,9 @@ gateway_per_user_owner_scoping: true
 # 需要确认的工具会在聊天里提示，回复 `/approve <密码>` 批准本次、`/deny` 拒绝。群聊永远不匹配。
 # 没设密码时不会有任何绑定；设为 false 时 /admin 拒绝，已有绑定不生效（文件保留）。只在 base owner 为 local/main 时可用。
 admin_channel_identity_enabled: true
+
+# Cell 部署的边缘身份要求。true 时携带部署凭据（gateway_auth_token）的请求必须带唯一且非空的 X-User-Id 与 X-Channel，且最终角色不能是管理员，否则返回 403；本机终端改用本机 G1 凭据。false 为原有单机行为。改文件后下一个请求即生效，不用重启；飞书回调进程在重启前沿用启动时的凭据。
+gateway_edge_identity_required: false
 
 # 网关 HTTP 绑定地址。默认 127.0.0.1(仅本机可达)。
 # 改成 0.0.0.0 等非回环地址会把网关暴露到网络,此时必须 auth_enabled=true,否则 fail-closed 拒绝启动
@@ -858,6 +864,9 @@ provider_max_concurrent_requests: 0
 responses_ws_idle_ttl_seconds: 300
 # Responses会话WebSocket进程内空闲连接池最大保留连接数（0至256，0表示关闭连接复用）。
 responses_ws_max_idle_connections: 32
+
+# 主模型 HTTP 调用（Chat Completions/Anthropic 兼容接口）每条线路保留的空闲长连接上限，0~256。0 表示不复用连接（原行为）；大于 0 时同一服务商线路的回合复用 TCP/TLS 连接，空闲超过 60 秒自动关闭。
+model_http_max_idle_connections: 0
 
 
 # HTTP 基础超时秒数：非流式请求把它当总时长下限；流式请求把它当首包后的滚动空闲窗口。

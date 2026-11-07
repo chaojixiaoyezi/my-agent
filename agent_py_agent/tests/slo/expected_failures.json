@@ -2,33 +2,15 @@
   "schema": 1,
   "entries": [
     {
-      "nodeid": "agent_py_agent/tests/slo/test_slo_cliff.py::test_idle_connections[cliff_idle]",
-      "reason": "S1-W1 control lane configuration is not integrated",
-      "clears_when": "S1-INT",
-      "added": "2026-11-05"
-    },
-    {
       "nodeid": "agent_py_agent/tests/slo/test_slo_cliff.py::test_slow_handlers[cliff_slow_handler]",
-      "reason": "S1-W1 slow general handlers require the integrated control lane",
-      "clears_when": "S1-INT",
-      "added": "2026-11-05"
-    },
-    {
-      "nodeid": "agent_py_agent/tests/slo/test_slo_streams_control.py::test_streams_control[streams_control]",
-      "reason": "S1-W1 native stream handoff configuration is not integrated",
-      "clears_when": "S1-INT",
+      "reason": "Control status passes, but saturating every general worker still rejects the offered ask with GATEWAY_HTTP_BUSY; S2-INT must confirm durable acceptance with the unchanged 100 ms target",
+      "clears_when": "S2-INT",
       "added": "2026-11-05"
     },
     {
       "nodeid": "agent_py_agent/tests/slo/test_slo_snapshot_counts.py::test_snapshot_counts[delta]",
-      "reason": "Delta snapshot checkout is not available at the anchor",
-      "clears_when": "S1-W2",
-      "added": "2026-11-05"
-    },
-    {
-      "nodeid": "agent_py_agent/tests/slo/test_slo_connection_reuse.py::test_connection_reuse",
-      "reason": "S1-W4 main HTTP pool configuration is not integrated",
-      "clears_when": "S1-INT",
+      "reason": "The transaction-capable fake now completes delta checkout, but the immediate warm turn still downloads 20/20 files because recent-mtime stat entries remain racy; S2-INT must meet downloads_warm_max=0 without changing the target or timestamp guard",
+      "clears_when": "S2-INT",
       "added": "2026-11-05"
     }
   ]

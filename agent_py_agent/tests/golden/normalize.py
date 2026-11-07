@@ -36,11 +36,20 @@ def _instant(value):
     return result
 
 
-# LLM: No event or field is removed; content digests are recomputed from normalized bodies, never renamed as IDs.
+# LLM: 不删除事件或字段；测试根下日期段保持一一映射，内容摘要只在归一后重算，不作为ID替换。
 # 函数用途: Normalize generated labels and chronological ordinals while keeping actual request content comparable.
 def normalize(trace):
     maps, clocks = defaultdict(dict), defaultdict(set)
     child_labels = {}
+    dates = {}
+
+    # LLM: 调用方仅传入本事件测试根后的路径；必须有后续斜线，不能把末段日期文件名当目录。
+    # 函数用途: 按首次出现顺序保留路径日期的相等和不同关系。
+    def fixture_dates(match):
+        def label(segment):
+            day = segment.group()
+            return dates.setdefault(day, f"date#{len(dates) + 1}")
+        return match.group(1) + re.sub(r"(?<=/)\d{4}-\d{2}-\d{2}(?=/)", label, match.group(2))
 
     # LLM: Each namespace retains a bijection including references embedded in provider messages.
     # 函数用途: Assign one stable label to each generated identity.
@@ -73,9 +82,12 @@ def normalize(trace):
             collect(json.loads(output["content"]), stream)
     ordinals = {stream: {stamp: index + 1 for index, stamp in enumerate(sorted(stamps))} for stream, stamps in clocks.items()}
 
-    # LLM: Only fixture-generated path roots, loopback ports, causal labels and protocol probe nonces are substituted in text.
+    # LLM: 日期只在本事件声明的fixture根路径内处理；源码日期、伪根文本与末段文件名保持可比较。
     # 函数用途: Preserve provider prompt text while making its generated labels repeatable.
     def text(value, event, *, tool_header=False):
+        root = event.get("fixture_root")
+        if root:
+            value = re.sub(r"(?<![\w/.-])(" + re.escape(root) + r")(/[^\s\"'<>\\]*)", fixture_dates, value)
         for namespace in ("fixture_root", "source_root"):
             root = event.get(namespace)
             if root:

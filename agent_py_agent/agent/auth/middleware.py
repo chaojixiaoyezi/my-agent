@@ -74,12 +74,14 @@ class AuthMiddleware:
     HEADER_CHANNEL = "X-Channel"
     HEADER_TOKEN = "X-Gateway-Token"
 
-    # LLM: 构造不读取或导出凭据；边缘身份要求默认关闭，所有角色仍由原认证服务决定。
-    # 函数用途: 初始化原鉴权服务、边缘身份开关和旧客户端观察账。
-    def __init__(self, auth_manager: AuthManager, auth_token: str = "", *, edge_identity_required: bool = False) -> None:
+    # LLM: 仅保存可热刷新的配置引用，不在构造时读取身份策略；无config的旧调用保持显式flag语义。
+    # 函数用途: 初始化原鉴权服务、策略引用和旧客户端观察账。
+    def __init__(self, auth_manager: AuthManager, auth_token: str = "", *, edge_identity_required: bool = False,
+                 config: object | None = None) -> None:
         self.auth_manager = auth_manager
         self.auth_token = auth_token  # 可选部署凭据，空值不代替 G1 本机凭据。
         self.edge_identity_required = bool(edge_identity_required)
+        self._config = config
         self._local_client_credential = ""
         self._observation_lock = threading.Lock()
         self._uncredentialed_loopback_by_endpoint: dict[str, dict[str, int | float]] = {}
@@ -109,10 +111,12 @@ class AuthMiddleware:
             return "deployment"
         return None
 
-    # LLM: 只对显式开启的部署凭据检查原始身份；同一 authenticate 接收提取路径的原值，不另建角色策略。
+    # LLM: 每次调用读取同一可热刷配置；无配置沿旧flag，仅对部署凭据检查原始身份，不另建角色策略。
     # 函数用途: 返回边缘身份缺失或管理员拒绝码，本机 G1 与默认关闭路径不受影响。
     def edge_identity_error(self, headers) -> str | None:
-        if not self.edge_identity_required or self.credential_kind(headers) != "deployment":
+        required = (bool(getattr(self._config, "gateway_edge_identity_required", False))
+                    if self._config is not None else self.edge_identity_required)
+        if not required or self.credential_kind(headers) != "deployment":
             return None
         if any(_header_count(headers, name) != 1 for name in (self.HEADER_USER_ID, self.HEADER_CHANNEL)):
             return GATEWAY_EDGE_IDENTITY_REQUIRED

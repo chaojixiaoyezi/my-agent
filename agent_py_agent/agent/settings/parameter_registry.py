@@ -54,6 +54,7 @@ _HOST_CAPACITY_KEYS = frozenset({
     "memory_reference_pin_chunk_bytes",
 })
 DEPLOYMENT_ONLY_KEYS = _HOST_CAPACITY_KEYS | frozenset({
+    "model_http_max_idle_connections", "scale_owner_snapshot_mode", "gateway_edge_identity_required",
     "max_background_agents",
     "workspace_root", "my_agent_home", "execution_mode", "my_agent_owner_provider", "my_agent_owner_kind",
     "my_agent_owner_id", "workspace_task_path_template", "memory_path", "local_store_path", "local_store_files_dir",

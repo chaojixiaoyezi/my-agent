@@ -108,6 +108,7 @@ _EXTRA_FLOAT_RANGES = {
 }
 # 枚举选择（choices）范围：与 _normalize.py 的 _apply_choice_field 同一组枚举。
 _CHOICES = {
+    "scale_owner_snapshot_mode": ("full", "delta_compat", "delta"),
     "model_backend": ("", "echo", "anthropic_compatible", "openai_compatible", "openai_responses"),
     "model_reasoning_effort": REASONING_LEVELS,
     "model_reasoning_control": REASONING_CONTROLS,

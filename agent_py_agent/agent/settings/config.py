@@ -708,6 +708,13 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 宿主内部擦洗上界：配置解析/克隆时冻结，不能由 YAML、参数中心或模型覆盖，也不含密钥值。
     host_credential_env_names: tuple[str, ...] = field(default=(), repr=False, metadata={"host_only": True})
 
+    # 新部署字段追加在末尾，保留既有位置参数顺序；0 保持主模型 HTTP 不复用连接。
+    model_http_max_idle_connections: int = field(default=0, metadata={"bounds": (0, 256), "unit": "个连接"})
+    # full 保持整目录快照；部署升级按 full→delta_compat→delta 顺序推进，改动需重启。
+    scale_owner_snapshot_mode: str = "full"
+    # 仅部署凭据的身份要求热刷新；飞书回调凭据保持启动值，需重启适配器收敛。
+    gateway_edge_identity_required: bool = False
+
     # LLM: 配置值/来源入口；公开值与内部诊断分离，日志设置副作用限原进程，联测配置加载。
     # 函数用途: 查询一个配置项的有效来源，不更改其当前值。
     def config_source_for(self, key: str) -> dict[str, object]:

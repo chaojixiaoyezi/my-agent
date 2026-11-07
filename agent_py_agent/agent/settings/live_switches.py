@@ -13,6 +13,7 @@ from .memory import MemorySettings
 from .runtime_guard_config import RuntimeGuardPolicy, runtime_guard_policy
 
 DEPLOY_LIVE_SWITCH_KEYS = frozenset({
+    "gateway_edge_identity_required",
     "admin_channel_identity_enabled", "audit_enabled", "auth_enabled",
     "daemon_mutate_state", "daemon_start_runners", "enable_gateway_memory_diagnostics",
     "feishu_bot_subscriptions_enabled", "feishu_cli_backend_enabled",
@@ -55,7 +56,8 @@ LIVE_SWITCH_KEYS = frozenset({
     "tui_follow_gateway_upgrade", "tui_mouse_capture_default",
 }) | DEPLOY_LIVE_SWITCH_KEYS
 
-_AUTH_KEYS = frozenset({"auth_enabled", "gateway_per_user_owner_scoping", "admin_channel_identity_enabled"})
+_AUTH_KEYS = frozenset({"auth_enabled", "gateway_per_user_owner_scoping", "admin_channel_identity_enabled",
+                        "gateway_edge_identity_required"})
 _GUARD_KEYS = frozenset({"terminal_block_enabled", "hard_failure_halt_enabled"})
 _MEMORY_KEYS = LIVE_SWITCH_KEYS & frozenset(item.name for item in fields(MemorySettings))
 _LOCK = threading.RLock()
@@ -186,7 +188,7 @@ def refresh_live_switches(config=None, *, path=None, force=False) -> frozenset[s
         return frozenset(changed)
 
 
-# LLM: 认证三项作为一组校验，既核新文件，也核 owner 覆盖后的实际组合；错误仅投影固定原因，不回显凭据。
+# LLM: 认证与边缘身份开关作为一组校验，既核新文件，也核 owner 覆盖后的实际组合；错误仅投影固定原因，不回显凭据。
 # 函数用途: 拒绝不安全的认证变化，并返回去重用的告警。
 def _auth_warning(fresh, candidate) -> str | None:
     from ..auth.configuration import AuthConfigurationError, validate_gateway_auth_configuration
