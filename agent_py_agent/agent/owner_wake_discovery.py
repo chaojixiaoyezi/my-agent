@@ -956,8 +956,13 @@ def _dir_own_signature(root: Path) -> tuple[int, int]:
 
 
 def _owner_has_hard_facts(owner_home: Path, *, deadline_out: list[float] | None = None) -> bool:
+    from .business_spaces.gap158_w6_notify import notification_deadline
     from .conversation.process_events import owner_has_pending_process_completions
 
+    notify_due = notification_deadline(owner_home)
+    if notify_due is not None:
+        _add_deadline(deadline_out, notify_due)
+        return True
     if any(
         _has_pending_wake_signal(store_root, owner_home=owner_home, deadline_out=deadline_out)
         or _has_enabled_progress_policy(store_root, owner_home=owner_home, deadline_out=deadline_out)

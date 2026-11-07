@@ -4408,6 +4408,9 @@ class _BackgroundSchedulerTickMixin:
                 now=now,
                 limit=PENDING_WAKE_CONSUME_LIMIT_COUNT,
             )
+            if agent is not None:
+                from ..business_spaces.gap158_w6_notify import resume_notifications
+                resume_notifications(agent, now=now)
         except OwnerQuotaUnavailable as exc:
             if wait.failed(now, exc):
                 _HEARTBEAT_LOGGER.warning(

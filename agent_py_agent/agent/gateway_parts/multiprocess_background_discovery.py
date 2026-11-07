@@ -267,7 +267,11 @@ class CoordinatorBackgroundRequests:
                 if kind == "maintenance" and not _maintenance_has_due_work(read_source(self.control.home_root, ref), time.time()):
                     continue
                 if kind == "scheduler" and not _scheduler_has_due_work(read_source(self.control.home_root, ref), time.time()):
-                    continue
+                    from ..business_spaces.gap158_w6_notify import notification_deadline
+                    _, notify_config, _ = resolve_owner_resource_configuration(self.control, owner)
+                    due = notification_deadline(home, notify_config)
+                    if due is None or due > time.time():
+                        continue
                 if kind == "observation" and not read_source(self.control.home_root, ref)["observations"]:
                     continue
                 if kind == "policy" and not _policy_has_due_work(read_source(self.control.home_root, ref), time.time()):
