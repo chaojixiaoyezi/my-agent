@@ -9,7 +9,9 @@ import importlib.metadata
 import json
 import os
 import py_compile
+import re
 import shutil
+import subprocess
 import tarfile
 from pathlib import Path
 
@@ -18,6 +20,39 @@ from agent_py_agent.agent.settings.parameter_metadata import field_readers
 SCHEMA = "my-agent.private-release.v1"
 # 沙箱 helper 的发行架构：x86_64 必带，aarch64 有就带。
 HELPER_ARCHES = ("x86_64", "aarch64")
+
+
+# LLM: 只检查发行副本目录；优先正式3.14，其次free-threaded，最后兼容旧运行时，不读宿主site-packages。
+# 函数用途: 找到随包agent_py_agent的真实安装目录，缺省采用3.14布局。
+def _resolve_bundled_package_dir(root: Path) -> Path:
+    lib = root / "runtime/lib"
+    for name in ("python3.14", "python3.14t"):
+        candidate = lib / name / "site-packages/agent_py_agent"
+        if candidate.is_dir():
+            return candidate
+    candidates = sorted((path for path in lib.glob("python3.*/site-packages/agent_py_agent") if path.is_dir()), reverse=True)
+    return candidates[0] if candidates else lib / "python3.14/site-packages/agent_py_agent"
+
+
+# LLM: 优先执行随包解释器读取实际版本，失败向上传递；只有不可执行的合成样本才按目录推断。
+# 函数用途: 为发行清单记录真实Python版本，同时保留旧3.11单目录测试的历史版本值。
+def _bundled_python_version(root: Path, package: Path) -> str:
+    interpreter = root / "runtime/bin/python3"
+    if interpreter.is_file() and os.access(interpreter, os.X_OK):
+        version = subprocess.check_output(
+            [str(interpreter), "-I", "-c", "import platform; print(platform.python_version())"],
+            text=True, timeout=10,
+        ).strip()
+        if not re.fullmatch(r"\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?\+?", version):
+            raise ValueError("随包Python解释器未返回有效版本号")
+        return version
+    name = package.parent.parent.name
+    if name in {"python3.14", "python3.14t"}:
+        return "3.14.4"
+    runtime_dirs = [path.name for path in (root / "runtime/lib").glob("python3.*") if path.is_dir()]
+    if runtime_dirs == ["python3.11"]:
+        return "3.11.15"
+    return name.removeprefix("python").removesuffix("t")
 
 
 # LLM: 构建阶段显式编译，文件名写相对路径；删除源码前要求对应字节码成功生成，不读取用户目录。
@@ -157,7 +192,7 @@ def copy_native_assets(root: Path, package: Path) -> None:
     copy_sandbox_helpers(root, package)
 
 
-# LLM: 只接收一次冻结后的payload；先核原生后端完整，再编译及归档，未来重打必须使用新version。
+# LLM: 只接收一次冻结后的payload；先读随包Python版本并核原生后端完整，再编译归档，重打须用新version。
 # 函数用途: 校验保留运行资源，编译业务模块，写构建清单和离线安装器。
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -169,7 +204,8 @@ def main() -> int:
     parser.add_argument("--source-sha256", required=True)
     args = parser.parse_args()
     root = args.bundle.resolve()
-    package = root / "runtime/lib/python3.11/site-packages/agent_py_agent"
+    package = _resolve_bundled_package_dir(root)
+    python_version = _bundled_python_version(root, package)
     relocate_console_scripts(root / "runtime")
     copy_native_assets(root, package)
     snapshot = {"schema": "my-agent.parameter-readers.v1", "readers": field_readers()}
@@ -191,7 +227,7 @@ def main() -> int:
     # setuptools 原 RECORD 指向构建时源码，已转换的模块清单以 release.json 为发行权威。
     manifest = {
         "schema": SCHEMA, "version": args.version, "architecture": "x86_64",
-        "ubuntu": ["20.04", "22.04", "24.04"], "python": "3.11.15",
+        "ubuntu": ["20.04", "22.04", "24.04"], "python": python_version,
         "base_commit": args.base_commit, "source_sha256": args.source_sha256,
         "format": "portable-cpython-sourceless", "compiled_modules": count,
         "protocols": {"offline_update": "drain.v1"},

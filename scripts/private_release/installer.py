@@ -395,7 +395,7 @@ def upgrade_existing_config_defaults(config_path: Path, template_content: str) -
         _atomic_write_config(config_path, text)
 
 
-# LLM: 首装保留原owner目录权威；更新只迁移旧并发出厂默认，不覆盖用户的模型、凭据或路径。
+# LLM: 首装保留原owner目录权威；模板优先随包3.14/3.14t并兼容旧目录，更新不覆盖用户模型、凭据或路径。
 # 函数用途: 初始化空白数据，已有配置通过受限的升级迁移入口更新。
 def initialize_data(prefix: Path, release: Path) -> None:
     config = prefix / "data" / "config" / "agent_config.yaml"
@@ -403,7 +403,12 @@ def initialize_data(prefix: Path, release: Path) -> None:
     (prefix / "data/tmp").mkdir(exist_ok=True, mode=0o700)
     (prefix / "data/cache").mkdir(exist_ok=True, mode=0o700)
     workspace_path(prefix).mkdir(parents=True, exist_ok=True)
-    package = release / "runtime" / "lib" / "python3.11" / "site-packages" / "agent_py_agent"
+    lib = release / "runtime/lib"
+    preferred = [lib / name / "site-packages/agent_py_agent" for name in ("python3.14", "python3.14t")]
+    candidates = [path for path in preferred if path.is_dir()]
+    if not candidates:
+        candidates = sorted((path for path in lib.glob("python3.*/site-packages/agent_py_agent") if path.is_dir()), reverse=True)
+    package = candidates[0] if candidates else lib / "python3.11/site-packages/agent_py_agent"
     content = (package / "config" / "agent_config.yaml").read_text(encoding="utf-8")
     if config.exists():
         upgrade_existing_config_defaults(config, content)
