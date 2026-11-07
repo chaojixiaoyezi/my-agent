@@ -78,6 +78,8 @@ def test_release_retry_and_claimed_expiry_use_consumable_time(tmp_path):
     assert repo.due_runtime_wakes(now=700)
 
 
+# LLM: 默认配置只供临时组件；显式覆盖允许将真实线程backstop与计时合同分开。
+# 函数用途: 在隔离目录组合真实索引和登记表，不启动完整Agent。
 def context_for(tmp_path, **config):
     from agent_py_agent.agent.owner_scoped_pool import ActiveOwnerRegistry
 
@@ -85,36 +87,98 @@ def context_for(tmp_path, **config):
                            owner_home_dir=tmp_path / "owners/local/main")
     registry = ActiveOwnerRegistry()
     index = SchedulerDueIndex(home.global_index_dir / "scheduler_due.sqlite3")
-    base = SimpleNamespace(config=SimpleNamespace(owner_agent_pool_max_agents=128, background_owner_workers=8,
-        owner_maintenance_scan_interval_seconds=0.06, **config), home_paths=home,
+    settings = {"owner_agent_pool_max_agents": 128, "background_owner_workers": 8,
+                "owner_maintenance_scan_interval_seconds": 0.06, **config}
+    base = SimpleNamespace(config=SimpleNamespace(**settings), home_paths=home,
         scheduler_repository=SimpleNamespace(due_index=index), _active_owner_registry=registry)
     return SimpleNamespace(agent=base), registry, index
 
 
-def test_timer_wakes_real_due_controller_within_fifty_ms(tmp_path):
+# LLM: 50ms是提示与消费的逻辑边界，不以CI线程调度延迟判定；真实线程另测。
+# 函数用途: 用可控时钟推进真实timer和due controller，验证不提前唤醒且50ms内登记。
+def test_timer_wakes_real_due_controller_within_fifty_ms(tmp_path, monkeypatch):
+    from agent_py_agent.agent.scheduler import timer_service
     from agent_py_agent.cli import gateway_loops as loops
 
     assert callable(getattr(loops, "_OwnerWakeHints", None))
+    wall, mono = [time.time()], [100.0]
+    clock = SimpleNamespace(time=lambda: wall[0], monotonic=lambda: mono[0])
+    monkeypatch.setattr(loops, "time", clock)
+    monkeypatch.setattr(timer_service, "time", clock)
     context, registry, index = context_for(tmp_path)
     hints = loops._OwnerWakeHints(context)
     controller = loops._GatewaySchedulerDueController(context)
     hints.bind_controller("scheduler_due", controller)
+    due = wall[0] + 0.3
+    due_mono = mono[0] + 0.3
+    try:
+        index.sync_owner(OWNER, store(due), now=wall[0])
+        with hints.timer._condition:
+            early = hints.timer._take_due_locked(due_mono - 0.001)
+        hints.timer._dispatch(early)
+        assert not hints.events["scheduler_due"].is_set()
+        assert controller.tick(now=due - 0.001) == 0
+        assert registry.snapshot() == []
+
+        wall[0], mono[0] = due + 0.049, due_mono + 0.049
+        with hints.timer._condition:
+            ready = hints.timer._take_due_locked(mono[0])
+        hints.timer._dispatch(ready)
+        assert hints.events["scheduler_due"].is_set()
+        assert controller.tick(now=wall[0]) == 1
+        assert [(owner.provider, owner.owner_kind, owner.owner_id) for owner in registry.snapshot()] == [KEY]
+        assert wall[0] <= due + 0.05
+    finally:
+        hints.close()
+
+
+# LLM: backstop大于等待上界，成功必须经真实timer事件而非定时轮询；失败也要关闭两条线程。
+# 函数用途: 验证真实线程唤醒链和异常路径的finally清理，不把主机负载当50ms性能门。
+def test_timer_thread_wakes_due_controller_before_backstop(tmp_path, monkeypatch):
+    from agent_py_agent.cli import gateway_loops as loops
+
+    context, registry, index = context_for(tmp_path, owner_maintenance_scan_interval_seconds=60)
+    hints = loops._OwnerWakeHints(context)
+    controller = loops._GatewaySchedulerDueController(context)
+    hints.bind_controller("scheduler_due", controller)
+    initial_tick = threading.Event()
+    awakened = threading.Event()
+    tick = controller.tick
+
+    def observe_tick():
+        result = tick()
+        initial_tick.set()
+        if registry.snapshot():
+            awakened.set()
+        return result
+
+    monkeypatch.setattr(controller, "tick", observe_tick)
     stop = threading.Event()
     thread = threading.Thread(target=controller.run, args=(stop,))
-    hints.start()
-    thread.start()
-    due = time.time() + 0.3
     try:
-        index.sync_owner(OWNER, store(due))
-        deadline = due + 0.05
-        while not registry.snapshot() and time.time() < deadline:
-            stop.wait(0.001)
-        assert registry.snapshot() and time.time() <= deadline
+        hints.start()
+        thread.start()
+        assert initial_tick.wait(5), "due controller did not start"
+        index.sync_owner(OWNER, store(time.time() + 0.1))
+        assert awakened.wait(5), "timer did not wake due controller before the 60s backstop"
+        assert [(owner.provider, owner.owner_kind, owner.owner_id) for owner in registry.snapshot()] == [KEY]
     finally:
         stop.set()
-        hints.close()
-        thread.join(0.5)
-    assert not thread.is_alive()
+        try:
+            hints.close()
+        finally:
+            if thread.ident is not None:
+                thread.join(5)
+            assert not thread.is_alive(), "due controller leaked after cleanup"
+            assert not hints.timer.snapshot()["running"], "timer leaked after cleanup"
+
+
+@pytest.mark.parametrize("context", [SimpleNamespace(), SimpleNamespace(agent=None)])
+def test_missing_base_agent_is_explicitly_rejected(context):
+    from agent_py_agent.cli import gateway_loops as loops
+
+    with pytest.raises(RuntimeError, match="缺少已初始化的 agent"):
+        loops._gateway_agent_from_context(context)
 
 
 def test_listener_exception_does_not_undo_commit_and_restart_rebuilds(tmp_path):
