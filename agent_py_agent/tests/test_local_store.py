@@ -822,15 +822,19 @@ def test_b2_event_maintenance_is_explicit_and_bounded_not_record_event_hot_path(
 def test_b2_clear_ledger_releases_file_lock_before_waiting_for_append_writer(tmp_path, monkeypatch, coordinator):
     from agent_py_agent.agent.local_storage import events as event_module
 
+    from contextlib import contextmanager
+
     store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
     writer = LocalStore(store.db_path)
     inserted, failures = threading.Event(), []
-    append = event_module.append_private_jsonl_records
+    event_lock = event_module.locked_json_path
     prune_jsonl = store._prune_event_jsonl
 
-    def blocked_append(*args, **kwargs):
+    @contextmanager
+    def blocked_event_lock(*args, **kwargs):
         inserted.set()  # INSERT 已成功且持DB写锁，随后会等裁剪者的文件锁。
-        return append(*args, **kwargs)
+        with event_lock(*args, **kwargs):
+            yield
 
     def write():
         try:
@@ -846,7 +850,7 @@ def test_b2_clear_ledger_releases_file_lock_before_waiting_for_append_writer(tmp
         assert inserted.wait(2), "append writer never reached file lock"
         return removed
 
-    monkeypatch.setattr(event_module, "append_private_jsonl_records", blocked_append)
+    monkeypatch.setattr(event_module, "locked_json_path", blocked_event_lock)
     monkeypatch.setattr(store, "_prune_event_jsonl", prune)
     if coordinator:
         transaction = store._coordinator_transaction
