@@ -13,8 +13,8 @@ from .native_history import (
     _has_native_envelope,
     _legacy_row_message,
     _row_turn_identity,
-    canonical_native_messages_from_metadata,
     iter_provider_history_messages_from_rows,
+    provider_history_native_messages_from_metadata,
 )
 
 
@@ -37,7 +37,7 @@ class NativeHistoryReplay:
 # 函数用途: 将单个冻结位置转换成公开消息，不让主循环叠加条件层数。
 def _replay_row_messages(row, native):
     if native:
-        return canonical_native_messages_from_metadata(getattr(row, 'metadata', None))
+        return provider_history_native_messages_from_metadata(getattr(row, 'metadata', None))
     legacy = _legacy_row_message(row)
     return (legacy,) if legacy is not None else ()
 
