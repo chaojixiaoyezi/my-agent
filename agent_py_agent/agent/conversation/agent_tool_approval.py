@@ -776,12 +776,19 @@ def renew_agent_tool_approval_consumer(
     root = validate_opaque_id(root_task_id, kind="root_task_id")
     directory = _approval_root(agent, root)
     target = directory / ".consumer.json"
+    seen = max(0.0, float(seen_at if seen_at is not None else time.time()))
+    # 心跳还剩过半有效期就不重写：在线判断看文件里的 seen_at，最多晚半个有效期续写仍在期内。
+    try:
+        if seen - os.stat(target).st_mtime < AGENT_TOOL_APPROVAL_CONSUMER_LEASE_SECONDS / 2:
+            return target
+    except FileNotFoundError:
+        pass
     write_json_file_atomic(
         target,
         {
             "schema_version": AGENT_TOOL_APPROVAL_CONSUMER_SCHEMA,
             "root_task_id": root,
-            "seen_at": max(0.0, float(seen_at if seen_at is not None else time.time())),
+            "seen_at": seen,
         },
     )
     return target
