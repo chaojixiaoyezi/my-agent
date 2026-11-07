@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextvars import Context
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -290,9 +291,9 @@ def _start_inprocess_dispatch(
     mark_errors: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     thread = threading.Thread(
-        target=_background_dispatch_worker,
+        target=Context().run,
         name=f"my-agent-{request.launch_id}",
-        args=(request,),
+        args=(_background_dispatch_worker, request),
         daemon=True,
     )
     _remember_background_dispatch(agent, request.launch_id, request.run_ids, thread.name)
@@ -351,6 +352,8 @@ def process_startup_returncode(process: subprocess.Popen) -> int | None:
     return None
 
 
+# LLM: 回收线程只保留准确进程句柄，显式空Context防止3.14t继承请求模型或授权绑定。
+# 函数用途: 启动只负责wait并回收本次子进程的守护线程。
 def _start_background_process_reaper(
     agent,
     request: _BackgroundDispatchRequest,
@@ -366,9 +369,9 @@ def _start_background_process_reaper(
     if not callable(getattr(process, "wait", None)):
         return
     thread = threading.Thread(
-        target=_reap_background_process,
+        target=Context().run,
         name=f"my-agent-reap-{request.launch_id}",
-        args=(agent, request.launch_id, process),
+        args=(_reap_background_process, agent, request.launch_id, process),
         daemon=True,
     )
     thread.start()
@@ -518,7 +521,7 @@ def _background_log_path(agent, launch_id: str) -> str:
     return str(workspace / "background_dispatch" / f"{launch_id}.log")
 
 
-# LLM: 后台线程不会自动继承 ContextVar；已解析的 agent.home_paths 是唯一 owner 来源，退出复位且不影响权限。
+# LLM: 显式空 Context 隔离含 3.14t 在内的线程继承策略；已解析的 agent.home_paths 是唯一 owner 来源，退出复位且不影响权限。
 # 函数用途: 在可停止和 owner 公平作用域里执行已接纳的后台派工。
 def _background_dispatch_worker(request: _BackgroundDispatchRequest) -> None:
     # 协作中断(批3):以线程名登记,cancel_subagents 可按名递中断旗;

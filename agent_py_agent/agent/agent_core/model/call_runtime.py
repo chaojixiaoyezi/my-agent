@@ -32,6 +32,7 @@ from ...contracts.model_call_ledger import (
 from ...conversation.context_usage import (
     ContextUsageBinding,
     capture_context_usage_binding,
+    public_context_usage_identity,
     record_model_context_usage,
 )
 from ...conversation.model_metrics import publish_model_metrics
@@ -183,6 +184,21 @@ def _publish_model_context_usage(
     sink = getattr(params, "effective_on_chunk", None)
     writer = getattr(sink, "write_context_usage", None)
     if not callable(writer):
+        return False
+    # 公开流归属只来自该出口自己的canonical绑定；不能借共享Agent当前child参数改写父流归属。
+    identity = public_context_usage_identity(usage)
+    stream_thread = getattr(sink, "conversation_thread_id", "")
+    if not stream_thread and not hasattr(sink, "conversation_thread_id"):
+        attrs = getattr(params, "task_attributes", None) or {}
+        # 旧出口只允许自己的主调用首次冻结canonical归属；child不能以自己的参数认领未知出口。
+        if identity.get("producer", {}).get("scope") == "main":
+            stream_thread = attrs.get("conversation_thread_id", "")
+            if stream_thread and stream_thread == identity.get("thread_id"):
+                try:
+                    sink.conversation_thread_id = stream_thread
+                except (AttributeError, TypeError):
+                    return False
+    if not identity.get("thread_id") or identity["thread_id"] != stream_thread:
         return False
     return writer(usage) is not False
 

@@ -175,6 +175,13 @@ def _gateway_compact_progress_callback(
     # LLM: 同代次的数值写入先于公开事件；遥测失败不改变原压缩回调或结果，也不增加模型调用。
     # 函数用途: 先落当前线程的显示快照，再送出进度，原聊天历史与成本账本不变。
     def publish(payload: dict[str, object]) -> object:
+        from ..conversation.context_usage import public_context_usage_identity
+
+        identity = getattr(on_chunk, "context_usage_identity", {})
+        identity = identity if isinstance(identity, dict) else {}
+        thread_id = str(getattr(thread, "thread_id", "") or "")
+        identity = {**identity, **public_context_usage_identity({"thread_id": thread_id})}
+        payload = {**payload, **identity}
         usage_writer = getattr(on_chunk, "write_context_usage", None)
         if payload.get("phase") == "started" and payload.get("context_window_tokens") and callable(usage_writer):
             usage = {
@@ -184,6 +191,7 @@ def _gateway_compact_progress_callback(
                 "context_window_tokens": payload["context_window_tokens"],
                 "compact_trigger_tokens": payload.get("trigger_tokens", 0),
                 "current_tokens": payload.get("before_tokens", 0),
+                **identity,
             }
             from ..conversation.context_usage import save_context_usage_snapshot
 
@@ -213,6 +221,7 @@ def preflight_gateway_conversation(
         return GatewayConversationContext(
             load_errors=(error or {"error_code": "thread_unavailable"},)
         )
+    _bind_gateway_stream_identity(inputs, thread)
     return GatewayConversationContext(
         thread_id=str(thread.thread_id or ""),
         cwd=str(getattr(thread, "cwd", "") or ""),
@@ -248,6 +257,7 @@ def gateway_conversation_context(
         return GatewayConversationContext(
             load_errors=(thread_error or {"error_code": "thread_unavailable"},)
         )
+    _bind_gateway_stream_identity(inputs, thread, include_model=True)
     if inputs.on_thread_loaded is not None and not force_compact:
         inputs.on_thread_loaded(thread)
     request_history.repair_gateway_conversation_messages(store, thread.thread_id, load_errors)
@@ -324,6 +334,17 @@ def gateway_conversation_context(
         compact_context=compact_context,
         compact_source=compact_source,
     )
+
+
+# LLM: 预检只绑定准确线程，不新增模型配置读取；车道内已进入该线程的选模作用域后再冻结标签，避免owner默认覆盖显式档案。
+# 函数用途: 把原请求自己的会话及已冻结模型身份交给流出口，首次压缩也有来源。
+def _bind_gateway_stream_identity(inputs, thread, *, include_model=False):
+    bind = getattr(inputs.on_chunk, "bind_conversation_identity", None)
+    if callable(bind):
+        identity = {"producer": {"scope": "main", "agent_run_id": ""}}
+        if include_model:
+            identity["model_name"] = str(getattr(getattr(inputs.agent, "backend", None), "model_name", "") or "")
+        bind(thread.thread_id, **identity)
 
 
 # LLM: 入口把线程记录与排除名单合成一个有效来源事实：被排除的会话即使带可学投影也按不可学处理，

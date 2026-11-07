@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import tempfile
 import time
@@ -551,16 +552,62 @@ def resolve_child_model_profile(agent: object, model: object) -> str:
     raise ModelProfileError(reason + " 可用配置：" + json.dumps(available, ensure_ascii=False))
 
 
-# LLM: 宿主属性先移除伪造值；显式 model 冻结 ID，否则继承父级快照，包括明确的 default，不能重读 owner 默认。
+# LLM: 递归 runner 的会话链接仍拥有根工作目录，选模先取已登记直接父线程；主轮和预检才使用会话链接，标签仅作诊断。
+# 函数用途: 返回当前父会话的 canonical 编号；脱离会话或调度固定绑定保留原继承路径。
+def _inheritance_parent_thread_id(agent: object) -> str:
+    from ..conversation.authority import current_conversation_task_attributes
+    from ..runtime_context import current_subagent_run_id
+    from .model_scope import current_model_selection
+
+    run_id = current_subagent_run_id(agent)
+    manager = getattr(agent, "subagents", None)
+    if run_id and manager is not None:
+        task = manager.load(run_id)
+        thread_id = getattr(task, "agent_thread_id", "")
+        if isinstance(thread_id, str) and thread_id.strip():
+            return thread_id.strip()
+    attrs = current_conversation_task_attributes(agent)
+    thread_id = attrs.get("conversation_thread_id")
+    if isinstance(thread_id, str) and thread_id.strip():
+        return thread_id.strip()
+    # Gateway 预检在生成 RunParams 前已建立同线程的选择快照；只借线程身份，不能借快照中的旧模型编号。
+    selection = current_model_selection(agent)
+    return selection.thread_id if selection is not None and selection.selection_source == "thread" else ""
+
+
+# LLM: 交叉核对仅是宿主预检材料，不是模型引用或去重账；最终初始化前移除，任务持久属性和公开 DTO 不增加字段。
+# 函数用途: 消费这次准备的诊断，不输出配置正文或凭据，也不跨创建缓存。
+def emit_model_inheritance_diagnostic(attrs: dict) -> None:
+    diagnostic = attrs.pop("host_model_inheritance_diagnostic.v1", None)
+    if not isinstance(diagnostic, list) or len(diagnostic) != 3:
+        return
+    logging.getLogger(__name__).warning(
+        "MODEL_INHERITANCE_LABEL_MISMATCH parent_thread_id=%s canonical_profile_id=%s label_profile_id=%s",
+        *diagnostic,
+    )
+
+
+# LLM: 宿主属性先移除伪造值；显式 model 仍走原解析器，普通继承以父线程为权威，不随标签或 owner 默认漂移。
 # 函数用途: 在 child 创建前记录选定模型，子孙和恢复引用创建时模型而不随父会话后续切换。
-def inherit_model_profile(attrs: dict, agent: object, *, model: object = None) -> None:
+def inherit_model_profile(attrs: dict, agent: object, *, model: object = None, emit_diagnostic: bool = True) -> None:
     attrs.pop("host_model_profile.v1", None)
+    attrs.pop("host_model_inheritance_diagnostic.v1", None)
     if model is not None:
         attrs["host_model_profile.v1"] = {"profile_id": resolve_child_model_profile(agent, model)}
         return
     sources = getattr(getattr(agent, "config", None), "config_sources", {})
     source = sources.get("model_name", {}) if isinstance(sources, dict) else {}
     selected = source.get("profile_id") if source.get("source") == "owner_model_profile" else "default"
+    parent_thread_id = _inheritance_parent_thread_id(agent)
+    if parent_thread_id:
+        from .thread_model_selection import thread_model_profile_id
+
+        canonical = thread_model_profile_id(agent, parent_thread_id)
+        if canonical != (selected or "default"):
+            attrs["host_model_inheritance_diagnostic.v1"] = [parent_thread_id, canonical, selected or "default"]
+        selected = canonical
+    if emit_diagnostic:
+        emit_model_inheritance_diagnostic(attrs)
     attrs["host_model_profile.v1"] = {"profile_id": selected or "default"}
 
 

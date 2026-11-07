@@ -197,8 +197,15 @@ def prepare_model_dependencies(agent: object, model_config: object, *, inherited
 def model_dependencies_scope(agent: object, dependencies: ModelScopeDependencies, *, thread_id: str = "", active: bool = False):
     if not isinstance(dependencies, ModelScopeDependencies) or dependencies.agent is not agent:
         raise ValueError("模型依赖不能绑定其他 Agent。")
-    selection = dependencies.selection or current_model_selection(agent)
-    token = _BINDINGS.set({**(_BINDINGS.get() or {}), id(agent): (agent, dict(dependencies.values), selection)})
+    bindings = _BINDINGS.get() or {}
+    previous = bindings.get(id(agent))
+    previous_thread_id = previous[3] if previous is not None and previous[0] is agent else ""
+    bound_thread_id = thread_id or (dependencies.selection.thread_id if dependencies.selection else previous_thread_id)
+    # 无选择快照的继承工作片也有线程身份；跨线程不能借用外层的选择来源。
+    selection = dependencies.selection
+    if selection is None and bound_thread_id == previous_thread_id:
+        selection = current_model_selection(agent)
+    token = _BINDINGS.set({**bindings, id(agent): (agent, dict(dependencies.values), selection, bound_thread_id)})
     display_key = object()
     if thread_id and active:
         with _CACHE_LOCK:
@@ -287,7 +294,10 @@ def activate_model_dependencies(agent: object, dependencies: ModelScopeDependenc
 @contextmanager
 def selected_model_scope(agent: object, *, inherited: bool = False, thread_id: str = "", active: bool = True,
                          initialize_thread: bool = True):
-    if not isinstance(getattr(type(agent), "config", None), ModelScopedAttribute) or id(agent) in (_BINDINGS.get() or {}):
+    bound = (_BINDINGS.get() or {}).get(id(agent))
+    # 隐式依赖读取和同线程重入保留冻结对象；显式跨线程必须新建一层并用 token 恢复。
+    if (not isinstance(getattr(type(agent), "config", None), ModelScopedAttribute)
+            or bound is not None and bound[0] is agent and (not thread_id or bound[3] == thread_id)):
         yield
         return
     from .thread_model_selection import (
