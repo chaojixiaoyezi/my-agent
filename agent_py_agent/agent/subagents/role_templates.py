@@ -7,12 +7,15 @@
 # 模块用途: 为直属及递归子代理提供一致的角色、工具偏好和权限模板。
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..common.nofollow_fs import read_bytes_beneath
 from ..common.value_parsing import StringListOptions, string_list
 from ..tooling.write_boundary import WRITE_TOOL_ORDER
 
@@ -132,6 +135,17 @@ class RoleTemplate:
     prompt_zh: str = ""
     source: str = "builtin"
     source_path: str = ""
+    disabled: bool = False
+    source_sha256: str = ""
+
+
+class RoleTemplateDisabledError(ValueError):
+    """显式禁用不能被未知角色的默认工具分支重新放行。"""
+
+    def __init__(self, template_id: str):
+        self.template_id = template_id
+        self.error_code = "STATE_CONFLICT"
+        super().__init__(f"角色模板已禁用: {template_id}")
 
 
 @dataclass(frozen=True)
@@ -145,30 +159,41 @@ class RoleTemplateIssue:
 class RoleTemplateRegistration:
     source: str
     source_path: str
+    sha256: str = ""
 
 
 @dataclass(frozen=True)
 class RoleTemplateStore:
     templates: dict[str, RoleTemplate]
     issues: list[RoleTemplateIssue] = field(default_factory=list)
+    source_hashes: dict[str, str] = field(default_factory=dict)
 
     def get(self, template_id: str) -> RoleTemplate | None:
-        return self.templates.get(_clean_id(template_id))
+        template = self.templates.get(_clean_id(template_id))
+        return template if template is not None and not template.disabled else None
 
     def all(self) -> list[RoleTemplate]:
-        return [self.templates[key] for key in sorted(self.templates)]
+        return [self.templates[key] for key in sorted(self.templates) if not self.templates[key].disabled]
+
+    def is_disabled(self, template_id: str) -> bool:
+        template = self.templates.get(_clean_id(template_id))
+        return template is not None and template.disabled
 
 
 def load_role_template_store(
     user_template_dir: str | Path | Iterable[str | Path] | None = None,
+    *,
+    exclude_paths: Iterable[Path] = (),
 ) -> RoleTemplateStore:
     templates: dict[str, RoleTemplate] = {}
     issues: list[RoleTemplateIssue] = []
+    source_hashes: dict[str, str] = {}
+    excluded = set(exclude_paths)
     for path in _builtin_template_paths():
         _load_template_file(path, templates, issues, source="builtin")
     for directory in _iter_user_template_dirs(user_template_dir):
-        _load_user_templates(directory, templates, issues)
-    return RoleTemplateStore(templates=templates, issues=issues)
+        _load_user_templates(directory, templates, issues, exclude_paths=excluded, source_hashes=source_hashes)
+    return RoleTemplateStore(templates=templates, issues=issues, source_hashes=source_hashes)
 
 
 def template_for_role(
@@ -248,6 +273,8 @@ def resolve_role_template_id(store: Any, role: str, *, default_id: str | None = 
     cleaned = _clean_id(role)
     if not cleaned:
         return _valid_template_default(store, default_id)
+    if callable(getattr(store, "is_disabled", None)) and store.is_disabled(cleaned):
+        raise RoleTemplateDisabledError(cleaned)
     exact = store.get(cleaned)
     if exact is not None:
         return exact.id
@@ -277,8 +304,11 @@ def role_template_detail_text(
     *,
     roles: list[str] | tuple[str, ...] | None = None,
     limit: int = 12,
+    store: RoleTemplateStore | None = None,
 ) -> str:
-    store = load_role_template_store(user_template_dir=user_template_dir)
+    # 预览显式传入内存副本，和运行时复用同一个渲染器，不创建临时覆盖文件。
+    if store is None:
+        store = load_role_template_store(user_template_dir=user_template_dir)
     templates = _selected_templates(store, roles=roles, limit=limit)
     return "\n".join(_detail_lines(item) for item in templates)
 
@@ -364,13 +394,16 @@ def _load_user_templates(
     directory: Path,
     templates: dict[str, RoleTemplate],
     issues: list[RoleTemplateIssue],
+    *,
+    exclude_paths: set[Path] | None = None,
+    source_hashes: dict[str, str] | None = None,
 ) -> None:
     if not directory.exists():
         return
     for path in sorted(directory.glob("*.json")):
-        if path.name.startswith("."):
+        if path.name.startswith(".") or path in (exclude_paths or set()):
             continue  # 跳过隐藏文件(如 macOS 打包产生的 ._ AppleDouble 元数据,二进制非 JSON)
-        _load_template_file(path, templates, issues, source="user")
+        _load_template_file(path, templates, issues, source="user", source_hashes=source_hashes)
 
 
 def _builtin_template_paths() -> list[Path]:
@@ -384,10 +417,16 @@ def _load_template_file(
     issues: list[RoleTemplateIssue],
     *,
     source: str,
+    source_hashes: dict[str, str] | None = None,
 ) -> None:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raw = read_bytes_beneath(path.parent, (path.name,)) if source == 'user' else path.read_bytes()
+        if raw is None:
+            return
+        if source_hashes is not None:
+            source_hashes[str(path)] = hashlib.sha256(raw).hexdigest()
+        payload = json.loads(raw.decode('utf-8'))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
         issues.append(RoleTemplateIssue("", str(path), f"invalid JSON: {exc}"))
         return
     for item in _iter_template_payloads(payload):
@@ -395,7 +434,8 @@ def _load_template_file(
             templates,
             issues,
             item,
-            registration=RoleTemplateRegistration(source=source, source_path=str(path)),
+            registration=RoleTemplateRegistration(source=source, source_path=str(path),
+                                                    sha256=hashlib.sha256(raw).hexdigest()),
         )
 
 
@@ -415,7 +455,13 @@ def _register_template(
     registration: RoleTemplateRegistration,
 ) -> None:
     template_id = _clean_id(payload.get("id"))
-    issue = _validate_payload(template_id, payload, registration.source_path)
+    if not valid_role_template_id(payload.get("id")):
+        issues.append(RoleTemplateIssue(template_id, registration.source_path, "invalid template id"))
+        return
+    if registration.source == "user" and template_id in templates:
+        payload = merge_role_template_payload(templates[template_id], payload)
+    issue = _validate_payload(template_id, payload, registration.source_path,
+                              allow_empty_use_when=registration.source == 'user')
     if issue:
         issues.append(issue)
         return
@@ -423,14 +469,34 @@ def _register_template(
         payload,
         source=registration.source,
         source_path=registration.source_path,
+        source_sha256=registration.sha256,
     )
     templates[template.id] = template
+
+
+def valid_role_template_id(value: object) -> bool:
+    """文件名只能使用模板标识字符；在任何路径拼接之前调用。"""
+    return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", value) is not None
+
+
+def merge_role_template_payload(lower: RoleTemplate, payload: dict[str, object]) -> dict[str, object]:
+    """软说明按字段覆盖；旧文件省略能力时继续安全关闭，显式继承才沿下层能力。"""
+    merged = {**asdict(lower), **payload}
+    if payload.get("inherit_capabilities") is not True:
+        for name in ("can_write", "can_accept", "can_run_tests", "can_spawn_children", "depends_on_outputs"):
+            if name not in payload:
+                merged[name] = False
+        if "default_tools" not in payload:
+            merged["default_tools"] = []
+    return merged
 
 
 def _validate_payload(
     template_id: str,
     payload: dict[str, object],
     source_path: str,
+    *,
+    allow_empty_use_when: bool = False,
 ) -> RoleTemplateIssue | None:
     if not template_id:
         return RoleTemplateIssue("", source_path, "missing template id")
@@ -441,12 +507,14 @@ def _validate_payload(
     for field_name in ("name_zh", "summary_zh", "output_contract_zh"):
         if not str(payload.get(field_name) or "").strip():
             return RoleTemplateIssue(template_id, source_path, f"missing {field_name}")
-    if not _role_template_list(payload.get("use_when_zh")):
+    if not _role_template_list(payload.get("use_when_zh")) and not (
+            allow_empty_use_when and payload.get('use_when_zh') == []):
         return RoleTemplateIssue(template_id, source_path, "missing use_when_zh")
     return None
 
 
-def _template_from_payload(payload: dict[str, object], *, source: str, source_path: str) -> RoleTemplate:
+def _template_from_payload(payload: dict[str, object], *, source: str, source_path: str,
+                           source_sha256: str = "") -> RoleTemplate:
     return RoleTemplate(
         id=_clean_id(payload.get("id")),
         name=str(payload.get("name") or "").strip(),
@@ -468,6 +536,8 @@ def _template_from_payload(payload: dict[str, object], *, source: str, source_pa
         prompt_zh=str(payload.get("prompt_zh") or "").strip(),
         source=source,
         source_path=source_path,
+        disabled=payload.get("disabled") is True,
+        source_sha256=source_sha256,
     )
 
 

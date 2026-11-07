@@ -2,6 +2,8 @@
 # 模块用途: 合并用户、父级与临时授权策略，保留读取诊断并让失效网络授权安全关闭。
 from __future__ import annotations
 
+import hashlib
+import json
 import stat
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -13,6 +15,7 @@ from ..common.json_io import (
     read_json_object_report,
     write_private_json_file_atomic_unlocked,
 )
+from ..common.nofollow_fs import read_bytes_beneath
 from ..common.value_parsing import non_negative_int, positive_int
 from .home_layout import MyAgentHomePaths
 from .owner_quota import owner_logical_usage_bytes
@@ -515,6 +518,61 @@ def _grant_payload(grant) -> dict[str, str]:
     }
 
 
+def _read_owner_policy_bytes(path) -> bytes | None:
+    """只读原策略叶子；坏链接和损坏内容不能变成一份空授权。"""
+    path = Path(path)
+    return read_bytes_beneath(path.parent, (path.name,), max_bytes=1_048_576)
+
+
+def owner_policy_document_sha256(path) -> str:
+    """将原文件字节绑定到后续 CAS；缺失必须显式匹配 absent。"""
+    raw = _read_owner_policy_bytes(path)
+    return 'absent' if raw is None else hashlib.sha256(raw).hexdigest()
+
+
+def cas_update_owner_policy_disabled_list(path, field, names, visible, *, expected_sha256, schema_version) -> bool:
+    """在原策略锁内重读并只改名单，保留其它字段，不吞并发写入。"""
+    path = Path(path)
+    names = tuple(str(name).strip() for name in names if str(name).strip())
+    if not names or type(visible) is not bool or type(expected_sha256) is not str or not field or not schema_version:
+        raise ValueError('invalid disabled-list update')
+    with locked_json_path(path):
+        raw = _read_owner_policy_bytes(path)
+        current = 'absent' if raw is None else hashlib.sha256(raw).hexdigest()
+        if current != expected_sha256:
+            return False
+        try:
+            payload = {} if raw is None else json.loads(raw)
+        except (ValueError, TypeError) as error:
+            raise ValueError('policy document is not readable JSON') from error
+        if not isinstance(payload, dict):
+            raise ValueError('policy document must be an object')
+        values = payload.get(field, [])
+        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+            raise ValueError('policy disabled list must be a list of strings')
+        # 读取端会去首尾空白；删除也按同一成员关系匹配，但不重写无关旧值。
+        updated = {value for value in values if value.strip() not in set(names)}
+        if not visible:
+            updated.add(names[0])
+        payload[field] = sorted(updated)
+        if raw is None:
+            payload['schema_version'] = schema_version
+        write_private_json_file_atomic_unlocked(path, payload)
+        return True
+
+
+def cas_update_owner_tool_policy_disabled_tools(home, tool_id, visible, *, expected_sha256) -> bool:
+    """工具可见性只有原 tool_policy.disabled_tools 一份权威。"""
+    return cas_update_owner_policy_disabled_list(home.owner_tool_policy_json, 'disabled_tools', (tool_id,), visible,
+        expected_sha256=expected_sha256, schema_version='tool-policy.v1')
+
+
+def cas_update_owner_skill_policy_disabled_skills(home, skill_name, aliases, visible, *, expected_sha256) -> bool:
+    """恢复技能时一起删除原策略支持的别名，不能另存可见性状态。"""
+    return cas_update_owner_policy_disabled_list(home.owner_skill_policy_json, 'disabled_skills',
+        (skill_name, *aliases), visible, expected_sha256=expected_sha256, schema_version='skill-policy.v1')
+
+
 __all__ = [
     "EffectiveOwnerPolicy",
     "LearningExclusionEntry",
@@ -522,6 +580,10 @@ __all__ = [
     "OwnerPolicyBundle",
     "OwnerPolicyBundleReport",
     "append_learning_exclusions",
+    "cas_update_owner_policy_disabled_list",
+    "cas_update_owner_skill_policy_disabled_skills",
+    "cas_update_owner_tool_policy_disabled_tools",
+    "owner_policy_document_sha256",
     "owner_disk_usage",
     "read_learning_exclusions",
     "read_owner_policy_bundle",
