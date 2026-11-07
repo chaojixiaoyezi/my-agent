@@ -685,7 +685,7 @@ class ThreadStore:
             updated = self.update_atomic(thread_id, apply)
             if commit.publish_thread_view:
                 try:
-                    rotate_committed_transcript(self.storage, updated, compact_root=compact_root)
+                    rotation = rotate_committed_transcript(self.storage, updated, compact_root=compact_root)
                 except (OSError, ValueError, TypeError, DataCorruptionError) as exc:
                     # 已发布CAS不可伪装失败；热文件或prepared布局仍完整可读，显式留下维护待重试事实。
                     error_type = type(exc).__name__
@@ -702,6 +702,25 @@ class ThreadStore:
                         return replace(latest, metadata=metadata)
 
                     updated = self.update_atomic(thread_id, maintenance_pending)
+                else:
+                    # 缺少维护回执不代表成功，不能据此清除先前状态。
+                    blocked = rotation['blocked'] if rotation else None
+                    if rotation and (blocked is not None or (rotation['rotated_rows'] and 'compact_transcript_maintenance' in updated.metadata)):
+                        # 沿用维护记录的三个字段；原因码放入现有error_type，不扩张持久化协议。
+                        def maintenance_result(latest):
+                            if latest.compact_checkpoint_id != updated.compact_checkpoint_id:
+                                return latest
+                            metadata = dict(latest.metadata)
+                            if blocked is not None:
+                                metadata['compact_transcript_maintenance'] = {
+                                    'status': 'blocked', 'error_type': blocked['reason_code'],
+                                    'checkpoint_id': updated.compact_checkpoint_id,
+                                }
+                            else:
+                                metadata.pop('compact_transcript_maintenance', None)
+                            return replace(latest, metadata=metadata)
+
+                        updated = self.update_atomic(thread_id, maintenance_result)
             return updated
 
     # LLM: 供应商用量校准只是少量数值线程遥测，以压缩代为CAS边界；模型活动不是用户可见活跃时间，因此不得推进 updated_at。

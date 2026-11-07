@@ -757,9 +757,9 @@ def cold_message_lookup(path: Path, key: str, *, reader=None):
     return entry, address
 
 
-# LLM: 仅原线程CAS成功后、持消息锁调用；先核边界与阈值，再仅核冷副本（禁热回退）；prepared封印旧/新前缀和逻辑代次。
+# LLM: 仅原线程CAS成功后、持消息锁调用；覆盖只认冷副本（禁热回退），未达阈值不要求副本；prepared封印前缀和逻辑代次。
 # 对非终态、活动索引或未知任务保守pin；终态任务仍须被本次thread摘要精确覆盖，原字节保存在冷段。
-# 函数用途: 将已覆盖且无活跃任务pin的前缀冷存，保留边界本行及全部迟到尾部。
+# 函数用途: 冷存最长安全前缀，保留首个阻塞行及后续原文；阻塞位置为热文件的零基行号。
 def rotate_committed_transcript(storage, thread, *, compact_root: str | Path | None = None):
     from inspect import signature
 
@@ -770,9 +770,10 @@ def rotate_committed_transcript(storage, thread, *, compact_root: str | Path | N
     from .message_selection import _validated_positions, message_position_index
     from .store_io import ImmutableJsonIndex
 
+    result = {'rotated_rows': 0, 'blocked': None}
     path = storage.message_path(thread.thread_id)
     if not path.exists() or not thread.compact_checkpoint_id:
-        return
+        return result
     recover_transcript_transition(path)
     before = transcript_manifest(path)
     base = before['hot_base'] if before else 0
@@ -781,11 +782,12 @@ def rotate_committed_transcript(storage, thread, *, compact_root: str | Path | N
     _validated_positions(positions, thread.thread_id)
     boundary = positions.by_id.get(thread.compacted_through_message_id)
     if boundary is None or base + boundary.address.offset + boundary.address.length != thread.compacted_through_byte_offset:
-        return
+        return result
     cut = boundary.address.offset
     count = sum(position.address.offset < cut for position in positions.entries)
-    if not cut or (cut < TRANSCRIPT_ROTATE_BYTES and count < TRANSCRIPT_ROTATE_ROWS):
-        return
+    if not cut:
+        return result
+    rotation_due = cut >= TRANSCRIPT_ROTATE_BYTES or count >= TRANSCRIPT_ROTATE_ROWS
     compact_root = storage.resolve_compact_root(compact_root)
     try:
         args = (compact_root, thread.thread_id, thread.compact_checkpoint_id)
@@ -806,23 +808,39 @@ def rotate_committed_transcript(storage, thread, *, compact_root: str | Path | N
             raise ValueError('committed cold checkpoint does not match thread head')
         meta = _validated_carried_metadata(row)
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+        # 小样本不要求冷副本存在；有有效证据时仍扫描并如实报告阻塞。
+        if not rotation_due:
+            return result
         raise DataCorruptionError('committed cold compact checkpoint is missing or invalid') from exc
     coverage_index = ImmutableJsonIndex(compact_root, ('evidence', thread.thread_id, 'indexes'))
     coverage = _IndexedMessageCoverage(meta['recent_messages'], coverage_index, meta['messages'], meta['message_count'])
     task_pins = {}
+    count, position = 0, 0
     with path.open('rb') as handle:
         while handle.tell() < cut:
+            offset = handle.tell()
             raw = handle.readline(cut - handle.tell())
             entry = _message_from_line(raw, thread.thread_id, skip_blank=True)
             if entry is None:
+                position += 1
                 continue
             if _entry_has_task_pin(storage, thread, entry, task_pins):
-                return
-            if entry.role in {'user', 'assistant'} and entry.message_id not in coverage:
+                task_id = next(str(entry.metadata[name]) for name in
+                               ('task_id', 'conversation_task_id', 'background_task_id')
+                               if task_pins.get(str(entry.metadata.get(name) or '')))
+                result['blocked'] = {'reason_code': 'task_pin', 'position': position, 'task_id': task_id}
+            elif entry.role in {'user', 'assistant'} and entry.message_id not in coverage:
                 from .models import is_audit_background_transcript_entry
 
                 if not is_audit_background_transcript_entry(entry):
-                    return
+                    result['blocked'] = {'reason_code': 'uncovered', 'position': position, 'task_id': None}
+            if result['blocked'] is not None:
+                cut = offset
+                break
+            count += 1
+            position += 1
+    if not cut or (cut < TRANSCRIPT_ROTATE_BYTES and count < TRANSCRIPT_ROTATE_ROWS):
+        return result
     after = dict(before) if before else {
         'schema': 'conversation_transcript_segments.v1', 'thread_id': thread.thread_id,
         'hot_base': 0, 'segment_count': 0, 'cold_message_count': 0,
@@ -869,6 +887,8 @@ def rotate_committed_transcript(storage, thread, *, compact_root: str | Path | N
     finally:
         os.close(directory)
     write_text_atomic_beneath(path.parent, (path.with_suffix('.manifest.json').name,), json.dumps(after, sort_keys=True) + '\n')
+    result['rotated_rows'] = count
+    return result
 
 
 # LLM: 原TaskLink及当前线程活动索引是任务生命周期事实；缺失/损坏/错线程均保守保留，不靠消息文字猜终态。
