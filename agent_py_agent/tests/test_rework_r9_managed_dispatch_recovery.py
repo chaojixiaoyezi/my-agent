@@ -12,6 +12,7 @@ from agent_py_agent.agent.conversation.models import new_id
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.conversation.store_wakes import WakeStore
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.user_space import managed_dispatch_recovery as recovery
 from agent_py_agent.agent.user_space.local_user_lifecycle import LocalUserLifecycle
 from agent_py_agent.agent.user_space.local_user_store import LocalUserStore
 from agent_py_agent.agent.user_space.managed_dispatch_recovery import (
@@ -249,8 +250,12 @@ def test_conflicting_receipt_retains_work_without_publication(home):
     assert len(open_legacy_conversation_store(home).wakes.pending()) == 1
 
 
-def test_reconcile_is_bounded_and_resumes_next_round(home):
+def test_reconcile_is_bounded_and_resumes_next_round(home, monkeypatch):
     dispatches = [_legacy_dispatch(home, f"Item {index}") for index in range(3)]
+    # 本例只核条数上界；时钟独立于真实 I/O 耗时，时间预算由下一例单独核验。
+    clock = SimpleNamespace(**vars(recovery.time))
+    clock.monotonic = lambda: 1000.0
+    monkeypatch.setattr(recovery, "time", clock)
     first = reconcile_managed_dispatches(home, commit_transition=lambda operation: operation(), limit=2)
     assert len(first["handed_off"]) == 2 and first["truncated"] is True
     second = reconcile_managed_dispatches(home, commit_transition=lambda operation: operation(), limit=2)
@@ -258,6 +263,30 @@ def test_reconcile_is_bounded_and_resumes_next_round(home):
     assert sorted(first["handed_off"] + second["handed_off"]) == sorted(item.task_id for item in dispatches)
     with pytest.raises(ValueError):
         reconcile_managed_dispatches(home, commit_transition=None)
+
+
+def test_reconcile_respects_time_budget_and_resumes_real_handoffs(home, monkeypatch):
+    dispatches = [_legacy_dispatch(home, f"Timed item {index}") for index in range(3)]
+    now = SimpleNamespace(value=1000.0)
+    clock = SimpleNamespace(**vars(recovery.time))
+    clock.monotonic = lambda: now.value
+    monkeypatch.setattr(recovery, "time", clock)
+    original = recovery._hand_off
+
+    def slow_handoff(*args, **kwargs):
+        result = original(*args, **kwargs)
+        now.value += 0.051
+        return result
+
+    monkeypatch.setattr(recovery, "_hand_off", slow_handoff)
+    reports = [reconcile_managed_dispatches(home, commit_transition=lambda operation: operation(),
+                limit=3, max_ms=50) for _ in dispatches]
+    assert [len(report["handed_off"]) for report in reports] == [1, 1, 1]
+    assert [report["truncated"] for report in reports] == [True, True, False]
+    assert all(not report["retained"] for report in reports)
+    assert sorted(task_id for report in reports for task_id in report["handed_off"]) == sorted(
+        item.task_id for item in dispatches)
+    assert all(_receipt(home, item.task_id)["phase"] == "completed" for item in dispatches)
 
 
 def test_frozen_legacy_wake_request_sees_source_changed_after_handoff(home):

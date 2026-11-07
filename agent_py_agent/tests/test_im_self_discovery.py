@@ -36,12 +36,14 @@ def _agent(tmp_path, *, kind='main'):
     return agent
 
 
-# LLM: 只解码真实执行器 handler 的短输出，不以产品内部函数替代 scoped 查询；list_tools 已由 tool_search(action=catalog) 取代。
-# 函数用途: 取得本次 tool_search 目录动作实际返回模型的自身事实页。
-def _discover(agent, **kwargs):
+# LLM: 解码真实执行器 handler 的 live 投影或完整归档，不以产品内部函数替代 scoped 查询。
+# 函数用途: 取得本次 tool_search 目录动作的短目录或原始完整事实页。
+def _discover(agent, *, full_manifest=False, **kwargs):
     result = execute_registry_test_call(agent.tools, 'tool_search', {'action': 'catalog'}, **kwargs)
     assert result.ok, result.output
-    return json.loads(result.metadata['handler_details']['tool_output_policy']['live_prompt_output'])
+    output = (result.output if full_manifest else
+              result.metadata['handler_details']['tool_output_policy']['live_prompt_output'])
+    return json.loads(output)
 
 
 @pytest.mark.parametrize('kind', ['main', 'user', 'group'])
@@ -54,9 +56,10 @@ def test_modes_status_and_manifest_share_owner_authority(tmp_path, kind):
         agent = _agent(tmp_path, kind=kind)
     execute_approval_mode_operation(agent.home_paths, 'set', 'ask', authorization_host=agent)
     authority = {'run_id': agent._current_run_params.run_id, 'register_with': agent} if kind == 'group' else {}
-    ask = _discover(agent, **authority)['self_context']
+    # 完整归档保留权限与身份；大目录的 live 核心投影允许省略这些字段。
+    ask = _discover(agent, full_manifest=True, **authority)['self_context']
     execute_approval_mode_operation(agent.home_paths, 'set', 'auto', authorization_host=agent)
-    auto = _discover(agent, **authority)['self_context']
+    auto = _discover(agent, full_manifest=True, **authority)['self_context']
     status = status_display_facts(agent)
     assert ask['permissions']['mode'] == 'ask'
     assert auto['permissions'] == status['permissions']

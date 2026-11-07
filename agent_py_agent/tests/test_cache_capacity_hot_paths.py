@@ -182,9 +182,9 @@ def test_owner_shared_find_snapshots_survive_workspace_rotation(
     builds = []
     original = find.FindFilesTool._build_snapshot
 
-    def build(tool, target, request):
+    def build(tool, target, request, *, started_at=None):
         builds.append(target)
-        return original(tool, target, request)
+        return original(tool, target, request, started_at=started_at)
 
     monkeypatch.setattr(find.FindFilesTool, "_build_snapshot", build)
     cursors, snapshot_ids = {}, {}
