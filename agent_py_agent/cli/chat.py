@@ -467,7 +467,8 @@ def cmd_resume(args) -> int:
     return cmd_chat(args)
 
 
-# LLM: 显式恢复只读 canonical history；Gateway TUI 将读取交给既有 preflight，不能在 readiness 前 HTTP 请求或以空历史启动 worker。
+# LLM: 显式恢复只读canonical history；网络plain/handoff沿实例已绑定HTTP readiness，本机默认不变。
+# Gateway TUI将历史读取交给既有preflight，不能在readiness前读取历史或以空历史启动worker。
 # 函数用途: 启动或恢复聊天，本地直接读历史，薄客户端先显示连接界面；正常关闭后登记统一会话提炼请求。
 def cmd_chat(args) -> int:
     from .chat_parts.tui_upgrade_follow import (
@@ -494,10 +495,12 @@ def cmd_chat(args) -> int:
     _ensure_chat_memory_limit(args)
     paths = gateway_paths(agent)
     if use_gateway and not use_tui:
-        _, alive = wait_for_gateway_running(
-            paths,
-            timeout=float(getattr(agent.config, "gateway_ready_timeout_seconds", 3) or 3),
-        )
+        timeout = float(getattr(agent.config, "gateway_ready_timeout_seconds", 3) or 3)
+        network_wait = getattr(agent, "wait_for_gateway_readiness", None)
+        if callable(network_wait):
+            alive = network_wait(paths, timeout=timeout).ready
+        else:
+            _, alive = wait_for_gateway_running(paths, timeout=timeout)
         if not alive:
             print("gateway 未在运行。请先执行: my-agent gateway start", file=sys.stderr)
             return 2
@@ -575,13 +578,14 @@ def cmd_chat(args) -> int:
     return result
 
 
-# LLM: 只给原地切换用：旧画面还在屏幕上，可以同步等；读 Gateway 自己的就绪事实，不看文案。没就绪返回 False，调用方退回可见连接流程。
+# LLM: 只给原地切换用：沿实例网络adapter或原本机判据读取Gateway就绪事实；不看文案。未就绪返回False，调用方退回可见连接流程。
 # 函数用途: 原地切换的新进程在首帧之前确认 Gateway 已可用。
 def _handoff_gateway_ready(agent, paths) -> bool:
     from .chat_parts.tui_preflight import wait_for_gateway_readiness
 
     try:
-        outcome = wait_for_gateway_readiness(
+        wait = getattr(agent, "wait_for_gateway_readiness", None) or wait_for_gateway_readiness
+        outcome = wait(
             paths, timeout=float(getattr(agent.config, "gateway_ready_timeout_seconds", 3) or 3),
         )
     except (OSError, ValueError, TypeError):

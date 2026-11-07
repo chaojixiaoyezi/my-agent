@@ -458,7 +458,8 @@ class NetworkGatewayObserver:
                 headers[AuthMiddleware.HEADER_TOKEN] = token
         return headers
 
-    # LLM: 复用认证且禁止重定向；会话只补原receipt范围头，total_deadline_seconds名/秒数及0.1下限保持，不读G1或重试写入。
+    # LLM: POST统一复用原owner投影（含群metadata），严格business Envelope例外；审批/提交不能另走丢身份的旁路。
+    # 会话头、认证/禁止重定向、原超时秒数与0.1下限保持，不读G1或重试写入，也不修改调用方payload。
     # 函数用途: 执行一次有界JSON请求，所有控制和审批沿同一HTTP入口。
     def request_json(self, method, path, payload=None, *, total_deadline_seconds=None, conversation_id: str = ""):
         import urllib.error
@@ -470,6 +471,11 @@ class NetworkGatewayObserver:
             headers["X-Conversation-Id"] = str(conversation_id)
         data = None
         if payload is not None:
+            owner = getattr(self.agent, "owner_identity", None)
+            if method == "POST" and owner is not None and path != "/client/business":
+                from ..chat_client_context import _with_client_identity
+
+                payload = _with_client_identity(owner, payload)
             headers["Content-Type"] = "application/json"
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(self.base_url + path, data=data, headers=headers, method=method)
@@ -510,6 +516,60 @@ class NetworkGatewayObserver:
     def bind_client_transport(self):
         self.agent.get_gateway_json = lambda path, *, timeout, conversation_id="", **_: self.request_json("GET", path, total_deadline_seconds=timeout, conversation_id=conversation_id)
         self.agent.post_gateway_json = lambda path, payload, *, timeout: self.request_json("POST", path, payload, total_deadline_seconds=timeout)
+        self.agent.wait_for_gateway_readiness = self.wait_for_readiness
+
+    # LLM: 远端就绪只读原/status，复用统一观测/等待DTO及轮询间隔；PID只作远端诊断，不查本机文件或进程。
+    # 函数用途: 在启动总预算内等待远端明确running；公开状态不验证凭据，认证仍由后续原业务请求裁决。
+    def wait_for_readiness(self, _paths, *, timeout, on_observation=None):
+        from ...agent.gateway_parts.status_rendering import (
+            _GATEWAY_FAILED_STATUSES,
+            _GATEWAY_READY_POLL_SECONDS,
+            REASON_GATEWAY_NOT_READY,
+            REASON_GATEWAY_READY,
+            REASON_GATEWAY_START_FAILED,
+            REASON_GATEWAY_START_TIMEOUT,
+            REASON_GATEWAY_STARTING,
+            GatewayReadiness,
+            GatewayReadinessWait,
+        )
+
+        started = time.monotonic()
+        deadline = started + max(0.0, float(timeout))
+        polls = 0
+        observed_alive = False
+        while polls == 0 or time.monotonic() < deadline:
+            # 运输已有0.1秒单次下限；预算耗尽后不再追加探测或睡眠。
+            code, body = self.request_json("GET", "/status",
+                total_deadline_seconds=max(0.1, deadline - time.monotonic()))
+            polls += 1
+            status = body.get("status", "") if code == 200 else ""
+            ready = status == "running"
+            state, reason = "stopped", REASON_GATEWAY_NOT_READY
+            if ready:
+                state, reason = "ready", REASON_GATEWAY_READY
+            elif status == "starting":
+                state, reason = "starting", REASON_GATEWAY_STARTING
+            elif status in _GATEWAY_FAILED_STATUSES:
+                state, reason = "failed", REASON_GATEWAY_START_FAILED
+            elif code in (401, 403):
+                state, reason = "failed", "GATEWAY_AUTH_DENIED"
+            observed_alive = observed_alive or code == 200
+            raw_pid = body.get("pid")
+            last = GatewayReadiness(state=state, reason=reason,
+                pid=raw_pid if type(raw_pid) is int and raw_pid > 0 else None,
+                process_alive=code == 200, ready=ready, status=status, source="http:/status",
+                started_at=0.0, observed_at=time.time())
+            if on_observation is not None:
+                on_observation(last)
+            remaining = deadline - time.monotonic()
+            if ready or state == "failed" or remaining <= 0:
+                break
+            time.sleep(min(_GATEWAY_READY_POLL_SECONDS, remaining))
+        reason = last.reason if ready or state == "failed" else (
+            REASON_GATEWAY_START_TIMEOUT if state == "starting" else REASON_GATEWAY_NOT_READY)
+        return GatewayReadinessWait(state=state if ready or state == "failed" else "timeout",
+            reason=reason, ready=ready, pid=last.pid, elapsed_seconds=round(time.monotonic() - started, 3),
+            polls=polls, observed_alive=observed_alive, last=last)
 
     # LLM: LF/blank-line terminated frames alone are observable. An incomplete UTF-8/data/id fragment never commits the cursor.
     # 函数用途: 解析有界SSE完整帧，断连时丢弃半帧并保留上一条已消费游标。
