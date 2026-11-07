@@ -572,6 +572,16 @@ def _project_public_progress_rows(lines, *, channel="", include=frozenset(), pre
             if permission_event is not None:
                 events.append(permission_event)
             continue
+        if row.get("kind") == "permission_resolved":
+            # 与完整请求 DTO 使用同一私有通道判据；决议只关闭原等待框，不创建授权。
+            if host_paths_visible_to_viewer(channel, can_access_all_users=False):
+                from ..contracts.tool_approval import ToolApprovalDecision
+
+                try:
+                    events.append({"kind": "permission_resolved", **ToolApprovalDecision.from_mapping(row).to_dict()})
+                except (TypeError, ValueError, OverflowError):
+                    pass
+            continue
         if row.get("kind") == "model_liveness":
             progress = row.get("progress")
             if isinstance(progress, dict) and progress.get("wait_state") == "model_response":
