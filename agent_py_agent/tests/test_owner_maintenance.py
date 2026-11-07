@@ -400,7 +400,7 @@ def test_b2_r3_local_event_ordinary_error_is_isolated(tmp_path, monkeypatch, sta
 
 
 # LLM: 借用真实C/claim/P3 fixture；观察真实LocalStore SQL与文件读取，不以Door模拟替代实际短门合同。
-# 函数用途: 验证实际后台来源能裁剪默认workspace库，SQL在原短门、JSONL读与锁等待在原短门外。
+# 函数用途: 验证SQL和封存段删除走原短门，段尾读取与锁等待在门外，活动流水保持原件。
 def test_b2_r3_actual_c_local_events_use_short_writes_and_outside_reads(tmp_path, monkeypatch):
     import sqlite3
     from contextlib import closing, contextmanager
@@ -412,6 +412,7 @@ def test_b2_r3_actual_c_local_events_use_short_writes_and_outside_reads(tmp_path
         require_background_transaction,
     )
     from agent_py_agent.agent.local_storage import LocalStore, maintenance
+    from agent_py_agent.agent.local_storage.events import event_segments_dir
     from agent_py_agent.agent.local_storage.maintenance import STEADY_STATE_EVENTS_KEEP_LAST
     from agent_py_agent.tests.test_gateway_background_curator_transactions import (
         curator_case,
@@ -423,21 +424,43 @@ def test_b2_r3_actual_c_local_events_use_short_writes_and_outside_reads(tmp_path
         store = LocalStore(agent.config.local_store_path)
         store.reset()
         _b2_seed_events(store, 25005)
+        active_bytes = store.events_path.read_bytes()
+        active_inode = store.events_path.stat().st_ino
+        directory = event_segments_dir(store.events_path)
+        directory.mkdir()
+        expired, retained = (directory / name for name in ("2020-01-01.jsonl", "2020-01-02.jsonl"))
+        expired.write_text(json.dumps({"event_id": "b2-000000"}) + "\n")
+        retained.write_text(json.dumps({"event_id": "b2-025004"}) + "\n")
+        retained_bytes, retained_inode = retained.read_bytes(), retained.stat().st_ino
+        segment_identities = {(path.stat().st_dev, path.stat().st_ino) for path in (expired, retained)}
         original_open, original_connect = Path.open, sqlite3.connect
+        original_fdopen, original_unlink = os.fdopen, Path.unlink
         original_lock = LocalStore._coordinator_events_lock
         original_maintain = LocalStore.maintain_events
         original_lane = maintenance.maintain_local_events_lane
         maintaining = []
         lane_counts = []
         observed = set()
-        # LLM: 只观察维护阶段对同一JSONL的读取；正常审计追加仍须在写门内。
-        # 函数用途: 核对真实文件读取没有占用后台短事务。
+        # Cat3-R4 只读封存段尾，活动流水可继续追加，但维护不得读取或重写它。
         def opened(path, *args, **kwargs):
             if maintaining and path == store.events_path and "r" in (args[0] if args else kwargs.get("mode", "r")):
+                pytest.fail("维护不得读取活动 JSONL")
+            return original_open(path, *args, **kwargs)
+
+        def segment_open(descriptor, *args, **kwargs):
+            info = os.fstat(descriptor)
+            if maintaining and (info.st_dev, info.st_ino) in segment_identities:
                 with pytest.raises(RequestExecutionOutcomeUncertainError):
                     require_background_transaction("observe_event_file_read")
                 observed.add("read")
-            return original_open(path, *args, **kwargs)
+            return original_fdopen(descriptor, *args, **kwargs)
+
+        def unlink(path, *args, **kwargs):
+            if maintaining and path in (expired, retained, store.events_path):
+                assert path == expired
+                assert require_background_transaction("observe_event_segment_unlink") is None
+                observed.add("unlink")
+            return original_unlink(path, *args, **kwargs)
         # LLM: 只观察同一维护库的连接出生，不替代SQLite连接或业务SQL。
         # 函数用途: 核对实际C库连接是在原短写门内打开。
         def connect(path, *args, **kwargs):
@@ -474,15 +497,22 @@ def test_b2_r3_actual_c_local_events_use_short_writes_and_outside_reads(tmp_path
 
         with monkeypatch.context() as patch:
             patch.setattr(Path, "open", opened)
+            patch.setattr(os, "fdopen", segment_open)
+            patch.setattr(Path, "unlink", unlink)
             patch.setattr(sqlite3, "connect", connect)
             patch.setattr(LocalStore, "_coordinator_events_lock", event_lock)
             patch.setattr(LocalStore, "maintain_events", maintain)
             patch.setattr(maintenance, "maintain_local_events_lane", maintain_lane)
             response = run_original(agent, gate, claim)
+        assert response["ok"] is True, json.dumps(response, ensure_ascii=False)
         marker = json.loads((agent.home_paths.owner_data_dir / "maintenance.json").read_text())
-        assert response["ok"] is True
         assert marker.get("local_store_events_maintenance", {}).get("deleted_db") == 5000
-        assert observed == {"sql", "lock", "read"}
+        assert marker["local_store_events_maintenance"]["deleted_jsonl"] == 1
+        assert observed == {"sql", "lock", "read", "unlink"}
+        assert not expired.exists()
+        assert (retained.read_bytes(), retained.stat().st_ino) == (retained_bytes, retained_inode)
+        assert store.events_path.stat().st_ino == active_inode
+        assert store.events_path.read_bytes().startswith(active_bytes)
         assert len(lane_counts) == 1
         total, non_old, old = lane_counts[0]
         assert total == STEADY_STATE_EVENTS_KEEP_LAST
