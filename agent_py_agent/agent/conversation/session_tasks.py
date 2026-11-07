@@ -1096,7 +1096,11 @@ class SessionTaskStore:
     # LLM: 状态推进只允许既定迁移；非法迁移不改文件，抛 ValueError 让调用方按结构化错误处理。
     #   终态不可被普通生命周期改写；取消只能从非终态发起。
     # 函数用途: 原子推进一条会话任务的状态与结果字段。
-    def advance(self, task_id: str, update: SessionTaskUpdate, *, now: float | None = None) -> SessionTask:
+    def advance(self, task_id: str, update: SessionTaskUpdate, *, now: float | None = None,
+                expected_owner_epoch: int | None = None) -> SessionTask:
+        from ..concurrency.lock_order import LockLevel, path_category
+        from ..user_space.owner_epoch import check_store_terminal_epoch
+
         target_status = str(update.status or "").strip()
         if target_status not in SESSION_TASK_STATUSES:
             raise ValueError(f"unknown session task status: {target_status}")
@@ -1105,6 +1109,8 @@ class SessionTaskStore:
         # LLM: 锁内重读最新记录再校验迁移；并发下只有一个写入方成功，避免双账。
         # 函数用途: 在原子更新内校验并应用状态迁移。
         def updater(data: dict[str, Any]) -> dict[str, Any]:
+            if target_status in SESSION_TASK_TERMINAL_STATUSES:
+                check_store_terminal_epoch(self.storage, expected_owner_epoch)
             latest = SessionTask.from_dict(data)
             if not _transition_allowed(latest.status, target_status):
                 raise ValueError(
@@ -1122,7 +1128,8 @@ class SessionTaskStore:
             )
             return updated.to_dict()
 
-        update_json_file_atomic(self._path(task_id), updater, require_existing=True)
+        with path_category(self._path(task_id), LockLevel.TASK_STORE):
+            update_json_file_atomic(self._path(task_id), updater, require_existing=True)
         self._list_index().publish(self._path(task_id))
         self._learning_index().publish(self._path(task_id))
         loaded = self.load(task_id)

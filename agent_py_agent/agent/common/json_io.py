@@ -610,7 +610,7 @@ _path_lock = path_thread_lock
 # LLM: birth_commit只包原lock FD open/create/chmod，等待/身份核验/close仍门外，默认None原链不变。
 # 函数用途: 取得原双层锁，可将每次准确FD出生交给当前C末门。
 @contextmanager
-def locked_json_path(path: Path, *, blocking: bool = True, birth_commit: Callable | None = None):
+def locked_json_path(path: Path, *, blocking: bool = True, birth_commit: Callable | None = None, category=None):
     """公开的"线程锁 + fcntl.flock(LOCK_EX)"双层临界区(与 io/jsonl.py 同手法)。
 
     供需要把 读-改-写 整段做成原子的调用方使用(如 OptimisticLock 的 CAS):
@@ -618,7 +618,7 @@ def locked_json_path(path: Path, *, blocking: bool = True, birth_commit: Callabl
     退出释放。临界区内落盘请用 write_json_file_atomic_unlocked(锁已持有)。"""
 
     options = {} if birth_commit is None else {"birth_commit": birth_commit}
-    with _locked_json_path(path, blocking=blocking, **options):
+    with _locked_json_path(path, blocking=blocking, category=category, **options):
         yield
 
 
@@ -626,16 +626,16 @@ def locked_json_path(path: Path, *, blocking: bool = True, birth_commit: Callabl
 # LLM: 可选birth_commit沿原链透传，不缓存callback，也不把线程锁/flock等待搬进Root。
 # 函数用途: 按原顺序取线程/OS锁，全部退出归还，FD出生可固定委托。
 @contextmanager
-def _locked_json_path(path: Path, *, blocking: bool = True, birth_commit: Callable | None = None):
+def _locked_json_path(path: Path, *, blocking: bool = True, birth_commit: Callable | None = None, category=None):
+    from ..concurrency.lock_order import category_for_path, ordered_lock
+
     handle = path_thread_lock(path)  # 保持包装强引用直到临界区结束。
-    if not handle.lock.acquire(blocking=blocking):
-        raise BlockingIOError("共享文件线程锁繁忙")
-    try:
+    with ordered_lock(category_for_path(path, category), handle.lock, blocking=blocking) as acquired:
+        if not acquired:
+            raise BlockingIOError("共享文件线程锁繁忙")
         options = {} if birth_commit is None else {"birth_commit": birth_commit}
         with _locked_file_path(path, blocking=blocking, **options):
             yield
-    finally:
-        handle.lock.release()
 
 
 # LLM: 锁文件必须与数据文件同口径私有：文件 0600、不跟随符号链接，缺失目录按 0700 新建、已存在的目录

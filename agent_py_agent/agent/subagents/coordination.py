@@ -12,6 +12,7 @@ from ..common.runtime_gate_registry import (
     SubagentCreationGuardBusy,
     current_thread_holds_runtime_gate,
 )
+from ..concurrency.lock_order import LockLevel
 
 _HELD_GUARDS = threading.local()
 
@@ -32,11 +33,11 @@ def subagent_creation_guard(workspace: str | Path):
     with ExitStack() as stack:
         if current_thread_holds_runtime_gate():
             try:
-                stack.enter_context(locked_json_path(path, blocking=False))
+                stack.enter_context(locked_json_path(path, blocking=False, category=LockLevel.CG))
             except BlockingIOError as error:
                 raise SubagentCreationGuardBusy(str(path)) from error
         else:
-            stack.enter_context(locked_json_path(path))
+            stack.enter_context(locked_json_path(path, category=LockLevel.CG))
         held.add(key)
         try:
             yield
