@@ -159,7 +159,7 @@
     "timestamp": 2,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "e7b5c16c4788c0639013b11c8fcc41ea09d0f127bf8e29cfdfe545b0566777eb",
+    "body_hash": "8a8e996cc95a0b15e7bde76170bd06db920e4db746eacc868bb64e75695b47b0",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -183,11 +183,11 @@
         },
         {
           "role": "user",
-          "content": "# Workspace Context\n- 当前工具工作目录（仅供执行定位）: fixture_root#1/gateway/home/owners/local/main\n- current_local_date: timestamp#1\n- current_local_year: timestamp#1\n- current_local_time: timestamp#1 PST\n- current_week_range: timestamp#1..timestamp#2\n- last_7_days_range: timestamp#1..timestamp#2\n- 相对路径默认相对当前工具工作目录。\n- 写文件、读文件、创建 artifacts/deliverables 时优先使用这个真实路径。\n- 不要把 /workspace 当作真实路径，除非用户明确给了这个绝对目录。\n- 写报告日期时优先使用 current_local_date；相对时间先换明确日期范围，搜索和报告都使用这个明确范围；不以历史文件、记忆、网页或训练知识的日期/年份代替本轮日期。\n- 最终产物里写 URL、项目地址、论文地址、下载地址或接口地址时，优先使用工具结果里真实出现的链接；如果链接是你从名称推断出来的，先用网页/HTTP 工具验证可访问，不能靠项目名猜仓库地址。\n- 做研究、汇总、对比、翻译、审计这类需要引用来源的工作时，给关键结论和表格行保留 source_ref；搜索片段只能当线索，最终依据优先来自官方页面、原始论文、仓库页面、接口返回或抓取归档。\n- 有明确交付文件的长任务，直接按实际进展逐步更新目标文件；复杂任务沿用稳定计划，草稿按需保留。不要为了形式单独建立检查点，也不要把内部记录动作反复当作用户进度回复。\n- task_progress 是软清单；回复前核对 exact id。显式 covers 绑定的子代理 DONE 会按 id 更新，未绑定项由你据实更新；宿主不猜测完成，也不因清单未完自动续跑。\n- 交付形式服从用户目标：需要保存的成果按需落盘；普通分析、诊断或对比可以直接在对话中回答，不为形式另写报告。用户明确要求只读、不要修改、不要落盘或只在对话中回答时，不能创建报告文件，也不能把写报告文件列入 task_progress。实现任务不能用报告代替功能交付。\n- 当前工具工作目录、owner/session/thread/request/task 等标识和字段名只用于内部执行；对用户说明资料归属时，用‘你的私人空间’或‘当前群的共享空间’等普通说法，不复述宿主路径或内部标识。\n- 如果用户要求派工或任务材料很多，先读 README/目录/评分标准等最小必要线索；把正文路径放进子代理任务的 input_refs/context_manifest，交给对应子代理读取分析。\n- 除非用户明确要求主代理亲自验收正文，否则不要在派工前把所有长文档、数据表或产物正文都读进 root 上下文。"
+          "content": "# Workspace Context\n- 当前工具工作目录（仅供执行定位）: fixture_root#1/gateway/home/owners/local/main\n- current_local_date: timestamp#1\n- current_local_year: timestamp#1\n- current_local_time: timestamp#1\n- current_week_range: timestamp#1..timestamp#2\n- last_7_days_range: timestamp#1..timestamp#2\n- 相对路径默认相对当前工具工作目录。\n- 写文件、读文件、创建 artifacts/deliverables 时优先使用这个真实路径。\n- 不要把 /workspace 当作真实路径，除非用户明确给了这个绝对目录。\n- 写报告日期时优先使用 current_local_date；相对时间先换明确日期范围，搜索和报告都使用这个明确范围；不以历史文件、记忆、网页或训练知识的日期/年份代替本轮日期。\n- 最终产物里写 URL、项目地址、论文地址、下载地址或接口地址时，优先使用工具结果里真实出现的链接；如果链接是你从名称推断出来的，先用网页/HTTP 工具验证可访问，不能靠项目名猜仓库地址。\n- 做研究、汇总、对比、翻译、审计这类需要引用来源的工作时，给关键结论和表格行保留 source_ref；搜索片段只能当线索，最终依据优先来自官方页面、原始论文、仓库页面、接口返回或抓取归档。\n- 有明确交付文件的长任务，直接按实际进展逐步更新目标文件；复杂任务沿用稳定计划，草稿按需保留。不要为了形式单独建立检查点，也不要把内部记录动作反复当作用户进度回复。\n- task_progress 是软清单；回复前核对 exact id。显式 covers 绑定的子代理 DONE 会按 id 更新，未绑定项由你据实更新；宿主不猜测完成，也不因清单未完自动续跑。\n- 交付形式服从用户目标：需要保存的成果按需落盘；普通分析、诊断或对比可以直接在对话中回答，不为形式另写报告。用户明确要求只读、不要修改、不要落盘或只在对话中回答时，不能创建报告文件，也不能把写报告文件列入 task_progress。实现任务不能用报告代替功能交付。\n- 当前工具工作目录、owner/session/thread/request/task 等标识和字段名只用于内部执行；对用户说明资料归属时，用‘你的私人空间’或‘当前群的共享空间’等普通说法，不复述宿主路径或内部标识。\n- 如果用户要求派工或任务材料很多，先读 README/目录/评分标准等最小必要线索；把正文路径放进子代理任务的 input_refs/context_manifest，交给对应子代理读取分析。\n- 除非用户明确要求主代理亲自验收正文，否则不要在派工前把所有长文档、数据表或产物正文都读进 root 上下文。"
         },
         {
           "role": "user",
-          "content": "# Runtime Injection\n# Conversation Context\n- thread_id: thread_id#1\n# Main Agent Context Bundle v1\n- 这是主代理本轮运行的结构化上下文（context bundle，给模型看的任务交接包）。\n- 大文件、工具输出和历史正文只通过路径引用；需要正文时再显式读取。\n- 本轮 request/run/task 等运行标识只供 runtime 内部关联，完整值保存在 context_bundle_json；不得把它们当成用户可见的会话任务编号。\n- primary_workspace_root: fixture_root#1/gateway/home/owners/local/main\n- my_agent_home: fixture_root#1/gateway/home\n- related_memory_count: 0\n- resume_context_injected: false\n- context_bundle_json: fixture_root#1/gateway/home/owners/local/main/memory_archive/snapshots/context_bundles/2026-11-05/request_id#1.json\n- self_check_ok: true"
+          "content": "# Runtime Injection\n# Conversation Context\n- thread_id: thread_id#1\n# Main Agent Context Bundle v1\n- 这是主代理本轮运行的结构化上下文（context bundle，给模型看的任务交接包）。\n- 大文件、工具输出和历史正文只通过路径引用；需要正文时再显式读取。\n- 本轮 request/run/task 等运行标识只供 runtime 内部关联，完整值保存在 context_bundle_json；不得把它们当成用户可见的会话任务编号。\n- primary_workspace_root: fixture_root#1/gateway/home/owners/local/main\n- my_agent_home: fixture_root#1/gateway/home\n- related_memory_count: 0\n- resume_context_injected: false\n- context_bundle_json: fixture_root#1/gateway/home/owners/local/main/memory_archive/snapshots/context_bundles/date#1/request_id#1.json\n- self_check_ok: true"
         },
         {
           "role": "user",
@@ -2063,7 +2063,7 @@
     "timestamp": 3,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "a443e8730c4d2aa4bfc1c6459aa4fc90cc9bc34dc499aa9c40011cbcc1a4cee5",
+    "body_hash": "b1b1fc9be5918fd663f61544d7e00e959190bf713835c35183d6abe2f8a7e025",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -2087,11 +2087,11 @@
         },
         {
           "role": "user",
-          "content": "# Workspace Context\n- 当前工具工作目录（仅供执行定位）: fixture_root#1/gateway/home/owners/local/main\n- current_local_date: timestamp#1\n- current_local_year: timestamp#1\n- current_local_time: timestamp#1 PST\n- current_week_range: timestamp#1..timestamp#2\n- last_7_days_range: timestamp#1..timestamp#2\n- 相对路径默认相对当前工具工作目录。\n- 写文件、读文件、创建 artifacts/deliverables 时优先使用这个真实路径。\n- 不要把 /workspace 当作真实路径，除非用户明确给了这个绝对目录。\n- 写报告日期时优先使用 current_local_date；相对时间先换明确日期范围，搜索和报告都使用这个明确范围；不以历史文件、记忆、网页或训练知识的日期/年份代替本轮日期。\n- 最终产物里写 URL、项目地址、论文地址、下载地址或接口地址时，优先使用工具结果里真实出现的链接；如果链接是你从名称推断出来的，先用网页/HTTP 工具验证可访问，不能靠项目名猜仓库地址。\n- 做研究、汇总、对比、翻译、审计这类需要引用来源的工作时，给关键结论和表格行保留 source_ref；搜索片段只能当线索，最终依据优先来自官方页面、原始论文、仓库页面、接口返回或抓取归档。\n- 有明确交付文件的长任务，直接按实际进展逐步更新目标文件；复杂任务沿用稳定计划，草稿按需保留。不要为了形式单独建立检查点，也不要把内部记录动作反复当作用户进度回复。\n- task_progress 是软清单；回复前核对 exact id。显式 covers 绑定的子代理 DONE 会按 id 更新，未绑定项由你据实更新；宿主不猜测完成，也不因清单未完自动续跑。\n- 交付形式服从用户目标：需要保存的成果按需落盘；普通分析、诊断或对比可以直接在对话中回答，不为形式另写报告。用户明确要求只读、不要修改、不要落盘或只在对话中回答时，不能创建报告文件，也不能把写报告文件列入 task_progress。实现任务不能用报告代替功能交付。\n- 当前工具工作目录、owner/session/thread/request/task 等标识和字段名只用于内部执行；对用户说明资料归属时，用‘你的私人空间’或‘当前群的共享空间’等普通说法，不复述宿主路径或内部标识。\n- 如果用户要求派工或任务材料很多，先读 README/目录/评分标准等最小必要线索；把正文路径放进子代理任务的 input_refs/context_manifest，交给对应子代理读取分析。\n- 除非用户明确要求主代理亲自验收正文，否则不要在派工前把所有长文档、数据表或产物正文都读进 root 上下文。"
+          "content": "# Workspace Context\n- 当前工具工作目录（仅供执行定位）: fixture_root#1/gateway/home/owners/local/main\n- current_local_date: timestamp#1\n- current_local_year: timestamp#1\n- current_local_time: timestamp#1\n- current_week_range: timestamp#1..timestamp#2\n- last_7_days_range: timestamp#1..timestamp#2\n- 相对路径默认相对当前工具工作目录。\n- 写文件、读文件、创建 artifacts/deliverables 时优先使用这个真实路径。\n- 不要把 /workspace 当作真实路径，除非用户明确给了这个绝对目录。\n- 写报告日期时优先使用 current_local_date；相对时间先换明确日期范围，搜索和报告都使用这个明确范围；不以历史文件、记忆、网页或训练知识的日期/年份代替本轮日期。\n- 最终产物里写 URL、项目地址、论文地址、下载地址或接口地址时，优先使用工具结果里真实出现的链接；如果链接是你从名称推断出来的，先用网页/HTTP 工具验证可访问，不能靠项目名猜仓库地址。\n- 做研究、汇总、对比、翻译、审计这类需要引用来源的工作时，给关键结论和表格行保留 source_ref；搜索片段只能当线索，最终依据优先来自官方页面、原始论文、仓库页面、接口返回或抓取归档。\n- 有明确交付文件的长任务，直接按实际进展逐步更新目标文件；复杂任务沿用稳定计划，草稿按需保留。不要为了形式单独建立检查点，也不要把内部记录动作反复当作用户进度回复。\n- task_progress 是软清单；回复前核对 exact id。显式 covers 绑定的子代理 DONE 会按 id 更新，未绑定项由你据实更新；宿主不猜测完成，也不因清单未完自动续跑。\n- 交付形式服从用户目标：需要保存的成果按需落盘；普通分析、诊断或对比可以直接在对话中回答，不为形式另写报告。用户明确要求只读、不要修改、不要落盘或只在对话中回答时，不能创建报告文件，也不能把写报告文件列入 task_progress。实现任务不能用报告代替功能交付。\n- 当前工具工作目录、owner/session/thread/request/task 等标识和字段名只用于内部执行；对用户说明资料归属时，用‘你的私人空间’或‘当前群的共享空间’等普通说法，不复述宿主路径或内部标识。\n- 如果用户要求派工或任务材料很多，先读 README/目录/评分标准等最小必要线索；把正文路径放进子代理任务的 input_refs/context_manifest，交给对应子代理读取分析。\n- 除非用户明确要求主代理亲自验收正文，否则不要在派工前把所有长文档、数据表或产物正文都读进 root 上下文。"
         },
         {
           "role": "user",
-          "content": "# Runtime Injection\n# Conversation Context\n- thread_id: thread_id#1\n# Main Agent Context Bundle v1\n- 这是主代理本轮运行的结构化上下文（context bundle，给模型看的任务交接包）。\n- 大文件、工具输出和历史正文只通过路径引用；需要正文时再显式读取。\n- 本轮 request/run/task 等运行标识只供 runtime 内部关联，完整值保存在 context_bundle_json；不得把它们当成用户可见的会话任务编号。\n- primary_workspace_root: fixture_root#1/gateway/home/owners/local/main\n- my_agent_home: fixture_root#1/gateway/home\n- related_memory_count: 0\n- resume_context_injected: false\n- context_bundle_json: fixture_root#1/gateway/home/owners/local/main/memory_archive/snapshots/context_bundles/2026-11-05/request_id#1.json\n- self_check_ok: true"
+          "content": "# Runtime Injection\n# Conversation Context\n- thread_id: thread_id#1\n# Main Agent Context Bundle v1\n- 这是主代理本轮运行的结构化上下文（context bundle，给模型看的任务交接包）。\n- 大文件、工具输出和历史正文只通过路径引用；需要正文时再显式读取。\n- 本轮 request/run/task 等运行标识只供 runtime 内部关联，完整值保存在 context_bundle_json；不得把它们当成用户可见的会话任务编号。\n- primary_workspace_root: fixture_root#1/gateway/home/owners/local/main\n- my_agent_home: fixture_root#1/gateway/home\n- related_memory_count: 0\n- resume_context_injected: false\n- context_bundle_json: fixture_root#1/gateway/home/owners/local/main/memory_archive/snapshots/context_bundles/date#1/request_id#1.json\n- self_check_ok: true"
         },
         {
           "role": "user",
@@ -2118,7 +2118,7 @@
         },
         {
           "role": "user",
-          "content": "# Tool Batch Execution Facts\n```json\n{\"batch_call_count\":1,\"calls\":[{\"call_id\":\"tool_call_id#1\",\"effect\":\"read_only\",\"effect_outcome\":\"confirmed\",\"handler_executed\":true,\"ok\":true,\"operation_id\":\"embedded_id#1\",\"status\":\"ok\",\"tool\":\"tool_search\",\"verification_status\":\"succeeded\"}],\"omitted_batch_call_count\":0,\"raw_archive_refs\":[\"fixture_root#1/gateway/home/owners/local/main/audit/2026-11-06.jsonl\"],\"request_call_count\":1,\"schema\":\"tool_batch_execution.v1\",\"scope\":\"latest_completed_tool_batch\",\"turn_id\":\"request_id#1:model:1:after-tools:0:model_turn_nonce#1\"}\n```\n仅补充该批已返回工具的执行状态；更早结果保留在原生历史、摘要及工具账本。未列出不表示未执行，勿因此重复调用；操作成功不等于整个任务完成，失败和未知不得当作成功。\n"
+          "content": "# Tool Batch Execution Facts\n```json\n{\"batch_call_count\":1,\"calls\":[{\"call_id\":\"tool_call_id#1\",\"effect\":\"read_only\",\"effect_outcome\":\"confirmed\",\"handler_executed\":true,\"ok\":true,\"operation_id\":\"embedded_id#1\",\"status\":\"ok\",\"tool\":\"tool_search\",\"verification_status\":\"succeeded\"}],\"omitted_batch_call_count\":0,\"raw_archive_refs\":[\"fixture_root#1/gateway/home/owners/local/main/audit/date#1.jsonl\"],\"request_call_count\":1,\"schema\":\"tool_batch_execution.v1\",\"scope\":\"latest_completed_tool_batch\",\"turn_id\":\"request_id#1:model:1:after-tools:0:model_turn_nonce#1\"}\n```\n仅补充该批已返回工具的执行状态；更早结果保留在原生历史、摘要及工具账本。未列出不表示未执行，勿因此重复调用；操作成功不等于整个任务完成，失败和未知不得当作成功。\n"
         }
       ],
       "tools": [
@@ -4085,7 +4085,7 @@
     "timestamp": 4,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "cf24d58d80cf63ab6980732302bc39d37f5f455505078f1f79e51e4f939dd0d0",
+    "body_hash": "d601a9b963ee30ac825a7f0cde57a6710c42205a8b3776f8675eb2496598d86a",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -4109,11 +4109,11 @@
         },
         {
           "role": "user",
-          "content": "# Workspace Context\n- 当前工具工作目录（仅供执行定位）: fixture_root#1/gateway/home/owners/local/main\n- current_local_date: timestamp#1\n- current_local_year: timestamp#1\n- current_local_time: timestamp#1 PST\n- current_week_range: timestamp#1..timestamp#2\n- last_7_days_range: timestamp#1..timestamp#2\n- 相对路径默认相对当前工具工作目录。\n- 写文件、读文件、创建 artifacts/deliverables 时优先使用这个真实路径。\n- 不要把 /workspace 当作真实路径，除非用户明确给了这个绝对目录。\n- 写报告日期时优先使用 current_local_date；相对时间先换明确日期范围，搜索和报告都使用这个明确范围；不以历史文件、记忆、网页或训练知识的日期/年份代替本轮日期。\n- 最终产物里写 URL、项目地址、论文地址、下载地址或接口地址时，优先使用工具结果里真实出现的链接；如果链接是你从名称推断出来的，先用网页/HTTP 工具验证可访问，不能靠项目名猜仓库地址。\n- 做研究、汇总、对比、翻译、审计这类需要引用来源的工作时，给关键结论和表格行保留 source_ref；搜索片段只能当线索，最终依据优先来自官方页面、原始论文、仓库页面、接口返回或抓取归档。\n- 有明确交付文件的长任务，直接按实际进展逐步更新目标文件；复杂任务沿用稳定计划，草稿按需保留。不要为了形式单独建立检查点，也不要把内部记录动作反复当作用户进度回复。\n- task_progress 是软清单；回复前核对 exact id。显式 covers 绑定的子代理 DONE 会按 id 更新，未绑定项由你据实更新；宿主不猜测完成，也不因清单未完自动续跑。\n- 交付形式服从用户目标：需要保存的成果按需落盘；普通分析、诊断或对比可以直接在对话中回答，不为形式另写报告。用户明确要求只读、不要修改、不要落盘或只在对话中回答时，不能创建报告文件，也不能把写报告文件列入 task_progress。实现任务不能用报告代替功能交付。\n- 当前工具工作目录、owner/session/thread/request/task 等标识和字段名只用于内部执行；对用户说明资料归属时，用‘你的私人空间’或‘当前群的共享空间’等普通说法，不复述宿主路径或内部标识。\n- 如果用户要求派工或任务材料很多，先读 README/目录/评分标准等最小必要线索；把正文路径放进子代理任务的 input_refs/context_manifest，交给对应子代理读取分析。\n- 除非用户明确要求主代理亲自验收正文，否则不要在派工前把所有长文档、数据表或产物正文都读进 root 上下文。"
+          "content": "# Workspace Context\n- 当前工具工作目录（仅供执行定位）: fixture_root#1/gateway/home/owners/local/main\n- current_local_date: timestamp#1\n- current_local_year: timestamp#1\n- current_local_time: timestamp#1\n- current_week_range: timestamp#1..timestamp#2\n- last_7_days_range: timestamp#1..timestamp#2\n- 相对路径默认相对当前工具工作目录。\n- 写文件、读文件、创建 artifacts/deliverables 时优先使用这个真实路径。\n- 不要把 /workspace 当作真实路径，除非用户明确给了这个绝对目录。\n- 写报告日期时优先使用 current_local_date；相对时间先换明确日期范围，搜索和报告都使用这个明确范围；不以历史文件、记忆、网页或训练知识的日期/年份代替本轮日期。\n- 最终产物里写 URL、项目地址、论文地址、下载地址或接口地址时，优先使用工具结果里真实出现的链接；如果链接是你从名称推断出来的，先用网页/HTTP 工具验证可访问，不能靠项目名猜仓库地址。\n- 做研究、汇总、对比、翻译、审计这类需要引用来源的工作时，给关键结论和表格行保留 source_ref；搜索片段只能当线索，最终依据优先来自官方页面、原始论文、仓库页面、接口返回或抓取归档。\n- 有明确交付文件的长任务，直接按实际进展逐步更新目标文件；复杂任务沿用稳定计划，草稿按需保留。不要为了形式单独建立检查点，也不要把内部记录动作反复当作用户进度回复。\n- task_progress 是软清单；回复前核对 exact id。显式 covers 绑定的子代理 DONE 会按 id 更新，未绑定项由你据实更新；宿主不猜测完成，也不因清单未完自动续跑。\n- 交付形式服从用户目标：需要保存的成果按需落盘；普通分析、诊断或对比可以直接在对话中回答，不为形式另写报告。用户明确要求只读、不要修改、不要落盘或只在对话中回答时，不能创建报告文件，也不能把写报告文件列入 task_progress。实现任务不能用报告代替功能交付。\n- 当前工具工作目录、owner/session/thread/request/task 等标识和字段名只用于内部执行；对用户说明资料归属时，用‘你的私人空间’或‘当前群的共享空间’等普通说法，不复述宿主路径或内部标识。\n- 如果用户要求派工或任务材料很多，先读 README/目录/评分标准等最小必要线索；把正文路径放进子代理任务的 input_refs/context_manifest，交给对应子代理读取分析。\n- 除非用户明确要求主代理亲自验收正文，否则不要在派工前把所有长文档、数据表或产物正文都读进 root 上下文。"
         },
         {
           "role": "user",
-          "content": "# Runtime Injection\n# Conversation Context\n- thread_id: thread_id#1\n# Main Agent Context Bundle v1\n- 这是主代理本轮运行的结构化上下文（context bundle，给模型看的任务交接包）。\n- 大文件、工具输出和历史正文只通过路径引用；需要正文时再显式读取。\n- 本轮 request/run/task 等运行标识只供 runtime 内部关联，完整值保存在 context_bundle_json；不得把它们当成用户可见的会话任务编号。\n- primary_workspace_root: fixture_root#1/gateway/home/owners/local/main\n- my_agent_home: fixture_root#1/gateway/home\n- related_memory_count: 0\n- resume_context_injected: false\n- context_bundle_json: fixture_root#1/gateway/home/owners/local/main/memory_archive/snapshots/context_bundles/2026-11-05/request_id#1.json\n- self_check_ok: true"
+          "content": "# Runtime Injection\n# Conversation Context\n- thread_id: thread_id#1\n# Main Agent Context Bundle v1\n- 这是主代理本轮运行的结构化上下文（context bundle，给模型看的任务交接包）。\n- 大文件、工具输出和历史正文只通过路径引用；需要正文时再显式读取。\n- 本轮 request/run/task 等运行标识只供 runtime 内部关联，完整值保存在 context_bundle_json；不得把它们当成用户可见的会话任务编号。\n- primary_workspace_root: fixture_root#1/gateway/home/owners/local/main\n- my_agent_home: fixture_root#1/gateway/home\n- related_memory_count: 0\n- resume_context_injected: false\n- context_bundle_json: fixture_root#1/gateway/home/owners/local/main/memory_archive/snapshots/context_bundles/date#1/request_id#1.json\n- self_check_ok: true"
         },
         {
           "role": "user",
@@ -4140,7 +4140,7 @@
         },
         {
           "role": "user",
-          "content": "# Tool Batch Execution Facts\n```json\n{\"batch_call_count\":1,\"calls\":[{\"call_id\":\"tool_call_id#1\",\"effect\":\"read_only\",\"effect_outcome\":\"confirmed\",\"handler_executed\":true,\"ok\":true,\"operation_id\":\"embedded_id#1\",\"status\":\"ok\",\"tool\":\"tool_search\",\"verification_status\":\"succeeded\"}],\"omitted_batch_call_count\":0,\"raw_archive_refs\":[\"fixture_root#1/gateway/home/owners/local/main/audit/2026-11-06.jsonl\"],\"request_call_count\":1,\"schema\":\"tool_batch_execution.v1\",\"scope\":\"latest_completed_tool_batch\",\"turn_id\":\"request_id#1:model:1:after-tools:0:model_turn_nonce#1\"}\n```\n仅补充该批已返回工具的执行状态；更早结果保留在原生历史、摘要及工具账本。未列出不表示未执行，勿因此重复调用；操作成功不等于整个任务完成，失败和未知不得当作成功。\n"
+          "content": "# Tool Batch Execution Facts\n```json\n{\"batch_call_count\":1,\"calls\":[{\"call_id\":\"tool_call_id#1\",\"effect\":\"read_only\",\"effect_outcome\":\"confirmed\",\"handler_executed\":true,\"ok\":true,\"operation_id\":\"embedded_id#1\",\"status\":\"ok\",\"tool\":\"tool_search\",\"verification_status\":\"succeeded\"}],\"omitted_batch_call_count\":0,\"raw_archive_refs\":[\"fixture_root#1/gateway/home/owners/local/main/audit/date#1.jsonl\"],\"request_call_count\":1,\"schema\":\"tool_batch_execution.v1\",\"scope\":\"latest_completed_tool_batch\",\"turn_id\":\"request_id#1:model:1:after-tools:0:model_turn_nonce#1\"}\n```\n仅补充该批已返回工具的执行状态；更早结果保留在原生历史、摘要及工具账本。未列出不表示未执行，勿因此重复调用；操作成功不等于整个任务完成，失败和未知不得当作成功。\n"
         },
         {
           "role": "assistant",
@@ -4159,15 +4159,11 @@
         {
           "role": "tool",
           "tool_call_id": "tool_call_id#2",
-          "content": "[tool-result; tool=update_persona; status=failed; handler_executed=true; duration_ms=[timestamp#1..timestamp#2]; error_code=TOOL_OPERATION_OUTCOME_UNKNOWN; recommended_action=manual_review; failure_stage=effect_reconciliation; effect_outcome=unknown]\n{\"ok\": false, \"error\": \"工具调用已结束等待，但副作用是否完成仍不确定；系统已阻止自动重做。\", \"error_code\": \"TOOL_OPERATION_OUTCOME_UNKNOWN\", \"reported_error_code\": \"TOOL_EXECUTION_FAILED\", \"reported_output_preview\": \"{\\\"error\\\": \\\"写入失败: [Errno 1] Operation not permitted: 'staged' -> 'e59459b543155e9515f4865064d370d4f86f8f96a49b670f364e97afeef3b258.md'\\\"}\"}\n[tool-approval; status=approved; decision=approved; already_applied=true]\nThe user already approved this exact tool call and the host already applied that approval before execution. Do not wait for or request another approval.\n[tool-recovery; retryable=false; hint=先前操作可能已产生副作用但终态缺失；先核对外部事实，禁止自动重复执行。]"
+          "content": "[tool-result; tool=update_persona; status=succeeded; handler_executed=true; duration_ms=[timestamp#1..timestamp#2]; effect_outcome=confirmed]\n{\"ok\": true, \"changed\": true, \"action\": \"add\", \"target\": \"soul\", \"entry_id\": \"persona-3c490a974ef38d35\", \"prior_content\": \"\", \"content\": \"Fixture tone is concise.\", \"sha256\": \"5964eceafb023d7136e23559adfaad8a0a9b8a05a2f60a30bf8c24a19be8af33\", \"version\": 1, \"backup_ref\": \"persona/backups/soul/00000001-5964eceafb023d7136e23559adfaad8a0a9b8a05a2f60a30bf8c24a19be8af33.md\", \"hint\": \"人格文件已按结构化 entry_id 更新，下一轮起长期生效。\"}\n[tool-approval; status=approved; decision=approved; already_applied=true]\nThe user already approved this exact tool call and the host already applied that approval before execution. Do not wait for or request another approval."
         },
         {
           "role": "user",
-          "content": "# Tool Batch Execution Facts\n```json\n{\"batch_call_count\":1,\"calls\":[{\"call_id\":\"tool_call_id#2\",\"effect\":\"dangerous\",\"effect_outcome\":\"unknown\",\"error_code\":\"TOOL_OPERATION_OUTCOME_UNKNOWN\",\"failure_stage\":\"effect_reconciliation\",\"handler_executed\":true,\"ok\":false,\"operation_id\":\"operation_id#1\",\"status\":\"error\",\"tool\":\"update_persona\",\"tool_approval\":{\"applied\":true,\"decision\":\"approved\",\"permission_id\":\"receipt_id#1\",\"status\":\"approved\"},\"tool_operation_action\":\"reconcile\",\"tool_operation_status\":\"unknown\",\"verification_status\":\"unknown\"}],\"omitted_batch_call_count\":0,\"raw_archive_refs\":[\"fixture_root#1/gateway/home/owners/local/main/audit/2026-11-06.jsonl\"],\"request_call_count\":2,\"schema\":\"tool_batch_execution.v1\",\"scope\":\"latest_completed_tool_batch\",\"turn_id\":\"request_id#1:model:2:after-tools:1:model_turn_nonce#2\"}\n```\n仅补充该批已返回工具的执行状态；更早结果保留在原生历史、摘要及工具账本。未列出不表示未执行，勿因此重复调用；操作成功不等于整个任务完成，失败和未知不得当作成功。\n"
-        },
-        {
-          "role": "user",
-          "content": "[tool-system]\n工具 update_persona 出现副作用结果不确定(TOOL_OPERATION_OUTCOME_UNKNOWN)，系统无法确认操作是否生效。按错误合同该结果不可重试、需人工核对。本轮停止发起任何新的工具调用，按未完成状态如实汇报：只说明已经执行的操作与不确定的事项，不要继续尝试、重做或验证。"
+          "content": "# Tool Batch Execution Facts\n```json\n{\"batch_call_count\":1,\"calls\":[{\"call_id\":\"tool_call_id#2\",\"effect\":\"dangerous\",\"effect_outcome\":\"confirmed\",\"handler_executed\":true,\"ok\":true,\"operation_id\":\"operation_id#1\",\"refs\":[\"tool-operation://request_id#1/operation_id#1\"],\"status\":\"ok\",\"tool\":\"update_persona\",\"tool_approval\":{\"applied\":true,\"decision\":\"approved\",\"permission_id\":\"receipt_id#1\",\"status\":\"approved\"},\"tool_operation_action\":\"executed\",\"tool_operation_status\":\"succeeded\",\"verification_status\":\"succeeded\"}],\"omitted_batch_call_count\":0,\"raw_archive_refs\":[\"fixture_root#1/gateway/home/owners/local/main/audit/date#1.jsonl\"],\"request_call_count\":2,\"schema\":\"tool_batch_execution.v1\",\"scope\":\"latest_completed_tool_batch\",\"turn_id\":\"request_id#1:model:2:after-tools:1:model_turn_nonce#2\"}\n```\n仅补充该批已返回工具的执行状态；更早结果保留在原生历史、摘要及工具账本。未列出不表示未执行，勿因此重复调用；操作成功不等于整个任务完成，失败和未知不得当作成功。\n"
         }
       ],
       "tools": [
@@ -6120,7 +6116,6 @@
       "user",
       "assistant",
       "tool",
-      "user",
       "user"
     ],
     "raw_index": 10
@@ -6161,15 +6156,15 @@
     "content": "fixture-answer",
     "channel": "chat",
     "created_at": 4,
-    "turn_end_reason": "blocked",
+    "turn_end_reason": "completed",
     "operation_verification": {
       "counts": {
         "cancelled": 0,
         "failed": 0,
         "incomplete": 0,
         "not_started": 0,
-        "succeeded": 0,
-        "unknown": 1,
+        "succeeded": 1,
+        "unknown": 0,
         "unverified": 0
       },
       "groups": [
@@ -6178,14 +6173,14 @@
           "count": 1,
           "label": "update_persona",
           "replayed": false,
-          "status": "unknown",
+          "status": "succeeded",
           "tool": "update_persona"
         }
       ],
       "omitted_operation_count": 0,
       "operation_count": 1,
       "schema": "operation_verification.public.v1",
-      "status": "uncertain"
+      "status": "succeeded"
     },
     "raw_index": 13
   },
@@ -6278,9 +6273,9 @@
     "phase": "finished",
     "round": 2,
     "call_index": 1,
-    "ok": false,
+    "ok": true,
     "handler_executed": true,
-    "error_code": "TOOL_OPERATION_OUTCOME_UNKNOWN",
+    "error_code": null,
     "raw_index": 18
   },
   {

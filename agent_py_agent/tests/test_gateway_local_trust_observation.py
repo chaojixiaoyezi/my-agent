@@ -290,6 +290,6 @@ def test_network_fallback_uses_real_json_transport_and_remaining_budget(network_
     assert result == {"identity": ["local-agent", "chat"]}
     assert len(calls) == 2
     assert calls[0][0] == calls[1][0] == "GET"
-    assert calls[0][1].startswith(observer.base_url + "/progress/fixture-request?since=0&include=")
-    assert calls[1][1] == observer.base_url + "/result/fixture-request"
+    assert calls[0][1] == observer.base_url + "/result/fixture-request"
+    assert calls[1][1].startswith(observer.base_url + "/progress/fixture-request?since=0&include=")
     assert all(0.1 <= timeout <= 30 for _method, _url, timeout in calls)
