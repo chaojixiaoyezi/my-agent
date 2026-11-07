@@ -92,6 +92,12 @@ class TenantRateLimiter:
     def available(self, tenant: str) -> float:
         return self._bucket_for(tenant).available()
 
+    # LLM: 只在既有映射锁下丢弃目标桶，不扫描或清空其它租户，也不重置并发准入。
+    # 函数用途: 让管理员显式恢复一个租户的突发令牌预算；下次访问按原容量惰性建桶。
+    def reset(self, tenant: str) -> None:
+        with self._lock:
+            self._buckets.pop(tenant, None)
+
     def tenant_count(self) -> int:
         with self._lock:
             return len(self._buckets)

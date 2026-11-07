@@ -502,6 +502,8 @@ class HttpBackend(BaseBackend):
             timeout=provider_request_timeout(self.request_timeout),
             connect_timeout=self.connect_timeout,
             first_event_timeout=options.first_event_timeout_seconds,
+            # 按本次配置冻结退避序列；空值保持原传输默认，不热改共享后端。
+            retry_backoff_seconds=tuple(getattr(self.config, "model_retry_backoff_seconds", ()) or ()),
             deadline=deadline,
             connection_pool=pool,
             provider_max_concurrent_requests=getattr(self, "provider_max_concurrent_requests", 0),
