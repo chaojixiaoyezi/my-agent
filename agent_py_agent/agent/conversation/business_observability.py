@@ -626,8 +626,10 @@ class BusinessObservationService:
 
     def _event_bounds(self, conn):
         """保留期清空后仍读取规范自增水位，区分新快照与清理前的零位点游标。"""
-        return conn.execute('SELECT min(seq),COALESCE(max(seq),'
-            '(SELECT seq FROM sqlite_sequence WHERE name=\'runtime_events\'),0) FROM runtime_events').fetchone()
+        # min 和 max 分开写，才能各自走索引端点，O(log N)。
+        return conn.execute('SELECT (SELECT min(seq) FROM runtime_events),'
+            'COALESCE((SELECT max(seq) FROM runtime_events),'
+            '(SELECT seq FROM sqlite_sequence WHERE name=\'runtime_events\'),0)').fetchone()
 
     # LLM: 事件复核复用本帧distinct身份读取，不复用任何授权裁决。
     # 函数用途: 用本次TaskRun规范关联投影无attempt生命周期层级。
