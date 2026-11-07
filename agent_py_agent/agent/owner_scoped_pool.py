@@ -22,6 +22,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from .common import cache_capacity
 from .delivery import RuntimeHealthProvider
 from .settings.config import AgentConfig
 from .settings.defaults import register_resident_owner_capacity
@@ -301,6 +302,8 @@ class OwnerScopedAgentPool:
         if max_agents is None:
             max_agents = getattr(base_config, "owner_agent_pool_max_agents", _DEFAULT_MAX_AGENT_COUNT)
         self._max_agents = _resolved_max_agents(max_agents)
+        # 进程内缓存容量随已配置的并发槽位推导（只读现有配置，不新增配置键）。
+        cache_capacity.configure_from_config(base_config)
         # 按 owner 分条目的进程级派生缓存（进程记录投影等）跟随本池常驻容量定界。
         register_resident_owner_capacity(self._max_agents)
         # Runtime health is process-scoped and read-only.  Keep the builder's four positional
