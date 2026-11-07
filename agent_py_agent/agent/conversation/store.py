@@ -92,7 +92,8 @@ class ConversationStore:
 
     # LLM: 跨域维护只在原调度周期调用，策略与 claim 使用同一时间与保留期，保持策略后 claim 的顺序；
     #   唤醒结案留档最后归档，用它自己的 14 天保留期（store_wake_quarantine_archive，只移不删），并同步清理
-    #   已移走或已消费记录遗留的超龄未持锁 .lock sidecar（cleanup_orphan_lock_files）。
+    #   已移走或已消费记录遗留的超龄未持锁 .lock sidecar（cleanup_orphan_lock_files），
+    #   并在维护周期内隔离解析不了的活动任务链接、剔除幽灵历史任务 id（读路径不修）。
     # 函数用途: 协调策略、租约旧账、唤醒结案留档归档与孤儿锁清理，返回各类计数，不新建后台任务。
     def gc_stale_ledger_records(
         self, *, now: float | None = None,
@@ -110,11 +111,19 @@ class ConversationStore:
             cleanup_orphan_lock_files(directory, now=current)
             for directory in self.storage.lock_sidecar_dirs()
         )
+        try:
+            threads, _thread_errors = self.threads.list_report(limit=0)
+            quarantined_task_links, pruned_task_ids = self.tasks.heal_broken_links(threads)
+        except Exception as exc:  # noqa: BLE001 - 自愈步骤失败不影响前面已完成的归档统计
+            logger.warning("TASK_LINK_HEAL_SKIPPED error_type=%s", type(exc).__name__)
+            quarantined_task_links = pruned_task_ids = 0
         return {
             "archived_policies": archived_policies,
             "archived_claims": archived_claims,
             "archived_wake_quarantine": archived_wake_quarantine,
             "cleaned_orphan_locks": cleaned_orphan_locks,
+            "quarantined_task_links": quarantined_task_links,
+            "pruned_task_ids": pruned_task_ids,
         }
 
     # LLM: 只组装既有领域读取结果；严格处理坏账的调用方使用 context_bundle_report，不建立第二份状态。

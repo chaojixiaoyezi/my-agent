@@ -1245,7 +1245,7 @@ class _BackgroundOwnerPlannerMixin:
                 activity = registry._recorded_at.get((owner.provider, owner.owner_kind, owner.owner_id), 0.0)
         return tuple(signatures), activity
 
-    # LLM: 0/非法配置或未知来源维持每拍规划；活动、新代次、失败重试先清零，表里仅保留旧身份不算新活动。
+    # LLM: 0/非法配置或未知来源维持每拍规划；活动、新代次、已到点或条件型重试才清零，普通冷却及表内旧身份不算新活动。
     # 函数用途: 决定这个owner能否等待下一次空闲规划截止点。
     def _owner_plan_backoff_state(self, key: object, scheduler: object, *, active: bool) -> tuple:
         streaks = self.__dict__.setdefault("_owner_idle_streaks", {})
@@ -1258,7 +1258,8 @@ class _BackgroundOwnerPlannerMixin:
         cap = cap if math.isfinite(cap) and cap > 0 else 0.0
         signature = self._owner_planner_signature(scheduler) if cap else None
         changed = key in signatures and signatures[key] != signature
-        reset = active or changed or not cap or signature is None or bool(self._lane_retry.count(str(key)))
+        reset = (active or changed or not cap or signature is None
+                 or self._lane_retry.count(str(key)) > len(self._lane_retry.cooling(str(key))))
         if reset:
             streaks[key], checks[key] = 0, 0.0
         wait = not reset and time.monotonic() < checks.get(key, 0.0)
@@ -1468,7 +1469,8 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
                         # 同一原就绪查询取一个工位即可在读观察前返回已有 wake，所有准入门保持原样。
                         ready = scheduler.ready_thread_ids(now=planned_at, limit=1)
                     streak = self._owner_idle_streaks.get(owner_key, 0) + 1
-                    delay = min(cap, 0.5 * (2 ** min(streak, 5))) if not reset and not ready else 0.0
+                    idle = not set(ready) - self._lane_retry.cooling(str(owner_key))
+                    delay = min(cap, 0.5 * (2 ** min(streak, 5))) if not reset and idle else 0.0
                     if delay:
                         delay = self._owner_plan_idle_delay(scheduler, delay, planned_at)
                 self._note_owner_plan(owner_key, signature, delay, planned_mono)
@@ -1508,7 +1510,7 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
             return False
 
     # LLM: 执行异常与恢复检查异常共用 typed 退避及脱敏日志，不修改持久 wake、claim 或 Goal。
-    # 函数用途: 记录精确失败车道和恢复条件，环境级故障按车道暂停，普通错误按代码常量 BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS 冷却。
+    # 函数用途: 记录精确失败车道和恢复条件，环境级故障按车道暂停，普通错误从 BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS 起连续翻倍冷却并封顶。
     def _record_thread_failure(self, label: str, thread_id: str, exc: Exception, *,
                                wait_for_inbound_marker: str | None = None) -> None:
         from ..agent.conversation.compact_guard import ConversationCompactError

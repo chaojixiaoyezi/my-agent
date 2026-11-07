@@ -2,6 +2,7 @@
 # 模块用途: 一次加载并冻结后台历史范围，纯投影原生历史；不推进调度、压缩或消息投递状态。
 from __future__ import annotations
 
+import logging
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -26,6 +27,8 @@ from .compact_summary_view import AppliedCompactContext, compact_covered_message
 from .history_seed import freeze_history_source
 from .models import ConversationHistorySeed, ConversationThread, MessageLogEntry
 from .store import ConversationStore
+
+logger = logging.getLogger(__name__)
 
 
 # LLM: 会话历史的"范围裁决"与"展示摘要"必须分开：
@@ -187,7 +190,7 @@ class BackgroundHistorySeedResult:
 # Gateway 与后台从会话层共用任务范围行和 provider 消息投影，不能用有界运行摘要替代完整原生历史。同时：
 #   ① 行选择必须复用既有结构化任务范围（detached named task 的创建锚点 + 精确 lineage），
 #      不能直接吞全 thread 未压缩行（会把后来别的任务的消息带进 detached 工作）；
-#   ② 读取失败给 typed 结果，绝不静默退回摘要；
+#   ② 文件级错误和全坏历史仍给 unreadable；可跳过坏行与前台一样降级并记录 JSONL_ROW_SKIPPED，绝不退回摘要；
 #   ③ 只读：不在后台切片里另起一次压缩（压缩由本片 context_overflow 路径与前台 Compact 负责）。
 # 就绪结果一定带历史种子，保留的 context_bundle 不含消息正文（Recent Messages 只在无种子时渲染）。
 # 函数用途: 为后台片一次读取历史并冻结范围，返回同源种子及可重复纯投影的内部材料。
@@ -236,13 +239,16 @@ def background_conversation_history_seed(
             load_errors=tuple(load_errors),
             detail=f"context bundle failed: {type(exc).__name__}",
         )
-    if load_errors:
-        # 读取/解析错误必须上报，不得被"空历史"掩盖。
+    if load_errors and (any("line_number" not in error and "row_index" not in error for error in load_errors)
+                        or not scoped.get("messages")):
+        # 读取/解析错误必须上报，不得被"空历史"掩盖；只有逐行坏账且仍有可读消息时才与前台一样跳过坏行。
         return BackgroundHistorySeedResult(
             "unreadable",
             load_errors=tuple(load_errors),
             detail="conversation context reported load errors",
         )
+    if load_errors:
+        logger.warning("JSONL_ROW_SKIPPED context=background.history thread=%s rows=%d", thread_id, len(load_errors))
     try:
         decision = task_scope_decision(scope_state, scoped)
         scope = background_compact_scope(request, decision)

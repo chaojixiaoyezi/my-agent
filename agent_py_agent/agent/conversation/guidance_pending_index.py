@@ -103,7 +103,7 @@ class GuidancePendingIndex(ObservationIndex):
                 conn.close()
 
     # LLM: target/status/sequence匹配实际查询；generation不符只丢投影，独立退休日志继续可恢复。
-    # 函数用途: 初始化有界等待的WAL数据库。
+    # 函数用途: 初始化有界等待的WAL数据库。首次安装时一次性删掉旧版本遗留的缺失来源 'null' 行。
     def _open_bounded(self, blocking, deadline):
         import time
         seconds = 5 if blocking else 0
@@ -135,6 +135,7 @@ class GuidancePendingIndex(ObservationIndex):
                     conn.execute('CREATE INDEX IF NOT EXISTS pending_target ON pending(target_type,target_id,status,sequence DESC)')
                     conn.execute('CREATE TABLE IF NOT EXISTS sources(path TEXT PRIMARY KEY,stamp TEXT,offset INTEGER)')
                     conn.execute('CREATE TABLE IF NOT EXISTS errors(path TEXT,offset INTEGER,error TEXT,PRIMARY KEY(path,offset))')
+                    conn.execute("DELETE FROM sources WHERE stamp='null'")
                     conn.commit()
                     _INSTALLED.add(key)
             return conn
@@ -276,7 +277,7 @@ class GuidancePendingIndex(ObservationIndex):
                          (entry.guidance_id, entry.target_type, entry.target_id, status, offset))
 
     # LLM: 持久字节游标每次最多64条；替换/缩短先清投影，append只读新增后缀，坏行保留load_errors。
-    # 函数用途: 回填一个目标队列的有界切片。
+    # 函数用途: 回填一个目标队列的有界切片。来源文件不存在时不保留来源行。
     def _queue_slice(self, conn, target_type, target_id, *, deadline=None):
         path = self.storage.guidance_path(target_type, target_id)
         identity = _identity(path)
@@ -317,8 +318,12 @@ class GuidancePendingIndex(ObservationIndex):
                     offset = handle.tell()
             if _identity(path) != identity:
                 raise GuidanceIndexIncomplete('guidance queue changed during indexing')
+        if identity is None:
+            if old:
+                conn.execute('DELETE FROM sources WHERE path=?', (str(path),))
+            return True
         conn.execute('INSERT OR REPLACE INTO sources VALUES (?,?,?)', (str(path), stamp, offset))
-        return identity is None or offset == identity[2]
+        return offset == identity[2]
 
     # LLM: 只有原receipt锁内的调用方能发布状态；读取候选仍复读回执，不把此表作为授权。
     # 函数用途: 从已提交规范回执维护目标/状态/次序投影。
