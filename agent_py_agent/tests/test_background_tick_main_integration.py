@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.common import cache_capacity
 from agent_py_agent.agent.scheduler import dispatch
 from agent_py_agent.agent.scheduler import repository as scheduler_module
 from agent_py_agent.agent.scheduler.repository import (
@@ -114,8 +115,10 @@ def test_waiting_reads_keep_main_lock_free_snapshot_path(tmp_path, projections, 
 
 
 def test_process_projection_lru_evicts_oldest_owner_and_hit_moves_entry(tmp_path, process_projections, monkeypatch):
-    # 上限随 owner 池登记的常驻容量(owner_agent_pool_max_agents)，这里按 64 登记。
+    # 同时隔离旧池下限和 R0 容量登记，避免先前 owner 池配置影响本例的 64 槽 LRU 边界。
     monkeypatch.setattr(settings_defaults, "_RESIDENT_OWNER_CAPACITIES", [64])
+    monkeypatch.setattr(cache_capacity, "_SLOTS", dict(cache_capacity._SLOTS))
+    cache_capacity.configure_from_config(SimpleNamespace(owner_agent_pool_max_agents=64))
     stores = []
     for index in range(65):
         store = ProcessSessionStore(tmp_path / f"owner-{index}")

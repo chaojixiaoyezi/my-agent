@@ -360,6 +360,7 @@ def test_same_logical_model_turn_preserves_distinct_physical_attempts() -> None:
     class _ContextSink:
         def __init__(self) -> None:
             self.rows: list[dict[str, object]] = []
+            self.conversation_thread_id = "thread-1"
 
         def write_context_usage(self, usage: dict[str, object]) -> bool:
             self.rows.append(dict(usage))
@@ -382,6 +383,8 @@ def test_same_logical_model_turn_preserves_distinct_physical_attempts() -> None:
             request_id="request-1",
             run_id="run-1",
             task_id="task-1",
+            # 上下文投影必须属于请求与出口共同绑定的规范会话；不借空归属出口接收遥测。
+            task_attributes={"conversation_thread_id": sink.conversation_thread_id},
             # 门槛1 后记账走 model_visible_context_tokens, 需 run snapshot;
             # text 协议下口径退化为 estimate_tokens(prompt), 不影响本测试意图
             # (逻辑 turn 去重 + 物理 attempt 计数)。
@@ -403,6 +406,8 @@ def test_same_logical_model_turn_preserves_distinct_physical_attempts() -> None:
     assert [record.metadata["physical_attempt"] for record in records] == [1, 2]
     assert len(sink.rows) == 2
     assert all(row["schema"] == "model_visible_context_usage.v1" for row in sink.rows)
+    assert all(row["thread_id"] == sink.conversation_thread_id for row in sink.rows)
+    assert all(row["producer"] == {"scope": "main", "agent_run_id": "run-1"} for row in sink.rows)
     assert [row["current_tokens"] for row in sink.rows] == [
         records[0].input_tokens,
         records[1].input_tokens,
