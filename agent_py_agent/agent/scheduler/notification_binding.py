@@ -61,3 +61,19 @@ def bound_notification_thread(agent, value, *, follow_latest_channel_session=Tru
             resolved.owner_id != thread.owner_id or resolved.owner_home != thread.owner_home):
         raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')
     return thread
+
+
+def enqueue_completed_notification(agent, *, owner_id, event_kind, event_id, payload):
+    """主投递完成后追加独立通知；故障不传播，不借消息正文推导 owner 或事件身份。"""
+    if not bool(getattr(getattr(agent, 'config', None), 'notify_delivery_enabled', False)):
+        return
+    try:
+        if owner_id != agent.home_paths.owner_id:
+            return
+        from ..business_spaces.gap158_w6_notify import enqueue_event
+        enqueue_event(agent, owner_id=owner_id, event_kind=event_kind, event_id=event_id,
+                      payload=payload)
+    except Exception as exc:
+        # 通知是原投递之后的独立副作用，只记录类型，避免 URL、密钥或消息正文进入日志。
+        import logging
+        logging.getLogger(__name__).warning('notify enqueue failed: %s', type(exc).__name__)

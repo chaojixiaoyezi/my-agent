@@ -350,6 +350,76 @@ class RuntimeDeliveryMixin:
         return [self._outbox_row_to_dict(row) for row in rows]
 
     @staticmethod
+    def _ensure_scoped_outbox_indexes(conn):
+        """W0 尚未合入时补齐相同索引；不改变已有投递状态或旧方法语义。"""
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_outbox_scope_owner '
+                     'ON outbox_entries(scope, owner_id, created_at, outbox_id)')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_outbox_scope_due '
+                     'ON outbox_entries(scope, owner_id, status, next_retry_at, created_at, outbox_id)')
+
+    def prepare_outbox_pages(self):
+        """写入消费者初始化时提交 W0 缺失的兼容索引；只读分页永不执行 DDL。"""
+        with self._runtime_connection() as conn:
+            self._ensure_scoped_outbox_indexes(conn)
+            conn.commit()
+
+    def list_outbox_page(self, *, scope, owner_id='', status='', after=None, limit=50):
+        """按准确 scope/owner 的复合键取有界窗口；空 owner 不是跨用户通配符。"""
+        import math
+
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError('outbox page limit must be in 1..100')
+        clauses, args = ['scope = ?', 'owner_id = ?'], [scope, owner_id]
+        if status:
+            clauses.append('status = ?')
+            args.append(status)
+        if after is not None:
+            if (not isinstance(after, (tuple, list)) or len(after) != 2
+                    or isinstance(after[0], bool) or not isinstance(after[0], (float, int))
+                    or not math.isfinite(after[0]) or not isinstance(after[1], str)):
+                raise ValueError('invalid outbox keyset')
+            clauses.append('(created_at, outbox_id) > (?, ?)')
+            args.extend(after)
+        with self._runtime_connection() as conn:
+            rows = conn.execute(
+                'SELECT * FROM outbox_entries WHERE ' + ' AND '.join(clauses)
+                + ' ORDER BY created_at, outbox_id LIMIT ?', (*args, limit + 1)).fetchall()
+        page = [self._outbox_row_to_dict(row) for row in rows[:limit]]
+        next_after = (page[-1]['created_at'], page[-1]['outbox_id']) if len(rows) > limit else None
+        return page, next_after
+
+    def claim_outbox_for_scope(self, *, scope, owner_id, claimed_by, batch_size=10, now=None,
+                               outbox_id=''):
+        """新消费者只领本 scope/owner 的到期行，不能抢走原通道消费者的投递。"""
+        if type(batch_size) is not int or not 1 <= batch_size <= 100:
+            raise ValueError('outbox claim batch must be in 1..100')
+        current = time.time() if now is None else now
+        claimed = []
+        with self._runtime_connection() as conn:
+            self._ensure_scoped_outbox_indexes(conn)
+            target_clause = ' AND outbox_id = ?' if outbox_id else ''
+            target_args = (outbox_id,) if outbox_id else ()
+            rows = conn.execute(
+                "SELECT * FROM outbox_entries WHERE scope = ? AND owner_id = ? "
+                "AND status IN ('PENDING', 'FAILED') AND next_retry_at <= ? "
+                + target_clause + ' ORDER BY next_retry_at, created_at, outbox_id LIMIT ?',
+                (scope, owner_id, current, *target_args, batch_size)).fetchall()
+            for row in rows:
+                changed = conn.execute(
+                    "UPDATE outbox_entries SET status = 'IN_FLIGHT', claimed_at = ?, "
+                    'claimed_by = ?, attempts = attempts + 1, updated_at = ? '
+                    "WHERE outbox_id = ? AND scope = ? AND owner_id = ? "
+                    "AND status IN ('PENDING', 'FAILED') AND next_retry_at <= ?",
+                    (current, claimed_by, current, row['outbox_id'], scope, owner_id, current))
+                if changed.rowcount == 1:
+                    item = self._outbox_row_to_dict(row)
+                    item.update(status=OUTBOX_IN_FLIGHT, attempts=item['attempts'] + 1,
+                                claimed_at=current, claimed_by=claimed_by, updated_at=current)
+                    claimed.append(item)
+            conn.commit()
+        return claimed
+
+    @staticmethod
     def _outbox_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         return {
             "outbox_id": str(row["outbox_id"]),

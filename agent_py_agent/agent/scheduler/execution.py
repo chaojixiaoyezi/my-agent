@@ -35,7 +35,7 @@ def close_unstarted_task(service, run: dict, *, now: float) -> None:
 def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: float):
     # LLM: 原wake义务优先，只有新工作写started；通知的原TaskLink保持active到确认或明确结束，不另建任务。
     # 函数用途: 分离一次实际工作与其失败通知，重启后不重新执行失败业务。
-    def run_once(kwargs):
+    def run_work(kwargs):
         from ..conversation.required_user_action import required_notice
         from ..conversation.runtime import _run_request
         from .precheck import admit_prechecked_work
@@ -57,7 +57,41 @@ def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: flo
             return dependencies.run_once(kwargs)
         return admission if admission is not False else None
 
+    def run_once(kwargs):
+        # run_work 返回时原后台 sender 已经完成；仅消费它的结构化提交回执。
+        report = run_work(kwargs)
+        _queue_completed_delivery(agent, claim.run, kwargs.get('wake_signal'), report)
+        return report
+
     return replace(dependencies, run_once=run_once)
+
+
+def _queue_completed_delivery(agent, run, signal, receipt):
+    """只在真实提交后发出 scheduler_delivery 事件，不把模型返回或待重投当送达。"""
+    if not bool(getattr(getattr(agent, 'config', None), 'notify_delivery_enabled', False)):
+        return
+    from ..conversation.models import BackgroundDeliveryCommit, BackgroundMainAgentReport
+
+    if isinstance(receipt, BackgroundMainAgentReport):
+        complete = (receipt.wake_handled and receipt.task_id == run['run_id']
+                    and receipt.thread_id == run['thread_id'])
+    elif isinstance(receipt, BackgroundDeliveryCommit):
+        complete = not receipt.outbox_frozen
+    else:
+        return
+    complete = (complete and receipt.commit_kind in {'external_delivery', 'canonical_record'}
+                and (bool(receipt.message_id) or receipt.delivery_status == 'sent'))
+    if not complete:
+        return
+    event_id = (signal.get('wake_signal_id', '') if isinstance(signal, dict)
+                else getattr(signal, 'wake_signal_id', '')) or receipt.message_id
+    if not event_id:
+        return
+    from .notification_binding import enqueue_completed_notification
+    enqueue_completed_notification(agent, owner_id=agent.home_paths.owner_id,
+        event_kind='scheduler_delivery', event_id=event_id,
+        payload={'job_id': run['job_id'], 'run_id': run['run_id'],
+                 'delivery_status': receipt.delivery_status, 'message_id': receipt.message_id})
 
 
 # LLM: 调用点须已等 worker 交回；清理只处理 quiescent attempt，失败记录类型且不掩盖原异常。
@@ -306,8 +340,10 @@ def _commit_target_result(agent, service, claim, kwargs, output):
         idempotency_key=background_delivery_idempotency_key(request))
     dependencies = BackgroundDeliveryDependencies(agent, service.conversation_store, agent.delivery_service,
         lambda _request: service.conversation_store.tasks.load(claim.run_id).status)
-    return record_background_response(dependencies, request, context, output, deliver=True,
+    commit = record_background_response(dependencies, request, context, output, deliver=True,
         delivery_reason='tool_rule_result', local_transcript_only=scheduled_local_delivery(agent, request))
+    _queue_completed_delivery(agent, claim.run, getattr(request, 'wake_signal', None), commit)
+    return commit
 
 
 # LLM: 来源按原creator冻结；缺源只沿认证目标固定同一actor，旧work仍须双引用且queued未claim，owner/topic门不放宽。
