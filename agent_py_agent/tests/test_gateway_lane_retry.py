@@ -20,7 +20,7 @@ from agent_py_agent.agent.settings.model_profiles import ModelProfileError
 from agent_py_agent.cli import gateway_lane_retry
 
 
-@pytest.mark.parametrize("error", [ModelNotConfiguredError(), ModelProfileError("模型引用已删除")])
+@pytest.mark.parametrize("error", [ModelNotConfiguredError()])
 def test_missing_model_waits_for_configuration_not_elapsed_time(monkeypatch, error):
     retries = gateway_lane_retry.BackgroundLaneRetry()
     now = [100.0]

@@ -16,13 +16,13 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 
 from ..agent.backends.errors import (
+    ModelNotConfiguredError,
     is_provider_environment_fault,
     provider_error_http_status,
 )
 from ..agent.conversation.compact_guard import ConversationCompactError, is_provider_quota_failure
 from ..agent.gateway_parts.loop_health import loop_health
 from ..agent.runtime_db.operations import RuntimeRecoveryRequiredError
-from ..agent.settings.thread_model_selection import is_model_configuration_unavailable
 from ..agent.user_space.owner_quota import OwnerQuotaUnavailable
 
 # 环境级故障暂停后的探测间隔：首次 60 秒，每次探测再失败翻倍，封顶 900 秒。安全兜底用内部常量，不进配置。
@@ -197,7 +197,8 @@ def _next_failure(previous: _LaneFailure | None, exc: Exception, delay: float) -
         count = previous.wait_count + 1 if previous is not None and previous.waiting_for_storage else 1
         interval = min(30.0, 2.0 ** min(count - 1, 5))
         return _LaneFailure(now + interval, False, waiting_for_storage=True, wait_count=count)
-    if is_model_configuration_unavailable(exc):
+    # 尚未选模型等用户配置；原档案失效（ModelProfileError）必须按普通冷却重试，才能推进毒丸结案。
+    if isinstance(exc, ModelNotConfiguredError):
         return _LaneFailure(0.0, True)
     if not (is_provider_environment_fault(exc) or is_provider_quota_failure(exc)):
         plain = previous is not None and not (previous.waiting_for_model or previous.waiting_for_environment

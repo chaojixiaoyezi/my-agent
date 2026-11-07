@@ -72,7 +72,8 @@
 - `is_provider_transient_error`：网络、5xx、限流（含 `ProviderUsageLimitError`），已由供应退避接管；
 - `ProviderTimeoutError`：供应超时，属于网络类；
 - `compact_guard.is_provider_quota_failure`：额度用完，含大线程压缩调用撞额度的 `ConversationCompactError` 包装，走额度分路；
-- `is_model_configuration_unavailable`：等用户配置模型；
+- `ModelNotConfiguredError`：尚未选定模型，等用户配置；原持久模型引用缺失或目录损坏的
+  `ModelProfileError` 属于确定性失败，和 `DataCorruptionError` 一样累计毒丸计数，不能无限等配置；
 - `RuntimeConflictError` 全族：CAS 或资源占用冲突，包括锁冲突 `RuntimeExecutionBusyError`；
   其中 `RuntimeRecoveryRequiredError` 由恢复闸接管；
 - `InterruptedError`、`BackgroundCompactSliceYield`：取消和压缩让出，本来就不算失败；
@@ -95,7 +96,10 @@ model_profile_id、model_selection_revision 与所选模型连接字段的进程
 压缩调用撞额度的包装也算。暂停只在进程内，重启即清；暂停和恢复各打一行
 `[gateway-lane-retry]`。对应的唤醒尝试照旧记不计数，满 24 小时由连续不计数提醒兜底。
 
-其余一律计数，包括 programmer_bug、`DataCorruptionError`、`ValueError`。
+其余一律计数，包括 programmer_bug、`DataCorruptionError`、`ModelProfileError`、`ValueError`。
+观察批次和普通/Goal 续跑唤醒共用这一分类；到阈值后分别确认观察或归档唤醒并确认其关联观察。
+Gateway 的 base 与其它线程车道都对确定性失败采用普通指数冷却；只有所有就绪线程均在该冷却中时，
+原 pending wake 或到期策略不再把 owner 空闲退避清零。冷却到期、健康线程或新来源仍按原规则立即重规划。
 
 误判的控制：N=5，加上退避一共约 7.5 分钟；瞬时类各有自己的退避；真误判了，一条人工重放命令就能恢复。
 
