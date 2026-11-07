@@ -73,6 +73,8 @@ from .loop_models import (
 from .run_params import run_params_from_values as run_params_from_values
 from .turn_trigger import turn_trigger_recommendation
 
+logger = logging.getLogger(__name__)
+
 
 # LLM: 只允许可信宿主设置 Agent._loop_driver；接收原参数并返回原结果合同，不新增模型字段或工具权限。
 # 类用途: 为宿主替换工具循环实现提供最小可调用协议，默认仍使用原循环。
@@ -248,6 +250,23 @@ def _package_recommendations(request: ToolSectionsRequest) -> str:
     )
 
 
+# LLM: 两个前台边界共用窄异常表；native 与取消必须同对象透传，不修文件、不记录未确认访问。
+# 函数用途: 长期记忆读取失败只降级本轮，告警不含正文并对 finding 去重。
+def _optional_memory_read(read, routed_context):
+    from ...memory_store.jsonl import _NATIVE_MEMORY_ERRORS
+
+    try:
+        return read()
+    except (*_NATIVE_MEMORY_ERRORS, InterruptedError):
+        raise
+    except (OSError, UnicodeError, ValueError, KeyError) as exc:
+        finding = f"long-term memory recall unavailable: {type(exc).__name__}"
+        if finding not in routed_context.findings:
+            routed_context.findings.append(finding)
+        logger.warning("MEMORY_RECALL_DEGRADED type=%s", type(exc).__name__)
+        return []
+
+
 # LLM: Runtime recall uses only active long-term plus formal lesson/HOT under structured scope;
 # task-local and explicit owner memory-off never read the formal repositories or project index.
 # LLM: 前台保留latency_safe正式前缀与隔离总闸；增量规则仅追加到最终runtime尾部，不进入冻结memories或bundle前缀。
@@ -274,10 +293,8 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
         else runtime_long_term_scope(agent.memory, task_id=request.task_id, task_attributes=request.task_attributes)
     )
 
-    long_term_memories = (
-        []
-        if recall_suppressed
-        else (
+    long_term_memories = [] if recall_suppressed else _optional_memory_read(
+        lambda: (
             agent.memory.search_scoped_candidates(
                 request.user_prompt,
                 memory_top_k,
@@ -290,7 +307,8 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
                 memory_top_k,
                 lambda record: long_term_record_matches_scope(record, recall_scope),
             )
-        )
+        ),
+        routed_context,
     )
 
     memories = _formal_memories_for_request(
@@ -634,8 +652,11 @@ def _formal_memories_for_request(
 def _confirm_final_memory_access(agent, memories, recall_scope, fixed_ids, routed_context):
     candidates = [record for record in memories
                   if record.entry_id not in fixed_ids and is_memory_context_admissible(record)]
-    confirmed = agent.memory.confirm_scoped_access(
-        candidates, lambda record: long_term_record_matches_scope(record, recall_scope),
+    confirmed = _optional_memory_read(
+        lambda: agent.memory.confirm_scoped_access(
+            candidates, lambda record: long_term_record_matches_scope(record, recall_scope),
+        ),
+        routed_context,
     ) if candidates else []
     current = {record.entry_id: record for record in confirmed}
     selected = BudgetedMemoryRecords(
