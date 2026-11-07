@@ -2,7 +2,7 @@
 #   三类失败：等模型配置（不靠计时，模型配好即放行）；环境暂停（backends.errors.is_provider_environment_fault 判定的环境级故障，
 #   加上只在车道这层显式并入的额度用完，额度用完按会话层唯一判定 is_provider_quota_failure，含压缩调用撞额度的包装；
 #   会话模型指纹变了立即放行，否则到探测时刻放行一次真实尝试，间隔 60 秒起翻倍封顶 900 秒）；
-#   其余按调用方给的时长冷却。
+#   普通失败从调用方给的时长起步，连续失败逐次翻倍，封顶 LANE_ENVIRONMENT_PROBE_MAX_SECONDS。
 #   分类只看异常类型和结构化状态码；状态不落盘，重启即清。环境暂停与恢复各打一行 [gateway-lane-retry]。
 # 模块用途: 分清等待模型配置、等待环境恢复与普通错误冷却，避免后台对坏掉的环境反复发请求；不新增调度器、模型调用或落盘状态。
 
@@ -58,7 +58,7 @@ class BackgroundLaneRetry:
         self._lock = threading.Lock()
 
     # LLM: 分类顺序固定：先判等模型配置（ModelNotConfiguredError 也命中环境级判定，必须先走这条），再判环境级故障或额度用完，
-    #   其余按 delay 冷却；远端 400/413 这类请求问题、临时断线都不是环境故障，保持普通冷却。环境暂停打一行日志。
+    #   其余从 delay 起连续翻倍冷却并封顶；远端 400/413 这类请求问题、临时断线都不是环境故障。环境暂停打一行日志。
     # 函数用途: 失败后记住这条车道要等配置、等环境恢复，还是等一段冷却时间。
     def failed(self, owner: str, thread_id: str, exc: Exception, *, delay: float,
                wait_for_inbound_marker: str | None = None) -> None:
@@ -164,6 +164,15 @@ class BackgroundLaneRetry:
         with self._lock:
             return sum(key[0] == owner for key in self._failures)
 
+    # LLM: 只返回普通计时冷却且尚未到点的线程；等模型/环境/额度存储/新输入的条件型记录不算，仍按原规则每拍复查。
+    # 函数用途: 告诉规划方哪些就绪线程还在普通失败冷却里，全部在冷却时可以走空闲退避而不是每秒重规划。
+    def cooling(self, owner: str) -> frozenset[str]:
+        now = time.monotonic()
+        with self._lock:
+            return frozenset(key[1] for key, row in self._failures.items() if key[0] == owner and now < row.retry_at
+                             and not (row.waiting_for_model or row.waiting_for_environment
+                                      or row.waiting_for_storage or row.waiting_for_user_input))
+
     # LLM: 只丢弃已离开本 supervisor 的 owner 临时投影；不能改原事件和任务。
     # 函数用途: owner 缓存淘汰时一并回收退避记录。
     def retain_owners(self, owners: Iterable[str]) -> None:
@@ -176,7 +185,8 @@ class BackgroundLaneRetry:
 #   显式并入环境暂停：重试同一额度不会恢复，换模型或额度重置后由指纹或探测放行；is_provider_environment_fault 本身不含额度
 #   （毒丸也用它，额度在毒丸那边按瞬时类不计数）。额度用完只读会话层唯一判定 compact_guard.is_provider_quota_failure，
 #   大线程压缩调用撞额度的包装也算。持久策略失败账排除同一组（background_claim._counts_as_policy_failure）。
-#   只有紧接在上一轮环境暂停之后才翻倍（探测失败），否则从 60 秒起；不读异常正文。
+#   环境暂停紧接上一轮环境暂停才翻倍，否则从 60 秒起；普通失败从调用方 delay 起连续翻倍，
+#   封顶 LANE_ENVIRONMENT_PROBE_MAX_SECONDS；切换条件类型后重新起步，不读异常正文。
 # 函数用途: 根据上一条记录和本次异常算出这条车道新的失败记录。
 def _next_failure(previous: _LaneFailure | None, exc: Exception, delay: float) -> _LaneFailure:
     now = time.monotonic()
@@ -190,7 +200,11 @@ def _next_failure(previous: _LaneFailure | None, exc: Exception, delay: float) -
     if is_model_configuration_unavailable(exc):
         return _LaneFailure(0.0, True)
     if not (is_provider_environment_fault(exc) or is_provider_quota_failure(exc)):
-        return _LaneFailure(now + max(0.0, delay), False)
+        plain = previous is not None and not (previous.waiting_for_model or previous.waiting_for_environment
+                                              or previous.waiting_for_storage or previous.waiting_for_user_input)
+        count = previous.wait_count + 1 if plain else 1
+        interval = min(LANE_ENVIRONMENT_PROBE_MAX_SECONDS, max(0.0, delay) * 2.0 ** min(count - 1, 5))
+        return _LaneFailure(now + interval, False, wait_count=count)
     interval = LANE_ENVIRONMENT_PROBE_BASE_SECONDS
     if previous is not None and previous.waiting_for_environment:
         interval = min(previous.probe_interval * 2, LANE_ENVIRONMENT_PROBE_MAX_SECONDS)
