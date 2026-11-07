@@ -256,10 +256,10 @@ def _ordinary_input_control_result(scope, turn_id, *, queued=False, error_code='
                  'input_state': 'queued' if queued else 'unconfirmed', 'active_appended': False})
 
 
-# LLM: 外层持原Gateway T/turn M/task/claim；所有正count/message_id写者以原纯公式取同input T，仅try并持到append末写，既有ordinary冲突不从receipt抄摘要。
-# 函数用途: 与G0原input T→M→queue CAS互斥；queue先则不append，append先则canonical迫使G0延期。
+# LLM: 未提交控制只预留版本；Stop仅供同T内取消JSON成功后的原写者发布；sequencer只try-lock，不持T等待Actor worker。
+# 函数用途: 分开可被拒绝的停止意图与已持久化的停止事实。
 def _control_command_decision(paths, scope, kind, turn_id, *, agent=None):
-    """邮箱只排版本；返回时短门已释放，调用者随后自行进入原 T。"""
+    """预留版本不停止请求；已提交的取消只做非阻塞内存通知。"""
     from ..conversation.conversation_actor import Steer, Stop
     from .request_worker import gateway_conversation_scheduler
 
@@ -267,7 +267,7 @@ def _control_command_decision(paths, scope, kind, turn_id, *, agent=None):
     if scheduler is None:
         return None
     key = "\x1f".join((scope.user_id, scope.channel, scope.conversation_id))
-    command = (Stop if kind == "stop" else Steer)(scope.user_id, key, turn_id)
+    command = (Stop if kind == "stop_committed" else Steer)(scope.user_id, key, turn_id)
     return scheduler.sequencer, key, scheduler.sequencer.decide(command)
 
 
@@ -2608,7 +2608,7 @@ def _mark_request_stopping(
         return _mark_request_stopping_locked(active, scope)
 
 
-# LLM: 在 T 内核对同请求、同运输代次及开放状态；只允许正式绑定在同代次更新，不停止换代后的新执行。
+# LLM: 在T内核同请求/attempt/scope并原子保存取消后才发布Stop；内存try-lock竞争不撤销耐久取消，拒绝/错误不发布。
 # 函数用途: 在已持回合锁时二次校验并写入 closing/cancel 事实。
 def _mark_request_stopping_locked(
     active: _GatewayRequestRecord,
@@ -2652,6 +2652,9 @@ def _mark_request_stopping_locked(
         return False, "停止请求暂时无法保存，请稍后重试。"
     if not updated_ref[0]:
         return False, "当前任务刚刚结束，无需停止。"
+    request_root = active.path.parent.parent
+    paths = gateway_paths_from_root(request_root.parent if request_root.name == "requests" else request_root)
+    _control_command_decision(paths, scope, "stop_committed", request_id)
     return True, ""
 
 
