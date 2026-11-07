@@ -6,17 +6,18 @@ import copy
 import hashlib
 import json
 import logging
+import os
 import threading
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import jsonl_lines, write_private_text_file_atomic
+from ..common.json_io import jsonl_lines, locked_json_path, write_private_text_file_atomic
 from ..gateway_parts.io import (
     locked_file_transition,
     update_json_file_atomic,
@@ -77,6 +78,8 @@ from .models import (
     ThreadTaskLink,
 )
 from .store_io import (
+    LEDGER_ARCHIVE_DIR,
+    archive_ledger_file,
     now,
     safe_file_stem,
 )
@@ -701,6 +704,68 @@ class TaskStore:
             require_existing=True,
         )
         return ConversationThread.from_dict(payload)
+
+    # LLM: 只由维护巡检 ConversationStore.gc_stale_ledger_records 调用（RES-W5：读路径仍绝不修索引）。活动链接文件解析不了
+    #   （与 store_threads._quarantine_thread_resolution_error 同一组错误类型）会让该会话每轮 fail-closed：原 JSON 锁内复核后
+    #   移入 tasks/.ledger_archive，读路径随后按“活动链接缺失”降级；身份不符、权限错误仍拒绝。历史 id 的链接文件已不存在时
+    #   在线程锁内从 task_ids 剔除（活动 id、其它字段与 updated_at 不变）。单个线程失败只记日志，整体不抛异常。
+    # 函数用途: 自愈长寿会话里的坏活动任务链接与幽灵历史链接，返回 (隔离数, 剔除数)。
+    def heal_broken_links(self, threads: Iterable[ConversationThread]) -> tuple[int, int]:
+        try:
+            present = set(os.listdir(self.storage.tasks_dir))
+        except FileNotFoundError:
+            present = set()
+        except OSError as exc:
+            _STORE_LOGGER.warning("TASK_LINK_HEAL_SKIPPED error_type=%s", type(exc).__name__)
+            return 0, 0
+        quarantined = pruned = 0
+        for thread in threads:
+            try:
+                for task_id in thread.active_task_ids:
+                    quarantined += self._quarantine_corrupt_active_link(thread.thread_id, task_id)
+                ghosts = {task_id for task_id in thread.task_ids
+                          if task_id not in thread.active_task_ids and f"{task_id}.json" not in present}
+                if ghosts:
+                    pruned += self._prune_ghost_task_ids(thread.thread_id, ghosts)
+            except Exception as exc:  # noqa: BLE001 - 单个线程坏账不阻断其它线程的维护
+                _STORE_LOGGER.warning("TASK_LINK_HEAL_FAILED thread=%s error_type=%s",
+                                      thread.thread_id, type(exc).__name__)
+        return quarantined, pruned
+
+    # LLM: 先无锁读一次，只有读出坏账才进原 JSON 锁（非阻塞，忙就留到下个维护周期）复核并移动；字节保留在归档目录。
+    # 函数用途: 把一条无法解析的活动任务链接移入归档目录，返回隔离条数（0 或 1）。
+    def _quarantine_corrupt_active_link(self, thread_id: str, task_id: str) -> int:
+        if self.load_report(task_id)[1] is None:
+            return 0
+        path = self.storage.task_path(task_id)
+        with locked_json_path(path, blocking=False):
+            _link, error = self.load_report(task_id)
+            if (path.is_symlink() or error is None
+                    or error.get("error_type") not in {"JSONDecodeError", "UnicodeDecodeError", "DataCorruptionError"}
+                    or not archive_ledger_file(path, self.storage.tasks_dir / LEDGER_ARCHIVE_DIR)):
+                return 0
+        _STORE_LOGGER.warning("TASK_LINK_QUARANTINED thread=%s task=%s error_type=%s",
+                              thread_id, task_id, error.get("error_type"))
+        return 1
+
+    # LLM: 在线程文件锁内复核：只剔除仍非活动且链接文件此刻仍不存在的 id；不改 updated_at，避免维护把旧会话顶到最近列表。
+    # 函数用途: 从线程历史任务索引剔除幽灵 id，返回剔除数。
+    def _prune_ghost_task_ids(self, thread_id: str, ghosts: set[str]) -> int:
+        removed = 0
+
+        # 函数用途: 持锁计算保留下来的历史 id，未变化时原样返回。
+        def updater(data: dict[str, Any]) -> dict[str, Any]:
+            nonlocal removed
+            latest = ConversationThread.from_dict(data)
+            kept = tuple(task_id for task_id in latest.task_ids if task_id not in ghosts
+                         or task_id in latest.active_task_ids or self.storage.task_path(task_id).exists())
+            removed = len(latest.task_ids) - len(kept)
+            return replace(latest, task_ids=kept).to_dict() if removed else data
+
+        update_json_file_atomic(self.storage.thread_path(thread_id), updater, require_existing=True)
+        if removed:
+            _STORE_LOGGER.warning("TASK_LINK_GHOSTS_PRUNED thread=%s removed=%d", thread_id, removed)
+        return removed
 
     # LLM: pending只来自独立typed宿主参数并仅新建时初始化；已有link即便缺键也原样保留，不从request读选择权限。
     # LLM: 主根身份只接 typed keyword，原锁内先复核不可改写；request/模型 attrs 同名字段不能登记身份。
