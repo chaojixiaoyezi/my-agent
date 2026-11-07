@@ -141,8 +141,6 @@ def env(tmp_path, monkeypatch):
 
     monkeypatch.setattr(v13, "v13_require_access", access)
     monkeypatch.setattr(v13, "v13_require_admin", admin)
-    monkeypatch.setattr(tools.mcp, "v13_require_access", access)
-    monkeypatch.setattr(tools.mcp, "v13_require_admin", admin)
 
     def factory(action="create", params=None, *, owner=None, key=None, host=None):
         owner = owner or resolve_owner_home(root)

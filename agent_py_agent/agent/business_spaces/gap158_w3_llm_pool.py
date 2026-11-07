@@ -6,7 +6,6 @@ from pathlib import Path
 
 from ..common.json_io import locked_json_path
 from ..conversation.session_tasks import SESSION_TASK_TERMINAL_STATUSES
-from ..gateway_parts.business_api_v13 import v13_require_access, v13_require_admin
 from ..llm_scale import hot_path
 from ..plugin_host.errors import HostAPIError
 from ..settings.config_io import load_simple_yaml
@@ -58,11 +57,15 @@ def _policy(call):
 
 
 def get_retry_policy(call):
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     v13_require_access(call)
     return {'policy': _policy(call)}
 
 
 def set_retry_policy(call):
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     v13_require_access(call)
     values = _validate_backoff(call.params['backoff_seconds'])
     path = _settings_path(call)
@@ -79,6 +82,8 @@ def _rate_limiter(call):
 
 
 def reset_pool(call):
+    from ..gateway_parts.business_api_v13 import v13_require_admin
+
     v13_require_admin(call)
     scope = call.params['scope']
     if scope == 'owner_rate_bucket':
@@ -100,6 +105,7 @@ def reset_pool(call):
 def pool_status(call):
     """只读原 owner 的有界模型明细；窗口之外的历史明确标记 partial。"""
     from ..agent_core.model.call_runtime import model_call_ledger
+    from ..gateway_parts.business_api_v13 import v13_require_access
 
     v13_require_access(call)
     limiter = hot_path._limiter()
@@ -128,6 +134,8 @@ def pool_status(call):
 
 def _task_thread(call):
     """准确点查原会话任务和目标线程；跨 owner 与缺失返回同一错误。"""
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     v13_require_access(call)
     store = getattr(call.context.host, 'conversation_store', None)
     if store is None:
@@ -196,6 +204,7 @@ def idempotent_handler(handler):
         import hashlib
         import json
 
+        from ..gateway_parts.business_api_v13 import v13_require_access, v13_require_admin
         from .v13_store import v13_store_for
 
         v13_require_access(call)

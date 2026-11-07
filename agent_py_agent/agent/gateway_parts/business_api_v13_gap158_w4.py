@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from ..business_spaces import gap158_w4_agent_prompts as prompts
 from ..business_spaces import gap158_w4_visibility as visibility
-from .business_api_v13 import V13Action
+from .business_api_v13_contracts import V13Action
 
 V13_DEFS = {'AgentVisibility': {'type': 'object',
                      'properties': {'key': {'type': 'string', 'minLength': 1, 'maxLength': 64},

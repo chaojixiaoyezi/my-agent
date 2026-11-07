@@ -26,7 +26,6 @@ from ..common.nofollow_fs import (
     write_bytes_atomic_beneath,
 )
 from ..conversation.business_access import BusinessError
-from ..gateway_parts.business_api_v13 import v13_require_access
 from ..plugin_host.workspace_v2_handlers import _forbid_internal
 from ..tooling.mcp_protocol import MCPError
 from .gap158_w8_acp_protocol import AcpTransport, normalize_update
@@ -177,6 +176,8 @@ class AcpBridge:
         return target
 
     def _owned(self, call, records=None):
+        from ..gateway_parts.business_api_v13 import v13_require_access
+
         identifier = call.params['session_id']
         record = ((records or {}).get(identifier) if records is not None
                   else v13_store_for(call, 'owner').get('acp_sessions', identifier))
@@ -222,6 +223,8 @@ class AcpBridge:
             return None
 
     def invoke(self, call):
+        from ..gateway_parts.business_api_v13 import v13_require_access
+
         v13_require_access(call)
         if call.owner_id != self.owner_id or Path(call.owner_home).resolve() != self.owner_home:
             raise BusinessError('RESOURCE_NOT_FOUND')
@@ -362,6 +365,8 @@ class AcpBridge:
         return result
 
     def _create(self, call, records, store):
+        from ..gateway_parts.business_api_v13 import v13_require_access
+
         root = self._project(call.params['project_root'])
         self._agent(call.params['agent_id'])
         ensure = _digest([call.owner_id, str(root), call.params['agent_id'], call.params.get('client_session_key', '')])
@@ -891,6 +896,8 @@ class AcpBridge:
 
 def bridge_for(call):
     """只从当前已发行宿主取 owner 实例，参数不能注入桥接器或选取别人的缓存。"""
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     v13_require_access(call)
     host = call.context.host
     # 同一宿主并发首次创建也必须合流；锁属于模块，不包含会话或 owner 数据。

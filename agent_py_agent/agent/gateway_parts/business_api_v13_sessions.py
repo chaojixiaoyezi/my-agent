@@ -2,7 +2,7 @@
 from ..conversation.business_access import BusinessError
 from ..plugin_host.business_action_specs import BUSINESS_LIST_DEFAULT_ROWS, BUSINESS_LIST_MAX_ROWS
 from ..plugin_host.errors import HostAPIError
-from .business_api_v13 import V13Action, v13_require_access
+from .business_api_v13_contracts import V13Action
 
 _SESSION_ITEM = {
     'type': 'object',
@@ -66,6 +66,8 @@ def _ready(call):
 # LLM: 读取前复核原上下文，只调用context.host的当前请求闭包，不回退缓存宿主；保留W1结果及既有错误码。
 # 函数用途: 返回当前认证viewer在本owner内的会话列表业务投影。
 def _list(call):
+    from .business_api_v13 import v13_require_access
+
     v13_require_access(call)
     params = call.params
     try:

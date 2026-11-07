@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from itertools import combinations
 from types import SimpleNamespace
 
@@ -368,23 +368,40 @@ def test_current_thread_task_context_outranks_transient_agent_attributes(tmp_pat
 
 
 @pytest.mark.parametrize('enabled', [False, True])
-def test_core_installs_sink_only_when_enabled(tmp_path, monkeypatch, enabled):
+def test_core_sink_tracks_live_switch_without_replacing_ledger(tmp_path, monkeypatch, enabled):
     from agent_py_agent.agent import core
-    from agent_py_agent.agent.settings.config import AgentConfig
-
-    @dataclass
-    class Config(AgentConfig):
-        llm_call_records_enabled: bool = enabled
+    from agent_py_agent.agent.settings import live_switches as live
+    from agent_py_agent.agent.settings.config import load_config
 
     monkeypatch.setattr(core, 'home_paths', lambda _root: SimpleNamespace(root=tmp_path))
     monkeypatch.setattr(core, 'runtime_guard_policy', lambda **_kw: None)
     monkeypatch.setattr(core, '_export_model_endpoint_env', lambda _c: None)
-    installed = []
-    monkeypatch.setattr(records, 'make_record_sink', lambda _agent: installed.append(True) or (lambda _r: None))
-    agent = SimpleNamespace()
-    core._initialize_agent_construction(agent, Config(my_agent_home=str(tmp_path)), tmp_path, None, None)
-    assert installed == ([True] if enabled else [])
-    assert (agent._model_call_ledger.options.record_sink is not None) is enabled
+    path = tmp_path / 'agent.yaml'
+    path.write_text(f'llm_call_records_enabled: {str(enabled).lower()}\n', encoding='utf-8')
+    config = replace(load_config(path), my_agent_home=str(tmp_path))
+    agent = _host(tmp_path)
+    core._initialize_agent_construction(agent, config, tmp_path, None, None)
+    live.register_live_config(agent.config)
+    ledger = agent._model_call_ledger
+    assert ledger.options.record_sink is not None
+    database = runtime_db_path(agent.home_paths.owner_home_dir)
+    assert not database.exists()
+    expected = []
+    for index, active in enumerate((enabled, not enabled, enabled)):
+        path.write_text(f'llm_call_records_enabled: {str(active).lower()}\n', encoding='utf-8')
+        live.refresh_live_switches(agent.config, force=True)
+        assert agent.config.llm_call_records_enabled is active
+        call_id = f'toggle-{index}'
+        ledger.started(ModelCallStartedParams(call_id, 'fake', 'model-a', 4))
+        ledger.finished(ModelCallFinishParams(call_id, output_tokens=2))
+        assert agent._model_call_ledger is ledger
+        if active:
+            expected.append(call_id)
+        if expected:
+            with records._database(agent.home_paths.owner_home_dir) as conn:
+                assert [row[0] for row in conn.execute('SELECT call_id FROM llm_call_records ORDER BY call_id')] == expected
+        else:
+            assert not database.exists()
 
 
 def test_sparse_and_empty_filter_combinations_have_bounded_indexed_pages(tmp_path):

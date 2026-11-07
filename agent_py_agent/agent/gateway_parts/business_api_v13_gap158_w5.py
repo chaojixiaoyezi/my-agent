@@ -4,7 +4,7 @@ from __future__ import annotations
 from ..business_spaces import gap158_w5_custom_tools as custom
 from ..business_spaces import gap158_w5_mcp_servers as mcp
 from ..business_spaces import gap158_w5_skill_packages as skills
-from .business_api_v13 import V13Action
+from .business_api_v13_contracts import V13Action
 
 
 def _custom_ready(call):

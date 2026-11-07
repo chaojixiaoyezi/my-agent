@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from ..business_spaces import gap158_w7_fs_watch as fs_watch
 from ..business_spaces import gap158_w7_scm as scm
-from .business_api_v13 import V13Action
+from .business_api_v13_contracts import V13Action
 
 V13_COLLECTIONS = {}
 

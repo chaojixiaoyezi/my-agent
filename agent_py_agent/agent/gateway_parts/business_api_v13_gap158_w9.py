@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from ..business_spaces import gap158_w9_collab_presence as presence
 from ..business_spaces import gap158_w9_web_terminal as terminal
-from .business_api_v13 import V13Action
+from .business_api_v13_contracts import V13Action
 
 V13_COLLECTIONS = {"collab_doc_state": "owner"}
 V13_DEFS = {'WebTerminalSession': {'type': 'object',

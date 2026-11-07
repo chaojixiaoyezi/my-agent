@@ -14,7 +14,6 @@ from itertools import combinations, islice
 from pathlib import Path
 from types import SimpleNamespace
 
-from ..gateway_parts.business_api_v13 import v13_require_access
 from ..plugin_host.errors import HostAPIError
 from ..runtime_context import current_task_attributes
 from ..runtime_db.schema import runtime_db_path
@@ -238,6 +237,8 @@ def _filters(call):
 
 
 def _list(conn, call):
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     limit = call.params.get('limit', 50)
     if type(limit) is not int or not 1 <= limit <= 100:
         raise HostAPIError('INVALID_SCHEMA')
@@ -290,6 +291,8 @@ def _by_model(conn, call):
 
 def execute(call):
     """供 V13 分片调用；身份与权限始终来自已签发 call，不消费 params 中的 owner。"""
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     v13_require_access(call)
     if call.action == 'llm_records.list' and not bool(
             getattr(call.context.host.config, 'llm_call_records_enabled', False)):

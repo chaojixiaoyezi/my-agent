@@ -19,7 +19,6 @@ from types import SimpleNamespace
 
 from ..common.nofollow_fs import open_directory_beneath, open_readonly_file_beneath
 from ..conversation.business_access import BusinessError
-from ..gateway_parts.business_api_v13 import v13_require_access
 from ..path_access_policy import HOST_CONFIG_OWNER_PARTS, PathAccessPolicy
 from ..plugin_host.errors import HostAPIError
 from ..plugin_host.workspace_v2_handlers import _forbid_internal
@@ -200,6 +199,8 @@ def _cancel_subscription(state, sub):
 # LLM: 状态只存数据，以 owner/home 为稳定键、epoch 原位撤销；每次只惰性清理本人，不扫描所有 owner。
 # 函数用途: 跨请求宿主复用有界订阅状态，并在授权与代次变化时拒绝旧结果。
 def _state(call):
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     v13_require_access(call)
     epoch = current_epoch(call)
     owner = _owner_key(call)
@@ -390,6 +391,8 @@ def subscribe(call):
     # LLM: 控制锁内生成订阅，失败不能登记半成品或幂等回执。
     # 函数用途: 校验根并创建有界快照。
     def create(state):
+        from ..gateway_parts.business_api_v13 import v13_require_access
+
         parts = confined_parts(call.params['root'])
         root = workspace_root(call)
         policy = _path_policy(call)
@@ -416,6 +419,8 @@ def subscribe(call):
 # 函数用途: 拒绝撤权、换代或策略变化之后的旧订阅结果。
 def _still_current(call, state, sub):
     """扫描/读文件之后重核原授权及原代次，不把异步结果当作新的访问凭据。"""
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     v13_require_access(call)
     if current_epoch(call) != sub.owner_epoch:
         _state(call)

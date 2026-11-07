@@ -1035,6 +1035,17 @@ agent_py_agent/
 
 ## Tree
 
+### 2026-11-07 CI 导入与热重载修复
+
+```text
+agent_py_agent/
+|-- agent/gateway_parts/
+|   `-- business_api_v13_contracts.py # 注册器和静态分片共用的不可变调用/动作声明，无注册副作用
+`-- tests/
+    `-- test_gap_w1_business_api_routes.py # 全新解释器导入顺序、完整注册与真实 HTTP 业务往返回归
+docs/tasks/HANDOFF_CI_FIX_20261107.md # 本地 CI 修复的范围、验证结果与集成边界
+```
+
 ### 2026-11-04 v1.5 新增生产模块与 API 对接 Skill
 
 以下登记当前源码中的新增入口及职责，不代表真实通道、完整业务链路或部署已验收；原有历史地图保持不变。
@@ -1616,6 +1627,11 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 ```
 
 ## 关键文件说明
+
+### v13 动作声明与冷启动回归（2026-11-07）
+
+- `agent_py_agent/agent/gateway_parts/business_api_v13_contracts.py`：唯一的 `V13Action`、`V13Call` 声明；分片导入声明时不初始化注册器，实际调用仍沿原授权与派发入口。
+- `agent_py_agent/tests/test_gap_w1_business_api_routes.py`：独立进程先导入 HTTP、主注册器或任一静态分片，再构造 HTTP 服务，核对动作对象、完整注册和重复安装；复用原 HTTP 夹具验证 W1 业务信封。
 
 ### MEGA 统一入口（2026-11-01）
 

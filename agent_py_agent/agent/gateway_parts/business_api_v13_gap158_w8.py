@@ -1,6 +1,6 @@
 """W8 ACP 静态 DTO：由派工合同逐字段投影，不在运行时读取仓外文件。"""
 from ..business_spaces.gap158_w8_acp_bridge import bridge_for
-from .business_api_v13 import V13Action
+from .business_api_v13_contracts import V13Action
 
 
 def _ready(call):

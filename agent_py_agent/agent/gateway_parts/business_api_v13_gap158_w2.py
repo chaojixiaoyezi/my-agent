@@ -1,6 +1,6 @@
 """W2 命令审批与目标范围的静态契约；仅由 W0 显式合入，不在运行时读取任务文件。"""
 from ..business_spaces.gap158_w2_policy_store import dispatch
-from .business_api_v13 import V13Action
+from .business_api_v13_contracts import V13Action
 
 # Coverage/Cursor 沿用 V13 共享定义，不能把 x-reuse 当作真实 schema。
 V13_DEFS = {'JudgeConfig': {'type': 'object',

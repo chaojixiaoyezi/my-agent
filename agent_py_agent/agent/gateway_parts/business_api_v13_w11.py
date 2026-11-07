@@ -2,7 +2,7 @@
 from functools import partial
 from importlib import import_module
 
-from .business_api_v13 import V13Action
+from .business_api_v13_contracts import V13Action
 
 
 # LLM: 按静态合同定位处理函数；只在实际调用时导入分片领域模块。

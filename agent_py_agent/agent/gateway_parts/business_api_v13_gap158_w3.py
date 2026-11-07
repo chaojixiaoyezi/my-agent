@@ -1,7 +1,7 @@
 """W3 静态 DTO 来自分派接口合同；运行时不依赖外部任务文件。"""
 from ..business_spaces import gap158_w3_llm_pool as pool
 from ..business_spaces import gap158_w3_side_questions as side
-from .business_api_v13 import V13Action
+from .business_api_v13_contracts import V13Action
 
 V13_COLLECTIONS = {"side_questions": "owner"}
 V13_DEFS = {'AdmissionStatus': {'additionalProperties': False,
