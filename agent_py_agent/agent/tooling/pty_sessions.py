@@ -113,6 +113,8 @@ class PtySession:
     # macOS 上父进程保留的一份 slave FD（-1 表示未保留），与 master 一起在尾部排空后关闭。
     tail_hold_fd: int = -1
     idle_timeout_seconds: float | None = None
+    # 保持 resize 返回原会话的契约；额外携带同一次 FD 借用内的内核读回值。
+    resize_readback: tuple[int, int] | None = None
 
     def append(self, chunk: bytes) -> None:
         with self.lock:
@@ -494,8 +496,8 @@ class PtySessionRegistry:
         session.last_active_at = time.time()
         return session
 
-    # LLM: TIOCSWINSZ持FD借用；不持写串行锁阻止输出排空，ESC仍不是真实resize。
-    # 函数用途: 调整当前可信会话里指定 PTY 的字符行列，并让交互程序收到真实窗口尺寸变化。
+    # LLM: TIOCSWINSZ/TIOCGWINSZ 共用 FD 借用；保留原 PtySession 返回值和旧调用方属性访问。
+    # 函数用途: 调整终端并在返回会话的 resize_readback 中附加实际行列，不用输入参数冒充读回值。
     def resize(
         self,
         session_id: str,
@@ -515,6 +517,9 @@ class PtySessionRegistry:
             if session.closed or session.process.poll() is not None:
                 return session
             fcntl.ioctl(session.master_fd, termios.TIOCSWINSZ, packed)
+            actual = fcntl.ioctl(session.master_fd, termios.TIOCGWINSZ, struct.pack("HHHH", 0, 0, 0, 0))
+            actual_rows, actual_columns, _, _ = struct.unpack("HHHH", actual)
+            session.resize_readback = (actual_columns, actual_rows)
         session.last_active_at = time.time()
         return session
 
