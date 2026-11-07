@@ -618,7 +618,9 @@ def locked_json_path(path: Path, *, blocking: bool = True, birth_commit: Callabl
     退出释放。临界区内落盘请用 write_json_file_atomic_unlocked(锁已持有)。"""
 
     options = {} if birth_commit is None else {"birth_commit": birth_commit}
-    with _locked_json_path(path, blocking=blocking, category=category, **options):
+    if category is not None:
+        options["category"] = category
+    with _locked_json_path(path, blocking=blocking, **options):
         yield
 
 
