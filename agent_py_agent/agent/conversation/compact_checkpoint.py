@@ -417,7 +417,7 @@ def _ledger_checkpoint_lookup(path, thread_id, *, validator=None):
         yield lookup, fallback_error
 
 
-# LLM: 从原thread head逆序逐行校验后yield；仅扫描入口允许冷副本回退，消费者仍须完整耗尽且关闭描述符。
+# LLM: 从原thread head逆序校验后yield；入口故障或缺热行使用冷副本时告警不重复，消费者仍须耗尽且关闭描述符。
 # v3内容封印及旧版本合同不变，原writer/CAS唯一；hydrate=False只供摘要元数据选择，完整接口默认恢复冷载荷。
 # 函数用途: 为摘要视图提供最新到最旧的只读检查点，完整链不成立时拒绝恢复。
 def iter_committed_compact_checkpoints(agent: SimpleAgent, thread: ConversationThread, *, hydrate: bool = True):
@@ -443,6 +443,8 @@ def iter_committed_compact_checkpoints(agent: SimpleAgent, thread: ConversationT
             row = lookup(current_id)
             if row is None:
                 row = _cold_checkpoint(Path(raw_root), thread.thread_id, current_id, fallback_hot=False)
+                if row is not None and fallback_error is None:
+                    logger.warning('COMPACT_LEDGER_COLD_FALLBACK thread=%s reason=%s', thread.thread_id, 'missing_hot_row')
             if row is None:
                 if fallback_error is not None:
                     raise fallback_error
@@ -594,7 +596,7 @@ def _validate_hot_checkpoint_row(row):
         _validate_summary(row)
 
 
-# LLM: 此接口只寻址原线程确切head；仅扫描入口三类故障可回退冷副本，后续身份、代次、边界校验不捕获。
+# LLM: 只寻址原线程确切head；成功代读缺热行时补告警但不重复入口告警，后续身份、代次、边界校验不捕获。
 # 函数用途: 常数上界恢复当前已提交的单条检查点，验证身份与代次而不走历史链。
 def load_latest_committed_compact_checkpoint(agent, thread):
     checkpoint_id = str(thread.compact_checkpoint_id or '')
@@ -609,6 +611,8 @@ def load_latest_committed_compact_checkpoint(agent, thread):
         row = lookup(checkpoint_id)
     if row is None:
         row = _cold_checkpoint(root, thread.thread_id, checkpoint_id, fallback_hot=False)
+        if row is not None and fallback_error is None:
+            logger.warning('COMPACT_LEDGER_COLD_FALLBACK thread=%s reason=%s', thread.thread_id, 'missing_hot_row')
     if row is None:
         if fallback_error is not None:
             raise fallback_error
