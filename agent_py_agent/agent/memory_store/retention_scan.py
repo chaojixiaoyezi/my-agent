@@ -12,19 +12,21 @@ import os
 import sqlite3
 import stat
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..audit.paths import audit_segment_day, audit_segment_paths
 from ..common.json_io import read_json_object_report, read_jsonl_objects_report
 from ..common.nofollow_fs import read_bytes_beneath
 from ..conversation.models import ConversationThread
 from ..conversation.store_io import safe_file_stem
 from ..conversation.workspace_paths import canonical_task_root, durable_work_root
 from ..local_storage.records import derived_terminal_expired
+from ..user_space.storage_lanes import STORAGE_LANE_SLICE_BYTES
 from . import reference_pins
 from .candidate_models import MemoryCandidate
 from .candidates import (
@@ -280,18 +282,28 @@ def _aged_file_actions(
 
 
 # LLM: 仅处理原写入器的两个owner内规范安全审计文件；不扫描raw audit/，不按文件mtime删除整份混龄账本。
-# 函数用途: 为存在过期记录的安全审计账本规划有指纹保护的记录级整理。
+# 函数用途: 封存段按日期整段回收，仅小活动文件规划兼容压缩。
 def _security_audit_actions(home, days, now, errors):
     if days <= 0:
         return []
     cutoff = now.timestamp() - days * _DAY_SECONDS
+    cutoff_day = datetime.fromtimestamp(cutoff, tz=timezone.utc).date().isoformat()
     actions = []
     for path in security_audit_paths(home):
         try:
-            if not path.exists():
+            for segment in audit_segment_paths(path):
+                if audit_segment_day(segment) < cutoff_day:
+                    actions.append(_action(category="security_audit", operation="delete_file", path=segment,
+                        reason=f"older_than_{days}_days", proof=_ActionProof(
+                            source_fingerprint=security_audit_segment_fingerprint(segment), cutoff_timestamp=cutoff)))
+            try:
+                snapshot = path.stat(follow_symlinks=False)
+            except FileNotFoundError:
                 continue
-            digest = file_fingerprint(path)
-            _content, removed = security_audit_content(path, cutoff)
+            if snapshot.st_size >= STORAGE_LANE_SLICE_BYTES:
+                continue
+            digest = security_audit_prefix_fingerprint(path, snapshot=snapshot)
+            _content, removed = security_audit_content(path, cutoff, snapshot=snapshot)
             if not removed:
                 continue
             actions.append(_action(category="security_audit", operation="security_audit_compact", path=path,
@@ -308,13 +320,17 @@ def security_audit_paths(home):
     return (Path(home.owner_logs_dir) / "audit" / "audit.jsonl", Path(home.owner_audit_log_jsonl))
 
 
-# LLM: 保留未知/坏JSON行及原字节排版；仅严格可判定的旧timestamp可删，首末FD/路径变化拒绝整批。
+# LLM: 保留未知/坏JSON行及原字节排版；读取上限固定为开始长度，正常追加不使既有前缀失效。
 # 函数用途: 计算安全审计保留内容与实际删除行数，扫描和锁内执行共用。
-def security_audit_content(path, cutoff):
+def security_audit_content(path, cutoff, *, snapshot=None):
     kept, removed = [], 0
-    with _fingerprint_source(path) as source:
-        before = _file_identity(os.fstat(source.fileno()))
-        for raw in source:
+    with _security_audit_prefix_source(path, snapshot) as (source, before):
+        remaining = before.st_size
+        while remaining:
+            raw = source.readline(remaining)
+            if not raw:
+                raise OSError("security audit truncated while reading")
+            remaining -= len(raw)
             text = raw.decode("utf-8")
             try:
                 row = json.loads(text)
@@ -325,11 +341,55 @@ def security_audit_content(path, cutoff):
                 removed += 1
             else:
                 kept.append(text)
-        if before != _file_identity(os.fstat(source.fileno())):
-            raise OSError("security audit changed while reading")
-    if before != _file_identity(path.stat(follow_symlinks=False)):
-        raise OSError("security audit replaced while reading")
     return "".join(kept), removed
+
+
+def security_audit_segment_fingerprint(path):
+    """封存段不再改写，以文件身份摘要复核删除，扫描不打开正文。"""
+    try:
+        info = path.stat(follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            return "unreadable"
+        return hashlib.sha256(repr((path.name, _file_identity(info))).encode("utf-8")).hexdigest()
+    except FileNotFoundError:
+        return "missing"
+
+
+def _security_audit_prefix_current(before, current):
+    if (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1
+            or (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino)
+            or current.st_size < before.st_size):
+        raise OSError("security audit replaced or truncated while reading")
+
+
+@contextmanager
+def _security_audit_prefix_source(path, snapshot=None):
+    """同一 FD 与路径必须仍指向原 inode；增长仅允许在快照长度之外。"""
+    with _fingerprint_source(path) as source:
+        before = snapshot if snapshot is not None else os.fstat(source.fileno())
+        _security_audit_prefix_current(before, os.fstat(source.fileno()))
+        yield source, before
+        _security_audit_prefix_current(before, os.fstat(source.fileno()))
+        _security_audit_prefix_current(before, path.stat(follow_symlinks=False))
+
+
+def security_audit_prefix_fingerprint(path, *, snapshot=None):
+    """仅安全审计采用固定前缀摘要，通用文件指纹语义保持不变。"""
+    try:
+        with _security_audit_prefix_source(path, snapshot) as (source, before):
+            digest = hashlib.sha256()
+            remaining = before.st_size
+            while remaining:
+                chunk = source.read(min(65536, remaining))
+                if not chunk:
+                    raise OSError("security audit truncated while fingerprinting")
+                digest.update(chunk)
+                remaining -= len(chunk)
+        return digest.hexdigest()
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "unreadable"
 
 
 # LLM: 快照仍走原回收主链；预算片未掌握完整剩余引用时不规划清单，不能把部分视图当全域无人引用。

@@ -1,7 +1,11 @@
 
 from __future__ import annotations
 
+import os
+import re
+import stat
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +14,71 @@ from typing import Any
 class AuditPaths:
     root: Path
     log_file: Path
+
+
+def audit_segment_dir(log_file: Path) -> Path:
+    """封存段与活动账本同目录，不另建可漂移的归档根。"""
+    return log_file.parent
+
+
+def _audit_segment_key(path: Path):
+    match = re.fullmatch(r".+-(\d{4}-\d{2}-\d{2})(?:\.([1-9]\d*))?" + re.escape(path.suffix), path.name)
+    if match is None:
+        return None
+    try:
+        day = date.fromisoformat(match[1]).isoformat()
+        sequence = int(match[2] or 0)
+    except ValueError:
+        return None
+    return day, sequence
+
+
+def audit_segment_day(path: Path) -> str | None:
+    """只接受完整日期段名，损坏日期不能成为整段删除证据。"""
+    key = _audit_segment_key(path)
+    return key[0] if key is not None else None
+
+
+def audit_segment_matches(log_file: Path, path: Path) -> bool:
+    """段名及所在目录必须精确归属一个活动账本，不能只凭日期扩大删除范围。"""
+    key = _audit_segment_key(path)
+    if key is None or path.parent != audit_segment_dir(log_file):
+        return False
+    day, sequence = key
+    expected = f"{log_file.stem}-{day}" + (f".{sequence}" if sequence else "") + log_file.suffix
+    return path.name == expected
+
+
+def audit_segment_paths(log_file: Path) -> list[Path]:
+    """非递归列出本账本的普通封存文件，按日期与数字序号排序。"""
+    found = []
+    try:
+        with os.scandir(audit_segment_dir(log_file)) as entries:
+            for entry in entries:
+                path = log_file.parent / entry.name
+                key = _audit_segment_key(path)
+                if key is None:
+                    continue
+                if not audit_segment_matches(log_file, path):
+                    continue
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                if stat.S_ISREG(info.st_mode):
+                    found.append((key, path))
+    except FileNotFoundError:
+        return []
+    return [path for _key, path in sorted(found)]
+
+
+def audit_uses_daily_segments(log_file: Path, trusted_root: Path | None) -> bool:
+    """仅规范 owner 安全审计开启轮转，自定义路径保留原行为。"""
+    if trusted_root is None:
+        return False
+    source = Path(os.path.abspath(log_file))
+    root = Path(os.path.abspath(trusted_root))
+    return source in (root / "logs" / "audit" / "audit.jsonl", root / "audit_log.jsonl")
 
 
 # LLM: 相对路径必须相对调用方给出的 canonical 目录解析；当前进程 cwd 不是所有者事实，

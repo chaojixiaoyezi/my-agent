@@ -5,16 +5,19 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..common.json_io import append_private_jsonl_records, path_thread_lock
 from ..common.nofollow_fs import ensure_private_dir
 from ..runtime_errors import runtime_error_report
-from .paths import resolve_audit_paths
+from ..user_space.storage_lanes import STORAGE_LANE_SLICE_BYTES, STORAGE_LANE_SLICE_ENTRIES
+from .paths import audit_uses_daily_segments, resolve_audit_paths
 from .records import (
     AuditAction,
     AuditEntry,
@@ -66,6 +69,18 @@ def _redact_audit_details(details: dict) -> dict:
     return {key: _redact_audit_value(key, value) for key, value in (details or {}).items()}
 
 
+def _audit_line_day(raw):
+    """安全审计 timestamp 为有限数值；无效首尾不能被猜成今天。"""
+    try:
+        row = json.loads(raw)
+        stamp = row.get("timestamp") if isinstance(row, dict) else None
+        if type(stamp) not in (int, float) or not math.isfinite(stamp):
+            return None
+        return datetime.fromtimestamp(stamp, tz=timezone.utc).date().isoformat()
+    except (ValueError, OverflowError, OSError, RecursionError):
+        return None
+
+
 # LLM: 原文件先于可选LocalStore；文件失败上抛、旁路失败尽力诊断，不把审计条目当业务许可或完成事实。
 # 类用途: 以原格式记录审计，按显式参数选择是否等待同一文件锁。
 class AuditLogger:
@@ -87,6 +102,7 @@ class AuditLogger:
             if root is not None
             else None
         )
+        self._first_audit_day = None
         if self.enabled:
             if self._trusted_root is not None:
                 ensure_private_dir(self._audit_root, canonical_root=self._trusted_root)
@@ -172,6 +188,7 @@ class AuditLogger:
                     blocking=blocking,
                 ) as (parent, root):
                     _audit_parent_current(self._audit_file, root, parent)
+                    self._rotate_audit_if_due_unlocked(parent, self._audit_file.name)
                     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW
                     try:
                         fd = os.open(self._audit_file.name, flags, 0o600, dir_fd=parent)
@@ -192,6 +209,62 @@ class AuditLogger:
                 handle.lock.release()
             return
         append_private_jsonl_records(self._audit_file, [entry.to_dict()], sort_keys=False, blocking=blocking)
+
+    def _rotate_audit_if_due_unlocked(self, parent_fd, name):
+        """持原写入双锁后只读首尾有界窗口，以 rename 封存旧活动文件。"""
+        if not audit_uses_daily_segments(self._audit_file, self._trusted_root):
+            return
+        from .query import _audit_regular
+
+        try:
+            info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        _audit_regular(info)
+        if info.st_size < STORAGE_LANE_SLICE_BYTES:
+            return
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=parent_fd)
+        try:
+            opened = os.fstat(descriptor)
+            _audit_regular(opened)
+            identity = (opened.st_dev, opened.st_ino)
+            if identity != (info.st_dev, info.st_ino):
+                return
+            if self._first_audit_day is None or self._first_audit_day[0] != identity:
+                head = os.pread(descriptor, 65536, 0)
+                day = _audit_line_day(head.split(b"\n", 1)[0]) if b"\n" in head else None
+                self._first_audit_day = (identity, day)
+            first_day = self._first_audit_day[1]
+            today = datetime.fromtimestamp(time.time(), tz=timezone.utc).date().isoformat()
+            if first_day is None or first_day >= today:
+                return
+            start = max(0, opened.st_size - 65536)
+            tail = os.pread(descriptor, opened.st_size - start, start)
+            # 未完成尾行不能提供封存日期；窗口从行中间开始时也不能解析截断行。
+            if not tail.endswith(b"\n"):
+                return
+            lines = tail[:-1].rsplit(b"\n", 1)
+            if start and len(lines) == 1:
+                return
+            last_day = _audit_line_day(lines[-1])
+            if last_day is None:
+                return
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) != (
+                opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns,
+            ):
+                return
+            for sequence in range(STORAGE_LANE_SLICE_ENTRIES):
+                suffix = f".{sequence}" if sequence else ""
+                segment = f"{self._audit_file.stem}-{last_day}{suffix}{self._audit_file.suffix}"
+                try:
+                    os.stat(segment, dir_fd=parent_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    os.rename(name, segment, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                    self._first_audit_day = None
+                    return
+        finally:
+            os.close(descriptor)
 
     def _write_to_local_store(self, entry: AuditEntry) -> None:
         try:
