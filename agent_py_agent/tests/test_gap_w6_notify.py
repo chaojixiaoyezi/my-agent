@@ -522,3 +522,145 @@ def test_delivery_limit_checked_before_database_read(world, limit):
     with pytest.raises(BusinessError, match='INVALID_SCHEMA'):
         notify.handle_notify(world.call('notify.deliveries.list', {'limit': limit}))
     assert not world.home.exists()
+
+
+@pytest.mark.parametrize('kind,status,frozen,expected', [
+    ('external_delivery', 'sent', False, 1),
+    ('canonical_record', 'suppressed', False, 1),
+    ('outbox_pending', 'failed', True, 0),
+    ('none', 'suppressed', False, 0),
+])
+def test_tool_producer_runs_after_primary_and_only_committed_receipts(world, monkeypatch,
+        kind, status, frozen, expected):
+    from agent_py_agent.agent.conversation import (
+        background_delivery,
+        background_im_progress,
+        runtime,
+    )
+    from agent_py_agent.agent.conversation.models import BackgroundDeliveryCommit
+    from agent_py_agent.agent.scheduler import execution
+
+    channel_id = create(world)['channel']['channel_id']
+    order = []
+    run = {'job_id': 'job', 'run_id': 'run', 'thread_id': 'thread'}
+    request = SimpleNamespace(wake_signal={'wake_signal_id': 'same-event'})
+    thread = SimpleNamespace(thread_id='thread')
+    store = SimpleNamespace(threads=SimpleNamespace(require=lambda _key: thread),
+        tasks=SimpleNamespace(load=lambda _key: SimpleNamespace(status='completed')))
+    world.agent.delivery_service = SimpleNamespace()
+    service = SimpleNamespace(conversation_store=store)
+    claim = SimpleNamespace(run=run, run_id='run')
+    commit = BackgroundDeliveryCommit('not-parsed', status, kind != 'none',
+        message_id='message' if kind != 'none' else '', commit_kind=kind, outbox_frozen=frozen)
+
+    def primary(*_a, **_k):
+        order.append('primary')
+        return commit
+
+    original_enqueue = notify.enqueue_event
+
+    def enqueue(*args, **kwargs):
+        assert order[-1] == 'primary'
+        order.append('notify')
+        return original_enqueue(*args, **kwargs)
+
+    monkeypatch.setattr(runtime, '_run_request', lambda _kwargs: request)
+    monkeypatch.setattr(execution, 'resolve_delivery', lambda *_a: (thread, 'internal', 'thread'))
+    monkeypatch.setattr(execution, 'scheduled_local_delivery', lambda *_a: False)
+    monkeypatch.setattr(background_im_progress, 'background_delivery_context', lambda *_a, **_k: SimpleNamespace())
+    monkeypatch.setattr(background_delivery, 'background_delivery_idempotency_key', lambda _r: 'same-key')
+    monkeypatch.setattr(background_delivery, 'record_background_response', primary)
+    monkeypatch.setattr(notify, 'enqueue_event', enqueue)
+    assert execution._commit_target_result(world.agent, service, claim, {}, 'ignored') is commit
+    assert execution._commit_target_result(world.agent, service, claim, {}, 'ignored') is commit
+    rows = notify.handle_notify(world.call('notify.deliveries.list'))['items']
+    assert len(rows) == expected
+    if expected:
+        assert rows[0]['channel_id'] == channel_id and rows[0]['event'] == 'scheduler_delivery'
+        assert order == ['primary', 'notify', 'primary', 'notify']
+    else:
+        assert order == ['primary', 'primary']
+
+
+def test_llm_producer_preserves_primary_return_and_notification_faults(world, monkeypatch):
+    from dataclasses import dataclass
+
+    from agent_py_agent.agent.conversation import required_user_action
+    from agent_py_agent.agent.conversation.models import BackgroundMainAgentReport
+    from agent_py_agent.agent.scheduler import execution, precheck
+
+    order = []
+    report = BackgroundMainAgentReport(thread_id='thread', task_id='run', reason='scheduled_job',
+        response='never parsed', route_channel='internal', route_target='thread', created_at=1,
+        delivery_status='sent', wake_handled=True, message_id='message', commit_kind='external_delivery')
+
+    @dataclass(frozen=True)
+    class Dependencies:
+        run_once: object
+
+    def primary(_kwargs):
+        order.append('primary')
+        return report
+
+    def broken_notify(*_a, **_k):
+        order.append('notify')
+        raise RuntimeError('transport-or-store-fault')
+
+    monkeypatch.setattr(required_user_action, 'required_notice', lambda *_a: None)
+    monkeypatch.setattr(precheck, 'admit_prechecked_work', lambda *_a, **_k: True)
+    monkeypatch.setattr(notify, 'enqueue_event', broken_notify)
+    service = SimpleNamespace(repository=SimpleNamespace(mark_run_running=lambda *_a, **_k: None))
+    claim = SimpleNamespace(run_id='run', claim_id='claim',
+        run={'job_id': 'job', 'run_id': 'run', 'thread_id': 'thread'})
+    bound = execution.with_scheduled_work(Dependencies(primary), world.agent, service, claim, None, now=1)
+    kwargs = {'thread_id': 'thread', 'task_id': 'run', 'wake_signal': {'wake_signal_id': 'wake'},
+        'reason': 'scheduled_job', 'now': 1}
+    assert bound.run_once(kwargs) is report
+    assert order == ['primary', 'notify']
+    world.config.notify_delivery_enabled = False
+    assert bound.run_once(kwargs) is report
+    assert order == ['primary', 'notify', 'primary']
+    # 尚未提交的原报告不会把后续网络错误变成一条通知。
+    world.config.notify_delivery_enabled = True
+    report = replace(report, commit_kind='outbox_pending', wake_handled=False)
+    assert bound.run_once(kwargs) is report
+    assert order == ['primary', 'notify', 'primary', 'primary']
+
+
+def test_v13_slice_real_dispatch_schema_cas_and_ready_gates(world, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import business_api_v13 as v13
+    from agent_py_agent.agent.gateway_parts import business_api_v13_gap158_w6 as slice_module
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+
+    registered = v13._load_registry((*v13.V13_SLICE_MODULES,
+        'agent_py_agent.agent.gateway_parts.business_api_v13_gap158_w6'))
+    for name, value in zip(('_ACTIONS', 'ALIASES', 'V13_DEFS', 'JOB_KINDS', 'COLLECTIONS'), registered):
+        monkeypatch.setattr(v13, name, value)
+    services = SimpleNamespace(owner_id=world.agent.home_paths.owner_id,
+        owner_home=world.home, host=world.agent)
+
+    def invoke(action, params, key='', revision=None):
+        return v13.v13_invoke(action, params, world.call(action).context, services,
+            request_id='request', idempotency_key=key, expected_revision=revision)
+
+    result = invoke('notify.channels.create', {'kind': 'webhook', 'name': 'wire',
+        'url': 'https://hooks.example/token', 'events': ['scheduler_delivery']}, 'v13_create_key_0001')
+    listed = invoke('notify.channels.list', {})
+    assert listed['items'] == [result['channel']] and listed['revision'] == result['revision']
+    changed = invoke('notify.channels.update', {'channel_id': result['channel']['channel_id'],
+        'name': 'wire-update'}, 'v13_update_key_0001', listed['revision'])
+    assert changed['revision'] > listed['revision']
+    with pytest.raises(BusinessError, match='REVISION_CONFLICT'):
+        invoke('notify.channels.delete', {'channel_id': result['channel']['channel_id']},
+            'v13_delete_key_0001', listed['revision'])
+    with pytest.raises(HostAPIError, match='INVALID_SCHEMA'):
+        invoke('notify.channels.list', {'owner_id': 'foreign'})
+    world.config.notify_delivery_enabled = False
+    assert not v13.v13_ready('notify.channels.test', services, world.call('notify.meta').context)
+    with pytest.raises(HostAPIError, match='HOST_NOT_READY'):
+        invoke('notify.channels.test', {'channel_id': result['channel']['channel_id']}, 'v13_test_key_00001')
+    assert not v13.v13_ready('ops.update.apply', services, world.call('notify.meta').context)
+    assert {action.name for action in slice_module.V13_ACTIONS} == {
+        'notify.meta', 'notify.channels.list', 'notify.channels.create', 'notify.channels.update',
+        'notify.channels.delete', 'notify.channels.test', 'notify.deliveries.list', 'notify.deliveries.retry',
+        'ops.update.check', 'ops.update.apply', 'ops.update.rollback', 'ops.update.stream', 'ops.gc.run'}
