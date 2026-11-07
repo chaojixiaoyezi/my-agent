@@ -512,8 +512,14 @@ class _TuiBackgroundActivityController:
         with owner._lock:
             incoming_thread = str(snapshot.get("thread_id") or "").strip() if isinstance(snapshot, Mapping) else ""
             bound_thread = _tui_thread_id(owner)
-            if incoming_thread and bound_thread and incoming_thread != bound_thread:
+            if not _accept_thread_frame(owner, snapshot, "background_activity"):
                 return False
+            if isinstance(snapshot, Mapping):
+                usage = snapshot.get("context_usage")
+                if isinstance(usage, Mapping) and usage.get("thread_id") and not _accept_thread_frame(
+                    owner, usage, "background_activity", own_stream=True,
+                ):
+                    return False
             thread_id = incoming_thread or bound_thread
             previous = self._state
             current = previous
@@ -771,7 +777,7 @@ def _background_activity_payload(
     }
 
 
-# LLM: 身份只取已接受的消息游标、Gateway绑定或typed状态；不从正文或指标推断线程。
+# LLM: 身份只取显式会话/请求绑定；状态栏是事件投影，不能反过来决定事件归属。
 # 函数用途: 以O(1)代价取得当前显示线程，供晚到帧和单调指标合并使用。
 def _tui_thread_id(runtime: TuiRuntime) -> str:
     thread_id = getattr(runtime, "background_message_thread_id", "")
@@ -780,7 +786,19 @@ def _tui_thread_id(runtime: TuiRuntime) -> str:
     binding = getattr(runtime, "_background_watch_gateway_binding", None)
     if isinstance(binding, tuple) and len(binding) == 2 and binding[1]:
         return binding[1]
-    return runtime.store.snapshot().status.thread_id
+    return getattr(runtime, "_request_thread_id", "")
+
+
+# LLM: 旧的无身份帧仅沿本页请求回调兼容；显式绑定不能被事件反向修改。
+# 函数用途: 在事件送入投影前检查归属，拒绝时只记录有界诊断。
+def _accept_thread_frame(runtime: TuiRuntime, value: object, kind: str, *, own_stream: bool = False) -> bool:
+    incoming = str(value.get("thread_id") or "").strip() if isinstance(value, Mapping) else ""
+    bound = _tui_thread_id(runtime)
+    if (incoming and bound and incoming != bound) or (bound and not incoming and not own_stream):
+        event = runtime._sequencer.emit(kind, "updated", f"foreign-thread:{kind}", {"thread_id": incoming})
+        runtime.store.record_diagnostic("TUI_FOREIGN_THREAD_EVENT_REJECTED", event)
+        return False
+    return True
 
 
 # LLM: Goal rows accept only bounded public scalars from the authenticated
@@ -1182,6 +1200,7 @@ class _TuiExecutionBindingRuntimeMixin:
                         and (not adapter._thread_id_confirmed or adapter._thread_id == thread_id)):
                     adapter._thread_id = thread_id
                     adapter._thread_id_confirmed = True
+                    self._request_thread_id = thread_id
 
     # LLM: 读取投影不取得控制资格；请求回执、完成事件与显示焦点都不能修改它。
     # 函数用途: 获取用户发出操作时看到的执行绑定副本。
@@ -1470,8 +1489,13 @@ class _TuiBackgroundActivityRuntimeMixin:
             ):
                 continue
             thread_id = item.get("thread_id")
-            if not isinstance(thread_id, str) or not thread_id:
-                thread_id = _tui_thread_id(self)
+            owned_stream = isinstance(gateway_id, str) and gateway_id in self._owned_gateway_requests
+            if not _accept_thread_frame(self, item, kind, own_stream=owned_stream):
+                continue
+            if payload.get("thread_id") and not _accept_thread_frame(self, payload, kind, own_stream=True):
+                continue
+            thread_id = (thread_id if isinstance(thread_id, str) and thread_id else
+                         _tui_thread_id(self) if owned_stream else "")
             if isinstance(gateway_id, str) and gateway_id in self._owned_gateway_requests:
                 self._deferred_background_events[(gateway_id, remote_seq)] = (
                     self.conversation_reset_generation, thread_id,
@@ -1534,6 +1558,8 @@ class _TuiBackgroundActivityRuntimeMixin:
                     )
                 continue
             display_payload = dict(payload)
+            if thread_id:
+                display_payload["thread_id"] = thread_id
             display_payload.pop("foreground_gateway_request_id", None)
             if isinstance(gateway_id, str) and gateway_id:
                 display_payload["foreground_gateway_request_id"] = gateway_id
@@ -1657,6 +1683,7 @@ class _TuiSessionRuntimeMixin(
         self._console_turn_scope = threading.local()
         self.background_message_cursor = 0
         self.background_message_thread_id = ""
+        self._request_thread_id = ""
         self.history_before_cursor = 0
         self.background_event_stream_id = ""
         self._recovered_background_turns = TuiIdentityWindow()
@@ -1695,6 +1722,7 @@ class _TuiSessionRuntimeMixin(
                 outputs.clear()
             self.background_message_cursor = 0
             self.background_message_thread_id = thread_id
+            self._request_thread_id = thread_id
             self.history_before_cursor = 0
             self.background_event_stream_id = ""
             # 只退休显示责任，worker仍须将这些在途回合按原身份收口。
@@ -2201,8 +2229,10 @@ class TuiTurnEventAdapter:
         with self.runtime._lock:
             if not self._display_current():
                 return JournalAppendResult("rejected", "retired_turn")
+            if not _accept_thread_frame(self.runtime, payload, kind, own_stream=True):
+                return JournalAppendResult("rejected", "foreign_thread")
             result = self.runtime._publish(kind, phase, block_id,
-                {**(payload or {}), "thread_id": self._thread_id or _tui_thread_id(self.runtime)}, request_id=request_id)
+                {**(payload or {}), "thread_id": (payload or {}).get("thread_id") or self._thread_id or _tui_thread_id(self.runtime)}, request_id=request_id)
             if result.accepted:
                 self._display_block_ids.add(block_id)
                 if kind == "assistant_completed":
@@ -2484,6 +2514,8 @@ class TuiTurnEventAdapter:
             return False
         with self.runtime._lock:
             if not self._display_current():
+                return False
+            if not _accept_thread_frame(self.runtime, usage, "context_usage_updated", own_stream=True):
                 return False
             state = self.runtime._background_activity._state
             thread_id = self._thread_id or _tui_thread_id(self.runtime)
@@ -2936,6 +2968,9 @@ def _consume_gateway_turn_event(
     payload: dict[str, Any],
 ) -> bool:
     kind = str(payload.get("kind") or "")
+    with adapter.runtime._lock:
+        if not _accept_thread_frame(adapter.runtime, payload, kind, own_stream=True):
+            return False
     if kind == "tool_progress" and isinstance(payload.get("progress"), dict):
         adapter.write_progress(dict(payload["progress"]))
         return True
@@ -3005,7 +3040,7 @@ def _consume_gateway_turn_event(
                 "compact_boundary",
                 "completed",
                 f"compact:{adapter.request_id}:{generation}",
-                {"compact_generation": generation},
+                {"compact_generation": generation, "thread_id": payload.get("thread_id") or adapter._thread_id},
                 request_id=adapter.request_id,
             )
         return True

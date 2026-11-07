@@ -38,6 +38,42 @@ def _context_usage_thread_id(params: object) -> str:
     return str(attrs.get("agent_thread_id") or attrs.get("conversation_thread_id") or "").strip()
 
 
+# LLM: 身份只从原宿主参数和线程本地runner取得；与持久CAS共用child优先规则，不从Agent共享的当前回合反推。
+# 函数用途: 为同次模型采样附上准确线程和生产者，不额外读取store。
+def context_usage_identity(agent: object, params: object) -> dict[str, object]:
+    from ..runtime_context import current_subagent_run_id
+
+    attrs = getattr(params, "task_attributes", None)
+    attrs = attrs if isinstance(attrs, Mapping) else {}
+    child_run = attrs.get("agent_run_id") or current_subagent_run_id(agent)
+    return public_context_usage_identity({
+        "thread_id": _context_usage_thread_id(params),
+        "producer": {"scope": "child" if child_run or attrs.get("agent_thread_id") else "main",
+                     "agent_run_id": child_run or getattr(params, "run_id", "")},
+    })
+
+
+# LLM: 身份不是正文标签，拒绝路径、控制字符和超长值，避免截断后两个线程成为同一身份；旧快照缺字段仍缺字段。
+# 函数用途: 清洗公开线程及生产者白名单，供快照与压缩事件复用。
+def public_context_usage_identity(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        return {}
+
+    # LLM: 不把任意对象转字符串，也不截断身份，防止私有材料泄露或身份碰撞。
+    # 函数用途: 只保留长度受控的ASCII身份字符。
+    def identifier(raw: object) -> str:
+        text = raw.strip() if isinstance(raw, str) else ""
+        return text if len(text) <= 128 and all(char.isascii() and (char.isalnum() or char in "._:-") for char in text) else ""
+
+    public: dict[str, object] = {}
+    if thread_id := identifier(value.get("thread_id")):
+        public["thread_id"] = thread_id
+    producer = value.get("producer")
+    if isinstance(producer, Mapping) and producer.get("scope") in ("main", "child"):
+        public["producer"] = {"scope": producer["scope"], "agent_run_id": identifier(producer.get("agent_run_id"))}
+    return public
+
+
 # LLM: 只能在实际估算开始前调用；已绑定模型仍用原选择版本，不给旧工作片绑定新的线程 revision。
 #   只读原 store，不创建线程；缺失、错代或普通读取故障仅弃遥测，原执行权未知必须交原请求处理，不能降格或重签。
 # 函数用途: 在采样点冻结准确 store/线程及两种代次，供迟到保存时沿原 CAS 检查。
@@ -123,6 +159,7 @@ def public_context_usage(value: object) -> dict[str, object]:
         "protocol": protocol if protocol in ("native", "text") else "unknown",
         "model_name": _label(value.get("model_name")),
         "reasoning_level": _label(value.get("reasoning_level")),
+        **public_context_usage_identity(value),
         **_measurement_fields(value),
     }
 

@@ -20,6 +20,7 @@ from ..conversation.channels import (
     supports_transcript_delivery,
 )
 from ..conversation.compact_progress import normalize_conversation_compact_progress
+from ..conversation.context_usage import public_context_usage_identity
 from ..conversation.tool_input_progress import public_tool_input_progress
 from .approval_session import ToolApprovalSessionCache
 from .progress_text_delta import TextDeltaBuffer
@@ -155,6 +156,8 @@ class BufferedChunkStreamWriter(StreamLiveness):
     text_delta_holdback_chars: int = 256
     _text_delta: TextDeltaBuffer = field(init=False, repr=False)
     _workflow_sequences: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    conversation_thread_id: str = field(default="", init=False)
+    _conversation_identity: dict[str, object] = field(default_factory=dict, init=False, repr=False)
 
     # LLM: 审批组件只持有同请求的路径和同步输出回调；不会建立新线程、缓存或持久账本。
     # 函数用途: 连接审批交互与本请求的流式发布和刷新边界。
@@ -527,7 +530,33 @@ class BufferedChunkStreamWriter(StreamLiveness):
     # fields and must never serialize prompt, message, guidance, or tool-schema content.
     # 函数用途: 把每次模型调用前的上下文总量和分类估算实时写入 TUI 事件流。
     def write_context_usage(self, usage: dict[str, object]) -> bool:
+        identity = public_context_usage_identity(usage)
+        if identity.get("thread_id") == self.conversation_thread_id:
+            public = public_context_usage_payload(usage)
+            self._conversation_identity.update({**identity, "model_name": public["model_name"],
+                                                "reasoning_level": public["reasoning_level"]})
         return self._write_rich_projection("context_usage_updated", "context_usage", usage, public_context_usage_payload)
+
+    # LLM: 只在Gateway解析原会话后绑定；同一个出口不能被其它线程的事件重定向，模型标签允许沿自己的实际采样刷新。
+    # 函数用途: 保存请求流自己的会话身份，为首次发送前压缩和代次边界提供同源标签。
+    def bind_conversation_identity(self, thread_id: str, *, producer: dict | None = None,
+                                   model_name: str = "", reasoning_level: str = "") -> None:
+        public = public_context_usage_payload({"schema": "model_visible_context_usage.v1", "thread_id": thread_id,
+            "producer": producer, "model_name": model_name, "reasoning_level": reasoning_level})
+        canonical = public.get("thread_id", "")
+        if not canonical or (self.conversation_thread_id and self.conversation_thread_id != canonical):
+            return
+        self.conversation_thread_id = canonical
+        self._conversation_identity.update(public_context_usage_identity(public))
+        for key in ("model_name", "reasoning_level"):
+            if public[key]:
+                self._conversation_identity[key] = public[key]
+
+    # LLM: 只返回本出口绑定的公开字段副本，调用方不能通过返回值改写流归属。
+    # 函数用途: 供压缩进度和完成边界复用同一会话身份。
+    @property
+    def context_usage_identity(self) -> dict[str, object]:
+        return {**self._conversation_identity, "thread_id": self.conversation_thread_id}
 
     # LLM: Native IR compaction is distinct from durable conversation compact. Only its bounded
     # counters may enter rich chunks; summary text, archived calls, and prompts remain private.
@@ -538,7 +567,18 @@ class BufferedChunkStreamWriter(StreamLiveness):
     # LLM: durable conversation compact 进度只允许冻结 schema 中的阶段/计数进入 rich chunk，摘要与原始消息永不外发。
     # 函数用途: 把持久会话 Compact 的真实处理阶段流式发给 TUI。
     def write_conversation_compact_progress(self, value: dict[str, object]) -> bool:
-        return self._write_rich_projection("conversation_compaction_progress", "compact_progress", value, normalize_conversation_compact_progress)
+        # 归一器仍决定原阶段/数值字段；身份在发布点补回，不能为保留身份而绕过原白名单。
+        # LLM: 原normalizer继续控制阶段数值，新增字段只走公开身份白名单。
+        # 函数用途: 为有效压缩进度附上会话及模型标签。
+        def project(payload):
+            normalized = normalize_conversation_compact_progress(payload)
+            if not normalized:
+                return {}
+            public = public_context_usage_payload({**payload, "schema": "model_visible_context_usage.v1"})
+            return {**normalized, **public_context_usage_identity(public),
+                    "model_name": public["model_name"], "reasoning_level": public["reasoning_level"]}
+
+        return self._write_rich_projection("conversation_compaction_progress", "compact_progress", value, project)
 
     # LLM: 固定审批选项来自owner控制面；插件强制确认先守门，普通请求可随自主切换续跑，不接受模型参数。
     # 函数用途: 向客户端发布审批并等待决定或自主模式切换；取消保持优先。
@@ -561,6 +601,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
             {
                 "kind": "conversation_compacted",
                 "compact_generation": normalized_generation,
+                **self.context_usage_identity,
             },
         )
 

@@ -651,7 +651,7 @@ def _adoption_conflict(latest: object, candidate: _CandidateRequest, attempt_id:
     return ""
 
 
-# LLM: 新工作片/Compact 只解析 canonical child 已生效选择，不读取旧建议或重跑决策；原继承模型保持原作用域，失败沿配置错误传播。
+# LLM: 新工作片/Compact 只解析 canonical child 已生效选择，不读取旧建议或重跑决策；继承也要覆盖父片依赖，失败沿配置错误传播。
 # 函数用途: 让自动采用后的 Goal 续轮、恢复及压缩读取同一有效模型，进入/退出仍只绑定原 ContextVar。
 @contextmanager
 def canonical_subagent_model_scope(agent: object, run_id: str, *, task_local: bool = True):
@@ -669,7 +669,7 @@ def canonical_subagent_model_scope(agent: object, run_id: str, *, task_local: bo
             pass
     store = getattr(manager, "conversation_store", None)
     thread = store.threads.load(task.agent_thread_id) if task is not None and store is not None else None
-    if thread is None or thread.model_selection_source not in {"automatic", "explicit"}:
+    if thread is None or thread.model_selection_source not in {"inherited", "automatic", "explicit"}:
         yield
         return
     config = project_task_runtime_config_overlay(inherited_model_config(agent, task), task, workspace_root=manager.workspace_root)

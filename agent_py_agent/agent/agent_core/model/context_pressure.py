@@ -23,7 +23,11 @@ from ...conversation.compact_progress import (
     COMPACT_TRIGGER_PREFLIGHT,
     COMPACT_TRIGGER_TOOL_CONTEXT_OVERFLOW,
 )
-from ...conversation.context_usage import ContextUsageBinding, public_context_usage
+from ...conversation.context_usage import (
+    ContextUsageBinding,
+    context_usage_identity,
+    public_context_usage,
+)
 from ...memory_archive import estimate_tokens
 from ...model_guidance import provider_system_instruction
 from ...prompting_parts.cache_layout import prompt_cache_layout
@@ -84,6 +88,8 @@ class ModelVisibleContextSnapshot:
     reasoning_level: str = ""
     usage_binding: ContextUsageBinding | None = field(default=None, repr=False, compare=False)
     measurement_kind: str = ""
+    thread_id: str = ""
+    producer: dict[str, object] = field(default_factory=dict)
 
     # LLM: 公开序列化与持久回读共用同一数值/枚举白名单；raw/校准与计数身份可见，指纹、CAS绑定及正文不进TUI事件。
     # 函数用途: 把上下文快照转换成可安全发送给 TUI 的结构化字典，不包含任何正文。
@@ -103,6 +109,8 @@ class ModelVisibleContextSnapshot:
             "protocol": self.protocol,
             "raw_estimated_tokens": self.raw_estimated_tokens,
             "measurement_kind": self.measurement_kind,
+            "thread_id": self.thread_id,
+            "producer": self.producer,
         })
 
 
@@ -149,6 +157,7 @@ def model_visible_context_snapshot(
         reasoning_level=_display_reasoning_level(agent, params),
         usage_binding=usage_binding,
         measurement_kind="calibrated_estimate" if calibrated else "conservative_estimate",
+        **context_usage_identity(agent, params),
     )
 
 

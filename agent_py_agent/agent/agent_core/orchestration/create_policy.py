@@ -601,7 +601,8 @@ def _bind_host_owned_selection(attrs: dict[str, object], raw_params: dict[str, o
     from .input_media_refs import bind_subagent_input_media
 
     bind_subagent_input_media(attrs, raw_params, agent)
-    inherit_model_profile(attrs, agent, model=raw_params.get("model"))
+    # 决策前后均会重建规格；这里只解析 canonical 选择，诊断交给真实 child 线程初始化，不能跨操作缓存。
+    inherit_model_profile(attrs, agent, model=raw_params.get("model"), emit_diagnostic=False)
     inherit_reasoning_effort(attrs, agent, raw_params.get("effort"))
 
 

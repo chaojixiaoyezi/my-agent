@@ -1355,6 +1355,13 @@ class TuiStateStore:
                 self._snapshot = current
             return self._snapshot
 
+    # LLM: 入口拒绝只更新有界诊断，不把外线程事件送进 reducer，也不刷新状态栏时间。
+    # 函数用途: 在存储锁内记录拒绝原因并使快照缓存失效，保持业务状态不变。
+    def record_diagnostic(self, code: str, event: TuiEvent) -> None:
+        with self._lock:
+            self.reducer.record_diagnostic(code, event)
+            self._snapshot = None
+
     # LLM: subscriber 只能请求 redraw，不得在 callback 中重入 publish 或执行业务动作。
     # 函数用途: 注册状态更新后的轻量通知函数。
     def subscribe(self, callback: Callable[[], None]) -> None:

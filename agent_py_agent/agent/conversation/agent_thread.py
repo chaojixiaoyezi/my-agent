@@ -118,7 +118,9 @@ def ensure_subagent_thread(manager: object, task: object, *, model_advice: Pendi
         or getattr(task, "goal", "")
         or run_id
     ).strip()[:240]
-    return store.threads.ensure_agent(
+    # 原创建锁串行同一 child 的初始化；恢复已有线程不重发诊断，预检临时材料不进入持久模型引用。
+    initializing = store.threads.load(thread_id) is None
+    thread = store.threads.ensure_agent(
         {
             "thread_id": thread_id,
             "agent_run_id": run_id,
@@ -138,6 +140,13 @@ def ensure_subagent_thread(manager: object, task: object, *, model_advice: Pendi
             "package_entry_initialization": package_entry_initialization,
         }
     )
+    if initializing:
+        from ..settings.model_profiles import emit_model_inheritance_diagnostic
+
+        emit_model_inheritance_diagnostic(attrs)
+    else:
+        attrs.pop("host_model_inheritance_diagnostic.v1", None)
+    return thread
 
 
 # LLM: The current child prompt is appended once before preflight and excluded by its typed request
