@@ -180,7 +180,7 @@ def test_revoked_grant_cannot_be_revived_by_operator_backups(tmp_path, monkeypat
     grant.path.write_text(json.dumps(payload), encoding='utf-8')
     reader = Mock(wraps=grants._read_payload_report)
     monkeypatch.setattr(grants, '_read_payload_report', reader)
-    with caplog.at_level(logging.DEBUG):
+    with caplog.at_level(logging.DEBUG, logger=grants.__name__):
         assert not grants.has_active_capability_grant(home.owner_temporary_grants_dir,
             'synthetic-capability', now='1999-01-01T00:00:00+00:00')
     assert [call.args[0] for call in reader.call_args_list] == [grant.path]

@@ -318,8 +318,8 @@ def test_rebuild_routing_index_end_to_end_applies_caps(tmp_path):
         _lesson(index, updated_at=f"2026-01-01T00:00:{index:02d}+00:00")
         for index in range(60)
     ]
-    for record in records:
-        (repo.lessons_dir / f"{record.lesson_id}.md").write_text(
+    for index, record in enumerate(records):
+        (repo.lessons_dir / f"{record.lesson_id}-{index:08x}.md").write_text(
             _render_lesson(record), encoding="utf-8"
         )
 
@@ -330,4 +330,4 @@ def test_rebuild_routing_index_end_to_end_applies_caps(tmp_path):
     assert len(text.encode("utf-8")) <= _ROUTING_INDEX_MAX_BYTES
     assert "已省略" in text
     # 正文不受索引省略影响：被省略的 lesson 文件仍在。
-    assert (repo.lessons_dir / "lesson-0000.md").exists()
+    assert (repo.lessons_dir / "lesson-0000-00000000.md").exists()

@@ -198,7 +198,7 @@ def test_lesson_operator_copies_are_ignored_before_reading(tmp_path, caplog, mig
     names = ["x.bak.md", "x copy.md", "x.old.md", original.stem + ".bak.md", original.stem + " copy.md"]
     for name in names:
         (repository.lessons_dir / name).write_text(text)
-    with caplog.at_level(logging.DEBUG):
+    with caplog.at_level(logging.DEBUG, logger=LessonRepository.__module__):
         assert repository.list() == [record]
     assert all(any(name in r.getMessage() and r.levelno == logging.DEBUG for r in caplog.records) for name in names)
 
