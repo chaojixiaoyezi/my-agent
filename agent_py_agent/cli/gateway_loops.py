@@ -219,10 +219,20 @@ def _gateway_request_loop(context: GatewayRunContext, paths: GatewayPaths, stop_
 #   （0.2 秒翻倍封顶 30 秒，成功清零），避免持续出错时每 0.2 秒打一条日志把磁盘再写满。关闭执行池由调用方做。
 # 函数用途: 跑派发主循环直到 stop_event 置位。
 def _run_request_dispatch(dispatcher: _RequestDispatcher, stop_event: threading.Event) -> None:
-    while not stop_event.is_set():
-        wait_seconds = _guarded_dispatch_tick(dispatcher)
-        if wait_seconds > 0:
-            stop_event.wait(wait_seconds)
+    from ..agent.gateway_parts.request_event_hub import hub_for_paths
+    hub = hub_for_paths(getattr(dispatcher, "paths", None))
+    signal = hub.signal(("dispatch",)) if hub is not None else None
+    try:
+        while not stop_event.is_set():
+            wait_seconds = _guarded_dispatch_tick(dispatcher)
+            if wait_seconds > 0:
+                if signal is None:
+                    stop_event.wait(wait_seconds)
+                else:
+                    signal.wait(hub.fallback_poll_seconds or wait_seconds, stop_event)
+    finally:
+        if signal is not None:
+            signal.close()
 
 
 # LLM: tick 外层守卫：接住从 tick 逃逸的任何 Exception（段外代码抛），次数记入 loop_health，打印按 dispatcher.backoff 限流

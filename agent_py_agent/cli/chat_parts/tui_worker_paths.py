@@ -25,20 +25,23 @@ def _worker_gateway_path(
         GatewayChunkPollRequest,
         check_gateway_alive,
         gateway_request_activity_paths,
+        network_gateway_observer,
         poll_gateway_chunks,
     )
 
-    if not str(getattr(ctx.job, "gateway_request_id", "") or "").strip() and not check_gateway_alive(ctx.cfg.paths):
+    network = network_gateway_observer(ctx.cfg.agent)
+    if network is None and not str(getattr(ctx.job, "gateway_request_id", "") or "").strip() and not check_gateway_alive(ctx.cfg.paths):
         raise RuntimeError("gateway 已停止。请先执行 my-agent gateway start")
     request_id, chunk_path, terminal_path = _submit_gateway_job(ctx)
     _publish_gateway_request_id(ctx, request_id)
     timeout = _gateway_timeout(ctx.cfg)
     ctx.turn_adapter.configure_gateway_permission_sink(
-        partial(write_gateway_permission_decision, chunk_path)
+        partial(write_gateway_permission_decision, chunk_path) if network is None else
+        partial(network.permission_sink, conversation_id=ctx.cfg.current_session_id)
     )
     try:
         # 宿主观察器仍受原审批 sink 与退出清理包围，不重投或取消服务端请求。
-        observe = poll_gateway_chunks if observer is None else observer
+        observe = observer if observer is not None else network if network is not None else poll_gateway_chunks
         response = observe(
             GatewayChunkPollRequest(
                 chunk_path,
@@ -47,7 +50,7 @@ def _worker_gateway_path(
                 ctx.turn_adapter,
                 [0],
                 [0],
-                activity_paths=gateway_request_activity_paths(
+                activity_paths=() if network is not None else gateway_request_activity_paths(
                     ctx.cfg.paths,
                     request_id,
                     chunk_path,

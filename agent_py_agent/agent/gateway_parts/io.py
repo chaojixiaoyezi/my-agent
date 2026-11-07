@@ -1001,6 +1001,9 @@ def write_gateway_request_once(paths: GatewayPaths, payload: dict, *, commit_tra
             receipt, created = commit() if commit_transition is None else commit_transition(commit)
         finally:
             window[0] = False
+    if created:
+        from .request_event_hub import notify_committed
+        notify_committed(paths, request_id, "written", payload=payload)
     for folder in (paths.inbox, paths.processing, paths.done, paths.failed):
         candidate = folder / f"{request_id}.json"
         if candidate.is_file():
