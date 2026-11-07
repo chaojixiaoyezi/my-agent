@@ -685,7 +685,7 @@ def preflight_gateway_credential(agent: object) -> None:
 # Workspace overrides are validated via validate_requested_workspace_roots (CAP-DIR: local/main in
 # workspace-write/full-access may bind safe external project directories; restricted/workspace-only
 # or non-admin owners must stay inside owner_home), checked before mkdir or credential IO.
-# G2b：构造后立即预检凭据——开关开且不可用时在这里拒绝启动，不让首个请求才报错。
+# G2b：本机模式构造后立即预检；网络模式必须先绑定显式远程运输，不能读取本机G1作为远端启动前提。
 # 函数用途: 构造连接同一个后台 Gateway、但会话和工作目录属于当前用户的轻量客户端。
 def make_gateway_chat_client(args) -> GatewayChatClientAgent:
     config = apply_runtime_config_environment(load_config(args.config))
@@ -724,7 +724,10 @@ def make_gateway_chat_client(args) -> GatewayChatClientAgent:
         scoped_home,
         owner_identity=owner_identity,
     )
-    preflight_gateway_credential(client)
+    from .chat_parts.gateway_client import network_gateway_observer
+
+    if network_gateway_observer(client) is None:
+        preflight_gateway_credential(client)
     return client
 
 

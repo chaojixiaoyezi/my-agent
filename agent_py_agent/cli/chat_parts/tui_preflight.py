@@ -44,6 +44,7 @@ class TuiGatewayPreflight:
     stop_event: threading.Event
     on_ready: Callable[[], None]
     prepare_session: Callable[[], str] | None = None
+    readiness_waiter: Callable[..., Any] | None = None
 
 
 # LLM: compatibility wrapper preserves the test/adapter patch point while delaying the heavy daemon status stack until the preflight thread runs.
@@ -73,14 +74,16 @@ def start_tui_gateway_preflight(config: TuiGatewayPreflight) -> threading.Thread
     return thread
 
 
-# LLM: readiness 后才允许有界历史读取，准备失败不得启动 worker；结果经 loop 提交，退出后迟到回调不得复活客户端。
+# LLM: 注入网络adapter或沿原本机waiter；readiness后才允许有界历史读取，准备失败不得启动worker。
+# 结果经loop提交，退出后迟到回调不得复活客户端；此处不另建探活/重试状态机。
 # 函数用途: 后台顺序等待真就绪、准备会话，把完整启动结果按结构化 reason 排队送回界面线程。
 def _run_gateway_preflight(config: TuiGatewayPreflight) -> None:
     alive = False
     error_code = ""
     diagnostic = {}
     try:
-        outcome = wait_for_gateway_readiness(
+        wait = config.readiness_waiter or wait_for_gateway_readiness
+        outcome = wait(
             config.paths,
             timeout=max(0.0, float(config.timeout_seconds or 0.0)),
             on_observation=_gateway_starting_observer(config),

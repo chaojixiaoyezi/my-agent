@@ -361,7 +361,7 @@ def _prepare_gateway_session(params: TuiRunParams, runtime, stop_event: threadin
     return ""
 
 
-# LLM: Gateway 显式恢复在 preflight readiness 后、worker 前进行；本地已加载显示可立即发布，恢复事件不进任务队列。
+# LLM: Gateway显式恢复在实例HTTP或原本机preflight readiness后、worker前进行；本地已加载显示可立即发布，恢复事件不进任务队列。
 # 函数用途: 先显示界面，再同步模型名和准备历史；本地配置在启动前读取，不影响正在运行的代理。
 def run_tui(*, params: TuiRunParams) -> int:
     from agent_py_agent import __version__
@@ -445,6 +445,7 @@ def run_tui(*, params: TuiRunParams) -> int:
                 prepare_session=(
                     lambda: _prepare_gateway_session(params, tui_runtime, stop_event)
                 ),
+                readiness_waiter=getattr(params.agent, "wait_for_gateway_readiness", None),
             ))
     else:
         pre_run = start_workers
