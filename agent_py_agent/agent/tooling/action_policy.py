@@ -150,6 +150,10 @@ class ActionPolicy:
         if path_decision is not None:
             return path_decision
 
+        scope_decision = _configured_policy_decision(request, runtime, effect, command, kind="scope")
+        if scope_decision is not None:
+            return scope_decision
+
         boundary_decision = _task_boundary_decision(request, effect)
         if boundary_decision is not None:
             return boundary_decision
@@ -163,6 +167,10 @@ class ActionPolicy:
         )
         if command_decision is not None:
             return command_decision
+
+        filter_decision = _configured_policy_decision(request, runtime, effect, command, kind="command")
+        if filter_decision is not None:
+            return filter_decision
 
         idempotency_decision = _idempotency_decision(call, runtime, effect)
         if idempotency_decision is not None:
@@ -762,6 +770,190 @@ def _ask(
         },
         resolved_effect=effect,
     )
+
+
+def _policy_host_config(request, runtime):
+    """只取本次宿主已加载的配置快照；关闭时不探测磁盘或加载 owner 状态。"""
+    boundary = request.write_boundary if isinstance(request.write_boundary, dict) else {}
+    policy = getattr(request.runtime_guard_policy, "values", None)
+    switches = policy if isinstance(policy, dict) else {}
+    host = None
+    # Shell 本身没有 Agent，冻结目录中其它原生 handler 仍持有同一真实宿主。
+    for selected in (runtime, *request.runtime_snapshot.runtimes):
+        handler = selected.handler
+        candidate = getattr(handler, "agent", None)
+        if candidate is None:
+            candidate = getattr(getattr(handler, "registry", None), "remote_push_agent", None)
+        if candidate is None:
+            continue
+        home = getattr(getattr(candidate, "home_paths", None), "owner_home_dir", None)
+        if request.owner_scope_root and home is not None and str(Path(home)) != str(Path(request.owner_scope_root)):
+            continue
+        host = candidate
+        break
+    snapshot = getattr(host, "_capability_config_runtime_snapshot", None)
+    config = getattr(snapshot, "config", None)
+    # write_boundary 与 runtime_guard_policy 均是宿主参数，不读取 ToolCall.arguments 中的同名键。
+    values = {name: boundary.get(name, switches.get(name, getattr(config, name, False))) is True
+              for name in ("command_approval_filter_enabled", "target_scope_policy_enabled")}
+    values["tool_approval_timeout_seconds"] = getattr(config, "tool_approval_timeout_seconds", 1800)
+    return host, values
+
+
+def _policy_command_values(command):
+    """补齐常见文件命令的相对操作数；字面 shell 程序复用原分析器，不执行展开。"""
+    from ..contracts.gates.command_policy import _NESTED_SHELL_DEPTH_LIMIT_COUNT
+    from ..contracts.gates.shell_source import shell_command_source
+
+    paths, urls, commands = [], [], []
+    pending = [(command, 0)] if command is not None else []
+    file_commands = {"cat", "cp", "mv", "tee", "stat", "file", "touch", "mkdir", "ln",
+                     "wc", "head", "tail", "ls", "du", "find", "sort", "uniq", "diff", "cmp"}
+    value_flags = {"-n", "-c", "--lines", "--bytes", "--max-depth", "-t", "--target-directory"}
+    while pending:
+        analysis, depth = pending.pop()
+        paths.extend(analysis.paths)
+        for segment in analysis.segments:
+            commands.append(segment.argv)
+            args = segment.argv[1:]
+            urls.extend(value for value in args if value.startswith(("http://", "https://")))
+            if segment.executable in {"sh", "bash", "zsh", "dash", "ksh"}:
+                source = shell_command_source(args)
+                if source is not None and depth < _NESTED_SHELL_DEPTH_LIMIT_COUNT:
+                    pending.append((analyze_command(source), depth + 1))
+                continue
+            if segment.executable not in file_commands:
+                continue
+            operands, skip, options = [], False, True
+            for value in args:
+                if skip:
+                    skip = False
+                    continue
+                if value == "--" and options:
+                    options = False
+                    continue
+                if options and value.startswith("-"):
+                    skip = value in value_flags
+                    # target-directory 的值本身是文件目标，不当数字选项丢掉。
+                    if value in {"-t", "--target-directory"}:
+                        skip = False
+                    continue
+                if value and value not in {"|", ";", "&&", "||", "&", ">", ">>", "<"}:
+                    operands.append(value)
+            paths.extend(operands or (["."] if segment.executable in {"ls", "du", "find"} else []))
+    return paths, urls, commands
+
+
+def _policy_call_facts(request, command):
+    """与原路径/URL 门共用字段匹配器；路径先 resolve，规则评估器无需任何 I/O。"""
+    from urllib.parse import urlparse
+
+    from ..contracts.gates.path_url_command import _matching_values
+    arguments = request.call.arguments
+    root = request.workspace_root
+    paths = []
+    for _key, value in _matching_values(arguments,
+            {"path", "file_path", "target_path", "output_path", "working_dir", "cwd", "directory"}):
+        if isinstance(value, str) and value:
+            candidate = Path(value)
+            paths.append(str((candidate if candidate.is_absolute() else root / candidate).resolve(strict=False)))
+    cwd = Path(str(arguments.get("working_dir") or arguments.get("cwd") or root))
+    if not cwd.is_absolute():
+        cwd = root / cwd
+    command_paths, command_urls, commands = _policy_command_values(command)
+    if command is not None:
+        for value in command_paths:
+            candidate = Path(value)
+            paths.append(str((candidate if candidate.is_absolute() else cwd / candidate).resolve(strict=False)))
+    domains = []
+    for _key, value in _matching_values(arguments, {"url", "urls", "endpoint", "webhook_url"}):
+        parsed = urlparse(str(value))
+        if parsed.hostname and parsed.scheme.lower() != "file":
+            domains.append(parsed.hostname)
+    for value in command_urls:
+        parsed = urlparse(value)
+        if parsed.hostname:
+            domains.append(parsed.hostname)
+    boundary = request.write_boundary if isinstance(request.write_boundary, dict) else {}
+    task_id = str(getattr(request.business_context, "task_id", "") or
+                  boundary.get("canonical_task_id") or boundary.get("task_id") or request.call.run_id)
+    allowed = request.runtime_snapshot.allowed_tools
+    return {"tool": request.call.tool_name, "task_id": task_id,
+            "argv": command.argv if command is not None else (),
+            "commands": tuple(commands),
+            "paths": tuple(dict.fromkeys(paths)), "domains": tuple(dict.fromkeys(domains)),
+            "workspace_root": str(root.resolve(strict=False)),
+            "allowed_tools": allowed if allowed is not None else request.runtime_snapshot.available_tool_names}
+
+
+def _record_policy_decision(request, decision, facts, *, approval_id="", scope=False):
+    """日志失败仅诊断，不把可选索引或历史变成新的工具硬门。"""
+    import logging
+
+    from ..business_spaces.gap158_w2_policy_history import append_record
+    try:
+        append_record(request.owner_scope_root, {
+            "at": request.now or time.time(), "tool": request.call.tool_name,
+            "task_id": facts["task_id"], "run_id": request.call.run_id,
+            "execution_id": request.call.operation_id or request.call.call_id,
+            "decision": "judge_pending" if decision.decision == "judge" else decision.decision,
+            "rule_id": decision.rule_id, "rule_source": decision.rule_source or "default",
+            "scope_rule_id": decision.rule_id if scope else "", "approval_id": approval_id})
+    except (OSError, ValueError, RuntimeError) as error:
+        logging.getLogger(__name__).warning("W2 政策历史未写入：%s", type(error).__name__)
+
+
+def _configured_policy_decision(request, runtime, effect, command, *, kind):
+    """两个开关仅加收窄门；批准后凭原 binding 复入，不从待决索引签发执行许可。"""
+    host, config = _policy_host_config(request, runtime)
+    enabled = config["target_scope_policy_enabled" if kind == "scope" else "command_approval_filter_enabled"]
+    if not enabled or not request.owner_scope_root:
+        return None
+    from ..business_spaces.gap158_w2_policy_store import get_snapshot
+    from .policy_rules import PolicyDecision, evaluate_command_rules, evaluate_scope_rules
+    facts = _policy_call_facts(request, command)
+    snapshot = get_snapshot(request.owner_scope_root, kind, facts["task_id"], request.workspace_root)
+    decision = (evaluate_scope_rules if kind == "scope" else evaluate_command_rules)(snapshot, facts)
+    if kind == "command" and not decision.rule_id:
+        tool_config = next((row for row in snapshot.get("tool_configs", ())
+                            if row["tool"] == request.call.tool_name), {})
+        default = tool_config.get("default_decision", "inherit")
+        if default != "inherit":
+            decision = PolicyDecision(default, "", "tool_config", ("工具默认审批策略",))
+    evidence = {"policy_rule": {"decision": decision.decision, "rule_id": decision.rule_id,
+                "rule_source": decision.rule_source, "reasons": list(decision.reasons)}}
+    if decision.decision == "deny":
+        _record_policy_decision(request, decision, facts, scope=kind == "scope")
+        return _deny("TARGET_SCOPE_DENIED" if kind == "scope" else "POLICY_RULE_DENIED",
+                     effect=effect, evidence=evidence)
+    if kind == "scope" or decision.decision == "allow":
+        if decision.rule_id:
+            _record_policy_decision(request, decision, facts, scope=kind == "scope")
+        return None
+    boundary = request.write_boundary if isinstance(request.write_boundary, dict) else {}
+    approved = boundary.get("approved_actions", ())
+    binding = evaluate_approval_binding_gate(ApprovalBindingFacts(
+        tool_name=request.call.tool_name, run_id=request.call.run_id,
+        operation_id=request.call.operation_id, idempotency_key=request.call.idempotency_key,
+        args_hash=request.call.args_hash, approved_actions=tuple(approved) if isinstance(approved, (list, tuple)) else ()))
+    if binding.allowed:
+        return None
+    if "APPROVAL_BINDING_MISMATCH" in binding.finding_codes:
+        return _deny("APPROVAL_BINDING_MISMATCH", effect=effect, evidence={"gate": binding.to_dict()})
+    approval_id = ""
+    try:
+        from ..business_spaces.gap158_w2_judge import add_pending, schedule_for_request
+        entry = add_pending(request, runtime, decision, task_id=facts["task_id"],
+            now=request.now or time.time(), timeout_seconds=config["tool_approval_timeout_seconds"])
+        approval_id = entry["approval_id"]
+        if decision.decision == "judge" and host is not None:
+            schedule_for_request(request, runtime, entry, snapshot.get("judge_config", {}), host)
+    except (OSError, ValueError, RuntimeError) as error:
+        import logging
+        logging.getLogger(__name__).warning("W2 待决索引未就绪：%s", type(error).__name__)
+    _record_policy_decision(request, decision, facts, approval_id=approval_id)
+    return _ask(request.call, "APPROVAL_REQUIRED", effect=effect,
+                evidence=evidence, approval_kind="command_approval_filter")
 
 
 __all__ = [
