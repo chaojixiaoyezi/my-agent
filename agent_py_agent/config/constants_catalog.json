@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1350,
+  "count": 1352,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -3106,6 +3106,14 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "任务工作名最多 64 字符：限制命令入参长度。"
+    },
+    {
+      "name": "ACTOR_HANDLER_BUDGET_MS",
+      "file": "agent_py_agent/agent/conversation/conversation_actor.py",
+      "value": 50,
+      "unit": "毫秒",
+      "category": "上限预算",
+      "description": "单条邮箱处理超过50毫秒只记诊断，严格测试将其视为阻塞处理器。"
     },
     {
       "name": "_THREAD_ROWS_COUNT",
@@ -7514,6 +7522,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "认领租约默认 300 秒：够一次定时回合正常跑完，超时让其它调度器实例接管。"
+    },
+    {
+      "name": "TIMER_WALL_CLOCK_JUMP_SECONDS",
+      "file": "agent_py_agent/agent/scheduler/timer_service.py",
+      "value": 1.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "墙钟与单调时钟的偏移跨过此不变量边界时，重算全部活跃闹钟。"
     },
     {
       "name": "_KEY_LEN_BYTES",
