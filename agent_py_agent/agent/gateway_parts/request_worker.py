@@ -1423,7 +1423,7 @@ def _process_claimed_gateway_request_path(
 
 
 # LLM: Only pre-business acquisition calls this; original T/P5 gate plus JSON lease/fingerprint CAS retain identity and reject pending/terminal collisions.
-# 函数用途: 将尚未开始业务的同一claim回到inbox，写原owner_capacity等待事实，不生成失败终态或释放持久P3。
+# 函数用途: 将尚未开始业务的同一claim回到inbox，成功退出原transition后释放内存actor，不生成终态或释放持久P3。
 def _requeue_owner_capacity(paths: GatewayPaths, processing_path: Path, request_payload: dict) -> bool:
     from .io import gateway_request_fingerprint
     from .request_binding import GatewayActiveTurnTransition
@@ -1451,6 +1451,7 @@ def _requeue_owner_capacity(paths: GatewayPaths, processing_path: Path, request_
         requeued = update_json_file_atomic(processing_path, pending, require_existing=True)
         _record_admission_wait(_PendingGatewayRequest(processing_path, requeued), reason="owner_capacity")
         processing_path.replace(target)
+    _release_claimed_gateway_actor(paths, processing_path, request_payload, transition.execution_attempt_id)
     return True
 
 
@@ -1793,7 +1794,27 @@ def _close_claimed_parent_capabilities(paths, processing_path, request_id, respo
     return _retry_on_creation_guard_busy(attempt)
 
 
+# LLM: 调用方已确认终态或持久回队成功才可释放精确attempt；仅canonical终态消费Stop，回队保留tombstone及持久P3。
+# 函数用途: 共用actor交接出口，仅清理本attempt绑定；迟到完成不得释放新attempt或非零epoch预留。
+def _release_claimed_gateway_actor(paths, processing_path, payload, attempt_id, *, terminal=False):
+    request_id = str(payload.get("id") or processing_path.stem)
+    epoch_binding = _finish_epoch_binding(processing_path, request_id, attempt_id)
+    with _CLAIM_EPOCH_LOCK:
+        _CLAIM_EPOCHS.pop(_claim_epoch_key(processing_path, request_id, attempt_id), None)
+    scheduler = gateway_conversation_scheduler(paths)
+    if scheduler is not None:
+        from ..conversation.conversation_actor import TurnFinished
+
+        conversation_key = request_conversation_key(payload) or request_id
+        target = (request_id, attempt_id, epoch_binding[1] if epoch_binding else 0)
+        if scheduler.sequencer.snapshot(conversation_key)["active"] == (request_id, "", 0):
+            target = (request_id, "", 0)
+        scheduler.post(TurnFinished(request_user_key(payload), conversation_key, *target),
+            handler=(lambda *_: scheduler.sequencer.retire_terminal(conversation_key, request_id)) if terminal else None)
+
+
 # LLM: 只有原后台消费者明确pending才经当前同Agent/claim短门重排，P3保留；其它响应沿main终态/重启/供应商续跑，不引入业务continuation旁路。
+#   移动processing之前固定原会话身份，仅规范终态或明确成功回队调用精确actor交接出口。
 # 函数用途: 将已认领请求的真实结果归档，后台尚未消费的同一来源让出执行槽后原请求稍后重领。
 def _finish_claimed_gateway_request(
     paths: GatewayPaths,
@@ -1821,14 +1842,18 @@ def _finish_claimed_gateway_request(
         except StaleOwnerEpoch as error:
             _observe_stale_owner_epoch(epoch_binding, processing_path, request_id, expected_execution_attempt_id, error)
             return
+    payload = (read_json_file_report(processing_path).payload
+               or read_json_file_report(paths.terminal / f"{request_id}.json").payload)
     if response.get("kind") == "background":
         from .multiprocess_background_execution import requeue_pending_background_request
 
         if requeue_pending_background_request(response, execution_agent):
+            _release_claimed_gateway_actor(paths, processing_path, payload, expected_execution_attempt_id)
             return
     if isinstance(response.get("provider_transient_resume"), dict):
         if _requeue_provider_transient_resume(paths, processing_path, response, conversation_store):
             # 供应商临时故障自动续跑：回合不写终态，请求重排回队列（退避与累计次数在 recovery 里写）。
+            _release_claimed_gateway_actor(paths, processing_path, payload, expected_execution_attempt_id)
             return
         # 重排失败退回正常归档：标记只服务重排判定，先清掉，不让它落进终态响应与 responses 投影。
         response.pop("provider_transient_resume", None)
@@ -1859,17 +1884,7 @@ def _finish_claimed_gateway_request(
         return
     if not archive_result.terminal_committed:
         return
-    with _CLAIM_EPOCH_LOCK:
-        _CLAIM_EPOCHS.pop(_claim_epoch_key(processing_path, request_id, expected_execution_attempt_id), None)
-    scheduler = gateway_conversation_scheduler(paths)
-    if scheduler is not None:
-        from ..conversation.conversation_actor import TurnFinished
-
-        payload = read_json_file_report(paths.terminal / f"{request_id}.json").payload
-        conversation_key = request_conversation_key(payload) or request_id
-        scheduler.post(TurnFinished(request_user_key(payload), conversation_key,
-            request_id, expected_execution_attempt_id, epoch_binding[1] if epoch_binding else 0),
-            handler=lambda *_: scheduler.sequencer.retire_terminal(conversation_key, request_id))
+    _release_claimed_gateway_actor(paths, processing_path, payload, expected_execution_attempt_id, terminal=True)
     from .recovery import (
         mark_gateway_terminal_projection_complete,
         repair_gateway_chunk_projection,
