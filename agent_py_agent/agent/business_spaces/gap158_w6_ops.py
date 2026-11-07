@@ -7,6 +7,7 @@ import importlib
 import json
 import os
 import re
+import sqlite3
 import threading
 import time
 import uuid
@@ -337,7 +338,7 @@ def _gc_receipt(call, kind, dry_run):
         return empty
     except (BusinessError, HostAPIError):
         raise
-    except (OSError, RuntimeError, ValueError, TypeError, KeyError):
+    except (OSError, sqlite3.Error, RuntimeError, ValueError, TypeError, KeyError):
         return {**empty, 'state': 'failed', 'error_code': 'HOST_NOT_READY'}
     if dry_run or hold:
         return {**empty, 'scanned': raw['items']}

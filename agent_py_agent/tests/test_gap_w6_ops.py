@@ -482,3 +482,24 @@ else:
         assert child.stdout.strip() == 'MAINTENANCE_BUSY'
     finally:
         lease.close()
+
+
+def test_gc_sqlite_failure_preserves_prior_and_following_lane_receipts(case, monkeypatch):
+    import sqlite3
+
+    visited = []
+
+    def lane(request):
+        visited.append(request.kind)
+        if request.kind == 'tool_outputs':
+            raise sqlite3.OperationalError('synthetic storage failure')
+        return {'cursor': {}, 'complete': True, 'items': 1, 'bytes': 10,
+            'deleted_items': 1, 'freed_bytes': 10}
+
+    monkeypatch.setattr(O, 'resolve_storage_lane', lambda _kind: lane)
+    selected = ['local_events', 'tool_outputs', 'asset_auxiliary']
+    result = _invoke(case, 'ops.gc.run', {'lanes': selected})
+    assert visited == selected
+    assert [row['state'] for row in result['receipt']] == ['done', 'failed', 'done']
+    assert result['receipt'][0]['removed'] == result['receipt'][2]['removed'] == 1
+    assert result['receipt'][1]['removed'] == 0

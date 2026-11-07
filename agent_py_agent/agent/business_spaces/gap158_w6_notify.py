@@ -48,6 +48,40 @@ _executor = None
 _worker_slots = None
 _worker_lock = threading.Lock()
 _cursor_key = os.urandom(32)
+_dns_slots = None
+
+
+def _resolve_bounded(host, timeout):
+    """系统解析不可强杀；用有界 daemon 槽隔离，超时后不增开线程补偿。"""
+    global _dns_slots
+    with _worker_lock:
+        if _dns_slots is None:
+            _dns_slots = threading.BoundedSemaphore(_limit('NOTIFY_WORKERS'))
+        slots = _dns_slots
+    if timeout <= 0 or not slots.acquire(blocking=False):
+        raise TimeoutError('resolver capacity or deadline')
+    done, results, errors = threading.Event(), [], []
+    resolver = _default_network_resolver
+
+    def resolve():
+        try:
+            results.append(tuple(resolver(host)))
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            slots.release()
+            done.set()
+
+    try:
+        threading.Thread(target=resolve, name='notify-dns', daemon=True).start()
+    except BaseException:
+        slots.release()
+        raise
+    if not done.wait(timeout=timeout):
+        raise TimeoutError('resolver deadline')
+    if errors:
+        raise errors[0]
+    return results[0]
 
 
 def _limit(name):
@@ -81,7 +115,9 @@ def notify_ready(call):
     return bool(getattr(_config(call), 'notify_delivery_enabled', False))
 
 
-def _validate_url(value, config, previous=()):
+def _validate_url(value, config, previous=(), *, deadline=None):
+    """配置检查和发送共用有界解析；传入期限时 DNS 消耗计入同次 HTTP 总预算。"""
+    deadline = time.monotonic() + _timeout(config) if deadline is None else deadline
     try:
         if type(value) is not str or any(ord(char) <= 32 or ord(char) == 127 for char in value):
             raise ValueError('url')
@@ -91,7 +127,7 @@ def _validate_url(value, config, previous=()):
             raise ValueError('https')
         host = (parts.hostname or '').lower().rstrip('.')
         literal = _canonical_ip(host)
-        resolved = (literal,) if literal else tuple(_default_network_resolver(host))
+        resolved = (literal,) if literal else _resolve_bounded(host, deadline - time.monotonic())
         settings = NetworkSafetySettings(
             allowed_private_hosts=tuple(getattr(config, 'allowed_private_hosts', ()) or ()),
             allow_private_resolution=False, previous_resolved_ips=tuple(previous),
@@ -99,6 +135,8 @@ def _validate_url(value, config, previous=()):
         if not resolved or _network_safety_error('notify', url, lambda _host: resolved, settings) is not None:
             raise ValueError('outbound')
         return url, resolved
+    except TimeoutError:
+        raise BusinessError('HOST_NOT_READY') from None
     except (ValueError, TypeError, OSError):
         # 不把异常文本（可能含 URL token）放进错误详情或回执。
         raise BusinessError('OUTBOUND_DOMAIN_DENIED') from None
@@ -192,7 +230,7 @@ class _PinnedHandler(HTTPSHandler):
     def https_open(self, request):
         connections = []
 
-        def connection(_host, timeout=None, **kwargs):
+        def connection(_host, timeout=None):
             import ssl
             conn = _PinnedHTTPSConnection(self.target, timeout, ssl.create_default_context())
             connections.append(conn)
@@ -245,7 +283,9 @@ def _get_delivery(repo, owner_id, outbox_id):
 
 
 def _attempt(repo, row, channels, config, clock):
+    """一次领取只做一次发送；总预算从解析前开始，结算必须仍持有准确 claim。"""
     started = time.monotonic()
+    deadline = started + _timeout(config)
     evidence = {'ok': False, 'http_status': 0, 'error_code': ''}
     try:
         if not getattr(config, 'notify_delivery_enabled', False):
@@ -253,7 +293,7 @@ def _attempt(repo, row, channels, config, clock):
         channel = _own_channel(channels, row['payload']['channel_id'], row['owner_id'])
         if not channel['enabled'] and not row['payload'].get('test'):
             raise BusinessError('HOST_NOT_READY')
-        url, resolved = _validate_url(channel['url'], config, channel.get('resolved_ips', ()))
+        url, resolved = _validate_url(channel['url'], config, channel.get('resolved_ips', ()), deadline=deadline)
         body = _json({key: row['payload'][key] for key in ('event', 'event_id', 'payload')})
         headers = {'Content-Type': 'application/json', 'Idempotency-Key': row['effect_key']}
         if channel['secret_env']:
@@ -261,7 +301,10 @@ def _attempt(repo, row, channels, config, clock):
             if not secret:
                 raise BusinessError('HOST_NOT_READY')
             headers['X-MyAgent-Signature'] = 'sha256=' + hmac.digest(secret.encode(), body, 'sha256').hex()
-        status = _send_webhook(url, body=body, headers=headers, timeout=_timeout(config), pin_ip=resolved[0])
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('delivery deadline')
+        status = _send_webhook(url, body=body, headers=headers, timeout=remaining, pin_ip=resolved[0])
         evidence.update(ok=200 <= status < 300, http_status=status)
         if not evidence['ok']:
             evidence['error_code'] = 'NETWORK_REQUEST_FAILED'
@@ -273,11 +316,11 @@ def _attempt(repo, row, channels, config, clock):
         # 外部传输可抛任意库异常；只记结构化类别，不保存 URL、密钥或远端回显。
         evidence['error_code'] = 'NETWORK_REQUEST_FAILED'
     evidence['latency_ms'] = max(0, int((time.monotonic() - started) * 1000))
-    return repo.settle_outbox(outbox_id=row['outbox_id'], status='ACKED' if evidence['ok'] else 'FAILED',
+    return repo.settle_outbox_for_claim(claim=row, status='ACKED' if evidence['ok'] else 'FAILED',
         provider_evidence=evidence, next_retry_at=0 if evidence['ok'] else clock() + max(1.0, _timeout(config)))
 
 
-def _submit(function, *args):
+def _submit(function, args=()):
     """执行器的队列也有界：满载不排内存任务，耐久 pending 留给下一次触发。"""
     global _executor, _worker_slots
     with _worker_lock:
@@ -303,19 +346,32 @@ def _read_channels(home, owner_id):
     return {row['channel_id']: row for row in store.list('notify_channels')}
 
 
+def _recover_expired(repo, owner_id, config, clock):
+    """只在入队/显式重试时回收一片过期领取；副作用不明仍保持至少一次语义。"""
+    return repo.recover_outbox_for_scope(scope='notify', owner_id=owner_id, now=clock(),
+        lease_seconds=max(1.0, 2 * _timeout(config)), limit=min(100, _limit('NOTIFY_DRAIN_BATCH')))
+
+
 def _drain(repo, home, owner_id, config, clock):
     if not getattr(config, 'notify_delivery_enabled', False):
         return []
-    # 集合有自然上限，一批只读一次配置；outbox 始终由 SQL 范围领取。
+    _recover_expired(repo, owner_id, config, clock)
+    # 集合有自然上限，一批只读一次；逐条领取避免结算失败时把未开始的整批锁死。
     channels = _read_channels(home, owner_id)
-    rows = repo.claim_outbox_for_scope(scope='notify', owner_id=owner_id,
-        claimed_by='notify-' + uuid.uuid4().hex,
-        batch_size=min(100, _limit('NOTIFY_DRAIN_BATCH')), now=clock())
-    return [_attempt(repo, row, channels, config, clock) for row in rows]
+    results = []
+    for _ in range(min(100, _limit('NOTIFY_DRAIN_BATCH'))):
+        if not getattr(config, 'notify_delivery_enabled', False):
+            break
+        rows = repo.claim_outbox_for_scope(scope='notify', owner_id=owner_id,
+            claimed_by='notify-' + uuid.uuid4().hex, batch_size=1, now=clock())
+        if not rows:
+            break
+        results.append(_attempt(repo, rows[0], channels, config, clock))
+    return results
 
 
 def _kick(repo, home, owner_id, config, clock):
-    return _submit(_drain, repo, home, owner_id, config, clock)
+    return _submit(_drain, (repo, home, owner_id, config, clock))
 
 
 def _target_once(repo, owner_id, outbox_id, channels, config, clock):
@@ -331,7 +387,7 @@ def _target_once(repo, owner_id, outbox_id, channels, config, clock):
 
 
 def _synchronous_attempt(repo, call, outbox_id, channels):
-    future = _submit(_target_once, repo, call.owner_id, outbox_id, channels, _config(call), call.clock)
+    future = _submit(_target_once, (repo, call.owner_id, outbox_id, channels, _config(call), call.clock))
     if future is None:
         # outbox 已耐久入队，不能把尚待尝试伪报成没有副作用的 HOST_NOT_READY。
         raise BusinessError('OUTCOME_UNKNOWN')
@@ -346,6 +402,7 @@ def _control(call):
     if not notify_ready(call):
         raise BusinessError('HOST_NOT_READY')
     repo = _runtime(call.owner_home)
+    _recover_expired(repo, call.owner_id, _config(call), call.clock)
 
     def mutate(channels, _store):
         if call.action == 'notify.channels.test':

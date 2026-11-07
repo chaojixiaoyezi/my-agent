@@ -215,7 +215,7 @@ def test_enqueue_dedup_signing_and_exact_sql_claim_scope(world, monkeypatch):
     assert repo.outbox_entry(foreign['outbox_id'])['status'] == 'PENDING'
     assert repo.outbox_entry(other_scope['outbox_id'])['status'] == 'PENDING'
     url, transport = world.sent[0]
-    assert url.endswith('key=url-token') and transport['timeout'] == 7.0
+    assert url.endswith('key=url-token') and 0 < transport['timeout'] <= 7.0
     assert transport['pin_ip'] == '93.184.216.34'
     assert transport['headers']['Idempotency-Key'] == key
     expected = hmac.digest(b'fake-signing-secret-not-a-credential', transport['body'], 'sha256').hex()
@@ -285,10 +285,10 @@ def test_concurrent_drain_cannot_send_same_in_flight_row_twice(world, monkeypatc
 
     monkeypatch.setattr(notify, '_send_webhook', transport)
     args = (notify._runtime(world.home), world.home, 'local/main', world.config, lambda: 1000.0)
-    first = notify._submit(notify._drain, *args)
+    first = notify._submit(notify._drain, args)
     try:
         assert entered.wait(timeout=5)
-        second = notify._submit(notify._drain, *args)
+        second = notify._submit(notify._drain, args)
         assert second is not None and second.result(timeout=5) == []
     finally:
         release.set()
@@ -664,3 +664,156 @@ def test_v13_slice_real_dispatch_schema_cas_and_ready_gates(world, monkeypatch):
         'notify.meta', 'notify.channels.list', 'notify.channels.create', 'notify.channels.update',
         'notify.channels.delete', 'notify.channels.test', 'notify.deliveries.list', 'notify.deliveries.retry',
         'ops.update.check', 'ops.update.apply', 'ops.update.rollback', 'ops.update.stream', 'ops.gc.run'}
+
+
+def test_settlement_failure_leaves_unstarted_rows_claimable_and_recovers_expired_claim(world, monkeypatch):
+    import sqlite3
+
+    create(world)
+    for value in range(3):
+        event(world, f'settlement-{value}')
+    repo = notify._runtime(world.home)
+    real_settle = repo.settle_outbox_for_claim
+
+    def fail(*_a, **_k):
+        raise sqlite3.OperationalError('synthetic settlement outage')
+
+    monkeypatch.setattr(repo, 'settle_outbox_for_claim', fail)
+    with pytest.raises(sqlite3.OperationalError, match='synthetic settlement outage'):
+        notify._drain(repo, world.home, 'local/main', world.config, lambda: 1000.0)
+    rows, _ = repo.list_outbox_page(scope='notify', owner_id='local/main')
+    assert sum(row['status'] == 'IN_FLIGHT' for row in rows) == 1
+    assert sum(row['status'] == 'PENDING' for row in rows) == 2
+    monkeypatch.setattr(repo, 'settle_outbox_for_claim', real_settle)
+    notify._drain(repo, world.home, 'local/main', world.config, lambda: 2000.0)
+    rows, _ = repo.list_outbox_page(scope='notify', owner_id='local/main')
+    assert all(row['status'] == 'ACKED' for row in rows)
+
+
+def test_dns_timeout_returns_without_unbounded_resolver_queue(world, monkeypatch):
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    world.config.tool_http_timeout = 0.01
+    errors = []
+
+    def resolver(_host):
+        entered.set()
+        assert release.wait(timeout=5)
+        return ('93.184.216.34',)
+
+    def caller():
+        try:
+            notify._validate_url('https://hooks.example/path', world.config)
+        except BusinessError as error:
+            errors.append(error.code)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(notify, '_default_network_resolver', resolver)
+    thread = threading.Thread(target=caller)
+    thread.start()
+    try:
+        assert entered.wait(timeout=5)
+        assert finished.wait(timeout=0.5), 'DNS must not keep the caller beyond its deadline'
+        assert errors == ['HOST_NOT_READY']
+    finally:
+        release.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+def test_expired_claim_recovery_is_scoped_bounded_and_fences_old_settlement(world):
+    from agent_py_agent.agent.runtime_db.operations import RuntimeConflictError
+
+    create(world)
+    repo = notify._runtime(world.home)
+    receipt = event(world)[0]
+    old = repo.claim_outbox_for_scope(scope='notify', owner_id='local/main',
+        claimed_by='old-worker', batch_size=1, now=1000.0)[0]
+    foreign = repo.enqueue_outbox(scope='notify', owner_id='local/foreign', effect_key='foreign-lease')
+    repo.claim_outbox_for_scope(scope='notify', owner_id='local/foreign',
+        claimed_by='foreign-worker', batch_size=1, now=1000.0)
+    assert repo.recover_outbox_for_scope(scope='notify', owner_id='local/main',
+        now=1001.0, lease_seconds=14.0, limit=1) == 0
+    assert repo.recover_outbox_for_scope(scope='notify', owner_id='local/main',
+        now=2000.0, lease_seconds=14.0, limit=1) == 1
+    recovered = repo.outbox_entry(receipt['outbox_id'])
+    assert recovered['status'] == 'FAILED'
+    assert recovered['provider_evidence']['attempt_1']['error_code'] == 'OUTCOME_UNKNOWN'
+    assert repo.outbox_entry(foreign['outbox_id'])['status'] == 'IN_FLIGHT'
+    current = repo.claim_outbox_for_scope(scope='notify', owner_id='local/main',
+        claimed_by='new-worker', batch_size=1, now=2000.0)[0]
+    assert current['attempts'] == 2
+    with pytest.raises(RuntimeConflictError, match='no longer current'):
+        repo.settle_outbox_for_claim(claim=old, status='ACKED')
+    assert repo.outbox_entry(receipt['outbox_id'])['status'] == 'IN_FLIGHT'
+    result = repo.settle_outbox_for_claim(claim=current, status='ACKED')
+    assert result['status'] == 'ACKED' and result['attempts'] == 2
+
+
+def test_explicit_retry_recovers_only_expired_notification_claim(world):
+    create(world)
+    repo = notify._runtime(world.home)
+    receipt = event(world)[0]
+    repo.claim_outbox_for_scope(scope='notify', owner_id='local/main',
+        claimed_by='disconnected-worker', batch_size=1, now=900.0)
+    result = notify.handle_notify(world.call('notify.deliveries.retry', {'outbox_id': receipt['outbox_id']}))
+    assert result == {'outbox_id': receipt['outbox_id'], 'status': 'ACKED', 'attempts': 2}
+    assert len(world.sent) == 1
+
+
+def test_attempt_deducts_dns_elapsed_from_http_total_budget(world, monkeypatch):
+    create(world)
+    event(world)
+    repo = notify._runtime(world.home)
+    row = repo.claim_outbox_for_scope(scope='notify', owner_id='local/main',
+        claimed_by='budget-worker', batch_size=1, now=1000.0)[0]
+    clock = [100.0]
+
+    def resolve(_host, timeout):
+        assert timeout == 7.0
+        clock[0] += 3.0
+        return ('93.184.216.34',)
+
+    monkeypatch.setattr(notify, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(notify, '_resolve_bounded', resolve)
+    result = notify._attempt(repo, row, notify._read_channels(world.home, 'local/main'),
+        world.config, lambda: 1000.0)
+    assert result['status'] == 'ACKED'
+    assert world.sent[0][1]['timeout'] == 4.0
+    assert notify._evidence(result)['latency_ms'] == 3000
+
+
+def test_expired_recovery_100k_inflight_uses_index_and_bounded_vm_work(world, monkeypatch):
+    create(world)
+    repo = notify._runtime(world.home)
+    with repo.transaction() as connection:
+        connection.executemany('INSERT INTO outbox_entries(outbox_id,effect_key,owner_id,scope,'
+            'payload_json,status,attempts,next_retry_at,claimed_at,created_at,updated_at) '
+            'VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+            ((f'lease-{i:06}', f'lease-effect-{i}', 'local/main', 'notify', '{}', 'IN_FLIGHT',
+              1, 0, 0 if i < 3 else 2000, i, i) for i in range(100000)))
+    callbacks = [0]
+    connect = repo._runtime_connect
+
+    def bounded_connection():
+        connection = connect()
+
+        def progress():
+            callbacks[0] += 1
+            return int(callbacks[0] > 200)
+
+        connection.set_progress_handler(progress, 100)
+        return connection
+
+    monkeypatch.setattr(repo, '_runtime_connect', bounded_connection)
+    assert repo.recover_outbox_for_scope(scope='notify', owner_id='local/main',
+        now=1000.0, lease_seconds=14.0, limit=2) == 2
+    assert callbacks[0] <= 200
+    monkeypatch.setattr(repo, '_runtime_connect', connect)
+    with repo._runtime_connection() as connection:
+        plans = connection.execute('EXPLAIN QUERY PLAN SELECT outbox_id,attempts,provider_evidence_json '
+            'FROM outbox_entries WHERE scope=? AND owner_id=? AND status=\'IN_FLIGHT\' AND claimed_at<=? '
+            'ORDER BY claimed_at,outbox_id LIMIT ?', ('notify', 'local/main', 986.0, 2)).fetchall()
+        detail = ' '.join(str(tuple(row)) for row in plans)
+        assert 'idx_outbox_scope_lease' in detail and 'TEMP B-TREE' not in detail
+        assert connection.execute("SELECT count(*) FROM outbox_entries WHERE status='FAILED'").fetchone()[0] == 2
