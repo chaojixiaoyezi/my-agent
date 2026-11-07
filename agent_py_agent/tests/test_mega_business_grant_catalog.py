@@ -153,10 +153,14 @@ def test_task_workflow_ref_is_required_nullable_and_still_validates_ids():
 
 
 def test_legacy_143_actions_remain_byte_equivalent():
+    specs = action_specs()
+    # GAP158-W7 新增三个工作区写动作；它们不属于原 143 项冻结合同。
+    added_actions = {"workspace.files.mkdir", "workspace.files.write", "workspace.files.delete"}
+    assert added_actions <= specs.keys()
     old = {name: {"name": spec.name, "mode": spec.mode, "capabilities": sorted(spec.capabilities),
                   "schema": spec.payload_schema, "scope_requirements": list(spec.scope_requirements),
                   "any_capabilities": sorted(spec.any_capabilities)}
-           for name, spec in action_specs().items() if not name.startswith("business.")}
+           for name, spec in specs.items() if not name.startswith("business.") and name not in added_actions}
     assert len(old) == 143
     assert digest(old) == "d3160bf300b61ec2142131bd4bf7822934e44feda0f43217119865249bdab924"
     assert action_spec("tasks.list").validate_payload({"thread_id": "thread-one"}) == {

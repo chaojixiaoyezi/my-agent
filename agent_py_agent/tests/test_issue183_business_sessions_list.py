@@ -211,12 +211,15 @@ def test_sessions_list_schema_and_cursor_errors(background_http):
     assert status == 200 and len(result['data']['items']) == 2, result
 
 
-# LLM: 用合入前的显式六分片重载作为 base，比较动作全集、别名及 W11 handler 身份。
-# 函数用途: 确认只增加一个无别名动作，没有重定义 conversations.list。
+# LLM: 用当前其它显式分片重载作为 base，比较动作全集、别名及 W11 handler 身份。
+# 函数用途: 确认 sessions 分片仍只增加一个无别名动作，没有重定义 conversations.list。
 def test_conversations_list_contract_unchanged():
     base_modules = tuple('agent_py_agent.agent.gateway_parts.business_api_v13_w' + str(wave)
         for wave in range(7, 13))
-    base_actions, base_aliases, base_defs, base_jobs, base_collections = v13._load_registry(base_modules)
+    gap_modules = tuple('agent_py_agent.agent.gateway_parts.business_api_v13_gap158_w' + str(wave)
+        for wave in range(1, 10))
+    base_actions, base_aliases, base_defs, base_jobs, base_collections = v13._load_registry(
+        (*base_modules, *gap_modules))
     actions, aliases, definitions, jobs, collections = v13._load_registry()
     assert set(actions) == set(base_actions) | {'sessions.list'}
     assert aliases == base_aliases
@@ -230,7 +233,8 @@ def test_conversations_list_contract_unchanged():
     assert actions['sessions.list'].effect == 'read'
     assert actions['sessions.list'].admin is False
     assert actions['sessions.list'].idempotency_required is False
-    expected_modules = (*base_modules, 'agent_py_agent.agent.gateway_parts.business_api_v13_sessions')
+    expected_modules = (*base_modules, 'agent_py_agent.agent.gateway_parts.business_api_v13_sessions',
+                        *gap_modules)
     assert expected_modules == v13.V13_SLICE_MODULES
 
 

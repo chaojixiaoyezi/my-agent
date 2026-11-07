@@ -157,13 +157,12 @@ def test_http_timeout_and_externalization_have_the_correct_tiers():
 # 函数用途: 核证当前目录的精确分层、新池与拓扑边界、部署守卫拆分和后台身份默认上限。
 def test_listed_parameter_classification_has_exact_counts():
     registry = listed_parameters()
-    # Stage 2五键：gateway_event_hub_ring_events、gateway_event_fallback_poll_seconds、conversation_actor_workers、
-    # owner_epoch_fence_enabled、background_owner_wake_rescan_seconds；保留Stage 1三项部署键。
-    assert Counter(spec.tier for spec in registry.values()) == {"common": 14, "advanced": 197, "deployment": 144}
+    # GAP158 高级参数及 CAT1/CAT3 部署参数已登记；精确计数须包含这些正式目录项。
+    assert Counter(spec.tier for spec in registry.values()) == {"common": 14, "advanced": 208, "deployment": 146}
     assert sum(spec.source == "runtime_guard" for spec in registry.values()) == 23
-    assert len(DEPLOYMENT_ONLY_KEYS) == 121
+    assert len(DEPLOYMENT_ONLY_KEYS) == 123
     assert registry.keys() >= DEPLOYMENT_ONLY_KEYS
-    assert len(registry) == 355
+    assert len(registry) == 368
     for key in ("gateway_http_control_lane_workers", "gateway_native_stream_max"):
         assert registry[key].tier == "advanced" and registry[key].writable and registry[key].user_editable
     topology = registry["gateway_worker_process_count"]
