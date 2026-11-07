@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
@@ -858,6 +860,8 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             self.record_diagnostic("TOOL_PROGRESS_WITHOUT_START", event)
             return
         detail = str(event.payload.get("detail") or event.payload.get("output") or block.detail)
+        detail = _tool_preview(event.payload.get("tool") or block.metadata.get("tool") or block.title,
+                               detail, event.payload)
         self.active_blocks[event.block_id] = replace(
             block,
             phase=str(event.payload.get("phase") or event.phase),
@@ -1386,6 +1390,9 @@ def _role_for_kind(kind: str) -> str:
 # LLM: block 工厂只拷贝公开字段，禁止把完整未知 payload 塞进 metadata 后被 renderer 意外展示。
 # 函数用途: 从事件构造一个新的显示块。
 def _block_from_tui_event(event: TuiEvent, *, role: str, phase: str) -> TuiBlock:
+    detail = str(event.payload.get("detail") or event.payload.get("output") or "")
+    if role == "tool":
+        detail = _tool_preview(event.payload.get("tool") or event.payload.get("title"), detail, event.payload)
     return TuiBlock(
         block_id=event.block_id,
         kind=event.kind,
@@ -1393,7 +1400,7 @@ def _block_from_tui_event(event: TuiEvent, *, role: str, phase: str) -> TuiBlock
         phase=phase,
         text=str(event.payload.get("text") or ""),
         title=str(event.payload.get("title") or event.payload.get("tool") or ""),
-        detail=str(event.payload.get("detail") or event.payload.get("output") or ""),
+        detail=detail,
         created_seq=event.seq,
         updated_seq=event.seq,
         metadata=_public_metadata(event.payload),
@@ -1540,6 +1547,10 @@ def _public_metadata(payload: dict[str, Any]) -> dict[str, Any]:
         and isinstance(payload.get("detail"), str)
     ):
         metadata["invocation"] = payload["detail"]
+    if metadata.get("tool") == "read_artifact":
+        invocation = _artifact_call_label(metadata.get("invocation"))
+        if invocation:
+            metadata["invocation"] = invocation
     raw_goals = payload.get("goals")
     if isinstance(raw_goals, list | tuple):
         metadata["goals"] = _public_goal_rows(raw_goals)
@@ -1669,11 +1680,118 @@ def _tool_terminal_detail(event: TuiEvent, active: TuiBlock) -> str:
         return "用户拒绝了工具调用"
     if error_code == "CANCELLED" or event.phase == "interrupted":
         return "已中断"
-    return str(
+    detail = str(
         event.payload.get("output")
         or event.payload.get("detail")
         or active.detail
     )
+    return _tool_preview(event.payload.get("tool") or active.metadata.get("tool") or active.title,
+                         detail, event.payload)
+
+
+_MANAGEMENT_TOOL_LABELS = {
+    "workflows": "工作流", "scripts": "脚本", "schedule": "计划任务",
+    "spaces": "空间", "business_spaces": "空间", "background_agents": "后台代理",
+}
+
+
+def _preview_label(value: object, limit: int = 64) -> str:
+    """JSON 解码后的名称不可重新引入转义控制符或多行终端指令。"""
+    if not isinstance(value, str):
+        return ""
+    text = " ".join("".join(char for char in value if char.isprintable() or char.isspace()).split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _artifact_call_label(value: object) -> str:
+    """只缩短显示用的 scoped call 引用；原事件与归档引用不变。"""
+    if not isinstance(value, str) or len(value) > 512:
+        return ""
+    prefix, separator, call = value.strip().rpartition(":")
+    if not separator or not re.fullmatch(r"[\w.:-]+", prefix) or not re.fullmatch(r"call_[\w-]+", call):
+        return ""
+    return f"已外置工具输出（{_preview_label(call, 32)}）"
+
+
+def _tool_item_name(value: object) -> str:
+    if isinstance(value, Mapping):
+        descriptor = value.get("descriptor")
+        if isinstance(descriptor, Mapping):
+            name = _preview_label(descriptor.get("name"))
+            if name:
+                return name
+        return next((name for key in ("name", "display_name", "title")
+                     if (name := _preview_label(value.get(key)))), "")
+    return _preview_label(value)
+
+
+def _management_preview(tool: str, data: dict | list) -> str:
+    label = _MANAGEMENT_TOOL_LABELS[tool]
+    prefix, collection_key, items = "", tool, data if isinstance(data, list) else None
+    if isinstance(data, dict):
+        action = _preview_label(data.get("action"), 32)
+        prefix = f"action={action} · " if action else ""
+        message = _preview_label(data.get("error")) or _preview_label(data.get("message"))
+        if message:
+            return prefix + message
+        collections = [(key, value) for key, value in data.items() if isinstance(value, list)]
+        if collections:
+            collection_key, items = next((row for row in collections if row[0] in (tool, "items", "jobs")), collections[0])
+    if items is not None:
+        known = collection_key in (tool, "items", "jobs", "spaces", "agents")
+        heading = f"共 {len(items)} 个{label}" if known else f"{_preview_label(collection_key)}：{len(items)} 项"
+        names = [name for item in items[:3] if (name := _tool_item_name(item))]
+        return prefix + heading + ("：" + "、".join(names) + ("…" if len(items) > 3 else "") if names else "")
+    name = _tool_item_name(data)
+    if not name and isinstance(data, dict):
+        for index, value in enumerate(data.values()):
+            if index >= 3:
+                break
+            if isinstance(value, dict) and (name := _tool_item_name(value)):
+                break
+    return prefix + (f"{label}：{name}" if name else f"{label}结构化结果")
+
+
+def _tool_preview(tool: object, text: str, payload: Mapping) -> str:
+    """共用实时/历史预览；有界解析只影响显示，不从正文推导执行状态。"""
+    if not isinstance(tool, str):
+        return text
+    if tool == "read_artifact":
+        reference = _artifact_call_label(text or payload.get("artifact_ref"))
+        if reference:
+            return reference
+    elif tool not in _MANAGEMENT_TOOL_LABELS:
+        return text
+    if not text[:64].lstrip().startswith(("{", "[", '"')):
+        return text
+    label = _MANAGEMENT_TOOL_LABELS.get(tool, "外置工具输出")
+    if len(text) > 16_384:
+        return f"{label}（预览过长）"
+    try:
+        data = json.loads(text)
+        if isinstance(data, str) and data.lstrip().startswith(("{", "[")):
+            data = json.loads(data)
+    except (ValueError, RecursionError):
+        # 上游按字符截断的 JSON 不能冒充完整列表，更不能用正则猜数量。
+        return f"{label}（预览不完整）"
+    if tool != "read_artifact":
+        return _management_preview(tool, data) if isinstance(data, (dict, list)) else text
+    if not isinstance(data, dict) or not (reference := _artifact_call_label(data.get("artifact_ref"))):
+        return text
+    parts = [reference]
+    mode = _preview_label(data.get("read_mode") or data.get("mode"), 32)
+    if mode:
+        parts.append(mode)
+    offset = data.get("content_offset", data.get("offset"))
+    if type(offset) is int and offset >= 0:
+        parts.append(f"偏移 {_preview_label(str(offset), 32)}")
+    amount = data.get("content_chars")
+    if type(amount) is int and amount >= 0:
+        parts.append(f"{_preview_label(str(amount), 32)} 字符")
+    message = _preview_label(data.get("error")) or _preview_label(data.get("message"))
+    if message:
+        parts.append(message)
+    return " · ".join(parts)
 
 
 # LLM: queue 排序只使用显式 priority 和 seq，文本内容不影响执行/显示顺序。
