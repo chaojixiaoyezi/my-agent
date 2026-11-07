@@ -137,12 +137,13 @@ def test_selection_clears_stale_usage_without_modifying_history_or_compact(tmp_p
     host = host_with_store(tmp_path)
     row = execute_local_model_operation(host, "s", "list", {})
     tid = row["thread_id"]
+    host.conversation_store.messages.append({"thread_id": tid, "role": "user", "content": "prior turn"})
     host.conversation_store.threads.update_atomic(tid, lambda thread: replace(
         thread, summary="prior summary", compact_generation=3, compact_checkpoint_id="checkpoint",
         model_context_usage={"current_tokens": 123}, provider_context_observation={"input_tokens": 123},
     ))
     a = add(host, model_name="A")[0]
-    execute_local_model_operation(host, "s", "select", {"profile_id": a})
+    assert execute_local_model_operation(host, "s", "select", {"profile_id": a})["thread_id"] == tid
     thread = host.conversation_store.threads.load(tid)
     assert thread.summary == "prior summary" and thread.compact_generation == 3
     assert thread.compact_checkpoint_id == "checkpoint"

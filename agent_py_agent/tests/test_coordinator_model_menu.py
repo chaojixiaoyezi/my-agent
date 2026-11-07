@@ -412,7 +412,8 @@ def test_supported_model_operation_bad_fields_are_original_error_not_waiting(tmp
         assert not delivered
 
 
-def test_first_model_bad_binding_is_not_empty_or_rebuilt(tmp_path, monkeypatch):
+def test_first_model_bad_binding_is_archived_and_rebound(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation.store_io import LEDGER_ARCHIVE_DIR
     from agent_py_agent.agent.gateway_parts.owner_conversation_store import (
         owner_conversation_store_from_config,
     )
@@ -432,8 +433,11 @@ def test_first_model_bad_binding_is_not_empty_or_rebuilt(tmp_path, monkeypatch):
         path.parent.mkdir(parents=True)
         path.write_text('{invalid-json')
         saved = path.read_bytes()
-        assert post_model(server, model_body())[0] == 500
-        assert path.read_bytes() == saved and not list(store.storage.threads_dir.glob('*.json'))
+        status, result = post_model(server, model_body())
+        assert status == 200 and result.get('ok') is True, (status, result)
+        assert (path.parent / LEDGER_ARCHIVE_DIR / path.name).read_bytes() == saved
+        threads = list(store.storage.threads_dir.glob('*.json'))
+        assert [p.stem for p in threads] == [result['thread_id']]
         assert not delivered
 
 
