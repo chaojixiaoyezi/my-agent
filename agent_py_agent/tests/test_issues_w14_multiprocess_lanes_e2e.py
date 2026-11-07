@@ -276,9 +276,9 @@ def test_foreign_thread_io_is_not_attributed_to_transition(tmp_path, monkeypatch
     assert _settled_fd_delta(before_fds, root=home.root) <= 0
 
 
-# LLM: 十车道与配额扫描都必须真实收敛；跨片生成器可合法持一个目录 FD，不能在仍有配额欠账时测泄漏。
+# LLM: 所有登记车道与配额扫描都必须真实收敛；跨片生成器可合法持一个目录 FD，不能在仍有配额欠账时测泄漏。
 # 函数用途: 沿同一 transition 排空领域和配额工作后，核对逐写受门、双周期及 FD 零增长。
-# 显式要求配额续扫，避免未启用配额的夹具在十车道完成后按日周期退出；两档预算均保持真实分片。
+# 显式要求配额续扫，避免未启用配额的夹具在全部车道完成后按日周期退出；两档预算均保持真实分片。
 @pytest.mark.parametrize('quota_entries', [None, 32])
 def test_transition_wires_all_lanes_and_fences_real_mutations(lane_world, monkeypatch, quota_entries):
     world = lane_world
@@ -298,7 +298,7 @@ def test_transition_wires_all_lanes_and_fences_real_mutations(lane_world, monkey
                 quota_max_entries=quota_entries, quota_max_ms=owner_maintenance._QUOTA_STEADY_MAX_MS)
             assert result.ran and result.apply_outcome == 'applied'
             marker, kinds = _observe_state(world.home, coordinator=True)
-            # 协调模式的配额回执独立于十车道 cursor，由原扫描器实际完成后发布。
+            # 协调模式的配额回执独立于各车道 cursor，由原扫描器实际完成后发布。
             quota_complete = marker['storage_maintenance']['quota_reconciliation']['complete'] is True
             if seen == set(LANE_BINDINGS):
                 revisited.update(kinds)
@@ -313,11 +313,11 @@ def test_transition_wires_all_lanes_and_fences_real_mutations(lane_world, monkey
             now += 7 * 86400 if tick == 0 else (1 if marker['maintenance_partial'] or not quota_complete else
                 MemoryRetentionPolicy().maintenance_interval_seconds)
         else:
-            pytest.fail('协调维护未在有界拍数内排空配额、消费宽限证明并重新走完十种车道')
+            pytest.fail('协调维护未在有界拍数内排空配额、消费宽限证明并重新走完全部登记车道')
     assert _settled_fd_delta(before_fds, root=world.home.root) <= 0
     assert seen == revisited == set(LANE_BINDINGS)
     assert repeated_all
-    # LocalStore 经 global_write_commit_scope 使用相同原写门，其余车道经 run_write。
+    # LocalStore 经 global_write_commit_scope 使用相同原写门；含真实过期历史的其余车道均经 run_write。
     assert lane_writes == set(LANE_BINDINGS) - {'local_events'}
     assert transition.commits.count('state') == tick + 1
     assert len(state_writes) == tick + 1
