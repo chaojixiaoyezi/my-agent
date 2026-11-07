@@ -534,9 +534,9 @@ def _open_lock_leaf(parent_fd: int, name: str, *, exclusive: bool) -> int:
 def open_private_lock_beneath_tightened(root: str | Path, relative_parts: tuple[str, ...]) -> int:
     descriptor = open_private_lock_beneath(root, relative_parts)
     try:
-        # Windows 的 Python 3.12 没有 os.fchmod：没有就跳过自愈（该平台没有 POSIX 权限位语义），
-        # 不影响其它平台把存量 0644 锁收紧到 0600。
-        if hasattr(os, "fchmod") and stat.S_IMODE(os.fstat(descriptor).st_mode) & 0o077:
+        # Windows 3.13+虽有fchmod，但不清除POSIX组/其他用户位；该平台不按这些位收紧。
+        # POSIX有fchmod时仍把存量0644锁收紧到0600，缺能力时跳过自愈。
+        if os.name != "nt" and hasattr(os, "fchmod") and stat.S_IMODE(os.fstat(descriptor).st_mode) & 0o077:
             os.fchmod(descriptor, 0o600)
     except OSError:
         pass
