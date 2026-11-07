@@ -148,8 +148,14 @@ def _gateway_outcome(ctx: Any, response: dict[str, Any]) -> tuple[str, bool, Tui
     )
     from ...agent.memory_archive.tokens import estimate_tokens
 
+    # 接回的排队请求没有本地接受时钟，完成计时须保留 Gateway 的结构化时间。
+    gateway_timing = {
+        key: response[key]
+        for key in ("duration_seconds", "started_at", "ended_at")
+        if key in response and response[key] is not None
+    } or None
     if is_silent_user_stop(response):
-        return "", False, TuiTurnSummary(ok=False, interrupted=True)
+        return "", False, TuiTurnSummary(ok=False, interrupted=True, gateway_timing=gateway_timing)
     if ctx.job.show_prompt and response.get("prompt"):
         with ctx.cfg.tui_runtime.turn_console_output(getattr(ctx, "turn_adapter", None)):
             ctx.cfg.tui_runtime.write_console(
@@ -170,7 +176,7 @@ def _gateway_outcome(ctx: Any, response: dict[str, Any]) -> tuple[str, bool, Tui
         if not response.get("user_error") and error == gateway_client_error_message(None):
             error += _public_failure_diagnostics(response)
         text = str(response.get("response") or "") if gateway_model_response_error_projection(response) else ""
-        return text, False, TuiTurnSummary(response_text=text, ok=False, error=error)
+        return text, False, TuiTurnSummary(response_text=text, ok=False, error=error, gateway_timing=gateway_timing)
     text = str(response.get("response") or "")
     context_tokens = current_context_token_estimate(response)
     with ctx.cfg.state_lock:
@@ -183,6 +189,7 @@ def _gateway_outcome(ctx: Any, response: dict[str, Any]) -> tuple[str, bool, Tui
         context_tokens=context_tokens,
         output_tokens=estimate_tokens(text) if text else 0,
         tool_rounds=_nonnegative_int(response.get("tool_rounds")),
+        gateway_timing=gateway_timing,
     )
     return text, False, summary
 

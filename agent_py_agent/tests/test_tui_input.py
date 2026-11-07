@@ -1617,16 +1617,52 @@ def test_reconciliation_queues_once_only_after_explicit_rejection(monkeypatch, t
     params.stop_event.set()
 
 
+@pytest.mark.parametrize("outcome", ["completed", "failed", "interrupted"])
+@pytest.mark.parametrize("timing,expected", [
+    ({"duration_seconds": 6.0, "started_at": 100.0, "ended_at": 106.0},
+     {"duration_seconds": 6.0, "started_at": 100.0, "ended_at": 106.0}),
+    ({"duration_seconds": None, "started_at": 100.0, "ended_at": 106.0},
+     {"started_at": 100.0, "ended_at": 106.0}),
+    ({"duration_seconds": 0.0}, {"duration_seconds": 0.0}),
+    ({"duration_seconds": None, "started_at": None, "ended_at": None}, None),
+    ({}, None),
+])
+def test_gateway_outcome_preserves_structured_timing(outcome, timing, expected) -> None:
+    from agent_py_agent.cli.chat_parts.tui_worker_paths import _gateway_outcome
+
+    response = {"ok": outcome != "failed", "response": "处理结果", **timing}
+    if outcome == "failed":
+        response["user_error"] = "请求失败"
+    elif outcome == "interrupted":
+        response.update(status="interrupted", error_code="INTERRUPTED")
+    ctx = SimpleNamespace(job=SimpleNamespace(show_prompt=False),
+        cfg=SimpleNamespace(state_lock=threading.Lock(), last_token_estimate_ref=[0]))
+
+    _text, _recorded, summary = _gateway_outcome(ctx, response)
+
+    assert summary.gateway_timing == expected
+
+
+@pytest.mark.parametrize("gateway_timing", [
+    {"duration_seconds": 6.0},
+    {"started_at": 100.0, "ended_at": 106.0},
+])
 def test_gateway_queued_active_input_attaches_exact_next_turn_without_resubmit(
     monkeypatch,
     tmp_path,
+    gateway_timing,
 ) -> None:
     from agent_py_agent.cli.chat_client_context import (
         ActiveTurnInputDelivery,
         ActiveTurnInputResult,
     )
+    from agent_py_agent.cli.chat_parts.tui_block_renderer import fragments_text, render_tui_snapshot
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiTurnSummary
+    from agent_py_agent.cli.chat_parts.tui_worker_paths import _gateway_outcome
 
     runtime = TuiRuntime("active-turn-server-queued")
+    runtime.enqueue_prompt("gwreq-ending", "上一轮", queued=False)
+    runtime.begin_turn("gwreq-ending")
     _publish_execution(runtime, "gwreq-ending")
     jobs: Queue[ChatJob] = Queue()
 
@@ -1675,6 +1711,22 @@ def test_gateway_queued_active_input_attaches_exact_next_turn_without_resubmit(
     assert runtime.store.snapshot().pending_steers == ()
     assert params.pending_jobs_ref_for_enqueue == [1]
     params.stop_event.set()
+
+    # 接回任务只观察 Gateway；不伪造本地接受时间，完成必须使用服务端计时。
+    assert queued_job.request_id not in runtime.completions.clocks
+    runtime.complete_turn("gwreq-ending", TuiTurnSummary(response_text="上一轮完成"))
+    runtime.begin_turn(queued_job.request_id)
+    ctx = SimpleNamespace(job=queued_job,
+        cfg=SimpleNamespace(state_lock=params.state_lock, last_token_estimate_ref=[0], tui_runtime=runtime))
+    _text, _recorded, summary = _gateway_outcome(ctx, {"ok": True, "response": "下一轮完成", **gateway_timing})
+    runtime.complete_turn(queued_job.request_id, summary)
+    snapshot = runtime.store.snapshot()
+    assert snapshot.status.completion["elapsed_seconds"] == 6.0
+    assert snapshot.status.completion["source"] == "gateway"
+    frame = render_tui_snapshot(snapshot, TuiRenderContext(width=180))
+    transcript = "\n".join(fragments_text(line) for line in frame.transcript_lines)
+    assert transcript.count("✻ Worked for 6s") == 1
+    assert "Worked for 未知" not in transcript
 
 
 # 类用途: 提交时只拿到入口编号（结果未知），状态查询给出“最终未确认”的假 Gateway 客户端，并记录查询次数。
