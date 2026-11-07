@@ -11,7 +11,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -23,7 +23,7 @@ from ..common.json_io import (
     locked_json_path,
     write_json_file_atomic_unlocked,
 )
-from ..common.nofollow_fs import read_bytes_beneath, unlink_file_beneath
+from ..common.nofollow_fs import ensure_private_dir, read_bytes_beneath, unlink_file_beneath
 from ..runtime_errors import runtime_error_report
 from ..settings.defaults import resident_owner_capacity
 from .process_cleanup_evidence import confirm_cleanup_reference, validate_cleanup_reference
@@ -43,6 +43,17 @@ from .process_session_records import (
     validate_process_record,
     validate_session_id,
 )
+
+try:
+    from ..common import cache_capacity
+except ImportError:  # R0 尚未合入的独立分片沿当前 main 已登记的容量运行。
+    cache_capacity = None
+
+
+def _process_records_capacity() -> int:
+    # 当前 main 已移除原固定下限，沿用其配置推导值，不重新引入常量或第二份容量登记。
+    floor = resident_owner_capacity()
+    return cache_capacity.resident_owners(floor) if cache_capacity is not None else floor
 
 
 # LLM: 进程记录目录投影缓存: 缓存"读到的记录/错误 +
@@ -81,12 +92,11 @@ class _ProcessRecordFiles:
 _PROCESS_RECORD_FILES_CACHE: OrderedDict[str, _ProcessRecordFiles] = OrderedDict()
 
 
-# LLM: 合并读取: 每根至多一个仍可加入的批次。领头者取得目录锁(含 redo 恢复)后才封批，批内成员都在读开始前到达，
-#   拿到的视图不早于各自到达时刻，与各自持锁读取等价；其余调用只等结果，不排队取锁、不重复扫描。
-#   只要有一个成员要全量记录，整批按全量核对；显式扫描预算的调用不入批，预算仍按单次调用计。
+# 同根同模式合并读取；待通知批次不拿目录锁，也不与持锁全量批次互相等待。
+# 显式扫描预算不入批，预算仍按单次调用计；所有候选在实际写回前仍要锁内重读。
 # 类用途: 承载一次合并读取的模式、到达人数与共享结果。
 class _ProcessRecordsScanBatch:
-    def __init__(self, key: str, pending_only: bool) -> None:
+    def __init__(self, key: tuple[str, bool], pending_only: bool) -> None:
         self.key = key
         self.pending_only = pending_only
         self.followers = 0
@@ -102,7 +112,7 @@ class _ProcessRecordsScanBatch:
             return self.pending_only
 
 
-_PROCESS_RECORDS_SCAN_BATCHES: dict[str, _ProcessRecordsScanBatch] = {}
+_PROCESS_RECORDS_SCAN_BATCHES: dict[tuple[str, bool], _ProcessRecordsScanBatch] = {}
 
 # 进程记录默认扫描的基础毫秒额度。
 _PROCESS_SESSION_SCAN_BASE_MS = 1000
@@ -173,7 +183,7 @@ def _store_process_records_projection(
     with _PROCESS_RECORDS_PROJECTION_LOCK:
         _PROCESS_RECORDS_PROJECTION_CACHE[key] = entry
         _PROCESS_RECORDS_PROJECTION_CACHE.move_to_end(key)
-        while len(_PROCESS_RECORDS_PROJECTION_CACHE) > resident_owner_capacity():
+        while len(_PROCESS_RECORDS_PROJECTION_CACHE) > _process_records_capacity():
             _PROCESS_RECORDS_PROJECTION_CACHE.popitem(last=False)
 
 
@@ -196,7 +206,7 @@ def _store_process_record_files(root: Path, files: _ProcessRecordFiles) -> None:
     with _PROCESS_RECORDS_PROJECTION_LOCK:
         _PROCESS_RECORD_FILES_CACHE[key] = files
         _PROCESS_RECORD_FILES_CACHE.move_to_end(key)
-        while len(_PROCESS_RECORD_FILES_CACHE) > resident_owner_capacity():
+        while len(_PROCESS_RECORD_FILES_CACHE) > _process_records_capacity():
             _PROCESS_RECORD_FILES_CACHE.popitem(last=False)
 
 
@@ -314,7 +324,8 @@ class ProcessSessionTransaction:
     # 函数用途: 读取锁内最新记录，用于启动准入、交接和精确终态更新。
     def load(self, session_id: str) -> dict[str, object] | None:
         self._require_active()
-        return read_process_record(self.root, session_id)
+        record = read_process_record(self.root, session_id)
+        return record if record is not None else read_process_record(self.root / "finished", session_id)
 
     # LLM: 单条损坏保留错误；调用方需要全范围原子操作时必须拒绝有错误的清单。
     # 函数用途: 在一个一致的目录视图内枚举原 session 文件，记录无效项。
@@ -373,6 +384,11 @@ class ProcessSessionTransaction:
     def write(self, record: dict[str, object]) -> dict[str, object]:
         self._require_active()
         incoming = validate_process_record(record)
+        # 历史记录已结清，不再接受旧执行体写回；不能把归档误当新预留覆盖原终态。
+        session_id = incoming["session_id"]
+        if (not (self.root / f"{session_id}.json").exists()
+                and (self.root / "finished" / f"{session_id}.json").exists()):
+            raise ProcessSessionRevisionConflict("archived process records are read-only")
         if incoming["schema"] == LEGACY_PROCESS_SESSION_SCHEMA:
             path = self.root / f"{incoming['session_id']}.json"
             with locked_json_path(path):
@@ -473,15 +489,26 @@ class ProcessSessionTransaction:
     #   只按可信finished_at判断超龄，不关闭进程、不替代资源释放或用explicit_stop标记代替消费读口。
     # 函数用途: 在原目录锁内清理数量超额或安全超龄记录，并返回实际删除的句柄。
     def prune_finished(self, max_finished: int | None = None, *, max_age_seconds: float | None = None,
-                       now: float | None = None, is_notice_consumed: Callable[[str], bool] | None = None) -> list[str]:
-        records, _errors = self.list_records()
+                       now: float | None = None, is_notice_consumed: Callable[[str], bool] | None = None,
+                       finished_only: bool = False) -> list[str]:
+        self._require_active()
+        records, _errors = ([], []) if finished_only else self.list_records()
+        history = self.root / "finished"
+        locations = {record["session_id"]: self.root for record in records}
+        # 活跃目录的收尾不反扫历史；只有维护通道显式选择历史时才枚举 finished/。
+        if finished_only and history.exists():
+            history_records, _history_errors = ProcessSessionTransaction(history).list_records()
+            records += history_records
+            locations.update((record["session_id"], history) for record in history_records)
+        # finished/ 的位置证明通知已在搬家前核验消费；维护不能因缺少跨会话 resolver 永久保留历史。
+        consumed = (lambda _notice: True) if finished_only and is_notice_consumed is None else is_notice_consumed
         finished = [
             record
             for record in records
             if record["status"] in PROCESS_TERMINAL_STATUSES
             and not record.get("retain_until_consumed", False)
             and record.get("activation_scope") is None
-            and _completion_obligation_finished(record, is_notice_consumed)
+            and _completion_obligation_finished(record, consumed)
         ]
         finished.sort(
             key=lambda item: float(item.get("finished_at") or item.get("started_at") or 0),
@@ -497,12 +524,17 @@ class ProcessSessionTransaction:
             and not record.get("stop_requested")
             and not record.get("retain_until_consumed", False)
             and _activation_exit_confirmed(record)
-            and _completion_obligation_finished(record, is_notice_consumed)
+            and _completion_obligation_finished(record, consumed)
         ]
         for record in (*finished, *activation_candidates):
             if _record_ttl_expired(record, max_age_seconds, current_now):
                 selected[record["session_id"]] = record
-        return [session_id for session_id, record in selected.items() if _unlink_session_if_unchanged(self.root, record)]
+            # 尚需保留的普通历史立即离开活跃目录；共享激活的资源证据继续沿原清理/TTL 边界。
+            if (record["session_id"] not in selected and record.get("activation_scope") is None
+                    and locations[record["session_id"]] == self.root):
+                _archive_session_if_unchanged(self.root, record)
+        return [session_id for session_id, record in selected.items()
+                if _unlink_session_if_unchanged(self.root, record, record_root=locations[session_id])]
 
 
 # LLM: pending状态优先保留；规范空目标{}无收件人，有目标必须有回执且消费读口明确证明结清，缺读口即保留。
@@ -585,18 +617,38 @@ def _append_log_retirement(root: Path, record: dict[str, object]) -> None:
 
 # LLM: 调用者持目录锁；叶锁内比较原记录和两次 nofollow 字节，退役责任耐久后才删除，侧车只随成功删除清理。
 # 函数用途: 删除未并发更新的准确 session 及其锁文件，不立即清理日志或其他资源。
-def _unlink_session_if_unchanged(root: Path, record: dict[str, object]) -> bool:
+def _unlink_session_if_unchanged(root: Path, record: dict[str, object], *, record_root: Path | None = None) -> bool:
+    record_root = root if record_root is None else record_root
     session_id = validate_session_id(record["session_id"])
     name = f"{session_id}.json"
-    with locked_json_path(root / name):
-        before = read_bytes_beneath(root, (name,))
-        if before is None or read_process_record(root, session_id) != record or read_bytes_beneath(root, (name,)) != before:
+    with locked_json_path(record_root / name):
+        before = read_bytes_beneath(record_root, (name,))
+        if (before is None or read_process_record(record_root, session_id) != record
+                or read_bytes_beneath(record_root, (name,)) != before):
             return False
         try:
             _append_log_retirement(root, record)
         except OSError:
             return False
-        unlink_file_beneath(root, (name,))
+        unlink_file_beneath(record_root, (name,))
+    unlink_file_beneath(record_root, (name + ".lock",))
+    return True
+
+
+def _archive_session_if_unchanged(root: Path, record: dict[str, object]) -> bool:
+    """原目录事务内核对准确版本后搬家，只清理已释放的叶锁，永久目录锁保持原位。"""
+    session_id = validate_session_id(record["session_id"])
+    name = f"{session_id}.json"
+    with locked_json_path(root / name):
+        before = read_bytes_beneath(root, (name,))
+        if (before is None or read_process_record(root, session_id) != record
+                or read_bytes_beneath(root, (name,)) != before):
+            return False
+        history = root / "finished"
+        ensure_private_dir(history, canonical_root=root)
+        if (history / name).exists():
+            raise ProcessSessionRevisionConflict("duplicate archived process record")
+        os.replace(root / name, history / name)
     unlink_file_beneath(root, (name + ".lock",))
     return True
 
@@ -684,8 +736,7 @@ class ProcessSessionStore:
 
     # LLM: 私有只读底座永远是全量记录和错误，冷读移交新对象或逐文件缓存中的共享只读对象；公开API负责复制，兼容参数不再选分支。
     #   信任在读前冻结，发布时只核目录身份；不因慢读跨过保护窗口而将旧视图变可信。
-    #   目录未命中仍原事务持锁扫描(先恢复redo)，但只重读代次变化或仍在2秒窗口内的文件；同根并发未命中合并成
-    #   一次持锁扫描(见 _ProcessRecordsScanBatch)，几十个代理不在目录锁上逐个排队重扫。
+    #   普通全量读取沿原事务恢复 redo；完成候选只读活跃集，不获取写锁。同根同模式的并发未命中合并读取。
     #   pending_only 只给完成协调读口：结果里的已结清记录可能是核对期内免 stat 复用的对象，调用方只取待通知记录；
     #   这样的结果不发布为目录投影，目录投影始终来自逐个核对过的扫描。
     # 函数用途: 复用目录内容投影，不缓存通知结论或暴露可变对象给外部。
@@ -696,7 +747,8 @@ class ProcessSessionStore:
             return hit.records, hit.errors
         if scan_budget:
             return self._scan_records_projection(scan_budget=scan_budget)
-        key = str(self.root)
+        # 只读批次不加入会等待写锁的全量批次，避免被另一读口间接串行化。
+        key = (str(self.root), pending_only)
         with _PROCESS_RECORDS_PROJECTION_LOCK:
             batch = _PROCESS_RECORDS_SCAN_BATCHES.get(key)
             if batch is None:
@@ -717,8 +769,8 @@ class ProcessSessionStore:
             batch.done.set()
         return batch.result
 
-    # LLM: 原事务持锁扫描(先恢复 redo)；合并批次在取得目录锁后封批并决定是否只核待通知记录。
-    # 函数用途: 执行一次持锁目录读取，按读前冻结的可信度发布目录投影。
+    # 普通读取持锁恢复；候选读取只观察原子发表的文件，未恢复 redo 时明确返回未知，不能自行修复。
+    # 函数用途: 按查询模式读取活跃集，只有完整核对的结果才可能发布目录投影。
     def _scan_records_projection(self, *, scan_budget: dict | None = None, batch: _ProcessRecordsScanBatch | None = None,
                                  pending_only: bool = False):
         before = _process_dir_stat_key(self.root)
@@ -729,11 +781,18 @@ class ProcessSessionStore:
         try:
             if not self.root.exists():
                 return [], []
-            with self.transaction() as transaction:
+            pending_only = batch.pending_only if batch is not None else pending_only
+            if pending_only and (self.root / ".process-sessions.redo.json").exists():
+                raise RuntimeError("managed process commit requires recovery")
+            # 通知候选只读原子替换的根目录文件；认领/写回仍由原事务逐条重读并执行 CAS。
+            context = nullcontext(ProcessSessionTransaction(self.root)) if pending_only else self.transaction()
+            with context as transaction:
                 transaction.reuse_listed_records = True
                 transaction.skip_settled_records = batch.seal() if batch is not None else pending_only
                 records, errors = transaction.list_records(**(scan_budget or {}))
                 complete = not transaction.listed_unverified
+            if pending_only and (self.root / ".process-sessions.redo.json").exists():
+                raise RuntimeError("managed process commit requires recovery")
         except (OSError, TypeError, ValueError, RuntimeError) as exc:
             return [], [process_session_error_report(exc, "process_session_store.list", path=self.root)]
         if read_trusted and complete:
