@@ -46,7 +46,9 @@ class _CategorisedGate:
         self.acquire()
         return self
 
-    def __exit__(self, *exc):
+    # LLM: 标准上下文退出协议始终释放原物理锁，不吞掉业务异常。
+    # 函数用途: 无论正常退出还是抛异常，都归还本次持有的锁。
+    def __exit__(self, exc_type=None, exc_val=None, exc_tb=None):
         self.release()
 
     def __getattr__(self, name):
