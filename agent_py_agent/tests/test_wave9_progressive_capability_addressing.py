@@ -1,5 +1,5 @@
 # LLM: 用真实Agent/冻结快照/线程与节点JSON验证渐进寻址；仅在临时目录准备输入，查询不能写盘、解密或联网。
-# 模块用途: 守住12领域总览、4个按需分块、权限边界与Level0唯一注入及瘦身合同。
+# 模块用途: 守住13领域总览、4个按需分块、权限边界与Level0唯一注入及瘦身合同。
 from dataclasses import replace
 from pathlib import Path
 
@@ -17,7 +17,7 @@ from agent_py_agent.agent.tooling.self_map_registry import SectionDescriptor
 from agent_py_agent.tests.test_self_map_runtime import _bytes, _read
 from agent_py_agent.tests.test_self_map_runtime import make_agent as make_agent
 
-_TOP = {'directories', 'tools', 'skills', 'packages', 'plugins', 'mcp', 'memory', 'models', 'config', 'work', 'permissions', 'context'}
+_TOP = {'directories', 'tools', 'business', 'skills', 'packages', 'plugins', 'mcp', 'memory', 'models', 'config', 'work', 'permissions', 'context'}
 _LEVEL1 = {'remote_peers', 'settings', 'schedules', 'assets'}
 
 
@@ -30,8 +30,8 @@ def owner_thread(agent, name, channel='local'):
 
 
 # LLM: 原默认描述符仍进入总览，专项只登记一次；总览不能偷读隐藏分块来膨胀成本。
-# 函数用途: 钉住总览12项、完整枚举16项及默认include标志。
-def test_level1_registered_but_overview_stays_exactly_twelve(make_agent, monkeypatch):
+# 函数用途: 钉住总览13项、完整枚举17项及默认include标志。
+def test_level1_registered_but_overview_stays_exactly_thirteen(make_agent, monkeypatch):
     agent = make_agent()
     tool = agent.tools.tools['self_map']
     assert 'include_in_overview' in SectionDescriptor.__dataclass_fields__

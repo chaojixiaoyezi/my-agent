@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from agent_py_agent.agent.contracts.tool_manifest_contract import tool_manifest_payload
 from agent_py_agent.agent.tooling.models import (
     ApprovalPolicy,
@@ -128,13 +130,15 @@ def _tool_manifest_payload() -> dict[str, object]:
     return tool_manifest_payload(snapshot)
 
 
-# LLM: 使用真实装配和同一请求快照；完整参数及身份留在归档，live 仅删逐工具重复描述。
+# LLM: 使用真实装配和同一请求快照；完整参数及身份留在归档，live 裁剪须精确记录省略数量。
 # 函数用途: 固定 v4 短卡目录及正规详情入口，不把折叠误说成无权限。
-def test_list_tools_live_cards_preserve_full_archive_and_authority(tmp_path):
+@pytest.mark.parametrize("business_enabled", [False, True])
+def test_list_tools_live_cards_preserve_full_archive_and_authority(tmp_path, business_enabled):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
 
-    registry = SimpleAgent(AgentConfig(enable_tools=True, memory_path=str(tmp_path / "m.jsonl")), str(tmp_path)).tools
+    registry = SimpleAgent(AgentConfig(enable_tools=True, business_spaces_enabled=business_enabled,
+        memory_path=str(tmp_path / "m.jsonl")), str(tmp_path)).tools
     snapshot = registry.runtime_snapshot()
     result = registry.tools["tool_search"]._execute_snapshot({"action": "catalog"}, snapshot)
     full = json.loads(result.output)
@@ -151,12 +155,18 @@ def test_list_tools_live_cards_preserve_full_archive_and_authority(tmp_path):
     assert live["self_context"] == {key: full["self_context"][key] for key in self_keys}
     direct = {spec.name for spec in registry.model_visible_specs(runtime_snapshot=snapshot)}
     assert live["counts"] == {"registered": len(snapshot.runtimes), "available": len(full["executable_tools"]), "direct": len(direct)}
-    assert {item["name"] for item in live["tools"]} == set(full["executable_tools"])
+    executable = set(full["executable_tools"])
+    expected_names = [item["name"] for item in full["tools"] if item["name"] in executable]
+    assert set(expected_names) == executable
+    omitted = live.get("omitted_items", {})
+    assert [item["name"] for item in live["tools"]] == expected_names[:len(live["tools"])]
+    assert len(live["tools"]) + omitted.get("tools", 0) == len(expected_names)
     assert all(set(item) == {"name", "category", "purpose", "schema_visibility"} for item in live["tools"])
     assert all(0 < len(item["purpose"]) <= 90 for item in live["tools"])
     assert all(item["schema_visibility"] == ("direct" if item["name"] in direct else "discoverable") for item in live["tools"])
     assert {"tool_search", "self_map", "read_artifact"} <= set(live["detail_policy"])
-    assert live["unavailable_tools"] == full["unavailable_tools"]
+    assert live["unavailable_tools"] == full["unavailable_tools"][:len(live["unavailable_tools"])]
+    assert len(live["unavailable_tools"]) + omitted.get("unavailable_tools", 0) == len(full["unavailable_tools"])
 
 
 # LLM: 真实外置器及正式读口兼容内联/blob；逐字核对全文、SHA及定义，不以JSON包装的旧content槽位限定存储格式。

@@ -188,7 +188,8 @@ def test_business_cold_disabled_service_wires_default_ports_after_enable(tmp_pat
     from agent_py_agent.agent.core import SimpleAgent
 
     monkeypatch.setenv('MY_AGENT_HOME', str(tmp_path / 'home'))
-    host = SimpleAgent(AgentConfig(model_backend='echo', enable_tools=False), tmp_path)
+    host = SimpleAgent(AgentConfig(model_backend='echo', enable_tools=False,
+        business_spaces_enabled=False), tmp_path)
     services = api.BusinessServices(host)
     assert services.background is None and services.projection is None
     host.config.business_spaces_enabled = True
