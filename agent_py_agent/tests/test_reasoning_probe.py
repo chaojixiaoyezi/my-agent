@@ -270,6 +270,42 @@ def test_manual_probe_records_unsupported_or_inconclusive_without_touching_the_p
     assert _KEY not in view.message + _stored_text(agent)
 
 
+@pytest.mark.parametrize("backend,base,declared", [
+    ("openai_compatible", _UNKNOWN, "effort"),
+    ("anthropic_compatible", _UNKNOWN, "budget"),
+    ("openai_compatible", "https://api.deepseek.com/v1", "auto"),
+])
+def test_stale_unsupported_record_does_not_override_active_reasoning_control(tmp_path, backend, base, declared):
+    agent, profile_id = _agent(tmp_path, base=base, model_backend=backend, reasoning_control="none", auto_probe=False)
+    thread_id = _run_thread(agent)
+    old_config = selected_model_config(agent, profile_id=profile_id)
+    record = {"status": "completed", "fingerprint": probe.model_fingerprint(old_config),
+              "verdict": "unsupported", "reason": "no_difference", "measure": "output_tokens",
+              "low_median": 100, "max_median": 100, "default_median": 100, "finished_at": 1_700_000_000}
+    probe._save_record(agent, profile_id, record)
+    change = set_profile_field(agent, ProfileFieldChange(profile_id, "reasoning_control", declared),
+                               origin=ChangeOrigin("test"))
+    assert change["ok"]
+    config = selected_model_config(agent, profile_id=profile_id)
+    target = probe.ProbeTarget(profile_id, config, thread_id)
+    resolved = "budget" if declared == "budget" else "effort"
+    assert probe._resolved(config, probe._declared(config)) == resolved
+    assert probe.current_record(agent, target) == record  # 控制方式变化没有使旧指纹失效。
+    path = probe.probe_records_path(agent.home_paths)
+    cached = path.read_bytes()
+    for source in ("reasoning_probe", "other"):
+        assert probe.queue_host_notice(agent.conversation_store, thread_id,
+            probe.host_notice(source, "CACHED_RESULT", "待送达提示"))
+
+    view = _run(agent, "/effort max")
+
+    assert view.ok and probe.CONTROL_LABELS[resolved] in view.message
+    assert "智能程度检测（" not in view.message and "/effort 设置不会改变请求" not in view.message
+    notices = agent.conversation_store.threads.require(thread_id).pending_host_notices
+    assert [notice["source"] for notice in notices] == ["other"]
+    assert path.read_bytes() == cached  # 只清理过期提示，不删除检测记录或改写原结论。
+
+
 def test_manual_probe_skips_needless_writes_for_known_hosts(tmp_path, monkeypatch):
     _Wire(_DEEPSEEK).install(monkeypatch)
     monkeypatch.setattr(probe, "_spawn", lambda target: target())

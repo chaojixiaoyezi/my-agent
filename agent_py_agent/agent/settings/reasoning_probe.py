@@ -387,7 +387,7 @@ def _applied_summary(report: dict, kind: str) -> dict:
     return {"kind": kind, **{key: report[key] for key in ("ok", "code", "error", "change_id") if key in report}}
 
 
-# LLM: 展示已有结论时顺带清掉本会话同来源的待送达提示（用户已经在这里看到了）；进行中只显示进度。副作用：改写会话线程记录。
+# LLM: 查看结论时清掉本会话同来源提示；旧 unsupported 不覆盖当前生效的 effort/budget，进行中只显示进度。副作用：改写会话线程记录。
 # 函数用途: 按记录生成 /effort 里展示的检测结果行；没有记录时不显示。
 def _record_lines(agent: object, target: ProbeTarget) -> list[str]:
     record = current_record(agent, target)
@@ -395,7 +395,10 @@ def _record_lines(agent: object, target: ProbeTarget) -> list[str]:
         return []
     if record.get("status") == "running":
         return [f"智能程度检测进行中：已完成 {record.get('completed_requests', 0)}/{_TOTAL_REQUESTS} 次请求，完成后再发 /effort 查看。"]
-    clear_host_notices(getattr(agent, "conversation_store", None), target.thread_id, _NOTICE_SOURCE)  # 这里已看到结论
+    clear_host_notices(getattr(agent, "conversation_store", None), target.thread_id, _NOTICE_SOURCE)  # 结论已查看或不再适用
+    if (record.get("verdict") == "unsupported"
+            and _resolved(target.config, _declared(target.config)) in {"effort", "budget"}):
+        return []
     lines = [_verdict_text(record)]
     applied = _applied_text(record.get("applied")) if isinstance(record.get("applied"), dict) else ""
     return lines + ([applied] if applied else [])
