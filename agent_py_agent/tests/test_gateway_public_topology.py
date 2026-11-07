@@ -56,18 +56,25 @@ def test_public_freeze_ignores_injected_count_and_config(tmp_path):
     assert args._gateway_frozen_config.gateway_worker_process_count == 88
 
 
-def test_public_run_passes_yaml_count_to_original_entry(tmp_path, monkeypatch):
+def test_public_run_migrates_yaml_count_then_uses_single_process_entry(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
     from agent_py_agent.cli import gateway_coordinated_run
 
     path = _config(tmp_path, 2)
     seen = []
     monkeypatch.setattr(gateway_process, "mark_hosting_gateway_process", lambda: None)
     monkeypatch.setattr(gateway_process, "wait_for_predecessor_exit", lambda _: True)
+    monkeypatch.setattr(gateway_coordinated_run, '_cold_gateway_paths',
+                        lambda _: gateway_paths_from_root(tmp_path / 'gateway'))
     monkeypatch.setattr(gateway_coordinated_run, "run_coordinated_gateway",
-                        lambda args, **kwargs: seen.append((args._gateway_worker_count, kwargs)) or 19)
+                        Mock(side_effect=AssertionError('retired worker topology')))
+    monkeypatch.setattr(gateway_process, '_run_standalone_gateway',
+                        lambda args, lifecycle: seen.append((args._gateway_worker_count,
+                                                            args._gateway_frozen_config.gateway_worker_process_count)) or 19)
     monkeypatch.setattr(gateway_process, "make_agent", Mock(side_effect=AssertionError("no Agent")))
     result = gateway_process.cmd_gateway_run(Namespace(config=path, workspace_root="", _gateway_worker_count=9))
-    assert result == 19 and seen == [(2, {"predecessor_exited": True})]
+    assert result == 19 and seen == [(0, 0)]
+    gateway_coordinated_run.run_coordinated_gateway.assert_not_called()
 
 
 @pytest.mark.parametrize("configured,observed", [(2, 0), (0, 2), (3, 2)])

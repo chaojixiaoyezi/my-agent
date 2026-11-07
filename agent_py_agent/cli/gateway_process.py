@@ -1324,7 +1324,7 @@ def _isolate_gateway_package_path() -> None:
 
 # LLM: 先清外来包根再写托管标记及构造Agent；不纠正已经被上层错误导入的包，子进程另以安全环境阻止cwd抢先。
 #   --after-pid 由安全重启的旧进程传入：先等旧进程退出再启动恢复；planned_restart 收尾后交给接班进程或服务管理器。
-# 函数用途: 从公开YAML选择拓扑；两种模式均先持同一生命周期锁，再构造业务和启动服务。
+# 函数用途: 持原锁启动单进程；正数旧配置先完成可恢复迁移，绝不再选择worker拓扑。
 # LLM: Count0在来源门和业务副作用之前退役已证明死亡的MP设施，未知来源仍按原结构码拒绝。
 def cmd_gateway_run(args) -> int:
     _isolate_gateway_package_path()
@@ -1336,10 +1336,6 @@ def cmd_gateway_run(args) -> int:
     install_daemon_log_rotation(os.environ.get("MY_AGENT_DAEMON_LOG_PATH"))
     predecessor_exited = wait_for_predecessor_exit(int(getattr(args, "after_pid", 0) or 0))
     count = args._gateway_worker_count
-    if count != 0:
-        from .gateway_coordinated_run import run_coordinated_gateway
-
-        return run_coordinated_gateway(args, predecessor_exited=predecessor_exited)
     from ..agent.gateway_parts.standalone_lifecycle import (
         StandaloneLifecycleUnavailable,
         standalone_lifecycle_guard,
@@ -1351,6 +1347,33 @@ def cmd_gateway_run(args) -> int:
     try:
         paths = _cold_gateway_paths(args)
         with standalone_lifecycle_guard(paths.root) as lifecycle:
+            if count > 0:
+                from copy import copy, deepcopy
+
+                from ..agent.gateway_parts.legacy_mp_migration import run_single_process_migration
+
+                print('[gateway-run] gateway_worker_process_count > 0 is deprecated; '
+                      'migrating legacy facilities before single-process service', file=sys.stderr)
+                run_single_process_migration(paths, dry_run=False)
+                args = copy(args)
+                args._gateway_frozen_config = deepcopy(args._gateway_frozen_config)
+                args._gateway_frozen_config.gateway_worker_process_count = 0
+                args._gateway_worker_count = 0
+                args._gateway_control_plane = None
+            else:
+                journal_path = paths.root / 'single_process_migration.json'
+                if journal_path.exists() or journal_path.is_symlink():
+                    from ..agent.common.nofollow_fs import read_bytes_beneath
+                    from ..agent.common.strict_json import load_strict_json
+                    from ..agent.gateway_parts.standalone_sources import StandaloneSourceUnproven
+
+                    try:
+                        journal = load_strict_json(read_bytes_beneath(paths.root, (journal_path.name,)))
+                    except (OSError, ValueError, TypeError) as error:
+                        raise StandaloneSourceUnproven('migration_journal_invalid') from error
+                    if (type(journal) is not dict or journal.get('schema') != 'gateway_single_process_migration.v1'
+                            or journal.get('state') != 'complete'):
+                        raise StandaloneSourceUnproven('migration_incomplete_use_migrate_single_process')
             from ..agent.gateway_parts.multiprocess_generation_retirement import (
                 retire_dead_multiprocess_generations,
             )
