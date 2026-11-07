@@ -23,6 +23,11 @@ from .local_user_lifecycle import now_utc
 from .local_user_store import LocalUserStore
 from .owner_resolver import OwnerHomeResult, OwnerIdentity
 
+try:
+    from ..common import cache_capacity
+except ImportError:
+    cache_capacity = None
+
 _POLICY_SCHEMA = "managed_user_governance_policy.v1"
 _GLOBAL_COMPACT_POLICY_PARTS = ("data", "managed_user_governance", "compact_force_policy.json")
 _COMPACT_POLICY_CACHE_MAX = 128
@@ -321,7 +326,8 @@ def read_compact_governance_snapshot(home, *, use_cache: bool = True) -> Compact
         with _COMPACT_POLICY_CACHE_LOCK:
             _COMPACT_POLICY_CACHE[key] = snapshot
             _COMPACT_POLICY_CACHE.move_to_end(key)
-            while len(_COMPACT_POLICY_CACHE) > _COMPACT_POLICY_CACHE_MAX:
+            while len(_COMPACT_POLICY_CACHE) > (cache_capacity.resident_owners(_COMPACT_POLICY_CACHE_MAX)
+                                              if cache_capacity is not None else _COMPACT_POLICY_CACHE_MAX):
                 _COMPACT_POLICY_CACHE.popitem(last=False)
     return snapshot
 

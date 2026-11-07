@@ -1,5 +1,5 @@
 # LLM: 进程内位置索引只是原canonical文件的可丢弃投影；旧前缀逐字节校验，selector不能授予覆盖或修改缓存。
-# 模块用途: 按字节预算缓存最多512份位置索引，惰性复制选择字段，并共用首地址和逐行错误。
+# 模块用途: 按推导容量与字节预算缓存位置索引，惰性复制选择字段，并共用首地址和逐行错误。
 from __future__ import annotations
 
 import copy
@@ -30,6 +30,11 @@ from .message_scan import (
 from .message_scan import scan_message_snapshot as scan_message_snapshot
 from .models import MessageLogEntry
 from .store_io import ImmutableIndexNodeMissing, json_row, jsonl_error
+
+try:
+    from ..common import cache_capacity
+except ImportError:
+    cache_capacity = None
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +179,7 @@ def _bounded_position(position: _Position, size: int, light_bytes: int):
     return replace(position, row=None), size, light_bytes
 
 
-# LLM: dev/ino绑定且完整旧前缀改变即重建；LRU锁内无I/O，最多512文件且仍受行数及16MiB预算约束。
+# LLM: dev/ino绑定且完整旧前缀改变即重建；LRU锁内无I/O，文件数与行数按常驻容量推导，仍受16MiB预算约束。
 # 函数用途: 单遍解析新增字节，保留轻量地址和物理行号，供选择和精确ID定位共用。
 def message_position_index(path: Path, through: int, interrupt_check=None) -> _PositionIndex:
     with path.open("rb") as handle:
@@ -215,9 +220,12 @@ def message_position_index(path: Path, through: int, interrupt_check=None) -> _P
                                 tuple(entries), by_id, tuple(errors), number, size, light_bytes)
     with _POSITION_CACHE_LOCK:
         _POSITION_CACHE.pop(identity, None)
-        if len(entries) <= _POSITION_CACHE_MAX_ENTRIES and len(errors) <= 128 and size <= _POSITION_CACHE_MAX_BYTES:
+        max_files = (cache_capacity.resident_owners(_POSITION_CACHE_MAX_FILES)
+                     if cache_capacity is not None else _POSITION_CACHE_MAX_FILES)
+        max_entries = _POSITION_CACHE_MAX_ENTRIES * max_files // _POSITION_CACHE_MAX_FILES
+        if len(entries) <= max_entries and len(errors) <= 128 and size <= _POSITION_CACHE_MAX_BYTES:
             _POSITION_CACHE[identity] = result
-            while (len(_POSITION_CACHE) > _POSITION_CACHE_MAX_FILES or sum(item.size_bytes for item in _POSITION_CACHE.values())
+            while (len(_POSITION_CACHE) > max_files or sum(item.size_bytes for item in _POSITION_CACHE.values())
                    > _POSITION_CACHE_MAX_BYTES):
                 _POSITION_CACHE.popitem(last=False)
     return result
