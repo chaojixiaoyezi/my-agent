@@ -165,7 +165,9 @@ def test_dispatch_registry_is_single_source_and_tiers_match_review(tmp_path, mon
     routes = getattr(http_service, "GATEWAY_HTTP_ROUTES", None)
     assert routes is not None, "分发和观察须复用同一张结构化路由表"
     pairs = [(method, route.template, route.access_tier) for method, group in routes.items() for route in group]
-    assert len(pairs) == 38 and len({(method, template) for method, template, _ in pairs}) == 38
+    assert len(pairs) == 42 and len({(method, template) for method, template, _ in pairs}) == 42
+    assert ("POST", "/v1/chat/completions", "credential") in pairs
+    assert ("POST", "/api/llm/test", "credential") in pairs
     assert ("POST", "/client/goal", "credential") in pairs
     assert ("POST", "/channel-observations", "credential") in pairs
     assert {(method, path, tier) for method, path, tier in pairs if path.startswith("/client/business")} == {
@@ -186,7 +188,12 @@ def test_dispatch_registry_is_single_source_and_tiers_match_review(tmp_path, mon
     called = []
     for method, group in routes.items():
         for route in group:
-            def echo(handler, _server=None, label=route.template):
+            aliases = tuple(candidate.template for candidate in group
+                            if (candidate.handler_module, candidate.handler_name) == (route.handler_module, route.handler_name))
+            def echo(handler, _server=None, label=route.template, aliases=aliases):
+                # 同一实际处理器可承载多个已登记别名；只在该处理器自身的别名集合内定位观察标签。
+                from agent_py_agent.agent.gateway_parts.http_routes import _route_matches
+                label = next((template for template in aliases if _route_matches(template, handler.path)), label)
                 called.append(label)
                 handler._send_json(200, {"route": label})
             target = importlib.import_module(route.handler_module, http_service.__package__) if route.handler_module else http_service.GatewayHTTPHandler
@@ -197,7 +204,7 @@ def test_dispatch_registry_is_single_source_and_tiers_match_review(tmp_path, mon
         port = server.server.server_address[1]
         for method, template, _tier in pairs:
             assert _request(port, method, template.replace("*", "fixture-id")) == (200, {"route": template})
-        assert len(called) == len(pairs) == 38
+        assert len(called) == len(pairs) == 42
         assert _request(port, "GET", "/no-route")[0] == 404
     finally:
         server.stop()
