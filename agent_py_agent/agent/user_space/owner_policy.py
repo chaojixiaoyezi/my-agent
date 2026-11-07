@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ from ..common.json_io import (
     read_json_object_report,
     write_private_json_file_atomic_unlocked,
 )
-from ..common.nofollow_fs import read_bytes_beneath
+from ..common.nofollow_fs import NoFollowPathError, read_bytes_beneath
 from ..common.value_parsing import non_negative_int, positive_int
 from .home_layout import MyAgentHomePaths
 from .owner_quota import owner_logical_usage_bytes
@@ -521,7 +522,15 @@ def _grant_payload(grant) -> dict[str, str]:
 def _read_owner_policy_bytes(path) -> bytes | None:
     """只读原策略叶子；坏链接和损坏内容不能变成一份空授权。"""
     path = Path(path)
-    return read_bytes_beneath(path.parent, (path.name,), max_bytes=1_048_576)
+    attempts = 5
+    for attempt in range(attempts):
+        try:
+            return read_bytes_beneath(path.parent, (path.name,), max_bytes=1_048_576)
+        except NoFollowPathError as error:
+            # 只重读底层已核验的普通文件原子替换；链接、权限和其它路径错误仍立即失败。
+            if not error.transient_open_race or attempt + 1 == attempts:
+                raise
+            time.sleep(0.001 * (attempt + 1))
 
 
 def owner_policy_document_sha256(path) -> str:

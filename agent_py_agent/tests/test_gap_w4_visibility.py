@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 
 import pytest
@@ -249,6 +250,125 @@ def test_concurrent_toggles_do_not_lose_updates(visibility_env):
     assert not failures
     stored = json.loads((home.owner_home_dir / 'tool_policy.json').read_text(encoding='utf-8'))
     assert stored['disabled_tools'] == ['read_file', 'web_search']
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='需要 POSIX dir_fd 来控制真实原子替换窗口')
+@pytest.mark.parametrize('window', ['before_open', 'after_open'])
+def test_policy_digest_retries_real_atomic_replace(tmp_path, monkeypatch, window):
+    import hashlib
+
+    from agent_py_agent.agent.common import nofollow_fs
+    from agent_py_agent.agent.user_space import owner_policy
+
+    path = tmp_path / 'tool_policy.json'
+    _write_json(path, {'disabled_tools': []})
+    replacement = tmp_path / 'replacement.json'
+    _write_json(replacement, {'disabled_tools': ['web_fetch']})
+    expected = hashlib.sha256(replacement.read_bytes()).hexdigest()
+    ready, replaced = threading.Event(), threading.Event()
+    failures, reads = [], []
+    original_open = os.open
+
+    def writer():
+        try:
+            assert ready.wait(10)
+            os.replace(replacement, path)
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            replaced.set()
+
+    def interleaved_open(name, flags, *args, **kwargs):
+        selected = name == path.name and kwargs.get('dir_fd') is not None
+        if selected:
+            reads.append(name)
+            first = len(reads) == 1
+            if first and window == 'before_open':
+                ready.set()
+                assert replaced.wait(10)
+        descriptor = original_open(name, flags, *args, **kwargs)
+        if selected and first and window == 'after_open':
+            ready.set()
+            assert replaced.wait(10)
+        return descriptor
+
+    # 保持 dir_fd 能力判断；拦截只针对这条策略叶，临界区中的实际 open/fstat 检查不替换。
+    monkeypatch.setattr(os, 'supports_dir_fd', {*os.supports_dir_fd, interleaved_open})
+    monkeypatch.setattr(nofollow_fs.os, 'open', interleaved_open)
+    thread = threading.Thread(target=writer)
+    thread.start()
+    try:
+        assert owner_policy.owner_policy_document_sha256(path) == expected
+    finally:
+        ready.set()
+        thread.join(10)
+    assert not thread.is_alive() and not failures
+    assert len(reads) == 2
+
+
+def test_policy_read_transient_retries_are_bounded(tmp_path, monkeypatch):
+    from agent_py_agent.agent.common.nofollow_fs import NoFollowPathError
+    from agent_py_agent.agent.user_space import owner_policy
+
+    attempts, pauses = [], []
+    error = NoFollowPathError('fixture atomic replace', transient_open_race=True)
+
+    def busy(*args, **kwargs):
+        attempts.append(1)
+        raise error
+
+    monkeypatch.setattr(owner_policy, 'read_bytes_beneath', busy)
+    monkeypatch.setattr(owner_policy.time, 'sleep', pauses.append)
+    with pytest.raises(NoFollowPathError) as caught:
+        owner_policy.owner_policy_document_sha256(tmp_path / 'tool_policy.json')
+    assert caught.value is error
+    assert len(attempts) == 5
+    assert pauses == [0.001, 0.002, 0.003, 0.004]
+
+
+@pytest.mark.parametrize('kind', ['unsafe', 'permission'])
+def test_policy_read_hard_errors_are_never_retried(tmp_path, monkeypatch, kind):
+    from agent_py_agent.agent.common.nofollow_fs import NoFollowPathError
+    from agent_py_agent.agent.user_space import owner_policy
+
+    attempts = []
+    # 即使文案和瞬态替换相同，缺少结构化标记的路径错误也必须立即拒绝。
+    error = NoFollowPathError('managed file changed during open') if kind == 'unsafe' else PermissionError('fixture')
+
+    def refused(*args, **kwargs):
+        attempts.append(1)
+        raise error
+
+    monkeypatch.setattr(owner_policy, 'read_bytes_beneath', refused)
+    with pytest.raises(type(error)) as caught:
+        owner_policy.owner_policy_document_sha256(tmp_path / 'tool_policy.json')
+    assert caught.value is error and len(attempts) == 1
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='需要 POSIX 符号链接')
+def test_policy_read_rejects_symlink_on_retry(tmp_path, monkeypatch):
+    from agent_py_agent.agent.common.nofollow_fs import NoFollowPathError
+    from agent_py_agent.agent.user_space import owner_policy
+
+    path, protected = tmp_path / 'tool_policy.json', tmp_path / 'protected.json'
+    _write_json(path, {'disabled_tools': []})
+    protected.write_bytes(b'protected')
+    original_read = owner_policy.read_bytes_beneath
+    attempts = []
+
+    def replaced_by_link(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            path.unlink()
+            path.symlink_to(protected)
+            raise NoFollowPathError('fixture atomic replace', transient_open_race=True)
+        return original_read(*args, **kwargs)
+
+    monkeypatch.setattr(owner_policy, 'read_bytes_beneath', replaced_by_link)
+    with pytest.raises(NoFollowPathError) as caught:
+        owner_policy.owner_policy_document_sha256(path)
+    assert not caught.value.transient_open_race and len(attempts) == 2
+    assert protected.read_bytes() == b'protected'
 
 
 def test_plugin_paths_report_host_not_ready_without_native_host(visibility_env):
