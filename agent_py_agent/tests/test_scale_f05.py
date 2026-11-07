@@ -79,10 +79,12 @@ def test_creation_capacity_does_not_enumerate_terminal_history(tmp_path, monkeyp
     calls = []
     original = Path.glob
 
-    def observe(path, pattern):
+    # LLM: 透明保留glob可选参数；Python3.14的rglob会携带关键字调用此观察器。
+    # 函数用途: 只记录工作区枚举，其他参数原样交给真实glob。
+    def observe(path, pattern, *args, **kwargs):
         if path == manager.workspace:
             calls.append(pattern)
-        return original(path, pattern)
+        return original(path, pattern, *args, **kwargs)
 
     monkeypatch.setattr(Path, "glob", observe)
     before = len(os.listdir("/dev/fd" if Path("/dev/fd").exists() else "/proc/self/fd"))
@@ -115,10 +117,12 @@ def test_real_creation_service_avoids_history_and_survives_restart(tmp_path, mon
         original_glob, original_os_open = Path.glob, os.open
         original_io_open, original_open = io.open, builtins.open
 
-        def observe_glob(path, pattern):
+        # LLM: 不改变真实glob行为或调用计数；兼容rglob传来的case_sensitive等参数。
+        # 函数用途: 记录子代理工作区枚举，并透明转发位置与关键字参数。
+        def observe_glob(path, pattern, *args, **kwargs):
             if path == agent.subagents.workspace:
                 enumerations.append(pattern)
-            return original_glob(path, pattern)
+            return original_glob(path, pattern, *args, **kwargs)
 
         def record(path):
             if isinstance(path, (str, bytes, os.PathLike)):
