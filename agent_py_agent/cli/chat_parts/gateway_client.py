@@ -437,9 +437,11 @@ class NetworkGatewayObserver:
         self._http_only = False
         self._refreshed = False
 
-    # LLM: Only an explicit remote-header provider/configured bearer may authenticate network mode; never call gateway_client_credentials or local credential files.
+    # LLM: Explicit remote headers retain precedence; configured tokens use the middleware contract. Never read local G1 credentials or replace original identity.
     # 函数用途: 生成原用户/群身份头及远程认证头，不读取宿主G1凭据。
     def _headers(self):
+        from ...agent.auth.middleware import AuthMiddleware
+
         identity = _gateway_submit_identity(self.agent)
         headers = {"X-User-Id": identity["user_id"], "X-Channel": identity["channel"]}
         if identity.get("channel_chat_type"):
@@ -453,17 +455,19 @@ class NetworkGatewayObserver:
         else:
             token = getattr(getattr(self.agent, "config", None), "gateway_auth_token", "")
             if isinstance(token, str) and token:
-                headers["Authorization"] = f"Bearer {token}"
+                headers[AuthMiddleware.HEADER_TOKEN] = token
         return headers
 
-    # LLM: 复用认证且禁止重定向的HTTP；total_deadline_seconds仍表示原单次运输秒数，默认值及0.1秒下限不变，不入文件队列或重试写入。
+    # LLM: 复用认证且禁止重定向；会话只补原receipt范围头，total_deadline_seconds名/秒数及0.1下限保持，不读G1或重试写入。
     # 函数用途: 执行一次有界JSON请求，所有控制和审批沿同一HTTP入口。
-    def request_json(self, method, path, payload=None, *, total_deadline_seconds=None):
+    def request_json(self, method, path, payload=None, *, total_deadline_seconds=None, conversation_id: str = ""):
         import urllib.error
         import urllib.request
 
         from ...agent.common.authenticated_http import open_authenticated_request
         headers = self._headers()
+        if conversation_id:
+            headers["X-Conversation-Id"] = str(conversation_id)
         data = None
         if payload is not None:
             headers["Content-Type"] = "application/json"
@@ -487,26 +491,24 @@ class NetworkGatewayObserver:
     def submit(self, payload):
         return self.request_json("POST", "/ask", payload)
 
-    # LLM: Only existing HTTP /approve or /deny controls may decide a pending request; never downgrade persistent grants to approval.
-    # 函数用途: 核对精确审批编号后发送原HTTP控制，服务端仍重新核owner、会话、截止和绑定。
+    # LLM: Full validated DTOs go to the existing client permission route; never turn a persistent grant into approve-once or an IM command.
+    # 函数用途: 核对精确审批编号并发送完整决定；服务端重新核 owner、会话、lease、截止和 binding。
     def permission_sink(self, request_value, decision_value, *, conversation_id):
         from ...agent.gateway_parts.permission_bridge import _approval_decision, _approval_request
         request = _approval_request(request_value)
         decision = _approval_decision(decision_value)
         if request.permission_id != decision.permission_id:
             raise ValueError("gateway permission decision id mismatch")
-        if decision.decision not in {"approved", "denied"}:
-            raise ValueError("该远程审批选项不支持通过原HTTP控制表达，未发送决定")
-        command = ("/approve " if decision.approved else "/deny ") + request.permission_id
-        status, body = self.request_json("POST", "/control", {"command": command,
-            "conversation_id": conversation_id, "request_id": request.request_id})
+        status, body = self.request_json("POST", "/client/agent-permission", {
+            "conversation_id": conversation_id, "run_id": request.binding["run_id"],
+            "request": request.to_dict(), "decision": decision.to_dict()})
         if status != 200 or not body.get("ok"):
             raise PermissionError("Gateway未确认审批决定")
 
-    # LLM: 原客户端保留公开timeout关键字、schema与授权检查；只为当前实例将同一秒数传给HTTP运输，不改共享类。
+    # LLM: 原timeout/schema/授权保持；仅当前实例透传同一秒数与GET会话范围，不改共享类或身份来源。
     # 函数用途: 为当前客户端绑定远程只读查询和控制HTTP，不更改共享类或其他用户客户端。
     def bind_client_transport(self):
-        self.agent.get_gateway_json = lambda path, *, timeout, **_: self.request_json("GET", path, total_deadline_seconds=timeout)
+        self.agent.get_gateway_json = lambda path, *, timeout, conversation_id="", **_: self.request_json("GET", path, total_deadline_seconds=timeout, conversation_id=conversation_id)
         self.agent.post_gateway_json = lambda path, payload, *, timeout: self.request_json("POST", path, payload, total_deadline_seconds=timeout)
 
     # LLM: LF/blank-line terminated frames alone are observable. An incomplete UTF-8/data/id fragment never commits the cursor.
@@ -540,8 +542,8 @@ class NetworkGatewayObserver:
         if request.visible_chunks_ref is not None:
             request.visible_chunks_ref[0] += visible
 
-    # LLM: 终态只认原HTTP结果投影或SSE终态帧；轮询透传原剩余秒数，不新增本地stat/open/read降级。
-    # 函数用途: 优先SSE续读原请求；503、重复连接失败或认证刷新失败后仅用HTTP进度与结果兜底。
+    # LLM: 终态只认原HTTP/SSE；HTTP先冻结终态再排空到游标不前进，异常页重试有原deadline上限，认证失败不返回缓存结果。
+    # 函数用途: 优先SSE续读；HTTP兜底在终态返回前补齐所有进度尾页，不读取服务器或G1文件。
     def __call__(self, request):
         import urllib.error
         import urllib.parse
@@ -606,16 +608,27 @@ class NetworkGatewayObserver:
                 if not self._http_only:
                     time.sleep(_WAIT_POLL_STEPS_SECONDS[0])
                     continue
-            status, batch = self.request_json("GET", f"/progress/{quoted}?since={self.line_cursor}&include={include}", total_deadline_seconds=max(0.1, deadline-time.time()))
-            if status in (401, 403):
-                raise PermissionError("Gateway网络观察未获授权")
-            if status == 200:
-                for event in batch.get("events", []):
-                    self._emit(request, event)
-                self.line_cursor = max(self.line_cursor, int(batch.get("next") or 0))
             status, result = self.request_json("GET", f"/result/{quoted}", total_deadline_seconds=max(0.1, deadline-time.time()))
-            if status == 200:
-                return result
             if status in (401, 403):
                 raise PermissionError("Gateway网络结果未获授权")
+            terminal = status == 200
+            while True:
+                if callable(request.is_wait_cancelled) and request.is_wait_cancelled():
+                    return {}
+                status, batch = self.request_json("GET", f"/progress/{quoted}?since={self.line_cursor}&include={include}", total_deadline_seconds=max(0.1, deadline-time.time()))
+                if status in (401, 403):
+                    raise PermissionError("Gateway网络观察未获授权")
+                if status == 200:
+                    for event in batch.get("events", []):
+                        self._emit(request, event)
+                    next_cursor = max(self.line_cursor, int(batch.get("next", self.line_cursor)))
+                    if terminal and next_cursor == self.line_cursor:
+                        return result
+                    self.line_cursor = next_cursor
+                if not terminal:
+                    break
+                if time.time() >= deadline:
+                    return result
+                if status != 200:
+                    time.sleep(_WAIT_POLL_STEPS_SECONDS[-1])
             time.sleep(_WAIT_POLL_STEPS_SECONDS[-1])

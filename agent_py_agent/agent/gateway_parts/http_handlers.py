@@ -651,8 +651,8 @@ def _progress_update_time(row: dict[str, object]) -> dict[str, str]:
     return {"updated_at": value} if parsed.tzinfo is not None else {}
 
 
-# LLM: 只接受结构化 permission 对象里的工具名和展示摘要；摘要经与最终回复同一的公开投影和宿主路径收敛并限长。
-# 函数用途: 把一条等待确认的工具审批变成 IM 可渲染的公开进度事件。
+# LLM: 原请求ACL先通过；仅原私有通道判据允许完整且重新校验的DTO，管理员/路径展示标志不能给外部IM完整审批。
+# 函数用途: 生成原摘要，并为私有TUI保留可写回同一等待方的规范审批对象。
 def _public_permission_request_event(row: dict, channel: str, *, preserve_host_paths: bool = False) -> dict[str, object] | None:
     permission = row.get("permission")
     if not isinstance(permission, dict):
@@ -666,7 +666,15 @@ def _public_permission_request_event(row: dict, channel: str, *, preserve_host_p
         preserve_host_paths=preserve_host_paths,
     )
     summary = " ".join(summary.split())[:200] or tool
-    return {"kind": "permission_requested", "tool": tool, "summary": summary}
+    event = {"kind": "permission_requested", "tool": tool, "summary": summary}
+    if host_paths_visible_to_viewer(channel, can_access_all_users=False):
+        from ..contracts.tool_approval import ToolApprovalRequest
+
+        try:
+            event["permission"] = ToolApprovalRequest.from_mapping(permission).to_dict()
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return event
 
 
 # LLM: 原ACL/坏JSON拒门先于等待投影；原权限DTO不含server，须由handle_result运输同次server；无payload不猜owner，不修队列。
@@ -1722,8 +1730,8 @@ def handle_client_goal(handler, server) -> None:
     handler._send_json(200, result)
 
 
-# LLM: 主/子审批仅向认证 owner 的原服务传递 mapping；请求格式或 owner 解析失败时不得写耐久记录。
-# 函数用途: 把 TUI/Web 的主/子后台工具审批决定写回当前用户的原始等待调用。
+# LLM: 原owner解析之后先精确匹配当前前台pending DTO/run/会话/lease；未匹配才沿原后台服务，错误身份不释放waiter。
+# 函数用途: 将认证私有TUI前台或原主/子后台审批写回各自原始等待调用。
 def handle_client_agent_permission(handler, server) -> None:
     body = _read_agent_control_body(handler, server)
     if body is None:
@@ -1735,17 +1743,47 @@ def handle_client_agent_permission(handler, server) -> None:
         return
     try:
         owner_agent, scope = _agent_control_context(handler, server, body)
-        result = resolve_agent_permission(
-            owner_agent,
-            scope=scope,
-            run_id=str(body.get("run_id") or ""),
-            request=request,
-            decision=decision,
-        )
+        result = _resolve_foreground_tool_permission(server, scope, body)
+        if result is None:
+            result = resolve_agent_permission(
+                owner_agent,
+                scope=scope,
+                run_id=str(body.get("run_id") or ""),
+                request=request,
+                decision=decision,
+            )
     except AgentControlError as exc:
         _send_agent_control_error(handler, exc)
         return
     handler._send_json(200, result)
+
+
+# LLM: pending_tool_approvals owns current owner/session/lease discovery; only its exact validated DTO plus binding.run_id may address the original file waiter.
+# 函数用途: 为匹配的前台审批核对有限选项与原截止后写原决定文件；未匹配返回None保留后台链。
+def _resolve_foreground_tool_permission(server, scope, body):
+    from ..contracts.tool_approval import ToolApprovalDecision, approval_deadline
+    from .admin_control_service import pending_tool_approvals
+    from .permission_bridge import write_gateway_permission_decision
+
+    for pending in pending_tool_approvals(server.agent, server.paths, scope):
+        request = pending.request
+        if (body["request"] != request.to_dict()
+                or str(body.get("run_id") or "") != request.binding["run_id"]):
+            continue
+        try:
+            decision = ToolApprovalDecision.from_mapping(body["decision"])
+            if (decision.permission_id != request.permission_id
+                    or time.time() >= approval_deadline(request)
+                    or decision.decision not in {option["decision"] for option in request.options} | {"cancelled", "unavailable"}):
+                raise ValueError("foreground approval mismatch or expired")
+            write_gateway_permission_decision(pending.chunk_path, request, decision)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise AgentControlError(409, "AGENT_APPROVAL_MISMATCH", "工具审批身份不匹配或已到期，决定未写入。") from exc
+        except OSError as exc:
+            raise AgentControlError(503, "AGENT_APPROVAL_UNAVAILABLE", "工具审批暂时无法写回；没有重复批准。") from exc
+        return {"ok": True, "run_id": request.binding["run_id"], "permission_id": request.permission_id,
+            "decision": decision.decision}
+    return None
 
 
 # LLM: Stop accepts one exact run and opaque operation id after resolving the exact owner. The
