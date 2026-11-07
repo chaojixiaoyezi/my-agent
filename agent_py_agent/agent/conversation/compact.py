@@ -9,11 +9,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 from collections.abc import Callable, Sequence
 from contextlib import closing
-from dataclasses import dataclass, field, replace
+from dataclasses import MISSING, dataclass, field, fields, replace
 from functools import partial
 from typing import TYPE_CHECKING, Protocol
 
@@ -122,6 +123,8 @@ if TYPE_CHECKING:
     from .active_turn_compact import CarriedToolCompactSource
     from .compact_summary_view import AppliedCompactContext
     from .store import ConversationStore
+
+logger = logging.getLogger(__name__)
 
 _MAX_COMPACT_OPERATION_EVENTS = 32
 # 空响应回退文本最多 12000 字符：控制重放体积。
@@ -403,8 +406,8 @@ def prepare_conversation_context(
     return _execute_compact_request(prepared)
 
 
-# LLM: 显式scope沿固定尾界先验证身份/锚点，再流式按原宿主范围与同次view去覆盖；可选取消贯穿扫描，不截短来源或混旧游标。
-# 函数用途: 只读冻结历史地址及策略，显式范围时不驻留选中正文，不调用摘要或推进检查点。
+# LLM: 显式scope沿固定尾界验证身份/锚点；只对已确认缺失的派生头做CAS重置并重试一次，完整性及取消错误仍传播。
+# 函数用途: 冻结历史地址及策略；缺失压缩头时保住原文，不调用摘要或覆盖并发提交。
 def load_conversation_compact_source(
     agent: SimpleAgent, store: ConversationStore, thread: ConversationThread, *, exclude_request_id: str = "",
     scope: CompactScope | None = None,
@@ -423,17 +426,54 @@ def load_conversation_compact_source(
         resolve_compact_summary_view,
     )
 
-    view = resolve_compact_summary_view(agent, thread, scope)
-    selected = select_message_snapshot(
-        store.messages, thread.thread_id, selector_factory=selector_factory,
-        exclude_message_ids=view.source_message_ids, exclude_through_message_ids=view.legacy_message_end_ids,
-        interrupt_check=interrupt_check,
-    )
+    for attempt in range(2):
+        try:
+            view = resolve_compact_summary_view(agent, thread, scope)
+            selected = select_message_snapshot(
+                store.messages, thread.thread_id, selector_factory=selector_factory,
+                exclude_message_ids=view.source_message_ids, exclude_through_message_ids=view.legacy_message_end_ids,
+                interrupt_check=interrupt_check,
+            )
+            break
+        except OSError as exc:
+            if attempt or (not isinstance(exc, FileNotFoundError) and str(exc) not in (
+                'conversation compact checkpoint chain is incomplete',
+                'conversation compact checkpoint chain ended early',
+                'conversation compact pointer is incomplete',
+            )):
+                raise
+            thread = _reset_unreachable_compact_head(store, thread, reason=str(exc))
     pending = _without_current_request_suffix(selected, exclude_request_id)
     return ConversationCompactSource(
         thread, pending, runtime_compact_policy(agent, thread=thread), dict(_recent_operation_evidence(pending) or {}),
         compact_context=AppliedCompactContext(thread.thread_id, scope, view),
     )
+
+
+# LLM: 只重置合同列出的派生字段；同锁内比较观察到的head与代次，并发新head及所有非compact字段均保留。
+# 函数用途: 原子清掉确已丢失的压缩指针，让下一次压缩从新链开始。
+def _reset_unreachable_compact_head(store, thread: ConversationThread, *, reason: str) -> ConversationThread:
+    reset_names = (
+        'compacted_through_message_id', 'compacted_through_byte_offset', 'compact_generation', 'compact_updated_at',
+        'compact_source_messages', 'compact_source_tool_pairs', 'compact_checkpoint_id', 'compact_consecutive_failures',
+        'compact_failure_updated_at', 'compact_failure_code', 'compact_vision_failed_generation', 'compact_operation_evidence',
+    )
+    applied = False
+
+    def updater(latest):
+        nonlocal applied
+        if (latest.compact_checkpoint_id, latest.compact_generation) != (thread.compact_checkpoint_id, thread.compact_generation):
+            return latest
+        reset = {item.name: item.default if item.default is not MISSING else item.default_factory()
+                 for item in fields(ConversationThread) if item.name in reset_names}
+        applied = True
+        return replace(latest, **reset)
+
+    result = store.threads.update_atomic(thread.thread_id, updater)
+    if applied:
+        logger.warning('COMPACT_HEAD_RESET thread=%s checkpoint=%s generation=%s reason=%s',
+                       thread.thread_id, thread.compact_checkpoint_id, thread.compact_generation, reason)
+    return result
 
 
 # LLM: 同线程/代次/视图统一校验；显式本次取消覆盖旧回调，未提供则保留来源取消；不拥有CAS或宿主准备权。
@@ -1474,14 +1514,23 @@ def _messages_after_cursor(
     raise RuntimeError("conversation compact cursor is missing from the authoritative transcript")
 
 
-# LLM: 自动预检、手动压缩与 /context 必须读取同一未压缩尾部；字节偏移权威优先，旧消息游标只保留为显式迁移路径。
-# 函数用途: 从唯一 transcript 读取当前还没进摘要的原始消息段。
+# LLM: 字节游标有效时仍为权威；仅已确认超过真实末尾时按现存消息ID回退，读取错误仍失败，不写恢复状态。
+# 函数用途: 从唯一transcript读取未压缩尾部，容忍原文截短、旧副本恢复或轮转清单缺失。
 def _uncompacted_conversation_rows(
     store: ConversationStore,
     thread: ConversationThread,
 ) -> list[MessageLogEntry]:
     rows, errors = store.messages.after_compact_report(thread)
     if errors:
+        if thread.compacted_through_byte_offset > 0:
+            end, end_errors = store.messages.complete_offset_report(thread.thread_id)
+            if not end_errors and thread.compacted_through_byte_offset > end:
+                logger.warning('COMPACT_CURSOR_BEYOND_TRANSCRIPT thread=%s cursor=%s end=%s',
+                               thread.thread_id, thread.compacted_through_byte_offset, end)
+                rows, errors = store.messages.recent_report(thread.thread_id, limit=0)
+                if not errors:
+                    cursor = thread.compacted_through_message_id
+                    return _messages_after_cursor(rows, cursor) if any(row.message_id == cursor for row in rows) else rows
         raise OSError("conversation transcript could not be read reliably")
     if thread.compacted_through_byte_offset > 0:
         return rows
