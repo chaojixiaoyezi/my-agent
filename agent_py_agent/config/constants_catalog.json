@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1352,
+  "count": 1353,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -4306,6 +4306,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "延迟升级到原生C看门狗的最小卡死观察窗口（秒）。"
+    },
+    {
+      "name": "NOTICES_MAX_WAIT_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/http_handlers.py",
+      "value": 25,
+      "unit": "秒",
+      "category": "上限预算",
+      "description": "通知长轮询协议上限：单连接最多等25秒，不是可调业务策略。"
     },
     {
       "name": "HTTP_CONTROL_PEEK_BYTES",
