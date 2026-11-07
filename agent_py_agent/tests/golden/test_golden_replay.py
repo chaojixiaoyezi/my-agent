@@ -4,6 +4,7 @@ from __future__ import annotations
 import difflib
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -21,7 +22,12 @@ SCENARIOS = [json.loads(path.read_text()) for path in sorted((HERE / "scenarios"
 def scenario_parameters():
     rows = []
     for scenario in SCENARIOS:
-        marks = [pytest.mark.sandbox_capability(*scenario["required_capabilities"])] if scenario["required_capabilities"] else []
+        capabilities = list(scenario["required_capabilities"])
+        # Linux 后台命令还需实际创建 bwrap 命名空间，能力不足沿根 conftest 的统一门处理。
+        if (sys.platform.startswith("linux") and "background_launcher_identity" in capabilities
+                and "linux_bwrap" not in capabilities):
+            capabilities.append("linux_bwrap")
+        marks = [pytest.mark.sandbox_capability(*capabilities)] if capabilities else []
         rows.append(pytest.param(scenario, id=scenario["id"], marks=marks))
     return rows
 

@@ -330,6 +330,73 @@ def provider_message_trace(content, role="user"):
     return [{"source": "provider", "seq": 1, "body": body, "body_hash": hashlib.sha256(wire).hexdigest()}]
 
 
+@pytest.mark.parametrize("suffix", ["", '"', r'\"', " ", "\n", "\\"])
+def test_clipped_subagent_directory_prefix_is_stable_before_body_hashing(suffix):
+    """截断的目录时间戳不参与快照比较，正文哈希仍须先核对，归一之后保持幂等。"""
+    old = provider_message_trace(f'/work/agents/subagent-1794055{suffix}')
+    current = provider_message_trace(f'/work/agents/subagent-1794081{suffix}')
+    original = copy.deepcopy(old)
+    normalized = normalize(old)
+    assert normalized == normalize(current)
+    assert normalized[0]["body"]["messages"][0]["content"] == f'/work/agents/subagent-clipped{suffix}'
+    assert normalized[0]["body_hash"] != old[0]["body_hash"]
+    assert normalize(normalized) == normalized
+    assert old == original
+    corrupted = copy.deepcopy(old)
+    corrupted[0]["body_hash"] = current[0]["body_hash"]
+    with pytest.raises(AssertionError, match="content/hash"):
+        normalize(corrupted)
+
+
+@pytest.mark.parametrize("template", [
+    "subagent-{stamp}", "/other/agents/subagent-{stamp}", "/work/agents-other/subagent-{stamp}",
+    "/work/agents/subagent-{stamp}/report.md", "/work/agents/subagent-{stamp}.json",
+    "/work/agents/subagent-{stamp}-tail", "/work/agents/subagent-{stamp}extra",
+])
+def test_clipped_subagent_rule_preserves_other_numeric_names(template):
+    first = provider_message_trace(template.format(stamp="1794055"))
+    second = provider_message_trace(template.format(stamp="1794081"))
+    assert normalize(first) == first
+    assert normalize(first) != normalize(second)
+
+
+def test_clipped_subagent_rule_keeps_distinct_complete_child_identities():
+    first, second = "/work/agents/subagent-1794055-1234abcd", "/work/agents/subagent-1794081-5678abcd"
+    normalized = normalize(provider_message_trace(f"{first} {second}"))
+    content = normalized[0]["body"]["messages"][0]["content"]
+    assert content == "/work/agents/embedded_id#1 /work/agents/embedded_id#2"
+    assert normalized != normalize(provider_message_trace(f"{first} {first}"))
+    assert normalize(normalized) == normalized
+
+
+@pytest.mark.parametrize("platform,capabilities,expected", [
+    ("linux", [], []),
+    ("linux", ["ps"], ["ps"]),
+    ("linux", ["ps", "background_launcher_identity"], ["ps", "background_launcher_identity", "linux_bwrap"]),
+    ("linux2", ["background_launcher_identity"], ["background_launcher_identity", "linux_bwrap"]),
+    ("linux", ["background_launcher_identity", "linux_bwrap"], ["background_launcher_identity", "linux_bwrap"]),
+    ("darwin", ["ps", "background_launcher_identity"], ["ps", "background_launcher_identity"]),
+    ("win32", ["ps", "background_launcher_identity"], ["ps", "background_launcher_identity"]),
+])
+def test_scenario_capability_marker_matches_platform_without_mutating_source(monkeypatch, platform, capabilities, expected):
+    from types import SimpleNamespace
+
+    from . import test_golden_replay as replay_module
+
+    scenario = {"id": "capability-fixture", "required_capabilities": list(capabilities)}
+    monkeypatch.setattr(replay_module, "SCENARIOS", [scenario])
+    # 只替换被测模块的引用，不改全局 sys.platform，避免影响宿主和其它测试的能力检测。
+    monkeypatch.setattr(replay_module, "sys", SimpleNamespace(platform=platform), raising=False)
+    [parameter] = replay_module.scenario_parameters()
+    assert parameter.values == (scenario,) and parameter.id == scenario["id"]
+    if expected:
+        [marker] = parameter.marks
+        assert marker.name == "sandbox_capability" and marker.args == tuple(expected)
+    else:
+        assert parameter.marks == []
+    assert scenario["required_capabilities"] == capabilities
+
+
 # LLM: A duration-looking business string is not host execution metadata, even inside a tool payload.
 # 函数用途: Preserve duration changes in user content and beneath a genuine tool header.
 def test_business_duration_text_is_not_normalized_as_tool_elapsed():

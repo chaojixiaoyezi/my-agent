@@ -106,6 +106,8 @@ def normalize(trace):
                 if namespace != "fixture_root" and original and len(original) > 8:
                     value = value.replace(original, stable)
         value = GENERATED_LABEL.sub(lambda match: identity("embedded_id", match.group()), value)
+        # 裁剪可能只留下子代理目录的时间戳前缀；只归一该路径末段，不吞掉其它数字文件名。
+        value = re.sub(r'(?<=/work/agents/)subagent-[0-9]+(?=["\\\s]|$)', "subagent-clipped", value)
         value = re.sub(r"(?<=子代理\[)[0-9a-f]{8}(?=\])",
                        lambda match: identity("embedded_id", child_labels[match.group()]) if match.group() in child_labels else match.group(), value)
         value = re.sub(r"(:after-tools:\d+:)([0-9a-f]{32})",
