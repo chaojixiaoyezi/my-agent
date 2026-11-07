@@ -469,7 +469,7 @@ def test_welcome_card_renders_bunny_girl_terminal_avatar_styles() -> None:
 
 @pytest.mark.parametrize(
     ("avatar", "min_rows", "max_rows", "max_width"),
-    [(TERMINAL_BUNNY_AVATAR, 18, 24, 47), (TERMINAL_BUNNY_AVATAR_COMPACT, 10, 12, 32)],
+    [(TERMINAL_BUNNY_AVATAR, 11, 13, 31), (TERMINAL_BUNNY_AVATAR_COMPACT, 9, 11, 25)],
 )
 def test_bunny_avatar_rows_share_one_display_width(avatar, min_rows, max_rows, max_width) -> None:
     widths = {display_width_fragments(line) for line in avatar}
@@ -498,7 +498,7 @@ def test_bunny_avatar_classes_resolve_to_theme_colors() -> None:
 
 @pytest.mark.parametrize(
     ("width", "avatar"),
-    [(58, TERMINAL_BUNNY_AVATAR), (40, TERMINAL_BUNNY_AVATAR_COMPACT), (30, ())],
+    [(58, TERMINAL_BUNNY_AVATAR), (30, TERMINAL_BUNNY_AVATAR_COMPACT), (24, ())],
 )
 def test_narrow_welcome_card_uses_largest_avatar_that_fits(width, avatar) -> None:
     frame = render_tui_snapshot(
