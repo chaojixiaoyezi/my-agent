@@ -7,7 +7,9 @@ import heapq
 import json
 import os
 import stat
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,11 +26,11 @@ _MAX_SEARCH_QUERY_CHARS = 4000
 _MAX_SEARCH_LINE_CHARS = 500
 # 写文件正文最多 100 万字符：超长拒绝，防异常输入。
 _MAX_WRITE_TEXT_CHARS = 1_000_000
-# 没有 ripgrep 等外部工具时，Python 后备遍历的存活上限（文件查找与内容搜索共用一份）：超过这么多候选文件或这么多秒就停，
+# 文件查找与内容搜索共用候选及整次扫描预算，原生程序与 Python 路径都不能绕过：
 # 结果标为不完整，不能据此判定“没有匹配”；只保护单个 Gateway 不被大目录长期占住。
 _FALLBACK_SCAN_MAX_FILES = 20_000
-# 无 ripgrep 时后备遍历最多 10 秒：超时标不完整，保护 Gateway 不被大目录占住。
-_FALLBACK_SCAN_MAX_SECONDS = 10.0
+# 单次扫描最多 8 秒；等待无输出的原生管道也计入同一预算。
+_FALLBACK_SCAN_MAX_SECONDS = 8.0
 # 文件发现命令参数允许累计的最大字节数，避免超过系统参数上限。
 _DISCOVERY_ARG_MAX_BYTES = 192 * 1024
 _INTERNAL_AGENT_STATUS_FILES = frozenset(
@@ -164,6 +166,61 @@ class _DiscoverySymlink(OSError):
     pass
 
 
+def _mark_scan_timeout(state, reason: str = 'time_limit') -> None:
+    """只记录当前扫描的预算耗尽事实，不把部分结果升级为完整覆盖。"""
+    state.limited = True
+    state.limit_reason = state.limit_reason or reason
+    if not getattr(state, 'budget_exhausted', False):
+        state.limit_path = getattr(state, 'current_path', None)
+    state.budget_exhausted = True
+
+
+def _scan_budget_expired(state, path: Path | None = None, *, reason: str = 'time_limit') -> bool:
+    if path is not None:
+        state.current_path = path
+    if time.monotonic() - state.started_at < _FALLBACK_SCAN_MAX_SECONDS:
+        return False
+    _mark_scan_timeout(state, reason)
+    return True
+
+
+def _scan_budget_details(tool, state) -> dict[str, object]:
+    path = getattr(state, 'limit_path', None)
+    return {
+        'budget_seconds': _FALLBACK_SCAN_MAX_SECONDS,
+        'elapsed_seconds': round(max(0.0, time.monotonic() - state.started_at), 6),
+        'exhausted': bool(getattr(state, 'budget_exhausted', False)),
+        'limit_path': tool.display_path(path) if path is not None else '',
+        'suggested_actions': ['narrow_path', 'exclude_runtime_directories'],
+    }
+
+
+@contextmanager
+def _discovery_process_budget(process, state, stop, *, on_timeout=None):
+    """截止时只终止本次原生进程；管道仍由消费线程关闭，退出前回收看门线程。"""
+    if state is None:
+        yield
+        return
+
+    def expire():
+        if process.poll() is not None:
+            return
+        _mark_scan_timeout(state, 'rg_time_limit')
+        if on_timeout is not None:
+            on_timeout()
+        stop(process)
+
+    remaining = max(0.0, _FALLBACK_SCAN_MAX_SECONDS - (time.monotonic() - state.started_at))
+    timer = threading.Timer(remaining, expire)
+    timer.daemon = True
+    timer.start()
+    try:
+        yield
+    finally:
+        timer.cancel()
+        timer.join()
+
+
 # LLM: 发现入口不继承直接读取链接的语义；逐级lstat只是变化检测，不声称原子文件系统快照。
 # 函数用途: 拒绝发现路径中的链接分量，保留普通读取工具原有语义。
 def _discovery_nofollow_stat(path: Path):
@@ -193,7 +250,8 @@ def _safe_discovery_path(tool, item: Path, *, root: Path, include_ignored: bool,
         if any(part in ignored_names for part in relative.parts[:-1]):
             return None
         # 只剪宽根下的运行态子树；显式进入该目录或其后代时仍可发现文件。
-        if (relative.parts[:2] == ("workspace", "runtime")
+        if (any(relative.parts[index:index + 2] == ("workspace", "runtime")
+                for index in range(len(relative.parts) - 1))
                 and not any(root.parts[index:index + 2] == ("workspace", "runtime")
                             for index in range(len(root.parts) - 1))):
             return None
@@ -223,9 +281,7 @@ def _iter_discovery_files(tool, target: Path, *, include_ignored: bool, ignored_
     try:
         while pending:
             raise_if_cancelled()
-            if time.monotonic() - scan_state.started_at >= _FALLBACK_SCAN_MAX_SECONDS:
-                scan_state.limited = True
-                scan_state.limit_reason = scan_state.limit_reason or 'time_limit'
+            if _scan_budget_expired(scan_state):
                 return
             _, item = heapq.heappop(pending)
             try:
@@ -236,6 +292,7 @@ def _iter_discovery_files(tool, target: Path, *, include_ignored: bool, ignored_
                                         ignored_names=ignored_names, path_stat=info)
             if safe is None:
                 continue
+            scan_state.current_path = safe if stat.S_ISDIR(info.st_mode) else safe.parent
             if observe is not None:
                 observe(safe)
             if stat.S_ISREG(info.st_mode):
@@ -251,9 +308,7 @@ def _iter_discovery_files(tool, target: Path, *, include_ignored: bool, ignored_
                         scan_state.limited = True
                         scan_state.limit_reason = scan_state.limit_reason or 'entry_limit'
                         return
-                    if time.monotonic() - scan_state.started_at >= _FALLBACK_SCAN_MAX_SECONDS:
-                        scan_state.limited = True
-                        scan_state.limit_reason = scan_state.limit_reason or 'time_limit'
+                    if _scan_budget_expired(scan_state, safe):
                         return
                     child = safe / entry.name
                     child_info = entry.stat(follow_symlinks=False)

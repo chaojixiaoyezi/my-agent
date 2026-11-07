@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1403,
+  "count": 1404,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -8478,10 +8478,10 @@
     {
       "name": "_FALLBACK_SCAN_MAX_SECONDS",
       "file": "agent_py_agent/agent/tooling/_filesystem_helpers.py",
-      "value": 10.0,
+      "value": 8.0,
       "unit": "秒",
       "category": "上限预算",
-      "description": "无 ripgrep 时后备遍历最多 10 秒：超时标不完整，保护 Gateway 不被大目录占住。"
+      "description": "单次扫描最多 8 秒；等待无输出的原生管道也计入同一预算。"
     },
     {
       "name": "_MAX_PATH_CHARS",
@@ -9546,6 +9546,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "进程管道排空超时 2 秒：收尾时防止子进程输出把管道堵死。"
+    },
+    {
+      "name": "_RUNTIME_SEARCH_MAX_SECONDS",
+      "file": "agent_py_agent/agent/tooling/shell.py",
+      "value": 15,
+      "unit": "秒",
+      "category": "上限预算",
+      "description": "运行数据宽根的只读递归搜索单独退避，不占满普通命令可能长达数分钟的超时。"
     },
     {
       "name": "_SUMMARIZED_PROMPT_PREVIEW_CHARS",

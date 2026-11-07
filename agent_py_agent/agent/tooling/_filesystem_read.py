@@ -58,6 +58,12 @@ _COMMON_FILE_DISCOVERY_IGNORES = frozenset(
         ".ruff_cache",
         ".venv",
         "venv",
+        "runs",
+        "compact",
+        "memory_archive",
+        "blobs",
+        ".background_jobs",
+        "releases",
     }
 )
 

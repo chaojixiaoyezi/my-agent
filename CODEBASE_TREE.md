@@ -1038,6 +1038,14 @@ agent_py_agent/
 
 ## Tree
 
+### 2026-11-07 本地搜索存活预算回归
+
+```text
+agent_py_agent/
+`-- tests/
+    `-- test_runtime_search_backoff.py # 默认归档剪枝、显式范围、部分匹配、静默管道和根目录命令退避及资源回收
+```
+
 ### 2026-11-07 CI 导入与热重载修复
 
 ```text
@@ -1636,6 +1644,9 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 - `agent_py_agent/agent/tooling/result_display.py`：工作流及归档读取的有界摘要，不改机器结果和原文归档。
 - `agent_py_agent/tests/test_business_model_tools.py`：通过真实注册工具验证业务发现、当前宿主身份、空间与后台代理操作。
 - `agent_py_agent/tests/test_business_tool_display.py`：验证工具进度、TUI 展示和完整原文归档的往返一致性。
+### 本地搜索存活预算（2026-11-07）
+
+- `agent_py_agent/tests/test_runtime_search_backoff.py`：在临时目录验证原生/Python 搜索策略一致、归档未被下降遍历、显式路径可查、命中保留及预算目录披露；用真实静默管道和前台进程组核对短期退避、退出与 FD 回收，不依赖真实用户运行数据。
 
 ### v13 动作声明与冷启动回归（2026-11-07）
 

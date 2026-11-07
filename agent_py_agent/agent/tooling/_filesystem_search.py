@@ -21,14 +21,16 @@ from typing import Any
 from ..common.cancellation import ToolCancelled, raise_if_cancelled, register_cancellation_callback
 from ._filesystem_helpers import (
     _FALLBACK_SCAN_MAX_FILES,
-    _FALLBACK_SCAN_MAX_SECONDS,
     _MAX_SEARCH_LINE_CHARS,
     _discovery_file_batch,
     _discovery_identity,
     _discovery_matches_glob,
     _discovery_nofollow_stat,
+    _discovery_process_budget,
     _iter_discovery_files,
     _safe_discovery_path,
+    _scan_budget_details,
+    _scan_budget_expired,
     path_resolution_error_outcome,
 )
 from ._filesystem_read import (
@@ -87,7 +89,7 @@ _SEARCH_TEXT_PARAMETERS = {
     "literal": "是否按普通文本匹配，默认 false；默认使用 ripgrep 正则语义",
     "ignore_case": "是否忽略大小写，默认 false",
     "output_mode": "输出模式：content、files_with_matches、count 或 line_numbers，默认 content",
-    "include_ignored": "是否搜索 .git/node_modules 等常见噪声目录，默认 false",
+    "include_ignored": "是否搜索运行归档、.git/node_modules 等常见噪声目录，默认 false",
 }
 _SEARCH_TEXT_PARAMETER_DETAILS = {
     "query": "必填；默认使用 ripgrep 正则语义，不做分词、语义检索或联网搜索；要把整段 query 当普通文字时传 literal=true。",
@@ -99,7 +101,7 @@ _SEARCH_TEXT_PARAMETER_DETAILS = {
     "literal": "默认 false，使用 ripgrep 正则语义；搜索包含正则符号的普通原文时传 true。",
     "ignore_case": "大小写不确定时传 true。",
     "output_mode": "content 返回行内容；line_numbers 只返回文件:行号；files_with_matches 只返回文件；count 返回每个文件命中数。",
-    "include_ignored": "默认跳过 .git、node_modules 和常见缓存目录；确实要查时传 true。",
+    "include_ignored": "默认跳过 runs、compact、memory_archive、blobs、.background_jobs、releases、workspace/runtime 与代码缓存；明确把 path 指向其中的目录也可搜索该目录。",
 }
 _SEARCH_TEXT_EXAMPLES = [
     '{"tool": "search_text", "query": "PromptBuilder"}',
@@ -135,6 +137,9 @@ class SearchScanState:
     issues: list[str] = field(default_factory=list)
     sources: dict[Path, tuple[int, ...]] = field(default_factory=dict)
     tool: Any = None
+    current_path: Path | None = None
+    limit_path: Path | None = None
+    budget_exhausted: bool = False
 
     # LLM: 读取预算或来源失败须停止消费，候选发现仅直接设置limited；原因列表有帽且后续命中不能抹去失败。
     # 函数用途: 记录正文消费停止，并将原因并入覆盖事实。
@@ -183,6 +188,8 @@ def _retain_search_bytes(size: int) -> bool:
 # 函数用途: 登记或复核已授权来源的身份和变化。
 def _observe_search_source(tool, path: Path) -> tuple[int, ...]:
     state = _SEARCH_STATE.get()
+    if state is not None:
+        state.current_path = path.parent
     try:
         safe = _safe_discovery_path(tool, path, root=path.parent,
                                     include_ignored=True, ignored_names=())
@@ -240,6 +247,9 @@ def _validate_search_sources(tool) -> None:
     if state is not None:
         for path in tuple(state.sources):
             raise_if_cancelled()
+            if _scan_budget_expired(state, reason='validation_time_limit'):
+                state.mark('validation_time_limit')
+                break
             try:
                 _observe_search_source(tool, path)
             except _SearchReadAbort:
@@ -305,6 +315,8 @@ def build_search_text_model_spec() -> ToolModelSpec:
         description=(
             "只在当前本地工作区文件中做字面或正则匹配，适合找函数名、配置项、章节标记和日志锚点；"
             "不联网、不分词、不做语义搜索，默认使用 ripgrep 正则语义；精确原文请传 literal=true。"
+            "本地文本搜索优先用本工具；默认排除运行归档，整次扫描最多 8 秒，触顶交付部分命中和缩小范围提示。"
+            "不要用未排除归档的 grep -r / rg / find 递归搜索整个 ~/.my-agent 或 owner_home。"
         ),
         input_schema={
             "type": "object",
@@ -373,7 +385,8 @@ class SearchTextTool(FileSystemTool):
     # LLM: ContextVar在finally恢复，不能让并行调用共享预算或来源状态。
     # 函数用途: 为一次搜索绑定独立执行状态。
     def _search_target(self, target: Path, request: SearchRequest) -> ToolHandlerOutcome:
-        token = _SEARCH_STATE.set(SearchScanState(started_at=time.monotonic(), tool=self))
+        token = _SEARCH_STATE.set(SearchScanState(started_at=time.monotonic(), tool=self,
+                                                 current_path=target if target.is_dir() else target.parent))
         try:
             return self._search_target_run(target, request)
         finally:
@@ -747,6 +760,8 @@ def _search_result_envelope(
             'rg_stdout_bytes': scan_state.rg_stdout_bytes,
             'rg_source_read_bytes_known': False,
         })
+        if scan_state.budget_exhausted:
+            envelope['search_result']['scan_budget'] = _scan_budget_details(tool, scan_state)
     return envelope
 
 
@@ -758,9 +773,7 @@ def _admit_fallback_candidate(state: SearchScanState) -> bool:
         state.limited = True
         state.limit_reason = "file_limit"
         return False
-    if time.monotonic() - state.started_at >= _FALLBACK_SCAN_MAX_SECONDS:
-        state.limited = True
-        state.limit_reason = "time_limit"
+    if _scan_budget_expired(state):
         return False
     state.candidates += 1
     return True
@@ -799,9 +812,11 @@ def _with_search_result_guidance(
             [
                 f"- scanned_files: {facts.get('scanned_files', 0)}",
                 f"- scan_limit_reason: {page_window.get('scan_limit_reason', '')}",
-                "- next: 搜索未完整覆盖；请缩小 path/file_glob 或安装 rg 后重试，不能据此认定本地完全无匹配",
+                "- next: 搜索未完整覆盖；请缩小 path/file_glob，避免重复全根扫描，不能据此认定本地完全无匹配",
             ]
         )
+        if facts.get('scan_budget'):
+            lines.append('- scan_budget: ' + json.dumps(facts['scan_budget'], ensure_ascii=False))
     else:
         lines.append(
             "- next: 先确认本地 checkout/path，再用更短的精确标识符或显式正则重试；联网范围请使用 web_search"
@@ -901,7 +916,10 @@ def _collect_hits_with_rg(tool: SearchTextTool, target: Path, request: SearchReq
     process = _start_rg_process(tool, target, request)
     if process is None:
         return None
-    with register_cancellation_callback(lambda: _stop_process(process)):
+    state = _SEARCH_STATE.get()
+    with register_cancellation_callback(lambda: _stop_process(process)), _discovery_process_budget(
+        process, state, _stop_process, on_timeout=lambda: state.mark('rg_time_limit'),
+    ):
         return _rg_hits_from_process(tool, process, request)
 
 
@@ -911,7 +929,10 @@ def _collect_counts_with_rg(tool: SearchTextTool, target: Path, request: SearchR
     process = _start_rg_process(tool, target, request)
     if process is None:
         return None
-    with register_cancellation_callback(lambda: _stop_process(process)):
+    state = _SEARCH_STATE.get()
+    with register_cancellation_callback(lambda: _stop_process(process)), _discovery_process_budget(
+        process, state, _stop_process, on_timeout=lambda: state.mark('rg_time_limit'),
+    ):
         return _rg_counts_from_process(tool, process, request)
 
 
@@ -929,8 +950,9 @@ def _start_rg_process(
     candidates = _discovery_file_batch(tool, target, include_ignored=request.include_ignored,
         ignored_names=_COMMON_FILE_DISCOVERY_IGNORES, scan_state=state,
         admit=_admit_fallback_candidate, file_glob=request.file_glob)
-    if not candidates:
+    if not candidates or _scan_budget_expired(state):
         return None
+    state.current_path = target if target.is_dir() else target.parent
     try:
         return subprocess.Popen(
             rg_args(rg_path, candidates, request),
@@ -1087,7 +1109,7 @@ def _bounded_rg_records(stdout):
     iterator = None if callable(readline) else iter(stdout)
     while True:
         raise_if_cancelled()
-        if state is not None and time.monotonic() - state.started_at >= _FALLBACK_SCAN_MAX_SECONDS:
+        if state is not None and _scan_budget_expired(state, reason='rg_time_limit'):
             state.mark('rg_time_limit')
             return
         remaining = _SEARCH_RG_MAX_BYTES - (state.rg_stdout_bytes if state is not None else 0)
@@ -1205,7 +1227,7 @@ def _bounded_source_lines(handle):
     index = 0
     while True:
         raise_if_cancelled()
-        if state is not None and time.monotonic() - state.started_at >= _FALLBACK_SCAN_MAX_SECONDS:
+        if state is not None and _scan_budget_expired(state, reason='read_time_limit'):
             state.mark('read_time_limit')
             return
         newline = pending.find(b'\n')
@@ -1255,6 +1277,9 @@ def _hydrate_search_page(tool, page: list[SearchHit], request: SearchRequest) ->
     if request.context <= 0 or not page:
         return page
     state = _SEARCH_STATE.get()
+    if state is not None and _scan_budget_expired(state, reason='context_time_limit'):
+        state.mark('context_time_limit')
+        return page
     grouped: dict[Path, list[tuple[int, SearchHit]]] = {}
     result = list(page)
     for position, hit in enumerate(page):
