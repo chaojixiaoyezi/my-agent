@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import py_compile
+import shlex
 import signal
 import subprocess
 import sys
@@ -21,14 +22,83 @@ import pytest
 from scripts.private_release import build, configure, installer
 
 
-def _bundle(root: Path, version="test.1") -> Path:
-    package = root / "runtime/lib/python3.11/site-packages/agent_py_agent/config"
+# LLM: 只生成临时发行清单和配置；不启动解释器或服务，默认保留旧3.11样本。
+# 函数用途: 为新旧Python目录布局构造可校验的离线包。
+def _bundle(root: Path, version="test.1", *, python_dir="python3.11") -> Path:
+    package = root / "runtime/lib" / python_dir / "site-packages/agent_py_agent/config"
     package.mkdir(parents=True)
     (package / "agent_config.yaml").write_text('workspace_root: ""\ngateway_port: 8420\n', encoding="utf-8")
     files = {str(path.relative_to(root)): {"sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
              for path in root.rglob("*") if path.is_file()}
     (root / "release.json").write_text(json.dumps({"schema": installer.SCHEMA, "architecture": os.uname().machine, "version": version, "files": files}))
     return root
+
+
+# LLM: 仅观察临时prefix的真实os.replace；配置和工作区使用原字节比较，不替代安装逻辑。
+# 函数用途: 验证3.11旧安装升级到新解释器布局时，current一次原子切换且数据不丢。
+@pytest.mark.parametrize("python_dir", ["python3.12", "python3.14", "python3.14t"])
+def test_cross_python_upgrade_preserves_data_and_switches_current_atomically(tmp_path, monkeypatch, python_dir):
+    monkeypatch.setattr(installer, "active_processes", lambda _: [])
+    prefix = tmp_path / "installed"
+    installer.install(_bundle(tmp_path / "old", "old.311"), prefix)
+    old = (prefix / "current").resolve()
+    config = prefix / "data/config/agent_config.yaml"
+    config.write_bytes(b'gateway_port: 19420\nmodel_name: "private choice"\nworkspace_root: ""\n')
+    history = prefix / "data/history.keep"
+    history.write_bytes(b"persistent\x00history")
+    work = installer.workspace_path(prefix) / "keep.txt"
+    work.write_bytes(b"user workspace\x00content")
+    before = {path: path.read_bytes() for path in (config, history, work)}
+    replace = os.replace
+    switches = []
+
+    # LLM: 透传所有真实替换，只在current发表前后检查旧/新链接，不制造成功回执。
+    # 函数用途: 证明链接不是先删后建，而是通过一次真实原子替换切换版本。
+    def observe_replace(source, target):
+        if Path(target) == prefix / "current":
+            assert (prefix / "current").resolve() == old
+            assert Path(source).is_symlink()
+            assert os.readlink(source) == "releases/new.runtime"
+            replace(source, target)
+            switches.append((prefix / "current").resolve())
+        else:
+            replace(source, target)
+
+    monkeypatch.setattr(installer.os, "replace", observe_replace)
+    result = installer.install(_bundle(tmp_path / "new", "new.runtime", python_dir=python_dir), prefix)
+    assert result["version"] == "new.runtime"
+    assert switches == [prefix / "releases/new.runtime"]
+    assert (prefix / "current").resolve() == switches[0]
+    assert old.is_dir()
+    assert {path: path.read_bytes() for path in before} == before
+    assert config.stat().st_mode & 0o777 == 0o600
+
+
+# LLM: 只在临时current的最终替换注入失败；旧链接和用户文件必须仍可读。
+# 函数用途: 验证3.14跨版本升级在发表失败时不会丢掉旧安装。
+def test_python314_upgrade_failed_switch_keeps_old_current_and_data(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "active_processes", lambda _: [])
+    prefix = tmp_path / "installed"
+    installer.install(_bundle(tmp_path / "old", "old.311"), prefix)
+    old = (prefix / "current").resolve()
+    config = prefix / "data/config/agent_config.yaml"
+    work = installer.workspace_path(prefix) / "keep.txt"
+    work.write_bytes(b"user work")
+    before = config.read_bytes(), work.read_bytes()
+    replace = os.replace
+
+    # LLM: 只拦current替换，不阻断launcher或配置的既有写路径。
+    # 函数用途: 模拟升级的最后发表步骤失败。
+    def fail_switch(source, target):
+        if Path(target) == prefix / "current":
+            raise OSError("current publication failed")
+        return replace(source, target)
+
+    monkeypatch.setattr(installer.os, "replace", fail_switch)
+    with pytest.raises(OSError, match="current publication failed"):
+        installer.install(_bundle(tmp_path / "new", "new.314", python_dir="python3.14"), prefix)
+    assert (prefix / "current").resolve() == old
+    assert (config.read_bytes(), work.read_bytes()) == before
 
 
 def test_install_and_upgrade_keep_explicit_data_and_workspace(tmp_path, monkeypatch):
@@ -744,6 +814,148 @@ def test_c4_build_refuses_missing_cli_backend_before_publishing(c4_build_case, m
         build.main()
     assert not case.output.exists()
     assert (case.package / '__init__.py').is_file()
+
+
+# LLM: 仅改合成构建样本的Python目录并补齐原生资源；不把ELF样本当作可运行后端。
+# 函数用途: 复用原构建入口测试3.12、3.14与free-threaded布局。
+def _prepare_python_build(case, python_dir):
+    current = case.root / "runtime/lib/python3.11"
+    if python_dir != current.name:
+        current.rename(current.with_name(python_dir))
+    package = case.root / "runtime/lib" / python_dir / "site-packages/agent_py_agent"
+    (package / "config/agent_config.yaml").write_text('workspace_root: ""\ngateway_port: 8420\n', encoding="utf-8")
+    (case.root / "native/feishu-cli-host.linux-x86_64").write_bytes(b"synthetic backend")
+    lark = case.root / "native/lark_cli"
+    lark.mkdir()
+    (lark / "release.json").write_text('{"version":"fixture"}')
+    return package
+
+
+# LLM: 真实调用构建/清单核验/安装；解释器与原生资源是合成文件，未证明Linux运行时可启动。
+# 函数用途: 验证新旧运行时布局都能构建归档、首装并升级既有安装。
+@pytest.mark.parametrize("python_dir,version", [
+    ("python3.11", "3.11.15"), ("python3.12", "3.12"),
+    ("python3.14", "3.14.4"), ("python3.14t", "3.14.4"),
+])
+def test_python_runtime_bundle_builds_verifies_installs_and_upgrades(c4_build_case, tmp_path, monkeypatch, python_dir, version):
+    case = c4_build_case
+    package = _prepare_python_build(case, python_dir)
+    assert build.main() == 0
+    manifest = json.loads((case.root / "release.json").read_text())
+    assert manifest["python"] == version
+    assert (package / "__init__.pyc").is_file()
+    assert not (package / "__init__.py").exists()
+    assert (case.output / "my-agent-test.cli-linux-x86_64.run").is_file()
+    extracted = tmp_path / "extracted"
+    with tarfile.open(case.output / "my-agent-test.cli-linux-x86_64.tar.gz") as archive:
+        archive.extractall(extracted, filter="data")
+    bundle = extracted / "bundle"
+    monkeypatch.setattr(installer.os, "uname", lambda: SimpleNamespace(machine="x86_64"))
+    monkeypatch.setattr(installer, "active_processes", lambda _: [])
+    assert installer.verify(bundle)["python"] == version
+    for existing in (False, True):
+        prefix = tmp_path / ("upgraded" if existing else "fresh")
+        if existing:
+            installer.install(_bundle(tmp_path / "old", "old.311"), prefix)
+            config = prefix / "data/config/agent_config.yaml"
+            config.write_bytes(b'gateway_port: 19420\nmodel_name: "preserve me"\n')
+            work = installer.workspace_path(prefix) / "user.txt"
+            work.write_bytes(b"workspace data")
+            original = config.read_bytes(), work.read_bytes()
+        installer.install(bundle, prefix)
+        assert (prefix / "current").resolve() == prefix / "releases/test.cli"
+        assert installer.verify(prefix / "current")["python"] == version
+        if existing:
+            assert (config.read_bytes(), work.read_bytes()) == original
+        else:
+            assert "gateway_port: 18420" in (prefix / "data/config/agent_config.yaml").read_text()
+
+
+# LLM: 通过临时shell启动当前测试解释器，只验证构建时的版本探测，不冒充便携Python运行证明。
+# 函数用途: 证明清单采用可执行bundled解释器的实际版本而不是目录或构建机猜值。
+def test_bundle_manifest_uses_executable_interpreter_version(c4_build_case):
+    case = c4_build_case
+    _prepare_python_build(case, "python3.11")
+    python = case.root / "runtime/bin/python3"
+    python.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
+    python.chmod(0o755)
+    assert build.main() == 0
+    manifest = json.loads((case.root / "release.json").read_text())
+    assert manifest["python"] == ".".join(str(part) for part in sys.version_info[:3])
+
+
+# LLM: 可执行文件的失败或非版本输出不能退回目录猜值，必须在编译和出包前拒绝。
+# 函数用途: 防止将无法探测的解释器冒充3.14写入发行清单。
+@pytest.mark.parametrize("body,error", [
+    ("exit 9\n", subprocess.CalledProcessError),
+    ("printf 'not-a-python-version\\n'\n", ValueError),
+    ("exit 0\n", ValueError),
+])
+def test_bundle_refuses_failed_or_invalid_interpreter_probe(c4_build_case, body, error):
+    case = c4_build_case
+    package = _prepare_python_build(case, "python3.14")
+    python = case.root / "runtime/bin/python3"
+    python.write_text("#!/bin/sh\n" + body)
+    python.chmod(0o755)
+    with pytest.raises(error):
+        build.main()
+    assert not case.output.exists()
+    assert (package / "__init__.py").is_file()
+
+
+# LLM: 所有候选包均在临时发行目录，不执行系统Python；安装器独立运行，不能依赖build模块。
+# 函数用途: 验证标准3.14优先于3.14t，再按旧目录倒序选择，且保留两入口各自缺省路径。
+@pytest.mark.parametrize("names,selected", [
+    ((), "python3.14"),
+    (("python3.11",), "python3.11"),
+    (("python3.11", "python3.12"), "python3.12"),
+    (("python3.12", "python3.14t"), "python3.14t"),
+    (("python3.11", "python3.12", "python3.14t", "python3.14"), "python3.14"),
+])
+def test_bundled_package_priority_and_missing_defaults(tmp_path, names, selected):
+    root = tmp_path / "bundle"
+    for name in names:
+        config = root / "runtime/lib" / name / "site-packages/agent_py_agent/config"
+        config.mkdir(parents=True)
+        (config / "agent_config.yaml").write_text(f"gateway_port: 8420\nfixture_runtime: {name}\n")
+    assert build._resolve_bundled_package_dir(root) == root / "runtime/lib" / selected / "site-packages/agent_py_agent"
+    prefix = tmp_path / "installed"
+    if not names:
+        with pytest.raises(FileNotFoundError, match=r"python3\.11"):
+            installer.initialize_data(prefix, root)
+    else:
+        installer.initialize_data(prefix, root)
+        assert f"fixture_runtime: {selected}\n" in (prefix / "data/config/agent_config.yaml").read_text()
+
+
+# LLM: 目录中无可执行解释器，不给未知的3.11发行补出并不存在的补丁号。
+# 函数用途: 保证3.11.15只用于唯一3.11目录的旧合成样本。
+def test_legacy_patch_version_is_not_inferred_for_mixed_runtime_directories(tmp_path):
+    package = tmp_path / "runtime/lib/python3.11/site-packages/agent_py_agent"
+    package.mkdir(parents=True)
+    (tmp_path / "runtime/lib/python3.12").mkdir()
+    assert build._bundled_python_version(tmp_path, package) == "3.11"
+
+
+# LLM: pip调用用成功退出的临时脚本代替，只验证原shell脚本移除发行副本标记且不改源运行时。
+# 函数用途: 检查EXTERNALLY-MANAGED清理覆盖3.11、3.12、3.14和3.14t。
+def test_prepare_runtime_removes_all_python3_managed_markers_only_from_copy(tmp_path):
+    root = tmp_path / "runtime build"
+    for name in ("bin", "lib", "include", "share"):
+        (root / name).mkdir(parents=True)
+    python = root / "bin/python3"
+    python.write_text("#!/bin/sh\nexit 0\n")
+    python.chmod(0o755)
+    versions = ("python3.11", "python3.12", "python3.14", "python3.14t")
+    for version in versions:
+        marker = root / "lib" / version / "EXTERNALLY-MANAGED"
+        marker.parent.mkdir()
+        marker.write_text("managed source runtime")
+    script = Path(__file__).resolve().parents[2] / "scripts/private_release/prepare_runtime.sh"
+    subprocess.run(["bash", str(script), str(root), str(tmp_path / "source")], check=True, capture_output=True)
+    for version in versions:
+        assert not (root / "bundle/runtime/lib" / version / "EXTERNALLY-MANAGED").exists()
+        assert (root / "lib" / version / "EXTERNALLY-MANAGED").read_text() == "managed source runtime"
 
 
 # LLM: 用合成proc及真实可关闭文件FD代替进程句柄；裸PID信号即失败，所有native/syscall发送由各例替换。

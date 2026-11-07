@@ -24,6 +24,7 @@ jobs:
         python-version:
           - "3.11"
           - "3.12"
+          - "3.14"
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
 
     steps:
@@ -43,6 +44,8 @@ jobs:
           # 默认 fast suite 覆盖 secrets 与 scale 正式能力；测试环境必须按声明
           # 安装这些 feature extras，不能依赖 runner 预装，也不能在测试里临时跳过。
           python3 -m pip install -e ".[dev,secrets,scale]"
+          # 3.14仍安装完整scale（含按ABI选择的psycopg-binary），不跳过正式能力依赖。
+          python3 -m pip check
 
       - name: Install ripgrep for native search regressions
         # 文件发现/搜索的原生回归（test_opt_filesystem_cursor_context.py）必须执行真实 rg；ubuntu runner
