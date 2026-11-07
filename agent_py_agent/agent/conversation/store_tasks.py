@@ -898,6 +898,15 @@ class TaskStore:
             return None, None
         return _read_task_link(path, selected)
 
+    # 复用单任务读口的缺失与坏账合同；归属只核链接中的线程身份，不加载线程历史索引。
+    def link_report(
+        self, thread_id: str, task_id: str
+    ) -> tuple[ThreadTaskLink | None, dict[str, Any] | None]:
+        link, error = self.load_report(task_id)
+        if link is not None and link.thread_id != thread_id:
+            return None, None
+        return link, error
+
     # LLM: store_tasks 的持久化合同：从线程历史任务身份读取关联及错误，不扫描其它线程；修改须同步本领域调用方与存储回归。
     # 函数用途: 从线程历史任务身份读取关联及错误，不扫描其它线程。
     def list_report(self, thread_id: str, *, classify_missing: bool = False):
