@@ -6,7 +6,7 @@ from ..business_spaces import v13_w10_credentials as credentials
 from ..business_spaces import v13_w10_identity as identity
 from ..business_spaces import v13_w10_mfa as mfa
 from ..business_spaces import v13_w10_tenancy as tenancy
-from .business_api_v13 import V13Action
+from .business_api_v13_contracts import V13Action
 
 
 # LLM: ready无live context只读组合根的接线事实；执行时仍由v13_provider复核实时授权。

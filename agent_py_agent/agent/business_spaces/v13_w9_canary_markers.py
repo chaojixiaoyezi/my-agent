@@ -11,7 +11,6 @@ import secrets
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from ..gateway_parts.business_api_v13 import v13_provider
 from ..plugin_host.errors import HostAPIError
 from .v13_w9_datasources import (
     w9_get,
@@ -54,6 +53,8 @@ def _fim_cursor(call, provider, *, encode=None):
 # LLM: FIM 没有原生引擎，缺适配器时保持 HOST_NOT_READY，不伪造空记录。
 # 函数用途: 读取真实 FIM 提供者的一页事件。
 def fim_events(call):
+    from ..gateway_parts.business_api_v13 import v13_provider
+
     if call.params.get("space_id"):
         w9_require_space(call, call.params["space_id"])
     provider = v13_provider(call, "osquery_fim")
@@ -68,6 +69,8 @@ def fim_events(call):
 # LLM: window 由 schema 校验，数值是固定时间单位换算，不从展示文案决定业务。
 # 函数用途: 查询指定时间窗的 FIM 聚合事实。
 def fim_summary(call):
+    from ..gateway_parts.business_api_v13 import v13_provider
+
     if call.params.get("space_id"):
         w9_require_space(call, call.params["space_id"])
     window = call.params["window"]

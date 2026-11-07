@@ -282,7 +282,10 @@ def test_slice_declares_exact_actions_and_rejects_argv(monkeypatch, environment)
     expected = {'catalog', 'probe', 'create', 'resume', 'restart', 'prompt', 'cancel_turn', 'events',
                 'permission.decide', 'answer', 'config.set', 'close', 'list'}
     assert {action.name.removeprefix('acp_bridge.') for action in slice_module.V13_ACTIONS} == expected
-    actions, aliases, definitions, kinds, collections = v13._load_registry([*v13.V13_SLICE_MODULES, slice_module.__name__])
+    assert slice_module.__name__ in v13.V13_SLICE_MODULES
+    actions, aliases, definitions, kinds, collections = v13._load_registry()
+    with pytest.raises(ValueError, match='v13动作重名: acp_bridge.catalog'):
+        v13._load_registry([*v13.V13_SLICE_MODULES, slice_module.__name__])
     monkeypatch.setattr(v13, '_ACTIONS', actions)
     monkeypatch.setattr(v13, 'ALIASES', aliases)
     monkeypatch.setattr(v13, 'V13_DEFS', definitions)

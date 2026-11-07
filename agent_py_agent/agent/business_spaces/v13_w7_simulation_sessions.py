@@ -6,7 +6,6 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from ..gateway_parts.business_api_v13 import v13_call_frozen, v13_require_access, v13_resolve_space
 from ..plugin_host.errors import HostAPIError
 from .v13_store import v13_store_for
 
@@ -14,6 +13,8 @@ from .v13_store import v13_store_for
 # LLM: 缺省只选择当前 owner 唯一的活动空间；多个候选不得凭名称或排序猜测。
 # 函数用途: 为可选空间参数补上有界、只读的唯一空间解析。
 def resolve_space(call, space_id=None):
+    from ..gateway_parts.business_api_v13 import v13_call_frozen, v13_resolve_space
+
     selected = space_id or call.params.get('space_id')
     if selected is None:
         page = v13_call_frozen(call, 'spaces.list', {'state': 'active', 'limit': 2})
@@ -48,6 +49,8 @@ def _view(row):
 # LLM: 缺失或其他 owner 必须是 404；在读取结果前核当前授权。
 # 函数用途: 读取并授权一条真实记录。
 def _get(call, store, collection, record_id):
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     row = store.get(collection, record_id)
     if row is None or row.get('owner_id') != call.owner_id:
         raise HostAPIError('RESOURCE_NOT_FOUND', 404)
@@ -92,6 +95,8 @@ def _record_store(call, collection, record_id):
 # LLM: 同一空间前后快照在同一集合锁内选择；没有技术目录不编造覆盖分母。
 # 函数用途: 保存当前规则覆盖与上一快照的差异。
 def drift_snapshot(call):
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     store = v13_store_for(call)
     space_id = resolve_space(call)['space_id']
     rules = [row for row in store.list('monitor_rules')
@@ -157,6 +162,8 @@ def create_session(call):
 # LLM: 会话、执行和回执沿 W0 多集合事务同笔提交，不暴露半条关联。
 # 函数用途: 登记发现并按需创建技术验证执行。
 def add_finding(call):
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     session_id = call.params['session_id']
     store = _record_store(call, 'simulation_sessions', session_id)
 
@@ -197,6 +204,8 @@ def add_finding(call):
 # LLM: 读取只返回真实 execution；不同观察版本明确未就绪，不捏造完整关联。
 # 函数用途: 读取会话及其关联验证执行。
 def get_session(call):
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     store = v13_store_for(call)
     row = _get(call, store, 'simulation_sessions', call.params['session_id'])
     expected = {finding['execution_id'] for finding in row['findings'] if finding['execution_id']}
@@ -212,6 +221,8 @@ def get_session(call):
 # LLM: completed 为不可逆终态；同键回放仍取首次成功，异键重做必须冲突。
 # 函数用途: 完成并归档桌面推演。
 def complete(call):
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     store = _record_store(call, 'simulation_sessions', call.params['session_id'])
 
     # LLM: 锁内取得最新会话再验证版本，不用外部旧快照覆盖 findings。
@@ -236,6 +247,8 @@ def complete(call):
 # LLM: 规则和告警必须属于同一会话空间；记录 CAS 在 execution 集合锁内检查。
 # 函数用途: 更新一次技术验证的实际检测证据。
 def update_detection(call):
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     store = _record_store(call, 'simulation_executions', call.params['execution_id'])
 
     # LLM: 不改会话归档状态，后续验证只能修改本次执行的显式字段。

@@ -46,7 +46,7 @@ from ..common.nofollow_fs import (
 )
 from ..contracts.gates.skill_guard import SkillGuardRequest, evaluate_skill_guard_gate
 from ..conversation.business_access import BusinessError
-from ..gateway_parts.business_api_v13 import V13Call, v13_require_access
+from ..gateway_parts.business_api_v13_contracts import V13Call
 from ..plugin_host.errors import HostAPIError
 from ..user_space.owner_quota import OwnerQuotaChange, owner_quota_enforcer_from_policy
 from . import gap158_w5_mcp_servers as mcp
@@ -505,9 +505,13 @@ def _invalidate(call):
 
 def _receipt(call, mutate):
     """先耐久预占，再锁内变更文件，最后封原回执；未知请求不得再次执行。"""
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     v13_require_access(call)
     precommit_denial = [None]
     def work():
+        from ..gateway_parts.business_api_v13 import v13_require_access
+
         effect = False
 
         def mark_effect():
@@ -549,6 +553,8 @@ def _receipt(call, mutate):
 def _boundary(function):
     @wraps(function)
     def invoke(call: V13Call) -> dict:
+        from ..gateway_parts.business_api_v13 import v13_require_access
+
         v13_require_access(call)
         try:
             return function(call)
@@ -578,6 +584,8 @@ def upload_zip(call: V13Call) -> dict:
     if type(call.params.get('replace', False)) is not bool:
         raise BusinessError('INVALID_SCHEMA')
     def install(admission, mark_effect):
+        from ..gateway_parts.business_api_v13 import v13_require_access
+
         if call.params.get('replace') and re.fullmatch(r'[0-9a-f]{64}', call.params.get('expected_sha256', '')) is None:
             raise BusinessError('REVISION_CONFLICT')
         if _protected(call, name):
@@ -763,6 +771,8 @@ def dirs_create(call: V13Call) -> dict:
         raise BusinessError('INVALID_SCHEMA')
 
     def create(_admission, mark_effect):
+        from ..gateway_parts.business_api_v13 import v13_require_access
+
         _owner_skill(call, name, writable=True)
         created = False
         parts = ('skills', name)
@@ -832,6 +842,8 @@ def files_write(call: V13Call) -> dict:
     full = ('skills', name, *parts)
 
     def write(admission, mark_effect):
+        from ..gateway_parts.business_api_v13 import v13_require_access
+
         _owner_skill(call, name, writable=True)
         expected = _current(call.owner_home, full)
         _cas(call.params['expected_sha256'], expected)
@@ -880,6 +892,8 @@ def files_delete(call: V13Call) -> dict:
     full = ('skills', name, *parts)
 
     def delete(admission, mark_effect):
+        from ..gateway_parts.business_api_v13 import v13_require_access
+
         try:
             _owner_skill(call, name, writable=True)
         except (FileNotFoundError, BusinessError) as error:

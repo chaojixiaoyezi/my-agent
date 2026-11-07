@@ -1,7 +1,7 @@
 """通知与运维的静态 V13 契约；仅复用认证上下文和既有领域入口。"""
 from __future__ import annotations
 
-from .business_api_v13 import V13Action
+from .business_api_v13_contracts import V13Action
 
 
 def _notify(call):

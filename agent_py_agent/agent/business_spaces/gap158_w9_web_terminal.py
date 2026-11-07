@@ -15,7 +15,6 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
-from ..gateway_parts.business_api_v13 import v13_require_access
 from ..plugin_host.errors import HostAPIError
 from ..tooling.pty_sessions import (
     _MAX_SESSION_COUNT,
@@ -76,6 +75,8 @@ def _launch_inputs(call, workspace):
 
 def _execute_with_host(registry, method, call):
     """原生 HTTP 的只读宿主视图只在需要工作根时租用同 owner 完整宿主。"""
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     v13_require_access(call)
     if method not in {'grant', 'open'} or hasattr(call.services.host, 'workspace'):
         return registry._execute(method, call)
@@ -148,6 +149,8 @@ class WebTerminalRegistry:
 
     def _execute(self, method, call):
         # 只在期限内保留有界回执；重放前仍重核授权，不以旧成功绕过撤权或到期。
+        from ..gateway_parts.business_api_v13 import v13_require_access
+
         with self.lock:
             v13_require_access(call)
             now = call.clock()
@@ -238,6 +241,8 @@ class WebTerminalRegistry:
                 self._expire(identifier)
 
     def grant(self, call):
+        from ..gateway_parts.business_api_v13 import v13_require_access
+
         v13_require_access(call)
         target, label = _workspace(call)
         with self.lock:
@@ -261,6 +266,8 @@ class WebTerminalRegistry:
                     'capabilities': list(grant.capabilities)}
 
     def _verified(self, call, capability=None):
+        from ..gateway_parts.business_api_v13 import v13_require_access
+
         v13_require_access(call)
         self.sweep(call.clock())
         digest = hashlib.sha256(call.params['ticket'].encode()).hexdigest()
@@ -388,6 +395,8 @@ class WebTerminalRegistry:
             return {'cols': cols, 'rows': rows}
 
     def close(self, call):
+        from ..gateway_parts.business_api_v13 import v13_require_access
+
         with self.lock:
             v13_require_access(call)
             # 关闭无需票据，仍必须匹配认证的 owner/subject，且重复关闭沿同一原回执。
@@ -406,6 +415,8 @@ class WebTerminalRegistry:
             return result
 
     def revoke(self, call):
+        from ..gateway_parts.business_api_v13 import v13_require_access
+
         with self.lock:
             v13_require_access(call)
             grant = self.grants.get(call.params['grant_id'])
@@ -424,6 +435,8 @@ class WebTerminalRegistry:
             return {'revoked': True, 'closed_sessions': closed}
 
     def list_sessions(self, call):
+        from ..gateway_parts.business_api_v13 import v13_require_access
+
         with self.lock:
             v13_require_access(call)
             self.sweep(call.clock())

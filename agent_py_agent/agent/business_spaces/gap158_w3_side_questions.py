@@ -15,7 +15,6 @@ from ..conversation.auxiliary_model_call import (
     AuxiliaryModelCallRequest,
     generate_auxiliary_model_response,
 )
-from ..gateway_parts.business_api_v13 import v13_require_access
 from ..plugin_host.errors import HostAPIError
 from ..settings.model_profiles import selected_model_config
 from ..settings.model_scope import (
@@ -69,6 +68,8 @@ def _view(row):
 
 def _conversation(call, conversation_id):
     """认证 owner 的规范线程是唯一来源；不存在与跨 owner 不可区分。"""
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     v13_require_access(call)
     agent = call.context.host
     store = getattr(agent, 'conversation_store', None)
@@ -85,6 +86,8 @@ def _conversation(call, conversation_id):
 
 
 def _row(call, request_id):
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     row = v13_store_for(call, 'owner').get('side_questions', request_id)
     if row is None or row.get('owner_id') != call.owner_id:
         raise HostAPIError('RESOURCE_NOT_FOUND', 404)
@@ -291,6 +294,8 @@ def delete_side_question(call):
     row_id = call.params['side_question_id']
 
     def mutate(rows):
+        from ..gateway_parts.business_api_v13 import v13_require_access
+
         current = rows.get(row_id)
         if current is None or current.get('owner_id') != call.owner_id:
             raise HostAPIError('RESOURCE_NOT_FOUND', 404)

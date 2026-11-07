@@ -5,7 +5,7 @@ import threading
 from contextlib import ExitStack
 
 from ..plugin_host.errors import HostAPIError
-from .business_api_v13 import V13Action, v13_require_access
+from .business_api_v13_contracts import V13Action
 
 _INSTALL_LOCK = threading.Lock()
 
@@ -125,6 +125,7 @@ def _ready(call):
 
 def _gateway(call):
     from ..business_spaces import gap158_w1_openai_compat as gateway
+    from .business_api_v13 import v13_require_access
 
     v13_require_access(call)
     with ExitStack() as stack:

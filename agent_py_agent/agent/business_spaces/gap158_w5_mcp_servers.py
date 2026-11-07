@@ -11,7 +11,6 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from ..conversation.business_access import BusinessError
-from ..gateway_parts.business_api_v13 import v13_require_access, v13_require_admin
 from ..plugin_host.errors import HostAPIError
 from ..plugin_runtime import PluginMCPClient
 from ..settings import parameter_changes
@@ -31,6 +30,8 @@ class _ReceiptReplay(Exception):
 
 def receipted(call, work, *, collection='admin_ops', scope='main'):
     """原 Store 先耐久占位，锁外执行一次，最后按 claim 封回执；未结绝不重放副作用。"""
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     v13_require_access(call)
     if not call.idempotency_key:
         raise HostAPIError('INVALID_SCHEMA')
@@ -106,6 +107,8 @@ def _admin_action(handler):
     """重放也须当前管理员；回执只承接原领域结果，不新增配置或连接权威。"""
     @wraps(handler)
     def invoke(call):
+        from ..gateway_parts.business_api_v13 import v13_require_admin
+
         v13_require_admin(call)
         return receipted(call, lambda: handler(call))
     return invoke
@@ -114,6 +117,8 @@ def _admin_action(handler):
 @contextmanager
 def live_host(call):
     """仅借已加载的准确 owner 宿主；被动普通 owner 不因此构造 Agent。"""
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     v13_require_access(call)
     host = call.context.host
     with ExitStack() as stack:
@@ -144,6 +149,8 @@ def live_registry(call):
 
 def config_snapshot(call):
     """路径来自已加载部署配置；字节摘要与正式 reader 前后复核，防止丢失并发写。"""
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     v13_require_access(call)
     config = deployment_model_config(call.services.host)
     path = user_config_path(config)
@@ -232,6 +239,8 @@ def list_servers(call):
 @_admin_action
 def create(call):
     """管理员修改部署映射，严格校验单项后复用原参数中心审计与整文件 CAS。"""
+    from ..gateway_parts.business_api_v13 import v13_require_admin
+
     v13_require_admin(call)
     path, revision, config = config_snapshot(call)
     revision = _expected(call, revision)
@@ -257,6 +266,8 @@ def create(call):
 @_admin_action
 def delete(call):
     """删除只改部署映射，不把配置删除误报为现有进程已停止。"""
+    from ..gateway_parts.business_api_v13 import v13_require_admin
+
     v13_require_admin(call)
     path, revision, config = config_snapshot(call)
     revision = _expected(call, revision)
@@ -292,6 +303,8 @@ def tools(call):
 @_admin_action
 def refresh(call):
     """管理员只刷新命名客户端的固定连接，失败保持原连接事实，不扫描或重启全部服务。"""
+    from ..gateway_parts.business_api_v13 import v13_require_admin
+
     v13_require_admin(call)
     _, _, config = config_snapshot(call)
     name = call.params['name']

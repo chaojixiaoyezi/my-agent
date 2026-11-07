@@ -21,7 +21,7 @@ from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
 from ..common.nofollow_fs import open_directory_beneath
-from ..gateway_parts.business_api_v13 import V13Call, v13_require_access
+from ..gateway_parts.business_api_v13_contracts import V13Call
 from ..path_access_policy import PathAccessPolicy
 from ..plugin_host.errors import HostAPIError
 
@@ -108,6 +108,8 @@ def _control_receipts(call, epoch):
 # 函数用途: 核验本次身份与订阅的工作根、撤销代次。
 def _authorize(call, sub=None):
     """每次请求及每个进程前重核原身份、工作根和撤销代次。"""
+    from ..gateway_parts.business_api_v13 import v13_require_access
+
     v13_require_access(call)
     epoch, key = _fs().current_epoch(call), _owner_key(call)
     _owner_state(call, epoch)

@@ -59,6 +59,23 @@ def test_refresh_updates_all_registered_copies_but_not_host_numeric_or_secret_fi
     assert (config.gateway_port, config.my_agent_home, config.api_key, config.memory_top_k) == before
 
 
+@pytest.mark.parametrize("key", [
+    "acp_bridge_enabled", "custom_tools_enabled", "llm_call_records_enabled",
+    "notify_delivery_enabled", "openai_compat_gateway_enabled", "ops_remote_update_enabled",
+    "side_questions_enabled", "web_terminal_enabled",
+])
+def test_gap_switches_refresh_registered_config_copies_in_both_directions(tmp_path, key):
+    path, config = _config(tmp_path, f"{key}: false\n")
+    pooled = replace(config)
+    live.register_live_config(config)
+    live.register_live_config(pooled)
+    for enabled in (True, False):
+        _write(path, f"{key}: {str(enabled).lower()}\n")
+        assert key in live.refresh_live_switches(config, force=True)
+        assert getattr(config, key) is enabled
+        assert getattr(pooled, key) is enabled
+
+
 def test_replace_override_and_unregistered_managed_owner_stay_isolated(tmp_path):
     path, base = _config(tmp_path)
     owner = replace(base, enable_tools=False)
@@ -219,18 +236,23 @@ def test_registration_does_not_retain_dead_config(tmp_path):
     assert live.refresh_live_switches(path=path) == frozenset()
 
 
-def test_capability_switch_and_router_see_file_edit_without_restart(tmp_path):
+@pytest.mark.parametrize("key", [
+    "tool_program_enabled", "command_approval_filter_enabled", "target_scope_policy_enabled",
+])
+def test_capability_switch_and_router_see_file_edit_without_restart(tmp_path, key):
+    assert key in live.LIVE_SWITCH_KEYS
     path = tmp_path / "capability.yaml"
-    _write(path, "tool_program_enabled: true\n")
+    _write(path, f"{key}: true\n")
     router = SimpleNamespace(config=None)
     agent = SimpleNamespace(root=tmp_path, capability_config_path=path, capability_router=router)
     before = capability.capability_config_for_agent(agent)
-    assert before.tool_program_enabled is True
-    _write(path, "tool_program_enabled: false\n")
-    current = capability.capability_config_for_agent(agent)
-    assert current.tool_program_enabled is False
-    assert agent._capability_config_runtime_snapshot.config is current
-    assert router.config is current
+    assert getattr(before, key) is True
+    for enabled in (False, True):
+        _write(path, f"{key}: {str(enabled).lower()}\n")
+        current = capability.capability_config_for_agent(agent)
+        assert getattr(current, key) is enabled
+        assert agent._capability_config_runtime_snapshot.config is current
+        assert router.config is current
 
 
 def test_capability_unchanged_snapshot_uses_one_stat_and_no_read(tmp_path, monkeypatch):
