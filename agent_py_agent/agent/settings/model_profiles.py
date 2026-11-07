@@ -562,7 +562,11 @@ def _inheritance_parent_thread_id(agent: object) -> str:
     run_id = current_subagent_run_id(agent)
     manager = getattr(agent, "subagents", None)
     if run_id and manager is not None:
-        task = manager.load(run_id)
+        try:
+            task = manager.load(run_id)
+        except (FileNotFoundError, KeyError):
+            # 父运行尚未登记时继续检查原调度/会话绑定，其它读取错误保持可见。
+            task = None
         thread_id = getattr(task, "agent_thread_id", "")
         if isinstance(thread_id, str) and thread_id.strip():
             return thread_id.strip()
