@@ -8,8 +8,10 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from ..runtime_errors import DataCorruptionError
 from .daemon_metadata import process_identity_is_live
 from .io import locked_file_transition, read_json_file_report
+from .owner_retention import gateway_terminal_exists
 from .paths import GatewayPaths
 
 _TARGET_SCHEMA = "gateway_execution_target.v1"
@@ -133,7 +135,11 @@ def _foreground_target(paths: GatewayPaths, claim: dict, thread_id: str, *, bloc
     request_id = task_id[len("gateway:"):]
     if not request_id or "/" in request_id or "\\" in request_id:
         return None
-    if (paths.terminal / f"{request_id}.json").exists():
+    try:
+        if gateway_terminal_exists(paths, f"{request_id}.json"):
+            return None
+    except DataCorruptionError:
+        # 终态未知时不投影为活动执行者，沿原无可用目标路径拒绝控制。
         return None
     options = {} if blocking and deadline is None else {'blocking': blocking, 'deadline': deadline}
     report = read_json_file_report(paths.processing / f"{request_id}.json", context="gateway.execution_target.request", **options)

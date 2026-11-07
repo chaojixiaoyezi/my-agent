@@ -39,6 +39,7 @@ from .io import (
     write_json_file_atomic,
 )
 from .logging import _report_gateway_side_effect_error, log_gateway_payload
+from .owner_retention import gateway_terminal_exists
 from .paths import GatewayPaths, gateway_chunk_path
 from .recovery_pending_index import RecoveryPendingIndex, projection_file_stamp
 
@@ -274,8 +275,9 @@ def _recover_one_processing_request(
         )
     # 原metadata含MP专属版本；剥标签必须被原完整指纹发现，不以普通owner字段猜模式或查新P3。
     validated_gateway_request_fingerprint(payload, request_id)
+    # 终态未知必须上报原恢复错误，不能落到 stale/pending 分支重新排队。
     if (
-        (paths.terminal / f"{request_id}.json").exists()
+        gateway_terminal_exists(paths, f"{request_id}.json")
         or payload.get("schema_version") == "gateway_terminal_request.v1"
         or payload.get("capability_closeout") is not None
     ):
@@ -305,7 +307,8 @@ def _finish_interrupted_queue_move(paths, request_path, payload, context):
         if not _processing_request_stale(fresh, request_path, context):
             return ""
         target = paths.inbox / request_path.name
-        if target.exists() or (paths.terminal / request_path.name).exists():
+        # 终态未知沿原异常路径保留 processing，不移动回可执行队列。
+        if target.exists() or gateway_terminal_exists(paths, request_path.name):
             raise DataCorruptionError("interrupted queue move conflicts with pending or terminal request")
         request_path.replace(target)
         return "requeued"
@@ -575,7 +578,8 @@ def _recover_committed_terminal_processing(
     conversation_store, settlement_ok = None, True
     with processing_metadata_scope(paths, request_id):
         canonical = paths.terminal / f"{request_id}.json"
-        canonical_committed = canonical.exists()
+        # 终态未知向原恢复故障上报，不把旧 processing 当作新的终态来源。
+        canonical_committed = gateway_terminal_exists(paths, canonical.name)
         if canonical_committed:
             report = read_json_file_report(
                 canonical,
@@ -1506,7 +1510,8 @@ def _commit_gateway_terminal_request(
 ) -> Path:
     paths.terminal.mkdir(parents=True, exist_ok=True)
     canonical = paths.terminal / f"{request_id}.json"
-    if canonical.exists():
+    # 终态未知沿原提交失败路径退出，不能覆盖已封存的唯一终态。
+    if gateway_terminal_exists(paths, canonical.name):
         existing_report = read_json_file_report(
             canonical,
             context="gateway.terminal_archive.read",
@@ -2092,7 +2097,8 @@ def _requeue_current_processing_locked(paths, claim, not_before_at):
             or fresh.get("lease_epoch") != claim.lease_epoch or fresh.get("lease_owner") != claim.lease_owner):
         raise DataCorruptionError("current processing requeue lease changed")
     target = paths.inbox / claim.path.name
-    if target.exists() or (paths.terminal / claim.path.name).exists():
+    # 终态未知沿原异常路径保留当前执行记录，不能重排同一请求。
+    if target.exists() or gateway_terminal_exists(paths, claim.path.name):
         raise DataCorruptionError("current processing requeue target already exists")
     requeued = dict(fresh, status="pending", priority="background", requeued_at=time.time(), not_before_at=not_before_at)
     for key in ("execution_attempt_id", "lease_owner", "lease_started_at", "lease_heartbeat_at",
@@ -2271,7 +2277,8 @@ def _recovery_failure_observation(paths, request_path, payload, error):
     report["path"] = str(request_path)
     try:
         canonical_path = paths.terminal / request_path.name
-        if not canonical_path.is_file():
+        # 终态未知只保留原错误报告，不据此重排或推断已经完成。
+        if not gateway_terminal_exists(paths, canonical_path.name):
             return "", report
         canonical = read_json_file_report(canonical_path, context="gateway.recovery.failure.canonical")
         row = canonical.payload
@@ -2302,6 +2309,6 @@ def _recovery_failure_observation(paths, request_path, payload, error):
         return (
             "failed" if row.get("status") == "failed" and response["ok"] is False else "archived"
         ), report
-    except OSError:
+    except (OSError, DataCorruptionError):
         # 观测读取失败不替换原故障，也不能据不完整事实计数、结算或释放资源。
         return "", report

@@ -36,6 +36,7 @@ from .multiprocess_records import (
 )
 from .multiprocess_route import RouteStamp, freeze_request_route, owner_digest
 from .multiprocess_session_key import project_admission_session, validate_session_scope
+from .owner_retention import gateway_terminal_exists
 
 # LLM: 规范路径冻结为 <gateway_root>/admission/reservations/<request_id>.json；换路径必须同步协议 §17 与测试。
 ADMISSION_DIR_NAME = "admission"
@@ -1187,9 +1188,10 @@ def _takeover_barrier_rejection(barrier, generation) -> str:
 # LLM: 单条终态对账：没有规范终态不动；释放动作的任何异常都按"这条失败"处理，不拖垮整轮。
 # 函数用途: 尝试释放一条已有终态的 occupied 预留，返回是否释放。
 def _release_settled_if_terminal(gate, request_id: str) -> bool:
-    if not (gate.paths.terminal / f"{request_id}.json").is_file():
-        return False
     try:
+        # 终态索引未知时沿原单条失败路径保留预留，不授予重新接纳权。
+        if not gateway_terminal_exists(gate.paths, f"{request_id}.json"):
+            return False
         return bool(release_reservation_if_terminal(gate, request_id).get("released"))
     except Exception:
         return False
@@ -1404,10 +1406,14 @@ def _processing_recovery_decision_locked(gate, path, ownership, authority):
         return _blocked("request_identity_conflict")
     if path.parent not in (gate.paths.processing, gate.paths.terminal):
         return _blocked("processing_recovery_path_conflict")
-    if current.get("status") == "pending" and (
-        (gate.paths.inbox / path.name).exists() or (gate.paths.terminal / path.name).exists()
-    ):
-        return _blocked("processing_recovery_path_conflict")
+    try:
+        if current.get("status") == "pending" and (
+            (gate.paths.inbox / path.name).exists() or gateway_terminal_exists(gate.paths, path.name)
+        ):
+            return _blocked("processing_recovery_path_conflict")
+    except DataCorruptionError:
+        # 终态未知按原终态冲突拒绝恢复准入，不能重盖章或重新执行。
+        return _blocked("processing_recovery_terminal_conflict")
     record = _read_reservation(reservation_file(gate.paths, path.stem))
     if not isinstance(record, dict) or session_scope_for_request(current) != ownership[1]:
         return _blocked("processing_recovery_reservation_unavailable")

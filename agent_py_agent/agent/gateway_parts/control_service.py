@@ -62,6 +62,7 @@ from ..memory_store.lifecycle import (
     MemoryCuratorLifecycleRequest,
     request_memory_curator_for_session,
 )
+from ..runtime_errors import DataCorruptionError
 from ..user_space.owner_resolver import OwnerIdentity
 from .audit_control_service import AuditControlRequest, execute_audit_control_operation
 from .end_task_control import execute_end_task_control
@@ -75,6 +76,7 @@ from .execution_control import (
 from .execution_target import GatewayExecutionTarget
 from .goal_control_service import GoalControlRequest, execute_goal_control_operation
 from .io import gateway_turn_transition, read_json_file_report, update_json_file_atomic
+from .owner_retention import gateway_terminal_exists
 from .paths import GatewayPaths, gateway_chunk_path, gateway_paths_from_root
 from .restart_control import execute_restart_control
 from .turn_recovery_control import execute_turn_recovery_control
@@ -2090,7 +2092,11 @@ def _load_open_exact_turn(
     scope: GatewayControlScope,
     expected_turn_id: str,
 ) -> dict[str, object] | None:
-    if (paths.terminal / f"{expected_turn_id}.json").exists():
+    try:
+        if gateway_terminal_exists(paths, f"{expected_turn_id}.json"):
+            return None
+    except DataCorruptionError:
+        # 终态未知按原回合不可用返回，不能向旧执行重新投递输入。
         return None
     if record.path is None or not record.path.exists():
         return None
@@ -2232,7 +2238,12 @@ def _exact_gateway_turn_lifecycle_locked(
     turn_id: str,
 ) -> str:
     terminal_path = paths.terminal / f"{turn_id}.json"
-    if terminal_path.is_file():
+    try:
+        terminal_exists = gateway_terminal_exists(paths, terminal_path.name)
+    except DataCorruptionError:
+        # 终态未知沿原 unknown 回执路径保留精确目标，不重新投递。
+        return "unknown"
+    if terminal_exists:
         return _validated_exact_turn_file_state(terminal_path, scope, turn_id, "terminal")
     processing_path = paths.processing / f"{turn_id}.json"
     if processing_path.is_file():

@@ -46,6 +46,7 @@ from .io import (
     read_json_file_report,
     write_json_file_atomic,
 )
+from .owner_retention import gateway_terminal_exists
 from .paths import GatewayPaths
 from .recovery_pending_index import RecoveryPendingIndex, projection_file_stamp
 from .steer_closeout_replay import (
@@ -715,7 +716,8 @@ def reconcile_gateway_input_request(
 # 函数用途: 判断归档请求是否已离开inbox/processing，避免误结算仍在排队或处理的输入。
 def _terminal_request_without_hot(paths: GatewayPaths, request_id: str) -> bool:
     name = f"{request_id}.json"
-    return ((paths.terminal / name).is_file() and not (paths.inbox / name).is_file()
+    # 终态未知向原输入对账错误上报，不能返回 False 触发重新排队或投递。
+    return (gateway_terminal_exists(paths, name) and not (paths.inbox / name).is_file()
             and not (paths.processing / name).is_file())
 
 
@@ -1276,7 +1278,10 @@ def _materialize_prepared_request_locked(
     read_options = {} if read_blocking else {'blocking': False}
     for folder in (paths.inbox, paths.processing, paths.terminal):
         candidate = folder / f"{receipt.request_id}.json"
-        if not candidate.is_file():
+        # 终态未知上报原物化失败，不能越过封存终态重新创建 inbox。
+        exists = (gateway_terminal_exists(paths, candidate.name)
+                  if folder == paths.terminal else candidate.is_file())
+        if not exists:
             continue
         report = read_json_file_report(candidate, context="gateway.input_request.read", **read_options)
         _raise_for_input_read_report(report, "existing gateway input request is unreadable")
@@ -1472,7 +1477,12 @@ def _gateway_turn_lifecycle_locked(paths: GatewayPaths, target_turn_id: str) -> 
     if not turn_id:
         return "unknown"
     canonical = paths.terminal / f"{turn_id}.json"
-    if canonical.exists():
+    try:
+        terminal_exists = gateway_terminal_exists(paths, canonical.name)
+    except DataCorruptionError:
+        # 终态未知保持原 unknown 生命周期，不能按残余 processing 重新投递。
+        return "unknown"
+    if terminal_exists:
         report = read_json_file_report(
             canonical,
             context="gateway.input_target.terminal",

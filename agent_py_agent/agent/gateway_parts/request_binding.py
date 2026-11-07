@@ -23,12 +23,14 @@ from ..conversation.run_claim import (
     claim_heartbeat_interval_seconds,
     conversation_run_lane,
 )
+from ..runtime_errors import DataCorruptionError
 from .io import (
     gateway_turn_transition,
     read_json_file_report,
     update_json_file_atomic,
 )
 from .multiprocess_execution import check_worker_transition, current_worker_execution
+from .owner_retention import gateway_terminal_exists
 from .paths import (
     gateway_paths_from_root,
 )
@@ -266,17 +268,21 @@ class GatewayActiveTurnTransition:
             )
             payload = report.payload
             turn_phase = str(payload.get("turn_phase") or "open").strip().lower()
-            if (
-                report.load_error is not None
-                or not payload
-                or str(payload.get("id") or self.request_path.stem) != self.request_id
-                or str(payload.get("status") or "") != "processing"
-                or turn_phase not in ({"open", "closing"} if allow_closing else {"open"})
-                or (payload.get("cancel_requested") is True and not allow_closing)
-                or str(payload.get("execution_attempt_id") or "") != self.execution_attempt_id
-                or (paths.terminal / f"{self.request_id}.json").exists()
-            ):
-                raise InterruptedError("Gateway active turn closed before provider admission")
+            try:
+                if (
+                    report.load_error is not None
+                    or not payload
+                    or str(payload.get("id") or self.request_path.stem) != self.request_id
+                    or str(payload.get("status") or "") != "processing"
+                    or turn_phase not in ({"open", "closing"} if allow_closing else {"open"})
+                    or (payload.get("cancel_requested") is True and not allow_closing)
+                    or str(payload.get("execution_attempt_id") or "") != self.execution_attempt_id
+                    or gateway_terminal_exists(paths, f"{self.request_id}.json")
+                ):
+                    raise InterruptedError("Gateway active turn closed before provider admission")
+            except DataCorruptionError as exc:
+                # 终态未知沿原中断路径拒绝 provider 准入，不能重新提交模型。
+                raise InterruptedError("Gateway active turn closed before provider admission") from exc
             check_worker_transition(self._worker_execution, payload)
             from ..user_space.owner_resolver import OwnerIdentity
             from .multiprocess_admission import _runtime_commit_scope
