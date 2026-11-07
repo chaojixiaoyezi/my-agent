@@ -87,7 +87,7 @@ DEPLOYMENT_ONLY_KEYS = _HOST_CAPACITY_KEYS | frozenset({
     "process_session_wait_slice_seconds", "max_parallel_tool_calls_global", "feishu_cloud_verify_sheet_writes_enabled",
     "decision_agent_timeout_min_seconds", "decision_agent_timeout_max_seconds", "session_pair_hourly_limit",
 })
-STRUCTURED_PARAMETER_KEYS = frozenset({"tool_catalog_categories", "tool_catalog_deferred_categories", "runner_timeout_by_role", "runner_role_limits"})
+STRUCTURED_PARAMETER_KEYS = frozenset({"tool_catalog_categories", "tool_catalog_deferred_categories", "runner_timeout_by_role", "runner_role_limits", "mcp_servers"})
 # 展示策略由通道在首发时冻结；不是实时改变已经发出的 text/card，也不授予执行权。
 _CHANNEL_PRESENTATION_KEYS = frozenset({"im_topic_aggregation_enabled", "im_progress_cards_enabled"})
 # 键名按下划线切成记号，命中任一记号即为安全边界：凭据、权限与审批、管理员、访问与信任名单、网络与外部地址、端口、
