@@ -371,6 +371,10 @@ def claim_request(paths: GatewayPaths, request_path: Path, *, worker_snapshot=No
     from ..observability.concurrency_metrics import gateway_request_claimed
 
     gateway_request_claimed()  # §6-A 认领计数(enqueued 涨而这个不跟=worker 槽饿死排队)
+    if claim is not None:
+        from .request_event_hub import notify_committed
+        notify_committed(paths, claim.request_id, "claimed", payload=locals().get("claimed_payload"),
+                         ref={"attempt_id": claim.execution_attempt_id})
     return claim
 
 
@@ -477,6 +481,8 @@ def _gateway_claim_epoch(payload: dict) -> int:
         return 0
 
 
+# LLM: The canonical terminal transaction remains the only completion authority; notify after its locks have exited, never on a failed/stale commit.
+# 函数用途: 原样提交终态归档，成功后额外唤醒观察者，不改变围栏和回执。
 def archive_request(
     paths: GatewayPaths,
     processing_path: Path,
@@ -505,6 +511,8 @@ def archive_request(
             expected_lease_epoch=expected_lease_epoch,
             expected_lease_heartbeat_at=expected_lease_heartbeat_at,
         )
+        from .request_event_hub import notify_committed
+        notify_committed(paths, request_id, "terminal", ref={"attempt_id": expected_execution_attempt_id})
         return GatewayArchiveResult(
             (
                 GatewayArchiveDisposition.ALREADY_COMMITTED

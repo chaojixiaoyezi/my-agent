@@ -66,10 +66,23 @@ def write_chunk_event(chunk_path: Path, payload: dict[str, object], *, still_cur
 
     try:
         line = json.dumps(redact_sensitive_value({"t": time.time(), **payload}), ensure_ascii=False)
+        committed = [still_current is None]
+
+        # LLM: Mirror the original predicate result under the private append lock; the hub is only touched after append exits.
+        # 函数用途: 记住原落盘末门是否通过，拒绝的迟到事件不发送唤醒。
+        def current():
+            committed[0] = bool(still_current())
+            return committed[0]
+
         if still_current is None:
             append_private_text(chunk_path, line + "\n")
         else:
-            append_private_text(chunk_path, line + "\n", still_current=still_current)
+            append_private_text(chunk_path, line + "\n", still_current=current)
+        if committed[0]:
+            from .request_event_hub import hub_for_paths, notify_chunk_written
+            if hub_for_paths(chunk_path) is not None:
+                notify_chunk_written(chunk_path, offset=chunk_path.stat().st_size,
+                                     attempt_id=str(payload.get("execution_attempt_id") or ""))
     except OSError:
         pass
 

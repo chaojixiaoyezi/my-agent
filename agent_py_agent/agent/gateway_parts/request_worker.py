@@ -699,24 +699,32 @@ def _wait_clock() -> Callable[[], float]:
 # LLM: 只读canonical终态，projection不能结束等待；首次先读、每轮睡眠截到剩余预算，步长封顶200ms。
 # 函数用途: 按20/50/100/200ms退避等待唯一终态，读到即返回，预算耗尽返回空。
 def wait_for_gateway_response(paths: GatewayPaths, request_id: str, timeout: float) -> dict:
+    from .request_event_hub import hub_for_paths
+    hub = hub_for_paths(paths)
+    signal = hub.signal(("request", request_id)) if hub is not None else None
     path = paths.terminal / f"{request_id}.json"
     clock = _wait_clock()
     deadline = clock() + max(0.0, float(timeout))
     step = 0
-    while True:
-        payload = read_gateway_terminal_response_file(
-            path,
-            request_id=request_id,
-            context="gateway.worker.terminal.read",
-        )
-        if payload:
-            return payload
-        remaining = deadline - clock()
-        if remaining <= 0.0:
-            return {}
-        delay = _WAIT_POLL_STEPS_SECONDS[min(step, len(_WAIT_POLL_STEPS_SECONDS) - 1)]
-        step += 1
-        time.sleep(min(delay, remaining))
+    try:
+        while True:
+            payload = read_gateway_terminal_response_file(
+                path, request_id=request_id, context="gateway.worker.terminal.read",
+            )
+            if payload:
+                return payload
+            remaining = deadline - clock()
+            if remaining <= 0.0:
+                return {}
+            delay = _WAIT_POLL_STEPS_SECONDS[min(step, len(_WAIT_POLL_STEPS_SECONDS) - 1)]
+            step += 1
+            if signal is None:
+                time.sleep(min(delay, remaining))
+            else:
+                signal.wait(min(hub.fallback_poll_seconds or delay, remaining))
+    finally:
+        if signal is not None:
+            signal.close()
 
 
 def _process_gateway_requests(

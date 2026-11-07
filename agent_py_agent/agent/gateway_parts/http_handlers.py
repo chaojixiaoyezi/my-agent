@@ -527,6 +527,13 @@ def _read_public_progress_events(
     path, since: int, *, channel: str = "", include: frozenset[str] = frozenset(), preserve_host_paths: bool = False
 ) -> tuple[list[dict[str, object]], int]:
     lines, next_cursor = read_progress_lines(path, since)
+    return _project_public_progress_rows(lines, channel=channel, include=include,
+                                         preserve_host_paths=preserve_host_paths, next_cursor=next_cursor)
+
+
+# LLM: One pure projection for legacy polling and durable SSE; no transport changes the whitelist, redaction or ordering.
+# 函数用途: 用同一白名单投影完整原始行，轮询与流式返回完全相同的安全事件。
+def _project_public_progress_rows(lines, *, channel="", include=frozenset(), preserve_host_paths=False, next_cursor=0):
     events: list[dict[str, object]] = []
     for line in lines:
         try:
@@ -1558,6 +1565,36 @@ def handle_control_status(handler, server) -> None:
 
 # LLM: 可信 owner/thread 选择分页；前台消息与实时过程独立声明去重能力，不授予执行权或隐式升级旧页。
 # 函数用途: 读取显式显示能力并投影消息/检查点/活动；旧客户端保持旧类型，控制授权仍独立。
+# 通知长轮询协议上限：单连接最多等25秒，不是可调业务策略。
+NOTICES_MAX_WAIT_SECONDS = 25
+
+
+# LLM: Optional wait changes no cursor/payload when absent. Subscribe before the first read; all owner resolution and I/O remain outside the hub lock.
+# 函数用途: 为原通知读口增加有界等候，收到提示后仍重新读取原权威通知。
+def _read_client_notices_with_wait(reader, agent, *, hub, wait=0, **kwargs):
+    try:
+        seconds = max(0, min(NOTICES_MAX_WAIT_SECONDS, float(wait)))
+    except (TypeError, ValueError, OverflowError):
+        seconds = 0
+    if not seconds or hub is None:
+        return reader(agent, **kwargs)
+    from ..user_space.owner_resolver import resolve_owner_home
+    from .control_service import resolve_gateway_scope_owner
+    owner = resolve_gateway_scope_owner(agent, kwargs["scope"])
+    owner_id = resolve_owner_home(agent.home_paths.root, owner).owner_id
+    signal = hub.signal(("owner", owner_id))
+    try:
+        result = reader(agent, **kwargs)
+        if not any(result.get(key) for key in ("notices", "transcript_events", "agent_permission_requests")):
+            signal.wait(seconds)
+            return reader(agent, **kwargs)
+        return result
+    finally:
+        signal.close()
+
+
+# LLM: Same authenticated notices and ownership projection; wait is optional and bounded, never a completion fact.
+# 函数用途: 返回原用户通知，可选等待提示后重读，不改变原请求与游标。
 def handle_client_notices(handler, server) -> None:
     """S-BG1: 返回当前会话的进行中任务数和后台主代理轮完成通知。
 
@@ -1588,8 +1625,11 @@ def handle_client_notices(handler, server) -> None:
     if not isinstance(event_stream_id, str):
         handler._send_json(400, {"error": "event_stream_id must be a string"})
         return
-    result = read_gateway_client_notices(
+    result = _read_client_notices_with_wait(
+        read_gateway_client_notices,
         server.agent,
+        hub=getattr(server, "request_event_hub", None),
+        wait=body.get("wait", 0),
         paths=server.paths,
         scope=_gateway_control_scope(
             handler,

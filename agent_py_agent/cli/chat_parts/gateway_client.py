@@ -110,6 +110,7 @@ def submit_chat_request(
         workspace_root=workspace_root,
         workspace_roots=workspace_roots,
     )
+    network = network_gateway_observer(agent)
     request_id, _, response_path = submit_gateway_ask(
         paths,
         params=GatewayAskParams(
@@ -135,7 +136,7 @@ def submit_chat_request(
             workspace_root=str(workspace.get("cwd") or ""),
             workspace_roots=[str(item) for item in workspace.get("roots", [])],
         ),
-        submit_request=partial(post_gateway_ask, agent),
+        submit_request=network.submit if network is not None else partial(post_gateway_ask, agent),
         **({"on_request_allocated": on_request_allocated} if on_request_allocated is not None else {}),
     )
     chunk_path = gateway_chunk_path(paths, request_id)
@@ -402,3 +403,219 @@ __all__ = [
     "poll_gateway_chunks",
     "submit_chat_request",
 ]
+
+
+# LLM: Network selection is explicit or based on URL host, never on local queue availability. No DNS lookup or local credential read occurs here.
+# 函数用途: 为远程Gateway或强制网络模式选择纯HTTP观察器，本地默认保持原行为。
+def network_gateway_observer(agent):
+    import ipaddress
+    import os
+    from urllib.parse import urlsplit
+    config = getattr(agent, "config", None)
+    url = str(getattr(agent, "gateway_url", "") or getattr(config, "gateway_url", "")
+              or os.environ.get("MY_AGENT_GATEWAY_URL", "") or f"http://127.0.0.1:{getattr(config, 'gateway_port', 0)}").rstrip("/")
+    host = urlsplit(url).hostname or ""
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host.lower() == "localhost"
+    if os.environ.get("MY_AGENT_TUI_NETWORK") != "1" and loopback:
+        return None
+    observer = NetworkGatewayObserver(agent, url)
+    observer.bind_client_transport()
+    return observer
+
+
+# LLM: A request-scoped HTTP observer owns only replay positions. It must never read server queue/chunks/heartbeat/terminal or export the host G1 credential.
+# 类用途: 用认证SSE重连读取同一请求，繁忙或认证刷新失败后本请求仅走HTTP轮询。
+class NetworkGatewayObserver:
+    # LLM: Construction does not read credentials, create threads, touch files or issue requests.
+    # 函数用途: 保存目标地址和原身份来源；运输凭据仅在发HTTP时读取显式远程配置。
+    def __init__(self, agent, base_url):
+        self.agent, self.base_url = agent, base_url
+        self.cursor, self.line_cursor = "", 0
+        self._http_only = False
+        self._refreshed = False
+
+    # LLM: Only an explicit remote-header provider/configured bearer may authenticate network mode; never call gateway_client_credentials or local credential files.
+    # 函数用途: 生成原用户/群身份头及远程认证头，不读取宿主G1凭据。
+    def _headers(self):
+        identity = _gateway_submit_identity(self.agent)
+        headers = {"X-User-Id": identity["user_id"], "X-Channel": identity["channel"]}
+        if identity.get("channel_chat_type"):
+            headers["X-Channel-Chat-Type"] = identity["channel_chat_type"]
+        if identity.get("channel_chat_id"):
+            headers["X-Channel-Chat-Id"] = identity["channel_chat_id"]
+        provider = getattr(self.agent, "gateway_network_headers", None)
+        if callable(provider):
+            identity_headers = {key.lower() for key in headers}
+            headers.update({key: value for key, value in provider().items() if key.lower() not in identity_headers})
+        else:
+            token = getattr(getattr(self.agent, "config", None), "gateway_auth_token", "")
+            if isinstance(token, str) and token:
+                headers["Authorization"] = f"Bearer {token}"
+        return headers
+
+    # LLM: Reuse authenticated no-redirect transport; this method never queues a file request or retries a write.
+    # 函数用途: 执行一次有界JSON请求，所有控制和审批沿同一HTTP入口。
+    def request_json(self, method, path, payload=None, *, timeout=None):
+        import urllib.error
+        import urllib.request
+
+        from ...agent.common.authenticated_http import open_authenticated_request
+        headers = self._headers()
+        data = None
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(self.base_url + path, data=data, headers=headers, method=method)
+        timeout = max(0.1, float(timeout if timeout is not None else getattr(self.agent.config, "gateway_request_timeout", 30)))
+        try:
+            with open_authenticated_request(request, timeout=timeout) as response:
+                raw = response.read(STREAM_CHUNK_READ_MAX_BYTES + 1)
+                if len(raw) > STREAM_CHUNK_READ_MAX_BYTES:
+                    return 0, {}
+                value = json.loads(raw.decode("utf-8"))
+                return response.status, value if isinstance(value, dict) else {}
+        except urllib.error.HTTPError as error:
+            return error.code, {}
+        except (OSError, ValueError, urllib.error.URLError):
+            return 0, {}
+
+    # LLM: The existing authenticated ask path still freezes identity and invokes allocation callback before this single HTTP effect.
+    # 函数用途: 只提交一次原输入，不做受理不明重试或文件队列降级。
+    def submit(self, payload):
+        return self.request_json("POST", "/ask", payload)
+
+    # LLM: Only existing HTTP /approve or /deny controls may decide a pending request; never downgrade persistent grants to approval.
+    # 函数用途: 核对精确审批编号后发送原HTTP控制，服务端仍重新核owner、会话、截止和绑定。
+    def permission_sink(self, request_value, decision_value, *, conversation_id):
+        from ...agent.gateway_parts.permission_bridge import _approval_decision, _approval_request
+        request = _approval_request(request_value)
+        decision = _approval_decision(decision_value)
+        if request.permission_id != decision.permission_id:
+            raise ValueError("gateway permission decision id mismatch")
+        if decision.decision not in {"approved", "denied"}:
+            raise ValueError("该远程审批选项不支持通过原HTTP控制表达，未发送决定")
+        command = ("/approve " if decision.approved else "/deny ") + request.permission_id
+        status, body = self.request_json("POST", "/control", {"command": command,
+            "conversation_id": conversation_id, "request_id": request.request_id})
+        if status != 200 or not body.get("ok"):
+            raise PermissionError("Gateway未确认审批决定")
+
+    # LLM: Existing thin-client methods keep their schemas and authority checks; only their transport is rebound for this client instance.
+    # 函数用途: 为当前客户端绑定远程只读查询和控制HTTP，不更改共享类或其他用户客户端。
+    def bind_client_transport(self):
+        self.agent.get_gateway_json = lambda path, *, timeout, **_: self.request_json("GET", path, timeout=timeout)
+        self.agent.post_gateway_json = lambda path, payload, *, timeout: self.request_json("POST", path, payload, timeout=timeout)
+
+    # LLM: LF/blank-line terminated frames alone are observable. An incomplete UTF-8/data/id fragment never commits the cursor.
+    # 函数用途: 解析有界SSE完整帧，断连时丢弃半帧并保留上一条已消费游标。
+    def _frames(self, response):
+        event, cursor, data, size = "message", "", [], 0
+        while True:
+            raw = response.readline(STREAM_CHUNK_READ_MAX_BYTES + 1)
+            if not raw:
+                return
+            size += len(raw)
+            if size > STREAM_CHUNK_READ_MAX_BYTES or not raw.endswith(b"\n"):
+                return
+            line = raw.rstrip(b"\r\n").decode("utf-8")
+            if not line:
+                if data:
+                    yield event, json.loads("\n".join(data)), cursor
+                event, cursor, data, size = "message", "", [], 0
+            elif line.startswith("event:"):
+                event = line[6:].lstrip(" ")
+            elif line.startswith("id:"):
+                cursor = line[3:].lstrip(" ")
+            elif line.startswith("data:"):
+                data.append(line[5:].lstrip(" "))
+
+    # LLM: Count/dispatch through the exact existing public event consumer; neither transport nor heartbeat implies model completion.
+    # 函数用途: 将公开事件交原TUI/plain回调，保留原显示计数。
+    def _emit(self, request, event):
+        count, visible = _emit_chunk_line(json.dumps(event, ensure_ascii=False), request.on_chunk, request.on_event)
+        request.chunks_printed_ref[0] += count
+        if request.visible_chunks_ref is not None:
+            request.visible_chunks_ref[0] += visible
+
+    # LLM: Terminal is accepted only from the original HTTP result projection or terminal SSE frame; no local stat/open/read fallback exists.
+    # 函数用途: 优先SSE续读原请求；503、重复连接失败或认证刷新失败后仅用HTTP进度与结果兜底。
+    def __call__(self, request):
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        from ...agent.common.authenticated_http import open_authenticated_request
+        from ...agent.gateway_parts.request_worker import _WAIT_POLL_STEPS_SECONDS
+        request_id = request.terminal_path.stem
+        quoted = urllib.parse.quote(request_id, safe="")
+        include = "assistant_text_delta,assistant_text_reset,assistant_text_done,workflow_step_progress"
+        deadline = request.deadline
+        failures = 0
+        while True:
+            if callable(request.is_wait_cancelled) and request.is_wait_cancelled():
+                return {}
+            if time.time() >= deadline:
+                if request.on_wait_timeout is None:
+                    return {}
+                request.on_wait_timeout()
+                deadline = time.time() + max(_WAIT_POLL_STEPS_SECONDS[-1], request.inactivity_timeout_seconds)
+            if not self._http_only:
+                headers = {**self._headers(), "Accept": "text/event-stream"}
+                if self.cursor:
+                    headers["Last-Event-ID"] = self.cursor
+                target = urllib.request.Request(self.base_url + f"/client/requests/{quoted}/events?include={include}", headers=headers)
+                try:
+                    with open_authenticated_request(target, timeout=max(0.1, deadline - time.time())) as response:
+                        for kind, data, cursor in self._frames(response):
+                            if callable(request.is_wait_cancelled) and request.is_wait_cancelled():
+                                return {}
+                            if kind == "progress" and isinstance(data, dict) and isinstance(data.get("event"), dict):
+                                self._emit(request, data["event"])
+                                if request.inactivity_timeout_seconds > 0:
+                                    deadline = time.time() + request.inactivity_timeout_seconds
+                            elif kind == "reset":
+                                self.cursor, self.line_cursor = "", 0
+                                if callable(request.on_event):
+                                    request.on_event({"kind": "assistant_text_reset", "request_id": request_id})
+                            elif kind == "terminal" and isinstance(data, dict) and isinstance(data.get("result"), dict):
+                                return data["result"]
+                            if cursor.startswith(f"v1:{request_id}:") and "\x00" not in cursor:
+                                parts = cursor.split(":")
+                                if len(parts) == 5 and parts[3].isdecimal() and parts[4].isdecimal():
+                                    self.cursor, self.line_cursor = cursor, int(parts[3])
+                            if time.time() >= deadline:
+                                break
+                    failures += 1
+                except urllib.error.HTTPError as error:
+                    if error.code == 503:
+                        self._http_only = True
+                    elif error.code in (401, 403):
+                        refresh = getattr(self.agent, "refresh_gateway_network_credentials", None)
+                        if self._refreshed or not callable(refresh) or not refresh():
+                            self._http_only = True
+                        self._refreshed = True
+                    else:
+                        failures += 1
+                except (OSError, UnicodeError, ValueError, urllib.error.URLError):
+                    failures += 1
+                if failures >= 2:
+                    self._http_only = True
+                if not self._http_only:
+                    time.sleep(_WAIT_POLL_STEPS_SECONDS[0])
+                    continue
+            status, batch = self.request_json("GET", f"/progress/{quoted}?since={self.line_cursor}&include={include}", timeout=max(0.1, deadline-time.time()))
+            if status in (401, 403):
+                raise PermissionError("Gateway网络观察未获授权")
+            if status == 200:
+                for event in batch.get("events", []):
+                    self._emit(request, event)
+                self.line_cursor = max(self.line_cursor, int(batch.get("next") or 0))
+            status, result = self.request_json("GET", f"/result/{quoted}", timeout=max(0.1, deadline-time.time()))
+            if status == 200:
+                return result
+            if status in (401, 403):
+                raise PermissionError("Gateway网络结果未获授权")
+            time.sleep(_WAIT_POLL_STEPS_SECONDS[-1])
