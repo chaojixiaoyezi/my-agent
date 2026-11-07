@@ -1581,7 +1581,11 @@ class _SchedulerStoreSupport:
         if not requested:
             return frozenset()
         before = _history_file_stamp(self.history_path)
-        if before is not None:
+        source_missing = before is None and self._history_source_seen
+        if source_missing:
+            _LOGGER.warning("SCHEDULER_HISTORY_SOURCE_MISSING owner=%s path=%s",
+                self.owner["id"], self.history_path)
+        elif before is not None:
             self._history_source_seen = True
         index = self._history_read_index
         if index is not None and len(requested) <= 4096:
@@ -1612,6 +1616,8 @@ class _SchedulerStoreSupport:
             except (OSError, ValueError, TypeError, KeyError):
                 # 派生索引失败只影响性能，不能当成规范身份不存在。
                 pass
+        if source_missing:
+            self._history_source_seen = False
         found = _history_membership_fallback(self.history_path, requested,
             allow_missing=not self._history_source_seen)
         if _history_file_stamp(self.history_path) is not None:
