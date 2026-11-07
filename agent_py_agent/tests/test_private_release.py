@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import hashlib
+import importlib.util
 import json
 import os
 import py_compile
@@ -882,6 +883,8 @@ def test_bundle_manifest_uses_executable_interpreter_version(c4_build_case):
     assert build.main() == 0
     manifest = json.loads((case.root / "release.json").read_text())
     assert manifest["python"] == ".".join(str(part) for part in sys.version_info[:3])
+    assert (case.root / "installer.pyc").read_bytes()[:4] == importlib.util.MAGIC_NUMBER
+    assert (case.package / "__init__.pyc").read_bytes()[:4] == importlib.util.MAGIC_NUMBER
 
 
 # LLM: 可执行文件的失败或非版本输出不能退回目录猜值，必须在编译和出包前拒绝。

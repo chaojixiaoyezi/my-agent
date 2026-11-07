@@ -6,12 +6,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.metadata
+import importlib.util
 import json
 import os
 import py_compile
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -34,17 +37,22 @@ def _resolve_bundled_package_dir(root: Path) -> Path:
     return candidates[0] if candidates else lib / "python3.14/site-packages/agent_py_agent"
 
 
-# LLM: 优先执行随包解释器读取实际版本，失败向上传递；只有不可执行的合成样本才按目录推断。
-# 函数用途: 为发行清单记录真实Python版本，同时保留旧3.11单目录测试的历史版本值。
+# LLM: 执行随包解释器读取版本与magic；不兼容时在任何发行副本写入前拒绝，只有不可执行的合成样本才按目录推断。
+# 函数用途: 校验构建字节码可由随包Python加载，并为清单记录实际版本，保留旧合成样本。
 def _bundled_python_version(root: Path, package: Path) -> str:
     interpreter = root / "runtime/bin/python3"
     if interpreter.is_file() and os.access(interpreter, os.X_OK):
-        version = subprocess.check_output(
-            [str(interpreter), "-I", "-c", "import platform; print(platform.python_version())"],
+        version, _, magic = subprocess.check_output(
+            [str(interpreter), "-I", "-c", "import importlib.util, platform; print(platform.python_version()); print(importlib.util.MAGIC_NUMBER.hex())"],
             text=True, timeout=10,
-        ).strip()
+        ).strip().partition("\n")
         if not re.fullmatch(r"\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?\+?", version):
             raise ValueError("随包Python解释器未返回有效版本号")
+        if magic != importlib.util.MAGIC_NUMBER.hex():
+            raise ValueError(
+                f"随包Python与构建解释器的 MAGIC_NUMBER 不匹配（{magic!r} != {importlib.util.MAGIC_NUMBER.hex()!r}）；"
+                "请使用随包解释器执行同一构建命令：" + shlex.join([str(interpreter), *sys.argv])
+            )
         return version
     name = package.parent.parent.name
     if name in {"python3.14", "python3.14t"}:

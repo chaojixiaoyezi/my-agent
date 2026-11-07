@@ -13,4 +13,11 @@ export PYTHONDONTWRITEBYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 "$python_bin" -m pip wheel --no-deps --no-build-isolation "$source_dir" --wheel-dir "$root/wheels"
 wheel="$root/wheels/my_agent-0.3.0-py3-none-any.whl"
 "$python_bin" -m pip install --no-compile "$wheel[scale,secrets]"
+# 只给普通3.14补同版binary wheel；3.14t不能使用cp314轮子，旧解释器仍沿原extra安装。
+normal_314="$("$python_bin" -c 'import sys, sysconfig; print(sys.version_info[:2] == (3, 14) and not sysconfig.get_config_var("Py_GIL_DISABLED"))')"
+if [ "$normal_314" = True ]; then
+  psycopg_version="$("$python_bin" -c 'from importlib.metadata import version; print(version("psycopg"))')"
+  "$python_bin" -m pip install --no-compile --only-binary=:all: "psycopg-binary==$psycopg_version"
+  "$python_bin" -c 'import psycopg, psycopg_binary; print("psycopg", psycopg.__version__, "binary", psycopg_binary.__version__)'
+fi
 "$python_bin" -c 'import agent_py_agent, ssl, sqlite3; print("runtime", agent_py_agent.__version__, ssl.OPENSSL_VERSION, sqlite3.sqlite_version)'
