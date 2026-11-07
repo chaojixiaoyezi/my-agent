@@ -3,6 +3,7 @@
 # 模块用途: 准备会话与目录事实并冻结同源压缩历史；补交历史、索引与模型调用保持原权限。
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -43,6 +44,9 @@ from .workspace_scope import gateway_request_workspace_scope, path_is_within
 
 if TYPE_CHECKING:
     from ...core import SimpleAgent
+
+
+logger = logging.getLogger(__name__)
 
 
 # 上下文最近任务工作区最多保留 4 个：只给模型最近几个可续做的现场。
@@ -120,6 +124,15 @@ class _GatewayLoadErrors(list):
     def __init__(self):
         super().__init__()
         self.warnings: list[dict] = []
+
+
+# LLM: 只给带分级通道的请求降级；旧的普通列表调用方仍收到原错误，不修复任何持久索引。
+# 函数用途: 把辅助上下文读取失败登记为同次告警，保留普通列表语义。
+def _degrade(load_errors: list[dict], error: dict) -> None:
+    if isinstance(load_errors, _GatewayLoadErrors):
+        load_errors.warnings.append(error)
+    else:
+        load_errors.append(error)
 
 
 def _gateway_task_links(store, thread_id, load_errors):
@@ -276,6 +289,10 @@ def gateway_conversation_context(
         workspace_task,
         load_errors,
     )
+    if load_errors.warnings:
+        sources = sorted({str(error.get("context") or error.get("code") or "unknown")
+                          for error in load_errors.warnings})
+        logger.warning("GATEWAY_CONTEXT_DEGRADED thread=%s sources=%s", thread.thread_id, ",".join(sources))
     return GatewayConversationContext(
         thread_id=thread.thread_id,
         cwd=str(getattr(thread, "cwd", "") or ""),
@@ -411,20 +428,22 @@ def _load_gateway_compact_context(
             inputs.agent, store, thread, exclude_request_id=inputs.request_id,
             scope=scope, selector_factory=selector_factory,
         )
+        # 真实来源以 source.thread 为准；缺少该字段的旧只读适配器保留输入，不遮住 prepare 的类型化失败。
+        source_thread = source.thread if hasattr(source, "thread") else thread
         if inputs.defer_compact:
-            return (thread, source.messages, source.policy.trigger_tokens,
+            return (source_thread, source.messages, source.policy.trigger_tokens,
                     source.recent_operation_evidence, source, source.compact_context)
         compact = prepare_conversation_context(
             inputs.agent,
             store,
-            thread,
+            source_thread,
             options=ConversationCompactOptions(
                 current_prompt=inputs.prompt,
                 exclude_request_id=inputs.request_id,
                 source=source,
                 force=force,
                 progress_callback=_gateway_compact_progress_callback(
-                    inputs.on_chunk, store=store, thread=thread,
+                    inputs.on_chunk, store=store, thread=source_thread,
                 ),
                 interrupt_check=is_interrupted,
                 model_surface=_gateway_compact_model_surface(inputs, source),
@@ -487,10 +506,10 @@ def _gateway_thread_goal(
     try:
         goals, error = store.goals.list_report(thread_id)
     except Exception as exc:
-        load_errors.append(runtime_error_report(exc, context="gateway.conversation.goal"))
+        _degrade(load_errors, runtime_error_report(exc, context="gateway.conversation.goal"))
         return None
     if error is not None:
-        load_errors.append(error)
+        _degrade(load_errors, error)
         return None
     unfinished = [goal for goal in goals if str(getattr(goal, "status", "") or "") != "complete"]
     try:
@@ -499,7 +518,7 @@ def _gateway_thread_goal(
             if str(getattr(store.tasks.load(goal.task_id), "cancellation_scope", "") or "") != "detached"
         ]
     except Exception as exc:
-        load_errors.append(runtime_error_report(exc, context="gateway.conversation.goal_task"))
+        _degrade(load_errors, runtime_error_report(exc, context="gateway.conversation.goal_task"))
         return None
     if len(unfinished) != 1:
         return None
@@ -529,13 +548,15 @@ def _gateway_named_work(
         links, link_errors = _gateway_task_links(store, thread_id, load_errors)
         goals, goal_error = store.goals.list_report(thread_id)
     except Exception as exc:
-        load_errors.append(runtime_error_report(exc, context="gateway.conversation.named_work"))
+        _degrade(load_errors, runtime_error_report(exc, context="gateway.conversation.named_work"))
         return ()
     if link_errors:
-        load_errors.extend(error for error in link_errors if isinstance(error, dict))
+        for error in link_errors:
+            if isinstance(error, dict):
+                _degrade(load_errors, error)
         return ()
     if goal_error is not None:
-        load_errors.append(goal_error)
+        _degrade(load_errors, goal_error)
         return ()
     terminal_links = {
         "abandoned",
@@ -602,9 +623,11 @@ def _gateway_subagent_completion_context(
             include_handled=True,
         )
     except Exception as exc:
-        load_errors.append(runtime_error_report(exc, context="gateway.conversation.subagent_completions"))
+        _degrade(load_errors, runtime_error_report(exc, context="gateway.conversation.subagent_completions"))
         return {}
-    load_errors.extend(error for error in errors if isinstance(error, dict))
+    for error in errors:
+        if isinstance(error, dict):
+            _degrade(load_errors, error)
     context, issues = subagent_completion_context_from_observations(
         observations,
         root_task_ids=root_task_ids,
@@ -612,13 +635,8 @@ def _gateway_subagent_completion_context(
         # 子代理完成回执最多展示几条：超出部分只保留计数摘要，防止对话上下文被完成列表撑爆。
         visible_limit=DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT,
     )
-    load_errors.extend(
-        runtime_error_report(
-            ValueError(issue),
-            context="gateway.conversation.subagent_completions",
-        )
-        for issue in issues
-    )
+    for issue in issues:
+        _degrade(load_errors, runtime_error_report(ValueError(issue), context="gateway.conversation.subagent_completions"))
     return context
 
 
@@ -638,11 +656,11 @@ def _gateway_workspace_lineage_task_ids(
     try:
         links, errors = _gateway_task_links(store, thread_id, load_errors)
     except Exception as exc:
-        load_errors.append(
-            runtime_error_report(exc, context="gateway.conversation.subagent_completion_lineage")
-        )
+        _degrade(load_errors, runtime_error_report(exc, context="gateway.conversation.subagent_completion_lineage"))
         return {current_task_id}
-    load_errors.extend(error for error in errors if isinstance(error, dict))
+    for error in errors:
+        if isinstance(error, dict):
+            _degrade(load_errors, error)
     resolved_cache: dict[str, str] = {"": ""}
 
     # LLM: Gateway请求路径解析；只使用既有任务链接，不由路径字符串扩大owner范围，联测预检。
@@ -681,10 +699,27 @@ def _gateway_workspace_task(
     except Exception as exc:
         load_errors.append(runtime_error_report(exc, context="gateway.conversation.workspace_task"))
         return None
-    if errors:
-        load_errors.extend(error for error in errors if isinstance(error, dict))
-        return None
+    active_task_ids = set(getattr(thread, "active_task_ids", ()))
+    for error in errors:
+        if not isinstance(error, dict):
+            continue
+        task_id = error.get("task_id")
+        if not task_id or (task_id in active_task_ids and error.get("error_type") != "FileNotFoundError"):
+            load_errors.append(error)
+        else:
+            _degrade(load_errors, error)
     from ..conversation.task_promotion import is_reusable_conversation_workspace
+
+    # 已确认丢失的精确链接不再选目录；未知绑定、非缺失损坏仍沿原拒绝边界。
+    missing_ids = {error.get("task_id") or error.get("id")
+                   for error in (*errors, *getattr(load_errors, "warnings", ())) if isinstance(error, dict)
+                   if error.get("error_type") == "FileNotFoundError" or error.get("code") == "missing_historical_task_link"}
+    if missing_ids:
+        exact_id = request_binding.gateway_bound_request_task_id(request, request_id=request_id, thread_id=thread_id)
+        if not exact_id and (thread_goal or {}).get("status") == "active":
+            exact_id = str(thread_goal.get("task_id") or "").strip()
+        if exact_id and exact_id in missing_ids:
+            return None
 
     # A detached named task owns its own execution lane and workspace.  It may
     # remain active while the parent conversation starts unrelated work, so it
@@ -841,9 +876,11 @@ def _gateway_recent_task_workspaces(
     try:
         links, errors = _gateway_task_links(store, thread_id, load_errors)
     except Exception as exc:
-        load_errors.append(runtime_error_report(exc, context="gateway.conversation.recent_task_workspaces"))
+        _degrade(load_errors, runtime_error_report(exc, context="gateway.conversation.recent_task_workspaces"))
         return ()
-    load_errors.extend(error for error in errors if isinstance(error, dict))
+    for error in errors:
+        if isinstance(error, dict):
+            _degrade(load_errors, error)
     current_task_id = str(getattr(workspace_task, "task_id", "") or "").strip()
     current_path = _existing_gateway_workspace_path(
         getattr(workspace_task, "task_path", "")
