@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
@@ -539,18 +540,24 @@ def append_private_jsonl_records_unlocked(path: Path, records: list[dict[str, ob
     check_io_deadline(deadline)
     blob = "".join(json.dumps(record, ensure_ascii=False, sort_keys=sort_keys) + "\n" for record in records)
     options = {} if deadline is None else {"deadline": deadline}
+    # 编码可能耗尽预算；封口也会改源文件，必须在它之前重新检查。
+    check_io_deadline(deadline)
     seal_private_jsonl_tail_unlocked(path)
     append_private_text_unlocked(path, blob, **options)
 
 
-# LLM: RES D-5：调用方持原锁；末字节LF/空/缺失/链接不动，完整对象只补LF，半行先0600留档.<name>.torn-<ms>再截回末个LF刷盘。
+# LLM: 调用方持原锁；缺失/链接不动，其余打开错误原样上抛；完整对象补LF，半行先0600留档再截回末个LF刷盘。
 # 函数用途: 与 store_messages._seal_torn_jsonl_tail 同算法封住崩溃残尾；按大小预记偏移的调用方须先封再量。
 def seal_private_jsonl_tail_unlocked(path: Path) -> str:
     from ..conversation.store_io import complete_jsonl_end
     try:
         handle = os.fdopen(os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)), "r+b", buffering=0)
-    except OSError:
+    except FileNotFoundError:
         return ""
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.EINVAL} and path.is_symlink():
+            return ""
+        raise
     with handle:
         size = os.fstat(handle.fileno()).st_size
         handle.seek(max(size - 1, 0))
@@ -577,7 +584,7 @@ def seal_private_jsonl_tail_unlocked(path: Path) -> str:
     return "completed" if completed else "quarantined"
 
 
-# LLM: 与 append_jsonl_records 同格式（每行一条、可选 sort_keys、批内一次写入），权限走私有 append。
+# LLM: 原锁只取一次，锁内共用JSONL封口/追加叶；格式、权限、blocking和deadline保持，不改变任意文本追加。
 # 函数用途: 私有追加原JSONL；显式deadline与blocking沿同一锁到末写，空批仍不操作。
 # LLM: 可选blocking只透传原锁，默认True和字节/权限不变；C锁忙异常不能当成未需要的写。
 # 函数用途: 让原私有写者可立即拒绝争用，仍使用同一序列化和原子落盘。
@@ -585,9 +592,10 @@ def append_private_jsonl_records(path: Path, records: list[dict[str, object]], *
     if not records:
         return
     check_io_deadline(deadline)
-    blob = "".join(json.dumps(record, ensure_ascii=False, sort_keys=sort_keys) + "\n" for record in records)
     options = {} if deadline is None else {"deadline": deadline}
-    append_private_text(path, blob, blocking=blocking, **options)
+    ensure_private_dir(path.parent)
+    with _locked_json_path(path, blocking=blocking):
+        append_private_jsonl_records_unlocked(path, records, sort_keys=sort_keys, **options)
 
 
 # LLM: 有界 append 的私有版：与 append_jsonl_capped 同一锁协议与读-改-写语义（只留最近 max_records 条、
