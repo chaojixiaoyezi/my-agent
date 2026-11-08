@@ -372,6 +372,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 默认沿 终端交互 主链由 TUI 接管滚轮、点击与应用内选区；F6 仍可临时退回宿主终端原生复制。
     # 关闭后备用屏幕收不到物理滚轮，历史只能用 PgUp/Ctrl+Home，因此不再作为开箱默认。
     tui_mouse_capture_default: bool = True
+    tui_agent_view_cache_max_count: int = field(default=32, metadata={"bounds": (1, None), "unit": "个"})
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     # 只给普通主会话追加执行中沟通软引导，不额外采样、不改变历史或执行终态。
     assistant_progress_updates_enabled: bool = True

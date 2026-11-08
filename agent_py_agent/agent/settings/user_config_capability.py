@@ -141,6 +141,12 @@ def _non_negative_numbers(value: object, *, yaml_scalars: bool = False) -> tuple
 # LLM: 白名单宁窄勿宽：新池只调整已存在执行器的有界容量，不扩大认证、路径或模型路由权限。
 # 常量用途: 声明可自助修改的配置项。
 TUNABLE_KEYS: dict[str, TunableSpec] = {
+    "tui_agent_view_cache_max_count": TunableSpec(
+        key="tui_agent_view_cache_max_count",
+        describe="TUI子代理详情页缓存的展示runtime上限，超出按最近最少使用回收不在当前导航路径上的页（默认32，最小1）",
+        validate=_positive_int,
+        effect=EFFECT_NEXT_SESSION,
+    ),
     "model_retry_backoff_seconds": TunableSpec(
         key="model_retry_backoff_seconds",
         describe="可重试模型HTTP错误的退避秒数列表，默认[2.0, 5.0, 15.0]，空列表不增加退避",

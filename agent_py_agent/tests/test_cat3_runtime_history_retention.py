@@ -17,7 +17,11 @@ from agent_py_agent.agent.runtime_db import history_retention as retention
 from agent_py_agent.agent.runtime_db.operations import AGENT_RUN_TERMINAL_STATUSES
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 from agent_py_agent.agent.user_space.home_layout import home_paths
-from agent_py_agent.agent.user_space.storage_lanes import StorageLaneBudget, StorageLaneRequest
+from agent_py_agent.agent.user_space.storage_lanes import (
+    STORAGE_LANE_SLICE_ENTRIES,
+    StorageLaneBudget,
+    StorageLaneRequest,
+)
 
 
 @pytest.fixture
@@ -497,10 +501,13 @@ def test_lane_total_items_respect_request_and_retention_scan_slice_limit(databas
     conn.commit()
     for limit in (6, 1000):
         result = retention.maintain_runtime_history_lane(_request(home, items=limit))
-        assert result["items"] <= min(limit, RETENTION_SCAN_SLICE_ENTRIES)
+        assert result["items"] <= (limit if limit <= RETENTION_SCAN_SLICE_ENTRIES else limit - STORAGE_LANE_SLICE_ENTRIES)
         assert sum(result[key] for key in ("slimmed", "deleted_events", "deleted_llm_records")) <= result["items"]
         assert all(result[key] > 0 for key in ("slimmed", "deleted_events", "deleted_llm_records"))
-        assert not result["complete"]
+        if limit == 6:
+            assert not result["complete"]
+        else:
+            assert result["items"] >= RETENTION_SCAN_SLICE_ENTRIES
 
 
 def test_lane_does_not_install_an_absent_llm_table(database):

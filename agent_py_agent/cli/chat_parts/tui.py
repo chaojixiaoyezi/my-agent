@@ -375,7 +375,10 @@ def run_tui(*, params: TuiRunParams) -> int:
     app_ref: list = [None]
     refresh_stop = threading.Event()
     tui_runtime = TuiRuntime(params.current_session_id)
-    agent_navigation = TuiAgentNavigationState(tui_runtime)
+    agent_navigation = TuiAgentNavigationState(
+        tui_runtime,
+        max_cached_runtimes=int(getattr(params.agent.config, "tui_agent_view_cache_max_count", 32) or 32),
+    )
     tui_runtime.publish_session(
         version=__version__,
         model=str(getattr(params.agent.config, "model_name", "") or ""),
