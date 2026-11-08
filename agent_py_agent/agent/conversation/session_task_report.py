@@ -34,6 +34,14 @@ def result_report_key(task):
     return f"session_task_result:{task.task_id}:{task.status}"
 
 
+def _business_sender_receives_wakes(source: object) -> bool:
+    """只有通道会话或显式后台身份主动接收业务回报，普通线程保留 next_turn 投递。"""
+    from .background_team_lifecycle import background_identity
+
+    return bool(source.channel_bindings or source.metadata.get("business_controller") is True
+                or background_identity(source) is not None)
+
+
 # LLM: 命中条件全部是结构化事实：任务记录里绑定的 request id 必须与本次回合一致，且任务尚未到终态。
 #   同一回合只会有唯一一条任务记录（bind_turn 拒绝改绑），所以不会误报别的任务。
 # 函数用途: 按准确回合找会话任务；显式终态读取仅供原委派结果补账，不复活执行。
@@ -133,7 +141,7 @@ def report_task_result(agent: object, task: object) -> bool:
     guidance = getattr(store, "guidance", None)
     if guidance is None:
         return False
-    # 业务派活（tasks.assign/submit/follow_up）的发送方需要被唤醒才能把结果告诉用户；沿委派同一wake形状与去重键。
+    # 业务上下文不代表来源线程可主动续跑；有真实接收路径时才沿委派同一 wake 形状与去重键唤醒。
     business = not delegated and isinstance((getattr(task, "metadata", None) or {}).get("business_context"), dict)
     summary = str(getattr(task, "summary", "") or "").strip()
     refs = tuple(str(item) for item in (getattr(task, "result_refs", ()) or ()))
@@ -178,7 +186,9 @@ def report_task_result(agent: object, task: object) -> bool:
             source = threads.require(sender)
             if delegated and source.status != "active":
                 return False
-        if (delegated or business) and source.status == "active":
+        if (delegated or business) and source.status == "active" and (
+            delegated or _business_sender_receives_wakes(source)
+        ):
             store.wakes.raise_signal({
                 "thread_id": sender, "urgency": "normal", "reason": "session_message",
                 "summary": "收到原委派任务的终态结果", "dedupe_key": dedupe_key, "retain_handled": True,
