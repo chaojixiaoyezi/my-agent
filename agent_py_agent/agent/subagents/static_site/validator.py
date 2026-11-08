@@ -16,6 +16,7 @@ from ...common.value_parsing import sequence_strings
 from ..execution.executor_helpers import _test_name, _utc_now_iso
 from ..execution.records import TestExecutionRecord
 
+# 静态站点校验时直接单次读取的小型文本文件字节上限（256 KiB）。
 SMALL_TEXT_MAX_BYTES = 262144
 REMOTE_SCHEMES = {"http", "https", "mailto", "tel", "data", "javascript"}
 _SITE_SCAN_EXCLUDES = frozenset({".git", "__pycache__", "node_modules", "local_store", "compact", "runs", "sessions"})
