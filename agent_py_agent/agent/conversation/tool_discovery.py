@@ -206,8 +206,6 @@ def record_session_discovered_tools(agent: object, tool_names: Iterable[str], *,
         return
 
 
-# LLM: 名称已由调用方按本轮快照与allowed裁决；与资产挂载同一主线程范围门，只写线程里还没有的名字，重复回合不写盘。
-# 函数用途: 把本轮创作/显式任务预载并入本线程已加载集合，让下一轮工具表与本轮逐字节一致，不再按提示词翻转。
 def persist_turn_preloaded_tools(agent: object, params: object, names: Iterable[str]) -> None:
     from ..runtime_context import current_subagent_run_id
 
@@ -215,7 +213,7 @@ def persist_turn_preloaded_tools(agent: object, params: object, names: Iterable[
     scope = str(getattr(params, "context_scope", "default") or "").strip().lower()
     if scope in {"task_local", "isolated", "control_plane"} or attrs.get("agent_thread_id") or current_subagent_run_id(agent):
         return
-    fresh = set(names) - thread_loaded_tools(agent, params)
+    fresh = set(names) - thread_loaded_tools(agent, params)  # 名称已由本轮快照与 allowed 裁决，只追加新名以稳定后续工具表。
     if fresh:
         record_session_discovered_tools(agent, sorted(fresh), params=params)
 

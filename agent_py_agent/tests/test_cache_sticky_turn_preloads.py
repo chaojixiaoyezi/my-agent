@@ -61,7 +61,10 @@ def test_persist_writes_only_fresh_names_in_sorted_order(tmp_path, monkeypatch):
 # 函数用途: 隔离/局部/控制面范围、子线程身份与子代理上下文都不写回本线程。
 @pytest.mark.parametrize("case", ["task_local", "isolated", "control_plane", "agent_thread", "subagent"])
 def test_persist_respects_main_thread_scope(tmp_path, case):
-    from agent_py_agent.agent.runtime_context import restore_current_subagent_context, set_current_subagent_context
+    from agent_py_agent.agent.runtime_context import (
+        restore_current_subagent_context,
+        set_current_subagent_context,
+    )
 
     agent, store, thread = _store_case(tmp_path)
     params = _params(thread.thread_id, scope=case if case in {"task_local", "isolated", "control_plane"} else "default")
