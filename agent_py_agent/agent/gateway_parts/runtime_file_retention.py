@@ -332,7 +332,8 @@ def _terminal_timestamp(paths, directory, path, row):
 
 
 # 先建立首次索引，再fsync发布标记/原字节并提交定位；失败保原件，旧索引丢失禁止重新建空库。
-# input的control/multiprocess/plugin等读者尚未切换，只冷备份不删原件；outbox仍重核前像后移除。
+# 读口经封存索引回落后（SCALE-FU-01），input与outbox一样在定位核实、前像重核后移除松散原件；
+#   已封存但旧版本保留的原件重走幂等发布后同样移除。plugin来源与仍在inbox/processing的输入不算终态。
 def _archive_one(paths, directory, path, *, before, max_bytes, deadline):
     with _entry_guard(paths, directory, path), locked_json_path(path, blocking=False):
         raw = read_bytes_beneath(paths.root, (directory, path.name),
@@ -352,9 +353,6 @@ def _archive_one(paths, directory, path, *, before, max_bytes, deadline):
         existing = read_bytes_beneath(paths.root, parts, max_bytes=_RuntimeScans.max_file_bytes, require_dir_fd=True)
         if existing is not None and existing != raw:
             raise DataCorruptionError('runtime_archive_conflict')
-        if (existing is not None and directory == 'input_receipts'
-                and lookup_runtime_file(paths, directory, path.name) == paths.root.joinpath(*parts)):
-            return 0, False
         connection = _index(paths, writable=True)
         try:
             marker_parts = ('archive', 'runtime-files-published.json')
@@ -374,8 +372,6 @@ def _archive_one(paths, directory, path, *, before, max_bytes, deadline):
             connection.close()
         if lookup_runtime_file(paths, directory, path.name) is None:
             raise DataCorruptionError('runtime_archive_publication_missing')
-        if directory == 'input_receipts':
-            return len(raw), False
         if read_bytes_beneath(paths.root, (directory, path.name),
                               max_bytes=_RuntimeScans.max_file_bytes, require_dir_fd=True) != raw:
             return 0, False
@@ -392,7 +388,7 @@ def _archive_one(paths, directory, path, *, before, max_bytes, deadline):
 def archive_terminal_slice(paths, *, directory: str, before: float, max_entries: int = 128,
                            max_ms: float = 50, retention_days: float = 7,
                            max_bytes: int = 4 * 1048576) -> dict:
-    """封存一片旧终态，input保留原件；before不越过七天，跨slice继续原目录枚举。"""
+    """封存一片旧终态并移除已核实的松散原件；before不越过七天，跨slice继续原目录枚举。"""
     if directory not in {'input_receipts', 'client_outbox'}:
         raise ValueError('runtime_retention_directory_not_enabled')
     if (type(max_entries) is not int or max_entries < 1 or type(max_bytes) is not int or max_bytes < 1
@@ -401,8 +397,6 @@ def archive_terminal_slice(paths, *, directory: str, before: float, max_entries:
         raise ValueError('invalid_runtime_retention_budget')
     cutoff = min(before, time.time() - retention_days * 86400)
     result = {'archived_entries': 0, 'scanned_entries': 0, 'bytes': 0, 'errors': [], 'complete': False}
-    if directory == 'input_receipts':
-        result.update(deferred_reason='input_receipt_reader_cutover_required', reader_cutover_required=True)
     folder = paths.root / directory
     if not folder.exists():
         return {**result, 'complete': True}

@@ -301,6 +301,12 @@ def _append_ordinary_input_guidance(store, paths, scope, payload, turn_id, deadl
             report = read_json_file_report(inputs.gateway_input_receipt_path(paths, request_id),
                 context='gateway.control.input_disposition.read', blocking=False, deadline=deadline)
             inputs._raise_for_input_read_report(report, 'ordinary input disposition is unreadable')
+            if not report.payload and not inputs.gateway_input_receipt_path(paths, request_id).exists():
+                # 已消费旧回执可能只剩封存件（SCALE-FU-01）：同T内按原回落读口取回，不能把缺席当无receipt写guidance。
+                report = inputs._read_input_receipt_report(paths, inputs.gateway_input_receipt_path(paths, request_id),
+                                                           blocking=False)
+                inputs._raise_for_input_read_report(report, 'ordinary input disposition is unreadable')
+                check_io_deadline(deadline)
             if not report.payload:
                 if inputs.gateway_input_receipt_path(paths, request_id).exists() or ordinary_id:
                     return _ordinary_input_control_result(scope, turn_id, error_code='INPUT_IDENTITY_UNCONFIRMED', input_request_id=request_id)
