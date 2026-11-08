@@ -421,7 +421,9 @@ def _run_background_notice_loop(
     event_cursor = [0]
     failure_delay = TUI_BACKGROUND_NOTICE_FAILURE_INITIAL_SECONDS
     debounce = _NoticeWarnDebounce()
+    idle_backoff = 0.0
     while not stop_event.is_set():
+        before = _capture_background_poll_state(tui_runtime, event_cursor)
         if wake is not None:
             wake.polling = True
         try:
@@ -465,9 +467,17 @@ def _run_background_notice_loop(
                 if foreground_running or background_active
                 else TUI_BACKGROUND_NOTICE_IDLE_INTERVAL_SECONDS
             )
+            # 前台未运行、无后台任务且观察页未打开时，游标/流/代次连续不变：退避从半个基础间隔起倍增，故前两拍仍按原基础间隔，
+            # 第三拍起翻倍并封顶复用失败退避上限；任何变化或失败立即复位。
+            pinned = foreground_running or (callable(activity_reader) and bool(activity_reader())) or bool(
+                getattr(navigation_view, "background_watch_active", False))
+            unchanged = _capture_background_poll_state(tui_runtime, event_cursor) == before
+            idle_backoff = (min(TUI_BACKGROUND_NOTICE_FAILURE_MAX_SECONDS, idle_backoff * 2) if idle_backoff else delay / 2
+                            ) if unchanged and not pinned else 0.0
+            delay = max(delay, idle_backoff)
             failure_delay = TUI_BACKGROUND_NOTICE_FAILURE_INITIAL_SECONDS
         else:
-            delay = failure_delay
+            delay, idle_backoff = failure_delay, 0.0
             failure_delay = min(
                 TUI_BACKGROUND_NOTICE_FAILURE_MAX_SECONDS,
                 failure_delay * 2.0,

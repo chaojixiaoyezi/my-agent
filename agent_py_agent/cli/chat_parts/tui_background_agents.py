@@ -6,6 +6,7 @@ import threading
 
 from ...agent.plugin_host.errors import HostAPIError
 from ..space_commands import BusinessClient, PreparedBusinessCall, business_client_for_agent
+from .tui_threading import TUI_BACKGROUND_NOTICE_FAILURE_MAX_SECONDS
 
 
 class TuiBackgroundAgents:
@@ -255,6 +256,7 @@ def start_business_observation(agent: object, navigation: object, stop_event: th
         business_client_for_agent(agent, conversation_id=navigation.root_runtime.session_id), stop_event)
 
     def observe():
+        delay, last = 5, None
         while not stop_event.is_set():
             try:
                 projection.refresh()
@@ -262,7 +264,12 @@ def start_business_observation(agent: object, navigation: object, stop_event: th
             except Exception:  # 展示失败必须显性，不能终止 TUI 或伪造空名册。
                 projection.count, projection.running_count, projection.coverage = None, None, 'unknown'
                 navigation.update_business_agents(projection)
-            stop_event.wait(5)
+            # 名册投影（数量/运行数/覆盖/拒读/身份与状态）连续不变时按2倍退避，封顶复用TUI通知失败退避上限；一变回5秒。
+            current = (projection.count, projection.running_count, projection.coverage, projection.read_denied,
+                       tuple((row.get('agent_id'), row.get('work_state')) for row in projection.rows))
+            delay = max(5, min(TUI_BACKGROUND_NOTICE_FAILURE_MAX_SECONDS, delay * 2)) if current == last else 5
+            last = current
+            stop_event.wait(delay)
 
     thread = threading.Thread(target=observe, name='tui-business-observation', daemon=True)
     thread.start()
