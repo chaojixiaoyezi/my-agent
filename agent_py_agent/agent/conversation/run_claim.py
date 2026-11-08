@@ -12,9 +12,11 @@ import time
 import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from contextvars import copy_context
 from dataclasses import dataclass, field
 from functools import partial
 
+from ..concurrency import daemon_executor
 from ..concurrency.interrupt import register_interruptible
 from ..runtime_errors import runtime_error_report
 
@@ -90,12 +92,19 @@ def detached_task_claim_scope_id(thread_id: str, task_id: str) -> str:
     return f"{selected_thread}.task.{selected_task}"
 
 
-class ConversationRunClaimHeartbeat(threading.Thread):
+# 每回合一条续约线程在 3.14t 下随创建次数涨 RSS：到期调度共用一条常驻线程，阻塞的续约写交给守护池，调度线程只投递。
+_CLAIM_TICKS = daemon_executor.SharedDeferredCalls("conversation-claim-heartbeat")
+_CLAIM_RENEWS = daemon_executor.DurableDaemonThreadPoolExecutor(thread_name_prefix="conversation-claim-renew")
+
+
+# 类用途: 保留原 start/stop/join/is_alive 用法；同一心跳的续约在 _gate 内串行，stop 拿到 _gate 后不会再续约。
+class ConversationRunClaimHeartbeat:
     """Renew the per-thread claim while one model turn owns the lane."""
 
     def __init__(self, config: dict):
         thread_id = str(config.get("thread_id") or "")
-        super().__init__(name=f"conversation-claim-heartbeat-{thread_id}", daemon=True)
+        self.name = f"conversation-claim-heartbeat-{thread_id}"
+        self._gate, self._done, self._pending = threading.Lock(), threading.Event(), None
         self.store = config["store"]
         self.thread_id = thread_id
         self.claim_scope_id = str(config.get("claim_scope_id") or "").strip()
@@ -104,12 +113,29 @@ class ConversationRunClaimHeartbeat(threading.Thread):
         self.interval_seconds = max(0.05, float(config.get("interval_seconds") or 0.05))
         self.stop_event = threading.Event()
 
+    def start(self) -> None:
+        self._pending = daemon_executor.DeferredCall(lambda: _CLAIM_RENEWS.submit(copy_context().run, self._tick))
+        _CLAIM_TICKS.start(self._pending, self.interval_seconds)
+
+    def is_alive(self) -> bool:
+        return self._pending is not None and not self._done.is_set()
+
+    def join(self, timeout: float | None = None) -> None:
+        self._done.wait(timeout)
+
     def stop(self) -> None:
         self.stop_event.set()
-        self.join(timeout=self.interval_seconds + 5.0)
+        if self._gate.acquire(timeout=self.interval_seconds + 5.0):
+            self._pending.cancel()
+            self._done.set()
+            self._gate.release()
+
+    def _tick(self) -> None:
+        with self._gate:
+            self.run()
 
     def run(self) -> None:
-        while not self.stop_event.wait(self.interval_seconds):
+        while not self.stop_event.is_set():
             try:
                 renewed = self.store.claims.renew(
                     {
@@ -127,9 +153,11 @@ class ConversationRunClaimHeartbeat(threading.Thread):
                     self.claim_id,
                     runtime_error_report(exc, context="conversation_claim_heartbeat.renew"),
                 )
-                return
+                break
             if renewed is None:
-                return
+                break
+            return self.start()
+        self._done.set()
 
 
 # LLM: Acquisition retains cancellation/cadence; a host transition serializes each attempt with
