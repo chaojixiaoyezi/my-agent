@@ -162,17 +162,24 @@ def prune_llm_call_records_step(conn, *, owner_id, cutoff, max_rows) -> dict:
                 "bytes": 0, "deleted_llm_records": deleted}
 
 
-def _runtime_history_vacuum(repo, db_path, request, budget) -> int:
-    """原通道写门内回收页；旧库只允许显式维护且资源充足时转换。"""
+def _runtime_history_vacuum(repo, db_path, request, budget, *, receipt=None) -> int:
+    """原写门内推进一片页回收，并将未完成的物理责任留在通道回执中。"""
     from ..io.sqlite_connection import sqlite_error_details
     from ..local_storage.maintenance import (
         LOCAL_STORE_INCREMENTAL_VACUUM_PAGES_COUNT,
         LOCAL_STORE_VACUUM_FREE_PERCENT,
+        _local_store_checkpoint_pending,
         _local_store_conversion_deferral,
         _local_store_vacuum_state,
     )
 
+    def defer(reason):
+        if receipt is not None:
+            receipt["complete"] = False
+            receipt.setdefault("deferred_reason", reason)
+
     if budget.remaining_ms() <= 0:
+        defer("budget_exhausted")
         return 0
     try:
         with repo._runtime_connection() as conn:
@@ -183,7 +190,10 @@ def _runtime_history_vacuum(repo, db_path, request, budget) -> int:
         convert = (mode == 0 and not request.coordinator
                    and free * 100 >= LOCAL_STORE_VACUUM_FREE_PERCENT * max(1, pages)
                    and _local_store_conversion_deferral(db_path, state, coordinator=False, allow_convert=True) is None)
-        if not incremental and not convert:
+        if not incremental and not convert and not _local_store_checkpoint_pending(db_path, state):
+            return 0
+        if budget.remaining_ms() <= 0:
+            defer("budget_exhausted")
             return 0
 
         def vacuum():
@@ -193,17 +203,24 @@ def _runtime_history_vacuum(repo, db_path, request, budget) -> int:
                     conn.commit()
                     conn.execute("VACUUM").fetchall()
                 else:
-                    conn.execute(f"PRAGMA incremental_vacuum({LOCAL_STORE_INCREMENTAL_VACUUM_PAGES_COUNT})").fetchall()
-                    # 页回收沿原代际写事务提交，checkpoint 必须在该事务结束后执行。
-                    conn.commit()
+                    if incremental:
+                        conn.execute(f"PRAGMA incremental_vacuum({LOCAL_STORE_INCREMENTAL_VACUUM_PAGES_COUNT})").fetchall()
+                        # 页回收沿原代际写事务提交，checkpoint 必须在该事务结束后执行。
+                        conn.commit()
                     busy, frames, copied = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
                     if not busy and frames == copied:
                         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+                after = _local_store_vacuum_state(conn)
+                if ((after[0] == 2 and after[1] >= LOCAL_STORE_INCREMENTAL_VACUUM_PAGES_COUNT)
+                        or _local_store_checkpoint_pending(db_path, after)):
+                    defer("vacuum_pending")
 
         request.run_write(vacuum)
         return max(0, before - os.stat(db_path).st_size)
     except sqlite3.OperationalError as exc:
-        if sqlite_error_details(exc).get("category") in {"busy", "locked"}:
+        category = sqlite_error_details(exc).get("category")
+        if category in {"busy", "locked"}:
+            defer(category)
             return 0
         raise
 
@@ -295,8 +312,8 @@ def maintain_runtime_history_lane(request) -> dict:
                 receipt[key] += result.get(key, 0)
         pending = next_pending
     receipt["complete"] = not pending and receipt.get("deferred_reason") != "budget_exhausted"
-    if receipt["slimmed"] or receipt["deleted_events"] or receipt["deleted_llm_records"]:
-        freed = _runtime_history_vacuum(repo, db_path, request, lane)
-        if freed:
-            receipt["freed_bytes"] = freed
+    # 逻辑变更结束后仍可能留下多片空闲页或未回填的 WAL，不能丢掉后续物理回收责任。
+    freed = _runtime_history_vacuum(repo, db_path, request, lane, receipt=receipt)
+    if freed:
+        receipt["freed_bytes"] = freed
     return receipt

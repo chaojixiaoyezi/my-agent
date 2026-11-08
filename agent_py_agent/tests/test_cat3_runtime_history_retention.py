@@ -7,6 +7,7 @@ import os
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -744,4 +745,82 @@ def test_repeated_lane_success_and_sql_error_release_all_descriptors(database, r
         exercise()
     fd_delta = len(os.listdir(root)) - before
     record_testsuite_property("runtime_history_fd_delta", fd_delta)
+    assert fd_delta == 0
+
+
+@pytest.mark.skipif(os.name != "posix", reason="需要 POSIX 原生 FD 目录")
+@pytest.mark.parametrize("code,category", [
+    (sqlite3.SQLITE_BUSY, "busy"), (sqlite3.SQLITE_LOCKED, "locked"), (sqlite3.SQLITE_ERROR, None),
+])
+def test_vacuum_failure_closes_transaction_preserves_cause_and_leaks_no_fds(
+    database, monkeypatch, record_testsuite_property, code, category,
+):
+    from agent_py_agent.agent.local_storage.maintenance import (
+        LOCAL_STORE_INCREMENTAL_VACUUM_PAGES_COUNT,
+    )
+
+    home, repo, conn = database
+    _run(conn)
+    _tool(conn, outcome=json.dumps({"output": "x" * (9 * 1024 * 1024)}))
+    conn.commit()
+    retention.slim_terminal_tool_outcomes_step(conn, cutoff=1000, max_rows=8)
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+    free_before = conn.execute("PRAGMA freelist_count").fetchone()[0]
+    assert free_before >= LOCAL_STORE_INCREMENTAL_VACUUM_PAGES_COUNT
+    repo = RuntimeRepository(repo.db_path, existing_only=True)
+    original_connection = RuntimeRepository._runtime_connection
+    opened = []
+    error = sqlite3.OperationalError("vacuum interrupted")
+    error.sqlite_errorcode = code
+    cause = RuntimeError("original failure cause")
+
+    @contextmanager
+    def observed_connection(self):
+        with original_connection(self) as borrowed:
+            opened.append(borrowed)
+
+            class InterruptedConnection:
+                def __getattr__(self, name):
+                    return getattr(borrowed, name)
+
+                def execute(self, sql, parameters=()):
+                    cursor = borrowed.execute(sql, parameters)
+                    if sql.startswith("PRAGMA incremental_vacuum("):
+                        cursor.fetchall()
+                        assert borrowed.in_transaction
+                        raise error from cause
+                    return cursor
+
+            yield InterruptedConnection()
+
+    monkeypatch.setattr(RuntimeRepository, "_runtime_connection", observed_connection)
+
+    def exercise():
+        receipt = {"complete": True}
+        request = _request(home)
+        if category is None:
+            with pytest.raises(sqlite3.OperationalError) as caught:
+                retention._runtime_history_vacuum(repo, repo.db_path, request, request.budget, receipt=receipt)
+            assert caught.value is error
+        else:
+            assert retention._runtime_history_vacuum(
+                repo, repo.db_path, request, request.budget, receipt=receipt) == 0
+            assert receipt == {"complete": False, "deferred_reason": category}
+        assert error.__cause__ is cause
+        for borrowed in opened:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+                borrowed.execute("SELECT 1")
+        opened.clear()
+        # 失败发生在真实增量回收后、提交前；关闭连接必须回滚这片页变更并释放写锁。
+        assert conn.execute("PRAGMA freelist_count").fetchone()[0] == free_before
+        conn.execute("BEGIN IMMEDIATE")
+        conn.rollback()
+
+    exercise()
+    root = Path("/proc/self/fd") if Path("/proc/self/fd").is_dir() else Path("/dev/fd")
+    before = len(os.listdir(root))
+    for _ in range(30):
+        exercise()
+    fd_delta = len(os.listdir(root)) - before
+    record_testsuite_property("runtime_vacuum_failure_fd_delta_" + str(code), fd_delta)
     assert fd_delta == 0
