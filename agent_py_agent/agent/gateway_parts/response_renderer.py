@@ -201,11 +201,15 @@ def read_gateway_terminal_envelope_report(
     *,
     request_id: str | None = None,
     context: str = "gateway.terminal.read",
+    include_sealed: bool = False,
 ) -> GatewayJsonReadReport:
     path = Path(terminal_path)
-    # 原件已封存删除时透明回读封存段；原件与封存都缺失才保持“缺失=空报告”原口径。
+    loose = path.exists()
+    # 默认原件缺失即“无终态”，轮询热路径不打开封存索引；历史读口显式include_sealed才经同一读口回读封存段。
+    if not loose and not include_sealed:
+        return GatewayJsonReadReport({})
     report = read_json_file_report(path, context=context)
-    if report.load_error is None and not report.payload and not path.exists():
+    if report.load_error is None and not report.payload and not loose:
         return GatewayJsonReadReport({})
     expected_id = str(request_id or path.stem).strip()
     if report.load_error is not None:
@@ -247,6 +251,7 @@ def read_gateway_terminal_response_file(
     request_id: str | None = None,
     context: str = "gateway.terminal.read",
     require_exists: bool = False,
+    include_sealed: bool = False,
 ) -> dict[str, Any]:
     path = Path(terminal_path)
     expected_id = str(request_id or path.stem).strip()
@@ -254,6 +259,7 @@ def read_gateway_terminal_response_file(
         path,
         request_id=expected_id,
         context=context,
+        include_sealed=include_sealed,
     )
     if report.load_error is not None:
         return gateway_response_load_error_response(

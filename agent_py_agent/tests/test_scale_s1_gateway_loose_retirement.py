@@ -77,9 +77,10 @@ def test_envelope_reader_falls_back_to_sealed_copy(tmp_path):
     before = read_gateway_terminal_envelope_report(path)
     assert before.load_error is None and before.payload
     _seal(paths)
-    after = read_gateway_terminal_envelope_report(path)
+    assert read_gateway_terminal_envelope_report(path).payload == {}
+    after = read_gateway_terminal_envelope_report(path, include_sealed=True)
     assert after.payload == before.payload and after.load_error is None
-    missing = read_gateway_terminal_envelope_report(paths.terminal / 'unknown.json')
+    missing = read_gateway_terminal_envelope_report(paths.terminal / 'unknown.json', include_sealed=True)
     assert missing.payload == {} and missing.load_error is None
 
 
@@ -91,7 +92,7 @@ def test_result_serves_sealed_request_without_recreating_loose_files(tmp_path, r
     replies = []
     handler = SimpleNamespace(_send_json=lambda code, body: replies.append((code, body)))
     assert _send_archived_terminal_result(handler, SimpleNamespace(paths=paths),
-        _ResultAccessContext('request-a', 'alice', None), repair_response_projection=repair)
+        _ResultAccessContext('request-a', 'alice', None), repair_response_projection=repair, include_sealed=True)
     assert replies == [(200, response)]
     assert not (paths.responses / 'request-a.json').exists()
     assert not (paths.terminal / 'request-a.json').exists()

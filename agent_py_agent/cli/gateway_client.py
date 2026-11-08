@@ -394,6 +394,7 @@ def cmd_gateway_result(args) -> int:
         terminal_path,
         request_id=args.request_id,
         context="gateway.cli.result.terminal.read",
+        include_sealed=True,
     )
     if not payload:
         print(f"未找到 gateway 终态结果: {args.request_id}", file=sys.stderr)
