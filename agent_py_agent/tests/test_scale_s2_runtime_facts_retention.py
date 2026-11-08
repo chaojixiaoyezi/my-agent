@@ -123,8 +123,10 @@ def test_owner_retention_override_is_applied_even_while_tool_outputs_rest(owner)
     fresh_locator(owner)
     policy = owner[0].owner_retention_json
     write_private_text_file_atomic(policy, json.dumps({'tool_output_days': 365}))
-    assert retention.maintain_owner_tool_outputs_lane(request(owner)) == {
-        'cursor': {'next_pass_at': owner[1] + 3600}, 'complete': True, 'items': 0, 'bytes': 0}
+    # 事实遍历计入检查条数并在走完后记录休息点（scale-s8）；保留期覆盖仍使200天事实保留。
+    kept = retention.maintain_owner_tool_outputs_lane(request(owner))
+    assert kept['complete'] is True and kept['items'] == 1 and 'deleted_items' not in kept
+    assert kept['cursor']['next_pass_at'] == owner[1] + 3600 and kept['cursor']['facts_after'] == ''
     assert directory.exists()
     write_private_text_file_atomic(policy, json.dumps({'tool_output_days': 30}))
     assert retention.maintain_owner_tool_outputs_lane(request(owner))['deleted_items'] == 1
