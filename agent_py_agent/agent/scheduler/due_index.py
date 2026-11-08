@@ -25,7 +25,7 @@ from typing import Any
 from ..owner_activity_index import next_hint_revision
 from ..storage_backend import ensure_sqlite_wal
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _SCHEMA_INIT_LOCK = threading.Lock()
 _SCHEMA_INITIALIZED_DBS: OrderedDict[str, tuple[int, int, int]] = OrderedDict()
 _SCHEMA_INITIALIZED_MAX = 256
@@ -396,6 +396,9 @@ def _create_due_schema(conn: sqlite3.Connection) -> None:
         key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at REAL NOT NULL)""")
     conn.execute("""CREATE INDEX IF NOT EXISTS scheduler_due_owner_ready_idx
         ON scheduler_due_owners (next_due_at, lease_until)""")
+    # 最早可领取时间还受租约约束，表达式索引让 MIN(MAX(...)) 直接定位索引端点。
+    conn.execute("""CREATE INDEX IF NOT EXISTS scheduler_due_owner_wake_idx
+        ON scheduler_due_owners (MAX(next_due_at, lease_until))""")
     conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
 
 
