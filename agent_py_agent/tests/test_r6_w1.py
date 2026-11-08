@@ -1,15 +1,21 @@
 """引用保护按路径深度匹配，来源写入后不得沿用旧投影。"""
+import gc
 import json
 import os
+import shutil
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.common import cache_capacity
 from agent_py_agent.agent.memory_store import retention_scan as scan
 from agent_py_agent.agent.memory_store.retention_scan_budget import RetentionScanBudget
+from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.tests.test_memory_retention_wave5 import (
     NOW,
     _expired_pin_target,
@@ -174,6 +180,7 @@ def test_cold_source_resumes_without_rereading_prefix(tmp_path, monkeypatch, col
 
 def test_partial_plan_never_deletes_and_complete_plan_keeps_references(tmp_path, cold_clock):
     home, _candidates, service = runtime(tmp_path)
+    service.config = SimpleNamespace(retention_scan_slice_entries=17, retention_scan_slice_bytes=128)
     target, control = (_expired_pin_target(home, name) for name in ("pinned.jsonl", "control.jsonl"))
     old_file(home.owner_memory_curator_runs_dir / "cold.jsonl", json.dumps(
         {"source_refs": [str(target)] + [f"evidence/{i}" for i in range(100)]}) + "\n")
@@ -183,6 +190,9 @@ def test_partial_plan_never_deletes_and_complete_plan_keeps_references(tmp_path,
         plan = service.plan(now=NOW, scan_budget=budget, scan_cursor=cursor)
         assert not plan.errors
         assert budget.entries <= 17 and budget.size <= 128
+        snapshot = scan._PIN_BUILDS.get(Path(home.owner_home_dir))
+        if snapshot is not None:
+            assert snapshot.budget.entries <= 17 and snapshot.budget.size <= 128
         if plan.scan_cursor.get(scan._PIN_CURSOR_KEY, {}).get("phase") in {"build", "verify"}:
             assert plan.scan_partial and not plan.actions
             partials += 1
@@ -200,6 +210,7 @@ def test_partial_plan_never_deletes_and_complete_plan_keeps_references(tmp_path,
 @pytest.mark.parametrize("expired", [False, True])
 def test_deadline_starts_after_fixed_discovery_prelude(tmp_path, monkeypatch, expired):
     home, _candidates, service = runtime(tmp_path)
+    service.config = SimpleNamespace(retention_scan_slice_entries=1, retention_scan_slice_bytes=4096)
     clock = [0.0]
     original = scan._conversation_roots
 
@@ -213,7 +224,8 @@ def test_deadline_starts_after_fixed_discovery_prelude(tmp_path, monkeypatch, ex
     budget = RetentionScanBudget(1, 4096, -1 if expired else .025)
     plan = service.plan(now=NOW, scan_budget=budget)
     assert plan.scan_partial and not plan.actions
-    assert budget.entries == (0 if expired else 1)
+    assert budget.entries == 0
+    assert scan._PIN_BUILDS[Path(home.owner_home_dir)].budget.entries == (0 if expired else 1)
     assert budget.deadline == pytest.approx(1.0 if expired else 1.025)
 
 
@@ -247,7 +259,8 @@ def test_actual_scan_io_exhausts_time_before_unbounded_source_build(tmp_path, mo
     budget = RetentionScanBudget(1000, 1024 * 1024, .025)
     report = service.plan(now=NOW, scan_budget=budget)
     assert report.scan_partial and not report.actions
-    assert len(reads) == 1 and budget.size == sum(reads)
+    assert len(reads) == 1 and budget.size == 0
+    assert scan._PIN_BUILDS[Path(home.owner_home_dir)].budget.size == sum(reads)
 
 
 def test_generation_change_during_pending_verification_restarts_closed(tmp_path, monkeypatch, cold_clock):
@@ -330,6 +343,7 @@ def test_incremental_formal_sources_keep_existing_tombstone_semantics(tmp_path, 
 
 def test_apply_persists_cold_continuation_and_reaches_original_delete_guard(tmp_path, monkeypatch, cold_clock):
     home, _candidates, service = runtime(tmp_path)
+    service.config = SimpleNamespace(retention_scan_slice_entries=11, retention_scan_slice_bytes=512)
     target, control = (_expired_pin_target(home, name) for name in ("pinned.jsonl", "control.jsonl"))
     old_file(home.owner_memory_curator_runs_dir / "cold.jsonl", json.dumps({"source_refs": [str(target)]}) + "\n")
     monkeypatch.setattr(RetentionScanBudget, "default",
@@ -394,6 +408,34 @@ def test_hot_post_group_cannot_publish_previous_pass_after_cold_continuation(tmp
     memory.path.write_text(original.replace("evidence/old", "evidence/new"))
     clock[0] += 3_000_000_000
     pins, _context = finish_projection(home, candidates, cursor)
+    assert pins.protects(home.owner_home_dir / "evidence/new", [])
+    assert not pins.protects(home.owner_home_dir / "evidence/old", [])
+
+
+def test_hot_object_changed_during_cold_post_is_revalidated_before_publish(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
+
+    home, candidates, _service = runtime(tmp_path)
+    memory = JsonlMemory(home.owner_memory_long_term_jsonl)
+    memory.add("user", "formal fact", attributes={"source_refs": ["evidence/old"]})
+    original = memory.path.read_text()
+    _freeze_pin_file_stat(monkeypatch, memory.path)
+    hot = scan._PinProjection._stamp(memory.path)
+    cold = old_file(home.owner_memory_curator_runs_dir / "large.jsonl", json.dumps({"note": "x" * 32768}) + "\n")
+    # 固定粗时钟边界：旧来源已稳定，唯一刚写的正式对象仍须同片复核。
+    monkeypatch.setattr(scan.reference_pins, "_is_settled", lambda stamp: stamp != hot)
+    source, opened = scan._fingerprint_source, []
+
+    def read(path):
+        if path == cold:
+            opened.append(path)
+            if len(opened) == 2:
+                memory.path.write_text(original.replace("evidence/old", "evidence/new"))
+        return source(path)
+
+    monkeypatch.setattr(scan, "_fingerprint_source", read)
+    pins, _context = finish_projection(home, candidates, size=4096)
+    assert len(opened) >= 2
     assert pins.protects(home.owner_home_dir / "evidence/new", [])
     assert not pins.protects(home.owner_home_dir / "evidence/old", [])
 
@@ -468,3 +510,242 @@ def test_legacy_invalid_events_cannot_be_normalized_before_validation(tmp_path, 
     else:
         pytest.fail("invalid event never surfaced")
     assert not result[1] and not result[0].complete and context.errors
+
+
+def _capacity(monkeypatch, count):
+    monkeypatch.setattr(cache_capacity, "_SLOTS", cache_capacity._SLOTS.copy())
+    config = AgentConfig(owner_agent_pool_max_agents=count)
+    cache_capacity.configure_from_config(config)
+    assert scan._pin_capacity() == count
+    return config
+
+
+def _pending_owner(path):
+    home, candidates, service = runtime(path)
+    old_file(home.owner_memory_curator_runs_dir / "cold.jsonl", '{"source_refs":["evidence/live"]}\n' * 500)
+    context, result = projection_step(home, candidates, entries=1)
+    assert result is None
+    return home, candidates, service, context
+
+
+@pytest.mark.parametrize("capacity", [1, 2])
+def test_capacity_plus_one_rotation_preserves_every_admitted_cursor(tmp_path, monkeypatch, capacity):
+    from agent_py_agent.agent.user_space.owner_quota import OwnerQuotaEnforcer
+
+    config = _capacity(monkeypatch, capacity)
+    owners = []
+    for index in range(capacity + 1):
+        home, candidates, service = runtime(tmp_path / str(index))
+        candidates.quota_enforcer = OwnerQuotaEnforcer(home.owner_home_dir, max_bytes=1024**3)
+        service.config = config
+        # 正常首拍建立审计锁，随后冻结来源；不把首次回执设施出生误计为缓存淘汰。
+        assert not service.apply(now=NOW).scan_partial
+        old_file(home.owner_memory_curator_runs_dir / "cold.jsonl", "".join(
+            json.dumps({"source_refs": [f"evidence/{row}"]}) + "\n" for row in range(500)))
+        cache = old_file(home.owner_cache_dir / "expired.bin", "expired")
+        owners.append((home, service, cache))
+    tokens, complete = {}, set()
+    for _ in range(64):
+        for index, (home, service, cache) in enumerate(owners):
+            if index in complete:
+                continue
+            report = service.apply(now=NOW)
+            assert not report.errors, report.errors
+            assert len(scan._PIN_BUILDS) <= capacity
+            state = report.scan_cursor.get(scan._PIN_CURSOR_KEY)
+            if state:
+                token = state["token"]
+                assert tokens.setdefault(index, token) == token, "live continuation was evicted"
+            assert json.loads((home.owner_data_dir / "retention_scan_cursor.json").read_text()) == report.scan_cursor
+            if not report.scan_partial:
+                assert not cache.exists()
+                complete.add(index)
+            else:
+                assert cache.exists() and not report.actions
+        if len(complete) == len(owners):
+            break
+    assert len(complete) == len(owners) and not scan._PIN_BUILDS
+
+
+def test_capacity_shrink_trims_before_denying_and_keeps_requested_resident(tmp_path, monkeypatch, cold_clock):
+    _capacity(monkeypatch, 3)
+    owners = [_pending_owner(tmp_path / str(i)) for i in range(3)]
+    requested = owners[0]
+    resident = scan._PIN_BUILDS[Path(requested[0].owner_home_dir)]
+    victims = [scan._PIN_BUILDS[Path(home.owner_home_dir)] for home, *_ in owners[1:]]
+    cache_capacity.configure_from_config(AgentConfig(owner_agent_pool_max_agents=1))
+    context, result = projection_step(requested[0], requested[1], requested[3].scan_cursor, entries=1)
+    assert result is None and context.scan_partial
+    assert list(scan._PIN_BUILDS.values()) == [resident]
+    assert all(snapshot.closed for snapshot in victims) and not resident.closed
+
+
+@pytest.mark.parametrize("reason", ["hold", "disabled", "zero", "missing-policy", "malformed-policy",
+                                    "unreadable-policy", "missing-home", "uncertain-root"])
+def test_one_unusable_resident_releases_only_derived_state(tmp_path, monkeypatch, cold_clock, reason):
+    _capacity(monkeypatch, 1)
+    home, _candidates, _service, _context = _pending_owner(tmp_path / "resident")
+    resident = scan._PIN_BUILDS[Path(home.owner_home_dir)]
+    policy_path = home.owner_retention_json
+    if reason in {"hold", "disabled", "zero"}:
+        payload = json.loads(policy_path.read_text())
+        payload.update({"hold": {"legal_hold": True}, "disabled": {"maintenance_enabled": False},
+                        "zero": {"maintenance_interval_seconds": 0}}[reason])
+        policy_path.write_text(json.dumps(payload))
+    elif reason == "missing-policy":
+        resident.close()
+        policy_path.unlink()
+    elif reason == "malformed-policy":
+        policy_path.write_text("{bad")
+    elif reason == "missing-home":
+        resident.close()
+        assert Path(home.owner_home_dir).is_relative_to(tmp_path)
+        shutil.rmtree(home.owner_home_dir)
+    elif reason == "unreadable-policy":
+        original = Path.read_bytes
+
+        def unreadable(path):
+            if path == policy_path:
+                raise PermissionError("single policy read error")
+            return original(path)
+
+        monkeypatch.setattr(Path, "read_bytes", unreadable)
+    else:
+        original = scan._PinProjection._stamp
+
+        def uncertain(path):
+            if path == home.owner_home_dir:
+                raise OSError("single root read error")
+            return original(path)
+
+        monkeypatch.setattr(scan._PinProjection, "_stamp", staticmethod(uncertain))
+    before = policy_path.read_text() if policy_path.exists() else None
+    waiting, candidates, _ = runtime(tmp_path / "waiting")
+    context, result = projection_step(waiting, candidates, entries=1)
+    assert result is None and context.scan_partial and resident.closed
+    assert list(scan._PIN_BUILDS) == [Path(waiting.owner_home_dir)]
+    assert (policy_path.read_text() if policy_path.exists() else None) == before
+    pins, _context = finish_projection(waiting, candidates, context.scan_cursor)
+    assert pins.complete
+
+
+def test_denied_admission_probes_one_rotating_resident_without_lock_io(tmp_path, monkeypatch, cold_clock):
+    _capacity(monkeypatch, 2)
+    first, second = [_pending_owner(tmp_path / str(i)) for i in range(2)]
+    waiting, candidates, _ = runtime(tmp_path / "waiting")
+    original, probes = scan._load_policy, []
+
+    def checked(path):
+        assert not scan._PIN_BUILDS_LOCK.locked()
+        if path in {first[0].owner_retention_json, second[0].owner_retention_json}:
+            probes.append(path)
+        return original(path)
+
+    monkeypatch.setattr(scan, "_load_policy", checked)
+    context, result = projection_step(waiting, candidates, entries=1)
+    assert result is None and len(probes) == 1
+    assert Path(waiting.owner_home_dir) not in scan._PIN_BUILDS
+    # 正常轮询借用不能把探测顺序重排回同一个owner。
+    for _home, _candidates, _service, resident_context in (first, second):
+        resumed = replace(resident_context, scan_budget=RetentionScanBudget(1, 4096, float("inf")))
+        assert scan._budgeted_pin_projection(resumed)[0] is None
+    policy = json.loads(second[0].owner_retention_json.read_text())
+    policy["maintenance_enabled"] = False
+    second[0].owner_retention_json.write_text(json.dumps(policy))
+    context, result = projection_step(waiting, candidates, context.scan_cursor, entries=1)
+    assert result is None and probes == [first[0].owner_retention_json, second[0].owner_retention_json]
+    assert Path(first[0].owner_home_dir) in scan._PIN_BUILDS
+    assert Path(waiting.owner_home_dir) in scan._PIN_BUILDS
+
+
+def test_policy_probe_cannot_retire_a_replacement(tmp_path, monkeypatch, cold_clock):
+    _capacity(monkeypatch, 1)
+    home, candidates, _service, context = _pending_owner(tmp_path / "resident")
+    old = scan._PIN_BUILDS[Path(home.owner_home_dir)]
+    policy = json.loads(home.owner_retention_json.read_text())
+    policy["legal_hold"] = True
+    home.owner_retention_json.write_text(json.dumps(policy))
+    replacement = scan._PinProjection(context)
+    original = scan._load_policy
+
+    def replaced(path):
+        if path == home.owner_retention_json:
+            assert not scan._PIN_BUILDS_LOCK.locked()
+            with scan._PIN_BUILDS_LOCK:
+                scan._PIN_BUILDS[Path(home.owner_home_dir)] = replacement
+            old.close()
+        return original(path)
+
+    monkeypatch.setattr(scan, "_load_policy", replaced)
+    waiting, waiting_candidates, _ = runtime(tmp_path / "waiting")
+    observed, result = projection_step(waiting, waiting_candidates, entries=1)
+    assert result is None and observed.scan_partial
+    assert scan._PIN_BUILDS[Path(home.owner_home_dir)] is replacement and not replacement.closed
+
+
+@pytest.mark.parametrize("moment", ["before_borrow", "after_advance"])
+def test_retired_borrow_cannot_publish_stale_protection_or_cursor(tmp_path, monkeypatch, cold_clock, moment):
+    _capacity(monkeypatch, 1)
+    home, candidates, _service, first = _pending_owner(tmp_path / "resident")
+    snapshot = scan._PIN_BUILDS[Path(home.owner_home_dir)]
+    entered, release = threading.Event(), threading.Event()
+    if moment == "before_borrow":
+        original = scan._admit_pin_projection
+
+        def pause(context, owner, token):
+            result = original(context, owner, token)
+            entered.set()
+            assert release.wait(10)
+            return result
+
+        monkeypatch.setattr(scan, "_admit_pin_projection", pause)
+    else:
+        original = scan._PinProjection.current
+
+        def pause(self, errors, *, target=None):
+            result = original(self, errors, target=target)
+            entered.set()
+            assert release.wait(10)
+            return result
+
+        monkeypatch.setattr(scan._PinProjection, "current", pause)
+    replacement = scan._PinProjection(first)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        future = pool.submit(projection_step, home, candidates, first.scan_cursor, entries=10000, size=1000000)
+        assert entered.wait(10)
+        with scan._PIN_BUILDS_LOCK:
+            assert scan._PIN_BUILDS.pop(Path(home.owner_home_dir)) is snapshot
+            scan._PIN_BUILDS[Path(home.owner_home_dir)] = replacement
+        closing = pool.submit(snapshot.close)
+        release.set()
+        context, result = future.result(timeout=10)
+        closing.result(timeout=10)
+    assert result is None and context.scan_partial
+    assert context.scan_cursor == first.scan_cursor
+    assert scan._PIN_BUILDS[Path(home.owner_home_dir)] is replacement and not replacement.closed
+
+
+def test_retiring_admitted_cancelled_and_failed_sources_closes_all_fds(tmp_path, monkeypatch, cold_clock):
+    _capacity(monkeypatch, 2)
+    gc.collect()
+    before = len(os.listdir("/dev/fd"))
+    home, candidates, _service, context = _pending_owner(tmp_path / "admitted")
+    pins, context = finish_projection(home, candidates, context.scan_cursor)
+    assert pins.protects(home.owner_home_dir / "evidence/live", [])
+    assert scan._finish_pin_cycle(context)
+    held, _candidates, _service, _context = _pending_owner(tmp_path / "cancelled")
+    policy = json.loads(held.owner_retention_json.read_text())
+    policy["legal_hold"] = True
+    held.owner_retention_json.write_text(json.dumps(policy))
+    other, other_candidates, _ = runtime(tmp_path / "failed")
+    broken = old_file(other.owner_memory_curator_runs_dir / "invalid.jsonl", "{broken\n")
+    policy, _ = scan._load_policy(other.owner_retention_json)
+    failed = scan._RetentionScanContext(other, other_candidates, policy, (), NOW,
+        scan_budget=RetentionScanBudget(128, 8388608, float("inf")))
+    result, _ = scan._budgeted_pin_projection(failed)
+    assert result is not None and not result[1] and failed.errors and broken.exists()
+    cancelled = scan._PIN_BUILDS.pop(Path(held.owner_home_dir))
+    cancelled.close()
+    assert not scan._PIN_BUILDS
+    gc.collect()
+    assert len(os.listdir("/dev/fd")) - before == 0

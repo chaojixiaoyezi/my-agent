@@ -11,6 +11,7 @@ import pytest
 from agent_py_agent.agent.memory_store import retention, retention_apply, retention_scan_budget
 from agent_py_agent.agent.memory_store.reference_pins import ReferencePinSnapshot
 from agent_py_agent.agent.memory_store.retention_models import MemoryRetentionReport
+from agent_py_agent.agent.memory_store.retention_scan import _PinProjection
 from agent_py_agent.agent.user_space import owner_maintenance, owner_maintenance_transition
 from agent_py_agent.tests.test_issues_w7_maintenance_controller import (
     _controller,
@@ -69,13 +70,14 @@ def _config_contract(operation):
 # LLM: Verify all four knobs reached actual reader results, not just mock call presence.
 # 函数用途: 核对预算三维值、分块大小及同一配置对象。
 def _assert_readers(seen, config):
-    assert len(seen.budgets) == len(seen.snapshots) == 1
+    assert len(seen.budgets) == 1 and len(seen.snapshots) == 2
     received, budget = seen.budgets[0]
     assert received is config
     assert (budget.max_entries, budget.max_bytes) == (1, 8388608)
     assert budget.deadline == pytest.approx(100.025)
-    assert seen.snapshots[0][0] is config
-    assert seen.snapshots[0][1].contents["chunk_bytes"] == 4096
+    assert sum(isinstance(snapshot, _PinProjection) for _, snapshot in seen.snapshots) == 1
+    assert all(received is config and snapshot.contents["chunk_bytes"] == 4096
+               for received, snapshot in seen.snapshots)
 
 
 # LLM: Every changed public seam must preserve the old positional parameter surface.

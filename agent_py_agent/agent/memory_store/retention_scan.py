@@ -18,7 +18,7 @@ from collections import Counter, OrderedDict
 from collections.abc import MutableSet
 from contextlib import closing, contextmanager
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -35,6 +35,7 @@ from ..conversation.store_io import safe_file_stem
 from ..conversation.thread_ledger_segments import archive_dir_for
 from ..conversation.workspace_paths import canonical_task_root, durable_work_root
 from ..local_storage.records import derived_terminal_expired
+from ..settings.config import AgentConfig
 from ..user_space.storage_lanes import STORAGE_LANE_SLICE_BYTES
 from . import reference_pins, retention_scan_budget
 from .candidate_models import MemoryCandidate
@@ -94,6 +95,7 @@ def build_retention_plan(
     now: datetime | None = None,
     scan_budget: RetentionScanBudget | None = None,
     scan_cursor: dict | None = None,
+    config: object | None = None,
 ) -> MemoryRetentionReport:
     remaining = max(0.0, scan_budget.deadline - retention_scan_budget.time.monotonic()) if scan_budget is not None else None
     current = _normalize_now(now)
@@ -130,6 +132,7 @@ def build_retention_plan(
         now=current,
         scan_budget=scan_budget,
         scan_cursor=deepcopy(scan_cursor) if scan_budget is not None and isinstance(scan_cursor, dict) else {},
+        config=config,
     )
     # 策略、根发现和游标准备属于固定前奏；只给实际条目扫描保留调用入口剩余的时间，不重置条目/字节账。
     if scan_budget is not None:
@@ -160,6 +163,10 @@ class _RetentionScanContext:
     scan_budget: RetentionScanBudget | None = None
     scan_cursor: dict = field(default_factory=dict)
     scan_partial: bool = False
+    config: object = None
+    discovery_context: object = None
+    discovery_actions: list = field(default_factory=list)
+    pin_projection: object = None
 
     # LLM: 法律保留任务 ID 从已解析策略转成统一集合，供所有扫描器按精确身份复用。
     # 函数用途: 返回禁止清理的任务编号集合。
@@ -172,15 +179,27 @@ class _RetentionScanContext:
 # 函数用途: 按任务保护关系组合会话、候选、运行记录、回收站与过期快照/工具清单的清理动作。
 def _collect_retention_actions(context: _RetentionScanContext) -> list[MemoryRetentionAction]:
     protection = None
+    pin_errors: list[MemoryRetentionError] = []
     if context.scan_budget is not None:
-        protection, continuation = _budgeted_pin_projection(context)
+        # 公开scan_budget仍计量原发现窗口；引用流沿同一配置和截止时间独立续进，不能重置发现计量。
+        entries = getattr(context.config, "retention_scan_slice_entries", RETENTION_SCAN_SLICE_ENTRIES)
+        size = getattr(context.config, "retention_scan_slice_bytes", RETENTION_SCAN_SLICE_BYTES)
+        if type(entries) is not int or entries <= 0 or type(size) is not int or size <= 0:
+            raise ValueError("invalid_retention_scan_budget")
+        pin_context = replace(context, scan_budget=RetentionScanBudget(entries, size, context.scan_budget.deadline),
+                              discovery_context=context, errors=[])
+        protection, continuation = _budgeted_pin_projection(pin_context)
+        pin_errors = pin_context.errors
+        context.scan_partial |= pin_context.scan_partial
+        context.pin_projection = pin_context.pin_projection
         if protection is None:
+            context.errors.extend(pin_errors)
             return []
         if continuation:
-            discovered = _budgeted_discovery_actions(context)
-            _finish_pin_cycle(context)
-            return discovered
-    discovered = _budgeted_discovery_actions(context) if context.scan_budget is not None else ()
+            context.errors.extend(pin_errors)
+            discovered = context.discovery_actions
+            return discovered if _finish_pin_cycle(context) else []
+    discovered = context.discovery_actions
     task_actions, selected_task_roots = _task_actions(
         home=context.home,
         policy=context.policy,
@@ -188,7 +207,6 @@ def _collect_retention_actions(context: _RetentionScanContext) -> list[MemoryRet
         now=context.now,
         errors=context.errors,
     )
-    pin_errors: list[MemoryRetentionError] = []
     if protection is None:
         protection = current_retention_pins(context.home, context.conversation_roots, pin_errors, now=context.now)
     actions = list(task_actions)
@@ -209,8 +227,7 @@ def _collect_retention_actions(context: _RetentionScanContext) -> list[MemoryRet
             protection=protection,
         )
     )
-    _finish_pin_cycle(context)
-    return actions
+    return actions if _finish_pin_cycle(context) else []
 
 
 # LLM: 正常续点表示未完周期；错误重试不独占周期，健康域完成后可再开新周期，停用域清掉旧续点。
@@ -240,7 +257,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
 
     def __init__(self, context):
         super().__init__(context.home, context.conversation_roots, context.now, current_retention_pins,
-                         config=context.scan_budget)
+                         config=context.config)
         self.token = secrets.token_hex(16)
         self.lock = threading.Lock()
         self.steps = self._build(context.policy)
@@ -249,24 +266,74 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
         self.paused = False
         self.index_revisions = []
         self.post_scopes = {}
+        self.context = context
+        self.discovery_done = context.discovery_context is None
+        self.queued_actions = {}
+        self.closed = False
+        # 只用于分类目录成员，不解析链接目标；真正来源及其祖先仍须严格验证。
+        from .generation_manifest import MemoryGenerationStore
+
+        store = MemoryGenerationStore(Path(context.home.owner_memory_long_term_jsonl))
+        self.pin_roots = {store.path, store.manifest_path, store.directory, store.tombstones.path,
+            Path(context.home.owner_retention_json),
+            Path(context.home.owner_workspace_dir) / "runtime/workspaces",
+            Path(context.home.owner_memory_candidates_jsonl),
+            Path(context.home.owner_memory_candidates_jsonl).parent / "candidates_archive",
+            Path(context.home.owner_memory_curator_runs_dir), Path(context.home.owner_memory_curator_runs_dir).parent / "state.json",
+            Path(context.home.owner_compact_dir) / "conversations", *_recovery_roots(context.home),
+            *(root / "threads" for root in self.roots)}
+        self.pin_ancestors = {parent for root in self.pin_roots for parent in (root, *root.parents)}
+        self.inventory = {Path(context.home.owner_home_dir),
+                          Path(context.home.owner_workspace_dir) / "runtime/workspaces"}
 
     def close(self):
         with self.lock:
-            self.steps.close()
-            reference_pins._close_source_descriptors(self.contents["fds"])
+            if self.closed:
+                return
+            self.closed = True
+            try:
+                self.steps.close()
+            finally:
+                reference_pins._close_source_descriptors(self.contents["fds"])
 
     def _current(self, errors, *, target=None):
+        discovery = self.context.discovery_context
+        if (discovery is not None and not self.discovery_done
+                and (self.value is not None or not self.queued_actions)):
+            for action in _budgeted_discovery_actions(discovery):
+                self.queued_actions[action.action_id] = action
+            self.discovery_done = not _discovery_pending(discovery.scan_cursor)
         # 继承快照的current作用域和pending发布门；迭代器保留解析位置，绝不把partial当作空pins。
-        while not self.budget.exhausted():
+        while self.value is None and not self.budget.exhausted():
             try:
                 entries = next(self.steps)
             except StopIteration:
                 self.value, self.pending = self.pending[0], None
                 self.phase = "discovery"
-                return self.value
+                break
             self.budget.charge(entries=1 if entries is None else entries)
-        self.paused = True
-        return None
+        if self.value is None:
+            self.paused = True
+        elif discovery is not None:
+            discovery.discovery_actions = list(self.queued_actions.values())
+            self.queued_actions.clear()
+        return self.value
+
+    def _pin_related(self, path):
+        return path in self.pin_ancestors or any(parent in self.pin_roots and parent not in self.inventory
+                                                 for parent in path.parents)
+
+    def _check_parents(self, path):
+        owner = Path(self.home.owner_home_dir)
+        anchors = (owner, *self.roots)
+        anchor = next((root for root in anchors if path.is_relative_to(root)), None)
+        if anchor is None:
+            raise OSError(22, "pin source is outside canonical roots", str(path))
+        parent = anchor
+        for part in ("", *path.relative_to(anchor).parts[:-1]):
+            parent = parent / part
+            if not stat.S_ISDIR(parent.stat(follow_symlinks=False).st_mode):
+                raise OSError(22, "unsafe pin source ancestor", str(parent))
 
     @staticmethod
     def _stamp(path):
@@ -282,6 +349,13 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
         self.sources[path] = observed
 
     def _chunks(self, path, *, required=False, verifying=False):
+        try:
+            self._check_parents(path)
+        except FileNotFoundError:
+            self._remember(path, None, None)
+            if required:
+                raise
+            return
         stamp = self._stamp(path)
         if stamp is None:
             self._remember(path, None, None)
@@ -307,6 +381,8 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                 scope = current_scope
                 count = min(self.contents["chunk_bytes"], self.budget.max_bytes - self.budget.size)
                 if count <= 0:
+                    if source.tell() == stamp[3]:
+                        break
                     yield b""
                     continue
                 raw = source.read1(count)
@@ -319,6 +395,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             if (after.st_nlink != 1 or reference_pins._metadata_stamp(after) != stamp
                     or self._stamp(path) != stamp):
                 raise _PinReadChanged(11, "pin source changed while reading", str(path))
+            self._check_parents(path)
         self._remember(path, stamp, digest.digest())
         if verifying:
             self.post_scopes[path] = scope
@@ -338,9 +415,12 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                 if required:
                     raise FileNotFoundError(2, "pin source missing", str(path))
                 return
-            row = json.loads(raw.decode("utf-8"))
-            if not isinstance(row, dict):
-                raise ValueError("pin source contains non-object rows")
+            # 复用唯一对象解析入口；输入是刚经nofollow分片读取并绑定代次的原字节，不再重复读盘。
+            self.contents["object_input"] = (path, raw)
+            try:
+                row = _pin_object(path)
+            finally:
+                self.contents.pop("object_input", None)
             yield row
             return
         pending = bytearray()
@@ -364,44 +444,46 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             yield row
 
     def _entries(self, path, *, verifying=False):
+        try:
+            self._check_parents(path)
+        except FileNotFoundError:
+            self._remember(path, None, None)
+            return
         stamp = self._stamp(path)
         if stamp is None:
             self._remember(path, None, None)
             return
         if not stat.S_ISDIR(stamp[2]):
             raise OSError(22, "pin discovery root is not a directory", str(path))
-        restart = True
-        while restart:
-            restart = False
-            descriptor = (open_directory_beneath(path.parent, (path.name,))
-                          if os.scandir in os.supports_fd else None)
-            try:
-                if descriptor is not None and reference_pins._metadata_stamp(os.fstat(descriptor)) != stamp:
-                    raise _PinReadChanged(11, "pin directory changed", str(path))
-                # 交换律摘要不需要整目录排序；每项含名称和inode，与原快照监视同一成员身份。
-                total = count = 0
-                scope = "settled" if reference_pins._is_settled(stamp) else self.contents["pass_token"]
-                with os.scandir(descriptor if descriptor is not None else path) as entries:
-                    for entry in entries:
-                        current_scope = "settled" if reference_pins._is_settled(stamp) else self.contents["pass_token"]
-                        if verifying and scope is not None and scope != current_scope:
-                            restart = True
-                            break
-                        scope = current_scope
-                        name = os.fsencode(entry.name)
-                        total = (total + int.from_bytes(hashlib.sha256(
-                            name + b"\0" + str(entry.inode()).encode()).digest(), "big")) % (1 << 256)
-                        count += 1
-                        member = entry.stat(follow_symlinks=False)
-                        if not (stat.S_ISREG(member.st_mode) or stat.S_ISDIR(member.st_mode)):
-                            raise OSError(22, "unsafe pin discovery member", str(path / entry.name))
-                        yield path / entry.name, stat.S_ISDIR(member.st_mode)
-                if ((descriptor is not None and reference_pins._metadata_stamp(os.fstat(descriptor)) != stamp)
-                        or self._stamp(path) != stamp):
-                    raise _PinReadChanged(11, "pin directory changed", str(path))
-            finally:
-                if descriptor is not None:
-                    os.close(descriptor)
+        descriptor = (open_directory_beneath(path.parent, (path.name,))
+                      if os.scandir in os.supports_fd else None)
+        try:
+            if descriptor is not None and reference_pins._metadata_stamp(os.fstat(descriptor)) != stamp:
+                raise _PinReadChanged(11, "pin directory changed", str(path))
+            # 交换律摘要不需要整目录排序；每项含名称和inode，与原快照监视同一成员身份。
+            total = count = 0
+            scope = "settled" if reference_pins._is_settled(stamp) else self.contents["pass_token"]
+            with os.scandir(descriptor if descriptor is not None else path) as entries:
+                for entry in entries:
+                    scope = "settled" if reference_pins._is_settled(stamp) else self.contents["pass_token"]
+                    name = os.fsencode(entry.name)
+                    total = (total + int.from_bytes(hashlib.sha256(
+                        name + b"\0" + str(entry.inode()).encode()).digest(), "big")) % (1 << 256)
+                    count += 1
+                    member = entry.stat(follow_symlinks=False)
+                    if not (stat.S_ISREG(member.st_mode) or stat.S_ISDIR(member.st_mode)):
+                        child = path / entry.name
+                        if path in self.inventory and not self._pin_related(child):
+                            yield child, False
+                            continue
+                        raise OSError(22, "unsafe pin discovery member", str(path / entry.name))
+                    yield path / entry.name, stat.S_ISDIR(member.st_mode)
+            if ((descriptor is not None and reference_pins._metadata_stamp(os.fstat(descriptor)) != stamp)
+                    or self._stamp(path) != stamp):
+                raise _PinReadChanged(11, "pin directory changed", str(path))
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
         self._remember(path, stamp, (total, count))
         if verifying:
             self.post_scopes[path] = scope or self.contents["pass_token"]
@@ -421,35 +503,30 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
         if stamp is not None:
             if stat.S_ISDIR(stamp[2]):
                 for _ in self._entries(path, verifying=True):
-                    yield
+                    yield 0
             else:
                 for _ in self._chunks(path, verifying=True):
                     yield 0
-        yield
+        yield 0
 
     def _verify(self):
         hot = []
         for path, (stamp, _digest) in self.sources.items():
             if stamp is not None and not reference_pins._is_settled(stamp):
                 hot.append(path)
-                yield
+                yield 0
             else:
                 yield from self._verify_source(path)
-        # 冷源只续验一次；热源组须在发布的同一个current完成，不能拼接旧pass的完整摘要。
-        settled = set()
-        while len(settled) < len(hot):
-            scope = self.contents["pass_token"]
-            for path in hot:
-                if path in settled:
-                    continue
-                if scope != self.contents["pass_token"]:
-                    break
+        # 冷源续验完成后才读热源，避免冷源暂停期间沿用先前片的热对象；按文件保持原字节代次校验。
+        for path in hot:
+            yield from self._verify_source(path)
+        for path, (stamp, _digest) in self.sources.items():
+            if (stamp is not None and reference_pins._is_settled(stamp)
+                    and self.post_scopes.get(path) not in (None, "settled")):
                 yield from self._verify_source(path)
-                if self.post_scopes.get(path) == "settled":
-                    settled.add(path)
-            else:
-                if scope == self.contents["pass_token"] or len(settled) == len(hot):
-                    break
+            if self._stamp(path) != stamp:
+                raise _PinReadChanged(11, "pin source generation changed", str(path))
+            yield 0
         for index, revision in self.index_revisions:
             with index.snapshot(minimum_revision=revision) as snapshot:
                 if snapshot.revision != revision:
@@ -497,7 +574,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             for row in self._rows(path):
                 if row is not None:
                     add(row)
-                yield
+                yield int(row is not None)
         else:
             # 根清单仍由唯一schema校验器解析；分片按原hash/count/事件身份校验，逐行可续。
             for segment in root["segments"]:
@@ -507,12 +584,12 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                     if row is not None:
                         add(row, generation=True)
                         count += 1
-                    yield
+                    yield int(row is not None)
                 if self.sources[source][1].hex() != segment["sha256"] or count != segment["count"]:
                     raise ValueError("MEMORY_GENERATION_UNREADABLE")
             # 原正式文件不再是代次权威，但仍属于原快照监视集合。
             for _ in self._chunks(path):
-                yield
+                yield 0
         tombstones = {}
         if marker.get("index_file") is None:
             for entry_id, row in marker["records"].items():
@@ -521,7 +598,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                 if record.action != "remove" or record.entry_id != entry_id or row.get("attributes"):
                     raise ValueError("MEMORY_TOMBSTONES_UNREADABLE")
                 tombstones[entry_id] = record
-                yield
+                yield 1
         legacy = _tombstone_path(path)
         for row in self._rows(legacy):
             if row is not None:
@@ -535,14 +612,14 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                     selected.removed_content_hashes = tuple(sorted(set(record.removed_content_hashes)
                         | set(old.removed_content_hashes if old else ())))
                     tombstones[record.entry_id] = selected
-            yield
+            yield int(row is not None)
         if marker.get("index_file") is None:
             if store.tombstones.index.has_committed_authority():
                 receipt = store.tombstones.index.migration_receipt()
                 identity = hashlib.sha256((marker_body or b"") + b"\0")
                 for record in tombstones.values():
                     identity.update(record.to_json().encode())
-                    yield
+                    yield 0
                 if (receipt is None or receipt.get("migrated_revision") != receipt["revision"]
                         or receipt.get("source_identity") != identity.hexdigest()):
                     raise ValueError("MEMORY_TOMBSTONES_UNREADABLE")
@@ -550,7 +627,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             for record in tombstones.values():
                 hashes.update(record.removed_content_hashes)
                 active.pop(record.entry_id, None)
-                yield
+                yield 0
         else:
             # 复用现有只读SQLite快照，页间只携带修订/主键，不跨片持连接或WAL读锁。
             from .storage_tombstone_index import _validated_tombstone_payload
@@ -584,14 +661,14 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                 if not sizes:
                     break
                 if not rows:
-                    yield
+                    yield 0
                     continue
                 self.budget.charge(size=sum(len(row[2].encode()) for row in rows))
                 for row in rows:
                     record = _validated_tombstone_payload(*row)
                     active.pop(record.entry_id, None)
                     after = row[0]
-                    yield
+                    yield 1
             self.index_revisions.append((store.tombstones.index, revision))
             items = iter(active.items())
             while True:
@@ -612,13 +689,13 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                 for entry_id, record in batch:
                     if entry_id not in blocked and (not record.expires_at or record.expires_at > self.now.timestamp()):
                         yield from pins.collect_steps({"source": record.source, "attributes": record.attributes}, path)
-                    yield
+                    yield 0
             return
         for record in active.values():
             if ((root is None or hashlib.sha256(record.content.encode()).hexdigest() not in hashes)
                     and (not record.expires_at or record.expires_at > self.now.timestamp())):
                 yield from pins.collect_steps({"source": record.source, "attributes": record.attributes}, path)
-            yield
+            yield 0
 
     def _task_states(self):
         owner = Path(self.home.owner_home_dir)
@@ -651,13 +728,14 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
     def _build(self, policy):
         pins = _RetentionPins(Path(self.home.owner_home_dir))
         for _ in self._entries(pins.home):
-            yield
+            yield 0
         runtime = Path(self.home.owner_workspace_dir) / "runtime/workspaces"
         for workspace, directory in self._entries(runtime):
             if directory:
+                self.inventory.add(workspace)
                 for _ in self._entries(workspace):
-                    yield
-            yield
+                    yield 0
+            yield 0
         # 策略读取与后续各源一样绑定字节代次，不能沿用固定前奏中的旧策略。
         raw = yield from self._read(Path(self.home.owner_retention_json))
         if raw is None or MemoryRetentionPolicy.from_payload(json.loads(raw)) != policy:
@@ -687,15 +765,15 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                             if key in monthly:
                                 raise ValueError("duplicate candidate cold version")
                             monthly[key] = envelope
-                        yield
+                        yield int(envelope is not None)
                     cold_cache[match[1]] = monthly
                 candidate = _hydrate_candidate(candidate_path, candidate, cold_cache)
                 row = candidate.to_record()
             yield from pins.collect_steps(row, candidate_path)
-            yield
+            yield 1
         for path in self._task_states():
             if path is None:
-                yield
+                yield 0
                 continue
             for row in self._rows(path, required=True):
                 if row is None:
@@ -709,11 +787,11 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                     if not reconciled:
                         pins.paths.add(path.parent.parent.resolve(strict=False))
                     yield from pins.collect_steps(row, path)
-                yield
+                yield 0
         for root in self.roots:
             for path in self._walk(root / "threads"):
                 if path is None:
-                    yield
+                    yield 0
                     continue
                 if path.suffix != ".json":
                     continue
@@ -725,18 +803,18 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                     if not thread.thread_id or thread.thread_id != path.stem:
                         raise ValueError("pin thread identity mismatches")
                     yield from pins.collect_steps(row, path)
-                    yield
+                    yield 0
                     if thread.compact_checkpoint_id:
                         checkpoint = Path(self.home.owner_compact_dir) / "conversations" / f"{thread.thread_id}.jsonl"
                         pins.paths.add(checkpoint.resolve(strict=False))
                         for item in self._rows(checkpoint, required=True):
                             if item is not None:
                                 yield from pins.collect_steps(item, checkpoint)
-                            yield
+                            yield int(item is not None)
         curator = Path(self.home.owner_memory_curator_runs_dir)
         for path in self._walk(curator):
             if path is None:
-                yield
+                yield 0
                 continue
             if path.suffix not in {".json", ".jsonl"}:
                 continue
@@ -747,14 +825,15 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                     if isinstance(warnings, (list, tuple)) and any(isinstance(value, str)
                         and value.startswith((_CURSOR_CHECKPOINT, _CURSOR_DELTA)) for value in warnings):
                         pins.paths.add(path.resolve(strict=False))
-                yield
+                yield int(row is not None)
         path = curator.parent / "state.json"
         for row in self._rows(path):
             if row is not None:
                 yield from pins.collect_steps(row, path)
-            yield
+            yield 0
         self.phase = "verify"
         self.pending = ((pins, True), self.sources)
+        yield 1
         yield from self._verify()
 
 
@@ -762,31 +841,43 @@ def _budgeted_pin_projection(context):
     owner = Path(context.home.owner_home_dir)
     cursor = context.scan_cursor.get(_PIN_CURSOR_KEY, {})
     token = cursor.get("token") if isinstance(cursor, dict) else None
-    retired = []
-    with _PIN_BUILDS_LOCK:
-        snapshot = _PIN_BUILDS.get(owner)
-        if snapshot is None or snapshot.token != token or snapshot.roots != context.conversation_roots:
-            if snapshot is not None:
-                retired.append(snapshot)
-            snapshot = _PinProjection(context)
-            _PIN_BUILDS[owner] = snapshot
-        _PIN_BUILDS.move_to_end(owner)
-        while len(_PIN_BUILDS) > cache_capacity.resident_owners(1):
-            retired.append(_PIN_BUILDS.popitem(last=False)[1])
-    for old in retired:
-        old.close()
-    continuation = snapshot.phase == "discovery"
+    snapshot = _admit_pin_projection(context, owner, token)
+    if snapshot is None:
+        context.scan_partial = True
+        return None, False
+    before_cursor = deepcopy(context.scan_cursor)
+    before_errors = len(context.errors)
     try:
         with snapshot.lock:
+            with _PIN_BUILDS_LOCK:
+                retained = _PIN_BUILDS.get(owner) is snapshot
+            if not retained or snapshot.closed:
+                context.scan_partial = True
+                return None, False
+            continuation = snapshot.phase == "discovery"
             snapshot.budget = context.scan_budget
-            protection = snapshot.value if continuation else snapshot.current(context.errors)
+            snapshot.context = context
+            protection = snapshot.current(context.errors)
+            with _PIN_BUILDS_LOCK:
+                retained = _PIN_BUILDS.get(owner) is snapshot
+            if not retained:
+                context.scan_cursor.clear()
+                context.scan_cursor.update(before_cursor)
+                del context.errors[before_errors:]
+                context.scan_partial = True
+                return None, False
+            context.pin_projection = snapshot
+            context.scan_cursor[_PIN_CURSOR_KEY] = {"token": snapshot.token, "phase": snapshot.phase}
     except (CandidateStoreCorruptError, OSError, ValueError, TypeError, KeyError, IndexError, OverflowError) as exc:
-        snapshot.close()
         with _PIN_BUILDS_LOCK:
             if _PIN_BUILDS.get(owner) is snapshot:
                 _PIN_BUILDS.pop(owner)
+        snapshot.close()
         context.scan_cursor.pop(_PIN_CURSOR_KEY, None)
         if isinstance(exc, _PinReadChanged):
+            for key in tuple(context.scan_cursor):
+                if isinstance(key, str) and key.startswith(("conversation:", "snapshot:")):
+                    context.scan_cursor.pop(key)
             if snapshot.paused:
                 # 跨片旧代次只丢弃并重建；不能在恢复入口偷偷退回无预算全扫。
                 context.scan_partial = True
@@ -796,25 +887,104 @@ def _budgeted_pin_projection(context):
         context.errors.append(MemoryRetentionError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE",
             str(getattr(exc, "filename", "") or ""), type(exc).__name__))
         return (_RetentionPins(owner, complete=False), False), False
-    context.scan_cursor[_PIN_CURSOR_KEY] = {"token": snapshot.token, "phase": snapshot.phase}
     if protection is None:
         context.scan_partial = True
     return protection, continuation
 
 
+def _admit_pin_projection(context, owner, token):
+    candidate = None
+    for attempt in range(2):
+        retired = []
+        probe = None
+        with _PIN_BUILDS_LOCK:
+            capacity = _pin_capacity()
+            # 只有配置缩容可淘汰；优先保留本次要借用的resident。
+            while len(_PIN_BUILDS) > capacity:
+                victim = next(iter(_PIN_BUILDS))
+                if victim == owner:
+                    _PIN_BUILDS.move_to_end(victim)
+                    victim = next(iter(_PIN_BUILDS))
+                retired.append(_PIN_BUILDS.pop(victim))
+            snapshot = _PIN_BUILDS.get(owner)
+            if snapshot is not None and (snapshot.token != token or snapshot.roots != context.conversation_roots
+                                         or snapshot.contents["chunk_bytes"] != getattr(context.config,
+                                             "memory_reference_pin_chunk_bytes", reference_pins._PIN_SOURCE_CHUNK_BYTES)):
+                retired.append(_PIN_BUILDS.pop(owner))
+                snapshot = None
+            available = len(_PIN_BUILDS) < capacity
+            if snapshot is None and not available and attempt == 0:
+                probe_owner = next(iter(_PIN_BUILDS))
+                probe = (probe_owner, _PIN_BUILDS[probe_owner])
+                _PIN_BUILDS.move_to_end(probe_owner)
+        for old in retired:
+            old.close()
+        if snapshot is not None:
+            return snapshot
+        if available:
+            candidate = _PinProjection(context)
+            with _PIN_BUILDS_LOCK:
+                if owner not in _PIN_BUILDS and len(_PIN_BUILDS) < _pin_capacity():
+                    _PIN_BUILDS[owner] = candidate
+                    # 进程状态丢失后旧发现动作也丢失，保守重新发现；旧版无pin token的输入续点保持原合同。
+                    if token is not None:
+                        for key in tuple(context.scan_cursor):
+                            if key == _PIN_CURSOR_KEY or key.startswith(("conversation:", "snapshot:")):
+                                context.scan_cursor.pop(key)
+                    return candidate
+            candidate.close()
+            return None
+        if probe is None:
+            return None
+        probe_owner, resident = probe
+        try:
+            stamp = resident._stamp(probe_owner)
+            policy_path = Path(resident.home.owner_retention_json)
+            policy_stamp = resident._stamp(policy_path)
+            policy, error = _load_policy(policy_path)
+            retire = (resident.closed or stamp is None or not stat.S_ISDIR(stamp[2]) or error is not None or policy is None
+                      or policy_stamp is None or not stat.S_ISREG(policy_stamp[2])
+                      or policy.legal_hold or not policy.maintenance_enabled or policy.maintenance_interval_seconds == 0)
+        except (OSError, ValueError, TypeError):
+            retire = True
+        removed = None
+        if retire:
+            with _PIN_BUILDS_LOCK:
+                if _PIN_BUILDS.get(probe_owner) is resident:
+                    removed = _PIN_BUILDS.pop(probe_owner)
+        if removed is not None:
+            removed.close()
+    return None
+
+
+def _pin_capacity():
+    # CLI尚未登记全局并发槽位时仍采用唯一配置默认值，显式capacity=1不会被默认下限盖掉。
+    return cache_capacity.resident_owners(0) or AgentConfig.__dataclass_fields__["owner_agent_pool_max_agents"].default
+
+
+def _discovery_pending(cursor):
+    return any(isinstance(key, str) and key.startswith(("conversation:", "snapshot:")) and not (
+        isinstance(value, dict) and value.get("retry") is True) for key, value in cursor.items())
+
+
 def _finish_pin_cycle(context):
-    if context.scan_budget is None:
-        return
-    pending = any(isinstance(key, str) and key.startswith(("conversation:", "snapshot:")) and not (
-        isinstance(value, dict) and value.get("retry") is True) for key, value in context.scan_cursor.items())
+    if context.scan_budget is None or context.pin_projection is None:
+        return True
+    pending = _discovery_pending(context.scan_cursor)
+    with _PIN_BUILDS_LOCK:
+        owner = Path(context.home.owner_home_dir)
+        snapshot = _PIN_BUILDS.get(owner)
+        if snapshot is not context.pin_projection:
+            context.scan_partial = True
+            return False
+        if not pending:
+            _PIN_BUILDS.pop(owner)
     if pending:
         context.scan_partial = True
-        return
+        return True
     context.scan_cursor.pop(_PIN_CURSOR_KEY, None)
-    with _PIN_BUILDS_LOCK:
-        snapshot = _PIN_BUILDS.pop(Path(context.home.owner_home_dir), None)
-    if snapshot is not None:
-        snapshot.close()
+    snapshot.close()
+    return True
 
 
 # LLM: 共用法律保留和终态输入；仅会话扫描消费共享预算，不以mtime预筛线程权威。
@@ -2835,7 +3005,7 @@ class _PinDigestReader(io.RawIOBase):
     # LLM: 每次只消费包装器请求的实际字节交绑定摘要，EOF必须与读前观察一致。
     # 函数用途: 在正常解析读取中流式校验，不另开来源或重复读取正文。
     def readinto(self, buffer):
-        raw = self.raw.read1(len(buffer))
+        raw = self.raw.read1(min(len(buffer), reference_pins._pin_source_chunk_bytes()))
         if not raw:
             self.verify()
             return 0
@@ -2908,8 +3078,11 @@ def _pin_rows(path: Path, *, required: bool = False, jsonl: bool | None = None):
 # LLM: JSON对象入口完整耗尽读取器以核对首末FD和路径，不允许未验证首行充当权威状态。
 # 函数用途: 读取唯一pin状态对象，缺失或多对象拒绝。
 def _pin_object(path: Path) -> dict[str, Any]:
-    rows = list(_pin_rows(path, required=True))
-    if len(rows) != 1:
+    contents = reference_pins._SOURCE_CONTENTS.get()
+    buffered = contents.get("object_input") if contents is not None else None
+    rows = ([json.loads(buffered[1].decode("utf-8"))] if buffered is not None and buffered[0] == path
+            else list(_pin_rows(path, required=True)))
+    if len(rows) != 1 or not isinstance(rows[0], dict):
         raise ValueError("pin source requires exactly one object")
     return rows[0]
 

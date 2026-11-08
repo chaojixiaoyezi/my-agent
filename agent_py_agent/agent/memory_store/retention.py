@@ -118,6 +118,7 @@ class MemoryRetentionService:
             now=_normalize_now(now),
             scan_budget=scan_budget,
             scan_cursor=scan_cursor,
+            config=self.config,
         )
 
     # LLM: None保原锁内plan/apply；callback长扫描门外、逐写短提交；始终预算扫描并透传同config，续点仅在同锁或原提交门保存。
