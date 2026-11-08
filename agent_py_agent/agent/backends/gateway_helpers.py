@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..concurrency.daemon_executor import DeferredCall, SharedDeferredCalls
 from . import keepalive_transport
 from .errors import (
     ProviderConnectionError,
@@ -432,6 +433,11 @@ def _stream_with_watchdog(request: GatewayRequest) -> Iterator[str]:
                 watchdog.cancel()
 
 
+# 每条在途模型流的空闲/硬期限检查共用一条常驻延时线程（3.14t 下每流一条 Timer 线程既常驻又随创建次数涨 RSS）；
+# 回调只做 socket shutdown/close，不读不等，不会拖住其它流的到期检查。
+_STREAM_WATCHDOG_CALLS = SharedDeferredCalls("stream-idle-watchdog")
+
+
 # LLM: watchdog 只关闭当前 guard；SSE 有效 data 后滚动续期，严格 JSON 不调用 touch，始终使用原绝对期限。
 # 类用途: 共用网络等待计时器，分别执行流式空闲和显式非流式总期限合同。
 class _StreamIdleWatchdog:
@@ -455,7 +461,7 @@ class _StreamIdleWatchdog:
         #   就能无限续期"那条路径。None 保持原语义（主模型与旧调用方不设总时限）。
         self._hard_deadline = hard_deadline
         self._lock = threading.Lock()
-        self._timer: threading.Timer | None = None
+        self._timer: DeferredCall | None = None
         self._cancelled = False
         self._timed_out = False
         self._seen_data = False
@@ -522,10 +528,9 @@ class _StreamIdleWatchdog:
         self._response_guard.abort()
 
     def _schedule_locked(self, delay: float) -> None:
-        timer = threading.Timer(max(0.001, delay), self._check)
-        timer.daemon = True
+        timer = DeferredCall(self._check)
         self._timer = timer
-        timer.start()
+        _STREAM_WATCHDOG_CALLS.start(timer, max(0.001, delay))
 
 
 # LLM: Convert watchdog/parser phase into the closed timeout-stage vocabulary used by the model-call ledger.
