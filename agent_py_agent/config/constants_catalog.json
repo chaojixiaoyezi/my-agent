@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1407,
+  "count": 1408,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -8402,6 +8402,14 @@
       "unit": "个",
       "category": "上限预算",
       "description": "会话进度最多展示的标题条数；超出截断，防止进度面板刷屏。"
+    },
+    {
+      "name": "SMALL_TEXT_MAX_BYTES",
+      "file": "agent_py_agent/agent/subagents/static_site/validator.py",
+      "value": 262144,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "静态站点校验时直接单次读取的小型文本文件字节上限（256 KiB）。"
     },
     {
       "name": "_FAILURE_MESSAGE_MAX_CHARS",
