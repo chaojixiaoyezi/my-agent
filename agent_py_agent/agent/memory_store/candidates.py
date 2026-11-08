@@ -1721,14 +1721,20 @@ def _read_cold_records(path: Path, name: str, *, missing_ok: bool = False) -> li
 
 # LLM: 精确ref版本且核心身份/版本绑定一致才补白名单详情；热状态/计数/排除标记不被旧冷快照覆盖。
 # 函数用途: 为get/详情和指定写入目标透明回填独立的完整候选，缺失或篡改明确报损坏。
-def _hydrate_candidate(path: Path, item: MemoryCandidate) -> MemoryCandidate:
+# LLM: cold_cache 只活在调用方的一次扫描内（如保留引用投影），按月缓存已整份校验过的信封；
+#   不跨扫描、不跨锁复用，月文件变化仍由调用方的来源复核发现并整轮重试。
+def _hydrate_candidate(path: Path, item: MemoryCandidate, cold_cache: dict | None = None) -> MemoryCandidate:
     if not item.cold_detail_ref:
         return item
     match = _COLD_REF.fullmatch(item.cold_detail_ref)
     if match is None or match[2] != item.candidate_id:
         raise CandidateStoreCorruptError("candidate cold reference is invalid")
-    records = _read_cold_records(path, match[1])
-    envelope = next((row for row in records if row["candidate_id"] == match[2] and row["sha256"] == match[3]), None)
+    by_key = cold_cache.get(match[1]) if cold_cache is not None else None
+    if by_key is None:
+        by_key = {(row["candidate_id"], row["sha256"]): row for row in _read_cold_records(path, match[1])}
+        if cold_cache is not None:
+            cold_cache[match[1]] = by_key
+    envelope = by_key.get((match[2], match[3]))
     if envelope is None:
         raise CandidateStoreCorruptError("candidate cold version is missing")
     detail = MemoryCandidate.from_record(envelope["record"])
