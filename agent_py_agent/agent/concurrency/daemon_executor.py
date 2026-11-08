@@ -17,11 +17,13 @@ import heapq
 import itertools
 import sys
 import threading
-import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures.thread import _worker
 from contextvars import Context, copy_context
+
+# 共用调度线程用导入时绑定的单调钟（同 threading.Timer）：调用方或测试替换 time.monotonic 只改它自己的计时，拨不动全进程的到期堆。
+from time import monotonic as _monotonic
 
 
 class DurableDaemonThreadPoolExecutor(ThreadPoolExecutor):
@@ -103,7 +105,7 @@ class SharedDeferredCalls:
 
     def start(self, call: DeferredCall, delay: float) -> None:
         with self._cv:
-            heapq.heappush(self._heap, (time.monotonic() + max(0.0, float(delay)), next(self._seq), call))
+            heapq.heappush(self._heap, (_monotonic() + max(0.0, float(delay)), next(self._seq), call))
             if self._thread is None or not self._thread.is_alive():
                 kwargs = {"context": Context()} if hasattr(sys.flags, "thread_inherit_context") else {}
                 self._thread = threading.Thread(target=self._run, name=self._name, daemon=True, **kwargs)
@@ -113,8 +115,8 @@ class SharedDeferredCalls:
     def _run(self) -> None:
         while True:
             with self._cv:
-                while not self._heap or self._heap[0][0] > time.monotonic():
-                    self._cv.wait(self._heap[0][0] - time.monotonic() if self._heap else None)
+                while not self._heap or self._heap[0][0] > _monotonic():
+                    self._cv.wait(self._heap[0][0] - _monotonic() if self._heap else None)
                 call = heapq.heappop(self._heap)[2]
             fn, context = call.fn, call.context
             if fn is not None and context is not None:
