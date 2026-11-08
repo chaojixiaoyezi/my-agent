@@ -337,8 +337,10 @@ def test_actual_crash_then_cold_restart_consumes_only_original_obligation(tmp_pa
     fixture_agent.subagents.mutate(foreign, lambda task: setattr(task, "owner", "providers/test/users/other"))
     untouched = {run: fixture_agent.subagents.load(run) for run in (later_child, foreign)}
     cold = ("from pathlib import Path; from agent_py_agent.tests.test_v13_w4_capability_closeout_multiprocess "
-            "import _cold_native_resume; import sys; _cold_native_resume(Path(sys.argv[1]), sys.argv[2] == '1')")
-    resumed = subprocess.run([sys.executable, "-c", cold, str(tmp_path), str(int(inject_io))],
+            "import _cold_native_resume; import sys; "
+            "_cold_native_resume(Path(sys.argv[1]), sys.argv[2] == '1', sys.argv[3] == '1')")
+    unstable_observation = checkpoint == "after_child_commit"
+    resumed = subprocess.run([sys.executable, "-c", cold, str(tmp_path), str(int(inject_io)), str(int(unstable_observation))],
         cwd=repo_root, env=environment, capture_output=True, text=True, timeout=45, start_new_session=True)
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     terminal = read_json_file(paths.terminal / path.name)
@@ -351,11 +353,12 @@ def test_actual_crash_then_cold_restart_consumes_only_original_obligation(tmp_pa
     assert {run: fixture_agent.subagents.load(run) for run in untouched} == untouched
     outcome = read_json_file(tmp_path / "native-recovery.json")
     assert outcome["fd_delta"] == 0 and len(outcome["io_errors"]) == int(inject_io)
+    assert not unstable_observation or outcome["p2_rejections"] >= 1
 
 
 # LLM: 真正fresh冷C只用ControlPlane/原P0/P1/P2/P3及恢复ports，不造Agent、进程身份或P2成功字典；前置不支持就真实失败。
 # 函数用途: 在独立进程消费同一原claim的pending证明，并保存真实恢复报告和FD观察。
-def _cold_native_resume(root, inject_io):
+def _cold_native_resume(root, inject_io, unstable_observation=False):
     import errno
     import time
     from dataclasses import asdict
@@ -402,7 +405,39 @@ def _cold_native_resume(root, inject_io):
         assert coordinator_for_root(paths.root, context=paths) is not None
         context = _RecoveryContext(time.time() + 100, 3, 900, True, control, None, admission_gate=gate)
         before = _fd_count()
-        report = recover_gateway_processing_requests_report(paths, params=context)
+        if unstable_observation:
+            from threading import get_ident
+
+            from agent_py_agent.agent.gateway_parts import multiprocess_takeover as p2
+
+            original_probe = p2.observe_processes
+            observing_thread, injected = get_ident(), False
+
+            # 只注入一次真实探针的读取失败；随后必须由原生进程表产生停止证明。
+            def unstable_once():
+                nonlocal injected
+                if get_ident() == observing_thread and not injected:
+                    injected = True
+                    raise p2.UnstableProcessSnapshot()
+                return original_probe()
+
+            p2.observe_processes = unstable_once
+        original_request = path.read_bytes()
+        deadline, p2_rejections = time.monotonic() + 15, 0
+        while True:
+            report = recover_gateway_processing_requests_report(paths, params=context)
+            if not report.load_errors:
+                break
+            # 共享 CI 进程表会变化；仅等待未进入操作、原请求字节未变的 P2 拒绝。
+            (error,) = report.load_errors
+            assert (error.get("error_code") == "ACTIVE_TURN_OUTCOME_UNCERTAIN"
+                    and error.get("phase") == "processing_recovery.p2"
+                    and error.get("request_id") == path.stem
+                    and error.get("operation_entered") is False), report.load_errors
+            assert path.read_bytes() == original_request
+            p2_rejections += 1
+            assert time.monotonic() < deadline, report.load_errors
+            time.sleep(0.05)
         assert report.load_errors == [], report.load_errors
         canonical = paths.terminal / path.name
         terminal = read_json_file(canonical)
@@ -414,7 +449,8 @@ def _cold_native_resume(root, inject_io):
         assert canonical.read_bytes() == original and not path.exists()
         delta = _fd_count() - before
         assert delta == 0 and len(errors) == int(inject_io), {"fd_delta": delta, "io_errors": errors}
-        write_json_file_atomic(root / "native-recovery.json", {"report": asdict(report), "fd_delta": delta, "io_errors": errors})
+        write_json_file_atomic(root / "native-recovery.json", {"report": asdict(report), "fd_delta": delta,
+                                                             "io_errors": errors, "p2_rejections": p2_rejections})
 
 
 def test_child_snapshot_io_failure_keeps_success_and_unconfirmed_proof(tmp_path, monkeypatch):
