@@ -331,6 +331,14 @@ class RequestEventHub:
             state.touched = now
             return subscription
 
+    # LLM: Read-only: never creates a topic or subscription; the topic object identity detects eviction/recreation.
+    # 函数用途: 返回 (主题对象, 最后序号)，供调用方 O(1) 判断“自上次读取后有无新提交事件”；主题不存在时为 (None, 0)。
+    def topic_mark(self, topic) -> tuple[object | None, int]:
+        key = _topic_key(topic)
+        with self._lock:
+            state = self._topics.get(key) if key is not None else None
+            return state, (state.last_seq if state is not None else 0)
+
     # LLM: Return a persistent, independently closeable subscription-backed view.
     # 函数用途: 为传输层创建可长期等待并主动唤醒的信号视图。
     def signal(self, topic) -> SignalView:
