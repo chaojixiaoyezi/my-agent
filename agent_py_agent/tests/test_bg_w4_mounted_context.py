@@ -17,6 +17,7 @@ from agent_py_agent.agent.capability.business_capabilities import (
     business_context_for_host,
 )
 from agent_py_agent.agent.conversation.business_contracts import BusinessExecutionContext
+from agent_py_agent.agent.conversation.session_tasks import SessionTaskUpdate
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts.business_api import (
     _model_business_actor,
@@ -181,6 +182,99 @@ def test_actual_worker_recovers_binding_from_canonical_lineage(agent, monkeypatc
     monkeypatch.setattr(business_capabilities, 'resolve_business_capabilities', observe)
     agent.capability_router.search('报告', limit=5)
     assert seen == [task.task_id]
+
+
+def _complete_task(agent, task):
+    store = agent.conversation_store.session_tasks
+    store.bind_turn(task.task_id, turn_id='completed-' + task.task_id)
+    return store.advance(task.task_id, SessionTaskUpdate('done', summary='已完成前一轮',
+                                                       result_refs=('result:' + task.task_id,)))
+
+
+def _assert_lineage_reads(agent, chat, sid, task, monkeypatch):
+    """同时验证注册工具的真实结果信封、当前执行线程身份和挂载能力读取。"""
+    context = _task_turn(agent, task)
+    outcome, result = _invoke(agent, 'spaces.get', {'space_id': sid})
+    assert outcome.ok, outcome.output
+    assert result['state'] == 'completed' and result['error'] is None
+    assert result['data']['space']['space_id'] == sid
+    assert _space_for_context(agent, context)['space_id'] == sid
+    actor = _model_business_actor(agent)
+    assert actor.source_thread_id == task.target_thread_id
+    assert actor.conversation_id == chat.channel_bindings[0].channel_conversation_id
+    seen = []
+    resolve = business_capabilities.resolve_business_capabilities
+
+    def observe(**kwargs):
+        seen.append(kwargs['context'].task_id)
+        return resolve(**kwargs)
+
+    with monkeypatch.context() as mounted:
+        mounted.setattr(business_capabilities, 'resolve_business_capabilities', observe)
+        agent.capability_router.search('报告', limit=5)
+    assert seen == [task.task_id]
+
+
+@pytest.mark.parametrize('caller', ['controller', 'ancestor-worker', 'original-sender'])
+def test_follow_up_with_current_sender_keeps_canonical_business_identity(agent, monkeypatch, caller):
+    # T0: chat→C，T1: C→A，T2: A→B；合法follow-up可由C或原发送方A继续发往B。
+    chat, sid, root, parent = _delegated_task(agent, controller=caller == 'controller')
+    worker = _call(agent, 'background_agents.create', {'name': '末级接手人', 'space_id': sid},
+                   idempotency_key='follow-up-leaf')['agent']['agent_id']
+    _task_turn(agent, parent)
+    task_id = _call(agent, 'tasks.assign', {'agent_id': worker, 'space_id': sid,
+        'instruction': '处理末级任务', 'origin_task_id': parent.task_id},
+        idempotency_key='follow-up-delegation')['task_id']
+    store = agent.conversation_store.session_tasks
+    task = store.require(task_id)
+    _assert_lineage_reads(agent, chat, sid, task, monkeypatch)
+    done = _complete_task(agent, task)
+    assert done.status == 'done'
+    source = parent if caller == 'original-sender' else root
+    _task_turn(agent, source)
+    result = _call(agent, 'tasks.follow_up', {'task_id': task_id, 'instruction': '继续补充结果'},
+                   idempotency_key='follow-up-current-sender')
+    next_task = store.require(result['new_task_id'])
+    assert next_task.task_id != task_id
+    assert (next_task.sender_thread_id, next_task.target_thread_id, next_task.origin_task_id) == (
+        source.target_thread_id, worker, task_id)
+    _assert_lineage_reads(agent, chat, sid, next_task, monkeypatch)
+    assert store.require(task_id).to_dict() == done.to_dict()
+
+
+def test_unlimited_follow_up_lineage_reads_beyond_depth_probe(agent, tmp_path, monkeypatch):
+    config = tmp_path / 'capability_config.yaml'
+    config.write_text('session_task_max_chain_depth: 0\nsession_pair_hourly_limit: 100\n', encoding='utf-8')
+    agent.capability_config_path = config
+    agent._capability_config_runtime_snapshot = None
+    chat, sid, root, task = _delegated_task(agent)
+    store = agent.conversation_store.session_tasks
+    completed, failures, probes = [], [], {}
+    for depth in range(1, 67):
+        if depth in {1, 63, 64, 65, 66}:
+            probes[depth] = store.chain_depth(task)
+            # 收集两个截断边界的真实失败，避免深度65的断言遮住深度66的复现。
+            try:
+                _assert_lineage_reads(agent, chat, sid, task, monkeypatch)
+            except AssertionError as error:
+                failures.append((depth, str(error)))
+        done = _complete_task(agent, task)
+        assert done.status == 'done'
+        completed.append(done)
+        if depth == 66:
+            break
+        _task_turn(agent, root)
+        result = _call(agent, 'tasks.follow_up', {'task_id': task.task_id, 'instruction': '继续处理'},
+                       idempotency_key=f'deep-follow-up-{depth}')
+        next_task = store.require(result['new_task_id'])
+        assert next_task.task_id != task.task_id
+        assert (next_task.sender_thread_id, next_task.target_thread_id, next_task.origin_task_id) == (
+            root.target_thread_id, task.target_thread_id, task.task_id)
+        assert store.require(task.task_id).to_dict() == done.to_dict()
+        task = next_task
+    assert probes == {1: 1, 63: 63, 64: 64, 65: 64, 66: 64}
+    assert all(store.require(previous.task_id).to_dict() == previous.to_dict() for previous in completed)
+    assert failures == []
 
 
 @pytest.mark.parametrize('defect', [
