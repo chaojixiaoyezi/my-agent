@@ -679,7 +679,7 @@ def _require_operation_authority(
     if check is None:
         return None
     try:
-        # 只在 handler 之前重读同一不可变身份，最多三次、合计 15ms 退避。
+        # 只在 handler 之前重读同一不可变身份，保留三次读取合同，合计 180ms 退避。
         # LOCKED 须先结束同连接冲突，结构损坏须停机；两者都不在这里盲重试。
         for attempt in range(3):
             try:
@@ -688,7 +688,7 @@ def _require_operation_authority(
             except Exception as exc:
                 if sqlite_error_details(exc).get("category") != "busy" or attempt == 2:
                     raise
-                time.sleep((0.005, 0.010)[attempt])
+                time.sleep((0.060, 0.120)[attempt])
         return None
     except AuthorityContextMissing as exc:
         return apply_tool_execution_facts(
