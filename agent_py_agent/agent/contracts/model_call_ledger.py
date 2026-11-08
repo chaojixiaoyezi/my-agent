@@ -251,6 +251,7 @@ class ModelCallRecord:
 @dataclass
 class _ModelCallTotals:
     logical_call_counts: dict[tuple[str, str], int] = field(default_factory=dict)
+    closed_logical_call_count: int = 0
     physical_model_attempt_count: int = 0
     provider_http_attempt_count: int = 0
     provider_http_retry_count: int = 0
@@ -390,7 +391,7 @@ class _ModelCallTotals:
     #   store_usage 落增量行时靠它们的差值算本行身份，改名或改口径要同步 store_usage._IDENTITY_FIELDS。
     # 函数用途: 生成公开统计快照，区分缺失和真实零用量、耗时，保留按名尝试次数与原计时覆盖计数。
     def to_summary(self) -> dict[str, object]:
-        logical_count = len(self.logical_call_counts)
+        logical_count = self.closed_logical_call_count + len(self.logical_call_counts)
         physical_count = max(0, self.physical_model_attempt_count)
         statuses = {
             status: max(0, int(self.status_counts.get(status, 0)))
@@ -493,6 +494,7 @@ def model_call_purpose(record: ModelCallRecord) -> str:
 # 类用途: 在原累计账内维护用途总量或宿主显式创建的输入预算。
 @dataclass
 class _ModelCallAggregate(_ModelCallTotals):
+    retry_logical_call_ids: dict[tuple[str, str], str] = field(default_factory=dict)
     input_budget: ModelCallInputBudgetState | None = None
     usage_scope_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     purpose_totals: dict[str, _ModelCallTotals] = field(default_factory=lambda: {name: _ModelCallTotals() for name in _PURPOSE_BUCKETS})
@@ -914,6 +916,28 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
     def records(self) -> tuple[ModelCallRecord, ...]:
         with self._lock:
             return tuple(self._records)
+
+    def open_logical_call(self, *, request_id: str, run_id: str, purpose: str, identity: str) -> str:
+        """只为仍可重试的输入保留身份；已关闭组再次发送时签发新 ID，不复用旧组。"""
+        scope = _selected_scope_key(request_id=request_id, run_id=run_id) or ("request", "")
+        with self._lock:
+            aggregate = self._scope_aggregates.setdefault(scope, _ModelCallAggregate())
+            return aggregate.retry_logical_call_ids.setdefault((purpose, identity), f"{identity}:{uuid.uuid4().hex}")
+
+    def close_logical_call(self, *, request_id: str, run_id: str, purpose: str, logical_call_id: str) -> None:
+        """宿主证明不会再重试后仅压实逻辑计数；物理回报与 residency 保留权不变。"""
+        key = (purpose, logical_call_id)
+        with self._lock:
+            for scope in (("request", str(request_id or "").strip()), ("run", str(run_id or "").strip())):
+                aggregate = self._scope_aggregates.get(scope)
+                if aggregate is None:
+                    continue
+                for totals in (aggregate, aggregate.purpose_totals.get(purpose)):
+                    if totals is not None and totals.logical_call_counts.pop(key, 0):
+                        totals.closed_logical_call_count += 1
+                retry_key = (purpose, logical_call_id.rpartition(":")[0])
+                if aggregate.retry_logical_call_ids.get(retry_key) == logical_call_id:
+                    del aggregate.retry_logical_call_ids[retry_key]
 
     # LLM: request_id 优先；累计容器的唯一代次随摘要返回，进程重启或 LRU 重建不得沿用旧游标。
     # 函数用途: 查询一次请求的完整累计用量及统计代次，前后台交接复用、真正新调用另计。

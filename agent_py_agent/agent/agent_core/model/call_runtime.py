@@ -100,7 +100,11 @@ def start_model_call_record(
     input_tokens = context_snapshot.current_tokens
     estimate = estimate_first_token_timeout(FirstTokenTimeoutParams(
         input_tokens=input_tokens, ledger=ledger, options=first_token_timeout_options(agent)))
-    logical_call_id = logical_model_call_id(request)
+    # 宿主组 ID 跨物理重试复用；输入指纹仍供未建立宿主生命周期的底层调用去重。
+    logical_call_id = (
+        getattr(request, "logical_call_id", "")
+        or logical_model_call_id(request)
+    )
     physical_attempt = 1 + sum(
         str(record.metadata.get("logical_call_id") or "") == logical_call_id
         for record in ledger.records()
