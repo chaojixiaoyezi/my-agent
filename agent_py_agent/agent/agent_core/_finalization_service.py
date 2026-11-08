@@ -376,7 +376,8 @@ class FinalizationService:
             active_turn_user_inputs=list(ctx.active_turn_user_inputs or []),
             canonical_native_messages=list(ctx.canonical_native_messages or []),
             **compact_auto_cycle_fields(
-                self._agent, ctx, params.token_ledger, request_id=params.run_request_id
+                self._agent, ctx, params.token_ledger, request_id=params.run_request_id,
+                archive_result=params.archive_result,
             ),
         )
 

@@ -153,9 +153,10 @@ def tool_call_source_refs(workspace: str | Path, scope: dict[str, Any], *,
 # LLM: Compact 应用一次遍历同时收两类引用；沿原投影保留身份/双参数/缺失路径/重复项，各类保持原顺序，先调用后输出报投影错。
 # 函数用途: 一次枚举和读取索引生成压缩包的小调用与大输出引用，避免原先重复整读两遍。
 def tool_source_refs(workspace: str | Path, scope: dict[str, Any], *,
-                     index_paths: Sequence[Path] | None = None) -> dict[str, list[dict[str, Any]]]:
+                     index_paths: Sequence[Path] | None = None, marks: dict[str, list[int]] | None = None,
+                     modified_since_ns: int | None = None) -> dict[str, list[dict[str, Any]]]:
     return _read_scope_refs(Path(workspace), scope, {"tool_calls": _tool_call_ref, "tool_outputs": _source_ref},
-                            index_paths=index_paths)
+                            marks, modified_since_ns, index_paths=index_paths)
 
 
 # LLM: 只保留匹配投影与每类首错，不保留原始索引全集；整次读取错误优先于投影错误，投影错按原调用类别顺序抛出。

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .compact import MemoryCompactPlanOptions, build_memory_compact_plan
+from .compact import MemoryCompactPlanOptions, _scope_payload, build_memory_compact_plan
 from .schema import (
     RuntimeMemorySchemaOptions,
     runtime_memory_schema_payload,
@@ -44,11 +44,17 @@ def build_memory_compact_suggestion(
     root: str | Path, options: MemoryCompactSuggestOptions
 ) -> dict[str, Any]:
     workspace = Path(root)
-    plan = build_memory_compact_plan(workspace, options.plan_options)
     ratio = _ratio(options.current_tokens, options.max_context_tokens)
     trigger_ratio = _effective_trigger_ratio(options)
     status = _suggestion_status(options, ratio)
     should_prompt = options.force_trigger or status == "ready_to_compact"
+    # 自动回合先判断资格；未触发的来源未评估，不能为零候选扫描历史。
+    plan = (build_memory_compact_plan(workspace, options.plan_options)
+            if should_prompt or options.plan_options.source_mode != "current_turn" else {
+                "scope": _scope_payload(options.plan_options), "archive": {"record_count": 0},
+                "snapshots": {"file_count": 0}, "tokens": {"ledger_count": 0}, "risks": [],
+                "source_scope": {"mode": "current_turn", "coverage": "not_evaluated"},
+            })
     trigger = _trigger_payload(options)
     return {
         "version": COMPACT_SUGGESTION_SCHEMA.version,
@@ -63,6 +69,7 @@ def build_memory_compact_suggestion(
         "trigger": trigger,
         "token_budget": _token_budget_payload(options, ratio),
         "scope": plan["scope"],
+        "source_scope": dict(plan.get("source_scope", {"mode": "historical"})),
         "candidate_counts": _candidate_counts(plan),
         "risks": list(plan["risks"]),
         "recommended_commands": _recommended_commands(plan, should_prompt),

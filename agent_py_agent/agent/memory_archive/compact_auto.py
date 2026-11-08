@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .compact import MemoryCompactPlanOptions
-from .compact_apply import MemoryCompactApplyOptions, apply_memory_compact
+from .compact_apply import IncompleteCompactSources, MemoryCompactApplyOptions, apply_memory_compact
 from .compact_circuit_breaker import (
     compact_circuit_open,
     read_compact_circuit,
@@ -47,6 +47,7 @@ class MemoryCompactAutoCycleOptions:
     trigger_source: str = "token_budget"
     force_trigger: bool = False
     now: float = 0.0  # 熔断时间基准；0 表示用真实 time.time()（仅测试注入）
+    main_context_bundle_ref: str = ""
 
 
 @dataclass(frozen=True)
@@ -70,7 +71,11 @@ def run_memory_compact_auto_cycle(root: str | Path, options: MemoryCompactAutoCy
     if compact_circuit_open(read_compact_circuit(workspace), now=now):
         # 连续失败熔断中：跳过自动 compact，让上层 stop_and_request_review，不空烧重试。
         return _cycle_payload(_AutoCyclePayloadOptions(workspace, options, suggestion, "blocked_circuit_open"))
-    apply_result = apply_memory_compact(workspace, MemoryCompactApplyOptions(plan_options=options.plan_options))
+    try:
+        apply_result = apply_memory_compact(workspace, MemoryCompactApplyOptions(
+            plan_options=options.plan_options, main_context_bundle_ref=options.main_context_bundle_ref))
+    except IncompleteCompactSources:
+        return _cycle_payload(_AutoCyclePayloadOptions(workspace, options, suggestion, "blocked_incomplete_sources"))
     resume = build_memory_compact_resume(
         workspace,
         MemoryCompactResumeOptions(

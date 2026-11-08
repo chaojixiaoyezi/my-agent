@@ -100,6 +100,8 @@ def compact_context_bundle_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "task": dict(payload.get("task", {}) if isinstance(payload.get("task"), dict) else {}),
         "error": str(payload.get("error", "") or ""),
         "load_error": dict(payload.get("load_error", {}) if isinstance(payload.get("load_error"), dict) else {}),
+        **{key: payload[key] for key in ("tool_index_marks", "tool_index_since_ns", "tool_index_sources_complete")
+           if key in payload},
     }
 
 
@@ -120,6 +122,8 @@ def _summary_payload(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
         "task": _dict_section(payload, "task"),
         "memory_refs": _dict_section(payload, "memory_refs"),
         "recovery_refs": _dict_section(payload, "recovery_refs"),
+        **{key: payload[key] for key in ("tool_index_marks", "tool_index_since_ns", "tool_index_sources_complete")
+           if key in payload},
         "error": "",
         "load_error": {},
     }

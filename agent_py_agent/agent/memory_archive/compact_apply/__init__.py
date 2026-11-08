@@ -15,11 +15,14 @@ self-check report so later resume/apply stages have a trustworthy boundary.
 
 import hashlib
 import json
+import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ...common.tool_output_paths import tool_output_index_paths_for_lookup
 from ...common.value_parsing import sequence_strings
 from ..compact import MemoryCompactPlanOptions, build_memory_compact_plan
 from ..compact_context_bundle import (
@@ -53,6 +56,10 @@ COMPACT_APPLY_LEDGER_SCHEMA = RuntimeMemorySchemaOptions("compact_apply_ledger")
 COMPACT_RESTORE_REFS_SCHEMA = RuntimeMemorySchemaOptions("compact_apply_restore_refs")
 COMPACT_SELF_CHECK_SCHEMA = RuntimeMemorySchemaOptions("compact_apply_self_check")
 COMPACT_SELF_CHECK_FAILURE_SCHEMA = RuntimeMemorySchemaOptions("compact_apply_self_check_failure")
+
+
+class IncompleteCompactSources(ValueError):
+    """自动来源缺失或原窗口失效；不得改读历史前缀获得完整性。"""
 
 
 # LLM: 默认actor标识新入口，显式传入值原样保留；仅apply_memory_compact负责落盘。
@@ -155,8 +162,12 @@ def _write_apply_state_documents(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
     restore_refs = restore_refs_payload(payload, plan, paths, now)
     _write_json(paths["restore_refs_json"], restore_refs)
+    # 当前回合的日文件 refs 只作精确恢复定位；旧工作状态 reader 不得为推断正文重新整读日历史。
+    state_refs = restore_refs
+    if plan.get("source_scope", {}).get("mode") == "current_turn":
+        state_refs = {**restore_refs, "source_refs": {**restore_refs["source_refs"], "archive_files": []}}
     work_state = build_work_state_snapshot(
-        WorkStateSnapshotRequest(plan, restore_refs, paths, now, payload["apply_id"], payload["plan_id"])
+        WorkStateSnapshotRequest(plan, state_refs, paths, now, payload["apply_id"], payload["plan_id"])
     )
     _write_json(paths["work_state_snapshot_json"], work_state)
     compaction_state = build_compaction_state(CompactionStateRequest(payload, restore_refs, work_state, paths))
@@ -216,6 +227,9 @@ def _metadata_payload(request: _ApplyMetadataBuildRequest) -> dict[str, Any]:
 
 def _source_plan(plan: dict[str, Any]) -> dict[str, Any]:
     return {
+        "source_scope": dict(plan.get("source_scope", {})),
+        "archive_receipt_known": plan["archive"].get("receipt_known"),
+        "current_append_complete": plan["archive"].get("current_append_complete"),
         "archive_record_count": plan["archive"]["record_count"],
         "archive_file_count": plan["archive"]["file_count"],
         "snapshot_file_count": plan["snapshots"]["file_count"],
@@ -296,6 +310,22 @@ def compact_apply_refs(paths: dict[str, Path]) -> dict[str, str]:
 
 
 def restore_refs_payload(payload: dict[str, Any], plan: dict[str, Any], paths: dict[str, Path], now: str) -> dict[str, Any]:
+    window = {}
+    if plan.get("source_scope", {}).get("mode") == "current_turn":
+        bundle = payload.get("main_context_bundle", {})
+        marks = bundle.get("tool_index_marks")
+        if (payload.get("main_context_bundle_match", {}).get("status") == "no_context_bundle"
+                and not bundle.get("ref") and not bundle.get("loaded") and not bundle.get("load_error")):
+            # 未声明来源的旧宿主只携当前事实，不发现索引；未知不能投影成已读完。
+            window = {"index_paths": (), "marks": {}}
+        elif (not bundle.get("loaded") or bundle.get("tool_index_sources_complete") is not True
+                or not isinstance(marks, dict) or not marks
+                or any(value and bundle.get("scope", {}).get(key) != value
+                       for key, value in plan["scope"].items() if key in {"request_id", "run_id", "task_id"})):
+            raise IncompleteCompactSources("incomplete_tool_index_sources")
+        else:
+            window = {"index_paths": tuple(Path(key) for key in marks), "marks": marks,
+                      "modified_since_ns": bundle.get("tool_index_since_ns")}
     result = {
         "version": COMPACT_RESTORE_REFS_SCHEMA.version,
         "schema": runtime_memory_schema_payload(COMPACT_RESTORE_REFS_SCHEMA),
@@ -306,10 +336,13 @@ def restore_refs_payload(payload: dict[str, Any], plan: dict[str, Any], paths: d
         "scope": plan["scope"],
         "created_at": now,
         "lineage": dict(payload.get("lineage", {})),
-        "source_refs": _source_refs(plan),
+        "source_scope": dict(plan.get("source_scope", {})),
+        "source_refs": _source_refs(plan, **window),
         "apply_refs": compact_apply_refs(paths),
         "content_preserved": True,
     }
+    if window:
+        result["source_scope"]["tool_index_coverage"] = "validated_window" if window["index_paths"] else "unknown"
     result["source_refs"]["context_bundles"] = main_context_bundle_source_refs(payload.get("main_context_bundle", {}))
     return result
 
@@ -462,13 +495,53 @@ def build_self_check_failure_payload(
 
 # LLM: 原文件来源不变，两类工具引用交给同一 scope 单扫描读取器；只读元数据、不改变恢复 schema 或归属。
 # 函数用途: 生成压缩恢复来源，一遍读取同时保留小调用和大输出，避免每次压缩重复扫描全部索引。
-def _source_refs(plan: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+def _source_refs(plan: dict[str, Any], *, index_paths: Sequence[Path] | None = None,
+                 marks: dict[str, list[int]] | None = None,
+                 modified_since_ns: int | None = None) -> dict[str, list[dict[str, Any]]]:
+    automatic = plan.get("source_scope", {}).get("mode") == "current_turn"
+    if automatic:
+        if index_paths is None or (index_paths and not marks):
+            raise IncompleteCompactSources("missing_tool_index_window")
+        index_paths = tool_output_index_paths_for_lookup(plan["workspace_root"], index_paths=index_paths)
+        before = _validate_tool_index_window(Path(plan["workspace_root"]), index_paths, marks)
+    tools = tool_source_refs(plan["workspace_root"], plan["scope"], index_paths=index_paths,
+                             marks=marks, modified_since_ns=modified_since_ns)
+    if automatic:
+        _validate_tool_index_window(Path(plan["workspace_root"]), index_paths, before)
     return {
         "archive_files": _file_refs(plan["archive"].get("files", [])),
         "snapshot_files": _file_refs(plan["snapshots"].get("latest", [])),
         "token_ledgers": _file_refs(plan["tokens"].get("latest", [])),
-        **tool_source_refs(plan["workspace_root"], plan["scope"]),
+        "raw_archive_refs": list(plan["archive"].get("raw_archive_refs", [])),
+        **tools,
     }
+
+
+def _validate_tool_index_window(workspace: Path, paths: Sequence[Path], marks: dict) -> dict:
+    """自动调用独立拒绝旧 reader 的失效标记整读分支，读取后再核同一文件身份。"""
+    current = {}
+    for path in paths:
+        mark = marks.get(str(path))
+        if (not path.is_relative_to(workspace.resolve()) or path.parts[-3:] != ("blobs", "tool_outputs", "index.jsonl")
+                or not isinstance(mark, list) or len(mark) != 3
+                or any(type(value) is not int or value < 0 for value in mark)):
+            raise IncompleteCompactSources("invalid_tool_index_mark")
+        try:
+            with path.open("rb") as handle:
+                info = os.fstat(handle.fileno())
+                if mark != [0, 0, 0]:
+                    if [info.st_dev, info.st_ino] != mark[:2] or info.st_size < mark[2]:
+                        raise IncompleteCompactSources("changed_tool_index_window")
+                    if mark[2]:
+                        handle.seek(mark[2] - 1)
+                        if handle.read(1) != b"\n":
+                            raise IncompleteCompactSources("unaligned_tool_index_window")
+                current[str(path)] = [info.st_dev, info.st_ino, info.st_size]
+        except FileNotFoundError as exc:
+            if mark != [0, 0, 0]:
+                raise IncompleteCompactSources("missing_tool_index") from exc
+            current[str(path)] = mark
+    return current
 
 
 def _identity_payload(plan: dict[str, Any]) -> dict[str, Any]:
@@ -497,6 +570,7 @@ def _file_refs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "path": str(item.get("path") or item.get("file_path") or ""),
             "size_bytes": int(item.get("size_bytes", 0) or 0),
             "created_at": str(item.get("created_at", "") or ""),
+            **{key: list(item[key]) for key in ("event_ids", "content_hashes") if key in item},
         })
     return refs
 
