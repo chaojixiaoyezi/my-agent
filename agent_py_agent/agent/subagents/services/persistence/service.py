@@ -94,7 +94,7 @@ from .model_normalizers import (
     _normalize_status_report,
 )
 from .projections import sync_derived_projections
-from .run_index import SubagentRunIndex
+from .run_index import SubagentRunIndex, SubagentRunIndexUnavailable, current_run_matches
 
 _HIGH_RISK_FAILURE_TYPES = {"tool_output_context_overflow", "context_overflow", "blackbox_output_overflow"}
 
@@ -174,7 +174,7 @@ def _canonical_runs_for_root(
     ]
 
 
-# LLM: 索引只挑候选，canonical核根；无索引回退同样规范化ID空白，不引入第二种根匹配语义。
+# LLM: 唯一 run_index 只挑候选，canonical 核根；索引不可用不回退历史扫描。
 # 函数用途: 实现按根任务的“索引选 ID、文件复核”读取，并返回结构化错误。
 def _list_runs_for_root_report(
     service: SubAgentPersistenceService,
@@ -187,24 +187,11 @@ def _list_runs_for_root_report(
         report["root_task_id"] = str(root_task_id or "")
         return SubAgentListRunsReport(load_errors=[report])
 
-    local_store = getattr(service.manager, "local_store", None)
-    tree_reader = getattr(local_store, "list_agent_tree", None)
-    if not callable(tree_reader):
-        return service.list_runs_selected_report(
-            lambda task: bool(_canonical_runs_for_root([task], root_id)),
-        )
-
     try:
-        tree = tree_reader(root_id)
-        selected_ids = list(
-            dict.fromkeys(
-                str(getattr(record, "run_id", "") or "").strip()
-                for record in list(getattr(tree, "runs", ()) or ())
-                if str(getattr(record, "root_task_id", "") or "").strip()
-                == root_id
-                and str(getattr(record, "run_id", "") or "").strip()
-            )
-        )
+        identity = service._run_index_identity()
+        service.prepare_run_index()
+        selected_ids = service.run_index.request_ids((root_id,), "", None)
+        service._require_run_index_identity(identity)
     except Exception as exc:
         report = runtime_error_report(exc, context="subagents.load_root_index")
         report["root_task_id"] = root_id
@@ -250,9 +237,11 @@ class SubAgentPersistenceService:
     # authoritative across processes.
     # 缺失canonical仅缓存稳定locator的指纹与既有reader解析路径，不保存正文或新的状态权威。
     # 函数用途: 初始化缓存与索引维护接线；只在后台建立旧目录库存，不在构造或热 miss 同步全扫。
-    def __init__(self, manager: Any):
+    def __init__(self, manager: Any, *, read_only: bool | None = None):
         self.manager = manager
-        self.run_index = SubagentRunIndex(manager.workspace)
+        # 冷投影原本只提供 workspace，不能由构造读口顺带获得安装/后台维护写权。
+        self.read_only = not callable(getattr(manager, "creation_guard", None)) if read_only is None else read_only
+        self.run_index = SubagentRunIndex(manager.workspace, read_only=self.read_only)
         # task.json 文件指纹未变时复用解析对象，避免每轮 dispatch 全量重读+重解析。
         # 近期 mtime 仍强制重读，以防多代替换后 inode 重用且时间戳同片；旧文件继续享有缓存收益。
         # 其余情况同时核对 inode、大小和 ctime，避免只看 mtime 漏掉原子替换。
@@ -264,7 +253,8 @@ class SubAgentPersistenceService:
         self._run_index_maintenance_lock = threading.Lock()
         self._run_index_maintenance_thread: threading.Thread | None = None
         self._run_index_maintenance_report: dict[str, object] = {}
-        self._start_run_index_maintenance()
+        if not self.read_only:
+            self._start_run_index_maintenance()
 
     @property
     def workspace(self) -> Path:
@@ -288,16 +278,30 @@ class SubAgentPersistenceService:
     # LLM: 热入口只点修一批 pending 并异步请求库存维护；当前仍 partial 时索引读继续 fail closed。
     # 函数用途: 为正常容量/请求/派工读准备索引，限定同步恢复为固定一批且绝不全扫。
     def prepare_run_index(self):
-        state = self.run_index.coverage()
+        state = self.run_index.readiness()
+        if self.read_only:
+            if not state["complete"] or state["pending"]:
+                raise SubagentRunIndexUnavailable("subagent run index coverage unavailable")
+            return state
         recovery = self.recover_pending_run_index(batch_size=64) if state["pending"] else {"errors": [], "recovered": 0, "discarded": 0}
-        state = self.run_index.coverage()
+        state = self.run_index.readiness()
         if not state["complete"] or state["pending"]:
             self._start_run_index_maintenance()
         return {**state, **recovery}
 
+    def _run_index_identity(self):
+        info = self.run_index.path.lstat()
+        return info.st_dev, info.st_ino
+
+    def _require_run_index_identity(self, identity):
+        if self._run_index_identity() != identity:
+            raise SubagentRunIndexUnavailable("subagent run index identity changed")
+
     # LLM: 只有显式维护和后台线程可建立库存；与创建共用原锁，每批 canonical 复核和 pending 点查均有上界。
     # 函数用途: 执行一批旧运行迁移与中断提交恢复并报告实际覆盖。
     def backfill_run_index(self, *, batch_size=64):
+        if self.read_only:
+            raise PermissionError("read-only subagent persistence")
         with self.manager.creation_guard():
             recovery = self.recover_pending_run_index(batch_size=batch_size)
             if recovery["errors"]:
@@ -308,7 +312,9 @@ class SubAgentPersistenceService:
     # LLM: 单服务至多一个后台维护线程；构造时与 prepare 的重复调度幂等，持久错误停止本轮而非无界重试。
     # 函数用途: 自动调度旧目录及 pending 的生产维护，不在当前请求中执行目录库存。
     def _start_run_index_maintenance(self):
-        state = self.run_index.coverage()
+        if self.read_only:
+            return
+        state = self.run_index.readiness()
         if state["complete"] and not state["pending"]:
             return
         with self._run_index_maintenance_lock:
@@ -337,6 +343,8 @@ class SubAgentPersistenceService:
     # LLM: 同创建锁和原 canonical guard 内按精确 ID 重读 pending；首写未发表须由定位证据和缺失事实共同证明。
     # 函数用途: 固定一批恢复中断提交，不枚举历史、不重放 canonical 写入或推进业务版本。
     def recover_pending_run_index(self, *, batch_size=64):
+        if self.read_only:
+            raise PermissionError("read-only subagent persistence")
         recovered, discarded, errors = 0, 0, []
         with self.manager.creation_guard():
             for run_id, _, _ in self.run_index.pending_rows(batch_size=batch_size):
@@ -464,6 +472,7 @@ class SubAgentPersistenceService:
     def list_recovery_runs_report(self, *, root_id: str = "") -> SubAgentListRunsReport:
         """索引仅选当前身份；逐ID重读规范状态，覆盖未知保持结构化错误。"""
         try:
+            identity = self._run_index_identity()
             self.prepare_run_index()
             if root_id:
                 run_ids = self.run_index.request_ids((root_id,), "", None)
@@ -474,16 +483,45 @@ class SubAgentPersistenceService:
                     run_ids.extend(page)
                     if not after:
                         break
+            self._require_run_index_identity(identity)
         except Exception as exc:
-            self._evict_run_cache(set())
             return SubAgentListRunsReport(load_errors=[runtime_error_report(exc, context="subagents.recovery_index")])
-        report = self.list_runs_by_ids_report(run_ids)
-        self._evict_run_cache(set(run_ids))
-        return report
+        # 当前集合只是缓存的子集；删除淘汰由全量 seen 完成，容量仍沿既有有界 FIFO。
+        return self.list_runs_by_ids_report(run_ids)
 
-    # LLM: Root-tree lookup uses LocalStore only to select exact ids, then reloads every selected
-    # canonical task file. Managed index errors stay explicit; local-unmanaged callers retain the
-    # canonical full-scan path because they deliberately have no lookup projection.
+    def list_current_runs_report(self, *, statuses: tuple[str, ...] = (), thread_id: str = "",
+                                 include_unbound_thread: bool = False,
+                                 include_open_capabilities: bool = False) -> SubAgentListRunsReport:
+        """按现有索引分页选当前义务，精确重读 canonical 并保留变化/缺失的错误事实。"""
+        selection = dict(statuses=statuses, thread_id=str(thread_id or "").strip(),
+                         include_unbound_thread=include_unbound_thread,
+                         include_open_capabilities=include_open_capabilities)
+        try:
+            identity = self._run_index_identity()
+            self.prepare_run_index()
+            run_ids, after = [], ""
+            while True:
+                page, after = self.run_index.candidate_ids(**selection, after=after, limit=RETENTION_SCAN_SLICE_ENTRIES)
+                run_ids.extend(page)
+                if not after:
+                    break
+            self._require_run_index_identity(identity)
+        except Exception as exc:
+            return SubAgentListRunsReport(load_errors=[runtime_error_report(exc, context="subagents.current_index")])
+        report = self.list_runs_by_ids_report(run_ids)
+        runs, errors = [], list(report.load_errors)
+        for task in report.runs:
+            try:
+                if not current_run_matches(task, **selection):
+                    raise ValueError("子代理当前索引与 canonical 不一致")
+                runs.append(task)
+            except Exception as exc:
+                error = runtime_error_report(exc, context="subagents.current_index")
+                error["run_id"] = task.id
+                errors.append(error)
+        return SubAgentListRunsReport(runs, errors)
+
+    # LLM: 托管与本地 manager 共用 run_index 的根候选，再逐 ID 复核 canonical；不回退全历史。
     # 函数用途: 按一个根任务读取其子代理树，避免后台调度每秒复制全部历史 run。
     def list_runs_for_root_report(
         self,
@@ -626,6 +664,9 @@ class SubAgentPersistenceService:
     ) -> None:
         """Persist a task as JSON plus human-readable Markdown."""
 
+        if self.read_only:
+            raise PermissionError("read-only subagent persistence")
+
         with gateway_short_transaction('child_canonical_save'):
             _apply_missing_paths(task, self.manager._build_work_order_paths(task.id, task.task_dir or None))
             # canonical state 有两类写者:业务状态保存与 runner-session 窄心跳。
@@ -660,6 +701,8 @@ class SubAgentPersistenceService:
         expected_revision: int | None = None,
         preserve_child_links: bool = True,
     ) -> SubAgentTask:
+        if self.read_only:
+            raise PermissionError("read-only subagent persistence")
         with gateway_short_transaction('child_canonical_mutate'):
             normalized_run_id = validate_opaque_id(run_id, kind="run_id")
             initial = self.load(normalized_run_id)
@@ -694,6 +737,9 @@ class SubAgentPersistenceService:
         now: float,
     ) -> bool:
         """Persist runner liveness without rebuilding task projections."""
+
+        if self.read_only:
+            raise PermissionError("read-only subagent persistence")
 
         with gateway_short_transaction('child_runner_session'):
             run_id = validate_opaque_id(run_id, kind="run_id")

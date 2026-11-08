@@ -245,10 +245,10 @@ def test_q2_m7_records_skip_concurrently_removed_task(tmp_path, monkeypatch):
 
     # LLM: 删除只发生在pytest临时目录中，模拟真实清理方而不伪造解析返回值。
     # 函数用途: 在目录快照之后移走待读取任务。
-    def read_after_cleanup(task_id):
+    def read_after_cleanup(task_id, **kwargs):
         if task_id == "gone":
             (tmp_path / "data/telemetry/task_calls/gone.json").unlink(missing_ok=True)
-        return original(task_id)
+        return original(task_id, **kwargs)
 
     monkeypatch.setattr(inspector, "_read", read_after_cleanup)
     assert inspector._records() == [live]

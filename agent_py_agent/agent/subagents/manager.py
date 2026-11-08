@@ -270,6 +270,13 @@ class SubAgentManager(SubagentKernelMixin):
         """恢复与当前树查询共用原运行索引，不回退历史全扫。"""
         return self.persistence.list_recovery_runs_report(root_id=root_id)
 
+    def list_current_runs_report(self, *, statuses: tuple[str, ...] = (), thread_id: str = "",
+                                 include_unbound_thread: bool = False,
+                                 include_open_capabilities: bool = False) -> SubAgentListRunsReport:
+        return self.persistence.list_current_runs_report(
+            statuses=statuses, thread_id=thread_id, include_unbound_thread=include_unbound_thread,
+            include_open_capabilities=include_open_capabilities)
+
     # LLM: Root-scoped reads delegate to the persistence/index adapter and return canonical task
     # copies. Scheduler callers must not fall back to parsing goal text or display tree rows.
     # 函数用途: 精确读取某个根任务的子代理，供后台完成合批和续跑判断使用。
@@ -374,10 +381,29 @@ def creation_run_index(manager):
 def request_scope_runs(manager, scope_ids, request_key, epoch):
     if not isinstance(manager, SubAgentManager):
         return manager.list_runs()
+    from ..conversation.authority import CONVERSATION_REQUEST_ID_ATTR
+
+    scope_ids = {str(value).strip() for value in scope_ids if str(value).strip()}
+    request_key = str(request_key or "").strip()
+    identity = manager.persistence._run_index_identity()
     run_ids = creation_run_index(manager).request_ids(scope_ids, request_key, epoch)
+    manager.persistence._require_run_index_identity(identity)
     report = manager.list_runs_by_ids_report(run_ids)
     if report.load_errors:
-        raise RuntimeError("subagent request index canonical rows unavailable")
+        error = SubagentRunIndexUnavailable("subagent request index canonical rows unavailable")
+        error.load_errors = report.load_errors
+        raise error
+    for task in report.runs:
+        attrs = task.attributes if isinstance(task.attributes, dict) else {}
+        lineage = {str(value or "").strip() for value in
+                   (task.id, task.root_id, task.parent_id, attrs.get("conversation_task_id"))}
+        try:
+            canonical_epoch = max(0, int(attrs.get("audit_run_epoch") or 0))
+        except (TypeError, ValueError):
+            canonical_epoch = None
+        if (not (lineage & scope_ids or request_key and str(attrs.get(CONVERSATION_REQUEST_ID_ATTR) or "").strip() == request_key)
+                or epoch is not None and epoch != canonical_epoch):
+            raise SubagentRunIndexUnavailable("subagent request index canonical relation changed")
     return report.runs
 
 
@@ -419,6 +445,18 @@ def select_recovery_runs(manager: Any, predicate: Callable[[Any], bool] | None =
     report = manager.list_recovery_runs_report()
     if report.load_errors:
         error = SubagentRunIndexUnavailable("subagent recovery canonical/index unavailable")
+        error.load_errors = report.load_errors
+        raise error
+    return [task for task in report.runs if predicate is None or predicate(task)]
+
+
+def select_current_runs(manager: Any, predicate: Callable[[Any], bool] | None = None, **selection) -> list[Any]:
+    """状态/线程义务不能冒充 recovery 集；旧内存适配器只保留自己的列表协议。"""
+    if not isinstance(manager, SubAgentManager):
+        return select_manager_runs(manager, predicate or (lambda task: True))
+    report = manager.list_current_runs_report(**selection)
+    if report.load_errors:
+        error = SubagentRunIndexUnavailable("subagent current canonical/index unavailable")
         error.load_errors = report.load_errors
         raise error
     return [task for task in report.runs if predicate is None or predicate(task)]

@@ -31,7 +31,13 @@ from typing import Any
 
 from ....subagents import runner_completion_wake
 from ....subagents.capability_auto_grant import auto_grant_open_requests
-from ....subagents.manager import SubAgentManager, SubagentRunIndexUnavailable, select_recovery_runs
+from ....subagents.manager import (
+    SubAgentManager,
+    SubagentRunIndexUnavailable,
+    request_scope_runs,
+    select_current_runs,
+    select_recovery_runs,
+)
 from ....subagents.models import (
     SUBAGENT_ENDED_STATUSES,
     SUBAGENT_RECOVERY_CLOSED_STATUSES,
@@ -115,8 +121,9 @@ def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
     try:
         from ....contracts.state_machine import DISPATCHABLE_STATES, normalize_status
 
-        tasks = select_recovery_runs(manager, lambda task:
-            normalize_status(str(getattr(task, "status", "") or "")) in DISPATCHABLE_STATES)
+        tasks = select_current_runs(manager, lambda task:
+            normalize_status(str(getattr(task, "status", "") or "")) in DISPATCHABLE_STATES,
+            statuses=tuple(DISPATCHABLE_STATES))
         if not tasks:
             return {
                 "started": 0,
@@ -548,8 +555,8 @@ def _reclaim_dead_running_runs(agent: Any) -> list[dict[str, object]]:
     if manager is None:
         return []
     reclaimed: list[dict[str, object]] = []
-    tasks = select_recovery_runs(manager, lambda task:
-        str(getattr(task, "status", "") or "").strip().upper() == "RUNNING")
+    tasks = select_current_runs(manager, lambda task:
+        str(getattr(task, "status", "") or "").strip().upper() == "RUNNING", statuses=("RUNNING",))
     if not tasks:
         return []
     all_tasks = select_recovery_runs(manager)
@@ -1323,11 +1330,18 @@ def _redispatch_stalled_subagents(agent: Any) -> int:
         getattr(agent, "config", None), "runtime_guard_policy", None
     )
     candidate_policy = RunnerCandidatePolicy(runtime_guard_policy=frozen_policy)
-    tasks = [
-        task
-        for task in manager.list_runs()
-        if _is_dispatch_runner_candidate(task, policy=candidate_policy)
-    ]
+    if isinstance(manager, SubAgentManager):
+        from ....subagents.services.persistence.run_index import request_selection
+
+        current = getattr(agent, "_current_run_params", None)
+        request_id = str(getattr(current, "request_id", "") or "").strip()
+        selection = request_selection(agent, request_id)
+        # 终态重试只读本请求历史；没有请求时仅巡检可派活跃集，不扫全 owner 的 FAILED/BLOCKED。
+        selected = (request_scope_runs(manager, *selection) if selection[0] or selection[1] else
+                    select_current_runs(manager, statuses=("PLANNING", "PENDING")))
+    else:
+        selected = manager.list_runs()
+    tasks = [task for task in selected if _is_dispatch_runner_candidate(task, policy=candidate_policy)]
     if not tasks:
         return 0
     decisions = conversation_lifecycle_decisions(agent, tasks)

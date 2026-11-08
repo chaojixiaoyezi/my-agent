@@ -40,14 +40,15 @@ def test_current_reads_ignore_terminal_history(tmp_path, monkeypatch, record_pro
     reader = getattr(manager, "list_recovery_runs_report", lambda: manager.list_runs_selected_report(lambda row: row.status == "RUNNING"))
     report = reader()
     assert not report.load_errors and {row.id for row in report.runs} == {str(i) for i in range(7)}
-    assert len(calls) == 7 and set(manager.persistence._run_cache) <= set(calls)
+    assert len(calls) == 7
+    assert len(manager.persistence._run_cache) <= manager.persistence._MAX_RUN_CACHE_ENTRIES
     assert len(stats) <= 7 * 6 and {path.parent.name for path in stats} == set(calls)
     record_property("canonical_stats", len(stats))
     calls.clear()
     agent = SimpleNamespace(subagents=manager)
     assert sweep.auto_start_stalled_orphans(agent)["started"] == 0
     assert sweep._reconcile_direct_parent_waits(agent)["direct_parent_waits_checked"] == 0
-    assert len(calls) == 14
+    assert len(calls) == 7
     ids, after = [], ""
     while True:
         page, after = index.recovery_ids(after=after, limit=3)

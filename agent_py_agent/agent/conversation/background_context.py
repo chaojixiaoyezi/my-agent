@@ -737,7 +737,7 @@ def _context_row_matches_task_ids(row: dict[str, Any], task_ids: set[str]) -> bo
     )
 
 
-# LLM: 优先使用不含可变字段的实时轻摘要；旧适配器仍可list_runs，失败只保留已证明身份，不按名字合并。
+# LLM: 真实管理器按 root 索引读取精确 canonical；旧内存适配器保原协议，失败只保留已证明身份。
 # 函数用途: 解析本次任务的合法 lineage 集合，供历史和事件过滤使用。
 def _task_context_ids(state: BackgroundContextLoad) -> set[str]:
     """Resolve one task's persisted subagent lineage without using prompt text."""
@@ -755,9 +755,9 @@ def _task_context_ids(state: BackgroundContextLoad) -> set[str]:
     root_id = str(getattr(current, "root_id", "") or "").strip() or task_id
     task_ids.add(root_id)
     try:
-        indexed = getattr(manager, "list_recovery_runs_report", None)
+        indexed = getattr(manager, "list_runs_for_root_report", None)
         if callable(indexed):
-            report = indexed(root_id=root_id)
+            report = indexed(root_id)
             state.load_errors.extend(report.load_errors)
             runs = report.runs
         else:
