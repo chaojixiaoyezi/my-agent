@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import time as time_module
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -17,6 +17,8 @@ from ..common.json_io import (
     read_json_object_report,
     write_private_text_file_atomic,
 )
+from ..common.tool_output_paths import tool_output_index_marks, tool_output_root
+from ..memory_archive.compact_tool_output_refs import CarriedIndexSource
 from .context_bundle_contracts import (
     finalize_context_bundle_contracts,
     main_context_contract_sections,
@@ -59,6 +61,7 @@ class MainContextBundleRequest:
     created_at: str | None = None
     # 回合起点的 owner 工具输出主索引标记（tool_output_index_marks）；只供收尾跳过旧前缀，不进提示。
     tool_index_marks: dict[str, list[int]] | None = None
+    tool_index_sources: tuple[CarriedIndexSource, ...] | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -97,7 +100,7 @@ def build_main_context_bundle(request: MainContextBundleRequest) -> MainContextB
 
 
 # LLM: Compact 自动续跑按同一 stem 重写快照（跨零点则落到新日期目录）；同 scope 旧快照在时沿用其标记与起点，
-#   收尾窗口才覆盖整次运行；旧件不可读、缺标记或起点不可得时去掉标记退回整读。只会放大读取窗口，不会缩小。
+#   明确来源保留首片标记并合入新来源；旧件不可读时保留来源并报告不完整，不静默展开历史目录。
 # 函数用途: 让同一 scope 重建的上下文包继承最早一片的工具索引读取窗口。
 def _carried_tool_index_window(bundle: dict[str, object], json_path: Path) -> dict[str, object]:
     try:
@@ -116,6 +119,14 @@ def _carried_tool_index_window(bundle: dict[str, object], json_path: Path) -> di
         except OSError:
             marks = None
         rest = {key: value for key, value in bundle.items() if key not in ("tool_index_marks", "tool_index_since_ns")}
+        if bundle.get("tool_index_sources_complete") is True:
+            inherited = {key: [0, 0, 0] for key in bundle["tool_index_marks"]}
+            inherited.update(marks if isinstance(marks, dict) else {})
+            rest["tool_index_marks"] = inherited
+            rest["tool_index_sources_complete"] = old.get("tool_index_sources_complete") is True and isinstance(marks, dict)
+            if type(since) is int:
+                rest["tool_index_since_ns"] = since
+            return rest
         return {**rest, "tool_index_marks": marks, "tool_index_since_ns": since} if isinstance(marks, dict) else rest
     return bundle
 
@@ -150,7 +161,11 @@ def _bundle_payload(request: MainContextBundleRequest) -> dict[str, object]:
         },
     }
     payload.update(main_context_contract_sections(request, home_paths))
-    if request.tool_index_marks is not None:
+    if request.tool_index_sources is not None:
+        paths = tuple(tool_output_root(source.root) / "index.jsonl" for source in request.tool_index_sources)
+        payload["tool_index_marks"] = tool_output_index_marks(request.root, index_paths=paths)
+        payload["tool_index_sources_complete"] = True
+    elif request.tool_index_marks is not None:
         payload["tool_index_marks"] = dict(request.tool_index_marks)
     return payload
 

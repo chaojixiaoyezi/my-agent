@@ -36,6 +36,8 @@ def update_main_context_bundle_artifacts(request: MainContextBundleArtifactUpdat
             result["load_error"] = bundle_report.load_error
         return result
     scope = _scope(request)
+    if payload.get("tool_index_sources_complete") is False:
+        return {"ok": False, "status": "incomplete_tool_index_sources", "artifact_count": 0}
     window = _tool_index_window(path, payload)
     refs = tool_output_source_refs(request.workspace_root, scope, **window) if _has_scope(scope) else []
     if not refs:
@@ -72,19 +74,23 @@ def _merged_artifact_refs(current: object, refs: list[dict[str, Any]]) -> dict[s
     }
 
 
-# LLM: 只有回合开始写入过标记的新包才收窄读取：主索引从标记读起，其余未打标记索引按窗口起点（续接片继承首片，
-#   否则为本包首写 mtime）跳过；起点随回写落盘供后续续接片继承。旧包、无标记或 stat 失败返回空窗口，保持原整读。
+# LLM: 明确来源的包只读标记键中的索引，续接片继承首片起点；stat 失败也保留这些精确来源。
+#   旧包没有来源完整性声明时仍维持原历史查找；不得把新包的空来源或坏标记转成历史枚举。
 # 函数用途: 由上下文包的回合起点标记与窗口起点得出本次收尾的索引读取窗口。
 def _tool_index_window(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
     marks, since = payload.get("tool_index_marks"), payload.get("tool_index_since_ns")
+    exact = payload.get("tool_index_sources_complete") is True
+    if exact and not isinstance(marks, dict):
+        raise ValueError("tool_index_sources_incomplete")
+    window = {"index_paths": tuple(Path(item) for item in marks)} if exact else {}
     if not isinstance(marks, dict):
-        return {}
+        return window
     try:
         since = since if type(since) is int else path.stat().st_mtime_ns
     except OSError:
-        return {}
+        return window
     payload["tool_index_since_ns"] = since
-    return {"marks": marks, "modified_since_ns": since}
+    return {**window, "marks": marks, "modified_since_ns": since}
 
 
 def _scope(request: MainContextBundleArtifactUpdateRequest) -> dict[str, str]:

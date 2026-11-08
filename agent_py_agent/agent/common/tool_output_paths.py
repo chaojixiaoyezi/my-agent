@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from pathlib import Path
 
 
@@ -31,23 +32,32 @@ def tool_output_roots_for_lookup(root: str | Path) -> tuple[Path, ...]:
 
 
 # LLM: Callers scan metadata-only JSONL indexes, never artifact bodies, when verifying refs.
-# 函数用途: 将 owner 范围内的工具输出目录投影成规范 index.jsonl 路径。
-def tool_output_index_paths_for_lookup(root: str | Path) -> tuple[Path, ...]:
+# 函数用途: 显式来源只规范化去重；未提供来源的历史查找仍覆盖 owner 的全部原索引。
+def tool_output_index_paths_for_lookup(root: str | Path, *, index_paths: Sequence[Path] | None = None) -> tuple[Path, ...]:
+    if index_paths is not None:
+        return tuple(dict.fromkeys(Path(path).expanduser().resolve(strict=False) for path in index_paths))
     return tuple(item / "index.jsonl" for item in tool_output_roots_for_lookup(root))
 
 
-# LLM: 回合开始只量 owner 主索引一个文件（不枚举 runs/tasks），键与上面查找同一解析口径；
+# LLM: 回合开始只量明确来源（默认 owner 主索引），不枚举 runs/tasks；明确来源尚未创建时记零身份而不丢路径。
 #   收尾仅在 inode 未换、长度未缩且标记前一字节为 LF 时从标记读起（tool_index_stream 核验），否则仍整读。
 # 函数用途: 记录 owner 工具输出主索引的回合起点 [dev, ino, size]，缺失或不可读时返回空。
-def tool_output_index_marks(root: str | Path) -> dict[str, list[int]]:
-    for directory in _unique_paths([tool_output_root(root)]):
-        index = directory / "index.jsonl"
+def tool_output_index_marks(root: str | Path, *, index_paths: Sequence[Path] | None = None) -> dict[str, list[int]]:
+    paths = (tool_output_root(root) / "index.jsonl",) if index_paths is None else index_paths
+    marks: dict[str, list[int]] = {}
+    for index in tool_output_index_paths_for_lookup(root, index_paths=paths):
         try:
             info = os.stat(index)
+        except FileNotFoundError:
+            if index_paths is not None:
+                marks[str(index)] = [0, 0, 0]
+            continue
         except OSError:
-            return {}
-        return {str(index): [info.st_dev, info.st_ino, info.st_size]}
-    return {}
+            if index_paths is not None:
+                raise
+            continue
+        marks[str(index)] = [info.st_dev, info.st_ino, info.st_size]
+    return marks
 
 
 # LLM: Path identity is lexical-resolved and fail-soft; an invalid path cannot widen lookup.
