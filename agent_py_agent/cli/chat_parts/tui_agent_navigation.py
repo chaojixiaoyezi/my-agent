@@ -152,6 +152,7 @@ class TuiAgentNavigationState:
         self._business_messages: dict[str, set[str]] = {}
         self._business_targets: dict[str, dict] = {}
         self._business_history: dict[str, dict] = {}
+        self._business_visible: tuple | None = None
         self.route_enabled: bool | None = None
 
     # LLM: route是共享会话设置的只读投影，未知不显示false，也不影响观察权限。
@@ -159,8 +160,11 @@ class TuiAgentNavigationState:
     def update_route_setting(self, setting: object) -> None:
         with self._lock:
             enabled = setting.get('enabled') if isinstance(setting, dict) else None
-            self.route_enabled = enabled if isinstance(enabled, bool) else None
-        self.root_runtime.store.invalidate()
+            enabled = enabled if isinstance(enabled, bool) else None
+            changed, self.route_enabled = enabled != self.route_enabled, enabled
+        # 未变化的周期观察不清渲染缓存、不重置刷新节奏；变化才整屏重绘。
+        if changed:
+            self.root_runtime.store.invalidate()
 
     # LLM: 名册仅作显示；thread_id不进入原run控制链，权限撤销清除全部业务会话。
     # 函数用途: 更新业务聚合状态与可见会话。
@@ -179,14 +183,20 @@ class TuiAgentNavigationState:
                     self._runtimes[key].publish_conversation_reset(target['thread_id'])
                 self._business_messages.clear()
                 self._business_history.clear()
-            if self._business_listing_locked():
+            listing = self._business_listing_locked()
+            if listing:
                 self._publish_business_locked()
             page = self._path[-1] if self._path else ''
             thread_id = self._business_targets.get(page, {}).get('thread_id', '')
             runtime = self._active_runtime_locked()
+            visible = (projection.count, projection.running_count, projection.coverage, projection.read_denied,
+                       tuple((row.get('agent_id'), row.get('work_state')) for row in projection.rows))
+            changed, self._business_visible = visible != self._business_visible, visible
         if thread_id and not projection.read_denied:
             self._load_business_conversation(thread_id, runtime)
-        self.root_runtime.store.invalidate()
+        # 名册底栏投影不变且未打开业务页时，周期刷新不清渲染缓存、不重置刷新节奏。
+        if changed or listing or thread_id:
+            self.root_runtime.store.invalidate()
 
     # LLM: 沿用同一导航栈和renderer，只追加空间层与后台实体数据。
     # 函数用途: 判断栈顶是否业务根或空间列表。
