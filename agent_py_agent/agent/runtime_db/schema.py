@@ -31,6 +31,7 @@ from types import EllipsisType
 from ..contracts.optimization_contracts import require_schema_generation
 from ..io.sqlite_schema import schema_fingerprint, schema_is_current, stamp_schema
 from ..io.sqlite_scope import scoped_connection, sqlite_connection_factory
+from .maintenance import execute_runtime_statement
 
 logger = logging.getLogger(__name__)
 
@@ -502,7 +503,8 @@ class RuntimeWriteFence:
     # 函数用途: 在原execute入口保护事务开头。
     def execute(self, sql, parameters=()):
         cursor = self._prepare(sql)
-        return _RuntimeFenceCursor(self, cursor if cursor is not None else self._connection.execute(sql, parameters))
+        return _RuntimeFenceCursor(self, cursor if cursor is not None
+                                   else execute_runtime_statement(self._connection, sql, parameters))
 
     # LLM: 批写与单写共享同一个写锁和header，不能按行重借库。
     # 函数用途: 保护原executemany入口。
@@ -591,7 +593,7 @@ class _RuntimeFenceCursor:
     def execute(self, sql, parameters=()):
         cursor = self._fence._prepare(sql)
         if cursor is None:
-            self._cursor.execute(sql, parameters)
+            execute_runtime_statement(self._fence._connection, sql, parameters, cursor=self._cursor)
         else:
             cursor.close()
         return self

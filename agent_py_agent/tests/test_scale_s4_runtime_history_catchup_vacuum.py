@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.contracts.optimization_contracts import StoreSchemaNewerError
+from agent_py_agent.agent.io.sqlite_scope import sqlite_connection_scope
 from agent_py_agent.agent.local_storage import maintenance
 from agent_py_agent.agent.memory_store.retention_models import MemoryRetentionPolicy
 from agent_py_agent.agent.memory_store.retention_scan_budget import RETENTION_SCAN_SLICE_ENTRIES
@@ -375,7 +376,35 @@ def test_page_state_reads_do_not_open_a_write_transaction(database):
         conn.rollback()
 
 
-@pytest.mark.parametrize("statement", ["VACUUM", "PRAGMA wal_checkpoint(PASSIVE)", "PRAGMA wal_checkpoint(TRUNCATE)"])
+@pytest.mark.parametrize("manual_cursor", [False, True], ids=["connection", "cursor"])
+@pytest.mark.parametrize("commit", [False, True], ids=["rollback", "commit"])
+@pytest.mark.parametrize("scoped", [False, True], ids=["short", "leased"])
+def test_incremental_vacuum_finishes_page_budget_without_implicit_commit(database, manual_cursor, commit, scoped):
+    _, repo, observer = database
+    _vacuum_backlog(observer)
+    observer.execute("INSERT INTO metadata(key,value) VALUES('vacuum_witness','0')")
+    observer.commit()
+    before = observer.execute("PRAGMA freelist_count").fetchone()[0]
+    with sqlite_connection_scope(enabled=scoped), repo._runtime_connection() as conn:
+        conn.execute("UPDATE metadata SET value='1' WHERE key='vacuum_witness'")
+        assert conn.in_transaction
+        with closing(conn.cursor()) as cursor:
+            executor = cursor if manual_cursor else conn
+            executor.execute("PRAGMA incremental_vacuum(16)").fetchall()
+        assert conn.in_transaction
+        assert before - conn.execute("PRAGMA freelist_count").fetchone()[0] == 16
+        if commit:
+            conn.commit()
+        else:
+            conn.rollback()
+        assert not conn.in_transaction
+    assert before - observer.execute("PRAGMA freelist_count").fetchone()[0] == (16 if commit else 0)
+    assert observer.execute("SELECT value FROM metadata WHERE key='vacuum_witness'").fetchone()[0] == (
+        "1" if commit else "0")
+
+
+@pytest.mark.parametrize("statement", ["VACUUM", "PRAGMA wal_checkpoint(PASSIVE)", "PRAGMA wal_checkpoint(TRUNCATE)",
+                                      "PRAGMA incremental_vacuum(16)"])
 def test_transaction_free_page_maintenance_still_checks_schema_generation(database, statement):
     _, repo, writer = database
     with repo._runtime_connection() as conn:
