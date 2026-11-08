@@ -9,11 +9,14 @@ import json
 import logging
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import Context, copy_context
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..common import cache_capacity
 from ..conversation.agent_activity import _MAIN_ACTIVITY_LIVE_PHASES
 from ..plugin_channel import (
     ERROR_BACKOFF_SECONDS,
@@ -75,7 +78,7 @@ class _PanelResult:
 class _DisplaySlot:
     running: bool = False
     capable: bool | None = None
-    pending: dict[tuple[str, str], _PendingRender] = field(default_factory=dict)
+    pending: OrderedDict[tuple[str, str], _PendingRender] = field(default_factory=OrderedDict)
 
 
 # LLM: 待发按（会话, 面板）只留最新一份；owner 供通道启动客户端，digest 供结果新鲜度比对。
@@ -88,6 +91,7 @@ class _PendingRender:
     kind: str
     topics: dict
     digest: str
+    context: Context = field(default_factory=copy_context, repr=False, compare=False)
 
 
 # LLM: 只读请求级快照，避免每个面板重复解析 owner、活动与会话列表；sessions 在锁外读一次后共享。
@@ -138,7 +142,7 @@ class PluginDisplayService:
             client_factory=wiring.client_factory or plugin_display_client, clock=wiring.clock)
         self._connections = self._pool.connections
         self._slots: dict[tuple[str, str], _DisplaySlot] = {}
-        self._results: dict[tuple[str, str, str, str], _PanelResult] = {}
+        self._results: OrderedDict[tuple[str, str, str, str], _PanelResult] = OrderedDict()
 
     # LLM: 只做内存判定与投递后台任务，不在请求线程里启动进程或等待插件；返回的是当前已有结果。
     #   交给共用池的有效集合用「这个 owner 全部已启用的激活」，不是只有面板的那部分——同一 owner 下
@@ -181,6 +185,8 @@ class PluginDisplayService:
         digest = _digest(topics)
         result_key = (context.owner_key, activation_id, context.thread_key, panel_id)
         result = self._results.get(result_key)
+        if result is not None:
+            self._results.move_to_end(result_key)
         # 只有成功渲染的结果才算最新；错误结果只控制退避，退避期过后必须重试
         fresh = (result is not None and result.state == "ready" and result.input_digest == digest
                  and result.activation_id == activation_id)
@@ -200,9 +206,13 @@ class PluginDisplayService:
     # 函数用途: 把一次渲染登记为待发，必要时提交后台串行执行。
     def _queue_render(self, conn_key: tuple[str, str], slot: _DisplaySlot, job: _PendingRender) -> None:
         slot.pending[(job.thread_key, job.panel_id)] = job
+        slot.pending.move_to_end((job.thread_key, job.panel_id))
+        while len(slot.pending) > cache_capacity.owner_sessions(1) * MAX_REQUESTED_PANEL_COUNT:
+            slot.pending.popitem(last=False)
         if not slot.running:
             slot.running = True
-            self._executor.submit(self._drain, conn_key)
+            # worker 出生空 Context；每个待发任务另存原请求身份，消费后即可释放。
+            Context().run(self._executor.submit, self._drain, conn_key)
 
     # LLM: 调用方必须已持有 self._lock；槽按（owner, 激活编号）与连接一一对应。
     # 函数用途: 取得或创建某连接的展示待发槽。
@@ -255,12 +265,18 @@ class PluginDisplayService:
     # 函数用途: 渲染一个待发任务并按需写回结果，撤销时返回 False。
     def _consume_job(self, conn_key: tuple[str, str], connection: ChannelConnection,
                      slot: _DisplaySlot, job: _PendingRender) -> bool:
-        outcome = self._render_outcome(connection, slot, job)
+        outcome = job.context.run(self._render_outcome, connection, slot, job)
         if outcome is None:
             return False
         with self._lock:
             if self._pool.holds(conn_key, connection):
-                self._results[(conn_key[0], conn_key[1], job.thread_key, job.panel_id)] = outcome
+                key = (conn_key[0], conn_key[1], job.thread_key, job.panel_id)
+                self._results[key] = outcome
+                self._results.move_to_end(key)
+                capacity = (cache_capacity.resident_owners(1) * cache_capacity.owner_sessions(1)
+                            * MAX_REQUESTED_PANEL_COUNT)
+                while len(self._results) > capacity:
+                    self._results.popitem(last=False)
         return True
 
     # LLM: 撤销返回 None 交给 _drain 结束本轮；其它异常转成面板错误结果并记退避，不向主流程抛出。
