@@ -12,12 +12,12 @@ import re
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Protocol
 
 from ...capability.config import CapabilityConfig
 from ...capability.runtime_config_reload import capability_config_for_agent
-from ...common.tool_output_paths import tool_output_index_marks
 from ...conversation.active_turn_input import (
     active_turn_user_input_texts,
     merge_active_turn_user_inputs,
@@ -27,7 +27,10 @@ from ...conversation.authority import (
 )
 from ...conversation.tool_discovery import thread_loaded_tools
 from ...memory_archive import build_auto_resume_context
-from ...memory_archive.compact_tool_output_refs import CARRIED_RUNTIME_ONLY_FIELD
+from ...memory_archive.compact_tool_output_refs import (
+    CARRIED_RUNTIME_ONLY_FIELD,
+    CarriedIndexSource,
+)
 from ...memory_archive.tool_output_externalizer import model_visible_tool_parameters
 from ...memory_routing import (
     RouteContextOptions,
@@ -448,6 +451,19 @@ def build_runtime_main_context_bundle(
         request,
         tool_runtime_snapshot,
     )
+    from ..run_task_workspace_writer import TOOL_OUTPUT_ARCHIVE_ROOT_ATTR, current_run_task_work_dir
+    from .owner_roots import runtime_owner_root
+
+    owner = runtime_owner_root(agent).expanduser().resolve(strict=False)
+    sources = [CarriedIndexSource(owner, "owner_index")]
+    task_work = current_run_task_work_dir(agent, request)
+    attrs = request.task_attributes or {}
+    pinned = attrs.get(TOOL_OUTPUT_ARCHIVE_ROOT_ATTR)
+    for candidate in (task_work, Path(pinned) if isinstance(pinned, str | Path) and str(pinned) else None):
+        if candidate is not None:
+            root = candidate.expanduser().resolve(strict=False)
+            if root.is_relative_to(owner):
+                sources.append(CarriedIndexSource(root, "task_index"))
     return build_main_context_bundle(
         MainContextBundleRequest(
             root=workspace_root,
@@ -474,7 +490,7 @@ def build_runtime_main_context_bundle(
             write_boundary=request.write_boundary,
             tool_runtime_snapshot=runtime_snapshot,
             tool_runtime_errors=tuple(tool_runtime_errors),
-            tool_index_marks=tool_output_index_marks(agent.root),
+            tool_index_sources=tuple(sources),
         )
     )
 

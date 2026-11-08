@@ -32,9 +32,9 @@ CARRIED_RUNTIME_ONLY_FIELD = "carried_runtime_only"
 # 函数用途: 从任务原索引恢复调用历史；跨 attempt/turn 的同号调用都保留，旧身份未知时只合并完全相同的索引行。
 def carried_tool_call_records(
     workspace: str | Path,
-    scope: dict[str, Any],
+    scope: dict[str, Any], *, index_paths: Sequence[Path] | None = None,
 ) -> list[dict[str, Any]]:
-    rows = list(_scoped_tool_index_rows(Path(workspace), scope))
+    rows = list(_scoped_tool_index_rows(Path(workspace), scope, index_paths=index_paths))
     return _carried_records((row, False) for row in rows if _is_indexed_call_fact(row) and _matches_scope(row, scope))
 
 
@@ -110,12 +110,10 @@ def _carried_record_key(row: dict[str, Any], record: dict[str, Any]) -> tuple[st
 
 
 # LLM: 只读 root 自己的索引文件，二进制逐行读取，记录边界只认物理 LF（与 jsonl_lines 同一规则），行尾一个 CR 去掉；
-#   不含任一请求编号字节的行直接跳过，不解析。文件不存在时不产出任何行。
+#   不含任一请求编号字节的行直接跳过，不解析；缺失来源也抛 OSError，由上层记录不完整事实。
 # 函数用途: 流式读出一个索引里可能属于指定请求的行，避免把整份 owner 索引读进内存。
 def _stream_index_rows(root: Path, wanted: tuple[str, ...]) -> Iterator[dict[str, Any]]:
     path = tool_output_root(root) / "index.jsonl"
-    if not path.exists():
-        return
     needles = tuple(item.encode("utf-8") for item in wanted)
     with path.open("rb") as handle:
         yield from filter(None, (_index_line_row(raw, needles) for raw in handle))
@@ -134,22 +132,26 @@ def _index_line_row(raw: bytes, needles: tuple[bytes, ...]) -> dict[str, Any]:
 def tool_output_source_refs(
     workspace: str | Path, scope: dict[str, Any], *,
     marks: dict[str, list[int]] | None = None, modified_since_ns: int | None = None,
+    index_paths: Sequence[Path] | None = None,
 ) -> list[dict[str, Any]]:
     return _read_scope_refs(
-        Path(workspace), scope, {"tool_outputs": _source_ref}, marks, modified_since_ns,
+        Path(workspace), scope, {"tool_outputs": _source_ref}, marks, modified_since_ns, index_paths=index_paths,
     )["tool_outputs"]
 
 
 # LLM: 单类入口不投影其它 kind，保持不相关类型的坏字段不会引发本类投影异常；顺序/重复项不变。
 # 函数用途: 返回当前范围的小调用引用，不整读其它回合的索引。
-def tool_call_source_refs(workspace: str | Path, scope: dict[str, Any]) -> list[dict[str, Any]]:
-    return _read_scope_refs(Path(workspace), scope, {"tool_calls": _tool_call_ref})["tool_calls"]
+def tool_call_source_refs(workspace: str | Path, scope: dict[str, Any], *,
+                          index_paths: Sequence[Path] | None = None) -> list[dict[str, Any]]:
+    return _read_scope_refs(Path(workspace), scope, {"tool_calls": _tool_call_ref}, index_paths=index_paths)["tool_calls"]
 
 
 # LLM: Compact 应用一次遍历同时收两类引用；沿原投影保留身份/双参数/缺失路径/重复项，各类保持原顺序，先调用后输出报投影错。
 # 函数用途: 一次枚举和读取索引生成压缩包的小调用与大输出引用，避免原先重复整读两遍。
-def tool_source_refs(workspace: str | Path, scope: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
-    return _read_scope_refs(Path(workspace), scope, {"tool_calls": _tool_call_ref, "tool_outputs": _source_ref})
+def tool_source_refs(workspace: str | Path, scope: dict[str, Any], *,
+                     index_paths: Sequence[Path] | None = None) -> dict[str, list[dict[str, Any]]]:
+    return _read_scope_refs(Path(workspace), scope, {"tool_calls": _tool_call_ref, "tool_outputs": _source_ref},
+                            index_paths=index_paths)
 
 
 # LLM: 只保留匹配投影与每类首错，不保留原始索引全集；整次读取错误优先于投影错误，投影错按原调用类别顺序抛出。
@@ -158,10 +160,11 @@ def tool_source_refs(workspace: str | Path, scope: dict[str, Any]) -> dict[str, 
 def _read_scope_refs(
     workspace: Path, scope: dict[str, Any], projectors: dict[str, Callable[[dict[str, Any]], dict[str, Any]]],
     marks: dict[str, list[int]] | None = None, modified_since_ns: int | None = None,
+    *, index_paths: Sequence[Path] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     result: dict[str, list[dict[str, Any]]] = {key: [] for key in projectors}
     errors: dict[str, Exception] = {}
-    for row in _scoped_tool_index_rows(Path(workspace), scope, marks, modified_since_ns):
+    for row in _scoped_tool_index_rows(Path(workspace), scope, marks, modified_since_ns, index_paths=index_paths):
         _collect_scope_projection(row, projectors, result, errors)
     for key in projectors:
         if key in errors:
@@ -185,16 +188,21 @@ def _collect_scope_projection(
         errors[kind] = exc
 
 
-# LLM: 不根据目录名推断归属，沿原 owner/runs/tasks 路径一次枚举；预筛只选一个非空 AND 条件作为必要条件。
+# LLM: 不根据目录名推断归属；明确来源不展开历史，未传来源保留历史查找；预筛只取非空 AND 必要条件。
 #   最终匹配仍用本模块原顶层四键与旧 conversation_request_id 回退，不借用 Curator 的嵌套 scope 规则。
 # 函数用途: 流式产出当前范围的索引行；IO/UTF-8 错误向上抛出，坏 JSON/非对象仍忽略。
 def _scoped_tool_index_rows(
     workspace: Path, scope: dict[str, Any],
     marks: dict[str, list[int]] | None = None, modified_since_ns: int | None = None,
+    *, index_paths: Sequence[Path] | None = None,
 ) -> Iterator[dict[str, Any]]:
     prescreen = _scope_prescreen_pattern(scope)
-    for path in tool_output_index_paths_for_lookup(workspace):
+    paths = (tool_output_index_paths_for_lookup(workspace) if index_paths is None else
+             tool_output_index_paths_for_lookup(workspace, index_paths=index_paths))
+    for path in paths:
         mark = (marks or {}).get(str(path))
+        if index_paths is not None and mark != [0, 0, 0] and not path.exists():
+            raise FileNotFoundError(path)
         if mark is None and _unchanged_since(path, modified_since_ns):
             continue
         yield from (
