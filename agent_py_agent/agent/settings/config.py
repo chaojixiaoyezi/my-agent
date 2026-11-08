@@ -375,6 +375,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     tui_agent_view_cache_max_count: int = field(default=32, metadata={"bounds": (1, None), "unit": "个"})
     # 每个 TUI 展示 runtime 保留并渲染的已冻结块上限；渲染缓存随之有界，完整历史仍在会话存储中。
     tui_transcript_max_blocks: int = field(default=500, metadata={"bounds": (1, None), "unit": "个"})
+    # TUI 完全空闲（无前台/后台任务、后台进程与观察页）时通知、名册、路由与对账线程的最长等待；任何变化或按键立即恢复原节奏。
+    tui_idle_poll_max_seconds: float = field(default=30.0, metadata={"bounds": (8.0, 300.0), "unit": "秒"})
+    # Gateway 对空闲 TUI 通知轮询复用上次空投影的最长时间；请求事件中心未启用或为 0 时每次都完整读取。
+    gateway_idle_notice_reuse_seconds: float = field(default=120.0, metadata={"bounds": (0.0, 3600.0), "unit": "秒"})
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     # 只给普通主会话追加执行中沟通软引导，不额外采样、不改变历史或执行终态。
     assistant_progress_updates_enabled: bool = True

@@ -6,7 +6,7 @@ import threading
 
 from ...agent.plugin_host.errors import HostAPIError
 from ..space_commands import BusinessClient, PreparedBusinessCall, business_client_for_agent
-from .tui_threading import TUI_BACKGROUND_NOTICE_FAILURE_MAX_SECONDS
+from .tui_threading import TUI_BACKGROUND_NOTICE_FAILURE_MAX_SECONDS, _idle_poll_cap
 
 
 class TuiBackgroundAgents:
@@ -241,9 +241,14 @@ def start_route_observation(agent: object, navigation: object, stop_event: threa
     # LLM: 通过原通道解析现有绑定，/new后不沿旧canonical thread读取。
     # 函数用途: 每五秒更新一次只读route显示快照。
     def observe():
+        delay, last, cap = 5, None, _idle_poll_cap(agent)
         while not stop_event.is_set():
-            navigation.update_route_setting(chat_route_setting(agent, navigation.root_runtime.session_id))
-            stop_event.wait(5)
+            setting = chat_route_setting(agent, navigation.root_runtime.session_id)
+            navigation.update_route_setting(setting)
+            # 路由显示连续不变时按2倍退避到空闲上限；一变回5秒。
+            delay = max(5, min(cap, delay * 2)) if setting == last else 5
+            last = setting
+            stop_event.wait(delay)
 
     thread = threading.Thread(target=observe, name='tui-route-observation', daemon=True)
     thread.start()
@@ -256,7 +261,7 @@ def start_business_observation(agent: object, navigation: object, stop_event: th
         business_client_for_agent(agent, conversation_id=navigation.root_runtime.session_id), stop_event)
 
     def observe():
-        delay, last = 5, None
+        delay, last, idle_cap = 5, None, _idle_poll_cap(agent)
         while not stop_event.is_set():
             try:
                 projection.refresh()
@@ -267,7 +272,8 @@ def start_business_observation(agent: object, navigation: object, stop_event: th
             # 名册投影（数量/运行数/覆盖/拒读/身份与状态）连续不变时按2倍退避，封顶复用TUI通知失败退避上限；一变回5秒。
             current = (projection.count, projection.running_count, projection.coverage, projection.read_denied,
                        tuple((row.get('agent_id'), row.get('work_state')) for row in projection.rows))
-            delay = max(5, min(TUI_BACKGROUND_NOTICE_FAILURE_MAX_SECONDS, delay * 2)) if current == last else 5
+            cap = TUI_BACKGROUND_NOTICE_FAILURE_MAX_SECONDS if projection.running_count else idle_cap
+            delay = max(5, min(cap, delay * 2)) if current == last else 5
             last = current
             stop_event.wait(delay)
 
