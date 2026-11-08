@@ -41,6 +41,7 @@ from .services.indexing.records import LocalRecordParams
 from .services.lifecycle import SubAgentLifecycleService
 from .services.memory_candidates import SubAgentMemoryCandidateService
 from .services.persistence import SubAgentPersistenceService
+from .services.persistence.run_index import SubagentRunIndexUnavailable
 from .services.persistence.service import SubAgentListRunsReport
 from .services.runner_context_service import SubAgentRunnerContextService
 from .services.runner_result_service import SubAgentRunnerResultService
@@ -265,6 +266,10 @@ class SubAgentManager(SubagentKernelMixin):
     def list_runs_by_ids_report(self, run_ids):
         return self.persistence.list_runs_by_ids_report(run_ids)
 
+    def list_recovery_runs_report(self, *, root_id: str = "") -> SubAgentListRunsReport:
+        """恢复与当前树查询共用原运行索引，不回退历史全扫。"""
+        return self.persistence.list_recovery_runs_report(root_id=root_id)
+
     # LLM: Root-scoped reads delegate to the persistence/index adapter and return canonical task
     # copies. Scheduler callers must not fall back to parsing goal text or display tree rows.
     # 函数用途: 精确读取某个根任务的子代理，供后台完成合批和续跑判断使用。
@@ -405,6 +410,18 @@ def select_manager_runs(manager: Any, predicate: Callable[[Any], bool]) -> list[
         ):
             return manager.list_runs_selected(predicate)
     return [task for task in manager.list_runs() if predicate(task)]
+
+
+def select_recovery_runs(manager: Any, predicate: Callable[[Any], bool] | None = None) -> list[Any]:
+    """真实管理器只读索引候选；旧内存适配器保持其原读口。"""
+    if not isinstance(manager, SubAgentManager):
+        return select_manager_runs(manager, predicate or (lambda task: True))
+    report = manager.list_recovery_runs_report()
+    if report.load_errors:
+        error = SubagentRunIndexUnavailable("subagent recovery canonical/index unavailable")
+        error.load_errors = report.load_errors
+        raise error
+    return [task for task in report.runs if predicate is None or predicate(task)]
 
 
 # LLM: 只有 status=TAKEN_OVER 且 task_replacement_successor 判为 taken_over 才算“已被接替”（已关闭来源只记 superseded_by 的不算）；

@@ -14,6 +14,7 @@ from sqlite3 import OperationalError
 from types import SimpleNamespace
 
 from ....common import nofollow_fs
+from ....common.audit_activation import structured_audit_source_worker_attributes
 from ....common.json_io import locked_json_path
 from ....common.nofollow_fs import (
     NoFollowPathError,
@@ -37,6 +38,12 @@ from ..contract_identity import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class SubagentRunIndexUnavailable(RuntimeError):
+    """索引或候选 canonical 尚不可用，不能当作空的当前集合。"""
+
+    error_code = "SUBAGENT_RUN_INDEX_UNAVAILABLE"
 
 
 # LLM: 新索引只登记规范写者提交的标量；pending 先于文件发表耐久提交，未知覆盖不得当作零占用。
@@ -97,20 +104,20 @@ class SubagentRunIndex:
                         run_id TEXT PRIMARY KEY, recovery TEXT NOT NULL, was_published INTEGER NOT NULL
                     );
         """)
-        if db.execute("SELECT value FROM meta WHERE key='schema'").fetchone() != (2,):
+        if db.execute("SELECT value FROM meta WHERE key='schema'").fetchone() != (3,):
             with os.scandir(self.workspace) as entries:
                 sampled = list(islice(entries, 8))
             legacy = (bool(db.execute("SELECT 1 FROM runs LIMIT 1").fetchone())
                       or len(sampled) == 8 or any(entry.is_dir(follow_symlinks=False) or entry.is_symlink() for entry in sampled))
             db.executemany("INSERT OR REPLACE INTO meta VALUES (?,?)",
                            [("complete", int(not legacy)), ("offset", 0),
-                            ("inventory_ready", int(not legacy)), ("schema", 2)])
+                            ("inventory_ready", int(not legacy)), ("schema", 3)])
 
     # LLM: 每连接只点查schema键；缺表或未完成种子复用原安装器，异常不能伪装成空库存。
     # 函数用途: 补未初始化的表及元数据，返回是否实际重装，由调用者复核身份后提交。
     def _ensure_schema(self, db):
         try:
-            if db.execute("SELECT 1 FROM meta WHERE key='schema'").fetchone():
+            if db.execute("SELECT value FROM meta WHERE key='schema'").fetchone() == (3,):
                 return False
         except OperationalError as exc:
             if str(exc) != "no such table: meta":
@@ -240,6 +247,15 @@ class SubagentRunIndex:
         lineage = {run_id, str(task.root_id or "").strip(), str(task.parent_id or "").strip(),
                    str(attrs.get("conversation_task_id") or "").strip()}
         rows = [(key, "lineage", run_id) for key in lineage if key]
+        from ...direct_parent_lifecycle import parent_wait_blocks_dispatch
+        from ..runtime_closeout import pending_closeout
+
+        if pending_closeout(task) is not None:
+            rows.append(("", "closeout", run_id))
+        if structured_audit_source_worker_attributes(attrs):
+            rows.append(("", "source_lifecycle", run_id))
+        if parent_wait_blocks_dispatch(task):
+            rows.append(("", "parent_wait", run_id))
         request = str(attrs.get(CONVERSATION_REQUEST_ID_ATTR) or "").strip()
         if request:
             rows.append((request, "request", run_id))
@@ -274,7 +290,7 @@ class SubagentRunIndex:
         pending = bool(db.execute("SELECT 1 FROM runs WHERE pending=1 LIMIT 1").fetchone())
         if partial or pending:
             reason = "coverage is partial" if partial else "has pending canonical commits"
-            raise RuntimeError(f"subagent run index {reason}")
+            raise SubagentRunIndexUnavailable(f"subagent run index {reason}")
 
     # LLM: 同一连接读取覆盖状态，不为观察触发迁移；pending 只提供数量不打印任务正文。
     # 函数用途: 返回显式迁移覆盖及未结提交事实。
@@ -331,6 +347,27 @@ class SubagentRunIndex:
             self._require_complete(db)
             sql, params = self._selection(scope_ids, request_key, epoch)
             return [row[0] for row in db.execute(sql + " ORDER BY r.updated DESC,r.run_id", params)]
+
+    def recovery_ids(self, *, after: str = "", limit: int) -> tuple[list[str], str]:
+        """只分页读取活跃集与结构化未结交付，终态历史不进入恢复热路。"""
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("recovery page limit must be positive")
+        with self.connect() as db:
+            db.execute("BEGIN")
+            self._require_complete(db)
+            rows = [row[0] for row in db.execute(
+                "SELECT run_id FROM runs WHERE active=1 AND run_id>? UNION "
+                "SELECT run_id FROM membership WHERE scope_id='' AND kind='closeout' AND run_id>? UNION "
+                "SELECT run_id FROM membership WHERE scope_id='' AND kind='source_lifecycle' AND run_id>? UNION "
+                "SELECT run_id FROM membership WHERE scope_id='' AND kind='parent_wait' AND run_id>? "
+                "ORDER BY run_id LIMIT ?", (after, after, after, after, limit + 1))]
+        return rows[:limit], rows[limit - 1] if len(rows) > limit else ""
+
+    def acknowledge_source_lifecycles(self, run_ids) -> None:
+        """只移除已核验 TaskLink 的查找提示，不改 canonical 或待交付 WAL。"""
+        with self.connect() as db:
+            db.executemany("DELETE FROM membership WHERE scope_id='' AND kind='source_lifecycle' AND run_id=?",
+                           ((run_id,) for run_id in run_ids))
 
     # LLM: 编号来自展示前缀而非 task.depth，含所有状态；按十进制长度排序避免 SQLite 整数溢出。
     # 函数用途: 查询同一父级指定展示深度的历史最大系统编号加一。
@@ -399,6 +436,8 @@ class SubagentRunIndex:
         if self.coverage()["inventory_ready"]:
             return
         with self.connect() as db:
+            # 换代后的库存重置留在后台；热读只发布 partial，不同步改写全部历史索引。
+            db.execute("UPDATE inventory SET done=0,error_type=''")
             # SQL 游标固定源快照，每次只取一页；只写 inventory，不改游标所读的 runs。
             existing = db.execute("SELECT run_id FROM runs ORDER BY run_id")
             for batch in iter(lambda: existing.fetchmany(64), []):

@@ -755,9 +755,16 @@ def _task_context_ids(state: BackgroundContextLoad) -> set[str]:
     root_id = str(getattr(current, "root_id", "") or "").strip() or task_id
     task_ids.add(root_id)
     try:
-        summaries = getattr(manager, "list_run_summaries", None)
-        runs = summaries() if callable(summaries) else manager.list_runs()
-    except Exception:
+        indexed = getattr(manager, "list_recovery_runs_report", None)
+        if callable(indexed):
+            report = indexed(root_id=root_id)
+            state.load_errors.extend(report.load_errors)
+            runs = report.runs
+        else:
+            summaries = getattr(manager, "list_run_summaries", None)
+            runs = summaries() if callable(summaries) else manager.list_runs()
+    except Exception as exc:
+        state.load_errors.append(runtime_error_report(exc, context="background_context.subagent_lineage"))
         return task_ids
     for run in runs:
         run_id = str(getattr(run, "id", "") or "").strip()

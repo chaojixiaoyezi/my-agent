@@ -25,12 +25,13 @@ from ....common.request_execution_ports import (
 import logging
 import time
 from contextlib import ExitStack
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from ....subagents import runner_completion_wake
 from ....subagents.capability_auto_grant import auto_grant_open_requests
-from ....subagents.manager import select_manager_runs
+from ....subagents.manager import SubAgentManager, SubagentRunIndexUnavailable, select_recovery_runs
 from ....subagents.models import (
     SUBAGENT_ENDED_STATUSES,
     SUBAGENT_RECOVERY_CLOSED_STATUSES,
@@ -85,6 +86,8 @@ def auto_capability_sweep(agent: Any, signal: Any) -> dict[str, object]:
             summary["redispatched"] = int(auto_start_orphan_run(agent, run_id).get("started") or 0)
         else:
             summary["redispatched"] = int(auto_start_stalled_orphans(agent).get("started") or 0)
+    except SubagentRunIndexUnavailable:
+        raise
     except Exception as transport_error:
         raise_if_transport_uncertain(transport_error)
         _LOGGER.warning("capability auto sweep redispatch failed", exc_info=True)
@@ -112,7 +115,7 @@ def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
     try:
         from ....contracts.state_machine import DISPATCHABLE_STATES, normalize_status
 
-        tasks = select_manager_runs(manager, lambda task:
+        tasks = select_recovery_runs(manager, lambda task:
             normalize_status(str(getattr(task, "status", "") or "")) in DISPATCHABLE_STATES)
         if not tasks:
             return {
@@ -135,6 +138,8 @@ def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
                 recovery_blocks.append(recovery_block)
                 continue
             stalled.append(task)
+    except SubagentRunIndexUnavailable:
+        raise
     except Exception as transport_error:
         raise_if_transport_uncertain(transport_error)
         _LOGGER.warning("orphan revive list_runs failed", exc_info=True)
@@ -354,12 +359,16 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
     try:
         parent_summary = _reconcile_conversation_parent_lifecycle(agent)
         summary.update(parent_summary)
+    except SubagentRunIndexUnavailable:
+        raise
     except Exception as transport_error:
         raise_if_transport_uncertain(transport_error)
         _LOGGER.debug("supervision parent lifecycle reconcile failed", exc_info=True)
     try:
         reclaimed = _reclaim_dead_running_runs(agent)
         _merge_running_reclaim_summary(summary, reclaimed)
+    except SubagentRunIndexUnavailable:
+        raise
     except Exception as transport_error:
         raise_if_transport_uncertain(transport_error)
         _LOGGER.debug("supervision running reclaim failed", exc_info=True)
@@ -376,9 +385,11 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
         )
         summary.update(recover_pending_closeouts(
             getattr(manager, "runtime_db", None), load_task=manager.load, save_task=manager.save,
-            list_tasks=manager.list_runs,
+            list_tasks=partial(select_recovery_runs, manager),
             notify_result=notifier.notify_result,
         ))
+    except SubagentRunIndexUnavailable:
+        raise
     except Exception as transport_error:
         raise_if_transport_uncertain(transport_error)
         _LOGGER.debug("supervision runtime closeout recovery failed", exc_info=True)
@@ -390,6 +401,8 @@ def _supervise_stalled_orphans_unlocked(agent: Any) -> dict[str, object]:
         # wait on unrelated file locks and previously delayed an already
         # recovered source worker by another full minute.
         _merge_orphan_revive_summary(summary, auto_start_stalled_orphans(agent))
+    except SubagentRunIndexUnavailable:
+        raise
     except Exception as transport_error:
         raise_if_transport_uncertain(transport_error)
         _LOGGER.debug("supervision immediate orphan revive failed", exc_info=True)
@@ -486,16 +499,21 @@ def _merge_orphan_revive_summary(
 # 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
 def _reconcile_direct_parent_waits(agent: Any) -> dict[str, int]:
     try:
-        from ....subagents.direct_parent_lifecycle import reconcile_all_parent_waits
+        from ....subagents.direct_parent_lifecycle import (
+            _reconcile_parent_wait,
+            parent_wait_blocks_dispatch,
+        )
 
-        wait_summary = reconcile_all_parent_waits(getattr(agent, "subagents", None))
-        if wait_summary.get("ok") is False:
-            _LOGGER.warning("direct parent wait unavailable: %s", wait_summary.get("error_type"))
+        manager = getattr(agent, "subagents", None)
+        parents = select_recovery_runs(manager, parent_wait_blocks_dispatch) if manager is not None else []
+        decisions = [_reconcile_parent_wait(manager, str(task.id)) for task in parents]
         return {
-            "direct_parent_waits_checked": int(wait_summary.get("checked") or 0),
-            "direct_parent_waits_released": int(wait_summary.get("released") or 0),
-            "direct_parent_waits_errors": int(wait_summary.get("ok") is False),
+            "direct_parent_waits_checked": len(parents),
+            "direct_parent_waits_released": sum(item.should_resume for item in decisions),
+            "direct_parent_waits_errors": 0,
         }
+    except SubagentRunIndexUnavailable:
+        raise
     except Exception as transport_error:
         raise_if_transport_uncertain(transport_error)
         _LOGGER.warning("supervision direct parent wait reconcile failed", exc_info=True)
@@ -530,11 +548,11 @@ def _reclaim_dead_running_runs(agent: Any) -> list[dict[str, object]]:
     if manager is None:
         return []
     reclaimed: list[dict[str, object]] = []
-    tasks = select_manager_runs(manager, lambda task:
+    tasks = select_recovery_runs(manager, lambda task:
         str(getattr(task, "status", "") or "").strip().upper() == "RUNNING")
     if not tasks:
         return []
-    all_tasks = list(manager.list_runs())
+    all_tasks = select_recovery_runs(manager)
     fully_stalled_host_pids = _fully_stalled_source_host_pids(all_tasks)
     # A suspended host can retain task/watch file locks indefinitely.  Fence
     # the host process before rewriting its durable attempts; doing this in
@@ -1049,10 +1067,21 @@ def _reconcile_conversation_parent_lifecycle(agent: Any) -> dict[str, int]:
     from ....common.audit_activation import structured_audit_source_worker_attributes
 
     store = getattr(agent, "conversation_store", None)
-    tasks = select_manager_runs(manager, lambda task:
-        not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES)
-        or (structured_audit_source_worker_attributes(getattr(task, "attributes", {}) or {})
-            and _source_worker_needs_lifecycle_reconcile(store, task)))
+    acknowledged = []
+
+    def needs_reconcile(task):
+        if not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES):
+            return True
+        if not structured_audit_source_worker_attributes(getattr(task, "attributes", {}) or {}):
+            return False
+        if _source_worker_needs_lifecycle_reconcile(store, task):
+            return True
+        acknowledged.append(task.id)
+        return False
+
+    tasks = select_recovery_runs(manager, needs_reconcile)
+    if acknowledged and isinstance(manager, SubAgentManager):
+        manager.persistence.run_index.acknowledge_source_lifecycles(acknowledged)
     if not tasks:
         return {
             "parent_closed_cancelled": 0,

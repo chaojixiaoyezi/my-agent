@@ -25,6 +25,7 @@ from ...common.request_execution_ports import (
     raise_if_transport_uncertain,
 )
 from ..models import SUBAGENT_FAILURE_STATUSES, TaskStatus
+from .persistence.run_index import SubagentRunIndexUnavailable
 
 if TYPE_CHECKING:
     from ...runtime_db.repository import RuntimeRepository
@@ -679,8 +680,11 @@ def recover_pending_closeouts(
         _LOGGER.debug("runtime closeout restore failed", exc_info=True)
     if not callable(list_tasks):
         return summary
+    # 索引覆盖未知不是“没有待收口”；原后台会继续迁移，当前拍保留未知给调用方。
     try:
         tasks = list(list_tasks() or [])
+    except SubagentRunIndexUnavailable:
+        raise
     except Exception as transport_error:  # noqa: BLE001 - 扫描失败不得影响其它监督动作
         raise_if_transport_uncertain(transport_error)
         return summary

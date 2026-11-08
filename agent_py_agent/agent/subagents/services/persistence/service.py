@@ -33,6 +33,7 @@ from ....common.opaque_id import validate_opaque_id
 from ....common.request_execution_ports import gateway_short_transaction
 from ....common.value_parsing import sequence_strings
 from ....concurrency.exceptions import ConcurrencyConflictError
+from ....memory_store.retention_scan_budget import RETENTION_SCAN_SLICE_ENTRIES
 from ....runtime_db.operations import directory_id_for_opaque
 from ....runtime_errors import runtime_error_report
 from ...model_capabilities import capability_request_requires_parent_resolution
@@ -459,6 +460,26 @@ class SubAgentPersistenceService:
                 load_errors.append(report)
         runs.sort(key=lambda item: item.updated_at or item.created_at, reverse=True)
         return SubAgentListRunsReport(runs=runs, load_errors=load_errors)
+
+    def list_recovery_runs_report(self, *, root_id: str = "") -> SubAgentListRunsReport:
+        """索引仅选当前身份；逐ID重读规范状态，覆盖未知保持结构化错误。"""
+        try:
+            self.prepare_run_index()
+            if root_id:
+                run_ids = self.run_index.request_ids((root_id,), "", None)
+            else:
+                run_ids, after = [], ""
+                while True:
+                    page, after = self.run_index.recovery_ids(after=after, limit=RETENTION_SCAN_SLICE_ENTRIES)
+                    run_ids.extend(page)
+                    if not after:
+                        break
+        except Exception as exc:
+            self._evict_run_cache(set())
+            return SubAgentListRunsReport(load_errors=[runtime_error_report(exc, context="subagents.recovery_index")])
+        report = self.list_runs_by_ids_report(run_ids)
+        self._evict_run_cache(set(run_ids))
+        return report
 
     # LLM: Root-tree lookup uses LocalStore only to select exact ids, then reloads every selected
     # canonical task file. Managed index errors stay explicit; local-unmanaged callers retain the
