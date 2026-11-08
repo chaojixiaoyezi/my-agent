@@ -341,3 +341,207 @@ def test_completed_physical_observation_is_retired_before_next_job():
     finally:
         release.set()
         worker.join(timeout=1)
+
+
+@pytest.fixture
+def reconfigurable_monitor_pool(monkeypatch):
+    from agent_py_agent.agent.scheduler import monitor_pool
+
+    monkeypatch.setattr(monitor_pool, '_SHARED_POOL', None)
+    try:
+        yield monitor_pool.shared_monitor_pool
+    finally:
+        if monitor_pool._SHARED_POOL is not None:
+            monitor_pool._SHARED_POOL.shutdown()
+
+
+def test_different_agent_limits_reconfigure_the_same_borrowed_monitor_pool(tmp_path, reconfigurable_monitor_pool):
+    from agent_py_agent.agent.owner_scoped_pool import _close_agent_mcp_clients
+
+    agents = []
+    try:
+        for index, (workers, inflight) in enumerate(((1, 3), (3, 5), (3, 4), (2, 3))):
+            root = tmp_path / str(index)
+            agent = SimpleAgent(AgentConfig(model_backend='echo', enable_plugins=False,
+                my_agent_home=str(root / 'home'), background_owner_workers=workers,
+                gateway_global_inflight_limit=inflight), root)
+            agents.append(agent)
+            pool = agent.scheduler_service.monitor_pool
+            assert pool is agents[0].scheduler_service.monitor_pool
+            assert pool._executor._max_workers == workers
+            assert pool._capacity == inflight
+        _close_agent_mcp_clients(agents[-1])
+        borrowed = agents[0].scheduler_service.monitor_pool
+        assert borrowed.submit(tmp_path, 'after-resize', 'run', lambda: 'done').result(timeout=10) == 'done'
+        borrowed.shutdown()
+        replacement = reconfigurable_monitor_pool(max_workers=1, queue_limit=0)
+        assert replacement is not borrowed and not replacement._closed
+        assert replacement.submit(tmp_path, 'replacement', 'run', lambda: 'done').result(timeout=10) == 'done'
+    finally:
+        for agent in agents:
+            _close_agent_mcp_clients(agent)
+
+
+def test_monitor_growth_preserves_running_and_queued_jobs(tmp_path, reconfigurable_monitor_pool):
+    pool = reconfigurable_monitor_pool(max_workers=1, queue_limit=2)
+    entered = [threading.Event() for _ in range(3)]
+    release = [threading.Event() for _ in range(3)]
+
+    def callback(index):
+        entered[index].set()
+        assert release[index].wait(10)
+        return index
+
+    try:
+        first = pool.submit(tmp_path, 'first', 'run1', lambda: callback(0))
+        assert entered[0].wait(10)
+        queued = pool.submit(tmp_path, 'queued', 'run2', lambda: callback(1))
+        assert not queued.running()
+        assert reconfigurable_monitor_pool(max_workers=2, queue_limit=1) is pool
+        third = pool.submit(tmp_path, 'third', 'run3', lambda: callback(2))
+        assert entered[1].wait(10)
+        assert not first.done() and not entered[2].is_set()
+        assert pool.submit(tmp_path, 'full', 'run4', lambda: None).result()['reason'] == 'queue_full'
+        release[1].set()
+        assert queued.result(timeout=10) == 1
+        assert entered[2].wait(10) and not first.done()
+        release[0].set()
+        release[2].set()
+        assert first.result(timeout=10) == 0 and third.result(timeout=10) == 2
+        assert len(pool._executor._threads) == 2
+    finally:
+        for event in release:
+            event.set()
+
+
+def test_monitor_shrink_keeps_accepted_jobs_and_bounds_new_execution(tmp_path, reconfigurable_monitor_pool):
+    pool = reconfigurable_monitor_pool(max_workers=3, queue_limit=1)
+    previous = pool._executor
+    entered = [threading.Event() for _ in range(4)]
+    release = [threading.Event() for _ in range(4)]
+
+    def callback(index):
+        entered[index].set()
+        assert release[index].wait(10)
+        return index
+
+    try:
+        running = [pool.submit(tmp_path, str(index), str(index), lambda index=index: callback(index))
+                   for index in range(3)]
+        assert all(event.wait(10) for event in entered[:3])
+        queued = pool.submit(tmp_path, 'queued', 'queued', lambda: callback(3))
+        assert reconfigurable_monitor_pool(max_workers=1, queue_limit=1) is pool
+        assert pool._capacity == 2 and len(pool._pending) == 4
+        assert pool.submit(tmp_path, '0', 'duplicate', lambda: None).result()['reason'] == 'already_running'
+        assert pool.submit(tmp_path, 'full', 'full', lambda: None).result()['reason'] == 'queue_full'
+        release[0].set()
+        release[1].set()
+        assert [future.result(timeout=10) for future in running[:2]] == [0, 1]
+        # FIFO 队列后的探针已执行，证明旧 worker 已接走排队任务，但执行门仍等待缩容。
+        previous.submit(lambda: None).result(timeout=10)
+        assert queued.running() and not entered[3].is_set()
+        release[2].set()
+        assert running[2].result(timeout=10) == 2
+        assert entered[3].wait(10)
+        returned = threading.Event()
+        queued.add_done_callback(lambda completed: returned.set())
+        release[3].set()
+        assert queued.result(timeout=10) == 3
+        # Future 唤醒可早于 done callback，等池锁下最后一份占位归还再检查回收。
+        assert returned.wait(10) and not pool._pending
+        assert pool._executor is not previous and previous._shutdown
+        for worker in previous._threads:
+            worker.join(timeout=10)
+            assert not worker.is_alive()
+        assert pool.submit(tmp_path, 'reuse', 'reuse', lambda: 'done').result(timeout=10) == 'done'
+        assert len(pool._executor._threads) == 1
+    finally:
+        for event in release:
+            event.set()
+
+
+def test_monitor_queue_reduction_keeps_cancellation_and_capacity_return(tmp_path, reconfigurable_monitor_pool):
+    pool = reconfigurable_monitor_pool(max_workers=1, queue_limit=2)
+    entered, release = threading.Event(), threading.Event()
+
+    def blocking():
+        entered.set()
+        assert release.wait(10)
+        return 'held'
+
+    try:
+        running = pool.submit(tmp_path, 'held', 'held', blocking)
+        assert entered.wait(10)
+        first = pool.submit(tmp_path, 'first', 'first', lambda: pytest.fail('已取消的监控不能执行'))
+        second = pool.submit(tmp_path, 'second', 'second', lambda: pytest.fail('已取消的监控不能执行'))
+        assert reconfigurable_monitor_pool(max_workers=1, queue_limit=1) is pool
+        assert first.cancel() and second.cancel()
+        replacement = pool.submit(tmp_path, 'first', 'replacement', lambda: 'replacement')
+        assert not replacement.done() and not running.done()
+        assert pool.submit(tmp_path, 'full', 'full', lambda: None).result()['reason'] == 'queue_full'
+        release.set()
+        assert running.result(timeout=10) == 'held'
+        assert replacement.result(timeout=10) == 'replacement'
+        assert first.cancelled() and second.cancelled()
+    finally:
+        release.set()
+
+
+@pytest.mark.parametrize('fails', [False, True])
+def test_monitor_resize_preserves_job_context_without_retaining_request(tmp_path, reconfigurable_monitor_pool, fails):
+    import gc
+    import weakref
+    from contextvars import ContextVar
+
+    request = ContextVar('res2-request', default=None)
+
+    class Payload:
+        pass
+
+    def callback():
+        assert request.get() is not None
+        if fails:
+            raise ValueError('synthetic failure')
+        return request.get().index
+
+    pool = None
+    for index, (workers, queue) in enumerate(((1, 1), (3, 1), (1, 0), (2, 2), (1, 1))):
+        item = Payload()
+        item.index = index
+        reference = weakref.ref(item)
+        token = request.set(item)
+        try:
+            current = reconfigurable_monitor_pool(max_workers=workers, queue_limit=queue)
+            assert pool is None or current is pool
+            pool = current
+            future = pool.submit(tmp_path, 'same', str(index), callback)
+        finally:
+            request.reset(token)
+        del item
+        if fails:
+            with pytest.raises(ValueError, match='synthetic failure'):
+                future.result(timeout=10)
+        else:
+            assert future.result(timeout=10) == index
+        del future
+        assert pool._executor.submit(request.get).result(timeout=10) is None
+        gc.collect()
+        assert reference() is None
+
+
+def test_concurrent_monitor_configuration_changes_keep_one_live_pool(tmp_path, reconfigurable_monitor_pool):
+    from concurrent.futures import ThreadPoolExecutor
+
+    def submit(index):
+        pool = reconfigurable_monitor_pool(max_workers=1 + index % 3, queue_limit=index % 2)
+        future = pool.submit(tmp_path, str(index), str(index), lambda: index)
+        return pool, future
+
+    with ThreadPoolExecutor(max_workers=8) as callers:
+        results = list(callers.map(submit, range(32)))
+    pool = results[0][0]
+    for current, future in results:
+        assert current is pool
+        result = future.result(timeout=10)
+        assert isinstance(result, int) or result['reason'] == 'queue_full'
+    assert not pool._closed and len(pool._executor._threads) <= 3
