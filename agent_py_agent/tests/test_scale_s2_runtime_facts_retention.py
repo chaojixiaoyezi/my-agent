@@ -16,6 +16,9 @@ import pytest
 
 from agent_py_agent.agent.common import nofollow_fs
 from agent_py_agent.agent.common.json_io import locked_json_path, write_private_text_file_atomic
+from agent_py_agent.agent.conversation import compact_checkpoint as checkpoints
+from agent_py_agent.agent.conversation.models import ConversationCompactCommit
+from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.memory_archive import tool_output_retention as retention
 from agent_py_agent.agent.memory_archive.runtime_fact_source import (
     ApprovedRuntimeFactSourceRequest,
@@ -25,13 +28,19 @@ from agent_py_agent.agent.memory_archive.runtime_fact_source import (
     write_approved_runtime_fact_source,
     write_runtime_fact_source,
 )
+from agent_py_agent.agent.memory_store import reference_pins, retention_scan
+from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
+from agent_py_agent.agent.memory_store.retention_models import MemoryRetentionPolicy
 from agent_py_agent.agent.run_intent import _MAX_FACT_FILES
 from agent_py_agent.agent.run_intent_index import _locator_path, read_locator
+from agent_py_agent.agent.user_space import storage_lanes
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 from agent_py_agent.agent.user_space.storage_lanes import (
     STORAGE_LANE_SLICE_ENTRIES,
     StorageLaneBudget,
     StorageLaneRequest,
+    owner_conversation_roots,
+    resolve_storage_lane,
     validate_lane_receipt,
 )
 
@@ -49,11 +58,11 @@ def request(owner, *, items=STORAGE_LANE_SLICE_ENTRIES, hold=False, commit=None,
         StorageLaneBudget(items, None, None), hold, commit is not None, None, commit)
 
 
-def fact(owner, name, *, phase='final', age=31, approved=False, root=None):
+def fact(owner, name, *, phase='final', age=31, approved=False, root=None, run_id='', task_id=''):
     home, now = owner
     root = Path(root or home.owner_home_dir)
     directory = Path(write_runtime_fact_source(RuntimeFactSourceRequest(
-        root=root, request_id=name, status='DONE' if phase == 'final' else 'running')))
+        root=root, request_id=name, status='DONE' if phase == 'final' else 'running', run_id=run_id, task_id=task_id)))
     if phase == 'failed':
         update_runtime_fact_terminal(RuntimeFactTerminalRequest(root=root, request_id=name, status='failed'))
     if approved:
@@ -126,13 +135,15 @@ def test_owner_retention_override_is_applied_even_while_tool_outputs_rest(owner)
     directory = fact(owner, 'two-hundred-days', age=200)
     fresh_locator(owner)
     policy = owner[0].owner_retention_json
-    write_private_text_file_atomic(policy, json.dumps({'tool_output_days': 365}))
+    # 引用复核需要现行完整策略，不能用缺少 schema 的单字段夹具关闭删除。
+    payload = {**MemoryRetentionPolicy().to_dict(), 'tool_output_days': 365}
+    write_private_text_file_atomic(policy, json.dumps(payload))
     # 事实遍历计入检查条数并在走完后记录休息点（scale-s8）；保留期覆盖仍使200天事实保留。
     kept = retention.maintain_owner_tool_outputs_lane(request(owner))
     assert kept['complete'] is True and kept['items'] == 1 and 'deleted_items' not in kept
     assert kept['cursor']['next_pass_at'] == owner[1] + 3600 and kept['cursor']['facts_after'] == ''
     assert directory.exists()
-    write_private_text_file_atomic(policy, json.dumps({'tool_output_days': 30}))
+    write_private_text_file_atomic(policy, json.dumps({**payload, 'tool_output_days': 30}))
     assert retention.maintain_owner_tool_outputs_lane(request(owner))['deleted_items'] == 1
     assert not directory.exists()
 
@@ -252,6 +263,189 @@ def test_age_phase_and_source_are_rechecked_inside_write_gate(owner, change):
     assert calls == [True]
     assert directory.exists() and not result.get('errors')
     assert result.get('deleted_items', 0) == 0
+
+
+def lane_pass(owner, *, cursor=None, commit=None):
+    """从登记入口运行有限轮次，游标和回执经过真实 JSON 往返及合同校验。"""
+    lane = resolve_storage_lane('tool_outputs')
+    assert lane is retention.maintain_owner_tool_outputs_lane
+    receipts = []
+    for _ in range(8):
+        receipt = validate_lane_receipt(json.loads(json.dumps(lane(request(owner, cursor=cursor, commit=commit)))))
+        receipts.append(receipt)
+        if receipt['complete']:
+            return receipts
+        cursor = receipt['cursor']
+    pytest.fail('事实退休未在有限切片内完成：' + repr(receipts[-1]))
+
+
+@contextmanager
+def no_fd_growth():
+    gc.collect()
+    fd_root = '/proc/self/fd' if os.path.isdir('/proc/self/fd') else '/dev/fd'
+    before = len(os.listdir(fd_root))
+    try:
+        yield
+    finally:
+        gc.collect()
+        assert len(os.listdir(fd_root)) - before == 0
+
+
+@pytest.mark.parametrize('resting', [False, True])
+@pytest.mark.parametrize('reference', ['path', 'member', 'request_id', 'run_id', 'task_id'])
+def test_formal_memory_refs_protect_old_facts(owner, reference, resting):
+    directory = fact(owner, 'referenced', run_id='retained-run', task_id='retained-task')
+    control = fact(owner, 'unreferenced')
+    fresh_locator(owner)
+    member = directory / 'proof.txt'
+    member.write_text('原始证据', encoding='utf-8')
+    task = directory / 'task.json'
+    value = {'path': str(task), 'member': str(member), 'request_id': directory.name,
+             'run_id': 'retained-run', 'task_id': 'retained-task'}[reference]
+    JsonlMemory(owner[0].owner_memory_long_term_jsonl).add('user', '保留来源', attributes={'source_refs': [value]})
+    errors = []
+    pins, complete = retention_scan.current_retention_pins(owner[0], owner_conversation_roots(owner[0]), errors,
+        now=datetime.fromtimestamp(owner[1], timezone.utc))
+    assert complete and pins.protects(directory if reference == 'member' else task, errors) and not errors
+    rows, errors = read_locator(directory.parent, limit=_MAX_FACT_FILES)
+    assert not errors and directory.name not in {row['directory'] for row in rows}
+    before = {path.name: path.read_bytes() for path in directory.iterdir()}
+
+    with no_fd_growth():
+        receipts = lane_pass(owner, cursor=None if resting else {})
+
+    assert directory.exists() and {path.name: path.read_bytes() for path in directory.iterdir()} == before
+    assert not control.exists() and sum(row.get('deleted_items', 0) for row in receipts) == 1
+    assert not any(row.get('errors') for row in receipts)
+
+
+@pytest.mark.parametrize('resting', [False, True])
+def test_active_compact_checkpoint_refs_protect_old_facts(owner, resting):
+    from agent_py_agent.agent.agent_core.runtime.context_compactor import RuntimeCompactPolicy
+
+    directory = fact(owner, 'checkpoint-source', run_id='retained-run')
+    control = fact(owner, 'checkpoint-control')
+    fresh_locator(owner)
+    home = owner[0]
+    store = ConversationStore(home.owner_home_dir / 'conversations', compact_root=home.owner_compact_dir)
+    thread = store.threads.get_or_create({'canonical_user_id': home.owner_id})
+    message = store.messages.append({'thread_id': thread.thread_id, 'role': 'user', 'content': '保留运行来源'})
+    offset = store.storage.message_path(thread.thread_id).stat().st_size
+    agent = SimpleNamespace(home_paths=home)
+    policy = RuntimeCompactPolicy(context_window_tokens=1000, trigger_percent=90, trigger_tokens=900,
+        recovery_target_percent=60, recovery_target_tokens=600, allow_persistent_apply=True,
+        recent_tail_max_turns=4, recent_tail_tokens=100, failure_threshold=3, failure_cooldown_seconds=300.0)
+    checkpoint_id = checkpoints.write_compact_checkpoint(agent, checkpoints.CompactCheckpointRequest(
+        thread=thread, summary='运行来源仍用于恢复', operation_evidence={}, compact_rows=(message,), retained_tail=(),
+        source_end_byte_offset=offset, projected_tokens_before=900, projected_tokens_after=300,
+        policy=policy, forced=False, source_tool_refs=({'run_id': 'retained-run', 'attempt_id': 'retained-attempt',
+                                                     'turn_id': 'retained-turn', 'call_id': 'retained-call'},)))
+    committed = store.threads.update_compact_state(thread.thread_id, commit=ConversationCompactCommit(
+        summary='运行来源仍用于恢复', operation_evidence={}, checkpoint_id=checkpoint_id,
+        compacted_through_message_id=message.message_id, compacted_through_byte_offset=offset,
+        source_messages=1, source_tool_pairs=1), expected_generation=0)
+    chain = checkpoints.committed_compact_checkpoint_chain(agent, committed)
+    assert chain[-1]['checkpoint_id'] == checkpoint_id
+    assert chain[-1]['source_tool_refs'][0]['run_id'] == 'retained-run'
+    before = (directory / 'task.json').read_bytes()
+
+    with no_fd_growth():
+        receipts = lane_pass(owner, cursor=None if resting else {})
+
+    assert directory.exists() and (directory / 'task.json').read_bytes() == before
+    assert not control.exists() and sum(row.get('deleted_items', 0) for row in receipts) == 1
+    assert not any(row.get('errors') for row in receipts)
+
+
+@pytest.mark.parametrize('resting', [False, True])
+@pytest.mark.parametrize('damage', ['malformed', 'unreadable'])
+def test_unreadable_pin_sources_preserve_facts_and_diagnostics(owner, monkeypatch, resting, damage):
+    directories = [fact(owner, f'unknown-pins-{index}') for index in range(2)]
+    fresh_locator(owner)
+    memory = JsonlMemory(owner[0].owner_memory_long_term_jsonl)
+    memory.add('user', '正式来源', attributes={'source_refs': [str(directories[0] / 'task.json')]})
+    if damage == 'malformed':
+        memory.path.write_text('{', encoding='utf-8')
+    else:
+        original = retention_scan._pin_rows
+
+        def unreadable(path, *args, **kwargs):
+            if path == memory.path:
+                raise PermissionError('private pin source detail')
+            yield from original(path, *args, **kwargs)
+
+        monkeypatch.setattr(retention_scan, '_pin_rows', unreadable)
+    before = [(directory / 'task.json').read_bytes() for directory in directories]
+
+    with no_fd_growth():
+        receipts = lane_pass(owner, cursor=None if resting else {})
+
+    assert all(directory.exists() for directory in directories)
+    assert [(directory / 'task.json').read_bytes() for directory in directories] == before
+    assert sum(row.get('deleted_items', 0) for row in receipts) == 0
+    errors = [error for row in receipts for error in row.get('errors', [])]
+    assert any(error['code'] == 'runtime_fact_unreadable' for error in errors)
+    assert any(error['code'] == 'MEMORY_RETENTION_PIN_SOURCE_UNREADABLE' for error in errors)
+    assert all(len(row.get('errors', [])) <= 16 for row in receipts)
+    assert 'private pin source detail' not in json.dumps(receipts)
+
+
+def test_reference_published_in_write_gate_is_checked_under_fact_locks(owner, monkeypatch):
+    directory = fact(owner, 'late-reference')
+    fresh_locator(owner)
+    memory = JsonlMemory(owner[0].owner_memory_long_term_jsonl)
+    original_lock, original_current = retention.locked_json_path, reference_pins.ReferencePinSnapshot.current
+    inside, held_locks, observed = [], [], []
+
+    @contextmanager
+    def observed_lock(path, **kwargs):
+        with original_lock(path, **kwargs):
+            held_locks.append(path)
+            try:
+                yield
+            finally:
+                held_locks.pop()
+
+    def current(snapshot, errors, *, target=None):
+        assert inside and len(held_locks) == 2 and held_locks[-1] == directory / 'task.json'
+        observed.append(target)
+        return original_current(snapshot, errors, target=target)
+
+    def commit(operation):
+        memory.add('user', '写门内新增来源', attributes={'source_refs': [str(directory / 'task.json')]})
+        inside.append(True)
+        try:
+            return operation()
+        finally:
+            inside.pop()
+
+    monkeypatch.setattr(retention, 'locked_json_path', observed_lock)
+    monkeypatch.setattr(reference_pins.ReferencePinSnapshot, 'current', current)
+    with no_fd_growth():
+        receipts = lane_pass(owner, commit=commit)
+    assert directory.exists() and observed == [directory / 'task.json']
+    assert not any(row.get('errors') for row in receipts)
+
+
+def test_stable_fact_candidates_reuse_one_full_pin_build(owner, monkeypatch):
+    directories = [fact(owner, f'stable-pins-{index}') for index in range(2)]
+    fresh_locator(owner)
+    JsonlMemory(owner[0].owner_memory_long_term_jsonl).add('user', '共享引用投影',
+        attributes={'source_refs': [str(directory / 'task.json') for directory in directories]})
+    original, builds = retention_scan.current_retention_pins, []
+
+    def counted(*args, **kwargs):
+        builds.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(retention_scan, 'current_retention_pins', counted)
+    # 本例只核对一次切片的解析次数；时间预算仍用原计算，冻结时钟避免调度延迟拆成两片。
+    monkeypatch.setattr(storage_lanes, 'time', SimpleNamespace(monotonic=lambda: 100.0))
+    with no_fd_growth():
+        receipts = lane_pass(owner)
+    assert len(receipts) == 1 and receipts[0]['items'] == 2 and builds == [True]
+    assert all(directory.exists() for directory in directories)
+    assert not receipts[0].get('errors')
 
 
 def _approved_writer_at_lock(root, ready, proceed, attempted, blocked, completed, results):

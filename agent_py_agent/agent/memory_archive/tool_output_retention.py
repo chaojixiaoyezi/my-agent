@@ -363,7 +363,7 @@ def _sweep_locks(request, cursor, directory, budget):
 
 # LLM: 先持目录外的家族锁，再取单事实锁；删除后者时家族锁仍排斥全部事实写者。
 # 函数用途: 在调用方写门内退休一个过期终态事实，返回实际释放字节。
-def _retire_fact_dir(parent, name, cutoff, task_path: Path):
+def _retire_fact_dir(parent, name, cutoff, task_path: Path, pin_snapshot, pin_errors):
     from .runtime_fact_source import _runtime_fact_fence_path
 
     try:
@@ -388,6 +388,10 @@ def _retire_fact_dir(parent, name, cutoff, task_path: Path):
                 if (not isinstance(payload, dict) or payload.get('source') != 'runtime_fact_source'
                         or not isinstance(phase, str) or phase not in _TERMINAL_FACT_PHASES):
                     return None
+                pins, _ = pin_snapshot.current(pin_errors, target=task_path)
+                if (pins.protects(task_path.parent, pin_errors)
+                        or pins.protects(task_path, pin_errors)):
+                    return None
                 files = []
                 with os.scandir(descriptor) as entries:
                     for entry in entries:
@@ -410,12 +414,15 @@ def _retire_fact_dir(parent, name, cutoff, task_path: Path):
 # 函数用途: 分片回收Owner根下过期且未受保护的终态运行事实目录。
 def _retire_runtime_facts(request, days, cursor=None):
     from ..common.nofollow_fs import _supports_dir_fd, open_directory_beneath
+    from ..memory_store.reference_pins import ReferencePinSnapshot
+    from ..memory_store.retention_scan import current_retention_pins
     from ..run_intent import _MAX_FACT_FILES
     from ..run_intent_index import read_locator
     from ..user_space.storage_lanes import (
         STORAGE_LANE_SLICE_BYTES,
         STORAGE_LANE_SLICE_ENTRIES,
         STORAGE_LANE_SLICE_MS,
+        owner_conversation_roots,
     )
 
     cursor = cursor or {}
@@ -437,6 +444,10 @@ def _retire_runtime_facts(request, days, cursor=None):
         return report
     budget = request.budget.capped(items=STORAGE_LANE_SLICE_ENTRIES, size=STORAGE_LANE_SLICE_BYTES,
                                    ms=STORAGE_LANE_SLICE_MS / 2)
+    if budget.remaining_ms() <= 0:
+        report.update(complete=False, cursor={'facts_after': after})
+        return report
+    pin_snapshot, pin_errors = None, []
     try:
         parent = open_directory_beneath(request.home.owner_home_dir, parts, require_dir_fd=True)
     except (OSError, ValueError):
@@ -449,7 +460,8 @@ def _retire_runtime_facts(request, days, cursor=None):
                 if seeking:
                     seeking = entry.name != after
                     continue
-                if (examined and budget.remaining_ms() <= 0) or report['items'] >= budget.max_items:
+                if ((report['items'] > 0 and budget.remaining_ms() <= 0)
+                        or report['items'] >= budget.max_items):
                     finished = False
                     break
                 try:
@@ -460,8 +472,11 @@ def _retire_runtime_facts(request, days, cursor=None):
                     info = os.stat(f'{entry.name}/task.json', dir_fd=parent, follow_symlinks=False)
                     if not stat.S_ISREG(info.st_mode) or info.st_mtime > cutoff:
                         continue
+                    if pin_snapshot is None:
+                        pin_snapshot = ReferencePinSnapshot(request.home, owner_conversation_roots(request.home),
+                            datetime.fromtimestamp(request.now, timezone.utc), current_retention_pins)
                     freed = request.run_write(lambda name=entry.name: _retire_fact_dir(
-                        parent, name, cutoff, facts_dir / name / 'task.json'))
+                        parent, name, cutoff, facts_dir / name / 'task.json', pin_snapshot, pin_errors))
                     if freed is not None:
                         removed.add(entry.name)
                         report['deleted'] += 1
@@ -472,6 +487,7 @@ def _retire_runtime_facts(request, days, cursor=None):
                     _error(report['errors'], 'runtime_fact_unreadable', '/'.join((*parts, entry.name)))
     finally:
         os.close(parent)
+    _pin_error_rows(pin_errors, report['errors'])
     if seeking or not finished:
         anchor = '' if seeking else next((name for name in reversed(examined) if name not in removed), after)
         report.update(complete=False, cursor={'facts_after': anchor})
