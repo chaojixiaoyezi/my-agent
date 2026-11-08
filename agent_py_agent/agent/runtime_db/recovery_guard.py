@@ -125,8 +125,9 @@ def runtime_db_generation_guard(path: Path, *, exclusive: bool = False, blocking
     descriptor = None
     state, token, completed = None, None, False
     try:
-        if not handle.lock.acquire(blocking=blocking):
-            raise RuntimeDatabaseDeferred("generation_busy")
+        # 进程内互斥只串行本进程“开锁FD+flock”这一有界临界区；同进程线程同时建连不是代次事实，
+        # 须等待而不是报 generation_busy。是否阻塞仍只由下面的 flock 按 blocking 决定。
+        handle.lock.acquire()
         try:
             descriptor = json_io._open_private_lock_descriptor(lock)
             try:

@@ -65,7 +65,7 @@ def test_plugin_execution_is_unready_http_direct_and_live_context(production_hos
         {**PAYLOADS[action], **({'expected_revision': 1} if action in {
             'background_agents.resume', 'background_agents.restore', 'workflow_runs.resume'} else {})},
         user='alice' if 'execute' in authorized_caps(action) else None, key='r2-refused-' + action.replace('.', '-'))
-    before = sorted(str(path.relative_to(owner.root)) for path in owner.root.rglob('*'))
+    before = _owner_tree(owner.root)
     assert backend.ready('business.' + action) is False
     with pytest.raises(HostAPIError) as direct:
         backend.call(authorized)
@@ -81,7 +81,13 @@ def test_plugin_execution_is_unready_http_direct_and_live_context(production_hos
         **({'as_user': {'user_id': 'alice'}} if 'execute' in authorized_caps(action) else {})})
     assert status == 503 and result['error']['code'] == 'HOST_NOT_READY', result
     assert result['error']['outcome'] == 'not_started'
-    assert sorted(str(path.relative_to(owner.root)) for path in owner.root.rglob('*')) == before
+    assert _owner_tree(owner.root) == before
+
+
+# LLM: 691c5345d 的代次锁侧车在首次读取既有库时建立，属于锁文件而非业务状态写入。
+# 函数用途: 列出 owner 树中除代次锁侧车外的全部路径。
+def _owner_tree(root):
+    return sorted(str(path.relative_to(root)) for path in root.rglob('*') if not path.name.endswith('.generation.lock'))
 
 
 def authorized_caps(action):

@@ -299,17 +299,20 @@ def _scope_connection(scope: _ConnectionScope, key: tuple[int, int, Path, bool],
         _cleanup_preserving_error(lambda: _release_entry(scope, key, entry, error=body_error), body_error)
 
 
-# LLM: 调用方工厂负责访问模式和 PRAGMA；完整身份键仅在原进程/线程的显式作用域内使用。
-# 函数用途: 为数据库操作选择请求级缓存或旧短连接寿命。
 @contextmanager
 def scoped_connection(path: Path, read_only: bool, connect: Callable[[], sqlite3.Connection]) -> Iterator[sqlite3.Connection]:
+    """原始工厂适配层：每条新物理连接只登记一次代次门。"""
+    with scoped_guarded_connection(path, read_only, lambda: guarded_runtime_connect(path, connect)) as conn:
+        yield conn
+
+
+# 已登记的工厂在初始化前持门；缓存命中复用同一物理连接，不再重入锁。
+@contextmanager
+def scoped_guarded_connection(path: Path, read_only: bool, connect: Callable[[], sqlite3.Connection]) -> Iterator[sqlite3.Connection]:
+    """为已有代次门的工厂选择原请求缓存、短连接和结构错误清理。"""
     if runtime_db_recovery_pending(path) and not runtime_db_exclusive_owned(path):
         retire_idle_runtime_connections(path)
         raise RuntimeDatabaseDeferred("recovery_pending")
-    factory = connect
-
-    def connect():
-        return guarded_runtime_connect(path, factory)
     try:
         scope = _SQLITE_ACTIVE_SCOPE.get()
         if scope is not None and _scope_owned(scope):

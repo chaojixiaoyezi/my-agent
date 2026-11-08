@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.common import json_io
 from agent_py_agent.agent.io.sqlite_connection import TrackedSQLiteConnection, sqlite_error_details
 from agent_py_agent.agent.io.sqlite_scope import (
     retire_scoped_database,
@@ -17,6 +18,7 @@ from agent_py_agent.agent.io.sqlite_scope import (
     sqlite_connection_scope,
 )
 from agent_py_agent.agent.runtime_db import recovery_guard as guard
+from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 from agent_py_agent.agent.runtime_db.sqlite_scope import (
     activate_sqlite_scope,
     close_persistent_sqlite_scope,
@@ -317,3 +319,110 @@ def test_windows_generation_lock_distinguishes_contention_and_io_errors(windows_
     else:
         assert raised.value is api.failure
     assert raised.value.__cause__ is None
+
+
+@pytest.fixture
+def exclusive_generation_backend(monkeypatch):
+    """用真实文件锁复现只支持 EX 的后端；不冒充 Windows 原生验证。"""
+    attempts = []
+    native = json_io.fcntl
+    if native is not None:
+        def lock(descriptor, mode):
+            attempts.append(descriptor)
+            native.flock(descriptor, (mode & ~native.LOCK_SH) | native.LOCK_EX)
+
+        monkeypatch.setattr(json_io, "fcntl", SimpleNamespace(**(vars(native) | {"flock": lock})))
+    else:
+        native_lock = guard._lock_windows_generation
+
+        def lock(descriptor, *, exclusive, blocking):
+            attempts.append(descriptor)
+            native_lock(descriptor, exclusive=True, blocking=blocking)
+
+        monkeypatch.setattr(guard, "_lock_windows_generation", lock)
+    return attempts
+
+
+def test_runtime_constructor_query_transaction_and_cache_acquire_once(database, exclusive_generation_backend):
+    attempts = exclusive_generation_backend
+    with sqlite_connection_scope(False):
+        repo = RuntimeRepository(database)
+        assert len(attempts) == 1
+        assert repo.get_task("absent") is None
+        assert len(attempts) == 2
+        with repo.transaction() as conn:
+            conn.execute("INSERT INTO metadata(key,value) VALUES('r7-proof','committed')")
+            assert len(guard._records()[1][guard._path(database)]) == 1
+        assert len(attempts) == 3
+        assert not guard._records()[1].get(guard._path(database))
+        with sqlite_connection_scope(True):
+            assert repo.get_task("absent") is None
+            record = next(iter(guard._records()[1][guard._path(database)].values()))
+            assert record["idle"] and len(attempts) == 4
+            assert repo.get_task("absent") is None
+            assert next(iter(guard._records()[1][guard._path(database)].values())) is record
+            assert len(attempts) == 4
+        with pytest.raises(sqlite3.ProgrammingError):
+            record["conn"].execute("SELECT 1")
+        assert not guard._records()[1].get(guard._path(database))
+        with repo.transaction() as conn:
+            assert conn.execute("SELECT value FROM metadata WHERE key='r7-proof'").fetchone()[0] == "committed"
+
+
+@pytest.mark.parametrize("mode", ["direct", "existing_only", "read_only"])
+def test_direct_runtime_connections_remain_pinned(database, exclusive_generation_backend, mode):
+    RuntimeRepository(database)
+    repo = RuntimeRepository(database, read_only=mode == "read_only", existing_only=mode == "existing_only")
+    conn = repo._runtime_connect()
+    try:
+        record = guard._records()[0][id(conn)]
+        assert record["conn"] is conn and record["path"] == guard._path(database)
+        assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 0
+        with pytest.raises(guard.RuntimeDatabaseDeferred, match="generation_busy"):
+            with guard.runtime_db_generation_guard(database, exclusive=True):
+                pytest.fail("直接连接未物理关闭前不能恢复")
+    finally:
+        guard.close_runtime_connection(conn)
+    assert id(conn) not in guard._records()[0]
+    with guard.runtime_db_generation_guard(database, exclusive=True):
+        pass
+
+
+@pytest.mark.parametrize("reuse", [False, True])
+def test_generic_raw_factory_retains_one_physical_guard(database, exclusive_generation_backend, reuse):
+    opened = []
+
+    def connect():
+        conn = sqlite3.connect(database, factory=TrackedSQLiteConnection)
+        opened.append(conn)
+        return conn
+
+    with sqlite_connection_scope(reuse):
+        for _ in range(2):
+            with scoped_connection(database, False, connect) as conn:
+                assert conn.execute("SELECT 1").fetchone() == (1,)
+                assert len(guard._records()[1][guard._path(database)]) == 1
+        assert len(opened) == (1 if reuse else 2)
+        assert len(exclusive_generation_backend) == len(opened)
+        if reuse:
+            with scoped_connection(database, False, connect):
+                with pytest.raises(guard.RuntimeDatabaseDeferred, match="generation_busy"):
+                    with guard.runtime_db_generation_guard(database, exclusive=True):
+                        pytest.fail("正在借用的缓存连接不能被恢复者关闭")
+    assert not guard._records()[1].get(guard._path(database))
+    for conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+@pytest.mark.parametrize("parent_exists", [False, True])
+def test_limited_runtime_missing_source_creates_no_sidecar(tmp_path, read_only, parent_exists):
+    path = tmp_path / "absent" / "runtime.db"
+    if parent_exists:
+        path.parent.mkdir()
+    before = set(tmp_path.rglob("*"))
+    repo = RuntimeRepository(path, read_only=read_only, existing_only=not read_only)
+    with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
+        repo.get_task("absent")
+    assert set(tmp_path.rglob("*")) == before

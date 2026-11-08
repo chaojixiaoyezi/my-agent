@@ -33,7 +33,7 @@ from types import EllipsisType
 from ..contracts.optimization_contracts import require_schema_generation
 from ..io.sqlite_connection import TrackedSQLiteConnection, sqlite_error_details
 from ..io.sqlite_schema import schema_fingerprint, schema_is_current, stamp_schema
-from ..io.sqlite_scope import scoped_connection, sqlite_connection_factory
+from ..io.sqlite_scope import scoped_guarded_connection, sqlite_connection_factory
 from .maintenance import execute_runtime_statement
 from .recovery_guard import (
     RuntimeDatabaseDeferred,
@@ -828,6 +828,9 @@ class RuntimeSchemaMixin:
         factory = sqlite_connection_factory()
         if (read_only or existing_only) and factory is TrackedSQLiteConnection:
             factory = _RuntimeReadConnection
+        if (read_only or existing_only) and not os.path.lexists(self.db_path):
+            # ro/existing_only 的 URI 打开本就不建库；缺库时不进代次门，免得为不存在的库建目录与锁侧车。
+            raise sqlite3.OperationalError("unable to open database file")
         conn = guarded_runtime_connect(
             self.db_path,
             lambda: sqlite3.connect(address, timeout=timeout, uri=read_only or existing_only, factory=factory),
@@ -894,7 +897,7 @@ class RuntimeSchemaMixin:
                 raise
 
         try:
-            with scoped_connection(self.db_path, self.read_only, connect) as conn:
+            with scoped_guarded_connection(self.db_path, self.read_only, connect) as conn:
                 try:
                     if not self.read_only:
                         require_runtime_schema_generation(conn)

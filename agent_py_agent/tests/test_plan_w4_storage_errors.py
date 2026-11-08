@@ -22,6 +22,10 @@ from agent_py_agent.agent.local_storage.tool_operations import (
     new_tool_operation_holder,
 )
 from agent_py_agent.agent.runtime_db.managed_operation_store import ManagedOperationStore
+from agent_py_agent.agent.runtime_db.recovery_guard import (
+    RuntimeDatabaseDeferred,
+    runtime_db_generation_guard,
+)
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 from agent_py_agent.agent.tooling import tool_operation_coordinator as coordinator
 from agent_py_agent.agent.tooling.models import (
@@ -174,6 +178,16 @@ def test_busy_text_without_structured_code_is_not_retried(tmp_path):
     assert not result.ok and len(reads) == 1 and tool.calls == 0
 
 
+# LLM: 691c5345d 起结构性错误发布持久恢复意图；新借用先被延后，经 EX 恢复者清除意图后才可重开。
+# 函数用途: 断言结构性失败后的库在恢复前不再借出，恢复后新物理连接可用。
+def _assert_fenced_until_exclusive_recovery(path, read_only, connect):
+    with pytest.raises(RuntimeDatabaseDeferred, match="recovery_pending"):
+        with scoped_connection(path, read_only, connect):
+            pass
+    with runtime_db_generation_guard(path, exclusive=True):
+        pass
+
+
 @pytest.mark.parametrize("caught_inside", [False, True])
 @pytest.mark.parametrize("kind", ["statement", "corrupt", "notadb"])
 def test_exceptional_connection_is_retired_even_if_sql_error_was_caught(tmp_path, caught_inside, kind):
@@ -202,6 +216,8 @@ def test_exceptional_connection_is_retired_even_if_sql_error_was_caught(tmp_path
         else:
             with pytest.raises(sqlite3.Error), scoped_connection(path, True, connect) as conn:
                 fail(conn)
+            if kind != "statement":
+                _assert_fenced_until_exclusive_recovery(path, True, connect)
         with scoped_connection(path, True, connect) as fresh:
             assert fresh.execute("SELECT 1").fetchone()[0] == 1
         assert len(opened) == 2 and opened[0] is not opened[1]
@@ -446,6 +462,7 @@ def test_structural_rollback_error_survives_cleanup_without_replacing_body(tmp_p
             assert diagnostic["cleanup_error"]["sqlite_primary_code"] == code
         else:
             assert diagnostic["sqlite_primary_code"] == code
+        _assert_fenced_until_exclusive_recovery(path, False, connect)
         with scoped_connection(path, False, connect) as fresh:
             assert fresh.execute("SELECT count(*) FROM rollback_probe").fetchone()[0] == 0
         assert len(opened) == 2
