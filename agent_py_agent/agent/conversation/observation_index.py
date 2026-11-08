@@ -287,17 +287,26 @@ class ObservationIndex:
         return (_identity(self.journal_path), _identity(self.storage.observation_handled_path),
                 _directory_stamp(self.storage.observations_dir))
 
+    # LLM: 同一回合轮流询问多个 scope（插话的 thread/request/agent_run/task 目标、观察的不同 wake）；单槽空结果
+    #   会被下一个 scope 顶掉，每次询问都重开 SQLite 写事务。按 scope 各留一份，来源签名与可信窗口规则不变；
+    #   投影库只比 dev/inode：任一 scope 的空刷新都会改库的 ctime/mtime，重建换 inode 仍失效，内容变化由来源签名覆盖。
+    #   只整份替换、从不原地改，出窗口即丢，规模随近期 scope 数有界。
     def _quiet_hit(self, scope, signature):
-        quiet = self._quiet
-        return bool(quiet and quiet[0] == (scope, signature, _identity(self.path))
+        current = self._quiet
+        quiet = current.get(scope) if isinstance(current, dict) else None
+        return bool(quiet and quiet[0] == (signature, (_identity(self.path) or ())[:2])
                     and 0 <= time.monotonic() - quiet[2] < CACHE_TRUST_AGE_SECONDS
                     and time.time() < quiet[1])
 
     def _remember_quiet(self, scope, before, earliest_due):
         # 不能把查询结束后新到的来源签名配给旧的空结果。
         after = self._quiet_signature(scope)
-        self._quiet = (((scope, after, _identity(self.path)), earliest_due, time.monotonic())
-                       if before == after else None)
+        now, current = time.monotonic(), self._quiet
+        quiet = {key: value for key, value in current.items()
+                 if key != scope and 0 <= now - value[2] < CACHE_TRUST_AGE_SECONDS} if isinstance(current, dict) else {}
+        if before == after:
+            quiet[scope] = ((after, (_identity(self.path) or ())[:2]), earliest_due, now)
+        self._quiet = quiet
 
     # LLM: 标量元数据不复制整个历史。
     # 函数用途: 精确读取一个持久游标。
