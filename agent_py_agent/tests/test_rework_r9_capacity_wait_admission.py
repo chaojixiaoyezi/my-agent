@@ -51,6 +51,7 @@ def _children_for(agent, task_id):
 # LLM: 测试屏障只延后真实孩子进入core，不替换容量裁决或执行结果；五拍后解除，必须由原runner完成。
 # 函数用途: 在真正启用任务路由的普通链上核验容量等待与释放后的继续执行。
 def test_five_capacity_waits_stay_uncounted_and_same_task_continues(tmp_path, monkeypatch, request):
+    from agent_py_agent.agent.agent_core.orchestration.background import dispatch
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.runtime_context import current_subagent_run_id
     from agent_py_agent.agent.subagents.manager import creation_capacity_counts
@@ -59,8 +60,10 @@ def test_five_capacity_waits_stay_uncounted_and_same_task_continues(tmp_path, mo
     agent, paths, _provider, calls, _ = ordinary_chain(tmp_path, monkeypatch)
     child_entered = Event()
     release_child = Event()
+    dispatch_finished = Event()
     request.addfinalizer(release_child.set)
     original_run = SimpleAgent.run
+    original_dispatch = dispatch._background_dispatch_worker
 
     # LLM: 保留真实run输入与返回，只让占位孩子等待显式测试事件；有界超时失败且异常退出亦释放。
     # 函数用途: 排除离线孩子在第五拍前已跑完的时序竞态。
@@ -71,7 +74,16 @@ def test_five_capacity_waits_stay_uncounted_and_same_task_continues(tmp_path, mo
                 raise TimeoutError('capacity test child release was not signalled')
         return original_run(current, prompt, params=params)
 
+    # DONE 后仍有 runner-session/background_start 提交；观察真实派工返回才是尾账完成边界。
+    def observe_dispatch(dispatch_request):
+        try:
+            return original_dispatch(dispatch_request)
+        finally:
+            if dispatch_request.agent is agent:
+                dispatch_finished.set()
+
     monkeypatch.setattr(SimpleAgent, 'run', run)
+    monkeypatch.setattr(dispatch, '_background_dispatch_worker', observe_dispatch)
     assert agent.runtime_guard_policy.provider_transient_auto_resume_delays_seconds == ()
     store = agent.conversation_store
     set_delegation_preference(agent, "feishu", "ou_a", True)
@@ -126,18 +138,11 @@ def test_five_capacity_waits_stay_uncounted_and_same_task_continues(tmp_path, mo
 
     # 已有孩子由原调度监督与 runner 正常跑完，名额自然释放；之后由同一任务、同一唤醒继续委派。
     release_child.set()
+    assert dispatch_finished.wait(timeout=120), 'capacity test child dispatch did not finish'
+    assert creation_capacity_counts(agent, '')[0] == 0
+    assert agent.subagents.load(occupant.id).status == 'DONE'
 
     deadline, index = time.monotonic() + 120, 5
-    # 完成正文不等于canonical与索引均提交；先观察真实释放，避免把本测试混成pending-index并发故障测试。
-    while True:
-        try:
-            settled = creation_capacity_counts(agent, '')[0] == 0
-        except RuntimeError:
-            settled = False
-        if settled and agent.subagents.load(occupant.id).status == 'DONE':
-            break
-        assert time.monotonic() < deadline, agent.subagents.load(occupant.id).status
-        time.sleep(0.05)
     while not _children_for(agent, second.task_id):
         assert time.monotonic() < deadline, agent.subagents.load(occupant.id).status
         scheduler.tick(now=base + index * _TICK_GAP_SECONDS)
