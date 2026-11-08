@@ -150,7 +150,7 @@ def test_owner_entrypoints_share_deletion_gate_and_preserve_error_records(
     monkeypatch.setattr(entry_module, "apply_owner_retention", lambda *args, **kwargs: retention)
     pruned = []
 
-    def prune(owner_home, *, now, commit_transition=None):
+    def prune(owner_home, *, now, commit_transition=None, cursor=None):
         def operation():
             pruned.append(owner_home)
             return {"executed": True}

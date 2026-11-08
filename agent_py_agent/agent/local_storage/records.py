@@ -673,7 +673,9 @@ def _derived_owner_pin_ids(home, pins):
         try:
             payload = _pin_object(state)
         except (FileNotFoundError, NotADirectoryError):
-            if canonical_task_root(home.owner_home_dir, root) is not None:
+            # 规范任务根可以是从未建过work/的无状态任务目录（tasks/<日>/<名>），它没有运行身份可补；
+            # 只有work/已存在而state缺失（写入中或被破坏）才按引用不完整拒绝清理。
+            if canonical_task_root(home.owner_home_dir, root) is not None and (root / "work").exists():
                 raise
             continue
         ids.update(_derived_run_keys({"source_id": ""}, payload))
