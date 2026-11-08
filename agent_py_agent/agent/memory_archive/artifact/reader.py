@@ -82,6 +82,8 @@ _INLINE_ARTIFACT_CACHE = _VerifiedArtifactCache(16 * 1024 * 1024)
 _BLOB_INDEX_CACHE = _VerifiedArtifactCache(8 * 1024 * 1024)
 _ARTIFACT_INDEX_CACHE = _VerifiedArtifactCache(16 * 1024 * 1024)
 _INDEX_LITERAL_FIELDS = ("path", "sha256", "scoped_call_id", "call_id", "artifact_id", "file_path", "archive_path", "source_ref", "uri")
+# 超预算索引的预筛命中结果不进LRU；单槽只给同一次准备与读取的第二次同键同引用查找复用，索引stat一变即失效。
+_OVERSIZED_LITERAL_SLOT: list = [None]
 # 外置blob流式解码字符偏移检查点的间隔字符数
 _BLOB_CHECKPOINT_CHARS = 4096
 
@@ -980,15 +982,20 @@ def _parsed_artifact_index(source, *, literal_ref: str | None = None):
         # 原文字节已超缓存预算时解析树必然入不了缓存：字面查找只解码预筛命中行（转义行仍保留），并跳过驻留体积遍历。
         oversized = before[2] > _ARTIFACT_INDEX_CACHE.max_bytes
         prescreen = tool_index_prescreen_pattern((literal_ref,)) if oversized and literal_ref else None
+        slot = _OVERSIZED_LITERAL_SLOT[0]
+        if prescreen is not None and slot is not None and slot[0] == (key, literal_ref):
+            return slot[1]
         rows = tuple(row for _, row in iter_decoded_tool_index_objects(_OpenArtifactIndex(handle), prescreen))
         by_literal: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
             for ref in {str(row.get(field, "") or "") for field in _INDEX_LITERAL_FIELDS}:
                 by_literal.setdefault(ref, []).append(row)
         result = rows, by_literal
-        if (not oversized and _blob_stat_signature(os.fstat(handle.fileno())) == before
-                and (literal_ref is None or literal_ref in by_literal)):
-            _ARTIFACT_INDEX_CACHE.put(key, result)
+        if _blob_stat_signature(os.fstat(handle.fileno())) == before and (literal_ref is None or literal_ref in by_literal):
+            if not oversized:
+                _ARTIFACT_INDEX_CACHE.put(key, result)
+            elif prescreen is not None:
+                _OVERSIZED_LITERAL_SLOT[0] = (key, literal_ref), result
         return result
 
 
