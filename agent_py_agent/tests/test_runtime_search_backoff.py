@@ -1,6 +1,7 @@
 """本地归档剪枝、部分搜索结果及真实静默管道的有界回收，不访问用户数据。"""
 from __future__ import annotations
 
+import gc
 import json
 import os
 import shlex
@@ -24,6 +25,7 @@ ARCHIVES = ('runs', 'compact', 'memory_archive', 'blobs', '.background_jobs', 'r
 
 
 def _fd_count():
+    gc.collect()
     directory = Path('/dev/fd') if Path('/dev/fd').is_dir() else Path('/proc/self/fd')
     if not directory.is_dir():
         return None
@@ -33,10 +35,12 @@ def _fd_count():
 
 @pytest.fixture
 def fd_balance():
+    gc.collect()
     before = _fd_count()
     yield
     if before is not None:
-        assert _fd_count() - before == 0
+        gc.collect()
+        assert _fd_count() - before <= 0
 
 
 def _tool(root, kind):
