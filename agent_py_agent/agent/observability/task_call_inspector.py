@@ -1,4 +1,4 @@
-# LLM: 每个任务 JSON 是权威，索引只是可重建投影；所有读改写受 owner 下同一进程锁保护。
+# LLM: 任务 JSON 保存元数据/摘要，轮次只有追加源；索引是可重建投影，所有写者持原 owner 锁。
 # 模块用途: 保存任务运行节点、模型轮次、Token 总量与工具时间线。
 from __future__ import annotations
 
@@ -26,6 +26,13 @@ from agent_py_agent.agent.observability.telemetry_ledger import (
 )
 
 from ..workflows.models import redact_bearer_values as redact_sensitive_value
+from .task_rounds import (
+    _append_task_round_unlocked,
+    _validate_round,
+    hydrate_task_rounds,
+    missing_task_metadata,
+    prepare_task_rounds,
+)
 
 SCHEMA = "task_call_telemetry.v1"
 STATUSES = {"running", "succeeded", "failed", "paused", "cancelled"}
@@ -178,17 +185,17 @@ class TaskCallInspector:
         self.ledger = ToolTelemetryLedger(self._home, owner_id=owner_id)
 
     # LLM: 从固定文件安全读取，不相信索引携带的路径或身份。
-    # 函数用途: 加载单任务权威记录。
-    def _read(self, task_id):
+    # 函数用途: 读取任务元数据；只有显式完整详情才组装追加源。
+    def _read(self, task_id, *, include_rounds=False):
         text = read_text_beneath(self._home, _path(task_id))
         if text is None:
-            return None
+            return missing_task_metadata(self._home, task_id, self._owner_id) if include_rounds else None
         row = json.loads(text)
         if row.get("schema") != SCHEMA or row.get("task_id") != task_id:
             raise ValueError("invalid task record")
         if self._owner_id and row["owner_id"] != self._owner_id:
             raise ValueError("owner mismatch")
-        return row
+        return hydrate_task_rounds(self._home, row) if include_rounds else row
 
     # LLM: 无目录返回空；列表后文件消失只过滤None，损坏/越权仍沿原异常，不把索引遗漏解释为没有任务。
     # 函数用途: 安全列举仍存在的任务，避开并发清理留下的空记录。
@@ -200,7 +207,7 @@ class TaskCallInspector:
         rows = []
         for name in sorted(names):
             if name.endswith(".json"):
-                loaded = self._read(name[:-5])
+                loaded = self._read(name[:-5], include_rounds=True)
                 if loaded is not None:
                     rows.append(loaded)
         return rows
@@ -236,9 +243,10 @@ class TaskCallInspector:
             write_text_atomic_beneath(self._home, (*PARTS, "task_calls_index.jsonl"), index)
 
     # LLM: 保存前验证并递归脱敏；JSON 原子提交后按需同步索引，追加轮次且索引已存在时不重扫目录。
-    # 函数用途: 在调用方持有锁时保存完整记录及索引投影。
-    def _save(self, payload, *, sync_index: bool = True):
+    # 函数用途: 在原锁内验证并保存元数据，轮次的单一追加源按需迁移与组装。
+    def _save(self, payload, *, sync_index: bool = True, include_rounds: bool = True, replace_rounds: bool = False):
         data = dict(payload)
+        rounds_state = data.pop("_rounds", None)
         if data.pop("schema", SCHEMA) != SCHEMA:
             raise ValueError("unsupported schema")
         item = TaskCallRecord(**data)
@@ -258,27 +266,38 @@ class TaskCallInspector:
             raise ValueError("invalid task collections")
         item.token_usage = _sum_usage(item.rounds) if item.rounds else _usage(item.token_usage)
         row = redact_sensitive_value(item.to_dict())
+        if rounds_state is not None:
+            row["_rounds"] = rounds_state
+        if item.rounds or replace_rounds:
+            row = prepare_task_rounds(self._home, row, replace=replace_rounds)
         write_text_atomic_beneath(self._home, _path(item.task_id), _encode(row))
-        index_path = self._home.joinpath(*PARTS, "task_calls_index.jsonl")
-        if sync_index or not index_path.is_file() or index_path.stat().st_size <= 0:
+        if sync_index or (include_rounds and self._index_missing()):
             self._write_index(row)
-        return row
+        return hydrate_task_rounds(self._home, row) if include_rounds else None
+
+    def _index_missing(self):
+        path = self._home.joinpath(*PARTS, "task_calls_index.jsonl")
+        return not path.is_file() or path.stat().st_size <= 0
 
     # LLM: 字典是部分更新，dataclass 是完整快照；锁内先读后合并，防止覆盖并发追加轮次。
     # 函数用途: 创建或更新任务记录。
     def upsert_task_call(self, record):
         payload = record.to_dict() if isinstance(record, TaskCallRecord) else dict(record)
+        payload.pop("_rounds", None)
+        payload.pop("rounds_coverage", None)
         _path(payload.get("task_id"))
         with _lock(self._home):
             existing = self._read(payload["task_id"]) or {}
-            return self._save({**existing, **payload})
+            return self._save({**existing, **payload}, replace_rounds="rounds" in payload)
 
-    # LLM: 默认必须已有任务；仅显式create在同一锁内建记录，轮次和树节点一起原子发表，不能覆盖已持久终态。
+    # LLM: 原 owner 锁串行源与摘要；两者不是跨文件原子事务，详情明确披露未追平的摘要。
     # 函数用途: 追加模型轮次、补齐对应运行节点并刷新累计用量。
-    def append_round(self, task_id, round_data, *, create_if_missing: bool = False):
+    def append_round(self, task_id, round_data, *, create_if_missing: bool = False, include_rounds: bool = True) -> dict | None:
         _path(task_id)
         with _lock(self._home):
             row = self._read(task_id)
+            data = dict(round_data)
+            _validate_round(data)
             created = row is None
             if created:
                 if not create_if_missing:
@@ -287,12 +306,11 @@ class TaskCallInspector:
                                      thread_id=str(round_data.get("thread_id") or ""),
                                      started_at=float(round_data.get("started_at") or time.time()),
                                      root_run_id=str(round_data.get("root_run_id") or "")).to_dict()
-            data = dict(round_data)
-            if "duration_ms" in data:
-                _number(data["duration_ms"])
-            _append_model_run(row, data)
-            row["rounds"].append(data)
-            return self._save(row, sync_index=created)
+                self._save(row, sync_index=include_rounds, include_rounds=False)
+            _append_task_round_unlocked(self._home, task_id, data)
+            if include_rounds and self._index_missing():
+                self._write_index(self._read(task_id))
+            return self._read(task_id, include_rounds=True) if include_rounds else None
 
     # LLM: completed 状态不含 running；结束时间未指定时取当前时间，负耗时由保存校验拒绝。
     # 函数用途: 更新任务终态及总耗时。
@@ -334,12 +352,12 @@ class TaskCallInspector:
             if not calls:
                 raise
             return _merge_task(None, calls)
-        return _merge_task(self._read(task_id), calls)
+        return _merge_task(self._read(task_id, include_rounds=True), calls)
 
 
 # LLM: 已有节点非空事实优先，轮次仅补空字段，不把模型调用终态冒充整个运行结束。
 # 函数用途: 为新轮次补齐运行树节点和任务根编号。
-def _append_model_run(row, data):
+def _append_model_run(row, data, *, runs_by_id=None):
     run_id = str(data.get("run_id") or "")
     row["root_run_id"] = row.get("root_run_id") or str(data.get("root_run_id") or "")
     if not run_id:
@@ -348,9 +366,12 @@ def _append_model_run(row, data):
                 root_run_id=str(data.get("root_run_id") or ""), model_name=str(data.get("model") or ""),
                 status="running", started_at=float(data.get("started_at") or row.get("started_at") or 0.0),
                 duration_ms=float(data.get("duration_ms") or 0.0))
-    previous = next((item for item in row["runs"] if item.get("run_id") == run_id), None)
+    previous = (runs_by_id.get(run_id) if runs_by_id is not None
+                else next((item for item in row["runs"] if item.get("run_id") == run_id), None))
     if previous is None:
         row["runs"].append(node)
+        if runs_by_id is not None:
+            runs_by_id[run_id] = node
     else:
         previous.update({key: value for key, value in node.items() if not previous.get(key)})
 
@@ -423,6 +444,8 @@ def record_model_call_telemetry(ledger: object, record: object) -> None:
                     completion_tokens=max(0, int(record.output_tokens)), cached_tokens=cached_tokens,
                     uncached_tokens=max(0, prompt_tokens - cached_tokens),
                     error_code=str(record.error_code or ""), stop_reason=str(record.stop_reason or ""))
-        TaskCallInspector(scope["home_dir"], owner_id=scope["owner_id"]).append_round(scope["task_id"], data, create_if_missing=True)
+        TaskCallInspector(scope["home_dir"], owner_id=scope["owner_id"]).append_round(
+            scope["task_id"], data, create_if_missing=True, include_rounds=False,
+        )
     except Exception:
         return

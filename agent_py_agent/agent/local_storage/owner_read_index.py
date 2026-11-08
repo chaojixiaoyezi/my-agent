@@ -180,6 +180,7 @@ class _ResumableSha256:
         return cls(raw[0], raw[1], tail)
 
 _FIELDS = {
+    "task_rounds": {"sequence": "INTEGER"},
     "telemetry": {
         "call_id": "TEXT", "tool_name": "TEXT", "owner_id": "TEXT",
         "task_id": "TEXT", "run_id": "TEXT", "parent_run_id": "TEXT",
@@ -206,14 +207,17 @@ _FIELDS = {
 }
 _TABLES = {domain: "ori_" + domain for domain in _FIELDS}
 _ID_FIELDS = {
+    "task_rounds": "sequence",
     "telemetry": "call_id", "audit": "entry_id",
     "scheduler": "run_id", "usage": "skill_id",
 }
 _TIME_FIELDS = {
+    "task_rounds": "sequence",
     "telemetry": "started_at", "audit": "timestamp",
     "scheduler": "ended_at", "usage": "at",
 }
 _JSON_ROOTS = {
+    "task_rounds": {"schema", "generation", "row"},
     "telemetry": {"schema", "args_summary", "metadata"},
     "audit": {"details", "metadata"},
     "scheduler": {"schema", "metadata", "event", "result"},
@@ -679,27 +683,8 @@ class OwnerReadIndex:
                     PRIMARY KEY (sid, generation, start)
                 )"""
             )
-            for domain, fields in _FIELDS.items():
-                table = _TABLES[domain]
-                columns = ", ".join(name + " " + kind for name, kind in fields.items())
-                connection.execute(
-                    f"""CREATE TABLE {table} (
-                        sid TEXT NOT NULL, generation TEXT NOT NULL,
-                        pos INTEGER NOT NULL, stop INTEGER NOT NULL,
-                        payload TEXT NOT NULL, {columns},
-                        PRIMARY KEY (sid, generation, pos, stop)
-                    )"""
-                )
-                identity = _ID_FIELDS[domain]
-                connection.execute(
-                    f"CREATE INDEX {table}_identity ON {table}"
-                    f"(sid, generation, {identity}, pos, stop)"
-                )
-                time_field = _TIME_FIELDS[domain]
-                connection.execute(
-                    f"CREATE INDEX {table}_time ON {table}"
-                    f"(sid, generation, {time_field}, pos, stop)"
-                )
+            for domain in _FIELDS:
+                self._initialize_domain(connection, domain)
             connection.execute(
                 "CREATE INDEX ori_telemetry_duration ON ori_telemetry"
                 "(sid, generation, duration_ms, pos, stop)"
@@ -712,6 +697,21 @@ class OwnerReadIndex:
         except BaseException:
             connection.rollback()
             raise
+
+    # 同一建表叶同时服务新库与旧缓存的惰性扩展，不另开连接或管理第二套索引。
+    def _initialize_domain(self, connection, domain):
+        table = _TABLES[domain]
+        columns = ", ".join(name + " " + kind for name, kind in _FIELDS[domain].items())
+        connection.execute(
+            f"CREATE TABLE IF NOT EXISTS {table} (sid TEXT NOT NULL, generation TEXT NOT NULL, "
+            f"pos INTEGER NOT NULL, stop INTEGER NOT NULL, payload TEXT NOT NULL, {columns}, "
+            "PRIMARY KEY (sid, generation, pos, stop))"
+        )
+        for label, field in (("identity", _ID_FIELDS[domain]), ("time", _TIME_FIELDS[domain])):
+            connection.execute(
+                f"CREATE INDEX IF NOT EXISTS {table}_{label} ON {table}"
+                f"(sid, generation, {field}, pos, stop)"
+            )
 
     # LLM: timeout 为零；无 ATTACH、无全库 VACUUM、无磁盘临时表或磁盘 journal。
     # 函数用途: 提供始终关闭的、带身份检查和执行预算的短 SQLite 连接。
@@ -1034,6 +1034,13 @@ class OwnerReadIndex:
             'INSERT INTO ori_meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
             ('proof:' + checkpoint['sid'], value),
         )
+        self._memo_put(("proof_progress", checkpoint["sid"], checkpoint["generation"]), position)
+
+    # 前缀复核尚未发布新记录时 through 不变；显式完整读取仍须按真实字节进展续跑。
+    def _advance_progress(self, view):
+        checked, _ = self._validate_view(view)
+        proof = self._memo_get(("proof_progress", checked["source_id"], checked["generation"])) or 0
+        return checked["through"], proof
 
     # LLM: 未见证的已发布字节逐块完整复核；见证只认可领域锁内写后的有界头尾核验，共享hasher锁内复制。
     # 函数用途: 有界、可跨实例且可跨冷进程地核验检查点的完整已验证前缀。
@@ -1210,6 +1217,9 @@ class OwnerReadIndex:
                 if row.get(key) is None:
                     values[key] = ""
             if "schema" in row and not isinstance(row["schema"], str):
+                raise _Issue("invalid_schema")
+        elif domain == "task_rounds":
+            if type(row.get("sequence")) is not int or row["sequence"] < 0:
                 raise _Issue("invalid_schema")
         elif document:
             values = {
@@ -1595,6 +1605,8 @@ class OwnerReadIndex:
             with self._database(
                 create=True, write=True, deadline=budget.deadline,
             ) as connection:
+                if domain == "task_rounds":
+                    self._initialize_domain(connection, domain)
                 checkpoint = self._checkpoint(connection, sid, domain, parts)
                 old = checkpoint
                 rebuild = checkpoint is None
@@ -1760,7 +1772,7 @@ class OwnerReadIndex:
                 else:
                     field = _TIME_FIELDS[domain]
                     operator = ">=" if key == "since" else "<="
-                    if domain in {"telemetry", "audit"}:
+                    if domain in {"telemetry", "audit", "task_rounds"}:
                         value = _number(expected)
                     elif isinstance(expected, str):
                         value = expected
