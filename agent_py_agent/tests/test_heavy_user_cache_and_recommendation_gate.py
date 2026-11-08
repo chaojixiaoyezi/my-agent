@@ -525,7 +525,7 @@ def test_heavy_user_cache_recommendation_and_compaction_gate(tmp_path, profile, 
     assert "job48" not in first[0]["layout"].canonical_user_turn
     assert alert != monitor != plain
 
-    # 发现作为独立后续回合：前3轮要求完全同序，发现后只允许在末尾追加一个名称。
+    # 前3轮wire完全同序；本轮预载的skill_search保持粘性，搜索只向wire末尾追加package_build。
     names_before = [row["name"] for row in first[0]["tools"]]
     assert "package_build" not in names_before
     discovery = _run_turn(
@@ -543,6 +543,7 @@ def test_heavy_user_cache_recommendation_and_compaction_gate(tmp_path, profile, 
     assert tuple(agent.conversation_store.threads.require(thread.thread_id).loaded_tool_names) == (
         "scripts",
         "workflows",
+        "skill_search",
         "package_build",
     )
     after_discovery = _run_turn(agent, provider, thread, "persist-discovery", plain)

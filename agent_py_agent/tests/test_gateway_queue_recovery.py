@@ -240,6 +240,8 @@ def test_pending_replay_after_actual_http_stop_lease_withdraw_and_new_c_birth(tm
         with pytest.raises(OSError):
             os.fstat(old.descriptor)
         monkeypatch.setattr(producer.CoordinatorInputReceiptSource, 'queue_unbound', queue)
+        # 首拍短预算只制造锁忙；新C上的正常重放恢复原生产资源预算。
+        monkeypatch.setattr(producer, 'input_resource_deadline', original_deadline)
         paths = gateway_paths_from_root(gate.paths.root)
         with coordinator_guard(paths.root, gate.count):
             controller = prepare_coordinator_takeover(paths, gate.count, 'new-c-after-normal-stop')
@@ -296,28 +298,32 @@ def _partial_lifecycle_case(case, receipt, phase):
     return canonical, canonical.read_bytes(), p3, p3.read_bytes()
 
 
-def test_pending_partial_processing_and_terminal_are_not_reenqueued(tmp_path, monkeypatch):
+@pytest.mark.parametrize('slow_replay', [False, True])
+def test_pending_partial_processing_and_terminal_are_not_reenqueued(tmp_path, monkeypatch, slow_replay):
     # 同一个普通测试逐次使用独立源；两种生命周期都由原API建立。
-    from agent_py_agent.agent.common.json_io import locked_json_path
     for phase in ('processing', 'terminal'):
         with monkeypatch.context() as local:
-            original_deadline = producer.input_resource_deadline
-            def short_budget():
-                with provider_request_budget(0.1):
-                    return original_deadline()
-            local.setattr(producer, 'input_resource_deadline', short_budget)
             with bg_first_call(tmp_path/phase, local) as (case, server, _backend):
                 gate = case[0]
                 writer = producer.write_json_file_atomic
-                def busy_final(path, payload, **options):
+                guidance_scope = producer.CoordinatorInputReceiptSource._queue_guidance_receipt
+                @contextmanager
+                def delayed_replay(source, expected, deadline):
+                    with guidance_scope(source, expected, deadline) as row:
+                        if slow_replay and source._fresh is None:
+                            # 模拟超过旧测试100ms短预算的读盘延迟；重放仍须沿正常资源预算完成。
+                            time.sleep(0.12)
+                        yield row
+                local.setattr(producer.CoordinatorInputReceiptSource, '_queue_guidance_receipt', delayed_replay)
+                def fail_final(path, payload, **options):
                     if path.parent.name == 'input_receipts' and payload.get('state') == 'queued':
-                        with held_lock(locked_json_path(path)):
-                            return writer(path, payload, **options)
+                        # 只在队列已提交后的末回执制造一次I/O失败，不依赖CI整轮文件操作在100ms内完成。
+                        raise OSError('injected final queued receipt write failure')
                     return writer(path, payload, **options)
-                local.setattr(producer, 'write_json_file_atomic', busy_final)
+                local.setattr(producer, 'write_json_file_atomic', fail_final)
                 def first():
                     code, result = send_first(server)
-                    assert code == 503
+                    assert code == 503 and result['error_code'] == 'OSError', result
                     receipt = inputs.read_gateway_input_receipt(gate.paths, result['request_id'])
                     assert receipt.state == 'pending' and (gate.paths.inbox/(receipt.request_id+'.json')).exists()
                     local.setattr(producer, 'write_json_file_atomic', writer)
