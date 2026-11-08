@@ -2378,6 +2378,8 @@ def _current_retention_pins_once(home: object, roots: tuple[Path, ...], errors: 
         _formal_memory_pins(home, pins, now)
         candidate_path = Path(home.owner_memory_candidates_jsonl)
         candidate_ids: set[str] = set()
+        # 同一次投影内每个冷归档月只读一次并整份校验；逐候选重读整月使维护成本为 候选数×月行数。
+        cold_cache: dict = {}
         for row in _pin_rows(candidate_path):
             candidate = MemoryCandidate.from_record(row)
             candidate_id = candidate.candidate_id
@@ -2387,7 +2389,7 @@ def _current_retention_pins_once(home: object, roots: tuple[Path, ...], errors: 
             if candidate.cold_detail_ref:
                 cold = candidate_path.parent / candidate.cold_detail_ref.partition("#")[0]
                 watch_pin_source(cold)
-                candidate = _hydrate_candidate(candidate_path, candidate)
+                candidate = _hydrate_candidate(candidate_path, candidate, cold_cache)
                 # 冷详情读取不经_pin_rows：按热行sha256内容寻址选版本（信封摘要由候选读取器校验），解析结果不随字节代次变化；
                 # 读后仍由发布前复核在解析边界之后重核。
                 reference_pins.recheck_pin_sources((cold,))
