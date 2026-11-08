@@ -368,8 +368,18 @@ def test_slow_directory_discovery_resumes_instead_of_restarting_forever(tmp_path
         def close(self):
             self.inner.close()
 
-    monkeypatch.setattr(d.os, "scandir", SlowScan)
+    # d.os 是共享模块，只给目标目录计时；其它目录和 fd 扫描保留真实行为。
+    def slow_sent_scan(directory):
+        return SlowScan(directory) if directory == store.root / "sent" else scan(directory)
+
+    monkeypatch.setattr(d.os, "scandir", slow_sent_scan)
     monkeypatch.setattr(d, "monotonic", lambda: elapsed.value)
+    # 其它后台目录发现不属于 sent 游标，也不应消耗本测试的假钟预算。
+    unrelated = tmp_path / "other-discovery"
+    unrelated.mkdir()
+    with d.os.scandir(unrelated) as entries:
+        assert list(entries) == []
+    assert (elapsed.value, elapsed.opens) == (0.0, 0)
     reports = []
     for _ in range(10):
         report = store.maintain_sent_receipts(now=clock.now)
