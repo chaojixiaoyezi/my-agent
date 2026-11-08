@@ -31,6 +31,11 @@ class DurableDaemonThreadPoolExecutor(ThreadPoolExecutor):
     def _adjust_thread_count(self) -> None:
         if self._idle_semaphore.acquire(timeout=0):
             return
+        # CPython 3.13+ 的 _worker 只在取空队列时归还空闲令牌，被抢走工作的已唤醒 worker 无令牌地重新挂起，令牌少计
+        # 真实空闲数，池子随时间涨到 max_workers；队列能给出准确空闲容量时，只有排队项多于空闲容量才扩容。
+        needs_worker = getattr(self._work_queue, "needs_worker", None)
+        if callable(needs_worker) and not needs_worker():
+            return
 
         def weakref_callback(_, queue=self._work_queue) -> None:
             queue.put(None)
