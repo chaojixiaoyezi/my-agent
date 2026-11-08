@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from contextvars import copy_context
+from contextvars import Context, copy_context
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
@@ -343,7 +343,8 @@ def _submit(function, args=()):
         if not slots.acquire(blocking=False):
             return None
         try:
-            future = _executor.submit(function, *args)
+            context = copy_context()
+            future = Context().run(_executor.submit, context.run, function, *args)
         except BaseException:
             slots.release()
             raise
@@ -437,7 +438,7 @@ def _drain(repo, home, owner_id, config, clock, automatic_only=False):
 
 
 def _kick(repo, home, owner_id, config, clock, automatic_only=False):
-    return _submit(copy_context().run, (_drain, repo, home, owner_id, config, clock, automatic_only))
+    return _submit(_drain, (repo, home, owner_id, config, clock, automatic_only))
 
 
 def _target_once(repo, owner_id, outbox_id, channels, config, clock):

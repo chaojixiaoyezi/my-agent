@@ -587,11 +587,16 @@ class SimpleAgent(
             )
         # 定时执行收口只凭结构化后续工作事实决定 waiting 还是结算；查询在调用时才读 subagents 等属性，宽限期从配置推出。
         from .scheduler.control import cancel_scheduled_task
+        from .scheduler.monitor_pool import shared_monitor_pool
 
         self.scheduler_service = SchedulerService(
             self.scheduler_repository,
             conversation_store=self.conversation_store,
             skill_snapshot_provider=self.current_skill_snapshot,
+            monitor_pool=shared_monitor_pool(
+                max_workers=config.background_owner_workers,
+                queue_limit=max(0, config.gateway_global_inflight_limit - config.background_owner_workers),
+            ),
             follow_up=_scheduler_follow_up_policy(self),
             cancellation_handler=lambda run: cancel_scheduled_task(self, self.scheduler_repository, run),
         )
