@@ -29,7 +29,7 @@ def queued_steer_expiry_response(paths: GatewayPaths, request: dict) -> dict | N
             or any(char in target for char in ("/", "\\", "\x00"))):
         raise DataCorruptionError("invalid_expected_turn_id")
     target = target.strip()
-    report = read_gateway_terminal_envelope_report(paths.terminal / f"{target}.json", request_id=target)
+    report = read_gateway_terminal_envelope_report(paths.terminal / f"{target}.json", request_id=target, include_sealed=True)
     if report.load_error is not None:
         raise DataCorruptionError("target_terminal_unreadable")
     if not report.payload:

@@ -141,6 +141,26 @@ def test_local_wait_loop_and_inflight_acl_never_open_the_index(tmp_path, monkeyp
     assert _can_read_finished_request(paths, _ResultAccessContext('inflight', 'bob', user)) is _FinishedRequestAccess.DENIED
 
 
+def test_prepared_input_without_target_never_opens_the_index(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts.queued_steer_expiry import (
+        queued_steer_expiry_response,
+        queued_steer_pre_acquire,
+    )
+    from agent_py_agent.tests.test_scale_s1_gateway_loose_retirement import _prepared_input
+
+    paths = gateway_paths_from_root(tmp_path / 'gateway')
+    _settled(paths)
+    _seal(paths)
+    receipt = _prepared_input(paths, 'ordinary')
+    assert 'expected_turn_id' not in receipt.prepared_request['metadata']
+    monkeypatch.setattr(archive, '_receipt_index', _no_index)
+    for _ in range(3):
+        assert queued_steer_expiry_response(paths, receipt.prepared_request) is None
+        assert queued_steer_pre_acquire(paths, receipt.prepared_request) == ''
+        assert read_gateway_terminal_envelope_report(paths.terminal / f'{receipt.request_id}.json').payload == {}
+        assert read_gateway_terminal_response_file(paths.terminal / f'{receipt.request_id}.json') == {}
+
+
 def test_cli_gateway_result_reads_sealed_request(tmp_path, monkeypatch, capsys):
     agent = SimpleAgent(AgentConfig(model_backend='echo', gateway_workspace='gateway',
                                     local_store_path='local_store/local.db', local_store_files_dir='local_store/files',
