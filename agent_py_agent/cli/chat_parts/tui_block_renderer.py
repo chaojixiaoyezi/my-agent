@@ -572,6 +572,21 @@ class TuiBlockRenderCache:
         self._live_last_at: dict[str, float] = {}
         self._stable_prefix: _StableBlockPrefix | None = None
         self._stable_prefixes: OrderedDict[tuple[Any, ...], _StableBlockPrefix] = OrderedDict()
+        self._retained_stable_blocks: tuple[TuiBlock, ...] | None = None
+
+    def retain_snapshot(self, snapshot: TuiViewSnapshot) -> None:
+        """稳定窗口换代才回收离场块，活动增量帧保持常数开销。"""
+        if snapshot.stable_blocks is self._retained_stable_blocks:
+            return
+        retained_ids = {block.block_id for block in (*snapshot.stable_blocks, *snapshot.active_blocks)}
+        for key in tuple(self._entries):
+            if key[0] not in retained_ids:
+                self._drop_entry(key)
+        for identity in tuple(self._live_last_key):
+            if identity not in retained_ids:
+                self._live_last_key.pop(identity, None)
+                self._live_last_at.pop(identity, None)
+        self._retained_stable_blocks = snapshot.stable_blocks
 
     # LLM: 缓存只保存已净化的不可变行，安全出口按类型复用；键仍绑定 block 版本、宽度和显示模式。
     # 函数用途: 返回已检查的缓存行；新版本才重新排版和过滤终端字符，稳定历史不随动画重扫。
@@ -696,6 +711,8 @@ def render_tui_snapshot(
     *,
     cache: TuiBlockRenderCache | None = None,
 ) -> TuiRenderFrame:
+    if cache is not None:
+        cache.retain_snapshot(snapshot)
     lines: list[FormattedLine] = []
     offsets: list[tuple[str, int]] = []
     active_thinking = tuple(

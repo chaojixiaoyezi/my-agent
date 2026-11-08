@@ -3,7 +3,12 @@
 # 模块用途: 固定配置三处接线、主页/子代理 runtime 的窗口来源，以及窗口外旧块不再被保留或渲染。
 from __future__ import annotations
 
+import os
+from collections import OrderedDict
+from dataclasses import replace
 from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.settings.parameter_registry import parameter_registry
@@ -17,6 +22,7 @@ from agent_py_agent.cli.chat_parts.tui_block_renderer import (
 )
 from agent_py_agent.cli.chat_parts.tui_identity_window import TuiIdentityWindow
 from agent_py_agent.cli.chat_parts.tui_threading import _consume_background_notices
+from agent_py_agent.cli.chat_parts.tui_view import make_tui_transcript_view
 
 
 # 函数用途: 用一个只带配置的替身构造主会话展示 runtime。
@@ -69,3 +75,123 @@ def test_render_cache_only_holds_the_window():
     cache = TuiBlockRenderCache()
     render_tui_snapshot(runtime.store.snapshot(), TuiRenderContext(width=100), cache=cache)
     assert len(cache._entries) <= 25
+
+
+def _assert_cache_retains_snapshot(cache, snapshot):
+    """条目和字符记账都只能引用当前投影中的块，不能靠缩小 LRU 预算伪造回收。"""
+    retained = {block.block_id for block in (*snapshot.stable_blocks, *snapshot.active_blocks)}
+    assert {key[0] for key in cache._entries} <= retained
+    assert cache._entry_chars.keys() == cache._entries.keys()
+    assert cache._chars == sum(cache._entry_chars.values())
+
+
+def _fd_count():
+    """只在宿主提供描述符目录时采样；目录读取结束即关闭，不要求 Windows 具备 POSIX 接口。"""
+    for path in ("/dev/fd", "/proc/self/fd"):
+        if os.path.isdir(path):
+            return len(os.listdir(path))
+    return None
+
+
+def test_default_window_releases_departed_entries_in_transcript_and_root_overlay():
+    """真实 runtime 到两个 view provider 连续回放，并验证子页切换不会迁走根审批浮层。"""
+    root = _runtime(AgentConfig().tui_transcript_max_blocks)
+    context = TuiRenderContext(width=80, now=1.0)
+    view = make_tui_transcript_view(root.store, lambda width: replace(context, width=width))
+    fd_before = _fd_count()
+    for start in range(0, 750, 50):
+        for index in range(start, start + 50):
+            root._publish("assistant_completed", "completed", f"reply-{index}",
+                          {"text": f"普通回复 {index}\n\n```python\nprint({index})\n```"})
+        snapshot = root.store.snapshot()
+        assert len(snapshot.stable_blocks) == min(start + 50, 500)
+        for width, detailed in ((40, False), (100, True)):
+            context = replace(context, width=width, detailed_transcript=detailed)
+            expected = render_tui_snapshot(snapshot, context)
+            for provider in (view.provider, view.overlay_provider):
+                assert provider.frame(width) == expected
+                _assert_cache_retains_snapshot(provider.block_cache, snapshot)
+                assert provider.block_cache.max_entries == 20_000
+                assert provider.block_cache.max_chars == 24_000_000
+
+    navigation = TuiAgentNavigationState(root, max_cached_runtimes=2)
+    child = navigation._runtime_for_locked("child-r1")
+    child._publish("assistant_completed", "completed", "child-reply", {"text": "子代理回复"})
+    root_snapshot, child_snapshot = root.store.snapshot(), child.store.snapshot()
+    view.set_state_store(child.store)
+    assert view.provider.state_store is child.store
+    assert view.overlay_provider.state_store is root.store
+    assert view.provider.frame(context.width) == render_tui_snapshot(child_snapshot, context)
+    assert view.overlay_provider.frame(context.width) == render_tui_snapshot(root_snapshot, context)
+    _assert_cache_retains_snapshot(view.provider.block_cache, child_snapshot)
+    _assert_cache_retains_snapshot(view.overlay_provider.block_cache, root_snapshot)
+    view.set_state_store(root.store)
+    assert view.provider.frame(context.width) == render_tui_snapshot(root_snapshot, context)
+    _assert_cache_retains_snapshot(view.provider.block_cache, root_snapshot)
+    assert root.store.snapshot() is root_snapshot and child.store.snapshot() is child_snapshot
+    if fd_before is not None:
+        fd_delta = _fd_count() - fd_before
+        assert fd_delta == 0
+
+
+@pytest.mark.parametrize("width,detailed", [(40, False), (100, True)])
+def test_freezing_one_of_two_active_blocks_keeps_500_cache_hits(width, detailed):
+    """500 稳定块和两个活动块换代时，只重排新冻结块，继续复用其余 500 个条目。"""
+    runtime = _runtime(AgentConfig().tui_transcript_max_blocks)
+    for index in range(500):
+        runtime._publish("assistant_completed", "completed", f"stable-{index}", {"text": f"稳定回复 {index}"})
+    runtime._publish("assistant_started", "started", "reply")
+    runtime._publish("assistant_delta", "delta", "reply", {"text": "正在回复"})
+    runtime._publish("thinking_started", "started", "thinking")
+    runtime._publish("thinking_delta", "delta", "thinking", {"text": "持续思考"})
+    context = TuiRenderContext(width=width, detailed_transcript=detailed, now=1.0)
+    cache = TuiBlockRenderCache()
+    before = runtime.store.snapshot()
+    assert len(before.stable_blocks) == 500 and len(before.active_blocks) == 2
+    assert render_tui_snapshot(before, context, cache=cache) == render_tui_snapshot(before, context)
+    initial = cache.stats()
+    runtime._publish("assistant_completed", "completed", "reply", {"text": "最终回复"})
+    snapshot = runtime.store.snapshot()
+    assert len(snapshot.stable_blocks) == 500 and len(snapshot.active_blocks) == 1
+    assert render_tui_snapshot(snapshot, context, cache=cache) == render_tui_snapshot(snapshot, context)
+    stats = cache.stats()
+    assert stats.misses - initial.misses == 1
+    assert stats.hits - initial.hits == 500
+    _assert_cache_retains_snapshot(cache, snapshot)
+
+
+def test_live_bookkeeping_retires_on_stable_change_and_idle_retention_does_not_scan():
+    """活动块单独移除可延迟回收；稳定窗口换代后必须同步清条目和两份流式记账。"""
+    runtime = _runtime(2)
+    runtime._publish("assistant_completed", "completed", "seed", {"text": "初始回复"})
+    runtime._publish("assistant_started", "started", "departed")
+    runtime._publish("assistant_delta", "delta", "departed", {"text": "待冻结正文"})
+    runtime._publish("thinking_started", "started", "kept")
+    runtime._publish("thinking_delta", "delta", "kept", {"text": "仍在思考"})
+    context, cache = TuiRenderContext(width=80, now=1.0), TuiBlockRenderCache()
+    snapshot = runtime.store.snapshot()
+    render_tui_snapshot(snapshot, context, cache=cache)
+    assert cache._live_last_key.keys() == cache._live_last_at.keys() == {"departed", "kept"}
+
+    class NoScanEntries(OrderedDict):
+        def __iter__(self):
+            raise AssertionError("同一稳定来源不得重新遍历缓存")
+
+    cache._entries = NoScanEntries(cache._entries)
+    active_only = replace(snapshot, active_blocks=tuple(block for block in snapshot.active_blocks if block.block_id == "kept"))
+    cache.retain_snapshot(active_only)
+    assert cache._retained_stable_blocks is snapshot.stable_blocks
+    assert "departed" in cache._live_last_key
+    cache._entries = OrderedDict(cache._entries.items())
+
+    runtime._publish("assistant_completed", "completed", "departed", {"text": "已完成正文"})
+    frozen = runtime.store.snapshot()
+    render_tui_snapshot(frozen, context, cache=cache)
+    assert "departed" in cache._live_last_key and "kept" in cache._live_last_key
+    for index in range(2):
+        runtime._publish("assistant_completed", "completed", f"next-{index}", {"text": f"后续回复 {index}"})
+    changed = runtime.store.snapshot()
+    assert render_tui_snapshot(changed, context, cache=cache) == render_tui_snapshot(changed, context)
+    assert cache._live_last_key.keys() == cache._live_last_at.keys() == {"kept"}
+    assert cache._retained_stable_blocks is changed.stable_blocks
+    _assert_cache_retains_snapshot(cache, changed)
