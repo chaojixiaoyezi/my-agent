@@ -92,7 +92,7 @@ _BACKGROUND_DEFAULTS = {
 
 _GATEWAY_PRESETS = {
     "gateway_http_listen_backlog": 128,
-    "gateway_http_max_request_workers": 128,
+    "gateway_http_max_request_workers": 32,
     "gateway_http_max_outstanding_requests": 256,
     "gateway_http_control_lane_workers": 10,
     "gateway_native_stream_max": 128,
@@ -414,7 +414,7 @@ def test_gw12_default_pools_start_and_explicit_zero_disables_after_restart(tmp_p
     try:
         service.start()
         server = service.server
-        assert server._request_executor._max_workers == 128
+        assert server._request_executor._max_workers == 32
         assert server._request_slots._initial_value == 256
         lane = server._lanes
         pool = service.business_stream_pool

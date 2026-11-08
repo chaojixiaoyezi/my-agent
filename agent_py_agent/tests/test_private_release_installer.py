@@ -11,7 +11,7 @@ _TEMPLATE = """# 测试发行模板
 gateway_user_inflight_limit: 128
 gateway_global_inflight_limit: 500
 # HTTP请求池容量
-gateway_http_max_request_workers: 128
+gateway_http_max_request_workers: 32
 # HTTP在途请求容量
 gateway_http_max_outstanding_requests: 256
 # 控制面VIP快速车道，stop/cancel和健康检查不排在普通线程后面
@@ -107,7 +107,7 @@ def test_initialize_data_migrates_old_defaults_and_adds_new_keys(tmp_path):
     assert _value(text, "gateway_port") == "18420"
     assert _value(text, "gateway_global_inflight_limit") == "900"
     for key, expected in (
-        ("gateway_http_max_request_workers", "128"),
+        ("gateway_http_max_request_workers", "32"),
         ("gateway_http_max_outstanding_requests", "256"),
         ("gateway_user_inflight_limit", "128"),
         ("owner_agent_pool_max_agents", "128"),
@@ -217,5 +217,5 @@ def test_upgrade_handles_other_historical_defaults(tmp_path):
     original = "gateway_http_max_request_workers: 64\nbackground_owner_workers: 8\nbackground_admin_threads_per_owner: 16\ngateway_http_control_lane_workers: 0\ngateway_native_stream_max: 0\n"
     _prefix, _release, config = _prepare(tmp_path, config_text=original)
     installer.upgrade_existing_config_defaults(config, _TEMPLATE)
-    expected = original.replace("workers: 64", "workers: 128").replace("workers: 8", "workers: 128").replace("owner: 16", "owner: 64")
+    expected = original.replace("workers: 64", "workers: 32").replace("workers: 8", "workers: 128").replace("owner: 16", "owner: 64")
     assert config.read_text(encoding="utf-8") == expected
