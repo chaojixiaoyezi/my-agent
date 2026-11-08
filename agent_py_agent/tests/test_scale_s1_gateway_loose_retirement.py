@@ -4,16 +4,25 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
+import sys
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
 
 from agent_py_agent.agent.auth.manager import AuthManager
 from agent_py_agent.agent.auth.middleware import AuthMiddleware
+from agent_py_agent.agent.gateway_parts import input_delivery_service as inputs
 from agent_py_agent.agent.gateway_parts import owner_retention as archive
+from agent_py_agent.agent.gateway_parts import queued_steer_expiry as expiry
+from agent_py_agent.agent.gateway_parts import request_worker as worker
 from agent_py_agent.agent.gateway_parts.http_handlers import (
+    _AskRequestContext,
+    _build_ask_request,
     _can_read_finished_request,
     _FinishedRequestAccess,
+    _http_idempotent_request_identity,
     _ResultAccessContext,
     _send_archived_terminal_result,
 )
@@ -24,14 +33,20 @@ from agent_py_agent.agent.gateway_parts.http_service import (
 from agent_py_agent.agent.gateway_parts.io import write_json_file_atomic
 from agent_py_agent.agent.gateway_parts.local_client_token import ensure_local_client_credential
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+from agent_py_agent.agent.gateway_parts.queue_service import ensure_gateway_folders
 from agent_py_agent.agent.gateway_parts.recovery import (
+    _project_recovered_terminal_response,
     _terminal_gateway_request_payload,
     mark_gateway_terminal_projection_complete,
+    terminalize_gateway_request_file,
 )
+from agent_py_agent.agent.gateway_parts.request_owner_binding import bind_request_owner
 from agent_py_agent.agent.gateway_parts.response_renderer import (
     read_gateway_terminal_envelope_report,
 )
 from agent_py_agent.agent.gateway_parts.wait_acceptance import confirm_wait_acceptance
+from agent_py_agent.agent.runtime_errors import DataCorruptionError
+from agent_py_agent.agent.settings import AgentConfig
 
 
 def _settled(paths, key='request-a', *, completed_at=1, pending=False):
@@ -159,3 +174,212 @@ def test_http_client_roundtrip_reads_sealed_result_without_repair(tmp_path):
     finally:
         connection.close()
         server.stop()
+
+
+def _prepared_input(paths, message_id, *, target='', user='alice', conversation='thread'):
+    """沿原HTTP身份/builder与Count0准备入口入队，不手造owner、指纹或回执。"""
+    ensure_gateway_folders(paths)
+    goal = '补充输入'
+    body = {'conversation_id': conversation, 'metadata': {'message_id': message_id}}
+    if target:
+        body['metadata']['expected_turn_id'] = target
+    request_id, digest = _http_idempotent_request_identity(body, goal=goal, user_id=user, channel='web')
+    body['metadata']['client_input_digest'] = digest
+    payload = _build_ask_request(_AskRequestContext(body, goal, request_id, user, 'web'))
+    host = SimpleNamespace(config=AgentConfig(gateway_per_user_owner_scoping=True),
+                           home_paths=SimpleNamespace(root=paths.root.parent / 'home'))
+    with inputs.gateway_input_transition(paths, request_id):
+        receipt, created = inputs.load_or_prepare_gateway_input_locked(
+            paths, request_id=request_id, client_input_digest=digest, client_message_id=message_id,
+            guidance_dedupe_key='', prepared_request=payload,
+            prepare_request=partial(bind_request_owner, host))
+        assert created
+        receipt, queued = inputs.queue_gateway_input_locked(paths, receipt)
+        assert queued
+    return receipt
+
+
+def _finish_input(paths, receipt, status):
+    """真实claim/终态提交构造可封存目标；不运行模型。"""
+    claim = worker.claim_request(paths, paths.inbox / f'{receipt.request_id}.json')
+    assert claim is not None
+    _finish_claim(paths, claim, status)
+    return read_gateway_terminal_envelope_report(paths.terminal / claim.name).payload
+
+
+def _finish_claim(paths, claim, status):
+    response = {'id': claim.request_id, 'ok': status == 'done', 'status': status, 'ended_at': 1, 'response': ''}
+    terminalize_gateway_request_file(paths, claim.path, paths.done if status == 'done' else paths.failed,
+                                    claim.request_id, terminal_response=response)
+    _project_recovered_terminal_response(paths, claim.request_id, True)
+
+
+def _live_fds():
+    """只比较实际存活描述符；listdir自己的临时目录句柄已关闭。"""
+    directory = '/dev/fd' if sys.platform == 'darwin' else '/proc/self/fd'
+    if not os.path.isdir(directory):
+        return None
+    result = set()
+    for name in os.listdir(directory):
+        descriptor = int(name)
+        try:
+            info = os.fstat(descriptor)
+        except OSError:
+            continue
+        result.add((descriptor, info.st_dev, info.st_ino, info.st_mode))
+    return result
+
+
+@pytest.fixture
+def steer_dispatch(tmp_path, monkeypatch):
+    """记录真实认领和提交；同步执行替身仍用原终态写端，并在finally归还原准入槽。"""
+    paths = gateway_paths_from_root(tmp_path / 'gateway')
+    admission = worker.GatewayAdmission()
+    monkeypatch.setattr(worker, 'admission', admission)
+    claims, submissions, active_counts = [], [], []
+    claim_request = worker.claim_request
+
+    def claim(*args, **kwargs):
+        result = claim_request(*args, **kwargs)
+        if result is not None:
+            claims.append(result.request_id)
+        return result
+
+    def submit(claim, user_key, conversation_key):
+        submissions.append(claim.request_id)
+        active_counts.append(admission.snapshot()['total'])
+        try:
+            _finish_claim(paths, claim, 'done')
+        finally:
+            admission.release(user_key, conversation_key=conversation_key)
+
+    # 目标构造也使用原claim，但只统计实际dispatcher发起的认领。
+    state = SimpleNamespace(paths=paths, claims=claims, submissions=submissions, active_counts=active_counts,
+                            dispatch=lambda: worker.dispatch_pending_requests(paths, worker.AdmissionLimits(1, 1), submit),
+                            observe=lambda: monkeypatch.setattr(worker, 'claim_request', claim))
+    before = _live_fds()
+    yield state
+    assert admission.snapshot()['total'] == 0
+    assert all(count <= 1 for count in active_counts)
+    after = _live_fds()
+    if before is not None:
+        assert after == before, ('fd_delta', after - before, before - after)
+
+
+@pytest.mark.parametrize('status,sealed', [('cancelled', False), ('cancelled', True),
+                                        ('stopped', False), ('interrupted', False)])
+def test_stopped_target_expires_prepared_steer_before_claim(steer_dispatch, sealed, status):
+    state = steer_dispatch
+    target = _prepared_input(state.paths, 'target')
+    canonical = _finish_input(state.paths, target, status)
+    if sealed:
+        _seal(state.paths)
+        assert not (state.paths.terminal / f'{target.request_id}.json').exists()
+    pending = _prepared_input(state.paths, 'steer', target=target.request_id)
+    state.observe()
+    claimed = state.dispatch()
+    assert (claimed, len(state.claims), len(state.submissions)) == (0, 0, 0)
+    terminal = read_gateway_terminal_envelope_report(state.paths.terminal / f'{pending.request_id}.json').payload
+    response = terminal['terminal_response']
+    assert (response['id'], response['status'], response['error_code'], response['expected_turn_id']) == (
+        pending.request_id, 'cancelled', 'EXPIRED_TARGET_TURN', target.request_id)
+    assert 'execution_attempt_id' not in terminal
+    assert not (state.paths.inbox / f'{pending.request_id}.json').exists()
+    assert not (state.paths.processing / f'{pending.request_id}.json').exists()
+    assert inputs.read_gateway_input_receipt(state.paths, pending.request_id).state == 'terminal_unknown'
+    assert read_gateway_terminal_envelope_report(state.paths.terminal / f'{target.request_id}.json',
+                                                include_sealed=True).payload == canonical
+    assert state.dispatch() == 0
+    assert state.claims == state.submissions == []
+
+
+@pytest.mark.parametrize('status', ['done', 'failed'])
+def test_sealed_completed_target_allows_one_next_turn(steer_dispatch, status):
+    state = steer_dispatch
+    target = _prepared_input(state.paths, 'target')
+    canonical = _finish_input(state.paths, target, status)
+    _seal(state.paths)
+    pending = _prepared_input(state.paths, 'next', target=target.request_id)
+    state.observe()
+    assert state.dispatch() == 1
+    assert state.dispatch() == 0
+    assert state.claims == state.submissions == [pending.request_id]
+    assert read_gateway_terminal_envelope_report(state.paths.terminal / f'{target.request_id}.json',
+                                                include_sealed=True).payload == canonical
+
+
+@pytest.mark.parametrize('scope', [{'user': 'bob'}, {'conversation': 'another-thread'}], ids=['owner', 'thread'])
+def test_sealed_target_scope_mismatch_keeps_pending_unclaimed(steer_dispatch, scope):
+    state = steer_dispatch
+    target = _prepared_input(state.paths, 'target', **scope)
+    canonical = _finish_input(state.paths, target, 'cancelled')
+    _seal(state.paths)
+    pending = _prepared_input(state.paths, 'steer', target=target.request_id)
+    with pytest.raises(DataCorruptionError, match='queued_steer_scope_conflict') as error:
+        expiry.queued_steer_expiry_response(state.paths, pending.prepared_request)
+    assert error.value.__cause__ is None
+    assert expiry.queued_steer_pre_acquire(state.paths, pending.prepared_request) == 'target_turn_unavailable'
+    state.observe()
+    assert state.dispatch() == 0
+    assert state.claims == state.submissions == []
+    assert (state.paths.inbox / f'{pending.request_id}.json').exists()
+    assert not (state.paths.terminal / f'{pending.request_id}.json').exists()
+    assert read_gateway_terminal_envelope_report(state.paths.terminal / f'{target.request_id}.json',
+                                                include_sealed=True).payload == canonical
+
+
+def test_unreadable_sealed_target_keeps_pending_unclaimed(steer_dispatch):
+    state = steer_dispatch
+    target = _prepared_input(state.paths, 'target')
+    _finish_input(state.paths, target, 'cancelled')
+    _seal(state.paths)
+    pending = _prepared_input(state.paths, 'steer', target=target.request_id)
+    segment, = (state.paths.root / 'archive').glob('receipts-seg-*.jsonl')
+    segment.write_bytes(b'{broken archive')
+    with pytest.raises(DataCorruptionError, match='target_terminal_unreadable') as error:
+        expiry.queued_steer_expiry_response(state.paths, pending.prepared_request)
+    assert error.value.__cause__ is None
+    assert expiry.queued_steer_pre_acquire(state.paths, pending.prepared_request) == 'target_turn_unavailable'
+    state.observe()
+    assert state.dispatch() == 0
+    assert state.claims == state.submissions == []
+    assert (state.paths.inbox / f'{pending.request_id}.json').exists()
+    assert inputs.read_gateway_input_receipt(state.paths, pending.request_id).state == 'queued'
+
+
+def test_sealed_stop_expiry_recovers_before_new_turn(steer_dispatch, monkeypatch):
+    state = steer_dispatch
+    target = _prepared_input(state.paths, 'active')
+    queued = _prepared_input(state.paths, 'steer', target=target.request_id)
+    canonical = _finish_input(state.paths, target, 'cancelled')
+    _seal(state.paths)
+    project = expiry.project_expired_steer
+
+    def interrupted_projection(*args, **kwargs):
+        raise OSError('projection interrupted after canonical commit')
+
+    monkeypatch.setattr(expiry, 'project_expired_steer', interrupted_projection)
+    state.observe()
+    assert state.dispatch() == 0
+    path = state.paths.terminal / f'{queued.request_id}.json'
+    committed = read_gateway_terminal_envelope_report(path).payload
+    assert committed['terminal_response']['error_code'] == 'EXPIRED_TARGET_TURN'
+    assert (state.paths.inbox / path.name).exists()
+    assert inputs.read_gateway_input_receipt(state.paths, queued.request_id).state == 'queued'
+    assert state.claims == state.submissions == []
+    # 原输入及取消证明保持到投影确认；恢复不得再次读取/依赖旧目标。
+    monkeypatch.setattr(expiry, 'project_expired_steer', project)
+    with monkeypatch.context() as recovery:
+        recovery.setattr(archive, '_receipt_index', lambda *_a, **_k: pytest.fail('recovery reopened target index'))
+        assert state.dispatch() == 0
+        assert state.dispatch() == 0
+    assert read_gateway_terminal_envelope_report(path).payload == committed
+    assert not (state.paths.inbox / path.name).exists()
+    assert inputs.read_gateway_input_receipt(state.paths, queued.request_id).state == 'terminal_unknown'
+    next_turn = _prepared_input(state.paths, 'new-turn')
+    assert state.dispatch() == 1
+    assert state.dispatch() == 0
+    assert state.claims == state.submissions == [next_turn.request_id]
+    assert read_gateway_terminal_envelope_report(path).payload == committed
+    assert read_gateway_terminal_envelope_report(state.paths.terminal / f'{target.request_id}.json',
+                                                include_sealed=True).payload == canonical
