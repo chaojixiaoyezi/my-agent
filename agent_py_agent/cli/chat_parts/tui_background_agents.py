@@ -251,7 +251,8 @@ def start_route_observation(agent: object, navigation: object, stop_event: threa
 
 def start_business_observation(agent: object, navigation: object, stop_event: threading.Event) -> threading.Thread:
     """只启动 UI 只读观察；退出页面仅停止此观察，不停后台工作。"""
-    projection = TuiBackgroundAgents(business_client_for_agent(agent), stop_event)
+    projection = TuiBackgroundAgents(
+        business_client_for_agent(agent, conversation_id=navigation.root_runtime.session_id), stop_event)
 
     def observe():
         while not stop_event.is_set():

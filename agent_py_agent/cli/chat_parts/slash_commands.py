@@ -82,7 +82,8 @@ def _handle_business_command(user, ctx, include_plain_help):
         if ctx.use_gateway:
             from ..chat_client_context import post_gateway_json
             _, result = post_gateway_json(ctx.agent, '/client/business',
-                business_command_request(command.kind, command.value), timeout=10.0)
+                business_command_request(command.kind, command.value), timeout=10.0,
+                conversation_id=ctx.conversation_id)
         else:
             result = run_business_command(ctx.agent, command.kind, command.value)
         ctx.print_line(json.dumps(result, ensure_ascii=False))

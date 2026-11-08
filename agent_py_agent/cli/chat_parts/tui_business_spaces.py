@@ -12,13 +12,15 @@ from ..space_commands import (
 )
 
 
-def handle_tui_business_command(raw: str, *, agent: object, print_line: Callable[[str], None]) -> bool:
+def handle_tui_business_command(raw: str, *, agent: object, print_line: Callable[[str], None],
+                                session_id: str = '') -> bool:
     if raw.strip().partition(' ')[0] not in {'/space', '/team', '/workflow'}:
         return False
     session = getattr(agent, '_tui_business_command_session', None)
-    if session is None:
-        session = BusinessCommandSession(business_client_for_agent(agent))
+    if session is None or getattr(agent, '_tui_business_command_scope', '') != session_id:
+        session = BusinessCommandSession(business_client_for_agent(agent, conversation_id=session_id))
         agent._tui_business_command_session = session
+        agent._tui_business_command_scope = session_id
     # 工作线程按命令消费；同一实例表格编号不被并发 list/get 冲掉。
     lock = getattr(agent, '_tui_business_command_lock', None)
     if lock is None:
