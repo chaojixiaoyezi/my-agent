@@ -1386,11 +1386,12 @@ class RuntimeRepository(
         任务续跑分裂出 taskrun 双份，挂载闸被绕过）。无权威记录 → None。
         """
         with self._runtime_connection() as conn:
+            # 一元 + 让 parent 空值只作过滤：根 run 占多数，走 parent 索引会扫全表。
             return conn.execute(
                 "SELECT ar.* FROM agent_runs ar "
                 "JOIN task_runs tr ON tr.task_run_id = ar.task_run_id "
                 "JOIN tasks t ON t.task_id = tr.task_id "
-                "WHERE t.task_id = ? AND ar.role = 'main' AND ar.parent_agent_run_id = '' "
+                "WHERE t.task_id = ? AND ar.role = 'main' AND +ar.parent_agent_run_id = '' "
                 "ORDER BY ar.created_at DESC LIMIT 1",
                 (task_id,),
             ).fetchone()
@@ -1420,13 +1421,14 @@ class RuntimeRepository(
     # 函数用途: 在调用方已有连接内计算同一份恢复事实和稳定版本。
     def _recovery_eligibility_conn(self, conn, task_id, *, expected_revision=None):
         task_id = str(task_id or "")
+        # 规划线程每拍对每条阻断唤醒调用；一元 + 保证经 task_runs(task_id) 定位，不扫 parent 空值索引。
         row = conn.execute(
             "SELECT ar.agent_run_id, ar.status AS run_status, ar.current_attempt_id, "
             "aa.status AS attempt_status, t.thread_id, ar.task_run_id "
             "FROM agent_runs ar JOIN task_runs tr ON tr.task_run_id=ar.task_run_id "
             "JOIN tasks t ON t.task_id=tr.task_id "
             "LEFT JOIN agent_attempts aa ON aa.attempt_id=ar.current_attempt_id "
-            "WHERE t.task_id=? AND ar.role='main' AND ar.parent_agent_run_id='' "
+            "WHERE t.task_id=? AND ar.role='main' AND +ar.parent_agent_run_id='' "
             "ORDER BY ar.created_at DESC LIMIT 1", (task_id,),
         ).fetchone()
         facts = dict(row) if row is not None else {}
