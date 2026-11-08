@@ -71,14 +71,20 @@ def test_concurrent_factory_creation_and_repeated_use_share_workers(tmp_path):
 
 
 @pytest.mark.parametrize("workers,queue", [(3, 2), (2, 3)])
-def test_live_pool_rejects_configuration_conflict_and_closed_pool_can_rebuild(workers, queue):
+def test_live_pool_reconfigures_in_place_and_closed_pool_can_rebuild(workers, queue):
     first = _shared()
-    with pytest.raises(ValueError, match="configuration conflict"):
-        _shared(workers, queue)
+    assert first._shared_limits == (2, 2)
+    assert _shared(workers, queue) is first
+    assert first._shared_limits == (workers, queue) and not first._closed
+    assert first._capacity == workers + queue
+    assert first._executor._max_workers == workers
     assert _shared() is first
+    assert first._shared_limits == (2, 2) and first._capacity == 4
     first.shutdown()
     replacement = _shared(workers, queue)
     assert replacement is not first and not replacement._closed
+    assert first._closed
+    assert replacement._shared_limits == (workers, queue)
     assert replacement._capacity == workers + queue
 
 
