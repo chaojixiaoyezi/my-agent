@@ -1,12 +1,16 @@
 # LLM: 使用真实事实写者和临时Owner目录；维护只经既有tool_outputs通道和协调器写门。
 # 模块用途: 验证运行事实到期回收的保护条件、分片预算及静息回执兼容。
+import gc
 import json
+import multiprocessing
 import os
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -248,3 +252,126 @@ def test_age_phase_and_source_are_rechecked_inside_write_gate(owner, change):
     assert calls == [True]
     assert directory.exists() and not result.get('errors')
     assert result.get('deleted_items', 0) == 0
+
+
+def _approved_writer_at_lock(root, ready, proceed, attempted, blocked, completed, results):
+    """子进程使用真实写者；只在原锁获取口报告已取得或正在等待，不替换磁盘写入。"""
+    from agent_py_agent.agent.common import json_io
+
+    acquire = json_io._acquire_verified_lock_descriptor
+    observed = False
+
+    def observe(path, *, blocking=True, **options):
+        nonlocal observed
+        if observed:
+            return acquire(path, blocking=blocking, **options)
+        observed = True
+        try:
+            descriptor = acquire(path, blocking=False, **options)
+        except BlockingIOError:
+            blocked.set()
+            attempted.set()
+            return acquire(path, blocking=blocking, **options)
+        attempted.set()
+        return descriptor
+
+    json_io._acquire_verified_lock_descriptor = observe
+    ready.set()
+    try:
+        assert proceed.wait(10)
+        directory = Path(write_approved_runtime_fact_source(ApprovedRuntimeFactSourceRequest(
+            root=Path(root), fact_id='concurrent', goal='批准事实必须保留', next_actions=[],
+            acceptance=['保留批准事实'], constraints=[], latest_tests=[])))
+        results.put({'path': str(directory), 'source': json.loads((directory / 'task.json').read_text())['source']})
+    except BaseException as error:
+        results.put({'error': type(error).__name__, 'message': str(error)})
+    finally:
+        json_io._acquire_verified_lock_descriptor = acquire
+        completed.set()
+
+
+@pytest.mark.parametrize('writer_first', [False, True])
+@pytest.mark.parametrize('lock_first', [False, True])
+def test_approved_writer_and_retirement_share_cross_process_exclusion(owner, monkeypatch, writer_first, lock_first):
+    directory = fact(owner, 'concurrent', age=40)
+    fresh_locator(owner)
+    rows, errors = read_locator(directory.parent, limit=_MAX_FACT_FILES)
+    assert not errors and directory.name not in {row['directory'] for row in rows}
+    assert nofollow_fs._supports_dir_fd(), '本回归必须实际进入dir_fd退休路径'
+    identity = directory.stat().st_ino
+    scan, unlink = os.scandir, os.unlink
+    ctx = multiprocessing.get_context('spawn')
+    ready, proceed, attempted, blocked, completed = (ctx.Event() for _ in range(5))
+    # Event已启动进程级resource tracker；其FD是继承基线，子进程及Queue的FD仍须完整归还。
+    gc.collect()
+    fd_root = '/proc/self/fd' if os.path.isdir('/proc/self/fd') else '/dev/fd'
+    before = len(os.listdir(fd_root))
+    results = ctx.Queue()
+    child = ctx.Process(target=_approved_writer_at_lock, args=(
+        str(owner[0].owner_home_dir), ready, proceed, attempted, blocked, completed, results))
+    child.start()
+    observed = []
+
+    @contextmanager
+    def ordered_scan(path):
+        with scan(path) as entries:
+            if isinstance(path, int) and os.fstat(path).st_ino == identity:
+                members = sorted(entries, key=lambda entry: (entry.name.endswith('.lock') != lock_first, entry.name))
+                yield iter(members)
+            else:
+                yield entries
+
+    def interleaved_unlink(path, *args, **kwargs):
+        result = unlink(path, *args, **kwargs)
+        if path == 'task.json.lock' and 'dir_fd' in kwargs and not writer_first:
+            observed.append(path)
+            proceed.set()
+            assert attempted.wait(10)
+            if not blocked.is_set():
+                assert completed.wait(10)
+        return result
+
+    def commit(operation):
+        if writer_first:
+            proceed.set()
+            assert completed.wait(10)
+        return operation()
+
+    try:
+        assert ready.wait(10)
+        # 只替换退休模块的OS适配器，保持全局os.supports_dir_fd中的函数身份真实不变。
+        observed_os = SimpleNamespace(**{name: getattr(os, name) for name in dir(os)})
+        observed_os.scandir, observed_os.unlink = ordered_scan, interleaved_unlink
+        with monkeypatch.context() as patch:
+            patch.setattr(retention, 'os', observed_os)
+            receipt = retention.maintain_owner_tool_outputs_lane(request(owner, commit=commit))
+        assert receipt['items'] > 0, '必须经过真实候选复核，不能因能力检测变化而跳过'
+        proceed.set()
+        assert completed.wait(10)
+        child.join(10)
+        assert not child.is_alive() and child.exitcode == 0
+        result = results.get(timeout=5)
+        assert result == {'path': str(directory), 'source': 'approved_runtime_fact_source'}
+        assert json.loads((directory / 'task.json').read_text())['source'] == 'approved_runtime_fact_source'
+        assert not receipt.get('errors')
+        assert receipt.get('deleted_items', 0) == (0 if writer_first else 1)
+        if not writer_first:
+            assert observed == ['task.json.lock'] and blocked.is_set()
+    finally:
+        proceed.set()
+        child.join(2)
+        if child.is_alive():
+            child.terminate()
+            child.join(5)
+        child.close()
+        results.close()
+        results.join_thread()
+        del results, child
+        deadline = time.monotonic() + 5
+        while True:
+            gc.collect()
+            fd_delta = len(os.listdir(fd_root)) - before
+            if fd_delta == 0 or time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
+        assert fd_delta == 0

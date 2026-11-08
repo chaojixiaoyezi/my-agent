@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import write_private_text_file_atomic
+from ..common.json_io import locked_json_path, write_private_text_file_atomic
 from ..common.nofollow_fs import ensure_private_dir
 from ..common.safe_id import safe_id
 from ..common.value_parsing import dedupe_strings
@@ -68,17 +68,24 @@ class RuntimeFactTerminalRequest:
     error: dict[str, Any] = field(default_factory=dict)
 
 
+# LLM: 同一事实根只保留一个目录外的锁；锁序固定为家族锁、单事实锁、locator发布。
+# 函数用途: 给三个事实写入口和目录退休提供不会随单事实删除的共同互斥锚点。
+def _runtime_fact_fence_path(facts_dir: Path) -> Path:
+    return facts_dir.parent / f".{facts_dir.name}.lifecycle"
+
+
 # LLM: 同一owner/task-local根内先发布原子事实，再原子更新有界locator；不改变请求公开签名。
 # 函数用途: 写本轮事实并让写工具能直接定位运行意图。
 def write_runtime_fact_source(request: RuntimeFactSourceRequest) -> str:
     if not request.request_id:
         return ""
     root = request.root / "memory_archive" / "runtime_facts" / _safe_id(request.request_id)
-    # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
-    ensure_private_dir(root)
-    payload = _runtime_fact_payload(request)
-    _write_json_atomic(root / "task.json", payload)
-    update_locator(root.parent, root.name, payload, limit=_MAX_FACT_FILES)
+    with locked_json_path(_runtime_fact_fence_path(root.parent)):
+        # 目录退休后再获准的写者在同一互斥边界内重建目录，再发布事实与locator。
+        ensure_private_dir(root)
+        payload = _runtime_fact_payload(request)
+        _write_json_atomic(root / "task.json", payload)
+        update_locator(root.parent, root.name, payload, limit=_MAX_FACT_FILES)
     return str(root)
 
 
@@ -90,31 +97,32 @@ def update_runtime_fact_terminal(request: RuntimeFactTerminalRequest) -> str:
         return ""
     root = request.root / "memory_archive" / "runtime_facts" / _safe_id(request.request_id)
     path = root / "task.json"
-    previous = _read_json_dict(path)
-    if not previous:
-        return ""
+    with locked_json_path(_runtime_fact_fence_path(root.parent)):
+        previous = _read_json_dict(path)
+        if not previous:
+            return ""
 
-    status = str(request.status or "").strip().lower()
-    if status not in {"failed", "cancelled"}:
-        raise ValueError(f"unsupported runtime fact terminal status: {request.status!r}")
+        status = str(request.status or "").strip().lower()
+        if status not in {"failed", "cancelled"}:
+            raise ValueError(f"unsupported runtime fact terminal status: {request.status!r}")
 
-    run_status = dict(previous.get("run_status")) if isinstance(previous.get("run_status"), dict) else {}
-    run_status.update(
-        {
-            "status": status,
-            "response_present": False,
-            "error": dict(request.error),
-        }
-    )
-    progress = (
-        dict(previous.get("runtime_progress"))
-        if isinstance(previous.get("runtime_progress"), dict)
-        else {}
-    )
-    progress.update({"phase": status, "updated_at": _utc_timestamp()})
-    payload = {**previous, "run_status": run_status, "runtime_progress": progress}
-    _write_json_atomic(path, payload)
-    update_locator(root.parent, root.name, payload, limit=_MAX_FACT_FILES)
+        run_status = dict(previous.get("run_status")) if isinstance(previous.get("run_status"), dict) else {}
+        run_status.update(
+            {
+                "status": status,
+                "response_present": False,
+                "error": dict(request.error),
+            }
+        )
+        progress = (
+            dict(previous.get("runtime_progress"))
+            if isinstance(previous.get("runtime_progress"), dict)
+            else {}
+        )
+        progress.update({"phase": status, "updated_at": _utc_timestamp()})
+        payload = {**previous, "run_status": run_status, "runtime_progress": progress}
+        _write_json_atomic(path, payload)
+        update_locator(root.parent, root.name, payload, limit=_MAX_FACT_FILES)
     return str(root)
 
 
@@ -124,10 +132,11 @@ def write_approved_runtime_fact_source(request: ApprovedRuntimeFactSourceRequest
     if not request.fact_id:
         return ""
     root = request.root / "memory_archive" / "runtime_facts" / _safe_id(request.fact_id)
-    ensure_private_dir(root)
-    payload = _approved_fact_payload(request, _read_json_dict(root / "task.json"))
-    _write_json_atomic(root / "task.json", payload)
-    update_locator(root.parent, root.name, payload, limit=_MAX_FACT_FILES)
+    with locked_json_path(_runtime_fact_fence_path(root.parent)):
+        ensure_private_dir(root)
+        payload = _approved_fact_payload(request, _read_json_dict(root / "task.json"))
+        _write_json_atomic(root / "task.json", payload)
+        update_locator(root.parent, root.name, payload, limit=_MAX_FACT_FILES)
     return str(root)
 
 

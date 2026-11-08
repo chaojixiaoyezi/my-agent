@@ -361,11 +361,14 @@ def _sweep_locks(request, cursor, directory, budget):
         os.close(descriptor)
 
 
-# LLM: 原事实锁内重核年龄、来源与阶段；仅删除无链接、无子目录的微型事实目录。
+# LLM: 先持目录外的家族锁，再取单事实锁；删除后者时家族锁仍排斥全部事实写者。
 # 函数用途: 在调用方写门内退休一个过期终态事实，返回实际释放字节。
 def _retire_fact_dir(parent, name, cutoff, task_path: Path):
+    from .runtime_fact_source import _runtime_fact_fence_path
+
     try:
-        with locked_json_path(task_path, blocking=False):
+        with (locked_json_path(_runtime_fact_fence_path(task_path.parent.parent), blocking=False),
+              locked_json_path(task_path, blocking=False)):
             descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
             try:
                 info = os.stat('task.json', dir_fd=descriptor, follow_symlinks=False)
@@ -374,6 +377,11 @@ def _retire_fact_dir(parent, name, cutoff, task_path: Path):
                     return None
                 task_fd = os.open('task.json', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=descriptor)
                 with os.fdopen(task_fd, 'rb') as handle:
+                    opened = os.fstat(handle.fileno())
+                    if (not stat.S_ISREG(opened.st_mode)
+                            or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+                            != (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)):
+                        return None
                     payload = json.loads(handle.read(_TOOL_OUTPUT_WRAPPER_MAX_BYTES))
                 progress = payload.get('runtime_progress') if isinstance(payload, dict) else None
                 phase = progress.get('phase') if isinstance(progress, dict) else None
@@ -397,7 +405,8 @@ def _retire_fact_dir(parent, name, cutoff, task_path: Path):
 
 
 # LLM: 复用原有界locator保护近期事实；按名字锚点facts_after续扫（跳过段只比名字不计时），每片检查数与时间守
-#   通道预算，删除逐项进写门；一轮未走完回执未完成，走完按工具正文同周期休息到facts_due_at，锚点消失则下片从头。
+#   通道预算；获准片查找锚点后至少检查首个候选，避免前缀成本吃尽时间造成零进度，查找前缀仍非O(1)。
+#   删除逐项进写门；一轮未走完回执未完成，走完按工具正文同周期休息到facts_due_at，锚点消失则下片从头。
 # 函数用途: 分片回收Owner根下过期且未受保护的终态运行事实目录。
 def _retire_runtime_facts(request, days, cursor=None):
     from ..common.nofollow_fs import _supports_dir_fd, open_directory_beneath
@@ -423,6 +432,9 @@ def _retire_runtime_facts(request, days, cursor=None):
         return report
     protected = {row['directory'] for row in rows}
     cutoff = request.now - days * 86400
+    if request.budget.remaining_ms() <= 0:
+        report['complete'] = False
+        return report
     budget = request.budget.capped(items=STORAGE_LANE_SLICE_ENTRIES, size=STORAGE_LANE_SLICE_BYTES,
                                    ms=STORAGE_LANE_SLICE_MS / 2)
     try:
@@ -437,7 +449,7 @@ def _retire_runtime_facts(request, days, cursor=None):
                 if seeking:
                     seeking = entry.name != after
                     continue
-                if budget.remaining_ms() <= 0 or report['items'] >= budget.max_items:
+                if (examined and budget.remaining_ms() <= 0) or report['items'] >= budget.max_items:
                     finished = False
                     break
                 try:

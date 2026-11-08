@@ -9,7 +9,9 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,6 +26,7 @@ from agent_py_agent.agent.memory_archive.runtime_fact_source import (
     write_approved_runtime_fact_source,
     write_runtime_fact_source,
 )
+from agent_py_agent.agent.user_space import storage_lanes
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 from agent_py_agent.agent.user_space.storage_lanes import (
     STORAGE_LANE_SLICE_ENTRIES,
@@ -206,6 +209,60 @@ def test_storage_imports_in_a_fresh_process(tmp_path):
         cwd=tmp_path, env={**os.environ, 'PYTHONPATH': str(Path(retention.__file__).resolve().parents[3])},
         capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize('exhausted', [False, True])
+def test_saved_cursor_progresses_after_production_size_prefix_seek(home, monkeypatch, exhausted):
+    target = fact(home, 'expired-tail', age_days=40)
+    fill_locator(home)
+    identity = target.parent.stat().st_ino
+    scan = os.scandir
+    clock, visited = [100.0], [0]
+    prefix_count = 100_000
+    seconds_per_entry = 0.00000025
+    anchor = f'kept-{prefix_count - 1:06d}'
+
+    @contextmanager
+    def prefixed_scan(path):
+        with scan(path) as entries:
+            if isinstance(path, int) and os.fstat(path).st_ino == identity:
+                real_entries = sorted(entries, key=lambda entry: entry.name != target.name)
+
+                def stream():
+                    for index in range(prefix_count):
+                        clock[0] += seconds_per_entry
+                        visited[0] += 1
+                        yield SimpleNamespace(name=f'kept-{index:06d}')
+                    yield from real_entries
+
+                yield stream()
+            else:
+                yield entries
+
+    # 只模拟生产量级前缀的25ms成本；真实128项/12.5ms预算计算保持启用，不声称这是磁盘延迟测量。
+    observed_os = SimpleNamespace(**{name: getattr(os, name) for name in dir(os)})
+    observed_os.scandir = prefixed_scan
+    monkeypatch.setattr(retention, 'os', observed_os)
+    monkeypatch.setattr(storage_lanes, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    cursor = {'facts_after': anchor, 'next_pass_at': time.time() + 3600}
+    receipts = []
+    for _ in range(4):
+        req = request(home, cursor=cursor)
+        if exhausted:
+            req = replace(req, budget=StorageLaneBudget(STORAGE_LANE_SLICE_ENTRIES, None, clock[0] - 1))
+        result = retention.maintain_owner_tool_outputs_lane(req)
+        validate_lane_receipt(result)
+        receipts.append(result)
+        cursor = json.loads(json.dumps(result['cursor']))
+    assert all(row['items'] <= STORAGE_LANE_SLICE_ENTRIES for row in receipts)
+    if exhausted:
+        assert visited[0] == 0 and target.exists()
+        assert all(row['items'] == 0 and not row['complete'] for row in receipts)
+        assert cursor['facts_after'] == anchor
+    else:
+        assert visited[0] >= prefix_count
+        assert any(row['items'] > 0 or row['cursor'].get('facts_after') != anchor for row in receipts)
+        assert not target.exists() and any(row['complete'] for row in receipts)
 
 
 @contextmanager
