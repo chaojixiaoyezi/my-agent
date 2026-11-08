@@ -12,11 +12,12 @@ import time
 import uuid
 from collections import OrderedDict
 from contextlib import ExitStack, contextmanager
-from itertools import count, islice
+from itertools import islice
 from pathlib import Path
 from threading import RLock
 
 from ..common.nofollow_fs import open_directory_beneath
+from ..memory_store.retention_models import MemoryRetentionPolicy
 from .display_archive import (
     _ARCHIVE_ID,
     _MAX_PAGE_BYTES,
@@ -41,10 +42,9 @@ _DISPLAY_ARCHIVE_MIN_SCAN_BUDGET_ENTRIES = 64
 _scan_cursors: OrderedDict[tuple[int, int, str], int] = OrderedDict()
 # 活状态保存(迭代器, 剩余重放量)和实际位置；位置须与_scan_cursors一致才可续读，重放也消耗原扫描预算。
 _live_scans: OrderedDict[tuple[int, int, str], tuple[ExitStack, object, int]] = OrderedDict()
-# 各目录/操作最近一次维护的调用序号（旧在前），据此清退停止维护的键；名额已满时等待的键令占用者跑完一轮即让出。
-_scan_recent: OrderedDict[tuple[int, int, str], int] = OrderedDict()
+# 各目录/操作按所属owner维护周期计算的单调时钟截止时间；其它owner的调用次数不缩短其续扫寿命。
+_scan_recent: OrderedDict[tuple[int, int, str], float] = OrderedDict()
 _scan_waiting: set[tuple[int, int, str]] = set()
-_scan_calls = count()
 _scan_cursor_lock = RLock()
 _CURSOR_FILE = ".display_archives.cursor.json"
 
@@ -308,32 +308,40 @@ def _persisted_cursor(root_path, root_info, operation, offset=None):
         os.close(parent)
 
 
-# LLM: 调用序号记录各键最近一次维护；超过活跃键数两倍（至多256）次调用未再维护即视为闲置，关闭其活迭代器并丢弃内存游标与等待，
-#   回来时按新进程语义从持久游标恢复。窗口封顶使一次性新键不能把阈值无限推远、让停止维护的占用者永久占槽；
-#   轮转维护不超过256个键时两次调用相隔不足窗口，不会被误清。
+# LLM: 两个既有维护周期内保留活扫描；显式直调的零周期只在资源清退时沿用原正默认，不启用已停用的日常维护。
+#   最近记录最多保留两倍活扫描容量加一；压力下先丢非活元数据，过期时才关闭仍占名额的ExitStack。
 # 函数用途: 让停止维护的目录/操作交还迭代器名额和FD，返回该键此前是否仍是本进程活跃键；调用方须持有_scan_cursor_lock。
-def _forget_idle_scans(key):
-    sequence = next(_scan_calls)
-    known = _scan_recent.pop(key, None) is not None
-    _scan_recent[key] = sequence
-    oldest = sequence - 2 * min(len(_scan_recent), 128)
-    while next(iter(_scan_recent.values())) < oldest:
-        idle, _ = _scan_recent.popitem(last=False)
+def _forget_idle_scans(key, idle_seconds):
+    now = time.monotonic()
+    for idle, deadline in tuple(_scan_recent.items()):
+        if deadline > now:
+            continue
+        del _scan_recent[idle]
         _scan_cursors.pop(idle, None)
         _scan_waiting.discard(idle)
         dropped = _live_scans.pop(idle, None)
         if dropped is not None:
             dropped[0].close()
+    known = _scan_recent.pop(key, None) is not None
+    _scan_recent[key] = now + 2 * (idle_seconds or MemoryRetentionPolicy.maintenance_interval_seconds)
+    for idle in tuple(_scan_recent):
+        if len(_scan_recent) <= 2 * 128 + 1:
+            break
+        if idle not in _live_scans:
+            del _scan_recent[idle]
+            _scan_cursors.pop(idle, None)
+            _scan_waiting.discard(idle)
     return known
 
 
 # LLM: 原根flock保护同目录维护；游标按真实根inode及操作隔离，同进程保留活迭代器续读，每个枚举项都计入预算，回绕共用同一预算。
 #   活迭代器最多128个且不因他键到来被中途淘汰；名额满时新键只从目录头查一个预算窗口、不推进游标，占用者走到目录尾时若有人等待即让出。
 #   同进程丢失活迭代器仍从头开新一轮；首次或闲置清退后的持久前缀按预算分次重放，剩余量和实际位置分开保存。
+#   一次进程重启可需多片有界恢复；逐片重启无法仅靠标量偏移同时保证固定重放预算和尾部进展。
 #   等待键的目录头一窗走到目录尾即已完整查过一轮，退出等待，不再令占用者让出。
 # 函数用途: 小批维护从上次位置续扫，避免固定前缀挡住后续可处理归档，也不让续扫代价随偏移线性增长。
-def _maintain(value, maximum, action):
-    result = {"scanned": 0, "compacted": 0, "expired": 0, "removed": 0, "skipped": 0, "errors": 0}
+def _maintain(value, maximum, action, *, idle_seconds):
+    result = {"scanned": 0, "compacted": 0, "expired": 0, "removed": 0, "skipped": 0, "errors": 0, "backlog": 0}
     if maximum == 0:
         return result
     scan_budget = max(_DISPLAY_ARCHIVE_MIN_SCAN_BUDGET_ENTRIES, maximum * _DISPLAY_ARCHIVE_SCAN_MULTIPLIER_ENTRIES)
@@ -345,7 +353,7 @@ def _maintain(value, maximum, action):
             operation = action.__qualname__
             cursor_key = (int(root_info.st_dev), int(root_info.st_ino), operation)
             with _scan_cursor_lock:
-                known = _forget_idle_scans(cursor_key)
+                known = _forget_idle_scans(cursor_key, idle_seconds)
                 offset = _scan_cursors.get(cursor_key)
                 live = _live_scans.pop(cursor_key, None)
                 if live is not None and live[2] != offset:
@@ -361,6 +369,7 @@ def _maintain(value, maximum, action):
                 scans, entries = _open_scan(root)
                 with scans:
                     inspected, hit_limit, _ = _scan_entries(root, entries, scan_budget, maximum, action, result)
+                result["backlog"] = int(inspected == scan_budget)
                 if inspected < scan_budget and not hit_limit:
                     with _scan_cursor_lock:
                         _scan_waiting.discard(cursor_key)
@@ -383,6 +392,7 @@ def _maintain(value, maximum, action):
                     offset = replay = 0
                     scans, entries = _open_scan(root)
                 inspected, hit_limit, vanished = _scan_entries(root, entries, scan_budget, maximum, action, result)
+                result["backlog"] = int(inspected == scan_budget)
                 position = max(0, offset + inspected - result["removed"] - vanished)
                 if inspected < scan_budget and not hit_limit:
                     # 走到目录尾：关闭旧迭代器；有键等待名额时就此让出，否则从头只补到本次起点，回绕与正常检查共用本次预算。
@@ -423,7 +433,7 @@ def _maintain(value, maximum, action):
 
 # LLM: 仅处理manifest修改时间满阈值的已发布归档；过期档不合页，失败不删除唯一副本。
 # 函数用途: 把超过一天的多页展示无损合成一个私有bundle。
-def compact_display_archives(store_or_root, *, now: float | None = None, min_age_days: float = 1.0, max_archives: int = 1000) -> dict[str, int]:
+def compact_display_archives(store_or_root, *, now: float | None = None, min_age_days: float = 1.0, max_archives: int = 1000, idle_seconds: float = MemoryRetentionPolicy.maintenance_interval_seconds) -> dict[str, int]:
     now = _options(now, (min_age_days,), max_archives)
     # LLM: 回调运行于原根锁内，只修改本次已打开UUID目录。
     # 函数用途: 判断单档年龄后执行合页。
@@ -432,12 +442,12 @@ def compact_display_archives(store_or_root, *, now: float | None = None, min_age
         if manifest.get("expired") is True or metadata.st_mtime > now - min_age_days * _DISPLAY_ARCHIVE_DAY_SECONDS:
             return None
         return "compacted" if _compact(fd, manifest) else None
-    return _maintain(store_or_root, max_archives, action)
+    return _maintain(store_or_root, max_archives, action, idle_seconds=idle_seconds)
 
 
 # LLM: pin整档保护；14天先刷盘墓碑再删载荷，墓碑按expired_at另保留30天，绝不递归删除未知文件。
 # 函数用途: 显式回收过期展示正文，再清除达到存根期限的空档。
-def prune_expired_display_archives(store_or_root, *, now: float | None = None, ttl_days: float = 14.0, pinned_archive_ids: set[str] | None = None, remove_expired_dirs_after_days: float = 30.0, max_archives: int = 1000) -> dict[str, int]:
+def prune_expired_display_archives(store_or_root, *, now: float | None = None, ttl_days: float = 14.0, pinned_archive_ids: set[str] | None = None, remove_expired_dirs_after_days: float = 30.0, max_archives: int = 1000, idle_seconds: float = MemoryRetentionPolicy.maintenance_interval_seconds) -> dict[str, int]:
     now = _options(now, (ttl_days, remove_expired_dirs_after_days), max_archives)
     pins = frozenset(pinned_archive_ids or ())
     # LLM: 先预检所有已知载荷；墓碑已发表但删除中断时重跑可继续收尾，不触碰链接。
@@ -483,7 +493,7 @@ def prune_expired_display_archives(store_or_root, *, now: float | None = None, t
                 raise
             return "removed"
         return "expired" if not expired else None
-    return _maintain(store_or_root, max_archives, action)
+    return _maintain(store_or_root, max_archives, action, idle_seconds=idle_seconds)
 
 
 # LLM: 只推进通道续点；归档内部进度仍由冻结的领域维护器独占，不另写状态。
@@ -516,6 +526,8 @@ def _display_archive_lane_nonempty(root):
 # LLM: 每片至多一个规范根/阶段，经协调器写门调用原维护器；法律保留与不完整pin关闭删除，不引入新删除路径。
 # 函数用途: 将既有1/14/30天归档生命周期接入所有者维护调度。
 def maintain_display_archives_lane(request) -> dict:
+    from ..common.json_io import read_json_object_report
+    from ..user_space.owner_maintenance import _positive_interval
     from ..user_space.storage_lanes import owner_conversation_roots, validate_lane_receipt
 
     if request.legal_hold:
@@ -542,7 +554,9 @@ def maintain_display_archives_lane(request) -> dict:
         phase = "compact"
     cursor = {"root": root, "phase": phase}
     following = _display_archive_lane_next(roots, index, phase)
-    result = dict(scanned=0, compacted=0, expired=0, removed=0, skipped=0, errors=0)
+    result = dict(scanned=0, compacted=0, expired=0, removed=0, skipped=0, errors=0, backlog=0)
+    policy = read_json_object_report(request.home.owner_retention_json, context="display_archive_maintenance.policy").payload
+    idle_seconds = _positive_interval(policy.get("maintenance_interval_seconds"))
     pins_incomplete = 0
     pin_errors = []
     maximum = max(1, min(128, request.budget.max_items or 128))
@@ -554,7 +568,7 @@ def maintain_display_archives_lane(request) -> dict:
     if nonempty:
         if phase == "compact":
             result = request.run_write(lambda: compact_display_archives(
-                Path(root), now=request.now, min_age_days=1.0, max_archives=maximum,
+                Path(root), now=request.now, min_age_days=1.0, max_archives=maximum, idle_seconds=idle_seconds,
             ))
         else:
             from datetime import datetime, timezone
@@ -570,14 +584,14 @@ def maintain_display_archives_lane(request) -> dict:
             else:
                 result = request.run_write(lambda: prune_expired_display_archives(
                     Path(root), now=request.now, ttl_days=14.0, pinned_archive_ids=set(pins.ids),
-                    remove_expired_dirs_after_days=30.0, max_archives=maximum,
+                    remove_expired_dirs_after_days=30.0, max_archives=maximum, idle_seconds=idle_seconds,
                 ))
 
     changed = result["compacted"] + result["expired"] + result["removed"]
     # 锁忙或中断补试一片，持续坏档则推进以免饿死后续根；下一轮仍会再访。
     # retry只属于通道游标，不改领域维护器的游标文件格式或另建恢复状态。
     retried = root == after and request.cursor.get("retry") is True
-    retry = changed >= maximum or (bool(result["errors"]) and not retried)
+    retry = bool(result["backlog"]) or changed >= maximum or (bool(result["errors"]) and not retried)
     next_cursor = cursor if retry else following
     if result["errors"] and changed < maximum and retry:
         next_cursor = {**cursor, "retry": True}
