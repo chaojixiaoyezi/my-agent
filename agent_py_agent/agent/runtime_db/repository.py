@@ -119,7 +119,7 @@ from .operations import (
 )
 from .recovery_guard import close_runtime_connection, mark_runtime_connection_idle
 from .run_creation import RunCreation, create_run_chain
-from .schema import RuntimeSchemaMixin, RuntimeWriteFence, runtime_db_path
+from .schema import RuntimeSchemaMixin, RuntimeWriteFence, runtime_db_identity, runtime_db_path
 
 #: D.6/D.9：binding 生命周期状态。v1 不扩容（D.8），迁移时旧 ACTIVE → SUPERSEDED。
 BINDING_ACTIVE = "ACTIVE"
@@ -526,7 +526,13 @@ class RuntimeRepository(
         # 默认 identity 无法区分）。
         self.instance_id = instance_id or f"{socket.gethostname()}-{os.getpid()}"
         if not read_only and not existing_only:
-            self._init_runtime_schema()
+            try:
+                self._init_runtime_schema()
+            except sqlite3.Error as error:
+                # 只重进无外部副作用的构造阶段；请求正文/工具永远不自动重放。
+                if getattr(error, "runtime_db_recovery", {}).get("status") not in {"recovered", "healthy", "already_recovered"}:
+                    raise
+                self._init_runtime_schema()
 
     # ------------------------------------------------------------------ 事务
     # LLM: 原独立连接/提交/回滚寿命不变；首写由原库写锁后同事务代际核验保护，显式BEGIN也走同一栅栏。
@@ -534,16 +540,32 @@ class RuntimeRepository(
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
         """多实体权威写入的原子事务（A.9：ConversationTaskLink 需同事务）。"""
-        conn = self._runtime_connect()
+        self._heal_runtime_db_before_open()
+        identity = runtime_db_identity(self.db_path)
         try:
-            yield RuntimeWriteFence(conn) if not self.read_only else conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
+            conn = self._runtime_connect()
+            original = None
+            try:
+                yield RuntimeWriteFence(conn) if not self.read_only else conn
+                conn.commit()
+            except BaseException as error:
+                original = error
+                try:
+                    conn.rollback()
+                except Exception as cleanup:
+                    error.sqlite_cleanup_error = cleanup
+                raise
+            finally:
+                mark_runtime_connection_idle(conn, True)
+                try:
+                    close_runtime_connection(conn)
+                except BaseException as cleanup:
+                    if original is None:
+                        raise
+                    original.sqlite_cleanup_error = cleanup
+        except BaseException as error:
+            self._observe_runtime_db_error(error, identity)
             raise
-        finally:
-            mark_runtime_connection_idle(conn, True)
-            close_runtime_connection(conn)
 
     # -------------------------------------------- A.4/A.5/A.6/A.9 主链写入
     # LLM: 根运行创建新的 TaskRun，child 复用父 TaskRun；Task 本身只承载
