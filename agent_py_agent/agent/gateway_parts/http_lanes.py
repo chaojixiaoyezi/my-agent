@@ -109,9 +109,32 @@ class _LaneTicket:
             server._reject_without_wait(self.request)
 
 
+# LLM: 3.14t 的 mimalloc 按线程保留峰值；FIFO 唤醒会把短请求轮转到池内每个空闲线程，最终每个线程都长到峰值。
+#   这里只改“哪个等待线程接手”（最近空闲者优先），条目仍按 Queue 原 FIFO 出队，容量、超时与取消语义不变。
+# 类用途: 让 put 唤醒最近进入等待的消费者，使短请求集中在少数热线程上。
+class _LifoWakeCondition(threading.Condition):
+    # 函数用途: 与标准 notify 相同的唤醒/计数规则，只从等待表尾部（最近等待者）开始。
+    def notify(self, n: int = 1) -> None:
+        if not self._is_owned():
+            raise RuntimeError("cannot notify on un-acquired lock")
+        waiters = self._waiters
+        while waiters and n > 0:
+            waiter = waiters.pop()
+            try:
+                waiter.release()
+            except RuntimeError:
+                continue  # 已被前一次 notify 释放但尚未移除的等待者，不计入本次唤醒。
+            n -= 1
+
+
 # LLM: 原daemon执行器沿用CPython WorkItem；Future取消本身不会删除排队项，必须在归还槽位前移除。
 # 类用途: 为这两个运输池提供可按原对象身份丢弃的工作队列，避免取消占位随历史增长。
 class _CancellableWorkQueue(Queue):
+    # 函数用途: 建立原 Queue 后只把 not_empty 换成最近空闲优先的唤醒条件，共用同一把 mutex。
+    def __init__(self, maxsize: int = 0) -> None:
+        super().__init__(maxsize)
+        self.not_empty = _LifoWakeCondition(self.mutex)
+
     # LLM: 仅删除尚未被worker取走的原WorkItem，不调用Future或用户代码；运行中的项由原CAS处理。
     # 函数用途: 在取消或提交中断后移除对应的物理排队项。
     def discard(self, owner) -> None:
