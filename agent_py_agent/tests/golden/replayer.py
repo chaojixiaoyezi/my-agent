@@ -99,7 +99,11 @@ class Replayer:
         for directory in candidates:
             path = directory / f"{request_id}.json"
             if path.is_file():
-                return json.loads(path.read_text())
+                try:
+                    return json.loads(path.read_text())
+                except FileNotFoundError:
+                    # 队列记录可能刚移到下一目录，留给下一候选或下一次轮询读取。
+                    continue
         return None
 
     # LLM: The production conversation claim binds the session and execution independently of request id reuse.
