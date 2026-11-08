@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 
+import os
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -45,19 +47,33 @@ def _is_server_side_template_project(target: Path, site_root: Path) -> bool:
     templates/ 目录(主流框架约定)或 .html 内含模板语法;真静态网站(无模板语法)仍照常校验。"""
     if any(part == "templates" for part in (*target.parts, *site_root.parts)):
         return True
-    for html in list(site_root.glob("*.html"))[:20]:
-        try:
-            head = html.read_text(encoding="utf-8", errors="ignore")[:8192]
-        except OSError:
-            continue
-        if any(marker in head for marker in _TEMPLATE_MARKERS):
-            return True
+    try:
+        with os.scandir(site_root) as entries:
+            html_files = (Path(entry.path) for entry in entries if entry.name.endswith(".html"))
+            for html in islice(html_files, 20):
+                try:
+                    with html.open("rb", buffering=0) as source:
+                        raw = bytearray()
+                        # UTF-8 每字符最多四字节；坏编码也不能令 ignore 解码无限读取。
+                        for _ in range(4):
+                            chunk = source.read(8192)
+                            raw.extend(chunk)
+                            head = raw.decode("utf-8", errors="ignore").replace("\r\n", "\n").replace("\r", "\n")
+                            if len(head) >= 8192 or not chunk:
+                                break
+                except OSError:
+                    continue
+                if any(marker in head[:8192] for marker in _TEMPLATE_MARKERS):
+                    return True
+    except OSError:
+        return False
     return False
 
 
 def _static_site_request(site_root: Path, workspace: Path) -> dict[str, object]:
     return {
         "validation_method": "static_site_check",
+        "post_write_check": True,
         "site_root": _site_root_ref(site_root, workspace),
         "require_complete_html": True,
         "strict_dom_bindings": True,
