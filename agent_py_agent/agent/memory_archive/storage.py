@@ -10,7 +10,6 @@ from ..common.json_io import (
     write_private_text_file_atomic,
 )
 from ..common.nofollow_fs import open_readonly_file_beneath
-from ..memory_store.retention_models import MemoryRetentionPolicy
 
 """JSONL storage primitives for memory hook snapshots and raw archive events.
 
@@ -286,6 +285,8 @@ def _archive_identity(root: Path) -> dict[str, int] | None:
 
 def _permission_marker_valid(marker: Path, identity: dict[str, int], *, now: float) -> bool:
     """标记只是有期限的复核凭据；有界 no-follow 读取，坏标记一律重新遍历。"""
+    from ..memory_store.retention_models import MemoryRetentionPolicy
+
     try:
         descriptor = open_readonly_file_beneath(marker.parent, (marker.name,))
         try:

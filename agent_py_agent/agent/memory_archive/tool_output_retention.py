@@ -32,6 +32,8 @@ _TOOL_OUTPUT_LOCK_SWEEP_INTERVAL_SECONDS = 86400.0
 # 镜像runtime_db.repository._QUIESCENT_ATTEMPT_STATUSES；unknown不证明执行已结束。
 _ENDED_ATTEMPT_STATUSES = frozenset({'done', 'failed', 'cancelled', 'recovered'})
 _PARTS = ('blobs', 'tool_outputs')
+# 运行事实只认收尾/失败写者落下的终态阶段；started/tool_loop/running及未知值一律保留。
+_TERMINAL_FACT_PHASES = frozenset({'final', 'failed', 'cancelled', 'timeout', 'channel_error', 'abandoned', 'interrupted'})
 
 
 # LLM: 不接受无时区或非ISO值作为到期事实；纯计算，不读文件。
@@ -376,7 +378,7 @@ def _retire_fact_dir(parent, name, cutoff, task_path: Path):
                 progress = payload.get('runtime_progress') if isinstance(payload, dict) else None
                 phase = progress.get('phase') if isinstance(progress, dict) else None
                 if (not isinstance(payload, dict) or payload.get('source') != 'runtime_fact_source'
-                        or not isinstance(phase, str) or phase in ('', 'running')):
+                        or not isinstance(phase, str) or phase not in _TERMINAL_FACT_PHASES):
                     return None
                 files = []
                 with os.scandir(descriptor) as entries:
@@ -394,9 +396,10 @@ def _retire_fact_dir(parent, name, cutoff, task_path: Path):
         return None
 
 
-# LLM: 复用原有界locator保护近期事实；扫描与每次变更均守既有通道预算及写门。
+# LLM: 复用原有界locator保护近期事实；按名字锚点facts_after续扫（跳过段只比名字不计时），每片检查数与时间守
+#   通道预算，删除逐项进写门；一轮未走完回执未完成，走完按工具正文同周期休息到facts_due_at，锚点消失则下片从头。
 # 函数用途: 分片回收Owner根下过期且未受保护的终态运行事实目录。
-def _retire_runtime_facts(request, days):
+def _retire_runtime_facts(request, days, cursor=None):
     from ..common.nofollow_fs import _supports_dir_fd, open_directory_beneath
     from ..run_intent import _MAX_FACT_FILES
     from ..run_intent_index import read_locator
@@ -406,10 +409,13 @@ def _retire_runtime_facts(request, days):
         STORAGE_LANE_SLICE_MS,
     )
 
-    report = {'items': 0, 'deleted': 0, 'freed_bytes': 0, 'errors': []}
+    cursor = cursor or {}
+    report = {'items': 0, 'deleted': 0, 'freed_bytes': 0, 'errors': [], 'complete': True,
+              'cursor': {key: cursor[key] for key in ('facts_after', 'facts_due_at') if key in cursor}}
     parts = ('memory_archive', 'runtime_facts')
     facts_dir = Path(request.home.owner_home_dir).joinpath(*parts)
-    if not _supports_dir_fd() or not facts_dir.is_dir():
+    after = str(cursor.get('facts_after') or '')
+    if cursor.get('facts_due_at', 0) > request.now or not _supports_dir_fd() or not facts_dir.is_dir():
         return report
     rows, locator_errors = read_locator(facts_dir, limit=_MAX_FACT_FILES)
     if any(error.get('error_code') == 'RUN_INTENT_LOCATOR_INVALID' for error in locator_errors):
@@ -424,21 +430,28 @@ def _retire_runtime_facts(request, days):
     except (OSError, ValueError):
         _error(report['errors'], 'runtime_facts_unreadable')
         return report
+    examined, removed, seeking, finished = [], set(), bool(after), True
     try:
         with os.scandir(parent) as entries:
             for entry in entries:
-                if budget.remaining_ms() <= 0 or report['deleted'] >= budget.max_items:
+                if seeking:
+                    seeking = entry.name != after
+                    continue
+                if budget.remaining_ms() <= 0 or report['items'] >= budget.max_items:
+                    finished = False
                     break
                 try:
                     if entry.name in protected or entry.name.startswith('.') or not entry.is_dir(follow_symlinks=False):
                         continue
+                    report['items'] += 1
+                    examined.append(entry.name)
                     info = os.stat(f'{entry.name}/task.json', dir_fd=parent, follow_symlinks=False)
                     if not stat.S_ISREG(info.st_mode) or info.st_mtime > cutoff:
                         continue
                     freed = request.run_write(lambda name=entry.name: _retire_fact_dir(
                         parent, name, cutoff, facts_dir / name / 'task.json'))
                     if freed is not None:
-                        report['items'] += 1
+                        removed.add(entry.name)
                         report['deleted'] += 1
                         report['freed_bytes'] += freed
                 except FileNotFoundError:
@@ -447,6 +460,11 @@ def _retire_runtime_facts(request, days):
                     _error(report['errors'], 'runtime_fact_unreadable', '/'.join((*parts, entry.name)))
     finally:
         os.close(parent)
+    if seeking or not finished:
+        anchor = '' if seeking else next((name for name in reversed(examined) if name not in removed), after)
+        report.update(complete=False, cursor={'facts_after': anchor})
+    else:
+        report['cursor'] = {'facts_after': '', 'facts_due_at': request.now + _TOOL_OUTPUT_PASS_INTERVAL_SECONDS}
     return report
 
 
@@ -482,8 +500,10 @@ def maintain_owner_tool_outputs_lane(request) -> dict:
         receipt['deferred_reason'] = 'legal_hold'
         return receipt
     days = owner_retention_override(request.home, 'tool_output_days', OWNER_TOOL_OUTPUT_RETENTION_DAYS)
-    facts = _retire_runtime_facts(request, days)
+    facts = _retire_runtime_facts(request, days, cursor)
+    cursor.update(facts['cursor'])
     if cursor.get('next_pass_at', 0) > request.now:
+        receipt['complete'] = facts['complete']
         return _with_runtime_facts(receipt, facts)
     home = Path(request.home.owner_home_dir)
     errors, skipped, decided, due = [], {}, set(), []
@@ -606,9 +626,10 @@ def maintain_owner_tool_outputs_lane(request) -> dict:
                 _error(errors, 'orphan_locks_unreadable')
     else:
         cursor['after'] = after
+    cursor.update(facts['cursor'])
     receipt['items'] += facts['items']
     receipt['deleted_items'] += facts['deleted']
     receipt['freed_bytes'] += facts['freed_bytes']
     errors.extend(facts['errors'][:max(0, 16 - len(errors))])
-    receipt.update(cursor=cursor, complete=complete)
+    receipt.update(cursor=cursor, complete=complete and facts['complete'])
     return validate_lane_receipt(receipt)
