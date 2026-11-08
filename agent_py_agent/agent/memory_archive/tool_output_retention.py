@@ -359,6 +359,109 @@ def _sweep_locks(request, cursor, directory, budget):
         os.close(descriptor)
 
 
+# LLM: 原事实锁内重核年龄、来源与阶段；仅删除无链接、无子目录的微型事实目录。
+# 函数用途: 在调用方写门内退休一个过期终态事实，返回实际释放字节。
+def _retire_fact_dir(parent, name, cutoff, task_path: Path):
+    try:
+        with locked_json_path(task_path, blocking=False):
+            descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            try:
+                info = os.stat('task.json', dir_fd=descriptor, follow_symlinks=False)
+                if (not stat.S_ISREG(info.st_mode) or info.st_mtime > cutoff
+                        or info.st_size > _TOOL_OUTPUT_WRAPPER_MAX_BYTES):
+                    return None
+                task_fd = os.open('task.json', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=descriptor)
+                with os.fdopen(task_fd, 'rb') as handle:
+                    payload = json.loads(handle.read(_TOOL_OUTPUT_WRAPPER_MAX_BYTES))
+                progress = payload.get('runtime_progress') if isinstance(payload, dict) else None
+                phase = progress.get('phase') if isinstance(progress, dict) else None
+                if (not isinstance(payload, dict) or payload.get('source') != 'runtime_fact_source'
+                        or not isinstance(phase, str) or phase in ('', 'running')):
+                    return None
+                files = []
+                with os.scandir(descriptor) as entries:
+                    for entry in entries:
+                        if len(files) >= 8 or not entry.is_file(follow_symlinks=False):
+                            return None
+                        files.append((entry.name, entry.stat(follow_symlinks=False).st_size))
+                for leaf, _ in files:
+                    os.unlink(leaf, dir_fd=descriptor)
+            finally:
+                os.close(descriptor)
+            os.rmdir(name, dir_fd=parent)
+            return sum(size for _, size in files)
+    except BlockingIOError:
+        return None
+
+
+# LLM: 复用原有界locator保护近期事实；扫描与每次变更均守既有通道预算及写门。
+# 函数用途: 分片回收Owner根下过期且未受保护的终态运行事实目录。
+def _retire_runtime_facts(request, days):
+    from ..common.nofollow_fs import _supports_dir_fd, open_directory_beneath
+    from ..run_intent import _MAX_FACT_FILES
+    from ..run_intent_index import read_locator
+    from ..user_space.storage_lanes import (
+        STORAGE_LANE_SLICE_BYTES,
+        STORAGE_LANE_SLICE_ENTRIES,
+        STORAGE_LANE_SLICE_MS,
+    )
+
+    report = {'items': 0, 'deleted': 0, 'freed_bytes': 0, 'errors': []}
+    parts = ('memory_archive', 'runtime_facts')
+    facts_dir = Path(request.home.owner_home_dir).joinpath(*parts)
+    if not _supports_dir_fd() or not facts_dir.is_dir():
+        return report
+    rows, locator_errors = read_locator(facts_dir, limit=_MAX_FACT_FILES)
+    if any(error.get('error_code') == 'RUN_INTENT_LOCATOR_INVALID' for error in locator_errors):
+        _error(report['errors'], 'runtime_facts_locator_invalid')
+        return report
+    protected = {row['directory'] for row in rows}
+    cutoff = request.now - days * 86400
+    budget = request.budget.capped(items=STORAGE_LANE_SLICE_ENTRIES, size=STORAGE_LANE_SLICE_BYTES,
+                                   ms=STORAGE_LANE_SLICE_MS / 2)
+    try:
+        parent = open_directory_beneath(request.home.owner_home_dir, parts, require_dir_fd=True)
+    except (OSError, ValueError):
+        _error(report['errors'], 'runtime_facts_unreadable')
+        return report
+    try:
+        with os.scandir(parent) as entries:
+            for entry in entries:
+                if budget.remaining_ms() <= 0 or report['deleted'] >= budget.max_items:
+                    break
+                try:
+                    if entry.name in protected or entry.name.startswith('.') or not entry.is_dir(follow_symlinks=False):
+                        continue
+                    info = os.stat(f'{entry.name}/task.json', dir_fd=parent, follow_symlinks=False)
+                    if not stat.S_ISREG(info.st_mode) or info.st_mtime > cutoff:
+                        continue
+                    freed = request.run_write(lambda name=entry.name: _retire_fact_dir(
+                        parent, name, cutoff, facts_dir / name / 'task.json'))
+                    if freed is not None:
+                        report['items'] += 1
+                        report['deleted'] += 1
+                        report['freed_bytes'] += freed
+                except FileNotFoundError:
+                    continue
+                except (OSError, ValueError):
+                    _error(report['errors'], 'runtime_fact_unreadable', '/'.join((*parts, entry.name)))
+    finally:
+        os.close(parent)
+    return report
+
+
+# LLM: 无事实变更和错误时保持原四键回执；只合并真实删除计量和有界错误。
+# 函数用途: 将事实退休结果附加到原工具输出通道回执。
+def _with_runtime_facts(receipt, facts):
+    receipt['items'] += facts['items']
+    if facts['deleted']:
+        receipt['deleted_items'] = receipt.get('deleted_items', 0) + facts['deleted']
+        receipt['freed_bytes'] = receipt.get('freed_bytes', 0) + facts['freed_bytes']
+    if facts['errors']:
+        receipt['errors'] = [*receipt.get('errors', []), *facts['errors']][:16]
+    return receipt
+
+
 # LLM: 调度器拥有游标和写门；pin每片只取一次，耗时后仍推进首项，未决名称不越过连续前缀。
 # 函数用途: 在Owner规范根有界退休终态attempt的到期工具正文。
 def maintain_owner_tool_outputs_lane(request) -> dict:
@@ -378,8 +481,10 @@ def maintain_owner_tool_outputs_lane(request) -> dict:
     if request.legal_hold:
         receipt['deferred_reason'] = 'legal_hold'
         return receipt
+    days = owner_retention_override(request.home, 'tool_output_days', OWNER_TOOL_OUTPUT_RETENTION_DAYS)
+    facts = _retire_runtime_facts(request, days)
     if cursor.get('next_pass_at', 0) > request.now:
-        return receipt
+        return _with_runtime_facts(receipt, facts)
     home = Path(request.home.owner_home_dir)
     errors, skipped, decided, due = [], {}, set(), []
     receipt.update(errors=errors, skipped=skipped, protected=0, deleted_items=0, freed_bytes=0, backlog=0)
@@ -390,7 +495,6 @@ def maintain_owner_tool_outputs_lane(request) -> dict:
     except (OSError, ValueError):
         _error(errors, 'tool_outputs_unreadable')
         return validate_lane_receipt(receipt)
-    days = owner_retention_override(request.home, 'tool_output_days', OWNER_TOOL_OUTPUT_RETENTION_DAYS)
     cutoff = request.now - days * 86400
     budget = request.budget.capped(items=STORAGE_LANE_SLICE_ENTRIES, size=STORAGE_LANE_SLICE_BYTES, ms=STORAGE_LANE_SLICE_MS)
     window = lane_cursor_window(cursor, (name for name in names if name.endswith('.json')), STORAGE_LANE_SLICE_ENTRIES)
@@ -502,5 +606,9 @@ def maintain_owner_tool_outputs_lane(request) -> dict:
                 _error(errors, 'orphan_locks_unreadable')
     else:
         cursor['after'] = after
+    receipt['items'] += facts['items']
+    receipt['deleted_items'] += facts['deleted']
+    receipt['freed_bytes'] += facts['freed_bytes']
+    errors.extend(facts['errors'][:max(0, 16 - len(errors))])
     receipt.update(cursor=cursor, complete=complete)
     return validate_lane_receipt(receipt)
