@@ -10,6 +10,7 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import Context, copy_context
 from dataclasses import dataclass, field
 
 from ..plugin_channel import (
@@ -183,7 +184,7 @@ class PluginEventHub:
             return
         self._running.add(owner_key)
         try:
-            self._executor.submit(self._drain, owner_key)
+            Context().run(self._executor.submit, copy_context().run, self._drain, owner_key)
         except Exception:
             self._running.discard(owner_key)
             raise
@@ -209,7 +210,9 @@ class PluginEventHub:
             return
         # 回收的时间界要在读表之前取：界之后别的调用方新建的连接一律不碰（B2 合同）。
         seq_before = self._pool.current_seq()
-        owner = self._owner(owner_key)
+        with self._lock:
+            owner = self._owners.get(owner_key)
+            version = self._version.get(owner_key, 0)
         if owner is None:
             self._finish(owner_key)
             return
@@ -221,9 +224,18 @@ class PluginEventHub:
         _close_idle(self, owner_key)
         with self._lock:
             try:
+                if self._closed:
+                    return
                 self._dispatch(owner_key, rows)
+                retry = self._version.get(owner_key, 0) != version
+                # 空槽证明本轮没有启用订阅或在途发送；已有激活槽及其水位必须保留。
+                if not self._slots.get(owner_key) and not retry:
+                    for state in (self._owners, self._latest, self._slots, self._version):
+                        state.pop(owner_key, None)
             finally:
                 self._running.discard(owner_key)
+            if retry and not self._slots.get(owner_key):
+                self._schedule(owner_key)
 
     # LLM: 调用方必须已持有 self._lock；槽按插件身份维护（换代重置水位与序号），订阅判定只读清单声明；
     #   每个（owner, 激活）同一时间只提交一个发送任务（在途时新事件只进待发、不收集不消耗水位），
@@ -245,7 +257,7 @@ class PluginEventHub:
                 continue
             self._inflight.add(key)
             try:
-                self._executor.submit(_send_batch, self, owner_key, row, batch)
+                Context().run(self._executor.submit, copy_context().run, _send_batch, self, owner_key, row, batch)
             except Exception:
                 self._inflight.discard(key)
                 raise
