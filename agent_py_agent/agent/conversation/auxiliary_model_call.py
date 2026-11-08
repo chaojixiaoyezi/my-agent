@@ -129,7 +129,8 @@ def generate_auxiliary_model_response(request: AuxiliaryModelCallRequest) -> obj
     if not callable(generate):
         raise RuntimeError("auxiliary model backend is unavailable")
 
-    ledger, call_id, input_tokens = _start_auxiliary_call(request, backend)
+    logical_call_ids: list[str] = []
+    ledger, call_id, input_tokens = _start_auxiliary_call(request, backend, logical_call_ids)
     started_at = time.monotonic()
     label = type(backend).__name__
     response: object | None = None
@@ -151,8 +152,15 @@ def generate_auxiliary_model_response(request: AuxiliaryModelCallRequest) -> obj
         ))
         raise
     finally:
-        if request.on_observation is not None:
-            _report_auxiliary_observation(request, ledger, call_id)
+        try:
+            if request.on_observation is not None:
+                _report_auxiliary_observation(request, ledger, call_id)
+        finally:
+            for logical_call_id in logical_call_ids:
+                ledger.close_logical_call(
+                    request_id=str(request.request_id or ""), run_id=str(request.run_id or ""),
+                    purpose="auxiliary", logical_call_id=logical_call_id,
+                )
     try:
         record_llm_call(label, time.monotonic() - started_at, response, ok=True)
     except Exception:
@@ -223,6 +231,7 @@ def _auxiliary_input_tokens(request: AuxiliaryModelCallRequest) -> int:
 def _start_auxiliary_call(
     request: AuxiliaryModelCallRequest,
     backend: object,
+    logical_call_ids: list[str] | None = None,
 ) -> tuple[object, str, int]:
     ledger = model_call_ledger(request.agent)
     identity = uuid.uuid4().hex
@@ -251,6 +260,9 @@ def _start_auxiliary_call(
             },
         )
     )
+    # 精确身份交给宿主 finally；不能从可能已被细节上限淘汰的记录反查。
+    if logical_call_ids is not None:
+        logical_call_ids.append(logical_call_id)
     return ledger, call_id, input_tokens
 
 
