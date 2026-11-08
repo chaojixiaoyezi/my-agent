@@ -9,7 +9,10 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from contextvars import Context
 from dataclasses import dataclass, field
+
+from ..concurrency import daemon_executor
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +27,9 @@ ERROR_BACKOFF_SECONDS = 5.0
 _CONNECTION_FAILURE_CODES = frozenset({
     "MCP_CONNECTION_CLOSED", "MCP_SERVER_START_FAILED", "MCP_TIMEOUT", "PLUGIN_CHANNEL_START_FAILED",
 })
+# 空闲关闭到期检查：全进程共用一条常驻延时线程，回调只投递；复核与 stop（可能阻塞）在守护池里做。
+_IDLE_CLOSE_TICKS = daemon_executor.SharedDeferredCalls("plugin-channel-idle-close")
+_IDLE_CLOSE_RUNS = daemon_executor.DurableDaemonThreadPoolExecutor(thread_name_prefix="plugin-channel-idle-close")
 
 
 # LLM: 通道级错误基类；code 只供上层区分展示文案，不参与机器判定。
@@ -87,6 +93,8 @@ class ChannelConnection:
     start_error: BaseException | None = None
     start_event: threading.Event = field(default_factory=threading.Event)
     request_lock: threading.Lock = field(default_factory=threading.Lock)
+    # 已挂上的空闲关闭到期检查；每条连接最多一个，只在池锁内读写。
+    idle_check: daemon_executor.DeferredCall | None = None
 
 
 # LLM: 连接按 (owner_key, 激活编号) 唯一；状态变更都在 _lock 内，stop 一律在锁外做（可能阻塞）。
@@ -154,6 +162,8 @@ class PluginChannelPool:
                 connection = ChannelConnection(key=key, installation=installation, created_seq=self._seq)
                 self._connections[key] = connection
             connection.last_used = now
+            if connection.idle_check is None:
+                _arm_idle_close(self, connection, IDLE_CLOSE_SECONDS)
             return connection
 
     # LLM: 供调用方在池锁内取连接（如服务锁内组装输出）；不创建、不更新使用时间。
@@ -464,6 +474,28 @@ def close_idle_connection(pool: PluginChannelPool, conn_key: tuple[str, str], no
         connection.client = None
         connection.transport = None
     _stop_client(client)
+
+
+# 函数用途: 只在池锁内调用；给连接挂一个 delay 秒后的空闲关闭到期检查（空 context 里建句柄，不留住触发它的请求上下文）。
+def _arm_idle_close(pool: PluginChannelPool, connection: ChannelConnection, delay: float) -> None:
+    due = Context().run(daemon_executor.DeferredCall, lambda: _IDLE_CLOSE_RUNS.submit(_idle_close_due, pool, connection))
+    connection.idle_check = due
+    _IDLE_CLOSE_TICKS.start(connection.idle_check, delay)
+
+
+# LLM: 空闲关闭原先只在该 owner 下一次面板查询/事件发送时顺手做；最后一个会话/面板离开后没有调用方再来，
+#   插件客户端（子进程）就一直开着。acquire 给每条连接最多挂一个到期检查，到点复核：期间又被 acquire 过就按
+#   新期限再挂，仍在启动/在途就过一个空闲周期再查；否则交给 close_idle_connection（只关客户端、保留条目）。
+# 函数用途: 到期复核一条连接是否已空闲满 IDLE_CLOSE_SECONDS，满了就关客户端，没满就重新挂检查。
+def _idle_close_due(pool: PluginChannelPool, connection: ChannelConnection) -> None:
+    with pool.lock:
+        connection.idle_check = None
+        if pool.connections.get(connection.key) is not connection:
+            return
+        remaining = connection.last_used + IDLE_CLOSE_SECONDS - pool._clock()
+        if remaining > 0 or connection.starting or connection.request_lock.locked():
+            return _arm_idle_close(pool, connection, remaining if remaining > 0 else IDLE_CLOSE_SECONDS)
+    close_idle_connection(pool, connection.key, pool._clock(), busy=False)
 
 
 # LLM: 关闭是终态：先置已关闭标记（acquire 与 _ensure_started 据此拒绝），再像 retire_stale 一样
