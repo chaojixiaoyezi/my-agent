@@ -21,7 +21,9 @@ from ..conversation.compact_threshold_policy import (
 )
 from ..conversation.run_claim import detached_task_claim_scope_id, user_input_turn_on_lane
 from ..conversation.store_threads import IdleCompactActivityChanged
+from ..io.bounded_directory import DirectoryCursor
 from ..settings.config_layers import compact_idle_parameters
+from ..settings.defaults import default_config_int
 from ..settings.model_scope import selected_model_scope
 from .background_resource_report import session_background_processes
 
@@ -173,7 +175,7 @@ def _compact_idle_candidate(agent, store, thread, *, now=None):
     return {**result, "compacted": bool(compacted.compacted), "reason": "compacted" if compacted.compacted else "no_source"}
 
 
-# LLM: 易失游标只选规范线程，每拍按配置上限检查；不在资格检查前建立会迁移模型的scope，不新建冷Agent。
+# LLM: 易失目录流只选规范线程，实际条目读取与业务检查各守配置预算；不迁移模型，不新建冷Agent。
 # 函数用途: 有界维护基础及已加载owner的空闲会话，坏记录只计失败，不阻挡后续线程。
 def idle_compact_maintenance_tick(base_agent, *, cursor, now=None):
     pool = getattr(base_agent, "_owner_pool", None)
@@ -182,11 +184,16 @@ def idle_compact_maintenance_tick(base_agent, *, cursor, now=None):
         for item in [base_agent, *(pool.active_agents() if pool is not None else [])]
         if getattr(getattr(item, "home_paths", None), "owner_home_dir", None) is not None
     ]
+    scans = cursor.setdefault("directories", {})
+    for key in scans.keys() - {str(item.home_paths.owner_home_dir) for item in candidates}:
+        scans.pop(key).close()
     if not candidates:
         return {"checked": 0, "compacted": 0, "failed": 0}
     agents = list({str(item.home_paths.owner_home_dir): item for item in candidates}.values())
     position = int(cursor.get("owner", 0))
-    threads = cursor.setdefault("threads", {})
+    config = getattr(base_agent, "config", None)
+    remaining = getattr(config, "retention_scan_slice_entries", default_config_int("retention_scan_slice_entries"))
+    deadline = time.monotonic() + getattr(config, "retention_scan_slice_ms", default_config_int("retention_scan_slice_ms")) / 1000
     report = {"checked": 0, "compacted": 0, "failed": 0}
     maximum = getattr(getattr(base_agent, "config", None), "memory_compact_idle_max_per_tick", 2)
     maximum = max(0, maximum) if type(maximum) is int else 2
@@ -197,12 +204,17 @@ def idle_compact_maintenance_tick(base_agent, *, cursor, now=None):
         if store is None:
             continue
         key = str(agent.home_paths.owner_home_dir)
-        files = sorted(store.storage.threads_dir.glob("thread-*.json"))
-        if not files:
+        scan = scans.setdefault(key, DirectoryCursor())
+        while remaining > 0 and time.monotonic() < deadline:
+            remaining -= 1
+            entry = scan.next_entry(store.storage.threads_dir)
+            if entry is None or entry.name.startswith("thread-") and entry.name.endswith(".json"):
+                break
+        else:
+            break
+        if entry is None:
             continue
-        previous = threads.get(key, "")
-        path = next((item for item in files if item.stem > previous), files[0])
-        threads[key] = path.stem
+        path = store.storage.threads_dir / entry.name
         row, error = store.threads.load_report(path.stem)
         report["checked"] += 1
         if error or row is None or row.owner_home and row.owner_home != key:

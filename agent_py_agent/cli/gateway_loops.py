@@ -2392,10 +2392,14 @@ class _GatewayOwnerMaintenanceController:
     # LLM: 节奏交给 _run_loop_with_backoff：出错记账、限流打印、等 max(interval, 退避)。
     # 函数用途: 跑维护循环直到 stop_event 置位。
     def run(self, stop_event: threading.Event) -> None:
-        _run_hinted_controller(
-            self, stop_event,
-            _LoopSite("owner-maintenance", "gateway_owner_maintenance.tick", "owner-maintenance", self.interval),
-        )
+        try:
+            _run_hinted_controller(
+                self, stop_event,
+                _LoopSite("owner-maintenance", "gateway_owner_maintenance.tick", "owner-maintenance", self.interval),
+            )
+        finally:
+            for scan in self._idle_compact_cursor.pop("directories", {}).values():
+                scan.close()
 
     # LLM: 每拍先跑基础 owner 与原闲置压缩；优先续作限半拍，发现至少一页，同拍去重、不构造 owner agent。
     #   摘要由 _maintenance_summary 汇总（failed 只算整次被拒与执行期动作失败，另有 refused / isolated），只打印、不落盘；容量兜底取AgentConfig。
