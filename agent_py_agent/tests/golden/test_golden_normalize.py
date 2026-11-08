@@ -667,3 +667,31 @@ def test_fixture_date_file_stems_are_bijective_before_body_hashing():
     assert content.count("date#1.jsonl") == 2 and content.count("date#2.jsonl") == 1
     assert normalize(normalized) == normalized
     assert "2026-11-06.jsonl" in raw[0]["body"]["messages"][0]["content"]
+
+
+@pytest.mark.parametrize("calendar_day", ["2026-11-07", "2026-11-08", "2027-01-01"])
+def test_replay_calendar_keeps_partitions_stable_across_utc_midnight(tmp_path, calendar_day):
+    """归档路径用同一夹具日历，跨 UTC 日的原始事件时间仍逐字保留。"""
+    import time
+
+    from agent_py_agent.agent.memory_archive import storage
+    from agent_py_agent.agent.memory_archive.models import RawMemoryEvent
+    from agent_py_agent.agent.user_space import context_bundle, run_workspace
+
+    from .replayer import _gateway_calendar
+
+    original_date = context_bundle.date
+    original_archive_key, original_run_key = storage._date_key, run_workspace._date_key
+    wall_clock, monotonic_clock = time.time, time.monotonic
+    stamps = ("2026-11-07T23:59:59+00:00", "2026-11-08T00:00:01+00:00")
+    with _gateway_calendar(calendar_day):
+        assert context_bundle.date.today().isoformat() == calendar_day
+        for number, stamp in enumerate(stamps):
+            event = RawMemoryEvent(f"event-{number}", "session", created_at=stamp)
+            path = storage.append_raw_event(tmp_path, event)
+            assert path == tmp_path / "audit" / f"{calendar_day}.jsonl"
+            assert run_workspace._date_key(stamp) == calendar_day
+        assert [row["created_at"] for row in map(json.loads, path.read_text().splitlines())] == list(stamps)
+        assert time.time is wall_clock and time.monotonic is monotonic_clock
+    assert context_bundle.date is original_date
+    assert storage._date_key is original_archive_key and run_workspace._date_key is original_run_key

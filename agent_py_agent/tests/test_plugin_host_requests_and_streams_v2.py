@@ -380,6 +380,21 @@ def test_native_tool_progress_emitter_keeps_optional_call_fields(fields):
     assert "read_file" in text
 
 
+@pytest.mark.parametrize("fields,arguments,expected", [
+    ({}, {"path": "src/main.py"}, "src/main.py"),
+    ({"name": "read_artifact"}, {"offset": 12}, "读取归档内容，偏移 12"),
+    ({"tool_name": None, "name": "workflows"}, {"action": "list"}, "list"),
+    ({"tool_name": "workflows", "name": "read_artifact"}, {"action": "run"}, "run"),
+    ({"tool_name": "read_artifact"}, {"offset": True}, "读取归档内容"),
+    ({}, {}, ""),
+])
+def test_tool_progress_detail_tolerates_optional_call_names(fields, arguments, expected):
+    from agent_py_agent.agent.agent_core.tool_loop import round_execution
+
+    call = SimpleNamespace(arguments=arguments, **fields)
+    assert round_execution._payload_progress_detail(call) == expected
+
+
 def test_tool_progress_helpers_do_not_directly_read_optional_call_fields():
     from agent_py_agent.agent.agent_core.tool_loop import round_execution
 

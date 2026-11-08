@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -12,4 +13,5 @@ import pytest
 @pytest.fixture
 def golden_parameters():
     path = Path(__file__).parent.parent / "slo" / "slo_targets.json"
-    return json.loads(path.read_text())["fixture"]
+    # 三次回放及重启共用同一天，不让宿主时区或 UTC 跨日改变目录分区。
+    return {**json.loads(path.read_text())["fixture"], "calendar_day": datetime.now(timezone.utc).date().isoformat()}
