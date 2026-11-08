@@ -12,6 +12,8 @@ import os
 import sqlite3
 import stat
 import time
+from collections import Counter
+from collections.abc import MutableSet
 from contextlib import closing, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -2042,6 +2044,69 @@ def _walk_files(root: Path, *, include_dirs: bool = False):
 
 # LLM: pin为单次扫描临时投影，不是第二份权威；仅解析结构化引用字段，绝不解析正文。
 # 类用途: 保存被引用的路径和记录ID，供扫描与执行阶段统一保护文件。
+class _PinPaths(MutableSet):
+    """写入时维护路径哈希投影，查询无需补扫历史；共享祖先按引用数移除。"""
+
+    def __init__(self, values=()):
+        self.values = set()
+        self.exact = set()
+        self.ancestors = Counter()
+        self.update(values)
+
+    def __contains__(self, value):
+        return value in self.values
+
+    def __iter__(self):
+        return iter(self.values)
+
+    def __len__(self):
+        return len(self.values)
+
+    def add(self, value):
+        from .retention import _path_and_ancestor_keys, _path_keys
+
+        if value in self.values:
+            return
+        self.values.add(value)
+        self.exact.update(_path_keys(value))
+        self.ancestors.update(_path_and_ancestor_keys((value,)))
+
+    def discard(self, value):
+        if value in self.values:
+            self.values.remove(value)
+            self._forget(value)
+
+    def _forget(self, value):
+        from .retention import _path_and_ancestor_keys, _path_keys
+
+        self.exact.difference_update(_path_keys(value))
+        for key in _path_and_ancestor_keys((value,)):
+            self.ancestors[key] -= 1
+            if not self.ancestors[key]:
+                del self.ancestors[key]
+
+    def pop(self):
+        value = self.values.pop()
+        self._forget(value)
+        return value
+
+    def update(self, *values):
+        for items in values:
+            for value in items:
+                self.add(value)
+
+    def clear(self):
+        self.values.clear()
+        self.exact.clear()
+        self.ancestors.clear()
+
+    def overlaps(self, path):
+        from .retention import _path_and_ancestor_keys, _path_keys
+
+        return (any(key in self.ancestors for key in _path_keys(path))
+                or bool(_path_and_ancestor_keys((path,)) & self.exact))
+
+
 @dataclass
 class _RetentionPins:
     home: Path
@@ -2050,6 +2115,11 @@ class _RetentionPins:
     complete: bool = True
     target_rebuild: Any = field(default=None, repr=False)
     verified_targets: set[Path] = field(default_factory=set, repr=False)
+
+    def __setattr__(self, name, value):
+        if name == "paths" and not isinstance(value, _PinPaths):
+            value = _PinPaths(value)
+        object.__setattr__(self, name, value)
 
     # LLM: 只为确切目标重核全体来源；仅开读前追加可采用新FD快照，损坏/不可读/读中变化始终False。
     # 函数用途: 将无关的读取起点竞态与目标保护解耦，绝不从源位置猜没有引用。
@@ -2093,7 +2163,7 @@ class _RetentionPins:
     # 函数用途: 判断文件或目录是否被引用；坏记录不按零引用处理。
     def protects(self, path: Path, errors: list[MemoryRetentionError], *, content_path: Path | None = None) -> bool:
         resolved = path.resolve(strict=False)
-        if any(resolved == pin or pin in resolved.parents or resolved in pin.parents for pin in self.paths):
+        if self.paths.overlaps(resolved):
             return True
         if path.name in self.ids or path.stem in self.ids:
             return True
