@@ -31,6 +31,7 @@ from .io import (
     gateway_response_path,
     gateway_turn_transition,
     read_json_file_report,
+    release_moved_lock_sidecar,
     write_json_file_atomic,
 )
 from .lease_service import is_heartbeat_alive_for_request
@@ -372,6 +373,7 @@ def claim_request(paths: GatewayPaths, request_path: Path, *, worker_snapshot=No
 
     gateway_request_claimed()  # §6-A 认领计数(enqueued 涨而这个不跟=worker 槽饿死排队)
     if claim is not None:
+        release_moved_lock_sidecar(request_path)
         from .request_event_hub import notify_committed
         notify_committed(paths, claim.request_id, "claimed", payload=locals().get("claimed_payload"),
                          ref={"attempt_id": claim.execution_attempt_id})
