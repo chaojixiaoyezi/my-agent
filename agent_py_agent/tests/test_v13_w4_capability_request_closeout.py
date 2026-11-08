@@ -430,7 +430,6 @@ def test_headless_stream_steer_stop_new_restart_next_conversation(tmp_path, monk
     from agent_py_agent.agent.gateway_parts.request_execution import claimed_request_chunk_path
     from agent_py_agent.agent.settings import AgentConfig
     from agent_py_agent.agent.settings.model_profiles import execute_model_profile_operation
-    from agent_py_agent.tests.test_rework_v14_admission_io_recovery import fd_count
 
     config = AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), gateway_per_user_owner_scoping=False)
     agent = SimpleAgent(config, tmp_path)
@@ -458,19 +457,22 @@ def test_headless_stream_steer_stop_new_restart_next_conversation(tmp_path, monk
             return ModelResponse(text="停止前的迟到结果", backend=backend.name)
         return ModelResponse(text="下一轮的完整回答", backend=backend.name)
 
-    monkeypatch.setattr(EchoBackend, "generate", generate)
-
     def enqueue(rid):
         path = paths.inbox / (rid + ".json")
         write_json_file_atomic(path, {"id": rid, "kind": "ask", "goal": "验证连续交互", "status": "pending", "verbose_level": "stream",
             "user_id": "tester", "metadata": {"channel": "chat", "user_id": "tester"}, "conversation": conversation})
         return path
 
+    # 先经同一worker完成本地echo请求，让SQLite、运行时及其惰性单例初始化落在FD基线之前。
+    warmup = enqueue("sequence-warmup")
+    assert request_worker._process_gateway_request_path(agent, paths, warmup, "sequence-warmup")
+    assert read_json_file(paths.responses / warmup.name)["ok"]
+    assert not agent.conversation_store.threads.require(thread.thread_id).active_task_ids
+    monkeypatch.setattr(EchoBackend, "generate", generate)
     first = enqueue("sequence-first")
-    # 模拟本进程的继承/临时FD在测量窗口中正常关闭，负差不能冒充泄漏。
+    # 排除随后明确关闭的继承FD，不能用旧FD的关闭抵消新资源泄漏。
     with (tmp_path / 'inherited-fd').open('wb') as inherited:
         gc.collect()
-        before = fd_count()
         original_fds = {identity for identity in _fd_snapshot() if identity[0] != inherited.fileno()}
 
     def worker():
@@ -526,9 +528,7 @@ def test_headless_stream_steer_stop_new_restart_next_conversation(tmp_path, monk
     assert len(calls) == 2 and not tuple(paths.processing.glob("*.json"))
     assert not restarted.conversation_store.threads.require(thread.thread_id).active_task_ids
     assert terminal.read_bytes() == saved
-    # 后台索引扫描可能跨过单次GC观察点；只等待收尾，不放宽FD身份集合或忽略目录FD。
+    # GC及后台扫描有有限收尾时间；只用收敛后的同一快照判决，不再另采一次含瞬态目录FD的总数。
+    # 身份集合仍严格零新增，持续存活的文件或目录FD不能被1-FD宽限掩盖。
     after_fds = _wait_for_fd_convergence(original_fds)
     assert after_fds <= original_fds, ('new live descriptors', after_fds - original_fds)
-    # 不允许正增量；继承/临时FD关闭使总量减少，不是泄漏。
-    gc.collect()
-    assert fd_count() - before <= 0
