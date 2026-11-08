@@ -69,9 +69,12 @@ def _always_failing(calls: dict):
     return tick
 
 
-def test_owner_maintenance_loop_never_retries_faster_than_its_interval(printed) -> None:
+@pytest.mark.parametrize("cursor_state", ["missing", "none", "invalid"])
+def test_owner_maintenance_loop_never_retries_faster_than_its_interval(printed, cursor_state) -> None:
     controller = object.__new__(gateway_loops._GatewayOwnerMaintenanceController)
     controller.interval = 60.0
+    if cursor_state != "missing":
+        controller._idle_compact_cursor = None if cursor_state == "none" else []
     calls = {"n": 0}
     controller.tick = _always_failing(calls)
     stop = _RecordingStop(limit=11)
@@ -82,6 +85,31 @@ def test_owner_maintenance_loop_never_retries_faster_than_its_interval(printed) 
     assert len(printed) == 2, loop_health.snapshot()  # 第 1 次与第 10 次
     assert loop_health.snapshot()["loop_error_counts"] == {"owner-maintenance": 11}
     assert loop_health.snapshot()["last_loop_errors"]["owner-maintenance"]["context"] == "gateway_owner_maintenance.tick"
+
+
+@pytest.mark.parametrize("cursor_state", ["missing", "none", "invalid"])
+def test_owner_maintenance_tick_recovers_and_reuses_its_idle_cursor(tmp_path, monkeypatch, cursor_state) -> None:
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.tests.test_gateway_owner_maintenance import _controller_for
+
+    controller = _controller_for(ensure_my_agent_home(tmp_path), monkeypatch)
+    assert isinstance(controller._idle_compact_cursor, dict)
+    if cursor_state == "missing":
+        del controller._idle_compact_cursor
+    else:
+        controller._idle_compact_cursor = None if cursor_state == "none" else []
+    controller._startup_started_at -= gateway_loops.STARTUP_GRACE_WINDOW_SECONDS + 1
+
+    try:
+        assert controller.tick(now=200_000)["failed"] == 0
+        cursor = controller._idle_compact_cursor
+        assert isinstance(cursor, dict)
+        assert controller.tick(now=200_001)["failed"] == 0
+        assert controller._idle_compact_cursor is cursor
+    finally:
+        stop = threading.Event()
+        stop.set()
+        controller.run(stop)
 
 
 def test_scheduler_due_loop_backs_off_and_throttles_prints(printed) -> None:
