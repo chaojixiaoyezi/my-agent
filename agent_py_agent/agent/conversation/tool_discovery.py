@@ -206,6 +206,18 @@ def record_session_discovered_tools(agent: object, tool_names: Iterable[str], *,
         return
 
 
+def persist_turn_preloaded_tools(agent: object, params: object, names: Iterable[str]) -> None:
+    from ..runtime_context import current_subagent_run_id
+
+    attrs = getattr(params, "task_attributes", None) or {}
+    scope = str(getattr(params, "context_scope", "default") or "").strip().lower()
+    if scope in {"task_local", "isolated", "control_plane"} or attrs.get("agent_thread_id") or current_subagent_run_id(agent):
+        return
+    fresh = set(names) - thread_loaded_tools(agent, params)  # 名称已由本轮快照与 allowed 裁决，只追加新名以稳定后续工具表。
+    if fresh:
+        record_session_discovered_tools(agent, sorted(fresh), params=params)
+
+
 # LLM: 仅从正式原生消息抽取assistant/tool_use名；普通正文、用户块与工具结果不成为使用信号，无副作用。
 # 函数用途: 在CAS锁外冻结近期实际使用顺序，避免锁内扫描原始消息。
 def recent_used_tool_names_from_messages(messages: Iterable[object]) -> tuple[str, ...]:

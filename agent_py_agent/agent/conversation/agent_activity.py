@@ -228,17 +228,17 @@ class BackgroundMainActivitySink:
     def write_context_compaction(self, value: dict[str, object]) -> bool:
         published = self._transcript.write_context_compaction(value)
         if published:
-            self._publish("compacting", "正在整理上下文")
+            self._publish("working", "继续当前任务")
         return published
 
     # LLM: Durable Compact progress shares the foreground TUI block protocol;
     # this callback does not write checkpoints or infer phase from display text. A superseded
     # candidate returns the scalar activity to ordinary work instead of leaving a false failure.
-    # 函数用途: 把后台会话 Compact 的结构化进度送进正文进度块，并在候选放弃后恢复普通工作提示。
+    # 函数用途: 把后台会话 Compact 的结构化进度送进正文进度块，所有结束阶段都撤下压缩中提示。
     def write_conversation_compact_progress(self, value: dict[str, object]) -> bool:
         published = self._transcript.write_conversation_compact_progress(value)
         if published:
-            if str(value.get("phase") or "") == "superseded":
+            if str(value.get("phase") or "") in {"completed", "superseded", "failed"}:
                 self._publish("working", "继续当前任务")
             else:
                 self._publish("compacting", "正在压缩会话上下文")

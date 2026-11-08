@@ -41,6 +41,11 @@ DECLARED = {
 DEFERRED_EFFECTIVE = DECLARED
 
 
+# 业务动作按 ActionSpec 逐个注册为 business_<action>，全部声明默认收起（HANDOFF_LOCAL_FIX_5）；名单随就绪动作变化，按前缀钉住。
+def _declared(names) -> set[str]:
+    return DECLARED | {name for name in names if name.startswith("business_")}
+
+
 def _agent(tmp_path, **overrides) -> SimpleAgent:
     cfg = AgentConfig(enable_tools=True, enable_subagents=True, memory_path=str(tmp_path / "m.jsonl"), **overrides)
     return SimpleAgent(cfg, str(tmp_path))
@@ -76,7 +81,7 @@ def test_declared_set_is_pinned_and_every_summary_is_short(tmp_path):
     declared = {name for name, tool in agent.tools.tools.items() if tool.model_spec.hints.default_deferred}
     # memory_search 默认不可用（enable_memory_search_tool 默认关）、部分会话工具按可见性条件注册；
     # 固定集合只钉“测试环境实际注册”的子集，未注册工具的标记由产品代码各自用例覆盖。
-    assert declared == DECLARED & set(agent.tools.tools)
+    assert declared == _declared(agent.tools.tools) & set(agent.tools.tools)
     assert not declared & TOOL_DISCOVERY_ENTRY_NAMES
     for name in declared:
         assert 0 < len(agent.tools.tools[name].model_spec.hints.deferred_summary) <= 60, name
@@ -119,7 +124,7 @@ def test_declared_deferral_needs_an_available_visible_tool_search(tmp_path):
     agent = _agent(tmp_path, tool_default_deferral_enabled=True)
     snapshot = agent.tools.runtime_snapshot()
     assert _declared_deferred_names(snapshot, []) == frozenset(
-        DEFERRED_EFFECTIVE & snapshot.available_tool_names
+        _declared(snapshot.available_tool_names) & snapshot.available_tool_names
     )
     assert _declared_deferred_names(snapshot, ["system"]) == frozenset(), "tool_search 被类别收起时不再额外收起"
     runtimes = tuple(runtime for runtime in snapshot.runtimes if runtime.model_spec.name != "tool_search")

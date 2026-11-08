@@ -196,6 +196,10 @@ class GatewayProcess:
         execute_model_profile_operation(host, "set_shared", {"profile_id": profile_id, "enabled": True})
         execute_model_profile_operation(host, "set_initial", {"profile_id": profile_id})
 
+    def _command(self):
+        """默认仍走原 CLI；回放夹具可只替换启动引导，不复制进程寿命与清理逻辑。"""
+        return [sys.executable, "-m", "agent_py_agent", "--config", str(self.config), "gateway", "run"]
+
     # LLM: Startup uses the current interpreter and checkout, not an installed editable tree.
     # 函数用途: Start a foreground Gateway child and wait for its real status endpoint.
     def start(self):
@@ -207,7 +211,7 @@ class GatewayProcess:
                "PYTHONPATH": os.pathsep.join([str(REPO.parent), str(REPO)]), "PYTHONDONTWRITEBYTECODE": "1"}
         env.pop("MY_AGENT_HOSTING_GATEWAY_PID", None)
         self.log = (self.root / "gateway-process.log").open("ab")
-        self.proc = subprocess.Popen([sys.executable, "-m", "agent_py_agent", "--config", str(self.config), "gateway", "run"],
+        self.proc = subprocess.Popen(self._command(),
                                      cwd=self.root, env=env, stdout=self.log, stderr=self.log, start_new_session=True)
         # LLM: A live PID alone is not readiness; only a successful status response ends startup.
         # 函数用途: Probe readiness while preserving early subprocess failure evidence.

@@ -1614,8 +1614,13 @@ def _initial_loop_loaded_tool_names(
     if _authoring_tools_requested(agent, params, seed, snapshot, attrs):
         additions.update({"skill_search", "scripts", "workflows"})
     loaded.update(additions & available)
-    from ...conversation.tool_discovery import mount_thread_asset_tools
+    from ...conversation.tool_discovery import (
+        mount_thread_asset_tools,
+        persist_turn_preloaded_tools,
+    )
 
+    if params.source != "background_main_agent" and additions & available:  # 后台保持精确白名单；前台沿线程保持粘性。
+        persist_turn_preloaded_tools(agent, params, additions & available)
     loaded.update(mount_thread_asset_tools(agent, params, runtime_snapshot=snapshot))
     return loaded
 

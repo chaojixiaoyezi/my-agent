@@ -24,6 +24,7 @@ from ..common.json_io import read_json_object_report, read_jsonl_objects_report
 from ..common.nofollow_fs import read_bytes_beneath
 from ..conversation.models import ConversationThread
 from ..conversation.store_io import safe_file_stem
+from ..conversation.thread_ledger_segments import archive_dir_for
 from ..conversation.workspace_paths import canonical_task_root, durable_work_root
 from ..local_storage.records import derived_terminal_expired
 from ..user_space.storage_lanes import STORAGE_LANE_SLICE_BYTES
@@ -1430,7 +1431,8 @@ def _bound_thread_ids(root: Path, errors: list[MemoryRetentionError]) -> set[str
 # LLM: thread-scoped 文件通过结构化 ID 组成；message JSONL 坏行会阻断整个会话删除。
 #   转写本按 canonical 布局整体收集：热文件、分卷清单、prepared 暂存段、archive/<thread>/ 下全部冷段与索引节点；
 #   清单或冷目录不可解析时整会话保守保留并报结构化错误，不能只搬热文件把冷集合留成无人认领的孤儿。
-# LLM: 模型usage仅精确枚举本线程JSONL及SQLite四文件；链接或读取未知保护整会话，锁侧车不移动。
+# LLM: observation/usage 按原 archive_dir_for 精确收集热账与完整冷家族，usage 另含 SQLite 四文件；
+#   链接、特殊文件或不可读成员保护整会话，锁侧车不移动，ledger 不套用转写本的冷段序号校验。
 # 函数用途: 收集一个会话的完整原文、任务、usage与唤醒家族，不移动Compact树。
 def _conversation_related_paths(
     root: Path,
@@ -1441,7 +1443,8 @@ def _conversation_related_paths(
     candidates = [
         root / "threads" / f"{thread_id}.json",
         *_transcript_member_paths(root / "messages", thread_id, errors),
-        root / "observations" / f"{thread_id}.jsonl",
+        *_conversation_ledger_member_paths(_conversation_ledger_active_paths(root, thread_id)[0], errors,
+                                          "MEMORY_RETENTION_CONVERSATION_OBSERVATIONS_UNREADABLE"),
         root / "goals" / f"{thread_id}.json",
         root / "background_claims" / f"{thread_id}.json",
         root / "guidance" / f"thread.{thread_id}.jsonl",
@@ -1480,7 +1483,7 @@ def _conversation_related_paths(
 
 
 # LLM: usage路径复用原安全文件名；父目录及叶必须真实目录/普通文件，异常不当作缺失，不跟随链接。
-# 函数用途: 返回线程模型用量JSONL与SQLite主库、WAL、SHM、journal的精确集合。
+# 函数用途: 返回线程模型用量热/冷家族与SQLite主库、WAL、SHM、journal的精确集合。
 def _conversation_usage_paths(root: Path, thread_id: str, errors: list[MemoryRetentionError]) -> list[Path]:
     directory = root / "model_usage"
     paths: list[Path] = []
@@ -1493,8 +1496,9 @@ def _conversation_usage_paths(root: Path, thread_id: str, errors: list[MemoryRet
         errors.append(_state_error("MEMORY_RETENTION_CONVERSATION_USAGE_UNREADABLE", directory))
         return paths
     stem = safe_file_stem(thread_id)
-    candidates = (directory / f"{stem}.jsonl", *(directory / f".{stem}-usage.sqlite3{suffix}"
-                  for suffix in ("", "-wal", "-shm", "-journal")))
+    paths.extend(_conversation_ledger_member_paths(_conversation_ledger_active_paths(root, thread_id)[1], errors,
+                                                 "MEMORY_RETENTION_CONVERSATION_USAGE_UNREADABLE"))
+    candidates = (directory / f".{stem}-usage.sqlite3{suffix}" for suffix in ("", "-wal", "-shm", "-journal"))
     for path in candidates:
         try:
             if not stat.S_ISREG(path.lstat().st_mode):
@@ -1505,6 +1509,34 @@ def _conversation_usage_paths(root: Path, thread_id: str, errors: list[MemoryRet
         except OSError:
             errors.append(_state_error("MEMORY_RETENTION_CONVERSATION_USAGE_UNREADABLE", path))
     return paths
+
+
+def _conversation_ledger_active_paths(root: Path, thread_id: str) -> tuple[Path, Path]:
+    """与原观察和用量写者保持相同热文件映射，供收集器与原写锁组合共用。"""
+    return (root / "observations" / f"{thread_id}.jsonl",
+            root / "model_usage" / f"{safe_file_stem(thread_id)}.jsonl")
+
+
+def _conversation_ledger_member_paths(active: Path, errors: list[MemoryRetentionError], code: str) -> list[Path]:
+    """只枚举本线程的普通文件；ledger 段名不套用 transcript 的序号连续性规则。"""
+    members = []
+    try:
+        if not stat.S_ISDIR(active.parent.lstat().st_mode):
+            raise OSError("ledger parent is not a real directory")
+        if _regular_member_exists(active):
+            members.append(active)
+        archived, _unused_transcript_sequences = _transcript_archive_files(archive_dir_for(active))
+        members.extend(archived)
+        for path in members:
+            if path.lstat().st_nlink != 1:
+                raise OSError("ledger member is not a single regular file")
+    except FileNotFoundError:
+        # 缺整个家族目录是空集合；枚举中消失的成员由计划/执行指纹重验继续保守处理。
+        if active.parent.exists():
+            errors.append(_state_error(code, active))
+    except OSError:
+        errors.append(_state_error(code, active))
+    return members
 
 
 # LLM: 只做 lstat/目录枚举，不跟随链接、不读冷段正文；清单仍经 message_scan 原选择器解析（prepared 按已提交前缀选唯一代次）。

@@ -572,7 +572,7 @@ class GatewayChatClientAgent:
 #   其它端点保留原正文身份合同。
 # 函数用途: 在原Gateway地址发送一次认证请求；真实超时/连接异常保留机器原因，未知错误不伪装瞬态。
 def post_gateway_json(
-    agent: object, path: str, payload: dict[str, object], *, timeout: float,
+    agent: object, path: str, payload: dict[str, object], *, timeout: float, conversation_id: str = "",
 ) -> tuple[int, dict[str, object]]:
     port = int(getattr(agent.config, "gateway_port", 0) or 0)
     if port <= 0:
@@ -583,7 +583,8 @@ def post_gateway_json(
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}{path}",
         data=json.dumps(normalized_payload, ensure_ascii=False).encode("utf-8"),
-        headers=_gateway_headers(owner_identity, json_body=True, credentials=gateway_client_credentials(agent)),
+        headers=_gateway_headers(owner_identity, json_body=True, conversation_id=conversation_id,
+                                 credentials=gateway_client_credentials(agent)),
     )
     try:
         with urllib.request.urlopen(request, timeout=max(0.1, float(timeout))) as response:

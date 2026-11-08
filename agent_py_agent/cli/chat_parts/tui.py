@@ -119,7 +119,8 @@ def _tui_handle_command(*, params: TuiHandleCommandParams) -> bool:
         return _tui_handle_expand_command(params.user, params.assistant_outputs)
     from .tui_business_spaces import handle_tui_business_command
 
-    if handle_tui_business_command(params.user, agent=params.agent, print_line=_cprint):
+    if handle_tui_business_command(params.user, agent=params.agent, print_line=_cprint,
+                                   session_id=str(params.current_session_id or "")):
         return True
     # LLM: Direct与Gateway都只在真实成功回执后重置UI，历史引用仍属于同一worker，不停止后台业务。
     # 函数用途: 执行原控制命令并应用结构化new回执。

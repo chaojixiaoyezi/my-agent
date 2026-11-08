@@ -215,6 +215,8 @@ class ModelUsageStore:
         path = self._path(snapshot.thread_id)
         transition = path.with_name(f".{path.name}.append-once")
         with locked_file_transition(transition), locked_json_path(path):
+            # 锁外预检后线程可能已退休，须在恢复或追加账本前重新核验。
+            self._require_thread(snapshot.thread_id)
             recover_pending(path)
             index = self._index(snapshot.thread_id)
             with index._connection() as conn:

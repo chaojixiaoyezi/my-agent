@@ -16,7 +16,8 @@ from .request_errors import PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED_STATUS
 class GatewayMainActivitySink:
     # LLM: request 是宿主 task-binding writer 更新的同一个字典，不能复制后冻结旧 task。
     # 函数用途: 绑定真实 owner、会话和请求，初始化本工作片的审批显示集合并发布准备阶段。
-    def __init__(self, agent: object, *, thread_id: str, request_id: str, request: dict, task_id: str = "") -> None:
+    def __init__(self, agent: object, *, thread_id: str, request_id: str, request: dict, task_id: str = "",
+                 progress_writer=None) -> None:
         self.agent = agent
         self.thread_id = thread_id
         self.request_id = request_id
@@ -25,6 +26,9 @@ class GatewayMainActivitySink:
         self.projection_id = f"gateway:{request_id}:{uuid4().hex}"
         self.started_at = time.time()
         self.closed = False
+        self._progress_writer = progress_writer
+        self._progress_value: tuple | None = None
+        self._tool_rounds = 0
         self._pending_permissions: set[str] = set()
         self._publish("running", "整理任务上下文", begin=True)
 
@@ -58,6 +62,8 @@ class GatewayMainActivitySink:
             return
         if kind == "tool_progress" and isinstance(event.get("progress"), dict):
             progress = event["progress"]
+            if type(progress.get("round")) is int:
+                self._tool_rounds = max(self._tool_rounds, progress["round"])
             tool = str(progress.get("tool") or "工具")[:80]
             phase = str(progress.get("phase") or "")
             terminal = phase in {"finished", "completed", "succeeded", "failed"}
@@ -104,6 +110,10 @@ class GatewayMainActivitySink:
             self.agent, MainActivitySource(self.thread_id, self.task_id, self.started_at, self.projection_id),
             phase=phase, activity=activity, context_usage=context_usage, begin=begin,
         )
+        value = (phase, activity, self._tool_rounds)
+        if phase and activity and value != self._progress_value and callable(self._progress_writer):
+            if self._progress_writer(phase=phase, status_message=activity, tool_rounds=self._tool_rounds) is not False:
+                self._progress_value = value
 
 
 # LLM: 状态行文案只按结构化 retry 字段选择：final 收口显示已停止重试，普通重试显示重连中；不解析文案。

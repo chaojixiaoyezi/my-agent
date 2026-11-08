@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.conversation.agent_activity import (
     BackgroundMainActivitySink,
     background_main_activity,
@@ -32,6 +34,104 @@ def test_foreground_writer_replaces_stale_background_activity(tmp_path):
     assert background_main_activity(agent, "thread-b", {"task-a"}) == {}
     writer.close()
     assert background_main_activity(agent, "thread-a", {"task-a"})["phase"] == "waiting"
+
+
+@pytest.mark.parametrize("change", ["attempt", "lease", "thread", "closed", "terminal"])
+def test_late_gateway_progress_cannot_overwrite_a_new_attempt_or_terminal(tmp_path, change):
+    import json
+
+    from agent_py_agent.agent.gateway_parts.io import write_json_file_atomic
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.agent.gateway_parts.request_binding import record_gateway_request_progress
+
+    paths = gateway_paths_from_root(tmp_path / "gateway")
+    path = paths.processing / "gwreq-original.json"
+    request = {"id": "gwreq-original", "status": "processing", "execution_attempt_id": "attempt-1", "lease_epoch": 1,
+               "conversation_runtime": {"request_id": "gwreq-original", "thread_id": "thread-a", "task_id": "task-a"}}
+    write_json_file_atomic(path, request)
+    record_gateway_request_progress(path, request, thread_id="thread-a", phase="tool", status_message="正在使用 read_file", tool_rounds=340)
+    current = json.loads(path.read_text(encoding="utf-8"))
+    assert current["tool_rounds"] == 340 and current["status_phase"] == "tool"
+    if change == "attempt":
+        current["execution_attempt_id"] = "attempt-2"
+    elif change == "lease":
+        current["lease_epoch"] = 2
+    elif change == "thread":
+        current["conversation_runtime"]["thread_id"] = "thread-other"
+    elif change == "closed":
+        current["turn_phase"] = "closed"
+    else:
+        paths.terminal.mkdir(parents=True, exist_ok=True)
+        write_json_file_atomic(paths.terminal / path.name, {"id": request["id"], "status": "done"})
+    write_json_file_atomic(path, current)
+    before = path.read_bytes()
+    record_gateway_request_progress(path, request, thread_id="thread-a", phase="waiting", status_message="等待后续事件", tool_rounds=341)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("phase", ["completed", "superseded", "failed", "context_window_compacted"])
+def test_background_compact_terminal_returns_to_working(phase):
+    agent = SimpleNamespace()
+    sink = BackgroundMainActivitySink(agent, thread_id="thread-a", task_id="task-a")
+    progress = {"schema": "conversation_compaction_progress.v1", "generation": 1, "phase": "started", "stage": "summarizing"}
+    assert sink.write_conversation_compact_progress(progress)
+    assert background_main_activity(agent, "thread-a", {"task-a"})["phase"] == "compacting"
+    if phase == "context_window_compacted":
+        assert sink.write_context_compaction({"schema": "model_visible_context_compaction.v1", "generation": 1})
+    else:
+        stage = {"completed": "completed", "superseded": "candidate_discarded", "failed": "failed"}[phase]
+        assert sink.write_conversation_compact_progress({**progress, "phase": phase, "stage": stage})
+    assert background_main_activity(agent, "thread-a", {"task-a"})["phase"] == "working"
+    sink.finish()
+
+
+def test_gateway_progress_does_not_wait_on_turn_lock_while_writer_is_committing(tmp_path):
+    import json
+    import threading
+
+    from agent_py_agent.agent.gateway_parts.io import (
+        gateway_turn_transition,
+        write_json_file_atomic,
+    )
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+
+    paths = gateway_paths_from_root(tmp_path / "gateway")
+    path = paths.processing / "gwreq-original.json"
+    request = {"id": "gwreq-original", "status": "processing", "execution_attempt_id": "attempt-1",
+               "conversation_runtime": {"request_id": "gwreq-original", "thread_id": "thread-a", "task_id": "task-a"}}
+    write_json_file_atomic(path, request)
+    writer = BufferedChunkStreamWriter(paths.processing / "gwreq-original.chunks.jsonl", rich_transcript=True)
+    request_execution._configure_gateway_main_activity(
+        SimpleNamespace(agent=SimpleNamespace(), on_chunk=writer, request_id=request["id"], request=request, request_path=path),
+        SimpleNamespace(thread_id="thread-a", workspace_task=None),
+    )
+    turn_held, commit_held, completed = threading.Event(), threading.Event(), threading.Event()
+
+    def complete_input():
+        with gateway_turn_transition(paths, request["id"]):
+            turn_held.set()
+            if commit_held.wait(2):
+                with writer._commit_lock:
+                    completed.set()
+
+    thread = threading.Thread(target=complete_input, daemon=True)
+    thread.start()
+    try:
+        assert turn_held.wait(2)
+        progress = {"round": 340, "call_index": 0, "tool": "read_file", "phase": "started"}
+        with writer._commit_lock:
+            commit_held.set()
+            writer.write_progress(progress, "")
+        thread.join(2)
+        assert completed.is_set() and not thread.is_alive()
+        # 锁忙时不缓存为已写入；同阶段下一事件仍会重试，并沿原请求/代次校验保存。
+        writer.write_progress(progress, "")
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        assert saved["status_phase"] == "tool" and saved["tool_rounds"] == 340
+    finally:
+        commit_held.set()
+        thread.join(2)
+        writer.close()
 
 
 def test_foreground_projection_follows_exact_promoted_task_and_not_conflicting_binding(tmp_path):

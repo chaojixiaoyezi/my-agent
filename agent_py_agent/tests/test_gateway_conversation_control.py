@@ -788,6 +788,102 @@ def test_btw_becomes_one_thread_user_message_after_model_accepts_it(tmp_path) ->
     assert rows[0].channel_message_id == "om-btw-accepted"
 
 
+@pytest.mark.parametrize("ok", [True, False])
+def test_restarted_gateway_request_reports_progress_and_consumes_original_turn_steer_over_http(tmp_path, ok):
+    from agent_py_agent.agent.conversation.runtime import BackgroundRunRequest, _run_params
+    from agent_py_agent.agent.gateway_parts.request_execution import (
+        _configure_gateway_main_activity,
+        _finalize_gateway_response,
+    )
+    from agent_py_agent.agent.gateway_parts.request_worker import _finish_claimed_gateway_request
+    from agent_py_agent.agent.gateway_parts.stream_writer import BufferedChunkStreamWriter
+    from agent_py_agent.cli.chat_parts.gateway_client import NetworkGatewayObserver
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False), tmp_path)
+    paths = gateway_paths(agent)
+    paths.processing.mkdir(parents=True, exist_ok=True)
+    request_id = "gwreq-recovered"
+    path = paths.processing / f"{request_id}.json"
+    write_json_file(path, _request(request_id))
+    _bind_durable_task(agent, request_id)
+    _hold_foreground_lane(agent, path)
+    _bind_live_main_request(agent, path)
+    request = json.loads(path.read_text(encoding="utf-8"))
+    thread = agent.conversation_store.threads.get_or_create(request["conversation"])
+    request.update(updated_at=1.0, status_message="正在压缩会话上下文", active_turn_recovery={
+        "schema_version": "gateway_active_turn_recovery.v1", "request_id": request_id, "cause": "gateway_restart",
+    })
+    write_json_file(path, request)
+    writer = BufferedChunkStreamWriter(paths.processing / f"{request_id}.chunks.jsonl", rich_transcript=True)
+    _configure_gateway_main_activity(
+        SimpleNamespace(agent=agent, on_chunk=writer, request_id=request_id, request=request, request_path=path),
+        SimpleNamespace(thread_id=thread.thread_id, workspace_task=None),
+    )
+    server = GatewayHTTPServer(_free_port(), paths, params=GatewayHTTPServerParams(agent=agent))
+    server.start()
+    client = NetworkGatewayObserver(SimpleNamespace(
+        config=agent.config,
+        gateway_request_identity=lambda: {"user_id": "u-1", "channel": "feishu"},
+        gateway_network_headers=lambda: _http_host_headers(agent),
+    ), f"http://127.0.0.1:{server.port}")
+    try:
+        writer.write_thinking("重启后继续当前任务", duration_seconds=1)
+        writer.write_progress({"round": 340, "call_index": 0, "tool": "read_file", "phase": "started"}, "")
+        status, progress = client.request_json("GET", f"/result/{request_id}")
+        assert status == 202
+        assert progress["status_phase"] == "tool"
+        assert progress["status_message"] == "正在使用 read_file"
+        assert progress["tool_rounds"] == 340
+        assert progress["updated_at"] > 1.0
+        persisted = json.loads(path.read_text(encoding="utf-8"))
+        assert persisted["status_message"] == progress["status_message"]
+        status, notices = client.request_json("POST", "/client/notices", {
+            "conversation_id": "c-1", "after": 0, "event_after": 0,
+            "client_capabilities": {"foreground_messages": True, "foreground_transcript": True, "display_checkpoints": True},
+        })
+        assert status == 200 and notices["ok"]
+        events = notices["transcript_events"]
+        assert {event["kind"] for event in events} >= {"thinking_completed", "tool_started"}
+        assert all(event["request_id"].startswith("bg-main:") and event["gateway_request_id"] == request_id for event in events)
+
+        status, receipt = client.request_json("POST", "/control", {
+            "command": "/btw 改为先验证数据库迁移", "conversation_id": "c-1",
+            "metadata": {"message_id": "after-restart-steer", "expected_turn_id": request_id},
+        })
+        assert status == 202 and receipt["control_state"] == "completed"
+        assert receipt["delivery_status"] == "unknown"  # 消费确认必须等模型提交与 ACK。
+        # bg-main 是显示编号，后台恢复参数仍保留原逻辑任务号；不能把它用作指导输入的机器身份。
+        params = _run_params(thread.thread_id, BackgroundRunRequest(thread.thread_id, task_id=request_id), agent, thread=thread)
+        assert params.request_id == request_id
+        params.tool_protocol_snapshot = make_test_protocol_snapshot(run_id=request_id, source_protocol="native")
+        params.live_archive_state, params.tool_context, params.runtime_injections, params.active_turn_user_inputs = {}, [], [], []
+        assert inject_pending_guidance(agent, params)
+        assert mark_injected_turn_input_submitted(agent, params, provider_call_id="recovered-provider-call") == 1
+        assert acknowledge_injected_turn_input(agent, params) == 1
+        assert not agent.conversation_store.guidance.pending("request", request_id)
+        assert not agent.conversation_store.guidance.pending("task", request_id)
+        users = [row for row in agent.conversation_store.messages.recent(thread.thread_id, limit=0) if row.role == "user"]
+        assert [(row.content, row.channel_message_id) for row in users] == [("改为先验证数据库迁移", "after-restart-steer")]
+
+        writer.write_progress({"round": 340, "call_index": 0, "tool": "read_file", "phase": "completed", "ok": True}, "")
+        writer.close()
+        response = {"id": request_id, "kind": "ask", "ok": ok, "status": "done" if ok else "failed",
+                    "response": "任务已完成" if ok else "", "tool_rounds": 340}
+        _finalize_gateway_response({"request_path": path, "started_at": time.time() - 3}, response)
+        _finish_claimed_gateway_request(paths, path, request_id, response,
+                                       conversation_store=agent.conversation_store,
+                                       expected_execution_attempt_id=request["execution_attempt_id"])
+        status, result = client.request_json("GET", f"/result/{request_id}")
+        assert status == 200 and result["ok"] is ok
+        assert result["status"] == response["status"] and result["tool_rounds"] == 340
+        assert result["status_phase"] == ("completed" if ok else "failed")
+        assert result["status_message"] == ("已完成" if ok else "执行失败")
+        assert not path.exists()
+    finally:
+        writer.close()
+        server.stop()
+
+
 def test_provider_ack_consumes_btw_after_exact_turn_enters_closing(tmp_path) -> None:
     agent = SimpleAgent(
         AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False),

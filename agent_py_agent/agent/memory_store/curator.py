@@ -137,6 +137,14 @@ _REASON_PRIORITY = (
 )
 
 
+# LLM: 只节流维护性终态冷归档，不改变到期判定、pending原因或真实run的提交路径；首拍与失败后仍立即执行。
+# 函数用途: 判断本策展实例距上次成功终态归档是否已满一个策展周期。
+def _terminal_compaction_due(curator: object) -> bool:
+    last = getattr(curator, "_terminal_compaction_at", None)
+    interval = max(1, int(getattr(getattr(curator, "config", None), "interval_seconds", 1) or 1))
+    return last is None or time.monotonic() - last >= interval
+
+
 # LLM: 输入权威损坏与供应商或 Schema 失败须分开分类；输入无法安全读取时始终阻止游标推进。
 # 类用途: 表示 ConversationStore、audit 或正式记忆输入无法安全读取。
 class CuratorInputError(RuntimeError):
@@ -255,13 +263,16 @@ class _CuratorLifecycleMixin:
             return self._result(status="busy", reason=pending or "interval")
         # 维护只冷归档已冷却终态详情；pending/approved、人格和正式长期记忆均不参与。
         # archive-first及原quota→candidate顺序由唯一候选仓库负责，失败不得伪装成not_due。
-        try:
-            with gateway_short_transaction("compact_terminal_candidates"):
-                self.candidate_service.compact_terminal_candidates(now=current)
-        except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
-            raise
-        except Exception as exc:
-            raise CuratorInputError("CURATOR_CANDIDATE_ARCHIVE_FAILED") from exc
+        # 30天冷却的归档晚一个策展周期无害：同实例按memory_curator_interval_seconds节流，失败不记时下拍重试。
+        if _terminal_compaction_due(self):
+            try:
+                with gateway_short_transaction("compact_terminal_candidates"):
+                    self.candidate_service.compact_terminal_candidates(now=current)
+            except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+                raise
+            except Exception as exc:
+                raise CuratorInputError("CURATOR_CANDIDATE_ARCHIVE_FAILED") from exc
+            self._terminal_compaction_at = time.monotonic()
         if pending:
             return self._run_pending_when_due(state, pending, current)
         if _daily_finalize_due(state, current, self.config.daily_finalize_hour):

@@ -107,10 +107,11 @@ class BusinessClient:
         return self.send(self.prepare(action, params))
 
 
-def business_client_for_agent(agent: object) -> BusinessClient:
+def business_client_for_agent(agent: object, *, conversation_id: str = "") -> BusinessClient:
     from .chat_client_context import post_gateway_json
 
-    return BusinessClient(partial(post_gateway_json, agent))
+    # 会话作用域只选同一用户/通道下的规范线程（与 /ask 同一 conversation_id），不携带授权。
+    return BusinessClient(partial(post_gateway_json, agent, conversation_id=str(conversation_id or "")))
 
 
 @dataclass

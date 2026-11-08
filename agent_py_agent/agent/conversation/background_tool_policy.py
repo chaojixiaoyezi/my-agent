@@ -69,6 +69,10 @@ SESSION_TASK_WAKE_ALLOWED_TOOLS = (
     "get_session_task",
     "cancel_session_task",
     "list_owner_sessions",
+    # 业务派活（tasks.assign/submit）也走 session_task 唤醒：后台代理/总控接单后可只读查看空间与团队、
+    #   再分派或追问；tasks.submit 与身份生命周期仍不放入，避免总控自递归与后台改团队编制。
+    "business_spaces_get", "business_spaces_list", "business_background_agents_list", "business_background_agents_get",
+    "business_tasks_assign", "business_tasks_follow_up", "business_tasks_get", "business_tasks_list", "business_messages_list",
 )
 
 GOAL_BACKGROUND_ALLOWED_TOOLS = (

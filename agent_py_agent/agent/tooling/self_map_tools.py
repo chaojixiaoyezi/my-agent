@@ -20,7 +20,8 @@ def business_projection(context):
     items = []
     for family, title, purpose in (
             ('spaces', '业务空间', '查询、创建和管理业务空间；与 /space 共用原服务'),
-            ('background_agents', '后台代理', '查询、创建、发消息、暂停、恢复和退役常驻代理；与 /team 共用原服务')):
+            ('background_agents', '后台代理', '查询、创建、发消息、暂停、恢复和退役常驻代理；与 /team 共用原服务'),
+            ('tasks', '后台任务', '派活给后台代理(tasks.assign)或总控(tasks.submit)、追问与查看结果；结束后结果自动回报本会话')):
         names = [spec.name for spec in specs if spec.category == family]
         if names:
             available = any(states.get(name) in {'ready', 'deferred'} for name in names)

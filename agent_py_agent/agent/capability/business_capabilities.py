@@ -121,11 +121,16 @@ def business_context_for_host(host):
     """只取宿主运行属性中的冻结DTO；文字不参与选择，开关关闭保持原路由字节。"""
     if host is None or getattr(getattr(host, 'config', None), 'business_spaces_enabled', False) is not True:
         return None
-    attrs = getattr(getattr(host, '_current_run_params', None), 'task_attributes', None) or {}
+    current = getattr(host, '_current_run_params', None)
+    attrs = getattr(current, 'task_attributes', None) or {}
     context = attrs.get('business_context')
     if context is None:
+        context = getattr(current, 'business_context', None)
+    if context is None:
         return None
-    return context if isinstance(context, BusinessExecutionContext) else BusinessExecutionContext.from_dict(context)
+    context = context if isinstance(context, BusinessExecutionContext) else BusinessExecutionContext.from_dict(context)
+    # 未归属空间的业务任务没有挂载能力，沿原普通路由；Owner/空间不一致仍由 _space_for_context 拒绝。
+    return context if context.space_id is not None else None
 
 
 def _owner(host):
@@ -140,9 +145,14 @@ def _owner(host):
 def _space_for_context(host, context):
     if not isinstance(context, BusinessExecutionContext) or context.owner_id != _owner(host) or context.space_id is None:
         raise PermissionError('业务上下文Owner/空间不匹配')
-    if not hasattr(host, 'business_spaces') or not hasattr(host, 'business_actor'):
-        raise RuntimeError('业务空间宿主端口尚未绑定')
-    view = host.business_spaces.get(context.space_id, actor=host.business_actor)
+    if hasattr(host, 'business_spaces') and hasattr(host, 'business_actor'):
+        spaces, actor = host.business_spaces, host.business_actor
+    else:
+        from ..gateway_parts.business_api import local_business_context
+
+        call_context, services = local_business_context(host, model=True)
+        spaces, actor = services.spaces, services.actor(call_context)
+    view = spaces.get(context.space_id, actor=actor)
     space = view['space']
     if space['space_id'] != context.space_id or space['state'] != 'active':
         raise PermissionError('业务空间不可用')

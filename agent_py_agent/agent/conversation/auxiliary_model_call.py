@@ -505,7 +505,7 @@ def _compact_output_cap(request: AuxiliaryModelCallRequest) -> int | None:
 #   supports_reasoning_update_items()；其它后端一律返回空串，继续沿线程档位，不冒险改请求级参数。
 # 函数用途: 返回压缩请求要通过 configuration_update 项申请的档位；不适用时返回空串。
 def _compact_reasoning_update_effort(request: AuxiliaryModelCallRequest, backend: object) -> str:
-    if not _is_compact_purpose(request.purpose):
+    if not _is_compact_purpose(request.purpose) or _prefix_free_compact(request):
         return ""
     if getattr(backend, "name", "") != "openai_responses":
         return ""
@@ -522,9 +522,39 @@ def _compact_reasoning_update_effort(request: AuxiliaryModelCallRequest, backend
 
 
 # LLM: 只有后端声明支持 provider 请求选项、且是明确标记的压缩目的、带线程身份时，才按线程读取思考档位。
-# 函数用途: 保留压缩请求的线程级思考分区，降档只能通过尾部更新项表达。
+# 函数用途: 复用主对话前缀的压缩请求保留线程级思考分区（降档只走尾部更新项）；不带前缀的压缩请求按配置请求级降档。
 def _compact_reasoning_options(request: AuxiliaryModelCallRequest, backend: object) -> tuple[bool, str]:
-    return _compact_baseline_reasoning(request, backend)
+    baseline = _compact_baseline_reasoning(request, backend)
+    return _prefix_free_downshift(request, backend, baseline) or baseline
+
+
+# LLM: 只有不带工具 + tool_choice=none 的压缩请求结构上不复用主对话前缀（DeepSeek 实测 none 不渲染工具），降档不会让热缓存失效；
+#   目标沿 memory_compact_reasoning_level 与唯一档位表换算，表示不了、会话档已不高于目标或已关思考时返回 None，保持原档。
+# 函数用途: 给无前缀压缩请求算请求级低档；复用前缀的分叉请求一律不在这里改档。
+def _prefix_free_downshift(request: AuxiliaryModelCallRequest, backend: object,
+                           baseline: tuple[bool, str]) -> tuple[bool, str] | None:
+    thinking_disabled, effort = baseline
+    if thinking_disabled or not effort or not _prefix_free_compact(request):
+        return None
+    from ..backends.reasoning_control import (
+        REASONING_LEVELS,
+        compact_reasoning_target,
+        reasoning_request_values,
+    )
+
+    configured = getattr(getattr(request.agent, "config", None), "memory_compact_reasoning_level", "low")
+    target, _reason = compact_reasoning_target(backend, configured, compact_summary_output_reserve_tokens(request.agent))
+    if target not in REASONING_LEVELS or effort not in REASONING_LEVELS:
+        return None
+    if REASONING_LEVELS.index(target) >= REASONING_LEVELS.index(effort):
+        return None
+    return reasoning_request_values(target, str(getattr(backend, "reasoning_control", "none") or "none"), forced=False)
+
+
+# 函数用途: 判断压缩请求是否结构上不带主对话前缀（不带工具且显式 tool_choice=none；分叉请求总是同工具 + auto）。
+def _prefix_free_compact(request: AuxiliaryModelCallRequest) -> bool:
+    return (_is_compact_purpose(request.purpose) and not list(request.tools or ())
+            and getattr(request.tool_choice, "mode", "") == "none")
 
 
 # LLM: 读取当前线程真实档位；压缩工具 none 不冒充强制工具的关思考操作。
@@ -544,6 +574,8 @@ def _compact_baseline_reasoning(request: AuxiliaryModelCallRequest, backend: obj
 # 函数用途: 给没有有效降档的压缩调用记录原因。
 def _compact_downshift_reason(request: AuxiliaryModelCallRequest, backend: object) -> str:
     if not _is_compact_purpose(request.purpose):
+        return ""
+    if _prefix_free_downshift(request, backend, _compact_baseline_reasoning(request, backend)) is not None:
         return ""
     from ..backends.reasoning_control import compact_reasoning_target
 

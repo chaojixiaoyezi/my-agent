@@ -19,6 +19,33 @@ _TERMINAL_KINDS = frozenset({
 _START_KINDS = frozenset({"tool_started"})
 
 
+def display_event_matches_request(event: Mapping, request_id: str) -> bool:
+    """只关联显示来源；别名不能替代执行身份或 owner/thread 校验。"""
+    if not request_id:
+        return False
+    metadata = event.get("metadata")
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    return request_id in (
+        event.get("request_id"), event.get("gateway_request_id"), event.get("task_id"),
+        metadata.get("request_id"), metadata.get("gateway_request_id"),
+    )
+
+
+def gateway_display_recovery(event: Mapping) -> str:
+    """读取宿主随检查点保存的恢复显示关联，不据此授予运行或控制权。"""
+    payload = event.get("payload")
+    recovery = payload.get("gateway_recovery") if isinstance(payload, Mapping) else None
+    if not isinstance(recovery, Mapping):
+        return ""
+    request_id = recovery.get("request_id")
+    attempt_id = recovery.get("execution_attempt_id")
+    if (not isinstance(request_id, str) or not request_id
+            or not isinstance(attempt_id, str) or not attempt_id
+            or not display_event_matches_request(event, request_id)):
+        return ""
+    return request_id
+
+
 # LLM: 检查点输入列明宿主身份和公开事件字段；不是开放参数入口，也不能包含控制/授权决定。
 # 类用途: 约束主子过程保存的入参结构；真实身份与公开事件仍由下方校验器检查。
 class DisplayCheckpointInput(TypedDict):
@@ -95,11 +122,14 @@ def display_checkpoint_event(row: object, *, live: bool = False) -> dict | None:
     kind, phase, payload = value["kind"], value["phase"], copy.deepcopy(value["payload"])
     if kind in _START_KINDS:
         if live:
-            return None
-        kind, phase = "system_message", "completed"
-        payload = {"text": f"{payload.get('tool') or '过程块'}：本工作片没有保存完整终态。", "history_incomplete": True}
+            if not gateway_display_recovery(value):
+                return None
+        else:
+            kind, phase = "system_message", "completed"
+            payload = {"text": f"{payload.get('tool') or '过程块'}：本工作片没有保存完整终态。", "history_incomplete": True}
     return {
         "schema": "conversation_history_display.v1", "request_id": value["request_id"],
+        "thread_id": value["thread_id"], "task_id": value["task_id"],
         "block_id": value["block_id"], "kind": kind, "phase": phase, "payload": payload,
         **({"gateway_request_id": value["gateway_request_id"]} if value["gateway_request_id"] else {}),
     }

@@ -6,6 +6,8 @@ import json
 import os
 import signal
 import sys
+from contextlib import contextmanager
+from datetime import date
 from pathlib import Path
 
 from agent_py_agent.tests.slo.fake_provider import FakeProvider
@@ -13,6 +15,44 @@ from agent_py_agent.tests.slo.load import GatewayProcess, durable_receipt, json_
 
 from .normalize import normalize
 from .recorder import Recorder
+
+
+@contextmanager
+def _gateway_calendar(calendar_day):
+    """只固定回放的目录日历分区；事件时间、租约、进程身份和超时继续使用真实时钟。"""
+    from unittest.mock import patch
+
+    from agent_py_agent.agent.memory_archive import storage
+    from agent_py_agent.agent.user_space import context_bundle, run_workspace
+
+    day = date.fromisoformat(calendar_day)
+
+    class CalendarDate(date):
+        @classmethod
+        def today(cls):
+            return day
+
+    with (patch.object(context_bundle, "date", CalendarDate),
+          patch.object(storage, "_date_key", lambda _created_at: day.isoformat()),
+          patch.object(run_workspace, "_date_key", lambda _created_at: day.isoformat())):
+        yield
+
+
+def _gateway_main():
+    """在真实 Gateway 入口前安装测试日历，重启也从同一启动参数恢复。"""
+    import runpy
+
+    calendar_day = sys.argv.pop(1)
+    with _gateway_calendar(calendar_day):
+        runpy.run_module("agent_py_agent", run_name="__main__", alter_sys=True)
+
+
+class ReplayGatewayProcess(GatewayProcess):
+    def _command(self):
+        command = super()._command()
+        calendar_day = self.parameters["calendar_day"]
+        bootstrap = "from agent_py_agent.tests.golden.replayer import _gateway_main; _gateway_main()"
+        return [command[0], "-c", bootstrap, calendar_day, *command[3:]]
 
 
 class Replayer:
@@ -311,7 +351,7 @@ class Replayer:
     def run(self):
         self.provider.start()
         try:
-            self.gateway = GatewayProcess(self.root / "gateway", self.provider, self.bounds, self.scenario.get("config", {}))
+            self.gateway = ReplayGatewayProcess(self.root / "gateway", self.provider, self.bounds, self.scenario.get("config", {}))
             self.recorder.gateway_origin = self.gateway.base_url
             self.provider.replacements = {"OWNER_HOME": str(self.gateway.home / "owners" / "local" / "main"),
                                           "PYTHON": sys.executable}

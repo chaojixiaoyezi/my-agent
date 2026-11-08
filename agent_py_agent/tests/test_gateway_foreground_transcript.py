@@ -18,7 +18,7 @@ from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.gateway_parts.request_execution import _configure_gateway_main_activity
 from agent_py_agent.agent.gateway_parts.request_history import GatewayAssistantTurn
 from agent_py_agent.agent.gateway_parts.stream_writer import BufferedChunkStreamWriter
-from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime, TuiTurnSummary
 from agent_py_agent.cli.chat_parts.tui_threading import (
     _consume_gateway_background_snapshot,
     _publish_background_notice_row,
@@ -131,6 +131,131 @@ def test_original_page_skips_both_live_and_committed_foreground(tmp_path):
     background.write_thinking("下一片独立后台思考")
     runtime.publish_background_transcript_events(read_background_transcript_events(agent, thread_id=thread.thread_id, after=page["cursor"], stream_id=page["stream_id"])["events"])
     assert runtime.store.snapshot().stable_blocks[-1].text == "下一片独立后台思考"
+
+
+@pytest.mark.parametrize("transport", ["ring", "checkpoint"])
+def test_restarted_request_uses_linked_display_source_without_freezing_or_duplicates(tmp_path, transport):
+    agent, old_writer, store, thread, request = _foreground(tmp_path)
+    runtime = TuiRuntime("original")
+    runtime.publish_conversation_reset(thread.thread_id)
+    runtime.enqueue_prompt("local-turn", "检查文件", queued=False)
+    adapter = runtime.begin_turn("local-turn", task_progress_generation_id="gwreq-live")
+    runtime.register_gateway_request("gwreq-live")
+    compact = {"schema": "conversation_compaction_progress.v1", "generation": 1,
+               "phase": "started", "stage": "summarizing", "percent": 20}
+    adapter.write_conversation_compact_progress(compact)
+    old_writer.write_conversation_compact_progress(compact)
+    assert any(block.kind.startswith("conversation_compaction") for block in runtime.store.snapshot().active_blocks)
+    before = read_background_transcript_events(agent, thread_id=thread.thread_id, after=0)
+    runtime.publish_background_transcript_events(before["events"])
+    request.update(execution_attempt_id="attempt-after-restart", active_turn_recovery={
+        "schema_version": "gateway_active_turn_recovery.v1", "request_id": "gwreq-live", "cause": "gateway_restart",
+    })
+    writer = BufferedChunkStreamWriter(tmp_path / "resumed.chunks.jsonl", rich_transcript=True)
+    _configure_gateway_main_activity(
+        SimpleNamespace(agent=agent, on_chunk=writer, request_id="gwreq-live", request=request),
+        SimpleNamespace(thread_id=thread.thread_id, workspace_task=None),
+    )
+
+    def deliver():
+        if transport == "ring":
+            page = read_background_transcript_events(agent, thread_id=thread.thread_id, after=before["cursor"])
+            runtime.publish_background_transcript_events(page["events"])
+        else:
+            # 进程内环已丢失时，只用 canonical 检查点恢复仍在观察原请求的页面。
+            notices, _, ok = read_background_response_page(
+                store, thread.thread_id, include_foreground=True, include_display_checkpoints=True,
+            )
+            assert ok
+            for notice in notices:
+                _publish_background_notice_row(runtime, notice, set())
+
+    writer.write_thinking("重启后继续检查", duration_seconds=2)
+    progress = {"round": 340, "call_index": 0, "tool": "read_file", "detail": "src/main.py"}
+    writer.write_progress({**progress, "phase": "started"}, "")
+    writer.flush()
+    deliver()
+    snapshot = runtime.store.snapshot()
+    assert not any(block.kind.startswith("conversation_compaction") for block in snapshot.active_blocks)
+    assert any(block.role == "thinking" and block.text == "重启后继续检查" for block in snapshot.stable_blocks)
+    assert [block.title for block in snapshot.active_blocks if block.role == "tool"] == ["read_file"]
+    assert runtime.execution_target() is None  # 显示交接不制造执行或控制身份。
+    old_writer.write_thinking("旧执行片迟到的事件", duration_seconds=1)
+    deliver()
+    assert all(block.text != "旧执行片迟到的事件" for block in runtime.store.snapshot().stable_blocks)
+
+    writer.write_progress({**progress, "phase": "completed", "ok": True, "output": "检查通过"}, "")
+    writer.flush()
+    deliver()
+    adapter.on_gateway_event({"kind": "tool_progress", "progress": {**progress, "phase": "completed", "ok": True}})
+    assert len([block for block in runtime.store.snapshot().stable_blocks if block.role == "tool"]) == 1
+    _commit(writer, store, thread)
+    deliver()
+    notices, _, _ = read_background_response_page(store, thread.thread_id, include_foreground=True)
+    for notice in notices:
+        _publish_background_notice_row(runtime, notice, set())
+    runtime.complete_turn("local-turn", TuiTurnSummary(response_text="这是完整的最终回复。", ok=True))
+    snapshot = runtime.store.snapshot()
+    assert [block.text for block in snapshot.stable_blocks if block.role == "assistant"] == ["这是完整的最终回复。"]
+    assert not snapshot.active_blocks
+    old_writer.close()
+
+
+@pytest.mark.parametrize("damage", ["thread", "request", "attempt", "block", "schema"])
+def test_recovery_display_cannot_retire_an_unrelated_or_invalid_observation(tmp_path, damage):
+    agent, writer, _, thread, _ = _foreground(tmp_path)
+    writer.write_thinking("公开思考", duration_seconds=1)
+    writer.flush()
+    event = copy.deepcopy(read_background_transcript_events(agent, thread_id=thread.thread_id, after=0)["events"][-1])
+    event["payload"]["gateway_recovery"] = {"request_id": "gwreq-live", "execution_attempt_id": "recovered-attempt"}
+    if damage == "thread":
+        event["thread_id"] = "thread-other"
+    elif damage == "request":
+        event["payload"]["gateway_recovery"]["request_id"] = "gwreq-other"
+    elif damage == "attempt":
+        event["payload"]["gateway_recovery"]["execution_attempt_id"] = ""
+    elif damage == "block":
+        event["block_id"] = "bg-main:another:thinking:1"
+    else:
+        event["schema"] = "untrusted.v1"
+    runtime = TuiRuntime("original")
+    runtime.publish_conversation_reset(thread.thread_id)
+    adapter = runtime.begin_turn("local-turn", task_progress_generation_id="gwreq-live")
+    runtime.register_gateway_request("gwreq-live")
+    adapter.write_thinking_delta("前台仍在执行")
+    before = runtime.store.snapshot()
+    runtime.publish_background_transcript_events([event])
+    assert runtime.store.snapshot().active_blocks == before.active_blocks
+    assert runtime.store.snapshot().stable_blocks == before.stable_blocks
+    writer.close()
+
+
+def test_late_recovered_attempt_cannot_reclaim_display_after_a_second_restart(tmp_path):
+    agent, old_writer, _, thread, request = _foreground(tmp_path)
+    request.update(execution_attempt_id="recovery-1", active_turn_recovery={
+        "schema_version": "gateway_active_turn_recovery.v1", "request_id": "gwreq-live", "cause": "gateway_restart",
+    })
+    runtime = TuiRuntime("original")
+    runtime.publish_conversation_reset(thread.thread_id)
+    runtime.begin_turn("local", task_progress_generation_id="gwreq-live")
+    runtime.register_gateway_request("gwreq-live")
+    writers = []
+    for attempt in ("recovery-1", "recovery-2"):
+        request["execution_attempt_id"] = attempt
+        writer = BufferedChunkStreamWriter(tmp_path / f"{attempt}.chunks.jsonl", rich_transcript=True)
+        _configure_gateway_main_activity(
+            SimpleNamespace(agent=agent, on_chunk=writer, request_id="gwreq-live", request=request),
+            SimpleNamespace(thread_id=thread.thread_id, workspace_task=None),
+        )
+        writer.write_progress({"round": 340, "call_index": 0, "tool": "read_file", "phase": "started", "detail": attempt}, "")
+        writers.append(writer)
+        runtime.publish_background_transcript_events(read_background_transcript_events(agent, thread_id=thread.thread_id, after=0)["events"])
+    assert [block.detail for block in runtime.store.snapshot().active_blocks if block.role == "tool"] == ["recovery-2"]
+    writers[0].write_progress({"round": 341, "call_index": 0, "tool": "read_file", "phase": "started", "detail": "旧执行片迟到"}, "")
+    runtime.publish_background_transcript_events(read_background_transcript_events(agent, thread_id=thread.thread_id, after=0)["events"])
+    assert [block.detail for block in runtime.store.snapshot().active_blocks if block.role == "tool"] == ["recovery-2"]
+    for writer in (old_writer, *writers):
+        writer.close()
 
 
 def test_steering_discards_uncommitted_candidate_and_confirms_exact_input(tmp_path):

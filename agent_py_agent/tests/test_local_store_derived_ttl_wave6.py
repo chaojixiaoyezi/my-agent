@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import threading
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,7 +23,7 @@ CUTOFF = NOW - 30 * 86400
 def record(store, sid, *, source="subagent_run", metadata=None, stamp=CUTOFF - 100):
     item = store.upsert_record(source_type=source, source_id=sid, title=sid,
         content=f"retention marker {sid}", metadata={"status": "done"} if metadata is None else metadata)
-    with sqlite3.connect(store.db_path) as conn:
+    with closing(sqlite3.connect(store.db_path)) as conn, conn:
         conn.execute("UPDATE records SET created_at=?,updated_at=? WHERE id=?", (stamp, stamp, item.id))
     return item
 
@@ -34,7 +35,7 @@ def prune(store, **kwargs):
 
 
 def ids(store):
-    with sqlite3.connect(store.db_path) as conn:
+    with closing(sqlite3.connect(store.db_path)) as conn:
         return {row[0] for row in conn.execute("SELECT id FROM records")}
 
 
@@ -959,3 +960,232 @@ def test_holistic_gateway_event_mirror_gate(attribute, configured, enabled):
     if enabled:
         assert calls[0]["source_type"] == "gateway_event"
         assert calls[0]["metadata"]["status"] == "completed"
+
+
+@pytest.fixture
+def reference_fd_guard(record_property):
+    import gc
+
+    gc.collect()
+    directory = next((path for path in (Path('/dev/fd'), Path('/proc/self/fd')) if path.is_dir()), None)
+    before = len(os.listdir(directory)) if directory else None
+    yield
+    gc.collect()
+    if before is not None:
+        delta = len(os.listdir(directory)) - before
+        record_property('fd_delta', delta)
+        assert delta == 0
+
+
+def _reference_case(tmp_path, *, count=1, extra_refs=()):
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / 'home')
+    paths = [home.owner_data_dir / 'local_store.sqlite3']
+    paths += [home.owner_home_dir / 'workspace/runtime/workspaces' / f'r1-{index:02}' /
+              'local_store/local.db' for index in range(count - 1)]
+    entries = []
+    for index, path in enumerate(paths):
+        store = LocalStore(path)
+        explicit = record(store, f'explicit-{index}')
+        inferred = record(store, f'inferred-{index}', metadata={
+            'status': 'done', 'conversation_runtime': {'task_id': 'active-task'}})
+        expired = record(store, f'expired-{index}')
+        entries.append((store, explicit, inferred, expired))
+    states = {}
+    for task_id, status in [('active-task', 'RUNNING'), ('cancelled-task', 'CANCELLED'),
+                            ('done-task', 'DONE'), ('failed-task', 'FAILED')]:
+        state = home.owner_tasks_dir / '2026-11-07' / task_id / 'work/state.json'
+        state.parent.mkdir(parents=True)
+        state.write_text(json.dumps({
+            'task_id': task_id, 'status': status, 'updated_at': NOW, 'scope_id': 'same-scope',
+            'source_refs': [row[1].id for row in entries] + list(extra_refs) if status == 'RUNNING' else [],
+            'cancellation_control': {'resource_cleanup_proofs': [
+                {'proof_ref': 'original-exit-proof', 'acknowledged': False}]},
+        }), encoding='utf-8')
+        states[state] = state.read_bytes()
+    return SimpleNamespace(home=home, entries=entries, states=states,
+        state=home.owner_tasks_dir / '2026-11-07/active-task/work/state.json')
+
+
+def _source_failure(monkeypatch, case, timing, error=None):
+    from agent_py_agent.agent.local_storage import records
+    from agent_py_agent.agent.memory_store import retention_scan
+
+    original_read = retention_scan._pin_object
+    failure = error if error is not None else PermissionError(13, 'source unreadable', str(case.state))
+    calls = []
+
+    def read(path):
+        if path == case.state:
+            calls.append(path)
+            raise failure
+        return original_read(path)
+
+    if timing == 'report':
+        monkeypatch.setattr(retention_scan, '_pin_object', read)
+    else:
+        name = 'owner_protected_ref_ids' if timing == 'later' else '_derived_owner_pin_ids'
+        original_collect = getattr(records, name)
+
+        # 阶段包装只限定真实读取器的故障窗口；报告、pins 和维护游标均由原实现生成。
+        def collect(*args, **kwargs):
+            with monkeypatch.context() as patch:
+                patch.setattr(retention_scan, '_pin_object', read)
+                return original_collect(*args, **kwargs)
+
+        monkeypatch.setattr(records, name, collect)
+    return calls
+
+
+def _maintain_reference_case(case, transition, *, now=NOW):
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+
+    options = {'commit_transition': lambda operation: operation()} if transition else {}
+    return run_owner_retention_if_due(case.home, now=now, include_global_indexes=False,
+        quota_max_ms=5000, **options)
+
+
+def _reference_marker(case):
+    return json.loads((case.home.owner_data_dir / 'maintenance.json').read_text(encoding='utf-8'))
+
+
+def _assert_reference_records(case):
+    for store, explicit, inferred, _expired in case.entries:
+        for item in (explicit, inferred):
+            current = store.get_record(item.id)
+            body = store.root / item.content_path
+            assert (current is not None, body.is_file()) == (True, True)
+            assert current.source_id == item.source_id
+            assert body.read_text() == f'retention marker {item.source_id}'
+    assert all(path.read_bytes() == original for path, original in case.states.items())
+    states = [json.loads(path.read_bytes()) for path in case.states]
+    assert sum(state['status'] == 'RUNNING' for state in states) == 1
+    assert all(state['cancellation_control']['resource_cleanup_proofs'][0]['acknowledged'] is False
+               for state in states)
+
+
+@pytest.mark.parametrize('transition', [False, True])
+@pytest.mark.parametrize('timing', ['healthy', 'report', 'later', 'supplementary'])
+def test_gptpro_r1_real_maintenance_keeps_referenced_results(
+    tmp_path, monkeypatch, reference_fd_guard, transition, timing
+):
+    case = _reference_case(tmp_path)
+    calls = _source_failure(monkeypatch, case, timing) if timing != 'healthy' else []
+    result = _maintain_reference_case(case, transition)
+    marker = _reference_marker(case)
+
+    assert result.ran and result.retention.applied and not result.retention.legal_hold
+    _assert_reference_records(case)
+    store, _explicit, _inferred, expired = case.entries[0]
+    if timing == 'healthy':
+        assert not result.retention.load_errors
+        assert marker['derived_records_pruned']['deleted_ids'] == [expired.id]
+        assert not (store.root / expired.content_path).exists()
+    else:
+        assert calls
+        assert store.get_record(expired.id) is not None
+        assert (store.root / expired.content_path).is_file()
+        if timing == 'report':
+            assert any(error['error_code'] == 'MEMORY_RETENTION_PIN_SOURCE_UNREADABLE'
+                       and error['path'] == str(case.state) for error in result.retention.load_errors)
+            assert marker['derived_records_pruned'] == {'executed': False, 'reason': 'retention_not_safe'}
+        else:
+            assert not result.retention.load_errors
+            assert marker['derived_records_pruned'] == {
+                'executed': False, 'reason': 'error', 'error_type': 'OSError', 'partial': True}
+            assert marker['maintenance_partial'] is True
+
+
+@pytest.mark.parametrize('transition', [False, True])
+@pytest.mark.parametrize('timing', ['later', 'supplementary'])
+def test_gptpro_r1_real_nine_store_continuation_rechecks_sources(
+    tmp_path, monkeypatch, reference_fd_guard, transition, timing
+):
+    case = _reference_case(tmp_path, count=9)
+    assert _maintain_reference_case(case, transition).ran
+    initial = _reference_marker(case)
+    assert not initial['load_errors'] and initial['apply_outcome'] == 'applied'
+    assert initial['derived_records_pruned']['partial'] is True
+    assert len(initial['derived_records_pruned']['stores']) == 8
+    assert initial['derived_records_pruned']['cursor']['after']
+    before = [ids(row[0]) for row in case.entries]
+
+    with monkeypatch.context() as patch:
+        calls = _source_failure(patch, case, timing)
+        assert _maintain_reference_case(case, transition, now=NOW + 1).ran
+        assert calls
+    assert [ids(row[0]) for row in case.entries] == before
+    _assert_reference_records(case)
+    failed = _reference_marker(case)
+    assert failed['derived_records_pruned'] == {
+        'executed': False, 'reason': 'error', 'error_type': 'OSError', 'partial': True}
+    assert failed['maintenance_partial'] is True
+
+    for step in range(3):
+        assert _maintain_reference_case(case, transition, now=NOW + 2 + step).ran
+        if not _reference_marker(case)['derived_records_pruned'].get('partial'):
+            break
+    else:
+        pytest.fail('真实引用源恢复后，九库派生清理未完成续扫')
+    _assert_reference_records(case)
+    assert all(row[0].get_record(row[3].id) is None for row in case.entries)
+
+
+@pytest.mark.parametrize('error_type', [PermissionError, FileNotFoundError, NotADirectoryError,
+    ValueError, TypeError, KeyError, IndexError])
+def test_gptpro_r1_known_task_read_error_preserves_cause_and_content(
+    tmp_path, monkeypatch, reference_fd_guard, error_type
+):
+    case = _reference_case(tmp_path)
+    error = error_type('known task source unreadable')
+    calls = _source_failure(monkeypatch, case, 'supplementary', error)
+    store = case.entries[0][0]
+    before = ids(store)
+    with pytest.raises(OSError, match='MEMORY_RETENTION_PIN_SOURCE_UNREADABLE') as caught:
+        prune(store, now=NOW)
+    assert calls and caught.value.__cause__ is error
+    assert ids(store) == before
+    _assert_reference_records(case)
+
+
+@pytest.mark.parametrize('existing_file', [False, True])
+def test_gptpro_r1_expected_missing_non_task_state_allows_cleanup(
+    tmp_path, reference_fd_guard, existing_file
+):
+    case = _reference_case(tmp_path, extra_refs=['data/non-task.json'])
+    if existing_file:
+        (case.home.owner_data_dir / 'non-task.json').write_text('{}', encoding='utf-8')
+    store, _explicit, _inferred, expired = case.entries[0]
+    assert prune(store, now=NOW)['deleted_ids'] == [expired.id]
+    _assert_reference_records(case)
+
+
+@pytest.mark.parametrize('via_maintenance', [False, True])
+@pytest.mark.parametrize('kind', ['runtime', 'request', 'context', 'write', 'bounded'])
+def test_gptpro_r1_execution_uncertainty_propagates_exact_original(
+    tmp_path, monkeypatch, reference_fd_guard, via_maintenance, kind
+):
+    from agent_py_agent.agent.user_space import owner_maintenance as maintenance
+
+    case = _reference_case(tmp_path)
+    error = {
+        'runtime': RuntimeError('original uncertainty'),
+        'request': maintenance.RequestExecutionOutcomeUncertainError(
+            {'id': 'original-request', 'execution_attempt_id': 'original-attempt',
+             'lease_epoch': 1, 'lease_owner': 'original-owner'}, 'retention.references'),
+        'context': maintenance.RequestExecutionContextUnavailable('original context'),
+        'write': maintenance.ToolWriteContextUnavailable('original write context'),
+        'bounded': maintenance.BoundedCallExitUnconfirmedError('original-call', 'exit_unconfirmed'),
+    }[kind]
+    calls = _source_failure(monkeypatch, case, 'supplementary', error)
+    store = case.entries[0][0]
+    before = ids(store)
+    with pytest.raises(type(error)) as caught:
+        if via_maintenance:
+            _maintain_reference_case(case, False)
+        else:
+            prune(store, now=NOW)
+    assert calls and caught.value is error
+    assert ids(store) == before
+    _assert_reference_records(case)
