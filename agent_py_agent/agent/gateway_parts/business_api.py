@@ -5,7 +5,7 @@ import json
 import re
 import sqlite3
 from contextlib import ExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import RLock
 from weakref import WeakSet
@@ -234,6 +234,10 @@ class _BusinessBackgroundService(BackgroundAgentService):
         plan = SessionTaskDispatchPlan(actor.source_thread_id, target.thread_id, request['instruction'],
             origin_task_id, self._operation_key(actor, idempotency_key))
         previous = self.store.session_tasks.find_by_dedupe_key(_task_dedupe_key(plan))
+        if not origin_task_id:
+            context = getattr(getattr(self.host, '_current_run_params', None), 'business_context', None)
+            plan = replace(plan, origin_task_id=previous.origin_task_id if previous is not None
+                           else context.task_id if context is not None else '')
         if previous is None and not background_identity_allows_work(target):
             raise ValueError('AGENT_NOT_AVAILABLE')
         if previous is None and (failure := session_task_pair_limit_error(
@@ -1129,12 +1133,23 @@ def _business_task_sender_binding(host, thread, context):
 
     if background_identity(thread) is None and thread.metadata.get('business_controller') is not True:
         return None
-    task = host.conversation_store.session_tasks.require(context.task_id)
-    sender = host.conversation_store.threads.require(task.sender_thread_id)
-    if (task.target_thread_id != thread.thread_id or context.owner_id != host.home_paths.owner_id
-            or sender.owner_id != host.home_paths.owner_id):
-        raise HostAPIError('CAPABILITY_DENIED', 403)
-    return next((row for row in sender.channel_bindings if row.channel in LOCAL_PRIVATE_CHANNELS), None)
+    store = host.conversation_store
+    task = store.session_tasks.require(context.task_id)
+    seen = set()
+    for _ in range(store.session_tasks.chain_depth(task) + 1):
+        sender = store.threads.require(task.sender_thread_id)
+        if (task.task_id in seen or task.target_thread_id != thread.thread_id
+                or context.owner_id != host.home_paths.owner_id or sender.owner_id != context.owner_id):
+            raise HostAPIError('CAPABILITY_DENIED', 403)
+        seen.add(task.task_id)
+        binding = next((row for row in sender.channel_bindings if row.channel in LOCAL_PRIVATE_CHANNELS), None)
+        if binding is not None or not task.origin_task_id:
+            return binding
+        parent = store.session_tasks.require(task.origin_task_id)
+        if (parent.sender_thread_id, parent.target_thread_id) != (task.sender_thread_id, task.target_thread_id):
+            thread = sender
+        task = parent
+    raise HostAPIError('CAPABILITY_DENIED', 403)
 
 
 def _model_request_binding(host):
