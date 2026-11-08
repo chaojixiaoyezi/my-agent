@@ -764,7 +764,10 @@ def native_business_context(handler, server):
     if base is None:
         raise HostAPIError('HOST_NOT_READY', 503)
     user_id, channel = _request_channel(handler)
-    scope = _gateway_control_scope(handler, {}, user_id=user_id, channel=channel)
+    # 客户端可用原X-Conversation-Id选择本人已有会话作为W2来源；缺省仍为default，owner/通道/用户由认证头决定。
+    conversation = str(handler.headers.get('X-Conversation-Id') or '').strip()
+    scope = _gateway_control_scope(handler, {'conversation_id': conversation} if conversation else {},
+        user_id=user_id, channel=channel)
     owner = resolve_gateway_scope_owner(base, scope)
     home = home_paths_with_owner(base.home_paths, resolve_owner_home(base.home_paths.root, owner))
     wired = complete_host_wired(server)
@@ -1099,11 +1102,28 @@ def _model_business_actor(host):
            for row in (thread, source)):
         raise HostAPIError('RESOURCE_NOT_FOUND', 404)
     binding = next((row for row in source.channel_bindings if row.channel in LOCAL_PRIVATE_CHANNELS), None)
+    if binding is None and getattr(current, 'business_context', None) is not None:
+        binding = _business_task_sender_binding(host, thread, current.business_context)
     request_id = str(getattr(current, 'request_id', '') or getattr(current, 'run_id', '') or '')
     if binding is None or not request_id:
         raise HostAPIError('CAPABILITY_DENIED', 403)
     return HostChannelActor(home.owner_id, source.thread_id, request_id, binding.channel,
         binding.channel_conversation_id, binding.channel_user_id or home.owner_id)
+
+
+def _business_task_sender_binding(host, thread, context):
+    """后台身份/总控执行原业务SessionTask时，沿原派活发送方的规范绑定恢复宿主身份。"""
+    from ..conversation.background_team_lifecycle import background_identity
+    from ..conversation.channels import LOCAL_PRIVATE_CHANNELS
+
+    if background_identity(thread) is None and thread.metadata.get('business_controller') is not True:
+        return None
+    task = host.conversation_store.session_tasks.require(context.task_id)
+    sender = host.conversation_store.threads.require(task.sender_thread_id)
+    if (task.target_thread_id != thread.thread_id or context.owner_id != host.home_paths.owner_id
+            or sender.owner_id != host.home_paths.owner_id):
+        raise HostAPIError('CAPABILITY_DENIED', 403)
+    return next((row for row in sender.channel_bindings if row.channel in LOCAL_PRIVATE_CHANNELS), None)
 
 
 def _model_request_binding(host):
@@ -1235,6 +1255,7 @@ def register_business_tools(agent):
             title, keywords = {
                 'spaces': ('业务空间', ('业务空间', '空间', 'space', 'spaces', '/space')),
                 'background_agents': ('后台代理', ('后台代理', '常驻代理', 'background_agents', 'team', '/team')),
+                'tasks': ('后台任务', ('后台任务', '派活', '派任务', '分配任务', '布置任务', '交给后台代理', 'tasks')),
             }.get(family, ('业务动作', (spec.action,)))
             verbs = {
                 'list': ('列出', '列表', '查询'), 'get': ('查看', '详情', '查询'),
@@ -1242,12 +1263,16 @@ def register_business_tools(agent):
                 'messages.send': ('发送消息', '发消息', 'send_message'),
                 'suspend': ('暂停', '挂起'), 'resume': ('恢复', '继续'),
                 'retire': ('退役', '停用'), 'restore': ('还原', '复原'),
-            }.get(spec.action.partition('.')[2], ()) if family in {'spaces', 'background_agents'} else ()
+                'assign': ('派给', '分配', '执行'), 'submit': ('交给总控', '提交'),
+                'follow_up': ('追问', '补充要求', '继续'), 'cancel': ('取消', '停止'),
+            }.get(spec.action.partition('.')[2], ()) if family in {'spaces', 'background_agents', 'tasks'} else ()
             purpose = (verbs[0] if verbs else '') + title + '：' + spec.action
+            if family == 'tasks' and spec.metadata['effect'] == 'execute':
+                purpose += '（异步执行；结束后结果自动回报本会话）'
             self.model_spec = ToolModelSpec('business_' + spec.action.replace('.', '_'),
                 purpose + '；直接调用内置工具，状态和权限由当前宿主复核。',
                 _model_business_schema(spec.native_request_schema),
-                hints=ToolModelHints(category=family if family in {'spaces', 'background_agents'} else 'business',
+                hints=ToolModelHints(category=family if family in {'spaces', 'background_agents', 'tasks'} else 'business',
                     keywords=(*keywords, *verbs), use_cases=(purpose,),
                     default_deferred=True, deferred_summary=purpose))
             effect = {'read': 'read_only', 'configure': 'mutating', 'execute': 'dangerous'}.get(spec.metadata['effect'], 'mutating')
