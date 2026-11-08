@@ -1,6 +1,7 @@
 """显式维护的扫描预算：跳过、错误和非UUID目录均不可无限枚举。"""
 import json
 import os
+import subprocess
 import sys
 from collections import OrderedDict
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import pytest
 
 from agent_py_agent.agent.conversation import display_archive as archive
 from agent_py_agent.agent.conversation import display_archive_maintenance as maintenance
+from agent_py_agent.agent.memory_store.retention_models import MemoryRetentionPolicy
 
 
 @pytest.mark.parametrize('operation', ['compact', 'prune', 'pinned', 'errors'])
@@ -66,7 +68,7 @@ def test_non_archive_entries_also_consume_enumeration_budget(tmp_path, monkeypat
     monkeypatch.setattr(maintenance.os, 'scandir', lambda _: Observed())
     result = maintenance.compact_display_archives(tmp_path, max_archives=1)
     assert len(visited) == 64
-    assert result == dict(scanned=0, compacted=0, expired=0, removed=0, skipped=0, errors=0)
+    assert result == dict(scanned=0, compacted=0, expired=0, removed=0, skipped=0, errors=0, backlog=1)
 
 
 def test_success_limit_and_zero_budget_keep_archive_contract(tmp_path):
@@ -346,15 +348,51 @@ def test_resumed_scan_enumeration_stays_within_budget_per_call(tmp_path, monkeyp
     assert len(set(visited[:300])) == 300 and visited[300:] == visited[:340]
 
 
-# 每轮新进程只能靠父目录游标文件续扫：80档、每轮1个名额也必须全部合页，且归档目录里不出现游标文件。
+# 一次真实进程重启后允许多片有界恢复；不能要求每片都重启仍靠标量偏移走过任意长前缀。
 def test_fresh_process_rounds_resume_from_persisted_cursor(tmp_path):
     store, ordered = _ordered_archives(tmp_path, 80)
     compacted = 0
-    for _ in range(85):
-        _fresh_process()
+    for _ in range(70):
         result = maintenance.compact_display_archives(store, now=2_000_000_000.0, min_age_days=0, max_archives=1)
         assert result['errors'] == 0 and result['scanned'] <= 64
         compacted += result['compacted']
+    _fresh_process()
+    code = '''
+import json, sys
+from pathlib import Path
+from agent_py_agent.agent.conversation import display_archive_maintenance as maintenance
+
+counts = []
+open_scan = maintenance._open_scan
+def observed_scan(root):
+    stack, entries = open_scan(root)
+    def counted():
+        for entry in entries:
+            counts[-1] += 1
+            yield entry
+    return stack, counted()
+maintenance._open_scan = observed_scan
+results = []
+try:
+    for _ in range(90):
+        counts.append(0)
+        results.append(maintenance.compact_display_archives(
+            Path(sys.argv[1]), now=2_000_000_000.0, min_age_days=0, max_archives=1))
+        if sum(row['compacted'] for row in results) == 10:
+            break
+finally:
+    for stack, _, _ in maintenance._live_scans.values():
+        stack.close()
+print(json.dumps({'results': results, 'counts': counts}))
+'''
+    child = subprocess.run([sys.executable, '-c', code, str(tmp_path)],
+                           capture_output=True, text=True, check=True,
+                           cwd=os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+    recovered = json.loads(child.stdout)
+    assert recovered['counts'][0] == 64 and max(recovered['counts']) <= 64
+    assert recovered['results'][0]['scanned'] == 0 and recovered['results'][0]['backlog'] == 1
+    assert all(row['errors'] == 0 for row in recovered['results'])
+    compacted += sum(row['compacted'] for row in recovered['results'])
     assert compacted == 80
     assert all((directory / 'pages_bundle.json').is_file() for _, directory in ordered)
     assert {path.name for path in (tmp_path / 'display_archives').iterdir()} == {ref['archive_id'] for ref, _ in ordered}
@@ -391,7 +429,7 @@ def test_persisted_cursor_damage_falls_back_without_following_links(tmp_path, da
 _R7_NOW = 2_000_000_000.0
 
 
-# 关闭并丢弃进程内全部续扫状态，各用例不继承活迭代器、等待键或调用序号。
+# 关闭并丢弃进程内全部续扫状态，各用例不继承活迭代器、等待键或清退期限。
 def _r7_reset():
     with maintenance._scan_cursor_lock:
         for scans, _, _ in maintenance._live_scans.values():
@@ -407,6 +445,15 @@ def _r7_clean_scans():
     _r7_reset()
     yield
     _r7_reset()
+
+
+@pytest.fixture
+def _r7_clock(monkeypatch):
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(maintenance, 'time', SimpleNamespace(
+        time=maintenance.time.time, monotonic=lambda: clock.now,
+    ))
+    return clock
 
 
 def _r7_young_archives(root, count):
@@ -497,9 +544,9 @@ def test_live_scan_slots_are_time_shared_beyond_capacity(tmp_path, _r7_observed)
     assert all(len(seen[root.stat().st_ino]) == 100 for root in roots)
 
 
-# LLM: 128个占位迭代器停止维护后，新根先等待；超过活跃键数两倍次调用后闲置迭代器被清退，新根取得名额并扫完整轮。
+# LLM: 128个占位迭代器停止维护后，新根先等待；超过两个维护周期才清退闲置迭代器，新根取得名额并扫完整轮。
 # 函数用途: 回归停止维护的根不会永久占满名额。
-def test_idle_live_scans_are_released_to_a_waiting_root(tmp_path, _r7_observed):
+def test_idle_live_scans_are_released_to_a_waiting_root(tmp_path, _r7_observed, _r7_clock):
     calls, seen = _r7_observed
     for index in range(128):
         root = _r7_filler_root(tmp_path / str(index) / "display_archives", 100)
@@ -509,6 +556,7 @@ def test_idle_live_scans_are_released_to_a_waiting_root(tmp_path, _r7_observed):
     calls.append(0)
     maintenance.compact_display_archives(late, now=_R7_NOW, max_archives=1)
     assert len(maintenance._live_scans) == 128 and len(maintenance._scan_waiting) == 1
+    _r7_clock.now += 2 * MemoryRetentionPolicy.maintenance_interval_seconds + 1
     for _ in range(300):
         if len(seen[late.stat().st_ino]) == 100:
             break
@@ -545,15 +593,32 @@ def test_lost_live_scan_restarts_without_replaying_the_prefix(tmp_path, _r7_obse
 # LLM: 持久游标偏移超出sys.maxsize、为负或非int均按损坏游标从0恢复，不让islice抛出未捕获异常；sys.maxsize本身按目录缩短重开。
 # 函数用途: 回归R6-ARCH-02超大合法JSON整数偏移。
 @pytest.mark.parametrize("offset", [2**63, sys.maxsize + 1, sys.maxsize, -1, True, 1.5])
-def test_out_of_range_persisted_cursor_offset_is_treated_as_damaged(tmp_path, offset):
+def test_out_of_range_persisted_cursor_offset_is_treated_as_damaged(tmp_path, offset, _r7_observed):
+    calls, seen = _r7_observed
     root = _r7_young_archives(tmp_path / "display_archives", 80)
     info = root.stat()
     operation = "compact_display_archives.<locals>.action"
     cursor = tmp_path / maintenance._CURSOR_FILE
     cursor.write_text(json.dumps({operation: [info.st_dev, info.st_ino, offset]}))
+    calls.append(0)
     result = maintenance.compact_display_archives(root, now=_R7_NOW, max_archives=1)
-    assert result["scanned"] == result["skipped"] == 64 and result["errors"] == 0
+    assert result["errors"] == 0
     assert json.loads(cursor.read_text())[operation] == [info.st_dev, info.st_ino, 64]
+    if type(offset) is int and offset == sys.maxsize:
+        assert result["scanned"] == 0 and result["backlog"] == 1
+        inspected = 0
+        for _ in range(4):
+            calls.append(0)
+            result = maintenance.compact_display_archives(root, now=_R7_NOW, max_archives=1)
+            assert result["errors"] == 0
+            inspected += result["scanned"]
+            if not result["backlog"]:
+                break
+        assert not result["backlog"] and inspected >= 80
+        assert len(seen[info.st_ino]) == 80
+    else:
+        assert result["scanned"] == result["skipped"] == 64
+    assert max(calls) <= 64
 
 
 # LLM: 同进程续扫异常丢失活迭代器后，128个非占用新键经内存游标LRU挤掉其偏移；该键仍在最近维护记录内，
@@ -589,11 +654,13 @@ def test_known_root_restarts_without_persisted_replay_after_cursor_eviction(tmp_
     assert calls[-1] == 64 and maintenance._scan_cursors[key] == 64
 
 
-# LLM: 128个占位根维护一次后停止，新根持续到来（每轮两个只维护一次的空目录）；闲置窗口至多256次调用，一次性新键不能把阈值无限推远：
+# LLM: 128个占位根维护一次后停止，新根持续到来（每轮两个只维护一次的空目录）；清退只看原维护周期，一次性新键不能延后期限：
 #   停止的占位者终被清退，常维护的根取得名额扫完整轮；最近记录有界，空目录头一窗即走完不滞留等待。
 # 函数用途: 回归R7-ARCH-02闲置阈值随新键自我放宽导致名额被停止维护的根永久占用。
-def test_stopped_holders_are_released_while_one_shot_roots_keep_arriving(tmp_path, _r7_observed):
+def test_stopped_holders_are_released_while_one_shot_roots_keep_arriving(tmp_path, _r7_observed, _r7_clock):
     calls, seen = _r7_observed
+    fd_dir = "/proc/self/fd" if os.path.isdir("/proc/self/fd") else "/dev/fd"
+    fd_before = len(os.listdir(fd_dir))
     holders = [_r7_filler_root(tmp_path / f"holder-{index}" / "display_archives", 65) for index in range(128)]
     for root in holders:
         calls.append(0)
@@ -603,6 +670,9 @@ def test_stopped_holders_are_released_while_one_shot_roots_keep_arriving(tmp_pat
     assert maintenance.compact_display_archives(victim, now=_R7_NOW, max_archives=1)["errors"] == 0
     assert len(maintenance._live_scans) == 128 and len(maintenance._scan_waiting) == 1
     for step in range(200):
+        if step == 100:
+            assert len(maintenance._live_scans) == 128 and len(seen[victim.stat().st_ino]) == 64
+            _r7_clock.now += 2 * MemoryRetentionPolicy.maintenance_interval_seconds + 1
         for index in range(2):
             transient = _r7_filler_root(tmp_path / f"transient-{step}-{index}" / "display_archives", 0)
             calls.append(0)
@@ -613,6 +683,8 @@ def test_stopped_holders_are_released_while_one_shot_roots_keep_arriving(tmp_pat
     holder_inodes = {root.stat().st_ino for root in holders}
     assert len(seen[victim.stat().st_ino]) == 100 and max(calls) == 64
     assert not [key for key in maintenance._live_scans if key[1] in holder_inodes]
+    _r7_reset()
+    assert len(os.listdir(fd_dir)) - fd_before == 0
 
 
 def test_display_archive_lane_import_executes_without_file_access(monkeypatch):

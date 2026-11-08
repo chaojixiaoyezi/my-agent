@@ -10,9 +10,12 @@ import pytest
 from agent_py_agent.agent.conversation import display_archive as archive
 from agent_py_agent.agent.conversation import display_archive_maintenance as maintenance
 from agent_py_agent.agent.conversation.models import ConversationThread
+from agent_py_agent.agent.conversation.store_layout import ConversationStorage
+from agent_py_agent.agent.conversation.store_threads import ThreadStore
 from agent_py_agent.agent.memory_store import retention_scan
 from agent_py_agent.agent.memory_store.retention_models import MemoryRetentionPolicy
 from agent_py_agent.agent.user_space.home_layout import home_paths
+from agent_py_agent.agent.user_space.owner_maintenance import run_storage_maintenance_slice
 from agent_py_agent.agent.user_space.owner_quota import owner_logical_usage_bytes
 from agent_py_agent.agent.user_space.storage_lanes import (
     StorageLaneBudget,
@@ -482,3 +485,140 @@ def test_archive_root_swapped_to_symlink_before_preflight_open_is_not_followed(o
     row = maintenance.maintain_display_archives_lane(request(home, commit=commit))
     assert swapped and row["errors"] and row["items"] == 0 and commits == []
     assert contents(other_home.owner_home_dir) == outside_before
+
+
+def test_real_owner_rotation_retains_bounded_lane_progress_to_expired_tail(tmp_path, monkeypatch):
+    """257 个非空 owner 的正常维护不能清掉尚未走完的 2049 档续点。"""
+    policy = MemoryRetentionPolicy(maintenance_interval_seconds=17)
+
+    def owner(name):
+        home = home_paths(tmp_path / name)
+        root = home.owner_home_dir / "conversations"
+        (root / "threads").mkdir(parents=True)
+        home.owner_retention_json.write_text(json.dumps(policy.to_dict()))
+        return home, root
+
+    home, root = owner("large")
+    references = [write_archive(root, text=f"真实归档-{index}") for index in range(2049)]
+    by_id = {ref["archive_id"]: ref for ref in references}
+    with os.scandir(root / "display_archives") as entries:
+        ordered = [by_id[entry.name] for entry in entries]
+    target = ordered[-1]
+    target_dir = root / "display_archives" / target["archive_id"]
+    os.utime(target_dir / "manifest.json", (NOW - 15 * DAY,) * 2)
+    original_tail = archive.read_display_archive_page(store(root), target, 0)["rows"]
+    ThreadStore(ConversationStorage(root, initialize=False)).write(
+        ConversationThread(thread_id="thread-w13", canonical_user_id="large"),
+    )
+    others = []
+    for index in range(257):
+        other_home, other_root = owner(f"other-{index}")
+        ref = write_archive(other_root, age=15, text=f"被引用的归档-{index}")
+        ThreadStore(ConversationStorage(other_root, initialize=False)).write(ConversationThread(
+            thread_id="thread-w13", canonical_user_id=f"other-{index}",
+            metadata={"message": {"role": "assistant", "display_archive_ref": ref["archive_id"]}},
+        ))
+        others.append((other_home, other_root, ref, {}))
+
+    foreground_writes = []
+
+    def forbidden_write(*args, **kwargs):
+        foreground_writes.append(1)
+        pytest.fail("夹具完成后只能维护，不能重新写归档或线程")
+
+    monkeypatch.setattr(archive, "archive_display_rows", forbidden_write)
+    monkeypatch.setattr(ThreadStore, "write", forbidden_write)
+    monkeypatch.setattr(ThreadStore, "update_atomic", forbidden_write)
+    clock = [100.0]
+    monkeypatch.setattr(maintenance, "time", SimpleNamespace(
+        time=maintenance.time.time, monotonic=lambda: clock[0],
+    ))
+    counts, covered, commits = [], {"compact": set(), "expire": set()}, []
+    active = [None, None]
+    open_scan = maintenance._open_scan
+
+    def observed_scan(descriptor):
+        scans, entries = open_scan(descriptor)
+
+        def counted():
+            for entry in entries:
+                counts[-1] += 1
+                if active[0] == home:
+                    covered[active[1]].add(entry.name)
+                yield entry
+
+        return scans, counted()
+
+    monkeypatch.setattr(maintenance, "_open_scan", observed_scan)
+    lane = resolve_storage_lane("display_archives")
+    assert lane is maintenance.maintain_display_archives_lane
+
+    def commit(operation):
+        commits.append(1)
+        return operation()
+
+    def step(current_home, cursor, maximum=128):
+        active[:] = [current_home, cursor.get("phase", "compact")]
+        counts.append(0)
+        receipt = validate_lane_receipt(lane(request(current_home, cursor, maximum=maximum, commit=commit)))
+        assert not receipt["errors"] and counts[-1] <= 2048
+        assert len(maintenance._live_scans) <= 128 and len(maintenance._scan_recent) <= 257
+        return receipt
+
+    rows = []
+
+    def adapter(cursor, budget):
+        receipt = step(home, cursor, budget["items"])
+        rows.append(receipt)
+        # 与生产 adapter 相同，只透传调度器实际消费的四个字段。
+        return {key: receipt[key] for key in ("cursor", "complete", "items", "bytes")}
+
+    fd_dir = "/proc/self/fd" if Path("/proc/self/fd").is_dir() else "/dev/fd"
+    fd_before = len(os.listdir(fd_dir))
+    state = {}
+    try:
+        for turn in range(8):
+            state = run_storage_maintenance_slice(
+                state, {"display_archives": adapter}, max_items=128, max_bytes=0, max_seconds=0,
+            )
+            assert not state["errors"]
+            receipt = rows[-1]
+            assert ("display_archives" in state["pending_kinds"]) is not receipt["complete"]
+            assert state["cursors"]["display_archives"] == receipt["cursor"]
+            if receipt["skipped"]["compacted"]:
+                assert archive.read_display_archive_page(store(root), target, 0)["rows"] == original_tail
+            for index, (other_home, other_root, ref, cursor) in enumerate(others):
+                other = step(other_home, cursor)
+                others[index] = (other_home, other_root, ref, other["cursor"])
+            if turn == 0:
+                info = (root / "display_archives").stat()
+                key = (info.st_dev, info.st_ino, "compact_display_archives.<locals>.action")
+                assert key in maintenance._live_scans, "未到清退期限的活扫描被其它 owner 淘汰"
+                assert maintenance._scan_recent[key] == clock[0] + 2 * policy.maintenance_interval_seconds
+            if receipt["complete"]:
+                assert covered == {phase: set(by_id) for phase in covered}
+                break
+            clock[0] += 1
+        else:
+            pytest.fail("有限归档目录未能沿原调度器续点完成")
+        assert [row["cursor"].get("phase") for row in rows] == ["compact", "expire", "expire", None]
+        assert [row["backlog"] for row in rows] == [1, 0, 1, 0]
+        assert rows[1]["skipped"]["compacted"] == rows[-1]["deleted_items"] == 1
+        assert json.loads((target_dir / "manifest.json").read_text())["expired"] is True
+        assert {path.name for path in target_dir.iterdir()} == {"manifest.json"}
+        with pytest.raises(archive.DisplayArchiveError) as caught:
+            archive.read_display_archive_page(store(root), target, 0)
+        assert caught.value.code == "DISPLAY_ARCHIVE_EXPIRED" and original_tail
+        assert archive.read_display_archive_page(store(root), ordered[0], 0)["rows"]
+        for _, other_root, ref, _ in others:
+            assert archive.read_display_archive_page(store(other_root), ref, 0)["rows"]
+        assert len(commits) == len(counts) and foreground_writes == []
+    finally:
+        with maintenance._scan_cursor_lock:
+            for scans, _, _ in maintenance._live_scans.values():
+                scans.close()
+            maintenance._live_scans.clear()
+            maintenance._scan_cursors.clear()
+            maintenance._scan_recent.clear()
+            maintenance._scan_waiting.clear()
+        assert len(os.listdir(fd_dir)) - fd_before == 0

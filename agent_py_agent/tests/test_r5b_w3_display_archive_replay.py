@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from types import SimpleNamespace
 
 import pytest
 
@@ -86,7 +87,7 @@ def test_cold_prefix_replay_counts_every_raw_entry(tmp_path, monkeypatch, operat
     meter = EnumerationMeter(monkeypatch)
     result = meter.step(operation, store)
     assert meter.counts == [64]
-    assert result["scanned"] == 0
+    assert result["scanned"] == 0 and result["backlog"] == 1
     assert list(maintenance._scan_cursors.values()) == [64]
 
 
@@ -149,7 +150,12 @@ def test_prefix_error_closes_owned_iterator_before_retry(tmp_path, monkeypatch):
     assert meter.step(operation, store)["compacted"] == 1
 
 
-def test_idle_eviction_closes_partial_replay_and_return_is_bounded(tmp_path, monkeypatch):
+@pytest.mark.parametrize("idle_seconds", [0, 17])
+def test_idle_eviction_closes_partial_replay_and_return_is_bounded(tmp_path, monkeypatch, idle_seconds):
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(maintenance, "time", SimpleNamespace(
+        time=maintenance.time.time, monotonic=lambda: clock.now,
+    ))
     owner = tmp_path / "owner"
     owner.mkdir()
     store, _ = _ordered_archives(owner, 256)
@@ -159,12 +165,15 @@ def test_idle_eviction_closes_partial_replay_and_return_is_bounded(tmp_path, mon
     other = tmp_path / "other" / "display_archives"
     other.mkdir(parents=True)
     meter = EnumerationMeter(monkeypatch)
-    meter.step(operation, store)
+    meter.step(operation, store, idle_seconds=idle_seconds)
     original = meter.opened[0]
     for _ in range(6):
-        meter.step(operation, other)
+        meter.step(operation, other, idle_seconds=idle_seconds)
+    assert not original.closed
+    clock.now += 2 * (idle_seconds or maintenance.MemoryRetentionPolicy.maintenance_interval_seconds) + 1
+    meter.step(operation, other, idle_seconds=idle_seconds)
     assert original.closed
-    meter.step(operation, store)
+    meter.step(operation, store, idle_seconds=idle_seconds)
     assert meter.counts[-1] == 64
     _fresh_process()
     assert all(scan.closed for scan in meter.opened)
@@ -182,7 +191,7 @@ def test_capacity_competition_keeps_partial_replay_bounded_and_closes_every_scan
         roots.append(root)
     meter = EnumerationMeter(monkeypatch)
     for root in roots:
-        meter.step(operation, root)
+        assert meter.step(operation, root)["backlog"] == 1
         assert len(maintenance._live_scans) <= 128
     assert len(maintenance._live_scans) == 128 and maintenance._scan_waiting
     for root in roots[:-1]:
