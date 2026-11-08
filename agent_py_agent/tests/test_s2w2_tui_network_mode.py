@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import builtins
+import gc
 import io
 import json
 import os
@@ -233,8 +234,9 @@ def startup_gateway(tmp_path, monkeypatch, request):
     from agent_py_agent.agent.settings import AgentConfig
 
     # 原HTTPServer.server_bind也调用getfqdn；macOS解析器首次保留进程级FD。
-    # 独立库调用已反证其与业务无关，先完成同一环境初始化，再严格测每次启动/关闭零增量。
+    # 独立库调用已反证其与业务无关，先完成初始化并回收旧对象，再检查启动/关闭无净增长。
     socket.getfqdn("127.0.0.1")
+    gc.collect()
     before_fd = _fd_count()
     server_home = tmp_path / "server-home"
     client_home = tmp_path / "client-home"
@@ -399,12 +401,20 @@ def _wait_until(predicate, *, timeout=10):
 
 def _assert_fd_restored(before):
     try:
-        _wait_until(lambda: _fd_count() == before, timeout=5)
+        _wait_until(lambda: _fd_count() <= before, timeout=5)
     except AssertionError:
         after = _fd_count()
         raise AssertionError(f"FD未恢复: before={before}, after={after}, fd_delta={after - before}; "
                              f"threads={[thread.name for thread in threading.enumerate()]}") from None
-    assert _fd_count() - before == 0
+    assert _fd_count() <= before
+
+
+def test_fd_restoration_allows_unrelated_descriptor_cleanup(tmp_path):
+    gc.collect()
+    with (tmp_path / "prior-test-file").open("wb"):
+        before = _fd_count()
+    # 批内旧对象的 FD 已关闭时，负增量表示资源减少，不能报成泄漏。
+    _assert_fd_restored(before)
 
 
 @pytest.mark.parametrize("status,ready,reason", [

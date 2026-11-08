@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from .normalize import assert_invariants, normalize
-from .replayer import replay
+from .replayer import Replayer, replay
 
 HERE = Path(__file__).parent
 SCENARIOS = [json.loads(path.read_text()) for path in sorted((HERE / "scenarios").glob("*.json"))]
@@ -59,6 +59,19 @@ def test_golden_replay(tmp_path, golden_parameters, scenario, record_property):
     elapsed = time.monotonic() - started
     record_property("golden_runtime_seconds", elapsed)
     assert elapsed < scenario["deadline_seconds"], f"scenario exceeded its CI deadline: {elapsed}"
+
+
+@pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda scenario: scenario["id"])
+def test_observation_budget_preserves_ci_headroom_and_polling(tmp_path, golden_parameters, scenario):
+    # 实际 Replayer 已扩大观察预算；固定这条合同，避免新调用入口退回共享 SLO 的短预算。
+    player = Replayer(tmp_path, scenario, golden_parameters)
+    try:
+        assert player.bounds["condition_seconds"] >= 20.0
+        assert player.bounds["poll_seconds"] == golden_parameters["poll_seconds"]
+        assert all(entry["deadline_seconds"] > player.bounds["condition_seconds"]
+                   for entry in player.provider.script if entry.get("wait_for_release"))
+    finally:
+        player.provider.close()
 
 
 # LLM: Diffs compare actual structured traces; no values are stripped to make a mismatch pass.

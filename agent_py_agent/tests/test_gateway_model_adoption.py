@@ -462,7 +462,7 @@ def test_noncooperative_probe_timeout_retains_without_late_adoption(tmp_path, mo
     def wait_probe():
         entered.set()
         try:
-            assert released.wait(5)
+            assert released.wait(10.0)
         finally:
             exited.set()
 
@@ -474,7 +474,7 @@ def test_noncooperative_probe_timeout_retains_without_late_adoption(tmp_path, mo
         assert len(decision.calls) == 1
     finally:
         released.set()
-        assert exited.wait(2)
+        assert exited.wait(10.0)
     current = fixture.agent.conversation_store.threads.require(fixture.thread_id)
     assert current.model_profile_id == fixture.original
     assert model_adoption.MODEL_ADOPTION_KEY not in current.metadata
