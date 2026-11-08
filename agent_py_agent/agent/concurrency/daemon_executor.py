@@ -13,12 +13,15 @@ and a stale worker is fenced from committing.
 
 from __future__ import annotations
 
+import heapq
+import itertools
 import sys
 import threading
+import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures.thread import _worker
-from contextvars import Context
+from contextvars import Context, copy_context
 
 
 class DurableDaemonThreadPoolExecutor(ThreadPoolExecutor):
@@ -79,4 +82,46 @@ class DurableDaemonThreadPoolExecutor(ThreadPoolExecutor):
         self._threads.add(thread)
 
 
-__all__ = ["DurableDaemonThreadPoolExecutor"]
+# LLM: 3.14t 每条短命线程退出后，其 mimalloc 堆里仍被别的线程引用的页无法回收，按线程创建次数线性涨 RSS；短延时回调
+#   统一挂在一条常驻守护线程上，不再一次回调一条 threading.Timer。回调须短小、不阻塞；在创建句柄时的 context 里执行
+#   （同 3.14t Timer 的继承语义）；cancel 只丢引用，已经开始执行的回调不撤回（同 Timer）。
+# 类用途: 一次延时回调的句柄，用法同 threading.Timer：先建句柄、再登记、可取消。
+class DeferredCall:
+    __slots__ = ("fn", "context")
+
+    def __init__(self, fn) -> None:
+        self.fn, self.context = fn, copy_context()
+
+    def cancel(self) -> None:
+        self.fn = self.context = None
+
+
+# 类用途: 进程级共享延时调用器：一条懒启动、空 context 出生的守护线程按到期顺序执行 DeferredCall，单个回调异常不终止线程。
+class SharedDeferredCalls:
+    def __init__(self, name: str) -> None:
+        self._name, self._cv, self._heap, self._seq, self._thread = name, threading.Condition(), [], itertools.count(), None
+
+    def start(self, call: DeferredCall, delay: float) -> None:
+        with self._cv:
+            heapq.heappush(self._heap, (time.monotonic() + max(0.0, float(delay)), next(self._seq), call))
+            if self._thread is None or not self._thread.is_alive():
+                kwargs = {"context": Context()} if hasattr(sys.flags, "thread_inherit_context") else {}
+                self._thread = threading.Thread(target=self._run, name=self._name, daemon=True, **kwargs)
+                self._thread.start()
+            self._cv.notify()
+
+    def _run(self) -> None:
+        while True:
+            with self._cv:
+                while not self._heap or self._heap[0][0] > time.monotonic():
+                    self._cv.wait(self._heap[0][0] - time.monotonic() if self._heap else None)
+                call = heapq.heappop(self._heap)[2]
+            fn, context = call.fn, call.context
+            if fn is not None and context is not None:
+                try:
+                    context.run(fn)
+                except Exception:
+                    sys.excepthook(*sys.exc_info())
+
+
+__all__ = ["DeferredCall", "DurableDaemonThreadPoolExecutor", "SharedDeferredCalls"]
