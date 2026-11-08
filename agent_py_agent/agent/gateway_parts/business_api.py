@@ -1136,7 +1136,7 @@ def _business_task_sender_binding(host, thread, context):
     store = host.conversation_store
     task = store.session_tasks.require(context.task_id)
     seen = set()
-    for _ in range(store.session_tasks.chain_depth(task) + 1):
+    while True:
         sender = store.threads.require(task.sender_thread_id)
         if (task.task_id in seen or task.target_thread_id != thread.thread_id
                 or context.owner_id != host.home_paths.owner_id or sender.owner_id != context.owner_id):
@@ -1146,10 +1146,9 @@ def _business_task_sender_binding(host, thread, context):
         if binding is not None or not task.origin_task_id:
             return binding
         parent = store.session_tasks.require(task.origin_task_id)
-        if (parent.sender_thread_id, parent.target_thread_id) != (task.sender_thread_id, task.target_thread_id):
+        if parent.target_thread_id != task.target_thread_id:
             thread = sender
         task = parent
-    raise HostAPIError('CAPABILITY_DENIED', 403)
 
 
 def _model_request_binding(host):
