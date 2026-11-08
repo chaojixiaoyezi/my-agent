@@ -4754,3 +4754,23 @@ agent_py_agent/
 ```
 
 关键文件说明：`sqlite_probe.py` 替代对活跃 SQLite 文件的裸 `open()`/`close()` 探针，防止释放同进程持有的 POSIX `fcntl` 记录锁引发 WAL 脑裂；`salvage.py` 与 `scripts/runtime_db_salvage.py` 提供 `runtime.db` 离线只读抢救重建能力；`bounded_directory.py` 为 Compact 与后台目录扫描提供有界枚举预算。
+
+## 2026-11-08 R6 保留扫描索引续扫、增量回合遥测、runtime.db 代际锁与自动抢救增量
+
+```text
+|-- agent_py_agent/agent/observability/task_rounds.py # 任务模型回合增量追加源与累计摘要水位管理
+|-- agent_py_agent/agent/runtime_db/recovery_guard.py # SQLite 物理连接代际锁守卫与跨进程静默恢复屏障
+|-- agent_py_agent/tests/test_r6_w1.py # 保留扫描引用针 O(depth) 索引与冷源预算断点续扫回归测试
+|-- agent_py_agent/tests/test_r6_w2.py # 子代理活跃与收口恢复候选索引分页选择回归测试
+|-- agent_py_agent/tests/test_r6_w3.py # 模型调用账本已关闭逻辑组标量压实回归测试
+|-- agent_py_agent/tests/test_r6_w4.py # 任务模型回合增量追加与 OwnerReadIndex 续点回归测试
+|-- agent_py_agent/tests/test_r6_w5.py # Compact 与回合收尾精确工具索引源传递回归测试
+|-- agent_py_agent/tests/test_r6_w6.py # SQLite 物理连接代际锁守卫与静默排他屏障回归测试
+|-- agent_py_agent/tests/test_r6_w7.py # runtime.db 启动期与在线损坏自动抢救及持久阶段发布回归测试
+|-- agent_py_agent/tests/test_r6_w8.py # JSONL 公共追加残尾封口与单次 EIO 传播继承回归测试
+|-- agent_py_agent/tests/test_r6o_w1_owner_maintenance_resume.py # Owner 维护周期跨 tick 游标续扫与跳过无状态任务根回归测试
+|-- agent_py_agent/tests/test_r6o_w2_background_late_startup_exit.py # 后台子进程启动轮询后非零退出尝试结算回归测试
+`-- agent_py_agent/tests/test_r6o_w3_consumer_renewal_nonblocking.py # 审批消费者租约非阻塞心跳续期回归测试
+```
+
+关键文件说明：`task_rounds.py` 将任务模型回合遥测从整份 JSON 重写改为增量追加源并维护固定摘要水位；`recovery_guard.py` 在物理 SQLite 连接完整生命周期内持有代际锁，配合 `salvage.py` 实现 `runtime.db` 启动期与在线损坏验证抢救。
