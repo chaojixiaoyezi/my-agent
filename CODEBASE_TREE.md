@@ -4734,3 +4734,14 @@ agent_py_agent/
 关键文件说明：`agent_py_agent/tests/test_background_result_identity.py`验证业务结果与宿主执行身份分离，关闭发布后冻结及未发表拒绝；合成测试不代表包验或真实服务。
 
 关键文件说明：`agent_py_agent/tests/test_background_reply_candidates.py`验证来源工具回执先按结构化形状筛候选，无候选不读取actor或触发来源认领，有候选保持原身份/目标/attempt与canonical操作门。
+
+## 2026-11-08 R5A/R5B 运行态驻留、热路径与 runtime.db 锁保留/抢救增量
+
+```text
+|-- agent_py_agent/agent/io/bounded_directory.py # 有界目录扫描原语（scandir 预算与游标截断）
+|-- agent_py_agent/agent/io/sqlite_probe.py # 锁保留 SQLite 只读探针（避免裸 open/close 释放进程级 POSIX fcntl 锁）
+|-- agent_py_agent/agent/runtime_db/salvage.py # runtime.db 离线只读抢救重建与回执校验服务
+`-- scripts/runtime_db_salvage.py # runtime.db 离线抢救 CLI 工具入口
+```
+
+关键文件说明：`sqlite_probe.py` 替代对活跃 SQLite 文件的裸 `open()`/`close()` 探针，防止释放同进程持有的 POSIX `fcntl` 记录锁引发 WAL 脑裂；`salvage.py` 与 `scripts/runtime_db_salvage.py` 提供 `runtime.db` 离线只读抢救重建能力；`bounded_directory.py` 为 Compact 与后台目录扫描提供有界枚举预算。
