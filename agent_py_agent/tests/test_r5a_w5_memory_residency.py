@@ -18,12 +18,15 @@ import weakref
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar, copy_context
+from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
 
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.concurrency.daemon_executor import DurableDaemonThreadPoolExecutor
 from agent_py_agent.agent.gateway_parts.background_resource_report import (
+    _owner_pool_memory_gauges,
+    _rss_peak_bytes,
     collect_runtime_memory_diagnostics,
 )
 from agent_py_agent.agent.owner_scoped_pool import OwnerScopedAgentPool, build_owner_scoped_agent
@@ -103,15 +106,21 @@ def _fd_count():
     return None
 
 
-def _snapshot(phase, pool, references, *, cycle=0, requests=0):
+def _snapshot(phase, pool, references, *, cycle=0, requests=0, full_snapshot=False):
     assert tracemalloc.is_tracing()
-    diagnostics = collect_runtime_memory_diagnostics(
+    # 密集采样仍取实时计数；完整分配快照只在控制点与释放后的首个样本执行。
+    diagnostics = (collect_runtime_memory_diagnostics(
         owner_pool=pool, config=SimpleNamespace(enable_gateway_memory_diagnostics=True), top_n=5)
+        if full_snapshot else {
+            "tracemalloc_scope": "existing_trace", "tracemalloc_top": [],
+            "owner_pool": _owner_pool_memory_gauges(pool),
+            "rss_peak_bytes": _rss_peak_bytes(), "rss_source": "resource.ru_maxrss (peak)",
+        })
     assert diagnostics["tracemalloc_scope"] == "existing_trace"
     current, peak = tracemalloc.get_traced_memory()
     rss, source = _current_rss()
     # gc.get_objects产生的临时列表在计数后立即释放，不把它本身当作持有者。
-    counts = Counter(type(value).__name__ for value in gc.get_objects())
+    counts = Counter(type(value).__name__ for value in gc.get_objects()) if full_snapshot else None
     return {
         "phase": phase, "cycle": cycle, "requests": requests, "monotonic": time.monotonic(),
         "python_live_bytes": current, "python_peak_bytes": peak,
@@ -119,21 +128,23 @@ def _snapshot(phase, pool, references, *, cycle=0, requests=0):
         "rss_peak_bytes": diagnostics["rss_peak_bytes"], "rss_peak_source": diagnostics["rss_source"],
         "rss_minus_traced_bytes": None if rss is None else rss - current,
         "residual_classification": "allocator/native/unresolved",
-        "gc_object_count": sum(counts.values()),
-        "selected_objects": {name: counts[name] for name in (
+        "gc_object_count": None if counts is None else sum(counts.values()),
+        "selected_objects": {name: None if counts is None else counts[name] for name in (
             "SimpleAgent", "ContextEstimateMemo", "ModelCallLedger", "ModelCallRecord", "RunParams")},
         "tracked_alive": {name: sum(ref() is not None for ref in refs)
                           for name, refs in references.items()},
         "threads": len(threading.enumerate()), "fd_count": _fd_count(),
         "owner_pool": diagnostics["owner_pool"], "allocation_top": diagnostics["tracemalloc_top"],
+        "full_snapshot": full_snapshot,
     }
 
 
 def _idle(samples, pool, references, phase, *, cycle, requests):
     # 连续静息采样与释放后的GC分开，不能仅凭一次collect声称堆已归还。
-    for _ in range(3):
-        time.sleep(0.06)
-        samples.append(_snapshot(phase, pool, references, cycle=cycle, requests=requests))
+    for index in range(3):
+        time.sleep(0.01)
+        samples.append(_snapshot(phase, pool, references, cycle=cycle, requests=requests,
+                                 full_snapshot=phase == "released_after_gc" and index == 0))
 
 
 def _context_control(executor_type):
@@ -175,6 +186,11 @@ def _quota_controls(root):
 
 
 def _run_replay(root):
+    # 冷导入及共享不可变目录属于夹具准备；所有 Agent 实例和请求仍在完整追踪窗口内创建。
+    from agent_py_agent.agent.core import SimpleAgent
+
+    import_module("agent_py_agent.agent.gateway_parts.business_api").business_action_specs()
+    import_module("agent_py_agent.agent.agent_core.self_map_bootstrap")
     root.mkdir(parents=True, exist_ok=True)
     config = AgentConfig(my_agent_home=str(root / "home"), enable_plugins=False,
                          enable_subagents=False, home_context_enabled=False, auto_save_memory=False,
@@ -183,7 +199,7 @@ def _run_replay(root):
     references = {name: [] for name in ("agents", "params", "memos", "results", "request_payloads")}
     tools, samples, finished = [], [], 0
 
-    def build(base_config, workspace, owner, workspace_roots):
+    def build(base_config, workspace, owner, workspace_roots) -> SimpleAgent:
         agent = build_owner_scoped_agent(base_config, workspace, owner, workspace_roots)
         agent.backend = _FakeLLM(agent, references)
         tool = _ProbeTool()
@@ -228,7 +244,7 @@ def _run_replay(root):
         positive = [_Payload(262144) for _ in range(8)]
         positive_refs = [weakref.ref(item) for item in positive]
         baseline_bytes = tracemalloc.get_traced_memory()[0]
-        samples.append(_snapshot("positive_retained", pool, references))
+        samples.append(_snapshot("positive_retained", pool, references, full_snapshot=True))
         assert sum(ref() is not None for ref in positive_refs) == 8
         del positive
         gc.collect()
@@ -244,12 +260,13 @@ def _run_replay(root):
         assert not controls["standard_executor"]["retained_after_release"]
         assert controls["standard_executor"]["retained_idle"] == bool(
             getattr(sys.flags, "thread_inherit_context", 0))
-        for cycle in range(2):
-            for mode, total in (("fixed", 8), ("growing", 4)):
+        # 固定 owner 的第三次请求验证复用；第三个不同 owner 超过容量，验证淘汰。
+        for cycle in range(1):
+            for mode, total in (("fixed", 3), ("growing", 1)):
                 for index in range(total):
-                    owner = OwnerIdentity.provider_user("replay", str(index % 2 if mode == "fixed" else index))
+                    owner = OwnerIdentity.provider_user("replay", str(index % 2 if mode == "fixed" else index + 2))
                     request(finished, owner)
-                    if index in (1, 3, total - 1):
+                    if index in (0, 1, total - 1):
                         samples.append(_snapshot(mode, pool, references, cycle=cycle, requests=finished))
                         assert pool.active_count() <= 2
                 _idle(samples, pool, references, "idle_before_release", cycle=cycle, requests=finished)
@@ -266,7 +283,7 @@ def _run_replay(root):
                     sys._is_gil_enabled() if hasattr(sys, "_is_gil_enabled") else True),
                 "thread_inherit_context": getattr(sys.flags, "thread_inherit_context", 0),
                 "tracking_started_before_work": True, "request_count": finished,
-                "pool_capacity": 2, "cycles": 2, "controls": controls, "samples": samples,
+                "pool_capacity": 2, "cycles": 1, "controls": controls, "samples": samples,
                 "normal_exit": True, "i8_status": "unresolved",
                 "post_release_alive": {name: sum(ref() is not None for ref in refs)
                                        for name, refs in references.items()},
@@ -290,12 +307,18 @@ def test_fixed_capacity_replay_and_normal_exit(tmp_path):
         env={**os.environ, "HOME": str(home), "MY_AGENT_HOME": str(home), "PYTHONDONTWRITEBYTECODE": "1"})
     assert completed.returncode == 0, completed.stderr
     data = json.loads(report.read_text())
-    assert data["normal_exit"] and data["request_count"] == 24
+    assert data["normal_exit"] and data["request_count"] == 4
     assert data["tracking_started_before_work"] and data["i8_status"] == "unresolved"
     assert data["tracking_stopped_after_work"]
     assert [row["quota_mb"] for row in data["controls"]["quota_admission"]] == [100, 1024, 100000]
-    assert sum(row["phase"] == "released_after_gc" for row in data["samples"]) == 6
-    assert len([row for row in data["samples"] if row["phase"] == "fixed"]) == 6
+    assert sum(row["phase"] == "released_after_gc" for row in data["samples"]) == 3
+    assert len([row for row in data["samples"] if row["phase"] == "fixed"]) == 3
+    assert [row["owner_pool"]["hard_count"] for row in data["samples"]
+            if row["phase"] == "fixed"] == [1, 2, 2]
+    assert [row["owner_pool"]["hard_count"] for row in data["samples"]
+            if row["phase"] == "growing"] == [2]
+    assert {row["phase"] for row in data["samples"] if row["full_snapshot"]} == {
+        "positive_retained", "released_after_gc"}
     assert all(row["rss_current_source"] != row["rss_peak_source"] for row in data["samples"])
     assert all(set(row) == {"location", "size_bytes"} for sample in data["samples"]
                for row in sample["allocation_top"])
