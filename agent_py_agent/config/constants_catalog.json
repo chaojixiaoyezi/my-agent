@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1406,
+  "count": 1407,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -8626,6 +8626,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "后台进程启动首秒保持50ms观察；之后由退避函数降低空闲唤醒，仍不提前回收组长。"
+    },
+    {
+      "name": "_HOST_STEADY_POLL_SECONDS",
+      "file": "agent_py_agent/agent/tooling/background_process_host.py",
+      "value": 1.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "托管进程运行满一分钟后的常态观察间隔（秒）：长驻服务的 host 不再每秒4次读记录；停止由清理方直接终止，不依赖此间隔。"
     },
     {
       "name": "BACKGROUND_START_SETTLE_SECONDS",
