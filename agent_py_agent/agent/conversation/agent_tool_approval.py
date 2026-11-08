@@ -783,14 +783,19 @@ def renew_agent_tool_approval_consumer(
             return target
     except FileNotFoundError:
         pass
-    write_json_file_atomic(
-        target,
-        {
-            "schema_version": AGENT_TOOL_APPROVAL_CONSUMER_SCHEMA,
-            "root_task_id": root,
-            "seen_at": seen,
-        },
-    )
+    # 续租是尽力心跳：同一root已有请求持锁续写时直接返回，不让每个通知读请求在同一把文件锁上排队重写（HTTP池拥塞）。
+    try:
+        write_json_file_atomic(
+            target,
+            {
+                "schema_version": AGENT_TOOL_APPROVAL_CONSUMER_SCHEMA,
+                "root_task_id": root,
+                "seen_at": seen,
+            },
+            blocking=False,
+        )
+    except BlockingIOError:
+        pass
     return target
 
 
