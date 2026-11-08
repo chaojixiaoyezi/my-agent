@@ -41,6 +41,16 @@ _HARD_BACKGROUND_VIEW_ERRORS = frozenset({"PERMISSION_DENIED", "OWNER_MISMATCH"}
 _BG_WATCH_PERMISSION_ERRNOS = frozenset({errno.EACCES, errno.EPERM})
 
 
+# LLM: 完全空闲退避封顶取配置 tui_idle_poll_max_seconds，不低于原失败退避上限；无配置的替身沿用原上限。
+# 函数用途: 返回本 TUI 完全空闲时轮询/对账的最长等待秒数。
+def _idle_poll_cap(agent: object) -> float:
+    try:
+        configured = float(getattr(getattr(agent, "config", None), "tui_idle_poll_max_seconds", 0) or 0)
+    except (TypeError, ValueError):
+        configured = 0.0
+    return max(TUI_BACKGROUND_NOTICE_FAILURE_MAX_SECONDS, configured)
+
+
 # LLM: 本轮报告只携原解析器的事实及易失上下文，不构造第二线程权威或执行权限；外层始终返回bool。
 # 类用途: 分别记录通知快照是否成功、绑定可信度和机器可判定的失败原因。
 @dataclass
@@ -472,7 +482,9 @@ def _run_background_notice_loop(
             pinned = foreground_running or (callable(activity_reader) and bool(activity_reader())) or bool(
                 getattr(navigation_view, "background_watch_active", False))
             unchanged = _capture_background_poll_state(tui_runtime, event_cursor) == before
-            idle_backoff = (min(TUI_BACKGROUND_NOTICE_FAILURE_MAX_SECONDS, idle_backoff * 2) if idle_backoff else delay / 2
+            # 仍有后台进程时沿原失败退避上限；完全空闲才放宽到配置上限，任何变化仍立即复位。
+            cap = TUI_BACKGROUND_NOTICE_FAILURE_MAX_SECONDS if background_active else _idle_poll_cap(agent)
+            idle_backoff = (min(cap, idle_backoff * 2) if idle_backoff else delay / 2
                             ) if unchanged and not pinned else 0.0
             delay = max(delay, idle_backoff)
             failure_delay = TUI_BACKGROUND_NOTICE_FAILURE_INITIAL_SECONDS
