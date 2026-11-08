@@ -26,6 +26,7 @@ from agent_py_agent.agent.memory_archive.runtime_fact_source import (
     write_approved_runtime_fact_source,
     write_runtime_fact_source,
 )
+from agent_py_agent.agent.memory_store.retention_models import MemoryRetentionPolicy
 from agent_py_agent.agent.user_space import storage_lanes
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 from agent_py_agent.agent.user_space.storage_lanes import (
@@ -112,10 +113,12 @@ def test_legal_hold_and_override_keep_facts(home):
     fill_locator(home)
     assert retention.maintain_owner_tool_outputs_lane(request(home, hold=True))['deferred_reason'] == 'legal_hold'
     assert target.exists()
-    Path(home.owner_retention_json).write_text(json.dumps({'tool_output_days': 365}))
+    # 保留完整策略合同，只覆写原通道天数；缺少 schema 应继续被引用核验拒绝。
+    policy = {**MemoryRetentionPolicy().to_dict(), 'tool_output_days': 365}
+    Path(home.owner_retention_json).write_text(json.dumps(policy))
     drain(home)
     assert target.exists()
-    Path(home.owner_retention_json).write_text(json.dumps({'tool_output_days': 100}))
+    Path(home.owner_retention_json).write_text(json.dumps({**policy, 'tool_output_days': 100}))
     drain(home)
     assert not target.exists()
 
@@ -263,6 +266,87 @@ def test_saved_cursor_progresses_after_production_size_prefix_seek(home, monkeyp
         assert visited[0] >= prefix_count
         assert any(row['items'] > 0 or row['cursor'].get('facts_after') != anchor for row in receipts)
         assert not target.exists() and any(row['complete'] for row in receipts)
+
+
+def test_real_saved_cursor_progresses_when_seek_exhausts_time(home, monkeypatch):
+    prefix = [fact(home, f'kept-{index:02d}', phase='approved', age_days=40) for index in range(16)]
+    target = fact(home, 'expired-tail', age_days=40)
+    fill_locator(home)
+    identity, scan = target.parent.stat().st_ino, os.scandir
+    names, visited, clock = {path.name for path in prefix}, [], [100.0]
+
+    @contextmanager
+    def ordered_scan(path):
+        with scan(path) as entries:
+            if isinstance(path, int) and os.fstat(path).st_ino == identity:
+                ordered = sorted(entries, key=lambda entry: (entry.name not in names, entry.name))
+
+                def stream():
+                    for entry in ordered:
+                        if entry.name in names:
+                            clock[0] += 0.002
+                            visited.append(entry.name)
+                        yield entry
+
+                yield stream()
+            else:
+                yield entries
+
+    observed_os = SimpleNamespace(**{name: getattr(os, name) for name in dir(os)})
+    observed_os.scandir = ordered_scan
+    monkeypatch.setattr(retention, 'os', observed_os)
+    monkeypatch.setattr(storage_lanes, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    cursor = {'facts_after': prefix[-1].name, 'next_pass_at': time.time() + 3600}
+    lane = storage_lanes.resolve_storage_lane('tool_outputs')
+    receipts = []
+    for _ in range(4):
+        result = lane(request(home, cursor=cursor))
+        validate_lane_receipt(result)
+        receipts.append(result)
+        cursor = json.loads(json.dumps(result['cursor']))
+        if result['complete']:
+            break
+    assert visited[:len(prefix)] == [path.name for path in prefix]
+    assert receipts[0]['items'] >= 1 and receipts[0].get('deleted_items') == 1
+    assert all(row['items'] <= STORAGE_LANE_SLICE_ENTRIES for row in receipts)
+    assert receipts[-1]['complete'] and not target.exists() and all(path.exists() for path in prefix)
+    assert sum(row.get('deleted_items', 0) for row in receipts) == 1
+
+
+@pytest.mark.parametrize('expires', ['entry', 'capped'])
+def test_expired_slice_entry_preserves_cursor_and_never_commits(home, monkeypatch, expires):
+    target = fact(home, 'entry-budget', age_days=40)
+    fill_locator(home)
+    clock, commits = [100.0], []
+
+    def monotonic():
+        instant = clock[0]
+        clock[0] += 0.1
+        return instant
+
+    def commit(operation):
+        commits.append(True)
+        return operation()
+
+    monkeypatch.setattr(storage_lanes, 'time', SimpleNamespace(monotonic=monotonic))
+    cursor = {'facts_after': '', 'next_pass_at': time.time() + 3600}
+    # capped 分支在入场时仍有额度，但创建封顶预算后时钟已越过截止时间。
+    req = replace(request(home, cursor=cursor, commit=commit), budget=StorageLaneBudget(
+        STORAGE_LANE_SLICE_ENTRIES, None, 99.0 if expires == 'entry' else 100.05))
+    result = storage_lanes.resolve_storage_lane('tool_outputs')(req)
+    validate_lane_receipt(result)
+    assert result['items'] == 0 and result['complete'] is False
+    assert result['cursor'] == cursor and commits == [] and target.exists()
+
+
+def test_missing_saved_fact_anchor_restarts_and_converges(home):
+    target = fact(home, 'missing-anchor-tail', age_days=40)
+    fill_locator(home)
+    rows = drain(home, cursor={'facts_after': 'removed-anchor', 'next_pass_at': time.time() + 3600})
+    assert rows[0]['items'] == 0 and rows[0]['complete'] is False
+    assert rows[0]['cursor']['facts_after'] == ''
+    assert rows[-1]['complete'] and not target.exists()
+    assert sum(row.get('deleted_items', 0) for row in rows) == 1
 
 
 @contextmanager
