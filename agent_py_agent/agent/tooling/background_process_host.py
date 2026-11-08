@@ -38,11 +38,15 @@ from .process_session_store import ProcessSessionStore
 
 # 后台进程启动首秒保持50ms观察；之后由退避函数降低空闲唤醒，仍不提前回收组长。
 _HOST_POLL_SECONDS = 0.05
+# 托管进程运行满一分钟后的常态观察间隔（秒）：长驻服务的 host 不再每秒4次读记录；停止由清理方直接终止，不依赖此间隔。
+_HOST_STEADY_POLL_SECONDS = 1.0
 
 
 # LLM: 只决定本host的睡眠间隔，不调用poll/wait，不影响出生身份、原记录投影与终止顺序。
-# 函数用途: 首秒50ms、十秒内150ms、长期250ms观察一次，保留短命令灵敏度。
+# 函数用途: 首秒50ms、十秒内150ms、一分钟内250ms，之后按常态间隔观察，保留短命令灵敏度。
 def _monitor_poll_interval(elapsed_s: float) -> float:
+    if elapsed_s >= 60.0:
+        return _HOST_STEADY_POLL_SECONDS
     return _HOST_POLL_SECONDS if elapsed_s < 1.0 else 0.15 if elapsed_s < 10.0 else 0.25
 
 
