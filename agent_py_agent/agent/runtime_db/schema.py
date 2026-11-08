@@ -20,7 +20,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 import sqlite3
 from collections.abc import Callable, Iterator
@@ -29,11 +31,89 @@ from pathlib import Path
 from types import EllipsisType
 
 from ..contracts.optimization_contracts import require_schema_generation
+from ..io.sqlite_connection import TrackedSQLiteConnection, sqlite_error_details
 from ..io.sqlite_schema import schema_fingerprint, schema_is_current, stamp_schema
 from ..io.sqlite_scope import scoped_connection, sqlite_connection_factory
 from .maintenance import execute_runtime_statement
+from .recovery_guard import (
+    RuntimeDatabaseDeferred,
+    close_runtime_connection,
+    guarded_runtime_connect,
+    mark_runtime_connection_idle,
+    runtime_db_exclusive_owned,
+    runtime_db_recovery_pending,
+)
 
 logger = logging.getLogger(__name__)
+
+SALVAGE_REQUEST_SUFFIX = ".salvage-request"
+CORRUPTION_RESULT_CODES = (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB)
+
+
+def runtime_db_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        info = os.lstat(path)
+        return info.st_dev, info.st_ino
+    except FileNotFoundError:
+        return None
+
+
+def runtime_db_corruption_details(error: BaseException) -> dict[str, object]:
+    details = sqlite_error_details(error)
+    if details.get("sqlite_primary_code") in CORRUPTION_RESULT_CODES:
+        return details
+    cleanup = details.get("cleanup_error", {})
+    return cleanup if cleanup.get("sqlite_primary_code") in CORRUPTION_RESULT_CODES else {}
+
+
+def note_runtime_db_corruption(db_path: Path, error: BaseException, *, expected_identity=None) -> None:
+    """数值主码触发请求；落盘失败只附诊断，不能掩盖最早的业务/清理异常。"""
+    details = runtime_db_corruption_details(error)
+    if not details:
+        return
+    from ..common import json_io
+    from ..common.nofollow_fs import read_bytes_beneath
+
+    marker = Path(f"{db_path}{SALVAGE_REQUEST_SUFFIX}")
+    try:
+        identity = expected_identity or runtime_db_identity(db_path)
+        with json_io.locked_json_path(Path(f"{db_path}.recovery-state"), blocking=False):
+            if marker.exists():
+                raw = read_bytes_beneath(marker.parent, (marker.name,))
+                previous = json.loads(raw) if raw and raw.strip() else {}
+                if not isinstance(previous, dict):
+                    raise ValueError("runtime_db_salvage_marker_invalid")
+                if previous.get("identity") == list(identity or ()):
+                    return
+            json_io.write_private_json_file_atomic_unlocked(marker, {
+                "schema": "runtime_db_salvage.v1", "phase": "requested",
+                "identity": list(identity or ()), "error": details,
+            })
+    except (OSError, ValueError) as failure:
+        error.sqlite_recovery_error = failure
+
+
+class _RuntimeReadError(Exception):
+    """只在借用内部运输原异常，防通用 scope 把只读探针升级为恢复写者。"""
+    def __init__(self, error):
+        self.error = error
+
+
+class _RuntimeReadConnection(TrackedSQLiteConnection):
+    def record_lease_error(self, error):
+        self._ensure_cursor_tracking()
+        if self._lease_error is None:
+            self._lease_error = error
+
+
+def _close_runtime_after_error(conn, original=None):
+    mark_runtime_connection_idle(conn, True)
+    try:
+        close_runtime_connection(conn)
+    except BaseException as cleanup:
+        if original is None:
+            raise
+        original.sqlite_cleanup_error = cleanup
 
 #: 每个 owner 的权威库文件名，位于 owner home 根（A.1 唯一 runtime.db）。
 RUNTIME_DB_FILENAME = "runtime.db"
@@ -645,6 +725,35 @@ class _RuntimeFenceCursor:
 class RuntimeSchemaMixin:
     """连接与建表。模式对齐 local_storage.schema（WAL+外键+busy_timeout）。"""
 
+    def _heal_runtime_db_before_open(self) -> None:
+        if (self.read_only or self.existing_only or runtime_db_exclusive_owned(self.db_path)
+                or not (os.path.lexists(f"{self.db_path}{SALVAGE_REQUEST_SUFFIX}")
+                        or runtime_db_recovery_pending(self.db_path))):
+            return
+        from .salvage import recover_runtime_database
+
+        report = recover_runtime_database(self.db_path, expected_identity=runtime_db_identity(self.db_path))
+        if report["status"] not in {"healthy", "recovered", "already_recovered", "superseded"}:
+            error = RuntimeDatabaseDeferred(str(report.get("reason", report["status"])))
+            error.runtime_db_recovery = report
+            raise error
+
+    def _observe_runtime_db_error(self, error: BaseException, identity) -> None:
+        details = runtime_db_corruption_details(error)
+        if not details:
+            return
+        report = {"status": "requires_recovery", "path": str(self.db_path),
+                  "identity": identity, "error": details}
+        if not self.read_only and not self.existing_only and not runtime_db_exclusive_owned(self.db_path):
+            from .salvage import recover_runtime_database
+
+            note_runtime_db_corruption(self.db_path, error, expected_identity=identity)
+            try:
+                report = recover_runtime_database(self.db_path, expected_identity=identity)
+            except Exception as failure:
+                report.update(reason="recovery_failed", recovery_error=type(failure).__name__)
+        error.runtime_db_recovery = report
+
     # LLM: 先读持久摘要，未命中时用写事务再次核对；迁移和盖章同提交，不引入进程内 owner 缓存。
     # 函数用途: 新库或旧副本才建表迁移，正常重复构造只查询一次结构摘要。
     def _init_runtime_schema(self) -> None:
@@ -716,7 +825,13 @@ class RuntimeSchemaMixin:
         mode = "ro" if read_only else "rw"
         address = self.db_path.resolve().as_uri() + "?mode=" + mode if read_only or existing_only else str(self.db_path)
         timeout = 0.0 if existing_only else 30.0
-        conn = sqlite3.connect(address, timeout=timeout, uri=read_only or existing_only, factory=sqlite_connection_factory())
+        factory = sqlite_connection_factory()
+        if (read_only or existing_only) and factory is TrackedSQLiteConnection:
+            factory = _RuntimeReadConnection
+        conn = guarded_runtime_connect(
+            self.db_path,
+            lambda: sqlite3.connect(address, timeout=timeout, uri=read_only or existing_only, factory=factory),
+        )
         conn.row_factory = sqlite3.Row
         if not read_only:
             try:
@@ -727,16 +842,20 @@ class RuntimeSchemaMixin:
                     if not present and self._install_runtime_schema(conn):
                         logger.warning("SQLITE_SCHEMA_REINSTALLED store=runtime_db path=%s", self.db_path)
                     require_runtime_schema_generation(conn, metadata_present=True)
-            except BaseException:
-                conn.close()
+            except BaseException as error:
+                _close_runtime_after_error(conn, error)
                 raise
-        conn.execute("PRAGMA busy_timeout=" + ("0" if existing_only else "30000"))
-        if not read_only and not existing_only:
-            try:
-                conn.execute("PRAGMA journal_mode=WAL")
-            except sqlite3.OperationalError:
-                pass
-        conn.execute("PRAGMA foreign_keys=ON")
+        try:
+            conn.execute("PRAGMA busy_timeout=" + ("0" if existing_only else "30000"))
+            if not read_only and not existing_only:
+                try:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                except sqlite3.OperationalError:
+                    pass
+            conn.execute("PRAGMA foreign_keys=ON")
+        except BaseException as error:
+            _close_runtime_after_error(conn, error)
+            raise
         return conn
 
     # LLM: 原F1只按path/read_only缓存；新增C existing_only须独立短连接，不能继承或污染原30秒rw预算。
@@ -744,14 +863,45 @@ class RuntimeSchemaMixin:
     # 函数用途: 借用原库连接，C现存库写入结束即关闭，正常请求仍用原F1作用域。
     @contextmanager
     def _runtime_connection(self) -> Iterator[sqlite3.Connection]:
+        self._heal_runtime_db_before_open()
+        identity = runtime_db_identity(self.db_path)
+        try:
+            with self._runtime_connection_scope() as conn:
+                yield conn
+        except BaseException as error:
+            self._observe_runtime_db_error(error, identity)
+            raise
+
+    @contextmanager
+    def _runtime_connection_scope(self) -> Iterator[sqlite3.Connection]:
         if getattr(self, "existing_only", False):
             conn = self._runtime_connect()
+            original = None
             try:
                 yield conn if getattr(self, 'read_only', False) else RuntimeWriteFence(conn)
+            except BaseException as error:
+                original = error
+                raise
             finally:
-                conn.close()
+                _close_runtime_after_error(conn, original)
             return
-        with scoped_connection(self.db_path, getattr(self, "read_only", False), self._runtime_connect) as conn:
-            if not getattr(self, 'read_only', False):
-                require_runtime_schema_generation(conn)
-            yield conn if getattr(self, 'read_only', False) else RuntimeWriteFence(conn)
+        def connect():
+            try:
+                return self._runtime_connect()
+            except sqlite3.Error as error:
+                if self.read_only:
+                    raise _RuntimeReadError(error) from None
+                raise
+
+        try:
+            with scoped_connection(self.db_path, self.read_only, connect) as conn:
+                try:
+                    if not self.read_only:
+                        require_runtime_schema_generation(conn)
+                    yield conn if self.read_only else RuntimeWriteFence(conn)
+                except sqlite3.Error as error:
+                    if self.read_only:
+                        raise _RuntimeReadError(error) from None
+                    raise
+        except _RuntimeReadError as carrier:
+            raise carrier.error from None

@@ -14,6 +14,7 @@ from ..io.sqlite_scope import (
     _discard_entry,
     _scope_owned,
 )
+from .recovery_guard import retire_idle_runtime_connections, runtime_db_recovery_pending
 
 
 # LLM: 仅扩展原连接表的激活计数，不另建连接池；计数不放Context，避免临时遮蔽或复制Context误判嵌套。
@@ -40,6 +41,9 @@ def _commit_planner_connections(scope: _ConnectionScope) -> None:
         return
     first_error = None
     for key, entry in tuple(scope.entries.items()):
+        if runtime_db_recovery_pending(key[2]):
+            retire_idle_runtime_connections(key[2])
+            continue
         if entry.in_use:
             continue
         try:
@@ -57,6 +61,10 @@ def _commit_planner_connections(scope: _ConnectionScope) -> None:
 def activate_sqlite_scope(scope: _PersistentConnectionScope | None) -> Iterator[None]:
     if scope is not None and not _scope_owned(scope):
         raise RuntimeError("persistent SQLite scope is closed or belongs to another thread/process")
+    if scope is not None:
+        for key in tuple(scope.entries):
+            if runtime_db_recovery_pending(key[2]):
+                retire_idle_runtime_connections(key[2])
     if scope is not None:
         scope._activation_depth += 1
     token = _SQLITE_ACTIVE_SCOPE.set(scope)

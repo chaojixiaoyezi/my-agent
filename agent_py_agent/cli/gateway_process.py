@@ -1390,9 +1390,34 @@ def cmd_gateway_run(args) -> int:
                 print("[gateway-run] retired multiprocess generation(s) "
                       + ", ".join(row["c_run_id"] for row in retired["generations"]), file=sys.stderr)
             require_standalone_sources(paths, lifecycle)
+            _heal_runtime_db_before_agent(args)
             return _run_standalone_gateway(args, lifecycle)
     except StandaloneLifecycleUnavailable as exc:
         return coordinated_refusal(exc.error_code, reason=str(exc))
+
+
+def _heal_runtime_db_before_agent(args) -> None:
+    """单例生命周期锁内、构建 Agent 前处理当前 owner 标记；健康路径不打开数据库。"""
+    import sqlite3
+
+    from ..agent.runtime_db.salvage import heal_runtime_db_at_startup
+    from ..agent.runtime_db.schema import runtime_db_path
+    from ..agent.user_space.home_layout import home_paths
+    from ..agent.user_space.home_root import configured_home_root
+    from ..agent.user_space.owner_resolver import owner_identity_from_config, resolve_owner_home
+    from .common import apply_runtime_config_environment, load_config
+
+    frozen = getattr(args, "_gateway_frozen_config", None)
+    config = frozen if frozen is not None else apply_runtime_config_environment(load_config(args.config))
+    owner = resolve_owner_home(home_paths(configured_home_root(config)).root, owner_identity_from_config(config))
+    try:
+        receipt = heal_runtime_db_at_startup(runtime_db_path(owner.home_dir))
+    except (OSError, sqlite3.Error) as error:
+        print(f"[gateway-run] runtime_db_salvage_deferred error={type(error).__name__}: {error}", file=sys.stderr)
+        return
+    if receipt is not None:
+        print(f"[gateway-run] runtime_db_salvaged events_copied={receipt.events_copied} "
+              f"events_error={receipt.events_error or '-'}", file=sys.stderr)
 
 
 # LLM: 入口先调进程级GIL间隔；正常停止末端同锁记录stop-v1，不自证physicalquiet，旧宿主死亡由后继fresh核。

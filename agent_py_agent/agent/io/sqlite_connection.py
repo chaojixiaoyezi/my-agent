@@ -20,6 +20,10 @@ def sqlite_error_details(error: BaseException, *, include_cleanup: bool = True) 
                    "sqlite_primary_code": primary, "sqlite_errorname": name if isinstance(name, str) else None,
                    "category": category}
     cleanup = getattr(error, "sqlite_cleanup_error", None) if include_cleanup else None
+    from ..runtime_db.recovery_guard import RuntimeDatabaseDeferred
+
+    if isinstance(error, RuntimeDatabaseDeferred):
+        details.update(status=error.status, error_code=error.code, reason=error.reason)
     if isinstance(cleanup, sqlite3.Error) and cleanup is not error:
         secondary = sqlite_error_details(cleanup, include_cleanup=False)
         details.setdefault("exception_type", type(error).__name__)
@@ -84,6 +88,19 @@ class TrackedSQLiteConnection(sqlite3.Connection):
         self._ensure_cursor_tracking()
         if self._lease_error is None:
             self._lease_error = error
+        if sqlite_error_details(error).get("category") == "structural":
+            from ..runtime_db.recovery_guard import record_runtime_corruption
+
+            try:
+                record_runtime_corruption(self)
+            except Exception as recovery_error:
+                object.__setattr__(error, "sqlite_recovery_error", recovery_error)
+
+    def close(self) -> None:
+        from ..runtime_db.recovery_guard import release_closed_runtime_connection
+
+        super().close()
+        release_closed_runtime_connection(self)
 
     # LLM: 即使调用方提供游标工厂也纳入跟踪；游标仍由 SQLite 执行，不改变 SQL 或参数。
     # 函数用途: 创建并登记一条可能占用读锁的语句。

@@ -1,15 +1,67 @@
-"""SQLite 探针只查路径元数据，由 SQLite 自己管理文件描述符和进程锁。"""
+"""普通探针只查元数据；换库只在连接已关闭的边界核对 SQLite 排他锁。"""
 from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from ..path_access_policy import SQLITE_SIDECAR_SUFFIXES
 
+# SQLite unix VFS 的固定文件格式边界，不是等待或容量参数。
+_SQLITE_SHARED_FIRST, _SQLITE_SHARED_SIZE = 0x40000000 + 2, 510
+
+
+def _require_no_local_database_handles(db: Path) -> None:
+    if os.name == "nt":
+        return  # Windows replace 自身拒绝仍打开的 SQLite 文件。
+    expected = os.lstat(db)
+    # 不打开原库：关闭任一同 inode 的新 FD 会破坏本进程已有 SQLite record lock。
+    with os.scandir("/dev/fd") as entries:
+        for entry in entries:
+            try:
+                info = os.fstat(int(entry.name))
+            except (OSError, ValueError):
+                continue
+            if (info.st_dev, info.st_ino) == (expected.st_dev, expected.st_ino):
+                raise BlockingIOError("runtime_db_local_reader_attached")
+
+
+@contextmanager
+def sqlite_connections_locked_out(db: Path) -> Iterator[None]:
+    """本进程连接已排空后检查非托管执行体；持锁期间不能再开关 SQLite/原库 FD。
+
+    POSIX record lock 随本进程任一同 inode FD 关闭而释放，因此此门只包最后的
+    sidecar 摘除与 replace，不包校验/复制。Windows 由原 EX 门和 replace 拒绝打开文件。
+    """
+    _require_no_local_database_handles(db)
+    descriptor = os.open(db, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened, current = os.fstat(descriptor), os.lstat(db)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)):
+            raise BlockingIOError("SQLite 文件身份已变化")
+        if os.name != "nt":
+            import fcntl
+
+            fcntl.lockf(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB,
+                        _SQLITE_SHARED_SIZE, _SQLITE_SHARED_FIRST)
+        yield
+    finally:
+        os.close(descriptor)
+
 
 def sqlite_readonly_probe_uri(db: Path) -> str:
     """保留 SQLite 的锁与 WAL 语义，不用 immutable 绕过并发写者。"""
+    from ..runtime_db.recovery_guard import (
+        RuntimeDatabaseDeferred,
+        runtime_db_exclusive_owned,
+        runtime_db_recovery_pending,
+    )
+
+    if runtime_db_recovery_pending(db) and not runtime_db_exclusive_owned(db):
+        raise RuntimeDatabaseDeferred("recovery_pending")
     return Path(db).absolute().as_uri() + "?mode=ro"
 
 

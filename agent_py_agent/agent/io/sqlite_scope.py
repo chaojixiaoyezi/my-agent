@@ -12,6 +12,16 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..runtime_db.recovery_guard import (
+    RuntimeDatabaseDeferred,
+    close_runtime_connection,
+    guarded_runtime_connect,
+    mark_runtime_connection_idle,
+    request_runtime_db_recovery,
+    retire_idle_runtime_connections,
+    runtime_db_exclusive_owned,
+    runtime_db_recovery_pending,
+)
 from .sqlite_connection import TrackedSQLiteConnection, sqlite_error_details
 from .sqlite_lease import SQLiteConnectionLease
 
@@ -71,7 +81,7 @@ def _file_identity(path: Path) -> tuple[int, int] | None:
 # 函数用途: 安全尝试关闭已退役的连接。
 def _close_connection(conn: sqlite3.Connection) -> None:
     try:
-        conn.close()
+        close_runtime_connection(conn)
     except Exception:  # noqa: BLE001 清理失败不得阻止其它连接回收
         pass
 
@@ -90,6 +100,7 @@ def _cleanup_preserving_error(cleanup: Callable[[], None], original: BaseExcepti
 # 函数用途: 退役一个失效或清理失败的缓存连接。
 def _discard_entry(scope: _ConnectionScope, key: tuple[int, int, Path, bool]) -> None:
     entry = scope.entries.pop(key)
+    mark_runtime_connection_idle(entry.conn, True)
     _close_connection(entry.conn)
 
 
@@ -109,6 +120,7 @@ def _acquire_entry(scope: _ConnectionScope, key: tuple[int, int, Path, bool], co
         return None
     if entry is not None and _file_identity(key[2]) == entry.file_identity:
         entry.in_use = True
+        mark_runtime_connection_idle(entry.conn, False)
         return entry
     if entry is not None:
         _discard_entry(scope, key)
@@ -123,6 +135,8 @@ def _acquire_entry(scope: _ConnectionScope, key: tuple[int, int, Path, bool], co
         return None
     entry = _ConnectionEntry(conn, after)
     scope.entries[key] = entry
+    mark_runtime_connection_idle(conn, False,
+        lambda: scope.entries.pop(key, None) if scope.entries.get(key) is entry else None)
     return entry
 
 
@@ -146,10 +160,11 @@ def _release_entry(scope: _ConnectionScope, key: tuple[int, int, Path, bool], en
             _discard_entry(scope, key)
             return
         entry.conn.close_lease_cursors()
-        if _file_identity(key[2]) != entry.file_identity:
+        if _file_identity(key[2]) != entry.file_identity or runtime_db_recovery_pending(key[2]):
             _discard_entry(scope, key)
             return
         entry.in_use = False
+        mark_runtime_connection_idle(entry.conn, True)
     except Exception as cleanup_error:  # noqa: BLE001 退役坏连接，不覆盖原业务结果
         if sqlite_error_details(cleanup_error).get("category") == "structural":
             if error is not None:
@@ -176,7 +191,8 @@ def _close_scope(scope: _ConnectionScope) -> None:
     first_error = None
     for conn in connections:
         try:
-            conn.close()
+            mark_runtime_connection_idle(conn, True)
+            close_runtime_connection(conn)
         except BaseException as exc:
             first_error = exc if first_error is None else first_error
     if first_error is not None:
@@ -217,7 +233,8 @@ def _short_connection(connect: Callable[[], sqlite3.Connection]) -> Iterator[sql
     try:
         yield conn
     finally:
-        conn.close()
+        mark_runtime_connection_idle(conn, True)
+        close_runtime_connection(conn)
 
 
 # LLM: 租期在归还前失效，行工厂仅原创建者恢复；失效清理不覆盖业务异常，不执行SQL。
@@ -241,7 +258,8 @@ def _release_uncached_connection(scope: _ConnectionScope, conn: sqlite3.Connecti
     if not _scope_owned(scope):
         return
     if scope.uncached.pop(id(conn), None) is not None:
-        conn.close()
+        mark_runtime_connection_idle(conn, True)
+        close_runtime_connection(conn)
 
 
 # LLM: 嵌套/溢出不是缓存但仍归创建者scope管理；交租期前登记强引用，异地只失效访问层，关闭中断不覆盖原异常。
@@ -285,11 +303,29 @@ def _scope_connection(scope: _ConnectionScope, key: tuple[int, int, Path, bool],
 # 函数用途: 为数据库操作选择请求级缓存或旧短连接寿命。
 @contextmanager
 def scoped_connection(path: Path, read_only: bool, connect: Callable[[], sqlite3.Connection]) -> Iterator[sqlite3.Connection]:
-    scope = _SQLITE_ACTIVE_SCOPE.get()
-    if scope is not None and _scope_owned(scope):
-        key = scope.pid, scope.thread_id, Path(os.path.abspath(path)), read_only
-        with _scope_connection(scope, key, connect) as conn:
+    if runtime_db_recovery_pending(path) and not runtime_db_exclusive_owned(path):
+        retire_idle_runtime_connections(path)
+        raise RuntimeDatabaseDeferred("recovery_pending")
+    factory = connect
+
+    def connect():
+        return guarded_runtime_connect(path, factory)
+    try:
+        scope = _SQLITE_ACTIVE_SCOPE.get()
+        if scope is not None and _scope_owned(scope):
+            key = scope.pid, scope.thread_id, Path(os.path.abspath(path)), read_only
+            with _scope_connection(scope, key, connect) as conn:
+                yield conn
+            return
+        with _short_connection(connect) as conn:
             yield conn
-        return
-    with _short_connection(connect) as conn:
-        yield conn
+    except BaseException as error:
+        if sqlite_error_details(error).get("category") == "structural":
+            _cleanup_preserving_error(lambda: request_runtime_db_recovery(path), error)
+        raise
+
+
+def retire_scoped_database(path: Path) -> bool:
+    """发布恢复意图并退役本线程闲置连接；返回值不能代替跨进程 EX 证明。"""
+    request_runtime_db_recovery(path)
+    return retire_idle_runtime_connections(path)
