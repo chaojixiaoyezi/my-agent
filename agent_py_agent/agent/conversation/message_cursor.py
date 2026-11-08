@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -19,6 +21,20 @@ _MESSAGE_CURSOR_CACHE_MAX_COUNT = 32768
 _MESSAGE_CURSOR_FILTER_BYTES = 8 * 1024
 _EMPTY_SEEN_FILTER = bytes(_MESSAGE_CURSOR_FILTER_BYTES)
 _MESSAGE_CURSORS = CursorCache(_MESSAGE_CURSOR_CACHE_MAX_COUNT)
+# 一次有界多页读取（Curator 单线程至多 16 页）内本进程刚逐行读过的热文件位置；作用域结束即丢弃，不进全局缓存。
+_PASS_POSITIONS: ContextVar[dict | None] = ContextVar("message_cursor_pass_positions", default=None)
+
+
+# LLM: 只给同一次多页读取开短命提示：热文件位置仍须同 inode、只增长或指纹完全相同并逐字节复核锚行，
+#   作用域外与跨轮次照旧冷扫；粗时间窗口只放宽到本次调用自己刚读过的前缀，不保存跨调用 offset。
+# 函数用途: 让续页按上一页末条消息 ID 定位时复用本次读取位置，不再每页从 byte 0 重扫热 transcript。
+@contextmanager
+def pass_position_scope():
+    token = _PASS_POSITIONS.set({})
+    try:
+        yield
+    finally:
+        _PASS_POSITIONS.reset(token)
 
 
 # LLM: 空位图共享唯一不可变bytes；非空位图冻结一次后可在同次位置/空尾投影间共享，不改变Bloom语义。
@@ -92,6 +108,8 @@ def _note_row(seen: bytearray, row: object) -> str | None:
 def _remember(path: Path, target: str, cursor: MessageCursor) -> None:
     if len(target) <= 256 and cache_entry_trustworthy(cursor.stamp.mtime_ns):
         _MESSAGE_CURSORS.put(cursor_key(path, target), cursor)
+    elif len(target) <= 256 and (scoped := _PASS_POSITIONS.get()) is not None:
+        scoped[cursor_key(path, target)] = cursor
 
 
 # LLM: byte_offset_after及after_report共用本入口；缓存缺失/替换/截断/改写时沿唯一完整扫描，不另留旧分支。
@@ -125,13 +143,26 @@ def _locate_in_transcript(reader, target):
 def _locate_open(handle, path: Path, target: str) -> MessageCursor:
     stamp = file_stamp(os.fstat(handle.fileno()))
     cached = _MESSAGE_CURSORS.get(cursor_key(path, target))
+    hint = _pass_hint(cursor_key(path, target), stamp)
     if cached is not None and _may_reuse(cached, stamp) and _anchor_matches(handle, cached, target):
         cursor = replace(cached, stamp=stamp, empty_tail=False)
+    elif hint is not None and _anchor_matches(handle, hint, target):
+        cursor = replace(hint, stamp=stamp, empty_tail=False)
     else:
         cursor = _scan_cursor(handle, path, target, stamp)
     if file_stamp(os.fstat(handle.fileno())) == stamp:
         _remember(path, target, cursor)
     return cursor
+
+
+# LLM: 与 _may_reuse 同一身份/增长规则，只省去信任窗口；无作用域、换 inode、变短或同长改写一律不给提示。
+# 函数用途: 取本次多页读取内可复核的热文件位置提示。
+def _pass_hint(key, stamp: FileStamp) -> MessageCursor | None:
+    scoped = _PASS_POSITIONS.get()
+    hint = scoped.get(key) if scoped is not None else None
+    if hint is None or not hint.stamp.same_file(stamp) or stamp.size < hint.stamp.size:
+        return None
+    return hint if stamp.size > hint.stamp.size or stamp == hint.stamp else None
 
 
 # LLM: 共享窗口外完整stamp相同才可复用；空键还必须有empty_tail证明，显式空ID定位的EOF不能代替从头空扫。

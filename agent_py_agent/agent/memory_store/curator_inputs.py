@@ -16,6 +16,7 @@ from typing import Any
 
 from ..common.cache_freshness import cache_entry_trustworthy
 from ..conversation.learning_source import derive_source_projection, projection_is_learnable
+from ..conversation.message_cursor import pass_position_scope
 from ..io.cursor_cache import CursorCache, file_stamp
 from .curator_audit_cursor import AuditRead, collect_audit_window
 from .curator_formal import CuratorFormalMemoryInput
@@ -536,7 +537,9 @@ def _collect_messages(
         if (str(thread.thread_id) in unreadable_thread_ids or _thread_learning_excluded(thread)
                 or thread_is_excluded(thread, source.excluded_conversation_ids)):
             continue
-        _collect_thread_messages(state, thread, str(cursors.get(str(thread.thread_id)) or ""))
+        # 单线程至多 16 页按上一页末条 ID 续读；作用域内复用本次刚读过的热文件位置，不改游标或页合同。
+        with pass_position_scope():
+            _collect_thread_messages(state, thread, str(cursors.get(str(thread.thread_id)) or ""))
     return selected, errors
 
 
