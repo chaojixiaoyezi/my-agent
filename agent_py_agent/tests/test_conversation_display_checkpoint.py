@@ -12,7 +12,10 @@ from agent_py_agent.agent.conversation.background_transcript import (
     BackgroundTranscriptSink,
     read_background_transcript_events,
 )
-from agent_py_agent.agent.conversation.display_checkpoint import display_checkpoint_metadata
+from agent_py_agent.agent.conversation.display_checkpoint import (
+    display_checkpoint_metadata,
+    display_event_matches_request,
+)
 from agent_py_agent.agent.conversation.history_display import conversation_history_display_events
 from agent_py_agent.agent.conversation.message_stream import read_background_response_page
 from agent_py_agent.agent.conversation.native_history import (
@@ -22,6 +25,16 @@ from agent_py_agent.agent.conversation.native_history import (
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 from agent_py_agent.cli.chat_parts.tui_threading import _publish_background_notice_row
+
+
+@pytest.mark.parametrize("field", ["request_id", "gateway_request_id", "task_id", "metadata.request_id", "metadata.gateway_request_id"])
+def test_display_request_matches_structured_aliases_only(field):
+    event = {"request_id": "bg-main:thread-a:display-segment", "metadata": {}}
+    target = event["metadata"] if field.startswith("metadata.") else event
+    target[field.removeprefix("metadata.")] = "gwreq-original"
+    assert display_event_matches_request(event, "gwreq-original")
+    assert not display_event_matches_request(event, "gwreq-unrelated")
+    assert not display_event_matches_request(event, "")
 
 
 # LLM: 真实owner ConversationStore和主/child sink；身份是结构化夹具，不启动模型或工具。

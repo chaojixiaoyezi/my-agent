@@ -415,9 +415,19 @@ def _configure_gateway_main_activity(context: request_context.GatewayAskRunConte
     from .foreground_transcript import GatewayForegroundTranscriptSink
     from .main_activity import GatewayMainActivitySink
 
+    progress_writer = None
+    request_path = getattr(context, "request_path", None)
+    if request_path is not None:
+        progress_writer = partial(
+            request_binding.record_gateway_request_progress, request_path, context.request,
+            thread_id=conversation.thread_id,
+            transition=request_binding.GatewayActiveTurnTransition(
+                request_path, context.request_id, str(context.request.get("execution_attempt_id") or "")),
+        )
     writer.main_activity_sink = GatewayMainActivitySink(
         context.agent, thread_id=conversation.thread_id, request_id=context.request_id, request=context.request,
         task_id=str(getattr(conversation.workspace_task, "task_id", "") or ""),
+        progress_writer=progress_writer,
     )
     writer.transcript_sink = GatewayForegroundTranscriptSink(
         context.agent, thread_id=conversation.thread_id, request_id=context.request_id, request=context.request,
@@ -1309,6 +1319,14 @@ def _finalize_gateway_response(context: dict, response: dict) -> None:
     _copy_final_lease_fields(response, context["request_path"])
     response["ended_at"] = ended_at
     response["duration_seconds"] = round(ended_at - context["started_at"], 3)
+    # 原 worker 的真实结果随唯一终态一起提交，不能留下上一执行片的压缩/等待文案。
+    response["updated_at"] = ended_at
+    if response.get("status") == "cancelled":
+        response.update(status_phase="interrupted", status_message="已停止")
+    elif response.get("ok") is True:
+        response.update(status_phase="completed", status_message="已完成")
+    else:
+        response.update(status_phase="failed", status_message="执行失败")
     stages = context.get("stage_timings")
     if stages:
         response["stages_ms"] = dict(stages)

@@ -5,11 +5,13 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Mapping
 
 from ..conversation.background_transcript import (
     BackgroundTranscriptSink,
     public_background_transcript_text,
 )
+from .request_binding import gateway_request_is_active_turn_recovery
 
 
 # LLM: 一个 sink 对应一个已认领的前台请求；锁保护显示顺序，默认后台/child 映射不改变候选正文策略。
@@ -18,12 +20,23 @@ class GatewayForegroundTranscriptSink(BackgroundTranscriptSink):
     # LLM: request 必须是宿主更新 task binding 的原对象；临时 display request 不得代替真实 Gateway ID。
     # 函数用途: 初始化独立显示片与完整块容器，不创建模型调用或第二份持久正文。
     def __init__(self, agent: object, *, thread_id: str, request_id: str, request: dict, task_id: str = "") -> None:
-        super().__init__(agent, thread_id=thread_id, task_id=task_id, gateway_request_id=request_id)
         self._host_request = request
+        attempt_id = request.get("execution_attempt_id")
+        self._gateway_recovery = (
+            {"request_id": request_id, "execution_attempt_id": attempt_id}
+            if gateway_request_is_active_turn_recovery(request, request_id) and isinstance(attempt_id, str) and attempt_id else None
+        )
+        super().__init__(agent, thread_id=thread_id, task_id=task_id, gateway_request_id=request_id)
         self._lock = threading.RLock()
         self._candidate_id = ""
         self._closed = False
         self._prepared = False
+
+    def _event(self, kind: str, phase: str, block_id: str, payload: Mapping[str, object]) -> None:
+        # bg-main 只是显示编号；明确恢复事实随检查点持久化，环形流丢失后仍可交接显示。
+        if self._gateway_recovery is not None:
+            payload = {**payload, "gateway_recovery": dict(self._gateway_recovery)}
+        super()._event(kind, phase, block_id, payload)
 
     # LLM: 只校验 exact 宿主关联；任务晋升不能把旧 task 冻结在显示流里，也不允许冲突事件跨会话投递。
     # 函数用途: 跟随本请求真实 task 绑定；畸形或不匹配时停止本次显示更新，不改变运行状态。

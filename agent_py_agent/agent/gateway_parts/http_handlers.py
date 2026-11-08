@@ -707,6 +707,9 @@ def _send_pending_state(handler, folder, status: str, access: _ResultAccessConte
         from .control_plane import server_wait_projection
 
         response.update(server_wait_projection(server, payload))
+        for key in ("status_phase", "status_message", "updated_at", "tool_rounds"):
+            if key in payload:
+                response[key] = payload[key]
     if request_load_error:
         response["request_load_error"] = request_load_error
     handler._send_json(202, response)
@@ -725,6 +728,9 @@ _PUBLIC_RESULT_FIELDS = (
     "kind",
     "ok",
     "status",
+    "status_phase",
+    "status_message",
+    "updated_at",
     "created_at",
     "started_at",
     "ended_at",

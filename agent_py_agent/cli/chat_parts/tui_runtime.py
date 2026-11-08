@@ -22,6 +22,7 @@ from ...agent.contracts.tool_approval import (
 )
 from ...agent.conversation.compact_progress import normalize_conversation_compact_progress
 from ...agent.conversation.context_usage import public_context_usage
+from ...agent.conversation.display_checkpoint import gateway_display_recovery
 from ...agent.conversation.model_metrics import newer_model_metrics, public_model_metrics
 from ...agent.conversation.tool_input_progress import ToolInputProgressEventProjector
 from ...agent.conversation.turn_resume_notice import turn_resumed_notice_text
@@ -998,9 +999,7 @@ class _TuiConversationBoundaryRuntimeMixin:
     def _publish_recovered_display_events(self, events: tuple[dict[str, object], ...]) -> None:
         background_blocks: dict[str, list[str]] = {}
         for item in events:
-            gateway_id = item.get("gateway_request_id")
-            if isinstance(gateway_id, str) and gateway_id in self._owned_gateway_requests:
-                continue
+            gateway_id = gateway_display_recovery(item) or item.get("gateway_request_id")
             request_id = str(item.get("request_id") or "")
             block_id = str(item.get("block_id") or "")
             kind = str(item.get("kind") or "")
@@ -1010,11 +1009,20 @@ class _TuiConversationBoundaryRuntimeMixin:
                 item.get("schema") != "conversation_history_display.v1"
                 or not request_id.startswith(("history:", "bg-main:", "bg-agent:"))
                 or not block_id.startswith(f"{request_id}:")
-                or kind not in {"user_message", "assistant_completed", "thinking_completed",
-                               "tool_completed", "tool_failed", "system_message"}
-                or phase not in {"completed", "failed"}
+                or not (kind in {"user_message", "assistant_completed", "thinking_completed",
+                                 "tool_completed", "tool_failed", "system_message"} and phase in {"completed", "failed"}
+                        or kind == "tool_started" and phase == "started")
                 or not isinstance(payload, Mapping)
             ):
+                continue
+            self._recover_gateway_display(item)
+            source = self._recovered_gateway_requests.get(gateway_id)
+            if source is not None and request_id.startswith("bg-main:") and request_id != source[1]:
+                continue
+            if (isinstance(gateway_id, str) and gateway_id in self._owned_gateway_requests
+                    and gateway_id not in self._recovered_gateway_requests):
+                continue
+            if kind == "tool_started" and gateway_id not in self._recovered_gateway_requests:
                 continue
             display_payload = {key: value for key, value in payload.items() if key not in _HISTORY_LIVE_PLAN_FIELDS}
             if kind == "user_message" and payload.get("message_id") and any(
@@ -1287,6 +1295,52 @@ class _TuiBackgroundActivityRuntimeMixin:
             request_id=observation_id,
         )
 
+    def _recover_gateway_display(self, event: Mapping) -> None:
+        """同请求恢复后由 canonical 流负责显示；原观察器仍保留审批和终态责任。"""
+        gateway_id = gateway_display_recovery(event)
+        thread_id = event.get("thread_id")
+        request_id = str(event.get("request_id") or "")
+        if (gateway_id not in self._owned_gateway_requests
+                or event.get("schema") not in {_BACKGROUND_TRANSCRIPT_SCHEMA, "conversation_history_display.v1"}
+                or event.get("kind") not in _BACKGROUND_TRANSCRIPT_KINDS
+                or event.get("phase") not in _BACKGROUND_TRANSCRIPT_PHASES
+                or not isinstance(thread_id, str) or not thread_id
+                or not request_id.startswith(f"bg-main:{thread_id}:")
+                or not str(event.get("block_id") or "").startswith(f"{request_id}:")
+                or not _accept_thread_frame(self, event, str(event.get("kind") or ""), own_stream=True)):
+            return
+        self._bind_foreground_request_thread(gateway_id, thread_id)
+        recovery = event["payload"]["gateway_recovery"]
+        source = (recovery["execution_attempt_id"], request_id)
+        if self._recovered_gateway_requests.get(gateway_id) == source:
+            return
+        if (gateway_id, *source) in self._seen_gateway_display_sources:
+            return
+        adapter = next((self._turns.get(local_id) or self._completing_turns.get(local_id)
+                        for local_id, canonical_id in self._foreground_gateway_bindings.items()
+                        if canonical_id == gateway_id), None)
+        if adapter is not None and not self._background_replay_matches_scope(
+                adapter._conversation_reset_generation, thread_id, adapter):
+            return
+        blocks = tuple(block.block_id for block in self.store.snapshot().active_blocks
+                       if block.metadata.get("foreground_gateway_request_id") == gateway_id)
+        self._publish(
+            "status_updated", "updated", f"foreground-release:{gateway_id}",
+            {"gateway_request_id": gateway_id, "foreground_observation_released": True,
+             "foreground_request_id": adapter.request_id if adapter is not None else "",
+             "foreground_block_ids": (*blocks, *(adapter._display_block_ids if adapter is not None else ()))},
+            request_id=gateway_id,
+        )
+        self._recovered_gateway_requests[gateway_id] = source
+        self._seen_gateway_display_sources.add((gateway_id, *source))
+        while len(self._recovered_gateway_requests) > self._owned_gateway_requests.maximum:
+            self._recovered_gateway_requests.pop(next(iter(self._recovered_gateway_requests)))
+        # 旧代暂存块已经由前台显示过，不能在真实终态时重新补放。
+        for pending in (self._deferred_background_events, self._deferred_background_responses):
+            for key in tuple(pending):
+                if key[0] == gateway_id:
+                    pending.pop(key)
+
     # LLM: 共用显示锁交接有界副本；已完成前台无正文也退休目标，观察未知/入队回滚不伪造完成，不改变服务端状态。
     # 函数用途: 释放前台显示所有权，补回完成缝隙中已经消费但尚未显示的canonical输出。
     def release_gateway_request(
@@ -1301,7 +1355,8 @@ class _TuiBackgroundActivityRuntimeMixin:
                 return
             adapter = next((value for local_id, value in self._completing_turns.items()
                             if self._foreground_gateway_bindings.get(local_id) == normalized), None)
-            if adapter is not None and adapter._displayed_response_text:
+            if (adapter is not None and adapter._displayed_response_text
+                    and normalized not in self._recovered_gateway_requests):
                 self._delivered_foreground_requests.add(
                     (normalized, adapter._thread_id, adapter._conversation_reset_generation))
             self._owned_gateway_requests.discard(normalized)
@@ -1326,6 +1381,7 @@ class _TuiBackgroundActivityRuntimeMixin:
                         continue
                     self.publish_background_response(content, thread_id=thread_id, message_id=message_id,
                                                      display_events=events, gateway_request_id=normalized)
+            self._recovered_gateway_requests.pop(normalized, None)
 
     # LLM: This is the single readback for display polling cadence; it delegates to the same
     # controller that consumes canonical activity snapshots and never parses rendered text.
@@ -1428,7 +1484,11 @@ class _TuiBackgroundActivityRuntimeMixin:
         request_id = f"history:{thread_id}:{message_id}"
         with self._lock:
             self._bind_foreground_request_thread(gateway_request_id, thread_id)
-            if gateway_request_id in self._owned_gateway_requests:
+            for event in display_events:
+                if event.get("thread_id") == thread_id:
+                    self._recover_gateway_display(event)
+            if (gateway_request_id in self._owned_gateway_requests
+                    and gateway_request_id not in self._recovered_gateway_requests):
                 key = (gateway_request_id, thread_id, message_id)
                 self._deferred_background_responses[key] = (self.conversation_reset_generation, text, display_events)
                 while len(self._deferred_background_responses) > self._owned_gateway_requests.maximum:
@@ -1473,7 +1533,7 @@ class _TuiBackgroundActivityRuntimeMixin:
             except (TypeError, ValueError):
                 continue
             consumed_cursor = max(consumed_cursor, remote_seq)
-            gateway_id = item.get("gateway_request_id")
+            gateway_id = gateway_display_recovery(item) or item.get("gateway_request_id")
             request_id = str(item.get("request_id") or "").strip()
             block_id = str(item.get("block_id") or "").strip()
             kind = str(item.get("kind") or "").strip()
@@ -1496,7 +1556,12 @@ class _TuiBackgroundActivityRuntimeMixin:
                 continue
             thread_id = (thread_id if isinstance(thread_id, str) and thread_id else
                          _tui_thread_id(self) if owned_stream else "")
-            if isinstance(gateway_id, str) and gateway_id in self._owned_gateway_requests:
+            self._recover_gateway_display(item)
+            source = self._recovered_gateway_requests.get(gateway_id)
+            if source is not None and request_id != source[1]:
+                continue
+            if (isinstance(gateway_id, str) and gateway_id in self._owned_gateway_requests
+                    and gateway_id not in self._recovered_gateway_requests):
                 self._deferred_background_events[(gateway_id, remote_seq)] = (
                     self.conversation_reset_generation, thread_id,
                     {**item, "seq": remote_seq, "payload": dict(payload)})
@@ -1668,6 +1733,8 @@ class _TuiSessionRuntimeMixin(
 
         self.completions = TurnCompletionLedger()
         self._owned_gateway_requests = TuiIdentityWindow()
+        self._recovered_gateway_requests: dict[str, tuple[str, str]] = {}
+        self._seen_gateway_display_sources = TuiIdentityWindow()
         self._completed_gateway_requests = TuiIdentityWindow()
         self._delivered_foreground_requests = TuiIdentityWindow()
         self._deferred_background_events: dict[tuple[str, int], tuple[int, str, dict]] = {}
@@ -1725,6 +1792,8 @@ class _TuiSessionRuntimeMixin(
             self._request_thread_id = thread_id
             self.history_before_cursor = 0
             self.background_event_stream_id = ""
+            self._recovered_gateway_requests.clear()
+            self._seen_gateway_display_sources.clear()
             # 只退休显示责任，worker仍须将这些在途回合按原身份收口。
             self._retired_turns.update(self._turns)
             self._turns.clear()
@@ -2231,6 +2300,13 @@ class TuiTurnEventAdapter:
                 return JournalAppendResult("rejected", "retired_turn")
             if not _accept_thread_frame(self.runtime, payload, kind, own_stream=True):
                 return JournalAppendResult("rejected", "foreign_thread")
+            gateway_id = self.runtime._foreground_gateway_bindings.get(self.request_id, self.request_id)
+            if gateway_id in self.runtime._recovered_gateway_requests and (
+                kind.startswith(("thinking_", "assistant_", "tool_", "conversation_compaction_"))
+                or kind == "compact_boundary"
+                or kind == "system_message" and (payload or {}).get("source_kind") == "turn_timing"
+            ):
+                return JournalAppendResult("rejected", "recovered_display_source")
             result = self.runtime._publish(kind, phase, block_id,
                 {**(payload or {}), "thread_id": (payload or {}).get("thread_id") or self._thread_id or _tui_thread_id(self.runtime)}, request_id=request_id)
             if result.accepted:

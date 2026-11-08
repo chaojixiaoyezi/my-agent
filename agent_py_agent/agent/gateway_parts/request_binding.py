@@ -90,6 +90,40 @@ def record_gateway_request_stage(path: Path, request: dict, stage: str, *, at: f
     return result
 
 
+def record_gateway_request_progress(path: Path, request: dict, *, thread_id: str,
+                                    phase: str, status_message: str, tool_rounds: int,
+                                    transition: GatewayActiveTurnTransition | None = None) -> bool:
+    """原请求当前执行代次只合并显示标量，终态仍由原 worker 提交。"""
+    request_id = str(request.get("id") or path.stem)
+    attempt_id = str(request.get("execution_attempt_id") or "")
+    if not attempt_id:
+        return False
+    transition = transition or GatewayActiveTurnTransition(path, request_id, attempt_id)
+    if (transition.request_path, transition.request_id, transition.execution_attempt_id) != (path, request_id, attempt_id):
+        return False
+    updated = False
+
+    def update(current: dict) -> dict:
+        nonlocal updated
+        binding = current.get("conversation_runtime") or current.get("conversation_claim")
+        if (not isinstance(binding, dict) or binding.get("request_id") != request_id
+                or binding.get("thread_id") != thread_id
+                or current.get("lease_epoch", 0) != request.get("lease_epoch", 0)):
+            return current
+        current.update(status_phase=phase, status_message=status_message, updated_at=time.time(),
+                       tool_rounds=max(int(current.get("tool_rounds") or 0), tool_rounds))
+        updated = True
+        return current
+
+    try:
+        # writer 的提交锁内也会发布活动；不能等持有 T、正在收口同一 writer 的线程。
+        transition("reserve", lambda: update_json_file_atomic(path, update, require_existing=True), blocking=False)
+    except (OSError, InterruptedError, TypeError, ValueError):
+        # 展示遥测失败不能使模型回合失败，也不能绕过原关闭/撤权门重建 processing。
+        return False
+    return updated
+
+
 # LLM: This writer is the only bridge from a promoted conversation task back to the exact
 # claimed Gateway request. Keep the durable request file and the live request object identical,
 # otherwise an inline Compact retry loses active-turn authority and leaves wake policies alive.
@@ -249,19 +283,21 @@ class GatewayActiveTurnTransition:
     # provider ACK/explicit rejection cleanup may finish the same attempt after stop marked closing.
     # worker绑定在创建回调时捕获；沿原T锁复核实际Agent及冻结路由，C最终同步操作与撤权/隔离共门。
     # 函数用途: 按补充消息阶段校验精确执行代次，并与停止、终态收口串行。
-    def __call__(self, phase: str, operation):
-        with self.scope(phase):
+    def __call__(self, phase: str, operation, *, blocking: bool = True):
+        with self.scope(phase, blocking=blocking):
             return operation()
 
     # LLM: scope保持原T实读和C生命周期短门覆盖整个file-only body；W仍用原冻结binding，不签发新许可，不包网络等待。
     # 函数用途: 为显式短事务提供原回合边界，模型提交callback继续经同一__call__。
     @contextmanager
-    def scope(self, phase: str):
+    def scope(self, phase: str, *, blocking: bool = True):
         phase_name = str(phase or "").strip().lower()
         allow_closing = phase_name in {"acknowledge", "restore", "release"}
         root = self.request_path.parent.parent.parent
         paths = gateway_paths_from_root(root)
-        with gateway_turn_transition(paths, self.request_id):
+        boundary = (gateway_turn_transition(paths, self.request_id) if blocking else
+                    gateway_turn_transition(paths, self.request_id, blocking=False))
+        with boundary:
             report = read_json_file_report(
                 self.request_path,
                 context="gateway.active_turn_transition.read",

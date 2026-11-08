@@ -509,7 +509,7 @@ def _release_transition_file_handle(file_handle, os_lock_acquired: bool) -> None
 # LLM: Gateway 同一请求的入队、执行、终态转换及活动回合入口共用此锁；摘要隔离不可信 ID，修改须联查回合转换调用方。
 # 函数用途: 取得并持有某个 Gateway 回合唯一的跨进程状态转换锁。
 @contextmanager
-def gateway_turn_transition(paths: GatewayPaths, request_id: str):
+def gateway_turn_transition(paths: GatewayPaths, request_id: str, *, blocking: bool = True):
     from ..concurrency.lock_order import LockLevel
 
     turn_id = str(request_id or "").strip()
@@ -517,7 +517,7 @@ def gateway_turn_transition(paths: GatewayPaths, request_id: str):
         raise ValueError("gateway turn transition requires request_id")
     digest = hashlib.sha256(turn_id.encode("utf-8")).hexdigest()
     transition_path = paths.root / "turn_transitions" / f"{digest}.transition"
-    with locked_file_transition(transition_path, category=LockLevel.T):
+    with locked_file_transition(transition_path, blocking=blocking, category=LockLevel.T):
         yield
 
 
