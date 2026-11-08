@@ -4741,6 +4741,15 @@ agent_py_agent/
 |-- agent_py_agent/agent/io/bounded_directory.py # 有界目录扫描原语（scandir 预算与游标截断）
 |-- agent_py_agent/agent/io/sqlite_probe.py # 锁保留 SQLite 只读探针（避免裸 open/close 释放进程级 POSIX fcntl 锁）
 |-- agent_py_agent/agent/runtime_db/salvage.py # runtime.db 离线只读抢救重建与回执校验服务
+|-- agent_py_agent/tests/test_r5d_d2_stream_watchdog_shared_timer.py # 流式空闲看门狗共享延迟调度器回归测试
+|-- agent_py_agent/tests/test_r5d_d3_claim_heartbeat_shared_timer.py # 会话运行租约续期共享延迟调度器回归测试
+|-- agent_py_agent/tests/test_r5d_d4_plugin_idle_close_timer.py # 插件连接池空闲自动关闭定时器回归测试
+|-- agent_py_agent/tests/test_r5d_d5_runtime_repo_cache_bound.py # Owner 唤醒发现 runtime_repo LRU 容量上界回归测试
+|-- agent_py_agent/tests/test_r5db_closeout_tool_index_window.py # 回合收尾工具输出索引按起点游标增量读取回归测试
+|-- agent_py_agent/tests/test_r5db_queue_lock_sidecar_release.py # 请求队列离开活跃态后释放 .lock 旁路文件回归测试
+|-- agent_py_agent/tests/test_r5db_curator_cursor_pass_hint.py # 记忆整理同轮多页游标复用位置偏移回归测试
+|-- agent_py_agent/tests/test_r5db_input_receipt_retention_cutover.py # 输入回执归档确认后移除热目录原文件回归测试
+|-- agent_py_agent/tests/test_r5db_jsonl_append_tail_seal.py # 通用 JSONL 锁内追加前自动封口崩溃残尾回归测试
 `-- scripts/runtime_db_salvage.py # runtime.db 离线抢救 CLI 工具入口
 ```
 
