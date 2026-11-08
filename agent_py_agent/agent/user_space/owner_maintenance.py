@@ -692,6 +692,7 @@ def _maintain_event_store(directory: Path, *, now: float, commit_transition=None
 
         from ..common.global_write_commit import global_write_commit_scope
         from ..local_storage import LocalStore
+        from ..local_storage.maintenance import STEADY_STATE_EVENTS_MAX_DELETE
 
         with global_write_commit_scope(commit_transition) if commit_transition is not None else nullcontext():
             store = LocalStore(db_path or directory / "local.db",
@@ -716,6 +717,10 @@ def _maintain_event_store(directory: Path, *, now: float, commit_transition=None
             result = store.maintain_events(max_batches=1, before=now)
             if steps:
                 result.update(steps[-1])
+                # 有界SQL步删满本拍上限即仍有积压：回执标partial，让分页把本库留在pending逐拍续删，
+                # 而不是等下一次全库轮转（每日间隔下每轮只删一次上限）。
+                if int(steps[-1].get("selected") or 0) >= STEADY_STATE_EVENTS_MAX_DELETE:
+                    result["partial"] = True
         return {"executed": True, **result}
     except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
             ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
