@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import threading
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -263,11 +264,13 @@ def test_trash_waits_for_message_writer_lock_before_thread_lock(tmp_path, monkey
     original_json_lock, original_transition = apply.locked_json_path, apply.locked_file_transition
 
     def json_lock(target, *args, **kwargs):
-        order.append(("message", Path(target)))
+        if Path(target) == path:
+            order.append(("message", Path(target)))
         return original_json_lock(target, *args, **kwargs)
 
     def transition(target, *args, **kwargs):
-        order.append(("thread", Path(target)))
+        if Path(target) == store.storage.thread_path(thread.thread_id):
+            order.append(("thread", Path(target)))
         return original_transition(target, *args, **kwargs)
 
     monkeypatch.setattr(apply, "locked_json_path", json_lock)
@@ -356,3 +359,438 @@ def test_related_paths_enumerate_exact_transcript_family(tmp_path, monkeypatch):
     assert _transcript_files(root, thread.thread_id) <= set(related)
     assert not [item for item in related if item.name.endswith(".lock")]
     assert root / "threads" / f"{thread.thread_id}.json" in related
+
+
+def _ledger_family_snapshot(store, thread_id):
+    members, errors = scan._conversation_related_paths(store.storage.root, store.threads.require(thread_id))
+    assert not errors
+    return {path: path.read_bytes() for path in members}
+
+
+def _fd_count():
+    directory = "/dev/fd" if Path("/dev/fd").is_dir() else "/proc/self/fd"
+    return len(os.listdir(directory))
+
+
+def _assert_family_locks_released(store, thread_id):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from agent_py_agent.agent.gateway_parts.io import locked_file_transition
+
+    usage = store.model_usage._path(thread_id)
+
+    def acquire():
+        with ExitStack() as locks:
+            locks.enter_context(locked_json_path(store.storage.message_path(thread_id), blocking=False))
+            locks.enter_context(locked_file_transition(store.storage.thread_path(thread_id), blocking=False))
+            locks.enter_context(locked_file_transition(usage.with_name(f".{usage.name}.append-once"), blocking=False))
+            for path in (usage, store.model_usage._index(thread_id).path, store.storage.observation_path(thread_id)):
+                locks.enter_context(locked_json_path(path, blocking=False))
+
+    # 独立线程避免把当前线程的重入能力误当成锁已释放。
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(acquire).result(timeout=10)
+
+
+@pytest.mark.parametrize("kind", ["usage", "observations"])
+def test_ledger_retirement_waits_for_real_writer_and_revalidates(tmp_path, monkeypatch, kind):
+    from agent_py_agent.agent.conversation import store_observations
+    from agent_py_agent.tests.test_cat3_thread_ledger_segments import _request
+
+    home, service = _owner(tmp_path)
+    store, thread, _roots, _cold = _retired_ledger_conversation(home)
+    action = _conversation_action(service.plan(now=NOW), thread.thread_id)
+    _assert_family_locks_released(store, thread.thread_id)
+    before_fd = _fd_count()
+    held, retiring, release = threading.Event(), threading.Event(), threading.Event()
+    writer_errors, retire_errors, results = [], [], []
+    connection_active = []
+    usage = store.model_usage._path(thread.thread_id)
+    target = usage.with_name(f".{usage.name}.append-once") if kind == "usage" else store.storage.observation_path(thread.thread_id)
+    original_transition, original_json = apply.locked_file_transition, apply.locked_json_path
+
+    def transition(path, *args, **kwargs):
+        if Path(path) == target:
+            retiring.set()
+        return original_transition(path, *args, **kwargs)
+
+    def json_lock(path, *args, **kwargs):
+        if Path(path) == target:
+            retiring.set()
+        return original_json(path, *args, **kwargs)
+
+    if kind == "usage":
+        original_seal = store.model_usage._seal_indexed
+
+        def seal(*args, **kwargs):
+            connection_active.append(True)
+            try:
+                held.set()
+                assert release.wait(30)
+                return original_seal(*args, **kwargs)
+            finally:
+                connection_active.pop()
+
+        monkeypatch.setattr(store.model_usage, "_seal_indexed", seal)
+    else:
+        original_append = store_observations.append_private_jsonl_records_unlocked
+
+        def append(*args, **kwargs):
+            result = original_append(*args, **kwargs)
+            held.set()
+            assert release.wait(30)
+            return result
+
+        monkeypatch.setattr(store_observations, "append_private_jsonl_records_unlocked", append)
+
+    def write():
+        try:
+            if kind == "usage":
+                store.model_usage.append_once(_request(thread.thread_id, 100000))
+            else:
+                store.observations.append({"thread_id": thread.thread_id, "summary": "最后一条观察", "now": OLD + 3})
+        except Exception as error:
+            writer_errors.append(error)
+
+    def retire():
+        try:
+            results.append(apply._trash_conversation(home=home, action=action, now=NOW))
+        except Exception as error:
+            retire_errors.append(error)
+
+    monkeypatch.setattr(apply, "locked_file_transition", transition)
+    monkeypatch.setattr(apply, "locked_json_path", json_lock)
+    original_move = apply._move_retention_payload
+
+    def move(source, destination):
+        assert not connection_active, "用量连接活动期间不得移动 SQLite/WAL"
+        return original_move(source, destination)
+
+    monkeypatch.setattr(apply, "_move_retention_payload", move)
+    writer = threading.Thread(target=write, daemon=True)
+    worker = threading.Thread(target=retire, daemon=True)
+    writer.start()
+    try:
+        assert held.wait(10)
+        worker.start()
+        assert retiring.wait(10)
+        assert worker.is_alive() and not results
+        assert store.storage.thread_path(thread.thread_id).exists()
+    finally:
+        release.set()
+        writer.join(30)
+        if worker.ident is not None:
+            worker.join(30)
+    assert not writer.is_alive() and not worker.is_alive()
+    assert not writer_errors and not retire_errors
+    assert results[0].status == "state_changed"
+    before = _ledger_family_snapshot(store, thread.thread_id)
+    assert _conversation_action(service.apply(now=NOW), thread.thread_id).status == "trashed"
+    assert all(not path.exists() for path in before)
+    _assert_family_locks_released(store, thread.thread_id)
+    assert _fd_count() == before_fd
+
+
+def test_ledger_retirement_single_move_failure_restores_family_and_retries(tmp_path, monkeypatch):
+    home, service = _owner(tmp_path)
+    store, thread, _roots, cold = _retired_ledger_conversation(home)
+    action = _conversation_action(service.plan(now=NOW), thread.thread_id)
+    before = _ledger_family_snapshot(store, thread.thread_id)
+    _assert_family_locks_released(store, thread.thread_id)
+    before_fd = _fd_count()
+    source = sorted(path for path in cold if path.name.startswith("seg-"))[0]
+    error = OSError("simulated ordinary move error")
+    cause = ValueError("original move cause")
+    error.__cause__ = cause
+    original_move, failures = apply._move_retention_payload, []
+
+    def move(path, destination):
+        if path == source and not failures:
+            failures.append(path)
+            raise error
+        return original_move(path, destination)
+
+    # 每轮仅一次普通移动失败，重复独立重试检查锁与描述符不会随维护次数累积。
+    for _attempt in range(3):
+        failures.clear()
+        with monkeypatch.context() as patch:
+            patch.setattr(apply, "_move_retention_payload", move)
+            with pytest.raises(OSError) as caught:
+                apply._trash_conversation(home=home, action=action, now=NOW)
+        assert caught.value is error and caught.value.__cause__ is cause and failures == [source]
+        assert {path: path.read_bytes() for path in before} == before
+        assert not action.destination.exists()
+        _assert_family_locks_released(store, thread.thread_id)
+        assert _fd_count() == before_fd
+    assert _conversation_action(service.apply(now=NOW), thread.thread_id).status == "trashed"
+    service.apply(now=NOW + timedelta(days=31))
+    assert not action.destination.exists()
+    assert all(not path.exists() for path in before)
+
+
+def test_ledger_collector_preserves_siblings_locks_and_prepared_members(tmp_path, monkeypatch):
+    home, service = _owner(tmp_path)
+    store, thread, roots, cold = _retired_ledger_conversation(home)
+    sibling_store, sibling, _sibling_roots, _sibling_cold = _retired_ledger_conversation(
+        home, identity="bound-sibling", unbind=False,
+    )
+    sibling_before = _ledger_family_snapshot(sibling_store, sibling.thread_id)
+    outside = tmp_path / "other-owner" / "unrelated.jsonl"
+    outside.parent.mkdir()
+    outside.write_bytes(b"another owner\n")
+    prepared = []
+    for root in roots:
+        directory = root / ".prepared"
+        directory.mkdir()
+        member = directory / "generation.part"
+        member.write_bytes(b"prepared ordinary member\n")
+        prepared.append(member)
+    cold.update(prepared)
+    original_open = Path.open
+
+    def metadata_only(path, *args, **kwargs):
+        assert path not in cold, "收集成员不得读取冷段正文"
+        return original_open(path, *args, **kwargs)
+
+    with locked_json_path(roots[0] / "held"):
+        lock = roots[0] / "held.lock"
+        inode = lock.stat().st_ino
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, "open", metadata_only)
+            members, errors = scan._conversation_related_paths(store.storage.root, store.threads.require(thread.thread_id))
+        assert not errors and cold <= set(members)
+        assert not any(path.name.endswith(".lock") for path in members)
+        assert not set(sibling_before).intersection(members)
+        before = {path: path.read_bytes() for path in members}
+        action = _conversation_action(service.plan(now=NOW), thread.thread_id)
+        assert _conversation_action(service.apply(now=NOW), thread.thread_id).status == "trashed"
+        assert lock.stat().st_ino == inode
+        for path, raw in before.items():
+            assert (action.destination / "payload" / path.relative_to(store.storage.root)).read_bytes() == raw
+    assert {path: path.read_bytes() for path in sibling_before} == sibling_before
+    assert outside.read_bytes() == b"another owner\n"
+
+
+@pytest.mark.parametrize("kind", ["observations", "usage"])
+@pytest.mark.parametrize("damage", ["symlink", "fifo", "unreadable"])
+def test_ledger_unsafe_or_unreadable_family_keeps_thread_with_error(tmp_path, monkeypatch, kind, damage):
+    home, service = _owner(tmp_path)
+    store, thread, roots, cold = _retired_ledger_conversation(home)
+    root = roots[0 if kind == "observations" else 1]
+    before = {path: path.read_bytes() for path in cold}
+    if damage == "symlink":
+        outside = tmp_path / "other-owner.jsonl"
+        outside.write_bytes(b"keep outside\n")
+        (root / "linked.jsonl").symlink_to(outside)
+    elif damage == "fifo":
+        os.mkfifo(root / "special.jsonl")
+    else:
+        original = scan.os.walk
+
+        def unreadable(path, *args, **kwargs):
+            if Path(path) == root:
+                raise PermissionError("simulated directory read error")
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(scan.os, "walk", unreadable)
+    plan = service.plan(now=NOW)
+    assert not any(action.category == "conversation" and action.record_id == thread.thread_id for action in plan.actions)
+    assert any("CONVERSATION" in error.error_code for error in plan.errors)
+    service.apply(now=NOW)
+    assert store.storage.thread_path(thread.thread_id).exists()
+    assert {path: path.read_bytes() for path in before} == before
+
+
+@pytest.mark.parametrize("kind", ["observations", "usage"])
+def test_late_ledger_member_requires_new_plan(tmp_path, kind):
+    home, service = _owner(tmp_path)
+    store, thread, roots, _cold = _retired_ledger_conversation(home)
+    action = _conversation_action(service.plan(now=NOW), thread.thread_id)
+    path = roots[0 if kind == "observations" else 1] / ".prepared-late"
+    path.write_bytes(b"new ordinary generation\n")
+    before = _ledger_family_snapshot(store, thread.thread_id)
+    assert apply._trash_conversation(home=home, action=action, now=NOW).status == "state_changed"
+    assert {path: path.read_bytes() for path in before} == before
+    assert _conversation_action(service.apply(now=NOW), thread.thread_id).status == "trashed"
+    assert all(not path.exists() for path in before)
+
+
+def _retired_ledger_conversation(home, *, observation_segments=1, identity="ledger-retirement", unbind=True):
+    """沿原 8 MiB 阈值轮转历史账本，准备阶段不修改生产阈值或配额。"""
+    from agent_py_agent.agent.conversation.models import ObservationEvent
+    from agent_py_agent.agent.conversation.store_usage import _thread_model_usage_event
+    from agent_py_agent.agent.conversation.thread_ledger_segments import archive_dir_for
+    from agent_py_agent.agent.user_space.storage_lanes import STORAGE_LANE_SLICE_BYTES
+    from agent_py_agent.tests.test_cat3_thread_ledger_segments import _request
+
+    store = ConversationStore(Path(home.owner_home_dir) / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": identity, "now": OLD})
+    active = store.storage.observation_path(thread.thread_id)
+    for segment in range(observation_segments):
+        with active.open("ab") as handle:
+            number = 0
+            while handle.tell() < STORAGE_LANE_SLICE_BYTES:
+                event = ObservationEvent(f"obs-{segment}-{number}", thread.thread_id, "progress", "x" * 65536,
+                                         observed_at=OLD, handled_at=OLD + 1)
+                handle.write((json.dumps(event.to_dict()) + "\n").encode())
+                number += 1
+        identifier = f"trigger-{segment}"
+        store.observations.mark_handled([identifier], now=OLD + 2)
+        store.observations.append({"thread_id": thread.thread_id, "_observation_id": identifier, "now": OLD + 3})
+    usage = store.model_usage._path(thread.thread_id)
+    with usage.open("wb") as handle:
+        number = 0
+        while handle.tell() < STORAGE_LANE_SLICE_BYTES:
+            event = _thread_model_usage_event(_request(thread.thread_id, number))
+            handle.write((json.dumps(event.to_dict(), sort_keys=True) + "\n").encode())
+            number += 1
+    index = store.model_usage._index(thread.thread_id)
+    with locked_json_path(usage), index._connection() as conn:
+        while not index.prepare(conn):
+            pass
+        store.model_usage._seal_indexed(usage, index, conn, STORAGE_LANE_SLICE_BYTES)
+    if unbind:
+        for name in ("channel_bindings.json", "user_latest_threads.json"):
+            path = store.storage.root / name
+            value = json.loads(path.read_text())
+            path.write_text(json.dumps({key: value for key, value in value.items() if value != thread.thread_id}))
+    roots = (archive_dir_for(active), archive_dir_for(usage))
+    cold = {path for root in roots for path in root.iterdir() if path.is_file()}
+    return store, store.threads.require(thread.thread_id), roots, cold
+
+
+def test_thread_retirement_collects_production_sized_usage_and_observation_families(tmp_path):
+    home, service = _owner(tmp_path)
+    store, thread, roots, cold = _retired_ledger_conversation(home, observation_segments=12)
+    initial = _bytes(cold)
+    assert initial > 100 * 1024 * 1024
+    assert owner_quota_enforcer_from_policy(Path(home.owner_home_dir)).max_bytes == 1024 ** 3
+    action = _conversation_action(service.plan(now=NOW), thread.thread_id)
+    omitted = cold - set(action.related_paths)
+    assert _conversation_action(service.apply(now=NOW), thread.thread_id).status == "trashed"
+    service.apply(now=NOW + timedelta(days=31))
+    residual = {path for path in cold if path.exists()}
+    followup = service.plan(now=NOW + timedelta(days=62))
+    evidence = {"initial_cold_bytes": initial, "omitted_members": len(omitted), "residual_members": len(residual),
+                "residual_bytes": _bytes(residual), "thread_exists": store.storage.thread_path(thread.thread_id).exists(),
+                "later_conversation_actions": sum(item.category == "conversation" for item in followup.actions)}
+    assert not residual, evidence
+    assert not omitted and all(not root.exists() for root in roots)
+
+
+@pytest.mark.parametrize("kind", ["observations", "usage"])
+def test_writer_prechecked_before_retirement_cannot_recreate_ledger(tmp_path, monkeypatch, kind):
+    from agent_py_agent.agent.conversation import store_observations, store_usage
+    from agent_py_agent.tests.test_cat3_thread_ledger_segments import _request
+
+    home, service = _owner(tmp_path)
+    store = ConversationStore(Path(home.owner_home_dir) / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "late-ledger", "now": OLD})
+    for name in ("channel_bindings.json", "user_latest_threads.json"):
+        path = store.storage.root / name
+        path.write_text("{}")
+    action = _conversation_action(service.plan(now=NOW), thread.thread_id)
+    module, lock_name = ((store_observations, "locked_json_path") if kind == "observations" else
+                         (store_usage, "locked_file_transition"))
+    original_lock = getattr(module, lock_name)
+    prechecked, release = threading.Event(), threading.Event()
+    outcome, failures = [], []
+
+    @contextmanager
+    def before_lock(*args, **kwargs):
+        if threading.current_thread().name == "late-ledger-writer":
+            prechecked.set()
+            assert release.wait(30)
+        with original_lock(*args, **kwargs):
+            yield
+
+    def write():
+        try:
+            if kind == "observations":
+                outcome.append(store.observations.append({"thread_id": thread.thread_id, "now": OLD}))
+            else:
+                outcome.append(store.model_usage.append_once(_request(thread.thread_id, 1)))
+        except (KeyError, FileNotFoundError) as error:
+            failures.append(error)
+
+    monkeypatch.setattr(module, lock_name, before_lock)
+    worker = threading.Thread(target=write, name="late-ledger-writer", daemon=True)
+    worker.start()
+    try:
+        assert prechecked.wait(10)
+        assert apply._trash_conversation(home=home, action=action, now=NOW).status == "trashed"
+    finally:
+        release.set()
+        worker.join(30)
+    assert not worker.is_alive()
+    active = (store.storage.observation_path(thread.thread_id) if kind == "observations" else
+              store.model_usage._path(thread.thread_id))
+    assert not active.exists(), "已通过锁外预检查的 writer 在退休后重新产生了无主账本"
+    assert failures and not outcome
+
+
+def test_thread_retirement_collects_usage_and_observation_cold_segments(tmp_path):
+    """原 8 MiB 阈值和 1 GiB 配额下，冷账本随线程回收并在正常保留期后清除。"""
+    from agent_py_agent.agent.conversation.models import ObservationEvent
+    from agent_py_agent.agent.conversation.store_usage import _thread_model_usage_event
+    from agent_py_agent.agent.conversation.thread_ledger_segments import archive_dir_for
+    from agent_py_agent.agent.gateway_parts.io import locked_file_transition
+    from agent_py_agent.agent.user_space.storage_lanes import STORAGE_LANE_SLICE_BYTES
+    from agent_py_agent.tests.test_cat3_thread_ledger_segments import _request
+
+    home, service = _owner(tmp_path)
+    store = ConversationStore(Path(home.owner_home_dir) / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "retention-ledger", "now": OLD})
+    tid = thread.thread_id
+    active = store.storage.observation_path(tid)
+    # 准备普通历史行；实际封段仍调用原公开 append，不缩小产品阈值。
+    for segment in range(12):
+        with active.open("ab") as handle:
+            number = 0
+            while handle.tell() < STORAGE_LANE_SLICE_BYTES:
+                event = ObservationEvent(f"obs-{segment}-{number}", tid, "progress", "x" * 65536,
+                                         observed_at=OLD, handled_at=OLD + 1)
+                handle.write((json.dumps(event.to_dict()) + "\n").encode())
+                number += 1
+        identifier = f"trigger-{segment}"
+        store.observations.mark_handled([identifier], now=OLD + 2)
+        store.observations.append({"thread_id": tid, "_observation_id": identifier, "now": OLD + 3})
+
+    usage = store.model_usage._path(tid)
+    with usage.open("wb") as handle:
+        number = 0
+        while handle.tell() < STORAGE_LANE_SLICE_BYTES:
+            event = _thread_model_usage_event(_request(tid, number))
+            handle.write((json.dumps(event.to_dict(), sort_keys=True) + "\n").encode())
+            number += 1
+    index = store.model_usage._index(tid)
+    transition = usage.with_name(f".{usage.name}.append-once")
+    with locked_file_transition(transition), locked_json_path(usage), index._connection() as conn:
+        while not index.prepare(conn):
+            pass
+    store.model_usage.append_once(_request(tid, number))
+
+    roots = [archive_dir_for(active), archive_dir_for(usage)]
+    cold = {path for directory in roots for path in directory.iterdir() if path.is_file()}
+    initial = _bytes(cold)
+    assert initial > 100 * 1024 * 1024
+    assert owner_quota_enforcer_from_policy(Path(home.owner_home_dir)).max_bytes == 1024**3
+    for name in ("channel_bindings.json", "user_latest_threads.json"):
+        path = store.storage.root / name
+        value = json.loads(path.read_text())
+        path.write_text(json.dumps({key: item for key, item in value.items() if item != tid}))
+    action = _conversation_action(service.plan(now=NOW), tid)
+    omitted = cold - set(action.related_paths)
+    assert _conversation_action(service.apply(now=NOW), tid).status == "trashed"
+    service.apply(now=NOW + timedelta(days=31))
+    residual = {path for path in cold if path.exists()}
+    followup = service.plan(now=NOW + timedelta(days=62))
+    evidence = {"case": "retired_ledgers", "quota_mib": 1024, "initial_cold_bytes": initial,
+                "omitted_members": len(omitted), "residual_members": len(residual),
+                "residual_bytes": _bytes(residual), "thread_exists": store.storage.thread_path(tid).exists(),
+                "later_conversation_actions": sum(item.category == "conversation" for item in followup.actions)}
+    print("RETENTION_EVIDENCE=" + json.dumps(evidence, sort_keys=True))
+    assert not residual, evidence
+    assert not omitted, evidence
+    assert not action.destination.exists()
+    assert not any(directory.exists() for directory in roots)

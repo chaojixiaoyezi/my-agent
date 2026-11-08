@@ -204,6 +204,8 @@ class ObservationStore:
         # 私有追加：0600/0700，存量宽权限观察账本下次写入即收紧；内容逐字节不变。
         path = self.storage.observation_path(thread_id)
         with locked_json_path(path):
+            # 锁外预检后线程可能已退休，须在恢复或追加账本前重新核验。
+            self._require_thread(thread_id)
             recover_pending(path)
             append_private_jsonl_records_unlocked(path, [event.to_dict()], sort_keys=True)
             if path.stat().st_size >= max_bytes:

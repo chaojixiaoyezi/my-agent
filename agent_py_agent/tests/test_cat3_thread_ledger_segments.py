@@ -439,3 +439,72 @@ def test_unknown_observation_ack_coverage_never_seals(tmp_path, monkeypatch):
     assert event.observation_id == "unknown"
     assert not segments.archive_dir_for(store.storage.observation_path(thread)).exists()
     assert ObservationEvent.from_dict(json.loads(store.storage.observation_path(thread).read_text())) == event
+
+
+@pytest.mark.parametrize("kind", ["usage", "observations"])
+def test_writer_past_thread_precheck_cannot_recreate_retired_ledger(tmp_path, monkeypatch, kind):
+    """真实写者在线程预检查后排队，退休提交后不能重新创建无主账本。"""
+    from agent_py_agent.agent.memory_store import retention_apply
+    from agent_py_agent.tests.test_rework_r9_conversation_transcript_retention import (
+        NOW,
+        OLD,
+        _owner,
+    )
+
+    home, service = _owner(tmp_path)
+    store = ConversationStore(Path(home.owner_home_dir) / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "queued-ledger", "now": OLD}).thread_id
+    if kind == "usage":
+        writer, module, lock_name = store.model_usage, store_usage, "locked_file_transition"
+        path = writer._path(thread)
+
+        def append(number):
+            return writer.append_once(_request(thread, number))
+    else:
+        writer, module, lock_name = store.observations, store_observations, "locked_json_path"
+        path = store.storage.observation_path(thread)
+
+        def append(number):
+            return writer.append({"thread_id": thread, "_observation_id": f"queued-{number}", "now": OLD})
+
+    append(0)
+    for name in ("channel_bindings.json", "user_latest_threads.json"):
+        index = store.storage.root / name
+        values = json.loads(index.read_text())
+        index.write_text(json.dumps({key: value for key, value in values.items() if value != thread}))
+    action, = [item for item in service.plan(now=NOW).actions
+               if item.category == "conversation" and item.record_id == thread]
+    attempted, release = threading.Event(), threading.Event()
+    original_lock = getattr(module, lock_name)
+    outcomes, errors = [], []
+
+    @contextmanager
+    def queued_lock(*args, **kwargs):
+        if threading.current_thread().name == "queued-ledger-writer":
+            attempted.set()
+            assert release.wait(10)
+        with original_lock(*args, **kwargs):
+            yield
+
+    def run():
+        try:
+            outcomes.append(append(1))
+        except Exception as error:
+            errors.append(error)
+
+    monkeypatch.setattr(module, lock_name, queued_lock)
+    worker = threading.Thread(target=run, name="queued-ledger-writer", daemon=True)
+    worker.start()
+    try:
+        assert attempted.wait(5)
+        retired = retention_apply._trash_conversation(home=home, action=action, now=NOW)
+        assert retired.status == "trashed"
+    finally:
+        release.set()
+        worker.join(10)
+    assert not worker.is_alive()
+    assert not store.storage.thread_path(thread).exists()
+    assert not path.exists(), {"kind": kind, "outcomes": outcomes, "errors": errors}
+    assert not segments.archive_dir_for(path).exists()
+    assert not outcomes
+    assert len(errors) == 1 and isinstance(errors[0], (KeyError, FileNotFoundError))

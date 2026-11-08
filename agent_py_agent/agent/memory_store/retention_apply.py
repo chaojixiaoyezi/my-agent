@@ -9,6 +9,7 @@ import logging
 import os
 import shutil
 import stat
+from contextlib import ExitStack
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +33,8 @@ from ..common.request_execution_ports import (
 )
 from ..common.tool_write_context import ToolWriteContextUnavailable
 from ..conversation.models import ConversationThread
+from ..conversation.thread_ledger_segments import archive_dir_for
+from ..conversation.usage_index import UsageIndex
 from ..gateway_parts.io import locked_file_transition, update_json_file_atomic
 from ..user_space.storage_lanes import STORAGE_LANE_SLICE_BYTES
 from .candidate_models import MemoryCandidate
@@ -50,6 +53,8 @@ from .retention_models import (
 from .retention_scan import (
     _DAY_SECONDS,
     _TRASH_COMMIT_PENDING,
+    _conversation_ledger_active_paths,
+    _conversation_ledger_member_paths,
     _conversation_related_paths,
     _load_policy,
     _runtime_unlocked,
@@ -723,8 +728,10 @@ def _restore_conversation_index(path, removed):
 
 # LLM: 与消息writer同锁序；锁内重验摘要、绑定、active task、cutoff及快路投影，提交后才追加退休证明。
 #   并重新枚举热/清单/暂存/冷段/索引完整成员；集合或指纹与规划不一致就放弃本轮，绝不搬半套或漏下冷段。
+#   保持消息 -> 线程次序，再依原用量 append-once -> JSON -> SQLite 投影锁取锁，最后取观察 JSON 锁；
+#   观察写者释放 JSON 锁后才更新线程，不把持有 SQLite 连接的文件移入回收站。
 #   移动及索引增量独立补偿，失败保留副本；提交后只rmdir本线程已空的冷目录，不碰*.lock侧车与共享archive根。
-# 函数用途: 将一个过期 ConversationStore thread 及其完整转写本、附属文件移入同一回收容器。
+# 函数用途: 将过期线程及其完整转写本、观察/用量家族、附属文件移入同一回收容器。
 def _trash_conversation(
     *,
     home: object,
@@ -737,7 +744,9 @@ def _trash_conversation(
     if action.path.parent.name != "threads" or action.path.name != f"{action.record_id}.json":
         return replace(action, status="state_changed")
     messages = root / "messages" / f"{action.record_id}.jsonl"
-    with locked_json_path(messages), locked_file_transition(action.path):
+    with ExitStack() as locks:
+        locks.enter_context(locked_json_path(messages))
+        locks.enter_context(locked_file_transition(action.path))
         try:
             payload = json.loads(action.path.read_text(encoding="utf-8"))
             thread = ConversationThread.from_dict(payload)
@@ -751,6 +760,18 @@ def _trash_conversation(
             or not _fingerprint_matches(action.authority_fingerprint, file_fingerprint(action.path))
         ):
             return replace(action, status="state_changed")
+        # 先拒绝已知不安全的家族目录，避免为外部链接目标创建锁侧车；取得原写锁后再完整复读。
+        observation, usage = _conversation_ledger_active_paths(root, thread.thread_id)
+        member_errors = []
+        for active in (observation, usage):
+            _conversation_ledger_member_paths(active, member_errors, "MEMORY_RETENTION_CONVERSATION_LEDGER_UNREADABLE")
+        if member_errors:
+            return replace(action, status="state_changed")
+        locks.enter_context(locked_file_transition(usage.with_name(f".{usage.name}.append-once")))
+        locks.enter_context(locked_json_path(usage))
+        # 原用量连接也持该投影锁；仅借原锁，不打开 SQLite，所有连接结束后才能搬库/WAL。
+        locks.enter_context(locked_json_path(UsageIndex(usage, thread.thread_id).path))
+        locks.enter_context(locked_json_path(observation))
         members, member_errors = _conversation_related_paths(root, thread)
         if thread.thread_id.startswith("thread-subagent-"):
             policy, policy_error = _load_policy(Path(home.owner_retention_json))
@@ -806,7 +827,9 @@ def _trash_conversation(
                     restored = False
             _finish_failed_trash(destination, action=action, payload=payload_root, now=now, restored=restored)
             raise
-        _prune_transcript_archive_dirs(root / "messages" / "archive" / thread.thread_id, moved)
+        for archive in (root / "messages" / "archive" / thread.thread_id,
+                        archive_dir_for(observation), archive_dir_for(usage)):
+            _prune_transcript_archive_dirs(archive, moved)
         # 只有所有者内已提交的回收可成为退休证明；追加失败不得触发上面的移动回滚。
         if root.is_relative_to(Path(home.owner_home_dir)):
             try:
