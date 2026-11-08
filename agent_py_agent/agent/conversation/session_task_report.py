@@ -133,6 +133,8 @@ def report_task_result(agent: object, task: object) -> bool:
     guidance = getattr(store, "guidance", None)
     if guidance is None:
         return False
+    # 业务派活（tasks.assign/submit/follow_up）的发送方需要被唤醒才能把结果告诉用户；沿委派同一wake形状与去重键。
+    business = not delegated and isinstance((getattr(task, "metadata", None) or {}).get("business_context"), dict)
     summary = str(getattr(task, "summary", "") or "").strip()
     refs = tuple(str(item) for item in (getattr(task, "result_refs", ()) or ()))
     failure_code = str(getattr(task, "failure_code", "") or "").strip()
@@ -170,12 +172,13 @@ def report_task_result(agent: object, task: object) -> bool:
         )
         if delegated and previous is None:
             _record_pair(store, task.target_thread_id, sender)
-        if delegated:
+        if delegated or business:
             from .session_messaging import SESSION_MESSAGE_KEY_FIELD
 
             source = threads.require(sender)
-            if source.status != "active":
+            if delegated and source.status != "active":
                 return False
+        if (delegated or business) and source.status == "active":
             store.wakes.raise_signal({
                 "thread_id": sender, "urgency": "normal", "reason": "session_message",
                 "summary": "收到原委派任务的终态结果", "dedupe_key": dedupe_key, "retain_handled": True,
