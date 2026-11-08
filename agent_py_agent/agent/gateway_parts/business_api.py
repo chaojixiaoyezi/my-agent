@@ -763,9 +763,12 @@ def native_business_context(handler, server):
     base = server.agent if server.agent is not None else getattr(server, 'control_plane', None)
     if base is None:
         raise HostAPIError('HOST_NOT_READY', 503)
+    headers = getattr(handler, 'headers', None)
+    if headers is None and getattr(handler, '_auth_middleware', None) is not None:
+        raise HostAPIError('CAPABILITY_DENIED', 403)
     user_id, channel = _request_channel(handler)
     # 客户端可用原X-Conversation-Id选择本人已有会话作为W2来源；缺省仍为default，owner/通道/用户由认证头决定。
-    conversation = str(handler.headers.get('X-Conversation-Id') or '').strip()
+    conversation = str(headers.get('X-Conversation-Id') or '').strip() if headers is not None else ''
     scope = _gateway_control_scope(handler, {'conversation_id': conversation} if conversation else {},
         user_id=user_id, channel=channel)
     owner = resolve_gateway_scope_owner(base, scope)
@@ -804,8 +807,9 @@ def native_business_context(handler, server):
     def check(action, facts):
         middleware = getattr(handler, '_auth_middleware', None)
         if middleware is not None:
-            if (not middleware.check_trusted(handler.headers, _handler_peer_ip(handler))
-                    or middleware.extract_identity(handler.headers, _handler_peer_ip(handler)) != (user_id, channel)):
+            headers = getattr(handler, 'headers', None)
+            if (headers is None or not middleware.check_trusted(headers, _handler_peer_ip(handler))
+                    or middleware.extract_identity(headers, _handler_peer_ip(handler)) != (user_id, channel)):
                 return False
         if resolve_gateway_scope_owner(base, scope) != owner:
             return False
@@ -845,7 +849,8 @@ def native_business_context(handler, server):
         middleware = getattr(handler, '_auth_middleware', None)
         if middleware is None:
             return home.owner_provider == 'local' and home.owner_kind == 'main'
-        return middleware.require_admin(handler.headers, _handler_peer_ip(handler))[0] is True
+        headers = getattr(handler, 'headers', None)
+        return headers is not None and middleware.require_admin(headers, _handler_peer_ip(handler))[0] is True
 
     host.business_native_admin = native_admin
     # 提供者只绑定本次已解析的owner；调用时由端口先过同一live check再租用，不缓存宿主或授权。
@@ -894,23 +899,29 @@ def _native_source(handler):
     from urllib.parse import urlsplit
 
     from ..auth.middleware import require_trusted_source
+    headers = getattr(handler, 'headers', None)
+    if headers is None:
+        raise HostAPIError('CAPABILITY_DENIED', 403)
     if require_trusted_source(handler):
         return False
-    origin = handler.headers.get('Origin')
+    origin = headers.get('Origin')
     if origin is not None:
         parsed = urlsplit(origin)
-        if parsed.scheme not in {'http', 'https'} or parsed.netloc != handler.headers.get('Host'):
+        if parsed.scheme not in {'http', 'https'} or parsed.netloc != headers.get('Host'):
             raise HostAPIError('CAPABILITY_DENIED', 403)
     return True
 
 
 def _native_json(handler):
     from ..plugin_host.schemas import REQUEST_MAX_BYTES, strict_json
-    lengths = handler.headers.get_all('Content-Length', [])
+    headers = getattr(handler, 'headers', None)
+    if headers is None:
+        raise HostAPIError('INVALID_SCHEMA')
+    lengths = headers.get_all('Content-Length', [])
     if (len(lengths) != 1 or not re.fullmatch(r'[0-9]{1,10}', lengths[0])
-            or handler.headers.get('Transfer-Encoding') is not None
-            or handler.headers.get('Content-Encoding') is not None
-            or handler.headers.get_content_type() != 'application/json'):
+            or headers.get('Transfer-Encoding') is not None
+            or headers.get('Content-Encoding') is not None
+            or headers.get_content_type() != 'application/json'):
         raise HostAPIError('INVALID_SCHEMA')
     length = int(lengths[0])
     if length > REQUEST_MAX_BYTES:
