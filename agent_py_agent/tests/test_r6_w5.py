@@ -101,13 +101,13 @@ def test_runtime_bundle_keeps_task_source_and_first_window_through_compactions(t
         assert _update(owner, Path(third.json_path))["status"] == "incomplete_tool_index_sources"
 
 
-def test_missing_owner_index_is_reported_without_losing_task_records(tmp_path):
+def test_absent_owner_candidate_keeps_task_records_without_incomplete_history(tmp_path):
     task = tmp_path / "runs/arbitrary/task/work"
     _externalize(task, SCOPE, "task-only")
     sources = (refs.CarriedIndexSource(tmp_path, "owner_index"), refs.CarriedIndexSource(task, "task_index"))
     read = refs.carried_tool_call_records_for_requests(sources, [SCOPE["request_id"]])
     assert [row["call_id"] for row in read.records] == ["task-only"]
-    assert read.unreadable_sources == ({"source": "owner_index", "error_type": "FileNotFoundError"},)
+    assert read.unreadable_sources == ()
 
 
 def test_closeout_keeps_host_bound_task_promotion_in_the_same_turn(tmp_path):

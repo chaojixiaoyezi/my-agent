@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import json
+import os
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,10 +28,13 @@ import pytest
 from agent_py_agent.agent.agent_core._tool_loop_service import (
     _DEFAULT_MAX_TOOL_ROUND_COUNT,
     _effective_max_tool_rounds,
+    _record_tool_call,
+    _runtime_workspace_context,
 )
 from agent_py_agent.agent.agent_core.orchestration.create_payload import (
     effective_replacement_ids_per_child,
 )
+from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
 from agent_py_agent.agent.agent_core.parameters import _one_shot_tool_call_is_duplicate
 from agent_py_agent.agent.agent_core.runtime.loop_models import (
     RunParams,
@@ -38,8 +43,14 @@ from agent_py_agent.agent.agent_core.runtime.loop_models import (
 )
 from agent_py_agent.agent.agent_core.runtime.loop_support import _tool_loop_execute_params
 from agent_py_agent.agent.agent_core.tool_call_runtime import (
+    ToolCallRuntimeRequest,
     _duplicate_one_shot_result,
     _one_shot_blocked_by_incomplete_carry,
+    guarded_tool_call_result,
+)
+from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
+    ToolCallExecuteParams,
+    ToolCallRecordParams,
 )
 from agent_py_agent.agent.contracts.error_taxonomy import ERROR_CONTRACTS
 from agent_py_agent.agent.conversation import background_execution as execution_module
@@ -62,7 +73,17 @@ from agent_py_agent.agent.memory_archive.compact_tool_output_refs import (
 )
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.settings.deployment_policy import RuntimeGuardPolicy
-from agent_py_agent.agent.user_space.run_workspace import run_workspace_owner_home
+from agent_py_agent.agent.subagents.manager_runner_result_payload import RecordRunnerResultParams
+from agent_py_agent.agent.user_space.run_workspace import (
+    EnsureRunWorkspaceRequest,
+    activate_run_workspace,
+    run_workspace_owner_home,
+)
+from agent_py_agent.tests._tool_runtime_harness import (
+    canonical_history_call,
+    execute_canonical_test_call,
+    make_test_protocol_snapshot,
+)
 
 _FOREGROUND = "gwreq-foreground-1"
 _CHILD_GOAL = "读取父项目资料并写出三条要点"
@@ -409,3 +430,108 @@ def test_wake_slice_rounds_are_a_per_slice_allowance_on_both_budget_branches(tmp
     assert params.task_attributes.get("max_tool_rounds") == slice_limit
     agent = SimpleNamespace(config=SimpleNamespace(max_tool_rounds=global_rounds))
     assert _effective_max_tool_rounds(agent, SimpleNamespace(task_attributes=params.task_attributes)) == effective
+
+
+class _DeferredCreateSubagentsTool(CreateSubagentsTool):
+    """仅由宿主延迟启动 runner，保留真实创建服务、协议校验和结果。"""
+
+    def execute(self, params):
+        return super().execute({**params, "defer_start": True})
+
+
+def test_first_child_completion_dispatches_distinct_work_without_a_task_index(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    owner = agent.home_paths.owner_home_dir
+    foreground = replace(_loop([]), request_id=_FOREGROUND, run_id=_FOREGROUND, task_id=_FOREGROUND,
+        task_attributes={"conversation_request_id": _FOREGROUND},
+        tool_protocol_snapshot=make_test_protocol_snapshot(run_id=_FOREGROUND, source_protocol="native"))
+    _runtime_workspace_context(agent, foreground)
+    task_root = owner / "tasks/2026-11-08/first-wake"
+    activate_run_workspace(task_root, EnsureRunWorkspaceRequest(
+        home=agent.home_paths.root, template="general", task_name="first-wake", user_prompt=_CHILD_GOAL,
+        owner_home=str(owner), request_id=_FOREGROUND, run_id=_FOREGROUND, task_id=_FOREGROUND,
+    ))
+    agent._current_run_task_workspace = str(task_root)
+    tools = {"create_subagents": _DeferredCreateSubagentsTool(agent)}
+    arguments = {"items": [{"goal": _CHILD_GOAL}]}
+    first = execute_canonical_test_call(owner, tools=tools, tool_name="create_subagents", arguments=arguments,
+                                        run_id=_FOREGROUND, call_id="first-create", attempt_id="foreground-attempt")
+    assert first.result.ok, first.result.output
+    _record_tool_call(agent, ToolCallRecordParams(foreground, 1, 1, first.call, first.result))
+    owner_index = owner / "blobs/tool_outputs/index.jsonl"
+    task_index = task_root / "work/blobs/tool_outputs/index.jsonl"
+    assert owner_index.is_file() and not task_index.exists()
+
+    child = agent.subagents.list_runs()[0]
+    attempt = agent.subagents.lifecycle.prepare_runner_attempt(child.id)
+    agent.subagents.runner_result.record_runner_result(RecordRunnerResultParams(
+        run_id=child.id, attempt_id=attempt.runner_active_attempt_id, dry_run=False, ok=True,
+        message="第一阶段完成", response="资料要点已整理。", status="DONE", turn_end_reason="completed",
+        actual_tools=[],
+    ))
+    assert agent.subagents.load(child.id).status == "DONE"
+    params = _wake_params(tmp_path, task_root)
+    assert not task_index.exists()
+    assert len(params.carried_archive_tool_calls) == 1
+    carried = params.carried_archive_tool_calls[0]
+    assert carried[CARRIED_RUNTIME_ONLY_FIELD] is True
+    assert tuple(carried[key] for key in ("run_id", "attempt_id", "turn_id", "call_id")) == (
+        first.call.run_id, first.call.attempt_id, first.call.turn_id, first.call.call_id,
+    )
+    loop = replace(_loop(params.carried_archive_tool_calls), task_attributes=params.task_attributes)
+    assert loop.archive_tool_calls == []
+
+    def gate(call):
+        return guarded_tool_call_result(ToolCallRuntimeRequest(agent, ToolCallExecuteParams(loop, 2, 1, call), call))
+
+    distinct = {"items": [{"goal": "根据第一阶段资料核对三条结论"}]}
+    second = execute_canonical_test_call(owner, tools=tools, tool_name="create_subagents", arguments=distinct,
+        run_id=_FOREGROUND, call_id="second-create", attempt_id="wake-attempt", pre_handler_gate=gate)
+    assert second.result.ok, second.result.output
+    assert second.result.handler_executed
+    assert CONVERSATION_ACTIVE_TURN_CARRY_INCOMPLETE_ATTR not in params.task_attributes
+    duplicate = execute_canonical_test_call(owner, tools=tools, tool_name="create_subagents", arguments=arguments,
+        run_id=_FOREGROUND, call_id="duplicate-create", attempt_id="wake-attempt", pre_handler_gate=gate)
+    assert duplicate.result.error_code == "TOOL_ONE_SHOT_ALREADY_EXECUTED"
+    assert not duplicate.result.handler_executed and duplicate.result.failure_stage == "runtime_gate"
+    assert len(agent.subagents.list_runs()) == 2
+    assert agent.subagents.load(child.id).status == "DONE"
+    replacement = {"items": [{"goal": _CHILD_GOAL, "replacement_for_run_ids": [child.id]}]}
+    assert gate(canonical_history_call("create_subagents", replacement)) is None
+    assert gate(canonical_history_call("read_file", {"path": "notes.txt"})) is None
+
+
+@pytest.mark.parametrize("read_error", [False, True])
+def test_implicit_candidate_reads_close_handles_and_preserve_mid_read_errors(tmp_path, monkeypatch, read_error):
+    owner, task_root = _owner_layout(tmp_path)
+    original_open = Path.open
+
+    class InterruptedRead:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            self.handle.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.handle.__exit__(*args)
+
+        def __iter__(self):
+            yield next(self.handle)
+            raise FileNotFoundError("opened source disappeared during iteration")
+
+    def open_source(path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        return InterruptedRead(handle) if read_error and path == owner / "blobs/tool_outputs/index.jsonl" else handle
+
+    monkeypatch.setattr(Path, "open", open_source)
+    fd_dir = "/proc/self/fd" if os.path.isdir("/proc/self/fd") else "/dev/fd"
+    before = len(os.listdir(fd_dir)) if os.path.isdir(fd_dir) else None
+    for _ in range(32):
+        read = carried_tool_call_records_for_requests(_sources(owner, task_root), [_FOREGROUND])
+        assert [row["call_id"] for row in read.records] == (["call-wake"] if read_error else ["call-create", "call-wake"])
+        assert read.unreadable_sources == (({"source": "owner_index", "error_type": "FileNotFoundError"},)
+                                          if read_error else ())
+    if before is not None:
+        assert len(os.listdir(fd_dir)) - before == 0

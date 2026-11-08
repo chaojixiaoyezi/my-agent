@@ -110,12 +110,16 @@ def _carried_record_key(row: dict[str, Any], record: dict[str, Any]) -> tuple[st
 
 
 # LLM: 只读 root 自己的索引文件，二进制逐行读取，记录边界只认物理 LF（与 jsonl_lines 同一规则），行尾一个 CR 去掉；
-#   不含任一请求编号字节的行直接跳过，不解析；缺失来源也抛 OSError，由上层记录不完整事实。
+#   不含任一请求编号字节的行直接跳过；隐式候选首次未写可缺失，成功打开后的读取错误仍报告不完整。
 # 函数用途: 流式读出一个索引里可能属于指定请求的行，避免把整份 owner 索引读进内存。
 def _stream_index_rows(root: Path, wanted: tuple[str, ...]) -> Iterator[dict[str, Any]]:
     path = tool_output_root(root) / "index.jsonl"
     needles = tuple(item.encode("utf-8") for item in wanted)
-    with path.open("rb") as handle:
+    try:
+        handle = path.open("rb")
+    except FileNotFoundError:
+        return
+    with handle:
         yield from filter(None, (_index_line_row(raw, needles) for raw in handle))
 
 
