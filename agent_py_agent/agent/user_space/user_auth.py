@@ -238,17 +238,15 @@ def _feishu_credential(root, uid, tenant):
     return _Credential("providers/feishu/users/" + uid, owner, str((row or {}).get("display_name") or uid), revision or 1, stored)
 
 
-# LLM: 原库读取前核父链与普通单链接SQLite头；实际hash仍由原只读Store取得，缺库与坏库分别报告。
+# LLM: 原库读取前只核父链与普通单链接元数据；实际hash及库格式由原只读Store核验，缺库与坏库分别报告。
 # 函数用途: 安全读取原IM密码，不跟随密码库符号链接或创建数据库。
 def _im_password(root, uid):
     try:
         parent = open_directory_beneath(root, ("session_lock",), require_dir_fd=True)
         try:
-            descriptor = os.open("private_chat_locks.db", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
-            with os.fdopen(descriptor, "rb") as handle:
-                info = os.fstat(handle.fileno())
-                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or handle.read(16) != b"SQLite format 3\x00":
-                    raise ValueError("invalid password database")
+            info = os.stat("private_chat_locks.db", dir_fd=parent, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValueError("invalid password database")
         finally:
             os.close(parent)
         with _SERVICE_LOCK:

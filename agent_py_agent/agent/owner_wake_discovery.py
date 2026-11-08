@@ -58,6 +58,7 @@ from typing import Any
 from .conversation.models import THREAD_TASK_LINK_ACTIVE_STATUS
 from .conversation.task_state import conversation_task_link_is_terminal
 from .gateway_parts.io import update_json_file_atomic
+from .io.sqlite_probe import _opened_sqlite_header, sqlite_readonly_probe_uri
 from .memory_store import curator_models as _curator_models
 from .runtime_db.operations import exec_lock_scope
 from .runtime_db.repository import (
@@ -1247,7 +1248,7 @@ def _main_run_row_for_task(repo: RuntimeRepository, task_id: str):
     return repo.main_agent_run_for_task(task_id)
 
 
-# LLM: 现行根目录权威优先，兼容data布局；不经写repo。冷WAL库用immutable禁建sidecar，DELETE库保持读锁。
+# LLM: 现行根目录权威优先，兼容data布局；不经写repo，由SQLite管理旁文件及并发读锁。
 # 函数用途: 为静止探针提供短时只读连接，读取期间权威变化或缺失时放弃静止证明。
 @contextmanager
 def _quiescent_probe_connection(owner_home: Path) -> Iterator[sqlite3.Connection | None]:
@@ -1267,9 +1268,13 @@ def _quiescent_probe_connection(owner_home: Path) -> Iterator[sqlite3.Connection
     if db_path != primary and before[0] != ("missing",):
         yield None
         return
-    with db_path.open("rb") as source:
-        immutable = not has_wal and source.read(20)[18:20] == b"\x02\x02"
-    address = db_path.absolute().as_uri() + "?mode=ro" + ("&immutable=1" if immutable else "")
+    address = sqlite_readonly_probe_uri(db_path)
+    if not has_wal and not shm.exists():
+        # 兼容冷 WAL 零旁文件合同：只借 SQLite 已管理的 FD 读头，DELETE 库仍保留正常读锁。
+        with closing(sqlite3.connect(address, uri=True, timeout=0.05)):
+            cold_wal = _opened_sqlite_header(db_path)[18:20] == b"\x02\x02"
+        if cold_wal and not wal.exists() and not shm.exists():
+            address += "&immutable=1"
     with closing(sqlite3.connect(address, uri=True, timeout=0.05)) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only=ON")

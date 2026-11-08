@@ -20,6 +20,7 @@ from ..common.nofollow_fs import (
     open_readonly_file_beneath,
 )
 from ..common.tool_output_paths import tool_output_root
+from ..io.sqlite_probe import require_plain_sqlite_files, sqlite_readonly_probe_uri
 
 # Owner根工具输出正文默认保留天数。
 OWNER_TOOL_OUTPUT_RETENTION_DAYS = 30
@@ -86,13 +87,9 @@ def _attempt_states(owner_home: Path, attempt_ids: set[str]) -> dict[str, tuple[
         db = None
         for candidate in dict.fromkeys((runtime_db_path(owner_home), owner_home / 'data' / 'runtime.db')):
             try:
-                descriptor = open_readonly_file_beneath(owner_home, candidate.relative_to(owner_home).parts)
+                require_plain_sqlite_files(candidate, beneath=owner_home)
             except FileNotFoundError:
                 continue
-            with os.fdopen(descriptor, 'rb') as handle:
-                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                    raise ValueError('runtime db is not regular')
-                header = handle.read(20)
             db = candidate
             break
         if db is None:
@@ -100,8 +97,7 @@ def _attempt_states(owner_home: Path, attempt_ids: set[str]) -> dict[str, tuple[
         wal, shm = Path(str(db) + '-wal'), Path(str(db) + '-shm')
         if wal.is_symlink() or shm.is_symlink() or (wal.exists() and not shm.is_file()):
             raise ValueError('unsafe runtime sidecar')
-        immutable = not wal.exists() and header[18:20] == b'\x02\x02'
-        uri = db.absolute().as_uri() + '?mode=ro' + ('&immutable=1' if immutable else '')
+        uri = sqlite_readonly_probe_uri(db)
         result = {}
         with closing(sqlite3.connect(uri, uri=True, timeout=0.05)) as conn:
             conn.execute('PRAGMA query_only=ON')
