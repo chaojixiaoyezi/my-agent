@@ -371,10 +371,33 @@ def _start_background_process_reaper(
     thread = threading.Thread(
         target=Context().run,
         name=f"my-agent-reap-{request.launch_id}",
-        args=(_reap_background_process, agent, request.launch_id, process),
+        args=(_reap_then_settle_unactivated_exit, agent, request, process),
         daemon=True,
     )
     thread.start()
+
+
+# LLM: 回收后再核：子进程晚于启动轮询窗口才非零退出、且本批预留轮次在运行库仍是pending（从未进入runner），
+#   与"启动期即退"同一结论，沿原launch/attempt条件写启动失败与通道失败，孤儿巡查不再每拍重派同一个必崩启动。
+#   已激活的轮次由runner自己收口，这里不碰；轮次读不到（库不可读/无运行库）按未知保守跳过。
+# 函数用途: 回收后台派工子进程，并把"未进入runner就退出"收敛为持久启动失败。
+def _reap_then_settle_unactivated_exit(agent, request: _BackgroundDispatchRequest, process: subprocess.Popen) -> None:
+    _reap_background_process(agent, request.launch_id, process)
+    returncode = getattr(process, "returncode", None)
+    getter = getattr(getattr(getattr(agent, "subagents", None), "runtime_db", None), "get_attempt", None)
+    if type(returncode) is not int or returncode == 0 or not callable(getter):
+        return
+    pending = []
+    for run_id in getattr(request, "run_ids", None) or []:
+        try:
+            row = getter(request.params.expected_attempt_ids[run_id])
+        except Exception:  # noqa: BLE001 读不到轮次即未知，保持原责任不改状态
+            continue
+        if row is not None and str(row["status"]) == "pending":
+            pending.append(run_id)
+    if pending:
+        _background_process_startup_failure(_ProcessStartupFailureRequest(
+            agent, replace(request, run_ids=pending), process, returncode, []))
 
 
 def _reap_background_process(agent, launch_id: str, process: subprocess.Popen) -> None:
