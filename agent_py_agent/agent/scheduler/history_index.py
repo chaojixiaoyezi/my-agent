@@ -10,7 +10,11 @@ import stat
 from contextlib import closing
 from pathlib import Path
 
-from ..common.json_io import append_private_jsonl_records_unlocked, locked_json_path
+from ..common.json_io import (
+    append_private_jsonl_records_unlocked,
+    locked_json_path,
+    seal_private_jsonl_tail_unlocked,
+)
 from ..common.nofollow_fs import ensure_private_dir, open_readonly_file_beneath
 
 logger = logging.getLogger(__name__)
@@ -140,6 +144,7 @@ class SchedulerHistoryIndex:
             return
         with locked_json_path(self.source), closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
+            seal_private_jsonl_tail_unlocked(self.source)
             before = _snapshot(self.source)
             state = self._prepare(self._state(conn), before)
             start = before["stamp"][2] if before["stamp"] else 0

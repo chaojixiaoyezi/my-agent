@@ -539,7 +539,42 @@ def append_private_jsonl_records_unlocked(path: Path, records: list[dict[str, ob
     check_io_deadline(deadline)
     blob = "".join(json.dumps(record, ensure_ascii=False, sort_keys=sort_keys) + "\n" for record in records)
     options = {} if deadline is None else {"deadline": deadline}
+    seal_private_jsonl_tail_unlocked(path)
     append_private_text_unlocked(path, blob, **options)
+
+
+# LLM: RES D-5：调用方持原锁；末字节LF/空/缺失/链接不动，完整对象只补LF，半行先0600留档.<name>.torn-<ms>再截回末个LF刷盘。
+# 函数用途: 与 store_messages._seal_torn_jsonl_tail 同算法封住崩溃残尾；按大小预记偏移的调用方须先封再量。
+def seal_private_jsonl_tail_unlocked(path: Path) -> str:
+    from ..conversation.store_io import complete_jsonl_end
+    try:
+        handle = os.fdopen(os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)), "r+b", buffering=0)
+    except OSError:
+        return ""
+    with handle:
+        size = os.fstat(handle.fileno()).st_size
+        handle.seek(max(size - 1, 0))
+        if not size or handle.read(1) == b"\n":
+            return ""
+        end = complete_jsonl_end(handle, size)
+        handle.seek(end)
+        tail = handle.read(size - end)
+        try:
+            completed = isinstance(json.loads(tail.decode("utf-8")), dict)
+        except (ValueError, UnicodeError, RecursionError):
+            completed = False
+        if completed:
+            handle.seek(size)
+            handle.write(b"\n")
+        else:
+            sidecar = path.with_name(f".{path.name}.torn-{time.time_ns() // 1_000_000}")
+            with os.fdopen(os.open(sidecar, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600), "wb") as kept:
+                kept.write(tail)
+                kept.flush()
+                os.fsync(kept.fileno())
+            handle.truncate(end)
+        os.fsync(handle.fileno())
+    return "completed" if completed else "quarantined"
 
 
 # LLM: 与 append_jsonl_records 同格式（每行一条、可选 sort_keys、批内一次写入），权限走私有 append。
