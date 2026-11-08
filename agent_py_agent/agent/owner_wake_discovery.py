@@ -1217,7 +1217,10 @@ _TERMINAL_TASK_RUN_STATUSES = AGENT_RUN_TERMINAL_STATUSES | {"completed", "inter
 # R1-03 发现层 repo 缓存：唤醒轮每 tick 调 unfinished_task_ids，每 tick 重建
 # RuntimeRepository（schema 初始化开销）不可接受。按 db 文件 mtime_ns 失效——
 # 外部写（settle/reclaim）后 mtime 变化，下次 tick 自动重建，读旧状态窗口 ≤ 1 tick。
-_RUNTIME_REPO_CACHE: dict[str, tuple[int, RuntimeRepository]] = {}
+# 发现层逐页走遍全部 owner，按 db 路径永久驻留会随历史 owner 数无界增长；按常驻 owner 槽 × 每 owner 会话槽做 LRU，
+# 淘汰只多一次重开（库与数据不动）。
+_RUNTIME_REPO_CACHE: OrderedDict[str, tuple[int, RuntimeRepository]] = OrderedDict()
+_RUNTIME_REPO_CACHE_LOCK = threading.Lock()
 
 
 def _runtime_repo_for_owner(owner_home: Path) -> RuntimeRepository | None:
@@ -1230,11 +1233,20 @@ def _runtime_repo_for_owner(owner_home: Path) -> RuntimeRepository | None:
         mtime_ns = db_path.stat().st_mtime_ns
     except OSError:
         return None
-    cached = _RUNTIME_REPO_CACHE.get(str(db_path))
-    if cached is not None and cached[0] == mtime_ns:
-        return cached[1]
+    from .common import cache_capacity
+
+    key = str(db_path)
+    with _RUNTIME_REPO_CACHE_LOCK:
+        cached = _RUNTIME_REPO_CACHE.get(key)
+        if cached is not None and cached[0] == mtime_ns:
+            _RUNTIME_REPO_CACHE.move_to_end(key)
+            return cached[1]
     repo = RuntimeRepository(db_path)
-    _RUNTIME_REPO_CACHE[str(db_path)] = (mtime_ns, repo)
+    with _RUNTIME_REPO_CACHE_LOCK:
+        _RUNTIME_REPO_CACHE[key] = (mtime_ns, repo)
+        _RUNTIME_REPO_CACHE.move_to_end(key)
+        while len(_RUNTIME_REPO_CACHE) > cache_capacity.resident_owners(1) * cache_capacity.owner_sessions(1):
+            _RUNTIME_REPO_CACHE.popitem(last=False)
     return repo
 
 
