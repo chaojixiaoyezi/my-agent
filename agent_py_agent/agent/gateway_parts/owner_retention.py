@@ -361,19 +361,22 @@ def _remove_sealed_bundle(paths, bundle):
     return True
 
 
-# LLM: 每根目录只保留有界scandir句柄；重启从头枚举但已删条目无需重放，绝不持久化不稳定offset作权威。
+# LLM: 每根目录只保留有界scandir句柄；句柄被换出或重启后从头枚举，按调用方持久化的名字锚点跳过本轮已检条目，
+#   锚点消失则本拍不算走完、下拍从头；只有常规.json候选计入条数，锁旁车只做名字过滤；跳过段只比名字不计时。
 #   生产接线传remove_loose=True（读口已切换到封存索引）；False仅供只封存不删原件的诊断/测试调用。
 #   已提交manifest的定位器先在同一维护锁下恢复；无新候选也能自愈，缺分段继续失败关闭。
 # 函数用途: 在总候选/时间/字节预算内封存一片原终态回执。
 def seal_gateway_receipts_slice(paths, *, before: float, max_entries: int = 128, max_ms: float = 50,
-                                max_bytes: int = 4 * 1_048_576, remove_loose: bool = True) -> dict:
+                                max_bytes: int = 4 * 1_048_576, remove_loose: bool = True,
+                                resume_after: str = '') -> dict:
     from .multiprocess_processing_recovery import processing_metadata_scope
 
     if (type(max_entries) is not int or max_entries < 1 or type(max_bytes) is not int or max_bytes < 1
             or type(max_ms) not in (int, float) or not math.isfinite(max_ms) or max_ms <= 0
-            or type(before) not in (int, float) or not math.isfinite(before)):
+            or type(before) not in (int, float) or not math.isfinite(before) or type(resume_after) is not str):
         raise ValueError('invalid_gateway_receipt_budget')
-    result = {'sealed_requests': 0, 'archived_requests': 0, 'scanned_entries': 0, 'bytes': 0, 'errors': [], 'complete': False}
+    result = {'sealed_requests': 0, 'archived_requests': 0, 'scanned_entries': 0, 'bytes': 0, 'errors': [], 'complete': False,
+              'resume_after': ''}
     if not paths.terminal.is_dir() and not (paths.root / 'archive' / 'receipts-manifest.json').exists():
         return {**result, 'complete': True}
     deadline = time.monotonic() + max_ms / 1000
@@ -384,17 +387,22 @@ def seal_gateway_receipts_slice(paths, *, before: float, max_entries: int = 128,
         if not paths.terminal.is_dir():
             return {**result, 'complete': True}
         identity = str(paths.root.absolute())
-        iterator = _RECEIPT_SCANS.get(identity)
+        iterator, seeking = _RECEIPT_SCANS.get(identity), ''
         if iterator is None:
-            iterator = _receipt_scan_entries(paths.terminal)
+            iterator, seeking = _receipt_scan_entries(paths.terminal), resume_after
             _RECEIPT_SCANS[identity] = iterator
         _RECEIPT_SCANS.move_to_end(identity)
         while len(_RECEIPT_SCANS) > 32:
             _key, old = _RECEIPT_SCANS.popitem(last=False)
             old.close()
-        bundles, size = [], 0
+        bundles, size, examined, removed = [], 0, [], set()
         try:
-            while result['scanned_entries'] < max_entries and time.monotonic() < deadline:
+            if seeking and next((entry for entry in iterator if entry.name == seeking), None) is None:
+                # 锚点已不在目录（外部删除）：本拍不算走完、锚点清空，下拍从头重扫。
+                iterator.close()
+                _RECEIPT_SCANS.pop(identity, None)
+                return result
+            while result['scanned_entries'] < max_entries and (not examined or time.monotonic() < deadline):
                 try:
                     entry = next(iterator)
                 except StopIteration:
@@ -405,6 +413,7 @@ def seal_gateway_receipts_slice(paths, *, before: float, max_entries: int = 128,
                 if not entry.name.endswith('.json') or not entry.is_file(follow_symlinks=False):
                     continue
                 result['scanned_entries'] += 1
+                examined.append(entry.name)
                 with processing_metadata_scope(paths, Path(entry.name).stem):
                     bundle = _receipt_bundle(paths, Path(entry.path), before)
                 if bundle is None:
@@ -413,6 +422,7 @@ def seal_gateway_receipts_slice(paths, *, before: float, max_entries: int = 128,
                     continue
                 weight = sum(len(raw) for relative, raw in bundle[1])
                 if size + weight > min(max_bytes, _RECEIPT_MAX_SEGMENT_BYTES // 2):
+                    examined.pop()
                     result['complete'] = False
                     break
                 bundles.append(bundle)
@@ -426,7 +436,10 @@ def seal_gateway_receipts_slice(paths, *, before: float, max_entries: int = 128,
                         current = _receipt_bundle(paths, paths.terminal / f'{key}.json', before)
                         if remove_loose and current == (key, bundle) and _remove_sealed_bundle(paths, bundle):
                             result['sealed_requests'] += 1
+                            removed.add(f'{key}.json')
                 result['bytes'] = size
+            if not result['complete']:
+                result['resume_after'] = next((name for name in reversed(examined) if name not in removed), resume_after)
         except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
                 ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
             iterator.close()
@@ -436,5 +449,5 @@ def seal_gateway_receipts_slice(paths, *, before: float, max_entries: int = 128,
             iterator.close()
             _RECEIPT_SCANS.pop(identity, None)
             result['errors'].append({'error_type': type(exc).__name__, 'side_effects_unknown': True})
-            result['complete'] = False
+            result.update(complete=False, resume_after=resume_after)
     return result

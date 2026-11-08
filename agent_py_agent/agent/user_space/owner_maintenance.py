@@ -1197,8 +1197,9 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
                     'complete': not runtime_pending, 'items': 0, 'bytes': 0}
         remaining_ms = max(0.001, (budget['deadline'] - time.monotonic()) * 1000)
         report = seal_gateway_receipts_slice(paths, before=now - 7 * 86400, max_entries=budget['items'],
-                                            max_bytes=budget['bytes'], max_ms=min(25, remaining_ms), remove_loose=True)
-        position = {'complete': report['complete'], 'errors': report['errors'],
+                                            max_bytes=budget['bytes'], max_ms=min(25, remaining_ms), remove_loose=True,
+                                            resume_after=str(cursor.get('resume_after') or ''))
+        position = {'complete': report['complete'], 'errors': report['errors'], 'resume_after': report['resume_after'],
                     'reader_cutover_required': False, 'archived_requests': report['archived_requests']}
         runtime_pending = any(_real_owner_directory(home, paths.root / name)
                               for name in ('input_receipts', 'client_outbox'))

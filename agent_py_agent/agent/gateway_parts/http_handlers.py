@@ -339,12 +339,13 @@ def handle_result(handler, server) -> None:
     if _send_pending_state(handler, server.paths.inbox, "queued", access, server=server):
         return
     # 终态可能在两次热队列检查之间提交，再读一次 canonical；独立 response
-    # 或 done/failed 投影永远不能把请求提升为完成。
+    # 或 done/failed 投影永远不能把请求提升为完成。热队列都没有时才查封存索引（原件已封存删除的老请求）。
     if _send_archived_terminal_result(
         handler,
         server,
         access,
         repair_response_projection=True,
+        include_sealed=True,
     ):
         return
     handler._send_json(404, _denial_body(handler, {"error": "not found", "request_id": request_id}))
@@ -393,17 +394,19 @@ def _send_archived_terminal_result(
     access: _ResultAccessContext,
     *,
     repair_response_projection: bool = False,
+    include_sealed: bool = False,
 ) -> bool:
     paths = server.paths
     archive_path = paths.terminal / f"{access.request_id}.json"
-    # 原件优先；原件已封存删除时按同一封存索引判定终态。
+    # 原件优先；原件缺失时只有历史读口（include_sealed）才查封存索引，在途轮询不打开索引。
     loose = archive_path.exists()
-    if not loose and not gateway_terminal_exists(paths, archive_path.name):
+    if not loose and not (include_sealed and gateway_terminal_exists(paths, archive_path.name)):
         return False
     terminal_report = read_gateway_terminal_envelope_report(
         archive_path,
         request_id=access.request_id,
         context="gateway.http_terminal_archive.read",
+        include_sealed=include_sealed,
     )
     payload = terminal_report.payload
     if terminal_report.load_error is not None:
@@ -813,19 +816,22 @@ def _can_read_finished_request(paths, access: _ResultAccessContext) -> _Finished
     found_request = False
     for folder in (paths.processing, paths.inbox, paths.terminal, paths.done, paths.failed):
         request_path = folder / f"{access.request_id}.json"
-        if request_path.exists():
-            payload, load_error = _read_payload_report(request_path, context="gateway.http_result_request.read")
-        elif folder in (paths.terminal, paths.done, paths.failed):
-            sealed = read_json_file_report(request_path, context="gateway.http_result_request.sealed_read")
-            if sealed.load_error is None and not sealed.payload:
-                continue
-            payload, load_error = sealed.payload, sealed.load_error
-        else:
+        if not request_path.exists():
             continue
         found_request = True
+        payload, load_error = _read_payload_report(request_path, context="gateway.http_result_request.read")
         if load_error or not _can_read_payload(payload, access.user_id, access.permission):
             return _FinishedRequestAccess.DENIED
-    return _FinishedRequestAccess.ALLOWED if found_request else _FinishedRequestAccess.NOT_FOUND
+    if found_request:
+        return _FinishedRequestAccess.ALLOWED
+    # 热队列与原件都没有时才查封存终态（原件已封存删除的老请求）；在途请求不打开封存索引。
+    sealed = read_json_file_report(paths.terminal / f"{access.request_id}.json",
+                                   context="gateway.http_result_request.sealed_read")
+    if sealed.load_error is None and not sealed.payload:
+        return _FinishedRequestAccess.NOT_FOUND
+    if sealed.load_error or not _can_read_payload(sealed.payload, access.user_id, access.permission):
+        return _FinishedRequestAccess.DENIED
+    return _FinishedRequestAccess.ALLOWED
 
 
 # LLM: 旧字典读口沿同一report实现，不吞写回或恢复动作，完整诊断消费者应使用report入口。
