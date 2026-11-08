@@ -5,17 +5,22 @@ from __future__ import annotations
 import http.client
 import json
 from dataclasses import replace
+from threading import Event, Thread
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.conversation.business_contracts import BusinessExecutionContext
+from agent_py_agent.agent.conversation.session_task_report import report_task_result
+from agent_py_agent.agent.conversation.session_tasks import SessionTaskUpdate
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts.http_service import (
     GatewayHTTPServer,
     GatewayHTTPServerParams,
 )
+from agent_py_agent.agent.gateway_parts.io import update_json_file_atomic
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.cli.chat_client_context import (
@@ -154,3 +159,177 @@ def test_background_business_turn_recovers_sender_identity(agent):
     _background_turn(agent, bystander, replace(context), request_id='bg-turn-3')
     outcome, mismatched = _call(agent, 'background_agents.list', {'limit': 20})
     assert not outcome.ok and mismatched['error']['code'] == 'CAPABILITY_DENIED', outcome.output
+
+
+@pytest.fixture
+def delegation(agent):
+    chat = _chat_thread(agent, 'delegation-entry')
+    _background_turn(agent, chat.thread_id, None)
+    _, space = _call(agent, 'spaces.create', {'name': '委派空间'}, idempotency_key='lineage-space')
+    sid = space['data']['space_id']
+    workers = []
+    for key in ('first', 'second'):
+        outcome, created = _call(agent, 'background_agents.create', {'name': key, 'space_id': sid},
+            idempotency_key='lineage-' + key)
+        assert outcome.ok, outcome.output
+        workers.append(created['data']['agent']['agent_id'])
+    outcome, assigned = _call(agent, 'tasks.assign', {'agent_id': workers[0], 'space_id': sid,
+        'instruction': '上级任务'}, idempotency_key='lineage-root')
+    assert outcome.ok, outcome.output
+    root = agent.conversation_store.session_tasks.require(assigned['data']['task_id'])
+    assert root.origin_task_id == ''
+    context = BusinessExecutionContext.from_dict(root.metadata['business_context'])
+    _background_turn(agent, workers[0], context)
+    return SimpleNamespace(chat=chat, sid=sid, first=workers[0], second=workers[1], root=root,
+        params={'agent_id': workers[1], 'space_id': sid, 'instruction': '下级任务'})
+
+
+def _later_parent(agent, case):
+    _background_turn(agent, case.chat.thread_id, None, request_id='later-chat')
+    outcome, result = _call(agent, 'tasks.assign', {'agent_id': case.first, 'space_id': case.sid,
+        'instruction': '后来的上级任务'}, idempotency_key='lineage-later-root')
+    assert outcome.ok, outcome.output
+    parent = agent.conversation_store.session_tasks.require(result['data']['task_id'])
+    _background_turn(agent, case.first, BusinessExecutionContext.from_dict(parent.metadata['business_context']),
+        request_id='later-parent-turn')
+    return parent
+
+
+@pytest.mark.parametrize('status', ['queued', 'done', 'failed', 'cancelled'])
+@pytest.mark.parametrize('legacy', [False, True], ids=['linked', 'legacy-empty-origin'])
+def test_omitted_origin_replay_preserves_canonical_identity_and_terminal_state(
+    agent, delegation, monkeypatch, status, legacy,
+):
+    case, store = delegation, agent.conversation_store
+    outcome, assigned = _call(agent, 'tasks.assign', case.params, idempotency_key='lineage-child')
+    assert outcome.ok, outcome.output
+    task = store.session_tasks.require(assigned['data']['task_id'])
+    if legacy:
+        # 模拟旧版本已受理的空来源记录；重放不能借后来上下文补写历史身份。
+        update_json_file_atomic(store.session_tasks._path(task.task_id),
+            lambda data: {**data, 'origin_task_id': ''}, require_existing=True)
+    else:
+        assert task.origin_task_id == case.root.task_id
+    if status != 'queued':
+        store.session_tasks.bind_turn(task.task_id, turn_id='executing-child')
+        store.session_tasks.advance(task.task_id, SessionTaskUpdate(status, summary='原任务结果', result_refs=('result:1',)))
+        if status == 'cancelled':
+            store.session_tasks.record_cancellation_control(task.task_id, outstanding_refs=['cleanup:original'])
+    original = store.session_tasks.require(task.task_id)
+    later = _later_parent(agent, case)
+    wakes_before = [row.wake_signal_id for row in store.wakes.pending(limit=0)]
+    outcome, replay = _call(agent, 'tasks.assign', case.params, idempotency_key='lineage-child')
+    assert outcome.ok and replay['data']['task_id'] == original.task_id, outcome.output
+    assert store.session_tasks.require(task.task_id).to_dict() == original.to_dict()
+    assert [row.wake_signal_id for row in store.wakes.pending(limit=0)] == wakes_before
+    create, errors = store.session_tasks.create, []
+
+    def observe_create(*args, **kwargs):
+        try:
+            return create(*args, **kwargs)
+        except ValueError as error:
+            errors.append(error)
+            raise
+
+    monkeypatch.setattr(store.session_tasks, 'create', observe_create)
+    outcome, conflict = _call(agent, 'tasks.assign', {**case.params, 'origin_task_id': later.task_id},
+        idempotency_key='lineage-child')
+    assert not outcome.ok and outcome.error_code == 'TOOL_OPERATION_OUTCOME_UNKNOWN', outcome.output
+    assert conflict['reported_error_code'] == 'TOOL_EXECUTION_FAILED'
+    assert len(errors) == 1 and str(errors[0]).startswith('IDEMPOTENCY_CONFLICT:')
+    assert errors[0].__cause__ is None
+    assert store.session_tasks.require(task.task_id).to_dict() == original.to_dict()
+    assert [row.wake_signal_id for row in store.wakes.pending(limit=0)] == wakes_before
+    if status in {'done', 'failed'}:
+        assert report_task_result(agent, original)
+        entries = store.guidance.pending('thread', case.first, limit=0)
+        reports = [entry for entry in entries if entry.metadata.get('session_task_id') == task.task_id]
+        assert len(reports) == 1 and reports[0].metadata['origin_thread_id'] == case.second
+    if status == 'cancelled':
+        assert store.session_tasks.require(task.task_id).metadata['cancellation_control']['outstanding_refs'] == [
+            'cleanup:original']
+
+
+def test_inherited_origin_uses_configured_dispatch_depth_limit(agent, delegation, tmp_path):
+    config = tmp_path / 'capability_config.yaml'
+    config.write_text('session_task_max_chain_depth: 1\n', encoding='utf-8')
+    agent.capability_config_path = config
+    agent._capability_config_runtime_snapshot = None
+    before = [row.wake_signal_id for row in agent.conversation_store.wakes.pending(limit=0)]
+    outcome, result = _call(agent, 'tasks.assign', delegation.params, idempotency_key='depth-rejected')
+    assert not outcome.ok and result['error']['code'] == 'SESSION_TASK_CHAIN_LIMIT', outcome.output
+    assert [row.wake_signal_id for row in agent.conversation_store.wakes.pending(limit=0)] == before
+
+
+def test_replay_racing_cancellation_keeps_cleanup_and_single_scope_claim(agent, delegation, monkeypatch):
+    case, store = delegation, agent.conversation_store
+    outcome, assigned = _call(agent, 'tasks.assign', case.params, idempotency_key='racing-child')
+    assert outcome.ok, outcome.output
+    task = store.session_tasks.require(assigned['data']['task_id'])
+    entered, proceed = Event(), Event()
+    find = store.session_tasks.find_by_dedupe_key
+    results, errors = [], []
+    claim = store.claims.acquire({'thread_id': case.second, 'reason': 'lineage-test', 'task_id': task.task_id})
+    assert claim is not None
+
+    def pause_after_lookup(key):
+        previous = find(key)
+        if previous is not None and previous.task_id == task.task_id:
+            entered.set()
+            assert proceed.wait(10)
+        return previous
+
+    def replay():
+        try:
+            _background_turn(agent, case.first, BusinessExecutionContext.from_dict(case.root.metadata['business_context']))
+            results.append(_call(agent, 'tasks.assign', case.params, idempotency_key='racing-child'))
+        except BaseException as error:
+            errors.append(error)
+
+    monkeypatch.setattr(store.session_tasks, 'find_by_dedupe_key', pause_after_lookup)
+    thread = Thread(target=replay)
+    thread.start()
+    try:
+        assert entered.wait(10)
+        _background_turn(agent, case.chat.thread_id, None, request_id='concurrent-chat-turn')
+        assert store.claims.acquire({'thread_id': case.second, 'reason': 'competing-task'}) is None
+        store.session_tasks.advance(task.task_id, SessionTaskUpdate('cancelled'))
+        cancelled = store.session_tasks.record_cancellation_control(task.task_id, outstanding_refs=['cleanup:original'])
+        wakes_before = [row.wake_signal_id for row in store.wakes.pending(limit=0)]
+    finally:
+        proceed.set()
+        thread.join(10)
+        store.claims.finish({'thread_id': case.second, 'claim_id': claim['claim_id'], 'status': 'cancelled'})
+    assert not thread.is_alive() and not errors
+    assert results[0][0].ok, results[0][0].output
+    assert store.session_tasks.require(task.task_id).to_dict() == cancelled.to_dict()
+    assert [row.wake_signal_id for row in store.wakes.pending(limit=0)] == wakes_before
+    assert store.claims.load(case.second)['status'] == 'cancelled'
+    assert agent._current_run_params.request_id == 'concurrent-chat-turn'
+
+
+def test_steer_cancel_and_next_task_keep_lineage_and_context_scope(agent, delegation):
+    case, store = delegation, agent.conversation_store
+    outcome, assigned = _call(agent, 'tasks.assign', case.params, idempotency_key='sequence-child')
+    assert outcome.ok, outcome.output
+    task = store.session_tasks.require(assigned['data']['task_id'])
+    outcome, sent = _call(agent, 'background_agents.messages.send', {'agent_id': case.second,
+        'text': '追加结构化资料', 'input_kind': 'guidance'}, idempotency_key='sequence-steer')
+    assert outcome.ok and sent['data']['receipt_state'] == 'accepted', outcome.output
+    outcome, stopped = _call(agent, 'tasks.cancel', {'task_id': task.task_id, 'include_descendants': False},
+        idempotency_key='sequence-stop', expected_revision=1)
+    assert outcome.ok and stopped['error'] is None, outcome.output
+    assert store.session_tasks.require(task.task_id).status == 'cancelled'
+    assert store.guidance.receipt(task.body_dedupe_key).status == 'rejected'
+    outcome, assigned = _call(agent, 'tasks.assign', {**case.params, 'instruction': '下一轮任务'},
+        idempotency_key='sequence-next')
+    assert outcome.ok, outcome.output
+    next_task = store.session_tasks.require(assigned['data']['task_id'])
+    assert next_task.task_id != task.task_id and next_task.origin_task_id == case.root.task_id
+    _background_turn(agent, case.second, BusinessExecutionContext.from_dict(next_task.metadata['business_context']),
+        request_id='sequence-worker-next')
+    outcome, space = _call(agent, 'spaces.get', {'space_id': case.sid})
+    assert outcome.ok and space['data']['space']['space_id'] == case.sid, outcome.output
+    _background_turn(agent, case.second, None, request_id='sequence-new-empty-turn')
+    outcome, denied = _call(agent, 'spaces.get', {'space_id': case.sid})
+    assert not outcome.ok and denied['error']['code'] == 'CAPABILITY_DENIED'
