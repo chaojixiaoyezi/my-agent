@@ -126,10 +126,11 @@ class _AgentViewProjection:
 class TuiAgentNavigationState:
     # LLM: 初始化固定根 runtime 和有界进程投影；换会话必须新建导航，不携带旧会话控制身份。
     # 函数用途: 创建主代理导航栈和仅用于展示的后台行缓存。
-    def __init__(self, root_runtime: TuiRuntime) -> None:
+    def __init__(self, root_runtime: TuiRuntime, *, max_cached_runtimes: int = 32) -> None:
         if not isinstance(root_runtime, TuiRuntime):
             raise TypeError("root_runtime must be TuiRuntime")
         self.root_runtime = root_runtime
+        self._max_cached_runtimes = max(1, int(max_cached_runtimes))
         self._runtimes: dict[str, TuiRuntime] = {}
         self._rows_by_parent: dict[str, tuple[dict[str, object], ...]] = {"": ()}
         self._rows_by_run: dict[str, dict[str, object]] = {}
@@ -728,11 +729,28 @@ class TuiAgentNavigationState:
     # no Agent, worker, queue, or model backend is constructed.
     # 函数用途: 创建或取得一个子代理详情页的 typed 展示 runtime。
     def _runtime_for_locked(self, run_id: str) -> TuiRuntime:
-        runtime = self._runtimes.get(run_id)
+        runtime = self._runtimes.pop(run_id, None)
         if runtime is None:
             runtime = TuiRuntime(f"{self.root_runtime.session_id}:agent:{run_id}")
-            self._runtimes[run_id] = runtime
+        self._runtimes[run_id] = runtime
+        self._evict_runtimes_locked(keep=run_id)
         return runtime
+
+    # LLM: 路径、业务会话和本次返回页始终保留；回收只清展示状态，重进后沿原事件重放。
+    # 函数用途: 按最久未访问顺序回收超额 runtime 及其游标和去重标记，保留代理名册。
+    def _evict_runtimes_locked(self, *, keep: str) -> None:
+        if len(self._runtimes) <= self._max_cached_runtimes:
+            return
+        pinned = set(self._path) | set(self._business_targets) | {keep}
+        for run_id in list(self._runtimes):
+            if len(self._runtimes) <= self._max_cached_runtimes:
+                break
+            if run_id in pinned:
+                continue
+            self._runtimes.pop(run_id, None)
+            self._event_cursors.pop(run_id, None)
+            self._final_response_keys.pop(run_id, None)
+            self._goal_published.discard(run_id)
 
     # LLM: 展示 runtime 按真实栈顶查找，保留独立后台页；不能复用空代理控制身份来决定页面。
     # 函数用途: 返回当前页面展示 runtime，后台页使用独立且无执行权的页面。
