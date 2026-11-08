@@ -6,15 +6,55 @@ import json
 import os
 import sys
 import time
+from fnmatch import fnmatchcase
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from .normalize import assert_invariants, normalize
-from .replayer import Replayer, replay
+from .recorder import Recorder
+from .replayer import Replayer, ReplayGatewayProcess, replay
 
 HERE = Path(__file__).parent
 SCENARIOS = [json.loads(path.read_text()) for path in sorted((HERE / "scenarios").glob("*.json"))]
+
+
+def _atomic_temporary(name):
+    """只排除原子发表的暂存名，正式账本、锁和其它隐藏文件仍是证据。"""
+    return any(fnmatchcase(name, pattern) for pattern in (".persona-ledger-*", "*.tmp", "*.tmp.*", ".tmp-*"))
+
+
+def replay_paths(root, pattern):
+    """在进入暂存目录前剪枝；只有本根内暂存项自然消失可以忽略。"""
+    root = Path(root)
+
+    def onerror(error):
+        if isinstance(error, FileNotFoundError) and error.filename is not None:
+            path = Path(error.filename)
+            if path.is_relative_to(root) and any(_atomic_temporary(part) for part in path.relative_to(root).parts):
+                return
+        raise error
+
+    for directory, directories, files in os.walk(root, onerror=onerror):
+        directories[:] = [name for name in directories if not _atomic_temporary(name)]
+        for name in (*directories, *files):
+            if not _atomic_temporary(name) and fnmatchcase(name, pattern):
+                yield Path(directory) / name
+
+
+@pytest.fixture(autouse=True)
+def atomic_snapshot_paths(tmp_path, monkeypatch):
+    """只适配当前 golden 临时根内的观察扫描，不改变子进程或共享回放器。"""
+    original = Path.rglob
+
+    def snapshot_rglob(root, pattern, *args, **kwargs):
+        if (root.is_relative_to(tmp_path) and isinstance(pattern, str)
+                and "/" not in pattern and not args and not kwargs):
+            return replay_paths(root, pattern)
+        return original(root, pattern, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "rglob", snapshot_rglob)
 
 
 # LLM: Capabilities use the existing root marker; no local try/skip or expected-failure path masks a golden failure.
@@ -82,3 +122,115 @@ def _difference(expected, actual):
     before = json.dumps(expected, ensure_ascii=False, indent=2, sort_keys=True).splitlines()
     after = json.dumps(actual, ensure_ascii=False, indent=2, sort_keys=True).splitlines()
     return "\n".join(difflib.unified_diff(before, after, fromfile="expected", tofile="actual"))
+
+
+@pytest.mark.parametrize("staging_name", [".persona-ledger-deadbeef", "write.tmp", "write.tmp.123", ".tmp-123"])
+def test_recorder_ignores_atomic_staging_directories(tmp_path, staging_name):
+    home = tmp_path / "home"
+    message = {"message_id": "one", "role": "assistant", "content": "committed", "created_at": 1}
+    for directory in (home / "messages", home / staging_name / "messages"):
+        directory.mkdir(parents=True)
+        (directory / "thread.jsonl").write_text(json.dumps(message) + "\n")
+    recorder = Recorder(tmp_path / "evidence")
+    paths = SimpleNamespace(**{name: home / name for name in ("processing", "done", "failed")})
+    recorder.session_and_tools(home, paths, {"thread_id": "thread", "request_id": "request"})
+    assert [event["content"] for event in recorder.events] == ["committed"]
+
+
+def test_replay_scan_does_not_enter_disappearing_atomic_directory(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    root = home / "gateway"
+    root.mkdir(parents=True)
+    (root / "gateway_state.json").write_text("{}")
+    staging = home / ".persona-ledger-deadbeef"
+    staging.mkdir()
+    entered = []
+    scandir = os.scandir
+
+    def disappear(path):
+        if Path(path) == staging:
+            entered.append(path)
+            staging.rmdir()
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", disappear)
+    paths = ReplayGatewayProcess.paths(SimpleNamespace(home=home))
+    assert paths.root == root
+    assert entered == [], "golden scans must prune atomic directories before descent"
+
+
+def test_replay_paths_preserves_committed_files_and_ignores_temporary_files(tmp_path):
+    committed = {"persona_ledger.json", ".hidden.json", "write.tmpish", "versions.jsonl.lock"}
+    temporary = {".persona-ledger-123", "write.tmp", "write.tmp.123", ".tmp-123"}
+    for name in committed | temporary:
+        (tmp_path / name).write_text(name)
+    paths = list(replay_paths(tmp_path, "*"))
+    assert {path.name: path.read_text() for path in paths} == {name: name for name in committed}
+
+
+@pytest.mark.parametrize("name,error_type,ignored", [
+    (".persona-ledger-123", FileNotFoundError, True),
+    ("write.tmp", FileNotFoundError, True),
+    ("write.tmp.123", FileNotFoundError, True),
+    (".tmp-123", FileNotFoundError, True),
+    ("messages", FileNotFoundError, False),
+    (".persona-ledger-123", PermissionError, False),
+])
+def test_replay_scan_only_ignores_missing_atomic_paths(tmp_path, monkeypatch, name, error_type, ignored):
+    committed = tmp_path / "gateway_state.json"
+    committed.write_text("{}")
+    walk = os.walk
+    error = error_type(2, "injected scan failure", str(tmp_path / name))
+
+    def scan(root, *, onerror):
+        onerror(error)
+        yield from walk(root, onerror=onerror)
+
+    monkeypatch.setattr(os, "walk", scan)
+    if ignored:
+        assert list(replay_paths(tmp_path, "gateway_state.json")) == [committed]
+    else:
+        with pytest.raises(error_type) as raised:
+            list(replay_paths(tmp_path, "gateway_state.json"))
+        assert raised.value is error
+
+
+def test_recorder_does_not_hide_missing_committed_evidence(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    directory = home / "messages"
+    directory.mkdir(parents=True)
+    committed = directory / "thread.jsonl"
+    committed.write_text("{}")
+    read_text = Path.read_text
+    missing = []
+
+    def disappear(path, *args, **kwargs):
+        if path == committed:
+            path.unlink()
+            missing.append(path)
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", disappear)
+    recorder = Recorder(tmp_path / "evidence")
+    paths = SimpleNamespace(**{name: home / name for name in ("processing", "done", "failed")})
+    with pytest.raises(FileNotFoundError):
+        recorder.session_and_tools(home, paths, {"thread_id": "thread", "request_id": "request"})
+    assert missing == [committed]
+
+
+def test_replay_scan_still_requires_one_authoritative_gateway_state(tmp_path):
+    for name in ("first", "second"):
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "gateway_state.json").write_text("{}")
+    with pytest.raises(AssertionError):
+        ReplayGatewayProcess.paths(SimpleNamespace(home=tmp_path))
+
+
+def test_snapshot_filter_keeps_other_roots_on_the_original_glob(tmp_path, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside-golden")
+    temporary = outside / "write.tmp"
+    temporary.write_text("outside this replay")
+    assert list(outside.rglob("*.tmp")) == [temporary]
+    (tmp_path / "write.tmp").write_text("atomic staging")
+    assert list(tmp_path.rglob("*.tmp")) == []
