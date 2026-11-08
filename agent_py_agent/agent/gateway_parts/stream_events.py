@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from ..backends.assistant_messages import message_projection
 from ..common.value_parsing import non_negative_int
+from ..concurrency.daemon_executor import DeferredCall, SharedDeferredCalls
 from ..conversation.channels import (
     project_host_paths_for_channel,
     project_user_reply,
@@ -19,6 +20,8 @@ CONTEXT_USAGE_SCHEMA = "model_visible_context_usage.v1"
 _THINKING_FLUSH_IDLE_SLICE_SECONDS = 1.0
 # 在途发布线程存活时跨线程等待排空的最大轮数
 _THINKING_FLUSH_IDLE_MAX_TURNS = 3
+# 思考尾块刷新共用一条常驻延时线程：每个刷新窗口不再新建一条 Timer 线程（3.14t 短命线程按创建次数涨 RSS）。
+_THINKING_FLUSH_CALLS = SharedDeferredCalls("thinking-flush-timer")
 _CONTEXT_USAGE_TOKEN_FIELDS = (
     "context_window_tokens",
     "compact_trigger_tokens",
@@ -578,7 +581,7 @@ def wait_thinking_flush_idle(
         return writer._thinking_publishing_tid in (None, ident)
 
 
-# LLM: 后台守护定时器只在单调时钟真正达到间隔且流未关闭时触发合批刷新，不绕过测试时钟。
+# LLM: 共享延时线程只在单调时钟真正达到间隔且流未关闭时触发合批刷新，不绕过测试时钟；先登记句柄再排程，回调必见句柄。
 # 函数用途: 在思考流暂停且无新delta到达时，按刷新间隔自动排空缓冲尾部。
 def schedule_thinking_flush_timer(writer: Any, due_check: Any = None) -> None:
     if getattr(writer, "_liveness_closed", False) or not writer._thinking_buffer:
@@ -596,10 +599,9 @@ def schedule_thinking_flush_timer(writer: Any, due_check: Any = None) -> None:
             return
         writer.flush_thinking_delta(final=False)
 
-    timer = threading.Timer(delay, _on_timer)
-    timer.daemon = True
+    timer = DeferredCall(_on_timer)
     writer._thinking_flush_timer = timer
-    timer.start()
+    _THINKING_FLUSH_CALLS.start(timer, delay)
 
 
 # LLM: 在任何显式刷新或流关闭时取消未触发的思考定时器，避免结束后残留后台线程。
