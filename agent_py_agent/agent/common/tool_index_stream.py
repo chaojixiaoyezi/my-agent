@@ -5,6 +5,7 @@ from __future__ import annotations
 import codecs
 import io
 import json
+import os
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -26,11 +27,12 @@ class InvalidToolIndexObject(ValueError):
 # 函数用途: 逐行返回文本候选，按原入口合同解码并立即丢弃无关对象。
 def iter_prescreened_tool_index_lines(
     path: Path, prescreen: re.Pattern[bytes] | None, *, universal_newlines: bool = False,
+    mark: list[int] | None = None,
 ) -> Iterator[tuple[int, str]]:
     if not path.exists():
         return
     pending: Exception | None = None
-    for number, raw in _iter_index_lines(path, universal_newlines=universal_newlines):
+    for number, raw in _iter_index_lines(path, universal_newlines=universal_newlines, mark=mark):
         text = _decode_record_bytes(raw)
         try:
             _check_index_resource_errors(text, universal_newlines)
@@ -90,10 +92,28 @@ def _check_index_resource_errors(text: str, enabled: bool) -> None:
 
 # LLM: with保证正常/异常关闭；没有整文件读取，通用换行也不把NEL/U+2028/U+2029当边界。
 # 函数用途: 按消费方原换行合同流式提供索引字节。
-def _iter_index_lines(path: Path, *, universal_newlines: bool = False) -> Iterator[tuple[int, bytes | str]]:
+def _iter_index_lines(
+    path: Path, *, universal_newlines: bool = False, mark: list[int] | None = None,
+) -> Iterator[tuple[int, bytes | str]]:
     with path.open("rb") as handle:
+        handle.seek(_verified_mark_offset(handle, mark))
         lines = _universal_index_lines(handle) if universal_newlines else handle
         yield from enumerate(lines, start=1)
+
+
+# LLM: 回合起点标记只在同一打开句柄上核验：inode 未换、长度未缩、标记前一字节为 LF 才跳过已有前缀，
+#   前缀行已在更早的收尾中按同一合同读过；标记缺失、畸形或任一不符都从 0 整读。
+# 函数用途: 返回本次逐行读取的起始偏移。
+def _verified_mark_offset(handle: Any, mark: list[int] | None) -> int:
+    try:
+        dev, ino, size = (int(value) for value in mark or ())
+    except (TypeError, ValueError):
+        return 0
+    info = os.fstat(handle.fileno())
+    if (info.st_dev, info.st_ino) != (dev, ino) or not 0 < size <= info.st_size:
+        return 0
+    handle.seek(size - 1)
+    return size if handle.read(1) == b"\n" else 0
 
 
 # LLM: 复用标准库增量UTF-8/通用换行，固定块避免每8KiB一次系统读取；不按Unicode分隔符断行。
