@@ -95,6 +95,18 @@ def _tui_request_exit(refs: TuiExitRefs) -> None:
     refs.stop_event.set()
 
 
+# LLM: 展示窗口只限制本页保留/渲染的冻结块数（渲染缓存随之有界），不影响会话存储里的完整历史，也不改事件重放。
+# 函数用途: 按配置的 tui_transcript_max_blocks 创建主会话展示 runtime。
+def _root_tui_runtime(params):
+    from ...agent.settings.config import AgentConfig
+    from .tui_runtime import TuiRuntime
+    from .tui_view_model import TuiStateStore, TuiViewModelReducer
+
+    window = int(getattr(params.agent.config, "tui_transcript_max_blocks", AgentConfig.tui_transcript_max_blocks)
+                 or AgentConfig.tui_transcript_max_blocks)
+    return TuiRuntime(params.current_session_id, store=TuiStateStore(reducer=TuiViewModelReducer(max_stable_blocks=window)))
+
+
 def _make_tui_exit_refs(params: TuiHandleCommandParams) -> TuiExitRefs:
     return TuiExitRefs(
         shutting_down_ref=params.shutting_down_ref,
@@ -368,13 +380,12 @@ def run_tui(*, params: TuiRunParams) -> int:
     from agent_py_agent import __version__
 
     from .tui_agent_navigation import TuiAgentNavigationState
-    from .tui_runtime import TuiRuntime
 
     assistant_outputs: list[str] = []
     stop_event = threading.Event()
     app_ref: list = [None]
     refresh_stop = threading.Event()
-    tui_runtime = TuiRuntime(params.current_session_id)
+    tui_runtime = _root_tui_runtime(params)
     agent_navigation = TuiAgentNavigationState(
         tui_runtime,
         max_cached_runtimes=int(getattr(params.agent.config, "tui_agent_view_cache_max_count", 32) or 32),
