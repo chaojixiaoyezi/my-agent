@@ -449,7 +449,7 @@ class _RequestDispatcher:
         if now >= self._next_terminal_projection_at:
             self._note_segment_progress()
             delay = self._run_segment(_PROJECTION_SITE, self._projection_backoff, self._project_terminals_once)
-            self._next_terminal_projection_at = now + max(0.75, delay)
+            self._next_terminal_projection_at = now + max(0.75, delay, self._projection_idle_delay())
         if now >= self._next_input_reconcile_at:
             self._note_segment_progress()
             delay = self._run_segment(_RECONCILE_SITE, self._reconcile_backoff, self._reconcile_inputs_once)
@@ -524,10 +524,30 @@ class _RequestDispatcher:
                 time.time(), 1, 1, False, self.bootstrap_agent, None,
                 admission_gate=self._admission_gate,
             )
-        repair_gateway_terminal_projections(
-            self.paths, agent=self.bootstrap_agent, limit=16, full_scan=startup,
+        limit, self._projection_page_full = 16, True
+        projected, errors = repair_gateway_terminal_projections(
+            self.paths, agent=self.bootstrap_agent, limit=limit, full_scan=startup,
             recovery_context=recovery_context,
         )
+        # 本拍未满一页：现存待结算条目已全部看过一遍；只有积压追平中才会满页。
+        self._projection_page_full = projected + len(errors) >= limit
+
+    # LLM: 终态投影是兜底（正常完成路径自己写投影）。终态目录自上一拍无增删且本拍未满一页时，剩下的只是上一拍已试过、
+    #   仍无法结算的同一批（如前台恢复交接未完成），按原 LoopErrorBackoff 倍增空转间隔（封顶同错误退避）；
+    #   目录一变、满页（积压追平中）或本拍抛错立即回到 0.75 秒节奏。不改结算、确认、游标与小时级全量复核合同。
+    # 函数用途: 返回终态投影段因空转应额外推迟的秒数。
+    def _projection_idle_delay(self) -> float:
+        from ..agent.gateway_parts.recovery import _terminal_directory_stamp
+
+        idle = self.__dict__.setdefault("_projection_idle", LoopErrorBackoff())
+        stamp = _terminal_directory_stamp(self.paths.terminal)
+        if (stamp is not None and stamp == self.__dict__.get("_projection_stamp")
+                and not self.__dict__.get("_projection_page_full", True)):
+            idle.record_failure("terminal_projection_idle")
+        else:
+            idle.record_success()
+        self._projection_stamp = stamp
+        return idle.delay()
 
     # LLM: 对账结果里的错误（对账抛错、带错误的终态未知）要抛给段守卫：进 loop_health 计数与限流打印，并只推迟本段自己的
     #   下次到期；不能像以前那样把 summary 丢掉让坏账回执被静默重读。
