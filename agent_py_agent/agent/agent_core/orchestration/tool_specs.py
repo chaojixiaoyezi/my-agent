@@ -358,8 +358,9 @@ def build_resolve_capability_requests_model_spec() -> ToolModelSpec:
     )
 
 
+# LLM: 角色模板索引每次构造只从磁盘读一次，且只在说明里确有占位符时读取；逐键重读会让每份工具快照多出十几次模板目录全量加载。
+# 函数用途: 把当前角色模板索引填进含占位符的参数说明，其余说明原样保留。
 def _with_role_template_index(details: dict[str, str]) -> dict[str, str]:
-    return {
-        key: value.replace("{role_template_index}", role_template_index_text())
-        for key, value in details.items()
-    }
+    marker = "{role_template_index}"
+    index = role_template_index_text() if any(marker in value for value in details.values()) else ""
+    return {key: value.replace(marker, index) for key, value in details.items()}
