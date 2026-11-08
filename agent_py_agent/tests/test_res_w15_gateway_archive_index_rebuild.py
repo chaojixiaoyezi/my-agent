@@ -158,7 +158,7 @@ def test_missing_index_reads_consumed_input_and_archived_outbox(tmp_path):
     assert not any(report['errors'] for report in _archive(paths, 'input_receipts'))
     assert not any(report['errors'] for report in _archive(paths, 'client_outbox'))
     hot = inputs.gateway_input_receipt_path(paths, row.request_id)
-    hot.unlink()
+    assert not hot.exists()  # SCALE-FU-01：封存经核验后保留期已删除热原件，不再手工删除。
     index = paths.root / 'archive/runtime-files.sqlite3'
     _remove_family(index)
     callback = Mock(side_effect=AssertionError('must not prepare a consumed input'))
@@ -432,7 +432,7 @@ def test_cold_directory_disappearance_after_eligibility_never_reprepares(tmp_pat
     row = _seed(paths)
     assert not any(report['errors'] for report in _archive(paths, 'input_receipts'))
     hot = inputs.gateway_input_receipt_path(paths, row.request_id)
-    hot.unlink()
+    assert not hot.exists()  # SCALE-FU-01：封存经核验后保留期已删除热原件，不再手工删除。
     index = paths.root / 'archive/runtime-files.sqlite3'
     _remove_family(index)
     cold = paths.root / 'archive/input_receipts'
@@ -495,7 +495,7 @@ def test_rebuild_ignores_lock_sidecars_created_by_archived_receipt_reads(tmp_pat
     assert not any(report['errors'] for report in _archive(paths, 'input_receipts'))
     index = paths.root / 'archive/runtime-files.sqlite3'
     before_rows = _index_rows(index)
-    inputs.gateway_input_receipt_path(paths, row.request_id).unlink()
+    assert not inputs.gateway_input_receipt_path(paths, row.request_id).exists()  # SCALE-FU-01：热原件已由保留期删除。
     prepare = Mock(side_effect=AssertionError('must not prepare consumed input'))
     reused, created = _prepare(paths, row, prepare)
     assert reused == row and not created
@@ -518,7 +518,7 @@ def test_real_month_replacement_before_open_preserves_consumed_input(
     row = _seed(paths)
     assert not any(report['errors'] for report in _archive(paths, 'input_receipts'))
     hot = inputs.gateway_input_receipt_path(paths, row.request_id)
-    hot.unlink()
+    assert not hot.exists()  # SCALE-FU-01：封存经核验后保留期已删除热原件，不再手工删除。
     index = paths.root / 'archive/runtime-files.sqlite3'
     _remove_family(index)
     newer = _outbox(paths, 'newer', updated_at=2) if operation == 'rebuild' else None

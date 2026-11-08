@@ -497,13 +497,9 @@ def test_retention_moves_only_terminal_old_entries(tmp_path, directory):
     assert all(row['scanned_entries'] <= 1 for row in reports)
     assert reports[0]['complete'] is False
     assert (paths.root / 'archive' / directory / '197001' / 'old.json').is_file()
-    if directory == 'input_receipts':
-        # 未迁移读者仍需热件：核冷备份与原件逐字节相同，不恢复危险删除来满足旧期望。
-        assert (folder / 'old.json').read_bytes() == (paths.root / 'archive' / directory / '197001' / 'old.json').read_bytes()
-        assert all(row['reader_cutover_required'] is True for row in reports)
-        assert all(row['deferred_reason'] == 'input_receipt_reader_cutover_required' for row in reports)
-    else:
-        assert not (folder / 'old.json').exists()
+    # SCALE-FU-01：读口已统一经封存索引回落，input与outbox一样在定位核实后移除松散原件。
+    assert not (folder / 'old.json').exists()
+    assert not any('reader_cutover_required' in row for row in reports)
     assert (folder / 'young.json').exists() and (folder / 'pending.json').exists()
     assert lock.read_text() == 'keep' and not any(row['errors'] for row in reports)
     if directory == 'input_receipts':
@@ -617,8 +613,9 @@ def test_receipt_maintenance_safe_gates_and_cross_slice_progress(tmp_path):
     assert not state['maintenance_partial']
     assert (paths.root / 'archive/input_receipts/197001/input-a.json').exists()
     assert (paths.root / 'archive/client_outbox/197001/empty.json').exists()
-    assert receipt_delivery.gateway_input_receipt_path(paths, 'input-a').read_bytes() == original_input
+    assert not receipt_delivery.gateway_input_receipt_path(paths, 'input-a').exists()
     assert (paths.root / 'archive/input_receipts/197001/input-a.json').read_bytes() == original_input
+    assert receipt_delivery.read_gateway_input_receipt(paths, 'input-a').to_dict() == receipt_json.loads(original_input)
     assert not (paths.root / 'client_outbox/empty.json').exists()
 
 
@@ -804,10 +801,9 @@ def test_rework_input_copy_retains_original_and_original_prepare_identity(tmp_pa
     hot = rework_inputs.gateway_input_receipt_path(paths, row.request_id)
     before = hot.read_bytes()
     reports = rework_archive(paths, 'input_receipts')
-    assert hot.exists(), 'unmigrated readers still require the original hot receipt'
-    assert hot.read_bytes() == before
+    # SCALE-FU-01：原件在封存定位核实后移除，同id重试仍经封存件保持原prepare身份。
+    assert not hot.exists()
     assert (paths.root / 'archive/input_receipts/197001/input-a.json').read_bytes() == before
-    assert any(r.get('deferred_reason') == 'input_receipt_reader_cutover_required' for r in reports)
     assert not any(r['errors'] for r in reports)
     reused, created = rework_prepare(paths, row)
     assert not created and reused == row
@@ -853,8 +849,8 @@ def test_rework_production_maintenance_retains_input_but_archives_empty_outbox(t
         if not state.get('maintenance_partial'):
             break
     assert not state['maintenance_partial']
-    assert hot.exists(), 'production maintenance may not delete receipts needed by control'
-    assert hot.read_bytes() == original and pending.exists() and not outbox.exists()
+    # SCALE-FU-01：control/wait读口已回落封存件，生产维护移除已核实的input原件。
+    assert not hot.exists() and pending.exists() and not outbox.exists()
     assert (paths.root / 'archive/input_receipts/197001/input-a.json').read_bytes() == original
     assert (paths.root / 'archive/client_outbox/197001/empty.json').exists()
 
@@ -935,25 +931,26 @@ def test_rework_repeated_input_copy_is_idempotent_and_budgeted(tmp_path):
     report = rework_retention.archive_terminal_slice(paths, directory='input_receipts', before=100,
         max_bytes=1, max_ms=1000)
     assert not report['complete'] and report['bytes'] == 0 and hot.exists()
+    before = hot.read_bytes()
     first = rework_archive(paths, 'input_receipts')
     assert sum(r['archived_entries'] for r in first) == 1
-    before = hot.read_bytes()
     again = rework_archive(paths, 'input_receipts')
     assert sum(r['archived_entries'] for r in again) == 0
     assert all(r['scanned_entries'] <= 1 for r in again)
-    assert hot.read_bytes() == before
+    assert not hot.exists()
+    assert (paths.root / 'archive/input_receipts/197001/input-a.json').read_bytes() == before
 
 
-def test_rework_static_input_retention_returns_before_any_unlink():
+def test_rework_static_unlink_follows_verified_publication():
     import ast
     import inspect
     import textwrap
 
+    # SCALE-FU-01 取代旧“input在unlink前返回”的静态钉：任何目录的unlink都必须排在封存定位核实之后。
     tree = ast.parse(textwrap.dedent(inspect.getsource(rework_retention._archive_one)))
     body = tree.body[0].body[0].body
-    input_return = next(i for i, node in enumerate(body) if isinstance(node, ast.If)
-        and ast.unparse(node.test) == "directory == 'input_receipts'"
-        and any(isinstance(child, ast.Return) for child in node.body))
+    verified = next(i for i, node in enumerate(body) if isinstance(node, ast.If)
+        and ast.unparse(node.test) == 'lookup_runtime_file(paths, directory, path.name) is None')
     unlink = next(i for i, node in enumerate(body) if any(isinstance(child, ast.Call)
         and ast.unparse(child.func) == 'os.unlink' for child in ast.walk(node)))
-    assert input_return < unlink
+    assert verified < unlink

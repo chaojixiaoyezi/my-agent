@@ -83,7 +83,13 @@ def confirm_wait_acceptance(paths, request_id: str, wait: dict, *, receipt=None)
             receipt = read_gateway_input_receipt(paths, request_id)
             if receipt is None:
                 raise FileNotFoundError("original input receipt is missing")
-            _sync_existing_control_file(paths.root, gateway_input_receipt_path(paths, request_id))
+            try:
+                _sync_existing_control_file(paths.root, gateway_input_receipt_path(paths, request_id))
+            except FileNotFoundError:
+                # 已封存回执的冷副本发布时已fsync；只有热件与封存定位都缺失才拒绝202（SCALE-FU-01）。
+                from .runtime_file_retention import lookup_runtime_file
+                if lookup_runtime_file(paths, "input_receipts", f"{request_id}.json") is None:
+                    raise
         if receipt is None or receipt.state == "queued":
             try:
                 accepted = _accepted_request_path(paths, request_id, receipt)
