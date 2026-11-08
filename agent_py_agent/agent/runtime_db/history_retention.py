@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -160,10 +162,62 @@ def prune_llm_call_records_step(conn, *, owner_id, cutoff, max_rows) -> dict:
                 "bytes": 0, "deleted_llm_records": deleted}
 
 
+def _runtime_history_vacuum(repo, db_path, request, budget) -> int:
+    """原通道写门内回收页；旧库只允许显式维护且资源充足时转换。"""
+    from ..io.sqlite_connection import sqlite_error_details
+    from ..local_storage.maintenance import (
+        LOCAL_STORE_INCREMENTAL_VACUUM_PAGES_COUNT,
+        LOCAL_STORE_VACUUM_FREE_PERCENT,
+        _local_store_conversion_deferral,
+        _local_store_vacuum_state,
+    )
+
+    if budget.remaining_ms() <= 0:
+        return 0
+    try:
+        with repo._runtime_connection() as conn:
+            state = _local_store_vacuum_state(conn)
+        mode, free, pages, _ = state
+        before = os.stat(db_path).st_size
+        incremental = mode == 2 and free >= LOCAL_STORE_INCREMENTAL_VACUUM_PAGES_COUNT
+        convert = (mode == 0 and not request.coordinator
+                   and free * 100 >= LOCAL_STORE_VACUUM_FREE_PERCENT * max(1, pages)
+                   and _local_store_conversion_deferral(db_path, state, coordinator=False, allow_convert=True) is None)
+        if not incremental and not convert:
+            return 0
+
+        def vacuum():
+            with repo._runtime_connection() as conn:
+                if convert:
+                    conn.execute("PRAGMA auto_vacuum=INCREMENTAL").fetchall()
+                    conn.commit()
+                    conn.execute("VACUUM").fetchall()
+                else:
+                    conn.execute(f"PRAGMA incremental_vacuum({LOCAL_STORE_INCREMENTAL_VACUUM_PAGES_COUNT})").fetchall()
+                    # 页回收沿原代际写事务提交，checkpoint 必须在该事务结束后执行。
+                    conn.commit()
+                    busy, frames, copied = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+                    if not busy and frames == copied:
+                        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+
+        request.run_write(vacuum)
+        return max(0, before - os.stat(db_path).st_size)
+    except sqlite3.OperationalError as exc:
+        if sqlite_error_details(exc).get("category") in {"busy", "locked"}:
+            return 0
+        raise
+
+
 def maintain_runtime_history_lane(request) -> dict:
     """在通道写门内分批改写或删除 owner 终态历史；策略关闭、保全或预算耗尽时不执行。"""
+    from ..local_storage.maintenance import LOCAL_STORE_CATCHUP_MAX_STEPS_COUNT
     from ..memory_store.retention_scan import _load_policy
     from ..memory_store.retention_scan_budget import RETENTION_SCAN_SLICE_ENTRIES
+    from ..user_space.storage_lanes import (
+        STORAGE_LANE_SLICE_BYTES,
+        STORAGE_LANE_SLICE_ENTRIES,
+        STORAGE_LANE_SLICE_MS,
+    )
     from .repository import RuntimeRepository
     from .schema import runtime_db_path
 
@@ -196,9 +250,12 @@ def maintain_runtime_history_lane(request) -> dict:
         for table in ("tool_operations", "runtime_events"):
             receipt["cursor"][table] = _history_cursor(conn, table)
     receipt["cursor"].setdefault("llm_call_records", "")
-    remaining = RETENTION_SCAN_SLICE_ENTRIES
-    if request.budget.max_items is not None:
-        remaining = min(remaining, request.budget.max_items)
+    allowance = request.budget.max_items if request.budget.max_items is not None else RETENTION_SCAN_SLICE_ENTRIES
+    if allowance > RETENTION_SCAN_SLICE_ENTRIES:
+        allowance = max(RETENTION_SCAN_SLICE_ENTRIES, allowance - STORAGE_LANE_SLICE_ENTRIES)
+    lane = request.budget.capped(items=allowance, size=STORAGE_LANE_SLICE_BYTES, ms=STORAGE_LANE_SLICE_MS)
+    remaining = min(RETENTION_SCAN_SLICE_ENTRIES, allowance)
+    pending = []
     for index, (table, days, step) in enumerate(steps):
         if remaining <= 0 or request.budget.remaining_ms() <= 0:
             receipt.update(complete=False, deferred_reason="budget_exhausted")
@@ -214,8 +271,32 @@ def maintain_runtime_history_lane(request) -> dict:
 
         result = request.run_write(execute_step)
         receipt["cursor"][table] = result.get("cursor", "")
-        receipt["complete"] = receipt["complete"] and result.get("complete", True)
+        if not result.get("complete", True):
+            pending.append((table, days, step))
         remaining -= result.get("items", 0)
         for key in ("items", "bytes", "slimmed", "deleted_events", "deleted_llm_records"):
             receipt[key] += result.get(key, 0)
+    for _round_index in range(1, LOCAL_STORE_CATCHUP_MAX_STEPS_COUNT):
+        if (not pending or receipt.get("deferred_reason") == "budget_exhausted"
+                or allowance - receipt["items"] <= 0 or lane.remaining_ms() <= 0):
+            break
+        next_pending = []
+        for index, (table, days, step) in enumerate(pending):
+            remaining = allowance - receipt["items"]
+            if remaining <= 0 or lane.remaining_ms() <= 0:
+                next_pending.extend(pending[index:])
+                break
+            limit = max(1, min(RETENTION_SCAN_SLICE_ENTRIES, remaining // len(pending)))
+            result = request.run_write(execute_step)
+            receipt["cursor"][table] = result.get("cursor", "")
+            if not result.get("complete", True):
+                next_pending.append((table, days, step))
+            for key in ("items", "bytes", "slimmed", "deleted_events", "deleted_llm_records"):
+                receipt[key] += result.get(key, 0)
+        pending = next_pending
+    receipt["complete"] = not pending and receipt.get("deferred_reason") != "budget_exhausted"
+    if receipt["slimmed"] or receipt["deleted_events"] or receipt["deleted_llm_records"]:
+        freed = _runtime_history_vacuum(repo, db_path, request, lane)
+        if freed:
+            receipt["freed_bytes"] = freed
     return receipt

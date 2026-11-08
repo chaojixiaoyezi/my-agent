@@ -481,6 +481,12 @@ class RuntimeWriteFence:
             return None
         if command == 'PRAGMA' and re.match(r'PRAGMA\s+(?:\w+\.)?(?:table_info|table_xinfo|index_list|index_info|foreign_key_list)\s*\(', statement, re.I):
             return None
+        if re.fullmatch(r'PRAGMA\s+(?:auto_vacuum|freelist_count|page_count|page_size)\s*;?\s*', statement, re.I):
+            return None
+        # 页维护不改业务行，且 SQLite 要求在事务外执行；仍复核原连接代际。
+        if re.fullmatch(r'(?:VACUUM|PRAGMA\s+wal_checkpoint\((?:PASSIVE|TRUNCATE)\))\s*;?\s*', statement, re.I):
+            require_runtime_schema_generation(self._connection)
+            return None
         if not self._connection.in_transaction:
             cursor = self._connection.execute('BEGIN IMMEDIATE')
             try:
@@ -650,6 +656,9 @@ class RuntimeSchemaMixin:
         fingerprint = schema_fingerprint((_BASE_RUNTIME_SQL, _RUNTIME_MIGRATIONS, _RUNTIME_MIGRATION_SQL))
         if schema_is_current(conn, fingerprint):
             return False
+        # LLM: 只在尚未建任何表的新库启用增量回收；存量库绝不在连接时转换（与 local.db 同口径）。
+        if conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone() is None:
+            conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
         conn.execute("BEGIN IMMEDIATE")
         if schema_is_current(conn, fingerprint):
             conn.rollback()
