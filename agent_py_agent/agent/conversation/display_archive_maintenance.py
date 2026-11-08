@@ -39,7 +39,7 @@ _DISPLAY_ARCHIVE_MIN_SCAN_BUDGET_ENTRIES = 64
 
 # 只保留有限个目录/操作的内存进度；新进程从归档根父目录的游标文件恢复，不向归档目录写游标文件。
 _scan_cursors: OrderedDict[tuple[int, int, str], int] = OrderedDict()
-# 续扫中的目录迭代器只在本进程有效，位置须与_scan_cursors一致才可接着读，避免每次重开后从头丢弃旧项。
+# 活状态保存(迭代器, 剩余重放量)和实际位置；位置须与_scan_cursors一致才可续读，重放也消耗原扫描预算。
 _live_scans: OrderedDict[tuple[int, int, str], tuple[ExitStack, object, int]] = OrderedDict()
 # 各目录/操作最近一次维护的调用序号（旧在前），据此清退停止维护的键；名额已满时等待的键令占用者跑完一轮即让出。
 _scan_recent: OrderedDict[tuple[int, int, str], int] = OrderedDict()
@@ -329,7 +329,7 @@ def _forget_idle_scans(key):
 
 # LLM: 原根flock保护同目录维护；游标按真实根inode及操作隔离，同进程保留活迭代器续读，每个枚举项都计入预算，回绕共用同一预算。
 #   活迭代器最多128个且不因他键到来被中途淘汰；名额满时新键只从目录头查一个预算窗口、不推进游标，占用者走到目录尾时若有人等待即让出。
-#   同进程丢失活迭代器（异常、名额竞争或内存游标LRU淘汰）从头开新一轮不重放；仅本进程首次或闲置清退后按持久游标一次性重放前缀（跨进程无seekdir的代价）。
+#   同进程丢失活迭代器仍从头开新一轮；首次或闲置清退后的持久前缀按预算分次重放，剩余量和实际位置分开保存。
 #   等待键的目录头一窗走到目录尾即已完整查过一轮，退出等待，不再令占用者让出。
 # 函数用途: 小批维护从上次位置续扫，避免固定前缀挡住后续可处理归档，也不让续扫代价随偏移线性增长。
 def _maintain(value, maximum, action):
@@ -365,17 +365,23 @@ def _maintain(value, maximum, action):
                     with _scan_cursor_lock:
                         _scan_waiting.discard(cursor_key)
                 return result
-            if live is None:
-                offset = 0 if offset is not None or known else _persisted_cursor(root_path, root_info, operation)
-            scans, entries = live[:2] if live is not None else (None, None)
+            replay = live[1][1] if live is not None else (
+                0 if offset is not None or known else _persisted_cursor(root_path, root_info, operation))
+            offset = offset if live is not None else 0
+            scans, entries = (live[0], live[1][0]) if live is not None else (None, None)
             try:
                 if scans is None:
                     scans, entries = _open_scan(root)
-                    if offset and sum(1 for _ in islice(entries, offset)) < offset:
-                        # 目录缩短到游标之前时重开，不把空尾部当作完整的一轮检查。
-                        scans.close()
-                        offset = 0
-                        scans, entries = _open_scan(root)
+                replay_limit = min(replay, scan_budget)
+                replayed = sum(1 for _ in islice(entries, replay_limit))
+                replay -= replayed
+                offset += replayed
+                scan_budget -= replayed
+                if replayed < replay_limit:
+                    # 目录缩短时重新检查；前缀与重开后的枚举共用本次剩余预算。
+                    scans.close()
+                    offset = replay = 0
+                    scans, entries = _open_scan(root)
                 inspected, hit_limit, vanished = _scan_entries(root, entries, scan_budget, maximum, action, result)
                 position = max(0, offset + inspected - result["removed"] - vanished)
                 if inspected < scan_budget and not hit_limit:
@@ -401,7 +407,7 @@ def _maintain(value, maximum, action):
                     scans.close()
                     scans, position = None, 0
                 if scans is not None:
-                    _live_scans[cursor_key] = (scans, entries, position)
+                    _live_scans[cursor_key] = (scans, (entries, replay), position)
                 _scan_cursors[cursor_key] = position
                 _scan_cursors.move_to_end(cursor_key)
                 while len(_scan_cursors) > 128:
