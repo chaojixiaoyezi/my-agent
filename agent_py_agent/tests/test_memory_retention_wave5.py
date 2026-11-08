@@ -409,6 +409,8 @@ def test_apply_revalidation_does_not_reread_settled_thread_bodies(tmp_path, monk
     from agent_py_agent.agent.conversation.models import ConversationThread
 
     home, _, service = runtime(tmp_path)
+    # 先建立正常审计设施，再固定被测来源；首次回执创建锁侧车不是正文的按动作重读。
+    assert not service.apply(now=NOW).scan_partial
     directory = Path(home.owner_home_dir) / "conversations/threads"
     directory.mkdir(parents=True)
     identities = set()
@@ -434,23 +436,42 @@ def test_apply_revalidation_does_not_reread_settled_thread_bodies(tmp_path, monk
         return original_read(fd, size)
 
     monkeypatch.setattr(os, "read", read)
-    original_object, parsed = scan._pin_object, []
+    original_source, opened, actual_bytes = scan._fingerprint_source, [], []
 
-    # LLM: 统计真实线程对象解析，防止只停hash却为每个动作重解析全部线程的假优化。
-    # 函数用途: 给冷源成本合同同时约束内容解析次数。
-    def pin_object(path):
+    class CountedSource:
+        def __init__(self, raw):
+            self.raw = raw
+
+        def __getattr__(self, name):
+            return getattr(self.raw, name)
+
+        def read1(self, size):
+            raw = self.raw.read1(size)
+            actual_bytes.append(len(raw))
+            return raw
+
+    def source(path):
+        raw = original_source(path)
         if path in source_paths:
-            parsed.append(path)
-        return original_object(path)
+            opened.append(path)
+            return CountedSource(raw)
+        return raw
 
-    monkeypatch.setattr(scan, "_pin_object", pin_object)
-    report = service.apply(now=NOW)
-    assert report.ok
-    assert len([item for item in report.actions if item.category == "daily" and item.status == "trashed"]) == 0
+    monkeypatch.setattr(scan, "_fingerprint_source", source)
+    actions = []
+    for _ in range(64):
+        report = service.apply(now=NOW)
+        assert report.ok
+        actions.extend(report.actions)
+        if not report.scan_partial:
+            break
+    assert not report.scan_partial
+    assert len([item for item in actions if item.category == "daily" and item.status == "trashed"]) == 0
     assert len(list(home.owner_memory_daily_dir.glob("old-*.jsonl"))) == 20
-    assert len([item for item in report.actions if item.category == "cache" and item.status == "deleted"]) == 20
+    assert len([item for item in actions if item.category == "cache" and item.status == "deleted"]) == 20
     assert not reads, "settled thread content must not be rehashed per retention action"
-    assert set(parsed) == source_paths and len(parsed) <= 4 * len(source_paths)
+    assert set(opened) == source_paths and len(opened) == 2 * len(source_paths)
+    assert sum(actual_bytes) == 2 * sum(path.stat().st_size for path in source_paths)
 
 
 # LLM: 热源缓存只能省hash，仍须逐次核真实字节；相同stat下改写必须重建引用视图。
