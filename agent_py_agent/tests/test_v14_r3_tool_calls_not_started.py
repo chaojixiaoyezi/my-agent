@@ -1,6 +1,7 @@
 """V14F-09：原收口事务写的未启动取消回执经真实业务读口可读，其余坏结果仍失败关闭。"""
 from __future__ import annotations
 
+import gc
 import json
 import os
 import sys
@@ -85,11 +86,13 @@ def test_not_started_cancellation_receipt_is_readable_as_not_executed(background
     assert data['tool_call'] == expected
     assert data['effect_outcome'] == 'not_started' and data['result_ref'] == operation_id
     actor = BusinessActor(services.owner_id, 'r3-reader', services.observation, lambda action, facts: True)
+    gc.collect()
     before = _fd_count()
     for _ in range(3):
         page = services.observation.query('tool_calls.list', {}, actor=actor)
         point = services.observation.query('tool_calls.get', {'operation_id': operation_id}, actor=actor)
-    assert _fd_count() - before == 0
+    gc.collect()
+    assert _fd_count() - before <= 0
     assert page['items'] == [expected] and page['coverage'] == 'complete'
     assert point['tool_call'] == expected
 
@@ -141,9 +144,11 @@ def test_approved_script_history_with_not_started_row_recovers_terminal_result(b
     assert rows[unstarted]['result_ref'] == unstarted and rows[unstarted]['duration_ms'] is None
     assert rows[script_operation]['executed'] is True and rows[script_operation]['status'] == 'SUCCEEDED'
     actor = BusinessActor(services.owner_id, 'r3-reader', services.observation, lambda action, facts: True)
+    gc.collect()
     before = _fd_count()
     page = services.observation.query('tool_calls.list', {'filter': {'task_id': task.task_id}}, actor=actor)
-    assert _fd_count() - before == 0
+    gc.collect()
+    assert _fd_count() - before <= 0
     assert {item['operation_id'] for item in page['items']} == {script_operation, unstarted}
     status, again = observation.background_call(background_http, 'scripts.runs.get', {'execution_id': 'r3-approved'})
     assert status == 200 and again['data']['run'] == result, again
@@ -173,13 +178,15 @@ def test_other_malformed_rows_still_raise_invalid_native_tool_result(background_
             (status, json.dumps(outcome), damaged))
         conn.commit()
     readers = observation.wire(services, runtime)
+    gc.collect()
     before = _fd_count()
     with pytest.raises(ValueError, match='invalid native tool result'):
         readers['tool_calls']({})
     with pytest.raises(ValueError, match='invalid native tool result'):
         readers['tool_calls']({'operation_id': damaged})
     [record] = readers['tool_calls']({'operation_id': kept}).records
-    assert _fd_count() - before == 0
+    gc.collect()
+    assert _fd_count() - before <= 0
     assert record.value['executed'] is False and record.value['effect_outcome'] == 'not_started'
     assert record.value['result_ref'] == kept and record.value['duration_ms'] is None
     status_code, body = observation.background_call(background_http, 'tool_calls.list')

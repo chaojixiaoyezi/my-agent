@@ -309,8 +309,10 @@ def test_protected_vacuum_backlog_never_enters_write_gate(database, reason):
     assert (repo.db_path.stat().st_size, conn.execute("PRAGMA freelist_count").fetchone()[0]) == before
 
 
-def test_checkpoint_continues_after_reader_defers_last_eligible_pages(database):
+def test_checkpoint_continues_after_reader_defers_last_eligible_pages(database, monkeypatch):
     home, repo, conn = database
+    # 此处验证读事务阻塞 checkpoint，时间片耗尽另有专门用例覆盖。
+    monkeypatch.setattr(storage_lanes, "STORAGE_LANE_SLICE_MS", 60000)
     _large_output(conn)
     before = repo.db_path.stat().st_size
     with closing(sqlite3.connect(repo.db_path)) as reader:

@@ -986,7 +986,11 @@ class _TuiConversationBoundaryRuntimeMixin:
             if self.history_before_cursor != expected_before or not 0 <= next_before < expected_before:
                 return ()
             previous = {block.block_id for block in self.store.snapshot().stable_blocks}
-            self._publish_recovered_display_events(tuple(events))
+            events = tuple(events)
+            # 旧页只能整页接在窗口前部；放不下时不补入、不前移游标，避免窗口裁掉阅读位置并拼出不连续的正文。
+            if len(previous) + len(events) > self.store.reducer.max_stable_blocks:
+                return ()
+            self._publish_recovered_display_events(events)
             inserted = tuple(block.block_id for block in self.store.snapshot().stable_blocks if block.block_id not in previous)
             if inserted:
                 self._publish("history_page_prepended", "completed", f"history-page:{expected_before}",
