@@ -57,12 +57,13 @@ def render_current_turn_execution_facts(agent: object, records: list[dict[str, o
                 break
             batch.append(row)
         batch.reverse()
+    lookup = _RuntimeLookup(agent)
     payload = {
         "schema": "tool_batch_execution.v1",
         "scope": "latest_completed_tool_batch",
         "request_call_count": len(rows),
         "batch_call_count": len(batch),
-        "calls": [_execution_call(agent, row) for row in batch[-_MAX_PROMPT_RECENT_CALL_COUNT:]],
+        "calls": [_execution_call(agent, row, lookup) for row in batch[-_MAX_PROMPT_RECENT_CALL_COUNT:]],
         "omitted_batch_call_count": max(0, len(batch) - _MAX_PROMPT_RECENT_CALL_COUNT),
         "raw_archive_refs": _recent_raw_archive_refs(batch),
     }
@@ -83,8 +84,9 @@ def build_operation_verification(
     agent: object,
     records: list[dict[str, object]] | None,
 ) -> dict[str, object]:
+    lookup = _RuntimeLookup(agent)
     calls = [
-        _execution_call(agent, record)
+        _execution_call(agent, record, lookup)
         for record in list(records or [])
         if isinstance(record, dict)
     ]
@@ -180,10 +182,11 @@ def public_operation_verification(
 
 # LLM: 当前轮调用投影只读取 archive typed fields 与运行快照，不检查 output 或最终回复文本。
 # 函数用途: 规范一条工具记录，供 prompt 事实和最终操作核验共用。
-def _execution_call(agent: object, record: dict[str, object]) -> dict[str, object]:
+def _execution_call(agent: object, record: dict[str, object], lookup: _RuntimeLookup | None = None) -> dict[str, object]:
+    lookup = lookup or _RuntimeLookup(agent)
     tool = str(record.get("tool") or "").strip() or "unknown"
     parameters = record.get("parameters")
-    effect = _tool_effect(agent, tool, parameters if isinstance(parameters, dict) else {})
+    effect = _tool_effect(lookup, tool, parameters if isinstance(parameters, dict) else {})
     item: dict[str, object] = {
         "call_id": str(record.get("call_id") or record.get("id") or "").strip(),
         "tool": tool,
@@ -195,7 +198,7 @@ def _execution_call(agent: object, record: dict[str, object]) -> dict[str, objec
     operation_id = str(record.get("operation_id") or "").strip()
     if operation_id:
         item["operation_id"] = operation_id
-    action = _declared_business_action(agent, tool, record)
+    action = _declared_business_action(lookup, tool, record)
     if action:
         item["action"] = action
     for key in (
@@ -245,18 +248,36 @@ def _applied_approval_from_record(record: dict[str, object]) -> dict[str, object
     }
 
 
+# LLM: 一次投影调用只取一份注册表快照：逐条记录重建全表快照（含全部工具说明/可用性复核）使收尾随调用数线性放大；
+#   取快照失败或注册表缺失时各调用方仍回退原 unknown/空动作，快照内容与语义不变。
+# 类用途: 在一次 render/build 调用内惰性共享同一工具运行时快照。
+class _RuntimeLookup:
+    def __init__(self, agent: object) -> None:
+        self._agent = agent
+        self._loaded = False
+        self._snapshot = None
+
+    def runtime(self, tool_name: str):
+        if not self._loaded:
+            self._loaded = True
+            registry = getattr(self._agent, "tools", None)
+            if registry is None or not hasattr(registry, "runtime_snapshot"):
+                raise AttributeError("tool registry has no runtime snapshot")
+            self._snapshot = registry.runtime_snapshot()
+        if self._snapshot is None:
+            raise AttributeError("tool registry has no runtime snapshot")
+        return self._snapshot.runtime(tool_name)
+
+
 def _tool_effect(
-    agent: object,
+    lookup: _RuntimeLookup,
     tool_name: str,
     parameters: dict[str, object],
 ) -> str:
-    registry = getattr(agent, "tools", None)
-    if registry is None or not hasattr(registry, "runtime_snapshot"):
-        return "unknown"
     try:
         from .models import tool_effect_for_runtime_policy
 
-        runtime = registry.runtime_snapshot().runtime(tool_name)
+        runtime = lookup.runtime(tool_name)
         if runtime is None:
             return "unknown"
         return tool_effect_for_runtime_policy(runtime.runtime_policy, parameters)
@@ -267,7 +288,7 @@ def _tool_effect(
 # LLM: 动作名只接受当前 ToolModelSpec Schema 明示的 action enum，不能把任意模型参数显示成可信动作。
 # 函数用途: 从已校验工具参数中提取一个安全、精确的业务动作标签。
 def _declared_business_action(
-    agent: object,
+    lookup: _RuntimeLookup,
     tool_name: str,
     record: dict[str, object],
 ) -> str:
@@ -277,11 +298,8 @@ def _declared_business_action(
     value = parameters.get("action")
     if not isinstance(value, str):
         return ""
-    registry = getattr(agent, "tools", None)
-    if registry is None or not hasattr(registry, "runtime_snapshot"):
-        return ""
     try:
-        runtime = registry.runtime_snapshot().runtime(tool_name)
+        runtime = lookup.runtime(tool_name)
         if runtime is None:
             return ""
         schema = runtime.model_spec.input_schema
