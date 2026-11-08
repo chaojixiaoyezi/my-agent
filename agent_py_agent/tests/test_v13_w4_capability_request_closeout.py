@@ -337,6 +337,67 @@ def _fd_snapshot():
     return result
 
 
+def _wait_for_fd_convergence(original_fds, *, timeout=5.0):
+    """给后台扫描和迭代器回收有限收尾时间；超时仍返回真实存活FD供严格断言。"""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while True:
+        gc.collect()
+        current = _fd_snapshot()
+        remaining = deadline - time.monotonic()
+        if current <= original_fds or remaining <= 0:
+            return current
+        time.sleep(min(0.01, remaining))
+
+
+def test_fd_convergence_waits_for_background_directory_scan(tmp_path, monkeypatch):
+    import os
+    import threading
+
+    gc.collect()
+    before = _fd_snapshot()
+    ready, release = threading.Event(), threading.Event()
+    snapshots = []
+    snapshot = _fd_snapshot
+
+    def scan():
+        with os.scandir(tmp_path):
+            ready.set()
+            assert release.wait(5)
+
+    def observe():
+        current = snapshot()
+        snapshots.append(current)
+        release.set()
+        return current
+
+    worker = threading.Thread(target=scan)
+    worker.start()
+    try:
+        assert ready.wait(5)
+        monkeypatch.setitem(globals(), '_fd_snapshot', observe)
+        after = _wait_for_fd_convergence(before)
+        assert not snapshots[0] <= before, '第一次快照必须仍观察到扫描目录FD'
+        assert len(snapshots) >= 2 and after <= before
+    finally:
+        release.set()
+        worker.join(5)
+        assert not worker.is_alive()
+
+
+@pytest.mark.parametrize('kind', ['file', 'directory'])
+def test_fd_convergence_keeps_persistent_leaks_visible(tmp_path, kind):
+    import os
+
+    gc.collect()
+    before = _fd_snapshot()
+    resource = os.scandir(tmp_path) if kind == 'directory' else (tmp_path / 'leaked').open('wb')
+    with resource:
+        assert not _wait_for_fd_convergence(before, timeout=0) <= before
+    assert _wait_for_fd_convergence(before) <= before
+
+
 @pytest.mark.parametrize('new_owned_path', [None, 'new-owned', 'inherited'])
 def test_fd_snapshot_distinguishes_inherited_cleanup_from_masked_leak(tmp_path, new_owned_path):
     with (tmp_path / 'inherited').open('wb') as inherited:
@@ -465,8 +526,8 @@ def test_headless_stream_steer_stop_new_restart_next_conversation(tmp_path, monk
     assert len(calls) == 2 and not tuple(paths.processing.glob("*.json"))
     assert not restarted.conversation_store.threads.require(thread.thread_id).active_task_ids
     assert terminal.read_bytes() == saved
-    gc.collect()
-    after_fds = _fd_snapshot()
+    # 后台索引扫描可能跨过单次GC观察点；只等待收尾，不放宽FD身份集合或忽略目录FD。
+    after_fds = _wait_for_fd_convergence(original_fds)
     assert after_fds <= original_fds, ('new live descriptors', after_fds - original_fds)
     # 不允许正增量；继承/临时FD关闭使总量减少，不是泄漏。
     gc.collect()
