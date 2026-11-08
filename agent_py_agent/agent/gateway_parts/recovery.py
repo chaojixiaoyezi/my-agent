@@ -35,6 +35,7 @@ from .io import (
     gateway_response_path,
     gateway_turn_transition,
     read_json_file_report,
+    release_moved_lock_sidecar,
     validated_gateway_request_fingerprint,
     write_json_file_atomic,
 )
@@ -1538,6 +1539,7 @@ def _commit_gateway_terminal_request(
                     f"gateway hot request conflicts with canonical terminal: {request_id}"
                 )
             path.unlink()
+            release_moved_lock_sidecar(path)
     else:
         # Commit the complete terminal authority before retiring the mutable
         # processing record. A crash can leave both files, but never leaves a
@@ -1545,6 +1547,7 @@ def _commit_gateway_terminal_request(
         write_json_file_atomic(canonical, terminal_payload)
         if path.exists() and path != canonical:
             path.unlink()
+            release_moved_lock_sidecar(path)
 
     other_folder = paths.failed if target_dir == paths.done else paths.done
     other_projection = other_folder / f"{request_id}.json"
@@ -1982,11 +1985,13 @@ def repair_gateway_chunk_projection(
             raise DataCorruptionError("gateway chunk projection conflicts with source stream")
         if source.exists():
             source.unlink()
+        release_moved_lock_sidecar(source)
         return target
     if not source.exists():
         return None
     target.parent.mkdir(parents=True, exist_ok=True)
     source.replace(target)
+    release_moved_lock_sidecar(source)
     return target
 
 

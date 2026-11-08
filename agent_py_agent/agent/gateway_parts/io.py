@@ -802,6 +802,20 @@ def _remove_orphan_lock_file(lock_path: Path, *, current: float | None = None) -
         handle.close()
 
 
+# LLM: 队列文件移出 pending/processing（认领、终态退役、流式归档）后即刻按原孤儿锁协议回收源伴生锁：
+#   非阻塞试锁、核 inode、数据仍缺失才删，不等 24h 宽限；持锁者/数据复现一律留给周期清理巡。
+#   迟到的阻塞持锁者拿到旧 inode 后身份核对失败会重开新锁，互斥不变；任何异常都不能打断已完成的移动。
+# 函数用途: 删除已移走队列文件留下的 <name>.lock sidecar，避免 5Hz 调度目录累积。
+def release_moved_lock_sidecar(source: Path) -> bool:
+    lock_path = source.with_name(source.name + ".lock")
+    if not lock_path.exists():
+        return False
+    try:
+        return _remove_orphan_lock_file(lock_path)
+    except Exception:  # noqa: BLE001 回收只是减负，失败留给周期清理巡
+        return False
+
+
 # 流式 chunk 文件单次读取上限：整体 f.read() 无上限会 MemoryError，按上限分块读、剩余部分下一拍继续
 # （CLI 与 TUI 两个网关客户端共用这一份）。
 STREAM_CHUNK_READ_MAX_BYTES = 8 * 1024 * 1024
