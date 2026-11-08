@@ -28,6 +28,15 @@ ACTIVE_TURN_RETRY_INITIAL_SECONDS = 0.25
 ACTIVE_TURN_RETRY_MAX_SECONDS = 3.0
 
 
+# LLM: 只读 tui_idle_poll_max_seconds；缺配置或非法值返回 0，由对账器回落到原 maximum_delay。
+# 函数用途: 返回本地对账线程在 outbox 为空时的等待上限。
+def _tui_idle_poll_seconds(agent: object) -> float:
+    try:
+        return float(getattr(getattr(agent, "config", None), "tui_idle_poll_max_seconds", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # LLM: Gateway memory I/O may traverse or update durable owner state and must never block the
 # prompt_toolkit input loop. The worker still calls the one shared slash dispatcher, so TUI and
 # plain mode keep identical result wording and memory semantics.
@@ -577,6 +586,7 @@ def _ensure_control_operation_reconciler(
         stop_event=params.stop_event,
         initial_delay=ACTIVE_TURN_RETRY_INITIAL_SECONDS,
         maximum_delay=ACTIVE_TURN_RETRY_MAX_SECONDS,
+        idle_delay=_tui_idle_poll_seconds(params.agent),
     )
     params.control_operation_reconciler = reconciler
     return reconciler
@@ -799,6 +809,7 @@ def _ensure_active_input_reconciler(
         stop_event=params.stop_event,
         initial_delay=ACTIVE_TURN_RETRY_INITIAL_SECONDS,
         maximum_delay=ACTIVE_TURN_RETRY_MAX_SECONDS,
+        idle_delay=_tui_idle_poll_seconds(params.agent),
     )
     params.active_input_reconciler = reconciler
     return reconciler

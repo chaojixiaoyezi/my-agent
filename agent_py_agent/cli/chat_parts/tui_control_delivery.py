@@ -125,6 +125,7 @@ class TuiControlOperationReconciler:
         stop_event: threading.Event,
         initial_delay: float,
         maximum_delay: float,
+        idle_delay: float = 0.0,
     ) -> None:
         self.path = Path(path)
         self.submit = submit
@@ -136,6 +137,8 @@ class TuiControlOperationReconciler:
         self.stop_event = stop_event
         self.initial_delay = max(0.05, float(initial_delay))
         self.maximum_delay = max(self.initial_delay, float(maximum_delay))
+        # 通道无任何待办行时的等待上限；入队与停止仍立即唤醒，未传时与原 maximum_delay 相同。
+        self.idle_delay = max(self.maximum_delay, float(idle_delay or 0))
         self._wake = threading.Event()
         self._settings_wake = threading.Event()
         self._lock = threading.RLock()
@@ -237,11 +240,12 @@ class TuiControlOperationReconciler:
                     if self._claim_entry(entry.message_id):
                         self._reconcile_claimed(entry)
                 remaining = _lane_entries(self._read_entries(), settings)
+                cap = self.maximum_delay if remaining else self.idle_delay
                 next_due = min(
                     (entry.next_attempt_at for entry in remaining),
-                    default=now + self.maximum_delay,
+                    default=now + cap,
                 )
-                timeout = max(0.05, min(self.maximum_delay, next_due - time.time()))
+                timeout = max(0.05, min(cap, next_due - time.time()))
             except Exception as exc:
                 self.on_error(exc)
                 timeout = min(self.maximum_delay, max(self.initial_delay, 0.25))
