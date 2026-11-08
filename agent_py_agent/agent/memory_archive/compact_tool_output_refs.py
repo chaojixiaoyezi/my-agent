@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -130,8 +131,13 @@ def _index_line_row(raw: bytes, needles: tuple[bytes, ...]) -> dict[str, Any]:
 
 # LLM: 收尾只读索引元数据；复用 E11a 预筛后仍用原 scope、kind、ledger 排除及投影，错误优先级沿旧整读，不读 artifact。
 # 函数用途: 返回当前范围的大输出引用，只解析可能匹配的行，不把全部历史索引装进列表。
-def tool_output_source_refs(workspace: str | Path, scope: dict[str, Any]) -> list[dict[str, Any]]:
-    return _read_scope_refs(Path(workspace), scope, {"tool_outputs": _source_ref})["tool_outputs"]
+def tool_output_source_refs(
+    workspace: str | Path, scope: dict[str, Any], *,
+    marks: dict[str, list[int]] | None = None, modified_since_ns: int | None = None,
+) -> list[dict[str, Any]]:
+    return _read_scope_refs(
+        Path(workspace), scope, {"tool_outputs": _source_ref}, marks, modified_since_ns,
+    )["tool_outputs"]
 
 
 # LLM: 单类入口不投影其它 kind，保持不相关类型的坏字段不会引发本类投影异常；顺序/重复项不变。
@@ -151,10 +157,11 @@ def tool_source_refs(workspace: str | Path, scope: dict[str, Any]) -> dict[str, 
 # 函数用途: 一次读完当前 scope 引用，延后投影报错以保持旧整读的 IO/UTF-8 优先级。
 def _read_scope_refs(
     workspace: Path, scope: dict[str, Any], projectors: dict[str, Callable[[dict[str, Any]], dict[str, Any]]],
+    marks: dict[str, list[int]] | None = None, modified_since_ns: int | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     result: dict[str, list[dict[str, Any]]] = {key: [] for key in projectors}
     errors: dict[str, Exception] = {}
-    for row in _scoped_tool_index_rows(Path(workspace), scope):
+    for row in _scoped_tool_index_rows(Path(workspace), scope, marks, modified_since_ns):
         _collect_scope_projection(row, projectors, result, errors)
     for key in projectors:
         if key in errors:
@@ -181,13 +188,30 @@ def _collect_scope_projection(
 # LLM: 不根据目录名推断归属，沿原 owner/runs/tasks 路径一次枚举；预筛只选一个非空 AND 条件作为必要条件。
 #   最终匹配仍用本模块原顶层四键与旧 conversation_request_id 回退，不借用 Curator 的嵌套 scope 规则。
 # 函数用途: 流式产出当前范围的索引行；IO/UTF-8 错误向上抛出，坏 JSON/非对象仍忽略。
-def _scoped_tool_index_rows(workspace: Path, scope: dict[str, Any]) -> Iterator[dict[str, Any]]:
+def _scoped_tool_index_rows(
+    workspace: Path, scope: dict[str, Any],
+    marks: dict[str, list[int]] | None = None, modified_since_ns: int | None = None,
+) -> Iterator[dict[str, Any]]:
     prescreen = _scope_prescreen_pattern(scope)
     for path in tool_output_index_paths_for_lookup(workspace):
+        mark = (marks or {}).get(str(path))
+        if mark is None and _unchanged_since(path, modified_since_ns):
+            continue
         yield from (
-            row for _, text in iter_prescreened_tool_index_lines(path, prescreen, universal_newlines=True)
+            row for _, text in iter_prescreened_tool_index_lines(path, prescreen, universal_newlines=True, mark=mark)
             if (row := _json_line(text)) and _matches_scope(row, scope)
         )
+
+
+# LLM: 收尾传入本回合上下文包首写时刻（同盘同一内核时钟）；未打标记的索引 mtime 严格更早说明本回合从未追加，跳过不读。
+# 函数用途: 判断一个工具索引自回合开始后是否未被写过；无时刻或不可 stat 时一律按已变化处理。
+def _unchanged_since(path: Path, modified_since_ns: int | None) -> bool:
+    if modified_since_ns is None:
+        return False
+    try:
+        return os.stat(path).st_mtime_ns < modified_since_ns
+    except OSError:
+        return False
 
 
 # LLM: scope 是各键 AND、每键允许值 OR；任意一个安全非空键足以构成必要条件。旧请求字段回退的同值也必在原字节中。

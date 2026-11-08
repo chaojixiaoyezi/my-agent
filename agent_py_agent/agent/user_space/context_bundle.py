@@ -7,13 +7,14 @@ import json
 import logging
 import time as time_module
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from ..common.json_io import (
     PrivateDirectoryChainResult,
     ensure_private_directory_chain,
+    read_json_object_report,
     write_private_text_file_atomic,
 )
 from .context_bundle_contracts import (
@@ -56,6 +57,8 @@ class MainContextBundleRequest:
     root_run_id: str = ""
     parent_run_id: str = ""
     created_at: str | None = None
+    # 回合起点的 owner 工具输出主索引标记（tool_output_index_marks）；只供收尾跳过旧前缀，不进提示。
+    tool_index_marks: dict[str, list[int]] | None = None
 
 
 @dataclass(frozen=True)
@@ -79,6 +82,8 @@ def build_main_context_bundle(request: MainContextBundleRequest) -> MainContextB
         return MainContextBundleResult(prompt_section=prompt_section, bundle=bundle)
     directory_result = _prepare_snapshot_directory(request)
     json_path, markdown_path = _snapshot_paths(request, directory_result)
+    if "tool_index_marks" in bundle:
+        bundle = _carried_tool_index_window(bundle, json_path)
     prompt_section = render_prompt_section(bundle, json_path=str(json_path))
     bundle = finalize_context_bundle_contracts(bundle, prompt_section)
     prompt_section = render_prompt_section(bundle, json_path=str(json_path))
@@ -89,6 +94,30 @@ def build_main_context_bundle(request: MainContextBundleRequest) -> MainContextB
         markdown_path=str(markdown_path),
         bundle=bundle,
     )
+
+
+# LLM: Compact 自动续跑按同一 stem 重写快照（跨零点则落到新日期目录）；同 scope 旧快照在时沿用其标记与起点，
+#   收尾窗口才覆盖整次运行；旧件不可读、缺标记或起点不可得时去掉标记退回整读。只会放大读取窗口，不会缩小。
+# 函数用途: 让同一 scope 重建的上下文包继承最早一片的工具索引读取窗口。
+def _carried_tool_index_window(bundle: dict[str, object], json_path: Path) -> dict[str, object]:
+    try:
+        earlier = json_path.parent.with_name((date.fromisoformat(json_path.parent.name) - timedelta(days=1)).isoformat())
+    except ValueError:
+        earlier = json_path.parent
+    for prior in dict.fromkeys((json_path, earlier / json_path.name)):
+        if not prior.exists():
+            continue
+        old = read_json_object_report(prior, context="context_bundle.prior_window").payload or {}
+        if old and old.get("scope") != bundle.get("scope"):
+            continue
+        marks, since = old.get("tool_index_marks"), old.get("tool_index_since_ns")
+        try:
+            since = since if type(since) is int else prior.stat().st_mtime_ns
+        except OSError:
+            marks = None
+        rest = {key: value for key, value in bundle.items() if key not in ("tool_index_marks", "tool_index_since_ns")}
+        return {**rest, "tool_index_marks": marks, "tool_index_since_ns": since} if isinstance(marks, dict) else rest
+    return bundle
 
 
 def latest_main_context_bundle_path(home_paths: Any | None) -> str:
@@ -121,6 +150,8 @@ def _bundle_payload(request: MainContextBundleRequest) -> dict[str, object]:
         },
     }
     payload.update(main_context_contract_sections(request, home_paths))
+    if request.tool_index_marks is not None:
+        payload["tool_index_marks"] = dict(request.tool_index_marks)
     return payload
 
 

@@ -17,6 +17,7 @@ from typing import Protocol
 
 from ...capability.config import CapabilityConfig
 from ...capability.runtime_config_reload import capability_config_for_agent
+from ...common.tool_output_paths import tool_output_index_marks
 from ...conversation.active_turn_input import (
     active_turn_user_input_texts,
     merge_active_turn_user_inputs,
@@ -473,6 +474,7 @@ def build_runtime_main_context_bundle(
             write_boundary=request.write_boundary,
             tool_runtime_snapshot=runtime_snapshot,
             tool_runtime_errors=tuple(tool_runtime_errors),
+            tool_index_marks=tool_output_index_marks(agent.root),
         )
     )
 

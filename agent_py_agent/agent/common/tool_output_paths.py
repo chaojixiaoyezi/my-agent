@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
@@ -33,6 +34,20 @@ def tool_output_roots_for_lookup(root: str | Path) -> tuple[Path, ...]:
 # 函数用途: 将 owner 范围内的工具输出目录投影成规范 index.jsonl 路径。
 def tool_output_index_paths_for_lookup(root: str | Path) -> tuple[Path, ...]:
     return tuple(item / "index.jsonl" for item in tool_output_roots_for_lookup(root))
+
+
+# LLM: 回合开始只量 owner 主索引一个文件（不枚举 runs/tasks），键与上面查找同一解析口径；
+#   收尾仅在 inode 未换、长度未缩且标记前一字节为 LF 时从标记读起（tool_index_stream 核验），否则仍整读。
+# 函数用途: 记录 owner 工具输出主索引的回合起点 [dev, ino, size]，缺失或不可读时返回空。
+def tool_output_index_marks(root: str | Path) -> dict[str, list[int]]:
+    for directory in _unique_paths([tool_output_root(root)]):
+        index = directory / "index.jsonl"
+        try:
+            info = os.stat(index)
+        except OSError:
+            return {}
+        return {str(index): [info.st_dev, info.st_ino, info.st_size]}
+    return {}
 
 
 # LLM: Path identity is lexical-resolved and fail-soft; an invalid path cannot widen lookup.
