@@ -62,6 +62,9 @@ class OwnerActivityIndex:
                 kind TEXT NOT NULL, revision INTEGER NOT NULL,
                 PRIMARY KEY(provider, owner_kind, owner_id, kind))""")
             conn.execute("CREATE INDEX IF NOT EXISTS owner_activity_checked ON owner_activity(facts_checked_at)")
+            conn.execute("""CREATE INDEX IF NOT EXISTS owner_activity_unknown
+                ON owner_activity(provider,owner_kind,owner_id)
+                WHERE hard_facts IS NULL OR soft_facts IS NULL OR facts_checked_at IS NULL""")
             for column in _DEADLINES.values():
                 conn.execute(f"CREATE INDEX IF NOT EXISTS owner_activity_{column} ON owner_activity({column})")
             persisted = conn.execute("SELECT MAX(revision) FROM (SELECT MAX(facts_revision) AS revision FROM owner_activity "
@@ -115,13 +118,22 @@ class OwnerActivityIndex:
 
     def priority_owners(self, *, now, facts_before, limit):
         """只取有界候选；缺失和过期事实优先，不能把未知排成安静owner。"""
+        limit = max(1, int(limit))
+        frontiers = [
+            ("hard_facts IS NULL OR soft_facts IS NULL OR facts_checked_at IS NULL",
+             "provider,owner_kind,owner_id", ()),
+            ("facts_checked_at<=?", "facts_checked_at", (facts_before,)),
+            *((f"{column}<=?", column, (now,)) for column in _DEADLINES.values()),
+        ]
+        candidates = {}
         with closing(self._connect()) as conn:
-            rows = conn.execute("""SELECT provider,owner_kind,owner_id FROM owner_activity WHERE
-                hard_facts IS NULL OR soft_facts IS NULL OR facts_checked_at IS NULL OR facts_checked_at<=?
-                OR next_wake_at<=? OR next_job_due_at<=? OR next_maintenance_at<=?
-                ORDER BY COALESCE(facts_checked_at,0),provider,owner_kind,owner_id LIMIT ?""",
-                (facts_before, now, now, now, max(1, int(limit)))).fetchall()
-        return [tuple(row) for row in rows]
+            # 各前沿沿索引直接取页，避免 LIMIT 前全表 OR 扫描与排序。
+            for predicate, ordering, parameters in frontiers:
+                rows = conn.execute(
+                    f"SELECT provider,owner_kind,owner_id FROM owner_activity WHERE {predicate} "
+                    f"ORDER BY {ordering} LIMIT ?", (*parameters, limit))
+                candidates.update((tuple(row), None) for row in rows)
+        return list(candidates)[:limit]
 
     def forget_owner(self, owner):
         """只清失效投影，不删除任何owner权威文件。"""
