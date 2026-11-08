@@ -9,6 +9,7 @@ from ..conversation.task_state import conversation_task_completed
 from ..memory_archive import run_memory_compact_auto_cycle
 from ..memory_archive.compact import MemoryCompactPlanOptions
 from ..memory_archive.compact_auto import MemoryCompactAutoCycleOptions
+from ..memory_archive.runtime import ArchiveRunTurnResult
 from ._runtime_params import FinalizeContext
 from .runtime.context_compactor import runtime_compact_policy
 from .runtime.owner_roots import runtime_scope_root
@@ -33,7 +34,8 @@ _DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH = 50
 # LLM: 触发判断用 runtime_compact_policy 的同一条触发线：封顶时传 trigger_tokens，否则按 trigger_percent；会话线程接管、
 #   任务已完成或续跑深度到顶时提前返回。副作用：可能执行 compact apply/resume（写归档与恢复包）。
 # 函数用途: 在一次 runtime 收尾时决定是否跑自动 compact 周期，并给出续跑字段。
-def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[str, int], *, request_id: str = "") -> dict:
+def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[str, int], *, request_id: str = "",
+                              archive_result: ArchiveRunTurnResult | None = None) -> dict:
     if conversation_task_completed(ctx.task_attributes):
         return _compact_auto_turn_complete_fields()
     if _conversation_thread_owns_compaction(ctx):
@@ -66,7 +68,18 @@ def compact_auto_cycle_fields(agent, ctx: FinalizeContext, token_ledger: dict[st
                 request_id=ctx.request_id or request_id,
                 run_id=ctx.run_id or "",
                 task_id=ctx.task_id or "",
+                source_mode="current_turn",
+                archive_result=archive_result,
+                raw_archive_refs=tuple(
+                    {"path": str(call.get("raw_archive_path") or ""),
+                     "event_id": str(call.get("raw_archive_event_id") or "")}
+                    for call in ctx.archive_tool_calls if isinstance(call, dict)
+                    and (call.get("raw_archive_path") or call.get("raw_archive_event_id"))
+                ),
+                compression_snapshot_path=ctx.compression_snapshot_path,
+                token_ledger=token_ledger,
             ),
+            main_context_bundle_ref=ctx.main_context_bundle_path,
             allow_apply=policy.allow_persistent_apply,
             owner_type=(
                 "subagent_run"

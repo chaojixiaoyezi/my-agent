@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from .query import collect_archive_records, filter_archive_records
-from .storage import compression_snapshot_dir
+from .runtime import ArchiveRunTurnResult
+from .storage import compression_snapshot_dir, raw_event_path_for
 from .tokens import token_ledger_dir
 
 
@@ -33,24 +34,42 @@ class MemoryCompactPlanOptions:
     task_id: str = ""
     level: int | None = None
     limit: int = 0
+    # 宿主当前回合事实，不是配置；CLI 显式历史计划维持默认读法。
+    source_mode: str = "historical"
+    archive_result: ArchiveRunTurnResult | None = None
+    raw_archive_refs: tuple[dict[str, str], ...] = ()
+    compression_snapshot_path: str = ""
+    token_ledger: dict[str, int] | None = None
 
 
 def build_memory_compact_plan(root: str | Path, options: MemoryCompactPlanOptions) -> dict[str, Any]:
     """返回说明: 构建只读 compact plan，供 CLI/测试消费。"""
 
     workspace = Path(root)
-    records = _matching_archive_records(workspace, options)
-    archive_files = _archive_files_from_records(records)
-    snapshots = _snapshot_summary(workspace, options)
-    tokens = _token_summary(workspace, options.session_id)
-    archive_summary = _archive_summary(records, archive_files)
+    if options.source_mode == "current_turn":
+        archive_summary, snapshots, tokens = _current_turn_sources(workspace, options)
+    elif options.source_mode == "historical":
+        records = _matching_archive_records(workspace, options)
+        archive_files = _archive_files_from_records(records)
+        snapshots = _snapshot_summary(workspace, options)
+        tokens = _token_summary(workspace, options.session_id)
+        archive_summary = _archive_summary(records, archive_files)
+    else:
+        raise ValueError("unknown_compact_source_mode")
     risks = _risk_notes(archive_summary, snapshots, tokens)
+    if options.source_mode == "current_turn":
+        risks.append("current-turn sources do not establish complete prior-run coverage")
+        if not archive_summary["current_append_complete"]:
+            risks.append("current archive append provenance is partial or unknown")
     return {
         "ok": True,
         "mode": "dry-run",
         "dry_run": True,
         "workspace_root": str(workspace),
         "scope": _scope_payload(options),
+        "source_scope": {"mode": options.source_mode, "coverage": (
+            "partial" if options.source_mode == "current_turn" else "historical"),
+            "prior_carry": "unknown" if options.source_mode == "current_turn" else "historical"},
         "archive": archive_summary,
         "snapshots": snapshots,
         "tokens": tokens,
@@ -58,6 +77,60 @@ def build_memory_compact_plan(root: str | Path, options: MemoryCompactPlanOption
         "risks": risks,
         "recommended_actions": _recommended_actions(archive_summary, snapshots, tokens, risks),
     }
+
+
+def _current_turn_sources(root: Path, options: MemoryCompactPlanOptions) -> tuple[dict, dict, dict]:
+    """只投影原宿主回执和精确快照；目录根、空回执与未知回执不能互相替代。"""
+    receipt = options.archive_result
+    supplied = [event.to_dict() for event in receipt.events] if receipt is not None else []
+    events = []
+    receipt_ids = set(receipt.event_ids) if receipt is not None else set()
+    paths = dict.fromkeys([*(str(path) for path in (receipt.write_paths if receipt is not None else ())),
+                           *(str(ref.get("path") or "") for ref in options.raw_archive_refs)])
+    files: dict[str, dict[str, Any]] = {
+        path: {**_file_payload(Path(path)), "event_ids": {}, "content_hashes": []}
+        for path in paths if path
+    }
+    complete = (receipt is not None and receipt.event_count == len(supplied) == len(receipt.event_ids) == len(receipt.content_hashes)
+                and len(receipt_ids) == len(supplied) and all(receipt.event_ids) and all(receipt.content_hashes))
+    for number, event in enumerate(supplied):
+        path = str(raw_event_path_for(root, event.get("created_at")))
+        identity = str(event.get("event_id") or "")
+        matches = all(not expected or str(event.get(key) or "") == expected for key, expected in (
+            ("session_id", options.session_id), ("request_id", options.request_id),
+            ("run_id", options.run_id), ("task_id", options.task_id)))
+        if path not in files or not identity or not matches or identity not in receipt_ids:
+            complete = False
+            continue
+        events.append(event)
+        complete = complete and number < len(receipt.content_hashes) and bool(event.get("content_hash")) and (
+            event["content_hash"] == receipt.content_hashes[number])
+        files[path]["event_ids"][identity] = None
+        files[path]["content_hashes"].append(str(event.get("content_hash") or ""))
+    for ref in options.raw_archive_refs:
+        path, identity = str(ref.get("path") or ""), str(ref.get("event_id") or "")
+        complete = complete and bool(path and identity)
+        if path:
+            if identity:
+                files[path]["event_ids"][identity] = None
+    archive = {"record_count": len(events), "file_count": len(files),
+        "files": [{**item, "event_ids": list(item["event_ids"])} for item in files.values()],
+        "total_bytes": sum(len(json.dumps(event, ensure_ascii=False).encode("utf-8")) for event in events),
+        "by_layer": {"raw": len(events)}, "by_archive_level": _count_by(events, "archive_level"),
+        "error_count": 0, "events": events, "event_ids": [event["event_id"] for event in events],
+        "content_hashes": [event.get("content_hash", "") for event in events],
+        "raw_archive_refs": list(options.raw_archive_refs), "receipt_known": receipt is not None,
+        "receipt_event_count": receipt.event_count if receipt is not None else None,
+        "current_append_complete": bool(complete), "prior_carry": "unknown"}
+    path = Path(options.compression_snapshot_path) if options.compression_snapshot_path else None
+    payloads, invalid = _read_json_files([path if path.is_absolute() else root / path], options=options) if path else ([], 0)
+    snapshots = {"directory": str(compression_snapshot_dir(root)), "file_count": len(payloads),
+        "invalid_count": invalid, "total_bytes": sum(item["size_bytes"] for item in payloads), "latest": payloads}
+    tokens = {"directory": str(token_ledger_dir(root)), "ledger_count": 0, "invalid_count": 0,
+        "turn_count": int(options.token_ledger is not None), "total_bytes": 0, "latest": [],
+        "cumulative_tokens": int((options.token_ledger or {}).get("cumulative", 0)),
+        "current": dict(options.token_ledger or {}), "known": options.token_ledger is not None}
+    return archive, snapshots, tokens
 
 
 def _matching_archive_records(root: Path, options: MemoryCompactPlanOptions) -> list[dict[str, Any]]:

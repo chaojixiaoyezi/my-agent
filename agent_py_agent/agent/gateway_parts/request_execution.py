@@ -787,13 +787,38 @@ def _gateway_recovered_active_turn_tool_calls(
 ) -> list[dict[str, object]]:
     if not request_binding.gateway_request_is_active_turn_recovery(context.request, context.request_id):
         return []
+    from ..common.tool_output_paths import tool_output_root
     from ..memory_archive.compact_tool_output_refs import carried_tool_call_records
     from ..user_space.runtime_paths import runtime_owner_root
 
     try:
+        owner = runtime_owner_root(context.agent).expanduser().resolve()
+        roots = [owner]
+        authority = request_binding.gateway_runtime_authority(context.request, context.request_id)
+        binding = context.request.get("conversation_runtime")
+        if isinstance(binding, dict) and binding.get("request_id") == context.request_id:
+            if (binding.get("task_id") and binding.get("task_path")
+                    and (not authority or binding["task_id"] == authority["task_id"])):
+                roots.append(Path(binding["task_path"]) / "work")
+        params = getattr(context.agent, "_current_run_params", None)
+        if getattr(params, "request_id", None) == context.request_id:
+            attrs = getattr(params, "task_attributes", None) or {}
+            if not isinstance(attrs, dict):
+                raise ValueError("invalid_recovered_tool_scope")
+            workspace = attrs.get("run_workspace") or {}
+            if isinstance(workspace, dict) and workspace.get("work_dir"):
+                roots.append(Path(workspace["work_dir"]))
+            if attrs.get("runtime_tool_output_archive_root"):
+                roots.append(Path(attrs["runtime_tool_output_archive_root"]))
+        roots = list(dict.fromkeys(root.expanduser().resolve() for root in roots))
+        if any(not root.is_relative_to(owner) for root in roots):
+            raise ValueError("recovered_tool_source_outside_owner")
+        # 未创建的候选沿原隐式空索引语义；实际操作是否缺证仍由后续 RuntimeDB 核验。
+        indices = tuple(tool_output_root(root) / "index.jsonl" for root in roots)
         return carried_tool_call_records(
-            runtime_owner_root(context.agent),
+            owner,
             {"conversation_request_id": context.request_id},
+            index_paths=tuple(path for path in indices if path.exists()),
         )
     except (OSError, RuntimeError, ValueError) as exc:
         raise ConversationPersistenceError(
