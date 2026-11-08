@@ -32,6 +32,11 @@ from ..contracts.optimization_contracts import require_schema_generation
 from ..io.sqlite_schema import schema_fingerprint, schema_is_current, stamp_schema
 from ..io.sqlite_scope import scoped_connection, sqlite_connection_factory
 from .maintenance import execute_runtime_statement
+from .recovery_guard import (
+    close_runtime_connection,
+    guarded_runtime_connect,
+    mark_runtime_connection_idle,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -716,7 +721,10 @@ class RuntimeSchemaMixin:
         mode = "ro" if read_only else "rw"
         address = self.db_path.resolve().as_uri() + "?mode=" + mode if read_only or existing_only else str(self.db_path)
         timeout = 0.0 if existing_only else 30.0
-        conn = sqlite3.connect(address, timeout=timeout, uri=read_only or existing_only, factory=sqlite_connection_factory())
+        conn = guarded_runtime_connect(
+            self.db_path,
+            lambda: sqlite3.connect(address, timeout=timeout, uri=read_only or existing_only, factory=sqlite_connection_factory()),
+        )
         conn.row_factory = sqlite3.Row
         if not read_only:
             try:
@@ -728,15 +736,21 @@ class RuntimeSchemaMixin:
                         logger.warning("SQLITE_SCHEMA_REINSTALLED store=runtime_db path=%s", self.db_path)
                     require_runtime_schema_generation(conn, metadata_present=True)
             except BaseException:
-                conn.close()
+                mark_runtime_connection_idle(conn, True)
+                close_runtime_connection(conn)
                 raise
-        conn.execute("PRAGMA busy_timeout=" + ("0" if existing_only else "30000"))
-        if not read_only and not existing_only:
-            try:
-                conn.execute("PRAGMA journal_mode=WAL")
-            except sqlite3.OperationalError:
-                pass
-        conn.execute("PRAGMA foreign_keys=ON")
+        try:
+            conn.execute("PRAGMA busy_timeout=" + ("0" if existing_only else "30000"))
+            if not read_only and not existing_only:
+                try:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                except sqlite3.OperationalError:
+                    pass
+            conn.execute("PRAGMA foreign_keys=ON")
+        except BaseException:
+            mark_runtime_connection_idle(conn, True)
+            close_runtime_connection(conn)
+            raise
         return conn
 
     # LLM: 原F1只按path/read_only缓存；新增C existing_only须独立短连接，不能继承或污染原30秒rw预算。
@@ -749,7 +763,8 @@ class RuntimeSchemaMixin:
             try:
                 yield conn if getattr(self, 'read_only', False) else RuntimeWriteFence(conn)
             finally:
-                conn.close()
+                mark_runtime_connection_idle(conn, True)
+                close_runtime_connection(conn)
             return
         with scoped_connection(self.db_path, getattr(self, "read_only", False), self._runtime_connect) as conn:
             if not getattr(self, 'read_only', False):

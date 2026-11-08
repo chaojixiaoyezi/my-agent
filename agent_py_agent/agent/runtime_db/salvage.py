@@ -3,12 +3,28 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from ..io.sqlite_scope import sqlite_connection_scope
+from .recovery_guard import (
+    close_runtime_connection,
+    guarded_runtime_connect,
+    mark_runtime_connection_idle,
+)
 from .repository import RuntimeRepository
+
+
+@contextmanager
+def _source_pinned_connection(source, target):
+    """ATTACH 源的门覆盖整个物理连接；关闭未确认时由 w6 保留证明，不能提前放行 EX。"""
+    conn = guarded_runtime_connect(source, lambda: sqlite3.connect(target.as_uri(), uri=True))
+    try:
+        yield conn
+    finally:
+        mark_runtime_connection_idle(conn, True)
+        close_runtime_connection(conn)
 
 
 @dataclass(frozen=True)
@@ -164,7 +180,7 @@ def salvage_runtime_db(source: Path, target: Path, *, batch_rows: int | None = N
     with sqlite_connection_scope(False):
         RuntimeRepository(target)
     tables, events_copied, events_last_seq, events_error = {}, 0, 0, ""
-    with closing(sqlite3.connect(target.as_uri(), uri=True)) as conn:
+    with _source_pinned_connection(source, target) as conn:
         attached = False
         try:
             try:

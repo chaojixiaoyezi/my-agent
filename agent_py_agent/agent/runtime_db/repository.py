@@ -117,6 +117,7 @@ from .operations import (
     exec_lock_scope,
     holder_is_alive,
 )
+from .recovery_guard import close_runtime_connection, mark_runtime_connection_idle
 from .run_creation import RunCreation, create_run_chain
 from .schema import RuntimeSchemaMixin, RuntimeWriteFence, runtime_db_path
 
@@ -541,7 +542,8 @@ class RuntimeRepository(
             conn.rollback()
             raise
         finally:
-            conn.close()
+            mark_runtime_connection_idle(conn, True)
+            close_runtime_connection(conn)
 
     # -------------------------------------------- A.4/A.5/A.6/A.9 主链写入
     # LLM: 根运行创建新的 TaskRun，child 复用父 TaskRun；Task 本身只承载
@@ -3291,11 +3293,12 @@ class RuntimeRepository(
                 # 幂等(双席复核 seq1947): 同 attempt+reason 只写一次, 防
                 # 每 ~5 分钟扫描周期重复刷事件。
                 try:
-                    already = self._runtime_connect().execute(
-                        "SELECT 1 FROM runtime_events WHERE event_type = 'orphan_reclaim_blocked' "
-                        "AND attempt_id = ? AND payload_json LIKE ? LIMIT 1",
-                        (attempt_id, "%\"reason\": \"side_effect_gate\"%"),
-                    ).fetchone()
+                    with self._runtime_connection() as reader:
+                        already = reader.execute(
+                            "SELECT 1 FROM runtime_events WHERE event_type = 'orphan_reclaim_blocked' "
+                            "AND attempt_id = ? AND payload_json LIKE ? LIMIT 1",
+                            (attempt_id, "%\"reason\": \"side_effect_gate\"%"),
+                        ).fetchone()
                     if already is None:
                         self.append_event(
                             event_type="orphan_reclaim_blocked",
@@ -3339,11 +3342,12 @@ class RuntimeRepository(
             # 事件只写一次——孤儿回收每 ~5 分钟一趟, 不幂等会每周期刷一条
             # 重复事件污染账本。已有同型事件 → 跳过本次写入。
             try:
-                already = self._runtime_connect().execute(
-                    "SELECT 1 FROM runtime_events WHERE event_type = 'orphan_reclaim_blocked' "
-                    "AND attempt_id = ? AND payload_json LIKE ? LIMIT 1",
-                    (attempt_id, "%\"reason\": \"nonterminal_ops\"%"),
-                ).fetchone()
+                with self._runtime_connection() as reader:
+                    already = reader.execute(
+                        "SELECT 1 FROM runtime_events WHERE event_type = 'orphan_reclaim_blocked' "
+                        "AND attempt_id = ? AND payload_json LIKE ? LIMIT 1",
+                        (attempt_id, "%\"reason\": \"nonterminal_ops\"%"),
+                    ).fetchone()
                 if already is None:
                     self.append_event(
                         event_type="orphan_reclaim_blocked",
