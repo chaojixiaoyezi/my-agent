@@ -25,6 +25,7 @@ from ....common.nofollow_fs import (
 from ....common.opaque_id import validate_opaque_id
 from ....common.value_parsing import text_value
 from ....conversation.authority import CONVERSATION_REQUEST_ID_ATTR
+from ...model_capabilities import capability_request_requires_parent_resolution
 from ...models import (
     SUBAGENT_ENDED_STATUSES,
     SUBAGENT_RECOVERY_CLOSED_STATUSES,
@@ -51,9 +52,12 @@ class SubagentRunIndexUnavailable(RuntimeError):
 class SubagentRunIndex:
     # LLM: 初始化仅采样八项；旧投影版本必须重核 canonical，库存完成前所有热查询 fail closed。
     # 函数用途: 初始化私有查找库及迁移状态；每次连接均在词法作用域内关闭。
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, *, read_only: bool = False):
         self.workspace = Path(workspace)
         self.path = self.workspace / ".run-index.sqlite3"
+        self.read_only = read_only
+        if read_only:
+            return
         with locked_json_path(self.workspace / ".run-index-init.guard"):
             with self.connect() as db:
                 self._install(db)
@@ -104,20 +108,20 @@ class SubagentRunIndex:
                         run_id TEXT PRIMARY KEY, recovery TEXT NOT NULL, was_published INTEGER NOT NULL
                     );
         """)
-        if db.execute("SELECT value FROM meta WHERE key='schema'").fetchone() != (3,):
+        if db.execute("SELECT value FROM meta WHERE key='schema'").fetchone() != (4,):
             with os.scandir(self.workspace) as entries:
                 sampled = list(islice(entries, 8))
             legacy = (bool(db.execute("SELECT 1 FROM runs LIMIT 1").fetchone())
                       or len(sampled) == 8 or any(entry.is_dir(follow_symlinks=False) or entry.is_symlink() for entry in sampled))
             db.executemany("INSERT OR REPLACE INTO meta VALUES (?,?)",
                            [("complete", int(not legacy)), ("offset", 0),
-                            ("inventory_ready", int(not legacy)), ("schema", 3)])
+                            ("inventory_ready", int(not legacy)), ("schema", 4)])
 
     # LLM: 每连接只点查schema键；缺表或未完成种子复用原安装器，异常不能伪装成空库存。
     # 函数用途: 补未初始化的表及元数据，返回是否实际重装，由调用者复核身份后提交。
     def _ensure_schema(self, db):
         try:
-            if db.execute("SELECT value FROM meta WHERE key='schema'").fetchone() == (3,):
+            if db.execute("SELECT value FROM meta WHERE key='schema'").fetchone() == (4,):
                 return False
         except OperationalError as exc:
             if str(exc) != "no such table: meta":
@@ -129,6 +133,10 @@ class SubagentRunIndex:
     # 函数用途: 为一次查询或固定批次提供私有短连接，先关 SQLite 再关预检 FD，异常完整回滚。
     @contextmanager
     def connect(self):
+        if self.read_only:
+            with self._connect_existing() as db:
+                yield db
+            return
         with locked_json_path(self.workspace / ".run-index-access.guard"):
             if not nofollow_fs._supports_dir_fd():
                 with self._connect_portable() as db:
@@ -163,6 +171,43 @@ class SubagentRunIndex:
                         _verify_sqlite_files(self.workspace, root_fd, pinned)
                 finally:
                     db.close()
+
+    @contextmanager
+    def _connect_existing(self):
+        """冷读只查原文件，不建 guard、不迁移、不收紧权限；变化或旧代次都保持未知。"""
+        root = nofollow_fs._portable_directory(self.workspace, (), create=False).lstat()
+        pinned = []
+        for suffix in ("-journal", "-wal", "-shm", ""):
+            path = Path(f"{self.path}{suffix}")
+            try:
+                pinned.append((path, path.lstat()))
+            except FileNotFoundError:
+                if not suffix:
+                    raise
+        _verify_portable_sqlite_files(self.workspace, root, pinned)
+        wal, shm = Path(f"{self.path}-wal"), Path(f"{self.path}-shm")
+        if wal.exists() != shm.exists():
+            raise SubagentRunIndexUnavailable("subagent run index WAL coverage unavailable")
+        # 无 sidecar 的冷只读快照不让 SQLite 生成 WAL/SHM；前后指纹核验拒绝并发变化。
+        before = [(path, _read_signature(path, info)) for path, info in pinned]
+        uri = self.path.absolute().as_uri() + "?mode=ro"
+        if not wal.exists() and not shm.exists() and not Path(f"{self.path}-journal").exists():
+            uri += "&immutable=1"
+        db = sqlite3.connect(uri, uri=True, timeout=0)
+        try:
+            _verify_portable_sqlite_files(self.workspace, root, pinned)
+            db.execute("PRAGMA query_only=ON")
+            if db.execute("SELECT value FROM meta WHERE key='schema'").fetchone() != (4,):
+                raise SubagentRunIndexUnavailable("subagent run index schema unavailable")
+            yield db
+            _verify_portable_sqlite_files(self.workspace, root, pinned)
+            after = [(path, _read_signature(path, path.lstat())) for path, _ in before]
+            if before != after or {path.name for path, _ in pinned} != {
+                    Path(f"{self.path}{suffix}").name for suffix in ("", "-wal", "-shm", "-journal")
+                    if Path(f"{self.path}{suffix}").exists()}:
+                raise SubagentRunIndexUnavailable("subagent run index changed during read")
+        finally:
+            db.close()
 
     # LLM: 便携分支沿原访问锁和路径预检；仅POSIX收紧权限，种子FD先关再开SQLite，不外推POSIX竞态强度。
     # 函数用途: 在无dir_fd平台提供真实提交、回滚及确定性关闭的短连接。
@@ -247,6 +292,10 @@ class SubagentRunIndex:
         lineage = {run_id, str(task.root_id or "").strip(), str(task.parent_id or "").strip(),
                    str(attrs.get("conversation_task_id") or "").strip()}
         rows = [(key, "lineage", run_id) for key in lineage if key]
+        rows.append((text_value(task.status), "status", run_id))
+        rows.append((_current_thread_id(task), "thread", run_id))
+        if any(capability_request_requires_parent_resolution(request.status) for request in task.capability_requests):
+            rows.append(("", "capability", run_id))
         from ...direct_parent_lifecycle import parent_wait_blocks_dispatch
         from ..runtime_closeout import pending_closeout
 
@@ -286,11 +335,18 @@ class SubagentRunIndex:
     # LLM: 生产 prepare/init 接线负责调度维护；当前读只核覆盖，不同步库存或列表回退。
     # 函数用途: 阻止部分迁移或中断提交被当作健康容量。
     def _require_complete(self, db) -> None:
-        partial = not db.execute("SELECT value FROM meta WHERE key='complete'").fetchone()[0]
+        partial = db.execute("SELECT value FROM meta WHERE key='complete'").fetchone() != (1,)
         pending = bool(db.execute("SELECT 1 FROM runs WHERE pending=1 LIMIT 1").fetchone())
         if partial or pending:
             reason = "coverage is partial" if partial else "has pending canonical commits"
             raise SubagentRunIndexUnavailable(f"subagent run index {reason}")
+
+    def readiness(self) -> dict[str, object]:
+        """热准入只核固定元数据和 pending 存在性，不统计历史 backfill 库存。"""
+        with self.connect() as db:
+            complete = db.execute("SELECT value FROM meta WHERE key='complete'").fetchone()
+            pending = db.execute("SELECT 1 FROM runs WHERE pending=1 LIMIT 1").fetchone()
+            return {"complete": complete == (1,), "pending": bool(pending)}
 
     # LLM: 同一连接读取覆盖状态，不为观察触发迁移；pending 只提供数量不打印任务正文。
     # 函数用途: 返回显式迁移覆盖及未结提交事实。
@@ -300,8 +356,8 @@ class SubagentRunIndex:
             pending = db.execute("SELECT count(*) FROM runs WHERE pending=1").fetchone()[0]
             remaining = db.execute("SELECT count(*) FROM inventory WHERE done=0").fetchone()[0]
             skipped = db.execute("SELECT count(*) FROM inventory WHERE done=1 AND error_type!=''").fetchone()[0]
-        return {"complete": bool(meta["complete"]), "offset": meta["offset"], "pending": pending,
-                "inventory_ready": bool(meta["inventory_ready"]), "remaining": remaining, "skipped": skipped}
+        return {"complete": meta["complete"] == 1, "offset": meta["offset"], "pending": pending,
+                "inventory_ready": meta["inventory_ready"] == 1, "remaining": remaining, "skipped": skipped}
 
     # LLM: 参数全来自宿主结构化身份；UNION 消除多个谱系键命中的同一 run。
     # 函数用途: 生成同时供请求列表与容量计数使用的唯一谱系选择器。
@@ -361,6 +417,38 @@ class SubagentRunIndex:
                 "SELECT run_id FROM membership WHERE scope_id='' AND kind='source_lifecycle' AND run_id>? UNION "
                 "SELECT run_id FROM membership WHERE scope_id='' AND kind='parent_wait' AND run_id>? "
                 "ORDER BY run_id LIMIT ?", (after, after, after, after, limit + 1))]
+        return rows[:limit], rows[limit - 1] if len(rows) > limit else ""
+
+    def candidate_ids(self, *, statuses: tuple[str, ...] = (), thread_id: str = "",
+                      include_unbound_thread: bool = False, include_open_capabilities: bool = False,
+                      after: str = "", limit: int) -> tuple[list[str], str]:
+        """状态/未结请求取并集，再按显式线程取交集；空选择绝不扩大为全历史。"""
+        statuses = tuple(dict.fromkeys(text_value(status) for status in statuses))
+        thread_id = text_value(thread_id)
+        if (type(limit) is not int or limit <= 0 or any(not status for status in statuses)
+                or not (statuses or include_open_capabilities or thread_id)):
+            raise ValueError("current run selection and positive page limit required")
+        members = [(status, "status") for status in statuses]
+        if include_open_capabilities:
+            members.append(("", "capability"))
+        if not members:
+            threads = (thread_id, "") if include_unbound_thread else (thread_id,)
+            members.extend((thread, "thread") for thread in threads)
+        selectors, values = [], []
+        # 每个固定成员键按主键中的 run_id 续读；UNION 有序合并，不每页重新物化全部候选。
+        for scope, kind in members:
+            sql = "SELECT run_id FROM membership selected WHERE scope_id=? AND kind=? AND run_id>?"
+            values.extend((scope, kind, after))
+            if thread_id:
+                threads = (thread_id, "") if include_unbound_thread else (thread_id,)
+                sql += (" AND EXISTS (SELECT 1 FROM membership m WHERE m.run_id=selected.run_id "
+                        "AND m.kind='thread' AND m.scope_id IN (" + ",".join("?" for _ in threads) + "))")
+                values.extend(threads)
+            selectors.append(sql)
+        with self.connect() as db:
+            db.execute("BEGIN")
+            self._require_complete(db)
+            rows = [row[0] for row in db.execute(" UNION ".join(selectors) + " ORDER BY run_id LIMIT ?", (*values, limit + 1))]
         return rows[:limit], rows[limit - 1] if len(rows) > limit else ""
 
     def acknowledge_source_lifecycles(self, run_ids) -> None:
@@ -565,6 +653,30 @@ class SubagentRunIndex:
 # 类用途: 标记一条库存行的规范记录已不属于该 run 身份。
 class InventoryCanonicalMismatch(ValueError):
     pass
+
+
+def _current_thread_id(task) -> str:
+    """保持现有 idle/current 消费者的显式线程优先级；不猜子线程或根线程。"""
+    attrs = task.attributes if isinstance(task.attributes, dict) else {}
+    return text_value(getattr(task, "conversation_thread_id", "") or getattr(task, "thread_id", "")
+                      or attrs.get("conversation_thread_id"))
+
+
+def current_run_matches(task, *, statuses=(), thread_id="", include_unbound_thread=False,
+                        include_open_capabilities=False) -> bool:
+    """只复核 canonical 成员条件，不根据索引授予任何执行/恢复权限。"""
+    selected = not statuses and not include_open_capabilities
+    selected = selected or text_value(task.status) in {text_value(status) for status in statuses}
+    selected = selected or include_open_capabilities and any(
+        capability_request_requires_parent_resolution(request.status) for request in task.capability_requests)
+    current_thread = _current_thread_id(task)
+    return bool(selected and (not thread_id or current_thread == thread_id or include_unbound_thread and not current_thread))
+
+
+def _read_signature(path, info):
+    # SHM read-mark 可由正常读者刷新，不是权威数据变更；身份/长度与 DB/WAL/JOURNAL 仍严格核验。
+    identity = (info.st_dev, info.st_ino, info.st_size)
+    return identity if path.name.endswith("-shm") else (*identity, info.st_mtime_ns, info.st_ctime_ns)
 
 
 # LLM: SQLite 连接前后复核原 no-follow FD 对应的路径；不存在的 sidecar 也必须在出现时保持普通私有单链接。

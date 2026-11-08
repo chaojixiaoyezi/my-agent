@@ -1345,6 +1345,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RETRY.value,
         recovery_hint="子代理账本或任务 lineage 暂时无法读取；恢复权威状态后再重试，不得按 0 占用量继续创建。",
     ),
+    "SUBAGENT_RUN_INDEX_UNAVAILABLE": ErrorContract(
+        code="SUBAGENT_RUN_INDEX_UNAVAILABLE",
+        category="orchestration",
+        retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint="子代理运行索引或候选权威记录暂时不可读；稍后重试或等待索引重建，不得把结果当作空集合或 0 占用继续。",
+    ),
     "SUBAGENT_PLANNED_DELEGATION_INVALID": ErrorContract(
         code="SUBAGENT_PLANNED_DELEGATION_INVALID",
         category="orchestration",
