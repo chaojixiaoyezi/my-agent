@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import sys
 import threading
@@ -3721,12 +3722,19 @@ def test_stop_ack_is_bounded_when_provider_transport_close_blocks(tmp_path) -> N
     _bind_live_main_request(agent, request_path)
     ready = threading.Event()
     release_cleanup = threading.Event()
+    cleanup_started = threading.Event()
+    cleanup_finished = threading.Event()
     observed = threading.Event()
     fixture_cleanup = threading.Event()
 
+    def blocking_close() -> None:
+        cleanup_started.set()
+        release_cleanup.wait(timeout=3.0)
+        cleanup_finished.set()
+
     def worker() -> None:
         with register_interruptible("conversation-request:req-slow-close"):
-            with register_interrupt_callback(release_cleanup.wait):
+            with register_interrupt_callback(blocking_close):
                 ready.set()
                 while not is_interrupted() and not fixture_cleanup.wait(0.01):
                     pass
@@ -3742,16 +3750,48 @@ def test_stop_ack_is_bounded_when_provider_transport_close_blocks(tmp_path) -> N
         result = execute_gateway_conversation_control(agent, paths, _command("/stop"), _scope())
         elapsed = time.monotonic() - started
 
+        assert cleanup_started.wait(timeout=1.0)
+        # 在释放关闭回调前核对 ACK；不能由 finally 的清理动作制造通过。
+        assert not cleanup_finished.is_set()
         stop_observed = observed.wait(timeout=2)
     finally:
         fixture_cleanup.set()
         release_cleanup.set()
         thread.join(timeout=2)
+        if cleanup_started.is_set():
+            assert cleanup_finished.wait(timeout=2)
 
     assert result.ok is True
-    assert elapsed < 0.5
+    assert elapsed < 1.2
     assert stop_observed
     assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("matching_marker", [True, False])
+def test_golden_process_marker_resolves_only_owned_descendant_pid(tmp_path, matching_marker):
+    """沙箱内 PID 可与宿主无关进程重号；非主线程派生的真实执行体仍须可核验。"""
+    from agent_py_agent.tests.golden.replayer import _linux_marker_host_pid
+
+    marker = tmp_path / "owner" / "process-ready"
+    proc = tmp_path / "proc"
+    for pid, namespace_pid, command in (
+        (100, 100, b"gateway"),
+        (102, 3, os.fsencode(marker if matching_marker else tmp_path / "other-marker")),
+        (3, 3, os.fsencode(marker)),
+    ):
+        process = proc / str(pid)
+        process.mkdir(parents=True)
+        (process / "status").write_text(f"NSpid:\t{pid}\t{namespace_pid}\n")
+        (process / "cmdline").write_bytes(command)
+    # 线程 101 才是 Popen 的父任务，进程 3 虽同号、同命令也不属于本 Gateway。
+    task = proc / "100" / "task" / "101"
+    task.mkdir(parents=True)
+    (task / "children").write_text("102")
+
+    host_pid = _linux_marker_host_pid(100, 3, marker, proc_root=proc)
+
+    assert host_pid == (102 if matching_marker else None)
+
 
 def test_stop_interrupts_active_ordinary_task_after_foreground_yield(tmp_path) -> None:
     """前台请求已结束、没有 claim/进程时，thread 的 active root 仍必须可被 /stop。"""

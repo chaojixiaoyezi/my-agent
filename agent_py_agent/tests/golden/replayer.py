@@ -8,6 +8,7 @@ import signal
 import sys
 from contextlib import contextmanager
 from datetime import date
+from itertools import islice
 from pathlib import Path
 
 from agent_py_agent.tests.slo.fake_provider import FakeProvider
@@ -21,6 +22,38 @@ def replay_bounds(parameters):
     """Golden 的状态观察至少留 25 秒，并保留共享 SLO 更大的启动与清理预算。"""
     return {**parameters, "condition_seconds": max(25.0, parameters["condition_seconds"],
         parameters["startup_seconds"] + parameters["teardown_seconds"])}
+
+
+def _shell_python():
+    """Linux owner 沙箱只挂系统目录，不能使用 setup-python 的宿主 toolcache。"""
+    executable = "/usr/bin/python3" if sys.platform.startswith("linux") else sys.executable
+    assert os.access(executable, os.X_OK), f"golden shell interpreter unavailable: {executable}"
+    return executable
+
+
+def _linux_marker_host_pid(gateway_pid, namespace_pid, marker, *, proc_root=Path("/proc")):
+    """只在本 Gateway 的有界进程树内把沙箱 PID 还原为宿主 PID，不扫描全机。"""
+    pending, seen = [gateway_pid], set()
+    while pending and len(seen) < 256:
+        pid = pending.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        process = proc_root / str(pid)
+        try:
+            status = process.joinpath("status").read_text()
+            namespace = next((line.split()[1:] for line in status.splitlines()
+                              if line.startswith("NSpid:")), [])
+            command = process.joinpath("cmdline").read_bytes()
+            if namespace and int(namespace[-1]) == namespace_pid and os.fsencode(marker) in command:
+                return pid
+            # Popen 可能来自非主线程；只读主线程 children 会漏掉真正的 shell。
+            for children in islice(process.joinpath("task").glob("*/children"), 256):
+                pending.extend(int(child) for child in children.read_text().split())
+        except FileNotFoundError:
+            # 子进程或线程可在两次 procfs 读取间退出，交给下一轮观察。
+            continue
+    return None
 
 
 @contextmanager
@@ -293,15 +326,24 @@ class Replayer:
     # 函数用途: Bind the shell readiness marker to its real PID, without inferring readiness from launch.
     def wait_process_ready(self, step):
         marker = self.gateway.home / "owners" / "local" / "main" / "process-ready"
+        request_id = self.aliases[step["target"]]
         # LLM: File creation can precede its first complete write; an empty marker is not readiness.
         # 函数用途: Read only a complete PID produced by the actual tool process.
         def marker_pid():
             value = marker.read_text().strip() if marker.exists() else ""
-            return int(value) if value.isdecimal() else None
+            if value.isdecimal():
+                pid = int(value)
+                if sys.platform.startswith("linux"):
+                    return _linux_marker_host_pid(self.gateway.proc.pid, pid, marker)
+                return pid
+            terminal = self.payload(request_id, terminal=True)
+            assert terminal is None, f"shell exited before readiness marker: {terminal}"
+            assert self.gateway.proc.poll() is None, "Gateway exited before shell readiness"
+            return None
         pid = wait_until(marker_pid, self.bounds["condition_seconds"], self.bounds["poll_seconds"])
         os.kill(pid, 0)
-        self.requests[self.aliases[step["target"]]]["shell_pid"] = pid
-        self.observe_start(self.aliases[step["target"]])
+        self.requests[request_id]["shell_pid"] = pid
+        self.observe_start(request_id)
 
     # LLM: A missing exact PID is process exit evidence; permission errors remain failures.
     # 函数用途: Confirm that the real shell process exited after stop rather than treating its ACK as exit.
@@ -363,7 +405,7 @@ class Replayer:
             self.gateway = ReplayGatewayProcess(self.root / "gateway", self.provider, self.bounds, self.scenario.get("config", {}))
             self.recorder.gateway_origin = self.gateway.base_url
             self.provider.replacements = {"OWNER_HOME": str(self.gateway.home / "owners" / "local" / "main"),
-                                          "PYTHON": sys.executable}
+                                          "PYTHON": _shell_python()}
             from agent_py_agent.agent.user_space.approval_mode import (
                 execute_approval_mode_operation,
             )
