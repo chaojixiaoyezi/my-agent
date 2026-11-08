@@ -692,22 +692,29 @@ def _prepare_carried_view(agent, request, row):
                 times = timeline.put(times, _timeline_key(previous['created_at'], previous['generation']), descriptor)
     messages, tools = base.get('messages'), base.get('tools')
     message_count, tool_count = int(base.get('message_count', 0)), int(base.get('tool_count', 0))
+    # LLM: 批量put_absent与逐键put根字节相同（树形只由键集合决定），只省去中间版本节点文件
     if not base and view.checkpoint_id:
-        for identity in view.source_message_ids:
-            messages = index.put(messages, identity, True)
-            message_count += 1
+        legacy_messages = dict.fromkeys(view.source_message_ids, True)
+        messages = index.put_absent(messages, legacy_messages.items())
+        message_count += len(view.source_message_ids)
+        legacy_tools = {}
         for ref in view.source_tool_refs:
-            tools = index.put(tools, json.dumps(ref, sort_keys=True), {'ref': ref, 'order': tool_count})
+            legacy_tools[json.dumps(ref, sort_keys=True)] = {'ref': ref, 'order': tool_count}
             tool_count += 1
+        tools = index.put_absent(tools, legacy_tools.items())
+    new_messages = {}
     for identity in row['source_message_ids']:
-        if index.get(messages, identity) is None:
-            messages = index.put(messages, identity, True)
-            message_count += 1
+        if identity not in new_messages and index.get(messages, identity) is None:
+            new_messages[identity] = True
+    messages = index.put_absent(messages, new_messages.items())
+    message_count += len(new_messages)
+    new_tools = {}
     for ref in row['source_tool_refs']:
         key = json.dumps(ref, sort_keys=True)
-        if index.get(tools, key) is None:
-            tools = index.put(tools, key, {'ref': ref, 'order': tool_count})
+        if key not in new_tools and index.get(tools, key) is None:
+            new_tools[key] = {'ref': ref, 'order': tool_count}
             tool_count += 1
+    tools = index.put_absent(tools, new_tools.items())
     recent_messages = list(dict.fromkeys([*(base['recent_messages'] if base else tuple(view.source_message_ids)),
                                         *row['source_message_ids']]))[-256:]
     recent_tools = {json.dumps(ref, sort_keys=True): ref for ref in (
