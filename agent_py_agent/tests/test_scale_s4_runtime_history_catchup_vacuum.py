@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
+from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -98,6 +102,13 @@ def _large_output(conn):
     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
 
 
+def _vacuum_backlog(conn):
+    _large_output(conn)
+    assert retention.slim_terminal_tool_outcomes_step(conn, cutoff=1000, max_rows=128)["slimmed"] == 1
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+    assert conn.execute("PRAGMA freelist_count").fetchone()[0] >= maintenance.LOCAL_STORE_INCREMENTAL_VACUUM_PAGES_COUNT
+
+
 def test_catchup_uses_multiple_short_batches_and_reaches_complete(database, monkeypatch):
     home, _, conn = database
     _fill(home, conn, 600)
@@ -155,6 +166,168 @@ def test_incremental_vacuum_reclaims_physical_database_pages(database, monkeypat
     assert any(result.get("freed_bytes", 0) > 0 for result in results)
     assert repo.db_path.stat().st_size < before
     assert json.loads(conn.execute("SELECT outcome_json FROM tool_operations").fetchone()[0])["retention"] == "slimmed"
+
+
+def test_idle_passes_drain_audited_scale_vacuum_backlog(database, record_testsuite_property):
+    home, repo, conn = database
+    body = json.dumps({"output": "x" * (128 * 1024)})
+    _run(conn)
+    for index in range(1024):
+        _tool(conn, f"op-{index}", outcome=body)
+    conn.commit()
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+    initial_size = repo.db_path.stat().st_size
+    assert initial_size >= 128 * 1024 * 1024
+    cursor, slimmed = {}, 0
+    for logical_calls in range(1, 121):
+        result = retention.maintain_runtime_history_lane(_request(home, items=512, cursor=cursor))
+        cursor = result["cursor"]
+        slimmed += result["slimmed"]
+        if slimmed == 1024:
+            break
+    assert slimmed == 1024
+    threshold = maintenance.LOCAL_STORE_INCREMENTAL_VACUUM_PAGES_COUNT
+    free_before = conn.execute("PRAGMA freelist_count").fetchone()[0]
+    size_before = repo.db_path.stat().st_size
+    assert free_before >= 2 * threshold
+    idle_results, free_pages = [], [free_before]
+    for _ in range(40):
+        result = retention.maintain_runtime_history_lane(_request(home, items=512, cursor=cursor))
+        storage_lanes.validate_lane_receipt(result)
+        cursor = result["cursor"]
+        assert result["slimmed"] == result["deleted_events"] == result["deleted_llm_records"] == 0
+        idle_results.append(result)
+        free_pages.append(conn.execute("PRAGMA freelist_count").fetchone()[0])
+        if free_pages[-1] < threshold and result["complete"]:
+            break
+    evidence = {"rows": slimmed, "payload_bytes": 1024 * len(body.encode("utf-8")),
+                "initial_database_bytes": initial_size, "logical_retention_calls": logical_calls,
+                "idle_calls": len(idle_results), "free_pages": free_pages,
+                "database_bytes_before_idle": size_before, "database_bytes_after_idle": repo.db_path.stat().st_size}
+    record_testsuite_property("runtime_vacuum_idle_continuation", json.dumps(evidence, sort_keys=True))
+    assert free_pages[-1] < threshold, evidence
+    assert idle_results[-1]["complete"], evidence
+    assert repo.db_path.stat().st_size < size_before, evidence
+    assert sum(result.get("freed_bytes", 0) for result in idle_results) > 0
+    assert sum(after < before for before, after in zip(free_pages, free_pages[1:])) > 1
+    assert all(not result["complete"] for result, free in zip(idle_results, free_pages[1:]) if free >= threshold)
+    assert conn.execute("SELECT count(*) FROM tool_operations WHERE status='SUCCEEDED' AND updated_at=201"
+                        ).fetchone()[0] == 1024
+    assert conn.execute("SELECT status,updated_at FROM agent_runs").fetchone() == ("done", 101)
+
+
+@pytest.mark.parametrize("reason", ["busy", "budget_exhausted"])
+def test_last_mutation_deferral_resumes_without_further_logical_changes(database, monkeypatch, reason):
+    home, repo, conn = database
+    _vacuum_backlog(conn)
+    _llm(conn, "last-mutation", owner=home.owner_id)
+    conn.commit()
+    before = repo.db_path.stat().st_size
+    clock = SimpleNamespace(monotonic=time.monotonic)
+    monkeypatch.setattr(storage_lanes, "time", clock)
+    calls = []
+
+    def commit(operation):
+        calls.append(True)
+        if len(calls) == 4:
+            assert reason == "busy"
+            # 最后一个逻辑批次已提交，再由真实 SQLite 写锁阻挡页回收。
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                return operation()
+            finally:
+                conn.rollback()
+        result = operation()
+        if len(calls) == 3 and reason == "budget_exhausted":
+            clock.monotonic = lambda: time.monotonic() + 60
+        return result
+
+    deferred = retention.maintain_runtime_history_lane(_request(home, commit=commit))
+    storage_lanes.validate_lane_receipt(deferred)
+    assert deferred["deleted_llm_records"] == 1
+    assert deferred["slimmed"] == deferred["deleted_events"] == 0
+    assert len(calls) == (4 if reason == "busy" else 3)
+    assert not deferred["complete"] and deferred["deferred_reason"] == reason
+    assert conn.execute("SELECT count(*) FROM llm_call_records").fetchone()[0] == 0
+    assert conn.execute("PRAGMA freelist_count").fetchone()[0] >= maintenance.LOCAL_STORE_INCREMENTAL_VACUUM_PAGES_COUNT
+    clock.monotonic = time.monotonic
+    resumed_calls = []
+
+    def resume(operation):
+        resumed_calls.append(True)
+        return operation()
+
+    result = retention.maintain_runtime_history_lane(_request(home, cursor=deferred["cursor"], commit=resume))
+    assert result["slimmed"] == result["deleted_events"] == result["deleted_llm_records"] == 0
+    assert result["complete"] and result["freed_bytes"] > 0
+    assert len(resumed_calls) == 4
+    assert conn.execute("PRAGMA freelist_count").fetchone()[0] < maintenance.LOCAL_STORE_INCREMENTAL_VACUUM_PAGES_COUNT
+    assert repo.db_path.stat().st_size < before
+
+
+def test_idle_small_database_adds_no_physical_write(database):
+    home, repo, conn = database
+    retention.maintain_runtime_history_lane(_request(home))
+    before = repo.db_path.stat().st_size
+    for _ in range(3):
+        commits = []
+
+        def commit(operation):
+            commits.append(True)
+            return operation()
+
+        result = retention.maintain_runtime_history_lane(_request(home, commit=commit))
+        assert result["complete"] and result["items"] == 0
+        assert result.get("freed_bytes", 0) == 0
+        assert "deferred_reason" not in result
+        assert len(commits) == 3  # 仅有既存三个类别的逻辑批次，没有额外页维护提交。
+        assert repo.db_path.stat().st_size == before
+        assert not conn.in_transaction
+
+
+@pytest.mark.parametrize("reason", ["request_hold", "policy_hold", "maintenance_disabled", "categories_disabled"])
+def test_protected_vacuum_backlog_never_enters_write_gate(database, reason):
+    home, repo, conn = database
+    _vacuum_backlog(conn)
+    policy = MemoryRetentionPolicy()
+    if reason == "policy_hold":
+        policy = replace(policy, legal_hold=True)
+    elif reason == "maintenance_disabled":
+        policy = replace(policy, maintenance_enabled=False)
+    elif reason == "categories_disabled":
+        policy = replace(policy, tool_output_days_after_terminal=0, audit_days=0)
+    home.owner_retention_json.write_text(json.dumps(policy.to_dict()), encoding="utf-8")
+    before = (repo.db_path.stat().st_size, conn.execute("PRAGMA freelist_count").fetchone()[0])
+
+    def unexpected_write(operation):
+        pytest.fail("保全或关闭维护的库仍进入了写门")
+
+    result = retention.maintain_runtime_history_lane(_request(
+        home, legal_hold=reason == "request_hold", commit=unexpected_write))
+    assert result["complete"] and result["items"] == 0
+    assert (repo.db_path.stat().st_size, conn.execute("PRAGMA freelist_count").fetchone()[0]) == before
+
+
+def test_checkpoint_continues_after_reader_defers_last_eligible_pages(database):
+    home, repo, conn = database
+    _large_output(conn)
+    before = repo.db_path.stat().st_size
+    with closing(sqlite3.connect(repo.db_path)) as reader:
+        reader.execute("BEGIN")
+        reader.execute("SELECT count(*) FROM tool_operations").fetchone()
+        retention.slim_terminal_tool_outcomes_step(conn, cutoff=1000, max_rows=128)
+        result = retention.maintain_runtime_history_lane(_request(home))
+        assert result["slimmed"] == result["deleted_events"] == result["deleted_llm_records"] == 0
+        assert not result["complete"] and result["deferred_reason"] == "vacuum_pending"
+        assert conn.execute("PRAGMA freelist_count").fetchone()[0] < maintenance.LOCAL_STORE_INCREMENTAL_VACUUM_PAGES_COUNT
+        assert repo.db_path.stat().st_size == before
+    resumed = retention.maintain_runtime_history_lane(_request(home, cursor=result["cursor"]))
+    assert resumed["slimmed"] == resumed["deleted_events"] == resumed["deleted_llm_records"] == 0
+    assert resumed["complete"] and resumed["freed_bytes"] > 0
+    with repo._runtime_connection() as observer:
+        state = maintenance._local_store_vacuum_state(observer)
+    assert not maintenance._local_store_checkpoint_pending(repo.db_path, state)
+    assert repo.db_path.stat().st_size < before
 
 
 def test_legacy_coordinator_never_converts_or_adds_a_vacuum_commit(legacy_database, monkeypatch):
