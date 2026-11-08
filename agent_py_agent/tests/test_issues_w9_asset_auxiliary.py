@@ -274,12 +274,13 @@ def test_auxiliary_read_budget_and_invalid_json_accounting(setup, invalid):
     assert result['deleted_items'] == 0
 
 
-# LLM: 等待只包住真实pins，不替换引用视图；每个有到期候选的片必须前进，空集合仍走原阶段切换。
+# LLM: 预算假钟只在真实pins处推进，不替换引用视图；每个有到期候选的片必须前进，空集合仍走原阶段切换。
 # 函数用途: 验证慢扫描下辅助候选最终清完、完整轮结束、字节计量及FD观察都准确。
 def test_slow_pin_snapshot_still_retires_due_auxiliary_files(setup, monkeypatch, record_property):
-    import time
+    from types import SimpleNamespace
 
     from agent_py_agent.agent.memory_store import retention_scan
+    from agent_py_agent.agent.user_space import storage_lanes
     from agent_py_agent.agent.user_space.storage_lanes import STORAGE_LANE_SLICE_MS
 
     paths = [candidate(setup, f'slow-{index}', age=31) for index in range(3)]
@@ -288,13 +289,16 @@ def test_slow_pin_snapshot_still_retires_due_auxiliary_files(setup, monkeypatch,
     preserved = {path: path.read_bytes() for path in blobs.rglob('*') if path.is_file()}
     original = retention_scan.current_retention_pins
     pin_calls, commits = [], []
+    clock = [0.0]
 
     def slow_pins(*args, **kwargs):
         pin_calls.append(True)
-        time.sleep(2 * STORAGE_LANE_SLICE_MS / 1000)
+        clock[0] += 2 * STORAGE_LANE_SLICE_MS / 1000
         return original(*args, **kwargs)
 
     monkeypatch.setattr(retention_scan, 'current_retention_pins', slow_pins)
+    # 只模拟pin超时，避免宿主目录/JSON读取抢先耗尽本测试的25ms预算。
+    monkeypatch.setattr(storage_lanes, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
     gc.collect()
     before = _fd_count(root=setup[0].root)
     cursor, rows = {'phase': 'candidates', 'kind': 'script', 'after': ''}, []
