@@ -147,6 +147,14 @@ def _delivery_dependencies(runtime):
         task_status=partial(_background_task_link_status, runtime.agent, store=runtime.store),
     )
 
+
+def _wake_retry_at(store, signal, earliest):
+    """退避从尝试结束起算，重投观察点必须覆盖同一唤醒的持久到期时间。"""
+    state, error = store.wakes.attempts.state_report(signal.wake_signal_id)
+    assert error is None and state is not None
+    return max(earliest, state.next_attempt_at)
+
+
 def test_unregistered_identity_route_still_records_reply_in_canonical_thread(tmp_path) -> None:
     """未注册渠道必须仍然留住模型答复：canonical 记录不依赖 transport 能力。"""
     agent, _backend = _agent(tmp_path)
@@ -259,7 +267,7 @@ def test_undelivered_reply_stays_pending_and_redelivers_without_model_turn(tmp_p
     native_request = rows[0].metadata["conversation_request_id"]
 
     channels.status = "sent"
-    report = scheduler.tick(now=51.0)
+    report = scheduler.tick(now=_wake_retry_at(store, signal, 51.0))
     assert len(backend.prompts) == 1, "重投不得再花一次模型轮"
     assert store.tasks.load("task-im").status == "completed"
     # 两次投递携带的是同一份冻结正文，证明重投没有重新生成内容。
@@ -471,7 +479,7 @@ def test_frozen_payload_survives_a_repeated_failure(tmp_path) -> None:
 
     assert scheduler.tick(now=20.0) == []
     assert store.tasks.load("task-im").status == "completed"
-    assert scheduler.tick(now=51.0) == []
+    assert scheduler.tick(now=_wake_retry_at(store, signal, 51.0)) == []
     assert store.tasks.load("task-im").status == "completed"
     pending = store.wakes.pending_one(signal.wake_signal_id)
     assert pending is not None
@@ -487,14 +495,26 @@ def test_frozen_payload_survives_a_repeated_failure(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_declared_transport_keeps_obligation_while_adapter_unavailable(tmp_path) -> None:
+@pytest.mark.parametrize("attempt_seconds", [0.0, 90.0])
+def test_declared_transport_keeps_obligation_while_adapter_unavailable(tmp_path, monkeypatch, attempt_seconds) -> None:
     """声明过的外发通道即使当前不可用，也仍然欠 owner 一次外送，不能确认唤醒。"""
+    from agent_py_agent.agent.conversation import wake_attempt_tracking
     from agent_py_agent.agent.conversation.background_delivery import (
         ROUTE_EXTERNAL,
         background_route_ownership,
     )
 
     agent, _backend = _agent(tmp_path)
+    clock = [0.0]
+    original_generate = _backend.generate
+
+    # 只控制尝试耗时的模块时钟，保留真实模型替身、投递和持久退避记账。
+    def generate(*args, **kwargs):
+        clock[0] += attempt_seconds
+        return original_generate(*args, **kwargs)
+
+    monkeypatch.setattr(wake_attempt_tracking, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(_backend, "generate", generate)
     # 真实 registry 永远声明 feishu/qq（与凭据是否齐全无关）。
     real = DeliveryService(build_default_channel_registry(agent.config))
     assert real.declares_channel("feishu") is True
@@ -544,7 +564,7 @@ def test_declared_transport_keeps_obligation_while_adapter_unavailable(tmp_path)
 
     # "适配器恢复"：同一条唤醒的重投必须只重发冻结正文而不再调用模型。
     channels.status = "sent"
-    report = scheduler.tick(now=51.0)
+    report = scheduler.tick(now=_wake_retry_at(store, signal, 51.0))
     assert len(_backend.prompts) == 1, "重投不得再花一次模型轮"
     assert store.tasks.load("task-im").status == "completed"
     assert [item.delivery_status for item in report] == ["sent"]
