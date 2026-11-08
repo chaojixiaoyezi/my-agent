@@ -49,7 +49,7 @@ class LocalStoreControlPlaneMixin:
         return self.get_agent_run(record.run_id) or record
 
     def get_agent_run(self, run_id: str) -> AgentRunRecord | None:
-        with self._connection() as conn:
+        with self._passive_connection() as conn:
             row = conn.execute("SELECT * FROM legacy_agent_runs WHERE run_id = ?", (run_id,)).fetchone()
         return agent_run_from_row(row) if row else None
 
@@ -67,7 +67,7 @@ class LocalStoreControlPlaneMixin:
         return self.get_task_rollup(rollup.task_id) or rollup
 
     def get_task_rollup(self, task_id: str) -> TaskRollupRecord | None:
-        with self._connection() as conn:
+        with self._passive_connection() as conn:
             row = conn.execute("SELECT * FROM task_rollups WHERE task_id = ?", (task_id,)).fetchone()
         return task_rollup_from_row(row) if row else None
 
@@ -99,7 +99,7 @@ class LocalStoreControlPlaneMixin:
         )
 
     def _agent_runs_for_task(self, task_id: str) -> list[AgentRunRecord]:
-        with self._connection() as conn:
+        with self._passive_connection() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM legacy_agent_runs

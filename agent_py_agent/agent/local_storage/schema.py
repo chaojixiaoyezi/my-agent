@@ -21,6 +21,7 @@ from ..common.global_write_commit import execute_global_write
 from ..common.json_io import append_private_jsonl_records_unlocked, locked_json_path
 from ..common.nofollow_fs import ensure_private_dir
 from ..io.sqlite_connection import sqlite_error_details
+from ..io.sqlite_probe import require_plain_sqlite_files, sqlite_readonly_probe_uri
 from ..io.sqlite_schema import schema_fingerprint, schema_is_current, stamp_schema
 from ..io.sqlite_scope import scoped_connection, sqlite_connection_factory
 from .events import rotate_event_jsonl_if_due_unlocked
@@ -540,6 +541,24 @@ class LocalStoreSchemaMixin:
             return
         with scoped_connection(self.db_path, False, self._connect) as conn:
             yield conn
+
+
+    @contextmanager
+    def _passive_connection(self) -> Iterator[sqlite3.Connection]:
+        """只读现存投影；不借写权限或修库，复用原物理关闭与首异常保留。"""
+        require_plain_sqlite_files(self.db_path, beneath=self.root)
+        address = sqlite_readonly_probe_uri(self.db_path)
+        conn = sqlite3.connect(address, uri=True, timeout=0.0)
+        primary = None
+        try:
+            conn.row_factory = sqlite3.Row
+            require_plain_sqlite_files(self.db_path, beneath=self.root)
+            yield conn
+        except BaseException as exc:
+            primary = exc
+            raise
+        finally:
+            _retire_coordinator_connection(conn, primary)
 
 
     # LLM: 只消费原global scope/window；不保存callback，不给普通W/Count0无条件增加global guard。
