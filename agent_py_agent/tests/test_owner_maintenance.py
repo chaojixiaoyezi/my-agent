@@ -523,7 +523,8 @@ def test_b2_r3_actual_c_local_events_use_short_writes_and_outside_reads(tmp_path
 
 # LLM: R8-MAINT-01：多进程Coordinator发现层必须识别已提交partial与有限配额待续作账本，且稍晚于24小时的日调度不得令活跃配额游标过期重开。
 # 函数用途: 验证生产发现层与transition执行链在日内续作与稍迟日调度下均能收敛配额对账。
-def test_r8_maint_01_gateway_discovery_and_daily_jitter_converge(tmp_path, monkeypatch):
+@pytest.mark.parametrize("quota_tick", [0.000001, 0.001], ids=["entry-budget", "time-budget"])
+def test_r8_maint_01_gateway_discovery_and_daily_jitter_converge(tmp_path, monkeypatch, quota_tick):
     import types
 
     from agent_py_agent.agent.gateway_parts import (
@@ -554,8 +555,14 @@ def test_r8_maint_01_gateway_discovery_and_daily_jitter_converge(tmp_path, monke
         for f in range(5):
             (sub / f"f{f}").write_bytes(b"x")
     clock = [3_000_000_000.0]
-    real_time = q.time
-    monkeypatch.setattr(q, "time", types.SimpleNamespace(time=lambda: clock[0], monotonic=real_time.monotonic))
+    scan_clock = [0.0]
+
+    def monotonic():
+        # 用确定性时钟分别触发条数与时间预算，避免依赖CI宿主当前负载。
+        scan_clock[0] += quota_tick
+        return scan_clock[0]
+
+    monkeypatch.setattr(q, "time", types.SimpleNamespace(time=lambda: clock[0], monotonic=monotonic))
 
     def source_payload():
         ref = freeze_source(
@@ -599,5 +606,17 @@ def test_r8_maint_01_gateway_discovery_and_daily_jitter_converge(tmp_path, monke
                     if ref["kind"] == "maintenance"
                 ]
             assert len(refs) == 1
+    # 日调度只保证推进一片；时间预算提前耗尽时继续走原维护入口，不能把三天三片当完成证明。
+    for _ in range(256):
+        ledger = json.loads((home.owner_home_dir / ".owner-quota-ledger.json").read_text())
+        if ledger["reconcile_cursor"]["complete"] and ledger["dirty_since"] is None:
+            break
+        clock[0] += 60
+        assert _maintenance_has_due_work(source_payload(), clock[0])
+        result = m.run_owner_retention_if_due(
+            home, now=clock[0], include_global_indexes=False,
+            commit_transition=lambda operation: operation(),
+        )
+        assert result.ran
     ledger = json.loads((home.owner_home_dir / ".owner-quota-ledger.json").read_text())
     assert ledger["reconcile_cursor"]["complete"] is True and ledger["dirty_since"] is None
