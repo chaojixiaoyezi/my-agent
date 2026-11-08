@@ -2398,8 +2398,11 @@ class _GatewayOwnerMaintenanceController:
                 _LoopSite("owner-maintenance", "gateway_owner_maintenance.tick", "owner-maintenance", self.interval),
             )
         finally:
-            for scan in self._idle_compact_cursor.pop("directories", {}).values():
-                scan.close()
+            # 部分初始化的 controller 退出时尚无扫描资源，清理不能遮蔽原循环结果。
+            idle_cursor = getattr(self, "_idle_compact_cursor", None)
+            if isinstance(idle_cursor, dict):
+                for scan in idle_cursor.pop("directories", {}).values():
+                    scan.close()
 
     # LLM: 每拍先跑基础 owner 与原闲置压缩；优先续作限半拍，发现至少一页，同拍去重、不构造 owner agent。
     #   摘要由 _maintenance_summary 汇总（failed 只算整次被拒与执行期动作失败，另有 refused / isolated），只打印、不落盘；容量兜底取AgentConfig。
@@ -2415,7 +2418,10 @@ class _GatewayOwnerMaintenanceController:
             now=current, config=getattr(self._base_agent, "config", None))]
         from ..agent.gateway_parts.compact_operations import idle_compact_maintenance_tick
 
-        idle_compact_maintenance_tick(self._base_agent, cursor=self._idle_compact_cursor, now=current)
+        idle_cursor = getattr(self, "_idle_compact_cursor", None)
+        if not isinstance(idle_cursor, dict):
+            idle_cursor = self._idle_compact_cursor = {}
+        idle_compact_maintenance_tick(self._base_agent, cursor=idle_cursor, now=current)
         limit = _positive_int_config(
             self._base_agent,
             "owner_agent_pool_max_agents",
