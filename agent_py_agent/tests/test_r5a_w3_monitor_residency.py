@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import gc
+import os
 import sys
 import threading
 import weakref
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from contextvars import ContextVar
 from functools import partial
 from pathlib import Path
@@ -14,10 +16,14 @@ import pytest
 
 from agent_py_agent.agent.business_spaces import gap158_w6_notify as notify
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.gateway_parts.managed_owner_runtime import managed_owner_pool_for_agent
 from agent_py_agent.agent.owner_scoped_pool import _close_agent_mcp_clients
 from agent_py_agent.agent.scheduler import monitor_pool as monitor
 from agent_py_agent.agent.scheduler.execution import _run_with_claim_interrupts
 from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.user_space.local_user_lifecycle import LocalUserLifecycle
+from agent_py_agent.agent.user_space.local_user_store import LocalUserStore
+from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
 from agent_py_agent.tests import test_gateway_multiprocess_worker_dispatch as worker_cases
 
 worker_case = worker_cases.setup
@@ -28,14 +34,15 @@ def isolated_executors(monkeypatch):
     monkeypatch.setattr(monitor, "_SHARED_POOL", None, raising=False)
     monkeypatch.setattr(notify, "_executor", None)
     monkeypatch.setattr(notify, "_worker_slots", None)
-    try:
-        yield
-    finally:
-        shared = getattr(monitor, "_SHARED_POOL", None)
-        if shared is not None:
-            shared.shutdown()
-        if notify._executor is not None:
-            notify._executor.shutdown(wait=True)
+    with ExitStack() as cleanup:
+        try:
+            yield cleanup
+        finally:
+            shared = getattr(monitor, "_SHARED_POOL", None)
+            if shared is not None:
+                shared.shutdown()
+            if notify._executor is not None:
+                notify._executor.shutdown(wait=True)
 
 
 def _shared(workers=2, queue=2):
@@ -110,6 +117,57 @@ def test_production_agents_borrow_one_pool_and_owner_retirement_does_not_close_i
     finally:
         for agent in agents:
             _close_agent_mcp_clients(agent)
+
+
+@pytest.mark.parametrize("workers,inflight", [(64, 500), (128, 256), (128, 500)])
+def test_managed_owner_preserves_deployment_monitor_capacity(tmp_path, isolated_executors, workers, inflight):
+    gc.collect()
+    fd_dir = next((path for path in (Path("/proc/self/fd"), Path("/dev/fd")) if path.is_dir()), None)
+    before = len(os.listdir(fd_dir)) if fd_dir is not None else None
+
+    def verify_closed_resources():
+        gc.collect()
+        if fd_dir is not None:
+            fd_delta = len(os.listdir(fd_dir)) - before
+            assert fd_delta == 0
+
+    # 最后才测 FD：监控池由 fixture 持有，owner 退役不能提前关闭宿主的共享 worker。
+    isolated_executors.callback(verify_closed_resources)
+    root = tmp_path / "host"
+    store = LocalUserStore(root)
+    LocalUserLifecycle(store).create("alice", idempotency_key="managed_monitor_capacity_0001")
+    owner = OwnerIdentity.local_user("alice")
+    with ExitStack() as cleanup:
+        host = SimpleAgent(AgentConfig(
+            model_backend="echo", my_agent_home=str(root), enable_plugins=False,
+            background_owner_workers=workers, gateway_global_inflight_limit=inflight,
+        ), tmp_path / "workspace", defer_mcp_connect=True)
+        cleanup.callback(_close_agent_mcp_clients, host)
+        pool = host.scheduler_service.monitor_pool
+        managed = managed_owner_pool_for_agent(host)
+        try:
+            with managed.acquire_pinned(owner) as agent:
+                assert agent.scheduler_service.monitor_pool is pool
+                assert agent.config.background_owner_workers == workers
+                assert agent.config.gateway_global_inflight_limit == inflight
+                assert pool._shared_limits == (workers, inflight - workers)
+                assert pool._executor._max_workers == workers
+                assert pool._capacity == inflight
+                assert managed.gauges()["building"] == 0
+                assert managed.gauges()["pinned"] == 1
+                assert managed._shared.gauges()["total_live_instances"] == 1
+                with managed.acquire_pinned(owner) as same:
+                    assert same is agent
+            assert managed.gauges()["pinned"] == 0
+            assert managed.gauges()["cached"] == 1
+        finally:
+            managed.release_idle(0)
+            assert managed.gauges() == {"building": 0, "pinned": 0, "cached": 0}
+            assert managed._shared.gauges()["pinned_count"] == 0
+            assert managed._shared.gauges()["total_live_instances"] == 0
+        assert not pool._closed
+        assert pool.submit(host.home_paths.owner_home_dir, "still-live", "after-retirement", lambda: "done").result(
+            timeout=10) == "done"
 
 
 def test_shared_admission_is_global_and_duplicate_identity_includes_owner(tmp_path):

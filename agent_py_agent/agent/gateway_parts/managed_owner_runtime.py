@@ -33,6 +33,7 @@ _HOST_OPERATIONAL_FIELDS = (
     "tool_read_max_chars", "tool_output_preview_chars", "tool_output_externalize_min_chars",
     "input_media_max_bytes", "input_media_max_files", "input_image_max_pixels", "gateway_request_timeout",
     "gateway_processing_timeout_seconds", "gateway_request_max_attempts", "background_claim_ttl_seconds",
+    "background_owner_workers", "gateway_global_inflight_limit",
     "owner_agent_pool_max_agents", "owner_agent_idle_seconds", "background_threads_per_owner",
     "owner_maintenance_scan_interval_seconds", "memory_curator_enabled", "log_level",
 )
