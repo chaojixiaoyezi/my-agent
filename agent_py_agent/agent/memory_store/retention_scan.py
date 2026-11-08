@@ -2698,8 +2698,8 @@ class _PinPaths(MutableSet):
         self._forget(value)
         return value
 
-    def update(self, *values):
-        for items in values:
+    def update(self, values=(), extra_values=()):
+        for items in (values, extra_values):
             for value in items:
                 self.add(value)
 

@@ -1,10 +1,12 @@
 """隔离真实 SQLite、线程 Event 和子进程证明代次门；不执行在线换库。"""
+import ctypes
 import os
 import sqlite3
 import subprocess
 import sys
 import threading
 from contextvars import copy_context
+from types import SimpleNamespace
 
 import pytest
 
@@ -247,4 +249,71 @@ def test_generation_guard_preserves_body_error_and_lock_inode(database):
     assert raised.value is error and guard.runtime_db_recovery_pending(database)
     with guard.runtime_db_generation_guard(database, exclusive=True):
         pass
-    assert lock.stat().st_ino == identity and lock.stat().st_mode & 0o777 == 0o600
+    assert lock.stat().st_ino == identity
+    if os.name != "nt":
+        assert lock.stat().st_mode & 0o777 == 0o600
+
+
+def test_nested_runtime_connect_and_shared_peer_release_only_after_close(database):
+    connections = []
+    try:
+        connections.append(guard.guarded_runtime_connect(database, lambda: guard.guarded_runtime_connect(
+            database, lambda: sqlite3.connect(database))))
+        connections.append(guard.guarded_runtime_connect(database, lambda: sqlite3.connect(database)))
+        assert all(conn.execute("SELECT 1").fetchone() == (1,) for conn in connections)
+        with pytest.raises(guard.RuntimeDatabaseDeferred, match="generation_busy"):
+            with guard.runtime_db_generation_guard(database, exclusive=True):
+                pytest.fail("嵌套连接和同库连接未关闭时不能恢复")
+        guard.close_runtime_connection(connections.pop(0))
+        with pytest.raises(guard.RuntimeDatabaseDeferred, match="generation_busy"):
+            with guard.runtime_db_generation_guard(database, exclusive=True):
+                pytest.fail("另一个共享连接仍持有代次门")
+    finally:
+        for conn in connections:
+            guard.close_runtime_connection(conn)
+    with guard.runtime_db_generation_guard(database, exclusive=True):
+        pass
+
+
+@pytest.fixture
+def windows_lock_api(monkeypatch):
+    api = SimpleNamespace(handle=ctypes.c_void_p(-2).value, calls=[], result=1, error=0, failure=None)
+    size = 3 * ctypes.sizeof(ctypes.c_void_p) + 8
+    assert ctypes.sizeof(guard._WindowsOverlapped) == size
+
+    def lock_file(handle, flags, reserved, low, high, overlapped):
+        api.calls.append((handle, flags, reserved, low, high, ctypes.string_at(overlapped, size)))
+        return api.result
+
+    # 实际经过 ctypes 的参数转换，验证宽句柄和归零结构；不把模拟当作 Windows 原生锁证明。
+    prototype = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+                                ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p)
+    monkeypatch.setattr(guard, "os", SimpleNamespace(**(vars(os) | {"name": "nt"})))
+    monkeypatch.setattr(guard.json_io, "msvcrt", SimpleNamespace(get_osfhandle=lambda descriptor: api.handle))
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(kernel32=SimpleNamespace(LockFileEx=prototype(lock_file))),
+                        raising=False)
+    monkeypatch.setattr(ctypes, "GetLastError", lambda: api.error, raising=False)
+    monkeypatch.setattr(ctypes, "WinError", lambda code: api.failure, raising=False)
+    return api
+
+
+@pytest.mark.parametrize("exclusive", [False, True])
+@pytest.mark.parametrize("blocking", [False, True])
+def test_windows_generation_lock_uses_shared_flags_and_full_handle(windows_lock_api, exclusive, blocking):
+    api = windows_lock_api
+    guard._lock_windows_generation(7, exclusive=exclusive, blocking=blocking)
+    assert api.calls == [(api.handle, int(exclusive) * 2 + int(not blocking), 0, 1, 0,
+                          bytes(ctypes.sizeof(guard._WindowsOverlapped)))]
+
+
+@pytest.mark.parametrize("code", [33, 5, 32, 6, 8])
+def test_windows_generation_lock_distinguishes_contention_and_io_errors(windows_lock_api, code):
+    api = windows_lock_api
+    api.result, api.error, api.failure = 0, code, OSError(code, "Win32 lock failure")
+    with pytest.raises(BlockingIOError if code in {33, 5, 32} else OSError) as raised:
+        guard._lock_windows_generation(7, exclusive=False, blocking=False)
+    if code in {33, 5, 32}:
+        assert raised.value.errno == code
+    else:
+        assert raised.value is api.failure
+    assert raised.value.__cause__ is None

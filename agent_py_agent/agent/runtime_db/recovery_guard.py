@@ -1,6 +1,7 @@
 """数据库代次门：连接持 SH 至物理关闭；恢复意图阻止新准入，EX 才证明排空。"""
 from __future__ import annotations
 
+import ctypes
 import os
 import sqlite3
 import threading
@@ -67,9 +68,35 @@ def request_runtime_db_recovery(path):
         raise RuntimeDatabaseDeferred("recovery_intent_busy") from error
 
 
+class _WindowsOverlapped(ctypes.Structure):
+    """保留 Win32 指针宽度与双 DWORD 偏移；每次锁请求单独归零。"""
+
+    _fields_ = [("Internal", ctypes.c_size_t), ("InternalHigh", ctypes.c_size_t),
+                ("Offset", ctypes.c_uint32), ("OffsetHigh", ctypes.c_uint32),
+                ("hEvent", ctypes.c_void_p)]
+
+
+def _lock_windows_generation(descriptor, *, exclusive, blocking):
+    """原字节区间提供真正的 SH/EX，避免独立连接句柄互相排斥。"""
+    if os.name != "nt" or json_io.msvcrt is None or not hasattr(ctypes, "windll"):
+        json_io._flock_descriptor(descriptor, blocking=blocking)
+        return
+    lock_file = ctypes.windll.kernel32.LockFileEx
+    lock_file.argtypes = (ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+                          ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(_WindowsOverlapped))
+    lock_file.restype = ctypes.c_int
+    overlapped = _WindowsOverlapped()
+    flags = (0x2 if exclusive else 0x0) | (0x0 if blocking else 0x1)
+    if not lock_file(json_io.msvcrt.get_osfhandle(descriptor), flags, 0, 1, 0, ctypes.byref(overlapped)):
+        error = ctypes.GetLastError()
+        if error in {33, 5, 32}:
+            raise BlockingIOError(error, "数据库代次锁繁忙")
+        raise ctypes.WinError(error)
+
+
 @contextmanager
 def runtime_db_generation_guard(path: Path, *, exclusive: bool = False, blocking: bool = False) -> ContextManager[None]:
-    """锁侧车永不换 inode；Windows 使用原 EX 语义，不宣称支持共享锁。"""
+    """锁侧车永不换 inode；各平台以 SH 保连接、EX 证明恢复前已排空。"""
     path = _path(path)
     owner = (os.getpid(), threading.current_thread())
     active = _EXCLUSIVE.get()
@@ -107,7 +134,7 @@ def runtime_db_generation_guard(path: Path, *, exclusive: bool = False, blocking
                     mode = json_io.fcntl.LOCK_EX if exclusive else json_io.fcntl.LOCK_SH
                     json_io.fcntl.flock(descriptor, mode | (0 if blocking else json_io.fcntl.LOCK_NB))
                 else:
-                    json_io._flock_descriptor(descriptor, blocking=blocking)
+                    _lock_windows_generation(descriptor, exclusive=exclusive, blocking=blocking)
             except BlockingIOError as error:
                 raise RuntimeDatabaseDeferred("generation_busy") from error
         finally:
