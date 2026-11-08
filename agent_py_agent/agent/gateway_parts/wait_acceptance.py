@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .input_delivery_service import gateway_input_receipt_path, read_gateway_input_receipt
 from .io import gateway_turn_transition, read_json_file_report
+from .owner_retention import gateway_terminal_exists
 from .response_renderer import read_gateway_terminal_envelope_report
 
 
@@ -84,5 +85,12 @@ def confirm_wait_acceptance(paths, request_id: str, wait: dict, *, receipt=None)
                 raise FileNotFoundError("original input receipt is missing")
             _sync_existing_control_file(paths.root, gateway_input_receipt_path(paths, request_id))
         if receipt is None or receipt.state == "queued":
-            _sync_existing_control_file(paths.root, _accepted_request_path(paths, request_id, receipt))
+            try:
+                accepted = _accepted_request_path(paths, request_id, receipt)
+            except FileNotFoundError:
+                # 封存段发布时已fsync，封存终态本身即耐久，无需再同步已删除的原件。
+                if not gateway_terminal_exists(paths, f"{request_id}.json"):
+                    raise
+            else:
+                _sync_existing_control_file(paths.root, accepted)
     return receipt

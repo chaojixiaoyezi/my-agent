@@ -1168,7 +1168,7 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
                 'items': report['scanned_entries'], 'bytes': 0}
 
     # LLM: legal_hold不发布或删除回执；canonical根必须在当前owner且祖先均为真实目录，冷owner不创建Gateway。
-    # 函数用途: 在剩余预算内封存已结算旧终态，保留所有松散原件供未迁移读者使用。
+    # 函数用途: 在剩余预算内封存已结算旧终态，封存段提交后删除松散原件（读口已统一经封存索引回读）。
     def receipt_step(cursor, budget):
         if retention.legal_hold:
             return {'cursor': {**cursor, 'complete': True, 'deferred_reason': 'legal_hold'},
@@ -1197,9 +1197,9 @@ def run_owner_storage_maintenance_slice(home, previous, retention, *, now, coord
                     'complete': not runtime_pending, 'items': 0, 'bytes': 0}
         remaining_ms = max(0.001, (budget['deadline'] - time.monotonic()) * 1000)
         report = seal_gateway_receipts_slice(paths, before=now - 7 * 86400, max_entries=budget['items'],
-                                            max_bytes=budget['bytes'], max_ms=min(25, remaining_ms), remove_loose=False)
+                                            max_bytes=budget['bytes'], max_ms=min(25, remaining_ms), remove_loose=True)
         position = {'complete': report['complete'], 'errors': report['errors'],
-                    'reader_cutover_required': True, 'archived_requests': report['archived_requests']}
+                    'reader_cutover_required': False, 'archived_requests': report['archived_requests']}
         runtime_pending = any(_real_owner_directory(home, paths.root / name)
                               for name in ('input_receipts', 'client_outbox'))
         complete = report['complete'] and not report['errors'] and not runtime_pending

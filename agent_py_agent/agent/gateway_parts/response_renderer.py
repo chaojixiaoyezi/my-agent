@@ -203,9 +203,10 @@ def read_gateway_terminal_envelope_report(
     context: str = "gateway.terminal.read",
 ) -> GatewayJsonReadReport:
     path = Path(terminal_path)
-    if not path.exists():
-        return GatewayJsonReadReport({})
+    # 原件已封存删除时透明回读封存段；原件与封存都缺失才保持“缺失=空报告”原口径。
     report = read_json_file_report(path, context=context)
+    if report.load_error is None and not report.payload and not path.exists():
+        return GatewayJsonReadReport({})
     expected_id = str(request_id or path.stem).strip()
     if report.load_error is not None:
         return report

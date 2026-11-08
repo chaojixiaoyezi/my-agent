@@ -148,7 +148,7 @@ def test_gateway_receipt_archive_rechecks_active_after_publication(tmp_path, mon
     assert (paths.responses / 'request-a.json').exists()
 
 
-# LLM: 从真实默认owner维护入口观察账本与归档，读口切换未闭合时必须保留原件，legal_hold不得封存。
+# LLM: 从真实默认owner维护入口观察账本与归档；读口切换已闭合：非legal_hold封存后删除原件，legal_hold不封存也不删除。
 # 函数用途: 验证生产维护调用真实适配器并持久化同一份游标。
 @pytest.mark.parametrize('hold', [False, True])
 def test_default_owner_maintenance_runs_protected_storage_adapters(tmp_path, hold):
@@ -171,8 +171,9 @@ def test_default_owner_maintenance_runs_protected_storage_adapters(tmp_path, hol
     assert storage['coordinator_deferred'] == ['global_indexes']
     assert (home.owner_home_dir / '.owner-quota-ledger.json').is_file()
     assert bool(list((paths.root / 'archive').glob('receipts-seg-*.jsonl'))) is not hold
-    assert (paths.terminal / 'request-a.json').exists()
-    assert (paths.responses / 'request-a.json').exists()
+    assert (paths.terminal / 'request-a.json').exists() is hold
+    assert (paths.responses / 'request-a.json').exists() is hold
+    assert archive.gateway_terminal_exists(paths, 'request-a.json')
 
 
 # LLM: 配额首次扫描用显式有界预算推进，完成后仍核归档幂等和原周期不忙循环。
