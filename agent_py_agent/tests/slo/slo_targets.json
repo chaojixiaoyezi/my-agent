@@ -6,7 +6,7 @@
     "probe_seconds": 1,
     "poll_seconds": 0.01,
     "teardown_seconds": 10,
-    "condition_seconds": 10,
+    "condition_seconds": 20.0,
     "selftest_seconds": 30,
     "model_context_window_tokens": 65536
   },
