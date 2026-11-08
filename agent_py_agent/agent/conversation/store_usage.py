@@ -11,7 +11,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import append_private_jsonl_records_unlocked, locked_json_path
+from ..common.json_io import (
+    append_private_jsonl_records_unlocked,
+    locked_json_path,
+    seal_private_jsonl_tail_unlocked,
+)
 from ..contracts.model_call_latency import MODEL_LATENCY_FIELDS
 from ..gateway_parts.io import locked_file_transition
 from ..runtime_errors import DataCorruptionError
@@ -218,6 +222,7 @@ class ModelUsageStore:
             # 锁外预检后线程可能已退休，须在恢复或追加账本前重新核验。
             self._require_thread(snapshot.thread_id)
             recover_pending(path)
+            seal_private_jsonl_tail_unlocked(path)
             index = self._index(snapshot.thread_id)
             with index._connection() as conn:
                 complete = index.prepare(conn)
