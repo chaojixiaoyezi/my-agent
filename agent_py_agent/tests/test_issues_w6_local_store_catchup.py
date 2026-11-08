@@ -5,10 +5,14 @@ import json
 import sqlite3
 import time
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.common.global_write_commit import global_write_commit_scope
+from agent_py_agent.agent.io.sqlite_scope import sqlite_connection_scope
 from agent_py_agent.agent.local_storage import LocalStore, maintenance
+from agent_py_agent.agent.user_space import storage_lanes
 from agent_py_agent.agent.user_space.home_layout import home_paths
 from agent_py_agent.agent.user_space.storage_lanes import (
     StorageLaneBudget,
@@ -62,6 +66,27 @@ def test_fresh_store_is_incremental_and_existing_none_is_unchanged(tmp_path):
     with store._connection() as conn:
         assert conn.execute("PRAGMA auto_vacuum").fetchone()[0] == 0
         assert conn.execute("SELECT value FROM preserved").fetchone()[0] == "keep"
+
+
+@pytest.mark.parametrize("coordinator", [False, True], ids=["ordinary", "coordinator"])
+@pytest.mark.parametrize("scoped", [False, True], ids=["short", "leased"])
+def test_incremental_vacuum_reclaims_the_requested_page_budget(tmp_path, coordinator, scoped):
+    store = LocalStore(tmp_path / "local.db")
+    with store._connection() as conn:
+        conn.execute("INSERT INTO metadata(key,value) VALUES('vacuum-padding',?)", ("x" * 1024 * 1024,))
+        conn.commit()
+        conn.execute("DELETE FROM metadata WHERE key='vacuum-padding'")
+        conn.commit()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+        before = conn.execute("PRAGMA freelist_count").fetchone()[0]
+    assert before > 16
+    with sqlite_connection_scope(enabled=scoped), global_write_commit_scope(lambda operation: operation()):
+        target = LocalStore(store.db_path, coordinator_io=True) if coordinator else store
+        report = target.incremental_vacuum_step(max_pages=16)
+    assert report["performed"] and report["released_pages"] == 16, report
+    with store._connection() as conn:
+        assert before - conn.execute("PRAGMA freelist_count").fetchone()[0] == 16
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
 
 def test_catchup_real_public_events_and_jsonl_converge(tmp_path, monkeypatch):
@@ -292,10 +317,23 @@ def test_commit_source_oserror_propagates_same_exception(tmp_path, monkeypatch):
 
 def test_confirmed_prune_counts_survive_later_vacuum_io_error(tmp_path, monkeypatch):
     monkeypatch.setattr(maintenance, "STEADY_STATE_EVENTS_KEEP_LAST", 1)
+    # 这是裁剪已提交后再遇IO错误的合同；25ms预算耗尽由相邻测试单独覆盖。
+    monkeypatch.setattr(storage_lanes, "STORAGE_LANE_SLICE_MS", 60_000)
     home = home_paths(tmp_path / "home")
     store = _store(home)
     for _ in range(3):
         store.record_event("due")
+    clock = [time.monotonic()]
+    monkeypatch.setattr(storage_lanes, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    prune = LocalStore.prune_events_step
+
+    def delayed_prune(self, **options):
+        result = prune(self, **options)
+        # 模拟裁剪在繁忙CI上耗时；本回归需要确实走到之后的页维护错误。
+        clock[0] += 1
+        return result
+
+    monkeypatch.setattr(LocalStore, "prune_events_step", delayed_prune)
     def fail(_self, **_options):
         raise OSError("vacuum phase I/O error")
     monkeypatch.setattr(LocalStore, "incremental_vacuum_step", fail)

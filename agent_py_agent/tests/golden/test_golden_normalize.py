@@ -385,7 +385,7 @@ def test_scenario_capability_marker_matches_platform_without_mutating_source(mon
 
     bounds = local_fixture_bounds()
     scenario = {"id": "capability-fixture", "required_capabilities": list(capabilities),
-                "deadline_seconds": bounds["startup_seconds"]}
+                "deadline_seconds": bounds["startup_seconds"], "repetitions": 3}
     monkeypatch.setattr(replay_module, "SCENARIOS", [scenario])
     # 只替换被测模块的引用，不改全局 sys.platform，避免影响宿主和其它测试的能力检测。
     monkeypatch.setattr(replay_module, "sys", SimpleNamespace(platform=platform), raising=False)
@@ -398,7 +398,7 @@ def test_scenario_capability_marker_matches_platform_without_mutating_source(mon
     else:
         assert capability_marks == []
     [timeout] = [mark for mark in parameter.marks if mark.name == "timeout"]
-    assert timeout.args == (scenario["deadline_seconds"] + bounds["teardown_seconds"],)
+    assert timeout.args == (scenario["deadline_seconds"] * scenario["repetitions"] + bounds["teardown_seconds"],)
     assert scenario["required_capabilities"] == capabilities
 
 

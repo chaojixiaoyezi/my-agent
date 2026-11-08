@@ -37,6 +37,7 @@ from ..common.json_io import (
 )
 from ..common.nofollow_fs import ensure_private_dir
 from ..io.sqlite_connection import sqlite_error_details
+from ..runtime_db.maintenance import execute_runtime_statement
 from .events import iter_event_jsonl_paths
 from .search import FTS_ROWID_ALIGNED_KEY, fts_rowid_aligned
 
@@ -100,10 +101,10 @@ class LocalStoreMaintenanceMixin:
             elif due:
                 statement = f"PRAGMA incremental_vacuum({int(max_pages)})"
                 if self.coordinator_io:
-                    self._coordinator_transaction(lambda conn: conn.execute(statement).fetchall())
+                    self._coordinator_transaction(lambda conn: execute_runtime_statement(conn, statement).fetchall())
                 else:
                     with self._connection() as conn:
-                        conn.execute(statement).fetchall()
+                        execute_runtime_statement(conn, statement).fetchall()
                         conn.commit()
 
             # LLM: checkpoint不在BEGIN内；C仍消费原末门，完整回填和物理缩小后才报释放量。

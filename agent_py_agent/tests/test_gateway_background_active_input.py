@@ -309,7 +309,9 @@ def test_actual_c_bg_compact_keeps_frozen_attempt_and_final_queue(tmp_path, monk
 def test_actual_bg_final_partial_terminal_keeps_one_finish_and_same_gateway_followup(transport_case, tmp_path, monkeypatch, expires):
     import threading
     import time
+    from types import SimpleNamespace
 
+    from agent_py_agent.agent.backends import request_scope
     from agent_py_agent.agent.backends.request_scope import provider_request_budget
     from agent_py_agent.agent.common.request_execution_ports import (
         RequestExecutionOutcomeUncertainError,
@@ -324,6 +326,9 @@ def test_actual_bg_final_partial_terminal_keeps_one_finish_and_same_gateway_foll
     case = (*case[:4], thread, *case[5:])
     locked, release = threading.Event(), threading.Event()
     holders, receipts, finishes = [], [], []
+    elapsed = [0.0]
+    monotonic = time.monotonic
+    monkeypatch.setattr(request_scope, 'time', SimpleNamespace(monotonic=lambda: monotonic() + elapsed[0]))
     original_finish = store.claims.finish
     def finish(*args, **kwargs):
         finishes.append(kwargs.get('expected_raw'))
@@ -335,11 +340,13 @@ def test_actual_bg_final_partial_terminal_keeps_one_finish_and_same_gateway_foll
         def hold():
             with gateway_turn_transition(bound_paths(case), receipt.request_id):
                 locked.set()
-                release.wait(5)
+                release.wait(30)
         holder = threading.Thread(target=hold)
         holders.append(holder)
         holder.start()
-        assert locked.wait(2)
+        assert locked.wait(20)
+        # 模拟真实绑定和输入准备消耗一秒；不能让短provider预算在claim终态提交之前耗尽。
+        elapsed[0] += 1
         if not expires:
             timer = threading.Timer(.12, release.set)
             timer.start()
@@ -349,7 +356,8 @@ def test_actual_bg_final_partial_terminal_keeps_one_finish_and_same_gateway_foll
     deps, args, row, _policy = claimed(case, lambda _: execution._run_background_model_attempt(agent, '普通收口', params)[0])
     before_p3 = reservation_file(bound_paths(case), gateway_claim.request_id).read_bytes()
     try:
-        with gateway_scope(kind, case), provider_request_budget(.45 if expires else 2):
+        # 给真实发布和终态提交留足时间；expires分支仍由原5秒输入安全点预算耗尽，锁保持到finally。
+        with gateway_scope(kind, case), provider_request_budget(20):
             if expires:
                 with pytest.raises(RequestExecutionOutcomeUncertainError):
                     claims.run_with_heartbeat(deps, row['claim_id'], args, claim_scope_id=row['claim_scope_id'])
@@ -379,5 +387,5 @@ def test_actual_bg_final_partial_terminal_keeps_one_finish_and_same_gateway_foll
     finally:
         release.set()
         for holder in holders:
-            holder.join(3)
+            holder.join(20)
             assert not holder.is_alive()

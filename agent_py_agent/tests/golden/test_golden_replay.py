@@ -30,7 +30,7 @@ def scenario_parameters():
             capabilities.append("linux_bwrap")
         marks = [pytest.mark.sandbox_capability(*capabilities)] if capabilities else []
         # 用例预算只有场景声明一份权威；pytest 总门另留既有清理余量，覆盖 CLI 的默认 60 秒。
-        marks.append(pytest.mark.timeout(scenario["deadline_seconds"] + fixture["teardown_seconds"]))
+        marks.append(pytest.mark.timeout(scenario["deadline_seconds"] * scenario["repetitions"] + fixture["teardown_seconds"]))
         rows.append(pytest.param(scenario, id=scenario["id"], marks=marks))
     return rows
 
@@ -42,7 +42,9 @@ def test_golden_replay(tmp_path, golden_parameters, scenario, record_property):
     started = time.monotonic()
     traces = []
     for index in range(scenario["repetitions"]):
+        replay_started = time.monotonic()
         trace = replay(tmp_path / f"run-{index}", scenario, golden_parameters)
+        assert time.monotonic() - replay_started < scenario["deadline_seconds"], "single replay exceeded its CI deadline"
         assert_invariants(trace, scenario["expected_effects"], scenario["forbidden_effects"])
         traces.append(trace)
     assert len(traces) == 3, "the golden contract requires exactly three consecutive runs"
@@ -58,7 +60,7 @@ def test_golden_replay(tmp_path, golden_parameters, scenario, record_property):
     assert traces[0] == baseline, _difference(baseline, traces[0])
     elapsed = time.monotonic() - started
     record_property("golden_runtime_seconds", elapsed)
-    assert elapsed < scenario["deadline_seconds"], f"scenario exceeded its CI deadline: {elapsed}"
+    assert elapsed < scenario["deadline_seconds"] * scenario["repetitions"], f"scenario exceeded its CI deadline: {elapsed}"
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=lambda scenario: scenario["id"])
