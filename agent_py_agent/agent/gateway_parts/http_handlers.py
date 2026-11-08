@@ -104,9 +104,10 @@ from .input_delivery_service import (
     reconcile_gateway_input_request,
 )
 from .input_identity import http_input_identity
-from .io import gateway_request_counts, write_json_file_atomic
+from .io import gateway_request_counts, read_json_file_report, write_json_file_atomic
 from .loop_health import evaluate_dispatcher_stall, loop_health
 from .multiprocess_global_write import GlobalWriteError
+from .owner_retention import gateway_terminal_exists
 from .paths import GatewayPaths, gateway_chunk_path, gateway_chunk_path_candidates
 from .progress_reader import read_progress_lines
 from .request_client import GatewayAskExecutionOptions
@@ -395,7 +396,9 @@ def _send_archived_terminal_result(
 ) -> bool:
     paths = server.paths
     archive_path = paths.terminal / f"{access.request_id}.json"
-    if not archive_path.exists():
+    # 原件优先；原件已封存删除时按同一封存索引判定终态。
+    loose = archive_path.exists()
+    if not loose and not gateway_terminal_exists(paths, archive_path.name):
         return False
     terminal_report = read_gateway_terminal_envelope_report(
         archive_path,
@@ -425,7 +428,7 @@ def _send_archived_terminal_result(
         return True
     response_path = paths.responses / f"{access.request_id}.json"
     try:
-        if repair_response_projection or not response_path.exists():
+        if loose and (repair_response_projection or not response_path.exists()):
             write_json_file_atomic(response_path, terminal_response)
     except OSError:
         # The canonical archive is already durable; serving it remains safe
@@ -810,13 +813,16 @@ def _can_read_finished_request(paths, access: _ResultAccessContext) -> _Finished
     found_request = False
     for folder in (paths.processing, paths.inbox, paths.terminal, paths.done, paths.failed):
         request_path = folder / f"{access.request_id}.json"
-        if not request_path.exists():
+        if request_path.exists():
+            payload, load_error = _read_payload_report(request_path, context="gateway.http_result_request.read")
+        elif folder in (paths.terminal, paths.done, paths.failed):
+            sealed = read_json_file_report(request_path, context="gateway.http_result_request.sealed_read")
+            if sealed.load_error is None and not sealed.payload:
+                continue
+            payload, load_error = sealed.payload, sealed.load_error
+        else:
             continue
         found_request = True
-        payload, load_error = _read_payload_report(
-            request_path,
-            context="gateway.http_result_request.read",
-        )
         if load_error or not _can_read_payload(payload, access.user_id, access.permission):
             return _FinishedRequestAccess.DENIED
     return _FinishedRequestAccess.ALLOWED if found_request else _FinishedRequestAccess.NOT_FOUND

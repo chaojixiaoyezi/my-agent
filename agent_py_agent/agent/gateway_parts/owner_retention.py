@@ -362,7 +362,7 @@ def _remove_sealed_bundle(paths, bundle):
 
 
 # LLM: 每根目录只保留有界scandir句柄；重启从头枚举但已删条目无需重放，绝不持久化不稳定offset作权威。
-#   生产接线传remove_loose=False，读口切换未闭合前不能自动删原件。
+#   生产接线传remove_loose=True（读口已切换到封存索引）；False仅供只封存不删原件的诊断/测试调用。
 #   已提交manifest的定位器先在同一维护锁下恢复；无新候选也能自愈，缺分段继续失败关闭。
 # 函数用途: 在总候选/时间/字节预算内封存一片原终态回执。
 def seal_gateway_receipts_slice(paths, *, before: float, max_entries: int = 128, max_ms: float = 50,
@@ -402,9 +402,9 @@ def seal_gateway_receipts_slice(paths, *, before: float, max_entries: int = 128,
                     _RECEIPT_SCANS.pop(identity, None)
                     result['complete'] = True
                     break
-                result['scanned_entries'] += 1
                 if not entry.name.endswith('.json') or not entry.is_file(follow_symlinks=False):
                     continue
+                result['scanned_entries'] += 1
                 with processing_metadata_scope(paths, Path(entry.name).stem):
                     bundle = _receipt_bundle(paths, Path(entry.path), before)
                 if bundle is None:
