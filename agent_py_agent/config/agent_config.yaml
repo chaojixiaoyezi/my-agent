@@ -1287,8 +1287,8 @@ agents_source_network_enabled: false
 # PARAM-W0 集中参数声明：配置保存后需重启 Gateway（CLI 下次启动）加载，不作即时热更新承诺。
 # HTTP 监听等待队列容量，默认128个连接，范围1..65535；等待接纳不等于正在处理，重启加载。
 gateway_http_listen_backlog: 128
-# HTTP普通请求线程池大小，默认128个线程，范围1..1024；按需创建，宿主容量只读，重启加载。
-gateway_http_max_request_workers: 128
+# HTTP普通请求线程池大小，默认32个线程，范围1..1024；按需创建且线程不回收，3.14t下突发后保留的内存约为峰值线程数×单请求峰值，重启加载。
+gateway_http_max_request_workers: 32
 # HTTP已接纳的排队和执行请求总量，默认256个，至少等于请求线程数；不等同业务inflight，重启加载。
 gateway_http_max_outstanding_requests: 256
 # 控制请求的VIP快速车道，默认10个独立线程，范围0..128；0关闭独立车道。

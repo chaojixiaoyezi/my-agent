@@ -283,7 +283,7 @@ exec "$release/runtime/bin/python3" -I -B -X utf8 -m agent_py_agent "$@"
 
 # 已知旧出厂值才能迁移；其它自定义值保持不动。
 _UPGRADEABLE_DEFAULTS = (
-    ("gateway_http_max_request_workers", ("16", "64"), "128"),
+    ("gateway_http_max_request_workers", ("16", "64", "128"), "32"),
     ("gateway_http_max_outstanding_requests", ("128",), "256"),
     ("gateway_user_inflight_limit", ("50",), "128"),
     ("owner_agent_pool_max_agents", ("64",), "128"),
