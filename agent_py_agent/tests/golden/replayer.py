@@ -17,6 +17,12 @@ from .normalize import normalize
 from .recorder import Recorder
 
 
+def replay_bounds(parameters):
+    """Golden 的状态观察至少留 25 秒，并保留共享 SLO 更大的启动与清理预算。"""
+    return {**parameters, "condition_seconds": max(25.0, parameters["condition_seconds"],
+        parameters["startup_seconds"] + parameters["teardown_seconds"])}
+
+
 @contextmanager
 def _gateway_calendar(calendar_day):
     """只固定回放的目录日历分区；事件时间、租约、进程身份和超时继续使用真实时钟。"""
@@ -60,9 +66,8 @@ class Replayer:
     # 函数用途: Bind the scenario, real isolated process, fake provider and evidence recorder.
     def __init__(self, root, scenario, fixture_parameters):
         self.root, self.scenario = Path(root), scenario
-        # 并行 CI 的进程就绪观察覆盖一次完整启动及清理余量；轮询频率仍沿用原配置。
-        self.bounds = {**fixture_parameters, "condition_seconds": max(fixture_parameters["condition_seconds"],
-            fixture_parameters["startup_seconds"] + fixture_parameters["teardown_seconds"])}
+        # 直接调用回放也执行同一预算规则，不能绕过 fixture 退回共享 SLO 的短等待。
+        self.bounds = replay_bounds(fixture_parameters)
         self.recorder = Recorder(self.root / "evidence")
         self.requests, self.aliases, self.last_stopped, self.delivered = {}, {}, None, set()
         # 持有的 provider 阶段必须晚于观察超时，不能在被测状态尚未观察到时自行结束。

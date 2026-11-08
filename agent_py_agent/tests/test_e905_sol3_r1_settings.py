@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,7 +13,7 @@ import pytest
 from agent_py_agent.agent.conversation.compact_threshold_policy import resolve_thread_compact_policy
 from agent_py_agent.agent.gateway_parts.settings_control_service import _all_line, _search, _show
 from agent_py_agent.agent.settings import parameter_changes as changes
-from agent_py_agent.agent.settings.config import AgentConfig
+from agent_py_agent.agent.settings.config import AgentConfig, load_config
 from agent_py_agent.agent.settings.deployment_policy import (
     RuntimeGuardPolicy,
     load_deployment_policy,
@@ -157,12 +158,12 @@ def test_http_timeout_and_externalization_have_the_correct_tiers():
 # 函数用途: 核证当前目录的精确分层、新池与拓扑边界、部署守卫拆分和后台身份默认上限。
 def test_listed_parameter_classification_has_exact_counts():
     registry = listed_parameters()
-    # GAP158、SCALE-S5 代理视图缓存及 CAT1/CAT3 部署参数已登记，计数覆盖全部正式目录项。
-    assert Counter(spec.tier for spec in registry.values()) == {"common": 14, "advanced": 209, "deployment": 146}
+    # TUI 消息块窗口已登记为高级参数，计数覆盖全部正式目录项。
+    assert Counter(spec.tier for spec in registry.values()) == {"common": 14, "advanced": 210, "deployment": 146}
     assert sum(spec.source == "runtime_guard" for spec in registry.values()) == 23
     assert len(DEPLOYMENT_ONLY_KEYS) == 123
     assert registry.keys() >= DEPLOYMENT_ONLY_KEYS
-    assert len(registry) == 369
+    assert len(registry) == 370
     for key in ("gateway_http_control_lane_workers", "gateway_native_stream_max"):
         assert registry[key].tier == "advanced" and registry[key].writable and registry[key].user_editable
     topology = registry["gateway_worker_process_count"]
@@ -174,6 +175,42 @@ def test_listed_parameter_classification_has_exact_counts():
     assert registry["im_topic_aggregation_enabled"].tier == "advanced"
     assert registry["im_progress_cards_enabled"].tier == "advanced"
     assert len(COMMON_KEYS) == len(set(COMMON_KEYS))
+
+
+@pytest.mark.parametrize("value", [1, 321])
+def test_tui_transcript_window_is_discoverable_and_tunable(tmp_path, value):
+    """展示上限沿 schema 的数字 writer 查询、保存并回读，无须增加权限白名单或派生公式。"""
+    agent = _agent(tmp_path)
+    key = "tui_transcript_max_blocks"
+    spec = listed_parameters()[key]
+    assert spec.tier == "advanced" and spec.writable and spec.user_editable
+    assert spec.value_type == "int" and spec.default == 500
+    assert spec.unit == "个" and "完整历史" in spec.description
+    tool = UserConfigTool(agent)
+    found = tool.execute({"action": "search", "key": key})
+    assert found.ok and key in found.output
+    result = tool.execute({"action": "set", "key": key, "value": str(value)})
+    assert result.ok, result.output
+    assert load_config(agent.config.config_path).tui_transcript_max_blocks == value
+    viewed = tool.execute({"action": "view", "key": key})
+    assert viewed.ok
+    payload = json.loads(viewed.output)
+    assert payload["fact"]["effective"] == str(value)
+    # 写盘不冒充已创建 TUI 的热更新；当前运行配置继续保留原值。
+    assert payload["parameter"]["running_value"] == "500"
+    assert payload["parameter"]["effect_when"] == spec.effect
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1.5"])
+def test_tui_transcript_window_rejects_invalid_values_without_writing(tmp_path, value):
+    """候选须通过正式加载器的最小值和整数约束，拒绝时不留下配置或变更账。"""
+    agent = _agent(tmp_path)
+    path = Path(agent.config.config_path)
+    before = path.read_bytes()
+    result = UserConfigTool(agent).execute({"action": "set", "key": "tui_transcript_max_blocks", "value": value})
+    assert not result.ok
+    assert path.read_bytes() == before
+    assert changes.parameter_history(user_path=path) == []
 
 
 # LLM: 完整回执会重新加载已保存主配置，但守卫必须仍来自原运行快照；无快照不能把重读得到的默认对象冒充运行。
