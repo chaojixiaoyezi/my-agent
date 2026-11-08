@@ -77,7 +77,6 @@ from .curator_models import (
     CURATOR_MODEL_NOT_CONFIGURED,
     CURATOR_REPLAY_BREAKER_FAILURE_COUNT,
     CURATOR_REPLAY_BREAKER_OPEN,
-    CURATOR_REPLAY_DETERMINISTIC_CODES,
     CuratorExtraction,
     CuratorModelRouting,
     CuratorRunResult,
@@ -85,6 +84,7 @@ from .curator_models import (
     MemoryCuratorState,
     curator_failure_retry_seconds,
     curator_replay_breaker_tripped,
+    curator_replay_deterministic,
     validate_curator_state,
 )
 from .curator_rejected_bindings import retain_rejected_target_bindings
@@ -1487,7 +1487,7 @@ def _apply_route(
 #   curator_replay_breaker_open:<真实失败码> 警告，打日志告警。读运行账出错时不熔断，按原失败码处理。
 # 函数用途: 判断同一批输入的重放是否达到上限，返回写进 state 的失败码与要加的运行账警告。
 def _replay_breaker(run_log: CuratorRunLog, context: _RunContext, failure_code: str) -> tuple[str, tuple[str, ...]]:
-    if failure_code not in CURATOR_REPLAY_DETERMINISTIC_CODES:
+    if not curator_replay_deterministic(failure_code):
         return failure_code, ()
     route = context.route
     grouped = "threads" in route

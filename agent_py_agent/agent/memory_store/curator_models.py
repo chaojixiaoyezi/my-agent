@@ -130,6 +130,15 @@ CURATOR_REPLAY_BREAKER_FAILURE_COUNT = 3
 CURATOR_REPLAY_BREAKER_RETRY_SECONDS = 3600
 # 对同一输入重放大概率得到同样结果的失败码（提交被拒、输出解析失败）；网络、额度、超时类不算，它们自己有退避。
 CURATOR_REPLAY_DETERMINISTIC_CODES = frozenset({"CURATOR_COMMIT_FAILED", "CURATOR_SCHEMA_INVALID"})
+
+
+# LLM: 增量输入读取失败（CURATOR_INPUT_*，如审计账不可读）同一游标重放也必然同样失败，与提交被拒/解析失败同属确定性；
+#   不纳入则每个维护周期（30–300 秒）整批重采一次、永不退避（2026-11-08 真机：同一游标连续失败 191 次，每次 9–49 秒 CPU）。
+# 函数用途: 判断一个失败码对同一批输入的重放是否确定性失败，熔断计数与 curator._replay_breaker 共用这一口径。
+def curator_replay_deterministic(failure_code: str) -> bool:
+    return failure_code in CURATOR_REPLAY_DETERMINISTIC_CODES or str(failure_code or "").startswith("CURATOR_INPUT_")
+
+
 _RETRY_SECONDS_BY_CODE = {CURATOR_MODEL_NOT_CONFIGURED: CURATOR_NOT_CONFIGURED_RETRY_SECONDS,
                           CURATOR_REPLAY_BREAKER_OPEN: CURATOR_REPLAY_BREAKER_RETRY_SECONDS}
 
@@ -150,8 +159,8 @@ def curator_replay_breaker_tripped(failure_code: str, cursor_before: dict, previ
     needed = CURATOR_REPLAY_BREAKER_FAILURE_COUNT - 1
     window = previous[:needed]
     view = project or (lambda value: value)
-    return (failure_code in CURATOR_REPLAY_DETERMINISTIC_CODES and len(window) == needed
-            and all(row.status == "failed" and row.failure_code in CURATOR_REPLAY_DETERMINISTIC_CODES
+    return (curator_replay_deterministic(failure_code) and len(window) == needed
+            and all(row.status == "failed" and curator_replay_deterministic(row.failure_code)
                     and view(row.cursor_before) == view(cursor_before) for row in window))
 
 
@@ -536,6 +545,7 @@ __all__ = [
     "CURATOR_REPLAY_BREAKER_RETRY_SECONDS",
     "CURATOR_REPLAY_DETERMINISTIC_CODES",
     "curator_replay_breaker_tripped",
+    "curator_replay_deterministic",
     "CURATOR_NOT_CONFIGURED_RETRY_SECONDS",
     "CURATOR_OUTPUT_SCHEMA_VERSION",
     "CURATOR_MODEL_ORIGINS",
