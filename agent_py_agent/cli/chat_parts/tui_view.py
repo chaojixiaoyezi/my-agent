@@ -161,6 +161,9 @@ class TuiFrameProvider:
         self.state_store = state_store
         self.context_factory = context_factory
         self.block_cache = block_cache or TuiBlockRenderCache()
+        # 根页与代理详情页各持一份渲染缓存：retain_snapshot 只回收同一页窗口外的块，往返子页不重排根页窗口。
+        self._home_store = state_store
+        self._agent_block_cache = TuiBlockRenderCache()
         self.transcript_state = transcript_state
         self.last_width = DEFAULT_TRANSCRIPT_WIDTH_CHARS
         self._cached_key: tuple[Any, ...] | None = None
@@ -182,6 +185,10 @@ class TuiFrameProvider:
         self.state_store.subscribe(self.invalidate)
         if self.transcript_state is not None:
             self.transcript_state.set_invalidate_callback(self.invalidate)
+
+    # 函数用途: 返回当前正文来源的渲染缓存；根页沿用 block_cache（可注入），各代理详情页共用另一份。
+    def _render_cache(self) -> TuiBlockRenderCache:
+        return self.block_cache if self.state_store is self._home_store else self._agent_block_cache
 
     # LLM: 切换typed store时清摘要、强引用布局及两类索引；订阅和冻结重绑不改变原运行时权威状态。
     # 函数用途: 进入或返回代理详情时一起切换正文来源和详细模式快照，不能留下另一代理的旧画面。
@@ -241,7 +248,7 @@ class TuiFrameProvider:
             rendered = replace(rendered, transcript_lines=lines, line_origins=origins, detail_page_offsets=pages,
                                pending_detail_blocks=pending)
         else:
-            rendered = render_tui_snapshot(snapshot, context, cache=self.block_cache)
+            rendered = render_tui_snapshot(snapshot, context, cache=self._render_cache())
         if self.transcript_state is not None:
             rendered = self.transcript_state.decorate_frame(
                 rendered,
@@ -294,7 +301,7 @@ class TuiFrameProvider:
     # LLM: 静态prefix强身份覆盖排版上下文；活动块须排在稳定块之后，否则稳定用户坐标可能变化，必须退回精确算法。
     # 函数用途: 只核有界活动尾部，不遍历或哈希大offset/origin元组。
     def _normal_user_index_sources(self, snapshot, frame, context) -> tuple:
-        prefix = self.block_cache.stable_prefix(snapshot.stable_blocks, context)
+        prefix = self._render_cache().stable_prefix(snapshot.stable_blocks, context)
         if len(prefix.line_ends) != len(snapshot.stable_blocks):
             return ()
         active = snapshot.active_blocks

@@ -123,7 +123,8 @@ def test_default_window_releases_departed_entries_in_transcript_and_root_overlay
     assert view.overlay_provider.state_store is root.store
     assert view.provider.frame(context.width) == render_tui_snapshot(child_snapshot, context)
     assert view.overlay_provider.frame(context.width) == render_tui_snapshot(root_snapshot, context)
-    _assert_cache_retains_snapshot(view.provider.block_cache, child_snapshot)
+    _assert_cache_retains_snapshot(view.provider._agent_block_cache, child_snapshot)
+    _assert_cache_retains_snapshot(view.provider.block_cache, root_snapshot)
     _assert_cache_retains_snapshot(view.overlay_provider.block_cache, root_snapshot)
     view.set_state_store(root.store)
     assert view.provider.frame(context.width) == render_tui_snapshot(root_snapshot, context)
@@ -195,3 +196,25 @@ def test_live_bookkeeping_retires_on_stable_change_and_idle_retention_does_not_s
     assert cache._live_last_key.keys() == cache._live_last_at.keys() == {"kept"}
     assert cache._retained_stable_blocks is changed.stable_blocks
     _assert_cache_retains_snapshot(cache, changed)
+
+
+def test_returning_from_a_child_page_reuses_the_root_window_render():
+    """根页窗口在往返子代理详情页后不得整窗重排；两份缓存各自只持本页窗口内的块。"""
+    root = _runtime(AgentConfig().tui_transcript_max_blocks)
+    for index in range(520):
+        root._publish("assistant_completed", "completed", f"reply-{index}", {"text": f"回复 {index}\n\n```python\nprint({index})\n```"})
+    view = make_tui_transcript_view(root.store, lambda width: TuiRenderContext(width=width, now=1.0))
+    provider = view.provider
+    provider.frame(80)
+    child = TuiAgentNavigationState(root, max_cached_runtimes=2)._runtime_for_locked("child-nav")
+    child._publish("assistant_completed", "completed", "child-reply", {"text": "子代理回复"})
+    for _ in range(2):
+        view.set_state_store(child.store)
+        assert provider.frame(80) == render_tui_snapshot(child.store.snapshot(), TuiRenderContext(width=80, now=1.0))
+        misses = provider.block_cache.stats().misses
+        view.set_state_store(root.store)
+        assert provider.frame(80) == render_tui_snapshot(root.store.snapshot(), TuiRenderContext(width=80, now=1.0))
+        assert provider.block_cache.stats().misses == misses
+    _assert_cache_retains_snapshot(provider.block_cache, root.store.snapshot())
+    _assert_cache_retains_snapshot(provider._agent_block_cache, child.store.snapshot())
+    assert len(provider.block_cache._entries) == 500
