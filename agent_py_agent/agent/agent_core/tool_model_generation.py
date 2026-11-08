@@ -81,6 +81,7 @@ from .tool_ir_history import (
     project_native_provider_messages,
     record_runtime_facts_turn_ir,
 )
+from .tool_loop.model_turn import ModelTurnRequest, _stream_incomplete_retryable
 from .tool_stream import (
     LongToolContentStreamAbort,
     MalformedToolProtocolStreamAbort,
@@ -138,6 +139,7 @@ class ModelGenerateParams:
     token_budget: RequestTokenBudget | None = None
     context_snapshot: object | None = field(default=None, repr=False, compare=False)
     budget_input_identity: str = ""
+    logical_call_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -265,14 +267,26 @@ def generate_model_response(request: ModelGenerateParams):
     # LLM: 覆盖的清除归「消费它的这次逻辑调用」：入口判定归属，结束时统一清（含异常路径），
     #   重试与自然回执轮都不再各自碰它。判定只读结构化字段，不读正文。
     owns_override = _owns_next_call_override(request.params)
+    ledger = model_call_ledger(request.agent)
+    scope = {"request_id": str(getattr(request.params, "request_id", "") or ""),
+             "run_id": str(getattr(request.params, "run_id", "") or ""), "purpose": "main"}
+    request = replace(request, logical_call_id=ledger.open_logical_call(
+        **scope, identity=logical_model_call_id(request)))
+    close_logical_group = False
     try:
         state = _start_model_generation(request)
         # 门槛5补证(维护记录): 返回与响应配对的 final_state——重试成功后
         # 用 attempt-2 的 state 收口(其 call_id 落 finished), 不落在 attempt-1。
         response, final_state = _generate_or_recover_context_pressure(request, state)
         _record_run_cost(request, response)  # 审计 #19/#2:真实 USD 成本累计到 owner/run 维度
-        return _finish_model_generation(request, final_state, response)
+        response = _finish_model_generation(request, final_state, response)
+        # 外层仍可重试断流/上下文恢复；物理失败或超时本身不是逻辑组关闭证明。
+        close_logical_group = (getattr(response, "runtime_status", "") != "context_overflow"
+                               and not _stream_incomplete_retryable(ModelTurnRequest(request.prompt, response, request.params)))
+        return response
     finally:
+        if close_logical_group:
+            ledger.close_logical_call(**scope, logical_call_id=request.logical_call_id)
         if owns_override:
             _clear_next_call_reasoning_override(request.params)
 
