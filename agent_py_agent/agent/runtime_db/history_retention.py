@@ -5,7 +5,10 @@ import hashlib
 import json
 import os
 import sqlite3
+import time
+from collections.abc import Callable
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 
 from .operations import (
@@ -225,6 +228,32 @@ def _runtime_history_vacuum(repo, db_path, request, budget, *, receipt=None) -> 
         raise
 
 
+# 重试必须在 run_write 外：失败先归还原写门和事务，再等待，不能让其它通道陪同持锁退避。
+def _run_write_within_budget(request, budget, operation: Callable[[], dict]) -> dict | None:
+    """锁忙时在剩余预算内重试；耗尽或同连接冲突返回 None，结构性错误原样传播。"""
+    from ..io.sqlite_connection import sqlite_error_details
+
+    if budget.deadline is None:
+        # 手工入口可不设截止时间；争用时仍沿既有通道时间片延期，不把无穷传给 sleep。
+        from ..user_space.storage_lanes import STORAGE_LANE_SLICE_MS
+
+        budget = replace(budget, deadline=time.monotonic() + STORAGE_LANE_SLICE_MS / 1000)
+    while budget.remaining_ms() > 0:
+        try:
+            return request.run_write(operation)
+        except sqlite3.OperationalError as exc:
+            category = sqlite_error_details(exc).get("category")
+            if category == "locked":
+                return None
+            if category != "busy":
+                raise
+            remaining = budget.remaining_ms()
+            if remaining <= 0:
+                return None
+            time.sleep(min(remaining, max(1.0, remaining / 4)) / 1000)
+    return None
+
+
 def maintain_runtime_history_lane(request) -> dict:
     """在通道写门内分批改写或删除 owner 终态历史；策略关闭、保全或预算耗尽时不执行。"""
     from ..local_storage.maintenance import LOCAL_STORE_CATCHUP_MAX_STEPS_COUNT
@@ -286,7 +315,12 @@ def maintain_runtime_history_lane(request) -> dict:
                 kwargs = {"owner_id": request.home.owner_id} if table == "llm_call_records" else {}
                 return step(conn, cutoff=request.now - days * 86400, max_rows=limit, **kwargs)
 
-        result = request.run_write(execute_step)
+        result = _run_write_within_budget(request, request.budget, execute_step)
+        if result is None:
+            receipt.update(complete=False)
+            receipt.setdefault("deferred_reason", "busy")
+            pending.append((table, days, step))
+            break
         receipt["cursor"][table] = result.get("cursor", "")
         if not result.get("complete", True):
             pending.append((table, days, step))
@@ -294,7 +328,7 @@ def maintain_runtime_history_lane(request) -> dict:
         for key in ("items", "bytes", "slimmed", "deleted_events", "deleted_llm_records"):
             receipt[key] += result.get(key, 0)
     for _round_index in range(1, LOCAL_STORE_CATCHUP_MAX_STEPS_COUNT):
-        if (not pending or receipt.get("deferred_reason") == "budget_exhausted"
+        if (not pending or receipt.get("deferred_reason") in {"budget_exhausted", "busy"}
                 or allowance - receipt["items"] <= 0 or lane.remaining_ms() <= 0):
             break
         next_pending = []
@@ -304,14 +338,21 @@ def maintain_runtime_history_lane(request) -> dict:
                 next_pending.extend(pending[index:])
                 break
             limit = max(1, min(RETENTION_SCAN_SLICE_ENTRIES, remaining // len(pending)))
-            result = request.run_write(execute_step)
+            result = _run_write_within_budget(request, lane, execute_step)
+            if result is None:
+                receipt.update(complete=False)
+                receipt.setdefault("deferred_reason", "busy")
+                next_pending.extend(pending[index:])
+                break
             receipt["cursor"][table] = result.get("cursor", "")
             if not result.get("complete", True):
                 next_pending.append((table, days, step))
             for key in ("items", "bytes", "slimmed", "deleted_events", "deleted_llm_records"):
                 receipt[key] += result.get(key, 0)
         pending = next_pending
-    receipt["complete"] = not pending and receipt.get("deferred_reason") != "budget_exhausted"
+    receipt["complete"] = not pending and receipt.get("deferred_reason") not in {"budget_exhausted", "busy"}
+    if receipt.get("deferred_reason") == "busy":
+        return receipt
     # 逻辑变更结束后仍可能留下多片空闲页或未回填的 WAL，不能丢掉后续物理回收责任。
     freed = _runtime_history_vacuum(repo, db_path, request, lane, receipt=receipt)
     if freed:
