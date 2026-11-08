@@ -16,6 +16,7 @@ from ...common.value_parsing import sequence_strings
 from ..execution.executor_helpers import _test_name, _utc_now_iso
 from ..execution.records import TestExecutionRecord
 
+SMALL_TEXT_MAX_BYTES = 262144
 REMOTE_SCHEMES = {"http", "https", "mailto", "tel", "data", "javascript"}
 _SITE_SCAN_EXCLUDES = frozenset({".git", "__pycache__", "node_modules", "local_store", "compact", "runs", "sessions"})
 _VALIDATE_FORM_CALL_RE = re.compile(r"validateForm\(\s*['\"]([^'\"]+)['\"]\s*\)")
@@ -92,6 +93,7 @@ class StaticSiteScanOptions:
     check_forms: bool
     strict_dom_bindings: bool
     required_dom_ids: list[str]
+    max_html_bytes: int | None = None
 
 
 @dataclass
@@ -263,13 +265,22 @@ def unique_paths(paths: list[Path]) -> list[Path]:
     return unique
 
 
-def small_text(path: Path, max_bytes: int = 262144) -> str:
+def small_text(path: Path, max_bytes: int = SMALL_TEXT_MAX_BYTES, *,
+               scan_result: StaticSiteCheckResult | None = None) -> str | None:
     try:
-        if path.stat().st_size > max_bytes:
-            return ""
-        return path.read_text(encoding="utf-8", errors="replace")
+        if path.stat().st_size <= max_bytes:
+            with path.open("rb", buffering=0) as source:
+                data = source.read(max_bytes + 1)
+            if len(data) <= max_bytes:
+                return data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
     except OSError:
-        return ""
+        pass
+    if scan_result is not None:
+        scan_result.scan_incomplete = True
+        scan_result.warnings.append("STATIC_SITE_SCAN_INCOMPLETE")
+        scan_result.scan_coverage.setdefault("unread_files", []).append(str(path))
+        return None
+    return ""
 
 
 def inside(path: Path, root: Path) -> bool:
@@ -495,13 +506,17 @@ def _scan_options(test: dict[str, Any]) -> StaticSiteScanOptions:
         check_forms=test.get("check_form_bindings", True) is not False,
         strict_dom_bindings=test.get("strict_dom_bindings", True) is not False,
         required_dom_ids=sequence_strings(test.get("required_dom_ids")),
+        max_html_bytes=SMALL_TEXT_MAX_BYTES if test.get("post_write_check") is True else None,
     )
 
 
 def _scan_html_file(request: StaticSiteHtmlScanRequest) -> None:
     result, path, site_root = request.result, request.path, request.site_root
     options, state = request.options, request.state
-    text = path.read_text(encoding="utf-8", errors="replace")
+    text = (path.read_text(encoding="utf-8", errors="replace") if options.max_html_bytes is None
+            else small_text(path, options.max_html_bytes, scan_result=result))
+    if text is None:
+        return
     if options.check_placeholders and _has_visible_template_placeholder(text):
         result.placeholder_hits.append(rel(path, site_root))
     if options.check_complete_html:
@@ -511,7 +526,8 @@ def _scan_html_file(request: StaticSiteHtmlScanRequest) -> None:
     state.form_ids.update(parser.form_ids)
     state.element_ids.update(parser.element_ids)
     local_script_text = "\n".join(
-        small_text(item) for item in unique_paths(local_script_refs(parser.refs, path, site_root))
+        small_text(item, scan_result=result if options.max_html_bytes is not None else None) or ""
+        for item in unique_paths(local_script_refs(parser.refs, path, site_root))
     )
     state.script_texts.extend([text, local_script_text])
     if options.check_refs:
