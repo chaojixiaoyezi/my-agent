@@ -26,6 +26,7 @@ from typing import Any
 from ....common.json_io import write_private_json_file_atomic
 from ....common.nofollow_fs import open_directory_beneath, open_readonly_file_beneath
 from ....common.opaque_id import validate_opaque_id
+from ....io.sqlite_probe import sqlite_readonly_probe_uri
 from ....runtime_db.operations import AGENT_RUN_TERMINAL_STATUSES
 from ....runtime_db.schema import runtime_db_path
 
@@ -102,7 +103,7 @@ def projection_runtime_facts(owner_home: Path, run_id: str, payload: dict[str, A
     return (sorted(active or statuses)[0] if statuses else ""), pending
 
 
-# LLM: 单库查询绝不初始化schema，拒绝链接及冷WAL副写；任何未知库向调用方报错保留投影。
+# LLM: 单库查询绝不初始化schema，拒绝链接，由SQLite管理WAL与锁；任何未知库向调用方报错保留投影。
 # 函数用途: 读取一个现存runtime库的运行状态和闹钟。
 def _runtime_file_facts(db: Path, run_id: str, payload: dict[str, Any]) -> tuple[str, bool]:
     if db.is_symlink() or db.parent.is_symlink() or not db.is_file():
@@ -111,9 +112,7 @@ def _runtime_file_facts(db: Path, run_id: str, payload: dict[str, Any]) -> tuple
     shm = Path(f"{db}-shm")
     if wal.is_symlink() or shm.is_symlink() or (wal.exists() and not shm.is_file()):
         raise ValueError("拒绝链接runtime旁文件")
-    with db.open("rb") as source:
-        immutable = not wal.exists() and source.read(20)[18:20] == b"\x02\x02"
-    uri = db.absolute().as_uri() + "?mode=ro" + ("&immutable=1" if immutable else "")
+    uri = sqlite_readonly_probe_uri(db)
     with closing(sqlite3.connect(uri, uri=True, timeout=0.05)) as conn:
         conn.execute("PRAGMA query_only=ON")
         conn.execute("BEGIN")
