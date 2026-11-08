@@ -1,4 +1,4 @@
-# LLM: 保main归档原权限收紧/错误计数；可选原callback只包逐entry chmod，扫描门外，不创建执行权。
+# LLM: 保main归档原权限收紧/错误计数；原callback包逐entry chmod及复核标记写入，扫描门外，不创建执行权。
 # 模块用途: 维护原归档存储与权限，后台调用沿同次短写门，默认入口原行为不变。
 
 from __future__ import annotations
@@ -7,7 +7,10 @@ from ..common.json_io import (
     append_private_jsonl_records,
     jsonl_lines,
     write_private_json_file_atomic,
+    write_private_text_file_atomic,
 )
+from ..common.nofollow_fs import open_readonly_file_beneath
+from ..memory_store.retention_models import MemoryRetentionPolicy
 
 """JSONL storage primitives for memory hook snapshots and raw archive events.
 
@@ -17,8 +20,10 @@ from ..common.json_io import (
 """
 
 import json
+import math
 import os
 import stat
+import time
 from datetime import date, timedelta
 from functools import partial
 from pathlib import Path
@@ -257,8 +262,57 @@ def tighten_memory_archive_permissions(archive: str | Path, *, commit_transition
     }
     if root.is_symlink() or not root.is_dir():
         return result
+    marker = root.parent / f".{root.name}.permissions-verified.json"
+    identity = _archive_identity(root)
+    if identity is not None and _permission_marker_valid(marker, identity, now=time.time()):
+        return result
     _tighten_tree(root, result, commit_transition=commit_transition)
+    if identity is not None and result["failed_count"] == 0:
+        write = partial(_write_permission_marker, marker, identity)
+        if commit_transition is None:
+            write()
+        else:
+            commit_transition(write)
     return result
+
+
+def _archive_identity(root: Path) -> dict[str, int] | None:
+    try:
+        info = root.stat()
+        return {"dev": info.st_dev, "ino": info.st_ino}
+    except OSError:
+        return None
+
+
+def _permission_marker_valid(marker: Path, identity: dict[str, int], *, now: float) -> bool:
+    """标记只是有期限的复核凭据；有界 no-follow 读取，坏标记一律重新遍历。"""
+    try:
+        descriptor = open_readonly_file_beneath(marker.parent, (marker.name,))
+        try:
+            if os.fstat(descriptor).st_size > 4096:
+                return False
+            payload = json.loads(os.read(descriptor, 4096))
+        finally:
+            os.close(descriptor)
+        if not isinstance(payload, dict):
+            return False
+        verified_at = payload.get("verified_at")
+        return (payload.get("schema_version") == "memory_archive_permissions_verified.v1"
+                and all(type(payload.get(key)) is int and payload[key] == identity[key] for key in ("dev", "ino"))
+                and type(verified_at) in (int, float) and math.isfinite(verified_at) and math.isfinite(now)
+                and 0 <= now - verified_at < MemoryRetentionPolicy().security_audit_days * 86400)
+    except Exception:
+        return False
+
+
+def _write_permission_marker(marker: Path, identity: dict[str, int]) -> None:
+    """沿原私有原子写发布复核时间；落盘失败只使下一次维护重新遍历。"""
+    try:
+        write_private_text_file_atomic(marker, json.dumps({
+            "schema_version": "memory_archive_permissions_verified.v1", **identity, "verified_at": time.time(),
+        }, sort_keys=True))
+    except OSError:
+        pass
 
 
 # LLM: 原callback只包单entry写，目录扫描不持T；None原调用，不捕获实际未结。
@@ -272,22 +326,23 @@ def _tighten_tree(directory: Path, result: dict[str, Any], *, commit_transition=
     else:
         commit_transition(operation)
     try:
-        entries = list(os.scandir(directory))
+        entries = os.scandir(directory)
     except OSError:
         return
-    for entry in entries:
-        if entry.is_symlink():
-            result["symlink_skipped_count"] += 1
-            continue
-        if entry.is_dir(follow_symlinks=False):
-            _tighten_tree(Path(entry.path), result, commit_transition=commit_transition)
-            continue
-        if entry.is_file(follow_symlinks=False):
-            operation = partial(_tighten_entry, Path(entry.path), result, is_directory=False)
-            if commit_transition is None:
-                operation()
-            else:
-                commit_transition(operation)
+    with entries as iterator:
+        for entry in iterator:
+            if entry.is_symlink():
+                result["symlink_skipped_count"] += 1
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                _tighten_tree(Path(entry.path), result, commit_transition=commit_transition)
+                continue
+            if entry.is_file(follow_symlinks=False):
+                operation = partial(_tighten_entry, Path(entry.path), result, is_directory=False)
+                if commit_transition is None:
+                    operation()
+                else:
+                    commit_transition(operation)
 
 
 # LLM: 目标权限目录 0700、文件 0600；已经不比目标宽就不动（不放松更严的既有权限）。成功才计入
