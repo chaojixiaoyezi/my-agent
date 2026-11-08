@@ -4623,6 +4623,7 @@ closed角色第三次读取验证入口：`agent_py_agent/tests/test_gateway_rol
 
 ### 输入期限与静默执行账关键文件
 
+- `agent_py_agent/agent/runtime_db/maintenance.py`：RuntimeDB 增量页回收入口转发与跨版本 SQLite autocommit 兼容辅助。
 - `agent_py_agent/agent/runtime_db/input_lifecycle.py`：原运行库整行claim、效果窗口和迟到complete/release CAS；新的active-Link例外在最终SQL核整树UNKNOWN/活动。
 - `agent_py_agent/agent/gateway_parts/runtime_wake_source.py`：canonical owner DB行的只读来源快照，不新建业务Agent。
 - `agent_py_agent/agent/conversation/runtime_wake.py`：Count0与P5 W共用单行算法；只有当前claim可expire或发布原Wake。
