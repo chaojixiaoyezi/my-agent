@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
 import threading
 from copy import deepcopy
 from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.cli.chat_parts.history import GatewayChatHistorySnapshot
 from agent_py_agent.cli.chat_parts.tui_block_renderer import TuiRenderContext
@@ -10,7 +13,7 @@ from agent_py_agent.cli.chat_parts.tui_history import TuiHistoryPager
 from agent_py_agent.cli.chat_parts.tui_markdown import fragments_text
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 from agent_py_agent.cli.chat_parts.tui_view import make_tui_transcript_view
-from agent_py_agent.cli.chat_parts.tui_view_model import TuiStateStore
+from agent_py_agent.cli.chat_parts.tui_view_model import TuiStateStore, TuiViewModelReducer
 
 
 # LLM: helper 只构造公开静态显示事件，使用持久消息形状的稳定 ID，无模型或控制动作。
@@ -185,3 +188,85 @@ def test_late_home_response_does_not_override_subsequent_scroll():
     anchor = view.control.history_anchor()
     pager._apply(500, True, GatewayChatHistorySnapshot(display_events=_events("older"), before_message_cursor=0))
     assert view.control.history_anchor() == anchor
+
+
+# LLM: 默认 500 块展示窗口下的真实 runtime/reducer/view/pager；fake app 只负责 UI 调度，读取线程被替换为记录调用。
+# 函数用途: 构造一个已载入 40 条近期历史、再收到 live 条实时回复的根页客户端，阅读位置停在顶部。
+def _windowed_pager(live, window=500):
+    runtime = TuiRuntime("session", store=TuiStateStore(reducer=TuiViewModelReducer(max_stable_blocks=window)))
+    runtime.publish_session(version="test", model="test", workspace="test")
+    runtime.publish_recovered_history([], display_events=_events("recent", 40), message_cursor=1000, before_message_cursor=500)
+    for index in range(live):
+        runtime._publish("assistant_completed", "completed", f"live-{index}", {"text": f"live-{index}"})
+    view = make_tui_transcript_view(runtime.store, lambda width: TuiRenderContext(width=width))
+    view.control.create_content(60, 5)
+    view.control.jump_to(0)
+    view.control.create_content(60, 5)
+    app = SimpleNamespace(invalidate=lambda: None, loop=SimpleNamespace(call_soon_threadsafe=lambda fn, *args: fn(*args)))
+    params = SimpleNamespace(tui_runtime=runtime, stop_event=threading.Event(), current_session_id="session",
+                             agent=SimpleNamespace(config=SimpleNamespace()))
+    pager, reads = TuiHistoryPager(app, params, view), []
+    pager._read = lambda before, home: reads.append(before)
+    return pager, runtime, view, reads
+
+
+def _run_history_reader_inline(monkeypatch):
+    # 读取只记录调用，同步执行以免断言与后台线程的调度先后竞争。
+    monkeypatch.setattr("agent_py_agent.cli.chat_parts.tui_history.threading.Thread",
+                        lambda **kwargs: SimpleNamespace(start=lambda: kwargs["target"](*kwargs["args"])))
+
+
+def _fd_count():
+    # Linux/macOS 核对描述符零增量，其它平台仍执行分页行为断言。
+    for directory in ("/proc/self/fd", "/dev/fd"):
+        if os.path.isdir(directory):
+            return len(os.listdir(directory))
+    return None
+
+
+@pytest.mark.parametrize(("live", "expected_reads"), [(440, [500]), (460, [])])
+def test_older_page_that_cannot_fit_the_window_is_not_spliced_in(monkeypatch, live, expected_reads):
+    """窗口已满（460 live）或补入会溢出（440 live）时：不裁阅读位置、不拼接不连续正文、不消费旧游标。"""
+    _run_history_reader_inline(monkeypatch)
+    before_fd = _fd_count()
+    pager, runtime, view, reads = _windowed_pager(live)
+    before = runtime.store.snapshot()
+    anchor = view.control.history_anchor()
+    pager.request()
+    assert reads == expected_reads
+    assert pager._loading is bool(expected_reads)
+    pager._apply(500, False, GatewayChatHistorySnapshot(display_events=_events("older", 40), before_message_cursor=0))
+    after = runtime.store.snapshot()
+    assert after.stable_blocks == before.stable_blocks
+    assert after.active_blocks == before.active_blocks
+    assert after.status == before.status and after.queued_inputs == before.queued_inputs
+    assert runtime.history_before_cursor == 500 and runtime.background_message_cursor == 1000
+    assert "tui_transcript_max_blocks" in runtime._notice_text
+    assert not pager._loading
+    assert view.control.history_anchor() == anchor
+    view.control.create_content(60, 5)
+    # 重绘会把控件游标归一到视口底行；阅读位置应检查实际滚动顶行。
+    assert view.control.preferred_vertical_scroll(view.window) == 0
+    if before_fd is not None:
+        fd_delta = _fd_count() - before_fd
+        assert fd_delta == 0
+
+
+def test_older_page_that_fits_the_window_stays_contiguous(monkeypatch):
+    _run_history_reader_inline(monkeypatch)
+    before_fd = _fd_count()
+    pager, runtime, view, reads = _windowed_pager(100)
+    anchor = view.control.history_anchor()
+    pager.request()
+    assert reads == [500]
+    pager._apply(500, False, GatewayChatHistorySnapshot(display_events=_events("older", 40), before_message_cursor=0))
+    ids = [block.block_id for block in runtime.store.snapshot().stable_blocks if block.kind != "session_started"]
+    assert ids[ids.index("history:older-39:assistant") + 1] == "history:recent-0:assistant"
+    assert runtime.history_before_cursor == 0
+    assert runtime.background_message_cursor == 1000
+    assert not pager._loading
+    view.control.create_content(60, 5)
+    assert view.control.history_anchor()[0] == anchor[0]
+    if before_fd is not None:
+        fd_delta = _fd_count() - before_fd
+        assert fd_delta == 0

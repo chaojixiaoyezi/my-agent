@@ -7,6 +7,9 @@ import threading
 
 from .history import chat_history_max_turns, load_gateway_chat_history
 
+# 窗口已满时的上翻提示：旧页不能接在窗口前部，指向可调的展示窗口参数。
+_WINDOW_FULL_NOTICE = "TUI 只保留最近 {limit} 个消息块（tui_transcript_max_blocks），更早历史未补入"
+
 
 # LLM: 一个控制器绑定当前 app 的 root session；child 自己的事件流和 cursor 继续由导航管理，不使用 root 分页。
 # 类用途: 在后台读取旧页，并把同一页的显示更新送回 UI 线程。
@@ -27,7 +30,12 @@ class TuiHistoryPager:
             if (self._loading or before <= 0 or self.params.stop_event.is_set()
                     or self.view.provider.state_store is not self.runtime.store):
                 return
-            self._loading = True
+            limit = self.runtime.store.reducer.max_stable_blocks
+            full = len(self.runtime.store.snapshot().stable_blocks) >= limit
+            self._loading = not full
+        if full:
+            self.runtime.set_notice(_WINDOW_FULL_NOTICE.format(limit=limit), duration_seconds=6)
+            return
         self.runtime.set_notice("正在读取更早的历史…", duration_seconds=15)
         threading.Thread(target=self._read, args=(before, home), name="tui-history-page", daemon=True).start()
 
@@ -68,6 +76,10 @@ class TuiHistoryPager:
             ids = self.runtime.prepend_history_page(
                 page.display_events or (), expected_before=before, next_before=page.before_message_cursor,
             )
+            if not ids and self.runtime.history_before_cursor == before:
+                limit = self.runtime.store.reducer.max_stable_blocks
+                self.runtime.set_notice(_WINDOW_FULL_NOTICE.format(limit=limit), duration_seconds=6)
+                return
             self.view.transcript_state.prepend_history(self.runtime.store.snapshot(), ids)
             for control, anchor, at_home in zip(controls, anchors, homes):
                 control.restore_history_anchor(anchor, home=at_home, block_ids=ids)
