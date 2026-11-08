@@ -38,6 +38,7 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
         _cleanup_owner_runtime,
         _maintain_local_store_events,
         _maintenance_state_path,
+        _partial_store_cursor,
         _prune_local_store_derived_records,
         _quota_only_continuation_due,
         _reclaim_text_vector_cache_orphans,
@@ -86,14 +87,16 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
     retention = _call_retention_callback(apply_owner_retention, home, now=datetime.fromtimestamp(now, timezone.utc),
         commit_transition=commit, expected_policy_fingerprint=policy, config=config, scan_budget=True)
     derived_prune = (_prune_local_store_derived_records(home.owner_home_dir,
-                         now=datetime.fromtimestamp(now, timezone.utc), commit_transition=commit)
+                         now=datetime.fromtimestamp(now, timezone.utc), commit_transition=commit,
+                         cursor=_partial_store_cursor(header, "derived_records_pruned"))
                      if _retention_deletion_safe(retention)
                      else {"executed": False, "reason": "retention_not_safe"})
     reclaim_owner_orphan_lock_files(home, commit_transition=commit)
     reclaimed, error = _reclaim_text_vector_cache_orphans(home, commit_transition=commit)
     permissions = _tighten_archive_permissions(home, commit_transition=commit)
     backfill = _backfill_hung_runs(home, now=now, commit_transition=commit)
-    local_events = (_maintain_local_store_events(home, now=now, commit_transition=commit)
+    local_events = (_maintain_local_store_events(home, now=now, commit_transition=commit,
+                                                 cursor=_partial_store_cursor(header, "local_store_events_maintenance"))
                     if retention.applied and not retention.legal_hold else
                     {"executed": False, "reason": "legal_hold" if retention.legal_hold else "retention_refused"})
     effects = {"text_vector_cache_reclaimed": reclaimed, "text_vector_cache_reclaim_error": error,

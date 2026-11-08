@@ -248,7 +248,8 @@ def run_owner_retention_if_due(
             scan_budget=True,
         )
         derived_prune = (_prune_local_store_derived_records(home.owner_home_dir,
-                            now=datetime.fromtimestamp(current, timezone.utc))
+                            now=datetime.fromtimestamp(current, timezone.utc),
+                            cursor=_partial_store_cursor(previous, "derived_records_pruned"))
                          if _retention_deletion_safe(retention)
                          else {"executed": False, "reason": "retention_not_safe"})
         reclaim_owner_orphan_lock_files(home)
@@ -265,7 +266,8 @@ def run_owner_retention_if_due(
         # rcb：历史悬挂 run 一次性补收口迁移（幂等；迁移记录写 runtime.db metadata，
         # 重复调用是空操作）。失败只记结构化回执，绝不影响保留主流程。
         run_closeout_backfill = _backfill_hung_runs(home, now=current)
-        local_events = (_maintain_local_store_events(home, now=current)
+        local_events = (_maintain_local_store_events(home, now=current,
+                                                     cursor=_partial_store_cursor(previous, "local_store_events_maintenance"))
                         if retention.applied and not retention.legal_hold else
                         {"executed": False, "reason": "legal_hold" if retention.legal_hold else "retention_refused"})
         effects = {"text_vector_cache_reclaimed": dropped_cache_keys,
@@ -280,6 +282,15 @@ def run_owner_retention_if_due(
             safe_to_delete=_retention_deletion_safe(retention),
             service=workflow_service)
         return _write_maintenance_result(state_path, retention, previous, current, effects)
+
+
+# LLM: 全量拍与续作拍共用同一分页续点：上拍partial留下的cursor原样续扫，不从第一页重来；无欠账返回None从头开始。
+# 函数用途: 取上一拍某个分页维护的未完成续点。
+def _partial_store_cursor(previous: dict[str, Any], key: str) -> dict | None:
+    before = previous.get(key)
+    if isinstance(before, dict) and before.get("partial") is True and isinstance(before.get("cursor"), dict):
+        return before["cursor"]
+    return None
 
 
 # LLM: 可信owner维护沿原节拍续跑持久化清理身份；保留安全门、owner核验及未知执行错误原抛，不开放公开恢复参数。
