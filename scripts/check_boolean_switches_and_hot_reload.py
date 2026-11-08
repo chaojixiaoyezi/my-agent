@@ -84,6 +84,7 @@ PURE_FAST_PARAMS = frozenset({"cheap_checks", "bounded", "scan_budget", "lazy_ha
 
 # Semantic names that share fast-path vocabulary but change observable behaviour (closed, with reasons).
 SEMANTIC_NAME_EXCEPTIONS = {
+    "tool_discovery_cache_pin_enabled": "wire-protocol tool schema delivery mode: inline schema in tool_search result vs mutating native tools mid-segment",
     "anthropic_prompt_cache_enabled": "provider wire-compat: some Anthropic-compatible endpoints reject cache_control; model-profile scoped",
     "owner_quota_policy_available": "capability fact, not an optimisation",
     "budget_exhausted": "result state, not a switch",

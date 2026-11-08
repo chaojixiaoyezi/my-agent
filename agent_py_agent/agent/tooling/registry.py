@@ -198,6 +198,8 @@ class ToolRegistryParams:
     catalog_offset: int = 0
     catalog_categories: list[str] | None = None
     catalog_deferred_categories: list[str] | None = None
+    # 打开后 tool_search 不在缓存段内改原生工具表（见 agent_config.yaml 同名键）。
+    tool_discovery_cache_pin_enabled: bool = False
     catalog_include_examples: bool = False
     catalog_entry_max_chars: int = 700
     tool_detail_max_chars: int = 0
@@ -460,6 +462,12 @@ def _search_deferred_tool_result(
     live = {**payload, "schema_version": 4,
             "tools": [{**_tool_search_card(spec), "status": "loaded"} for spec in specs],
             "schema_delivery": "The next model request contains complete native tools. Full definitions remain in the original archive."}
+    if getattr(registry, "tool_discovery_cache_pin_enabled", False) and specs:
+        # 换原生工具表会让整段提示缓存作废（实测每次 17万～35万 token）：本缓存段内定义直接随结果给出，
+        # 模型按名调用；typed 加载名照旧登记，下次 Compact 时由 active_tools_for_compact 并入原生工具表。
+        live = {**payload, "loaded_for_next_model_call": [], "callable_by_name": loaded_names,
+                "schema_delivery": "Native tools stay unchanged until the next compaction to keep the prompt cache. "
+                                   "Call these tools by exact name now; the input_schema in this result is authoritative."}
     return ToolHandlerOutcome(
         "tool_search",
         True,
@@ -764,6 +772,12 @@ class ToolRegistry:
     @property
     def catalog_include_examples(self) -> bool:
         return self._live_bool("tool_catalog_include_examples", "catalog_include_examples")
+
+    # LLM: 只读同一 live_config；无配置时沿 DTO 默认关闭，不冻结开关、不改变工具权限。
+    # 函数用途: 每次检索时读取当前的原生工具表钉住策略。
+    @property
+    def tool_discovery_cache_pin_enabled(self) -> bool:
+        return self._live_bool("tool_discovery_cache_pin_enabled")
 
     @property
     def vector_search_enabled(self) -> bool:

@@ -47,6 +47,17 @@ def reload_schema_after_blind_call(agent: object, params: object, archive_record
     )
     if any(spec.name == tool for spec in visible):
         return ""
+    from ...conversation.tool_discovery import discovery_cache_pinned
+
+    if discovery_cache_pinned(agent):
+        # 缓存钉住：不改下一次请求的原生工具表，参数速查直接放在本结果尾部，模型按定义按名重试。
+        schemas = build_discovered_tool_micro_schemas(snapshot, [tool], max_tools=1)
+        if not schemas:
+            return ""
+        details = {"loaded_micro_schema": schemas[0], "schema_inline_only": True}
+        archive_record["schema_reload"] = details
+        return (f"\n[tool-schema-inline] {tool} 的参数定义如下，请按定义直接按名重新调用。\n"
+                + json.dumps(details, ensure_ascii=False, separators=(",", ":")))
     if isinstance(loaded, list):
         loaded.append(tool)
     else:

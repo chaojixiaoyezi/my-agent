@@ -141,6 +141,13 @@ def _non_negative_numbers(value: object, *, yaml_scalars: bool = False) -> tuple
 # LLM: 白名单宁窄勿宽：新池只调整已存在执行器的有界容量，不扩大认证、路径或模型路由权限。
 # 常量用途: 声明可自助修改的配置项。
 TUNABLE_KEYS: dict[str, TunableSpec] = {
+    "tool_discovery_cache_pin_enabled": TunableSpec(
+        key="tool_discovery_cache_pin_enabled",
+        describe="工具发现时保持本缓存段的原生工具表不变，新定义随结果给出并在下次压缩并入；默认关闭",
+        # 布尔解析与拒绝仍交给 parameter_changes 的统一标量校验，不复制另一份合法取值表。
+        validate=lambda value: (True, "", value),
+        effect=EFFECT_IMMEDIATE,
+    ),
     "tui_agent_view_cache_max_count": TunableSpec(
         key="tui_agent_view_cache_max_count",
         describe="TUI子代理详情页缓存的展示runtime上限，超出按最近最少使用回收不在当前导航路径上的页（默认32，最小1）",

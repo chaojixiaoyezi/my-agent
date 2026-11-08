@@ -276,6 +276,9 @@ class _ToolConfigFields:
     # 无异常），前台回合不再每轮发它们的 Schema，目录末尾留“名字：一句用途”的索引，用到时 tool_search 一步加载；
     # 关回 false 即恢复全量直出。显式 allowed_tools 的回合不受影响。
     tool_default_deferral_enabled: bool = True
+    # 打开后 tool_search/盲调补表不在缓存段内改原生工具表（换工具表会让整段提示缓存作废），新工具定义随工具结果给出、
+    # 模型按名调用，下次 Compact 时并入原生工具表；默认关，验收通过后再改默认值。
+    tool_discovery_cache_pin_enabled: bool = False
     # 推荐区和 tool_search 的检索容量已降为 agent/core.py 的具名常量 TOOL_RETRIEVAL_LIMIT_COUNT（2026-09-28 参数减量）。
     # 工具语义检索开关；向量来自与记忆语义召回共用的嵌入服务 embedding_*（没配模型时只走关键词）。
     tool_vector_search_enabled: bool = True

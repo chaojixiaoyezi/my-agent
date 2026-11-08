@@ -68,6 +68,12 @@ def _micro_property_summary(value: object, depth: int = 0) -> object:
     return kind if isinstance(kind, str) else {"$ref": value["$ref"]} if "$ref" in value else "schema"
 
 
+# LLM: 只读宿主配置开关，不看正文；缺配置按关闭处理。打开后发现的新工具只进线程发现史，不在本缓存段改原生工具表。
+# 函数用途: 判断本次发现是否钉住原生工具表（agent_config.yaml 的 tool_discovery_cache_pin_enabled）。
+def discovery_cache_pinned(agent: object) -> bool:
+    return getattr(getattr(agent, "config", None), "tool_discovery_cache_pin_enabled", False) is True
+
+
 # LLM: 新序列保留首次发现顺序，旧集合使用统一稳定兜底；损坏字段不变成新工具，授权仍由当前快照过滤。
 # 函数用途: 归一线程的有序工具名，不执行工具。
 def normalized_loaded_tools(value: object) -> tuple[str, ...]:
@@ -169,16 +175,18 @@ def discovery_revisions(thread: object) -> dict[str, int]:
 def persist_discovered_tools(agent: object, params: object, record: dict[str, object]) -> None:
     names = ordered_carried_loaded_tool_names([record])
     reload = record.get("schema_reload")
-    if isinstance(reload, dict) and reload.get("schema_auto_activated_for_next_turn") is True:
+    if isinstance(reload, dict) and (reload.get("schema_auto_activated_for_next_turn") is True
+                                     or reload.get("schema_inline_only") is True):
         schema = reload.get("loaded_micro_schema")
         if isinstance(schema, dict) and schema.get("name") == record.get("tool"):
             names = ordered_tool_names([*names, schema["name"]])
-    record_session_discovered_tools(agent, names, params=params)
+    record_session_discovered_tools(agent, names, params=params, native=not discovery_cache_pinned(agent))
 
 
 # LLM: 调用方已用当前快照裁决展示资格；此入口仅记录名称，不授权或执行，不伪造一次tool_search调用。
 # 函数用途: 将搜索或宿主自动补表的名称原子并入当前线程，刷新同一份新近性与版本。
-def record_session_discovered_tools(agent: object, tool_names: Iterable[str], *, params: object) -> None:
+def record_session_discovered_tools(agent: object, tool_names: Iterable[str], *, params: object,
+                                   native: bool = True) -> None:
     names = ordered_tool_names(list(tool_names))
     thread_id = run_thread_id(params)
     store = getattr(agent, "conversation_store", None)
@@ -188,7 +196,8 @@ def record_session_discovered_tools(agent: object, tool_names: Iterable[str], *,
     # LLM: 回调读 update_atomic 提供的最新线程，拷贝 metadata 后合并，不热改传入对象。
     # 函数用途: 原子保留wire追加顺序并刷新发现新近性和版本，不覆盖其它线程字段。
     def merge(thread):
-        loaded = normalized_loaded_tools((*thread.loaded_tool_names, *names))
+        # native=False（缓存钉住）只记发现史与版本，原生工具表等 Compact 边界再由 active_tools_for_compact 并入。
+        loaded = normalized_loaded_tools((*thread.loaded_tool_names, *(names if native else ())))
         metadata = dict(thread.metadata)
         history = normalized_loaded_tools(metadata.get("discovered_tool_history", ()))
         complete = normalized_loaded_tools([*history, *thread.loaded_tool_names])

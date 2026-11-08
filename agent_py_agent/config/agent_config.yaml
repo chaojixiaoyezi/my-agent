@@ -1180,6 +1180,15 @@ tool_catalog_deferred_categories: ["collaboration", "web", "vision", "meta", "mc
 #   每次调用约省 4.4K token 的工具说明）。关回 false 即恢复“全量直出”旧行为；修改后重启 Gateway 生效。
 tool_default_deferral_enabled: true
 
+# 工具检索不改缓存段内的原生工具表（缓存钉住）。工具定义位于提示最前部（DeepSeek 实测、Anthropic 文档的缓存顺序
+# 均为 tools → system → messages），中途用 tool_search 加载新工具会让整段提示缓存作废：2026-11-07 四窗口实测
+# 每次重读 17万～35万 token，占全部未命中的约 26%。
+# - true：本缓存段内不改原生工具表；新工具的完整参数定义随 tool_search 结果给出，模型直接按名调用；
+#   下次 Compact 时（前缀本来就重建）并入原生工具表。权限和可调用范围不变。
+# - false：保持旧行为，加载后的下一次请求立刻带上新工具的原生定义。
+# 保存后由现有布尔开关刷新入口同步到运行配置，无需重建工具注册表。
+tool_discovery_cache_pin_enabled: false
+
 # 工具目录条目是否带示例；默认关闭以控制每轮上下文，完整示例仍可通过 tool_search(action=catalog) 读取。
 tool_catalog_include_examples: false
 

@@ -2819,7 +2819,7 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     if record.result.ok:
         _record_successful_tool(record.params, record.result)
     archive_record = archive_tool_call_record(agent, record)
-    _load_discovered_tools(record.params, archive_record)
+    _load_discovered_tools(record.params, archive_record, agent=agent)
     schema_hint = reload_schema_after_blind_call(agent, record.params, archive_record)
     archive_tool_call_if_enabled(
         agent,
@@ -2933,13 +2933,18 @@ def _optional_result_hints(agent, record: ToolCallRecordParams, archive_record: 
 
 # LLM: 复用正式搜索/凭据信封的有序投影；顺序保存在原live_archive_state中随replace续轮，旧set读口不变，不授予权限。
 # 函数用途: 在下一模型调用前按首次发现顺序追加Schema，不让集合排序改写既有前缀。
-def _load_discovered_tools(params: ToolLoopExecuteParams, archive_record: dict[str, object]) -> None:
+def _load_discovered_tools(params: ToolLoopExecuteParams, archive_record: dict[str, object], *,
+                           agent: object = None) -> None:
+    from ..conversation.tool_discovery import discovery_cache_pinned
     from ..tooling.tool_search_state import (
         ordered_carried_loaded_tool_names,
         ordered_loop_loaded_tool_names,
     )
 
     names = ordered_carried_loaded_tool_names([archive_record])
+    if names and discovery_cache_pinned(agent):
+        # 缓存钉住：本段不改下一次请求的原生工具表，定义已随 tool_search 结果给出；线程发现账照旧在归档后登记。
+        return
     existing = ordered_loop_loaded_tool_names(params)
     state = getattr(params, "live_archive_state", None)
     if not isinstance(state, dict):

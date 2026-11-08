@@ -55,6 +55,7 @@ LIVE_SWITCH_KEYS = frozenset({
     "subagent_failure_auto_split_enabled", "subagent_input_media_enabled",
     "subagent_stream_activity_projection_enabled", "subagent_takeover_hint_enabled",
     "target_scope_policy_enabled", "task_progress_closeout_guidance_enabled", "tool_catalog_include_examples",
+    "tool_discovery_cache_pin_enabled",
     "tool_output_externalize_on_low_headroom", "tool_program_enabled", "tool_vector_search_enabled",
     "tui_follow_gateway_upgrade", "tui_mouse_capture_default", "web_terminal_enabled",
 }) | DEPLOY_LIVE_SWITCH_KEYS
