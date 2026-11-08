@@ -731,7 +731,12 @@ class TuiAgentNavigationState:
     def _runtime_for_locked(self, run_id: str) -> TuiRuntime:
         runtime = self._runtimes.pop(run_id, None)
         if runtime is None:
-            runtime = TuiRuntime(f"{self.root_runtime.session_id}:agent:{run_id}")
+            from .tui_view_model import TuiStateStore, TuiViewModelReducer
+
+            # 子代理详情页沿用主页的展示窗口，不另设上限。
+            window = self.root_runtime.store.reducer.max_stable_blocks
+            runtime = TuiRuntime(f"{self.root_runtime.session_id}:agent:{run_id}",
+                                 store=TuiStateStore(reducer=TuiViewModelReducer(max_stable_blocks=window)))
         self._runtimes[run_id] = runtime
         self._evict_runtimes_locked(keep=run_id)
         return runtime
