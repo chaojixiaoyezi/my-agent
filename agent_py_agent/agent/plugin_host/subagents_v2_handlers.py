@@ -14,6 +14,7 @@ from ..common.log_redaction import redact_sensitive_value
 from ..common.nofollow_fs import (
     open_directory_beneath,
     open_readonly_file_beneath,
+    read_bytes_beneath,
 )
 from ..concurrency.exceptions import ConcurrencyConflictError
 from ..conversation.display_checkpoint import is_display_checkpoint
@@ -24,29 +25,49 @@ from ..subagents.cancellation import (
     cleanup_subagent_tree,
     prepare_subagent_stops,
 )
-from ..subagents.services.persistence.service import SubAgentPersistenceService
+from ..subagents.models import TaskStatus
+from ..subagents.services.agent_run_state import canonical_state_path_from_payload
+from ..subagents.services.persistence.service import SubAgentPersistenceService, task_from_payload
 from ..tooling.process_session_cleanup import ProcessSessionCleanupError, stop_process_session
 from ..tooling.process_session_store import ProcessSessionStore, process_session_store_root
 from ..user_space.home_layout import home_paths
 from ..user_space.owner_resolver import home_paths_with_owner
+from ..user_space.runtime_paths import runtime_paths_for_agent
 from .errors import HostAPIError
 from .tasks import resource_id
 
 _TERMINAL = {"DONE", "FAILED", "CANCELLED", "ABANDONED", "TAKEN_OVER", "TIMEOUT", "CHANNEL_ERROR"}
 # LLM: 原服务只读构造不创建manager/DB；注入agent须属同一owner；目录逐段nofollow，坏记录不降级空列表。
 # 函数用途: 找出本owner原持久化读取口。
-def _readers(context, agent):
+def _readers(context, agent, *, payload=None, store=None):
     home = context.owner_home.home_dir
     if agent is not None:
         if agent.subagents.owner_id != context.owner_home.owner_id:
             raise HostAPIError("SUBAGENT_NOT_FOUND", 404)
         return [agent.subagents]
     base = home / "workspace" / "runtime" / "workspaces"
+    if store is not None:
+        thread, error = store.threads.load_report(payload["thread_id"])
+        if error:
+            raise HostAPIError("STORE_UNAVAILABLE", 503)
+        if thread is None or thread.owner_id != context.owner_home.owner_id or thread.owner_home != str(home):
+            raise HostAPIError("SUBAGENT_NOT_FOUND", 404)
+        roots = thread.runtime_workspace_roots or (thread.workspace_root or thread.cwd,)
+        if not all(roots):
+            raise HostAPIError("STORE_UNAVAILABLE", 503)
+        paths = home_paths_with_owner(home_paths(context.owner_home.root), context.owner_home)
+        candidates = [runtime_paths_for_agent(SimpleNamespace(), Path(root), paths)["subagent_workspace"] for root in roots]
+    else:
+        # 无会话 Store 的旧内部适配仅枚举索引目录，canonical 仍由线程索引精确选择。
+        candidates = sorted(base.glob("*/subagents"))
     readers = []
-    for path in sorted(base.glob("*/subagents")):
-        descriptor = open_directory_beneath(home, path.relative_to(home).parts, require_dir_fd=True)
+    for path in dict.fromkeys(candidates):
+        try:
+            descriptor = open_directory_beneath(home, path.relative_to(home).parts, require_dir_fd=True)
+        except (OSError, ValueError):
+            raise HostAPIError("STORE_UNAVAILABLE", 503) from None
         os.close(descriptor)
-        readers.append(SubAgentPersistenceService(SimpleNamespace(workspace=path)))
+        readers.append(SubAgentPersistenceService(SimpleNamespace(workspace=path), read_only=True))
     return readers
 # LLM: owner、thread和root都是精确交集；空范围不扩大为全owner，旧CAS不能投递或取消。
 # 函数用途: 核实一个canonical子代理及可选修订。
@@ -63,12 +84,39 @@ def _check(context, task, payload, *, cas=False):
 # 函数用途: 精确加载并检查目标，不创建原任务。
 def _load(context, payload, agent):
     identifier = resource_id(payload["subagent_id"])
+    if agent is None:
+        return _cold_task(context, identifier, payload)
     for reader in _readers(context, agent):
         try:
             return _check(context, reader.load(identifier), payload)
         except FileNotFoundError:
             continue
     raise HostAPIError("SUBAGENT_NOT_FOUND", 404)
+
+
+def _cold_task(context, identifier, payload):
+    """精确 owner locator 只定位一条 canonical；不遍历其它项目，不信任裸路径引用。"""
+    home = context.owner_home.home_dir
+    try:
+        source = read_bytes_beneath(home, ("agents", identifier, "state.json"))
+        if source is None:
+            raise HostAPIError("SUBAGENT_NOT_FOUND", 404)
+        locator = json.loads(source)
+        if locator.get("owner_id") != context.owner_home.owner_id or locator.get("run_id") != identifier:
+            raise HostAPIError("SUBAGENT_NOT_FOUND", 404)
+        path = canonical_state_path_from_payload(locator, workspace=home)
+        if path is None:
+            raise HostAPIError("STORE_UNAVAILABLE", 503)
+        task = task_from_payload(json.loads(read_bytes_beneath(home, path.relative_to(home).parts)))
+        if task.id != identifier:
+            raise HostAPIError("SUBAGENT_NOT_FOUND", 404)
+        return _check(context, task, payload)
+    except HostAPIError:
+        raise
+    except FileNotFoundError:
+        raise HostAPIError("SUBAGENT_NOT_FOUND", 404) from None
+    except (OSError, TypeError, ValueError, AttributeError):
+        raise HostAPIError("STORE_UNAVAILABLE", 503) from None
 # LLM: 只按认证context重建原owner目录，不信agent或payload提供的路径；读取不迁移落盘，坏目录显式503。
 # 函数用途: 读取本次投影共用的当前用户模型档案。
 def _owner_model_profiles(context):
@@ -102,8 +150,12 @@ def list_subagents(context, payload, *, agent=None, store=None):
         raise HostAPIError("INVALID_SCHEMA")
     profiles = _owner_model_profiles(context)
     rows = []
-    for reader in _readers(context, agent):
-        report = reader.list_runs_report()
+    for reader in _readers(context, agent, payload=payload, store=store):
+        # 冷/热查询都只消费现存索引；读者不能顺带回填 pending 或启动后台维护。
+        current = SubAgentPersistenceService(reader, read_only=True)
+        statuses = () if payload.get("include_finished", True) else tuple(
+            status.value for status in TaskStatus if status.value not in _TERMINAL)
+        report = current.list_current_runs_report(thread_id=payload["thread_id"], statuses=statuses)
         if report.load_errors:
             raise HostAPIError("STORE_UNAVAILABLE", 503)
         for task in report.runs:

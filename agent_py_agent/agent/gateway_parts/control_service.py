@@ -3321,14 +3321,24 @@ def _subagent_status(agent: object, request_ids: list[str]) -> _SubagentStatusCo
     selected_ids = list(dict.fromkeys(item for item in request_ids if item))
     if not selected_ids:
         return _SubagentStatusCounts(0, 0, 0, 0)
+    by_ids = getattr(getattr(agent, "subagents", None), "list_runs_by_ids_report", None)
     try:
         request_run_ids = {
             run_id
             for request_id in selected_ids
             for run_id in agent.subagent_run_ids_for_request(request_id)
         }
-        tasks = agent.subagents.list_runs()
-    except Exception:
+        # 已由请求索引选出精确 id；只回读这些 canonical run，不为状态轮询深拷贝全部历史。
+        if callable(by_ids):
+            report = by_ids(sorted(request_run_ids))
+            if report.load_errors:
+                raise DataCorruptionError("子代理状态投影不可用")
+            tasks = report.runs
+        else:
+            tasks = agent.subagents.list_runs()
+    except Exception as error:
+        if callable(by_ids):
+            raise DataCorruptionError("子代理状态投影不可用") from error
         return _SubagentStatusCounts(0, 0, 0, 0)
     from ..conversation.agent_activity import subagent_display_label
 
