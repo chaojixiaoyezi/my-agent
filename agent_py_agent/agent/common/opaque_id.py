@@ -73,8 +73,8 @@ def validate_opaque_id(value: Any, *, kind: str) -> str:
             "must be an opaque identifier (letters/digits/underscore/hyphen only; "
             "no slashes, backslashes, dot segments, whitespace or control characters)",
         )
-    if _looks_like_absolute_path(value):
-        raise OpaqueIdError(kind, "must not look like an absolute path")
+    # 全串白名单已经排除 POSIX/Windows 路径所需的 /、反斜杠与冒号；
+    # 高频合法 ID 不再重复访问解释器的共享正则缓存。
     return value
 
 
@@ -93,10 +93,6 @@ def validate_path_segment(value: Any, *, kind: str) -> str:
     者一眼看到这是受控路径段而不是任意字符串。
     """
     return validate_opaque_id(value, kind=kind)
-
-
-def _looks_like_absolute_path(value: str) -> bool:
-    return value.startswith("/") or bool(re.match(r"^[A-Za-z]:[\\/]", value))
 
 
 __all__ = [

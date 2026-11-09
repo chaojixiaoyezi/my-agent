@@ -15,7 +15,11 @@ from agent_py_agent.agent.common.id_generator import (
     UnknownIdKindError,
     new_id,
 )
-from agent_py_agent.agent.common.opaque_id import validate_opaque_id
+from agent_py_agent.agent.common.opaque_id import (
+    OpaqueIdError,
+    validate_opaque_id,
+    validate_path_segment,
+)
 
 # B.1 七类必须齐全，缺一类就是回归。
 B1_KINDS = (
@@ -82,3 +86,15 @@ def test_run_id_prefix_unchanged():
 def test_attempt_id_prefix_unchanged():
     assert ID_KIND_PREFIXES["attempt_id"] == "attempt"
     assert new_id("attempt_id").startswith("attempt-")
+
+
+@pytest.mark.parametrize("value", ["/tmp/file", r"C:\home", "Z:/home", r"\\host\share", "../task", "thread/other",
+                                   "thread\n", "a：b", "-run", "x" * 129])
+def test_opaque_path_segments_reject_path_shapes_on_every_platform(value):
+    with pytest.raises(OpaqueIdError):
+        validate_path_segment(value, kind="thread_id")
+
+
+def test_opaque_path_segments_keep_valid_historical_and_max_length_ids():
+    for value in ("t", "thread-aB_1", "x" * 128):
+        assert validate_path_segment(value, kind="thread_id") is value
