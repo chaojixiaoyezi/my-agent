@@ -5,6 +5,7 @@ import math
 import os
 import sqlite3
 import time
+from collections import OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -88,6 +89,80 @@ _FIXED = ('data/local_store.sqlite3', 'data/local_store/local.db', 'local_store/
 _WORKSPACES = ('workspace', 'runtime', 'workspaces')
 
 
+# 热提示只保留有限owner；淘汰不丢责任，冷目录发现和库内job仍是恢复来源。
+_FTS_HINT_OWNER_MAX_COUNT = 64
+# 同owner热路径的提示数量上限；不持有Store、连接、正文或授权callback。
+_FTS_HINT_STORE_MAX_COUNT = 8
+# 拒绝把异常长配置路径变成常驻提示；不影响原Store路径合同。
+_FTS_HINT_PATH_MAX_CHARS = 4096
+_HOT_HINTS = (os.getpid(), Lock(), OrderedDict())
+
+
+def _hot_hint_state():
+    global _HOT_HINTS
+    state = _HOT_HINTS
+    if state[0] != os.getpid():
+        # fork只继承字符串建议，不借父进程锁或把旧建议当当前活跃来源。
+        state = (os.getpid(), Lock(), OrderedDict())
+        _HOT_HINTS = state
+    return state
+
+
+def note_active_store(db_path):
+    """纯进程提示；仅原规范路径，不检查文件、不打开SQLite、不授权维护。"""
+    from .maintenance import _FTS_BATCH_LIMITS
+
+    if _FTS_BATCH_LIMITS.get() is not None:
+        return
+    raw = os.fspath(db_path)
+    if not isinstance(raw, str) or len(raw) > _FTS_HINT_PATH_MAX_CHARS:
+        return
+    path = Path(os.path.abspath(raw))
+    if len(str(path)) > _FTS_HINT_PATH_MAX_CHARS or '\x00' in raw:
+        return
+    relative = None
+    if (len(path.parts) > 6 and path.parts[-6:-3] == _WORKSPACES
+            and path.parts[-2:] == ('local_store', 'local.db')):
+        home = path.parents[5]
+        relative = path.relative_to(home).as_posix()
+    else:
+        for fixed in _FIXED:
+            parts = Path(fixed).parts
+            if path.parts[-len(parts):] == parts and len(path.parts) > len(parts):
+                relative, home = fixed, path.parents[len(parts) - 1]
+                break
+    if relative is None:
+        return
+    _, lock, owners = _hot_hint_state()
+    with lock:
+        stores = owners.get(str(home))
+        if stores is None:
+            stores = OrderedDict()
+            owners[str(home)] = stores
+        stores[relative] = None
+        stores.move_to_end(relative)
+        owners.move_to_end(str(home))
+        while len(stores) > _FTS_HINT_STORE_MAX_COUNT:
+            stores.popitem(last=False)
+        while len(owners) > _FTS_HINT_OWNER_MAX_COUNT:
+            owners.popitem(last=False)
+
+
+def _take_active_store(home, pending):
+    _, lock, owners = _hot_hint_state()
+    key = os.path.abspath(os.fspath(home))
+    with lock:
+        stores = owners.get(key)
+        if stores is None:
+            return None
+        while stores:
+            relative, _ = stores.popitem(last=True)
+            if relative not in pending:
+                return relative
+        owners.pop(key, None)
+    return None
+
+
 def next_upgrade_at(home: Path, previous: dict, now: float) -> float | None:
     """只做固定数量路径事实检查，不打开数据库或枚举workspace。"""
     from ..user_space.owner_maintenance import _local_store_candidate_exists, _real_owner_directory
@@ -104,7 +179,7 @@ def next_upgrade_at(home: Path, previous: dict, now: float) -> float | None:
     return max(float(due), 0.0)
 
 
-def _candidate(home, cursor):
+def _candidate(home, cursor, *, selected_only=False):
     """最多核三个固定库和一个目录项；游标仅负责发现，job仍在原库内。"""
     from ..user_space.owner_maintenance import _local_store_candidate_exists
 
@@ -122,6 +197,8 @@ def _candidate(home, cursor):
         if _local_store_candidate_exists(home, path, include_event_files=False):
             return path
         cursor.pop('selected', None)
+    if selected_only:
+        return None
     position = cursor.get('fixed', 0)
     if type(position) is not int or not 0 <= position <= len(_FIXED):
         raise ValueError('invalid FTS maintenance position')
@@ -184,6 +261,9 @@ def _advance_upgrade_slice(home, previous, now, *, commit=None, deadline=None, r
     discover = cursor.get('discover_next', True)
     if type(discover) is not bool:
         raise ValueError('invalid FTS maintenance discovery turn')
+    hot_next = cursor.get('hot_next', True)
+    if type(hot_next) is not bool:
+        raise ValueError('invalid FTS hot discovery turn')
     cursor.pop('selected', None)
     if resume_only and not pending:
         return None
@@ -191,7 +271,16 @@ def _advance_upgrade_slice(home, previous, now, *, commit=None, deadline=None, r
         path = _candidate(home, {'selected': pending.pop(0)})
         cursor['discover_next'] = True
     else:
-        path = _candidate(home, cursor)
+        try:
+            hinted = _take_active_store(home, pending) if hot_next and len(pending) < 8 else None
+        except Exception:  # noqa: BLE001 可丢提示失败只回到原冷发现，不吞扫描或原提交异常。
+            hinted = None
+        if hinted is not None:
+            path = _candidate(home, {'selected': hinted}, selected_only=True)
+            cursor['hot_next'] = False
+        else:
+            path = _candidate(home, cursor)
+            cursor['hot_next'] = True
         cursor['discover_next'] = False
     cursor['pending'] = pending
     report = {'cursor': cursor, 'next_at': now + FTS_UPGRADE_INTERVAL_SECONDS,

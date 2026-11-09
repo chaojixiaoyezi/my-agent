@@ -170,6 +170,11 @@ class LocalStoreSearchMixin:
         title: str,
         content: str,
     ) -> None:
+        try:
+            from .fts_upgrade import note_active_store
+            note_active_store(self.db_path)
+        except Exception:  # noqa: BLE001 只隔离可丢提示，原SQL和写入异常仍原样传播。
+            pass
         conn.execute("DELETE FROM records_fts WHERE id = ?", (record_id,))
         conn.execute(
             "INSERT INTO records_fts(id, title, content) VALUES (?, ?, ?)",
@@ -201,6 +206,11 @@ class LocalStoreSearchMixin:
         if rowid is not None and fts_rowid_aligned(conn):
             conn.execute("DELETE FROM records_fts WHERE rowid = ?", (rowid,))
         else:
+            try:
+                from .fts_upgrade import note_active_store
+                note_active_store(self.db_path)
+            except Exception:  # noqa: BLE001 只隔离提示，不吞删除和原事务异常。
+                pass
             conn.execute("DELETE FROM records_fts WHERE id = ?", (record_id,))
 
     def _safe_search_fts(

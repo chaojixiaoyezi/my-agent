@@ -315,3 +315,156 @@ def test_current_receipt_also_discharges_manifest_delta_and_map(tmp_path):
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='maintenance_fts_retired'").fetchone() is None
         for table in ('maintenance_fts_docs', 'maintenance_fts_delta', 'maintenance_fts_retired_map'):
             assert conn.execute(f'SELECT 1 FROM {table} LIMIT 1').fetchone() is None
+
+
+def _workspace_legacy(home, name):
+    path = home.owner_home_dir / 'workspace' / 'runtime' / 'workspaces' / name / 'local_store' / 'local.db'
+    store = LocalStore(path)
+    item = store.upsert_record(source_type='memory', source_id='hot', title='hot', content='hothintneedle')
+    with store._connection() as conn:
+        conn.execute('UPDATE records SET rowid=rowid+100')
+        conn.execute("DELETE FROM metadata WHERE key IN ('records_fts_rowid_aligned','records_fts_rebuild_pending')")
+        conn.commit()
+    return store, item
+
+
+def test_recent_legacy_store_precedes_cold_workspace_discovery(tmp_path, monkeypatch):
+    home = ensure_my_agent_home(tmp_path)
+    cold, _ = _workspace_legacy(home, 'cold-first')
+    hot, item = _workspace_legacy(home, 'recent-hot')
+    # 原目录页可晚到任意位置；真实候选及SQLite仍由正式入口复核。
+    pages = []
+    def cold_page(*args, **kwargs):
+        pages.append(True)
+        return ['cold-first'], {}, False
+    monkeypatch.setattr(upgrade, 'directory_page', cold_page)
+    LocalStore(hot.db_path)
+    with upgrade.fts_upgrade_tick_scope(deadline=time.monotonic() + 20, max_steps=1):
+        report = upgrade.advance_upgrade(home.owner_home_dir, {}, 1000)
+    assert report['store'] == hot.db_path.relative_to(home.owner_home_dir).as_posix()
+    assert pages == [] and report['status'] in {'partial', 'complete'}
+    assert {row.id for row in hot.search('hothintneedle')} == {item.id}
+    # 提示不改变60秒节流，不让新消息把下一拍变成热自旋。
+    assert upgrade.advance_upgrade(home.owner_home_dir, {'local_store_fts_upgrade': report}, 1001) is None
+
+
+def test_hot_hint_turn_keeps_cold_discovery_and_original_shared_budget(tmp_path, monkeypatch):
+    home = ensure_my_agent_home(tmp_path)
+    cold, _ = _workspace_legacy(home, 'cold')
+    hot, _ = _workspace_legacy(home, 'hot')
+    cold.rebuild_fts()
+    hot.rebuild_fts()
+    pages = []
+    def cold_page(*args, **kwargs):
+        pages.append(True)
+        return ['cold'], {}, False
+    monkeypatch.setattr(upgrade, 'directory_page', cold_page)
+    previous = {}
+    selected = []
+    for turn in range(4):
+        upgrade.note_active_store(hot.db_path)
+        with upgrade.fts_upgrade_tick_scope(deadline=time.monotonic() + 20, max_steps=1) as budget:
+            report = upgrade.advance_upgrade(home.owner_home_dir, previous, 1000 + 61 * turn)
+        assert budget.remaining_steps == 0
+        selected.append(report['store'])
+        previous = {'local_store_fts_upgrade': report}
+    def relative(store):
+        return store.db_path.relative_to(home.owner_home_dir).as_posix()
+    assert selected == [relative(hot), relative(cold), relative(hot), relative(cold)]
+    assert len(pages) == 2
+
+
+def test_hot_hint_cannot_select_other_owner_or_bypass_revoked_commit(tmp_path, monkeypatch):
+    first = ensure_my_agent_home(tmp_path / 'first')
+    other = ensure_my_agent_home(tmp_path / 'other')
+    local, _ = _workspace_legacy(first, 'first')
+    foreign, _ = _workspace_legacy(other, 'foreign')
+    LocalStore(foreign.db_path)
+    LocalStore(local.db_path)
+    from agent_py_agent.agent.io import sqlite_scope
+    original_connect = sqlite_scope.connect_projection_sqlite
+    opened = []
+    def connect(path, *, read_only=False, timeout=5):
+        opened.append(path)
+        return original_connect(path, read_only=read_only, timeout=timeout)
+    monkeypatch.setattr(sqlite_scope, 'connect_projection_sqlite', connect)
+    original = PermissionError('maintenance source revoked')
+    def revoked(operation):
+        raise original
+    with pytest.raises(PermissionError) as caught:
+        upgrade.advance_upgrade(first.owner_home_dir, {}, 1000, commit=revoked)
+    assert caught.value is original
+    assert opened and all(path == local.db_path for path in opened)
+    for store in (local, foreign):
+        with store._connection() as conn:
+            assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='maintenance_fts_job'").fetchone() is None
+
+
+def test_hot_hint_source_symlink_is_not_opened(tmp_path, monkeypatch):
+    home = ensure_my_agent_home(tmp_path / 'owner')
+    store, _ = _workspace_legacy(home, 'hot')
+    LocalStore(store.db_path)
+    original = store.db_path.with_name('original.db')
+    store.db_path.rename(original)
+    store.db_path.symlink_to(original)
+    def forbidden(*args, **kwargs):
+        pytest.fail('revoked hinted path must not open SQLite')
+    monkeypatch.setattr(LocalStore, '_init_schema', forbidden)
+    report = upgrade.advance_upgrade(home.owner_home_dir, {}, 1000)
+    assert report['scope'] == 'discovery_page' and 'store' not in report
+
+
+def test_hot_hint_capacity_pid_boundary_and_noncanonical_paths(tmp_path, monkeypatch):
+    from collections import OrderedDict
+    from threading import Lock
+
+    owners = OrderedDict()
+    monkeypatch.setattr(upgrade, '_HOT_HINTS', (os.getpid(), Lock(), owners))
+    for owner in range(70):
+        for workspace in range(10):
+            upgrade.note_active_store(tmp_path / f'owner-{owner}' / 'workspace' / 'runtime' /
+                                      'workspaces' / str(workspace) / 'local_store' / 'local.db')
+    assert len(owners) == upgrade._FTS_HINT_OWNER_MAX_COUNT
+    assert all(len(stores) == upgrade._FTS_HINT_STORE_MAX_COUNT for stores in owners.values())
+    before = tuple(owners)
+    upgrade.note_active_store(tmp_path / 'external' / 'custom.db')
+    upgrade.note_active_store('x' * (upgrade._FTS_HINT_PATH_MAX_CHARS + 1))
+    assert tuple(owners) == before
+    class ParentLock:
+        def __enter__(self):
+            pytest.fail('child must never enter inherited hint lock')
+    monkeypatch.setattr(upgrade, '_HOT_HINTS', (os.getpid() - 1, ParentLock(), owners))
+    upgrade.note_active_store(tmp_path / 'child' / 'data' / 'local_store' / 'local.db')
+    assert upgrade._HOT_HINTS[0] == os.getpid() and upgrade._HOT_HINTS[2] is not owners
+    assert tuple(owners) == before
+
+
+def test_hint_failure_does_not_change_constructor_or_legacy_write(tmp_path, monkeypatch):
+    home = ensure_my_agent_home(tmp_path)
+    def unavailable(path):
+        raise RuntimeError('optional hint cache failed')
+    monkeypatch.setattr(upgrade, 'note_active_store', unavailable)
+    store, item = _workspace_legacy(home, 'hot')
+    LocalStore(store.db_path)
+    updated = store.upsert_record(source_type='memory', source_id='hot', title='changed', content='changedneedle')
+    assert updated.id == item.id and store.get_record(item.id).content == 'changedneedle'
+    assert {row.id for row in store.search('changedneedle')} == {item.id}
+
+
+def test_legacy_write_refreshes_only_hint_without_extra_sql_queries(tmp_path, monkeypatch):
+    home = ensure_my_agent_home(tmp_path)
+    store, item = _workspace_legacy(home, 'hot')
+    seen, sql = [], []
+    def note(path):
+        seen.append(path)
+    monkeypatch.setattr(upgrade, 'note_active_store', note)
+    with store._connection() as conn:
+        # 先完成SQLite原虚表连接的config懒加载；只计本次替换及提示新增的语句。
+        conn.execute('SELECT 1 FROM records_fts LIMIT 0')
+        conn.set_trace_callback(sql.append)
+        store._replace_fts_row(conn, item.id, 'changed', 'newneedle')
+        conn.commit()
+        conn.set_trace_callback(None)
+    assert seen == [store.db_path]
+    assert [text for text in sql if text.startswith(('SELECT', 'PRAGMA'))] == []
+    assert {row.id for row in store.search('newneedle')} == {item.id}

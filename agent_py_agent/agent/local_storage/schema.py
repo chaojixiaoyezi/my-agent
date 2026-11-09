@@ -408,7 +408,15 @@ class LocalStoreSchemaMixin:
     # 函数用途: 恢复三个独立事实：配置开启、索引可读、正文待回填。
     def _restore_fts_state(self, conn: sqlite3.Connection) -> bool:
         self._fts_available = self.enable_fts and _existing_fts_available(conn)
-        self._fts_needs_rebuild = _read_local_state(conn, _FTS_REBUILD_PENDING_KEY) == "true"
+        states = dict(conn.execute("SELECT key,value FROM metadata WHERE key IN (?, ?)",
+                                   (_FTS_REBUILD_PENDING_KEY, FTS_ROWID_ALIGNED_KEY)).fetchall())
+        self._fts_needs_rebuild = states.get(_FTS_REBUILD_PENDING_KEY) == "true"
+        if self._fts_available and (self._fts_needs_rebuild or states.get(FTS_ROWID_ALIGNED_KEY) != "true"):
+            try:
+                from .fts_upgrade import note_active_store
+                note_active_store(self.db_path)
+            except Exception:  # noqa: BLE001 可丢提示不影响原构造和业务写入。
+                pass
         return not self.enable_fts or self._fts_available
 
     # LLM: 只能与实际回填在同一事务内清标记，失败/中断 rollback 后重开仍待回填。
