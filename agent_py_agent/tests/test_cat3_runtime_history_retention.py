@@ -72,6 +72,44 @@ def _request(home, *, now=200 * 86400, items=None, deadline=None, cursor=None, l
                               legal_hold, commit is not None, None, commit)
 
 
+def _finish_physical_retention(request, receipt):
+    """逻辑裁剪已完，按正式游标有限推进物理责任；仅接受自然partial，不重试busy或SQL异常。"""
+    from agent_py_agent.agent.memory_store.retention_scan_budget import RETENTION_SCAN_SLICE_ENTRIES
+
+    assert receipt["cursor"] == {"tool_operations": 0, "runtime_events": 0, "llm_call_records": ""}
+    for _ in range(32):
+        if receipt["complete"]:
+            return receipt
+        assert receipt.get("deferred_reason") in {"budget_exhausted", "vacuum_pending"}, receipt
+        # 每拍仍由原入口封顶25ms，条数不因测试续作而扩大；只有正规续点跨拍传递。
+        receipt = retention.maintain_runtime_history_lane(replace(request, cursor=receipt["cursor"]))
+        maximum = request.budget.max_items if request.budget.max_items is not None else RETENTION_SCAN_SLICE_ENTRIES
+        assert receipt["items"] <= maximum
+        assert receipt["slimmed"] == receipt["deleted_events"] == receipt["deleted_llm_records"] == 0
+    pytest.fail(f"物理保留责任在有界续作后仍未完成：{receipt}")
+
+
+@pytest.fixture(params=[False, True], ids=["natural_budget", "physical_budget_expired"])
+def expire_first_vacuum(request, monkeypatch):
+    """只过期传给原物理回收的这一片预算；复现逻辑已提交而物理责任尚未完成，不动全局时钟。"""
+    armed = [bool(request.param)]
+    original = retention._runtime_history_vacuum
+
+    def vacuum(repo, path, lane_request, budget, *, receipt=None):
+        if armed[0]:
+            armed[0] = False
+            budget = replace(budget, deadline=time.monotonic() - 1)
+        return original(repo, path, lane_request, budget, receipt=receipt)
+
+    if request.param:
+        monkeypatch.setattr(retention, "_runtime_history_vacuum", vacuum)
+
+    def arm():
+        armed[0] = bool(request.param)
+
+    return arm
+
+
 @pytest.mark.parametrize("status", ["SUCCEEDED", "FAILED", "CANCELLED"])
 def test_tool_slimming_preserves_state_timestamp_and_exact_original_digest(database, status):
     _, _, conn = database
@@ -388,7 +426,7 @@ def test_lane_missing_database_is_complete_without_creating_owner(tmp_path):
     assert not home.owner_home_dir.exists()
 
 
-def test_lane_uses_v2_policy_separate_cutoffs_and_owner_under_write_gate(database):
+def test_lane_uses_v2_policy_separate_cutoffs_and_owner_under_write_gate(database, expire_first_vacuum):
     home, _, conn = database
     now = 200 * 86400
     _run(conn)
@@ -406,11 +444,14 @@ def test_lane_uses_v2_policy_separate_cutoffs_and_owner_under_write_gate(databas
         commits.append(True)
         return operation()
 
-    receipt = retention.maintain_runtime_history_lane(_request(home, now=now, commit=commit))
+    request = _request(home, now=now, commit=commit)
+    receipt = retention.maintain_runtime_history_lane(request)
     assert len(commits) == 3
     assert receipt["slimmed"] == receipt["deleted_events"] == receipt["deleted_llm_records"] == 1
-    assert receipt["items"] == 5 and receipt["bytes"] > 0 and receipt["complete"]
+    assert receipt["items"] == 5 and receipt["bytes"] > 0
     assert receipt["cursor"] == {"tool_operations": 0, "runtime_events": 0, "llm_call_records": ""}
+    finished = _finish_physical_retention(request, receipt)
+    assert finished["complete"] and finished["cursor"] == receipt["cursor"]
     assert {row[0] for row in conn.execute("SELECT record_id FROM llm_call_records")} == {"recent-llm", "other-owner"}
 
 
@@ -714,7 +755,7 @@ def test_recent_boundary_sql_error_preserves_exception_and_transaction(database,
 
 
 @pytest.mark.skipif(os.name != "posix", reason="需要 POSIX 原生 FD 目录")
-def test_repeated_lane_success_and_sql_error_release_all_descriptors(database, record_testsuite_property):
+def test_repeated_lane_success_and_sql_error_release_all_descriptors(database, record_testsuite_property, expire_first_vacuum):
     home, _, conn = database
     _run(conn)
     _tool(conn)
@@ -724,9 +765,12 @@ def test_repeated_lane_success_and_sql_error_release_all_descriptors(database, r
     conn.commit()
 
     def exercise():
-        result = retention.maintain_runtime_history_lane(_request(home, items=8))
-        assert result["items"] <= 8 and result["complete"]
+        expire_first_vacuum()
+        request = _request(home, items=8)
+        result = retention.maintain_runtime_history_lane(request)
+        assert result["items"] <= 8
         assert result["cursor"]["tool_operations"] == result["cursor"]["runtime_events"] == 0
+        assert _finish_physical_retention(request, result)["complete"]
         conn.execute("CREATE TRIGGER reject_lane_cursor BEFORE INSERT ON metadata "
                      "WHEN NEW.key LIKE 'history_retention_cursor:%' "
                      "BEGIN SELECT RAISE(ABORT,'lane cursor rejected'); END")
