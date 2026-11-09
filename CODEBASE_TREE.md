@@ -631,6 +631,9 @@ agent_py_agent/
 
 ### R8 历史审计补修（2026-11-08）
 
+- `model_request_capabilities.py` 是出站思考及工具选择的能力来源；关闭、强制选择与不兼容结果均有线级回归。
+- `R8_OPERATION_CONFIRMATION_DRAFT.md` 记录未知副作用继续硬停与可证明未来收口的边界；未实现自动确认。
+
 - `docs/tasks/R8_AUDIT_FOLLOWUPS.md`：14项功能、历史失败、最终验收与交付的统一状态入口。
 - `conversation/immutable_node_store.py`、`checkpoint_offset_store.py`、`task_history.py`：历史节点共享与回收、冷读定位和任务分页。
 - `conversation/usage_sources.py`、`usage_source_maintenance.py`、`user_space/directory_paging.py`：来源时间索引与可续作后台维护，读口不迁移。
@@ -1060,6 +1063,12 @@ agent_py_agent/
 ### 2026-11-08 R8 审计补修文件
 
 ```text
+|-- agent_py_agent/agent/backends/model_request_capabilities.py # 明确模型必需思考与原生工具选择能力。
+|-- agent_py_agent/tests/test_required_thinking_capability.py # 三种协议实际发送及不兼容请求本地拒绝。
+|-- agent_py_agent/tests/test_r8_background_transcript_bytes.py # 多线程展示字节预算、归档重读与慢读者交错。
+|-- agent_py_agent/tests/test_r8_model_call_exact_lookup.py # 模型准确调用ID的定值查询、保留/淘汰与错误合同。
+|-- agent_py_agent/tests/test_r8_model_worker_context_release.py # 模型线程退出证明与请求Context释放。
+|-- docs/design/R8_OPERATION_CONFIRMATION_DRAFT.md # 等待确证退出的操作合同草案；旧未知不能补签。
 |-- agent_py_agent/agent/agent_core/orchestration/background/log_retention.py # 派工日志随实际进程退出留存；未知执行体和未收口业务证据永不按年龄删除。
 |-- agent_py_agent/agent/conversation/checkpoint_offset_store.py # 检查点物理行地址的可重建投影；只封存已完成严格扫描的固定源水位。
 |-- agent_py_agent/agent/conversation/claim_activity_projection.py # 只读分片核对当前 claim 目录；未完成或变化中的扫描不能签发空闲事实。
