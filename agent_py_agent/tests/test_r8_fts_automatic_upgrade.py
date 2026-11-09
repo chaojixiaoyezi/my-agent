@@ -404,3 +404,16 @@ def test_busy_projection_slice_does_not_wait_for_business_sqlite_timeout(tmp_pat
     state = json.loads((home.owner_data_dir / 'maintenance.json').read_text())
     assert state['local_store_fts_upgrade']['status'] == 'unknown'
     assert not _aligned(store)
+
+
+def test_projection_slice_does_not_modify_cached_business_connection_timeout(tmp_path):
+    from agent_py_agent.agent.io.sqlite_scope import sqlite_connection_scope
+    from agent_py_agent.agent.local_storage.fts_upgrade import advance_upgrade
+
+    home, store, _ = _legacy(tmp_path)
+    with sqlite_connection_scope(True):
+        with store._connection() as conn:
+            assert conn.execute('PRAGMA busy_timeout').fetchone()[0] == 30_000
+        advance_upgrade(home.owner_home_dir, {}, 1000)
+        with store._connection() as conn:
+            assert conn.execute('PRAGMA busy_timeout').fetchone()[0] == 30_000

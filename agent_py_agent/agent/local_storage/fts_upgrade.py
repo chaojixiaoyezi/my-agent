@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from ..common.global_write_commit import global_write_commit_scope
+from ..io.sqlite_scope import sqlite_connection_scope
 from ..user_space.directory_paging import directory_page
 
 # 与原owner维护轮询同一节流；不建立线程、队列或另一个重建checkpoint。
@@ -72,8 +73,9 @@ def _candidate(home, cursor):
     return None
 
 
+@sqlite_connection_scope(enabled=False)
 def advance_upgrade(home, previous, now, *, commit=None):
-    """一拍只推进一个原job；空间/锁延期保留旧索引，不影响删除维护的授权与公平性。"""
+    """一拍一个原job；独立短连接不借用或改动业务缓存连接的等待策略。"""
     from contextlib import nullcontext
     from copy import deepcopy
 

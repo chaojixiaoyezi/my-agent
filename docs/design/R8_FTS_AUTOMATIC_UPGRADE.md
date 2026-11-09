@@ -24,7 +24,8 @@ SQLite 原 `maintenance_fts_job`、变化捕获器、验证、原子发表及退
 和一个 workspace 原生目录项，持久目录 cookie 随原 maintenance.json 保存。
 必要投影维护不受 TTL maintenance_enabled、间隔 0、legal_hold 禁用；删除与 vacuum 继续守原策略。
 原 Gateway 提示只合并既有维护时刻，不增加线程或队列。沿原 60 秒节流，每拍一个库，
-128 项、8MiB 和 25ms 协作预算；连接锁等待在该上下文收紧为零，普通业务连接仍为 30 秒。
+128 项、8MiB 和 25ms 协作预算；连接锁等待在该上下文收紧为零，并沿原 sqlite_connection_scope(False) 使用独立短连接，
+不复用或改动父业务缓存连接的 busy_timeout；普通业务连接仍为 30 秒。
 原生目录枚举跨冷进程续点；便携枚举沿已有受控实现，本片未证明 Windows 大规模公平性。
 
 原空间检查保留 1.2 倍门槛，估计改用整库页数安全上界，避免 dbstat 遍历全部索引页。
