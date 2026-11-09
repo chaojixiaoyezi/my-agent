@@ -7,3 +7,5 @@
 POSIX 复用公共 directory_page 原生目录 cookie，每步关闭目录 FD。Windows 使用最多 8 个 DirectoryCursor 流，SQLite 按固定代号排队，进行中流不会被容量淘汰；完成后释放槽。失联流 60 秒后释放且清掉其未完成投影，下次重新核对。等待者每拍仍受原扫描预算，不能将等待当空。进程丢失不是持久化权威丢失，只会重新 unknown 至核对完成。
 
 运行时回归覆盖原实现 6×300 交错永久 unknown 的红测、原生 6-store 和便携 12-store 收敛、Event 控制原子换叶、坏行/目录删除重建，以及固定页缓存/FD 上限。未启动真实 Gateway 或操作真实 owner 数据。
+
+Linux 同时间刻度内目录增删可能保留相同 mtime/ctime。对最多 16 项的小目录，每拍在读取前后核名字及叶 inode/size/时间摘要，不能凭目录戳复用旧 idle；canonical 原子换叶因此会被发现。两个探针最多各读 17 项，并从原 128 项扫描预算扣减，25ms 超时仍返回 unknown。大目录超过小探针窗口后继续原生 cookie 分片，不生成全量名字或 busy 内存集合。

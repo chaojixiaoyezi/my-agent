@@ -18,15 +18,26 @@ def test_six_large_stores_round_robin_converge(tmp_path, monkeypatch, portable, 
             write(store.storage.background_claims_dir / f'{item}.json',
                   {'status': 'finished', 'thread_id': thread.thread_id})
         stores.append((store, thread.thread_id))
-    reads = []
+    reads, work = [], []
     original = view._read_claim_report
     monkeypatch.setattr(view, '_read_claim_report', lambda path: (reads.append(path), original(path))[1])
+    probe, page = view._small_proof, view._page
+    def observed_probe(*args):
+        result = probe(*args)
+        work.append(result[1])
+        return result
+    def observed_page(*args):
+        work.append(1)
+        return page(*args)
+    monkeypatch.setattr(view, '_small_proof', observed_probe)
+    monkeypatch.setattr(view, '_page', observed_page)
     complete = set()
     for _ in range(30):
         for number, (store, thread_id) in enumerate(stores):
             reads.clear()
+            work.clear()
             state = view.claim_activity_state(store.storage, thread_id)
-            assert len(reads) <= 128
+            assert len(reads) <= 128 and sum(work) <= 128
             if state == '':
                 complete.add(number)
         if len(complete) == len(stores):
@@ -188,3 +199,25 @@ def test_fork_waits_for_other_thread_sql_and_keeps_parent_cache(tmp_path, monkey
     monkeypatch.setattr(view, '_cleanup', original)
     assert parent_directory.is_dir()
     assert view.claim_activity_state(store.storage, 'thread') == ''
+
+
+@pytest.mark.parametrize('change', ['append', 'replace', 'delete_bad'])
+def test_small_directory_same_stat_never_reuses_old_activity(tmp_path, monkeypatch, change):
+    store = ConversationStore(tmp_path / change)
+    directory = store.storage.background_claims_dir
+    path = directory / 'old.json'
+    if change == 'delete_bad':
+        path.write_text('{broken', encoding='utf-8')
+    else:
+        write(path, {'status': 'finished', 'thread_id': 'thread'})
+    signature = view._signature(directory)
+    monkeypatch.setattr(view, '_signature', lambda _path: signature)
+    assert view.claim_activity_state(store.storage, 'thread') == ('activity_unknown' if change == 'delete_bad' else '')
+    if change == 'delete_bad':
+        path.unlink()
+        expected = ''
+    else:
+        write(path if change == 'replace' else directory / 'new.json',
+              {'status': 'running', 'thread_id': 'thread'})
+        expected = 'foreground_active'
+    assert view.claim_activity_state(store.storage, 'thread') == expected

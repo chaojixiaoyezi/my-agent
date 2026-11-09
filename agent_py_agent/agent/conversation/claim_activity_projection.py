@@ -1,13 +1,16 @@
 """临时磁盘投影保留分片续点；只有稳定且完整的 canonical 核对才能证明空闲。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
+import stat
 import tempfile
 import threading
 import time
 
+from ..common.nofollow_fs import open_directory_beneath
 from ..io.bounded_directory import DirectoryCursor
 from ..user_space.directory_paging import directory_page
 from .store_claims import _read_claim_report
@@ -24,6 +27,34 @@ def _signature(path):
         return stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns
     except FileNotFoundError:
         return None
+
+
+def _small_proof(directory, deadline):
+    """最多17项区分小目录；原子换叶的 inode 使同时间刻度的变更也可见。"""
+    descriptor = None
+    try:
+        try:
+            info = directory.lstat()
+        except FileNotFoundError:
+            return hashlib.sha256(b'[]').hexdigest(), 0
+        if not stat.S_ISDIR(info.st_mode):
+            raise ValueError('claim_directory_not_real')
+        if os.name != 'nt':
+            descriptor = open_directory_beneath(directory.parent, (directory.name,), require_dir_fd=True)
+        rows = []
+        with os.scandir(directory if descriptor is None else descriptor) as entries:
+            for entry in entries:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('claim_probe_budget')
+                if len(rows) == 16:
+                    return None, 17
+                info = entry.stat(follow_symlinks=False)
+                rows.append((entry.name, info.st_dev, info.st_ino, info.st_size,
+                             info.st_mtime_ns, info.st_ctime_ns, info.st_mode))
+        return hashlib.sha256(json.dumps(sorted(rows)).encode()).hexdigest(), len(rows)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _before_fork():
@@ -130,13 +161,16 @@ def claim_activity_state(storage, thread_id):
             conn = _connection()
             with conn:
                 _cleanup(conn)
+                deadline = time.monotonic() + .025
+                proof, probe_items = _small_proof(directory, deadline)
                 signature = json.dumps(_signature(directory))
                 key = str(directory.absolute())
                 row = conn.execute('SELECT signature,generation,cursor,complete,unknown,checked '
                                    'FROM scans WHERE store=?', (key,)).fetchone()
                 if row is None:
                     generation, cursor, complete, unknown, checked = time.monotonic_ns(), {}, False, False, 0
-                elif (row[0] != signature or row[3] and time.monotonic() - row[5] >= 5
+                elif (row[0] != signature or json.loads(row[2]).get('_small_proof') != proof
+                      or row[3] and time.monotonic() - row[5] >= 5
                       or key in _PORTABLE and time.monotonic() - _PORTABLE[key][1] > 60):
                     conn.execute('INSERT OR IGNORE INTO retired VALUES (?,?)', (key, row[1]))
                     portable = _PORTABLE.pop(key, None)
@@ -148,10 +182,10 @@ def claim_activity_state(storage, thread_id):
                     cursor = json.loads(encoded)
                 conn.execute('INSERT OR REPLACE INTO scans VALUES (?,?,?,?,?,?,?,?)',
                              (key, signature, generation, json.dumps(cursor), int(complete), int(unknown), checked, time.monotonic()))
-                deadline = time.monotonic() + .025
                 if not complete:
                     # 单项推进保证 canonical 读取也受时间预算约束；cookie 立即落入本事务。
-                    for _ in range(128):
+                    # 为前后小目录探针各预留至多17项，总目录项成本仍不超过128。
+                    for _ in range(128 - probe_items - 17):
                         names, cursor, complete = _page(conn, key, directory, cursor)
                         for name in names:
                             if not name.endswith('.json'):
@@ -173,9 +207,11 @@ def claim_activity_state(storage, thread_id):
                             break
                     if complete:
                         checked = time.monotonic()
+                cursor['_small_proof'] = proof
                 conn.execute('INSERT OR REPLACE INTO scans VALUES (?,?,?,?,?,?,?,?)',
                              (key, signature, generation, json.dumps(cursor), int(complete), int(unknown), checked, time.monotonic()))
-                if json.dumps(_signature(directory)) != signature:
+                after_proof, _ = _small_proof(directory, deadline)
+                if after_proof != proof or json.dumps(_signature(directory)) != signature:
                     return 'activity_unknown'
                 if conn.execute('SELECT 1 FROM busy WHERE store=? AND generation=? AND thread=?',
                                 (key, generation, thread_id)).fetchone():
