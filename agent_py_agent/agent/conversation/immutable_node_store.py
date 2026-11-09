@@ -87,12 +87,20 @@ class ImmutableNodeStore:
             mode = 'rw' if write else 'ro'
             conn = sqlite3.connect(self.path.absolute().as_uri() + '?mode=' + mode, uri=True,
                                    timeout=5, factory=sqlite_connection_factory())
-            conn.execute('PRAGMA busy_timeout=5000')
-            if write:
-                conn.execute('PRAGMA journal_mode=WAL')
-                conn.execute('PRAGMA synchronous=FULL')
-                conn.executescript(_SCHEMA)
-            return conn
+            try:
+                conn.execute('PRAGMA busy_timeout=5000')
+                if write:
+                    conn.execute('PRAGMA journal_mode=WAL')
+                    conn.execute('PRAGMA synchronous=FULL')
+                    conn.executescript(_SCHEMA)
+                return conn
+            except BaseException as primary:
+                try:
+                    conn.close()
+                except BaseException as cleanup:
+                    primary.sqlite_cleanup_error = cleanup
+                    primary.sqlite_unclosed_factory_connection = conn
+                raise
 
         with scoped_connection(self.path, read_only=not write, connect=connect) as conn:
             try:

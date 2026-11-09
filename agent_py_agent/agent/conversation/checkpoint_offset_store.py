@@ -51,14 +51,22 @@ class CheckpointOffsetStore:
             mode = 'rw' if write else 'ro'
             conn = sqlite3.connect(self.path.absolute().as_uri() + '?mode=' + mode, uri=True, timeout=5,
                                    factory=sqlite_connection_factory())
-            if write:
-                conn.execute('PRAGMA journal_mode=WAL')
-                conn.execute('PRAGMA synchronous=FULL')
-                conn.executescript('''CREATE TABLE IF NOT EXISTS offsets (
-                offset INTEGER PRIMARY KEY, identity TEXT NOT NULL, length INTEGER NOT NULL, digest BLOB NOT NULL);
-                CREATE INDEX IF NOT EXISTS offsets_identity ON offsets(identity,offset DESC);
-                CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);''')
-            return conn
+            try:
+                if write:
+                    conn.execute('PRAGMA journal_mode=WAL')
+                    conn.execute('PRAGMA synchronous=FULL')
+                    conn.executescript('''CREATE TABLE IF NOT EXISTS offsets (
+                        offset INTEGER PRIMARY KEY, identity TEXT NOT NULL, length INTEGER NOT NULL, digest BLOB NOT NULL);
+                        CREATE INDEX IF NOT EXISTS offsets_identity ON offsets(identity,offset DESC);
+                        CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);''')
+                return conn
+            except BaseException as primary:
+                try:
+                    conn.close()
+                except BaseException as cleanup:
+                    primary.sqlite_cleanup_error = cleanup
+                    primary.sqlite_unclosed_factory_connection = conn
+                raise
 
         with scoped_connection(self.path, read_only=not write, connect=connect) as conn:
             try:

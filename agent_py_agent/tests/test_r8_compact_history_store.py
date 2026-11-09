@@ -323,3 +323,90 @@ def test_unchanged_cold_projection_uses_only_read_only_connection(tmp_path, monk
     with scan.checkpoint_row_lookup(path) as lookup:
         assert lookup('one')['checkpoint_id'] == 'one'
     assert projection.path.stat().st_mtime_ns == before
+
+
+@pytest.mark.parametrize('kind', ['nodes', 'offsets'])
+def test_bad_database_initialization_closes_physical_connection_while_error_is_held(tmp_path, monkeypatch, kind):
+    import sqlite3
+
+    from agent_py_agent.agent.conversation.checkpoint_offset_store import CheckpointOffsetStore
+    from agent_py_agent.agent.runtime_db.recovery_guard import runtime_db_generation_guard
+
+    store = (ImmutableNodeStore(tmp_path, ('nodes',)) if kind == 'nodes'
+             else CheckpointOffsetStore(tmp_path / 'ledger.jsonl'))
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_bytes(b'not a sqlite database')
+    physical = []
+    original = sqlite3.connect
+
+    def connected(*args, **kwargs):
+        conn = original(*args, **kwargs)
+        physical.append(conn)
+        return conn
+
+    monkeypatch.setattr(sqlite3, 'connect', connected)
+    with pytest.raises(sqlite3.DatabaseError) as retained:
+        with store.connection(write=True):
+            pass
+    assert retained.value.__traceback__ is not None and physical
+    for conn in physical:
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            conn.execute('SELECT 1')
+    # 原异常与raw connection仍有强引用，物理关闭证明成立后 EX 才可取得。
+    with runtime_db_generation_guard(store.path, exclusive=True):
+        assert retained.value.__traceback__ is not None
+
+
+@pytest.mark.parametrize('kind', ['nodes', 'offsets'])
+def test_initialization_close_failure_retains_generation_until_creator_retires(tmp_path, monkeypatch, kind):
+    import sqlite3
+    from threading import Event, Thread
+
+    from agent_py_agent.agent.conversation import checkpoint_offset_store, immutable_node_store
+    from agent_py_agent.agent.runtime_db.recovery_guard import (
+        close_runtime_connection,
+        runtime_db_generation_guard,
+    )
+
+    class FirstCloseFails(sqlite3.Connection):
+        closes = 0
+
+        def close(self):
+            self.closes += 1
+            if self.closes == 1:
+                raise sqlite3.OperationalError('physical close deferred')
+            return super().close()
+
+    module = immutable_node_store if kind == 'nodes' else checkpoint_offset_store
+    monkeypatch.setattr(module, 'sqlite_connection_factory', lambda: FirstCloseFails)
+    store = (ImmutableNodeStore(tmp_path, ('nodes',)) if kind == 'nodes'
+             else checkpoint_offset_store.CheckpointOffsetStore(tmp_path / 'ledger.jsonl'))
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_bytes(b'not a sqlite database')
+    failed, release = Event(), Event()
+    retained = []
+
+    def creator():
+        try:
+            with store.connection(write=True):
+                raise AssertionError('bad initialization must fail')
+        except sqlite3.DatabaseError as error:
+            retained.append(error)
+            failed.set()
+            assert release.wait(10)
+            close_runtime_connection(error.sqlite_unclosed_factory_connection)
+
+    thread = Thread(target=creator)
+    thread.start()
+    assert failed.wait(10)
+    try:
+        assert isinstance(retained[0].sqlite_cleanup_error, sqlite3.OperationalError)
+        with pytest.raises(sqlite3.OperationalError):
+            with runtime_db_generation_guard(store.path, exclusive=True):
+                raise AssertionError('physical connection still holds original generation')
+    finally:
+        release.set()
+        thread.join(10)
+    assert not thread.is_alive()
+    with runtime_db_generation_guard(store.path, exclusive=True):
+        assert retained[0].__traceback__ is not None
