@@ -240,16 +240,32 @@ class GatewayProcess:
         self.log = (self.root / "gateway-process.log").open("ab")
         self.proc = subprocess.Popen(self._command(),
                                      cwd=self.root, env=env, stdout=self.log, stderr=self.log, start_new_session=True)
+        observation = {"probes": 0, "response_status": None, "transport_error": None}
         # LLM: A live PID alone is not readiness; only a successful status response ends startup.
         # 函数用途: Probe readiness while preserving early subprocess failure evidence.
         def ready():
             if self.proc.poll() is not None:
                 raise AssertionError((self.root / "gateway-process.log").read_text())
+            observation["probes"] += 1
             try:
-                return json_request(self.base_url, "/status", timeout=self.parameters["probe_seconds"])[0] == 200
-            except (OSError, http.client.HTTPException):
+                status, _ = json_request(self.base_url, "/status", timeout=self.parameters["probe_seconds"])
+                observation.update(response_status=status, transport_error=None)
+                return status == 200
+            except (OSError, http.client.HTTPException) as error:
+                observation.update(response_status=None, transport_error=(type(error).__name__, getattr(error, "errno", None)))
                 return False
-        wait_until(ready, self.parameters["startup_seconds"], self.parameters["poll_seconds"])
+        try:
+            wait_until(ready, self.parameters["startup_seconds"], self.parameters["poll_seconds"])
+        except AssertionError as error:
+            if self.proc.poll() is not None:
+                raise
+            # 只读夹具自己的最后 16 KiB，输出启动阶段和栈帧，不回显模型正文、配置或请求头。
+            with (self.root / "gateway-process.log").open("rb") as log:
+                log.seek(max(0, log.seek(0, os.SEEK_END) - 16 * 1024))
+                tail = log.read().decode(errors="replace").splitlines()
+            stages = [line.strip() for line in tail if line.lstrip().startswith(("[gateway-run]", "File \"", "Thread 0x"))]
+            raise AssertionError(f"Gateway readiness deadline: {observation}; pid={self.proc.pid}; "
+                                 f"stages={stages[-72:]}") from error
         return self
 
     # LLM: Credential values remain in memory and the isolated host's own credential file.
