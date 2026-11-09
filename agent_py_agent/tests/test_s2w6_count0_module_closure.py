@@ -49,7 +49,8 @@ if str(legacy_root) != '.':
     real_paths = api.gateway_paths
     api.gateway_paths = lambda agent: gateway_paths_from_root(legacy_root)
 observed = []
-def observe(context):
+def observe(context, *, memory_tracing=None):
+    assert memory_tracing is not None
     server = http_service._server_instance
     connection = http.client.HTTPConnection('127.0.0.1', server.server.server_address[1], timeout=5)
     try:

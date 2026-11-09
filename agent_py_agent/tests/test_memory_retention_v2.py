@@ -189,7 +189,11 @@ def test_retention_v2_default_policy_has_all_required_periods(tmp_path: Path):
 
 # LLM: 同一临时文件树先比较规划前后字节，再执行真实清理；活跃、法律保留及原始 audit 必须保留，不能全停假通过。
 # 函数用途: 验证只读规划与跨候选、会话、任务、工具及归档的实际回收行为。
-def test_retention_plan_is_read_only_and_apply_covers_every_authority(tmp_path: Path):
+def test_retention_plan_is_read_only_and_apply_covers_every_authority(tmp_path: Path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
+
     conversation_root = (
         tmp_path
         / "home"
@@ -283,8 +287,13 @@ def test_retention_plan_is_read_only_and_apply_covers_every_authority(tmp_path: 
     assert not any(action.path == active for action in plan.actions)
     assert not any(str(held) in str(action.path) for action in plan.actions)
 
-    applied = service.apply(now=NOW)
+    # 本例守跨权威动作/保留资格；不把机器在25ms内的IO吞吐混成完整退休合同。
+    # 默认条目/字节预算与真实apply保持；默认deadline暂停另由W2的独立行为测试守住。
+    with monkeypatch.context() as completion_clock:
+        completion_clock.setattr(budgets, "time", SimpleNamespace(monotonic=lambda: 0.0))
+        applied = service.apply(now=NOW)
 
+    assert not applied.scan_partial and applied.scan_cursor == {}
     assert applied.ok is True
     assert applied.applied is True
     # audit 类别不再参与清理，两个文件都必须原地保留。
