@@ -425,13 +425,15 @@ class OwnerQuotaAdmission:
                 child_parts = parts[:depth]
                 key = ('/'.join(child_parts[:-1]), child_parts[-1])
                 if key not in children:
+                    is_directory = depth < len(parts)
                     try:
                         info = _quota_sorted_stat(root, child_parts[:-1], child_parts[-1])
                     except FileNotFoundError:
                         before = None
                     else:
                         before = _quota_child_row(child_parts[:-1], child_parts[-1], info)
-                    children[key] = (before, depth < len(parts))
+                        is_directory = is_directory or stat.S_ISDIR(info.st_mode)
+                    children[key] = (before, is_directory)
         if rebased is not None:
             # 快照未发布时仍按旧前像结算：新路径的目录项前像照常补入，已有的保持本准入开始时的值。
             for key, row in children.items():
@@ -1578,13 +1580,36 @@ def _quota_declared_rows(root, dirs, before_children, *, limit=None, create=True
     grouped = {}
     for (parent_rel, name), (before, is_dir) in before_children.items():
         grouped.setdefault(parent_rel, []).append((name, before, is_dir))
+        if is_dir:
+            grouped.setdefault('/'.join(filter(None, (parent_rel, name))), [])
     changed = {}
     for rel, children in grouped.items():
         parts = tuple(rel.split('/')) if rel else ()
         row = list(dirs[rel]) if rel in dirs else None
         if row is None and not create or parts and parts[0] in _QUOTA_HOST_TREES:
             continue
-        descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
+        try:
+            descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
+        except FileNotFoundError:
+            # 只有声明过的目录且完整旧摘要已由逐项前像减到零，才能退休该辅助行。
+            # 只声明父目录不能掩盖未声明的子项删除；未知/部分扫描行仍使基线失效。
+            declared = before_children.get(('/'.join(parts[:-1]), parts[-1])) if parts else None
+            if (not declared or not declared[1] or declared[0] is None
+                    or not _valid_quota_row(row) or limit is not None):
+                raise
+            remaining = list(row[4:])
+            for _name, before, _is_dir in children:
+                if before is not None:
+                    remaining[0] -= before[0]
+                    remaining[1] -= before[1]
+                    remaining[2] = (remaining[2] - before[2]) & _QUOTA_HASH_MASK
+                    remaining[3] -= 1
+                    remaining[4] -= before[3]
+                    remaining[5] -= before[4]
+            if any(remaining):
+                raise ValueError('quota removed directory has undeclared children') from None
+            changed[rel] = (None, True, True)
+            continue
         try:
             info = os.fstat(descriptor)
             stamp = [info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns]
@@ -1626,8 +1651,11 @@ def _quota_declared_rows(root, dirs, before_children, *, limit=None, create=True
 # 函数用途: 返回声明变更后核对未通过的目录集合。
 def _quota_mismatched_rows(root, changed, table, root_vouched):
     merged = {**table, **{rel: row for rel, (row, _vouched, _dentries) in changed.items()}}
+    merged = {rel: row for rel, row in merged.items() if row is not None}
     failed = set()
     for rel, (row, vouched, _dentries) in changed.items():
+        if row is None:
+            continue
         if root_vouched if not rel else vouched:
             continue
         if _quota_row_entries(row) <= _QUOTA_VERIFY_BUDGET_ENTRIES:
@@ -1644,8 +1672,12 @@ def _quota_mismatched_rows(root, changed, table, root_vouched):
 # LLM: 新行超出目录表字节预算时整表作废，回到受控写代次；不截断成半张表冒充完整。
 # 函数用途: 合并声明变更产生的目录行并维持目录表容量上限。
 def _merge_quota_rows(cursor, dirs, changed):
-    added = [rel for rel in changed if rel not in dirs]
-    dirs.update({rel: row for rel, (row, _vouched, _dentries) in changed.items()})
+    added = [rel for rel, (row, _vouched, _dentries) in changed.items() if row is not None and rel not in dirs]
+    for rel, (row, _vouched, _dentries) in changed.items():
+        if row is None:
+            dirs.pop(rel, None)
+        else:
+            dirs[rel] = row
     if added and _quota_metadata_bytes(cursor) + sum(_quota_row_bytes(rel) for rel in added) > _QUOTA_MAX_METADATA_BYTES:
         _drop_quota_metadata(cursor)
     cursor.pop('metadata_bytes', None)
@@ -1709,13 +1741,22 @@ def _apply_quota_pass_changes(root, cursor, paths, before_children, *, root_vouc
                 cursor['prep'] = None
     if tracked:
         for rel, (row, _vouched, _dentries) in rows.items():
+            if row is None:
+                fresh.pop(rel, None)
+                base.pop(rel, None)
+                scanning.pop(rel, None)
+                continue
             if rel in failed:
                 row[2] = row[3] = 0
             if rel in fresh or rel not in base and rel and (settling or rel + '/' <= last):
                 fresh[rel] = row
             else:
                 base[rel] = row
-        scanning.update({rel: row for rel, (row, _vouched, _dentries) in partial.items()})
+        for rel, (row, _vouched, _dentries) in partial.items():
+            if row is None:
+                scanning.pop(rel, None)
+            else:
+                scanning[rel] = row
         cursor.pop('metadata_bytes', None)
         if _quota_metadata_bytes(cursor) > _QUOTA_MAX_METADATA_BYTES:
             _drop_quota_metadata(cursor)

@@ -51,6 +51,7 @@ jobs:
           agent_py_agent/tests/test_subagent_manager_core.py
           agent_py_agent/tests/test_r8_bounded_process_log.py
           agent_py_agent/tests/test_r8_claim_projection_eviction.py
+          agent_py_agent/tests/test_r8_compact_history_store.py::test_projection_header_without_o_nofollow_still_checks_real_identity
           agent_py_agent/tests/test_sandbox_output_capture.py::test_two_streams_have_separate_caps
           agent_py_agent/tests/test_sandbox_output_capture.py::test_small_output_preserves_text_completed_process_contract
           agent_py_agent/tests/test_sandbox_output_capture.py::test_reader_failure_exposes_stream_error_and_missing_eof

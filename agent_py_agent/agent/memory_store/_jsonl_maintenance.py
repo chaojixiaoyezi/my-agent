@@ -210,7 +210,7 @@ def finish_tier_generation(memory, root, *, admission=None, collect=True, formal
         # 首次发表已做GC也不能省略校验：不可读的新根不得成为抹除legacy原文的许可。
         store.events(root, include_tombstones=False)
         if collect:
-            store.collect_unreferenced(root, commit=commit)
+            store.collect_unreferenced(root, commit=commit, admission=admission)
         marker = json.dumps({"schema_version": GENERATION_SCHEMA, "manifest": store.manifest_path.name}) + "\n"
         if read_text_beneath(memory.path.parent, (memory.path.name,)) != marker:
             if admission is not None:

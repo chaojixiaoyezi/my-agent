@@ -613,7 +613,7 @@ class MemoryGenerationStore:
                 raise RemovalCleanupError("REMOVE_CLEANUP_PENDING", formal_memory_changed=True) from exc
             raise
         try:
-            self.collect_unreferenced(plan["root"], commit=commit)
+            self.collect_unreferenced(plan["root"], commit=commit, admission=admission)
         except Exception as exc:
             from ._jsonl_indexing import _NATIVE_MEMORY_ERRORS, RemovalCleanupError
 
@@ -624,7 +624,9 @@ class MemoryGenerationStore:
 
     # LLM: 调用方持formal锁且根已提交；保留当前引用，按原writer协议清.tmp，目录与叶均nofollow/单链接拒绝。
     # 函数用途: 清理无引用JSONL和中断暂存及空代目录，不碰未知文件、永久墓碑或其它逻辑库。
-    def collect_unreferenced(self, root, *, commit=None):
+    def collect_unreferenced(self, root, *, commit=None, admission=None):
+        from ..user_space.owner_quota import OwnerQuotaChange
+
         retained = {item["path"] for item in root["segments"]}
         if root.get("legacy_quarantine"):
             retained.add(root["legacy_quarantine"]["path"])
@@ -637,6 +639,8 @@ class MemoryGenerationStore:
                 continue
             fd = open_directory_beneath(self.path.parent, (self.directory.name, directory.name), require_dir_fd=True)
             try:
+                if admission is not None:
+                    admission.check([OwnerQuotaChange(directory, 0, append=True)])
                 for name in os.listdir(fd):
                     relative = f"{self.directory.name}/{directory.name}/{name}"
                     temporary = re.fullmatch(
@@ -654,6 +658,9 @@ class MemoryGenerationStore:
                             raise ValueError("MEMORY_GENERATION_UNREADABLE")
                     finally:
                         os.close(leaf)
+                    if admission is not None:
+                        # 新代已通过共存峰值准入；这里只登记实际删除的前像，不提前抵扣空间。
+                        admission.check([OwnerQuotaChange(directory / name, 0, append=True)])
                     if commit is None:
                         os.unlink(name, dir_fd=fd)
                     else:

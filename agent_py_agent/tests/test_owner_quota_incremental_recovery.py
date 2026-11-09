@@ -23,6 +23,67 @@ def _reconcile(root, **options):
     return operation(root, **options)
 
 
+@pytest.mark.parametrize('empty', [False, True])
+def test_declared_directory_retirement_keeps_exact_large_owner_baseline(tmp_path, empty):
+    retired = tmp_path / 'retired'
+    retired.mkdir()
+    leaf = retired / 'old.json'
+    if not empty:
+        leaf.write_bytes(b'old-data')
+    for number in range(160):
+        (tmp_path / f'payload-{number}').write_bytes(b'x')
+    for _ in range(16):
+        report = _reconcile(tmp_path, max_entries=128, max_ms=1000)
+        if report['complete']:
+            break
+    assert report['complete']
+    target = tmp_path / 'next'
+    enforcer = quota.OwnerQuotaEnforcer(tmp_path, max_bytes=1024 * 1024)
+    with enforcer.admission() as admission:
+        changes = [quota.OwnerQuotaChange(retired, 0, append=True)]
+        if not empty:
+            changes.append(quota.OwnerQuotaChange(leaf, 0, append=True))
+        admission.check(changes)
+        if not empty:
+            leaf.unlink()
+        retired.rmdir()
+        admission.check([quota.OwnerQuotaChange(target, 4)])
+        target.write_bytes(b'next')
+    ledger = quota._read_quota_ledger(tmp_path)
+    assert ledger['usage_authoritative'] and ledger['dirty_since'] is None
+    assert ledger['used_bytes'] == 164 and ledger['inode_count'] == 161
+    assert 'retired' not in ledger['reconcile_cursor']['dir_stamps']
+    assert quota.owner_logical_usage_bytes(tmp_path, exact=True) == 164
+
+
+def test_declaring_directory_alone_does_not_hide_undeclared_child_deletions(tmp_path):
+    retired = tmp_path / 'retired'
+    retired.mkdir()
+    leaf = retired / 'undeclared.json'
+    leaf.write_bytes(b'old-data')
+    for number in range(160):
+        (tmp_path / f'payload-{number}').write_bytes(b'x')
+    for _ in range(16):
+        report = _reconcile(tmp_path, max_entries=128, max_ms=1000)
+        if report['complete']:
+            break
+    assert report['complete']
+    enforcer = quota.OwnerQuotaEnforcer(tmp_path, max_bytes=1024 * 1024)
+    with enforcer.admission() as admission:
+        admission.check([quota.OwnerQuotaChange(retired, 0, append=True)])
+        leaf.unlink()
+        retired.rmdir()
+        with pytest.raises(quota.OwnerQuotaUnavailable):
+            admission.check([quota.OwnerQuotaChange(tmp_path / 'next', 4)])
+    ledger = quota._read_quota_ledger(tmp_path)
+    assert ledger['dirty_since'] is not None
+    assert ledger['reconcile_cursor']['ledger_revision'] < ledger['revision']
+    with pytest.raises(quota.OwnerQuotaUnavailable):
+        with enforcer.reserve([quota.OwnerQuotaChange(tmp_path / 'next', 4)]):
+            pytest.fail('未声明删除不能使下一次增长获得准入')
+    assert not (tmp_path / 'next').exists()
+
+
 # LLM: 最多两项预算必须多拍完成，硬链接按路径计费且不跟随外部链接。
 # 函数用途: 验证有界扫描与持久游标及最终统计。
 def test_quota_reconcile_is_bounded_and_persistent(tmp_path):
