@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import http.client
+import io
 import json
+import os
 import socket
 import threading
 import time
@@ -179,7 +181,7 @@ def test_oversized_json_never_checks_in_an_unread_body(decision, monkeypatch):
         assert len(state.accepted) == 2
 
 
-@pytest.mark.parametrize("max_retries", [None, 0])
+@pytest.mark.parametrize("max_retries", [None, 0, 1])
 def test_peer_close_after_checkout_uses_one_accounted_fresh_retry(max_retries, monkeypatch):
     pool = transport.main_connection_pool(4)
     dropped, waited, events = [], [], []
@@ -215,7 +217,7 @@ def test_peer_close_after_checkout_uses_one_accounted_fresh_retry(max_retries, m
         assert len(failed) == 1
         assert failed[0]["reason"] == "stale_reused_connection"
         assert failed[0]["retry_wait_seconds"] == 0.0
-        assert failed[0]["retry_scheduled"] is (max_retries is None)
+        assert failed[0]["retry_scheduled"] is (max_retries != 0)
         assert len(dropped) == 1
         started = [e for e in events if e["status"] == "started"]
         assert len({e["attempt_id"] for e in started}) == (1 if max_retries == 0 else 2)
@@ -515,3 +517,67 @@ def test_error_body_remains_readable_without_retaining_a_connection_socket(path,
             assert len(state.requests) == 1
         finally:
             error.close()
+
+
+@pytest.mark.parametrize('timed_response', [False, True])
+@pytest.mark.parametrize('reused', [False, True])
+@pytest.mark.parametrize('received', [b'', b'HTTP/1.', b'HTTP/1.1 200 OK\r\nX-Test: ',
+                                       b'HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nx',
+                                       b'HTTP/1.1 100 Continue\r\n\r\n'])
+@pytest.mark.parametrize('failure', [ConnectionResetError, BrokenPipeError, http.client.RemoteDisconnected, TimeoutError])
+def test_pooled_response_marks_only_zero_byte_reused_peer_close(timed_response, reused, received, failure, monkeypatch):
+    original = failure('peer stopped before response completed')
+    sent, dropped = [], []
+    class PeerBytes(io.FileIO):
+        def __init__(self):
+            read_fd, write_fd = os.pipe()
+            os.close(write_fd)
+            super().__init__(read_fd, 'rb', closefd=True)
+            self.pending = received
+        def readable(self):
+            return True
+        def readinto(self, buffer):
+            if self.pending:
+                size = min(len(buffer), len(self.pending))
+                buffer[:size], self.pending = self.pending[:size], self.pending[size:]
+                return size
+            raise original
+    raw = PeerBytes()
+    owned_fd = raw.fileno()
+    class PeerSocket:
+        def makefile(self, mode):
+            return io.BufferedReader(raw)
+        def sendall(self, value):
+            sent.append(value)
+        def close(self):
+            pass
+    connection = http.client.HTTPConnection('127.0.0.1', 80)
+    connection.sock = PeerSocket()
+    if timed_response:
+        from agent_py_agent.agent.backends.transport_timing import AttemptTiming
+        timing = AttemptTiming(lambda event: None)
+        transport.instrument_connection(connection, timing, tls=False)
+        timing.skip_connection(tunnel=False, tls=False)
+    response_class = connection.response_class
+    pool = SimpleNamespace(checkout=lambda route: connection if reused else None, drop_idle=dropped.append)
+    route = transport.KeepAliveRoute('http', '127.0.0.1', 80)
+    monkeypatch.setattr(transport, '_new_connection', lambda *args: connection)
+    monkeypatch.setattr(transport, '_prepare_reused', lambda *args: None)
+    response = None
+    try:
+        with pytest.raises(failure) as caught:
+            response = transport.pooled_urlopen(transport.KeepAliveTarget(pool, route),
+                                               urllib.request.Request('http://127.0.0.1/json'), None)
+            response.read()
+    finally:
+        if response is not None:
+            transport.release_pooled_response(response, aborted=True)
+            response.close()
+    assert caught.value is original
+    stale = reused and not received and failure is not TimeoutError
+    assert getattr(original, 'stale_reused_connection', False) is stale
+    assert dropped == ([route] if stale else [])
+    assert len(sent) == 1 and connection.sock is None and raw.closed
+    assert connection.response_class is response_class
+    with pytest.raises(OSError):
+        os.fstat(owned_fd)

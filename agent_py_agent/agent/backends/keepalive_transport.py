@@ -199,15 +199,41 @@ def pooled_urlopen(target: KeepAliveTarget, req: urllib.request.Request, options
                 if callable(drop_idle):
                     drop_idle(route)
             raise wrapped from err
+        response_started = None
+        response_class = getattr(connection, "response_class", None)
+        probe_response = reused and isinstance(response_class, type) and issubclass(response_class, http.client.HTTPResponse)
+        if probe_response:
+            # 只对复用连接预读同一缓冲区：见过任何字节后，状态行/100/headers失败都不能再算陈旧。
+            def open_response(*args, **kwargs):
+                nonlocal response_started
+                opened = response_class(*args, **kwargs)
+                try:
+                    peek = getattr(opened.fp, "peek", None)
+                    if callable(peek):
+                        response_started = False
+                        response_started = bool(peek(1))
+                except BaseException:
+                    # 构造器尚未返回，stdlib还未接管此fp；先关闭自有响应，仍抛原异常。
+                    _close_quietly(opened)
+                    raise
+                return opened
+
+            connection.response_class = open_response
         try:
-            response = connection.getresponse()
-        except http.client.RemoteDisconnected as exc:
-            if reused:
-                exc.stale_reused_connection = True
-                drop_idle = getattr(target.pool, "drop_idle", None)
-                if callable(drop_idle):
-                    drop_idle(route)
-            raise
+            try:
+                response = connection.getresponse()
+            except (BrokenPipeError, ConnectionResetError) as exc:
+                # RemoteDisconnected的旧无状态行判据保留；新增Reset/BrokenPipe必须有零字节证明。
+                if reused and (response_started is False or
+                               (response_started is None and isinstance(exc, http.client.RemoteDisconnected))):
+                    exc.stale_reused_connection = True
+                    drop_idle = getattr(target.pool, "drop_idle", None)
+                    if callable(drop_idle):
+                        drop_idle(route)
+                raise
+        finally:
+            if probe_response:
+                connection.response_class = response_class
     except BaseException:
         if connection is not None:
             _close_quietly(connection)
