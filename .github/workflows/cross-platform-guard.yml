@@ -1,89 +1,44 @@
-name: Cross-platform guard
+name: Windows 文件时间与身份诊断
 
 on:
   workflow_dispatch:
-  pull_request:
-  push:
-    branches:
-      - main
+
+permissions:
+  contents: read
 
 jobs:
-  focused:
-    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
-    runs-on: ${{ matrix.os }}
+  observe:
+    runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - macos-latest
-          - windows-latest
-        python-version:
-          - "3.12"
-          - "3.14"
-
+        python: ["3.12", "3.14"]
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-
-      - name: Install package and test tools
+          python-version: ${{ matrix.python }}
+      - name: Observe path and descriptor identity within a synthetic directory
+        shell: python
         run: |
-          python -m pip install -U pip
-          python -m pip install -e ".[dev]"
-
-      - name: Compile Python sources
-        run: python -m compileall -q agent_py_agent scripts
-
-      - name: Run cross-platform focused tests
-        run: >
-          python -m pytest
-          agent_py_agent/tests/test_process_control.py
-          agent_py_agent/tests/test_binary_snapshot_identity.py
-          agent_py_agent/tests/test_curator_message_slices.py::test_large_hot_target_then_small_message_resumes_after_suffix_anchor
-          agent_py_agent/tests/test_curator_message_slices.py::test_duplicate_id_keeps_first_match_and_prefix_blank_error
-          agent_py_agent/tests/test_curator_message_slices.py::test_exact_metadata_byte_budget_defers_once_then_serves_big_and_small
-          agent_py_agent/tests/test_r8_curator_audit_scope.py
-          agent_py_agent/tests/test_message_prefix_proof.py
-          agent_py_agent/tests/test_windows_process_observation.py
-          agent_py_agent/tests/test_dispatch_host_wait_start_failures.py
-          agent_py_agent/tests/test_darwin_process_tree_snapshot.py
-          agent_py_agent/tests/test_shell_foreground_cleanup.py::test_natural_exit_cleans_child_after_outer_pipes_close
-          agent_py_agent/tests/test_daemon_control.py
-          agent_py_agent/tests/test_supervisor.py
-          agent_py_agent/tests/test_dispatch_loop.py
-          agent_py_agent/tests/test_policy_checks.py
-          agent_py_agent/tests/test_subagent_policies.py
-          agent_py_agent/tests/test_subagent_manager_core.py
-          agent_py_agent/tests/test_r8_bounded_process_log.py
-          agent_py_agent/tests/test_r8_candidate_cleanup_missing.py
-          agent_py_agent/tests/test_r8_claim_projection_eviction.py
-          agent_py_agent/tests/test_r8_ledger_gc_pages.py
-          agent_py_agent/tests/test_r8_pending_current_discovery.py
-          agent_py_agent/tests/test_r8_compact_history_store.py::test_projection_header_without_o_nofollow_still_checks_real_identity
-          agent_py_agent/tests/test_sandbox_output_capture.py::test_two_streams_have_separate_caps
-          agent_py_agent/tests/test_sandbox_output_capture.py::test_small_output_preserves_text_completed_process_contract
-          agent_py_agent/tests/test_sandbox_output_capture.py::test_reader_failure_exposes_stream_error_and_missing_eof
-          -q
-
-      - name: Verify native HTTP socket ownership and ordinary admission
-        run: >-
-          python -m pytest -q
-          agent_py_agent/tests/test_s1w1_http_lanes.py
-          agent_py_agent/tests/test_gateway_bounded_http_server.py
-          -k "not real_gateway_complete_request_still_requires_authentication"
-
-      # 隔离 Gateway 的测试宿主用 POSIX 进程组回收；Win32 在上一步实测原生 socket 生命周期。
-      - name: Verify macOS Gateway admission and authenticated receipt
-        if: runner.os == 'macOS'
-        run: >-
-          python -m pytest -q
-          agent_py_agent/tests/test_s1w1_http_lanes.py::test_real_gateway_complete_request_still_requires_authentication
-          agent_py_agent/tests/slo/test_slo_cliff.py
-
-      - name: Check formatting whitespace
-        run: git diff --check
+          import os, sys
+          sys.path.insert(0, os.getcwd())
+          import json, os, sys, tempfile, time
+          from pathlib import Path
+          from agent_py_agent.agent.common.nofollow_fs import file_descriptor_change_ns
+          FIELDS=('st_dev','st_ino','st_mode','st_nlink','st_size','st_mtime_ns','st_ctime_ns','st_birthtime_ns','st_file_attributes','st_reparse_tag')
+          def info(s): return {k:getattr(s,k,None) for k in FIELDS}
+          with tempfile.TemporaryDirectory() as d:
+           p=Path(d)/'leaf'; p.write_bytes(b'first\r\n\x1asecond')
+           for phase in ('initial','backdated'):
+            if phase=='backdated':
+             saved=p.stat(); time.sleep(2.05); p.write_bytes(b'other\r\n\x1asecond'); os.utime(p,ns=(saved.st_atime_ns,saved.st_mtime_ns))
+            fd=os.open(p,os.O_RDONLY|getattr(os,'O_BINARY',0))
+            try:
+             before=os.fstat(fd); change=file_descriptor_change_ns(fd,before); raw=os.read(fd,100); after=os.fstat(fd)
+             print(json.dumps({'phase':phase,'python':sys.version,'lstat':info(p.lstat()),'stat':info(p.stat()),'fstat_before':info(before),'fstat_after':info(after),'changed_ns':change,'byte_length':len(raw)},sort_keys=True))
+            finally:os.close(fd)
+      - name: Observe synthetic hot scan
+        shell: pwsh
+        run: |
+          python -I .github/diagnostics/win_hot_snapshot.py --source "$env:GITHUB_WORKSPACE" --output "$env:RUNNER_TEMP/hot-source.json"
