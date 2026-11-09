@@ -1111,6 +1111,7 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_r8_candidate_pin_stream.py # 候选只读遍历持有上界、完整性与关闭周期释放的行为回归
 |-- agent_py_agent/tests/test_r8_retention_directory_fds.py # 维护目录分页续点、暂停句柄释放及关闭链的真实FD回归
 |-- agent_py_agent/tests/test_r8_gateway_memory_diagnostics.py # 正式内存追踪生命周期、信号导出与隐私边界回归
+|-- agent_py_agent/tests/test_tui_render_cache_lifetime.py # 离场与换版正文释放、空窗口别名及完整渲染等价回归
 |-- agent_py_agent/tests/test_cancel_receipt_identity.py # 错源取消诊断不签发退出证明、不改变终态的回归
 |-- agent_py_agent/tests/test_cancel_stop_reconciliation.py # 取消执行时保留结构化诊断及未知结果的回归
 |-- agent_py_agent/tests/test_r8_usage_source_maintenance.py # 旧用量维护追平、目录重启续点与合法保留门验证
@@ -1733,6 +1734,7 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 
 - `test_r8_candidate_pin_stream.py` 与 `test_r8_retention_directory_fds.py`：验证候选只读流和维护扫描释放临时对象/目录句柄，同时保留全部保护引用与代次校验。
 - `test_r8_gateway_memory_diagnostics.py`：用独立进程验证正式启动与信号导出，覆盖追踪所有权、私密正文不输出及停止后释放回调。
+- `test_tui_render_cache_lifetime.py`：确认旧宽度/模式不再强持离场正文，完整显示和历史分页保持。
 - `test_cancel_receipt_identity.py` 与 `test_cancel_stop_reconciliation.py`：诊断回执不构成恢复授权，缺源或错源不能改变 UNKNOWN、父失败和子取消。
 
 ### R8 长期历史与运行资源（2026-11-08）
