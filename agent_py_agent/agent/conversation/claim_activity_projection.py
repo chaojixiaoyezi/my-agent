@@ -1,15 +1,21 @@
-"""只读分片核对当前 claim 目录；未完成或变化中的扫描不能签发空闲事实。"""
+"""临时磁盘投影保留分片续点；只有稳定且完整的 canonical 核对才能证明空闲。"""
 from __future__ import annotations
 
+import json
+import os
+import sqlite3
+import tempfile
 import threading
 import time
-from collections import OrderedDict
 
 from ..io.bounded_directory import DirectoryCursor
+from ..user_space.directory_paging import directory_page
 from .store_claims import _read_claim_report
 
 _LOCK = threading.RLock()
-_SCANS = OrderedDict()
+_CACHE = None
+_PORTABLE = {}
+_NATIVE = os.name != "nt"
 
 
 def _signature(path):
@@ -20,69 +26,132 @@ def _signature(path):
         return None
 
 
-class _Scan:
-    def __init__(self, signature):
-        self.signature = signature
-        self.cursor = DirectoryCursor()
-        self.busy = set()
-        self.unknown = self.complete = False
-        self.checked_at = time.monotonic()
+def _connection():
+    global _CACHE
+    if _CACHE is None or _CACHE[0] != os.getpid():
+        # 一个进程只持有一个缓存连接，不随 owner 数量保留目录 FD 或 Python 活跃集。
+        directory = tempfile.TemporaryDirectory(prefix='my-agent-claim-view-')
+        conn = sqlite3.connect(os.path.join(directory.name, 'projection.sqlite3'),
+                               check_same_thread=False, timeout=0)
+        conn.execute('PRAGMA cache_size=-256')
+        conn.execute('PRAGMA mmap_size=0')
+        conn.executescript('''
+            CREATE TABLE scans (store TEXT PRIMARY KEY, signature TEXT, generation INTEGER,
+                cursor TEXT, complete INTEGER, unknown INTEGER, checked REAL, last_access REAL);
+            CREATE INDEX scan_access ON scans(last_access);
+            CREATE INDEX scan_waiting ON scans(complete,generation);
+            CREATE TABLE busy (store TEXT, generation INTEGER, thread TEXT,
+                PRIMARY KEY(store,generation,thread));
+            CREATE TABLE retired (store TEXT, generation INTEGER, PRIMARY KEY(store,generation));
+        ''')
+        _CACHE = os.getpid(), directory, conn
+    return _CACHE[2]
 
-    def close(self):
-        self.cursor.close()
+
+def _page(conn, key, directory, cursor):
+    if _NATIVE:
+        return directory_page(directory.parent, (directory.name,), cursor, 1)
+    # Windows 没有可恢复的 dir_fd cookie：固定槽只接纳队首，不淘汰进行中的流。
+    for stored, (stream, accessed) in list(_PORTABLE.items()):
+        if time.monotonic() - accessed > 60:
+            stream.close()
+            del _PORTABLE[stored]
+            conn.execute('INSERT OR IGNORE INTO retired SELECT store,generation FROM scans WHERE store=?', (stored,))
+            conn.execute('DELETE FROM scans WHERE store=?', (stored,))
+    if key not in _PORTABLE:
+        oldest = conn.execute('SELECT store FROM scans WHERE complete=0 '
+                              'ORDER BY generation LIMIT 1').fetchone()
+        if len(_PORTABLE) >= 8 or oldest and oldest[0] != key and oldest[0] not in _PORTABLE:
+            return [], cursor, False
+        _PORTABLE[key] = DirectoryCursor(), time.monotonic()
+    stream, _ = _PORTABLE[key]
+    _PORTABLE[key] = stream, time.monotonic()
+    entry = stream.next_entry(directory)
+    if entry is None:
+        del _PORTABLE[key]
+        return [], {}, True
+    return [entry.name], {}, False
+
+
+def _cleanup(conn):
+    # 只过期长期未访问的 store；数量压力不会丢失活跃扫描续点。
+    for key, generation in conn.execute('SELECT store,generation FROM scans '
+                                       'WHERE last_access<? ORDER BY last_access LIMIT 4',
+                                       (time.monotonic() - 3600,)).fetchall():
+        conn.execute('INSERT OR IGNORE INTO retired VALUES (?,?)', (key, generation))
+        conn.execute('DELETE FROM scans WHERE store=?', (key,))
+    retired = conn.execute('SELECT store,generation FROM retired LIMIT 1').fetchone()
+    if retired is None:
+        return
+    conn.execute('DELETE FROM busy WHERE rowid IN (SELECT rowid FROM busy '
+                 'WHERE store=? AND generation=? LIMIT 128)', retired)
+    if conn.execute('SELECT 1 FROM busy WHERE store=? AND generation=? LIMIT 1', retired).fetchone() is None:
+        conn.execute('DELETE FROM retired WHERE store=? AND generation=?', retired)
 
 
 def claim_activity_state(storage, thread_id):
-    """每拍最多128项/25ms，不依赖可被历史清理移除的 TaskLink 定位孤立租约。
+    """每拍最多128项/25ms；跨 store 淘汰、线程切换不丢失目录续点。
 
-    原 acquire/renew/finish 均原子换叶，因此目录版本能废弃已核对结果。
-    仅保留活跃线程集合；缓存至多4个store，静止结果5秒后重新分片核对。
+    目录 cookie 与活跃线程只存在进程私有临时 SQLite 中，不授予 claim 状态。
+    canonical 原子换叶使目录版本变化，旧代投影立即失效、垃圾分片回收。
     """
     directory = storage.background_claims_dir
     try:
         with _LOCK:
-            signature = _signature(directory)
-            key = str(directory.absolute())
-            scan = _SCANS.pop(key, None)
-            if scan is not None and (scan.signature != signature or
-                    scan.complete and time.monotonic() - scan.checked_at >= 5):
-                scan.close()
-                scan = None
-            scan = scan or _Scan(signature)
-            _SCANS[key] = scan
-            while len(_SCANS) > 4:
-                _SCANS.popitem(last=False)[1].close()
-            deadline = time.monotonic() + .025
-            if not scan.complete:
-                for _ in range(128):
-                    entry = scan.cursor.next_entry(directory)
-                    if entry is None:
-                        scan.complete = True
-                        scan.checked_at = time.monotonic()
-                        break
-                    if entry.name.endswith('.json'):
-                        if not entry.is_file(follow_symlinks=False):
-                            scan.unknown = True
-                        else:
-                            claim, error = _read_claim_report(directory / entry.name)
+            conn = _connection()
+            with conn:
+                _cleanup(conn)
+                signature = json.dumps(_signature(directory))
+                key = str(directory.absolute())
+                row = conn.execute('SELECT signature,generation,cursor,complete,unknown,checked '
+                                   'FROM scans WHERE store=?', (key,)).fetchone()
+                if row is None:
+                    generation, cursor, complete, unknown, checked = time.monotonic_ns(), {}, False, False, 0
+                elif row[0] != signature or row[3] and time.monotonic() - row[5] >= 5:
+                    conn.execute('INSERT OR IGNORE INTO retired VALUES (?,?)', (key, row[1]))
+                    portable = _PORTABLE.pop(key, None)
+                    if portable:
+                        portable[0].close()
+                    generation, cursor, complete, unknown, checked = time.monotonic_ns(), {}, False, False, 0
+                else:
+                    _, generation, encoded, complete, unknown, checked = row
+                    cursor = json.loads(encoded)
+                conn.execute('INSERT OR REPLACE INTO scans VALUES (?,?,?,?,?,?,?,?)',
+                             (key, signature, generation, json.dumps(cursor), int(complete), int(unknown), checked, time.monotonic()))
+                deadline = time.monotonic() + .025
+                if not complete:
+                    # 单项推进保证 canonical 读取也受时间预算约束；cookie 立即落入本事务。
+                    for _ in range(128):
+                        names, cursor, complete = _page(conn, key, directory, cursor)
+                        for name in names:
+                            if not name.endswith('.json'):
+                                continue
+                            path = directory / name
+                            if path.is_symlink() or not path.is_file():
+                                unknown = True
+                                continue
+                            claim, error = _read_claim_report(path)
                             if error or claim.get('status') not in {'running', 'claimed', 'finished', 'failed', 'cancelled'}:
-                                scan.unknown = True
+                                unknown = True
                             elif claim['status'] in {'running', 'claimed'}:
                                 identity = claim.get('thread_id')
                                 if isinstance(identity, str) and identity:
-                                    scan.busy.add(identity)
+                                    conn.execute('INSERT OR IGNORE INTO busy VALUES (?,?,?)', (key, generation, identity))
                                 else:
-                                    scan.unknown = True
-                    if time.monotonic() >= deadline:
-                        break
-            if _signature(directory) != signature:
-                scan.close()
-                _SCANS.pop(key, None)
-                return 'activity_unknown'
-            if thread_id in scan.busy:
-                return 'foreground_active'
-            if not scan.complete or scan.unknown:
-                return 'activity_unknown'
-            return ''
-    except (OSError, ValueError, TypeError):
+                                    unknown = True
+                        if complete or time.monotonic() >= deadline:
+                            break
+                    if complete:
+                        checked = time.monotonic()
+                conn.execute('INSERT OR REPLACE INTO scans VALUES (?,?,?,?,?,?,?,?)',
+                             (key, signature, generation, json.dumps(cursor), int(complete), int(unknown), checked, time.monotonic()))
+                if json.dumps(_signature(directory)) != signature:
+                    return 'activity_unknown'
+                if conn.execute('SELECT 1 FROM busy WHERE store=? AND generation=? AND thread=?',
+                                (key, generation, thread_id)).fetchone():
+                    return 'foreground_active'
+                if not complete or unknown:
+                    return 'activity_unknown'
+                return ''
+    except (OSError, ValueError, TypeError, sqlite3.Error):
         return 'activity_unknown'
