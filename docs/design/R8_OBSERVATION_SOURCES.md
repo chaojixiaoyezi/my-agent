@@ -49,3 +49,5 @@ store.model_usage.prepare_window_sources(limit=4, deadline=time.monotonic() + 0.
 历史执行从100增加至4000，末尾3项的 SQLite VM 步数均为815；历史用量从100增加至4000，请求300条窗口都只回读300条 canonical 事件。最终工具步数与完整测试数见仓外交接/JUnit，不以返回数量冒充源成本证据。
 
 建议下一步：root 集成后把私有 `_pair_scan_page` import 换为新公共 `user_space.directory_paging.directory_page`，接原维护lane并跑组合严格gate/跨平台CI。可由其他agent只读复核来源 CAS/intent 生命周期；不要并写同一 reader 或 source writer。10 TUI 长历史资源实测由root在冻结组合源统一执行，本片没有新增真实用户负载或访问真实个人数据。
+
+显式 `usage.batch` 已保留所选窗口数据，现一次 `pairs` 消费同时收集事件与成员授权事实，消除逐来源的第二次事件读取；所有来源消费后再次核对原捕获 revision，不能把新 revision 贴到旧窗口。最终逐成员授权保持原入口。普通 `usage.get` 仍以固定内存重流末核成员，未改变其合同。

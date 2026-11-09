@@ -26,17 +26,17 @@ def test_investigation_reads_one_usage_window(usage_case, monkeypatch):
                 case.owner, case.space, None, tid, 1, None, (), (), 'business-context.v1'))
         tasks.append(task.task_id)
         baseline._append_usage(case, 'agent-a', task.task_id, f'batch-event-{index}', 10)
-    original = store.model_usage.events_report
+    original = store.model_usage.events_window_report
     values = {'bytes': 0, 'reads': 0}
 
-    def events(thread_id):
-        result = original(thread_id)
+    def events(thread_id, **window):
+        result = original(thread_id, **window)
         values['reads'] += 1
         path = store.model_usage._path(thread_id)
         values['bytes'] += path.stat().st_size if path.exists() else 0
         return result
 
-    monkeypatch.setattr(store.model_usage, 'events_report', events)
+    monkeypatch.setattr(store.model_usage, 'events_window_report', events)
     observed = []
     for count in (1, 5, 10):
         # 每轮仅变更有限调查集；同一真实事件窗口和三份来源账本保持不变。
@@ -54,7 +54,7 @@ def test_investigation_reads_one_usage_window(usage_case, monkeypatch):
         observed.append(dict(values))
     print('usage source bytes/reads for R=1,5,10:', observed)
     assert observed[1] == observed[0] and observed[2] == observed[0]
-    assert observed[0]['reads'] <= 3
+    assert 0 < observed[0]['reads'] <= 3
     duplicate = baseline._investigation(case, 'duplicate-task', tasks[0])
     baseline._seed(case, 'soc_investigations', [duplicate])
     result = baseline._data(case, 'costs.investigations_aggregate', {'space_id': case.space})
@@ -70,15 +70,15 @@ def test_dashboard_reads_each_usage_ledger_once_per_request(usage_case, monkeypa
 
     case = usage_case
     store = case.host.conversation_store
-    original_events = store.model_usage.events_report
+    original_events = store.model_usage.events_window_report
     original_snapshot = readers._OwnerReaders.resource_snapshot
     counts, snapshots = Counter(), []
 
     # LLM: 精确计量原账本读口，不改变事件或错误。
     # 函数用途: 记录每个thread的事件读取次数。
-    def events(thread_id):
+    def events(thread_id, **window):
         counts[thread_id] += 1
-        return original_events(thread_id)
+        return original_events(thread_id, **window)
 
     # LLM: 只观察原快照调用，不替换计数来源。
     # 函数用途: 记录真实资源快照次数。
@@ -86,7 +86,7 @@ def test_dashboard_reads_each_usage_ledger_once_per_request(usage_case, monkeypa
         snapshots.append(self.owner)
         return original_snapshot(self)
 
-    monkeypatch.setattr(store.model_usage, 'events_report', events)
+    monkeypatch.setattr(store.model_usage, 'events_window_report', events)
     monkeypatch.setattr(readers._OwnerReaders, 'resource_snapshot', snapshot)
     registered = readers.default_observation_readers(case.home, case.owner, store, case.services.observation.runtime)
     assert 'usage.batch' in registered
@@ -250,8 +250,8 @@ def test_usage_identity_reads_are_request_local_and_distinct(usage_case, monkeyp
         status, body = baseline._request(case, 'usage.get', {'filter': filters})
         assert status == 200, body
         assert body['data']['actual']['input_tokens'] == 240
-        assert lists == {'tasks': 1, 'threads': 1}
-        assert all(count == 1 for count in points.values())
+        assert lists == {'tasks': 1} and lists['threads'] == 0
+        assert points and all(count == 1 for count in points.values())
 
 
 # LLM: 公共聚合DTO无法反推成员归属，内部端口缺失应只禁用成本分组，不修改usage.get合同。
@@ -378,3 +378,20 @@ def test_empty_usage_group_rejects_unwitnessed_and_foreign_scopes(usage_case):
         with pytest.raises(BusinessError) as denied:
             service.usage_groups(params, [selector], actor=actor)
         assert denied.value.code == 'HOST_NOT_READY'
+
+
+def test_batch_rechecks_source_revision_after_last_single_pass(usage_case, monkeypatch):
+    from agent_py_agent.agent.conversation.usage_sources import UsageSourcePlan
+
+    case = usage_case
+    original, appended = UsageSourcePlan.rows, []
+    def changed_after_sources(plan):
+        yield from original(plan)
+        if not appended:
+            # 真实末源消费后发表新事件；不能把新revision贴到已经读取的旧窗口上。
+            baseline._append_usage(case, 'agent-a', case.task_ids['agent-a'], 'late-batch-revision', 10)
+            appended.append(True)
+    monkeypatch.setattr(UsageSourcePlan, 'rows', changed_after_sources)
+    status, body = baseline._request(case, 'costs.dashboard', {'space_id': case.space})
+    assert appended == [True]
+    assert status == 503 and body['error']['code'] == 'HOST_NOT_READY'

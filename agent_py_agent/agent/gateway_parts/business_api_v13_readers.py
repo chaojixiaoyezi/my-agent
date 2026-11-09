@@ -805,10 +805,22 @@ class _OwnerReaders:
         if resources is None:
             raise ValueError('resource source missing')
         window, members, revision = self.usage_window(params)
-        event_map = {identifier: list(rows) for identifier, rows in window.events.items()}
+        event_map, source_revisions, gathered_members = {}, {}, []
+        # batch本就保留所选窗口；一次canonical消费同时收事件和授权事实，避免members再读来源。
+        with closing(iter(window.events)) as identifiers:
+            for identifier in identifiers:
+                source_revisions[identifier] = window.revision(identifier)
+                with closing(window.pairs(identifier)) as pairs:
+                    selected_events = []
+                    for event, facts in pairs:
+                        selected_events.append(event)
+                        gathered_members.append(facts)
+                        window.capture(facts)
+                    event_map[identifier] = selected_events
+        if any(window.original.revision(identifier) != expected for identifier, expected in source_revisions.items()):
+            raise ValueError('usage source generation changed')
         events = [event for rows in event_map.values() for event in rows]
-        source_revisions = {identifier: window.original.revision(identifier) for identifier in event_map}
-        members = tuple(members)
+        members = tuple(gathered_members)
         if len(events) != len(members):
             raise ValueError('usage member alignment mismatch')
         indexes = {key: {} for key in ('task_id', 'agent_id', 'space_id')}
