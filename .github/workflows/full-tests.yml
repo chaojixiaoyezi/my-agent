@@ -131,12 +131,14 @@ jobs:
           import json, os
           from pathlib import Path
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
-              print("| SLO | Samples | P99 (ms) | Receipt ratio | Failed requests |", file=summary)
-              print("|---|---:|---:|---:|---:|", file=summary)
+              print("| SLO | Samples | P99 (ms) | Receipt ratio | Failed requests | Ask send → response headers (ms) |", file=summary)
+              print("|---|---:|---:|---:|---:|---:|", file=summary)
               for path in sorted(Path(os.environ["MY_AGENT_SLO_REPORT_DIR"]).glob("*.json")):
                   data = json.loads(path.read_text())
+                  headers = data.get("transport_stages", {}).get("ask", {}).get("sent_to_headers_ms")
                   print(f"| {path.stem} | {data['samples']} | {data['p99_ms']:.3f} | "
-                        f"{data['receipt_correlation']:.3f} | {data['failures']['count']} |", file=summary)
+                        f"{data['receipt_correlation']:.3f} | {data['failures']['count']} | "
+                        f"{format(headers, '.3f') if headers is not None else '—'} |", file=summary)
           PY
 
       - name: Run security tests
