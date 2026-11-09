@@ -144,3 +144,151 @@ def test_cold_resume_during_large_root_settlement_stays_dirty_until_fresh_pass(t
         assert quota._read_quota_ledger(tmp_path)['usage_authoritative'] is True
     finally:
         _clear_scans()
+
+
+def test_growth_checks_root_membership_when_directory_timestamps_collide(tmp_path, monkeypatch):
+    from agent_py_agent.tests.test_owner_quota_incremental_recovery import _r7_grow
+
+    _clear_scans()
+    try:
+        for index in range(301):
+            (tmp_path / f'{index:05d}').write_bytes(b'x')
+        _finish(tmp_path)
+        assert _r7_grow(tmp_path) == 'ok'
+        frozen = tmp_path.stat()
+        original_stat = Path.stat
+
+        class SameTick:
+            def __init__(self, actual):
+                self.actual = actual
+
+            def __getattr__(self, key):
+                return getattr(frozen if key in {'st_mtime_ns', 'st_ctime_ns', 'st_mtime', 'st_ctime'}
+                               else self.actual, key)
+
+        def coarse_stat(path, *args, **kwargs):
+            actual = original_stat(path, *args, **kwargs)
+            return SameTick(actual) if path == tmp_path else actual
+
+        monkeypatch.setattr(Path, 'stat', coarse_stat)
+        assert tmp_path.stat().st_mtime_ns == frozen.st_mtime_ns
+        assert tmp_path.stat().st_ctime_ns == frozen.st_ctime_ns
+        (tmp_path / 'oob.bin').write_bytes(b'z' * 4096)
+        assert _r7_grow(tmp_path) == 'refused'
+        assert quota._read_quota_ledger(tmp_path)['dirty_since'] is not None
+        assert _finish(tmp_path)['used_bytes'] == quota.owner_logical_usage_bytes(tmp_path, exact=True) == 4398
+    finally:
+        _clear_scans()
+
+
+def test_external_root_member_between_admission_and_settlement_is_not_vouched(tmp_path):
+    from agent_py_agent.tests.test_owner_quota_incremental_recovery import _r7_grow
+
+    _clear_scans()
+    try:
+        for index in range(301):
+            (tmp_path / f'{index:05d}.lock').write_bytes(b'x')
+        _finish(tmp_path)
+        enforcer = quota.OwnerQuotaEnforcer(tmp_path, max_bytes=1 << 30)
+        with enforcer.admission() as admission:
+            admission.check([quota.OwnerQuotaChange(tmp_path / 'managed', 1)])
+            (tmp_path / 'managed').write_bytes(b'y')
+            (tmp_path / 'oob.bin').write_bytes(b'z' * 4096)
+        ledger = quota._read_quota_ledger(tmp_path)
+        assert ledger['dirty_since'] is not None
+        assert _r7_grow(tmp_path) == 'refused'
+        assert _finish(tmp_path)['used_bytes'] == quota.owner_logical_usage_bytes(tmp_path, exact=True) == 4398
+    finally:
+        _clear_scans()
+
+
+@pytest.mark.parametrize('members', [None, [True, 0], [-1, 0], [1]])
+def test_missing_or_invalid_root_member_proof_requires_real_rebuild(tmp_path, members):
+    _clear_scans()
+    try:
+        for index in range(301):
+            (tmp_path / f'{index:05d}.lock').write_bytes(b'x')
+        _finish(tmp_path)
+        ledger = quota._read_quota_ledger(tmp_path)
+        if members is None:
+            ledger['reconcile_cursor'].pop('root_membership', None)
+        else:
+            ledger['reconcile_cursor']['root_membership'] = members
+        quota._write_quota_ledger(tmp_path, ledger)
+        enforcer = quota.OwnerQuotaEnforcer(tmp_path, max_bytes=1 << 30)
+        with pytest.raises(quota.OwnerQuotaUnavailable) as error:
+            with enforcer.reserve([quota.OwnerQuotaChange(tmp_path / 'managed', 1)]):
+                pytest.fail('unknown lock classifications must not authorize growth')
+        assert error.value.reason_code == 'reconciliation_pending'
+        _finish(tmp_path)
+        with enforcer.reserve([quota.OwnerQuotaChange(tmp_path / 'managed', 1)]):
+            (tmp_path / 'managed').write_bytes(b'y')
+        assert quota._read_quota_ledger(tmp_path)['used_bytes'] == 302
+    finally:
+        _clear_scans()
+
+
+@pytest.mark.parametrize('net_growth', [0, -1])
+def test_non_growth_check_does_not_scan_root_but_later_growth_checks_fresh_members(
+    tmp_path, monkeypatch, net_growth,
+):
+    _clear_scans()
+    try:
+        for index in range(301):
+            (tmp_path / f'{index:05d}.bin').write_bytes(b'x')
+        target = tmp_path / 'managed'
+        target.write_bytes(b'y')
+        _finish(tmp_path)
+        original = quota._quota_large_dir_matches
+        checked = []
+
+        def observed(*args, **kwargs):
+            checked.append(args[1])
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(quota, '_quota_large_dir_matches', observed)
+        enforcer = quota.OwnerQuotaEnforcer(tmp_path, max_bytes=1 << 30)
+        with enforcer.admission() as admission:
+            admission.check([quota.OwnerQuotaChange(target, 0, append=net_growth == 0)])
+            assert checked == []
+            (tmp_path / 'oob.bin').write_bytes(b'z' * 4096)
+            with pytest.raises(quota.OwnerQuotaUnavailable) as error:
+                admission.check([quota.OwnerQuotaChange(target, 1, append=True)])
+            assert error.value.reason_code == 'reconciliation_pending'
+            assert checked
+        assert _finish(tmp_path)['used_bytes'] == quota.owner_logical_usage_bytes(tmp_path, exact=True) == 4398
+    finally:
+        _clear_scans()
+
+
+@pytest.mark.parametrize('phase', ['before_growth', 'during_transaction'])
+def test_equal_count_external_plain_member_replacement_is_not_adopted(tmp_path, phase):
+    from agent_py_agent.tests.test_owner_quota_incremental_recovery import _r7_grow
+
+    _clear_scans()
+    try:
+        for index in range(301):
+            (tmp_path / f'{index:05d}.bin').write_bytes(b'x')
+        (tmp_path / 'managed').write_bytes(b'y')
+        _finish(tmp_path)
+
+        def replace_member():
+            (tmp_path / '00000.bin').unlink()
+            (tmp_path / 'replacement.bin').write_bytes(b'z' * 4096)
+
+        if phase == 'before_growth':
+            replace_member()
+            assert _r7_grow(tmp_path) == 'refused'
+            expected = 4397
+        else:
+            enforcer = quota.OwnerQuotaEnforcer(tmp_path, max_bytes=1 << 30)
+            with enforcer.reserve([quota.OwnerQuotaChange(tmp_path / 'managed', 1, append=True)]):
+                with (tmp_path / 'managed').open('ab') as stream:
+                    stream.write(b'y')
+                replace_member()
+            assert _r7_grow(tmp_path) == 'refused'
+            expected = 4398
+        assert quota._read_quota_ledger(tmp_path)['dirty_since'] is not None
+        assert _finish(tmp_path)['used_bytes'] == quota.owner_logical_usage_bytes(tmp_path, exact=True) == expected
+    finally:
+        _clear_scans()
