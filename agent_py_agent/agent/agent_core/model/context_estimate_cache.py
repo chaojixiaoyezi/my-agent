@@ -14,11 +14,18 @@ class ContextEstimateMemo:
     def __init__(self):
         self._lock = Lock()
         self._last = None
+        self._revision = 0
         self._inflight = {}
         self._prompt_projection = None
         self._inline_batch = None
         self._inline_pending = {}
         self._prompt_timings = None
+
+    def forget_context(self):
+        """不可缓存的新输入释放旧投影；在途等待照常完成，但不重新发表过时代次。"""
+        with self._lock:
+            self._last = self._prompt_projection = None
+            self._revision += 1
 
     # LLM: 当前线程才可借其准备时长，返回独立数字字典，不从其它worker继承秒表。
     # 函数用途: 取得最近实际prompt构建的分阶段耗时。
@@ -70,18 +77,18 @@ class ContextEstimateMemo:
             flight = self._inflight.get(key)
             producer = flight is None
             if producer:
-                flight = (Future(), get_ident())
+                flight = (Future(), get_ident(), self._revision)
                 self._inflight[key] = flight
-        future, owner = flight
+        future, owner, revision = flight
         if not producer:
             if owner == get_ident():
                 raise RuntimeError("上下文计量不能同键自等待")
             return _detached(future.result())
-        return self._produce(key, future, compute)
+        return self._produce(key, future, compute, revision)
 
     # LLM: 捕获BaseException避免永久挂起waiter；Future回调在锁外，发布的key只用计算前捕获值。
     # 函数用途: 完成producer并在通知后清理inflight。
-    def _produce(self, key, future, compute):
+    def _produce(self, key, future, compute, revision):
         try:
             result = _freeze(compute())
         except BaseException as error:
@@ -89,7 +96,8 @@ class ContextEstimateMemo:
             raise
         else:
             with self._lock:
-                self._last = key, result
+                if self._revision == revision:
+                    self._last = key, result
             future.set_result(result)
             return _detached(result)
         finally:

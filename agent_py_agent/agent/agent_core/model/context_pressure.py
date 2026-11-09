@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import time
 from copy import copy
 from dataclasses import dataclass, field, fields, is_dataclass, replace
@@ -757,10 +758,12 @@ def _model_visible_context_components(
     projection, history, guidance, already_forwarded = _model_visible_request_projection(agent, params, prompt)
     fingerprint = request_projection_surface_fingerprint(agent, projection)
     state = getattr(params, "live_archive_state", None)
-    key = _context_estimate_key(params, projection, history, guidance, already_forwarded, fingerprint) if isinstance(state, dict) else None
     from .context_estimate_cache import estimate_memo_for
 
-    memo = estimate_memo_for(params) if key is not None else None
+    memo = estimate_memo_for(params) if isinstance(state, dict) else None
+    key = _context_estimate_key(params, projection, history, guidance, already_forwarded, fingerprint) if memo is not None else None
+    if memo is not None and key is None:
+        memo.forget_context()
     # LLM: 闭包只保留本次key的输入，等待期间不重新取可变params的消息集合。
     # 函数用途: 延迟执行同键的昂贵组件计量。
     def compute():
@@ -837,10 +840,12 @@ def project_request_prompt_history(params, prompt):
     from ..tool_ir_history import project_native_prompt_history
     from .context_estimate_cache import estimate_memo_for
 
-    history = list(getattr(params, "tool_ir_history", None) or [])
+    history = getattr(params, "tool_ir_history", None) or []
     conversation = conversation_runtime_state_section(params)
-    key = _prompt_history_projection_key(params, prompt, history, conversation, project_native_prompt_history)
     memo = estimate_memo_for(params)
+    key = _prompt_history_projection_key(params, prompt, history, conversation, project_native_prompt_history) if memo is not None else None
+    if memo is not None and key is None:
+        memo.forget_context()
     cached = memo.prompt_projection() if memo is not None else None
     if key is not None and cached is not None and (key == cached[0] or key == cached[1]):
         if cached[1] == _prompt_history_projection_key(params, cached[2], cached[3], conversation, project_native_prompt_history):
@@ -856,48 +861,73 @@ def project_request_prompt_history(params, prompt):
         except (AttributeError, TypeError, ValueError, RecursionError):
             key, projection_params = None, params
     projected, result = project_native_prompt_history(projection_params, prompt, conversation_state=conversation)
-    output_key = _prompt_history_projection_key(params, projected, result, conversation, project_native_prompt_history)
-    if memo is not None and key is not None and output_key is not None and key == _prompt_history_projection_key(params, prompt, getattr(params, "tool_ir_history", None) or [], conversation, project_native_prompt_history):
-        memo.remember_prompt_projection((key, output_key, projected, tuple(result)))
+    if memo is not None and key is not None:
+        output_key = _prompt_history_projection_key(params, projected, result, conversation, project_native_prompt_history)
+        if output_key is not None and key == _prompt_history_projection_key(params, prompt, getattr(params, "tool_ir_history", None) or [], conversation, project_native_prompt_history):
+            memo.remember_prompt_projection((key, output_key, projected, tuple(result)))
+        else:
+            memo.forget_context()
+    elif memo is not None:
+        memo.forget_context()
     return projected, result
 
 
 # LLM: 内容键含本轮降级覆盖的完整类型和值树，不能把缓存中的原文或旧桩送出；scope和投影器变化同样失效。
 # 函数用途: 为同轮纯投影构造含降级桩的精确结构键，不能在桩变化后复用旧原文或旧计量。
 def _prompt_history_projection_key(params, prompt, history, conversation, projector):
+    if (isinstance(prompt, str) and sys.getsizeof(prompt) > _CONTEXT_MEMO_KEY_MAX_BYTES
+            or type(history) not in (list, tuple) or len(history) > _CONTEXT_MEMO_KEY_MAX_NODES):
+        return None
+    # 外层history沿原合同统一序列类型；只在O(1)项数门通过后装箱，最多4096个引用。
+    history = tuple(history)
+    scope = tuple(str(getattr(params, name, "") or "") for name in ("session_id", "run_id", "request_id"))
     try:
-        content = _context_value_fingerprint((str(prompt), prompt_cache_layout(prompt), tuple(history), conversation,
-                                              tuple((getattr(params, "compact_degradation_stubs", None) or {}).items())))
+        content = _context_value_fingerprint((scope, str(prompt), prompt_cache_layout(prompt), history, conversation,
+                                              getattr(params, "compact_degradation_stubs", None) or {}))
     except (AttributeError, TypeError, ValueError, RecursionError):
         return None
-    scope = tuple(str(getattr(params, name, "") or "") for name in ("session_id", "run_id", "request_id"))
     return (scope, content, id(projector)) if content is not None else None
 
 
 # LLM: 精确类型标签加不可变值树；容器复制结构，字符串只借不可变值，NaN/负零保float表示；不调用hash压缩身份。
 #   未知对象、非字符串字典键、环或超过64层时不缓存；该键仅留请求私有memo，不进入归档或公开遥测。
 # 函数用途: 通过完整结构相等核对输入，避免-1/-2等hash碰撞污染投影和计量。
-def _context_value_fingerprint(value: object, *, _depth: int = 0) -> tuple | None:
-    if _depth > 64:
+# 临时memo身份树总预算256KiB；包含结构和所引用的叶子，不能钉住完整大历史。
+_CONTEXT_MEMO_KEY_MAX_BYTES = 256 * 1024
+# 一次身份核对最多4096节点；宽容器不能先线性装箱再判预算。
+_CONTEXT_MEMO_KEY_MAX_NODES = 4096
+
+
+def _context_value_fingerprint(value: object, *, _depth: int = 0, _budget=None) -> tuple | None:
+    budget = [_CONTEXT_MEMO_KEY_MAX_BYTES, _CONTEXT_MEMO_KEY_MAX_NODES] if _budget is None else _budget
+    budget[1] -= 1
+    if _depth > 64 or budget[1] < 0:
         return None
     kind = type(value)
-    if kind in (str, bytes, int, bool, type(None)):
-        return kind, value
-    if kind is float:
-        return kind, value.hex()
+    if kind in (str, bytes, int, bool, type(None), float):
+        leaf = value.hex() if kind is float else value
+        budget[0] -= sys.getsizeof(leaf) + sys.getsizeof((kind, leaf))
+        return (kind, leaf) if budget[0] >= 0 else None
     if kind is dict:
-        if any(type(key) is not str for key in value):
-            return None
         entries = value.items()
     elif kind in (list, tuple):
         entries = enumerate(value)
     elif is_dataclass(value) and not isinstance(value, type):
+        if len(value.__dataclass_fields__) > budget[1]:
+            return None
         entries = ((item.name, getattr(value, item.name)) for item in fields(value))
     else:
         return None
+    # 每条pair及最终tuple槽位预付，构造期间也不越过同一预算。
+    budget[0] -= sys.getsizeof((kind, ())) + sys.getsizeof(())
     parts = []
     for key, item in entries:
-        part = _context_value_fingerprint(item, _depth=_depth + 1)
+        if kind is dict and type(key) is not str:
+            return None
+        budget[0] -= sys.getsizeof(key) + sys.getsizeof((key, None)) + 16
+        if budget[0] < 0 or budget[1] <= 0:
+            return None
+        part = _context_value_fingerprint(item, _depth=_depth + 1, _budget=budget)
         if part is None:
             return None
         parts.append((key, part))
@@ -910,7 +940,11 @@ def _context_estimate_key(params, projection, history, guidance, forwarded, surf
     if estimate_tokens is not _MEMO_ESTIMATE_TOKENS:
         return None
     native = projection.messages is not None
-    sources = (str(projection.provider_prompt or ""), history, guidance,
+    if (sys.getsizeof(projection.provider_prompt) > _CONTEXT_MEMO_KEY_MAX_BYTES
+            or len(forwarded) > _CONTEXT_MEMO_KEY_MAX_NODES):
+        return None
+    scope = tuple(str(getattr(params, name, "") or "") for name in ("session_id", "run_id", "request_id"))
+    sources = (scope, str(projection.provider_prompt or ""), history, guidance,
                getattr(params, "provider_history_messages", None) if native else None,
                getattr(params, "tool_context", None) if native else None, tuple(sorted(forwarded)))
     try:
@@ -919,7 +953,6 @@ def _context_estimate_key(params, projection, history, guidance, forwarded, surf
         return None
     if content is None:
         return None
-    scope = tuple(str(getattr(params, name, "") or "") for name in ("session_id", "run_id", "request_id"))
     return (scope, surface, content, media_token_reserve(), id(estimate_tokens),
             id(projected_model_context_components), id(classify_nontext_content))
 
