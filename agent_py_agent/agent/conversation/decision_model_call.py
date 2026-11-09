@@ -164,7 +164,7 @@ def _collect_transport_facts(ledger: ModelCallLedger, call_id: str, sink: list[d
     if sink is None:
         return
     try:
-        record = next((item for item in ledger.records() if item.call_id == call_id), None)
+        record = ledger.record(call_id)
         if record is not None:
             sink.append(decision_transport_facts(record))
     except Exception:

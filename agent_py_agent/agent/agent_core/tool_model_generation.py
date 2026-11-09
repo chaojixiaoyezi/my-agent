@@ -1238,12 +1238,9 @@ def _provider_timeout_idle_silence(ledger: object, call_id: str) -> float | None
     fallback 与「真实零静默」合并(此前 fallback 0.0 会污染账本语义)。
     """
     try:
-        for item in ledger.records():
-            if item.call_id == call_id:
-                return max(
-                    0.0,
-                    float(ledger.context.now()) - float(item.last_activity_at),
-                )
+        item = ledger.record(call_id)
+        if item is not None:
+            return max(0.0, float(ledger.context.now()) - float(item.last_activity_at))
     except Exception:
         pass
     return None
@@ -1253,9 +1250,9 @@ def _provider_timeout_elapsed(ledger: object, call_id: str) -> float:
     """掐断时刻的真实墙钟经过（now - record.started_at），与 record 层时间戳
     双持贯通证据链；record 不在账或 ledger 异常时返回 0.0（行为不回归）。"""
     try:
-        for item in ledger.records():
-            if item.call_id == call_id:
-                return max(0.0, float(ledger.context.now()) - float(item.started_at))
+        item = ledger.record(call_id)
+        if item is not None:
+            return max(0.0, float(ledger.context.now()) - float(item.started_at))
     except Exception:
         pass
     return 0.0

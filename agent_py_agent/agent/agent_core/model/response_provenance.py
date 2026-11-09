@@ -45,7 +45,7 @@ def stamp_response_provenance(params: object, ledger: object, call_id: str, resp
     response.response_provenance = None
     response.internal_response = ''
     response.public_receipt = None
-    record = next((item for item in ledger.records() if item.call_id == call_id), None)
+    record = ledger.record(call_id)
     if record is None or record.status != 'finished':
         return
     metadata = record.metadata

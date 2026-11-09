@@ -913,6 +913,12 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
             self._replace(updated)
             return updated
 
+    def record(self, call_id: str) -> ModelCallRecord | None:
+        """同锁精确读取现存快照；已淘汰/未知保持None，不额外保留或重建身份。"""
+        with self._lock:
+            index = self._index.get(call_id)
+            return None if index is None else self._records[index]
+
     def records(self) -> tuple[ModelCallRecord, ...]:
         with self._lock:
             return tuple(self._records)

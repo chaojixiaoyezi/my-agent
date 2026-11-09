@@ -411,7 +411,7 @@ def _last_response_metrics(response: object, ledger: object, call_id: str) -> di
         reported_cache_read_token_usage,
     )
 
-    record = next((record for record in ledger.records() if record.call_id == call_id), None)
+    record = ledger.record(call_id)
     if record and record.metadata.get("purpose") == "decision":
         return {}
     known = "cache_read_input_tokens" in provider_usage_fields(response)

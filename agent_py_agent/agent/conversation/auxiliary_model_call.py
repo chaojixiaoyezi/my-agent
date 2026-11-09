@@ -656,7 +656,7 @@ def _call_backend(
 # 函数用途: 把原 HTTP 次数与调用编号交给宿主，用于诚实报告内部重试的统计边界。
 def _report_auxiliary_observation(request: AuxiliaryModelCallRequest, ledger: object, call_id: str) -> None:
     try:
-        record = next((item for item in ledger.records() if item.call_id == call_id), None)
+        record = ledger.record(call_id)
         request.on_observation(AuxiliaryModelCallObservation(
             call_id, record.provider_attempt_count if record is not None else None,
         ))

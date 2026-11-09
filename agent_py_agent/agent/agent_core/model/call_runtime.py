@@ -255,7 +255,7 @@ def record_model_call_first_token(
     chunk: str,
     first_token_estimate: object,
 ) -> None:
-    record = next((item for item in ledger.records() if item.call_id == call_id), None)
+    record = ledger.record(call_id)
     if record is None:
         return
     latency = max(0.0, float(ledger.context.now()) - record.started_at)

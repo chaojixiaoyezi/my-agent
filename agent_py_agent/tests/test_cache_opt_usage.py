@@ -13,6 +13,7 @@ from agent_py_agent.agent.agent_core.model.usage import (
     provider_visible_input_token_usage,
     reported_cache_read_token_usage,
 )
+from agent_py_agent.agent.contracts.model_call_ledger import ModelCallLedger
 from agent_py_agent.agent.conversation.model_metrics import _last_response_metrics
 
 
@@ -57,7 +58,7 @@ def test_deepseek_fallback_requires_valid_total_and_preserves_canonical_zero(usa
     assert reported_cache_read_token_usage(response) == read
     assert goal_token_usage(response) == 10100 - read
     assert "cache_read_input_tokens" in provider_usage_fields(response)
-    metrics = _last_response_metrics(response, SimpleNamespace(records=lambda: ()), "")
+    metrics = _last_response_metrics(response, ModelCallLedger(), "")
     assert metrics["cache_percent"] == read / 100
 
 
@@ -67,7 +68,7 @@ def test_hit_without_valid_prompt_total_is_not_reported(total):
                                      "prompt_cache_hit_tokens": 9000, "output_tokens": 100})
     assert reported_cache_read_token_usage(response) == 0
     assert "cache_read_input_tokens" not in provider_usage_fields(response)
-    assert _last_response_metrics(response, SimpleNamespace(records=lambda: ()), "")["cache_percent"] is None
+    assert _last_response_metrics(response, ModelCallLedger(), "")["cache_percent"] is None
 
 
 def test_misses_are_not_cache_writes_and_unknown_read_is_not_zero_percent():
@@ -76,7 +77,7 @@ def test_misses_are_not_cache_writes_and_unknown_read_is_not_zero_percent():
     assert normalize_usage(response).cache_creation_input_tokens == 0
     assert "cache_write_input_tokens" not in provider_usage_fields(response)
     assert "cache_read_input_tokens" not in provider_usage_fields(response)
-    assert _last_response_metrics(response, SimpleNamespace(records=lambda: ()), "")["cache_percent"] is None
+    assert _last_response_metrics(response, ModelCallLedger(), "")["cache_percent"] is None
 
 
 def test_anthropic_disjoint_counters_and_legacy_inclusive_helper_are_unchanged():
