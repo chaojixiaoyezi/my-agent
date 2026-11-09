@@ -64,6 +64,20 @@ def test_five_capacity_waits_stay_uncounted_and_same_task_continues(tmp_path, mo
     request.addfinalizer(release_child.set)
     original_run = SimpleAgent.run
     original_dispatch = dispatch._background_dispatch_worker
+    original_start = dispatch._start_inprocess_dispatch
+    dispatch_returns = {}
+
+    # 后继孩子极快完成时，它的启动/收尾写入会与同tick第一任务的完成唤醒交叠。
+    # 容量资格用例只等自己新派工的真实返回，不改变默认tick范围或吞掉历史读取错误。
+    def start(current, dispatch_request, mark_errors=None):
+        finished = None
+        if current is agent:
+            finished = Event()
+            dispatch_returns[dispatch_request.launch_id] = finished
+        result = original_start(current, dispatch_request, mark_errors)
+        if finished is not None and len(dispatch_returns) > 1:
+            assert finished.wait(timeout=30), 'capacity test successor dispatch did not finish'
+        return result
 
     # LLM: 保留真实run输入与返回，只让占位孩子等待显式测试事件；有界超时失败且异常退出亦释放。
     # 函数用途: 排除离线孩子在第五拍前已跑完的时序竞态。
@@ -81,9 +95,11 @@ def test_five_capacity_waits_stay_uncounted_and_same_task_continues(tmp_path, mo
         finally:
             if dispatch_request.agent is agent:
                 dispatch_finished.set()
+                dispatch_returns[dispatch_request.launch_id].set()
 
     monkeypatch.setattr(SimpleAgent, 'run', run)
     monkeypatch.setattr(dispatch, '_background_dispatch_worker', observe_dispatch)
+    monkeypatch.setattr(dispatch, '_start_inprocess_dispatch', start)
     assert agent.runtime_guard_policy.provider_transient_auto_resume_delays_seconds == ()
     store = agent.conversation_store
     set_delegation_preference(agent, "feishu", "ou_a", True)

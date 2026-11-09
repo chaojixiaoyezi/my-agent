@@ -115,3 +115,59 @@ def test_file_level_report_blocks_even_when_readable_messages_remain(case, monke
         assert result.status == "unreadable" and result.seed is None
         assert report in result.load_errors
         assert _source_state(case) == before
+
+
+def test_history_pending_commit_is_unknown_until_fresh_complete_read(case, monkeypatch):
+    from threading import Event, Thread, current_thread
+
+    from agent_py_agent.agent.subagents.services.base import CreateRunParams
+
+    manager = case.agent.subagents
+    first = manager.create_run(params=CreateRunParams(goal='history scope', thought='test', plan=['read'],
+                                                    allowed_tools=['read_file']))
+    second = manager.create_run(params=CreateRunParams(goal='other root', thought='test', plan=['read'],
+                                                     allowed_tools=['read_file']))
+    case.store.tasks.bind({'thread_id': case.thread.thread_id, 'task_id': first.id, 'goal': 'history', 'now': 1})
+    case.request.task_id = first.id
+    before = _source_state(case)
+    index = manager.persistence.run_index
+    original_mark, original_ids = index.mark_pending, index.request_ids
+    start, pending, release = Event(), Event(), Event()
+    errors = []
+
+    def mark(run_id, *, task=None):
+        original_mark(run_id, task=task)
+        if current_thread() is writer:
+            pending.set()
+            assert release.wait(timeout=5), 'history reader did not release canonical writer'
+
+    def ids(*args, **kwargs):
+        start.set()  # 原prepare已结束；随后开始原canonical提交，固定实际TOCTOU交错。
+        assert pending.wait(timeout=5), 'canonical pending intent was not committed'
+        return original_ids(*args, **kwargs)
+
+    def write():
+        try:
+            assert start.wait(timeout=5)
+            manager.save(second)
+        except BaseException as error:
+            errors.append(error)
+
+    monkeypatch.setattr(index, 'mark_pending', mark)
+    monkeypatch.setattr(index, 'request_ids', ids)
+    writer = Thread(target=write, name='history-pending-commit')
+    writer.start()
+    try:
+        with pytest.raises(BackgroundHistoryUnavailableError) as caught:
+            prepare_background_history_or_raise(case.agent, case.store, case.thread, case.request)
+        assert any(error.get('context') == 'subagents.load_root_index'
+                   and error.get('error_type') == 'SubagentRunIndexUnavailable' for error in caught.value.load_errors)
+    finally:
+        release.set()
+        writer.join(timeout=5)
+    assert not writer.is_alive() and errors == []
+    monkeypatch.setattr(index, 'request_ids', original_ids)
+    fresh = prepare_background_history_or_raise(case.agent, case.store, case.thread, case.request)
+    assert fresh.status == 'ready' and not fresh.load_errors
+    assert seed_text_messages(fresh.seed) == case.expected
+    assert _source_state(case) == before
