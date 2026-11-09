@@ -385,7 +385,9 @@ class OwnerQuotaAdmission:
             spent = ledger.get('permanent_pending_growth_bytes', 0)
             pending_limit = self._enforcer.permanent_pending_growth_bytes
             spent = spent if type(spent) is int and spent >= 0 else pending_limit
+            # 待对账余量只能借用同一 owner 的完整历史基线；缺账的默认零计数不能授权增长。
             if (permanent_only and not snapshot_invalidated
+                    and _quota_control_baseline(root, ledger, reservation=self._reservation)
                     and spent + (final - replaced) <= min(pending_limit, headroom)):
                 ledger['permanent_pending_growth_bytes'] = spent + (final - replaced)
                 permanent_pending = True

@@ -235,3 +235,26 @@ def test_pressure_unrepresentable_ratio_is_unknown_and_preserves_ledger(tmp_path
     before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
     assert quota.owner_quota_pressure(tmp_path) is None
     assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+
+@pytest.mark.parametrize('untrusted_ledger', [False, True])
+def test_pending_permanent_growth_requires_existing_authoritative_baseline(tmp_path, untrusted_ledger):
+    (tmp_path / 'memory').mkdir()
+    for index in range(160):
+        (tmp_path / f'item-{index}').write_bytes(b'x')
+    with (tmp_path / 'external.bin').open('wb') as handle:
+        handle.truncate(2 * 1024 * 1024)
+    if untrusted_ledger:
+        ledger = quota._read_quota_ledger(tmp_path)
+        ledger['usage_authoritative'] = False
+        quota._write_quota_ledger(tmp_path, ledger)
+    target = tmp_path / 'memory' / 'new.md'
+    enforcer = quota.OwnerQuotaEnforcer(tmp_path, max_bytes=1024 * 1024)
+    with pytest.raises(quota.OwnerQuotaUnavailable, match='reconciliation pending'):
+        _write(enforcer, target, 1)
+    assert not target.exists()
+    assert quota._read_quota_ledger(tmp_path).get('permanent_pending_growth_bytes', 0) == 0
+    _reconcile(tmp_path)
+    with pytest.raises(quota.OwnerQuotaExceeded):
+        _write(enforcer, target, 1)
+    assert not target.exists()

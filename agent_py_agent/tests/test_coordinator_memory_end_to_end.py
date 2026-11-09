@@ -138,6 +138,16 @@ def test_same_borrow_quota_policy_updates_original_object_and_rejects_bad_or_dis
         quota = domain.long_term.quota_enforcer
         for max_mb in [0, 1, 3, 1, 0]:
             domain.home.owner_quota_json.write_text(json.dumps({"max_disk_mb": max_mb}), encoding="utf-8")
+            if max_mb:
+                from agent_py_agent.agent.user_space.owner_quota import reconcile_owner_quota_slice
+                # 本用例核缓存策略切换；先沿真实分片对账建立有限配额的事实基线，
+                # 不再靠缺账默认零用量为 search 的访问计数增长授权。
+                for _ in range(64):
+                    report = reconcile_owner_quota_slice(domain.home.owner_home_dir, max_entries=128, max_ms=100)
+                    if report['complete']:
+                        break
+                else:
+                    pytest.fail('owner quota reconciliation did not complete')
             status, result = memory_post(server, actor, query="needle")
             assert status == 200 and result["ok"], result
             assert domain.long_term.quota_enforcer is quota and quota.max_bytes == max_mb * 1024 * 1024
