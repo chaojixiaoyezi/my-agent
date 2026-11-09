@@ -1539,3 +1539,33 @@ def test_r3_public_search_revalidates_after_vector_hits(tmp_path, monkeypatch, a
         assert scans[-1]["scanned_records"] <= 1
     assert all(facts["scanned_records"] <= jsonl._AUTHORITY_SCAN_MAX_RECORDS
                and facts["scanned_bytes"] <= jsonl._AUTHORITY_SCAN_MAX_BYTES for facts in scans)
+
+
+@pytest.mark.parametrize('purge', [False, True])
+def test_operation_audit_uses_exact_quota_and_refuses_unfunded_write(tmp_path, purge):
+    from agent_py_agent.agent.memory_store.operations import (
+        append_memory_operation_events,
+        append_memory_purge_event,
+    )
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    path = tmp_path / 'ops.jsonl'
+    path.write_text('{"existing": true}\n', encoding='utf-8')
+    before = path.read_bytes()
+    enforcer = quota.OwnerQuotaEnforcer(tmp_path, max_bytes=len(before) + 1)
+    assert quota.reconcile_owner_quota_slice(tmp_path, max_entries=128, max_ms=1000)['complete']
+    def write(admission):
+        if purge:
+            append_memory_purge_event(path, entry_ids={'forgotten'}, content_hashes={'hash'}, admission=admission)
+        else:
+            append_memory_operation_events(path, [MemoryRecord('user', 'private text', entry_id='entry')],
+                                           admission=admission)
+    with enforcer.admission() as admission:
+        with pytest.raises(quota.OwnerQuotaExceeded):
+            write(admission)
+    assert path.read_bytes() == before
+    enforcer.max_bytes = 4096
+    with enforcer.admission() as admission:
+        write(admission)
+    assert quota._read_quota_ledger(tmp_path)['used_bytes'] == path.stat().st_size
+    assert b'private text' not in path.read_bytes()

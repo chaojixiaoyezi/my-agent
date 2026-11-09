@@ -634,9 +634,10 @@ class _JsonlMemoryMutationMixin:
                 _consume_pending_snapshot(self, pending_snapshot)
         from ._jsonl_indexing import removal_cleanup_phase
 
-        with removal_cleanup_phase(formal_memory_changed=True, enabled=bool(final_removed_ids)):
+        with _quota_admission(self.quota_enforcer, _admission) as cleanup_admission, removal_cleanup_phase(
+                formal_memory_changed=True, enabled=bool(final_removed_ids)):
             if removed_content_hashes and self.candidate_service is not None:
-                self.candidate_service.redact_content_admitted(_admission, {
+                self.candidate_service.redact_content_admitted(cleanup_admission, {
                     "content_hashes": removed_content_hashes,
                     "exclude_candidate_ids": {
                         source.removeprefix("candidate:")
@@ -650,10 +651,12 @@ class _JsonlMemoryMutationMixin:
                     self.ops_path,
                     entry_ids=final_removed_ids,
                     content_hashes=removed_content_hashes,
+                    admission=cleanup_admission,
                     **({} if not self.coordinator_io else {"coordinator_io": True}),
                 )
-            append_memory_operation_events(self.ops_path, persisted, **({} if not self.coordinator_io else {"coordinator_io": True}))
-            self._after_commit_indexes(persisted, _admission=_admission)
+            append_memory_operation_events(self.ops_path, persisted, admission=cleanup_admission,
+                **({} if not self.coordinator_io else {"coordinator_io": True}))
+            self._after_commit_indexes(persisted, _admission=cleanup_admission)
             # 已删除取全部历史版本；replace仅取被覆盖版本，新正文缓存不在清理范围内。
             if not final_removed_ids:
                 self._forget_cached_vectors(
@@ -738,13 +741,15 @@ class _JsonlMemoryMutationMixin:
                 ]
                 tombstones = _persisted_remove_events(tombstones, current_events, set(expected))
                 _write_compacted_memory(self, current_events, [*retained, *tombstones], {}, admission)
-        append_memory_purge_event(
-            self.ops_path,
-            entry_ids=set(expected),
-            content_hashes={content_hash for _version, content_hash in expected.values()},
-        )
-        append_memory_operation_events(self.ops_path, tombstones)
-        self._after_commit_indexes(tombstones)
+        with _quota_admission(self.quota_enforcer) as cleanup_admission:
+            append_memory_purge_event(
+                self.ops_path,
+                entry_ids=set(expected),
+                content_hashes={content_hash for _version, content_hash in expected.values()},
+                admission=cleanup_admission,
+            )
+            append_memory_operation_events(self.ops_path, tombstones, admission=cleanup_admission)
+            self._after_commit_indexes(tombstones, _admission=cleanup_admission)
         return tombstones
 
 # LLM: 检索与治理分离；Search只消费本库冷热权威的已验证候选，有界partial不代表完整，投影不授予正文权。

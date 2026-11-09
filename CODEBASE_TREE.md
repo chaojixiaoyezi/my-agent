@@ -2136,8 +2136,11 @@ IM 多任务和公共包的新长期入口及关键文件职责（均复用原 S
 |-- agent_py_agent/agent/conversation/message_prefix_proof.py # 稳定热文件已验证前缀的首 ID 否定提示；总位图不超过 4 MiB
 |-- agent_py_agent/tests/test_message_prefix_proof.py # 位图冲突、重复 ID、换源、并发与实际读口的回归
 |-- agent_py_agent/tests/test_curator_message_slices.py # 长线程、冷热来源变化、预算公平、日终及原租约的续办回归
+|-- agent_py_agent/tests/curator_slice_test_support.py # 在真实线程读取后制造预算到期、验证来源隔离和跨片续办的测试夹具
 |-- agent_py_agent/tests/test_binary_snapshot_identity.py # 核验同一已打开文件的字节和身份，替换、短读及失败时关闭描述符
 |-- agent_py_agent/tests/test_r8_windows_hot_slice.py # Windows 路径与句柄时钟不同仍能续读，实际换源或权限变化不发布结果
+|-- agent_py_agent/tests/test_r8_windows_tail_clocks.py # 消息及观察尾部核对同源时钟，原位改写拒绝，稳定 EOF 免重复解析
+|-- agent_py_agent/tests/test_r8_observation_portable_tail.py # 验证只读固定尾窗，以及越权、换源或文件身份未知时不返回观察记录
 |-- docs/design/R8_CURATOR_MESSAGE_SLICES.md # 后台消息采集的分片、首 ID、文件身份和进展边界
 |-- agent_py_agent/agent/memory_store/curator_audit_cursor.py # 已校验旧分片/锚行跳过，错误/预算/缺cursor保持
 |-- agent_py_agent/tests/test_r8_curator_audit_scope.py # 空审计不枚举历史，候选身份未知不消费，已识别坏线程按原策略隔离

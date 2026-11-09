@@ -19,6 +19,7 @@ from ..common.nofollow_fs import (
     file_descriptor_change_ns,
     file_identity_snapshot,
     open_readonly_file_beneath,
+    read_tail_snapshot_beneath,
 )
 from ..gateway_parts.io import read_json_file_report
 from ..runtime_errors import DataCorruptionError, runtime_error_report
@@ -573,35 +574,47 @@ class ObservationStore:
 
 
 def _observation_tail_window(path, max_bytes, limit):
-    """一个nofollow FD只读固定尾窗；不跨预算找有效行，保留损坏与代次变化事实。"""
-    try:
-        descriptor = open_readonly_file_beneath(path.parent, (path.name,))
-    except FileNotFoundError:
-        return [], [], False, 0, True
-    except OSError as exc:
-        return [], [runtime_error_report(exc, context="conversation.observations.window")], True, 0, False
-    errors, rows, consumed = [], [], 0
-    try:
-        with os.fdopen(descriptor, "rb") as handle:
-            before = os.fstat(handle.fileno())
-            changed = file_descriptor_change_ns(handle.fileno(), before)
-            if not stat.S_ISREG(before.st_mode):
-                return [], [{"reason_code": "invalid_ledger_type", "path": str(path)}], True, 0, False
-            start = max(0, before.st_size - max_bytes)
-            handle.seek(start)
-            raw = handle.read(max_bytes)
-            consumed = len(raw)
-            current, current_changed = file_identity_snapshot(path)
-            after = os.fstat(handle.fileno())
-            final_changed = file_descriptor_change_ns(handle.fileno(), after)
-    except OSError as exc:
-        return [], [runtime_error_report(exc, context="conversation.observations.window")], True, max_bytes, False
-    def fields(info):
-        return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
-                info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-    if (fields(before) != fields(after) or fields(current) != fields(after)
-            or changed is None or changed != current_changed or changed != final_changed):
-        errors.append({"reason_code": "ledger_changed_during_read", "path": str(path)})
+    """固定尾窗复用平台身份核验；不跨预算找有效行，保留损坏与代次变化事实。"""
+    if os.name == "nt":
+        # 此处是有界展示投影：显式使用原portable快照能力，不冒充strict dir_fd模式。
+        try:
+            snapshot = read_tail_snapshot_beneath(path.parent, (path.name,), max_bytes=max_bytes)
+        except OSError as exc:
+            return [], [runtime_error_report(exc, context="conversation.observations.window")], True, max_bytes, False
+        if snapshot is None:
+            return [], [], False, 0, True
+        raw = snapshot.content
+        start = max(0, snapshot.stat.st_size - max_bytes)
+        consumed, errors, rows = len(raw), [], []
+    else:
+        try:
+            descriptor = open_readonly_file_beneath(path.parent, (path.name,))
+        except FileNotFoundError:
+            return [], [], False, 0, True
+        except OSError as exc:
+            return [], [runtime_error_report(exc, context="conversation.observations.window")], True, 0, False
+        errors, rows, consumed = [], [], 0
+        try:
+            with os.fdopen(descriptor, "rb") as handle:
+                before = os.fstat(handle.fileno())
+                changed = file_descriptor_change_ns(handle.fileno(), before)
+                if not stat.S_ISREG(before.st_mode):
+                    return [], [{"reason_code": "invalid_ledger_type", "path": str(path)}], True, 0, False
+                start = max(0, before.st_size - max_bytes)
+                handle.seek(start)
+                raw = handle.read(max_bytes)
+                consumed = len(raw)
+                current, current_changed = file_identity_snapshot(path)
+                after = os.fstat(handle.fileno())
+                final_changed = file_descriptor_change_ns(handle.fileno(), after)
+        except OSError as exc:
+            return [], [runtime_error_report(exc, context="conversation.observations.window")], True, max_bytes, False
+        def fields(info):
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+                    info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        if (fields(before) != fields(after) or fields(current) != fields(after)
+                or changed is None or changed != current_changed or changed != final_changed):
+            errors.append({"reason_code": "ledger_changed_during_read", "path": str(path)})
     lines = raw.split(b"\n")
     if start:
         lines = lines[1:]

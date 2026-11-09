@@ -195,43 +195,63 @@ def test_real_tool_archive_and_control_plane_feed_task_evidence(tmp_path):
     assert evidence['hash_scope'] == 'verified_read_output'
 
 
-def test_broadcast_actual_curator_runs_commit_one_daily_candidate_and_all_cursors(tmp_path):
-    from agent_py_agent.tests.test_curator_observation_identity import (
-        _Backend,
-        _candidate,
-        _output,
-        _service,
-    )
+def test_broadcast_actual_curator_runs_commit_one_daily_candidate_and_all_cursors(tmp_path, monkeypatch):
+    from agent_py_agent.agent.backends import ModelResponse
+    from agent_py_agent.tests.curator_slice_test_support import expire_first_thread_read
+    from agent_py_agent.tests.test_curator_observation_identity import _candidate, _output, _service
 
     store, messages = _store_messages(tmp_path, 12)
-    config = _config(batch_message_limit=6)
-    first = _collect(tmp_path, store, config=config)
-    first_ids = {item.message_id for item in first.messages}
-    groups = (first.messages, tuple(item for item in messages if item.message_id not in first_ids))
-    outputs = []
-    for group in groups:
-        refs = [{'message_id': item.message_id} for item in group]
-        candidate = _candidate(group[0].message_id, 'SYNTHETIC_ONLY_RULE', 'SYNTHETIC_ONLY_SUBJECT')
-        candidate.update(candidate_type='user_preference', source_message_refs=refs, promotion_target='user')
-        output = _output(group[0], [candidate])
-        output['processed_message_refs'] = refs
-        output['daily_events'] = [{'event_type': 'decision', 'summary': 'SYNTHETIC_ONLY_RULE',
-            'actor': 'user', 'origin': 'user_explicit', 'message_refs': refs, 'tool_refs': [],
-            'artifact_refs': [], 'decisions': [], 'lessons': [], 'next_actions': []}]
-        outputs.append(output)
-    backend = _Backend(*outputs)
+    by_id = {item.message_id: item for item in messages}
+
+    class Backend:
+        name = 'actual-batch-broadcast'
+        calls = 0
+        batches = []
+
+        def generate_structured(self, prompt, *, response_schema):
+            # 正式输入可能为任意合法短页；模型只回显当拍实际提供的结构化来源。
+            payload = json.loads(prompt.rsplit('待提炼经历 JSON：\n', 1)[1])
+            ids = [source['message_id'] for row in payload['messages']
+                   for source in row.get('broadcast_sources', [row])]
+            assert ids and len(ids) <= 6 and all(mid in by_id for mid in ids)
+            self.calls += 1
+            self.batches.append(ids)
+            refs = [{'message_id': mid} for mid in ids]
+            first = by_id[ids[0]]
+            candidate = _candidate(first.message_id, 'SYNTHETIC_ONLY_RULE', 'SYNTHETIC_ONLY_SUBJECT')
+            candidate.update(candidate_type='user_preference', source_message_refs=refs, promotion_target='user')
+            output = _output(first, [candidate])
+            output['processed_message_refs'] = refs
+            output['daily_events'] = [{'event_type': 'decision', 'summary': 'SYNTHETIC_ONLY_RULE',
+                'actor': 'user', 'origin': 'user_explicit', 'message_refs': refs, 'tool_refs': [],
+                'artifact_refs': [], 'decisions': [], 'lessons': [], 'next_actions': []}]
+            return ModelResponse(text=json.dumps(output), backend=self.name)
+
+    backend = Backend()
     service = _service(tmp_path, backend, store)
     service.config = replace(service.config, batch_message_limit=6)
-    for _ in range(2):
+    fired = expire_first_thread_read(monkeypatch, store)
+    expected = {item.thread_id: item.message_id for item in messages}
+    results = []
+    for _ in range(32):
         result = service.run(reason='admin')
-        assert (result.status, result.failure_code, result.processed_messages) == ('succeeded', '', 6), result
+        results.append(result)
+        assert result.status in {'succeeded', 'busy'} and not result.failure_code, result
+        assert 0 <= result.processed_messages <= 6, result
+        if service.state_store.load().per_thread_cursors == expected:
+            break
+        assert result.processed_messages or 'message_scan_partial' in result.warnings, result
+    else:
+        pytest.fail(f'12条广播未在32片内全部提交: {results!r}')
+    assert fired and 'message_scan_partial' in results[0].warnings
     [event] = service.daily_store.list(day='1970-01-01')
     [candidate] = service.candidate_service.list()
     assert event.sequence == 1 and not event.previous_event_id and len(event.message_refs) == 12
     assert candidate.occurrence_count == 1 and len(candidate.source_message_refs) == 12
-    assert service.state_store.load().per_thread_cursors == {item.thread_id: item.message_id for item in messages}
-    # 原生产入口重放同一批：不重置state，而通过验证/提交稳定身份的既有反例覆盖崩溃重放。
-    assert backend.calls == 2
+    assert service.state_store.load().per_thread_cursors == expected
+    assert sum(result.processed_messages for result in results) == 12
+    assert {mid for batch in backend.batches for mid in batch} == set(by_id)
+    assert backend.calls >= 2
 
 
 def test_broadcast_interleaved_unprocessed_message_stops_contiguous_cursor(tmp_path):

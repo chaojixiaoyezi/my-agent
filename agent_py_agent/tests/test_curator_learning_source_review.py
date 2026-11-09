@@ -23,7 +23,7 @@ from agent_py_agent.tests.test_review38_contracts import thread
 @pytest.mark.parametrize("source_kind", ["dispatch", "unknown", "missing-request", "user", "user-child"])
 # LLM: 保留真实消息、audit和工具账本；可学来源自动归档，混入派活/未知来源仍阻断，不替换晋升器。
 # 函数用途: 验证Curator引用的逐项来源资格到正式自动归档始终生效。
-def test_curator_mixed_reference_learning_is_not_laundered(env, tmp_path, reference, source_kind):
+def test_curator_mixed_reference_learning_is_not_laundered(env, tmp_path, monkeypatch, reference, source_kind):
     allowed = source_kind in {"user", "user-child"}
     good_thread = thread(env, ls.user_dialogue_projection(), "good")
     message = env.store.messages.append(dict(thread_id=good_thread.thread_id, role="user", content="项目使用 UTC 保存时间", metadata={"gateway_request_id": "good-request"}))
@@ -53,7 +53,14 @@ def test_curator_mixed_reference_learning_is_not_laundered(env, tmp_path, refere
     if reference in {"artifact", "both"}:
         draft["source_artifact_refs"] = [{"artifact_ref": "artifact://current-output"}]
     backend = _StaticStructuredBackend(_output(message, [draft]))
-    result = _make_curator(env, audit_dir, backend).run(reason="admin")
+    from agent_py_agent.tests.curator_slice_test_support import (
+        expire_first_thread_read,
+        run_until_candidate,
+    )
+
+    fired = expire_first_thread_read(monkeypatch, env.store)
+    result, slices = run_until_candidate(_make_curator(env, audit_dir, backend))
+    assert fired and 'message_scan_partial' in slices[0].warnings
     assert result.status == "succeeded", result
     [candidate] = env.service.candidates.list()
     if reference in {"tool", "both"}:

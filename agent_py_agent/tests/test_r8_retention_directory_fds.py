@@ -161,3 +161,87 @@ def test_partial_task_work_scan_releases_descriptors_before_retirement(tmp_path)
     finally:
         projection.close()
     assert _target_fds(work) == []
+
+
+def test_pin_chunk_pause_releases_source_without_gc(tmp_path, monkeypatch):
+    projection, _context = _projection(tmp_path)
+    projection.contents['pass_token'] = 'pass'
+    class Budget:
+        max_bytes = 4
+        size = 0
+        def charge(self, *, size):
+            self.size += size
+    projection.budget = Budget()
+    path = projection.home.owner_home_dir / 'tasks/day/task/work/state.json'
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'abcdefgh')
+    opened = []
+    original = scan._fingerprint_source
+    def capture(source):
+        stream = original(source)
+        opened.append(stream)
+        return stream
+    monkeypatch.setattr(scan, '_fingerprint_source', capture)
+    chunks = projection._chunks(path, required=True)
+    try:
+        assert next(chunks) == b'abcd'
+        assert opened and all(source.closed for source in opened)
+        assert next(chunks) == b''
+        assert all(source.closed for source in opened)
+        projection.budget.size = 0
+        assert next(chunks) == b'efgh'
+        assert all(source.closed for source in opened)
+        with pytest.raises(StopIteration):
+            next(chunks)
+        import hashlib
+        assert projection.sources[path][1] == hashlib.sha256(b'abcdefgh').digest()
+    finally:
+        chunks.close()
+        projection.close()
+
+
+@pytest.mark.parametrize('change', ['replace', 'truncate', 'rewrite', 'missing'])
+def test_pin_chunk_resume_rejects_changed_source_and_releases_handles(tmp_path, monkeypatch, change):
+    projection, _context = _projection(tmp_path)
+    projection.contents['pass_token'] = 'pass'
+    class Budget:
+        max_bytes = 4
+        size = 0
+        def charge(self, *, size):
+            self.size += size
+    projection.budget = Budget()
+    path = projection.home.owner_home_dir / 'tasks/day/task/work/state.json'
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'abcdefgh')
+    opened = []
+    original = scan._fingerprint_source
+    def capture(source):
+        stream = original(source)
+        opened.append(stream)
+        return stream
+    monkeypatch.setattr(scan, '_fingerprint_source', capture)
+    chunks = projection._chunks(path, required=True)
+    try:
+        assert next(chunks) == b'abcd'
+        assert all(source.closed for source in opened)
+        if change == 'replace':
+            replacement = path.with_suffix('.replacement')
+            replacement.write_bytes(b'abcdefgh')
+            replacement.replace(path)
+        elif change == 'truncate':
+            path.write_bytes(b'ab')
+        elif change == 'missing':
+            path.unlink()
+        else:
+            before = path.stat()
+            path.write_bytes(b'ABCDEFGH')
+            # 本例测身份换代拒绝，不依赖仿真文件系统能分辨连续写入的时钟tick。
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+        projection.budget.size = 0
+        with pytest.raises(FileNotFoundError if change == 'missing' else scan._PinReadChanged):
+            next(chunks)
+        assert path not in projection.sources
+        assert all(source.closed for source in opened)
+    finally:
+        chunks.close()
+        projection.close()
