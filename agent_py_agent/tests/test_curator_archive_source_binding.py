@@ -87,7 +87,14 @@ def test_real_archive_source_reaches_curator(env, monkeypatch, reference, case):
     key, ref = ("source_tool_refs", {"event_id": event["event_id"]}) if reference == "tool" else (
         "source_artifact_refs", {"artifact_ref": event["content_path"]})
     draft[key] = [ref]
-    result = _curator(env, message, draft).run(reason="admin")
+    from agent_py_agent.tests.curator_slice_test_support import (
+        expire_first_thread_read,
+        run_until_candidate,
+    )
+
+    fired = expire_first_thread_read(monkeypatch, env.store)
+    result, slices = run_until_candidate(_curator(env, message, draft))
+    assert fired and 'message_scan_partial' in slices[0].warnings
     assert result.status == "succeeded", result
     [candidate] = env.service.candidates.list()
     allowed = source_kind == "user"
