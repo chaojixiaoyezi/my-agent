@@ -178,7 +178,7 @@ def test_current_root_association_change_and_cold_revision_are_structural(tmp_pa
 
 def test_live_unknown_scope_is_not_empty_and_expired_scope_needs_no_revival(tmp_path):
     agent, child, handle = _approval_tree(tmp_path)
-    row = json.loads(handle.path.read_text())
+    row = json.loads(handle.path.read_text(encoding="utf-8"))
     (agent.subagents.workspace / child.id / 'task.json').write_text('{bad')
     with pytest.raises(approvals.AgentToolApprovalDiscoveryUnavailable):
         approvals.list_pending_agent_tool_approvals_report(agent, root_task_id=child.root_id, deadline=time.monotonic() + 10)

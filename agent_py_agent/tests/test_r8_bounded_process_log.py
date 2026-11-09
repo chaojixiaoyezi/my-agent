@@ -38,7 +38,7 @@ with bounded_stdio_from_environment():
     os.write(2, b'actual native stderr\\n' * 10000)
 '''
     log = _worker(tmp_path, script)
-    stats = json.loads(capture_path(log).read_text())
+    stats = json.loads(capture_path(log).read_text(encoding="utf-8"))
     assert log.read_bytes() == (data + error)[:4096]
     assert log.stat().st_size == stats['retained_bytes'] == 4096
     assert stats['seen_bytes'] == len(data) + len(error)
@@ -68,7 +68,7 @@ with bounded_stdio_from_environment():
 '''
     log = _worker(tmp_path, script)
     assert log.read_bytes() == b'descendant output'
-    stats = json.loads(capture_path(log).read_text())
+    stats = json.loads(capture_path(log).read_text(encoding="utf-8"))
     assert stats['seen_bytes'] == len(b'descendant output') and stats['eof']
 
 
@@ -93,7 +93,7 @@ with open(sys.argv[1],'wb',buffering=0) as out:
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         try:
-            stats = json.loads(capture_path(log).read_text())
+            stats = json.loads(capture_path(log).read_text(encoding="utf-8"))
             if stats['eof']:
                 break
         except (OSError, ValueError):
@@ -115,7 +115,7 @@ def test_config_yaml_dataclass_and_registry_use_same_default():
     assert default == 4 * 1024 * 1024
     spec = parameter_registry()['background_dispatch_log_max_bytes']
     assert spec.default == default and spec.description and not spec.writable
-    assert f'background_dispatch_log_max_bytes: {default}' in packaged_config_path().read_text()
+    assert f'background_dispatch_log_max_bytes: {default}' in packaged_config_path().read_text(encoding="utf-8")
 
 
 def test_real_module_entry_wires_capture_before_cli_help_bootstrap(tmp_path):
@@ -125,7 +125,7 @@ sys.argv=['my-agent','--help']
 runpy.run_module('agent_py_agent',run_name='__main__')
 '''
     log = _worker(tmp_path, script, limit=1024)
-    stats = json.loads(capture_path(log).read_text())
+    stats = json.loads(capture_path(log).read_text(encoding="utf-8"))
     assert log.stat().st_size == 1024 and stats['seen_bytes'] > 1024
     assert stats['discarded_bytes'] == stats['seen_bytes'] - 1024 and stats['eof']
 
@@ -137,7 +137,7 @@ from agent_py_agent.agent.io.bounded_process_log import bounded_stdio_from_envir
 with bounded_stdio_from_environment(): os.write(1,b'12345')
 '''
     log = _worker(tmp_path, script, limit=1)
-    stats = json.loads(capture_path(log).read_text())
+    stats = json.loads(capture_path(log).read_text(encoding="utf-8"))
     assert log.read_bytes() == b'1'
     assert stats['retained_bytes'] == 1 and stats['discarded_bytes'] == 4
 
@@ -181,7 +181,7 @@ with bounded_stdio_from_environment(): os.write(1,b'small output')
 '''
     limit = 1024 * 1024 * 1024 + 1
     log = _worker(tmp_path, script, limit=limit)
-    stats = json.loads(capture_path(log).read_text())
+    stats = json.loads(capture_path(log).read_text(encoding="utf-8"))
     assert stats['max_bytes'] == limit and stats['seen_bytes'] == 12 and stats['eof']
     assert stats['discarded_bytes'] == 0 and log.read_bytes() == b'small output'
 
@@ -248,7 +248,7 @@ with module.bounded_stdio_from_environment():
 '''
     expected = b'parent-out\nparent-err\nchild-out\nchild-err\n'
     log = _worker(tmp_path, script, limit=25)
-    stats = json.loads(capture_path(log).read_text())
+    stats = json.loads(capture_path(log).read_text(encoding="utf-8"))
     assert log.read_bytes() == expected[:25]
     assert stats['seen_bytes'] == len(expected) and stats['retained_bytes'] == 25
     assert stats['discarded_bytes'] == len(expected) - 25 and stats['eof']
@@ -302,5 +302,5 @@ except OSError: pass
 assert len(threading.enumerate())==1
 '''
     log = _worker(tmp_path, script)
-    stats = json.loads(capture_path(log).read_text())
+    stats = json.loads(capture_path(log).read_text(encoding="utf-8"))
     assert log.read_bytes() == b'actual data' and stats['seen_bytes'] == 11 and stats['eof']
