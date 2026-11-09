@@ -7,6 +7,9 @@
 !agent_py_agent/**
 !deploy/
 !deploy/Dockerfile
+!deploy/install_watchman.py
+!deploy/verify_owner_observer.py
+!deploy/WATCHMAN_NOTICES.md
 
 # 生产镜像不携带测试、缓存和运行状态。
 agent_py_agent/tests/

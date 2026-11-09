@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import socket
+import sqlite3
 import stat
 import threading
 import time
@@ -18,6 +19,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from agent_py_agent.agent.common.json_io import write_private_json_file_atomic_unlocked
+from agent_py_agent.agent.owner_change_journal import OwnerChangeJournal
+from agent_py_agent.agent.owner_snapshot_cache import OwnerSnapshotIndex
 from agent_py_agent.agent.owner_snapshot_index import OwnerStatIndex, stage_and_hash
 from agent_py_agent.agent.pg_rls import tenant_session
 from agent_py_agent.agent.scale_runtime import ScaleRuntimeConfig
@@ -38,6 +41,13 @@ class OwnerFile:
     content_sha256: str
     size_bytes: int
     file_mode: int
+
+
+@dataclass(frozen=True)
+class OwnerManifestDelta:
+    complete: bool
+    entries: tuple[tuple[str, OwnerFile | None], ...]
+    reason: str = ''
 
 
 @dataclass(frozen=True)
@@ -110,15 +120,15 @@ class _OwnerSnapshotHead:
     # LLM: CAS 必须先于任何清单变更，且所有语句共享租户事务；仅退出提交阶段的连接故障归为结果未知。
     # 函数用途: 原子提交租约版本和文件清单增量。
     def commit(self, tenant: str, kind: str, owner: str, *, incarnation: str,
-               removed: list[str], changed: list[OwnerFile]) -> int:
+               removed: list[str], changed: list[OwnerFile], expected_version: int | None = None) -> int:
         exiting = False
         now_ms = int(time.time() * 1000)
         try:
             with tenant_session(self._backend, tenant) as conn:
                 version = conn.execute(text(
-                    "UPDATE owner_snapshot_head SET version = version + 1, holder = NULL, holder_incarnation = NULL, lease_expires_at = NULL, updated_at = :now_ms WHERE tenant = :tenant AND owner_kind = :kind AND owner_id = :owner AND holder_incarnation = :inc AND lease_expires_at > now() RETURNING version"
+                    "UPDATE owner_snapshot_head SET version = version + 1, holder = NULL, holder_incarnation = NULL, lease_expires_at = NULL, updated_at = :now_ms WHERE tenant = :tenant AND owner_kind = :kind AND owner_id = :owner AND (CAST(:expected AS BIGINT) IS NULL OR version=CAST(:expected AS BIGINT)) AND holder_incarnation = :inc AND lease_expires_at > now() RETURNING version"
                 ), {"tenant": tenant, "kind": kind, "owner": owner, "inc": incarnation,
-                    "now_ms": now_ms}).scalar_one_or_none()
+                    "now_ms": now_ms, "expected": expected_version}).scalar_one_or_none()
                 if version is None:
                     raise OwnerSnapshotLeaseLost("owner 快照租约已失效")
                 if removed:
@@ -136,6 +146,11 @@ class _OwnerSnapshotHead:
                     ), [{"tenant": tenant, "kind": kind, "owner": owner, "path": row.relative_path,
                          "object_key": row.object_key, "sha": row.content_sha256, "size": row.size_bytes,
                          "mode": row.file_mode, "now_ms": now_ms} for row in changed])
+                version = conn.execute(text('SELECT version FROM owner_snapshot_head WHERE tenant=:tenant '
+                                            'AND owner_kind=:kind AND owner_id=:owner'),
+                                       {'tenant': tenant, 'kind': kind, 'owner': owner}).scalar_one_or_none()
+                if version is None:
+                    raise OwnerSnapshotLeaseLost('owner 快照提交头消失')
                 version = int(version)
                 exiting = True
         except (ConnectionError, OSError, DBAPIError) as exc:
@@ -154,13 +169,13 @@ class _OwnerSnapshotHead:
 
 
 class OwnerSnapshotStore:
-    """每次 owner 执行都恢复并原子替换清单；对象先上传，清单后提交。"""
+    """以租约、原生变更证明和清单代次提交 owner 文件增量。"""
 
     _EPHEMERAL_ROOTS = frozenset({"cache", "tmp", "trash"})
     _head: _OwnerSnapshotHead | None = None
 
-    # LLM: 构造时只绑定租约助手；full 的恢复、提交和连接锁实现保持原样。
-    # 函数用途: 初始化对象存储和可选增量快照依赖。
+    # LLM: 构造只绑定租约助手；观察器在 slot 首次使用时出生，显式恢复仍保留完整校验。
+    # 函数用途: 初始化对象存储、租约与变更投影依赖。
     def __init__(
         self,
         backend: StorageBackend,
@@ -202,9 +217,12 @@ class OwnerSnapshotStore:
         with ExitStack() as stack:
             if hold_advisory_lock:
                 stack.enter_context(self._owner_lock(tenant, owner_kind, owner_id))
-            while head.acquire(tenant, owner_kind, owner_id, holder=holder,
-                               incarnation=incarnation, ttl_seconds=lease_ttl_seconds) is None:
-                time.sleep(min(renew_interval, head.seconds_until_expiry(tenant, owner_kind, owner_id)))
+            version = None
+            while version is None:
+                version = head.acquire(tenant, owner_kind, owner_id, holder=holder,
+                                       incarnation=incarnation, ttl_seconds=lease_ttl_seconds)
+                if version is None:
+                    time.sleep(min(renew_interval, head.seconds_until_expiry(tenant, owner_kind, owner_id)))
 
             # LLM: 释放失败不覆盖已知提交结果；连接故障只让租约按 TTL 到期。
             # 函数用途: 尽力释放当前租约代次。
@@ -239,26 +257,268 @@ class OwnerSnapshotStore:
             except (OSError, ValueError, UnicodeError, RecursionError):
                 clean = False
             write_private_json_file_atomic_unlocked(state_path, {"state": "DIRTY"})
-            rows = self._read_manifest(tenant, owner_kind, owner_id)
-            self._prune_warm_home(home_root, owner_home)
-            if (not clean or not owner_home.is_dir()
-                    or any(stat.S_ISLNK(path.lstat().st_mode) for path in self._warm_paths(owner_home))):
-                if owner_home.exists() and not owner_home.is_dir():
-                    owner_home.unlink()
-                self.restore(tenant, owner_kind, owner_id, owner_home)
-                index = OwnerStatIndex()
-                for row in rows:
-                    index.record(row.relative_path, (owner_home / _safe_relative(row.relative_path)).lstat(),
-                                 row.content_sha256, time.time())
+            projection = warm_dir / 'snapshot-index.sqlite3'
+            recovered_index = False
+            try:
+                index = stack.enter_context(OwnerSnapshotIndex.open(projection))
+            except sqlite3.Error:
+                # 这里只退休可重建投影；原 owner 文件仍须由远端清单和对象 hash 完整恢复后才交付。
+                OwnerSnapshotIndex.retire_projection(projection)
+                clean = False
+                recovered_index = True
+                index = stack.enter_context(OwnerSnapshotIndex.open(projection))
+            identity = [tenant, owner_kind, owner_id, str(owner_home)]
+            metadata = index.metadata()
+            journal = self._journal()
+            home_root.mkdir(parents=True, exist_ok=True)
+
+            def observe(clock):
+                return journal.query(home_root, clock, control_root=warm_dir)
+
+            batch = observe(str(metadata.get('clock') or ''))
+            valid = (clean and type(metadata.get('version')) is int and 0 <= metadata['version'] <= version
+                     and metadata.get('identity') == identity and owner_home.is_dir() and batch.complete)
+            reason = ''
+            remote_paths = set()
+            if valid and metadata['version'] != version:
+                delta = self._read_manifest_delta(tenant, owner_kind, owner_id, after=metadata['version'], through=version)
+                valid = delta.complete
+                reason = delta.reason
+                if valid:
+                    for relative, row in delta.entries:
+                        remote_paths.add(relative)
+                        if row is None:
+                            index.forget(relative)
+                        else:
+                            index.set_manifest(row)
+            if not valid:
+                if not clean:
+                    reason = 'cache_projection_unreadable' if recovered_index else 'cache_dirty_or_cold'
+                elif metadata.get('identity') != identity:
+                    reason = 'cache_identity_changed'
+                elif type(metadata.get('version')) is not int or metadata['version'] != version:
+                    reason = reason or 'remote_version_changed'
+                elif not owner_home.is_dir():
+                    reason = 'owner_home_missing'
+                else:
+                    reason = batch.reason or 'observer_coverage_unconfirmed'
+                rows = self._read_manifest(tenant, owner_kind, owner_id)
+                self._prune_warm_home(home_root, owner_home)
+                restored = (not clean or not owner_home.is_dir()
+                            or any(path.is_symlink() for path in self._warm_paths(owner_home)))
+                if restored:
+                    if owner_home.exists() and not owner_home.is_dir():
+                        owner_home.unlink()
+                    self.restore(tenant, owner_kind, owner_id, owner_home)
+                    index.reset(rows)
+                    for row in rows:
+                        index.record(row.relative_path, (owner_home / _safe_relative(row.relative_path)).lstat(),
+                                     row.content_sha256, time.time())
+                else:
+                    wanted = {row.relative_path for row in rows}
+                    for stale in index.paths() - wanted:
+                        index.forget(stale)
+                    for row in rows:
+                        index.set_manifest(row)
+                # 完整校对是显式恢复边界；先装watch再扫描，期间变化必须在cookie之后再次校对。
+                batch = observe(batch.clock)
+                self._reconcile_warm(owner_home, rows, index, verified_restore=restored)
+                for _ in range(3):
+                    after = observe(batch.clock)
+                    if not after.complete:
+                        batch = after
+                        break
+                    pending, foreign = self._observed_paths(home_root, owner_home, after.paths, index)
+                    if not pending and not foreign:
+                        batch = after
+                        break
+                    self._reconcile_observed(home_root, owner_home, pending, foreign, index)
+                    batch = after
+                else:
+                    raise RuntimeError('owner 缓存校对期间持续变动，保留 DIRTY 等待重试')
             else:
-                index = OwnerStatIndex.load(warm_dir / "stat-index.json")
-                self._reconcile_warm(owner_home, rows, index)
+                for _ in range(3):
+                    pending, foreign = self._observed_paths(home_root, owner_home, batch.paths, index)
+                    pending.update(remote_paths)
+                    remote_paths.clear()
+                    self._reconcile_observed(home_root, owner_home, pending, foreign, index)
+                    after = observe(batch.clock)
+                    if not after.complete:
+                        raise RuntimeError('owner 观察器在温缓存校对中丢失覆盖，保留 DIRTY')
+                    batch = after
+                    pending, foreign = self._observed_paths(home_root, owner_home, batch.paths, index)
+                    if not pending and not foreign:
+                        break
+                else:
+                    raise RuntimeError('owner 温缓存持续变动，保留 DIRTY 等待重试')
+            start_clock = batch.clock
             yield owner_home
-            removed, changed = self._snapshot_delta(tenant, owner_home, warm_dir, rows, index)
-            head.commit(tenant, owner_kind, owner_id, incarnation=incarnation, removed=removed, changed=changed)
-            index.save(warm_dir / "stat-index.json")
+            changed_batch = observe(start_clock)
+            if changed_batch.complete:
+                pending, foreign = self._observed_paths(home_root, owner_home, changed_batch.paths, index)
+                if foreign:
+                    self._prune_warm_home(home_root, owner_home)
+                for _ in range(3):
+                    removed, changed = self._snapshot_observed(tenant, owner_home, warm_dir, pending, index)
+                    after = observe(changed_batch.clock)
+                    if not after.complete:
+                        changed_batch = after
+                        break
+                    more, foreign = self._observed_paths(home_root, owner_home, after.paths, index)
+                    changed_batch = after
+                    if foreign:
+                        self._prune_warm_home(home_root, owner_home)
+                    if not more:
+                        break
+                    pending.update(more)
+                else:
+                    raise RuntimeError('owner 快照期间持续变动，保留 DIRTY 等待重试')
+            if not changed_batch.complete:
+                reason = changed_batch.reason or 'observer_coverage_lost'
+                rows = [OwnerFile(**row) for row in index.manifest().values()]
+                removed, changed = self._snapshot_delta(tenant, owner_home, warm_dir, rows, index)
+                changed_batch = observe(changed_batch.clock)
+            committed = head.commit(tenant, owner_kind, owner_id, incarnation=incarnation, removed=removed, changed=changed,
+                                    expected_version=version)
+            for relative in removed:
+                index.forget(relative)
+            for row in changed:
+                index.set_manifest(row)
+            index.set_metadata({'identity': identity, 'version': committed, 'clock': changed_batch.clock,
+                                'mode': 'full_reconcile' if reason else 'incremental', 'reason': reason,
+                                'recovered_index': recovered_index})
+            index.conn.commit()
             write_private_json_file_atomic_unlocked(state_path, {"state": "CLEAN"})
+            (warm_dir / 'stat-index.json').unlink(missing_ok=True)
             shutil.rmtree(warm_dir / "staging", ignore_errors=True)
+
+    def _journal(self):
+        journal = getattr(self, '_changes', None)
+        if journal is None:
+            self._changes = journal = OwnerChangeJournal()
+        return journal
+
+    def start(self):
+        self._journal().start()
+
+    def release_warm(self, warm_dir):
+        journal = getattr(self, '_changes', None)
+        if journal is not None:
+            journal.release(Path(warm_dir) / 'home')
+
+    def close(self):
+        journal = getattr(self, '_changes', None)
+        if journal is not None:
+            journal.close()
+
+    def _observed_paths(self, home_root, owner_home, events, index):
+        prefix = owner_home.relative_to(home_root).as_posix()
+        paths, subtrees, foreign, whole_root = set(), set(), False, False
+        for event in events:
+            name = event['name']
+            if name == prefix:
+                whole_root = whole_root or not event['exists'] or event.get('new')
+                continue
+            if not name.startswith(prefix + '/'):
+                if prefix.startswith(name + '/') and event.get('type') == 'd' and event['exists']:
+                    continue
+                foreign = True
+                continue
+            relative = name[len(prefix) + 1:]
+            _safe_relative(relative)
+            if event.get('type') == 'd' and event['exists'] and not event.get('new'):
+                continue
+            paths.add(relative)
+            if event.get('type') == 'd' or not event['exists'] and event.get('type') not in {'f', 'l'}:
+                subtrees.add(relative)
+        if whole_root:
+            if owner_home.is_symlink():
+                raise RuntimeError('owner 快照拒绝符号链接根')
+            paths.update(index.paths())
+            if owner_home.is_dir():
+                paths.update(path.relative_to(owner_home).as_posix() for path in self._warm_paths(owner_home))
+            return paths, foreign
+        roots = set()
+        # 同一批嵌套目录事件只展开最外层，避免 rename/new-subtree 引出重复子树扫描。
+        for relative in sorted(subtrees, key=lambda value: (value.count('/'), value)):
+            if not any(parent.as_posix() in roots for parent in _safe_relative(relative).parents):
+                roots.add(relative)
+        for relative in roots:
+            paths.update(index.subtree(relative))
+            target = owner_home / _safe_relative(relative)
+            if target.is_dir() and not target.is_symlink():
+                paths.update(path.relative_to(owner_home).as_posix() for path in self._warm_paths(target))
+        return paths, foreign
+
+    def _reconcile_observed(self, home_root, owner_home, paths, foreign, index):
+        if foreign:
+            self._prune_warm_home(home_root, owner_home)
+        previous = index.manifest(paths)
+        for relative in sorted(paths, key=lambda value: (value.count('/'), value), reverse=True):
+            target = owner_home / _safe_relative(relative)
+            row = previous.get(relative)
+            if row is None:
+                if target.is_symlink() or target.exists() and not target.is_dir():
+                    target.unlink()
+                elif target.is_dir():
+                    try:
+                        target.rmdir()
+                    except OSError:
+                        pass
+                index.forget(relative)
+        for relative, value in previous.items():
+            row = OwnerFile(**value)
+            target = owner_home / _safe_relative(relative)
+            try:
+                info = target.lstat()
+            except FileNotFoundError:
+                info = None
+            valid = (info is not None and stat.S_ISREG(info.st_mode) and info.st_size == row.size_bytes
+                     and stat.S_IMODE(info.st_mode) == row.file_mode and _file_digest(target)[0] == row.content_sha256)
+            if not valid:
+                if target.is_dir() and not target.is_symlink():
+                    shutil.rmtree(target)
+                elif target.is_symlink():
+                    target.unlink()
+                self._download_row(owner_home, row)
+            index.record(relative, target.lstat(), row.content_sha256, time.time())
+
+    def _snapshot_observed(self, tenant, owner_home, warm_dir, paths, index):
+        previous = index.manifest(paths)
+        removed, changed = [], []
+        for relative in sorted(paths):
+            target = owner_home / _safe_relative(relative)
+            try:
+                info = target.lstat()
+            except FileNotFoundError:
+                if relative in previous:
+                    removed.append(relative)
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                raise RuntimeError(f'owner 快照拒绝符号链接: {relative}')
+            if not stat.S_ISREG(info.st_mode):
+                if relative in previous:
+                    removed.append(relative)
+                continue
+            if Path(relative).parts[0] in self._EPHEMERAL_ROOTS:
+                continue
+            staged, digest, size = stage_and_hash(target, warm_dir / 'staging')
+            after = target.lstat()
+            fields = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns', 'st_mode', 'st_nlink')
+            if any(getattr(info, field) != getattr(after, field) for field in fields):
+                staged.unlink(missing_ok=True)
+                raise RuntimeError(f'owner 文件在快照时仍被写入: {target}')
+            key = self._object_key(tenant, digest)
+            try:
+                old = previous.get(relative)
+                row = OwnerFile(relative, key, digest, size, stat.S_IMODE(info.st_mode))
+                if old is None or row != OwnerFile(**old):
+                    self._upload(staged, key)
+                    changed.append(row)
+            finally:
+                staged.unlink(missing_ok=True)
+            index.record(relative, target.lstat(), digest, time.time())
+        return removed, changed
 
     # LLM: 显式扫描不吞权限等枚举错误，不能将漏读路径解释为删除；符号链接只列出而不跟随。
     # 函数用途: 完整列举温缓存子树，任何不可读目录都使本轮失败。
@@ -305,7 +565,8 @@ class OwnerSnapshotStore:
 
     # LLM: 每行对照权威摘要和完整文件状态，不信任版本号；先删除阻挡新目录的旧文件及所有额外路径。
     # 函数用途: 将 CLEAN 缓存逐行校对成与完整恢复相同的文件树。
-    def _reconcile_warm(self, owner_home: Path, rows: list[OwnerFile], index: OwnerStatIndex) -> None:
+    def _reconcile_warm(self, owner_home: Path, rows: list[OwnerFile], index: OwnerStatIndex,
+                        *, verified_restore: bool = False) -> None:
         files = {_safe_relative(row.relative_path) for row in rows}
         directories = {parent for path in files for parent in path.parents if parent != Path(".")}
         for path in reversed(self._warm_paths(owner_home)):
@@ -322,7 +583,8 @@ class OwnerSnapshotStore:
             st = target.lstat() if target.exists() else None
             if (st is not None and stat.S_ISREG(st.st_mode) and st.st_size == row.size_bytes
                     and stat.S_IMODE(st.st_mode) == row.file_mode
-                    and index.lookup(row.relative_path, st) == row.content_sha256):
+                    and (index.lookup(row.relative_path, st) == row.content_sha256
+                         or verified_restore and _file_digest(target)[0] == row.content_sha256)):
                 continue
             self._download_row(owner_home, row)
             index.record(row.relative_path, target.lstat(), row.content_sha256, time.time())
@@ -365,6 +627,7 @@ class OwnerSnapshotStore:
 
     def require_ready(self) -> None:
         """启动硬门：bucket 可达且已开版本控制，灾难恢复不能靠覆盖后的单一对象。"""
+        OwnerChangeJournal.require_available()
         self._client.head_bucket(Bucket=self._bucket)
         versioning = self._client.get_bucket_versioning(Bucket=self._bucket)
         if str(versioning.get("Status") or "") != "Enabled":
@@ -397,24 +660,6 @@ class OwnerSnapshotStore:
                 return
             raise
         raise RuntimeError("owner object bucket 保留的 missing probe key 不应存在")
-
-    @contextmanager
-    def checkout(
-        self,
-        tenant: str,
-        owner_kind: str,
-        owner_id: str,
-        owner_home: Path,
-    ) -> Iterator[Path]:
-        """跨 Pod 串行同一 owner；异常执行不覆盖上一份已提交快照。"""
-        with self._owner_lock(tenant, owner_kind, owner_id):
-            self.restore(tenant, owner_kind, owner_id, owner_home)
-            try:
-                yield owner_home
-            except BaseException:
-                raise
-            else:
-                self.commit(tenant, owner_kind, owner_id, owner_home)
 
     def restore(self, tenant: str, owner_kind: str, owner_id: str, owner_home: Path) -> int:
         rows = self._read_manifest(tenant, owner_kind, owner_id)
@@ -473,6 +718,36 @@ class OwnerSnapshotStore:
                     text("SELECT pg_advisory_unlock(hashtextextended(:owner_ref, 0))"),
                     {"owner_ref": owner_ref},
                 )
+
+    def _read_manifest_delta(self, tenant, owner_kind, owner_id, *, after, through):
+        with tenant_session(self._backend, tenant) as conn:
+            current = conn.execute(text('SELECT version,change_floor FROM owner_snapshot_head WHERE tenant=:tenant '
+                                        'AND owner_kind=:kind AND owner_id=:owner'),
+                                   {'tenant': tenant, 'kind': owner_kind, 'owner': owner_id}).one()
+            if current.version != through:
+                raise OwnerSnapshotLeaseLost('owner 清单在取得租约后发生变化')
+            if after < current.change_floor:
+                return OwnerManifestDelta(False, (), 'remote_change_cursor_expired')
+            rows = conn.execute(text('''SELECT c.relative_path,c.removed,m.object_key,m.content_sha256,m.size_bytes,m.file_mode
+                FROM owner_file_changes c LEFT JOIN owner_file_manifest m ON m.tenant=c.tenant
+                AND m.owner_kind=c.owner_kind AND m.owner_id=c.owner_id AND m.relative_path=c.relative_path
+                WHERE c.tenant=:tenant AND c.owner_kind=:kind AND c.owner_id=:owner
+                AND c.version>:after AND c.version<=:through ORDER BY c.version'''),
+                                {'tenant': tenant, 'kind': owner_kind, 'owner': owner_id,
+                                 'after': after, 'through': through}).all()
+        entries = []
+        for row in rows:
+            _safe_relative(row.relative_path)
+            if row.removed:
+                if row.object_key is not None:
+                    raise RuntimeError('owner 删除投影与权威清单冲突')
+                entries.append((row.relative_path, None))
+            else:
+                if row.object_key is None:
+                    raise RuntimeError('owner 变更投影缺少权威清单行')
+                entries.append((row.relative_path, OwnerFile(row.relative_path, row.object_key, row.content_sha256,
+                                                            int(row.size_bytes), int(row.file_mode))))
+        return OwnerManifestDelta(True, tuple(entries))
 
     def _read_manifest(self, tenant: str, owner_kind: str, owner_id: str) -> list[OwnerFile]:
         with tenant_session(self._backend, tenant) as conn:

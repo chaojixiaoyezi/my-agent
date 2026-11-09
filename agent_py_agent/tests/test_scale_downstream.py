@@ -85,7 +85,7 @@ def test_owner_snapshot_commits_before_external_reply(tmp_path, monkeypatch) -> 
 
     class Store:
         @contextmanager
-        def checkout(self, *_args):
+        def checkout_delta(self, *_args, **_kwargs):
             events.append("restore")
             yield
             events.append("commit")

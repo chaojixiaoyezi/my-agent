@@ -165,6 +165,71 @@ def _grant_scale_application_schema(conn, app_role: str) -> None:
 
 # LLM: 规模迁移只追加版本；旧 Pod 的版本检查仍允许数据库已有更高版本。
 # 函数用途: 注册普通队列和可选规模数据的顺序迁移。
+def _create_owner_manifest_generation(conn, app_role: str) -> None:
+    """同事务安装变更投影/RLS/触发器，旧 writer 也不能绕过清单代次。"""
+    if not app_role or not app_role.replace('_', '').isalnum():
+        raise ValueError('DATABASE_APP_ROLE 非法')
+    statements = (
+        'ALTER TABLE owner_snapshot_head ADD COLUMN IF NOT EXISTS change_floor BIGINT NOT NULL DEFAULT 0',
+        '''CREATE TABLE IF NOT EXISTS owner_file_changes (
+            tenant TEXT NOT NULL, owner_kind TEXT NOT NULL, owner_id TEXT NOT NULL,
+            relative_path TEXT NOT NULL, version BIGINT NOT NULL, removed BOOLEAN NOT NULL,
+            PRIMARY KEY(tenant,owner_kind,owner_id,relative_path))''',
+        'CREATE INDEX IF NOT EXISTS ix_owner_file_changes_generation ON owner_file_changes(tenant,owner_kind,owner_id,version)',
+        'ALTER TABLE owner_file_changes ENABLE ROW LEVEL SECURITY',
+        'ALTER TABLE owner_file_changes FORCE ROW LEVEL SECURITY',
+        'DROP POLICY IF EXISTS owner_file_changes_tenant_isolation ON owner_file_changes',
+        '''CREATE POLICY owner_file_changes_tenant_isolation ON owner_file_changes
+            USING (tenant = current_setting('app.tenant_id', true))
+            WITH CHECK (tenant = current_setting('app.tenant_id', true))''',
+        'REVOKE ALL ON owner_file_changes FROM PUBLIC',
+        f'GRANT SELECT,INSERT,UPDATE,DELETE ON owner_file_changes TO {app_role}',
+        '''CREATE OR REPLACE FUNCTION my_agent_owner_file_changed(t TEXT,k TEXT,o TEXT,p TEXT,deleted BOOLEAN)
+            RETURNS VOID LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,public AS $$
+            DECLARE next_version BIGINT; floor_version BIGINT;
+            BEGIN
+                INSERT INTO owner_snapshot_head(tenant,owner_kind,owner_id,version,updated_at)
+                    VALUES(t,k,o,1,(extract(epoch from clock_timestamp())*1000)::bigint)
+                    ON CONFLICT(tenant,owner_kind,owner_id) DO UPDATE
+                    SET version=owner_snapshot_head.version+1,updated_at=EXCLUDED.updated_at
+                    RETURNING version INTO next_version;
+                INSERT INTO owner_file_changes(tenant,owner_kind,owner_id,relative_path,version,removed)
+                    VALUES(t,k,o,p,next_version,deleted)
+                    ON CONFLICT(tenant,owner_kind,owner_id,relative_path) DO UPDATE
+                    SET version=EXCLUDED.version,removed=EXCLUDED.removed;
+                IF next_version % 64 = 0 THEN
+                    UPDATE owner_snapshot_head SET change_floor=GREATEST(change_floor,next_version-65536)
+                        WHERE tenant=t AND owner_kind=k AND owner_id=o RETURNING change_floor INTO floor_version;
+                    WITH obsolete AS (SELECT ctid FROM owner_file_changes
+                        WHERE tenant=t AND owner_kind=k AND owner_id=o AND version<=floor_version
+                        ORDER BY version LIMIT 128)
+                        DELETE FROM owner_file_changes WHERE ctid IN (SELECT ctid FROM obsolete);
+                END IF;
+            END $$''',
+        '''CREATE OR REPLACE FUNCTION my_agent_owner_manifest_generation()
+            RETURNS TRIGGER LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog,public AS $$
+            BEGIN
+                IF TG_OP = 'DELETE' THEN
+                    PERFORM my_agent_owner_file_changed(OLD.tenant,OLD.owner_kind,OLD.owner_id,OLD.relative_path,TRUE);
+                ELSE
+                    IF TG_OP = 'UPDATE' AND (OLD.tenant,OLD.owner_kind,OLD.owner_id,OLD.relative_path)
+                        IS DISTINCT FROM (NEW.tenant,NEW.owner_kind,NEW.owner_id,NEW.relative_path) THEN
+                        PERFORM my_agent_owner_file_changed(OLD.tenant,OLD.owner_kind,OLD.owner_id,OLD.relative_path,TRUE);
+                    END IF;
+                    PERFORM my_agent_owner_file_changed(NEW.tenant,NEW.owner_kind,NEW.owner_id,NEW.relative_path,FALSE);
+                END IF;
+                RETURN NULL;
+            END $$''',
+        'REVOKE ALL ON FUNCTION my_agent_owner_file_changed(TEXT,TEXT,TEXT,TEXT,BOOLEAN) FROM PUBLIC',
+        f'GRANT EXECUTE ON FUNCTION my_agent_owner_file_changed(TEXT,TEXT,TEXT,TEXT,BOOLEAN) TO {app_role}',
+        'DROP TRIGGER IF EXISTS owner_manifest_generation ON owner_file_manifest',
+        '''CREATE TRIGGER owner_manifest_generation AFTER INSERT OR UPDATE OR DELETE ON owner_file_manifest
+            FOR EACH ROW EXECUTE FUNCTION my_agent_owner_manifest_generation()''',
+    )
+    for statement in statements:
+        conn.execute(text(statement))
+
+
 def runtime_migrations(
     backend: StorageBackend,
     *,
@@ -202,6 +267,7 @@ def runtime_migrations(
         ),
         Migration(11, "expand_owner_snapshot_head", _create_owner_snapshot_head),
         Migration(12, "secure_owner_snapshot_head_rls", lambda conn: _secure_owner_snapshot_head(conn, app_role)),
+        Migration(13, "expand_owner_manifest_generation", lambda conn: _create_owner_manifest_generation(conn, app_role)),
     )
 
 
@@ -273,6 +339,12 @@ def _require_scale_physical_schema(backend: StorageBackend, inspector) -> None:
         raise RuntimeError("数据库迁移版本与物理 schema 漂移: 缺 owner_file_manifest")
     if "owner_snapshot_head" not in inspector.get_table_names():
         raise RuntimeError("数据库迁移版本与物理 schema 漂移: 缺 owner_snapshot_head")
+    if "owner_file_changes" not in inspector.get_table_names():
+        raise RuntimeError("数据库迁移版本与物理 schema 漂移: 缺 owner_file_changes")
+    if 'change_floor' not in {str(item['name']) for item in inspector.get_columns('owner_snapshot_head')}:
+        raise RuntimeError("数据库迁移版本与物理 schema 漂移: 缺 owner change_floor")
+    if 'ix_owner_file_changes_generation' not in {str(item['name']) for item in inspector.get_indexes('owner_file_changes')}:
+        raise RuntimeError('数据库迁移版本与物理 schema 漂移: 缺 owner change generation 索引')
     ingress_columns = {str(item["name"]) for item in inspector.get_columns("ingress_messages")}
     if "release_channel" not in ingress_columns:
         raise RuntimeError("数据库迁移版本与物理 schema 漂移: 缺 release_channel")
@@ -285,11 +357,16 @@ def _require_scale_physical_schema(backend: StorageBackend, inspector) -> None:
         flags = conn.execute(
             text(
                 "SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity FROM pg_class c "
-                "WHERE c.oid IN ('tenant_runtime_state'::regclass, 'owner_file_manifest'::regclass, 'owner_snapshot_head'::regclass)"
+                "WHERE c.oid IN ('tenant_runtime_state'::regclass, 'owner_file_manifest'::regclass, 'owner_snapshot_head'::regclass, 'owner_file_changes'::regclass)"
             )
         ).all()
-    if len(flags) != 3 or any(not bool(row.relrowsecurity) or not bool(row.relforcerowsecurity) for row in flags):
+    if len(flags) != 4 or any(not bool(row.relrowsecurity) or not bool(row.relforcerowsecurity) for row in flags):
         raise RuntimeError("scale 租户表未同时 ENABLE/FORCE RLS")
+    with backend.connect() as conn:
+        enabled = conn.execute(text("SELECT count(*) FROM pg_trigger WHERE tgrelid='owner_file_manifest'::regclass "
+                                    "AND tgname='owner_manifest_generation' AND tgenabled='O' AND NOT tgisinternal")).scalar_one()
+    if enabled != 1:
+        raise RuntimeError('owner 清单 generation 触发器缺失或停用')
     _require_scale_privileges(backend)
 
 
@@ -305,6 +382,7 @@ def _require_scale_privileges(backend: StorageBackend) -> None:
                 "has_table_privilege(current_user, 'tenant_runtime_state', 'SELECT,INSERT,UPDATE,DELETE') AS tenant_ok, "
                 "has_table_privilege(current_user, 'owner_file_manifest', 'SELECT,INSERT,UPDATE,DELETE') AS owner_ok, "
                 "has_table_privilege(current_user, 'owner_snapshot_head', 'SELECT,INSERT,UPDATE,DELETE') AS head_ok, "
+                "has_table_privilege(current_user, 'owner_file_changes', 'SELECT,INSERT,UPDATE,DELETE') AS changes_ok, "
                 "has_table_privilege(current_user, 'my_agent_schema_migrations', 'SELECT') AS version_ok"
             )
         ).one()
@@ -315,6 +393,7 @@ def _require_scale_privileges(backend: StorageBackend) -> None:
             privileges.tenant_ok,
             privileges.owner_ok,
             privileges.head_ok,
+            privileges.changes_ok,
             privileges.version_ok,
         )
     ):

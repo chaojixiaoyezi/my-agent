@@ -547,7 +547,9 @@ model_speed_profile_path: ""
 # 大于 0 时启动先执行一次单进程迁移（与 my-agent gateway migrate-single-process 相同），再按单进程服务。
 gateway_worker_process_count: 0
 
-# 规模 worker 的 owner 快照模式。full 为原有整目录恢复与整表替换；delta_compat 在保留 PG advisory 锁的同时启用租约行与增量清单（滚动升级期间新旧 Pod 混跑用）；delta 只用租约行与增量清单。只能按 full→delta_compat→delta 顺序升级。
+# 规模 worker 的 owner 快照锁策略。full（默认）与 delta_compat 都保留 PG advisory 锁；delta 仅使用租约行。
+# 三种模式统一使用代次清单与温缓存变更流，不再每轮全树扫描；须先应用 migration 13，再升级 worker。
+# 只有 Linux inotify + Watchman cookie 提供完整增量证明；冷缓存、丢事件、过期游标及其它平台显式完整校对。
 scale_owner_snapshot_mode: full
 # Gateway运行目录；留空使用当前owner规范工作区，显式相对路径也按该工作区解析。
 gateway_workspace: ""

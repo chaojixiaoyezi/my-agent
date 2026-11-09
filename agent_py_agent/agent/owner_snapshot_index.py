@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -104,12 +105,15 @@ class OwnerStatIndex:
 # 函数用途: 复制文件到唯一暂存路径并计算该副本的摘要与大小。
 def stage_and_hash(source: Path, staging_dir: Path) -> tuple[Path, str, int]:
     before = source.lstat()
+    if not stat.S_ISREG(before.st_mode):
+        raise RuntimeError(f"owner 快照来源不是常规文件: {source}")
     staging_dir.mkdir(parents=True, exist_ok=True)
     staged = staging_dir / f"{uuid4().hex}.stage"
     try:
         shutil.copyfile(source, staged)
         after = source.lstat()
-        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        fields = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns', 'st_mode', 'st_nlink')
+        if tuple(getattr(before, name) for name in fields) != tuple(getattr(after, name) for name in fields):
             raise RuntimeError(f"owner 文件在快照时仍被写入: {source}")
         with staged.open("rb") as handle:
             digest = hashlib.file_digest(handle, "sha256").hexdigest()

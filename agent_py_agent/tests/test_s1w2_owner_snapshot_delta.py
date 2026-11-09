@@ -160,11 +160,12 @@ class _FakeHead:
         self.expires = self.now + ttl_seconds
         return True
 
-    def commit(self, tenant, kind, owner, *, incarnation, removed, changed):
+    def commit(self, tenant, kind, owner, *, incarnation, removed, changed, expected_version=None):
         if self.fail_commit:
             raise self.fail_commit
-        if incarnation != self.incarnation or self.expires <= self.now:
-            raise snapshots.OwnerSnapshotLeaseLost("expired")
+        if (incarnation != self.incarnation or self.expires <= self.now
+                or expected_version is not None and expected_version != self.version):
+            raise snapshots.OwnerSnapshotLeaseLost("expired or generation changed")
         self.commits.append((list(removed), list(changed)))
         for rel in removed:
             self.rows.pop(rel, None)
@@ -503,12 +504,6 @@ def test_execute_checkout_compatibility_and_commit_before_reply(tmp_path, monkey
 
     class Store:
         @contextmanager
-        def checkout(self, *args):
-            calls.append((args, {}))
-            yield
-            events.append("commit")
-
-        @contextmanager
         def checkout_delta(self, *args, **kwargs):
             calls.append((args, kwargs))
             yield
@@ -526,11 +521,8 @@ def test_execute_checkout_compatibility_and_commit_before_reply(tmp_path, monkey
     assert pool._run_locked(msg, trace) == 4
     assert events == ["commit", "reply"]
     assert len(calls[0][0]) == 4
-    if mode == "full":
-        assert calls[0][1] == {}
-    else:
-        assert calls[0][1] == {"warm_dir": pool._warm_dir(("acme", "user", "u1")),
-                                "lease_ttl_seconds": 9, "hold_advisory_lock": mode == "delta_compat"}
+    assert calls[0][1] == {"warm_dir": pool._warm_dir(("acme", "user", "u1")),
+                            "lease_ttl_seconds": 9, "hold_advisory_lock": mode != "delta"}
     assert not any((tmp_path / ".owner-executions").iterdir())
 
 
@@ -682,7 +674,9 @@ def test_successful_commit_but_index_save_failure_never_marks_clean(tmp_path, mo
     def fail_save(self, path):
         raise OSError("index fsync failed")
 
-    monkeypatch.setattr(OwnerStatIndex, "save", fail_save)
+    from agent_py_agent.agent.owner_snapshot_cache import OwnerSnapshotIndex
+
+    monkeypatch.setattr(OwnerSnapshotIndex, "set_metadata", fail_save)
     with pytest.raises(OSError, match="index fsync"):
         with _checkout(store, warm, home):
             _write_old(home / "data", b"committed")

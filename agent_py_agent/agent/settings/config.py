@@ -732,7 +732,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
 
     # 新部署字段追加在末尾，保留既有位置参数顺序；0 保持主模型 HTTP 不复用连接。
     model_http_max_idle_connections: int = field(default=0, metadata={"bounds": (0, 256), "unit": "个连接"})
-    # full 保持整目录快照；部署升级按 full→delta_compat→delta 顺序推进，改动需重启。
+    # full/delta_compat 保留 advisory 锁，delta 仅租约；统一变更流快照，须先升级 PG schema，改动需重启。
     scale_owner_snapshot_mode: str = "full"
     # 仅部署凭据的身份要求热刷新；飞书回调凭据保持启动值，需重启适配器收敛。
     gateway_edge_identity_required: bool = False

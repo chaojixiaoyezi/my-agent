@@ -48,8 +48,9 @@ def test_runtime_migrations_upgrade_legacy_ingress_table(tmp_path) -> None:
 def test_scale_migration_registry_includes_release_channel_and_owner_manifest(tmp_path) -> None:
     db = StorageBackend.for_path(tmp_path / "registry.db")
     migrations = runtime_migrations(db, include_scale_data=True, app_role="my_agent_app")
-    assert [item.version for item in migrations] == list(range(1, 13))
+    assert [item.version for item in migrations] == list(range(1, 14))
     assert migrations[6].name == "expand_release_channel"
     assert migrations[8].name == "expand_owner_file_manifest"
     assert migrations[10].name == "expand_owner_snapshot_head"
     assert migrations[11].name == "secure_owner_snapshot_head_rls"
+    assert migrations[12].name == "expand_owner_manifest_generation"

@@ -17,6 +17,7 @@ import importlib
 import json
 import os
 import time
+from contextlib import contextmanager
 
 from agent_py_agent.agent.asgi_entry import backend_from_env, env_int
 from agent_py_agent.agent.graceful import DrainState, install_sigterm_drain
@@ -86,6 +87,29 @@ def drain_worker_components(pool: WorkerPool, reaper: StaleReaper, *, timeout: f
     return DrainReport(unfinished == 0, unfinished, until, result.in_flight)
 
 
+@contextmanager
+def handler_lifecycle(handler):
+    """启动/关闭由处理器显式提供，异常退出也归还已启动的宿主资源。"""
+    primary = None
+    try:
+        startup = getattr(handler, 'startup', None)
+        if callable(startup):
+            startup()
+        yield handler
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        close = getattr(handler, 'close', None)
+        if callable(close):
+            try:
+                close()
+            except BaseException as cleanup:
+                if primary is None:
+                    raise
+                primary.handler_cleanup_error = cleanup
+
+
 # LLM: 启动先通过原bwrap/数据库门；信号只翻drain，主线程finally执行共享deadline并按真实unfinished选择退出码。
 # 函数用途: 运行企业worker，排空超时保留恢复事实并非零退出。
 def serve() -> int:  # pragma: no cover - 真进程入口(容器内跑)
@@ -106,18 +130,19 @@ def serve() -> int:  # pragma: no cover - 真进程入口(容器内跑)
     )
     install_thread_excepthook()  # 后台线程(worker/reaper)未捕获异常落日志可告警,不静默死(审计 #19)
     drain = DrainState()
-    pool, queue = build_pool(load_handler(), backend)
-    reaper = StaleReaper(queue)  # 周期回收崩溃 worker 的租约,防会话永久卡死
+    with handler_lifecycle(load_handler()) as handler:
+        pool, queue = build_pool(handler, backend)
+        reaper = StaleReaper(queue)  # 周期回收崩溃 worker 的租约,防会话永久卡死
 
-    install_sigterm_drain(drain)
-    try:
-        pool.start()
-        reaper.start()
-        drain.wait()
-    finally:
-        result = drain_worker_components(pool, reaper, timeout=env_int('WORKER_DRAIN_SECONDS', 110))
-        print(json.dumps({'event': 'worker_drain', 'budget_source': 'WORKER_DRAIN_SECONDS/default110', **result.to_dict()}), flush=True)
-    return 0 if result.drained else 1
+        install_sigterm_drain(drain)
+        try:
+            pool.start()
+            reaper.start()
+            drain.wait()
+        finally:
+            result = drain_worker_components(pool, reaper, timeout=env_int('WORKER_DRAIN_SECONDS', 110))
+            print(json.dumps({'event': 'worker_drain', 'budget_source': 'WORKER_DRAIN_SECONDS/default110', **result.to_dict()}), flush=True)
+        return 0 if result.drained else 1
 
 
 if __name__ == "__main__":  # pragma: no cover
