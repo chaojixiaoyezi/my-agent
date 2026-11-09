@@ -519,3 +519,74 @@ def test_portable_initialization_and_migration_keep_existing_policy(tmp_path, mo
         assert row['state'] == 'pending' and first is True and dispatch == 'original'
     sent = anchors.mark_sent(tmp_path, _key(10), root_message_id='om_portable', thread_id='omt_portable', now='sent')
     assert anchors.mark_unknown(tmp_path, _key(10), now='late') == sent
+
+
+def test_portable_source_uses_fd_clock_and_binary_bytes(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    module = _migration()
+    path = _legacy(tmp_path, 3)
+    raw = path.read_bytes().replace(b', ', b',\r\n') + b'\x1atail'
+    path.write_bytes(raw)
+    real_path = module._portable_path
+    class CreationClockPath:
+        def __fspath__(self):
+            return os.fspath(path)
+        def lstat(self):
+            info = path.lstat()
+            values = {key: getattr(info, key) for key in
+                      ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
+            values['st_ctime_ns'] = 1
+            return SimpleNamespace(**values)
+    monkeypatch.setattr(anchors, '_supports_dir_fd', lambda: False)
+    monkeypatch.setattr(module, '_portable_path', lambda root, parts, create=False:
+                        CreationClockPath() if parts == anchors._ROOT_PARTS else real_path(root, parts, create=create))
+    fd = module._open_source(tmp_path)
+    try:
+        assert os.read(fd, len(raw) + 1) == raw
+        assert module._seal(fd) == [getattr(os.fstat(fd), key) for key in
+                                   ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')]
+    finally:
+        os.close(fd)
+
+
+def test_old_five_field_checkpoint_resumes_byte_exact_portable_source(tmp_path, monkeypatch):
+    module = _migration()
+    monkeypatch.setattr(anchors, '_supports_dir_fd', lambda: False)
+    path = _legacy(tmp_path, 5, keys_first=True)
+    path.write_bytes(path.read_bytes().replace(b', ', b',\r\n'))
+    first = module.migrate_legacy(tmp_path, max_records=1)
+    assert not first['complete'] and first['cursor'] > 0
+    state = module._load_progress(tmp_path)
+    original_source = list(state['source'])
+    # 原五字段断点没有native补充字段，来源数值始终由实际旧FD取得而非伪造。
+    state.pop('source_change_ns')
+    module._save_progress(tmp_path, state)
+    _finish(tmp_path, max_records=1)
+    assert module._load_progress(tmp_path)['source'] == original_source
+    for index in range(5):
+        row, first, dispatch = anchors._reserve_for_delivery(tmp_path, _key(index), now='retry')
+        assert row == _row(index) and first is False and dispatch == f'original-dispatch-{index}'
+
+
+@pytest.mark.parametrize('missing', [False, True])
+@pytest.mark.parametrize('old_checkpoint', [False, True])
+def test_native_generation_unknown_or_changed_never_advances_checkpoint(tmp_path, monkeypatch, missing, old_checkpoint):
+    module = _migration()
+    _legacy(tmp_path, 5)
+    assert not module.migrate_legacy(tmp_path, max_records=1)['complete']
+    before = module._load_progress(tmp_path)
+    expected = before['source_change_ns']
+    if old_checkpoint:
+        before.pop('source_change_ns')
+        module._save_progress(tmp_path, before)
+        expected = before['source'][4]
+        class WindowsObservationOS:
+            name = 'nt'
+            def __getattr__(self, name):
+                return getattr(os, name)
+        monkeypatch.setattr(module, 'os', WindowsObservationOS())
+    monkeypatch.setattr(module, 'file_descriptor_change_ns', lambda fd, info: None if missing else expected + 1)
+    with pytest.raises((ValueError, module.NoFollowPathError)):
+        module.migrate_legacy(tmp_path, max_records=1)
+    assert module._load_progress(tmp_path) == before
+    assert anchors._read_ready(tmp_path) is None

@@ -17,6 +17,9 @@ from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import (
     NoFollowPathError,
     _portable_path,
+    _portable_snapshot_parents,
+    file_descriptor_change_ns,
+    file_identity_snapshot,
     open_readonly_file_beneath,
     read_bytes_beneath,
     write_text_atomic_beneath,
@@ -67,6 +70,8 @@ def _load_progress(root):
     if state['kind'] == 'legacy' and (not isinstance(state.get('source'), list)
             or len(state['source']) != 5 or any(type(item) is not int for item in state['source'])):
         raise ValueError('invalid legacy source binding')
+    if 'source_change_ns' in state and type(state['source_change_ns']) is not int:
+        raise ValueError('invalid legacy native source binding')
     return state
 
 
@@ -90,16 +95,20 @@ def _open_source(root):
     if anchors._supports_dir_fd():
         return open_readonly_file_beneath(root, anchors._ROOT_PARTS)
     target = _portable_path(root, anchors._ROOT_PARTS, create=False)
-    before = target.lstat()
+    parents = _portable_snapshot_parents(root, anchors._ROOT_PARTS)
+    before, before_change = file_identity_snapshot(target)
     if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
         raise NoFollowPathError('legacy alert source is not regular single-link')
-    descriptor = os.open(target, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+    descriptor = os.open(target, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0))
     try:
         opened = os.fstat(descriptor)
-        current = _portable_path(root, anchors._ROOT_PARTS, create=False).lstat()
-        fields = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+        current, current_change = file_identity_snapshot(_portable_path(root, anchors._ROOT_PARTS, create=False))
+        opened_change = file_descriptor_change_ns(descriptor, opened)
+        fields = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
         if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
                 or not stat.S_ISREG(current.st_mode) or current.st_nlink != 1
+                or before_change is None or before_change != opened_change or current_change != opened_change
+                or parents != _portable_snapshot_parents(root, anchors._ROOT_PARTS)
                 or any(getattr(before, field) != getattr(opened, field)
                     or getattr(opened, field) != getattr(current, field) for field in fields)):
             raise NoFollowPathError('legacy alert source changed during portable open')
@@ -112,14 +121,24 @@ def _open_source(root):
 # LLM: Check both the opened descriptor and the current no-follow name, not a detached old fd.
 # 函数用途: 确认本片仍读取原版旧文件，且关闭二次检查使用的 FD。
 def _verify_source(root, descriptor, state):
-    if _seal(descriptor) != state['source']:
+    if _seal(descriptor) != state['source'] or not _native_source_matches(descriptor, state):
         raise ValueError('legacy alert source changed during migration')
     current = _open_source(root)
     try:
-        if _seal(current) != state['source']:
+        if _seal(current) != state['source'] or not _native_source_matches(current, state):
             raise ValueError('legacy alert source changed during migration')
     finally:
         os.close(current)
+
+
+def _native_source_matches(descriptor, state):
+    # 原五字段绝不换含义；旧Windows断点只有第五项本已绑定同一原生ChangeTime才可安全续办。
+    expected = state.get('source_change_ns')
+    if expected is None and os.name != 'nt':
+        return True
+    if expected is None:
+        expected = state['source'][4]
+    return file_descriptor_change_ns(descriptor, os.fstat(descriptor)) == expected
 
 
 class _Reader:
@@ -350,6 +369,10 @@ def _begin(root, primary_key):
     if descriptor is not None:
         try:
             state.update(kind='legacy', phase='root', primary_key='', source=_seal(descriptor))
+            changed = file_descriptor_change_ns(descriptor, os.fstat(descriptor))
+            if changed is None:
+                raise NoFollowPathError('legacy alert source generation is unavailable')
+            state['source_change_ns'] = changed
         finally:
             os.close(descriptor)
     _save_progress(root, state)
