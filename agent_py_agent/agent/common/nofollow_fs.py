@@ -267,7 +267,7 @@ def _snapshot_leaf_identity(parent_fd, name, before, opened, descriptor):
 
 # LLM: 初始regular0在open前丢弃，读前后0link均不授bytes；同一原FD有界读/复采及清理保持，初次缺叶可None，重读后missing硬拒。
 # 函数用途: 尝试取得完整单链接版本；零链接copyout只耗既有预算，未打开时不读正文，已打开的所有出口归还原叶FD。
-def _read_snapshot_leaf(parent_fd, name, max_bytes, allow_missing, *, observation=None, read_content=True):
+def _read_snapshot_leaf(parent_fd, name, max_bytes, allow_missing, *, observation=None, read_content=True, tail=False):
     try:
         before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError:
@@ -283,7 +283,9 @@ def _read_snapshot_leaf(parent_fd, name, max_bytes, allow_missing, *, observatio
     try:
         _snapshot_leaf_identity(parent_fd, name, before, os.fstat(descriptor), descriptor)
         generation_before = file_descriptor_change_ns(descriptor, os.fstat(descriptor)) if observation is not None else None
-        content = _read_descriptor(descriptor, max_bytes) if read_content else b""
+        content = b""
+        if read_content:
+            content = _read_tail_descriptor(descriptor, max_bytes) if tail else _read_descriptor(descriptor, max_bytes)
         observed = os.fstat(descriptor)
         _snapshot_leaf_identity(parent_fd, name, before, observed, descriptor)
         if observation is not None:
@@ -339,19 +341,26 @@ def read_bytes_snapshot_beneath(root, relative_parts, *, max_bytes, require_dir_
     return _binary_file_snapshot(root, relative_parts, max_bytes, require_dir_fd, True)
 
 
+def read_tail_snapshot_beneath(root, relative_parts, *, max_bytes, require_dir_fd=False):
+    """同一原生身份快照只读固定尾窗；严格模式仍要求dir_fd，绝不读取完整历史。"""
+    if type(max_bytes) is not int or max_bytes < 0:
+        raise ValueError("managed tail limit must be a nonnegative integer")
+    return _binary_file_snapshot(root, relative_parts, max_bytes, require_dir_fd, True, tail=True)
+
+
 def inspect_file_snapshot_beneath(root, relative_parts, *, require_dir_fd=False):
     """只打开原普通文件核FD/父链，不读正文；不单凭路径stat认证旧内容。"""
     return _binary_file_snapshot(root, relative_parts, None, require_dir_fd, False)
 
 
-def _binary_file_snapshot(root, parts, max_bytes, require_dir_fd, read_content):
+def _binary_file_snapshot(root, parts, max_bytes, require_dir_fd, read_content, *, tail=False):
     _validate_relative_parts(parts)
     if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
         raise ValueError("managed read limit must be a nonnegative integer")
     if not _supports_dir_fd():
         if require_dir_fd:
             raise NoFollowPathError("strict no-follow reading is unavailable")
-        return _portable_binary_snapshot(root, parts, max_bytes, read_content)
+        return _portable_binary_snapshot(root, parts, max_bytes, read_content, tail=tail)
     parent_fd, bindings = _snapshot_parent(root, parts)
     if parent_fd is None:
         return None
@@ -359,7 +368,7 @@ def _binary_file_snapshot(root, parts, max_bytes, require_dir_fd, read_content):
     try:
         _verify_snapshot_parents(root, parts, bindings)
         content = _read_snapshot_leaf(parent_fd, parts[-1], max_bytes, True,
-                                      observation=observed, read_content=read_content)
+                                      observation=observed, read_content=read_content, tail=tail)
         _verify_snapshot_parents(root, parts, bindings)
     except BaseException as error:
         _close_snapshot_fds([parent_fd], error)
@@ -461,7 +470,7 @@ def file_descriptor_change_ns(descriptor, info):
     return (value.change - 116444736000000000) * 100 if success and value.change > 0 else None
 
 
-def _portable_binary_snapshot(root, parts, max_bytes, read_content):
+def _portable_binary_snapshot(root, parts, max_bytes, read_content, *, tail=False):
     try:
         parents = _portable_snapshot_parents(root, parts)
         target = _portable_path(root, parts, create=False)
@@ -475,7 +484,9 @@ def _portable_binary_snapshot(root, parts, max_bytes, read_content):
         opened = os.fstat(descriptor)
         changed_before = file_descriptor_change_ns(descriptor, opened)
         _portable_snapshot_identity(target, before, opened, before_changed, changed_before)
-        content = _read_descriptor(descriptor, max_bytes) if read_content else b""
+        content = b""
+        if read_content:
+            content = _read_tail_descriptor(descriptor, max_bytes) if tail else _read_descriptor(descriptor, max_bytes)
         observed = os.fstat(descriptor)
         changed_after = file_descriptor_change_ns(descriptor, observed)
         _portable_snapshot_identity(target, before, observed, before_changed, changed_after)
@@ -1047,6 +1058,19 @@ def _read_bytes_portable(
         os.close(descriptor)
 
 
+def _read_tail_descriptor(descriptor, max_bytes):
+    # 不为尾窗计量读全文件；实际字节最多max_bytes，变更由原首末FD/父链核验拒绝。
+    os.lseek(descriptor, max(0, os.fstat(descriptor).st_size - max_bytes), os.SEEK_SET)
+    chunks, remaining = [], max_bytes
+    while remaining:
+        chunk = os.read(descriptor, min(1024 * 1024, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
 # LLM: 以剩余预算加一字节检测超限，不能因为文件大小在打开后改变而无界分配。
 # 函数用途: 读取已验证的描述符，供 POSIX/portable 和文本/二进制共用。
 def _read_descriptor(descriptor: int, max_bytes: int | None) -> bytes:
@@ -1112,6 +1136,7 @@ __all__ = [
     "open_readonly_file_beneath",
     "read_text_beneath",
     "read_bytes_beneath",
+    "read_tail_snapshot_beneath",
     "regular_file_exists_beneath",
     "unlink_file_beneath",
     "write_text_atomic_beneath",
