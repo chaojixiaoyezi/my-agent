@@ -19,6 +19,12 @@ Python 3.12.13 / SQLite 3.50.4 合成 1k、10k、50k 文档时，旧删除分别
 沿原维护 pending 游标语义，最多保留八条续作路径，与发现页交替；路径只提示查找，不签权限。
 SQLite 原 `maintenance_fts_job`、变化捕获器、验证、原子发表及退休回收仍为唯一领域状态。
 
+`records_fts_active_complete` 单独描述active全文覆盖，不能把rowid对齐或pending当作完整性。
+缺表且有records、关闭FTS写入时标false；完整旧active在影子pending前保true；发表时同事务置true。
+两个正式MATCH读口在同一读事务核该事实，未完整时沿原typed OperationalError/预览LIKE，
+避免部分FTS命中压掉旧canonical命中。完整旧active继续MATCH，不能对所有pending盲目全扫。
+coverage只加入当拍快照CAS，不改变原持久job.state编码，原在途job不会因新增键永久失配。
+
 普通/协调 LocalStore 构造只恢复结构，不同步调用全量 rebuild。
 旧 unicode61 active 不再在构造时 DROP；影子使用当前目标声明，原子发表后才写新 schema version。升级发现最多检查三个固定库
 和一个 workspace 原生目录项，持久目录 cookie 随原 maintenance.json 保存。
@@ -51,6 +57,11 @@ TTL 与索引各有独立片预算；索引延期不阻止原删除维护继续�
 旧 tokenizer 发表前完整保留、双库进行中/缺空间时另一库仍可完成、
 坏维护游标和 1k/20k 历史点写工作量。原 schema/rebuild 测试改为构造只恢复后由显式原维护续作，
 原正文、检索、事务和 CAS 断言保留。
+
+当前60秒每片可能让大库存迁移持续多天：普通复制最多128条/8MiB每分钟，
+还有verify、old-map和退役回收等遍历。约10万条的六遍行数模型约4688片、78小时，
+未含发现/失败；DB大小不能直接等同正文量。吞吐提速尚待根审既有controller总deadline内的有限catch-up，
+本片不盲目提高全owner调度频率，也不能声称现参数已满足用户的短时首迁目标。
 
 仍须集成者在冻结版本运行组合和跨平台 CI，并沿正式部署观察真实库自动迁移进度及稳态写耗时。
 本片不声称已迁移真实资料，不承诺任意超过原单文档上限的索引自动完成。

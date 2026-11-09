@@ -417,3 +417,86 @@ def test_projection_slice_does_not_modify_cached_business_connection_timeout(tmp
         advance_upgrade(home.owner_home_dir, {}, 1000)
         with store._connection() as conn:
             assert conn.execute('PRAGMA busy_timeout').fetchone()[0] == 30_000
+
+
+def test_new_partial_fts_does_not_hide_old_canonical_search_matches(tmp_path):
+    from agent_py_agent.agent.local_storage.search import ThreadSearch, search_records_in_thread
+
+    path = tmp_path / 'partial.db'
+    disabled = LocalStore(path, enable_fts=False)
+    old = disabled.upsert_record(source_type='memory', source_id='old', title='old',
+        content='sharedsearchneedle old body', metadata={'thread_id': 'thread-1'})
+    enabled = LocalStore(path)
+    new = enabled.upsert_record(source_type='memory', source_id='new', title='new',
+        content='sharedsearchneedle new body', metadata={'thread_id': 'thread-1'})
+    expected = {old.id, new.id}
+    assert {row.id for row in enabled.search('sharedsearchneedle', limit=10)} == expected
+    assert {row.id for row in search_records_in_thread(enabled, 'sharedsearchneedle',
+        ThreadSearch('thread-1', limit=10))} == expected
+
+
+def test_complete_old_active_keeps_match_during_alignment_pending(tmp_path, monkeypatch):
+    home, store, items = _legacy(tmp_path)
+    result = store.rebuild_fts_step(max_rows=1, max_records=1)
+    assert result['status'] == 'partial'
+    def forbidden(*args, **kwargs):
+        pytest.fail('complete old active must keep indexed MATCH during shadow rebuild')
+    monkeypatch.setattr(LocalStore, '_search_like', forbidden)
+    assert {row.id for row in store.search('searchable', limit=10)} == {item.id for item in items}
+
+
+def test_missing_fts_is_rebuilt_by_formal_owner_entry_without_erasing_records(tmp_path):
+    home, store, items = _legacy(tmp_path)
+    with store._connection() as conn:
+        conn.execute('DROP TABLE records_fts')
+        conn.commit()
+    policy = json.loads(home.owner_retention_json.read_text())
+    policy['maintenance_enabled'] = False
+    home.owner_retention_json.write_text(json.dumps(policy))
+    for turn in range(40):
+        run_owner_retention_if_due(home, now=1000 + turn * 61)
+        if _aligned(store):
+            break
+    assert _aligned(store)
+    assert {row.id for row in store.search('searchable', limit=10)} == {item.id for item in items}
+
+
+def test_active_coverage_is_checked_at_commit_without_invalidating_durable_job(tmp_path, monkeypatch):
+    home, store, _ = _legacy(tmp_path)
+    first = store.rebuild_fts_step(max_rows=1, max_records=1)
+    original = store._prepare_fts_rebuild
+    def change_after_prepare():
+        snapshot = original()
+        with store._connection() as conn:
+            conn.execute("UPDATE metadata SET value='false' WHERE key='records_fts_active_complete'")
+            conn.commit()
+        return snapshot
+    with monkeypatch.context() as patch:
+        patch.setattr(store, '_prepare_fts_rebuild', change_after_prepare)
+        with pytest.raises(BlockingIOError, match='active_coverage_changed'):
+            store.rebuild_fts_step(max_rows=1)
+    # 覆盖状态是active读口事实，不复制进持久内容fence；下一片重新取事实仍能沿原job续作。
+    for _ in range(30):
+        result = store.rebuild_fts_step(max_rows=1)
+        assert result['job_id'] == first['job_id']
+        if result['status'] == 'complete':
+            break
+    assert result['status'] == 'complete'
+    assert _aligned(store)
+
+
+def test_disabled_writes_during_job_resume_with_current_canonical_coverage(tmp_path):
+    home, store, items = _legacy(tmp_path)
+    first = store.rebuild_fts_step(max_rows=1, max_records=1)
+    disabled = LocalStore(store.db_path, enable_fts=False)
+    disabled.upsert_record(source_type='memory', source_id='0', title='changed', content='disabledwriteneedle')
+    enabled = LocalStore(store.db_path)
+    assert {row.id for row in enabled.search('disabledwriteneedle', limit=10)} == {items[0].id}
+    for _ in range(40):
+        result = enabled.rebuild_fts_step(max_rows=1)
+        assert result['job_id'] == first['job_id']
+        if result['status'] == 'complete':
+            break
+    assert result['status'] == 'complete'
+    assert {row.id for row in enabled._search_fts('disabledwriteneedle', limit=10,
+        source_type=None, visibility=None)} == {items[0].id}

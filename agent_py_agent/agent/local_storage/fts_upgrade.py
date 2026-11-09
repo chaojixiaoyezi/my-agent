@@ -177,6 +177,9 @@ def advance_upgrade(home, previous, now, *, commit=None):
                     store = LocalStore(path, coordinator_io=commit is not None)
                 finally:
                     _FTS_BATCH_LIMITS.reset(token)
+                if not store.fts_available:
+                    cursor.pop('selected', None)
+                    return {**report, 'status': 'unavailable'}
                 try:
                     remaining_ms = max(0, (deadline - time.monotonic()) * 1000)
                     if remaining_ms <= 0:

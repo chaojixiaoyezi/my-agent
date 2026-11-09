@@ -9,10 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .models import LocalSearchResult
-from .schema import _FTS_REBUILD_PENDING_KEY
-
-# records_fts 的 rowid 与 records.rowid 一一对齐的结构化证明；只允许 'true'/'false'。
-FTS_ROWID_ALIGNED_KEY = "records_fts_rowid_aligned"
+from .schema import _FTS_REBUILD_PENDING_KEY, FTS_ROWID_ALIGNED_KEY, _fts_active_complete
 
 
 def fts_rowid_aligned(conn: sqlite3.Connection) -> bool:
@@ -133,6 +130,10 @@ class LocalStoreSearchMixin:
             LIMIT ?
         """
         with self._connection() as conn:
+            if not conn.in_transaction:
+                conn.execute('BEGIN')
+            if not _fts_active_complete(conn):
+                raise sqlite3.OperationalError('local_store_fts_active_incomplete')
             rows = conn.execute(sql, [*params, limit]).fetchall()
         return [self._row_to_result(row, score=float(row["rank"])) for row in rows]
 
@@ -345,6 +346,10 @@ def _search_thread_fts(store: Any, fts_query: str, scope: ThreadSearch) -> list[
         LIMIT ?
     """
     with store._connection() as conn:
+        if not conn.in_transaction:
+            conn.execute('BEGIN')
+        if not _fts_active_complete(conn):
+            raise sqlite3.OperationalError('local_store_fts_active_incomplete')
         rows = conn.execute(sql, [*params, scope.thread_id, scope.limit]).fetchall()
     return [store._row_to_result(row, score=float(row["rank"])) for row in rows]
 

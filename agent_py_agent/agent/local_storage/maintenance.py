@@ -472,11 +472,16 @@ def _local_events_precheck(db_path):
 
 
 def _local_events_alignment_needed(conn):
-    """只读预检复用 R2 的证明；空索引缺标记时不在只读连接中盖章。"""
+    """只读区分缺投影、未完整active和未对齐；不在读取中盖完成标记。"""
+    from .schema import _FTS_ACTIVE_COMPLETE_KEY
+
     if conn.execute("SELECT 1 FROM sqlite_master WHERE name='records_fts'").fetchone() is None:
-        return False
-    metadata = dict(conn.execute("SELECT key,value FROM metadata WHERE key IN (?, 'records_fts_rebuild_pending')",
-                                 (FTS_ROWID_ALIGNED_KEY,)).fetchall())
+        return (conn.execute("SELECT 1 FROM sqlite_master WHERE name='records'").fetchone() is not None
+                and conn.execute('SELECT 1 FROM records LIMIT 1').fetchone() is not None)
+    metadata = dict(conn.execute("SELECT key,value FROM metadata WHERE key IN (?, ?, ?)",
+        (FTS_ROWID_ALIGNED_KEY, 'records_fts_rebuild_pending', _FTS_ACTIVE_COMPLETE_KEY)).fetchall())
+    if _FTS_ACTIVE_COMPLETE_KEY in metadata and metadata[_FTS_ACTIVE_COMPLETE_KEY] != 'true':
+        return True
     if (FTS_ROWID_ALIGNED_KEY not in metadata and metadata.get('records_fts_rebuild_pending') != 'true'
             and conn.execute('SELECT 1 FROM records_fts LIMIT 1').fetchone() is None):
         return False
@@ -1121,6 +1126,7 @@ class _FtsRebuildSnapshot:
     finished: bool = False
     directory: tuple = ()
     dirty: tuple = ()
+    active_coverage: tuple | None = None
 
 
 # LLM: 原schema摘要、FTS版本和pending继续参与CAS，附加真实records及捕获器结构，不把无关event当记录变化。
@@ -1567,6 +1573,8 @@ def _fts_start(store, expected):
             (job_id, generation, upper, json.dumps(identity)))
         for statement in _fts_capture_sql().values():
             conn.execute(statement)
+        from .schema import _remember_fts_active_coverage
+        _remember_fts_active_coverage(conn)
         conn.execute("INSERT INTO metadata(key,value) VALUES('records_fts_rebuild_pending','true') "
                      'ON CONFLICT(key) DO UPDATE SET value=excluded.value')
         conn.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES(?, 'false')", (FTS_ROWID_ALIGNED_KEY,))
@@ -1668,6 +1676,8 @@ def _fts_prepare(store):
     with store._connection() as conn:
         job = _fts_job(conn)
         state = _read_rebuild_state(conn)
+        from .schema import _FTS_ACTIVE_COMPLETE_KEY, _read_local_state
+        coverage = (_read_local_state(conn, _FTS_ACTIVE_COMPLETE_KEY),)
         if job is not None and job['phase'] != 'complete':
             if _fts_pack(state) != job['state'] or json.loads(job['identity']) != list(identity):
                 raise _FtsRebuildDeferred('fts rebuild deferred: stored structure fence changed')
@@ -1701,7 +1711,7 @@ def _fts_prepare(store):
         raise BlockingIOError('local_store_rebuild_database_changed')
     if mode in {'rewind', 'restart'}:
         return _FtsRebuildSnapshot(columns, (), state, identity, (), (), 0,
-            job=job, mode=mode, finished=True, directory=directory)
+            job=job, mode=mode, finished=True, directory=directory, active_coverage=coverage)
     if mode in {'map_gc', 'map'}:
         rows, selected, consumed = [], [], 0
         for values in candidates:
@@ -1720,7 +1730,7 @@ def _fts_prepare(store):
         return _FtsRebuildSnapshot(columns, tuple(rows), state, identity, (), (), 0,
             job=job, mode=mode, selected=tuple(selected),
             advance=selected[-1] if selected else job['verify_cursor'],
-            finished=finished and len(rows) == len(candidates), directory=directory)
+            finished=finished and len(rows) == len(candidates), directory=directory, active_coverage=coverage)
     if mode == 'verify':
         rows, versions, selected, dirty = [], [], [], []
         consumed = 0
@@ -1750,7 +1760,7 @@ def _fts_prepare(store):
         return _FtsRebuildSnapshot(columns, tuple(rows), state, identity, (), tuple(versions), 0,
             job=job, mode=mode, selected=tuple(selected),
             advance=selected[-1] if selected else job['verify_cursor'],
-            finished=finished and len(rows) == len(candidates), directory=directory, dirty=tuple(dirty))
+            finished=finished and len(rows) == len(candidates), directory=directory, dirty=tuple(dirty), active_coverage=coverage)
     by_id = {values[0]: values for values in candidates}
     sequence = tokens if mode == 'delta' else tuple((values[0], values[0]) for values in candidates)
     selected, processed, contents, versions = [], [], [], []
@@ -1803,7 +1813,7 @@ def _fts_prepare(store):
     return _FtsRebuildSnapshot(columns, tuple(sorted(processed, key=lambda values: values[0])),
         state, identity, tuple(contents), tuple(versions), content_bytes,
         job=job, mode=mode, selected=tuple(sorted(selected)), tokens=saved_tokens,
-        advance=advance, finished=done, directory=directory)
+        advance=advance, finished=done, directory=directory, active_coverage=coverage)
 
 
 # LLM: 保留完整raw行、任务及本批正文代次CAS；最终只作有限目录stat，不在写门读正文。
@@ -1812,6 +1822,10 @@ def _fts_validate(store, conn, snapshot):
     # 先拒绝准备后版本/DDL变化；不能让新版本判定遮住原快照CAS异常。
     if snapshot.job is None or not _typed_rebuild_rows_equal(_read_rebuild_state(conn), snapshot.state):
         raise BlockingIOError('local_store_rebuild_snapshot_changed')
+    from .schema import _FTS_ACTIVE_COMPLETE_KEY, _read_local_state
+    if (snapshot.active_coverage is not None
+            and (_read_local_state(conn, _FTS_ACTIVE_COMPLETE_KEY),) != snapshot.active_coverage):
+        raise BlockingIOError('local_store_rebuild_active_coverage_changed')
     job = _fts_job(conn)
     if (not _fts_same_job(job, snapshot.job)
             or _rebuild_db_identity(store.db_path) != snapshot.db_identity

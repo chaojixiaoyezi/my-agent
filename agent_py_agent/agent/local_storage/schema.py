@@ -42,6 +42,8 @@ _LOCAL_CONNECTION_TIMEOUT = ContextVar("local_store_connection_timeout", default
 # 版本号变了就 DROP+重建 records_fts 并由 maintenance.rebuild_fts 回填正文。
 _FTS_SCHEMA_VERSION = "2"
 _FTS_SCHEMA_VERSION_KEY = "records_fts_schema_version"
+_FTS_ACTIVE_COMPLETE_KEY = "records_fts_active_complete"
+FTS_ROWID_ALIGNED_KEY = "records_fts_rowid_aligned"
 # trigram:子串级中文检索的关键。代价:① 查询 token 需 >=3 字符才可能命中
 # (1-2 字查询由 search() 的 LIKE 兜底,已有逻辑);② 索引体积略增。
 _FTS_TOKENIZE = "trigram"
@@ -300,6 +302,20 @@ def _write_local_state(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.execute(_LOCAL_STATE_SQL, (key, value))
 
 
+def _fts_active_complete(conn: sqlite3.Connection) -> bool:
+    values = dict(conn.execute("SELECT key,value FROM metadata WHERE key IN (?, ?)",
+        (_FTS_ACTIVE_COMPLETE_KEY, _FTS_REBUILD_PENDING_KEY)).fetchall())
+    if _FTS_ACTIVE_COMPLETE_KEY in values:
+        return values[_FTS_ACTIVE_COMPLETE_KEY] == 'true'
+    # 旧完整active没有coverage键；旧失败回填的pending不能被当成完整。
+    return values.get(_FTS_REBUILD_PENDING_KEY) != 'true'
+
+
+def _remember_fts_active_coverage(conn: sqlite3.Connection) -> None:
+    if _read_local_state(conn, _FTS_ACTIVE_COMPLETE_KEY) is None:
+        _write_local_state(conn, _FTS_ACTIVE_COMPLETE_KEY, 'true' if _fts_active_complete(conn) else 'false')
+
+
 # LLM: 数字版本只能向前迁移；遇到旧程序不认识的非数字版本也保留，不能为了指纹失配降级投影。
 # 函数用途: 判断已有 FTS 是否超出当前程序可安全迁移的版本。
 def _newer_fts_version(stored: str | None) -> bool:
@@ -351,6 +367,9 @@ class LocalStoreSchemaMixin:
         fingerprint = _local_schema_fingerprint(self.enable_fts)
         with self._connection() as conn:
             self._ensure_schema(conn, fingerprint)
+            if not self.enable_fts and _read_local_state(conn, _FTS_ACTIVE_COMPLETE_KEY) != 'false':
+                _write_local_state(conn, _FTS_ACTIVE_COMPLETE_KEY, 'false')
+                conn.commit()
         # 正文重建仅由正式维护按持久job续作；构造不能同步遍历旧库。
 
     # LLM: 写锁内复查命中需结束本初始化事务；仅实际安装者返回True，避免重复迁移或报警。
@@ -378,6 +397,7 @@ class LocalStoreSchemaMixin:
         else:
             self._fts_available = False
             _write_local_state(conn, _FTS_REBUILD_PENDING_KEY, "true")
+            _write_local_state(conn, _FTS_ACTIVE_COMPLETE_KEY, "false")
         self._restore_fts_state(conn)
         if fts_initialized:
             stamp_schema(conn, fingerprint)
@@ -395,6 +415,7 @@ class LocalStoreSchemaMixin:
     # 函数用途: 由维护器在成功回填提交前记下完成状态。
     def _record_fts_rebuild_complete(self, conn: sqlite3.Connection) -> None:
         _write_local_state(conn, _FTS_REBUILD_PENDING_KEY, "false")
+        _write_local_state(conn, _FTS_ACTIVE_COMPLETE_KEY, "true")
 
     # LLM: 本迁移仅保留数据改名，SQL 属结构摘要；调用方持写事务，不能同时建立新旧同名权威。
     # 函数用途: 把旧投影表改名，与 runtime.db 的真实运行表区分。
@@ -442,9 +463,15 @@ class LocalStoreSchemaMixin:
         if not has_fts:
             needs_rebuild = conn.execute("SELECT 1 FROM records LIMIT 1").fetchone() is not None
             _write_local_state(conn, _FTS_REBUILD_PENDING_KEY, "true" if needs_rebuild else "false")
+            _write_local_state(conn, _FTS_ACTIVE_COMPLETE_KEY, 'false' if needs_rebuild else 'true')
+            if _read_local_state(conn, FTS_ROWID_ALIGNED_KEY) is not None:
+                _write_local_state(conn, FTS_ROWID_ALIGNED_KEY, 'false')
             return True
         stored_version = _read_local_state(conn, _FTS_SCHEMA_VERSION_KEY)
-        if stored_version == _FTS_SCHEMA_VERSION or _newer_fts_version(stored_version):
+        if _newer_fts_version(stored_version):
+            return True
+        _remember_fts_active_coverage(conn)
+        if stored_version == _FTS_SCHEMA_VERSION:
             return True
         _write_local_state(conn, _FTS_REBUILD_PENDING_KEY, "true")
         return False
@@ -580,6 +607,9 @@ class LocalStoreSchemaMixin:
         primary = None
         try:
             self._ensure_schema(conn, fingerprint)
+            if not self.enable_fts and _read_local_state(conn, _FTS_ACTIVE_COMPLETE_KEY) != 'false':
+                _write_local_state(conn, _FTS_ACTIVE_COMPLETE_KEY, 'false')
+                conn.commit()
         except BaseException as exc:
             primary = exc
             raise
