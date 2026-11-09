@@ -6,6 +6,7 @@
 # 模块用途: 汇总一个 owner 在时间窗内的决策使用情况，供审计工具输出。
 from __future__ import annotations
 
+import heapq
 from collections.abc import Mapping
 
 from .model_metrics import split_unsent_failures, unfinished_usage_facts
@@ -78,8 +79,9 @@ def _thread_usage(usage: object, thread_id: str, since: float) -> tuple[dict | N
         return None, 0, 0
     events, errors = usage.events_report(thread_id)
     row, legacy = _zero_row(), 0
-    for event in [event for event in events if event.created_at >= since]:
-        legacy += int(_add_event(row, event.model_calls))
+    for event in events:
+        if event.created_at >= since:
+            legacy += int(_add_event(row, event.model_calls))
     return row, legacy, int(bool(errors))
 
 
@@ -89,18 +91,26 @@ def _thread_usage(usage: object, thread_id: str, since: float) -> tuple[dict | N
 # 函数用途: 汇总这些会话在时间窗内的决策调用次数、成败与已报输入 token，并给出调用最多的会话明细。
 def decision_usage_summary(store: object, thread_ids: list[str], *, since: float) -> dict:
     totals = {"legacy_events_without_purpose": 0, "unreadable_threads": 0}
-    rows = []
-    for thread_id in thread_ids:
+    accumulated, leading, count = _zero_row(), [], 0
+    for order, thread_id in enumerate(thread_ids):
         row, legacy, unreadable = _thread_usage(store.model_usage, thread_id, since)
         totals["legacy_events_without_purpose"] += legacy
         totals["unreadable_threads"] += unreadable
         if row and row["calls"]:
-            rows.append({"thread_id": thread_id, **_with_failure_split(row)})
-    totals.update(_with_failure_split({key: sum(item[key] for item in rows) for key in _zero_row()}))
-    totals["threads_with_calls"] = len(rows)
+            count += 1
+            for key in accumulated:
+                accumulated[key] += row[key]
+            item = (row['calls'], -order, {"thread_id": thread_id, **_with_failure_split(row)})
+            if len(leading) < _THREAD_ROWS_COUNT:
+                heapq.heappush(leading, item)
+            elif item[:2] > leading[0][:2]:
+                heapq.heapreplace(leading, item)
+    totals.update(_with_failure_split(accumulated))
+    totals["threads_with_calls"] = count
     totals["in_flight"] = max(0, totals["calls"] - sum(totals[key] for key in _STATUS_KEYS))
-    rows.sort(key=lambda item: item["calls"], reverse=True)
-    return {**totals, "threads": rows[:_THREAD_ROWS_COUNT]}
+    rows = [item[2] for item in sorted(leading, key=lambda item: (-item[0], -item[1]))]
+    return {**totals, "threads": rows}
+
 
 
 __all__ = ["decision_settings_summary", "decision_usage_summary"]

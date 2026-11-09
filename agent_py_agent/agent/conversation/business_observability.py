@@ -62,6 +62,8 @@ def _observation_cached(key, read):
     if cache is None:
         return read()
     if key not in cache:
+        if len(cache) >= 1024:
+            cache.pop(next(iter(cache)))
         try:
             cache[key] = True, read()
         except (OSError, sqlite3.Error, ValueError, TypeError, KeyError) as error:
@@ -126,6 +128,51 @@ class ObservationPage:
     records: tuple[ObservationRecord, ...] = ()
     coverage: str = 'complete'
     revision: str = ''
+    source_paged: bool = False
+    next_position: dict | None = None
+
+
+@dataclass(frozen=True)
+class ObservationSourcePage:
+    """宿主验证后的源分页参数；不属于公开请求Schema。"""
+    position: dict | None = None
+    limit: int = 50
+
+    def __post_init__(self):
+        if type(self.limit) is not int or not 1 <= self.limit <= 100 or (self.position is not None and type(self.position) is not dict):
+            raise ValueError('invalid observation source page')
+
+
+def bounded_observation_reader(read):
+    """宿主显式登记支持源分页的reader，旧自定义reader参数合同保持不变。"""
+    read.observation_source_paging_version = 1
+    return read
+
+
+def runtime_source_revision(path):
+    """主库及WAL版本约束同一次读窗，不创建来源或扫描历史。"""
+    values = []
+    for suffix in ('', '-wal'):
+        try:
+            info = Path(str(path) + suffix).stat()
+        except FileNotFoundError:
+            values.append(None)
+        else:
+            if suffix == '-wal' and info.st_size == 0:
+                values.append(None)
+                continue
+            values.append((info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns))
+    return _digest(values)
+
+
+def source_after(request, revision):
+    if request is None or request.position is None:
+        return 0
+    position = request.position
+    if (type(position) is not dict or set(position) != {'revision', 'after'} or position.get('revision') != revision
+            or type(position.get('after')) is not int or position['after'] < 0):
+        raise BusinessError('CURSOR_EXPIRED')
+    return position['after']
 
 
 class BusinessObservationService:
@@ -198,26 +245,48 @@ class BusinessObservationService:
             return False
         return actor.authorize(action, {'owner_id': self.owner_id, **facts}) is True
 
-    def _source(self, name, params):
+    def _source(self, name, params, *, source_page=None):
         try:
             if name in self.readers:
-                page = self.readers[name](_copy(params))
+                reader = self.readers[name]
+                page = (reader(_copy(params), source_page=source_page) if source_page is not None
+                        and getattr(reader, 'observation_source_paging_version', None) == 1 else reader(_copy(params)))
             elif name == 'tasks':
                 page = self._tasks()
             elif name == 'executions':
-                page = self._executions()
+                page = self._executions(params, source_page=source_page)
             else:
                 return ObservationPage(coverage='unknown')
             if (not isinstance(page, ObservationPage) or page.coverage not in {'complete', 'partial', 'expired', 'unknown'}
-                    or any(not isinstance(row, ObservationRecord) for row in page.records)):
+                    or any(not isinstance(row, ObservationRecord) for row in page.records)
+                    or type(page.source_paged) is not bool or type(page.revision) is not str
+                    or (page.next_position is not None and type(page.next_position) is not dict)):
                 raise BusinessError('OBSERVATION_SOURCE_INVALID')
             return page
+        except BusinessError as error:
+            if error.code == 'CURSOR_EXPIRED':
+                raise
+            return ObservationPage(coverage='unknown')
         except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
             # 缺来源、坏账和短暂读不到不冒充空的完整查询；公开响应不携底层路径。
             return ObservationPage(coverage='unknown')
 
+    def _paged_source(self, name, action, params, actor):
+        native = name == 'executions' and name not in self.readers
+        reader = self.readers.get(name)
+        if not native and getattr(reader, 'observation_source_paging_version', None) != 1:
+            return self._source(name, params)
+        scope = self.scope_digest(action, params, actor)
+        position = self.cursor_position(params.get('cursor'), scope)
+        request = ObservationSourcePage(position, params.get('limit', 50))
+        return self._source(name, params, source_page=request)
+
     def _paginate(self, records, page, action, params, actor):
         scope = self.scope_digest(action, params, actor)
+        if page.source_paged:
+            chosen = records[:params.get('limit', 50)]
+            cursor = self.cursor(scope, page.next_position) if page.next_position is not None else None
+            return chosen, cursor
         position = self.cursor_position(params.get('cursor'), scope)
         revision = page.revision or _digest([row.value for row in records])
         offset = 0
@@ -258,13 +327,13 @@ class BusinessObservationService:
                 'approvals.list': ('approvals', 'ApprovalView')}
             if action in routes:
                 source, kind = routes[action]
-                page = self._source(source, params)
+                page = self._paged_source(source, action, params, actor)
                 records = [row for row in page.records if self._visible(row, action, params, actor)]
                 chosen, cursor = self._paginate(records, page, action, params, actor)
                 result = {'items': [_view(kind, row.value) for row in chosen], 'next_cursor': cursor,
                     'coverage': 'partial' if cursor and page.coverage == 'complete' else page.coverage}
             elif action == 'executions.get':
-                page = self._source('executions', params)
+                page = self._paged_source('executions', action, params, actor)
                 rows = [row for row in page.records if self._visible(row, action, params, actor)
                         and (params.get('attempt_id') is not None or row.value.get('_is_current') is True)]
                 if len(rows) != 1:
@@ -378,7 +447,7 @@ class BusinessObservationService:
                 'coverage': coverage, 'reason_code': 'CANONICAL_PAGE'}}
 
     def _subagents(self, action, params, actor):
-        page = self._source('executions', params)
+        page = self._paged_source('executions', action, params, actor)
         records = []
         for record in page.records:
             value = record.value
@@ -428,16 +497,48 @@ class BusinessObservationService:
             rows.append(ObservationRecord(value, self.owner_id, value['space_id'], value['project_ref'], task.task_id, task.target_thread_id))
         return ObservationPage(tuple(rows), 'partial' if errors else 'complete')
 
-    def _executions(self):
+    def _executions(self, params=None, *, source_page=None):
         if self.runtime is None:
             return ObservationPage(coverage='unknown')
+        params = params or {}
+        request = source_page or ObservationSourcePage(limit=100)
+        revision = runtime_source_revision(self.runtime.db_path)
+        after = source_after(request, revision)
+        limit = min(100, request.limit)
+        selected_run = params.get('run_id')
+        selected_attempt = params.get('attempt_id')
+        more, next_position = False, None
         with self.runtime._runtime_connection() as conn:
+            if selected_run is not None:
+                where = 'ar.run_id=? AND t.owner_id=?'
+                values = [selected_run, self.owner_id]
+                if selected_attempt is not None:
+                    where += ' AND aa.attempt_id=?'
+                    values.append(selected_attempt)
+                else:
+                    where += ' AND aa.attempt_id=ar.current_attempt_id'
+                source = 'agent_attempts aa'
+            else:
+                # 先按canonical rowid固定窗口，再join/owner过滤；稀疏权限不能驱动SQL扫描全部历史。
+                positions = conn.execute('SELECT rowid FROM agent_attempts WHERE rowid>? ORDER BY rowid LIMIT ?',
+                                         (after, limit + 1)).fetchall()
+                more = len(positions) > limit
+                positions = positions[:limit]
+                if more:
+                    next_position = {'revision': revision, 'after': positions[-1][0]}
+                if not positions:
+                    return ObservationPage(revision=revision, source_paged=True)
+                where = 'aa.rowid IN (' + ','.join('?' for _ in positions) + ') AND t.owner_id=?'
+                values = [row[0] for row in positions] + [self.owner_id]
+                source = 'agent_attempts aa'
             raw = conn.execute('SELECT ar.run_id,ar.current_attempt_id,ar.parent_agent_run_id,pa.run_id AS parent_run_id,'
                 't.thread_id,tr.metadata_json,aa.attempt_id,aa.status,aa.started_at,aa.ended_at,aa.metadata_json AS attempt_metadata '
-                'FROM agent_runs ar JOIN task_runs tr ON tr.task_run_id=ar.task_run_id '
-                'JOIN tasks t ON t.task_id=tr.task_id JOIN agent_attempts aa ON aa.agent_run_id=ar.agent_run_id '
-                'LEFT JOIN agent_runs pa ON pa.agent_run_id=ar.parent_agent_run_id WHERE t.owner_id=? '
-                'ORDER BY ar.created_at,ar.run_id,aa.attempt_generation', (self.owner_id,)).fetchall()
+                'FROM ' + source + ' JOIN agent_runs ar ON ar.agent_run_id=aa.agent_run_id '
+                'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id '
+                'LEFT JOIN agent_runs pa ON pa.agent_run_id=ar.parent_agent_run_id WHERE ' + where +
+                ' ORDER BY aa.rowid LIMIT ?', [*values, 2 if selected_run is not None else limit]).fetchall()
+        if runtime_source_revision(self.runtime.db_path) != revision:
+            raise BusinessError('CURSOR_EXPIRED')
         rows, incomplete = [], False
         for row in raw:
             metadata = json.loads(row['metadata_json'])
@@ -456,7 +557,7 @@ class BusinessObservationService:
                 '_parent_run_id': row['parent_run_id'] or None}
             rows.append(ObservationRecord(value, self.owner_id, value['space_id'], context.project_ref if context else None,
                 value['task_id'], value['thread_id'], value['run_id'], value['attempt_id']))
-        return ObservationPage(tuple(rows), 'partial' if incomplete else 'complete')
+        return ObservationPage(tuple(rows), 'partial' if incomplete or more else 'complete', revision, True, next_position)
 
     # LLM: 线程原对象与其它本请求观察共用读取，节点/边仍逐条授权，不跨请求保存。
     # 函数用途: 从规范执行和线程生成准确范围的观察树。
@@ -521,7 +622,7 @@ class BusinessObservationService:
             record.value['has_children'] = bool(children[identifier])
         root = params.get('root_agent_id')
         if root is not None and root not in records:
-            raise BusinessError('OBSERVATION_NOT_FOUND')
+            raise BusinessError('OBSERVATION_NOT_FOUND' if execution_page.coverage == thread_coverage == 'complete' else 'HOST_NOT_READY')
         roots = [root] if root else sorted(set(records) - {edge['to_id'] for edge in edges})
         frontier, selected, seen, has_more = [(item, 0) for item in roots], [], set(), False
         depth = params.get('max_depth', 20)
@@ -541,7 +642,7 @@ class BusinessObservationService:
         return {'nodes': [_view('NodeView', row.value) for row in chosen],
             'edges': [edge for edge in edges if edge['to_id'] in ids], 'next_cursor': cursor,
             'coverage': _coverage((page.coverage, 'partial' if has_more or cursor else 'complete')),
-            'has_more_descendants': has_more or cursor is not None}
+            'has_more_descendants': has_more or cursor is not None or execution_page.next_position is not None}
 
     # LLM: 内部非catalog端口不放宽usage授权；每组及其所有成员仍先核与末核，缓存不含裁决。
     # 函数用途: 对单窗口的多个准确子范围读取用量，可将已整窗授权的事件供模型次数聚合复用。

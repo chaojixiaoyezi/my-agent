@@ -109,6 +109,9 @@ HOST_STATE_OWNER_FILES: tuple[tuple[str, ...], ...] = (
 HOST_STATE_OWNER_DIRS: tuple[tuple[str, ...], ...] = (
     ("capability_requests",), ("temporary_grants",), ("compact",), ("logs",), ("audit",), ("workspace", "runtime"),
     ("data",), ("agents",),
+    # 共享用量来源投影及写前intent；规范workspace/runtime已整根保护，旧会话根补同一物理家族。
+    ("conversations", ".model_usage_sources"), ("sessions", ".model_usage_sources"),
+    ("sessions", "conversations", ".model_usage_sources"),
     ("memory", "curator"), ("memory", "candidates.jsonl.records"), ("memory_archive",), ("cache",), ("trash",), ("skills",), (".agents", "skills"),
 )
 HOST_STATE_OWNER_SQLITE: tuple[str, ...] = ("runtime.db",)

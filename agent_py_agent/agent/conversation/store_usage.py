@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
+import sqlite3
 import threading
+import time
 from collections.abc import Callable, Iterable
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -193,7 +197,11 @@ class ModelUsageStore:
     def append_once(self, request: dict[str, Any]) -> ThreadModelUsageEvent:
         event = _thread_model_usage_event(request)
         self._require_thread(event.thread_id)
-        return self._append_indexed(event)
+        before, token = self._begin_usage_source(event.thread_id)
+        try:
+            return self._append_indexed(event)
+        finally:
+            self._refresh_usage_source(event.thread_id, before, token)
 
     # LLM: 仍按同范围摘要计算单调delta；点查和投影更新在原追加协议内，不改变迟到事实口径。
     # 函数用途: 保存累计用量的新事实并保留重放冲突检查。
@@ -204,10 +212,76 @@ class ModelUsageStore:
         request = _snapshot_event_request(request)
         snapshot = _thread_model_usage_event(request)
         self._require_thread(snapshot.thread_id)
-        return self._append_indexed(snapshot, snapshot_request=request)
+        before, token = self._begin_usage_source(snapshot.thread_id)
+        try:
+            return self._append_indexed(snapshot, snapshot_request=request)
+        finally:
+            self._refresh_usage_source(snapshot.thread_id, before, token)
 
     # LLM: 局部导入避免数字求和器与投影初始化形成模块循环；不缓存可变事件。
     # 函数用途: 取得当前线程独立的用量定位器。
+    def _source_index(self):
+        from .usage_sources import UsageSourceIndex
+        return UsageSourceIndex(self._directory)
+
+    def _usage_source_snapshot(self, thread_id, *, prepare=False, already_locked=False):
+        try:
+            self._require_thread(thread_id)
+        except KeyError:
+            return None
+        index = self._index(thread_id)
+        def snapshot():
+            before = self.revision(thread_id)
+            minimum, maximum = index.source_bounds()
+            if self.revision(thread_id) != before:
+                raise ValueError('usage source changed during bounds read')
+            return minimum, maximum, before, True
+        try:
+            return snapshot()
+        except (OSError, ValueError, RuntimeError, sqlite3.Error):
+            if prepare:
+                path = self._path(thread_id)
+                with (nullcontext() if already_locked else locked_file_transition(path.with_name(f'.{path.name}.append-once'))), (
+                        nullcontext() if already_locked else locked_json_path(path)):
+                    recover_pending(path)
+                    with index._connection() as conn:
+                        index.prepare(conn)
+                try:
+                    return snapshot()
+                except (OSError, ValueError, RuntimeError, sqlite3.Error):
+                    pass
+            return None, None, self.revision(thread_id), False
+
+    def _begin_usage_source(self, thread_id):
+        sources = self._source_index()
+        before = sources.stamps()
+        return before, sources.begin(thread_id)
+
+    def _reconcile_usage_source(self, thread_id, *, token=None):
+        sources = self._source_index()
+        before, path = sources.stamps(), self._path(thread_id)
+        with locked_file_transition(path.with_name(f'.{path.name}.append-once'), blocking=False), locked_json_path(path, blocking=False):
+            snapshot = self._usage_source_snapshot(thread_id, prepare=True, already_locked=True)
+            if token is None:
+                token = sources.begin(thread_id)
+            sources.update(thread_id, snapshot, before_stamp=before, token=token, store=self)
+
+    def _refresh_usage_source(self, thread_id, before, token):
+        try:
+            sources = self._source_index()
+            sources.update(thread_id, self._usage_source_snapshot(thread_id), before_stamp=before, token=token, store=self)
+            sources.prepare(self, limit=16, deadline=time.monotonic() + 0.025)
+        except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
+            # 原事件已提交；可重建来源投影失败只失去覆盖，不能重复记费或阻断原模型回合。
+            logging.getLogger(__name__).warning('USAGE_SOURCE_PROJECTION_PARTIAL error_type=%s', type(error).__name__)
+
+    def prepare_window_sources(self, *, limit=16, deadline=None):
+        """仅维护写lane调用；每步最多推进一个目录项或一源128行，query绝不迁移。"""
+        return self._source_index().prepare(self, limit=limit, deadline=deadline)
+
+    def window_source_plan(self, *, since=0, until=float('inf')):
+        return self._source_index().plan(since=since, until=until)
+
     def _index(self, thread_id):
         from .usage_index import UsageIndex
 
@@ -325,6 +399,16 @@ class ModelUsageStore:
             finally:
                 records.close()
         return events, errors
+
+    def events_window_report(self, thread_id, *, since=0, until=float('inf'), limit=128):
+        """公开只读范围查询，不创建索引、不恢复或扫描旧账。"""
+        normalized = str(thread_id or '').strip()
+        if not normalized:
+            raise ValueError('thread_id is required')
+        try:
+            return self._index(normalized).window_events(since=since, until=until, limit=limit), []
+        except (OSError, ValueError, RuntimeError) as error:
+            return [], [jsonl_error(error, 'conversation.model_usage.window', path=self._path(normalized))]
 
     def _event_records(self, thread_id, *, after=0):
         """按逻辑字节游标流读封存段和活动尾巴；只物化调用方请求的事件页。"""

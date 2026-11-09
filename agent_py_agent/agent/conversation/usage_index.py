@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 
 from ..runtime_errors import DataCorruptionError
 from .models import ThreadModelUsageEvent
@@ -37,8 +38,8 @@ class UsageIndex(ObservationIndex):
     # 函数用途: 初始化私有数据库及主键索引。
     def _open(self):
         conn = sqlite3.connect(f"{self.path.as_uri()}?mode=rw", uri=True, timeout=5)
-        conn.row_factory = sqlite3.Row
         try:
+            conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=FULL")
@@ -53,6 +54,10 @@ class UsageIndex(ObservationIndex):
                 self._put(conn, "source", "null")
                 self._put(conn, "offset", 0)
             conn.execute("CREATE INDEX IF NOT EXISTS events_source ON events(file)")
+            if 'created_at' not in columns:
+                conn.execute('ALTER TABLE events ADD COLUMN created_at REAL')
+            conn.execute('CREATE INDEX IF NOT EXISTS events_time_window ON events(created_at,id)')
+            conn.execute('CREATE INDEX IF NOT EXISTS events_time_missing ON events(id) WHERE created_at IS NULL')
             for table in ("active_totals", "carried_totals"):
                 conn.execute(f"CREATE TABLE IF NOT EXISTS {table}(scope TEXT PRIMARY KEY,calls TEXT,count INTEGER,known INTEGER)")
             for table in ("active_diagnostics", "carried_diagnostics"):
@@ -62,7 +67,10 @@ class UsageIndex(ObservationIndex):
             conn.commit()
             return conn
         except BaseException:
-            conn.close()
+            try:
+                conn.close()
+            except BaseException:
+                pass
             raise
 
     # LLM: 不把created_at当重放身份；首次原账时间仍由精确行返回。
@@ -73,6 +81,13 @@ class UsageIndex(ObservationIndex):
     # LLM: 重建投影由持久字节游标恢复，每次最多128行；正常追加只读新后缀。
     # 函数用途: 追平一个有界批次，返回是否可以使用完整数字投影。
     def prepare(self, conn, *, with_events=True):
+        self._prepare_remaining = 128
+        try:
+            return self._prepare_locations(conn, with_events=with_events)
+        finally:
+            self.last_work['events_read'] = 128 - self._prepare_remaining
+
+    def _prepare_locations(self, conn, *, with_events=True):
         stamp = json.dumps(archive_stamp(self.source))
         if self._get(conn, "archive_stamp", "") != stamp:
             self._seed_archives(conn)
@@ -89,18 +104,19 @@ class UsageIndex(ObservationIndex):
         if identity is None:
             self._put(conn, "source", stamp)
             self._put(conn, "offset", 0)
-            return self._prepare_archived_events(conn) if with_events else True
+            return self._prepare_event_locations(conn) if with_events else True
         if offset == identity[2]:
-            return self._prepare_archived_events(conn) if with_events else True
+            return self._prepare_event_locations(conn) if with_events else True
         consumed = 0
         with _reader(self.source) as handle:
             handle.seek(offset)
-            for _ in range(128):
+            for _ in range(self._prepare_remaining):
                 start = handle.tell()
                 raw = handle.readline(1048577)
                 if not raw:
                     break
                 consumed += len(raw)
+                self._prepare_remaining -= 1
                 if len(raw) > 1048576:
                     raise DataCorruptionError("model usage row exceeds bounded read limit")
                 if raw.strip():
@@ -117,7 +133,21 @@ class UsageIndex(ObservationIndex):
         self._put(conn, "source", stamp)
         self._put(conn, "offset", offset)
         self.last_work = {"bytes_read": consumed}
-        return offset == identity[2] and (not with_events or self._prepare_archived_events(conn))
+        return offset == identity[2] and (not with_events or self._prepare_event_locations(conn))
+
+    def _prepare_event_locations(self, conn):
+        if not self._prepare_archived_events(conn):
+            return False
+        # 旧数据库的时间定位逐128条从canonical精确行补齐，不在观察读口迁移。
+        missing = conn.execute('SELECT id FROM events WHERE created_at IS NULL ORDER BY id LIMIT ?',
+                               (self._prepare_remaining,)).fetchall()
+        for row in missing:
+            self._prepare_remaining -= 1
+            event = self.event(conn, row['id'])
+            if event is None:
+                raise DataCorruptionError('model usage time index source missing; coverage=partial')
+            conn.execute('UPDATE events SET created_at=? WHERE id=?', (event.created_at, event.event_id))
+        return conn.execute('SELECT 1 FROM events WHERE created_at IS NULL LIMIT 1').fetchone() is None
 
     def _reset_active(self, conn):
         """活动身份被替换时重放活动段；已结转数字不能被清零。"""
@@ -196,13 +226,14 @@ class UsageIndex(ObservationIndex):
 
     def _prepare_archived_events(self, conn):
         """投影丢失时每次最多补 128 条定位；summary 不需要回读封存正文。"""
-        remaining = 128
+        remaining = self._prepare_remaining
         while remaining:
             row = conn.execute("SELECT * FROM archives WHERE complete=0 ORDER BY file LIMIT 1").fetchone()
             if row is None:
                 return True
             # 缺叶和空段也消耗预算；否则损坏来源会在同一 EOF 位置永久空转。
             remaining -= 1
+            self._prepare_remaining = remaining
             path = archive_dir_for(self.source) / row["file"]
             eof = False
             try:
@@ -222,6 +253,7 @@ class UsageIndex(ObservationIndex):
                                 raise ValueError("thread model usage scope mismatch")
                             self._install_event(conn, event, offset, len(raw), row["file"])
                         remaining -= 1
+                        self._prepare_remaining = remaining
                     offset = handle.tell()
             except FileNotFoundError:
                 self._put(conn, "coverage", "partial")
@@ -249,18 +281,23 @@ class UsageIndex(ObservationIndex):
 
     def _install_event(self, conn, event, offset, length, file):
         digest = self._digest(event)
-        existing = conn.execute("SELECT digest FROM events WHERE id=?", (event.event_id,)).fetchone()
+        existing = conn.execute("SELECT digest,offset,file FROM events WHERE id=?", (event.event_id,)).fetchone()
         if existing:
             if existing[0] != digest:
                 raise DataCorruptionError("model usage event id reused with different input")
+            if existing['offset'] != offset or existing['file'] != file:
+                self._put(conn, 'coverage', 'partial')
+            conn.execute('UPDATE events SET created_at=? WHERE id=? AND created_at IS NULL',
+                         (event.created_at, event.event_id))
             return False
-        conn.execute("INSERT INTO events(id,offset,length,digest,file) VALUES (?,?,?,?,?)", (event.event_id, offset, length, digest, file))
+        conn.execute("INSERT INTO events(id,offset,length,digest,file,created_at) VALUES (?,?,?,?,?,?)",
+                     (event.event_id, offset, length, digest, file, event.created_at))
         return True
 
     # LLM: 只对当前事件ID读取原账精确行，不返回索引缓存的业务记录。
     # 函数用途: 查询已提交事件以校验重放。
     def event(self, conn, event_id):
-        row = conn.execute("SELECT offset,length,file FROM events WHERE id=?", (event_id,)).fetchone()
+        row = conn.execute("SELECT offset,length,file,digest,created_at FROM events WHERE id=?", (event_id,)).fetchone()
         if row is None:
             return None
         path = archive_dir_for(self.source) / row["file"] if row["file"] else self.source
@@ -274,9 +311,78 @@ class UsageIndex(ObservationIndex):
             event = ThreadModelUsageEvent.from_dict(json.loads(raw))
         except (ValueError, TypeError, KeyError) as exc:
             raise DataCorruptionError("model usage indexed row is unreadable") from exc
-        if event.event_id != event_id or event.thread_id != self.thread_id:
+        if (event.event_id != event_id or event.thread_id != self.thread_id or self._digest(event) != row['digest']
+                or (row['created_at'] is not None and event.created_at != row['created_at'])):
             raise DataCorruptionError("model usage indexed row identity mismatch")
         return event
+
+    @contextmanager
+    def _range_connection(self):
+        """只读时间索引定位后核原行；坏/未完成投影明确unknown，绝不读全历史兜底。"""
+        from ..io.sqlite_probe import sqlite_readonly_probe_uri
+        from ..io.sqlite_scope import scoped_guarded_connection
+
+        before, archive = _identity(self.source), archive_stamp(self.source)
+        database = _identity(self.path)
+        if database is None:
+            raise DataCorruptionError('model usage time index unavailable; coverage=unknown')
+        def connect():
+            conn = sqlite3.connect(sqlite_readonly_probe_uri(self.path), uri=True, timeout=0.0)
+            try:
+                conn.row_factory = sqlite3.Row
+                return conn
+            except BaseException:
+                try:
+                    conn.close()
+                except BaseException:
+                    pass
+                raise
+        with scoped_guarded_connection(self.path, True, connect) as conn:
+            conn.execute('PRAGMA query_only=ON')
+            conn.execute('PRAGMA temp_store=MEMORY')
+            conn.execute('BEGIN')
+            try:
+                stored = json.loads(self._get(conn, 'source', 'null'))
+                offset = int(self._get(conn, 'offset', '0'))
+                source_matches = stored == (list(before) if before is not None else None)
+                source_matches |= not stored and offset == 0 and (before is None or before[2] == 0)
+                if (not source_matches or offset != (before[2] if before else 0)
+                        or self._get(conn, 'archive_stamp', '') != json.dumps(archive)
+                        or self._get(conn, 'coverage', 'complete') != 'complete'
+                        or conn.execute('SELECT 1 FROM archives WHERE complete=0 LIMIT 1').fetchone() is not None
+                        or conn.execute('SELECT 1 FROM events WHERE created_at IS NULL LIMIT 1').fetchone() is not None):
+                    raise DataCorruptionError('model usage time index incomplete; coverage=unknown')
+                yield conn
+                current = _identity(self.path)
+                if (_identity(self.source) != before or archive_stamp(self.source) != archive or current is None
+                        or current[:2] != database[:2]):
+                    raise DataCorruptionError('model usage window source changed; coverage=unknown')
+            finally:
+                conn.rollback()
+
+    def source_bounds(self):
+        """两次有序定位取得来源时间界，不对全部历史重新MIN/MAX扫描。"""
+        with self._range_connection() as conn:
+            first = conn.execute('SELECT created_at FROM events ORDER BY created_at,id LIMIT 1').fetchone()
+            last = conn.execute('SELECT created_at FROM events ORDER BY created_at DESC,id DESC LIMIT 1').fetchone()
+            return (first[0] if first else None, last[0] if last else None)
+
+    def window_events(self, *, since, until, limit=128):
+        """按时间索引流式核原行，limit只限制每批内存，不截断请求窗口。"""
+        if type(limit) is not int or not 0 < limit <= 128 or until < since:
+            raise ValueError('invalid model usage window')
+        with self._range_connection() as conn:
+            cursor = conn.execute('SELECT id FROM events WHERE created_at>=? AND created_at<? '
+                                  'ORDER BY created_at,id', (since, until))
+            while True:
+                positions = cursor.fetchmany(limit)
+                if not positions:
+                    break
+                for row in positions:
+                    event = self.event(conn, row['id'])
+                    if event is None:
+                        raise DataCorruptionError('model usage window indexed event disappeared; coverage=unknown')
+                    yield event
 
     # LLM: 原累计delta算法仍使用同一范围数字，不扫描该范围的历史行。
     # 函数用途: 取得一个范围的累计数字。

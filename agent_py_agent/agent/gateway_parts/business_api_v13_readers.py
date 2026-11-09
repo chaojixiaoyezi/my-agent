@@ -14,6 +14,8 @@ import os
 import re
 import sqlite3
 import time
+from collections import OrderedDict
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,10 +31,14 @@ from ..conversation.business_observability import (
     BusinessObservationService,
     ObservationPage,
     ObservationRecord,
+    ObservationSourcePage,
     _observation_cached,
     _observation_task,
     _observation_thread,
+    bounded_observation_reader,
     observation_request,
+    runtime_source_revision,
+    source_after,
 )
 from ..conversation.decision_audit import decision_usage_summary
 from ..conversation.display_archive import (
@@ -40,6 +46,7 @@ from ..conversation.display_archive import (
     _read_manifest,
     read_display_archive_page,
 )
+from ..conversation.usage_sources import UsageSourcePlan
 from ..runtime_db.repository import RuntimeRepository
 
 
@@ -76,7 +83,15 @@ def usage_record_visible(service, record, params, actor):
     if not BusinessObservationService._visible(service, record, 'usage.get', scope, actor):
         return False
     # 时间边界由源按原created_at数值过滤，不能再用ISO文本排序覆盖它；其它成员事实逐条末核。
-    return all(BusinessObservationService._visible(service, member, 'usage.get', scope, actor) for member in record.members)
+    members = iter(record.members)
+    try:
+        return all(BusinessObservationService._visible(service, member, 'usage.get', scope, actor) for member in members)
+    except (OSError, ValueError, RuntimeError, sqlite3.Error):
+        return False
+    finally:
+        close = getattr(members, 'close', None)
+        if close is not None:
+            close()
 
 
 class DefaultBusinessObservationService(BusinessObservationService):
@@ -108,6 +123,119 @@ class _DecisionWindow:
     # 函数用途: 返回当前窗口原事件对象。
     def events_report(self, thread_id):
         return self.events[thread_id], []
+
+
+class _UsageEventSources:
+    def __init__(self, window):
+        self.window = window
+
+    def __iter__(self):
+        if self.window.source_plan is None:
+            yield from self.window.explicit_revisions
+            return
+        with closing(self.window.source_plan.rows()) as rows:
+            for identifier, revision in rows:
+                self.window.source_revisions[identifier] = revision
+                self.window.source_revisions.move_to_end(identifier)
+                if len(self.window.source_revisions) > 128:
+                    self.window.source_revisions.popitem(last=False)
+                yield identifier
+
+    def __getitem__(self, identifier):
+        return _StreamUsageEvents(self.window, identifier)
+
+    def values(self):
+        for identifier in self:
+            yield self[identifier]
+
+    def items(self):
+        for identifier in self:
+            yield identifier, self[identifier]
+
+
+class _StreamUsageEvents:
+    def __init__(self, window, thread_id):
+        self.window, self.thread_id = window, thread_id
+
+    def __iter__(self):
+        with closing(self.window.pairs(self.thread_id)) as pairs:
+            for event, facts in pairs:
+                self.window.capture(facts)
+                yield event
+
+
+class _StreamUsageMembers:
+    def __init__(self, window):
+        self.window = window
+
+    def __bool__(self):
+        return self.window.member_count > 0
+
+    def __iter__(self):
+        with closing(iter(self.window.events)) as identifiers:
+            for identifier in identifiers:
+                with closing(self.window.pairs(identifier)) as pairs:
+                    for _, facts in pairs:
+                        yield facts
+
+
+class _StreamDecisionWindow:
+    """时间索引流式窗口；只保固定线程集合、计数与范围证明，不保所有事件正文。"""
+    def __init__(self, source, threads, revisions, params, since, until):
+        self.source = source
+        self.source_plan = threads if isinstance(threads, UsageSourcePlan) else None
+        self.explicit_revisions = revisions
+        self.source_revisions = OrderedDict()
+        self.params, self.since, self.until = params, since, until
+        self.model_usage, self.original = self, source.store.model_usage
+        self.events = _UsageEventSources(self)
+        self.members = _StreamUsageMembers(self)
+        self.member_count, self.common, self.mixed = 0, {}, set()
+
+    def revision(self, thread_id):
+        return self.explicit_revisions[thread_id] if self.source_plan is None else self.source_revisions[thread_id]
+
+    def events_report(self, thread_id):
+        return self.events[thread_id], []
+
+    def capture(self, facts):
+        self.member_count += 1
+        for key in ('space_id', 'project_ref', 'task_id', 'thread_id', 'run_id', 'attempt_id'):
+            value = getattr(facts, key)
+            if key not in self.common:
+                self.common[key] = value
+            elif key not in self.mixed and self.common[key] != value:
+                self.common[key] = None
+                self.mixed.add(key)
+
+    def pairs(self, thread_id):
+        expected, store = self.revision(thread_id), self.source.store.model_usage
+        thread = _observation_thread(self.source.store, thread_id)
+        if thread.owner_id != self.source.owner:
+            raise ValueError('usage source owner mismatch')
+        if store.revision(thread_id) != expected:
+            raise ValueError('usage source generation changed')
+        rows, errors = store.events_window_report(thread_id, since=self.since, until=self.until)
+        if errors:
+            raise ValueError('usage window source unreadable')
+        try:
+            for event in rows:
+                if event.thread_id != thread_id or not self.since <= event.created_at < self.until:
+                    raise ValueError('usage event indexed range mismatch')
+                facts = self.source.usage_event_record(thread, event)
+                filters = self.params.get('filter', {})
+                if any(filters.get(key) is not None and getattr(facts, key) != filters[key]
+                       for key in ('space_id', 'project_ref', 'task_id', 'run_id')):
+                    continue
+                yield event, facts
+            if store.revision(thread_id) != expected:
+                raise ValueError('usage source generation changed')
+        except RuntimeError as error:
+            raise ValueError('usage window source unreadable') from error
+        finally:
+            close = getattr(rows, 'close', None)
+            if close is not None:
+                close()
 
 
 # LLM: 注册只核schema与来源存在性，不能读取历史正文或计算资源快照；坏源在实际读取时保持unknown。
@@ -187,7 +315,7 @@ class _OwnerReaders:
 
     # LLM: 同owner且准确attempt属于同run；点详情必须在SQL中筛选，历史尝试不偷换成current。
     # 函数用途: 读取工具或产物账的严格授权join，可按operation精确点读。
-    def joined(self, table, *, operation_id=None):
+    def joined(self, table, *, operation_id=None, rowids=None):
         if table not in {'tool_operations', 'artifact_records'}:
             raise ValueError('invalid source')
         condition, values = 't.owner_id=?', [self.owner]
@@ -196,19 +324,40 @@ class _OwnerReaders:
                 raise ValueError('invalid operation source')
             condition += ' AND x.operation_id=?'
             values.append(operation_id)
+        if rowids is not None:
+            if not rowids:
+                return []
+            condition += ' AND x.rowid IN (' + ','.join('?' for _ in rowids) + ')'
+            values.extend(rowids)
+        bound = 2 if operation_id is not None else len(rowids) if rowids is not None else None
         with self.repo._runtime_connection() as conn:
             return conn.execute('SELECT x.*,ar.run_id,t.thread_id,tr.metadata_json FROM ' + table + ' x '
                 'JOIN agent_runs ar ON ar.agent_run_id=x.agent_run_id '
                 'JOIN agent_attempts aa ON aa.attempt_id=x.attempt_id AND aa.agent_run_id=ar.agent_run_id '
                 'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id '
-                'WHERE ' + condition + ' ORDER BY x.created_at,x.rowid', values).fetchall()
+                'WHERE ' + condition + ' ORDER BY x.rowid' + (' LIMIT ?' if bound is not None else ''),
+                [*values, bound] if bound is not None else values).fetchall()
 
     # LLM: handler开始与嵌套outcome为执行事实；点详情限制源SQL，成功状态不等于副作用已提交。
     # 函数用途: 将runtime工具账投影为工具调用视图，保留既有结算协议。
-    def tool_calls(self, params):
+    @bounded_observation_reader
+    def tool_calls(self, params, *, source_page=None):
         records = []
-        selected = ({'operation_id': params['operation_id']} if 'operation_id' in params else {})
-        for row in self.joined('tool_operations', **selected):
+        request = source_page or ObservationSourcePage(limit=100)
+        revision = runtime_source_revision(self.repo.db_path)
+        after = source_after(request, revision)
+        next_position = None
+        if 'operation_id' in params:
+            selected = self.joined('tool_operations', operation_id=params['operation_id'])
+        else:
+            limit = min(100, request.limit)
+            with self.repo._runtime_connection() as conn:
+                positions = conn.execute('SELECT rowid FROM tool_operations WHERE rowid>? ORDER BY rowid LIMIT ?',
+                                         (after, limit + 1)).fetchall()
+            if len(positions) > limit:
+                next_position = {'revision': revision, 'after': positions[limit - 1][0]}
+            selected = self.joined('tool_operations', rowids=[row[0] for row in positions[:limit]])
+        for row in selected:
             outcome = json.loads(row['outcome_json'])
             if not isinstance(outcome, dict):
                 raise ValueError('invalid tool outcome')
@@ -256,7 +405,10 @@ class _OwnerReaders:
             record = self.record(value, row)
             value['task_id'] = record.task_id
             records.append(record)
-        return ObservationPage(tuple(records))
+        if runtime_source_revision(self.repo.db_path) != revision:
+            raise BusinessError('CURSOR_EXPIRED')
+        return ObservationPage(tuple(records), 'partial' if next_position is not None else 'complete',
+                               revision, True, next_position)
 
     # LLM: 详情沿同一行授权，不把不存在或跨owner操作伪装成功。
     # 函数用途: 从原工具行生成冻结详情。
@@ -388,23 +540,33 @@ class _OwnerReaders:
 
     # LLM: 线程列表和distinct身份按请求复用，不从过滤字段捏造空间归属或缓存授权。
     # 函数用途: 返回与请求结构化过滤相符的规范线程。
-    def selected_threads(self, params):
-        threads, errors = _observation_cached((self.store.threads, 'list', None),
-            lambda: self.store.threads.list_report(limit=0))
-        if errors:
-            raise ValueError('thread source unreadable')
-        result = []
+    def selected_threads(self, params, *, since=0, until=float('inf')):
         filters = params.get('filter', {})
-        for thread in threads:
-            _observation_cached((self.store.threads, 'record', thread.thread_id), lambda: thread)
-            if thread.owner_id != self.owner:
-                continue
-            if filters.get('agent_id') is not None and filters['agent_id'] != thread.thread_id:
-                continue
-            if any(filters.get(key) is not None for key in ('attempt_id', 'workflow_run_id')):
-                raise ValueError('usage scope unavailable')
-            result.append(thread)
-        return result
+        if any(filters.get(key) is not None for key in ('attempt_id', 'workflow_run_id')):
+            raise ValueError('usage scope unavailable')
+        identifier = filters.get('agent_id')
+        if identifier is None and filters.get('task_id'):
+            task = _observation_task(self.store, filters['task_id'])
+            if task is None:
+                raise ValueError('usage task unavailable')
+            sender = _observation_thread(self.store, task.sender_thread_id)
+            if sender.owner_id != self.owner:
+                raise ValueError('usage task owner mismatch')
+            identifier = task.target_thread_id
+        if identifier is None and filters.get('run_id'):
+            with self.repo._runtime_connection() as conn:
+                rows = conn.execute('SELECT t.thread_id FROM agent_runs ar JOIN task_runs tr ON tr.task_run_id=ar.task_run_id '
+                                    'JOIN tasks t ON t.task_id=tr.task_id WHERE ar.run_id=? AND t.owner_id=? LIMIT 2',
+                                    (filters['run_id'], self.owner)).fetchall()
+            if len(rows) != 1:
+                raise ValueError('usage run source unavailable')
+            identifier = rows[0][0]
+        if identifier is None:
+            return self.store.model_usage.window_source_plan(since=since, until=until)
+        thread = _observation_thread(self.store, identifier)
+        if thread.owner_id != self.owner:
+            raise ValueError('usage thread owner mismatch')
+        return (thread,)
 
     # LLM: 用量事件task_id回到canonical任务和两端owner；每个ID本请求只读一次，不缓存授权。
     # 函数用途: 为原用量事件恢复准确授权事实，不把同线程不同task混算。
@@ -436,41 +598,37 @@ class _OwnerReaders:
         until = datetime.fromisoformat(filters['until'].replace('Z', '+00:00')).timestamp() if filters.get('until') else float('inf')
         if until < since:
             raise ValueError('usage window reversed')
-        events, members, revisions = {}, [], []
-        for thread in self.selected_threads(params):
-            revision = self.store.model_usage.revision(thread.thread_id)
-            if not revision:
-                continue
-            rows, errors = self.store.model_usage.events_report(thread.thread_id)
-            if errors or revision != self.store.model_usage.revision(thread.thread_id):
-                raise ValueError('usage ledger unreadable or changed')
-            revisions.append([thread.thread_id, revision])
-            events[thread.thread_id] = []
-            seen = set()
-            for event in rows:
-                if event.thread_id != thread.thread_id or event.event_id in seen:
-                    raise ValueError('usage event identity duplicate or mismatch')
-                seen.add(event.event_id)
-                if not since <= event.created_at < until:
-                    continue
-                facts = self.usage_event_record(thread, event)
-                if any(filters.get(key) is not None and getattr(facts, key) != filters[key]
-                        for key in ('space_id', 'project_ref', 'task_id', 'run_id')):
-                    continue
-                events[thread.thread_id].append(event)
-                members.append(facts)
-        if not events:
-            raise ValueError('usage source missing')
-        return _DecisionWindow(self.store.model_usage, events, dict(revisions)), tuple(members), _digest(revisions)
+        threads = self.selected_threads(params, since=since, until=until)
+        revisions = {}
+        if not isinstance(threads, UsageSourcePlan):
+            for thread in threads:
+                revision = self.store.model_usage.revision(thread.thread_id)
+                if revision:
+                    revisions[thread.thread_id] = revision
+            if not revisions:
+                raise ValueError('usage source missing')
+        window = _StreamDecisionWindow(self, threads, revisions, params, since, until)
+        revision = threads.generation if isinstance(threads, UsageSourcePlan) else _digest(sorted(revisions.items()))
+        return window, window.members, revision
 
     # LLM: 探测不解析事件或列出线程；存在不等于可读，坏账在查询时保持unknown。
     # 函数用途: 用原用量目录中的文件存在性廉价检查来源。
     def usage_exists(self):
         try:
+            source_index = self.store.model_usage._source_index()
+            if source_index.path.is_file() and not source_index.path.is_symlink():
+                return True
             with os.scandir(self.store.model_usage._directory) as entries:
-                return any(entry.name.endswith('.jsonl') and entry.is_file(follow_symlinks=False)
-                    for entry in entries)
-        except (OSError, ValueError, TypeError, KeyError):
+                for _ in range(128):
+                    entry = next(entries, None)
+                    if entry is None:
+                        return False
+                    if ((entry.name.endswith('.jsonl') and entry.is_file(follow_symlinks=False))
+                            or (entry.name == 'archive' and entry.is_dir(follow_symlinks=False))):
+                        return True
+                # 大目录尚未核完也只装只读端口；真实查询仍须完整来源索引，绝不伪造空账或0费用。
+                return True
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
             return False
 
     # LLM: 注册只核公开活动源的小型身份元数据，不扫描任务、线程或运行历史；坏源不能冒充已接线。
@@ -616,7 +774,7 @@ class _OwnerReaders:
     def usage_page(self, params, window, members, revision, resources):
         filters = params.get('filter', {})
         # 时间窗已按原created_at筛完。since=0避免原mtime快路径误跳过带未来事件的合法账本。
-        report = decision_usage_summary(window, list(window.events), since=0)
+        report = decision_usage_summary(window, window.events, since=0)
         if report['unreadable_threads']:
             raise ValueError('usage ledger unreadable')
         unknown = dict.fromkeys(('input_tokens', 'cached_input_tokens', 'uncached_input_tokens', 'output_tokens', 'cost', 'currency'))
@@ -625,10 +783,11 @@ class _OwnerReaders:
             actual['input_tokens'] = report['input_tokens_reported']
         if report['estimated_unfinished_calls']:
             estimated.update(input_tokens=report['input_tokens_estimated_unfinished'], coverage='partial')
-        common = {}
-        for key in ('space_id', 'project_ref', 'task_id', 'thread_id', 'run_id', 'attempt_id'):
-            values = {getattr(member, key) for member in members}
-            common[key] = next(iter(values)) if len(values) == 1 else None
+        common = dict(window.common) if isinstance(window, _StreamDecisionWindow) else {}
+        if not isinstance(window, _StreamDecisionWindow):
+            for key in ('space_id', 'project_ref', 'task_id', 'thread_id', 'run_id', 'attempt_id'):
+                values = {getattr(member, key) for member in members}
+                common[key] = next(iter(values)) if len(values) == 1 else None
         # 空窗口不伪造发生时间或0 token；准确身份来自规范源，不能直接复制filter。
         if not members:
             common.update(self.empty_usage_scope(filters))
@@ -647,7 +806,10 @@ class _OwnerReaders:
         if resources is None:
             raise ValueError('resource source missing')
         window, members, revision = self.usage_window(params)
-        events = [event for rows in window.events.values() for event in rows]
+        event_map = {identifier: list(rows) for identifier, rows in window.events.items()}
+        events = [event for rows in event_map.values() for event in rows]
+        source_revisions = {identifier: window.original.revision(identifier) for identifier in event_map}
+        members = tuple(members)
         if len(events) != len(members):
             raise ValueError('usage member alignment mismatch')
         indexes = {key: {} for key in ('task_id', 'agent_id', 'space_id')}
@@ -670,9 +832,9 @@ class _OwnerReaders:
                 event, member = events[index], members[index]
                 chosen_events.setdefault(event.thread_id, []).append(event)
                 chosen_members.append(member)
-            chosen = _DecisionWindow(window.original, chosen_events, window.revisions)
+            chosen = _DecisionWindow(window.original, chosen_events, source_revisions)
             pages.append(self.usage_page(request, chosen, tuple(chosen_members), revision, resources))
-        return tuple(pages), window.events
+        return tuple(pages), event_map
 
 
 # LLM: 四参数默认工厂没有真实前台执行句柄；组合根持有真实Agent时才显式装配审批。
