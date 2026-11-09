@@ -42,12 +42,25 @@ def host_state_read_only_guard() -> Iterator[None]:
 def _host_state_permission_failure(exc: BaseException) -> bool:
     if os.environ.get(HOST_STATE_READ_ONLY_ENV) != "1":
         return False
-    if isinstance(exc, OSError):
-        return exc.errno in _PERMISSION_ERRNOS
     import sqlite3
 
-    code = getattr(exc, "sqlite_errorcode", None) if isinstance(exc, sqlite3.Error) else None
-    return isinstance(code, int) and (code & 0xFF) in _SQLITE_PERMISSION_CODES
+    # 脱敏包装会隐藏 traceback 的 context，但权限事实仍在原异常链；不读取文案或公开内层路径。
+    # 链深与循环都设界，异常对象不能让 CLI 错误处理本身无限遍历。
+    seen: set[int] = set()
+    for _ in range(16):
+        if id(exc) in seen:
+            break
+        seen.add(id(exc))
+        if isinstance(exc, OSError) and exc.errno in _PERMISSION_ERRNOS:
+            return True
+        code = getattr(exc, "sqlite_errorcode", None) if isinstance(exc, sqlite3.Error) else None
+        if type(code) is int and (code & 0xFF) in _SQLITE_PERMISSION_CODES:
+            return True
+        cause = exc.__cause__ if exc.__cause__ is not None else exc.__context__
+        if cause is None:
+            break
+        exc = cause
+    return False
 
 
 __all__ = ["CLI_HOST_STATE_READ_ONLY", "host_state_read_only_guard"]

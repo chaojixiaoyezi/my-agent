@@ -1228,6 +1228,62 @@ def test_cli_guard_only_rewrites_permission_failures_inside_the_sandbox(tmp_path
         guarded(ValueError("x"))
 
 
+def test_cli_guard_preserves_wrapped_permission_facts_without_exposing_private_context(tmp_path, monkeypatch, capsys):
+    import errno
+
+    from agent_py_agent.agent.path_access_policy import HOST_STATE_READ_ONLY_ENV
+    from agent_py_agent.agent.settings import deployment_policy
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+    from agent_py_agent.cli.host_state_guard import (
+        CLI_HOST_STATE_READ_ONLY,
+        host_state_read_only_guard,
+    )
+
+    paths = home_paths(tmp_path / "home")
+
+    def denied(*args, **kwargs):
+        raise PermissionError(errno.EACCES, "PRIVATE-CONTEXT", "PRIVATE-PATH")
+
+    monkeypatch.setattr(deployment_policy, "_read_deployment_policy_source", denied)
+    monkeypatch.delenv(HOST_STATE_READ_ONLY_ENV, raising=False)
+    with pytest.raises(deployment_policy.DeploymentPolicyError):
+        with host_state_read_only_guard():
+            deployment_policy.load_deployment_policy(trusted_host_paths=paths)
+    monkeypatch.setenv(HOST_STATE_READ_ONLY_ENV, "1")
+    with pytest.raises(SystemExit) as stopped:
+        with host_state_read_only_guard():
+            deployment_policy.load_deployment_policy(trusted_host_paths=paths)
+    output = capsys.readouterr().err
+    assert stopped.value.code == 1 and f"error_code={CLI_HOST_STATE_READ_ONLY}" in output
+    assert "PRIVATE-CONTEXT" not in output and "PRIVATE-PATH" not in output
+    monkeypatch.setattr(deployment_policy, "_read_deployment_policy_source", lambda *args, **kwargs: b'{broken')
+    with pytest.raises(deployment_policy.DeploymentPolicyError):
+        with host_state_read_only_guard():
+            deployment_policy.load_deployment_policy(trusted_host_paths=paths)
+
+
+def test_cli_guard_exception_chain_is_bounded_and_explicit_cause_takes_precedence(monkeypatch):
+    import errno
+
+    from agent_py_agent.agent.path_access_policy import HOST_STATE_READ_ONLY_ENV
+    from agent_py_agent.cli.host_state_guard import _host_state_permission_failure
+
+    monkeypatch.setenv(HOST_STATE_READ_ONLY_ENV, "1")
+    denied = PermissionError(errno.EPERM, "denied")
+    wrapper = ValueError("wrapper")
+    wrapper.__context__ = denied
+    wrapper.__cause__ = ValueError("actual cause")
+    assert not _host_state_permission_failure(wrapper)
+    wrapper.__cause__ = wrapper
+    assert not _host_state_permission_failure(wrapper)
+    deep = denied
+    for _ in range(16):
+        outer = ValueError("wrapper")
+        outer.__cause__ = deep
+        deep = outer
+    assert not _host_state_permission_failure(deep)
+
+
 # 函数用途: 收集 owner home 里全部 A 类宿主状态（文件和目录里的文件）的字节，用来核对命令没改它们。
 def _host_state_bytes(root: Path, owner: Path) -> dict[Path, bytes]:
     from agent_py_agent.agent.path_access_policy import host_readonly_paths
