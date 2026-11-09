@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
+from ..concurrency.interrupt import wait_interruptibly
 from ..tooling.runtime_contracts import ProviderToolCapability, ToolChoice
 from .base import BackendOptions, BaseBackend, ProviderRequestOptions, _utc_now_iso
 from .errors import (
@@ -323,11 +324,17 @@ class HttpBackend(BaseBackend):
             return cached
         # 同一 Gateway/owner 的 Agent 会被多个请求线程复用。探针必须 single-flight，
         # 否则冷启动并发会重复烧请求，并让一个成功、一个失败的结果互相打架。
-        with self._provider_tool_capability_lock:
+        # 等待别的请求探测时仍消费本轮停止信号；未取得锁绝不能释放别人的执行权。
+        while not self._provider_tool_capability_lock.acquire(blocking=False):
+            wait_interruptibly(0.05)
+        try:
+            wait_interruptibly(0)
             cached = self._provider_tool_capability_cache
             if cached is not None:
                 return cached
             return self._probe_tool_capability_uncached()
+        finally:
+            self._provider_tool_capability_lock.release()
 
     # LLM: Caller holds `_provider_tool_capability_lock`; probe the ordinary auto tool-choice
     # surface, not forced-call or reasoning-disable support. Only a matching nonce proves support.
@@ -374,6 +381,9 @@ class HttpBackend(BaseBackend):
                     tool_choice=ToolChoice.auto("native_capability_probe"),
                     request_options=ProviderRequestOptions(is_probe=True),
                 )
+            except InterruptedError as exc:
+                _fail_probe_call(scope, call_id, exc)
+                raise
             except (ProviderRecoverableError, ProviderConfigurationError) as exc:
                 _fail_probe_call(scope, call_id, exc)
                 # 保留供应商失败分类，让调用方处理配置、额度和网络，不能改成能力不足。

@@ -14,6 +14,7 @@ import threading
 import zlib
 from dataclasses import dataclass
 
+from ..concurrency.interrupt import wait_interruptibly
 from ..tooling.runtime_contracts import ToolChoice
 from .base import ProviderRequestOptions
 from .errors import (
@@ -103,7 +104,11 @@ def resolve_vision_capability(backend: object) -> VisionCapability:
         lock = _KEY_LOCKS.setdefault(key, threading.Lock())
     if cached is not None:
         return cached
-    with lock:
+    # 单飞锁可跨供应商请求；等待者的取消不能依赖另一请求先完成。
+    while not lock.acquire(blocking=False):
+        wait_interruptibly(0.05)
+    try:
+        wait_interruptibly(0)
         with _CACHE_LOCK:
             cached = _CACHE.get(key)
         if cached is not None:
@@ -113,6 +118,8 @@ def resolve_vision_capability(backend: object) -> VisionCapability:
             with _CACHE_LOCK:
                 _CACHE[key] = result
         return result
+    finally:
+        lock.release()
 
 
 # 函数用途: 清空进程级缓存；只供测试和显式管理入口使用。
@@ -150,7 +157,7 @@ def probe_vision_capability(backend: object) -> VisionCapability:
         except ProviderRequestRejectedError as exc:
             code = str(getattr(exc, "error_code", "") or "").strip().upper()
             return VisionCapability(VISION_UNSUPPORTED, "probe_unsupported", f"provider_rejected_media{':' + code if code else ''}")
-        except (ProviderRecoverableError, ProviderConfigurationError):
+        except (InterruptedError, ProviderRecoverableError, ProviderConfigurationError):
             raise
         except Exception as exc:  # noqa: BLE001 本地确定性异常（解析/协议）重试无意义，记类型后按不可用处理
             return VisionCapability(VISION_UNAVAILABLE, "probe_unavailable", f"live_probe_failed:{type(exc).__name__}")
