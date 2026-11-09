@@ -571,7 +571,7 @@ def _transition_capability_selection(
 def _assert_no_named_task_conflict(
     store: TaskStore, thread_id: str, task_id: str, work_kind: str, work_name: str,
 ) -> None:
-    links, errors = store.list_report(thread_id)
+    links, errors = store.active_report(thread_id)
     if errors:
         raise DataCorruptionError("conversation task links are unavailable")
     duplicate = next(
@@ -1017,6 +1017,57 @@ class TaskStore:
         if link is not None and link.thread_id != thread_id:
             return None, None
         return link, error
+
+    def context_report(self, thread_id: str, *, recent_limit: int = task_history.PAGE_SIZE,
+                       required_task_ids: Iterable[str] = ()):
+        """热上下文只读近期、活动及显式身份；完整历史接口仍由list_report负责。"""
+        thread = self._require_thread(thread_id)
+        coverage = {'selection': 'recent_active_required', 'status': 'unknown', 'complete': False,
+                    'history_complete': False, 'history_positions': None, 'selected_count': 0}
+        try:
+            if type(recent_limit) is not int or recent_limit < 0:
+                raise ValueError('invalid task context window')
+            limit = min(recent_limit, task_history.PAGE_SIZE)
+            if isinstance(required_task_ids, (str, bytes)):
+                raise ValueError('invalid required task identities')
+            required = tuple(required_task_ids)
+            if any(type(value) is not str or not value for value in required):
+                raise ValueError('invalid required task identity')
+            path = self.storage.thread_path(thread_id)
+            manifest = task_history._read(task_history.history_root(path), ('index.json',))
+            if ((manifest is None and thread.task_history_version == 1)
+                    or (manifest is not None and manifest.get('incomplete'))):
+                raise FileNotFoundError('线程历史索引被删除，已知窗口仍可继续新任务但完整历史不可证明')
+            count = manifest['count'] if manifest is not None else len(thread.task_ids)
+            start = max(0, count - limit)
+            recent = task_history.page(path, thread, cursor=start, limit=limit)[0] if limit else ()
+            selected = tuple(dict.fromkeys((*required,
+                                           *((thread.workspace_task_id,) if thread.workspace_task_id else ()),
+                                           *thread.active_task_ids, *recent)))
+            links, errors = [], []
+            for identifier in selected:
+                link, error = _read_task_link(self.storage.task_path(identifier), identifier)
+                if link is not None and link.thread_id != thread_id:
+                    error = runtime_error_report(DataCorruptionError('task link belongs to another thread'),
+                                                 context='conversation.task_context.scope')
+                    error.update(task_id=identifier, scope_resolution='thread_mismatch', expected_thread_id=thread_id)
+                    link = None
+                if link is not None:
+                    links.append(link)
+                if error is not None:
+                    errors.append(error)
+            complete = start == 0 and not errors
+            coverage.update(status='unknown' if errors else ('complete' if complete else 'window'),
+                            complete=complete, history_complete=complete, history_positions=count,
+                            recent_limit=limit, recent_from=start, selected_count=len(selected))
+            warnings = [{'code': 'missing_historical_task_link', 'id': error['task_id']}
+                        for error in errors if error.get('error_type') == 'FileNotFoundError'
+                        and isinstance(error.get('task_id'), str) and error['task_id']
+                        and error['task_id'] not in thread.active_task_ids]
+            missing = {row['id'] for row in warnings}
+            return links, [error for error in errors if error.get('task_id') not in missing], warnings, coverage
+        except (OSError, ValueError, TypeError) as error:
+            return [], [runtime_error_report(error, context='conversation.task_history.read')], [], coverage
 
     # LLM: store_tasks 的持久化合同：从线程历史任务身份读取关联及错误，不扫描其它线程；修改须同步本领域调用方与存储回归。
     # 函数用途: 从线程历史任务身份读取关联及错误，不扫描其它线程。

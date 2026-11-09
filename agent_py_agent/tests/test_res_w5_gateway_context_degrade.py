@@ -201,6 +201,8 @@ def test_task_store_errors_without_identity_stay_blocking(case, monkeypatch, err
         return ([], [error], []) if classify_missing else ([], [error])
 
     monkeypatch.setattr(case.store.tasks, "list_report", report)
+    monkeypatch.setattr(case.store.tasks, "context_report",
+                        lambda *_args, **_kwargs: ([], [error], [], {"status": "unknown", "history_complete": False}))
     context = _context(case)
     assert error in context.load_errors
     with pytest.raises(ConversationPersistenceError):

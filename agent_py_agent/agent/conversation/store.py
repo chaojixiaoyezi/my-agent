@@ -128,8 +128,10 @@ class ConversationStore:
 
     # LLM: 只组装既有领域读取结果；严格处理坏账的调用方使用 context_bundle_report，不建立第二份状态。
     # 函数用途: 为旧有正文上下文调用返回跨领域快照，不写盘或标记已消费。
-    def context_bundle(self, thread_id: str, *, recent_limit: int = 20) -> dict[str, Any]:
-        bundle, _load_errors = self.context_bundle_report(thread_id, recent_limit=recent_limit)
+    def context_bundle(self, thread_id: str, *, recent_limit: int = 20,
+                       required_task_ids: tuple[str, ...] = ()) -> dict[str, Any]:
+        bundle, _load_errors = self.context_bundle_report(thread_id, recent_limit=recent_limit,
+                                                         required_task_ids=required_task_ids)
         return bundle
 
     # LLM: 模型上下文只投影运行事实；include_messages=False只延后正文读取，调用方须同次按任务范围补齐，不能当空历史。
@@ -141,19 +143,22 @@ class ConversationStore:
         *,
         recent_limit: int = 20,
         include_messages: bool = True,
+        required_task_ids: tuple[str, ...] = (),
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         thread = self.threads.require(thread_id)
         messages, message_errors = (
             self.messages.recent_report(thread_id, limit=recent_limit) if include_messages else ([], [])
         )
-        tasks, task_errors, task_warnings = self.tasks.list_report(thread_id, classify_missing=True)
+        tasks, task_errors, task_warnings, task_coverage = self.tasks.context_report(
+            thread_id, recent_limit=recent_limit, required_task_ids=required_task_ids)
         active_task_ids = set(thread.active_task_ids)
         degraded_ids = {str(row.get("task_id") or row.get("id")) for row in task_warnings
                         if row.get("task_id") or row.get("id")}
         blocking_errors = []
         for error in task_errors:
             task_id = error.get("task_id")
-            if task_id and (task_id not in active_task_ids or error.get("error_type") == "FileNotFoundError"):
+            if (task_id and error.get('scope_resolution') != 'thread_mismatch'
+                    and (task_id not in active_task_ids or error.get("error_type") == "FileNotFoundError")):
                 degraded_ids.add(str(task_id))
             else:
                 blocking_errors.append(error)
@@ -173,6 +178,7 @@ class ConversationStore:
             "thread": thread_payload,
             "messages": [item.to_dict() for item in messages],
             "tasks": [item.to_dict() for item in tasks],
+            "task_coverage": task_coverage,
             "channel_bindings": [item.to_dict() for item in thread.channel_bindings],
             "observations": [item.to_dict() for item in observations],
             "guidance": [item.to_dict() for item in guidance],

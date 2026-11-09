@@ -325,7 +325,7 @@ def test_background_context_overflow_resumes_after_committed_recovery_same_slice
             assert thread_id == original.thread_id
             return original, None
 
-        def context_bundle_report(self, thread_id, *, recent_limit=0, include_messages=True):
+        def context_bundle_report(self, thread_id, *, recent_limit=0, include_messages=True, required_task_ids=()):
             assert type(include_messages) is bool
             del recent_limit
             return {"thread": {"thread_id": thread_id}}, []
@@ -426,7 +426,7 @@ def test_background_compact_slice_yields_after_eight_progressful_generations(mon
             )
 
     class Store:
-        def context_bundle_report(self, thread_id, *, recent_limit=0, include_messages=True):
+        def context_bundle_report(self, thread_id, *, recent_limit=0, include_messages=True, required_task_ids=()):
             assert type(include_messages) is bool
             del recent_limit
             return {"thread": {"thread_id": thread_id}}, []
@@ -511,7 +511,7 @@ def test_background_scheduler_treats_compact_slice_yield_as_clean_continuation(
         # 夹具补全：领取后准入按任务号读 store.session_tasks（派活正文是否已放弃），替身也得有这个属性。
         session_tasks = None
 
-        def context_bundle_report(self, thread_id, *, recent_limit=0, include_messages=True):
+        def context_bundle_report(self, thread_id, *, recent_limit=0, include_messages=True, required_task_ids=()):
             assert type(include_messages) is bool
             del recent_limit
             return {"thread": {"thread_id": thread_id}}, []
@@ -608,7 +608,7 @@ def test_background_empty_transcript_carries_active_turn_into_committed_recovery
             assert thread_id == original.thread_id
             return original, None
 
-        def context_bundle_report(self, thread_id, *, recent_limit=0, include_messages=True):
+        def context_bundle_report(self, thread_id, *, recent_limit=0, include_messages=True, required_task_ids=()):
             assert type(include_messages) is bool
             del recent_limit
             return {"thread": {"thread_id": thread_id}}, []

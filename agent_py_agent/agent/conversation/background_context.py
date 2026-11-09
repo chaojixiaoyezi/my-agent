@@ -98,6 +98,7 @@ class BackgroundContextLoad:
     config: object | None
     policy_request: BackgroundToolPolicyRequest | None
     load_errors: list[dict[str, Any]]
+    task_scope_ids: list[frozenset[str]] = field(default_factory=list, repr=False, compare=False)
 
 
 # LLM: 仅保存一次已读取的后台材料；不授予身份或执行权，不进入持久状态，候选渲染不能重新触发进度写账。
@@ -165,6 +166,7 @@ _BACKGROUND_SECTIONS: tuple[tuple[str, str, type], ...] = (
     ("Task Runtime State", "task_runtime_state", dict),
     ("Recent Messages", "messages", list),
     ("Bound Tasks", "tasks", list),
+    ("Task Coverage", "task_coverage", dict),
     ("Channel Bindings", "channel_bindings", list),
     ("Recent Observations", "observations", list),
     ("Guidance", "guidance", list),
@@ -172,7 +174,7 @@ _BACKGROUND_SECTIONS: tuple[tuple[str, str, type], ...] = (
     ("Recovery Snapshot", "recovery_snapshot", dict),
     ("Agent Tree Snapshot", "agent_tree", dict),
 )
-_NARROW_AUDIT_KEYS = frozenset({"active_wake_signal", "tasks", "load_errors"})
+_NARROW_AUDIT_KEYS = frozenset({"active_wake_signal", "tasks", "task_coverage", "load_errors"})
 
 
 # LLM: 只由结构化渲染开关决定，不看字段是否为空；预算与渲染共用这一结果。
@@ -211,6 +213,7 @@ def _render_background_projection(prepared: PreparedBackgroundContext, bounded: 
                     wake_signal=bounded.get("active_wake_signal"),
                 ),
             ),
+            ("Task Coverage", bounded.get("task_coverage") or {}),
             ("Runtime Load Errors", bounded.get("load_errors") or []),
             (
                 "Background Context Projection",
@@ -434,6 +437,7 @@ def load_context_bundle(state: BackgroundContextLoad) -> dict[str, Any]:
             bundle, load_errors = state.store.context_bundle_report(
                 state.thread.thread_id,
                 recent_limit=CONVERSATION_CONTEXT_RECENT_LIMIT_COUNT,
+                **({"required_task_ids": tuple(sorted(_task_context_ids(state)))} if state.task_id else {}),
                 **({"include_messages": False} if messages_deferred else {}),
             )
             state.load_errors.extend(load_errors)
@@ -532,6 +536,11 @@ def _task_scoped_operational_context(
     task_rows = _dict_rows(bundle.get("tasks"))
     scoped = dict(bundle)
     scoped["tasks"] = [row for row in task_rows if _context_row_matches_task_ids(row, task_ids)]
+    if 'task_coverage' in scoped:
+        scoped['task_coverage'] = {'selection': 'explicit_task_scope',
+                                   'status': 'unknown' if scoped['task_coverage']['status'] == 'unknown' else 'window',
+                                   'complete': False, 'history_complete': False,
+                                   'selected_count': len(scoped['tasks'])}
     scoped["observations"] = [
         row
         for row in _dict_rows(bundle.get("observations"))
@@ -740,7 +749,13 @@ def _context_row_matches_task_ids(row: dict[str, Any], task_ids: set[str]) -> bo
 # LLM: 真实管理器按 root 索引读取精确 canonical；旧内存适配器保原协议，失败只保留已证明身份。
 # 函数用途: 解析本次任务的合法 lineage 集合，供历史和事件过滤使用。
 def _task_context_ids(state: BackgroundContextLoad) -> set[str]:
-    """Resolve one task's persisted subagent lineage without using prompt text."""
+    if not state.task_scope_ids:
+        state.task_scope_ids.append(frozenset(_resolve_task_context_ids(state)))
+    return set(state.task_scope_ids[0])
+
+
+def _resolve_task_context_ids(state: BackgroundContextLoad) -> set[str]:
+    """同次冻结精确lineage，供选中链接和后续过滤共享，不为载入全史再次枚举。"""
     task_id = str(state.task_id or "").strip()
     if not task_id:
         return set()

@@ -85,6 +85,7 @@ def _bounded_payload(
         "subagent_completions": lambda: _bounded_subagent_completions(request.subagent_completions or {}, limits),
         "messages": lambda: _bounded_top_level_list(
             request.bundle.get("messages"), limits, render=_bounded_message, keep_tail=True),
+        "task_coverage": lambda: deepcopy(request.bundle.get("task_coverage", {})),
         "tasks": lambda: _bounded_top_level_list(request.bundle.get("tasks"), limits, render=_bounded_value),
         "channel_bindings": lambda: _bounded_top_level_list(
             request.bundle.get("channel_bindings"), limits, render=_bounded_value),
