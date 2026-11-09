@@ -1080,6 +1080,7 @@ agent_py_agent/
 |-- agent_py_agent/agent/user_space/home_index_retirement.py # 全局索引退役只接受 canonical 消失及原运行权威终态；仍可定位历史保持原引用。
 |-- agent_py_agent/agent/user_space/owner_directory_index.py # 可丢弃的 owner 目录分页投影；目录事实仍是发现与权限的唯一来源。
 |-- agent_py_agent/tests/test_r8_bounded_process_log.py # 真实子进程日志限额、输出继承、元数据频率及描述符回收
+|-- agent_py_agent/tests/test_r8_candidate_cleanup_missing.py # 缺失中间节点不签发空写，真实清理保留原协调末门与恢复证明
 |-- agent_py_agent/tests/test_r8_claim_projection_eviction.py # 多store续点、可丢弃缓存和fork交错回归
 |-- agent_py_agent/tests/test_r8_compact_history_store.py # R8：持久历史根、分叉、崩溃搬迁与冷启动定位的运行时回归。
 |-- agent_py_agent/tests/test_r8_compact_progress_pulse.py # 摘要等待可观察、覆盖数不虚增，退出后不再发表旧进度。
