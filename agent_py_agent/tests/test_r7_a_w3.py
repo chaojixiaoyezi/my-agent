@@ -202,7 +202,11 @@ def test_status_and_closeout_keep_index_failure_unknown(case, monkeypatch, failu
     params = _tool_loop_params(root_user_prompt="汇总当前工作", executed_tools=["create_subagents", "dispatch_subagents"])
     params_task_agent = SimpleNamespace(subagents=case.manager,
         subagent_run_ids_for_request=lambda _key: case.agent.subagent_run_ids_for_request("task-live"))
-    assert _delegated_work_facts(params_task_agent, params) == {}
+    facts = _delegated_work_facts(params_task_agent, params)
+    if failure == "missing-canonical":
+        assert facts.get("coverage") == "partial" and facts.get("load_errors")
+    else:
+        assert facts == {}
     assert not scans
     server = GatewayHTTPServer(0, gateway_paths_from_root(case.paths.root / "gateway"),
         params=GatewayHTTPServerParams(agent=case.agent))

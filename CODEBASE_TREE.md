@@ -4770,7 +4770,22 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_r6_w8.py # JSONL 公共追加残尾封口与单次 EIO 传播继承回归测试
 |-- agent_py_agent/tests/test_r6o_w1_owner_maintenance_resume.py # Owner 维护周期跨 tick 游标续扫与跳过无状态任务根回归测试
 |-- agent_py_agent/tests/test_r6o_w2_background_late_startup_exit.py # 后台子进程启动轮询后非零退出尝试结算回归测试
-`-- agent_py_agent/tests/test_r6o_w3_consumer_renewal_nonblocking.py # 审批消费者租约非阻塞心跳续期回归测试
+|-- agent_py_agent/tests/test_r6o_w3_consumer_renewal_nonblocking.py # 审批消费者租约非阻塞心跳续期回归测试
+|-- agent_py_agent/tests/test_r7_a_w1.py # 被动控制面只读状态探测与写操作连接权限隔离回归测试
+|-- agent_py_agent/tests/test_r7_a_w2.py # 子代理分页恢复候选索引与分类存储故障报告回归测试
+|-- agent_py_agent/tests/test_r7_a_w3.py # 插件宿主机与控制面子代理精确索引读口零历史扫描回归测试
+|-- agent_py_agent/tests/test_r7_a_w4.py # 启动恢复、观察守卫与入站源工作器精确子代理索引读口回归测试
+|-- agent_py_agent/tests/test_r7_a_w5.py # 编排派发、收尾与取消路径精确请求候选集选择回归测试
+|-- agent_py_agent/tests/test_r7_a_w6.py # 子代理领域服务、看板、恢复与会话续跑作用域索引选择回归测试
+|-- agent_py_agent/tests/test_r7_a_w7.py # 保留扫描跨类型有界预算投影与多 Owner 公平推进回归测试
+|-- agent_py_agent/tests/test_r7_a_w8.py # 辅助模型调用在宿主终态边界自动关闭逻辑组回归测试
+|-- agent_py_agent/tests/test_r7_a_w9.py # 自动与收尾 Compact 计划对当前工具索引源完整绑定回归测试
+|-- agent_py_agent/tests/test_r7_w1_generation_guard_contention.py # 同进程 SQLite 代际锁竞争等待与跨连接读写准入回归测试
+|-- agent_py_agent/tests/test_r7_w2_passive_reads_no_history_scan.py # 被动通知、状态与回合收口精确 ID 回读拒绝全量扫描回归测试
+|-- agent_py_agent/tests/test_r7_w3_recovery_report_cache.py # 恢复候选报告保留子代理缓存与错误码字典登记回归测试
+|-- agent_py_agent/tests/test_r7_w4_idle_busy_indexed.py # 空闲 Compact 忙闲检查与技能学习保护读取精确活跃索引回归测试
+|-- agent_py_agent/tests/test_r7_w5_retention_symlink_shapes.py # 保留扫描生产符号链接形态与引用针祖先保留回归测试
+`-- agent_py_agent/tests/test_r7_w6_events_backlog_drain.py # 本地事件稳态维护触及单步删除上限时部分完成续扫回归测试
 ```
 
 关键文件说明：`task_rounds.py` 将任务模型回合遥测从整份 JSON 重写改为增量追加源并维护固定摘要水位；`recovery_guard.py` 在物理 SQLite 连接完整生命周期内持有代际锁，配合 `salvage.py` 实现 `runtime.db` 启动期与在线损坏验证抢救。
