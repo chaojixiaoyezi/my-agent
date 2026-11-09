@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ..common.cache_freshness import cache_entry_trustworthy
+from ..common.nofollow_fs import file_descriptor_change_ns, file_identity_snapshot
 from ..io.cursor_cache import CursorCache, FileStamp, cursor_key, file_stamp, note_seen
 from ..runtime_errors import DataCorruptionError
 from .display_checkpoint import is_display_checkpoint
@@ -173,7 +174,14 @@ def _unchanged_end(path: Path, target: str) -> bool:
     cached = _MESSAGE_CURSORS.get(cursor_key(path, "" if blank_target else target))
     if cached is None:
         return False
-    stamp = file_stamp(path.stat())
+    # Windows 路径 ctime 是出生时间；必须以同源 FD 的真实变更时间核空尾。
+    if os.name == "nt":
+        info, changed = file_identity_snapshot(path)
+        if changed is None or cached.changed_ns is None or changed != cached.changed_ns:
+            return False
+        stamp = file_stamp(info)
+    else:
+        stamp = file_stamp(path.stat())
     return (cache_entry_trustworthy(stamp.mtime_ns) and cached.stamp == stamp
             and (cached.empty_tail or (not blank_target and cached.end == stamp.size)))
 
@@ -188,27 +196,32 @@ def read_after_rows(path: Path, target: str, limit: int):
     with TranscriptReader(path) as reader:
         cursor = _locate_in_transcript(reader, target) if str(target or '').strip() else None
         handle = reader if reader.manifest else reader.hot
-        stamp = file_stamp(os.fstat(reader.hot.fileno()))
+        before = os.fstat(reader.hot.fileno())
+        changed = file_descriptor_change_ns(reader.hot.fileno(), before)
+        stamp = file_stamp(before)
         handle.seek(cursor.end if cursor else 0)
         seen = bytearray(cursor.seen if cursor else _EMPTY_SEEN_FILTER)
         rows, errors, positions = _read_tail(handle, path, limit, seen)
-        if reader.manifest is None and (cursor is None or cursor.stamp.same_file(stamp)) and file_stamp(os.fstat(reader.hot.fileno())) == stamp:
-            _cache_read(path, stamp, (target, cursor), (rows, errors, positions, seen), limit=limit)
+        after = os.fstat(reader.hot.fileno())
+        if (reader.manifest is None and (cursor is None or cursor.stamp.same_file(stamp))
+                and file_stamp(after) == stamp
+                and changed == file_descriptor_change_ns(reader.hot.fileno(), after)):
+            _cache_read(path, stamp, (target, cursor), (rows, errors, positions, seen), limit=limit, changed_ns=changed)
         return rows, errors
 
 
 # LLM: 同次提交只冻结一次seen并共享给位置与空尾；原同fd首末stamp/freshness/正limit规则不变，不推进消费状态。
 # 函数用途: 保存精确首位置和空尾证明，包含空文件及仅展示/空白行，不缓存错误或未执行的扫描。
-def _cache_read(path: Path, stamp: FileStamp, anchor: tuple, result: tuple, *, limit: int) -> None:
+def _cache_read(path: Path, stamp: FileStamp, anchor: tuple, result: tuple, *, limit: int, changed_ns=None) -> None:
     target, cursor = anchor
     rows, errors, positions, seen = result
     frozen = _freeze_seen(seen)
-    _save_positions(path, stamp, frozen, positions)
+    _save_positions(path, stamp, frozen, positions, changed_ns=changed_ns)
     if not rows and not errors:
         if cursor is not None:
-            _remember(path, target, replace(cursor, stamp=stamp, seen=frozen, empty_tail=True))
+            _remember(path, target, replace(cursor, stamp=stamp, seen=frozen, empty_tail=True, changed_ns=changed_ns))
         elif not str(target or "").strip() and limit > 0:
-            _remember(path, "", MessageCursor(stamp, 0, stamp.size, frozen, empty_tail=True))
+            _remember(path, "", MessageCursor(stamp, 0, stamp.size, frozen, empty_tail=True, changed_ns=changed_ns))
 
 
 # LLM: UTF-8/JSON坏行即停，display不计条数；Bloom误报只不记位置，读取对象和错误保持原样。

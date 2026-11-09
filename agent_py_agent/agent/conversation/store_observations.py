@@ -15,7 +15,11 @@ from pathlib import Path
 from typing import Any
 
 from ..common.json_io import append_private_jsonl_records_unlocked, locked_json_path
-from ..common.nofollow_fs import open_readonly_file_beneath
+from ..common.nofollow_fs import (
+    file_descriptor_change_ns,
+    file_identity_snapshot,
+    open_readonly_file_beneath,
+)
 from ..gateway_parts.io import read_json_file_report
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from ..user_space.storage_lanes import STORAGE_LANE_SLICE_BYTES
@@ -580,22 +584,23 @@ def _observation_tail_window(path, max_bytes, limit):
     try:
         with os.fdopen(descriptor, "rb") as handle:
             before = os.fstat(handle.fileno())
+            changed = file_descriptor_change_ns(handle.fileno(), before)
             if not stat.S_ISREG(before.st_mode):
                 return [], [{"reason_code": "invalid_ledger_type", "path": str(path)}], True, 0, False
             start = max(0, before.st_size - max_bytes)
             handle.seek(start)
             raw = handle.read(max_bytes)
             consumed = len(raw)
+            current, current_changed = file_identity_snapshot(path)
             after = os.fstat(handle.fileno())
+            final_changed = file_descriptor_change_ns(handle.fileno(), after)
     except OSError as exc:
         return [], [runtime_error_report(exc, context="conversation.observations.window")], True, max_bytes, False
     def fields(info):
-        return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
-    try:
-        current = path.lstat()
-    except OSError:
-        current = None
-    if fields(before) != fields(after) or current is None or fields(current) != fields(after):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+                info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    if (fields(before) != fields(after) or fields(current) != fields(after)
+            or changed is None or changed != current_changed or changed != final_changed):
         errors.append({"reason_code": "ledger_changed_during_read", "path": str(path)})
     lines = raw.split(b"\n")
     if start:
