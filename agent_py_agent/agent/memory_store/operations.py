@@ -48,6 +48,7 @@ def append_memory_operation_events(
     records: list[object],
     *,
     coordinator_io: bool = False,
+    admission=None,
 ) -> None:
     """Record content-free active-memory mutations for diagnostics."""
 
@@ -77,6 +78,7 @@ def append_memory_operation_events(
             },
             max_records=_MAX_OPERATION_EVENTS,
             **({} if not coordinator_io else {"coordinator_io": True}),
+            **({} if admission is None else {"admission": admission}),
         )
 
 
@@ -89,6 +91,7 @@ def append_memory_purge_event(
     entry_ids: set[str],
     content_hashes: set[str],
     coordinator_io: bool = False,
+    admission=None,
 ) -> None:
     if path is None:
         return
@@ -104,6 +107,7 @@ def append_memory_purge_event(
         },
         max_records=_MAX_OPERATION_EVENTS,
         **({} if not coordinator_io else {"coordinator_io": True}),
+        **({} if admission is None else {"admission": admission}),
     )
 
 
@@ -117,18 +121,29 @@ __all__ = [
 
 # LLM: 默认严格委托原capped append；C保原读取/坏行跳过/裁剪/编码，在持原锁的Root外准备，仅raw写入门。
 # 函数用途: 将同一个ops事件按原上限写回原文件，不合并业务事件或新建状态。
-def _append_operation_record(path, record, *, max_records, coordinator_io=False):
-    if not coordinator_io:
+def _append_operation_record(path, record, *, max_records, coordinator_io=False, admission=None):
+    if not coordinator_io and admission is None:
         return append_private_jsonl_capped(path, record, max_records=max_records)
-    _coordinator_operation_write(lambda: ensure_private_dir(path.parent))
-    with locked_json_path(path, birth_commit=_coordinator_operation_write):
+    if coordinator_io:
+        _coordinator_operation_write(lambda: ensure_private_dir(path.parent))
+    else:
+        ensure_private_dir(path.parent)
+    with locked_json_path(path, **({"birth_commit": _coordinator_operation_write} if coordinator_io else {})):
         records = read_jsonl_objects_report(path).records
         records.append(record)
         if max_records > 0:
             records = records[-max_records:]
         content = "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in records)
-        _coordinator_operation_write(lambda: write_private_text_file_atomic_unlocked(
-            path, content, replace_once=True))
+        if admission is not None:
+            from ..user_space.owner_quota import OwnerQuotaChange
+
+            # 内容准备后精确预留原审计文件，自己的rename不能掩盖未登记增长。
+            admission.check([OwnerQuotaChange(path, len(content.encode("utf-8")))])
+        if coordinator_io:
+            _coordinator_operation_write(lambda: write_private_text_file_atomic_unlocked(
+                path, content, replace_once=True))
+        else:
+            write_private_text_file_atomic_unlocked(path, content)
 
 
 # LLM: 只消费当前原global scope，目录/FD出生与已准备raw叶逐次核，不持scan/锁等待/付费业务。
