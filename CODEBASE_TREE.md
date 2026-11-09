@@ -1116,7 +1116,7 @@ agent_py_agent/
 |-- agent_py_agent/agent/local_storage/fts_upgrade.py # 原owner维护内渐进升级旧FTS，保留旧active与唯一SQLite重建job
 |-- agent_py_agent/tests/test_r8_fts_automatic_upgrade.py # 旧库冷构造、覆盖完整性、自动续作与业务连接隔离回归
 |-- agent_py_agent/tests/test_r8_fts_catchup.py # 原维护tick内有限追赶、全局公平预算、片间释锁与辅助表退休完整性回归
-|-- agent_py_agent/tests/test_r8_artifact_lookup_work.py # 同次归档负命中复用的源变化、内存上界与并发隔离回归
+|-- agent_py_agent/tests/test_r8_artifact_lookup_work.py # 归档正负命中内容验证、超大来源共享缓存上界及并发隔离回归
 |-- agent_py_agent/tests/test_r8_tui_explicit_stream.py # 真实HTTP正文流往返、撤回、去重及连续控制交错回归
 |-- agent_py_agent/tests/test_r8_local_store_stage_timing.py # 原审计锁/事务分段、并发隔离和资源退出异常保持
 |-- agent_py_agent/tests/test_gateway_request_stage_timing.py # 请求准备与收尾耗时、原停止及结束时间边界回归

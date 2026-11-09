@@ -34,6 +34,9 @@ coverage只加入当拍快照CAS，不改变原持久job.state编码，原在途
 共享4096片上限，单owner最多1024片/2秒。只在真实进展后续片，busy/space/unsupported/零进展即让出；
 每个burst至多一个新目录发现页，后继只轮转已核同owner pending引用，每片先释放原SQLite/业务锁。
 资源耗尽不刷新未服务owner的到期时刻，保留原优先FIFO；hint按原周期退避，不能变为热自旋。
+64个待续owner已满时，发现游标只越过实际服务或入队的身份。旧FIFO与新发现轮换；同一owner在同拍不重复服务。
+原安全清理仍先执行。若单项不可抢占工作超过协作期限，下一次给被延迟的scoped owner服务机会；
+base的retention和idle compact也轮换。20秒是新工作准入预算，不能作为安全清理或单项I/O的硬时限。
 Count0的共享预算是进程内原controller tick；C/W单owner原operation同样受1024片/2秒约束，
 并发仍归原worker/claim，不伪称新增了跨进程global计数。
 连接锁等待在该上下文收紧为零，并沿原 sqlite_connection_scope(False) 使用独立短连接，
@@ -60,7 +63,7 @@ TTL 与索引各有独立片预算；索引延期不阻止原删除维护继续�
 ## 验证边界
 
 回归覆盖普通/协调入口、冷构造、关闭 TTL、间隔 0、legal_hold、低空间后恢复、
-大文档尾部完整检索、Event 控制准备后更新/删除、原 job 身份、来源拒绝、配置关闭、
+大文档尾部完整检索、Event 控制准备后更新/删除、原 job 身份、来源拒绝、低层显式禁写、已退役开关不再作为正式owner入口的读取条件、
 旧 tokenizer 发表前完整保留、双库进行中/缺空间时另一库仍可完成、
 坏维护游标和 1k/20k 历史点写工作量。原 schema/rebuild 测试改为构造只恢复后由显式原维护续作，
 原正文、检索、事务和 CAS 断言保留。
