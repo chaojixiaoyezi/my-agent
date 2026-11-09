@@ -5,13 +5,16 @@ import hashlib
 import os
 import sqlite3
 import uuid
-from contextlib import closing
+from contextlib import contextmanager
 from pathlib import Path
 
 from ..common import json_io
 from ..runtime_db import salvage
 from ..runtime_db.recovery_guard import (
     RuntimeDatabaseDeferred,
+    close_runtime_connection,
+    guarded_runtime_connect,
+    mark_runtime_connection_idle,
     runtime_db_corruption_recovery_pending,
     runtime_db_generation_guard,
     runtime_db_recovery_pending,
@@ -49,6 +52,26 @@ def _inventory(conn):
     return schema, counts, digests
 
 
+@contextmanager
+def _candidate_connection(candidate):
+    # 候选初始化/close失败同样保留SH；重试清理不能越过仍可使用的旧物理连接。
+    conn = guarded_runtime_connect(candidate, lambda: sqlite3.connect(candidate))
+    error = None
+    try:
+        yield conn
+    except BaseException as original:
+        error = original
+        raise
+    finally:
+        mark_runtime_connection_idle(conn, True)
+        try:
+            close_runtime_connection(conn)
+        except BaseException as cleanup:
+            if error is None:
+                raise
+            error.sqlite_cleanup_error = cleanup
+
+
 def _build_candidate(db, candidate):
     with salvage._recovery_connection(db) as source:
         source.execute('PRAGMA query_only=ON')
@@ -57,7 +80,7 @@ def _build_candidate(db, candidate):
         versions = tuple(source.execute(f'PRAGMA {key}').fetchone()[0] for key in ('user_version', 'application_id'))
         descriptor = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         os.close(descriptor)
-        with closing(sqlite3.connect(candidate)) as target:
+        with _candidate_connection(candidate) as target:
             # iterdump 必须完整耗尽；禁止忽略错误或仅取可读前缀。
             for statement in source.iterdump():
                 target.execute(statement)
@@ -82,7 +105,7 @@ def _discard_unpublished_candidate(db, state):
     candidate = salvage._artifact(db, state, 'candidate')
     if not os.path.lexists(candidate):
         return
-    if state.get('phase') not in {'backed_up', 'building_candidate'}:
+    if state.get('phase') not in {'backed_up', 'building_candidate', 'requires_recovery'}:
         raise ValueError('sqlite_unpublished_candidate_phase_unknown')
     if salvage._source_signature(db) != state['source_signature']:
         raise ValueError('sqlite_source_changed_before_candidate_retry')
@@ -95,7 +118,23 @@ def _discard_unpublished_candidate(db, state):
             json_io._sync_parent_directory(candidate)
 
 
-def recover_sqlite_database(path: Path, *, automatic: bool = False) -> dict:
+def _build_projection_candidate(candidate):
+    """仅显式可重建投影使用；空定位库必须由原canonical游标重新追平，绝非业务恢复完成。"""
+    descriptor = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(descriptor)
+    with _candidate_connection(candidate) as conn:
+        conn.execute('VACUUM')
+        if conn.execute('PRAGMA integrity_check').fetchall() != [('ok',)]:
+            raise ValueError('sqlite_projection_candidate_integrity_unverified')
+    descriptor = os.open(candidate, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return {'projection_rebuild': True, 'canonical_replay_required': True}
+
+
+def recover_sqlite_database(path: Path, *, automatic: bool = False, rebuild_projection=False) -> dict:
     """按原代次非阻塞恢复；无法完整读取时永久保留源/四文件备份和操作说明。"""
     db, state = Path(path).absolute(), {}
     try:
@@ -113,6 +152,9 @@ def recover_sqlite_database(path: Path, *, automatic: bool = False) -> dict:
                         tuple(state.get('identity', ())), tuple(state.get('candidate_identity', ()))):
                     raise ValueError('sqlite_source_generation_changed_requires_operator')
                 if state.get('phase') in {'publishing', 'published', 'candidate_ready'}:
+                    if state.get('receipt', {}).get('projection_rebuild'):
+                        if not callable(rebuild_projection) or not rebuild_projection():
+                            raise ValueError('sqlite_projection_canonical_sources_unverified')
                     if current_identity == tuple(state.get('candidate_identity', ())):
                         if salvage._file_digest(db) != state['candidate_digest']:
                             raise ValueError('sqlite_published_candidate_changed')
@@ -145,18 +187,25 @@ def recover_sqlite_database(path: Path, *, automatic: bool = False) -> dict:
                 if healthy:
                     return salvage._complete_recovery(db, state, 'healthy',
                         preserve_evidence=bool(state.get('corruption_confirmed')))
-                if state.get('phase') == 'requires_recovery' and same_source:
+                if state.get('phase') == 'requires_recovery' and same_source and not rebuild_projection:
                     raise salvage._RecoveryStopped({**state, 'status': 'requires_recovery'})
+                projection_proof = None
+                if rebuild_projection:
+                    if not callable(rebuild_projection) or not (projection_proof := rebuild_projection()):
+                        raise ValueError('sqlite_projection_canonical_sources_unverified')
                 state['corruption_confirmed'] = True
                 _discard_unpublished_candidate(db, state)
                 salvage._save_state(db, state, 'building_candidate')
                 try:
-                    state['receipt'] = _build_candidate(db, salvage._artifact(db, state, 'candidate'))
+                    state['receipt'] = (_build_projection_candidate(salvage._artifact(db, state, 'candidate'))
+                                        if rebuild_projection else _build_candidate(db, salvage._artifact(db, state, 'candidate')))
                 except (sqlite3.Error, ValueError) as error:
                     state.update(status='requires_recovery', reason=type(error).__name__,
                         next_action='保留原库及四文件备份；由操作者提供完整备份或离线修复后重新核验，禁止创建空库。')
                     salvage._save_state(db, state, 'requires_recovery')
                     raise salvage._RecoveryStopped(state) from error
+                if rebuild_projection and rebuild_projection() != projection_proof:
+                    raise ValueError('sqlite_projection_canonical_sources_changed')
                 candidate = salvage._artifact(db, state, 'candidate')
                 if salvage._source_signature(db) != state['source_signature']:
                     raise ValueError('sqlite_source_changed_during_recovery')

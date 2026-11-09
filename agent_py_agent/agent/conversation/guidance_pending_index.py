@@ -18,6 +18,7 @@ from ..common.json_io import (
 )
 from ..common.nofollow_fs import ensure_private_dir
 from ..gateway_parts.io import locked_file_transition
+from ..io.sqlite_scope import connect_projection_sqlite, scoped_connection
 from ..runtime_errors import DataCorruptionError
 from ..user_space.home_indexes import is_sqlite_busy
 from .models import GuidanceEntry
@@ -25,6 +26,7 @@ from .observation_index import (
     _INSTALLED,
     _INSTALLED_LOCK,
     ObservationIndex,
+    _close_failed_factory,
     _directory_stamp,
     _identity,
     _legacy_slice,
@@ -64,43 +66,31 @@ class GuidancePendingIndex(ObservationIndex):
             if not self.path.exists():
                 fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
                 os.close(fd)
-            info = _identity(self.path)
+            _identity(self.path)
             os.chmod(self.path, 0o600, follow_symlinks=False)
-            for suffix in ('-wal', '-shm'):
+            for suffix in ('-wal', '-shm', '-journal'):
                 _identity(Path(str(self.path) + suffix))
             try:
-                conn = self._open_bounded(blocking, deadline)
+                with scoped_connection(self.path, False, lambda: self._open_bounded(blocking, deadline),
+                                       rebuild_projection=self._projection_rebuild_proof) as conn:
+                    try:
+                        conn.execute('BEGIN IMMEDIATE')
+                        yield conn
+                        check_io_deadline(deadline)
+                        conn.commit()
+                    except BaseException:
+                        conn.rollback()
+                        raise
             except sqlite3.DatabaseError as exc:
                 if is_sqlite_busy(exc):
                     raise BlockingIOError('guidance projection is busy') from exc
-                if getattr(exc, 'sqlite_errorcode', 0) & 255 not in (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB):
-                    raise
-                with _INSTALLED_LOCK:
-                    _INSTALLED.discard((str(self.path), *info[:2]))
-                fd = os.open(self.path, os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0))
-                try:
-                    current = os.fstat(fd)
-                    if (current.st_dev, current.st_ino, current.st_nlink) != (info[0], info[1], 1):
-                        raise DataCorruptionError('guidance projection identity changed')
-                    os.ftruncate(fd, 0)
-                finally:
-                    os.close(fd)
-                conn = self._open_bounded(blocking, deadline)
-            try:
-                conn.execute('BEGIN IMMEDIATE')
-                yield conn
-                check_io_deadline(deadline)
-                conn.commit()
-            except sqlite3.DatabaseError as exc:
-                conn.rollback()
-                if is_sqlite_busy(exc):
-                    raise BlockingIOError('guidance projection is busy') from exc
                 raise
-            except BaseException:
-                conn.rollback()
-                raise
-            finally:
-                conn.close()
+
+    def _projection_rebuild_proof(self):
+        journal = _identity(self.journal_path)
+        legacy = _identity(self.storage.guidance_delivered_path)
+        directory = _directory_stamp(self.storage.root)
+        return (journal, legacy, directory[:2]) if directory and (journal or legacy) else None
 
     # LLM: target/status/sequence匹配实际查询；generation不符只丢投影，独立退休日志继续可恢复。
     # 函数用途: 初始化有界等待的WAL数据库。首次安装时一次性删掉旧版本遗留的缺失来源 'null' 行。
@@ -111,7 +101,7 @@ class GuidancePendingIndex(ObservationIndex):
             seconds = min(seconds, max(0, deadline - time.monotonic()))
         identity = _identity(self.path)
         key = (str(self.path), *identity[:2])
-        conn = sqlite3.connect(f'{self.path.as_uri()}?mode=rw', uri=True, timeout=seconds)
+        conn = connect_projection_sqlite(self.path, timeout=seconds)
         conn.row_factory = sqlite3.Row
         try:
             conn.execute(f'PRAGMA busy_timeout={int(seconds * 1000)}')
@@ -139,8 +129,8 @@ class GuidancePendingIndex(ObservationIndex):
                     conn.commit()
                     _INSTALLED.add(key)
             return conn
-        except BaseException:
-            conn.close()
+        except BaseException as error:
+            _close_failed_factory(conn, error)
             raise
 
     # LLM: 内部无dedupe消息的正退休事实只追加；不能代替幂等回执的provider确认。

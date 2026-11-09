@@ -18,7 +18,8 @@ from pathlib import Path
 
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import ensure_private_dir
-from ..user_space.home_indexes import is_sqlite_busy
+from ..io.sqlite_scope import connect_projection_sqlite, scoped_connection
+from .observation_index import _close_failed_factory
 
 _REBUILD_BATCH = 128
 
@@ -54,35 +55,22 @@ class SessionListIndex:
             info = self.path.lstat()
             if info.st_nlink != 1:
                 raise ValueError("list projection hardlink rejected")
-            try:
-                conn = self._open_projection()
-            except sqlite3.DatabaseError as error:
-                # 锁忙不是损坏：不能在另一写者仍持锁时把投影截断成空数据库。
-                if is_sqlite_busy(error):
-                    raise
-                # 这里只重建私有的可丢弃投影，不碰canonical；拒绝替换、链接和特殊文件。
-                fd = os.open(self.path, os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0))
+            with scoped_connection(self.path, False, self._open_projection,
+                                   rebuild_projection=self._projection_rebuild_proof) as conn:
                 try:
-                    current = os.fstat(fd)
-                    if (current.st_dev, current.st_ino, current.st_nlink) != (info.st_dev, info.st_ino, 1):
-                        raise ValueError("list projection changed during repair")
-                    os.ftruncate(fd, 0)
-                finally:
-                    os.close(fd)
-                conn = self._open_projection()
-            try:
-                yield conn
-                conn.commit()
-            except BaseException:
-                conn.rollback()
-                raise
-            finally:
-                conn.close()
+                    yield conn
+                    conn.commit()
+                except BaseException:
+                    conn.rollback()
+                    raise
+
+    def _projection_rebuild_proof(self):
+        return _stamp(self.root) if self.root.is_dir() else None
 
     # LLM: 两个排序索引分别服务过滤和无过滤 keyset 查询，按原建库路径幂等升级。
     # 函数用途: 打开私有列表投影并补齐有界分页所需索引。
     def _open_projection(self):
-        conn = sqlite3.connect(f"{self.path.as_uri()}?mode=rw", uri=True, timeout=5.0)
+        conn = connect_projection_sqlite(self.path, timeout=5.0)
         conn.row_factory = sqlite3.Row
         try:
             conn.execute("PRAGMA busy_timeout=5000")
@@ -95,8 +83,8 @@ class SessionListIndex:
             conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
             conn.execute("INSERT OR IGNORE INTO meta VALUES ('revision', ?)", (str(time.time_ns()),))
             return conn
-        except BaseException:
-            conn.close()
+        except BaseException as error:
+            _close_failed_factory(conn, error)
             raise
 
     def _meta(self, conn, key, default=""):

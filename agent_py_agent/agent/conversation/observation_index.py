@@ -11,13 +11,17 @@ import sqlite3
 import stat
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from ..common.cache_freshness import CACHE_TRUST_AGE_SECONDS
 from ..common.json_io import check_io_deadline, locked_json_path
 from ..common.nofollow_fs import ensure_private_dir
-from ..user_space.home_indexes import is_sqlite_busy
+from ..io.sqlite_scope import connect_projection_sqlite, scoped_connection
+from ..runtime_db.recovery_guard import (
+    RuntimeDatabaseDeferred,
+    runtime_db_corruption_recovery_pending,
+)
 from .models import ObservationEvent
 
 _INSTALLED: set[tuple[str, int, int]] = set()
@@ -47,6 +51,15 @@ class ObservationIndexError(ValueError):
 # 类用途: 暴露索引尚未追平，避免未迁移 ack 再次上报。
 class ObservationIndexIncomplete(ObservationIndexError):
     pass
+
+
+def _close_failed_factory(conn, error):
+    """保留首因与未关闭物理连接，代次门由通用工厂登记而非提前释放。"""
+    try:
+        conn.close()
+    except BaseException as cleanup:
+        error.sqlite_cleanup_error = cleanup
+        error.sqlite_unclosed_factory_connection = conn
 
 
 def _stat_identity(info):
@@ -161,43 +174,35 @@ class ObservationIndex:
             if not self.path.exists():
                 fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
                 os.close(fd)
-            info = _identity(self.path)
+            _identity(self.path)
             os.chmod(self.path, 0o600, follow_symlinks=False)
-            for suffix in ("-wal", "-shm"):
+            for suffix in ("-wal", "-shm", "-journal"):
                 _identity(Path(str(self.path) + suffix))
-            try:
-                conn = self._open()
-            except sqlite3.DatabaseError as exc:
-                code = getattr(exc, "sqlite_errorcode", 0) & 255
-                if is_sqlite_busy(exc) or code not in (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB):
-                    raise
-                with _INSTALLED_LOCK:
-                    _INSTALLED.discard((str(self.path), *info[:2]))
-                fd = os.open(self.path, os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0))
+            with scoped_connection(self.path, False, self._open,
+                                   rebuild_projection=self._projection_rebuild_proof) as conn:
                 try:
-                    current = os.fstat(fd)
-                    if (current.st_dev, current.st_ino, current.st_nlink) != (info[0], info[1], 1):
-                        raise ObservationIndexError("observation projection changed during repair")
-                    os.ftruncate(fd, 0)
-                finally:
-                    os.close(fd)
-                conn = self._open()
-            try:
-                conn.execute("BEGIN IMMEDIATE")
-                yield conn
-                conn.commit()
-            except BaseException:
-                conn.rollback()
-                raise
-            finally:
-                conn.close()
+                    conn.execute("BEGIN IMMEDIATE")
+                    yield conn
+                    conn.commit()
+                except BaseException:
+                    conn.rollback()
+                    raise
+
+    def _projection_rebuild_proof(self):
+        """来源缺失不能成为空投影完整证明；Usage继承只接受仍存在的原JSONL。"""
+        if hasattr(self, 'source'):
+            return _identity(self.source)
+        journal = _identity(self.journal_path)
+        legacy = _identity(self.storage.observation_handled_path)
+        directory = _directory_stamp(self.storage.observations_dir)
+        return (journal, legacy, directory) if directory and (journal or legacy) else None
 
     # LLM: ack 与 pending 同事务更新；全局及 thread 两种访问均有匹配的排序索引。
     # 函数用途: 初始化私有 WAL 数据库。
     def _open(self):
         identity = _identity(self.path)
         key = (str(self.path), *identity[:2])
-        conn = sqlite3.connect(f"{self.path.as_uri()}?mode=rw", uri=True, timeout=5)
+        conn = connect_projection_sqlite(self.path, timeout=5)
         conn.row_factory = sqlite3.Row
         try:
             conn.execute("PRAGMA busy_timeout=5000")
@@ -219,8 +224,8 @@ class ObservationIndex:
                     conn.commit()
                     _INSTALLED.add(key)
             return conn
-        except BaseException:
-            conn.close()
+        except BaseException as error:
+            _close_failed_factory(conn, error)
             raise
 
     @contextmanager
@@ -240,34 +245,37 @@ class ObservationIndex:
         if deadline is not None:
             seconds = min(seconds, max(0, deadline - time.monotonic()))
         conn = None
-        try:
-            conn = sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=seconds)
-            conn.row_factory = sqlite3.Row
-            conn.execute(f"PRAGMA busy_timeout={int(seconds * 1000)}")
-            conn.execute("BEGIN")
-            conn.execute("SELECT 1 FROM meta LIMIT 1").fetchone()
-            current = _identity(self.path)
-            if current is None or current[:2] != identity[:2]:
-                conn.close()
+        with ExitStack() as stack:
+            def connect():
+                raw = connect_projection_sqlite(self.path, read_only=True, timeout=seconds)
+                try:
+                    raw.row_factory = sqlite3.Row
+                    raw.execute(f"PRAGMA busy_timeout={int(seconds * 1000)}")
+                    raw.execute("BEGIN")
+                    raw.execute("SELECT 1 FROM meta LIMIT 1").fetchone()
+                    return raw
+                except BaseException as error:
+                    _close_failed_factory(raw, error)
+                    raise
+            try:
+                conn = stack.enter_context(scoped_connection(self.path, True, connect))
+                current = _identity(self.path)
+                if current is None or current[:2] != identity[:2]:
+                    stack.close()
+                    conn = None
+            except RuntimeDatabaseDeferred:
+                if not runtime_db_corruption_recovery_pending(self.path):
+                    raise
+                # 原只读快路退出后由既有写/prepare路径消费损坏意图，不把blocked误当空结果。
                 conn = None
-        except sqlite3.DatabaseError as exc:
-            if conn is not None:
-                conn.close()
-            if getattr(exc, "sqlite_errorcode", 0) & 255 not in (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB):
-                raise
-            with _INSTALLED_LOCK:
-                _INSTALLED.discard(key)
-            conn = None
-        except BaseException:
-            if conn is not None:
-                conn.close()
-            raise
-        try:
+            except sqlite3.DatabaseError as exc:
+                if getattr(exc, "sqlite_errorcode", 0) & 255 not in (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB):
+                    raise
+                with _INSTALLED_LOCK:
+                    _INSTALLED.discard(key)
+                conn = None
             yield conn
             check_io_deadline(deadline)
-        finally:
-            if conn is not None:
-                conn.close()
 
     def _journal_current(self, conn):
         """只比较持久游标与权威字节身份，不在查询事务中回放或改写。"""

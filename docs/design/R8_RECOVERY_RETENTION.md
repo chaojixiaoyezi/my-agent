@@ -13,9 +13,12 @@
 
 同一generation SH/EX协议覆盖物理连接寿命。工厂初始化失败须先关闭raw连接；若close本身失败，原异常携带真实`sqlite_unclosed_factory_connection`及`sqlite_cleanup_error`，guard仍登记并持有该物理连接SH，直到创建者确认关闭；不能因工厂没有正常返回就放行EX。消费者先证明排空并流式保全原DB、WAL、SHM、journal，然后重新检查源完整性。误报只解锁，不执行旧请求。
 
-真正损坏时只接受完整耗尽的SQL dump。源与候选逐项核对全部schema、逐表完整行数、按原生类型编码的内容摘要，以及可见rowid；同时核对user_version、application_id、完整性与外键。虚表、坏页、行缺失、rowid改变、候选替换、未确认关闭或排他门失败均拒绝发表。候选以原阶段journal和摘要恢复；dump中断留下的未发表半成品须在候选EX和SQLite排空证明后，仅清理原journal绑定的候选四文件再重建，源库及备份不动；不丢弃原证据，不把未知建成空库。
+权威数据库真正损坏时只接受完整耗尽的SQL dump。源与候选逐项核对全部schema、逐表完整行数、按原生类型编码的内容摘要，以及可见rowid；同时核对user_version、application_id、完整性与外键。虚表、坏页、行缺失、rowid改变、候选替换、未确认关闭或排他门失败均拒绝发表。候选以原阶段journal和摘要恢复；dump中断留下的未发表半成品须在候选EX和SQLite排空证明后，仅清理原journal绑定的候选四文件再重建，源库及备份不动；不丢弃原证据，不把未知建成空库。
 
 无法无损恢复时保留意图、备份、候选及结构化`next_action`，要求操作者使用完整备份或离线修复。热journal导致只读探测拒绝时保持deferred，不把READONLY错误误分类为损坏。确认损坏后若源被外部换代，不自动接受未知替换。
+
+
+观察/插话/会话列表/费用定位投影另以显式`rebuild_projection=canonical身份回调`声明可重建边界，默认权威路径不变。原CORRUPT/NOTADB直接ftruncate已移除：同一通用恢复器先取得EX并保全DB/WAL/SHM/journal，再发表有持久阶段和摘要的干净定位候选；回调来源缺失、变化或重启后不再可核验均保全封锁。候选回执明确`canonical_replay_required`，不宣称业务数据恢复完成；原固定批prepare/partial与JSONL格式校验继续执行，未读完整或坏来源不能当空complete。连接工厂在任何SQL前借已有FD读取固定SQLite格式头；POSIX不额外开关原DB FD而破坏同进程record锁，也不通过RO SQL提前改变SHM。新物理读写连接及候选连接均登记SH，打开前错误才可重试，已进入的业务事务绝不自动重放。
 
 ## 输入引用
 

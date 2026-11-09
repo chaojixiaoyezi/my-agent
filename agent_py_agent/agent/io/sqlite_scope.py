@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import stat
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -300,19 +301,74 @@ def _scope_connection(scope: _ConnectionScope, key: tuple[int, int, Path, bool],
         _cleanup_preserving_error(lambda: _release_entry(scope, key, entry, error=body_error), body_error)
 
 
+def connect_projection_sqlite(path, *, read_only=False, timeout=5):
+    """只在原连接FD借读固定格式头；任何SQL前识别NOTADB，不让SQLite先改SHM。
+
+    POSIX不能为此另开关DB FD（会释放同进程SQLite record locks）；Windows句柄锁无此限制。
+    """
+    from .sqlite_probe import _opened_sqlite_header
+
+    path = Path(path).absolute()
+    conn = sqlite3.connect(path.as_uri() + ('?mode=ro' if read_only else '?mode=rw'), uri=True, timeout=timeout)
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError('sqlite_projection_file_unverified')
+        if info.st_size:
+            if os.name == 'nt':
+                with path.open('rb') as reader:
+                    header = reader.read(16)
+            else:
+                header = _opened_sqlite_header(path)
+            if not header:
+                raise RuntimeDatabaseDeferred('sqlite_projection_header_probe_unavailable')
+            if header[:16] != b'SQLite format 3\0':
+                error = sqlite3.DatabaseError('projection SQLite header is invalid')
+                error.sqlite_errorcode = sqlite3.SQLITE_NOTADB
+                error.sqlite_errorname = 'SQLITE_NOTADB'
+                raise error
+        return conn
+    except BaseException as error:
+        try:
+            conn.close()
+        except BaseException as cleanup:
+            error.sqlite_cleanup_error = cleanup
+            error.sqlite_unclosed_factory_connection = conn
+        raise
+
+
 @contextmanager
-def scoped_connection(path: Path, read_only: bool, connect: Callable[[], sqlite3.Connection]) -> Iterator[sqlite3.Connection]:
-    """原始工厂适配层：每条新物理连接只登记一次代次门。"""
+def scoped_connection(path: Path, read_only: bool, connect: Callable[[], sqlite3.Connection],
+                      *, rebuild_projection=False) -> Iterator[sqlite3.Connection]:
+    """每条物理连接只登记一次代次门；可重建投影显式提供canonical来源身份回调。
+
+    回调缺失/返回假值不准建空候选；普通权威数据库仍必须证明全部记录无损。
+    """
     if (not read_only and runtime_db_recovery_pending(path) and runtime_db_corruption_recovery_pending(path)
             and not runtime_db_exclusive_owned(path)):
         from .sqlite_recovery import recover_sqlite_database
 
-        report = recover_sqlite_database(path, automatic=True)
+        report = recover_sqlite_database(path, automatic=True, rebuild_projection=rebuild_projection)
         if report['status'] not in {'healthy', 'recovered', 'superseded'}:
             error = RuntimeDatabaseDeferred(str(report.get('reason', report['status'])))
             error.sqlite_recovery = report
             raise error
-    with scoped_guarded_connection(path, read_only, lambda: guarded_runtime_connect(path, connect)) as conn:
+    def guarded_connect():
+        try:
+            return guarded_runtime_connect(path, connect)
+        except BaseException as error:
+            # 只重试打开前的可重建定位投影；yield后的业务事务从不自动重放。
+            if read_only or not rebuild_projection or sqlite_error_details(error).get("category") != "structural":
+                raise
+            request_runtime_db_recovery(path, reason="sqlite_structural_error")
+            from .sqlite_recovery import recover_sqlite_database
+            report = recover_sqlite_database(path, automatic=True, rebuild_projection=rebuild_projection)
+            if report['status'] not in {'healthy', 'recovered', 'superseded'}:
+                deferred = RuntimeDatabaseDeferred(str(report.get('reason', report['status'])))
+                deferred.sqlite_recovery = report
+                raise deferred from error
+            return guarded_runtime_connect(path, connect)
+    with scoped_guarded_connection(path, read_only, guarded_connect) as conn:
         yield conn
 
 
