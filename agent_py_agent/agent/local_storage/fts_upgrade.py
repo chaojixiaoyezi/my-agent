@@ -2,9 +2,14 @@
 from __future__ import annotations
 
 import math
+import os
 import sqlite3
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Lock
 
 from ..common.global_write_commit import global_write_commit_scope
 from ..io.sqlite_scope import sqlite_connection_scope
@@ -12,6 +17,70 @@ from ..user_space.directory_paging import directory_page
 
 # 与原owner维护轮询同一节流；不建立线程、队列或另一个重建checkpoint。
 FTS_UPGRADE_INTERVAL_SECONDS = 60
+FTS_UPGRADE_CATCHUP_MAX_STEPS_COUNT = 1024
+FTS_UPGRADE_CATCHUP_MAX_MS = 2000
+FTS_UPGRADE_TICK_MAX_STEPS_COUNT = 4096
+
+
+@dataclass
+class FtsUpgradeTickBudget:
+    deadline: float
+    remaining_steps: int
+    parent: FtsUpgradeTickBudget | None = None
+    pid: int = field(default_factory=os.getpid)
+    closed: bool = False
+    lock: Lock = field(default_factory=Lock)
+
+    def reserve(self) -> bool:
+        if self.pid != os.getpid():
+            return False
+        with self.lock:
+            if (self.closed or self.pid != os.getpid() or self.remaining_steps <= 0
+                    or time.monotonic() >= self.deadline):
+                return False
+            if self.parent is not None and not self.parent.reserve():
+                return False
+            self.remaining_steps -= 1
+            return True
+
+    def exhausted(self) -> bool:
+        if self.pid != os.getpid():
+            return True
+        with self.lock:
+            unavailable = (self.closed or self.pid != os.getpid() or self.remaining_steps <= 0
+                           or time.monotonic() >= self.deadline)
+        return unavailable or (self.parent is not None and self.parent.exhausted())
+
+
+_TICK_BUDGET = ContextVar('fts_upgrade_tick_budget', default=None)
+
+
+def current_tick_budget():
+    budget = _TICK_BUDGET.get()
+    # fork后的新执行域沿自己的原维护入口计预算，不使用父进程锁或计数。
+    return budget if budget is None or budget.pid == os.getpid() else None
+
+
+@contextmanager
+def fts_upgrade_tick_scope(*, deadline: float, max_steps: int = FTS_UPGRADE_TICK_MAX_STEPS_COUNT):
+    if not math.isfinite(deadline) or type(max_steps) is not int or max_steps <= 0:
+        raise ValueError('invalid FTS tick budget')
+    parent = current_tick_budget()
+    if parent is not None:
+        deadline = min(deadline, parent.deadline)
+    budget = FtsUpgradeTickBudget(deadline, max_steps, parent)
+    token = _TICK_BUDGET.set(budget)
+    try:
+        yield budget
+    finally:
+        if budget.pid == os.getpid():
+            with budget.lock:
+                budget.closed = True
+        else:
+            budget.closed = True
+        _TICK_BUDGET.reset(token)
+
+
 _FIXED = ('data/local_store.sqlite3', 'data/local_store/local.db', 'local_store/local.db')
 _WORKSPACES = ('workspace', 'runtime', 'workspaces')
 
@@ -74,7 +143,7 @@ def _candidate(home, cursor):
 
 
 @sqlite_connection_scope(enabled=False)
-def advance_upgrade(home, previous, now, *, commit=None):
+def _advance_upgrade_slice(home, previous, now, *, commit=None, deadline=None, resume_only=False):
     """一拍一个原job；独立短连接不借用或改动业务缓存连接的等待策略。"""
     from contextlib import nullcontext
     from copy import deepcopy
@@ -94,9 +163,10 @@ def advance_upgrade(home, previous, now, *, commit=None):
         _local_events_alignment_needed,
     )
 
-    deadline = time.monotonic() + STORAGE_LANE_SLICE_MS / 1000
+    deadline = min(time.monotonic() + STORAGE_LANE_SLICE_MS / 1000,
+                   deadline if deadline is not None else float("inf"))
     due = next_upgrade_at(home, previous, now)
-    if due is None or now < due:
+    if due is None or (not resume_only and now < due):
         return None
     saved = previous.get('local_store_fts_upgrade', {})
     cursor = deepcopy(saved.get('cursor', {}))
@@ -112,7 +182,9 @@ def advance_upgrade(home, previous, now, *, commit=None):
     if type(discover) is not bool:
         raise ValueError('invalid FTS maintenance discovery turn')
     cursor.pop('selected', None)
-    if pending and not discover:
+    if resume_only and not pending:
+        return None
+    if pending and (resume_only or not discover):
         path = _candidate(home, {'selected': pending.pop(0)})
         cursor['discover_next'] = True
     else:
@@ -121,7 +193,7 @@ def advance_upgrade(home, previous, now, *, commit=None):
     cursor['pending'] = pending
     report = {'cursor': cursor, 'next_at': now + FTS_UPGRADE_INTERVAL_SECONDS,
               'scope': 'selected_store' if path is not None else 'discovery_page',
-              'status': 'discovery', 'complete': False}
+              'status': 'discovery', 'complete': False, 'progressed': False}
     if path is None:
         return report
     relative = path.relative_to(home).as_posix()
@@ -162,6 +234,10 @@ def advance_upgrade(home, previous, now, *, commit=None):
             needed = _local_events_alignment_needed(conn)
             job = _fts_job(conn)
             retired = conn.execute("SELECT 1 FROM sqlite_master WHERE name='maintenance_fts_retired'").fetchone() is not None
+            if job is not None and job['phase'] == 'complete':
+                # 旧FTS表已DROP仍可能有manifest/delta/map；只查责任存在性，不能误签整代清完。
+                retired = retired or any(conn.execute(f'SELECT 1 FROM {table} LIMIT 1').fetchone() is not None
+                    for table in ('maintenance_fts_docs', 'maintenance_fts_delta', 'maintenance_fts_retired_map'))
         if not needed and not retired:
             cursor.pop('selected', None)
             return {**report, 'status': 'current', 'complete': True}
@@ -188,11 +264,12 @@ def advance_upgrade(home, previous, now, *, commit=None):
                         result = store.rebuild_fts_step(max_rows=STORAGE_LANE_SLICE_ENTRIES,
                             max_bytes=STORAGE_LANE_SLICE_BYTES, max_ms=remaining_ms,
                             start_new=job is None or job['phase'] == 'complete')
-                        report.update(status=result['status'], copied=result['copied'])
+                        report.update(status=result['status'], copied=result['copied'], progressed=result['progressed'])
                     else:
                         result = store.cleanup_fts_retired_step(max_rows=STORAGE_LANE_SLICE_ENTRIES,
                             max_bytes=STORAGE_LANE_SLICE_BYTES, max_ms=remaining_ms)
-                        report.update(status='retiring' if result['pending'] else 'current', complete=not result['pending'])
+                        report.update(status='retiring' if result['pending'] else 'current', complete=not result['pending'],
+                                      progressed=bool(result['removed']) or not result['pending'])
                         if report['complete']:
                             cursor.pop('selected', None)
                 except _FtsByteBudget as exc:
@@ -202,13 +279,14 @@ def advance_upgrade(home, previous, now, *, commit=None):
                         if needed:
                             result = store.rebuild_fts_step(max_rows=1, max_bytes=exc.required_bytes,
                                 max_ms=remaining_ms, start_new=False)
-                            report.update(status=result['status'], copied=result['copied'],
+                            report.update(status=result['status'], copied=result['copied'], progressed=result['progressed'],
                                           single_document_bytes=exc.required_bytes)
                         else:
                             result = store.cleanup_fts_retired_step(max_rows=1, max_bytes=exc.required_bytes,
                                 max_ms=remaining_ms)
                             report.update(status='retiring' if result['pending'] else 'current',
-                                          complete=not result['pending'], single_document_bytes=exc.required_bytes)
+                                          complete=not result['pending'], progressed=bool(result['removed']) or not result['pending'],
+                                          single_document_bytes=exc.required_bytes)
                     elif exc.required_bytes <= _FTS_SYNC_SINGLE_MAX_BYTES:
                         report.update(status='budget_exhausted', required_bytes=exc.required_bytes)
                     else:
@@ -229,3 +307,43 @@ def advance_upgrade(home, previous, now, *, commit=None):
             raise
         cursor.pop('selected', None)
         return {**report, 'status': 'unknown', 'error_type': type(exc).__name__}
+
+
+@sqlite_connection_scope(enabled=False)
+def advance_upgrade(home, previous, now, *, commit=None):
+    """原调度一拍内有限追赶；只续已核owner路径，每个SQLite/业务锁在单片末释放。"""
+    due = next_upgrade_at(home, previous, now)
+    if due is None or now < due:
+        return None
+    budget = current_tick_budget()
+    deadline = min(time.monotonic() + FTS_UPGRADE_CATCHUP_MAX_MS / 1000,
+                   budget.deadline if budget is not None else float('inf'))
+    working, report, attempts, progressed, single_bytes = previous, None, 0, False, 0
+    for step in range(FTS_UPGRADE_CATCHUP_MAX_STEPS_COUNT):
+        if time.monotonic() >= deadline or (budget is not None and not budget.reserve()):
+            break
+        attempts += 1
+        result = _advance_upgrade_slice(home, working, now, commit=commit,
+                                        deadline=deadline, resume_only=step > 0)
+        if result is None:
+            break
+        report = result
+        progressed = progressed or result['progressed']
+        single_bytes = max(single_bytes, result.get('single_document_bytes', 0))
+        working = {**previous, 'local_store_fts_upgrade': result}
+        pending = result['cursor'].get('pending', [])
+        if not pending:
+            break
+        if result['progressed'] or (result['status'] == 'current' and result['complete']):
+            continue
+        # 初次有界发现没选中库时，仍给既有pending一次机会；之后零进展立即让出。
+        if step == 0 and result['status'] == 'discovery':
+            continue
+        break
+    if report is None:
+        # 不刷新未获资源owner的到期时刻：保留原优先续作顺序，hint由controller统一节流。
+        return None
+    report['cursor']['discover_next'] = True
+    report['catchup'] = {'steps': attempts, 'progressed': progressed,
+                         'single_document_max_bytes': single_bytes}
+    return report

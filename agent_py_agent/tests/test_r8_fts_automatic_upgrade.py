@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
 
 from agent_py_agent.agent.local_storage import LocalStore, maintenance
+from agent_py_agent.agent.local_storage.fts_upgrade import fts_upgrade_tick_scope
 from agent_py_agent.agent.local_storage.search import FTS_ROWID_ALIGNED_KEY
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
@@ -59,7 +61,8 @@ def test_formal_owner_entry_aligns_legacy_despite_disabled_retention(tmp_path, m
     monkeypatch.setattr(LocalStore, 'rebuild_fts', forbidden)
     options = {'commit_transition': lambda operation: operation(), 'include_global_indexes': False} if coordinator else {}
     for turn in range(30):
-        run_owner_retention_if_due(home, now=1000 + turn * 61, **options)
+        with fts_upgrade_tick_scope(deadline=time.monotonic() + 20, max_steps=1):
+            run_owner_retention_if_due(home, now=1000 + turn * 61, **options)
         # 每次重新构造，不能靠进程内缓存维持迁移进度。
         store = LocalStore(store.db_path)
         if _aligned(store):
@@ -112,7 +115,7 @@ def test_large_document_reuses_original_bounded_single_document_cap(tmp_path):
         observed.append(state['local_store_fts_upgrade'])
         if _aligned(store):
             break
-    assert any(row.get('single_document_bytes', 0) > 8 * 1024 * 1024 for row in observed)
+    assert any(row.get('catchup', {}).get('single_document_max_bytes', 0) > 8 * 1024 * 1024 for row in observed)
     assert _aligned(store)
     assert {r.id for r in store._search_fts('deependingneedle', limit=10, source_type=None, visibility=None)} == {large.id}
     assert store.get_record(large.id).content == text
@@ -365,7 +368,8 @@ def test_owner_store_rotation_preserves_other_job_progress(tmp_path, monkeypatch
     policy['maintenance_enabled'] = False
     home.owner_retention_json.write_text(json.dumps(policy))
     for turn in range(60):
-        run_owner_retention_if_due(home, now=1000 + turn * 61)
+        with fts_upgrade_tick_scope(deadline=time.monotonic() + 20, max_steps=2):
+            run_owner_retention_if_due(home, now=1000 + turn * 61)
         if _aligned(second):
             break
     assert _aligned(second), 'the first store must not pin all subsequent owner maintenance'

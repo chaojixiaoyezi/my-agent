@@ -206,13 +206,17 @@ def test_lane_aligns_existing_fts_in_multiple_bounded_steps(tmp_path, coordinato
         conn.execute('INSERT OR REPLACE INTO metadata VALUES(?, ?)', (FTS_ROWID_ALIGNED_KEY, 'false'))
         conn.commit()
         assert not fts_rowid_aligned(conn)
-    from agent_py_agent.agent.local_storage.fts_upgrade import advance_upgrade
+    from agent_py_agent.agent.local_storage.fts_upgrade import (
+        advance_upgrade,
+        fts_upgrade_tick_scope,
+    )
 
     previous, progress = {}, []
     with global_write_commit_scope(lambda operation: operation()):
         for turn in range(100):
-            result = advance_upgrade(home.owner_home_dir, previous, 1000 + turn * 61,
-                commit=(lambda operation: operation()) if coordinator else None)
+            with fts_upgrade_tick_scope(deadline=time.monotonic() + 20, max_steps=1):
+                result = advance_upgrade(home.owner_home_dir, previous, 1000 + turn * 61,
+                    commit=(lambda operation: operation()) if coordinator else None)
             previous = {'local_store_fts_upgrade': result}
             progress.append(result)
             if _meta(store, FTS_ROWID_ALIGNED_KEY) == 'true':
