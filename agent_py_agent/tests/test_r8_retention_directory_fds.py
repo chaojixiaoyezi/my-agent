@@ -122,7 +122,10 @@ def test_directory_generation_change_never_publishes_complete_source(tmp_path, c
     next(entries)
     assert _target_fds(directory) == []
     if change == 'add':
+        before = directory.stat()
         (directory / 'new').touch()
+        # 此例验证页间metadata换代；粗时钟下的同stamp新增另由发布前内容复核覆盖。
+        os.utime(directory, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
     else:
         directory.rename(root / 'old')
         if change == 'replace':
@@ -244,4 +247,52 @@ def test_pin_chunk_resume_rejects_changed_source_and_releases_handles(tmp_path, 
         assert all(source.closed for source in opened)
     finally:
         chunks.close()
+        projection.close()
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='native directory descriptor lifecycle')
+def test_same_stamp_directory_addition_is_rejected_by_prepublication_verification(tmp_path, monkeypatch):
+    import json
+
+    from agent_py_agent.agent.memory_store.retention_models import MemoryRetentionPolicy
+    from agent_py_agent.agent.memory_store.retention_scan_budget import RetentionScanBudget
+    from agent_py_agent.agent.user_space import directory_paging
+
+    projection, _context = _projection(tmp_path)
+    home = projection.home
+    home.owner_home_dir.mkdir(parents=True)
+    home.owner_retention_json.write_text(json.dumps(MemoryRetentionPolicy().to_dict()))
+    directory = home.owner_home_dir / 'tasks/2026-11-07'
+    state = directory / 'old/work/state.json'
+    state.parent.mkdir(parents=True)
+    before = b'{"task_id":"old","status":"RUNNING","source_refs":["old-proof"]}'
+    state.write_bytes(before)
+    stamp = projection._stamp(directory)
+    original_stamp = projection._stamp
+    monkeypatch.setattr(projection, '_stamp', lambda path: stamp if path == directory else original_stamp(path))
+    original_page = directory_paging.directory_page
+    added = []
+    def page(root, parts, cursor, limit, **kwargs):
+        result = original_page(root, parts, cursor, limit, **kwargs)
+        if Path(root).joinpath(*parts) == directory and not added:
+            assert result[2], 'fixture must finish the original bounded page before mutation'
+            fresh = directory / 'new/work/state.json'
+            fresh.parent.mkdir(parents=True)
+            fresh.write_text('{"task_id":"new","status":"RUNNING","source_refs":["new-proof"]}')
+            added.append(fresh)
+        return result
+    monkeypatch.setattr(directory_paging, 'directory_page', page)
+    try:
+        # 走真实build→pending→verify→current发表链；每拍仍使用正式默认预算。
+        with pytest.raises(scan._PinReadChanged):
+            for _ in range(32):
+                projection.budget = RetentionScanBudget.default()
+                assert projection.current([]) is None
+            pytest.fail('changed directory was neither rejected nor completed within bounded continuation')
+        assert added and projection.value is None
+        assert projection.phase == "verify" and projection.pending is not None
+        assert state.read_bytes() == before
+        assert added[0].is_file()
+        assert _target_fds(directory) == []
+    finally:
         projection.close()
