@@ -633,6 +633,8 @@ agent_py_agent/
 
 - `model_request_capabilities.py` 是出站思考及工具选择的能力来源；关闭、强制选择与不兼容结果均有线级回归。
 - `R8_OPERATION_CONFIRMATION_DRAFT.md` 记录未知副作用继续硬停与可证明未来收口的边界；未实现自动确认。
+- `R8_HOST_WAIT_OWNERSHIP.md` 区分宿主实际等待、只读判活和持久控制效果的证明。
+- `gateway_parts/http_body_readiness.py` 只预读有界传输前缀，保留原套接字与 HTTP 处理器；详见 `R8_HTTP_BODY_READINESS.md`。
 
 - `docs/tasks/R8_AUDIT_FOLLOWUPS.md`：14项功能、历史失败、最终验收与交付的统一状态入口。
 - `conversation/immutable_node_store.py`、`checkpoint_offset_store.py`、`task_history.py`：历史节点共享与回收、冷读定位和任务分页。
@@ -1071,6 +1073,13 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_r8_context_memo_bounds.py # 长历史临时计量键的内存上限、完整正文与迟到结果的并发回归。
 |-- agent_py_agent/tests/test_darwin_process_tree_snapshot.py # macOS 命令树限定枚举、换代及未知退出回归。
 |-- docs/design/R8_OPERATION_CONFIRMATION_DRAFT.md # 等待确证退出的操作合同草案；旧未知不能补签。
+|-- docs/design/R8_HOST_WAIT_OWNERSHIP.md # 自有子进程的等待归属与退出证明边界。
+|-- docs/design/R8_HTTP_BODY_READINESS.md # 慢正文准入、正常请求保留容量与套接字回放。
+|-- agent_py_agent/agent/gateway_parts/http_body_readiness.py # 有界 HTTP 前缀分类及原生 socket 的读取顺序。
+|-- agent_py_agent/tests/test_dispatch_host_wait_ownership.py # 只读判活、直接子进程的真实退出码及等待异常。
+|-- agent_py_agent/tests/test_windows_process_observation.py # Win32 只读句柄判活、拒权未知与原生退出码。
+|-- agent_py_agent/tests/test_r8_model_activity_cost.py # 流 chunk 活动明细与累计统计的差分及并发验证。
+|-- agent_py_agent/tests/test_r8_fts_cold_discovery.py # 无热提示的旧库发现、首片预算和多owner公平性。
 |-- agent_py_agent/agent/agent_core/orchestration/background/log_retention.py # 派工日志随实际进程退出留存；未知执行体和未收口业务证据永不按年龄删除。
 |-- agent_py_agent/agent/conversation/checkpoint_offset_store.py # 检查点物理行地址的可重建投影；只封存已完成严格扫描的固定源水位。
 |-- agent_py_agent/agent/conversation/claim_activity_projection.py # 只读分片核对当前 claim 目录；未完成或变化中的扫描不能签发空闲事实。

@@ -1,12 +1,12 @@
 # 原宿主等待与确认义务的前置边界
 
-状态：独立修复候选，尚未集成；只保护原Popen退出状态和wait返回值，不启用操作确认阶段。完整目标见[R8_OPERATION_CONFIRMATION_DRAFT.md](R8_OPERATION_CONFIRMATION_DRAFT.md)。旧c9、UNKNOWN、失败父回合及取消子回合不迁移、不重开。
+状态：已集成到补修分支；只保护原Popen退出状态和wait返回值，不启用操作确认阶段。完整目标见[R8_OPERATION_CONFIRMATION_DRAFT.md](R8_OPERATION_CONFIRMATION_DRAFT.md)。旧c9、UNKNOWN、失败父回合及取消子回合不迁移、不重开。
 
 ## 已落地的小片
 
 `subagents.process_control.is_pid_alive`改为只观察。旧实现会对任意传入PID调用`waitpid(WNOHANG)`；若它恰好是本进程拥有的已退出child，会抢走原Popen的退出状态。随后CPython的Popen等待遇ECHILD可能缓存0。自有exit(7)及Event控制的“观察先于原reaper”等价反例在旧实现下均返回0，新实现保留真实7。
 
-Linux保留原`/proc`僵尸观察；Darwin复用原`process_registry._process_is_zombie`，活进程读内核，必要时只点查该PID。Windows保留原kill(0)边界。观察不会调用waitpid或新增信号；PermissionError仍保守视为存在，不能由这个布尔接口签发规范退出证明。
+Linux保留原`/proc`僵尸观察；Darwin复用原`process_registry._process_is_zombie`，活进程读内核，必要时只点查该PID。Windows 查询同一原生进程的 SYNCHRONIZE 句柄，以零等待检查是否已退出，不向 PID 发送信号；打不开、等待或关闭失败保持未知。对外只接受布尔值的守卫将未知作为仍可能存活处理，不能据此签发退出证明。
 
 `background.dispatch._reap_background_process`仍由原宿主持原Popen执行wait，现在显式返回该次等待结果。调用者不再在等待异常后从可变`process.returncode`补日志退出回执或结算未启动attempt；非严格int结果也不强制转换成退出码。原异常诊断保留，未知不补成功。
 
@@ -17,7 +17,7 @@ Linux保留原`/proc`僵尸观察；Darwin复用原`process_registry._process_is
 - `orchestration/background/dispatch`唯一实际Popen出生点，正常启动与启动窗口即退两条分支均登记同一原`_start_background_process_reaper`；原reaper持句柄直到wait返回。进程内启动没有子进程等待义务。
 - `subagents/shell_gateway_execution._run_subprocess_with_budget`自行持Popen；正常、取消、超时均沿原wait返回并收集输出，不依赖判活观察偷reap。
 - `background_start_record_stale`、`cancellation_hosts.cleanup_runner_stop`、`capability_auto_sweep`只观察原派工宿主；`startup_recovery`也可能观察另一进程或已换父宿主，不能成为其wait拥有者。非本进程child仍由其原父/OS拥有等待责任。
-- 其它`gateway_parts.process_control.is_pid_alive`是另一条原只读接口，本片未改。
+- Gateway 判活、调度租约、运行库 holder、适配器与心跳在 Windows 复用同一个只读原语；原生进程等待与出生身份比较仍各归其原拥有者。
 - 同族原生waitpid点仍在`multiprocess_native_host_observation`、`multiprocess_native_host_session`及`multiprocess_drain_darwin_waitid`；它们由原Popen/宿主生命周期锁及直接child来源调用，不从本片新授权。
 
 既有spawn成功后到reaper登记前的异常窗口、Thread.start失败的退出责任仍需按正式源单独评审；本片没有用判活或诊断掩盖它们，也不宣称所有异常启动均有完整持久退出证明。
