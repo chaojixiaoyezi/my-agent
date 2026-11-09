@@ -177,28 +177,27 @@ def _start_background_dispatch(
         return _with_reused_starts({"status": "failed", "run_ids": run_ids, "background_mark_errors": mark_errors}, reused)
     if _use_inprocess_autostart(agent):
         return _with_reused_starts(_start_inprocess_dispatch(agent, request, mark_errors), reused)
-    process = _spawn_background_dispatch_process(agent, request)
-    # Persist the PID before giving the child enough startup time to enter the
-    # runner and contend for the same canonical task guard.  The previous
-    # poll-first order gave the child a 250 ms head start; on a busy task tree
-    # the parent then waited behind repeated runner saves for tens of seconds.
-    # An immediate exit is still detected below and is overwritten with the
-    # typed startup-failure state.
-    mark_errors.extend(mark_background_start(request, status="running", pid=process.pid))
-    if (returncode := process_startup_returncode(process)) is not None:
+    with _BackgroundProcessWaitOwner(agent, request) as wait_owner:
+        process = _spawn_background_dispatch_process(agent, request, wait_owner=wait_owner)
+        # Persist the PID before giving the child enough startup time to enter the
+        # runner and contend for the same canonical task guard.  The previous
+        # poll-first order gave the child a 250 ms head start; on a busy task tree
+        # the parent then waited behind repeated runner saves for tens of seconds.
+        # An immediate exit is still detected below and is overwritten with the
+        # typed startup-failure state.
+        mark_errors.extend(mark_background_start(request, status="running", pid=process.pid))
+        if (returncode := process_startup_returncode(process)) is not None:
+            _remember_background_dispatch(agent, launch_id, run_ids, f"pid:{process.pid}")
+            return _with_reused_starts(_background_process_startup_failure(
+                _ProcessStartupFailureRequest(agent, request, process, returncode, mark_errors)
+            ), reused)
+        # 孤儿回收前提:pid 必须落盘到任务权威记录(R6a 实锤:此前 pid 只进内存
+        # registry,主代理退出后无人能定位后台进程;cancel_subagents 的
+        # background_start.pid 终止路径因此永远 no_pid)。
         _remember_background_dispatch(agent, launch_id, run_ids, f"pid:{process.pid}")
-        _start_background_process_reaper(agent, request, process)
-        return _with_reused_starts(_background_process_startup_failure(
-            _ProcessStartupFailureRequest(agent, request, process, returncode, mark_errors)
-        ), reused)
-    # 孤儿回收前提:pid 必须落盘到任务权威记录(R6a 实锤:此前 pid 只进内存
-    # registry,主代理退出后无人能定位后台进程;cancel_subagents 的
-    # background_start.pid 终止路径因此永远 no_pid)。
-    _remember_background_dispatch(agent, launch_id, run_ids, f"pid:{process.pid}")
-    _start_background_process_reaper(agent, request, process)
-    payload = _background_process_started_payload(agent, request, process)
-    attach_mark_errors(payload, mark_errors)
-    return _with_reused_starts(payload, reused)
+        payload = _background_process_started_payload(agent, request, process)
+        attach_mark_errors(payload, mark_errors)
+        return _with_reused_starts(payload, reused)
 
 
 # LLM: 混合批次分别报告本次新启动与原接纳；失败不能把仍有效的旧启动说成已取消。
@@ -314,14 +313,66 @@ def _start_inprocess_dispatch(
     return payload
 
 
-def _spawn_background_dispatch_process(agent, request: _BackgroundDispatchRequest) -> subprocess.Popen:
+class _BackgroundProcessWaitOwner:
+    """在Popen前预约原唯一wait线程；启动登记完成或异常退出后才回收。"""
+
+    def __init__(self, agent, request):
+        self._agent, self._request, self._process = agent, request, None
+        self._setup_done = threading.Event()
+        attempts = getattr(getattr(request, 'params', None), 'expected_attempt_ids', None)
+        run_ids = getattr(request, 'run_ids', ())
+        self._run_attempts = (tuple((run_id, attempts[run_id]) for run_id in run_ids)
+                              if isinstance(attempts, dict) and set(attempts) == set(run_ids) else None)
+        self.thread = threading.Thread(
+            target=Context().run, name=f"my-agent-reap-{request.launch_id}",
+            args=(self._consume,), daemon=True,
+        )
+
+    def __enter__(self):
+        try:
+            self.thread.start()
+        except BaseException:
+            # start可能已出生后才报错；还未Popen，唤醒它空退，不重试起线程。
+            self._agent = self._request = self._process = None
+            self._run_attempts = None
+            self._setup_done.set()
+            raise
+        return self
+
+    def bind(self, process):
+        if self._process is not None:
+            raise RuntimeError('background_wait_owner_already_bound')
+        self._process = process
+
+    def __exit__(self, *_error):
+        self._setup_done.set()
+
+    def _consume(self):
+        try:
+            self._setup_done.wait()
+            process = self._process
+            if process is not None and callable(getattr(process, 'wait', None)):
+                _reap_then_settle_unactivated_exit(
+                    self._agent, self._request, process, self._run_attempts,
+                )
+        finally:
+            # 完成后不随Thread引用保留请求宿主或Popen；无等待队列/GC回收前置条件。
+            self._agent = self._request = self._process = None
+            self._run_attempts = None
+
+
+def _spawn_background_dispatch_process(agent, request: _BackgroundDispatchRequest, *,
+                                       wait_owner: _BackgroundProcessWaitOwner) -> subprocess.Popen:
+    if (type(wait_owner) is not _BackgroundProcessWaitOwner
+            or wait_owner._agent is not agent or wait_owner._request is not request
+            or not wait_owner.thread.is_alive() or wait_owner._setup_done.is_set()
+            or wait_owner._process is not None):
+        raise ValueError('background_wait_owner_scope_changed')
     log_path = Path(_background_log_path(agent, request.launch_id))
     log_path.parent.mkdir(parents=True, exist_ok=True)
     from .log_retention import pin_dispatch_log, retire_dispatch_logs_slice
 
     retire_dispatch_logs_slice(log_path.parent)
-    descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
-    log_handle = os.fdopen(descriptor, 'wb', buffering=0)
     command = _background_dispatch_command(agent, request)
     # 标记后台派工子进程:子进程里记录的 runner 会话据此标 in_process=False,宿主已死回收对它
     # 保留原 pid-liveness(不被网关重启的 epoch 换代判据误杀——它是独立进程,不随网关死)。
@@ -331,6 +382,9 @@ def _spawn_background_dispatch_process(agent, request: _BackgroundDispatchReques
     limit = int(getattr(getattr(agent, 'config', None), 'background_dispatch_log_max_bytes', 4 * 1024 * 1024))
     child_env = {**os.environ, RUNNER_SUBPROCESS_ENV: "1", BOUNDED_STDIO_LIMIT_ENV: str(limit),
                  BOUNDED_STDIO_PATH_ENV: str(log_path.absolute())}
+    # 由标准FileIO工厂直接拥有opener返回的FD，避免裸FD向fdopen移交时抛错无人关闭。
+    log_handle = open(log_path, 'xb', buffering=0,  # noqa: SIM115 显式close以保留原异常，含次生关闭失败回归
+                      opener=lambda path, flags: os.open(path, flags | getattr(os, 'O_NOFOLLOW', 0), 0o600))
     try:
         pin_dispatch_log(log_handle)
         process = subprocess.Popen(
@@ -342,13 +396,18 @@ def _spawn_background_dispatch_process(agent, request: _BackgroundDispatchReques
             start_new_session=True,
             env=child_env,
         )
+        # 在任何日志metadata/登记可能抛错前，把原Popen交给已出生的同一拥有者。
+        wait_owner.bind(process)
         info = os.fstat(log_handle.fileno())
         process._my_agent_background_log_identity = (info.st_dev, info.st_ino)
         process._my_agent_bounded_capture_expected = limit > 0
         log_handle.close()
         return process
-    except Exception:
-        log_handle.close()
+    except BaseException as error:
+        try:
+            log_handle.close()
+        except BaseException as cleanup:
+            error.add_note(f"background_log_close_error:{type(cleanup).__name__}")
         raise
 
 
@@ -363,36 +422,6 @@ def process_startup_returncode(process: subprocess.Popen) -> int | None:
         if index < 5:
             time.sleep(0.05)
     return None
-
-
-# LLM: 回收线程只保留准确进程句柄，显式空Context防止3.14t继承请求模型或授权绑定。
-# 函数用途: 启动只负责wait并回收本次子进程的守护线程。
-def _start_background_process_reaper(
-    agent,
-    request: _BackgroundDispatchRequest,
-    process: subprocess.Popen,
-) -> None:
-    """Retain and reap a successfully started dispatch child.
-
-    ``Popen`` must remain owned until ``wait()`` completes.  Dropping the only
-    handle leaves a signalled child as a zombie until another subprocess spawn
-    happens to run Python's lazy cleanup.  Audit workers start and stop for a
-    long time, so cleanup cannot depend on a future spawn.
-    """
-    if not callable(getattr(process, "wait", None)):
-        return
-    attempts = getattr(getattr(request, 'params', None), 'expected_attempt_ids', None)
-    run_ids = getattr(request, 'run_ids', ())
-    run_attempts = (tuple((run_id, attempts[run_id]) for run_id in run_ids)
-                    if isinstance(attempts, dict) and set(attempts) == set(run_ids) else None)
-    thread = threading.Thread(
-        target=Context().run,
-        name=f"my-agent-reap-{request.launch_id}",
-        args=(_reap_then_settle_unactivated_exit, agent, request, process,
-              run_attempts),
-        daemon=True,
-    )
-    thread.start()
 
 
 # LLM: 回收后再核：子进程晚于启动轮询窗口才非零退出、且本批预留轮次在运行库仍是pending（从未进入runner），

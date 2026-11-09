@@ -270,7 +270,8 @@ def test_process_reaper_does_not_retain_request_binding(bound_host, monkeypatch)
         (agent.config.model_name, current_model_selection(agent))))
     request = SimpleNamespace(launch_id="reaper-context")
     with selected_model_scope(host, thread_id=a):
-        dispatch._start_background_process_reaper(host, request, SimpleNamespace(wait=lambda: 0))
+        with dispatch._BackgroundProcessWaitOwner(host, request) as owner:
+            owner.bind(SimpleNamespace(wait=lambda: 0))
         for worker in workers:
             worker.join(timeout=5)
             assert not worker.is_alive()
