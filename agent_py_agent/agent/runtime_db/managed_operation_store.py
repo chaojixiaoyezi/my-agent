@@ -1427,15 +1427,20 @@ def _holder_pid_alive(holder: dict[str, Any]) -> bool:
     pid = int(holder.get("pid") or 0)
     if pid <= 0:
         return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
+    if os.name == "nt":
+        from ..common.heartbeat import windows_process_alive
+
+        return windows_process_alive(pid) is not False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
 
 
 # LLM: Reconciliation claims use the same host process evidence and a hard lease. A dead local

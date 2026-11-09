@@ -104,10 +104,20 @@ def holder_is_alive(pid: int, start_token: str = "") -> bool:
     """
     if int(pid or 0) <= 0:
         return True
-    try:
-        os.kill(int(pid), 0)
-    except OSError:
-        return False
+    if os.name == "nt":
+        from ..common.heartbeat import windows_process_alive
+
+        observed = windows_process_alive(int(pid))
+        if observed is not True:
+            return observed is None
+        return not start_token or start_time_matches(str(start_token), process_start_time(int(pid)))
+    else:
+        try:
+            os.kill(int(pid), 0)
+        except PermissionError:
+            return True
+        except OSError:
+            return False
     if not start_token:
         return True
     return start_time_matches(str(start_token), process_start_time(int(pid)))

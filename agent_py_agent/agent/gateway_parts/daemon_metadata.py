@@ -292,10 +292,17 @@ def process_identity_is_live(identity: object) -> bool | None:
     recorded_start = identity.get("start_time")
     if type(pid) is not int or pid <= 0 or type(recorded_start) not in (int, str) or recorded_start == "":
         return None
-    try:
-        os.kill(pid, 0)
-    except OSError as error:
-        return False if error.errno == errno.ESRCH else None
+    if os.name == "nt":
+        from ..common.heartbeat import windows_process_alive
+
+        observed = windows_process_alive(pid)
+        if observed is not True:
+            return observed
+    else:
+        try:
+            os.kill(pid, 0)
+        except OSError as error:
+            return False if error.errno == errno.ESRCH else None
     token = _FRESH_PROCESS_OBSERVATION.set(True)
     try:
         current_start = _process_start_observation(pid, recorded_start)

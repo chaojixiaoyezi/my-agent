@@ -45,21 +45,23 @@ class TestIsPidAlive:
         assert is_pid_alive(99999) is False
 
     def test_windows_process_alive(self, monkeypatch):
-        """验证 Windows 下通过 OpenProcess/GetExitCodeProcess 检查存活。"""
+        """验证 Windows 下通过原生进程句柄零等待观察存活。"""
         from agent_py_agent.agent.gateway_parts import process_control
         from agent_py_agent.agent.gateway_parts.process_control import is_pid_alive
 
         kernel32 = MagicMock()
         kernel32.OpenProcess.return_value = 123
-        kernel32.GetExitCodeProcess.side_effect = lambda _handle, exit_code: setattr(exit_code._obj, "value", 259) or True
-        windll = MagicMock(kernel32=kernel32)
+        kernel32.WaitForSingleObject.return_value = 258
+        from agent_py_agent.agent.common import heartbeat
+        heartbeat._windows_process_api.cache_clear()
 
         monkeypatch.setattr(process_control.os, "name", "nt")
-        monkeypatch.setattr(process_control.ctypes, "windll", windll, raising=False)
+        monkeypatch.setattr(heartbeat.ctypes, "WinDLL", lambda *args, **kwargs: kernel32, raising=False)
 
         assert is_pid_alive(12345) is True
         kernel32.OpenProcess.assert_called_once()
         kernel32.CloseHandle.assert_called_once_with(123)
+        heartbeat._windows_process_api.cache_clear()
 
     def test_windows_process_missing(self, monkeypatch):
         """验证 Windows 下 OpenProcess 失败时返回 False。"""
@@ -68,12 +70,15 @@ class TestIsPidAlive:
 
         kernel32 = MagicMock()
         kernel32.OpenProcess.return_value = 0
-        windll = MagicMock(kernel32=kernel32)
+        from agent_py_agent.agent.common import heartbeat
+        heartbeat._windows_process_api.cache_clear()
 
         monkeypatch.setattr(process_control.os, "name", "nt")
-        monkeypatch.setattr(process_control.ctypes, "windll", windll, raising=False)
+        monkeypatch.setattr(heartbeat.ctypes, "WinDLL", lambda *args, **kwargs: kernel32, raising=False)
 
+        monkeypatch.setattr(heartbeat.ctypes, "get_last_error", lambda: 87, raising=False)
         assert is_pid_alive(99999) is False
+        heartbeat._windows_process_api.cache_clear()
 
 
 

@@ -33,9 +33,7 @@ def running_in_dispatch_subprocess() -> bool:
 
 
 # LLM: 判活只观察；真实wait只属于持原Popen的宿主reaper，不能偷走child退出状态导致其wait伪报0。
-#   先尝试非阻塞 reap:被信号终止的直接子进程在父进程 wait 前是 zombie,
-#   kill -0 对 zombie 仍成功——出口回收恰好发生在父进程内(dispatch 进程是
-#   主代理的直接子进程),不 reap 会把已死进程误判为活、白等宽限再误升 SIGKILL。
+#   僵尸观察不回收退出状态，真正wait仅由持有原Popen的宿主负责。
 #   EPERM(进程存在但无权限)按存活处理;pid<=0 一律不存活。
 # 函数用途: 判断一个落盘 pid 现在还有没有对应的活进程。
 def is_pid_alive(pid: int) -> bool:
@@ -48,12 +46,17 @@ def is_pid_alive(pid: int) -> bool:
 
         if _process_is_zombie(pid):
             return False
-    try:
-        os.kill(pid, 0)
-    except PermissionError:
-        return True
-    except OSError:
-        return False
+    if os.name == "nt":
+        from ..common.heartbeat import windows_process_alive
+
+        return windows_process_alive(pid) is not False
+    else:
+        try:
+            os.kill(pid, 0)
+        except PermissionError:
+            return True
+        except OSError:
+            return False
     return True
 
 

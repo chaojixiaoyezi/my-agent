@@ -2597,15 +2597,21 @@ def _process_state(pid: int) -> str:
     """
     if pid <= 0:
         return "unverifiable"
-    try:
-        os.kill(pid, 0)
-        return "alive"
-    except ProcessLookupError:
-        return "dead"
-    except PermissionError:
-        return "alive"
-    except OSError:
-        return "unverifiable"
+    if os.name == "nt":
+        from ..common.heartbeat import windows_process_alive
+
+        observed = windows_process_alive(pid)
+        return "dead" if observed is False else "alive" if observed is True else "unverifiable"
+    else:
+        try:
+            os.kill(pid, 0)
+            return "alive"
+        except ProcessLookupError:
+            return "dead"
+        except PermissionError:
+            return "alive"
+        except OSError:
+            return "unverifiable"
 
 
 # LLM: Lease expiry is not proof of death; only a missing PID or a verified PID/starttime mismatch is reclaimable.

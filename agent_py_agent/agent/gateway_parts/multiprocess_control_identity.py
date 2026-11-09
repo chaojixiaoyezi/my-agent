@@ -16,11 +16,18 @@ def control_executor_live(identity):
         return None
     if identity['schema_version'] != 'multiprocess_process_identity.v1' or identity['host_id'] != process_host_id():
         return None
-    try:
-        os.kill(identity['pid'], 0)
-    except ProcessLookupError:
-        return False
-    except (OSError, OverflowError):
-        return None
+    if os.name == "nt":
+        from ..common.heartbeat import windows_process_alive
+
+        observed = windows_process_alive(identity["pid"])
+        if observed is not True:
+            return observed
+    else:
+        try:
+            os.kill(identity['pid'], 0)
+        except ProcessLookupError:
+            return False
+        except (OSError, OverflowError):
+            return None
     birth = process_birth(identity['pid'])
     return None if birth is None else birth == identity['start_time']

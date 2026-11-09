@@ -129,10 +129,67 @@ def start_time_matches(recorded: object, current: str | None) -> bool:
     return start_time_relation(recorded, current) != "different"
 
 
+@functools.lru_cache(maxsize=1)
+def _windows_process_api():
+    """固定原生签名一次，HANDLE 使用指针宽度，避免逐次加载 DLL。"""
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel.WaitForSingleObject.restype = wintypes.DWORD
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel.CloseHandle.restype = wintypes.BOOL
+    return kernel
+
+
+def windows_process_alive(pid: int) -> bool | None:
+    """只读观察 Windows 进程；拒绝访问或观察失败保持未知，不发送 signal 0。"""
+    if pid <= 0:
+        return False
+    if pid > 0xFFFFFFFF:
+        return None
+    try:
+        kernel = _windows_process_api()
+        # SYNCHRONIZE 只允许观察进程对象是否 signaled；不申请终止或修改权限。
+        handle = kernel.OpenProcess(0x00100000, False, pid)
+    except OSError:
+        return None
+    if not handle:
+        return False if ctypes.get_last_error() == 87 else None
+    observed = None
+    try:
+        result = kernel.WaitForSingleObject(handle, 0)
+        observed = False if result == 0 else True if result == 258 else None
+    except OSError:
+        pass
+    finally:
+        try:
+            if not kernel.CloseHandle(handle):
+                observed = None
+        except OSError:
+            observed = None
+    return observed
+
+
 def process_alive(pid: int, *, start_time: str | None = None) -> bool:
     """PID 是否对应活进程;若给了 start_time,还要求当前启动指纹与之匹配(防 PID 复用)。"""
     if pid <= 0:
         return False
+    if os.name == "nt":
+        observed = windows_process_alive(pid)
+        if observed is not True:
+            return observed is None
+    else:
+        return _posix_process_alive(pid, start_time=start_time)
+    if start_time is None:
+        return True
+    current = process_start_time(pid)
+    return current is None or current == start_time
+
+
+def _posix_process_alive(pid: int, *, start_time: str | None = None) -> bool:
     try:
         os.kill(pid, 0)  # 不发信号只探活:ESRCH=无此进程,EPERM=存在但无权(仍算活)
     except ProcessLookupError:

@@ -72,6 +72,14 @@ def verify_identities(identities):
         elif live is not False or row['identity'] is None:
             raise StandaloneSourceUnproven('retirement_executor_alive_or_unknown')
         if row['role'] == 'W' and live is False:
+            if os.name == "nt":
+                from ...common.heartbeat import windows_process_alive
+
+                observed = windows_process_alive(row['identity']['pid'])
+                if observed is not False:
+                    reason = 'migration_worker_pid_reused' if observed is True else 'migration_worker_liveness_unknown'
+                    raise StandaloneSourceUnproven(reason)
+                continue
             try:
                 os.kill(row['identity']['pid'], 0)
             except ProcessLookupError:

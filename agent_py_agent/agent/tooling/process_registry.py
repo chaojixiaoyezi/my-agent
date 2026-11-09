@@ -778,16 +778,9 @@ def _pid_alive(pid: int) -> bool:
     if not pid or pid <= 0:
         return False
     if _IS_WINDOWS:
-        try:
-            out = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return False
-        return str(pid) in (out.stdout or "")
+        from ..common.heartbeat import windows_process_alive
+
+        return windows_process_alive(pid) is not False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -1304,12 +1297,19 @@ _DEFAULT_PROCESS_GROUP_MAP = _process_group_map
 # LLM: 只认消失/僵尸/明确复用；旧本地化指纹须同PID原生locale复核，任何观察错误均不等于死亡，不调用waitpid。
 # 函数用途: 只读核对原进程实例确已终止，避免升级后的日期语言差异或拒读伪造完成回执。
 def _process_instance_terminated(pid: int, birth_token: str) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    except OSError:
-        return False
+    if _IS_WINDOWS:
+        from ..common.heartbeat import windows_process_alive
+
+        observed = windows_process_alive(pid)
+        if observed is not True:
+            return observed is False
+    else:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
     if _process_is_zombie(pid):
         return True
     current = capture_process_birth_token(pid) if birth_token else ""

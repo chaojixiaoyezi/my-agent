@@ -864,15 +864,20 @@ def _holder_payload(holder: ToolOperationHolder) -> dict[str, object]:
 
 
 def _pid_exists(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
+    if os.name == "nt":
+        from ..common.heartbeat import windows_process_alive
+
+        return windows_process_alive(pid) is not False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
 
 
 # LLM: 进程启动标记统一走 common.heartbeat.process_start_time（Linux /proc ticks、macOS sysctl“秒.微秒”，

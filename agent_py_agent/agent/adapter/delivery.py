@@ -90,7 +90,14 @@ def _dispatch_owner_live(identity: object) -> bool | None:
         pid = int(identity.get("pid") or 0)
         if pid <= 0:
             return None
-        os.kill(pid, 0)
+        if os.name == "nt":
+            from ..common.heartbeat import windows_process_alive
+
+            observed = windows_process_alive(pid)
+            if observed is not True:
+                return observed
+        else:
+            os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except (OSError, ValueError, TypeError):
