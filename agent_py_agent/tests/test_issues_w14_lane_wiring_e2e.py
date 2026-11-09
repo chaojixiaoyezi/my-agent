@@ -341,7 +341,13 @@ def _assert_live(owner):
 
 def _assert_retired(world):
     """检查真实领域后像，不将完成回执或检查计数冒充删除结果。"""
-    assert not world.retired_tree.exists()
+    # generation及恢复意图的锁锚不能unlink换inode；仅精确空锚可留，业务载荷必须全消失。
+    remaining = {path.relative_to(world.retired_tree) for path in world.retired_tree.rglob('*') if path.is_file()}
+    assert remaining <= {Path(namespace) / ('.nodes.sqlite3' + suffix)
+                         for namespace in ('indexes', 'timeline')
+                         for suffix in ('.generation.lock', '.recovery-intent.json.lock')}
+    assert all((world.retired_tree / path).stat().st_size == 0 for path in remaining)
+    assert not any(path.is_symlink() for path in world.retired_tree.rglob('*'))
     assert not (world.home.owner_compact_dir / 'conversations' / (world.retired.thread_id + '.jsonl')).exists()
     assert not world.orphan.exists()
     manifest = json.loads((world.archive / 'manifest.json').read_text())

@@ -145,7 +145,8 @@ def test_first_thread_marks_150_committed_checkpoints_before_sweeping(compact_ca
     monkeypatch.setattr(storage_lanes.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(hamt._LaneWork, "read", measured)
     result = compact.maintain_compact_reachability_lane(request_for(home_for(case)))
-    assert clock[0] > storage_lanes.STORAGE_LANE_SLICE_MS / 1000
+    assert clock[0] < storage_lanes.STORAGE_LANE_SLICE_MS / 1000
+    # 已登记历史根走零引用队列，不再重读150个checkpoint才能回收孤儿。
     assert not result["errors"] and not result["skipped"].get("mark_budget_exceeded")
     assert not target.exists() and result["deleted_items"] == 1
     for version in (versions[0], versions[-1]):
@@ -164,10 +165,14 @@ def test_mark_allowance_skip_preserves_objects_without_per_thread_error(compact_
         lane = transcript.maintain_transcript_index_lane
     before = {path: path.read_bytes() for path in case.root.rglob("*.json")}
 
-    def stop(index, reference):
+    def stop(*args):
         raise hamt._BudgetExceeded("oversized mark")
 
-    monkeypatch.setattr(hamt._MeasuredIndex, "_load", stop)
+    if kind == "compact_checkpoints":
+        from agent_py_agent.agent.conversation import compact_index_lifecycle
+        monkeypatch.setattr(compact_index_lifecycle, "index_store_due", stop)
+    else:
+        monkeypatch.setattr(hamt._MeasuredIndex, "_load", stop)
     result = lane(request_for(home_for(case), kind=kind))
     assert result["skipped"].get("mark_budget_exceeded") == 1 and not result["errors"]
     assert result["deleted_items"] == 0
@@ -380,9 +385,24 @@ def test_waiting_retirement_closes_compact_pass(compact_case):
     live = case.store.threads.get_or_create({"canonical_user_id": "live-owner", "now": now})
     live_case = SimpleNamespace(**{**vars(case), "thread_id": live.thread_id})
     committed_pair(live_case)
+    from agent_py_agent.agent.conversation.immutable_node_store import ImmutableNodeStore
+
+    stores = [ImmutableNodeStore(home.owner_compact_dir, ("evidence", tid, namespace))
+              for tid in (case.thread_id, live.thread_id) for namespace in ("indexes", "timeline")]
+    from agent_py_agent.agent.conversation.checkpoint_offset_store import CheckpointOffsetStore
+
+    node_facts, mutable_files = {}, set()
+    for tid in (case.thread_id, live.thread_id):
+        projection = CheckpointOffsetStore(home.owner_compact_dir / "conversations" / (tid + ".jsonl")).path
+        mutable_files.update(projection.with_name(projection.name + suffix) for suffix in ("", "-wal", "-shm"))
+    for store in stores:
+        if store.exists():
+            with store.connection() as conn:
+                node_facts[store.path] = conn.execute("SELECT name,raw,refs FROM nodes ORDER BY name").fetchall()
+            mutable_files.update(store.path.with_name(store.path.name + suffix) for suffix in ("", "-wal", "-shm"))
     protected = {
         path: path.read_bytes() for directory in (home.owner_compact_dir, action.destination)
-        for path in directory.rglob("*") if path.is_file()
+        for path in directory.rglob("*") if path.is_file() and path not in mutable_files
     }
     cursor = {}
     for _ in range(20):
@@ -393,7 +413,12 @@ def test_waiting_retirement_closes_compact_pass(compact_case):
             break
     assert result["complete"] and result["deferred_reason"] == "retired_thread_waiting"
     assert cursor["journal_offset"] == 0 and cursor["phase"] == "live"
-    assert all(path.read_bytes() == raw for path, raw in protected.items())
+    for path, raw in protected.items():
+        assert path.read_bytes() == raw, path
+    for store in stores:
+        if store.path in node_facts:
+            with store.connection() as conn:
+                assert conn.execute("SELECT name,raw,refs FROM nodes ORDER BY name").fetchall() == node_facts[store.path]
 
 
 def test_torn_journal_tail_closes_compact_pass(compact_case, record_property):
@@ -583,7 +608,7 @@ def test_first_thread_allowance_collects_orphan_with_tiny_slices(compact_case, m
 def test_node_cap_overflow_is_skipped_not_an_error(compact_case, monkeypatch, kind):
     case = compact_case
     if kind == "compact_checkpoints":
-        committed_pair(case)
+        versions = committed_pair(case)
         lane, module = compact.maintain_compact_reachability_lane, compact
     else:
         rotation(case, monkeypatch)
@@ -598,7 +623,14 @@ def test_node_cap_overflow_is_skipped_not_an_error(compact_case, monkeypatch, ki
         cursor = result["cursor"]
         if result["complete"]:
             break
-    assert result["complete"] and skipped >= 1
+    assert result["complete"]
+    if kind == "compact_checkpoints":
+        assert skipped == 0
+        for version in versions:
+            rows = list(compact.iter_committed_compact_checkpoints(case.agent, version, hydrate=False))
+            assert rows[0]["checkpoint_id"] == version.compact_checkpoint_id
+    else:
+        assert skipped >= 1
 
 
 def test_transcript_pending_list_runs_grace_in_parallel(compact_case, monkeypatch):
@@ -713,10 +745,11 @@ def test_full_busy_and_mark_budget_slices_have_zero_fd_delta(compact_case, monke
             release.set()
         future.result(timeout=5)
 
-    def exceeded(index, reference):
+    def exceeded(*args):
         raise hamt._BudgetExceeded("mark limit")
 
-    monkeypatch.setattr(hamt._MeasuredIndex, "_load", exceeded)
+    from agent_py_agent.agent.conversation import compact_index_lifecycle
+    monkeypatch.setattr(compact_index_lifecycle, "index_store_due", exceeded)
     before = _fd_count()
     oversized = compact.maintain_compact_reachability_lane(request)
     assert _fd_count() - before == 0

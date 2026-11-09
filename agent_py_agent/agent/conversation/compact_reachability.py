@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 from ..common.json_io import locked_json_path, read_json_object_report
 from ..common.nofollow_fs import open_directory_beneath
+from ..io.sqlite_scope import sqlite_connection_scope
 from ..memory_store.retired_thread_journal import (
     RetiredThreadPage,
     iter_retired_threads,
@@ -621,6 +622,7 @@ def _retired_slice(work, root, cursor):
 
 # LLM: 首线程使用独立标记额度；超额保留整树并推进，轮次完成与逐线程错误分开表达。
 # 函数用途: 执行一个受预算限制的 compact 可达性维护片。
+@sqlite_connection_scope(enabled=True)
 def maintain_compact_reachability_lane(request: StorageLaneRequest) -> dict:
     work = _LaneWork(request)
     cursor = {

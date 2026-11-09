@@ -450,10 +450,16 @@ def test_retired_cursor_stops_before_waiting_or_unknown_row(compact_case, state)
         row = json.loads(rows[-1])
         row["schema"] = "unknown.v99"
         journal.write_text(rows[0] + "\n" + json.dumps(row) + "\n")
-    result = maintain_compact_reachability_lane(request_for(home))
+    cursor, restored = {}, 0
+    for _ in range(32):
+        result = maintain_compact_reachability_lane(request_for(home, cursor=cursor))
+        cursor = result["cursor"]
+        restored += result["skipped"].get("restored", 0)
+        if result["complete"]:
+            break
     assert result["complete"] and result["cursor"]["journal_offset"] == first.next_offset
     assert result["cursor"]["phase"] == "live" and result["cursor"]["after"] == ""
-    assert result["skipped"]["restored"] == 1
+    assert restored == 1
     assert result["skipped"]["retired_thread_" + state] == 1
     if state == "unknown":
         assert any(error["code"] == "retired_thread_state_unknown" for error in result["errors"])
