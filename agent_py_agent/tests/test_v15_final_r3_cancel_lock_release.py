@@ -15,11 +15,11 @@ from agent_py_agent.agent.runtime_db.operations import attempt_status_is_termina
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 from agent_py_agent.agent.scheduler.control import cancel_monitor
 from agent_py_agent.agent.workflows import script_runner
+from agent_py_agent.tests.support.fd_lifetime import assert_fd_unchanged, fd_baseline
 from agent_py_agent.tests.test_v15_rework_monitor_pool_interrupt import (
     _assert_done,
     _assert_occupied,
     _await_step,
-    _fd_count,
     _join,
     _schedule,
     _start,
@@ -59,7 +59,7 @@ def test_cancelled_pool_attempt_releases_without_replaying_and_fresh_run_complet
     warm = _schedule(case, 'warm')
     _join(*_start(case, warm))
     _assert_done(case, warm)
-    fd_before = _fd_count()
+    fd_before = fd_baseline(case.home)
     repo = case.agent.subagents.runtime_db
     execute = script_runner._execute
     guard, timing = Lock(), {'active': 0, 'peak': 0, 'starts': {}, 'ends': {}}
@@ -161,7 +161,7 @@ def test_cancelled_pool_attempt_releases_without_replaying_and_fresh_run_complet
     assert mutation is not None and fresh_run is not None
     assert mutation['state'] == 'STABLE' and mutation['attempt_id'] == fresh_run['current_attempt_id']
     assert case.store.tasks.load(stopped.signal.root_task_id).status == 'cancelled'
-    assert _fd_count() - fd_before == 0
+    assert_fd_unchanged(fd_before, case.home)
 
 
 @pytest.mark.parametrize('status', ['running', 'unknown'])
@@ -177,13 +177,13 @@ def test_terminal_release_keeps_running_unknown_and_missing_attempts_unchanged(t
         assert repo._mark_attempt_unknown(attempt_id, chain['agent_run_id'], reason='guard', operator='test')
     before = _rows(repo, attempt_id)
     assert repo.get_attempt(attempt_id)['status'] == status
-    fd_before = _fd_count()
+    fd_before = fd_baseline()
     assert repo.release_terminal_attempt_operations(attempt_id, reason='too_early') == []
     assert repo.release_terminal_attempt_operations('missing', reason='missing') == []
     assert _rows(repo, attempt_id) == before
     assert repo.cleanup_stale_resource_locks(now=time.time() + 3600) == []
     assert _rows(repo, attempt_id) == before
-    assert _fd_count() - fd_before == 0
+    assert_fd_unchanged(fd_before)
 
 
 def test_backstop_waits_for_all_attempt_leases_and_keeps_confirmed_mutations(tmp_path):
@@ -206,7 +206,7 @@ def test_backstop_waits_for_all_attempt_leases_and_keeps_confirmed_mutations(tmp
     stable = dict(repo.mark_mutation_stable('owner:stable'))
     dirty = dict(repo.mark_mutation_dirty(canonical_scope='owner:dirty', reason='original_dirty', attempt_id=attempt_id))
     before = _rows(repo, attempt_id)
-    fd_before = _fd_count()
+    fd_before = fd_baseline()
     # 活 attempt 即使所有租约都过时，也不能仅凭时间清理，原 exec 锁仍在。
     assert repo.cleanup_stale_resource_locks(now=max(lock['lease_expires_at'] for lock in locks) + 1) == []
     assert _rows(repo, attempt_id) == before
@@ -228,7 +228,7 @@ def test_backstop_waits_for_all_attempt_leases_and_keeps_confirmed_mutations(tmp
         assert mutation['state'] == 'DIRTY' and mutation['dirty_reason'] == 'terminal_attempt_lease_expired'
     assert dict(repo.mutation_for_scope('owner:stable')) == stable
     assert dict(repo.mutation_for_scope('owner:dirty')) == dirty
-    assert _fd_count() - fd_before == 0
+    assert_fd_unchanged(fd_before)
 
 
 def test_terminal_release_never_deletes_execution_lock_and_rolls_back_on_event_error(tmp_path, monkeypatch):
@@ -253,13 +253,13 @@ def test_terminal_release_never_deletes_execution_lock_and_rolls_back_on_event_e
     def fail_event(*args, **kwargs):
         raise sqlite3.OperationalError('simulated event I/O error')
 
-    fd_before = _fd_count()
+    fd_before = fd_baseline()
     with monkeypatch.context() as patch:
         patch.setattr(repo, '_append_event_conn', fail_event)
         with pytest.raises(sqlite3.OperationalError, match='simulated event'):
             repo.release_terminal_attempt_operations(attempt_id, reason='event_error')
     assert _rows(repo, attempt_id) == before
-    assert _fd_count() - fd_before == 0
+    assert_fd_unchanged(fd_before)
     assert repo._append_event_conn == append
     assert repo.release_terminal_attempt_operations(attempt_id, reason='worker_exited') == [operation['operation_id']]
     after = _rows(repo, attempt_id)
@@ -275,4 +275,4 @@ def test_terminal_release_never_deletes_execution_lock_and_rolls_back_on_event_e
     assert repo.get_attempt(attempt_id)['status'] == repo.get_agent_run(chain['agent_run_id'])['status'] == 'cancelled'
     assert repo.release_terminal_attempt_operations(attempt_id, reason='repeat') == []
     assert _rows(repo, attempt_id) == after
-    assert _fd_count() - fd_before == 0
+    assert_fd_unchanged(fd_before)

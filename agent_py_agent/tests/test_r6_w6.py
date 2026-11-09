@@ -23,6 +23,7 @@ from agent_py_agent.agent.runtime_db.sqlite_scope import (
     activate_sqlite_scope,
     close_persistent_sqlite_scope,
 )
+from agent_py_agent.tests.support.fd_lifetime import assert_fd_unchanged, fd_baseline
 from agent_py_agent.tests.test_persistent_planner_sqlite_scope import _query
 from agent_py_agent.tests.test_sqlite_scope_lifetime import _raw_lease, _raw_once
 
@@ -31,7 +32,7 @@ from agent_py_agent.tests.test_sqlite_scope_lifetime import _raw_lease, _raw_onc
 def database(tmp_path):
     path = tmp_path / "runtime.db"
     fd_dir = "/proc/self/fd" if os.path.isdir("/proc/self/fd") else "/dev/fd"
-    before = len(os.listdir(fd_dir)) if os.path.isdir(fd_dir) else None
+    before = fd_baseline() if os.path.isdir(fd_dir) else None
     with sqlite3.connect(path) as connection:
         connection.execute("CREATE TABLE facts(value)")
     connection.close()
@@ -39,7 +40,7 @@ def database(tmp_path):
     with guard.runtime_db_generation_guard(path, exclusive=True):
         pass
     if before is not None:
-        assert len(os.listdir(fd_dir)) - before == 0
+        assert_fd_unchanged(before)
 
 
 def test_event_transaction_blocks_recovery_and_new_admission(database):

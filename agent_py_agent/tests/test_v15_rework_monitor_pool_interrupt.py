@@ -40,6 +40,7 @@ from agent_py_agent.agent.workflows import script_runner
 from agent_py_agent.agent.workflows.run_artifacts import current_run_out_target
 from agent_py_agent.agent.workflows.run_store import WorkflowRunStore
 from agent_py_agent.agent.workflows.script_runner import ScriptRunner
+from agent_py_agent.tests.support.fd_lifetime import assert_fd_unchanged, fd_baseline
 from agent_py_agent.tests.test_schedule_control import _agent
 from agent_py_agent.tests.test_scheduler_runtime import _RetryDelivery
 
@@ -226,7 +227,7 @@ def test_stop_during_real_script_prevents_later_steps_and_delivery(case, sender)
     warm = _schedule(case, 'warm')
     _join(*_start(case, warm))
     _assert_done(case, warm)
-    fd_before, delivery_before, call_before = _fd_count(), len(case.channels.attempts), len(case.calls)
+    fd_before, delivery_before, call_before = fd_baseline(case.home), len(case.channels.attempts), len(case.calls)
     run = _schedule(case, 'stopped')
     thread, errors = _start(case, run)
     _await_step(run, thread, errors)
@@ -259,7 +260,7 @@ def test_stop_during_real_script_prevents_later_steps_and_delivery(case, sender)
     assert _claim(binding)['status'] == 'cancelled'
     assert not is_interruptible_registered(conversation_request_interrupt_name(run.signal.root_task_id))
     assert not is_interruptible_registered(conversation_claim_interrupt_name(binding.claim_id))
-    assert _fd_count() - fd_before == 0
+    assert_fd_unchanged(fd_before, case.home)
 
     # C：原 worker 必须清旗；取消操作仅在 worker 退出后结为 UNKNOWN 并释放 scope 锁。
     probe = case.service.monitor_pool.submit(case.home, run.job['job_id'], 'r3-reuse-probe',
@@ -274,7 +275,7 @@ def test_stop_during_real_script_prevents_later_steps_and_delivery(case, sender)
     assert {call[1] for call in case.calls[call_before:]} == {case.calls[call_before][1]}
     assert case.store.tasks.load(run.signal.root_task_id).status == ('cancelled' if sender == 'cancel_monitor' else 'active')
     assert len(case.channels.attempts) == delivery_before + 1
-    assert _fd_count() - fd_before == 0
+    assert_fd_unchanged(fd_before, case.home)
 
 
 @pytest.mark.parametrize('sender', ['request', 'claim'])
@@ -366,7 +367,7 @@ def test_real_script_failure_preserves_terminal_agreement_and_zero_fd_delta(case
     warm = _schedule(case, 'warm')
     _join(*_start(case, warm))
     _assert_done(case, warm)
-    fd_before, delivery_before = _fd_count(), len(case.channels.attempts)
+    fd_before, delivery_before = fd_baseline(case.home), len(case.channels.attempts)
     run = _schedule(case, 'failed', fail=True)
     _join(*_start(case, run))
     records = case.runs.list_runs(workflow_id=run.workflow_id)
@@ -379,7 +380,7 @@ def test_real_script_failure_preserves_terminal_agreement_and_zero_fd_delta(case
     assert all(not scratch.exists() for _, scratch, _ in run.markers)
     assert case.store.tasks.load(run.signal.root_task_id).status == 'abandoned'
     assert len(case.channels.attempts) == delivery_before
-    assert _fd_count() - fd_before == 0
+    assert_fd_unchanged(fd_before, case.home)
 
 
 def test_interrupt_names_follow_real_claim_binding_and_bound_turn_precedence(case):
