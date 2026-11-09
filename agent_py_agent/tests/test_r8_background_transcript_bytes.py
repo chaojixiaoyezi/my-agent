@@ -63,3 +63,61 @@ def test_cyclic_payload_and_new_task_preserve_bounded_accounting():
     other = SimpleNamespace()
     append(other, 'thread', 2, {'text': 'other owner'})
     assert not state.events
+
+
+def test_oversized_completed_frame_keeps_its_readable_archive(tmp_path):
+    from agent_py_agent.agent.conversation.display_archive import (
+        archive_display_rows,
+        read_display_archive_page,
+    )
+    from agent_py_agent.agent.conversation.store import ConversationStore
+
+    store = ConversationStore(tmp_path / "conversation")
+    agent = SimpleNamespace(conversation_store=store)
+    thread = store.threads.get_or_create({"canonical_user_id": "u", "channel": "chat",
+                                          "channel_conversation_id": "session", "channel_user_id": "u"})
+    text = "完整原文" * 30000
+    ref = archive_display_rows(agent, thread_id=thread.thread_id, rows=[{"text": text}])
+    append(agent, thread.thread_id, 1, {"text": text, "display_archive_ref": ref})
+    page = transcript.read_background_transcript_events(agent, thread_id=thread.thread_id, after=0)
+    payload = page["events"][0]["payload"]
+    assert page["truncated"] and payload["display_archive_ref"] == ref
+    restored = read_display_archive_page(store, payload["display_archive_ref"], 0)
+    assert text.startswith(restored["rows"][0]["text"]) and restored["rows"][0]["text"]
+
+
+def test_unknown_payload_object_cannot_run_code_under_the_display_lock():
+    class Unexpected:
+        def __sizeof__(self):
+            raise AssertionError("must not invoke unknown object")
+
+    agent = SimpleNamespace()
+    append(agent, "thread", 1, {"unexpected": Unexpected()})
+    result = transcript.read_background_transcript_events(agent, thread_id="thread", after=0)
+    assert result["truncated"] and result["events"][0]["payload"]["history_incomplete"]
+
+
+def test_slow_page_copy_does_not_block_another_thread_writer(monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    agent = SimpleNamespace()
+    append(agent, "old", 1, {"text": "old"})
+    copying, resume = threading.Event(), threading.Event()
+    deepcopy = transcript.copy.deepcopy
+
+    def paused(value):
+        if isinstance(value, dict) and value.get("block_id") == "block-1":
+            copying.set()
+            assert resume.wait(5)
+        return deepcopy(value)
+
+    monkeypatch.setattr(transcript.copy, "deepcopy", paused)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        read = pool.submit(transcript.read_background_transcript_events, agent, thread_id="old", after=0)
+        try:
+            assert copying.wait(2)
+            assert pool.submit(append, agent, "new", 2, {"text": "new"}).result(timeout=1) == 2
+        finally:
+            resume.set()
+        assert read.result(timeout=2)["events"][0]["payload"] == {"text": "old"}

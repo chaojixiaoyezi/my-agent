@@ -755,18 +755,31 @@ def _background_transcript_lock(agent: object) -> threading.Lock:
 # LLM: The mapping is process-local display state keyed by canonical thread id;
 # callers receive copies and cannot mutate the ring directly.
 # 函数用途: 取得或初始化后台展示事件表。
-def _background_transcript_rows(
-    agent: object,
-) -> OrderedDict[str, _ThreadTranscriptState]:
+class _TranscriptRows(OrderedDict):
+    """只核算此 Agent 的易失展示；成员及字节数在同一把锁中更新。"""
+
+    retained_bytes: int = 0
+
+
+def _background_transcript_rows(agent: object) -> _TranscriptRows:
     rows = getattr(agent, _TRANSCRIPT_STATE_ATTR, None)
-    if not isinstance(rows, OrderedDict):
-        rows = OrderedDict(
+    if not isinstance(rows, _TranscriptRows):
+        rows = _TranscriptRows(
             (str(key), value)
             for key, value in (rows.items() if isinstance(rows, dict) else ())
             if isinstance(value, _ThreadTranscriptState)
         )
+        rows.retained_bytes = sum(item.retained_bytes for item in rows.values())
         setattr(agent, _TRANSCRIPT_STATE_ATTR, rows)
     return rows
+
+
+def _reset_transcript_events(rows, state):
+    rows.retained_bytes -= state.retained_bytes
+    state.events.clear()
+    state.sizes.clear()
+    state.retained_bytes = 0
+    state.truncated_through_seq = 0
 
 
 # LLM: The process-wide display cache is capped independently from each thread
@@ -774,7 +787,7 @@ def _background_transcript_rows(
 # notices and lifecycle facts live elsewhere and are never touched.
 # 函数用途: 取得一个会话的事件环，并在会话过多时淘汰最久未使用的纯展示缓存。
 def _background_thread_state(
-    rows: OrderedDict[str, _ThreadTranscriptState],
+    rows: _TranscriptRows,
     thread_key: str,
 ) -> _ThreadTranscriptState:
     state = rows.get(thread_key)
@@ -782,7 +795,8 @@ def _background_thread_state(
         rows.move_to_end(thread_key)
         return state
     while len(rows) >= BACKGROUND_TRANSCRIPT_MAX_THREADS_COUNT:
-        rows.popitem(last=False)
+        _key, evicted = rows.popitem(last=False)
+        rows.retained_bytes -= evicted.retained_bytes
     state = _ThreadTranscriptState()
     rows[thread_key] = state
     return state
@@ -807,57 +821,82 @@ def begin_background_transcript_turn(
         rows = _background_transcript_rows(agent)
         state = _background_thread_state(rows, thread_key)
         if task_key and state.task_id and state.task_id != task_key:
-            state.events.clear()
-            state.sizes.clear()
-            state.retained_bytes = 0
-            state.truncated_through_seq = 0
+            _reset_transcript_events(rows, state)
         if task_key:
             state.task_id = task_key
         return f"bg-main:{thread_key}:{uuid4().hex}"
 
 
-def _display_payload_size(value, *, remaining, depth=0, nodes=None):
-    """有界核算容器与叶子内存；未知/循环/过深结构沿不完整展示路径。"""
-    nodes = [BACKGROUND_TRANSCRIPT_PAYLOAD_MAX_NODES] if nodes is None else nodes
-    nodes[0] -= 1
-    if nodes[0] < 0 or depth > BACKGROUND_TRANSCRIPT_PAYLOAD_MAX_DEPTH:
+def _copy_display_value(value, budget, depth=0):
+    """在同一次有界遍历里取得独立副本；未知叶不执行其 __sizeof__ 或 __deepcopy__。"""
+    budget[1] -= 1
+    if budget[1] < 0 or depth > BACKGROUND_TRANSCRIPT_PAYLOAD_MAX_DEPTH:
         raise ValueError("display payload exceeds projection budget")
-    size = sys.getsizeof(value)
-    if size > remaining:
-        raise ValueError("display payload exceeds projection budget")
-    if type(value) in (str, int, float, bool, type(None)):
-        return size
-    if type(value) not in (dict, list, tuple):
+    kind = type(value)
+    if kind in (str, int, float, bool, type(None)):
+        budget[0] -= sys.getsizeof(value)
+        if budget[0] < 0:
+            raise ValueError("display payload exceeds projection budget")
+        return value
+    mapping = kind is dict or (depth == 0 and isinstance(value, Mapping))
+    if not mapping and kind not in (tuple, list):
         raise ValueError("unsupported display payload")
-    entries = ((part for pair in value.items() for part in pair) if type(value) is dict else iter(value))
-    for child in entries:
-        size += _display_payload_size(child, remaining=remaining-size, depth=depth+1, nodes=nodes)
-    return size
+    # 粗筛巨大内置容器；只把最终保留的新容器计入预算，不计同一旧/新容器两次。
+    if kind in (dict, list, tuple) and sys.getsizeof(value) > budget[0]:
+        raise ValueError("display payload exceeds projection budget")
+    if mapping:
+        result = {}
+        for key, child in value.items():
+            if type(key) is not str:
+                raise ValueError("unsupported display key")
+            result[_copy_display_value(key, budget, depth + 1)] = _copy_display_value(child, budget, depth + 1)
+    else:
+        items = [_copy_display_value(child, budget, depth + 1) for child in value]
+        result = tuple(items) if kind is tuple else items
+    budget[0] -= sys.getsizeof(result)
+    if budget[0] < 0:
+        raise ValueError("display payload exceeds projection budget")
+    return result
 
 
-def _bounded_display_payload(payload):
+def _copy_display_payload(payload, maximum):
+    budget = [maximum, BACKGROUND_TRANSCRIPT_PAYLOAD_MAX_NODES]
+    result = _copy_display_value(payload, budget)
+    return result, maximum - budget[0]
+
+
+def _bounded_display_payload(payload, thread_id):
+    maximum = BACKGROUND_TRANSCRIPT_EVENT_MAX_BYTES // 2
     try:
-        size = _display_payload_size(payload, remaining=BACKGROUND_TRANSCRIPT_EVENT_MAX_BYTES // 2)
-    except ValueError:
-        # 保留最后帧的生命周期与有限正文预览；完整内容仍沿canonical/归档读取。
+        result, size = _copy_display_payload(payload, maximum)
+        return result, size, False
+    except (ValueError, RuntimeError):
+        # 超大或读时变化的展示不能代替原页；保留同线程的规范引用供重连分页。
         result = {"history_incomplete": True, "truncated": True}
         if type(payload) is dict:
-            for key in ("text", "tool", "status", "error_code", "display_archive_ref"):
+            for key in ("tool", "status", "error_code", "text"):
                 value = payload.get(key)
                 if type(value) is str:
-                    result[key] = value[:BACKGROUND_TRANSCRIPT_TEXT_LIMIT_CHARS // 4]
-        try:
-            size = _display_payload_size(result, remaining=BACKGROUND_TRANSCRIPT_EVENT_MAX_BYTES // 2)
-        except ValueError:
-            result = {"history_incomplete": True, "truncated": True}
-            size = _display_payload_size(result, remaining=BACKGROUND_TRANSCRIPT_EVENT_MAX_BYTES // 2)
+                    result[key] = value[:BACKGROUND_TRANSCRIPT_TEXT_LIMIT_CHARS // 4 if key == "text" else 128]
+            reference = payload.get("display_archive_ref")
+            if type(reference) is dict and len(reference) <= 6:
+                from .display_archive import validate_display_archive_reference
+
+                try:
+                    ref, _ = _copy_display_payload(reference, 2048)
+                    if validate_display_archive_reference(ref)[1] == thread_id:
+                        result["display_archive_ref"] = ref
+                except (ValueError, RuntimeError):
+                    pass
+        result, size = _copy_display_payload(result, maximum)
         return result, size, True
-    return copy.deepcopy(payload), size, False
 
 
-def _drop_display_event(state):
+def _drop_display_event(rows, state):
     event = state.events.popleft()
-    state.retained_bytes -= state.sizes.popleft()
+    size = state.sizes.popleft()
+    state.retained_bytes -= size
+    rows.retained_bytes -= size
     state.truncated_through_seq = max(state.truncated_through_seq, int(event["seq"]))
 
 
@@ -888,21 +927,19 @@ def append_background_transcript_event(
     ):
         return 0
     task_key = str(source.task_id or "").strip()
+    # 各线程准备自己的展示副本，不在所有窗口共用的发表锁里遍历正文。
+    bounded_payload, payload_bytes, incomplete = _bounded_display_payload(payload if payload is not None else {}, thread_key)
     lock = _background_transcript_lock(agent)
     with lock:
         rows = _background_transcript_rows(agent)
         state = _background_thread_state(rows, thread_key)
         if task_key and state.task_id and state.task_id != task_key:
-            state.events.clear()
-            state.sizes.clear()
-            state.retained_bytes = 0
-            state.truncated_through_seq = 0
+            _reset_transcript_events(rows, state)
         if task_key:
             state.task_id = task_key
         next_seq = max(0, _safe_int(getattr(agent, _TRANSCRIPT_SEQ_ATTR, 0))) + 1
         setattr(agent, _TRANSCRIPT_SEQ_ATTR, next_seq)
         state.next_seq = next_seq
-        bounded_payload, payload_bytes, incomplete = _bounded_display_payload(payload if payload is not None else {})
         event = {
             "schema": BACKGROUND_TRANSCRIPT_SCHEMA,
             "seq": next_seq,
@@ -918,23 +955,21 @@ def append_background_transcript_event(
         event_bytes = payload_bytes + sys.getsizeof(event) + sum(
             sys.getsizeof(key) + sys.getsizeof(value) for key, value in event.items() if key != "payload"
         )
-        if event_bytes > BACKGROUND_TRANSCRIPT_EVENT_MAX_BYTES:
+        if event_bytes > min(BACKGROUND_TRANSCRIPT_EVENT_MAX_BYTES, BACKGROUND_TRANSCRIPT_MAX_BYTES):
             state.truncated_through_seq = max(state.truncated_through_seq, next_seq)
             return next_seq
         if len(state.events) >= BACKGROUND_TRANSCRIPT_MAX_EVENTS:
-            _drop_display_event(state)
-        total = sum(item.retained_bytes for item in rows.values())
+            _drop_display_event(rows, state)
         # 每条事件只入队/淘汰一次；查找至多原256个当前线程，绝不遍历历史正文。
-        while total + event_bytes > BACKGROUND_TRANSCRIPT_MAX_BYTES:
+        while rows.retained_bytes + event_bytes > BACKGROUND_TRANSCRIPT_MAX_BYTES:
             oldest = next((item for item in rows.values() if item.events), None)
             if oldest is None:
                 break
-            before = oldest.retained_bytes
-            _drop_display_event(oldest)
-            total -= before - oldest.retained_bytes
+            _drop_display_event(rows, oldest)
         state.events.append(event)
         state.sizes.append(event_bytes)
         state.retained_bytes += event_bytes
+        rows.retained_bytes += event_bytes
         if incomplete:
             state.truncated_through_seq = max(state.truncated_through_seq, next_seq)
         return next_seq
@@ -969,13 +1004,13 @@ def read_background_transcript_events(
         if state is None:
             return {"events": [], "cursor": cursor, "stream_id": current_stream, "truncated": False}
         rows.move_to_end(thread_key)
-        retained = [copy.deepcopy(row) for row in state.events if int(row["seq"]) > cursor]
-        return {
-            "events": retained,
-            "cursor": max(cursor, state.next_seq),
-            "stream_id": current_stream,
-            "truncated": bool(cursor < state.truncated_through_seq),
-        }
+        # 已发表事件不再改写。锁内固定游标与事件代次，锁外复制给客户端；
+        # 一个慢读者不应阻塞其它线程的新事件、驱逐和任务切换。
+        retained = tuple(row for row in state.events if int(row["seq"]) > cursor)
+        truncated = cursor < state.truncated_through_seq
+        cursor = max(cursor, state.next_seq)
+    return {"events": [copy.deepcopy(row) for row in retained], "cursor": cursor,
+            "stream_id": current_stream, "truncated": truncated}
 
 
 # LLM: Model-authored text always passes through user projection and host-path redaction.
