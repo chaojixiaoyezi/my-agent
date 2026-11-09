@@ -117,3 +117,73 @@ def test_projection_commit_failure_overrides_idle_result(tmp_path, monkeypatch):
     assert view.claim_activity_state(store.storage, 'thread') == 'activity_unknown'
     monkeypatch.setattr(view, '_connection', original)
     assert view.claim_activity_state(store.storage, 'thread') == ''
+
+
+@pytest.mark.skipif(not hasattr(__import__('os'), 'fork'), reason='requires POSIX fork')
+def test_fork_waits_for_other_thread_sql_and_keeps_parent_cache(tmp_path, monkeypatch):
+    import os
+    import threading
+    from pathlib import Path
+
+    store = ConversationStore(tmp_path / 'concurrent-fork')
+    assert view.claim_activity_state(store.storage, 'thread') == ''
+    parent_directory = Path(view._CACHE[1].name)
+    sql_entered, release_sql = threading.Event(), threading.Event()
+    fork_requested, fork_returned = threading.Event(), threading.Event()
+    errors, children = [], []
+    original = view._cleanup
+
+    def wait_in_sql():
+        sql_entered.set()
+        if not release_sql.wait(3):
+            raise RuntimeError('test did not release SQL')
+        return 1
+
+    def cleanup(conn):
+        original(conn)
+        conn.create_function('claim_fork_wait', 0, wait_in_sql)
+        conn.execute('SELECT claim_fork_wait()').fetchone()
+
+    def read():
+        try:
+            view.claim_activity_state(store.storage, 'thread')
+        except BaseException as error:
+            errors.append(error)
+
+    def fork():
+        try:
+            fork_requested.set()
+            pid = os.fork()
+            if pid == 0:
+                # 再次 fork 也要读 child 当前锁，而不是注册时绑定的父锁。
+                nested = os.fork()
+                if nested == 0:
+                    os._exit(0)
+                _, status = os.waitpid(nested, 0)
+                os._exit(0 if status == 0 and view._CACHE is None else 1)
+            children.append(pid)
+            fork_returned.set()
+        except BaseException as error:
+            errors.append(error)
+
+    monkeypatch.setattr(view, '_cleanup', cleanup)
+    reader = threading.Thread(target=read, daemon=True)
+    forker = threading.Thread(target=fork, daemon=True)
+    reader.start()
+    assert sql_entered.wait(2)
+    forker.start()
+    try:
+        assert fork_requested.wait(2)
+        assert not fork_returned.wait(.1), 'fork must wait until module SQL leaves its lock'
+    finally:
+        release_sql.set()
+        reader.join(3)
+        forker.join(3)
+    assert not reader.is_alive() and not forker.is_alive() and not errors
+    assert fork_returned.is_set()
+    for pid in children:
+        _, status = os.waitpid(pid, 0)
+        assert status == 0
+    monkeypatch.setattr(view, '_cleanup', original)
+    assert parent_directory.is_dir()
+    assert view.claim_activity_state(store.storage, 'thread') == ''

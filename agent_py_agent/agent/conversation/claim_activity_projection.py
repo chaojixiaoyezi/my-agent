@@ -26,6 +26,15 @@ def _signature(path):
         return None
 
 
+def _before_fork():
+    # 动态读取当前锁：child 重置后再次 fork 也必须守住自己的 SQL/目录流边界。
+    _LOCK.acquire()
+
+
+def _after_fork_parent():
+    _LOCK.release()
+
+
 def _after_fork():
     global _LOCK, _CACHE
     _LOCK = threading.RLock()
@@ -40,7 +49,8 @@ def _after_fork():
 
 
 if hasattr(os, 'register_at_fork'):
-    os.register_at_fork(after_in_child=_after_fork)
+    os.register_at_fork(before=_before_fork, after_in_parent=_after_fork_parent,
+                        after_in_child=_after_fork)
 
 
 def _connection():
