@@ -569,6 +569,10 @@ def test_cleanup_without_safe_pid_handle_does_not_use_bare_kill(fake_install_pro
     case = fake_install_proc
     _proc_entry(case.proc, 703, case.executable, argv=['python3', 'tools/fetch.py'])
     monkeypatch.delattr(installer.os, 'pidfd_open', raising=False)
+    # 无Python入口不等于没有Linux安全syscall；同时证明内核入口不可用，绝不申请真实PID句柄。
+    syscall = Mock(return_value=-1)
+    monkeypatch.setattr(installer.ctypes, 'CDLL', Mock(return_value=SimpleNamespace(syscall=syscall)))
+    monkeypatch.setattr(installer.ctypes, 'get_errno', lambda: errno.ENOSYS)
     sent = []
     monkeypatch.setattr(installer.os, 'kill', lambda *args: sent.append(args))
     with pytest.raises(ValueError, match='pidfd'):

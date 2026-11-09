@@ -649,7 +649,8 @@ def test_http_response_limit_includes_envelope(http_host):
 
 # LLM: 使用真实监听和撤销记录；缩短的是测试心跳间隔，不改变生产默认值。
 # 函数用途: 验证领域阻塞时心跳仍工作且激活撤销后不再送事件。
-def test_http_idle_stream_heartbeat_and_revocation(http_host, monkeypatch):
+@pytest.mark.parametrize("revocation_point", ["before_token", "after_token"])
+def test_http_idle_stream_heartbeat_and_revocation(http_host, monkeypatch, revocation_point):
     import threading
     from http.client import HTTPConnection
 
@@ -657,11 +658,23 @@ def test_http_idle_stream_heartbeat_and_revocation(http_host, monkeypatch):
     from agent_py_agent.agent.plugin_host.contracts import HostDomainPorts
     server, token, store, entry = http_host
     release = threading.Event()
+    armed, entered, proceed = threading.Event(), threading.Event(), threading.Event()
+    from agent_py_agent.agent.plugin_host.authorization import IngressIssuer
+    original_token = IngressIssuer._token
+    def token_boundary(issuer, value):
+        if not armed.is_set():
+            return original_token(issuer, value)
+        armed.clear()
+        fixed = original_token(issuer, value) if revocation_point == "after_token" else None
+        entered.set()
+        assert proceed.wait(10), "revoke boundary was not released"
+        return fixed if revocation_point == "after_token" else original_token(issuer, value)
+    monkeypatch.setattr(IngressIssuer, "_token", token_boundary)
     monkeypatch.setattr(transport, "HEARTBEAT_SECONDS", 0.05)
     # LLM: 模拟等待原业务，不把退订视为cancel。
     # 函数用途: 阻塞到测试释放后才结束生成器。
     def events(authorized):
-        release.wait(3)
+        release.wait()
         yield from ()
     server.plugin_host.composition.ports = HostDomainPorts(conversation=SimpleNamespace(stream=events))
     client = HTTPConnection("127.0.0.1", server.server.server_address[1], timeout=2)
@@ -672,12 +685,21 @@ def test_http_idle_stream_heartbeat_and_revocation(http_host, monkeypatch):
         response = client.getresponse()
         assert response.status == 200 and response.readline() == b": heartbeat\n"
         assert response.readline() == b"\n"
+        armed.set()
+        assert entered.wait(10), "idle stream did not reach token revalidation"
         store.change_activation(PluginActivationRequest("revoke-stream", entry.revision,
                                                        replace(entry.activation, phase="revoked")))
+        proceed.set()
         remaining = response.read()
-        assert b"event: error\n" in remaining and b"PLUGIN_TOKEN_INVALID" in remaining
+        expected = "PLUGIN_TOKEN_INVALID" if revocation_point == "before_token" else "ACTIVATION_REVOKED"
+        assert b"event: error\n" in remaining
+        frames = [json.loads(line.removeprefix(b"data: ")) for line in remaining.splitlines()
+                  if line.startswith(b"data: ")]
+        assert len(frames) == 1 and frames[0]["code"] == expected
+        assert frames[0]["outcome"] == "not_started" and frames[0]["retryable"] is False
         assert b"event: request\n" not in remaining
     finally:
+        proceed.set()
         release.set()
         client.close()
 
