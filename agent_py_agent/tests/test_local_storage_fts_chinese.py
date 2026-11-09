@@ -167,8 +167,15 @@ class TestFtsMigrationFromUnicode61:
         check.close()
         assert pre == 0
 
-        # 3) 用新代码重开 -> 自动迁移 + 回填。
+        # 3) 冷构造保留完整旧active；显式原维护续作后才原子发表目标分词器。
         store = LocalStore(db, files_dir=files)
+        with store._connection() as conn2:
+            assert conn2.execute('SELECT id FROM records_fts').fetchall()[0][0] == 'rec-old'
+            assert 'trigram' not in conn2.execute(
+                "SELECT sql FROM sqlite_master WHERE name='records_fts'").fetchone()[0].lower()
+            assert conn2.execute('SELECT value FROM metadata WHERE key=?',
+                                 (_FTS_SCHEMA_VERSION_KEY,)).fetchone() is None
+        store.rebuild_fts()
         with store._connection() as conn2:
             ver = conn2.execute(
                 "SELECT value FROM metadata WHERE key = ?", (_FTS_SCHEMA_VERSION_KEY,)

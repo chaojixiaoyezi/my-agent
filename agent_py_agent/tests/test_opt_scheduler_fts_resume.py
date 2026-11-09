@@ -429,6 +429,8 @@ def test_fts_revision_map_fences_rewind_and_resume_same_job(tmp_path):
     rewound = _fts_revision_job(store)
     assert rewound['phase'] == 'delta' and rewound['epoch'] > job['epoch']
     reopened = LocalStore(store.db_path)
+    # 冷构造只恢复job；显式维护入口负责续作，不能把历史扫描藏在启动。
+    reopened.rebuild_fts()
     completed = _fts_revision_job(reopened)
     assert completed['job_id'] == job['job_id'] and completed['phase'] == 'complete'
     assert not reopened._fts_needs_rebuild
@@ -481,6 +483,8 @@ def test_fts_revision_large_document_full_and_automatic_resume(tmp_path, monkeyp
         assert large_reads
     else:
         completed_store = LocalStore(store.db_path)
+        assert _fts_revision_job(completed_store) == before
+        completed_store.rebuild_fts()
     completed = _fts_revision_job(completed_store)
     assert completed['job_id'] == before['job_id'] and completed['phase'] == 'complete'
     assert completed['copied'] == 3 and not completed_store._fts_needs_rebuild
@@ -564,6 +568,8 @@ def test_fts_r1_boundary_deltas_survive_until_applied(tmp_path, phase, change):
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='maintenance_fts_shadow'").fetchone()
         assert conn.execute("SELECT value FROM metadata WHERE key='records_fts_rebuild_pending'").fetchone()[0] == 'true'
     reopened = LocalStore(store.db_path)
+    # 冷构造只恢复job；显式维护入口负责续作，不能把历史扫描藏在启动。
+    reopened.rebuild_fts()
     completed = _fts_revision_job(reopened)
     assert completed['job_id'] == before['job_id'] and completed['phase'] == 'complete'
     assert completed['copied'] == (2 if change == 'delete' else 4 if change == 'insert' else 3)
@@ -598,6 +604,8 @@ def test_fts_r1_delta_byte_budget_retains_queue_and_active(tmp_path):
         assert [tuple(row) for row in conn.execute('SELECT * FROM records_fts ORDER BY rowid')] == active
     assert _fts_revision_job(store) == job
     reopened = LocalStore(store.db_path)
+    assert _fts_revision_job(reopened) == job
+    reopened.rebuild_fts()
     assert _fts_revision_job(reopened)['job_id'] == before['job_id']
     assert _fts_revision_job(reopened)['phase'] == 'complete'
     assert _fts_revision_match(reopened, 'budgetdeltaneedle') == {'revision-0'}

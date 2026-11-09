@@ -484,12 +484,11 @@ def _local_events_alignment_needed(conn):
 
 
 def _local_events_extra_work(db_path):
-    """预检只发现封存段和 FTS 责任，段尾读取留给执行步骤以免重复消耗预算。"""
+    """预检只发现封存段责任，段尾读取留给执行步骤以免重复消耗预算。"""
     conn = sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True, timeout=0.0)
     try:
-        alignment = _local_events_alignment_needed(conn)
         active = db_path.parent / 'events.jsonl'
-        return alignment, any(path != active for path in iter_event_jsonl_paths(active))
+        return any(path != active for path in iter_event_jsonl_paths(active))
     finally:
         conn.close()
 
@@ -604,9 +603,9 @@ def maintain_local_events_lane(request: StorageLaneRequest) -> dict:
     try:
         snapshot = _local_events_precheck(db_path)
         event_work = snapshot is not None and bool(snapshot[0] or snapshot[1])
-        alignment_work = segment_work = False
+        segment_work = False
         if snapshot is not None:
-            alignment_work, segment_work = _local_events_extra_work(db_path)
+            segment_work = _local_events_extra_work(db_path)
         vacuum = {"performed": False, "deferred_reason": "below_threshold"}
         vacuum_work = snapshot is not None and bool(snapshot[3] or _local_store_vacuum_due(snapshot[2]))
         if vacuum_work and snapshot[2][0] == 0:
@@ -615,7 +614,7 @@ def maintain_local_events_lane(request: StorageLaneRequest) -> dict:
             if reason is not None:
                 vacuum_work = False
                 vacuum["deferred_reason"] = reason
-        initial_work = snapshot is None or event_work or vacuum_work or alignment_work or segment_work
+        initial_work = snapshot is None or event_work or vacuum_work or segment_work
         if initial_work:
             budget = request.budget.capped(items=STORAGE_LANE_SLICE_ENTRIES,
                                           size=STORAGE_LANE_SLICE_BYTES, ms=STORAGE_LANE_SLICE_MS)
@@ -633,21 +632,11 @@ def maintain_local_events_lane(request: StorageLaneRequest) -> dict:
                     _FTS_BATCH_LIMITS.reset(token)
                 deleted, mirrored, scanned, vacuum, after, segments_pending = _local_events_advance(
                     store, request, snapshot, budget, receipt, segments_due=segment_work)
-                if store.fts_available and budget.remaining_ms() > 0 and scanned < budget.max_bytes:
-                    with store._connection() as conn:
-                        alignment_work = _local_events_alignment_needed(conn)
-                        job = _fts_job(conn) if alignment_work else None
-                    if alignment_work:
-                        alignment = store.rebuild_fts_step(max_rows=budget.max_items,
-                            max_bytes=budget.max_bytes - scanned, max_ms=budget.remaining_ms(),
-                            start_new=job is None or job['phase'] == 'complete')
-                        # 通道顶层是冻结 schema；开放 cursor 只展示进度，重建权威仍在原 SQLite job。
-                        receipt['cursor']['fts_alignment'] = {key: alignment[key] for key in ('status', 'copied')}
                 if source_failure:
                     raise source_failure[0]
             receipt.update(deleted_items=deleted, bytes=scanned,
                            freed_bytes=vacuum.get("released_pages", 0) * after[2][3])
-            cycle_pending = cycle_pending or event_work or vacuum_work or alignment_work or bool(
+            cycle_pending = cycle_pending or event_work or vacuum_work or bool(
                 deleted or mirrored or segments_pending or vacuum.get("performed"))
             snapshot = after
         receipt["backlog"] = snapshot[0]
@@ -1313,10 +1302,18 @@ def _fts_shadow_sql(conn):
     declaration = row[0] if row else ''
     match = re.fullmatch(r'''CREATE\s+VIRTUAL\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?
         (?:"records_fts"|records_fts)\s+USING\s+fts5
-        (\(\s*id\s+UNINDEXED\s*,\s*title\s*,\s*content\s*,\s*
-        tokenize\s*=\s*'(?:[^']|'')*'\s*\))\s*;?''', declaration, re.I | re.X)
+        (\(\s*id\s+UNINDEXED\s*,\s*title\s*,\s*content\s*
+        (?:,\s*tokenize\s*=\s*'(?:[^']|'')*'\s*)?\))\s*;?''', declaration, re.I | re.X)
     if match is None:
         raise _FtsRebuildDeferred('fts rebuild deferred: unsupported active FTS schema')
+    from . import schema
+    stored = schema._read_local_state(conn, schema._FTS_SCHEMA_VERSION_KEY)
+    if schema._newer_fts_version(stored):
+        raise _FtsRebuildDeferred('fts rebuild deferred: newer active FTS version')
+    if stored != schema._FTS_SCHEMA_VERSION:
+        # active仍是旧分词器；目标声明来自唯一schema，而不是复制旧布局后冒签新版本。
+        return schema._FTS_TABLE_SQL.format(tokenizer=schema._FTS_TOKENIZE).replace(
+            ' IF NOT EXISTS', '').replace('records_fts', 'maintenance_fts_shadow', 1)
     return 'CREATE VIRTUAL TABLE maintenance_fts_shadow USING fts5' + match.group(1)
 
 
@@ -1510,18 +1507,8 @@ def _fts_check_space(store):
             page_bound = int(conn.execute('PRAGMA page_size').fetchone()[0]) * int(conn.execute('PRAGMA page_count').fetchone()[0])
         except sqlite3.Error:
             pass
-        names = tuple('records_fts_' + suffix for suffix in ('data', 'idx', 'content', 'docsize', 'config'))
-        present = {row[0] for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ("
-            + ','.join('?' for _ in names) + ')', names)}
-        if present == set(names):
-            try:
-                value = conn.execute('SELECT SUM(pgsize) FROM dbstat WHERE name IN ('
-                    + ','.join('?' for _ in names) + ')', names).fetchone()[0]
-                if type(value) is int and value > 0:
-                    estimate = value
-            except sqlite3.Error:
-                pass
+        # 整库页数是影子FTS的保守上界；dbstat SUM会遍历索引全部页，不能藏在有界首拍。
+        estimate = page_bound
     if estimate is None:
         try:
             database = store.db_path.stat().st_size
@@ -1822,11 +1809,13 @@ def _fts_prepare(store):
 # LLM: 保留完整raw行、任务及本批正文代次CAS；最终只作有限目录stat，不在写门读正文。
 # 函数用途: 拒绝准备后的库、结构、记录、delta或正文变化。
 def _fts_validate(store, conn, snapshot):
+    # 先拒绝准备后版本/DDL变化；不能让新版本判定遮住原快照CAS异常。
+    if snapshot.job is None or not _typed_rebuild_rows_equal(_read_rebuild_state(conn), snapshot.state):
+        raise BlockingIOError('local_store_rebuild_snapshot_changed')
     job = _fts_job(conn)
-    if (snapshot.job is None or not _fts_same_job(job, snapshot.job)
+    if (not _fts_same_job(job, snapshot.job)
             or _rebuild_db_identity(store.db_path) != snapshot.db_identity
             or json.loads(job['identity']) != list(snapshot.db_identity)
-            or not _typed_rebuild_rows_equal(_read_rebuild_state(conn), snapshot.state)
             or _fts_pack(snapshot.state) != job['state']):
         raise BlockingIOError('local_store_rebuild_snapshot_changed')
     if snapshot.columns:
@@ -1982,6 +1971,7 @@ def _fts_publish(store, conn, snapshot):
         conn.execute(statement)
     store._record_event(conn, 'fts_rebuilt', '', {'count': job['copied']},
         **({'append_records': store._append_coordinator_event_records} if store.coordinator_io else {}))
+    store._record_fts_schema_version(conn)
     store._record_fts_rebuild_complete(conn)
     conn.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES(?, 'true')", (FTS_ROWID_ALIGNED_KEY,))
     _fts_update(conn, phase='complete', verify_cursor=snapshot.advance, verified_count=job['copied'])

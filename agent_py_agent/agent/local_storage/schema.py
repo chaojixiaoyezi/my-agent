@@ -16,6 +16,7 @@ import stat
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 
 from ..common.global_write_commit import execute_global_write
 from ..common.json_io import append_private_jsonl_records_unlocked, locked_json_path
@@ -31,6 +32,8 @@ logger = logging.getLogger(__name__)
 
 # 串行化本进程的新库出生，硬链接被拒时也只对尚未发表的库创建并关闭 FD。
 _SQLITE_BIRTH_LOCK = threading.Lock()
+# 有界维护只收紧本上下文连接的锁等待，不改变普通业务30秒合同。
+_LOCAL_CONNECTION_TIMEOUT = ContextVar("local_store_connection_timeout", default=30.0)
 
 # FTS5 records 索引的 schema 版本。中文检索失灵根因:默认 unicode61 把一整段汉字
 # 当作 1 个 token(实测 sqlite 3.53 下 '记忆推送模式...' 整串=单 token),子串/词
@@ -348,17 +351,7 @@ class LocalStoreSchemaMixin:
         fingerprint = _local_schema_fingerprint(self.enable_fts)
         with self._connection() as conn:
             self._ensure_schema(conn, fingerprint)
-        # 索引刚被迁移重建(旧 unicode61 表被丢弃),用现有 records 回填新 trigram 索引。
-        # rebuild_fts 由 maintenance mixin 提供;最小 schema-only store 没有它时跳过
-        # 回填(它本就没有 records 内容文件,新空索引即正确)。
-        rebuild = getattr(self, "rebuild_fts", None)
-        if self._fts_needs_rebuild and self._fts_available and callable(rebuild):
-            try:
-                rebuild()
-                self._fts_needs_rebuild = False
-            except sqlite3.OperationalError:
-                # 回填失败不能让 store 起不来:LIKE 兜底仍可用,下次 rebuild_fts 再补。
-                pass
+        # 正文重建仅由正式维护按持久job续作；构造不能同步遍历旧库。
 
     # LLM: 写锁内复查命中需结束本初始化事务；仅实际安装者返回True，避免重复迁移或报警。
     # 函数用途: 在同一事务完成需要的建表与迁移，或者只恢复 FTS 实例状态。
@@ -431,35 +424,30 @@ class LocalStoreSchemaMixin:
     # 函数用途: 创建或升级可重建的全文索引，返回语句是否成功以决定能否盖完成指纹。
     def _init_fts_schema(self, conn: sqlite3.Connection) -> bool:
         try:
-            self._migrate_fts_schema(conn)
+            current = self._migrate_fts_schema(conn)
             conn.execute(_FTS_TABLE_SQL.format(tokenizer=_FTS_TOKENIZE))
             self._fts_available = True
-            self._record_fts_schema_version(conn)
+            if current:
+                self._record_fts_schema_version(conn)
             return True
         except sqlite3.OperationalError:
             self._fts_available = False
             return False
 
-    # LLM: 只丢弃纯 FTS 投影，不动正文事实；迁移 SQL 包含在摘要，调用方在事务外按旧语义回填。
-    # 函数用途: 分词器版本变化时重建索引，并告诉初始化器需要回填。
-    def _migrate_fts_schema(self, conn: sqlite3.Connection) -> None:
-        """旧 FTS schema(无 trigram)在版本不匹配时丢弃并标记回填。
-
-        records_fts 是纯索引,正文事实源在 records 表/内容文件,DROP 后 rebuild_fts
-        可无损重建。仅当 records_fts 已存在且记录的 schema 版本与当前不一致时才丢弃,
-        首建(无表)不触发回填。"""
+    # LLM: 旧active保持可读；目标分词器只在影子原子发表后盖版本，不在启动清空索引。
+    def _migrate_fts_schema(self, conn: sqlite3.Connection) -> bool:
         has_fts = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='records_fts'"
         ).fetchone()
         if not has_fts:
             needs_rebuild = conn.execute("SELECT 1 FROM records LIMIT 1").fetchone() is not None
             _write_local_state(conn, _FTS_REBUILD_PENDING_KEY, "true" if needs_rebuild else "false")
-            return
+            return True
         stored_version = _read_local_state(conn, _FTS_SCHEMA_VERSION_KEY)
         if stored_version == _FTS_SCHEMA_VERSION or _newer_fts_version(stored_version):
-            return
-        conn.execute(_FTS_DROP_SQL)
+            return True
         _write_local_state(conn, _FTS_REBUILD_PENDING_KEY, "true")
+        return False
 
     # LLM: 新程序可记录已建好的版本，旧程序不能覆盖新库的版本事实。
     # 函数用途: 保存 FTS 声明版本但不执行降级。
@@ -480,10 +468,10 @@ class LocalStoreSchemaMixin:
             ensure_private_dir(self.events_path.parent)
         _private_sqlite_files(self.db_path, create=True)
         fresh = os.stat(self.db_path).st_size == 0
-        conn = sqlite3.connect(self.db_path, timeout=30.0, factory=sqlite_connection_factory())
+        conn = sqlite3.connect(self.db_path, timeout=_LOCAL_CONNECTION_TIMEOUT.get(), factory=sqlite_connection_factory())
         try:
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute(f"PRAGMA busy_timeout={int(_LOCAL_CONNECTION_TIMEOUT.get() * 1000)}")
             # LLM: 只在尚未建表的空文件启用增量回收；现存数据库绝不在连接时转换。
             if fresh:
                 conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
@@ -576,13 +564,7 @@ class LocalStoreSchemaMixin:
         self._fts_needs_rebuild = False
         fingerprint = _local_schema_fingerprint(self.enable_fts)
         self._local_write(lambda: self._initialize_coordinator_schema(fingerprint))
-        rebuild = getattr(self, "rebuild_fts", None)
-        if self._fts_needs_rebuild and self._fts_available and callable(rebuild):
-            try:
-                rebuild()
-                self._fts_needs_rebuild = False
-            except sqlite3.OperationalError:
-                pass
+        # 与普通构造一致：这里只恢复结构事实，不同步回填历史正文。
 
     # LLM: 只准备原root/files/events父目录，路径来自同Store；不接任意目录或做扫描。
     # 函数用途: 在固定初始化末门内执行原三处目录确保。

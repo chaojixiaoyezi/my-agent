@@ -394,7 +394,7 @@ def test_rebuild_fts_migration_pending_recovers_with_c_strategy(tmp_path, monkey
     door = Door()
     with global_write_commit_scope(door):
         enabled = LocalStore(path, coordinator_io=True)
-        assert enabled._fts_needs_rebuild is False
+        assert enabled._fts_needs_rebuild is True
         assert enabled.rebuild_fts() == 1
     assert read_sql(enabled, "SELECT title FROM records_fts") == [("原记录",)]
     monkeypatch.setattr(schema_module, "_FTS_SCHEMA_VERSION", "next")
@@ -405,11 +405,15 @@ def test_rebuild_fts_migration_pending_recovers_with_c_strategy(tmp_path, monkey
     monkeypatch.setattr(LocalStore, "_replace_fts_row", fail_after_row)
     with global_write_commit_scope(door):
         failed = LocalStore(path, coordinator_io=True)
+        with pytest.raises(sqlite3.OperationalError, match="mid rebuild"):
+            failed.rebuild_fts()
     assert failed._fts_needs_rebuild
     assert read_sql(failed, "SELECT value FROM metadata WHERE key='records_fts_rebuild_pending'") == [("true",)]
     monkeypatch.setattr(LocalStore, "_replace_fts_row", replace)
     with global_write_commit_scope(door):
         recovered = LocalStore(path, coordinator_io=True)
+        assert recovered._fts_needs_rebuild
+        recovered.rebuild_fts()
     assert not recovered._fts_needs_rebuild
     assert read_sql(recovered, "SELECT title FROM records_fts") == [("原记录",)]
 

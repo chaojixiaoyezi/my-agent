@@ -131,6 +131,10 @@ def test_local_fts_migration_invalidates_fingerprint_and_backfills(tmp_path, mon
     monkeypatch.setattr(local_schema, "_FTS_TOKENIZE", "unicode61")
     reopened = LocalStore(path)
     with reopened._connection() as conn:
+        assert "trigram" in conn.execute("SELECT sql FROM sqlite_master WHERE name='records_fts'").fetchone()[0]
+        assert conn.execute("SELECT title FROM records_fts").fetchone()[0] == "保留"
+    reopened.rebuild_fts()
+    with reopened._connection() as conn:
         sql = conn.execute("SELECT sql FROM sqlite_master WHERE name='records_fts'").fetchone()[0]
         assert "unicode61" in sql
         assert conn.execute("SELECT title FROM records_fts").fetchone()[0] == "保留"

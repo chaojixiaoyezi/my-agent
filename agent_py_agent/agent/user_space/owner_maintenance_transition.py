@@ -34,6 +34,7 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
                         quota_max_ms=None, quota_max_entries=None, config=None):
     from .owner_maintenance import (
         OwnerMaintenanceResult,
+        _advance_local_fts_projection,
         _backfill_hung_runs,
         _cleanup_owner_runtime,
         _maintain_local_store_events,
@@ -43,10 +44,11 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
         _quota_only_continuation_due,
         _reclaim_text_vector_cache_orphans,
         _retention_deletion_safe,
+        _retention_maintenance_due,
         _run_quota_continuation_slice,
         _tighten_archive_permissions,
+        _write_local_fts_projection,
         _write_maintenance_result,
-        owner_maintenance_due,
         reclaim_owner_orphan_lock_files,
         run_owner_storage_maintenance_slice,
     )
@@ -78,8 +80,11 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
         return transition(execute)
 
     runtime_cleanup = _cleanup_owner_runtime(home, now=now, commit_transition=commit)
-    if not owner_maintenance_due(home.owner_home_dir, now=now):
-        return OwnerMaintenanceResult(False, "not_due")
+    projection = _advance_local_fts_projection(home, header, now, commit=commit, config=config)
+    if not _retention_maintenance_due(home.owner_home_dir, now=now):
+        return commit(lambda: _write_local_fts_projection(path, header, projection)) if projection is not None else OwnerMaintenanceResult(False, 'not_due')
+    if projection is not None:
+        header = {**header, 'local_store_fts_upgrade': projection}
     if _quota_only_continuation_due(home.owner_home_dir, header, now):
         return _run_quota_continuation_slice(
             path, home, header, now, coordinator=True, commit_transition=commit,
@@ -107,6 +112,9 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
                "storage_maintenance": run_owner_storage_maintenance_slice(
                    home, json.loads(before) if before else {}, retention, now=now, coordinator=True,
                    quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries, commit_transition=commit)}
+
+    if projection is not None:
+        effects['local_store_fts_upgrade'] = projection
 
     # LLM: 外层commit已持原state锁且完成字节CAS；仍写唯一原文件，不制造已确认物理退出或新调度事实。
     # 函数用途: 用实际执行结果提交本轮原维护状态。

@@ -869,6 +869,10 @@ class _OwnerWakeHints:
         due = None
         if policy.get("maintenance_enabled", True) and interval > 0:
             due = current if owner_maintenance_due(home, now=current) else float(marker.get("last_attempt_at") or 0) + interval
+        from ..agent.local_storage.fts_upgrade import next_upgrade_at
+        index_due = next_upgrade_at(Path(home), marker, current)
+        if index_due is not None:
+            due = index_due if due is None else min(due, index_due)
         if due is not None and not_before is not None:
             due = max(due, not_before)
         with self._notice_lock:

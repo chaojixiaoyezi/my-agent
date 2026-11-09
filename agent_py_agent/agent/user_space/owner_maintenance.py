@@ -153,7 +153,57 @@ def _owner_pressure(home) -> dict | None:
 # LLM: 原关闭/间隔规则优先；已提交partial沿同一maintenance.json下一拍续作，不重新等待整周期。
 #   建过配额账（受有限配额准入）的owner账脏或一轮未走完时同样下一拍续作对账，不让一次准入外写入拒绝增长一整天。
 # 函数用途: 判断原维护是否到期，包含有游标的未完成片与待追赶的配额对账。
-def owner_maintenance_due(
+def _advance_local_fts_projection(home, previous, current, *, commit=None, config=None):
+    from ..local_storage.fts_upgrade import advance_upgrade
+
+    if getattr(config, 'local_store_fts_enabled', True) is False:
+        from ..local_storage.fts_upgrade import FTS_UPGRADE_INTERVAL_SECONDS, next_upgrade_at
+        due = next_upgrade_at(home.owner_home_dir, previous, current)
+        if due is None or due > current:
+            return None
+        return {**previous.get('local_store_fts_upgrade', {}), 'status': 'disabled',
+                'next_at': current + FTS_UPGRADE_INTERVAL_SECONDS}
+    return advance_upgrade(home.owner_home_dir, previous, current, commit=commit)
+
+
+def _read_fts_maintenance_state(path):
+    report = read_json_object_report(path, context='owner_maintenance.fts_source')
+    if report.load_error is not None:
+        error = ValueError('FTS_MAINTENANCE_SOURCE_UNREADABLE')
+        error.load_error = report.load_error
+        raise error
+    return report.payload
+
+
+def _write_local_fts_projection(path, previous, projection):
+    """只保存原发现游标；重建事实由同一SQLite job持有，不签删除许可。"""
+    if projection is None:
+        return OwnerMaintenanceResult(False, 'not_due')
+    from .home_retention import require_maintenance_fence
+    from .owner_quota import refresh_owner_quota_host_rows
+
+    expected = maintenance_fence(previous)
+    require_maintenance_fence(_read_fts_maintenance_state(path), expected)
+    payload = {**previous, 'schema_generation': 1, 'schema_version': 'owner-maintenance.v1',
+               'maintenance_epoch': expected[1] + 1, 'local_store_fts_upgrade': projection}
+    write_json_file_atomic_unlocked(path, payload)
+    refresh_owner_quota_host_rows(path.parent.parent, ('data', ''))
+    return OwnerMaintenanceResult(True, 'index_maintenance')
+
+
+def owner_maintenance_due(owner_home: str | Path, *, now: float | None = None) -> bool:
+    from ..local_storage.fts_upgrade import next_upgrade_at
+
+    home = Path(owner_home)
+    current = float(now if now is not None else time.time())
+    previous = _read_fts_maintenance_state(_maintenance_state_path(home))
+    maintenance_fence(previous)
+    maintenance_fence(previous.get('storage_maintenance', {}))
+    due = next_upgrade_at(home, previous, current)
+    return (due is not None and due <= current) or _retention_maintenance_due(home, now=current)
+
+
+def _retention_maintenance_due(
     owner_home: str | Path,
     *,
     now: float | None = None,
@@ -227,15 +277,18 @@ def run_owner_retention_if_due(
             expected_state_fingerprint=expected_state_fingerprint,
             quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries, config=config)
     if not owner_maintenance_due(home.owner_home_dir, now=current):
-        return OwnerMaintenanceResult(False, "not_due")
+        return OwnerMaintenanceResult(False, 'not_due')
     state_path = _maintenance_state_path(home.owner_home_dir)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     with locked_json_path(state_path):
-        if not owner_maintenance_due(home.owner_home_dir, now=current):
-            return OwnerMaintenanceResult(False, "not_due")
-        previous = read_json_object_report(state_path, context="owner_maintenance.state").payload
+        previous = _read_fts_maintenance_state(state_path)
         maintenance_fence(previous)
         maintenance_fence(previous.get('storage_maintenance', {}))
+        projection = _advance_local_fts_projection(home, previous, current, config=config)
+        if not _retention_maintenance_due(home.owner_home_dir, now=current):
+            return _write_local_fts_projection(state_path, previous, projection)
+        if projection is not None:
+            previous = {**previous, 'local_store_fts_upgrade': projection}
         if _quota_only_continuation_due(home.owner_home_dir, previous, current):
             return _run_quota_continuation_slice(
                 state_path, home, previous, current,
@@ -278,6 +331,8 @@ def run_owner_retention_if_due(
                    "local_store_events_maintenance": local_events,
                    "storage_maintenance": run_owner_storage_maintenance_slice(home, previous, retention, now=current,
                        quota_max_ms=quota_max_ms, quota_max_entries=quota_max_entries, state_locked=True)}
+        if projection is not None:
+            effects['local_store_fts_upgrade'] = projection
         effects['workflow_maintenance'] = run_owner_workflow_maintenance(home, previous, now=current,
             safe_to_delete=_retention_deletion_safe(retention),
             service=workflow_service)

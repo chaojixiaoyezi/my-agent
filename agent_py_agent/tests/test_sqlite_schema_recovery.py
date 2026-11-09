@@ -34,11 +34,15 @@ def test_fts_enable_backfills_records_created_while_disabled(tmp_path):
     store.upsert_record(source_type="memory", source_id="m", title="原文", content="启用之前的中文正文")
     enabled = LocalStore(path)
     assert enabled.fts_available
+    assert enabled._fts_needs_rebuild
+    enabled.rebuild_fts()
     assert enabled._fts_needs_rebuild is False
     assert _fts_titles(enabled) == ["原文"]
     disabled = LocalStore(path, enable_fts=False)
     disabled.upsert_record(source_type="memory", source_id="n", title="新增", content="关闭之后的中文正文")
-    assert _fts_titles(LocalStore(path)) == ["原文", "新增"]
+    reopened = LocalStore(path)
+    reopened.rebuild_fts()
+    assert _fts_titles(reopened) == ["原文", "新增"]
 
 
 def test_fts_backfill_failure_remains_pending_and_recovers_on_reopen(tmp_path, monkeypatch):
@@ -58,6 +62,8 @@ def test_fts_backfill_failure_remains_pending_and_recovers_on_reopen(tmp_path, m
     assert failed.count_records() == 1
     monkeypatch.setattr(LocalStore, "rebuild_fts", original)
     recovered = LocalStore(path)
+    assert recovered._fts_needs_rebuild
+    recovered.rebuild_fts()
     assert recovered._fts_needs_rebuild is False
     assert _fts_titles(recovered) == ["保留"]
     assert _metadata(path, "records_fts_rebuild_pending")[0] == "false"
@@ -96,12 +102,16 @@ def test_mid_backfill_failure_rolls_back_and_pending_survives(tmp_path, monkeypa
 
     monkeypatch.setattr(LocalStore, "_replace_fts_row", write_then_fail)
     failed = LocalStore(path)
+    with pytest.raises(sqlite3.OperationalError, match="injected after FTS row write"):
+        failed.rebuild_fts()
     assert failed._fts_needs_rebuild
     assert _fts_titles(failed) == []
     assert failed.count_records() == 1
     assert _metadata(path, "records_fts_rebuild_pending")[0] == "true"
     monkeypatch.setattr(LocalStore, "_replace_fts_row", original)
-    assert _fts_titles(LocalStore(path)) == ["保留"]
+    recovered = LocalStore(path)
+    recovered.rebuild_fts()
+    assert _fts_titles(recovered) == ["保留"]
 
 
 @pytest.mark.parametrize("store_type,sql_name", [(RuntimeRepository, "_BASE_RUNTIME_SQL"), (LocalStore, "_BASE_SCHEMA_SQL")])
