@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import threading
 import time
@@ -2271,6 +2272,11 @@ class TuiTurnEventAdapter:
         self._assistant_block_id = ""
         self._assistant_text = ""
         self._model_candidate_text = ""
+        # 非负数是下一序号；-1仅关闭候选输入，-2表示取消/后继取代且拒绝旧采纳帧。
+        self._public_text_calls: dict[str, int] = {}
+        self._public_text_call = ""
+        self._public_text_work = 0
+        self._public_text_commits: set[tuple[str, str, str]] = set()
         self._terminal_response_text = ""
         self._displayed_response_text = ""
         self._display_block_ids: set[str] = set()
@@ -2483,6 +2489,7 @@ class TuiTurnEventAdapter:
     def begin_active_turn_input(self, client_message_ids: tuple[str, ...]) -> None:
         with self._lock:
             self._late_thinking_completion_expected = False
+            _retire_public_text_candidate(self)
             self._complete_active_assistant()
             self.runtime.promote_active_turn_inputs(
                 client_message_ids,
@@ -2511,6 +2518,7 @@ class TuiTurnEventAdapter:
         with self._lock:
             boundary = (str(provider_call_id), tuple(client_message_ids))
             if client_message_ids and boundary not in self._submitted_input_boundaries:
+                _retire_public_text_candidate(self)
                 self._complete_active_assistant()
                 self._submitted_input_boundaries.add(boundary)
             _submit_active_turn_input_ids(
@@ -2736,6 +2744,7 @@ class TuiTurnEventAdapter:
                 if self._complete_thinking():
                     self._late_thinking_completion_expected = True
                 self._tool_input_projector.clear()
+            _retire_public_text_candidate(self)
             self._complete_active_assistant(process=True)
             self._publish_tool_progress(progress)
 
@@ -2767,6 +2776,8 @@ class TuiTurnEventAdapter:
                 phase="interrupted" if summary.interrupted else "failed"
             )
             self._complete_thinking()
+            if summary.interrupted or not summary.response_text:
+                _clear_public_text_candidate(self)
             if not summary.interrupted and summary.response_text:
                 self._finalize_assistant_text(summary.response_text)
             else:
@@ -3054,6 +3065,8 @@ def _consume_gateway_turn_event(
     if kind == "tool_progress" and isinstance(payload.get("progress"), dict):
         adapter.write_progress(dict(payload["progress"]))
         return True
+    if kind in {"assistant_text_delta", "assistant_text_reset", "assistant_text_done"}:
+        return _consume_public_text_event(adapter, payload)
     if kind == "model_delta":
         adapter.write_model(str(payload.get("text") or ""))
         return True
@@ -3166,6 +3179,7 @@ def _close_resumed_turn_generation(
         adapter._close_compact_if_active(phase="interrupted")
         adapter._complete_thinking(phase="interrupted")
         adapter._late_thinking_completion_expected = False
+        _retire_public_text_candidate(adapter)
         adapter._complete_active_assistant(phase="interrupted")
         for block_id in tuple(adapter._open_tool_blocks):
             adapter._publish(
@@ -3512,10 +3526,109 @@ def runtime_has_active_permission(runtime: TuiRuntime) -> bool:
     return runtime._permission_coordinator.active_controller() is not None
 
 
+# 公开候选已由宿主完整上下文净化；只投影到原活动块，绝不提交会话正文。
+# 同调用序号及有界累计拼接成本防重放/欠序；超限只放弃候选，终稿仍可发表。
+def _clear_public_text_candidate(adapter: TuiTurnEventAdapter) -> None:
+    if adapter._public_text_call and adapter._assistant_block_id:
+        adapter._publish("assistant_discarded", "removed", adapter._assistant_block_id,
+            request_id=adapter.request_id)
+        adapter._assistant_block_id = ""
+        adapter._assistant_text = ""
+        adapter._model_candidate_text = ""
+
+
+def _retire_public_text_candidate(adapter: TuiTurnEventAdapter) -> None:
+    _clear_public_text_candidate(adapter)
+    if adapter._public_text_call:
+        adapter._public_text_calls[adapter._public_text_call] = -2
+        adapter._public_text_call = ""
+
+
+def _consume_public_text_event(adapter: TuiTurnEventAdapter, payload: dict[str, Any]) -> bool:
+    call = payload.get("model_call_id")
+    if (not isinstance(call, str) or not call.strip() or len(call) > 240
+            or (payload.get("request_id") and payload["request_id"] != adapter.request_id)):
+        return False
+    calls = adapter._public_text_calls
+    if call not in calls and len(calls) >= 128:
+        return False
+    kind = payload["kind"]
+    expected = calls.get(call, 0)
+    if expected < 0 or adapter._defer_assistant_display:
+        return True
+    if kind == "assistant_text_reset":
+        reason = payload.get("reason")
+        if reason not in {"retry", "cancel", "tool_call", "superseded"}:
+            return False
+        if adapter._public_text_call == call:
+            _clear_public_text_candidate(adapter)
+        calls[call] = 0 if reason == "retry" else (-1 if reason == "tool_call" else -2)
+        return True
+    seq = payload.get("seq")
+    if type(seq) is not int or seq < 0:
+        return False
+    if kind == "assistant_text_done":
+        if seq != max(0, expected - 1) and adapter._public_text_call == call:
+            _clear_public_text_candidate(adapter)
+        calls[call] = -1
+        return True
+    text = payload.get("text")
+    if not isinstance(text, str) or payload.get("level", payload.get("verbose_level")) != "stream":
+        return False
+    if seq < expected:
+        return True
+    if seq != expected:
+        if adapter._public_text_call == call:
+            _clear_public_text_candidate(adapter)
+        calls[call] = -1
+        return True
+    if adapter._public_text_call != call:
+        _clear_public_text_candidate(adapter)
+        if adapter._public_text_call:
+            calls[adapter._public_text_call] = -2
+        adapter._public_text_call = call
+    if adapter._complete_thinking():
+        adapter._late_thinking_completion_expected = True
+    adapter._ensure_assistant_started()
+    cost = len(adapter._assistant_text) + len(text)
+    adapter._public_text_work += cost
+    if cost > 1_048_576 or adapter._public_text_work > 16_777_216:
+        _clear_public_text_candidate(adapter)
+        calls[call] = -1
+        return True
+    adapter._assistant_text += text
+    calls[call] = expected + 1
+    adapter._publish("assistant_delta", "delta", adapter._assistant_block_id,
+        {"text": text}, request_id=adapter.request_id)
+    adapter._record_output_metrics(text)
+    return True
+
+
 # LLM: committed入口在defer后复用原thinking完成/late标记；fallback显式public_stream，final待summary唯一freeze，不覆写stable或续接旧call正文。
 # 函数用途: 将确认过程和终答落到原TUI块，终态summary可更正同一final块而不双发。
 def _consume_committed_assistant_event(adapter: TuiTurnEventAdapter, payload: dict[str, Any]) -> bool:
     kind = str(payload.get("kind") or "")
+    source = payload.get("model_source")
+    source_call = source.get("call_id") if isinstance(source, dict) else None
+    if isinstance(source_call, str) and source_call in adapter._public_text_calls:
+        if adapter._public_text_calls[source_call] == -2:
+            return False
+        if adapter._public_text_call and source_call != adapter._public_text_call:
+            return False
+        key = (source_call, kind, hashlib.sha256(str(payload.get("text") or "").encode()).hexdigest())
+        if key in adapter._public_text_commits:
+            return True
+        adapter._public_text_commits.add(key)
+    if (kind == "assistant_final" and adapter._public_text_calls
+            and adapter._terminal_response_text == str(payload.get("text") or "")):
+        return True
+    replace_public_candidate = bool(adapter._public_text_call)
+    if adapter._public_text_call:
+        # 采纳边界用完整已净化正文替换候选，不能把它再追加一次。
+        call = adapter._public_text_call
+        adapter._model_candidate_text = ""
+        adapter._public_text_calls[call] = -1
+        adapter._public_text_call = ""
     if adapter._defer_assistant_display:
         return True
     with adapter._lock:
@@ -3525,7 +3638,7 @@ def _consume_committed_assistant_event(adapter: TuiTurnEventAdapter, payload: di
         # 完整已确认正文沿原块冻结为过程；没有当前块时按原全文入口创建，不能从旧raw delta补正文。
         with adapter._lock:
             adapter._model_candidate_text = ""
-            if payload.get("replace_candidate") is True:
+            if payload.get("replace_candidate") is True or replace_public_candidate:
                 adapter._ensure_assistant_started()
                 adapter._assistant_text = str(payload.get("text") or "")
             if adapter._assistant_block_id:

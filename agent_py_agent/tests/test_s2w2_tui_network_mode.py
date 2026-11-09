@@ -715,9 +715,11 @@ def test_real_network_tui_stream_steer_approval_stop_new_next_turn(startup_gatew
                 terminal_ids.append(first_id)
                 _wait_until(lambda: any(event.get("kind") == "assistant_text_delta"
                     and "首轮正在生成" in str(event.get("text", "")) for event in received_events))
-                # 旧Gateway候选正文只计量；不能把未提交模型片段当已公开正文。
-                assert not any("首轮正在生成" in block.text
+                # 显式stream的宿主安全候选可见，但仍未冻结为已采纳正文。
+                assert any("首轮正在生成" in block.text
                     for block in runtime.store.snapshot().active_blocks)
+                assert not any("首轮正在生成" in block.text
+                    for block in runtime.store.snapshot().stable_blocks)
                 # /btw必须等原后台快照发布实际执行绑定，收到流片段不等于控制目标已可用。
                 _wait_until(lambda: bool(runtime.execution_target()), timeout=5)
                 assert runtime.execution_target()["turn_id"] == first_id
