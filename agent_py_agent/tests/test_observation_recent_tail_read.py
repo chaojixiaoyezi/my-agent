@@ -194,3 +194,157 @@ def test_tail_applies_persisted_handled_times_after_reopening(tmp_path):
     recent, errors = reopened.recent_report(thread.thread_id, limit=20)
     assert recent == [*events[-20:-1], replace(events[-1], handled_at=100)]
     assert errors == []
+
+
+@pytest.mark.parametrize('suffix', ['\n' * 300000, '{bad\n' * 60000, 'x' * 300000])
+def test_bounded_window_never_falls_back_on_sparse_or_bad_tail(observation_store, monkeypatch, suffix):
+    path = observation_store.storage.observation_path('thread')
+    path.write_text(json.dumps(_row(1)) + '\n' + suffix)
+    monkeypatch.setattr(store_observations, 'read_jsonl_report', lambda *a, **k: pytest.fail('禁止全账读取'))
+    monkeypatch.setattr(store_observations, 'read_manifest', lambda *a, **k: pytest.fail('禁止全清单读取'))
+    events, errors, coverage = observation_store.recent_window_report('thread', max_bytes=4096)
+    assert not events and errors
+    assert coverage['bytes_read_upper_bound'] <= 4096
+    assert not coverage['requested_window_complete'] and not coverage['source_exhausted']
+    assert coverage['history_coverage'] == 'unknown'
+
+
+def test_bounded_window_distinguishes_requested_window_from_full_history(observation_store, monkeypatch):
+    path = observation_store.storage.observation_path('thread')
+    path.write_text(''.join(json.dumps(_row(i)) + '\n' for i in range(5000)))
+    monkeypatch.setattr(observation_store, '_read_handled', lambda ids: {})
+    events, errors, coverage = observation_store.recent_window_report('thread')
+    assert [e.observation_id for e in events] == [f'obs-{i}' for i in range(4872, 5000)]
+    assert not errors and coverage['requested_window_complete']
+    assert not coverage['source_exhausted'] and coverage['history_coverage'] == 'unknown'
+    assert coverage['bytes_read_upper_bound'] <= 262144
+    path.write_text(json.dumps(_row(1)) + '\n')
+    events, errors, coverage = observation_store.recent_window_report('thread')
+    assert len(events) == 1 and not errors
+    assert coverage['requested_window_complete'] and coverage['source_exhausted']
+    assert coverage['history_coverage'] == 'complete'
+
+
+@pytest.mark.parametrize('header', [None, {'pending': {}, 'coverage': 'complete', 'last_seq': 1},
+                                   {'pending': None, 'coverage': 'partial', 'last_seq': 1}])
+def test_bounded_window_unknown_archive_navigation_never_reads_full_manifest(observation_store, monkeypatch, header):
+    path = observation_store.storage.observation_path('thread')
+    directory = store_observations.archive_dir_for(path)
+    directory.mkdir(parents=True)
+    (directory / 'manifest.json').write_bytes(b'x' * 1000000)
+    monkeypatch.setattr(store_observations, 'read_manifest_header', lambda _: header)
+    monkeypatch.setattr(store_observations, 'read_manifest', lambda *a: pytest.fail('禁止全清单读取'))
+    monkeypatch.setattr(store_observations, 'recover_pending', lambda *a: pytest.fail('只读窗口不恢复'))
+    _, errors, coverage = observation_store.recent_window_report('thread')
+    assert errors and not coverage['requested_window_complete']
+    assert coverage['history_coverage'] == 'unknown'
+
+
+def test_bounded_window_missing_segment_and_segment_budget_are_partial(observation_store, monkeypatch):
+    path = observation_store.storage.observation_path('thread')
+    directory = store_observations.archive_dir_for(path)
+    directory.mkdir(parents=True)
+    monkeypatch.setattr(store_observations, 'read_manifest_header', lambda _: {'pending': None, 'coverage': 'complete', 'last_seq': 10000})
+    _, errors, coverage = observation_store.recent_window_report('thread', max_segments=2)
+    assert coverage['segments_read'] == 2
+    assert set(coverage['reason_codes']) == {'archive_segment_missing', 'archive_segment_budget_exhausted'}
+    assert errors and not coverage['requested_window_complete']
+
+
+@pytest.mark.parametrize('operation', ['replace', 'truncate'])
+def test_bounded_window_reports_deterministic_concurrent_file_changes(observation_store, monkeypatch, operation):
+    path = observation_store.storage.observation_path('thread')
+    path.write_text(json.dumps(_row(1)) + '\n')
+    original = store_observations.os.fdopen
+    class InterleavedRead:
+        def __init__(self, handle):
+            self.handle = handle
+        def __enter__(self):
+            self.handle.__enter__()
+            return self
+        def __exit__(self, *args):
+            return self.handle.__exit__(*args)
+        def __getattr__(self, name):
+            return getattr(self.handle, name)
+        def read(self, size):
+            raw = self.handle.read(size)
+            if operation == 'replace':
+                newer = path.with_suffix('.new')
+                newer.write_text(json.dumps(_row(2)) + '\n')
+                newer.replace(path)
+            else:
+                path.write_bytes(b'')
+            return raw
+    monkeypatch.setattr(store_observations.os, 'fdopen', lambda *a, **k: InterleavedRead(original(*a, **k)))
+    monkeypatch.setattr(observation_store, '_read_handled', lambda ids: {})
+    _, errors, coverage = observation_store.recent_window_report('thread')
+    assert any(e.get('reason_code') == 'ledger_changed_during_read' for e in errors)
+    assert not coverage['requested_window_complete']
+
+
+def test_bounded_window_keeps_events_but_reports_unknown_ack(observation_store, monkeypatch):
+    path = observation_store.storage.observation_path('thread')
+    path.write_text(json.dumps(_row(1)) + '\n')
+    def unknown(ids):
+        raise store_observations.ObservationIndexError('unknown')
+    monkeypatch.setattr(observation_store, '_read_handled', unknown)
+    events, errors, coverage = observation_store.recent_window_report('thread')
+    assert len(events) == 1 and errors
+    assert 'handled_coverage_unknown' in coverage['reason_codes']
+    assert not coverage['requested_window_complete']
+
+
+def test_bounded_window_reads_real_archive_header_and_orders_recent_segments(observation_store, monkeypatch):
+    path = observation_store.storage.observation_path('thread')
+    directory = store_observations.archive_dir_for(path)
+    directory.mkdir(parents=True)
+    path.write_text(json.dumps(_row(3)) + '\n')
+    for number in (1, 2):
+        (directory / f'seg-{number:06d}.jsonl').write_text(json.dumps(_row(number)) + '\n')
+    header = {'schema': 'thread_ledger_segments.v1', 'pending': None, 'coverage': 'complete', 'last_seq': 2}
+    (directory / 'manifest.json').write_text(json.dumps(header)[:-1] + ',\n"segments": ' + 'x' * 1000000)
+    monkeypatch.setattr(observation_store, '_read_handled', lambda ids: {})
+    monkeypatch.setattr(store_observations, 'read_manifest', lambda *a: pytest.fail('禁止全清单读取'))
+    events, errors, coverage = observation_store.recent_window_report('thread', limit=2, max_bytes=4096)
+    assert [e.observation_id for e in events] == ['obs-2', 'obs-3']
+    assert not errors and coverage['requested_window_complete']
+    assert not coverage['source_exhausted'] and coverage['history_coverage'] == 'unknown'
+    assert coverage['segments_read'] == 1 and coverage['bytes_read_upper_bound'] <= 4096
+    (directory / 'manifest.json').write_bytes(b'x' * 1000000)
+    _, errors, coverage = observation_store.recent_window_report('thread', limit=2, max_bytes=4096)
+    assert errors and 'archive_navigation_unknown' in coverage['reason_codes']
+
+
+def test_bounded_window_header_alone_never_proves_full_archive_history(observation_store, monkeypatch):
+    path = observation_store.storage.observation_path('thread')
+    directory = store_observations.archive_dir_for(path)
+    directory.mkdir(parents=True)
+    header = {'schema': 'thread_ledger_segments.v1', 'pending': None, 'coverage': 'complete', 'last_seq': 1}
+    (directory / 'manifest.json').write_text(json.dumps(header)[:-1] + ',\n"segments": INVALID')
+    (directory / 'seg-000001.jsonl').write_text(json.dumps(_row(1)) + '\n')
+    monkeypatch.setattr(observation_store, '_read_handled', lambda ids: {})
+    events, errors, coverage = observation_store.recent_window_report('thread')
+    assert len(events) == 1 and errors
+    assert coverage['reason_codes'] == ['archive_history_unverified']
+    assert not coverage['source_exhausted'] and coverage['history_coverage'] == 'unknown'
+    assert not coverage['requested_window_complete']
+
+
+def test_bounded_window_reports_header_replaced_during_navigation(observation_store, monkeypatch):
+    path = observation_store.storage.observation_path('thread')
+    directory = store_observations.archive_dir_for(path)
+    directory.mkdir(parents=True)
+    manifest = directory / 'manifest.json'
+    header = {'schema': 'thread_ledger_segments.v1', 'pending': None, 'coverage': 'complete', 'last_seq': 0}
+    manifest.write_text(json.dumps(header)[:-1] + ',\n"segments": []}')
+    read_header = store_observations.read_manifest_header
+    def replace_header(directory):
+        result = read_header(directory)
+        newer = directory / 'new.json'
+        newer.write_text(manifest.read_text())
+        newer.replace(manifest)
+        return result
+    monkeypatch.setattr(store_observations, 'read_manifest_header', replace_header)
+    _, errors, coverage = observation_store.recent_window_report('thread')
+    assert errors and 'archive_navigation_changed' in coverage['reason_codes']
+    assert not coverage['requested_window_complete']

@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import stat
 import threading
 import time
 from collections import OrderedDict
@@ -14,8 +15,9 @@ from pathlib import Path
 from typing import Any
 
 from ..common.json_io import append_private_jsonl_records_unlocked, locked_json_path
+from ..common.nofollow_fs import open_readonly_file_beneath
 from ..gateway_parts.io import read_json_file_report
-from ..runtime_errors import runtime_error_report
+from ..runtime_errors import DataCorruptionError, runtime_error_report
 from ..user_space.storage_lanes import STORAGE_LANE_SLICE_BYTES
 from .models import (
     ConversationThread,
@@ -25,6 +27,7 @@ from .models import (
 from .observation_index import ObservationIndex, ObservationIndexError
 from .store_index import _file_fingerprint
 from .store_io import (
+    json_row,
     now,
     read_jsonl_report,
     read_jsonl_tail_report,
@@ -315,6 +318,102 @@ class ObservationStore:
                                "message": "thread ledger recent window exceeds bounded archive probe"})
             return [event for chunk in reversed(chunks) for event in chunk], errors
 
+    def recent_window_report(self, thread_id: str, *, limit: int = 128,
+                             max_bytes: int = 262144, max_segments: int = 8):
+        """只读有界近期展示；不足时明确partial，不恢复、扫描目录或回退全历史。
+
+        complete仅证明所请求近期窗口已覆盖，绝不签发任务归属或全历史完整性。
+        字节计数包括最多512字节的归档导航预算；ack索引另守原固定批次合同。
+        """
+        if (type(limit) is not int or not 1 <= limit <= 128
+                or type(max_bytes) is not int or not 1 <= max_bytes <= 1048576
+                or type(max_segments) is not int or not 0 <= max_segments <= 128):
+            raise ValueError("观察窗口需要1至128条、1至1048576字节及0至128段预算")
+        path = self.storage.observation_path(thread_id)
+        directory = archive_dir_for(path)
+        errors, reasons, chunks = [], [], []
+        remaining, segments, count = max_bytes, 0, 0
+        def partial(code, target):
+            if code not in reasons:
+                reasons.append(code)
+            errors.append({"coverage": "partial", "reason_code": code, "path": str(target)})
+        with locked_json_path(path):
+            header = None
+            has_archive = directory.exists()
+            if has_archive:
+                if remaining < 512:
+                    partial("byte_budget_exhausted", directory)
+                else:
+                    remaining -= 512
+                    try:
+                        navigation_before = file_stamp(directory / "manifest.json")
+                        header = read_manifest_header(directory)
+                        if navigation_before != file_stamp(directory / "manifest.json"):
+                            partial("archive_navigation_changed", directory)
+                            header = None
+                    except (OSError, ValueError, TypeError, DataCorruptionError) as exc:
+                        errors.append(runtime_error_report(exc, context="conversation.observations.window"))
+                    if header is None or header.get("pending") is not None:
+                        partial("archive_navigation_unknown", directory)
+                        header = None
+                    elif header["coverage"] != "complete":
+                        partial("archive_coverage_partial", directory)
+            paths = [(path, False)]
+            if header is not None:
+                last = header["last_seq"]
+                paths.extend((directory / f"seg-{seq:06d}.jsonl", True)
+                             for seq in range(last, max(0, last - max_segments), -1))
+            truncated = False
+            all_ranges_read = True
+            for target, archived in paths:
+                if count >= limit:
+                    all_ranges_read = False
+                    break
+                if remaining <= 0:
+                    partial("byte_budget_exhausted", target)
+                    all_ranges_read = False
+                    break
+                if archived:
+                    segments += 1
+                rows, load_errors, cut, consumed, missing = _observation_tail_window(target, remaining, limit - count)
+                remaining -= consumed
+                all_ranges_read = all_ranges_read and not cut
+                errors.extend(load_errors)
+                if load_errors:
+                    partial("unreadable_rows", target)
+                if missing and archived:
+                    partial("archive_segment_missing", target)
+                try:
+                    handled = self._read_handled([str(row.get("observation_id") or "") for row in rows]) if rows else {}
+                except ObservationIndexError as exc:
+                    handled = {}
+                    errors.append(runtime_error_report(exc, context="conversation.observations.window.ack"))
+                    partial("handled_coverage_unknown", target)
+                events, parse_errors = _observation_events(rows, handled)
+                errors.extend(parse_errors)
+                if parse_errors:
+                    partial("unreadable_events", target)
+                chunks.append(events)
+                count += len(events)
+                if cut and count < limit:
+                    truncated = True
+                    partial("tail_range_incomplete", target)
+                    # 当前文件还有未读的较新记录，不能用更旧归档冒充连续尾窗。
+                    break
+            if count < limit and header is not None and header["last_seq"] > segments and not truncated:
+                partial("archive_segment_budget_exhausted", directory)
+            # 小首行只授权近期导航；不读取完整manifest时不能证明全部历史封印。
+            if has_archive and count < limit and not reasons:
+                partial("archive_history_unverified", directory)
+        source_exhausted = not reasons and all_ranges_read and not has_archive
+        coverage = {"status": "partial" if reasons else "complete", "reason_codes": reasons,
+                    "requested_window_complete": not reasons and (count >= limit or source_exhausted),
+                    "source_exhausted": source_exhausted,
+                    "history_coverage": "complete" if source_exhausted else "unknown",
+                    "limit": limit, "bytes_read_upper_bound": max_bytes - remaining,
+                    "segments_read": segments}
+        return [event for chunk in reversed(chunks) for event in chunk][-limit:], errors, coverage
+
     def _recent_path_report(self, path, *, limit, include_handled):
         """保留原单文件尾窗和坏行回退语义；跨段只在当前窗口不足时继续。"""
         if include_handled and limit > 0:
@@ -454,3 +553,51 @@ class ObservationStore:
                 if journal_fp is not None:
                     self._handled_cache_fp = (journal_fp, None)
             return handled
+
+
+def _observation_tail_window(path, max_bytes, limit):
+    """一个nofollow FD只读固定尾窗；不跨预算找有效行，保留损坏与代次变化事实。"""
+    try:
+        descriptor = open_readonly_file_beneath(path.parent, (path.name,))
+    except FileNotFoundError:
+        return [], [], False, 0, True
+    except OSError as exc:
+        return [], [runtime_error_report(exc, context="conversation.observations.window")], True, 0, False
+    errors, rows, consumed = [], [], 0
+    try:
+        with os.fdopen(descriptor, "rb") as handle:
+            before = os.fstat(handle.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                return [], [{"reason_code": "invalid_ledger_type", "path": str(path)}], True, 0, False
+            start = max(0, before.st_size - max_bytes)
+            handle.seek(start)
+            raw = handle.read(max_bytes)
+            consumed = len(raw)
+            after = os.fstat(handle.fileno())
+    except OSError as exc:
+        return [], [runtime_error_report(exc, context="conversation.observations.window")], True, max_bytes, False
+    def fields(info):
+        return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+    try:
+        current = path.lstat()
+    except OSError:
+        current = None
+    if fields(before) != fields(after) or current is None or fields(current) != fields(after):
+        errors.append({"reason_code": "ledger_changed_during_read", "path": str(path)})
+    lines = raw.split(b"\n")
+    if start:
+        lines = lines[1:]
+    nonempty = [line for line in lines if line.strip()]
+    lines = nonempty[-limit:]
+    for line in lines:
+        try:
+            text = line.decode("utf-8")
+        except UnicodeError as exc:
+            errors.append(runtime_error_report(exc, context="conversation.observations.window"))
+            continue
+        row, error = json_row(text, context="conversation.observations.window", path=path, line_number=0)
+        if error is not None:
+            errors.append(error)
+        elif row is not None:
+            rows.append(row)
+    return rows, errors, start > 0 or len(nonempty) > limit, consumed, False
