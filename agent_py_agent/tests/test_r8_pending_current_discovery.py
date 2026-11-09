@@ -273,3 +273,89 @@ def test_root_round_progress_survives_small_lru_and_long_history_per_root(tmp_pa
     observed.clear()
     rows = gateway_pending._pending_approval_round(agent, store, thread_id, tuple(sorted(roots)), deadline=time.monotonic() + 10)
     assert len(rows) == 7 and observed == []
+
+
+@pytest.mark.parametrize('portable', [False, True])
+def test_old_schema_heartbeat_installs_generation_before_body_without_changing_inventory(tmp_path, monkeypatch, portable):
+    import subprocess
+    import sys
+
+    workspace, index, _, _, tasks = _current_set(tmp_path, 1)
+    with index.connect() as db:
+        expected = db.execute("SELECT key,value FROM meta WHERE key IN ('schema','complete','offset','inventory_ready') ORDER BY key").fetchall()
+        db.execute("DELETE FROM meta WHERE key='current_membership_revision'")
+    with pytest.raises(SubagentRunIndexUnavailable):
+        SubagentRunIndex(workspace, read_only=True).current_membership_revision()
+    if portable:
+        from agent_py_agent.agent.subagents.services.persistence import run_index
+        monkeypatch.setattr(run_index.nofollow_fs, '_supports_dir_fd', lambda: False)
+    # 沿已经存在的writer对象同状态心跳；没有重新构造install，也没有成员变更。
+    index.upsert(replace(tasks[0], goal='heartbeat', updated_at=time.time()))
+    cold = SubagentRunIndex(workspace, read_only=True)
+    assert cold.current_membership_revision() > 0
+    with cold.connect() as db:
+        assert db.execute("SELECT key,value FROM meta WHERE key IN ('schema','complete','offset','inventory_ready') ORDER BY key").fetchall() == expected
+    code = ('import sys; from pathlib import Path; '
+            'from agent_py_agent.agent.subagents.services.persistence.run_index import SubagentRunIndex; '
+            'print(SubagentRunIndex(Path(sys.argv[1]),read_only=True).current_membership_revision())')
+    assert int(subprocess.check_output([sys.executable, '-c', code, str(workspace)], text=True)) == cold.current_membership_revision()
+    with index.connect() as db:
+        db.execute("DELETE FROM meta WHERE key='current_membership_revision'")
+    with pytest.raises(RuntimeError, match='body rollback'):
+        with index.connect() as db:
+            db.execute('BEGIN')
+            raise RuntimeError('body rollback')
+    assert SubagentRunIndex(workspace, read_only=True).current_membership_revision() > 0
+
+
+def test_abandoned_current_discovery_slots_expire_without_losing_live_progress(tmp_path, monkeypatch):
+    workspace, _, store, thread, _ = _current_set(tmp_path, 129)
+    clock = [0.0]
+    monkeypatch.setattr(gateway_pending, '_pending_cache_clock', lambda: clock[0])
+    monkeypatch.setattr(gateway_pending, '_PENDING_DISCOVERY_CACHE_LIMIT_COUNT', 2)
+    gateway_pending._current_approval_roots.clear()
+    for name in ('abandoned-one', 'abandoned-two'):
+        _, complete = gateway_pending._current_child_approval_roots(workspace, store, name,
+            deadline=time.monotonic() + 10, scan_limit=1)
+        assert not complete
+    first_key = (str(workspace), 'abandoned-one')
+    first = gateway_pending._current_approval_roots[first_key]
+    first['in_use'] = True
+    clock[0] = 61.0
+    _, complete = gateway_pending._current_child_approval_roots(workspace, store, thread.thread_id,
+        deadline=time.monotonic() + 10, scan_limit=1)
+    assert not complete
+    assert gateway_pending._current_approval_roots[first_key] is first
+    assert first['after'] == 'run-0000' and first['in_use']
+    assert (str(workspace), 'abandoned-two') not in gateway_pending._current_approval_roots
+    roots, complete = gateway_pending._current_child_approval_roots(workspace, store, thread.thread_id,
+        deadline=time.monotonic() + 10, scan_limit=128)
+    assert complete and roots == {'root'}
+    first['in_use'] = False
+
+
+def test_abandoned_root_round_slots_expire_but_locked_round_is_preserved(tmp_path, monkeypatch):
+    _, _, store, _, _ = _current_set(tmp_path, 1)
+    clock = [0.0]
+    monkeypatch.setattr(gateway_pending, '_pending_cache_clock', lambda: clock[0])
+    monkeypatch.setattr(gateway_pending, '_PENDING_DISCOVERY_CACHE_LIMIT_COUNT', 2)
+    gateway_pending._approval_root_rounds.clear()
+    first = gateway_pending._approval_round(store, 'one', ('root-one',))
+    gateway_pending._approval_round(store, 'two', ('root-two',))
+    clock[0] = 30.0
+    with pytest.raises(HostAPIError):
+        gateway_pending._approval_round(store, 'three', ('root-three',))
+    clock[0] = 61.0
+    first['lock'].acquire()
+    try:
+        third = gateway_pending._approval_round(store, 'three', ('root-three',))
+        assert gateway_pending._approval_root_rounds[(str(store.storage.root), 'one')] is first
+        assert tuple(first['queue']) == ('root-one',)
+        assert (str(store.storage.root), 'two') not in gateway_pending._approval_root_rounds
+        assert tuple(third['queue']) == ('root-three',)
+    finally:
+        first['lock'].release()
+    clock[0] = 122.0
+    fourth = gateway_pending._approval_round(store, 'four', ('root-four',))
+    assert tuple(fourth['queue']) == ('root-four',)
+    assert len(gateway_pending._approval_root_rounds) == 1

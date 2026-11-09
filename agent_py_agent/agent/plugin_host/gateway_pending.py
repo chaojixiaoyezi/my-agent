@@ -62,6 +62,9 @@ def pending_inputs(services, authorized, context, thread_id):
     return result
 
 
+_PENDING_DISCOVERY_CACHE_LIMIT_COUNT = 64
+_PENDING_DISCOVERY_CACHE_IDLE_SECONDS = 60.0
+_pending_cache_clock = time.monotonic
 _current_approval_roots = OrderedDict()
 _current_approval_roots_lock = threading.RLock()
 
@@ -86,18 +89,25 @@ def _current_child_approval_roots(workspace, store, thread_id, *, deadline, scan
     key = str(workspace), thread_id
     if not _current_approval_roots_lock.acquire(blocking=False):
         return set(), False
+    state = None
     try:
+        touched = _pending_cache_clock()
+        for old, value in list(_current_approval_roots.items()):
+            if not value['in_use'] and touched - value['touched'] >= _PENDING_DISCOVERY_CACHE_IDLE_SECONDS:
+                _current_approval_roots.pop(old)
         stamp = _run_membership_stamp(index)
         state = _current_approval_roots.get(key)
         if state is None or state['stamp'] != stamp:
-            if state is None and len(_current_approval_roots) >= 64:
+            if state is None and len(_current_approval_roots) >= _PENDING_DISCOVERY_CACHE_LIMIT_COUNT:
                 retired = next((old for old, value in _current_approval_roots.items() if value['complete']), None)
                 if retired is None:
                     return set(), False
                 _current_approval_roots.pop(retired)
-            state = {'stamp': stamp, 'after': '', 'roots': set(), 'root_threads': {}, 'complete': False}
+            state = {'stamp': stamp, 'after': '', 'roots': set(), 'root_threads': {}, 'complete': False,
+                     'touched': touched, 'in_use': False}
             _current_approval_roots[key] = state
         _current_approval_roots.move_to_end(key)
+        state.update(touched=touched, in_use=True)
         # 完整缓存也须走原index覆盖/pending门；只保查找refs，不借缓存绕过canonical提交。
         if state['complete']:
             readiness = index.readiness()
@@ -131,6 +141,8 @@ def _current_child_approval_roots(workspace, store, thread_id, *, deadline, scan
             return set(), False
         return set(state['roots']) if state['complete'] else set(), state['complete']
     finally:
+        if state is not None:
+            state.update(touched=_pending_cache_clock(), in_use=False)
         # pending/忙只是当前不可用；保留游标，下一拍先核持久成员代次再决定能否续用。
         _current_approval_roots_lock.release()
 
@@ -142,17 +154,28 @@ _approval_root_rounds_lock = threading.RLock()
 def _approval_round(store, thread_id, roots):
     key = str(store.storage.root), thread_id
     with _approval_root_rounds_lock:
+        touched = _pending_cache_clock()
+        for old, value in list(_approval_root_rounds.items()):
+            if touched - value['touched'] < _PENDING_DISCOVERY_CACHE_IDLE_SECONDS:
+                continue
+            if value['lock'].acquire(blocking=False):
+                try:
+                    _approval_root_rounds.pop(old)
+                finally:
+                    value['lock'].release()
         state = _approval_root_rounds.get(key)
         if state is None or state['roots'] != roots:
-            if state is None and len(_approval_root_rounds) >= 64:
+            if state is None and len(_approval_root_rounds) >= _PENDING_DISCOVERY_CACHE_LIMIT_COUNT:
                 # 不逐出未完成轮次，保住已开始owner的公平进展；完成轮次可随时冷重建。
-                retired = next((old for old, value in _approval_root_rounds.items() if not value['queue']), None)
+                retired = next((old for old, value in _approval_root_rounds.items() if not value['queue'] and not value['lock'].locked()), None)
                 if retired is None:
                     raise HostAPIError('STORE_UNAVAILABLE', 503)
                 _approval_root_rounds.pop(retired)
-            state = {'roots': roots, 'queue': deque(roots), 'refs': {}, 'stamps': {}, 'lock': threading.Lock()}
+            state = {'roots': roots, 'queue': deque(roots), 'refs': {}, 'stamps': {}, 'lock': threading.Lock(),
+                     'touched': touched}
             _approval_root_rounds[key] = state
         _approval_root_rounds.move_to_end(key)
+        state['touched'] = touched
         return state
 
 
@@ -199,6 +222,7 @@ def _pending_approval_round(agent, store, thread_id, roots, *, deadline):
             raise HostAPIError('STORE_UNAVAILABLE', 503)
         return rows
     finally:
+        state['touched'] = _pending_cache_clock()
         state['lock'].release()
 
 

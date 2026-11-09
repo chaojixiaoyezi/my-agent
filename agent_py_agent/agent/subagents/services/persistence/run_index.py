@@ -140,6 +140,8 @@ class SubagentRunIndex:
     def _ensure_schema(self, db):
         try:
             if db.execute("SELECT value FROM meta WHERE key='schema'").fetchone() == (4,):
+                if db.execute("SELECT 1 FROM meta WHERE key='current_membership_revision'").fetchone() is None:
+                    self._ensure_membership_revision(db)
                 return False
         except OperationalError as exc:
             if str(exc) != "no such table: meta":
@@ -181,9 +183,12 @@ class SubagentRunIndex:
                 try:
                     _verify_sqlite_files(self.workspace, root_fd, pinned)
                     with db:
-                        if self._ensure_schema(db):
+                        installed = self._ensure_schema(db)
+                        if installed or db.in_transaction:
+                            # schema-ready补入的代次也须先核原FD并提交，业务回滚不能撤销它。
                             _verify_sqlite_files(self.workspace, root_fd, pinned)
                             db.commit()
+                        if installed:
                             logger.warning("SQLITE_SCHEMA_REINSTALLED store=subagent_run_index path=%s", self.path)
                         yield db
                         _verify_sqlite_files(self.workspace, root_fd, pinned)
@@ -252,9 +257,11 @@ class SubagentRunIndex:
         try:
             _verify_sqlite_files(self.workspace, root_info, pinned)
             with db:
-                if self._ensure_schema(db):
+                installed = self._ensure_schema(db)
+                if installed or db.in_transaction:
                     _verify_sqlite_files(self.workspace, root_info, pinned)
                     db.commit()
+                if installed:
                     logger.warning("SQLITE_SCHEMA_REINSTALLED store=subagent_run_index path=%s", self.path)
                 yield db
                 _verify_sqlite_files(self.workspace, root_info, pinned)
