@@ -158,3 +158,47 @@ def test_key_accounting_does_not_allocate_temporary_size_tuples(monkeypatch):
     monkeypatch.setattr(pressure, 'sys', SimpleNamespace(getsizeof=measured))
     assert pressure._context_value_fingerprint(source) == expected
     assert tuple_queries == []
+
+
+def test_large_estimate_preserves_cacheable_prompt_projection(monkeypatch):
+    from agent_py_agent.agent.agent_core import tool_ir_history
+
+    agent, params = _context_case()
+    params.provider_history_messages = [{'role': 'user', 'content': 'x' * 300_000}]
+    original = tool_ir_history.project_native_prompt_history
+    calls = []
+
+    def projected(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tool_ir_history, 'project_native_prompt_history', projected)
+    results = [pressure._model_visible_context_components(agent, params, 'small prompt') for _ in range(3)]
+    assert results[0] == results[1] == results[2]
+    assert results[0][1] > 50_000
+    assert calls == [1]
+    assert params._context_estimate_memo.prompt_projection() is not None
+    assert params._context_estimate_memo._last is None
+
+
+def test_estimate_invalidation_fences_only_estimate_producer():
+    memo = ContextEstimateMemo()
+    revision = memo.context_revision()
+    entered, release = Event(), Event()
+
+    def compute():
+        entered.set()
+        assert release.wait(3)
+        return 'native', 12, {}, 'exact'
+
+    with ThreadPoolExecutor(1) as pool:
+        pending = pool.submit(memo.evaluate, ('estimate',), compute)
+        assert entered.wait(3)
+        try:
+            memo.forget_estimate()
+            memo.remember_prompt_projection(('key', 'output-key', 'complete', ()), revision=revision)
+            assert memo.prompt_projection() is not None
+        finally:
+            release.set()
+        assert pending.result(3)[1] == 12
+    assert memo._last is None

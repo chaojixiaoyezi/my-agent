@@ -763,7 +763,7 @@ def _model_visible_context_components(
     memo = estimate_memo_for(params) if isinstance(state, dict) else None
     key = _context_estimate_key(params, projection, history, guidance, already_forwarded, fingerprint) if memo is not None else None
     if memo is not None and key is None:
-        memo.forget_context()
+        memo.forget_estimate()
     # LLM: 闭包只保留本次key的输入，等待期间不重新取可变params的消息集合。
     # 函数用途: 延迟执行同键的昂贵组件计量。
     def compute():

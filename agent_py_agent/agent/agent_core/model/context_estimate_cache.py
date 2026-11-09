@@ -15,6 +15,7 @@ class ContextEstimateMemo:
         self._lock = Lock()
         self._last = None
         self._revision = 0
+        self._prompt_revision = 0
         self._inflight = {}
         self._prompt_projection = None
         self._inline_batch = None
@@ -25,6 +26,13 @@ class ContextEstimateMemo:
         """不可缓存的新输入释放旧投影；在途等待照常完成，但不重新发表过时代次。"""
         with self._lock:
             self._last = self._prompt_projection = None
+            self._revision += 1
+            self._prompt_revision += 1
+
+    def forget_estimate(self):
+        """估算键超限只释放数字计量；仍有完整小key的prompt投影保持独立寿命。"""
+        with self._lock:
+            self._last = None
             self._revision += 1
 
     # LLM: 当前线程才可借其准备时长，返回独立数字字典，不从其它worker继承秒表。
@@ -49,13 +57,13 @@ class ContextEstimateMemo:
     def context_revision(self):
         """只借同锁轻量代次，昂贵投影和内容复核仍在锁外。"""
         with self._lock:
-            return self._revision
+            return self._prompt_revision
 
     # LLM: 只保留最新投影；共享holder使frozen参数及同轮replace都能复用，不改归档字典。
     # 函数用途: 原子发表一次通过内容核验的纯投影。
     def remember_prompt_projection(self, projection, *, revision):
         with self._lock:
-            if revision == self._revision:
+            if revision == self._prompt_revision:
                 self._prompt_projection = projection
 
     # LLM: 批次取原模型turn身份，预算变动不丢未提交预留；只按真实IR中已提交的call_id结算，同调用重试不重复扣。
