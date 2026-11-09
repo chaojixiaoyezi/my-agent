@@ -90,8 +90,10 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
 
             value = openai_tool_choice(choice or ToolChoice.auto())
             payload["tool_choice"] = {"type": "function", "name": value["function"]["name"]} if isinstance(value, dict) else value
+        from .model_request_capabilities import validate_thinking_request
         from .reasoning_control import responses_reasoning_field, responses_reasoning_update_item
-
+        validate_thinking_request(self, disabled=request.thinking_disabled,
+                                  effort=request.reasoning_effort or request.reasoning_update_effort)
         payload.update(responses_reasoning_field(self.reasoning_control, request.reasoning_effort, self.reasoning_levels,
                                                  disabled=request.thinking_disabled))
         # 压缩降档：请求级 reasoning.effort 不动（前缀不失配），只在 input 末尾追加 configuration_update 项。

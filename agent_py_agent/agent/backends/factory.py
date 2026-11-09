@@ -70,6 +70,7 @@ def get_backend(name: str, config: Any | None = None) -> BaseBackend:
         reasoning_control=resolved_reasoning_control(
             getattr(config, "model_reasoning_control", "auto"), config.api_base, name,
         ),
+        thinking_requirement=getattr(config, "model_thinking_requirement", "auto"),
         reasoning_levels=tuple(getattr(config, "model_reasoning_levels", ()) or ()),
         reasoning_update_items=str(getattr(config, "model_reasoning_update_items", "auto") or "auto"),
         structured_output=resolved_structured_output(

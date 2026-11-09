@@ -106,6 +106,7 @@ class _GenerationFields:
     # 函数用途: 创建高级控件并保留当前表单未暴露的模型能力字段。
     def __init__(self, data: dict, backend: str):
         self.reasoning_update_items = data.get("reasoning_update_items", "auto")
+        self.thinking_requirement = data.get("thinking_requirement")
         self.backend = RadioList(_GENERATION_BACKENDS, default=backend, select_on_focus=True)
         self.temperature, self.top_p = _field(data.get("temperature", "")), _field(data.get("top_p", ""))
         self.queue = _field(data.get("model_queue_wait_seconds", ""))
@@ -133,7 +134,8 @@ class _GenerationFields:
                 "temperature": self.temperature.text, "top_p": self.top_p.text, "model_queue_wait_seconds": self.queue.text,
                 "usage_tags": self.usage.text, "input_modalities": self.modalities.text, "reasoning_levels": self.levels.text,
                 "reasoning_control": self.reasoning.current_value, "structured_output": self.structured.current_value,
-                "reasoning_update_items": self.reasoning_update_items}
+                "reasoning_update_items": self.reasoning_update_items,
+                **({"thinking_requirement": self.thinking_requirement} if self.thinking_requirement is not None else {})}
 
 
 # LLM: 编辑保留原用途/协议；decision 不发送生成采样字段和用途标签，保存无网络，同步用途表单回归。

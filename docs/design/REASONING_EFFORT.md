@@ -309,3 +309,14 @@ my-agent 为了确认 opencode.ai 是否支持 `reasoning_effort`，先后 3 次
 - 采用3a给出的平均输入354000、新增约2000做条件计算：`(354000-2000)/354000 = 99.44%`。前提是历史序列相同、思考和档位分区不变、缓存仍有效；这不是修后官网实测，也不是整体新命中率预测。
 - 若某次开头约160000历史token因误关思考而失去命中，修复至多避免这一部分按未命中价重算；每次费用差额为 `160000 × (未命中单价－命中单价) / 1000000`。没有本轮真实usage或价格证据，不给人民币金额。
 - 本线没有抓真实会话，也没有运行Gateway。合成N/N+1载荷合同不能证明实际落盘、摘要替换、归档引用、重载序列永不变化；该路径由ds7继续。压缩请求的档位及前缀由luna3继续，本线不改压缩代码、不拿本线结果替代辅助调用2.2%的修复验收。下一步先集成已复核规则，再单独处理已捕获的强制分区例外和两条分工结果。
+
+
+## 2026-11-09：必需思考与effort独立
+
+本地候选实现，尚待集成及部署验收。模型档案可显式声明 `thinking_requirement: required_adaptive`；缺省 `auto`，普通模型仍沿原行为。该结构能力独立于 `reasoning_control` 和 `reasoning_levels`，不能用降低effort表达关闭必需思考。主配置中的对应字段是档案派生投影，不另加用户开关。
+
+正式MiniMax端点 `api.minimax.io`、`api.minimaxi.com`、`api.minimax.cn` 与精确模型ID `MiniMax-M3.1-Flash` 的组合由已核对能力目录自动补足，旧档案不需改写；展示名、模型名前缀、报错文本和其它域名不参与判定。已知必需模型的显式optional声明与固定budget控制本地报能力不兼容，不覆盖用户配置。
+
+Anthropic与Chat请求保留adaptive及原effort；Responses仅沿其原reasoning字段，不注入Messages字段。用户显式off、none、minimal或请求关闭思考时，返回 `MODEL_CAPABILITY_MISMATCH`，不发HTTP。内部强制工具的旧关闭兼容逻辑不能覆盖必需思考。MiniMax Anthropic正式合同仅支持auto：none通过不提供工具表达，历史tool-use/result引用保留；required/specific和依赖specific的原结构化信封本地明确拒绝，不静默改成auto、不新增重试。其它模型的合法强制工具与原完整结构化验证保留。
+
+依据：[MiniMax模型调用](https://platform.minimax.io/docs/guides/text-generation)、[Anthropic兼容接口](https://platform.minimax.io/docs/api-reference/text-anthropic-api)。本轮真实失败末个出站包未持久保存，不能据供应商提示反推具体最后调用；隔离回归证明旧forced.none会在已配置low时构造disabled，新能力合同阻止该类无效请求。

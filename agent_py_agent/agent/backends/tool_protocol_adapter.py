@@ -356,8 +356,14 @@ __all__ = [
 def tools_for_choice(
     tools: list[dict[str, Any]] | None,
     choice: ToolChoice | None,
+    *, supported_modes: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     selected = list(tools or ())
+    if choice is not None and supported_modes is not None and choice.mode not in supported_modes:
+        if choice.mode == 'none':
+            return []
+        from .errors import ProviderModelCapabilityError
+        raise ProviderModelCapabilityError('forced_tool_choice_not_supported')
     if choice is None or choice.mode in {"auto", "none"}:
         return selected
     if not selected:

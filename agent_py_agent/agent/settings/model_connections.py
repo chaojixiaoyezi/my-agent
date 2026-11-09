@@ -113,13 +113,16 @@ def _add_one(data: dict, provider_id: str, backend: str, item: object) -> str:
     row = validate_model({"provider_id": provider_id, "model_name": item.get("model_name"), "model_backend": backend,
                           "model_context_window_tokens": item.get("model_context_window_tokens"),
                           "capability": item.get("capability", _capability(backend)),
-                          "reasoning_levels": item.get("reasoning_levels")})
+                          "reasoning_levels": item.get("reasoning_levels"),
+                          "thinking_requirement": item.get("thinking_requirement")})
     existing = next((other for key, other in data["profiles"].items() if key != profile_id and other["provider_id"] == provider_id
                      and other["model_name"] == row["model_name"] and other["model_backend"] == backend), None)
     if existing is not None:
         # 已添加的同名模型不重复添加；只用这次带来的服务商声明刷新思考档位（其它字段不动）。
         if row.get("reasoning_levels"):
             existing["reasoning_levels"] = row["reasoning_levels"]
+        if row.get("thinking_requirement"):
+            existing["thinking_requirement"] = row["thinking_requirement"]
         return ""
     if profile_id in data["profiles"] and data["profiles"][profile_id] != row:
         raise ModelProfileError("这个模型编号已被使用，请重新打开新增模型。")

@@ -18,6 +18,23 @@ class ProviderConfigurationError(RuntimeError):
     error_code = "PROVIDER_CONFIGURATION_INVALID"
 
 
+class ProviderModelCapabilityError(ProviderConfigurationError):
+    """已声明能力与本次控制冲突；本地拒绝，不发请求、不重试或改模型。"""
+
+    error_code = 'MODEL_CAPABILITY_MISMATCH'
+
+    def __init__(self, reason: str):
+        messages = {
+            'invalid_thinking_requirement': '模型思考能力声明无效。',
+            'thinking_requirement_conflict': '该端点的模型要求adaptive思考，不能声明为可关闭。',
+            'thinking_disable_not_supported': '当前模型必须使用adaptive思考，不能关闭；请使用low等受支持档位。',
+            'adaptive_budget_not_supported': 'adaptive思考不能使用固定budget控制，请使用effort或服务商默认。',
+            'forced_tool_choice_not_supported': '当前模型接口不支持本次强制工具选择；请求未发送，不能冒称已强制。',
+        }
+        super().__init__(messages.get(reason, '模型能力与本次请求不兼容。'))
+        self.reason = reason
+
+
 # LLM: 本地配置缺失不是上游拒绝或瞬时故障；不得发请求、重试或切换其它模型。
 # 类用途: 提示用户先配置模型，同时允许无模型状态下使用设置菜单和查看历史。
 class ModelNotConfiguredError(ProviderConfigurationError):

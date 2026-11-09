@@ -221,7 +221,7 @@ def validate_model(value: object) -> dict:
             "model_backend": value["model_backend"], "model_context_window_tokens": None if window is None else int(window),
             "capability": capability, "enabled": value.get("enabled", True), **_usage_tags_field(value, capability),
             **_input_modalities_field(value, capability), **_reasoning_control_field(value, capability),
-            **_reasoning_levels_field(value, capability), **_reasoning_update_items_field(value, capability),
+            **_reasoning_levels_field(value, capability), **_thinking_requirement_field(value, capability), **_reasoning_update_items_field(value, capability),
             **_structured_output_field(value, capability)}
     temperature = parse_temperature(value.get("temperature"))
     if temperature is not None:
@@ -395,7 +395,7 @@ def validate_model_profile(value: object) -> dict:
         "custom_headers": value.get("model_custom_headers", {}), "session_header": value.get("model_session_header", "")})
     if not provider["api_key"] and not provider.get("api_key_ref") and provider.get("transport") != "offline":
         raise ModelProfileError("模型名称、地址和密钥不能为空。")
-    row = {key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds", "capability", "enabled", "usage_tags", "input_modalities", "reasoning_control", "reasoning_levels", "reasoning_update_items", "structured_output") if key in model}
+    row = {key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds", "capability", "enabled", "usage_tags", "input_modalities", "reasoning_control", "reasoning_levels", "thinking_requirement", "reasoning_update_items", "structured_output") if key in model}
     row.update(api_base=provider["api_base"], api_key=provider["api_key"])
     if provider.get("api_key_ref"):
         row["api_key_ref"] = provider["api_key_ref"]
@@ -489,6 +489,7 @@ def resolved_model(data: dict, profile_id: str, *, require_enabled: bool = True,
             # 未声明即 auto，不继承部署配置里为其它模型写的控制方式；思考档位同理，未声明即空（只发通用档位）。
             "model_reasoning_control": model.get("reasoning_control") or "auto",
             "model_reasoning_levels": list(model.get("reasoning_levels") or []),
+            "model_thinking_requirement": model.get("thinking_requirement") or "auto",
             "model_reasoning_update_items": model.get("reasoning_update_items") or "auto",
             "temperature": model.get("temperature"), "top_p": model.get("top_p"),
             "model_queue_wait_seconds": model.get("model_queue_wait_seconds"),
@@ -503,3 +504,14 @@ def resolved_model(data: dict, profile_id: str, *, require_enabled: bool = True,
     else:
         result["model_auth_ref"] = {}
     return result
+
+
+def _thinking_requirement_field(value: dict, capability: str) -> dict:
+    from ..backends.model_request_capabilities import normalize_thinking_requirement
+
+    requirement = normalize_thinking_requirement(value.get('thinking_requirement'))
+    if not requirement:
+        raise ModelProfileError('思考能力只接受auto、optional或required_adaptive。')
+    if requirement != 'auto' and capability != 'agentic':
+        raise ModelProfileError('只有生成模型接受思考能力声明。')
+    return {} if requirement == 'auto' else {'thinking_requirement': requirement}

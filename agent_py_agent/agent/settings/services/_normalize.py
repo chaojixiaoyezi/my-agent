@@ -19,6 +19,7 @@ import re
 from dataclasses import fields
 from functools import cache
 
+from ...backends.model_request_capabilities import THINKING_REQUIREMENTS
 from ...backends.reasoning_control import (
     REASONING_CONTROLS,
     REASONING_LEVELS,
@@ -243,6 +244,7 @@ class ModelFieldsService:
         # 智能程度档位与控制方式取值与 backends/reasoning_control 一致；非法值告警并回默认。
         warnings.extend(_apply_choice_field(out, defaults, "model_reasoning_effort", REASONING_LEVELS))
         warnings.extend(_apply_choice_field(out, defaults, "model_reasoning_control", REASONING_CONTROLS))
+        warnings.extend(_apply_choice_field(out, defaults, "model_thinking_requirement", THINKING_REQUIREMENTS))
         warnings.extend(_apply_choice_field(out, defaults, "model_reasoning_update_items", REASONING_UPDATE_ITEM_MODES))
         # 结构化输出方式取值与 backends/structured_output_mode 一致；非法值告警并回默认。
         warnings.extend(_apply_choice_field(out, defaults, "model_structured_output", STRUCTURED_OUTPUT_MODES))

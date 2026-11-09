@@ -73,7 +73,7 @@ class _StreamCallbacks:
     total_deadline_seconds: float | None = None
 
 
-# LLM: 关闭思考优先（兼容 Anthropic 官方 thinking 参数，不识别的端点如 MiniMax 静默忽略）；否则按档位经
+# LLM: 先核模型思考能力；允许关闭的模型沿原关闭逻辑，其余按档位经
 #   reasoning_control 唯一表换算并过滤模型声明，预算夹在本次 max_tokens 以内；同步 test_reasoning_effort。
 # 函数用途: 按后端冻结的思考控制方式计算本次 Messages 请求的思考字段，不改动共享后端。
 def anthropic_thinking_fields(
@@ -81,16 +81,19 @@ def anthropic_thinking_fields(
     request: _AnthropicGenerateRequest,
     max_tokens: int,
 ) -> dict[str, Any]:
+    from .model_request_capabilities import required_thinking_fields
+    required = required_thinking_fields(backend, disabled=request.thinking_disabled,
+                                        effort=request.reasoning_effort, protocol='anthropic')
     if request.thinking_disabled:
         return {"thinking": {"type": "disabled"}}
     if request.reasoning_effort:
-        return reasoning_payload_fields(
+        return {**required, **reasoning_payload_fields(
             backend.reasoning_control,
             request.reasoning_effort,
             "anthropic",
             ReasoningPayloadLimits(max_tokens, backend.reasoning_levels),
-        )
-    return {}
+        )}
+    return required
 
 
 # LLM: 单次物理流必须把 delta、block-stop 与参数 observer 一起交给 collector；重试边界仍由调用方掌权，
@@ -225,6 +228,11 @@ class AnthropicCompatibleBackend(HttpBackend):
         """Force one non-executable tool block as the provider-native JSON envelope."""
 
         options = request_options or ProviderRequestOptions()
+        from .model_request_capabilities import (
+            requires_adaptive_thinking,
+            validate_thinking_request,
+        )
+        validate_thinking_request(self, disabled=options.thinking_disabled, effort=options.reasoning_effort)
         tool_name = "my_agent_structured_output"
         for attempt in range(2):
             surface = self.structured_request_surface(prompt, response_schema, repair=bool(attempt))
@@ -249,9 +257,9 @@ class AnthropicCompatibleBackend(HttpBackend):
                     token_budget=budget,
                     first_event_timeout_seconds=options.first_event_timeout_seconds,
                     total_deadline_seconds=options.total_deadline_seconds,
-                    # LLM: 强制工具信封不需要推理；部分兼容端点(如 工具运行时 zen)在思考模式下拒绝强制 tool_choice，
-                    # 显式关闭 thinking 可同时满足该约束并节省结构化调用的延迟与 token。
-                    thinking_disabled=True,
+                    # 允许关闭的模型沿原信封约定；必需adaptive的模型保留思考，工具选择仍须通过能力门。
+                    thinking_disabled=not requires_adaptive_thinking(self),
+                    reasoning_effort=options.reasoning_effort if requires_adaptive_thinking(self) else '',
                 )
             )
             blocks = [
@@ -336,7 +344,8 @@ class AnthropicCompatibleBackend(HttpBackend):
         if cache_projection.system:
             payload["system"] = cache_projection.system
         payload.update(anthropic_thinking_fields(self, request, payload["max_tokens"]))
-        selected_tools = tools_for_choice(request.tools, request.tool_choice)
+        selected_tools = tools_for_choice(request.tools, request.tool_choice,
+                                         supported_modes=self.model_request_capabilities.native_tool_choices)
         payload["messages"], selected_tools = anthropic_messages_with_optional_cache(
             prompt=cache_projection.prompt,
             messages=project_input_media(repair_native_messages(request.messages), self.input_media_max_bytes),

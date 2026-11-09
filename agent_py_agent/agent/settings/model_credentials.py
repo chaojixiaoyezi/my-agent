@@ -128,6 +128,7 @@ def _legacy_model_records(raw: dict, *, provider_id: str, environ: Mapping) -> t
                      ("model_queue_wait_seconds", "model_queue_wait_seconds"),
                      ("model_input_modalities", "input_modalities"), ("temperature", "temperature"), ("top_p", "top_p"),
                      ("model_reasoning_control", "reasoning_control"), ("model_reasoning_levels", "reasoning_levels"),
+                     ("model_thinking_requirement", "thinking_requirement"),
                      ("model_reasoning_update_items", "reasoning_update_items"), ("model_structured_output", "structured_output")):
         if old in raw:
             model[new] = raw[old]
@@ -143,7 +144,7 @@ def _decode_legacy_model_values(raw: dict) -> dict:
     defaults = {"api_key": "", "api_key_env": "", "api_base": "", "model_backend": "", "model_name": "",
                 "model_context_window_tokens": None, "temperature": None, "top_p": None,
                 "model_queue_wait_seconds": None, "model_custom_headers": {}, "model_session_header": "",
-                "model_reasoning_control": "", "model_reasoning_update_items": "", "model_structured_output": ""}
+                "model_reasoning_control": "", "model_thinking_requirement": "", "model_reasoning_update_items": "", "model_structured_output": ""}
     return {key: defaults[key] if key in defaults and value in (None, [], "") else value
             for key, value in raw.items()}
 

@@ -701,6 +701,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 当前模型声明的服务商思考档位（如 low/medium/high/xhigh/max/ultra），通常由 /model 档案带入；
     # effort 协议只发声明内的值，留空表示未声明（Responses 沿通用 low/medium/high，Chat/Messages 沿原四档）。
     model_reasoning_levels: list[str] = field(default_factory=list, metadata={"host_only": True, "model_projection": True})
+    # 模型档案的独立思考能力投影；auto按已核端点/精确模型ID，不能用effort档位推断是否能关闭。
+    model_thinking_requirement: str = field(default="auto", metadata={"host_only": True, "model_projection": True})
     # 当前模型能不能在 input 里追加 configuration_update 项改思考档位（OpenAI GPT-6 系列的 Responses 接口）：
     # auto = 按已核对的模型名前缀 gpt-6 判断，on/off = 档案显式声明。压缩降档只在支持时才用这个项。
     model_reasoning_update_items: str = field(default="auto", metadata={"host_only": True, "model_projection": True})

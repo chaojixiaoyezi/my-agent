@@ -254,7 +254,10 @@ class OpenAICompatibleBackend(HttpBackend):
     #   缓存路由只追加顶层字段，不改变 system/tools/messages 前缀；投影与真实发送都走这里。
     # 函数用途: 构造Chat历史、工具、缓存键和输出格式；保留原思考优先级，媒体包含有界文件读取。
     def _request_payload(self, request: _OpenAIGenerateRequest) -> dict[str, Any]:
+        from .model_request_capabilities import required_thinking_fields
         from .sampling import chat_sampling_fields
+        required = required_thinking_fields(self, disabled=request.thinking_disabled,
+                                            effort=request.reasoning_effort, protocol='openai')
 
         payload = {
             "model": self.model_name,
@@ -306,6 +309,11 @@ class OpenAICompatibleBackend(HttpBackend):
                 self.reasoning_control, request.reasoning_effort, "openai",
                 ReasoningPayloadLimits(payload["max_tokens"], self.reasoning_levels),
             ))
+        if required:
+            if payload.get('thinking') == {'type': 'disabled'}:
+                from .errors import ProviderModelCapabilityError
+                raise ProviderModelCapabilityError('thinking_disable_not_supported')
+            payload.update(required)
         if request.response_schema is not None:
             payload["response_format"] = {
                 "type": "json_schema",

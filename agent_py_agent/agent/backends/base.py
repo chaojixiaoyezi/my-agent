@@ -84,6 +84,8 @@ class BackendOptions:
     top_p: float | None = None
     # 已解析的思考控制方式（effort/budget/none，见 reasoning_control.py）；随 profile 冻结，档位按请求传入。
     reasoning_control: str = "none"
+    # 与effort独立的模型能力；auto只取已核端点/模型事实，optional保持原行为。
+    thinking_requirement: str = "auto"
     # 模型档案声明的服务商思考档位（所有 effort 协议按声明过滤）；空表示未声明，沿各协议原通用范围。
     reasoning_levels: tuple[str, ...] = ()
     # 模型能不能用 configuration_update 项改思考档位：auto 按已核对的模型名前缀判断，on/off 由档案显式声明（见 responses.py）。

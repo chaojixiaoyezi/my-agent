@@ -152,6 +152,13 @@ def request_reasoning_options(agent: object, params: object, backend: object, *,
     override = next_call_reasoning_level(params)
     if override and next_call_override_applies(params):
         level = override
+    from ..backends.model_request_capabilities import (
+        requires_adaptive_thinking,
+        validate_thinking_request,
+    )
+    if requires_adaptive_thinking(backend):
+        validate_thinking_request(backend, disabled=False, effort=level)
+        forced = False
     return reasoning_request_values(level, control, forced=forced)
 
 
