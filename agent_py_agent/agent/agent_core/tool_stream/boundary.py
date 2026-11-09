@@ -72,7 +72,6 @@ class ToolBoundaryChunkFilter:
     on_chunk: Callable[[str], None] | None
     max_inline_content_chars: int = MAX_INLINE_WRITE_CONTENT_CHARS
     bypass: bool = False  # native 直通：不解析 text 协议标记，全量转发
-    _text: str = ""
     _forwarded: int = 0
     _closed: bool = False
     cut_detected: bool = field(default=False, init=False)
@@ -82,14 +81,19 @@ class ToolBoundaryChunkFilter:
         default_factory=IncrementalTextToolParser, init=False, repr=False
     )
 
+    @property
+    def _text(self) -> str:
+        return self._parser.text
+
     def __call__(self, chunk: str) -> None:
         value = str(chunk or "")
-        self._text += value
-        self._parser.feed(value)
         if self.bypass:
-            if self.on_chunk is not None:
-                self._forward_to(len(self._text))
+            # 原生工具协议的正文原样逐块转发；最终裁决仍核完整响应。
+            # 若先累计给文本解析器，每个 delta 都会复制两份逐渐增长的全文。
+            if value and self.on_chunk is not None:
+                self.on_chunk(value)
             return
+        self._parser.feed(value)
         # 先转发本帧已确认安全的可见部分再检查中止：abort 抛出时 UI 已推进到
         # 第一个块 open 之前，可见文本与 chunk 切分方式无关（J-4）。
         if self.on_chunk is not None:

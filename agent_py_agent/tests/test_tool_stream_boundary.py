@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from agent_py_agent.agent.agent_core.tool_stream import (
     LongToolContentAbortPayload,
     LongToolContentStreamAbort,
@@ -238,3 +240,21 @@ def test_malformed_tool_protocol_abort_response_uses_host_violation() -> None:
     evidence = json.loads(violation["evidence_preview"])
     assert violation["code"] == "TOOL_CALL_UNCLOSED"
     assert evidence == {"limit": 8, "marker_count": 9, "start_marker": "[TOOL_CALL]"}
+
+
+@pytest.mark.parametrize("observe", [False, True])
+def test_native_delta_never_enters_text_protocol_and_preserves_each_chunk(monkeypatch, observe):
+    from agent_py_agent.agent.backends.text_protocol_parser import IncrementalTextToolParser
+
+    def forbidden(*args):
+        raise AssertionError("native tool calls do not use the text-protocol parser")
+
+    monkeypatch.setattr(IncrementalTextToolParser, "feed", forbidden)
+    seen = []
+    handle = ToolBoundaryChunkFilter(seen.append if observe else None, bypass=True)
+    chunks = ["这段是", "[TOOL_", "", "CALL]示例[/TOOL_CALL]", "文本", "x" * 120000]
+    for value in chunks:
+        handle(value)
+    handle.finish()
+    assert seen == ([part for part in chunks if part] if observe else [])
+    assert handle.complete_tool_text() == "" and not handle.cut_detected

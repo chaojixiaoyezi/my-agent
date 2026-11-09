@@ -231,10 +231,12 @@ def test_bypass_forwards_all_and_never_aborts() -> None:
     boundary = ToolBoundaryChunkFilter(
         forwarded.append, max_inline_content_chars=12, bypass=True
     )
-    boundary('[TOOL_CALL]\n{"tool":"write_file","path":"x.txt","content":"')
-    boundary("A" * 1000)
+    chunks = ['[TOOL_CALL]\n{"tool":"write_file","path":"x.txt","content":"', "A" * 1000]
+    for chunk in chunks:
+        boundary(chunk)
     boundary.finish()
 
-    assert "".join(forwarded) == boundary._text
-    assert boundary._text.endswith("A")
+    # 校验收到的实际原文与分块；native 不需要另存整段响应作为对照。
+    assert forwarded == chunks
+    assert not boundary.cut_detected
     assert boundary.complete_tool_text() == ""
