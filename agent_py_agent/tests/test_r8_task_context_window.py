@@ -167,3 +167,52 @@ def test_named_bind_keeps_active_read_error_blocking(tmp_path):
     with pytest.raises(DataCorruptionError, match='unavailable'):
         store.tasks.bind({'thread_id': thread.thread_id, 'task_id': 'new-named', 'work_kind': 'audit', 'work_name': 'same'})
     assert path.read_bytes() == b'{broken' and not store.storage.task_path('new-named').exists()
+
+
+@pytest.mark.parametrize('active_count', [0, 1, 100])
+def test_active_report_reads_only_active_members_and_keeps_terminal_history_out(tmp_path, monkeypatch, active_count):
+    store, thread, ids = _history(tmp_path, 140)
+    active = ids[:active_count]
+    for identifier in active:
+        path = store.storage.task_path(identifier)
+        data = json.loads(path.read_text())
+        data['status'] = 'active'
+        path.write_text(json.dumps(data))
+    store.threads.write(replace(thread, active_task_ids=active))
+    original, reads = store_tasks._read_task_link, []
+
+    def read(path, identifier):
+        reads.append(identifier)
+        return original(path, identifier)
+
+    monkeypatch.setattr(store_tasks, '_read_task_link', read)
+    monkeypatch.setattr(store.tasks, 'iter_task_ids', lambda *_args: pytest.fail('history traversal'))
+    links, errors = store.tasks.active_report(thread.thread_id)
+    assert not errors and tuple(row.task_id for row in links) == active
+    assert reads == list(active)
+    assert not ({row.task_id for row in links} & set(ids[active_count:]))
+
+
+def test_foreign_active_link_is_rejected_by_active_control_and_named_consumers(tmp_path):
+    from agent_py_agent.agent.gateway_parts.control_service import _session_protected_task_ids
+    from agent_py_agent.agent.runtime_errors import DataCorruptionError
+
+    store, thread, ids = _history(tmp_path, 140)
+    foreign = store.threads.create(canonical_user_id='foreign')
+    assert foreign.thread_id != thread.thread_id
+    path = store.storage.task_path(ids[0])
+    data = json.loads(path.read_text())
+    data.update(thread_id=foreign.thread_id, work_kind='audit', work_name='same')
+    path.write_text(json.dumps(data))
+    before = path.read_bytes()
+    links, errors = store.tasks.active_report(thread.thread_id)
+    assert links == [] and len(errors) == 1
+    assert errors[0]['error_type'] == 'DataCorruptionError'
+    assert errors[0]['scope_resolution'] == 'thread_mismatch'
+    assert errors[0]['task_id'] == ids[0] and errors[0]['expected_thread_id'] == thread.thread_id
+    assert store.tasks.link_report(thread.thread_id, ids[0]) == (None, None)
+    with pytest.raises(ValueError, match='不能确认'):
+        _session_protected_task_ids(store, thread.thread_id)
+    with pytest.raises(DataCorruptionError, match='unavailable'):
+        store.tasks.bind({'thread_id': thread.thread_id, 'task_id': 'new-named', 'work_kind': 'audit', 'work_name': 'same'})
+    assert path.read_bytes() == before and not store.storage.task_path('new-named').exists()

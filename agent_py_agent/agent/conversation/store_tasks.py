@@ -1091,7 +1091,17 @@ class TaskStore:
     # 函数用途: 从线程活动索引读取候选任务，完成记录不因目录扫描重新进入列表。
     def active_report(self, thread_id: str) -> tuple[list[ThreadTaskLink], list[dict[str, Any]]]:
         thread = self._require_thread(thread_id)
-        return self._links_for_ids(thread.active_task_ids)
+        links, errors = self._links_for_ids(thread.active_task_ids)
+        selected = []
+        for link in links:
+            if link.thread_id == thread_id:
+                selected.append(link)
+                continue
+            error = runtime_error_report(DataCorruptionError('task link belongs to another thread'),
+                                         context='conversation.active_tasks.scope')
+            error.update(task_id=link.task_id, scope_resolution='thread_mismatch', expected_thread_id=thread_id)
+            errors.append(error)
+        return selected, errors
 
     # LLM: store_tasks 的持久化合同：按索引顺序加载任务文件并汇总错误，不改变原记录或索引；修改须同步本领域调用方与存储回归。
     # 函数用途: 按索引顺序加载任务文件并汇总错误，不改变原记录或索引。
