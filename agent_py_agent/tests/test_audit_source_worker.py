@@ -360,7 +360,7 @@ def test_slice2_lifecycle_only_visits_unsettled_source_workers(
 
 
 # LLM: 同轮多个watch共用实际运行快照，计数不替代来源核验。
-# 函数用途: 验证来源对账只加载一次运行列表。
+# 函数用途: 验证多个来源共用一次真实请求索引快照。
 def test_slice2_reconcile_reuses_one_run_snapshot(tmp_path: Path, monkeypatch) -> None:
     from agent_py_agent.agent.agent_core.orchestration import lifecycle
 
@@ -370,19 +370,20 @@ def test_slice2_reconcile_reuses_one_run_snapshot(tmp_path: Path, monkeypatch) -
     states = [_watch(owner_home, "audit-source-test", i) for i in range(3)]
     for state in states:
         assert ensure_audit_source_worker(agent, state)["run_id"]
-    original = agent.subagents.list_runs
+    original = source_worker_module.request_scope_runs
     reads = []
 
-    # LLM: 保留原list_runs行为，只记录实际调用。
-    # 函数用途: 计数对账取得运行快照的次数。
-    def counted():
-        reads.append(1)
-        return original()
+    # LLM: 透传真实请求索引和canonical回读，不把全历史列表当作数据源。
+    # 函数用途: 记录快照的明确请求范围及读取次数。
+    def counted(manager, scope_ids, request_key, epoch):
+        reads.append((set(scope_ids), request_key, epoch))
+        return original(manager, scope_ids, request_key, epoch)
 
-    monkeypatch.setattr(agent.subagents, "list_runs", counted)
+    monkeypatch.setattr(source_worker_module, "request_scope_runs", counted)
     report = reconcile_audit_source_workers(agent)
     assert report["checked"] == 3 and report["waiting"] == 3
     assert len(reads) == 1
+    assert reads[0] == ({"audit-source-test"}, "audit-source-test", None)
 
 
 # LLM: 显式空快照有效，不能按真值回退重读，代次过滤仍生效。
@@ -440,28 +441,37 @@ def test_slice2_snapshot_refreshes_after_mutation(tmp_path, monkeypatch, change)
         _watch(owner_home, "audit-source-test", i)
     records, snapshots, reads = [], [], []
 
-    # LLM: 返回独立列表暴露旧快照复用，记录真实读取次数。
-    # 函数用途: 提供随对账变化的本地运行集合。
-    def listing():
-        reads.append(1)
-        return list(records)
+    original = source_worker_module.request_scope_runs
+
+    # LLM: 只观察真实请求查询；记录变更须先写入原canonical和运行索引。
+    # 函数用途: 记录每拍读取的请求范围。
+    def listing(manager, scope_ids, request_key, epoch):
+        reads.append((set(scope_ids), request_key, epoch))
+        return original(manager, scope_ids, request_key, epoch)
 
     # LLM: 仅首个来源制造参数指定的结构化变更，不额外扩大场景。
     # 函数用途: 模拟一次对账变更并记录各拍快照。
     def reconcile(agent, state, *, runs_snapshot=None):
         snapshots.append(runs_snapshot)
         if len(snapshots) == 1:
-            records.append(SimpleNamespace(id="new-worker", status="PENDING"))
+            task = agent.subagents.create_run(
+                goal="new-worker", parent_id=state.audit_root_task_id, root_id=state.audit_root_task_id,
+                attributes={CONVERSATION_REQUEST_ID_ATTR: state.audit_root_task_id},
+            )
+            task.status = TaskStatus.PENDING.value
+            agent.subagents.save(task)
+            records.append(agent.subagents.load(task.id))
             return {"created": change == "created", "action": change}
         return {}
 
-    monkeypatch.setattr(agent.subagents, "list_runs", listing)
+    monkeypatch.setattr(source_worker_module, "request_scope_runs", listing)
     monkeypatch.setattr(source_worker_module, "_reconcile_one_audit_source_worker", reconcile)
     monkeypatch.setattr(source_worker_module, "_record_source_reconcile_result", lambda *a: None)
     monkeypatch.setattr(source_worker_module, "_reconcile_capacity_groups", lambda *a: [])
     reconcile_audit_source_workers(agent)
     assert snapshots == [[], records]
     assert len(reads) == 2
+    assert reads == [({"audit-source-test"}, "audit-source-test", None)] * 2
 
 
 # LLM: 检查点身份稳定，执行scope随代次变化，二者不共用租约含义。

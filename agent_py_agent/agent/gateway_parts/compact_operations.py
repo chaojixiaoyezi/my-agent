@@ -6,6 +6,7 @@ import math
 import time
 from contextlib import nullcontext
 from itertools import chain, islice
+from types import SimpleNamespace
 
 from ..common.cancellation import ToolCancelled
 from ..common.json_io import read_json_object_report
@@ -42,7 +43,7 @@ def idle_compact_busy_state(agent, store, thread):
             return "foreground_active"
     try:
         _tasks, task_errors = store.tasks.list_report(thread.thread_id)
-        report = agent.subagents.list_runs_report()
+        report = _idle_subagent_report(agent.subagents, thread)
         if task_errors or report.load_errors:
             return "activity_unknown"
         for run in report.runs:
@@ -72,6 +73,26 @@ def idle_compact_busy_state(agent, store, thread):
     except (AttributeError, OSError, ValueError, TypeError, RuntimeError):
         return "activity_unknown"
     return ""
+
+
+# LLM: 真实管理器只读运行索引的当前集合与本会话任务谱系，再逐 id 回读 canonical；坏索引/坏行原样进 load_errors。
+#   旧适配器（无索引读口）沿原全量报告；状态与审批判据仍由调用方按原规则逐条裁决。
+# 函数用途: 为闲置判定取得本会话相关子代理，成本随本会话任务数而非 owner 全部历史 run 增长。
+def _idle_subagent_report(manager, thread):
+    indexed = getattr(manager, "list_recovery_runs_report", None)
+    if not callable(indexed):
+        return manager.list_runs_report()
+    runs, errors = {}, []
+    reports = [indexed(), *(indexed(root_id=task_id) for task_id in dict.fromkeys(thread.task_ids))]
+    current = getattr(manager, "list_current_runs_report", None)
+    if callable(current):
+        # 恢复集不含终态待批；无绑定线程的义务仍须让所有会话保守让位。
+        reports.append(current(statuses=("BLOCKED", "WAITING_APPROVAL"), thread_id=thread.thread_id,
+                               include_unbound_thread=True, include_open_capabilities=True))
+    for report in reports:
+        errors.extend(report.load_errors)
+        runs.update((str(getattr(run, "id", "") or ""), run) for run in report.runs)
+    return SimpleNamespace(runs=list(runs.values()), load_errors=errors)
 
 
 # LLM: 仅观察同owner原审批/私卡路径，限制1024条；未知坏账拒绝，不调用会吞读错或续租的展示列表。

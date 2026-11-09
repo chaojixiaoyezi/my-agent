@@ -112,9 +112,13 @@ def identity_outstanding(host, thread) -> tuple[list[str], list]:
     manager = getattr(host, "subagents", None)
     if manager is not None:
         from ..subagents.model_capabilities import capability_request_requires_parent_resolution
-        from ..subagents.models import task_status_in
+        from ..subagents.models import TaskStatus, task_status_in
 
-        report = manager.list_runs_report()
+        current = getattr(manager, "list_current_runs_report", None)
+        report = (current(statuses=tuple(status.value for status in TaskStatus
+                                        if status.value not in {"DONE", "FAILED", "CANCELLED", "STOPPED"}),
+                          thread_id=thread.thread_id, include_open_capabilities=True)
+                  if callable(current) else manager.list_runs_report())
         if report.load_errors:
             refs.append("subagents:unreadable")
         for task in report.runs:

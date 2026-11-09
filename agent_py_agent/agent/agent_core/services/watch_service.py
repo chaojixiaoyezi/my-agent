@@ -409,7 +409,7 @@ def _watch_scoped_dispatch_params(agent: SimpleAgent, dispatch_params: DispatchP
         return replace(dispatch_params, **updates) if updates else dispatch_params
     run_ids = [
         str(getattr(task, "id", "") or "")
-        for task in agent.subagents.list_runs()
+        for task in _watch_current_runs(agent.subagents)
         if str(getattr(task, "id", "") or "").strip()
     ]
     if not run_ids:
@@ -570,12 +570,31 @@ def _run_watch_input_load_error_cycle(
 
 def _watch_dispatch_input_state(agent: SimpleAgent) -> WatchDispatchInputState:
     try:
-        return WatchDispatchInputState(has_inputs=bool(agent.subagents.list_runs()))
+        return WatchDispatchInputState(has_inputs=bool(_watch_current_runs(agent.subagents)))
     except Exception as exc:
         return WatchDispatchInputState(
             has_inputs=False,
             load_error=runtime_error_report(exc, context="watch.subagents.list_runs"),
         )
+
+
+def _watch_current_runs(manager):
+    """恢复义务与当前审批取并集；覆盖未知不得成为 watch 空闲或历史全扫。"""
+    reader = getattr(manager, "list_recovery_runs_report", None)
+    if not callable(reader):
+        return manager.list_runs()
+    reports = [reader()]
+    current = getattr(manager, "list_current_runs_report", None)
+    if callable(current):
+        reports.append(current(statuses=("BLOCKED", "WAITING_APPROVAL"), include_open_capabilities=True))
+    runs = {}
+    for report in reports:
+        if report.load_errors:
+            from ...subagents.manager import SubagentRunIndexUnavailable
+
+            raise SubagentRunIndexUnavailable("watch subagent index coverage unavailable")
+        runs.update((task.id, task) for task in report.runs)
+    return sorted(runs.values(), key=lambda task: task.updated_at or task.created_at, reverse=True)
 
 
 def _run_advancing_watch_cycle(

@@ -54,7 +54,14 @@ from ..concurrency.retry import jittered_backoff
 from ..conversation.audit_requirements import audit_runtime_requirement_text
 from ..conversation.authority import CONVERSATION_REQUEST_ID_ATTR
 from ..conversation.workspace_paths import audit_workspace_path
+from ..runtime_errors import runtime_error_report
 from ..settings.runtime_guard_config import runtime_guard_int
+from ..subagents.manager import (
+    SubAgentListRunsReport,
+    SubAgentManager,
+    SubagentRunIndexUnavailable,
+    request_scope_runs,
+)
 from ..subagents.model_capabilities import capability_request_counts_as_open
 from ..subagents.models import (
     PROVIDER_SUPPLY_FAILURE_TYPES,
@@ -456,6 +463,7 @@ def source_worker_facts(agent: object | None, state: WatchState) -> dict[str, ob
         agent,
         worker_key,
         run_epoch=state.audit_run_epoch,
+        audit_id=state.audit_root_task_id,
     )
     lease = _read_lease(_lease_path(state))
     now = time.time()
@@ -510,6 +518,7 @@ def ensure_audit_source_worker(
         retire_duplicates=True,
         run_epoch=state.audit_run_epoch,
         runs_snapshot=runs_snapshot,
+        audit_id=audit_id,
     )
     if existing is None:
         adopted = _adopt_current_audit_subagent(agent, state, worker_key)
@@ -849,6 +858,7 @@ def settle_audit_source_worker(agent: object, state: WatchState) -> bool:
         agent,
         worker_key,
         run_epoch=state.audit_run_epoch,
+        audit_id=state.audit_root_task_id,
     )
     if task is None:
         return True
@@ -1187,16 +1197,15 @@ def reconcile_audit_source_workers(agent: object) -> dict[str, object]:
     capacity_groups: dict[str, list[tuple[WatchState, str]]] = {}
     runs_snapshot = None
     statuses: dict[str, str] = {}
-    for row in list_states(owner_home):
-        state = _open_audit_watch(owner_home, row)
-        if state is None:
-            continue
+    states = [state for row in list_states(owner_home) if (state := _open_audit_watch(owner_home, row)) is not None]
+    audit_ids = tuple(dict.fromkeys(state.audit_root_task_id for state in states))
+    for state in states:
         if runs_snapshot is None:
-            runs_snapshot = _worker_runs_snapshot(agent)
+            runs_snapshot = _worker_runs_snapshot(agent, audit_ids=audit_ids)
             statuses = {str(getattr(task, "id", "")): str(getattr(task, "status", "")) for task in runs_snapshot}
         result = _reconcile_one_audit_source_worker(agent, state, runs_snapshot=runs_snapshot)
         if _source_worker_snapshot_changed(result, statuses):
-            runs_snapshot = _worker_runs_snapshot(agent)
+            runs_snapshot = _worker_runs_snapshot(agent, audit_ids=audit_ids)
             statuses = {str(getattr(task, "id", "")): str(getattr(task, "status", "")) for task in runs_snapshot}
         workers.append(result)
         _record_source_reconcile_result(summary, capacity_groups, state, result)
@@ -1831,7 +1840,7 @@ def audit_task_has_unreported_findings(agent: object, audit_id: str) -> bool:
     if not selected or manager is None:
         return False
     try:
-        report = manager.list_runs_report()
+        report = _audit_runs_report(manager, selected)
         if list(getattr(report, "load_errors", []) or []):
             return True
         tasks = list(getattr(report, "runs", []) or [])
@@ -3216,26 +3225,49 @@ def _matching_worker_task(
     worker_key: str,
     *,
     run_epoch: object | None = None,
+    audit_id: str = "",
 ) -> object | None:
     task, _retired = _canonical_worker_task(
         agent,
         worker_key,
         retire_duplicates=False,
         run_epoch=run_epoch,
+        audit_id=audit_id,
     )
     return task
 
 
-# LLM: 使用agent现有manager，不构造另一套workspace存储；读取失败保留原匹配函数的空列表语义。
-# 函数用途: 一次读取本agent的run列表，供当前巡检或单次匹配使用。
-def _worker_runs_snapshot(agent: object | None) -> list[object]:
+# LLM: 原manager按打开的请求精确回读；真实索引未知上抛，只有旧适配器保留原空列表错误语义。
+# 函数用途: 取得当前巡检或单次匹配的请求候选，不扫描owner终态历史。
+def _worker_runs_snapshot(agent: object | None, *, audit_ids=None) -> list[object]:
     manager = getattr(agent, "subagents", None) if agent is not None else None
     if manager is None or not callable(getattr(manager, "list_runs", None)):
         return []
+    if isinstance(manager, SubAgentManager):
+        reports = ([_audit_runs_report(manager, audit_id) for audit_id in dict.fromkeys(audit_ids)]
+                   if audit_ids else [manager.list_recovery_runs_report()])
+        runs = {}
+        for report in reports:
+            if report.load_errors:
+                error = SubagentRunIndexUnavailable("subagent state unavailable")
+                error.load_errors = report.load_errors
+                raise error
+            runs.update((task.id, task) for task in report.runs)
+        return list(runs.values())
     try:
         return manager.list_runs()
     except Exception:
         return []
+
+
+def _audit_runs_report(manager, audit_id):
+    """按原请求/谱系索引精确回读，包括终态未送达和配额阻塞；未知不变成空集。"""
+    if not isinstance(manager, SubAgentManager):
+        return manager.list_runs_report()
+    try:
+        return SubAgentListRunsReport(runs=request_scope_runs(manager, (audit_id,), audit_id, None))
+    except Exception as exc:
+        return SubAgentListRunsReport(load_errors=[runtime_error_report(exc, context="audit.source_worker.index")])
 
 
 # LLM: None按原入口读取，显式空快照不回退I/O；key/epoch/结构化属性筛选保持一致。
@@ -3246,8 +3278,10 @@ def _matching_worker_tasks(
     *,
     run_epoch: object | None = None,
     runs_snapshot: list[object] | None = None,
+    audit_id: str = "",
 ) -> list[object]:
-    tasks = _worker_runs_snapshot(agent) if runs_snapshot is None else runs_snapshot
+    tasks = (_worker_runs_snapshot(agent, audit_ids=(audit_id,) if audit_id else None)
+             if runs_snapshot is None else runs_snapshot)
     matching = []
     selected_epoch = None if run_epoch is None else _normalized_run_epoch(run_epoch)
     for task in tasks:
@@ -3276,12 +3310,14 @@ def _canonical_worker_task(
     retire_duplicates: bool,
     run_epoch: object | None = None,
     runs_snapshot: list[object] | None = None,
+    audit_id: str = "",
 ) -> tuple[object | None, int]:
     matching = _matching_worker_tasks(
         agent,
         worker_key,
         run_epoch=run_epoch,
         runs_snapshot=runs_snapshot,
+        audit_id=audit_id,
     )
     if not matching:
         return None, 0
@@ -3504,7 +3540,7 @@ def resume_quota_blocked_source_workers(agent: object, audit_id: str) -> int:
     manager = getattr(agent, "subagents", None)
     if not selected_audit_id or manager is None:
         return 0
-    report = manager.list_runs_report()
+    report = _audit_runs_report(manager, selected_audit_id)
     if list(getattr(report, "load_errors", []) or []):
         raise RuntimeError("subagent state unavailable")
     resumed = 0
