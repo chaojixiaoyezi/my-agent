@@ -194,7 +194,17 @@ def test_sqlite_migration_validates_before_logical_switch(store):
     target = {'datasource_id': 'new-orders', 'kind': 'sqlite', 'title': '新库',
         'database_path': str(store.owner_home / 'new.sqlite')}
     prepared = store.migrate_datasource('orders', target)
-    assert prepared['state'] == 'READY_TO_SWITCH'
+    # 仅输出宿主已有结构化迁移事实；不展开规格、路径、SQL或错误正文。
+    assert prepared['state'] == 'READY_TO_SWITCH', json.dumps({
+        'migration_id': prepared.get('migration_id'),
+        'state': prepared.get('state'),
+        'error_code': prepared.get('error_code'),
+        'error_type': prepared.get('error_type'),
+        'history_states': [row.get('state') for row in prepared.get('history', [])],
+        'validation_ok': prepared.get('validation', {}).get('ok'),
+        'effect_outcome': prepared.get('effect_outcome'),
+        'switch_commit_uncertain': prepared.get('switch_commit_uncertain'),
+    }, sort_keys=True)
     assert prepared['validation']['ok'] and prepared['validation']['row_counts']['orders'] == 2
     assert store.get_datasource_spec('orders').database_path == str(original)
     # 显式switch可复用同一个已经验证的迁移，不覆盖现有目标库或再拷贝一次。
