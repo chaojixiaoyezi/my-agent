@@ -307,7 +307,7 @@ def scoped_connection(path: Path, read_only: bool, connect: Callable[[], sqlite3
             and not runtime_db_exclusive_owned(path)):
         from .sqlite_recovery import recover_sqlite_database
 
-        report = recover_sqlite_database(path)
+        report = recover_sqlite_database(path, automatic=True)
         if report['status'] not in {'healthy', 'recovered', 'superseded'}:
             error = RuntimeDatabaseDeferred(str(report.get('reason', report['status'])))
             error.sqlite_recovery = report

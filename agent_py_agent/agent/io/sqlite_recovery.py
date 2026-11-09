@@ -10,7 +10,12 @@ from pathlib import Path
 
 from ..common import json_io
 from ..runtime_db import salvage
-from ..runtime_db.recovery_guard import runtime_db_generation_guard
+from ..runtime_db.recovery_guard import (
+    RuntimeDatabaseDeferred,
+    runtime_db_corruption_recovery_pending,
+    runtime_db_generation_guard,
+    runtime_db_recovery_pending,
+)
 from ..runtime_db.schema import runtime_db_identity
 from .sqlite_probe import require_plain_sqlite_files, sqlite_connections_locked_out
 
@@ -90,11 +95,17 @@ def _discard_unpublished_candidate(db, state):
             json_io._sync_parent_directory(candidate)
 
 
-def recover_sqlite_database(path: Path) -> dict:
+def recover_sqlite_database(path: Path, *, automatic: bool = False) -> dict:
     """按原代次非阻塞恢复；无法完整读取时永久保留源/四文件备份和操作说明。"""
     db, state = Path(path).absolute(), {}
     try:
-        with runtime_db_generation_guard(db, exclusive=True):
+        with runtime_db_generation_guard(db, exclusive=True, create_intent=not automatic):
+            if automatic:
+                # 锁外selector不是消费权；原控制者可能已完成，或又签发了人工排空意图。
+                if not runtime_db_recovery_pending(db):
+                    raise salvage._RecoveryStopped({'status': 'superseded'})
+                if not runtime_db_corruption_recovery_pending(db):
+                    raise RuntimeDatabaseDeferred('recovery_intent_requires_original_controller')
             with json_io.locked_json_path(salvage._marker_lock(db), blocking=False):
                 state = salvage._load_state(db)
                 current_identity = runtime_db_identity(db)

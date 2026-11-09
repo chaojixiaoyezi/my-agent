@@ -113,7 +113,7 @@ def _lock_windows_generation(descriptor, *, exclusive, blocking):
 
 
 @contextmanager
-def runtime_db_generation_guard(path: Path, *, exclusive: bool = False, blocking: bool = False) -> ContextManager[None]:
+def runtime_db_generation_guard(path: Path, *, exclusive: bool = False, blocking: bool = False, create_intent: bool = True) -> ContextManager[None]:
     """锁侧车永不换 inode；各平台以 SH 保连接、EX 证明恢复前已排空。"""
     path = _path(path)
     owner = (os.getpid(), threading.current_thread())
@@ -127,7 +127,8 @@ def runtime_db_generation_guard(path: Path, *, exclusive: bool = False, blocking
             os.close(descriptor)
         return
     if exclusive:
-        request_runtime_db_recovery(path)
+        if create_intent:
+            request_runtime_db_recovery(path)
         retire_idle_runtime_connections(path)
     elif runtime_db_recovery_pending(path):
         raise RuntimeDatabaseDeferred("recovery_pending")

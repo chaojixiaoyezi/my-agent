@@ -4,7 +4,7 @@
 
 ## 解决问题
 
-- 普通SQLite的CORRUPT/NOTADB意图此前没有消费者。`scoped_connection`的非只读重试现在只自动消费结构化`reason=sqlite_structural_error`的CORRUPT/NOTADB意图；只读访问保持只读。显式EX/人工排空与旧无码意图不能被后来的普通写请求抢先解锁，仍由原控制者或显式恢复入口消费。原runtime数据库继续使用专属恢复器。
+- 普通SQLite的CORRUPT/NOTADB意图此前没有消费者。`scoped_connection`的非只读重试现在只自动消费结构化`reason=sqlite_structural_error`的CORRUPT/NOTADB意图；只读访问保持只读。显式EX/人工排空与旧无码意图不能被后来的普通写请求抢先解锁，仍由原控制者或显式恢复入口消费。自动入口取得EX后重核意图类别；旧意图已完成时不另生新意图，换成人工意图时保持封锁。原runtime数据库继续使用专属恢复器。
 - `by_turn`引用与sidecar此前没有退役入口。新增`gateway_input_refs`内部通道；普通维护与协调者维护调用同一个有界消费者。
 - global_index压缩此前只去重复行。维护现在按持久key游标检查最多128个旧key，仅在明确来源退役后删除最后一行。
 - 后台派工子进程日志此前没有保留消费者。启动与真实wait回收现在推进有界日志维护，不增加线程或常驻任务。

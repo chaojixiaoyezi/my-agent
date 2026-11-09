@@ -171,3 +171,53 @@ def test_real_generic_structural_error_marks_only_corruption_recovery_intent(tmp
             raise AssertionError('damaged source must not be admitted')
     assert deferred.value.sqlite_recovery['status'] == 'requires_recovery'
     assert factory_calls == [True]
+
+
+@pytest.mark.parametrize('replace_with_manual', [False, True])
+def test_automatic_consumer_rechecks_intent_under_ex_before_unlock(tmp_path, monkeypatch, replace_with_manual):
+    from agent_py_agent.agent.io import sqlite_scope
+    from agent_py_agent.agent.runtime_db.recovery_guard import (
+        runtime_db_corruption_recovery_pending,
+        runtime_db_generation_guard,
+    )
+    path = tmp_path / 'local.db'
+    _database(path)
+    request_runtime_db_recovery(path, reason='sqlite_structural_error')
+    selected, replaced = threading.Event(), threading.Event()
+    def controller():
+        assert selected.wait(5)
+        with runtime_db_generation_guard(path, exclusive=True):
+            pass
+        if replace_with_manual:
+            request_runtime_db_recovery(path)
+        replaced.set()
+    thread = threading.Thread(target=controller)
+    thread.start()
+    original_check = sqlite_scope.runtime_db_corruption_recovery_pending
+    def paused_check(db):
+        result = original_check(db)
+        selected.set()
+        assert replaced.wait(5)
+        return result
+    monkeypatch.setattr(sqlite_scope, 'runtime_db_corruption_recovery_pending', paused_check)
+    factories = []
+    def connect():
+        factories.append(True)
+        return sqlite3.connect(path)
+    try:
+        if replace_with_manual:
+            with pytest.raises(sqlite3.OperationalError) as error:
+                with scoped_connection(path, False, connect):
+                    raise AssertionError('new manual intent must stay fenced')
+            assert error.value.sqlite_recovery['reason'] == 'recovery_intent_requires_original_controller'
+            assert runtime_db_recovery_pending(path) and not runtime_db_corruption_recovery_pending(path)
+            assert factories == []
+        else:
+            with scoped_connection(path, False, connect) as conn:
+                assert conn.execute('SELECT count(*) FROM records').fetchone() == (1499,)
+            assert not runtime_db_recovery_pending(path)
+            assert factories == [True]
+    finally:
+        selected.set()
+        thread.join(5)
+    assert not thread.is_alive()
