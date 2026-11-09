@@ -215,3 +215,22 @@ def test_tui_edit_preserves_explicit_thinking_capability():
 
     form = _GenerationFields({'thinking_requirement': 'required_adaptive'}, 'anthropic_compatible')
     assert form.values()['thinking_requirement'] == 'required_adaptive'
+
+
+@pytest.mark.parametrize('level', ['auto', 'off', 'low'])
+def test_effort_display_uses_same_required_capability_as_serializer(level):
+    from agent_py_agent.agent.backends.reasoning_control import describe_config_reasoning_effect
+
+    config = AgentConfig()
+    config.api_base = 'https://api.minimaxi.com/anthropic'
+    config.model_backend, config.model_name = 'anthropic_compatible', 'MiniMax-M3.1-Flash'
+    config.model_reasoning_control, config.model_reasoning_levels = 'effort', ['low', 'medium', 'high', 'xhigh', 'max']
+    text = describe_config_reasoning_effect(level, config)
+    assert 'adaptive' in text
+    if level == 'off':
+        assert 'MODEL_CAPABILITY_MISMATCH' in text and '请求未发送' in text
+        assert text != '请求时关闭思考。'
+    elif level == 'auto':
+        assert '不额外发送推理参数' not in text
+    else:
+        assert 'low' in text

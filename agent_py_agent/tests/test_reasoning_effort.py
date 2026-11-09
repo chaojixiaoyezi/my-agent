@@ -466,3 +466,24 @@ def test_orchestration_native_schema_has_all_eight_levels():
     # items-only 合同（7101c9fa2）：顶层不再有派工字段，effort 只在每个 item 内。
     assert "effort" not in _CREATE_PARAMETER_SCHEMA
     assert _CREATE_PARAMETER_SCHEMA["items"]["items"]["properties"]["effort"]["enum"] == expected
+
+
+def test_effort_command_receipt_keeps_required_thinking_and_explicit_off_visible(tmp_path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[],
+                                    gateway_per_user_owner_scoping=False), tmp_path / "ws")
+    profile_id = str(uuid4())
+    result = execute_model_profile_operation(agent, "add", {"profile_id": profile_id, "profile": {
+        "model_backend": "anthropic_compatible", "model_name": "opaque-model",
+        "api_base": "https://provider.example.invalid", "api_key": "fake-key", "model_context_window_tokens": 128000,
+        "thinking_requirement": "required_adaptive", "reasoning_control": "effort", "reasoning_levels": ["low", "high"]}})
+    assert result["ok"]
+    assert execute_model_profile_operation(agent, "set_default", {"profile_id": profile_id})["ok"]
+    paths = gateway_paths(agent)
+    off = execute_gateway_conversation_control(agent, paths, _command("/effort off"), _scope())
+    assert off.ok and "MODEL_CAPABILITY_MISMATCH" in off.message and "请求未发送" in off.message
+    assert "adaptive" in off.message and "请求时关闭思考。" not in off.message
+    view = execute_gateway_conversation_control(agent, paths, _command("/effort"), _scope())
+    assert "关闭思考（本会话设置）" in view.message and "MODEL_CAPABILITY_MISMATCH" in view.message
+    low = execute_gateway_conversation_control(agent, paths, _command("/effort low"), _scope())
+    assert low.ok and "adaptive" in low.message and "发送 low" in low.message
+    assert "MODEL_CAPABILITY_MISMATCH" not in low.message and "fake-key" not in low.message

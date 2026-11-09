@@ -313,7 +313,14 @@ def describe_level_choices() -> str:
 #   不把配置原始 max_tokens 当出站值。auto/off/none 保持原优先级；联测真实控制服务与参数中心，纯读取、不发请求。
 # 函数用途: 按模型配置说明发送字段或未发送原因，供 /effort 回执和参数中心共用。
 def describe_config_reasoning_effect(level: str, config: object) -> str:
+    from types import SimpleNamespace
+
     from ..settings.defaults import effective_max_output_tokens
+    from .errors import ProviderModelCapabilityError
+    from .model_request_capabilities import (
+        resolve_model_request_capabilities,
+        validate_thinking_request,
+    )
 
     level = normalize_reasoning_level(level) or "auto"
     backend = str(getattr(config, "model_backend", "") or "")
@@ -321,6 +328,20 @@ def describe_config_reasoning_effect(level: str, config: object) -> str:
                                          getattr(config, "api_base", ""), backend)
     protocol = _PROTOCOLS.get(backend.strip().lower(), "")
     levels = tuple(getattr(config, "model_reasoning_levels", ()) or ())
+    # 回执与出站共用能力裁决，不再把必需思考的off说成已关闭；这里只读，不改用户设置。
+    try:
+        capability = resolve_model_request_capabilities(
+            getattr(config, "model_thinking_requirement", "auto"),
+            getattr(config, "api_base", ""), getattr(config, "model_name", ""), backend,
+        )
+        validate_thinking_request(SimpleNamespace(thinking_requirement=capability.thinking_requirement,
+                                                  reasoning_control=control), disabled=level == "off", effort=level)
+    except ProviderModelCapabilityError as exc:
+        return f"{exc.error_code}：{exc} 请求未发送。"
+    if capability.thinking_requirement == "required_adaptive":
+        if level == "auto":
+            return "当前模型必须使用adaptive思考，effort由服务商默认决定。"
+        return "当前模型必须使用adaptive思考；" + describe_reasoning_effect(level, control, protocol=protocol, levels=levels)
     if control == "budget" and protocol == "anthropic" and level not in {"auto", "off"}:
         return _describe_budget_effect(level, protocol, effective_max_output_tokens(config))
     return describe_reasoning_effect(level, control, protocol=protocol, levels=levels)
