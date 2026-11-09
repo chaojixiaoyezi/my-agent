@@ -44,6 +44,7 @@ jobs:
           python -m pytest
           agent_py_agent/tests/test_process_control.py
           agent_py_agent/tests/test_binary_snapshot_identity.py
+          agent_py_agent/tests/test_r8_windows_hot_slice.py
           agent_py_agent/tests/test_curator_message_slices.py::test_large_hot_target_then_small_message_resumes_after_suffix_anchor
           agent_py_agent/tests/test_curator_message_slices.py::test_duplicate_id_keeps_first_match_and_prefix_blank_error
           agent_py_agent/tests/test_curator_message_slices.py::test_exact_metadata_byte_budget_defers_once_then_serves_big_and_small
