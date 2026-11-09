@@ -18,6 +18,25 @@ from .normalize import normalize
 from .recorder import Recorder
 
 
+def _child_worker_exited(child):
+    """终态不是退出：原canonical session须绑定该run/attempt/worker，再证明准确PID已消失。"""
+    session = (child.get('attributes') or {}).get('runner_session')
+    if (not isinstance(session, dict) or session.get('schema_version') != 'runner_session_pool.v1'
+            or session.get('run_id') != child.get('id') or session.get('status') != 'completed'
+            or session.get('in_process') is not False or child.get('runner_active_attempt_id') != ''
+            or any(type(session.get(key)) is not str or not session[key]
+                   for key in ('attempt_id', 'launch_id', 'worker_birth_token'))):
+        return False
+    pid = session.get('worker_pid')
+    if type(pid) is not int or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False  # 存活、PID复用或权限未知均不能当作该执行体已退出。
+
+
 def replay_bounds(parameters):
     """Golden 的状态观察至少留 25 秒，并保留共享 SLO 更大的启动与清理预算。"""
     return {**parameters, "condition_seconds": max(25.0, parameters["condition_seconds"],
@@ -312,7 +331,10 @@ class Replayer:
                 data = read_agent_state_payload(path)
                 if data.get("goal") == "Return fixture-answer.":
                     rows[data["id"]] = data
-            return list(rows.values()) if rows and all(str(row.get("status", "")).upper() in {"DONE", "FAILED", "CANCELLED"} for row in rows.values()) else None
+            # canonical已DONE时，worker仍可能在提交runner-session/投影；下一ask不能抢进这个收口窗口。
+            closed = rows and all(str(row.get("status", "")).upper() in {"DONE", "FAILED", "CANCELLED"}
+                                  and _child_worker_exited(row) for row in rows.values())
+            return list(rows.values()) if closed else None
         children = wait_until(terminal_children, self.bounds["condition_seconds"], self.bounds["poll_seconds"])
         assert len(children) == 1, children
         row = self.payload(request_id, terminal=True)

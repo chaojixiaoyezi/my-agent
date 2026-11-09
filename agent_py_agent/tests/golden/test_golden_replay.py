@@ -4,6 +4,7 @@ from __future__ import annotations
 import difflib
 import json
 import os
+import subprocess
 import sys
 import time
 from fnmatch import fnmatchcase
@@ -14,7 +15,7 @@ import pytest
 
 from .normalize import assert_invariants, normalize
 from .recorder import Recorder
-from .replayer import Replayer, ReplayGatewayProcess, replay
+from .replayer import Replayer, ReplayGatewayProcess, _child_worker_exited, replay
 
 HERE = Path(__file__).parent
 SCENARIOS = [json.loads(path.read_text()) for path in sorted((HERE / "scenarios").glob("*.json"))]
@@ -234,3 +235,38 @@ def test_snapshot_filter_keeps_other_roots_on_the_original_glob(tmp_path, tmp_pa
     assert list(outside.rglob("*.tmp")) == [temporary]
     (tmp_path / "write.tmp").write_text("atomic staging")
     assert list(tmp_path.rglob("*.tmp")) == []
+
+
+@pytest.mark.sandbox_capability("ps", "background_launcher_identity")
+def test_child_terminal_state_waits_for_exact_owned_worker_exit():
+    from agent_py_agent.agent.tooling.process_registry import capture_process_birth_token
+
+    process = subprocess.Popen([sys.executable, '-c', 'import sys;sys.stdin.buffer.read()'],
+                               stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        child = {'id': 'child', 'status': 'DONE', 'runner_active_attempt_id': '', 'attributes': {
+            'runner_session': {'schema_version': 'runner_session_pool.v1', 'run_id': 'child',
+                'attempt_id': 'attempt', 'launch_id': 'launch', 'worker_pid': process.pid,
+                'worker_birth_token': capture_process_birth_token(process.pid),
+                'status': 'completed', 'in_process': False}}}
+        assert child['attributes']['runner_session']['worker_birth_token']
+        assert not _child_worker_exited(child), '终态时真实worker仍活着，不能提前推进下一ask'
+        process.stdin.close()
+        assert process.wait(timeout=5) == 0
+        assert _child_worker_exited(child)
+        session = child['attributes']['runner_session']
+        for key, invalid in (('run_id', 'other'), ('attempt_id', ''), ('launch_id', ''),
+                             ('worker_pid', True), ('worker_birth_token', ''),
+                             ('status', 'running'), ('in_process', True)):
+            original = session[key]
+            session[key] = invalid
+            assert not _child_worker_exited(child), key
+            session[key] = original
+        child['runner_active_attempt_id'] = 'new-attempt'
+        assert not _child_worker_exited(child)
+        del child['runner_active_attempt_id']
+        assert not _child_worker_exited(child)
+    finally:
+        if process.stdin is not None and not process.stdin.closed:
+            process.stdin.close()
+        process.wait(timeout=5)
