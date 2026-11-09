@@ -661,8 +661,14 @@ def test_ready_framing_does_not_guess_keepalive_close_tokens():
 def test_replay_setup_failure_closes_original_socket_without_gc(server, monkeypatch):
     from agent_py_agent.agent.gateway_parts.http_body_readiness import PrefetchedSocket
 
-    failed = threading.Event()
+    failed, closed = threading.Event(), threading.Event()
     retained = []
+    original_close = server.close_request
+
+    def observe_close(sock):
+        original_close(sock)
+        if retained and sock is retained[0]:
+            closed.set()
 
     def fail_timeout(wrapped, _timeout):
         retained.append(wrapped)
@@ -671,9 +677,11 @@ def test_replay_setup_failure_closes_original_socket_without_gc(server, monkeypa
 
     with monkeypatch.context() as scoped:
         scoped.setattr(PrefetchedSocket, 'settimeout', fail_timeout)
+        scoped.setattr(server, 'close_request', observe_close)
         with request(server, 'GET', '/ordinary') as client:
             assert b'GATEWAY_HTTP_BUSY' in response(client)
-        assert failed.wait(1) and retained[0].fileno() == -1
+        # 收到 TCP FIN 只证明 shutdown(SHUT_WR)；再等原句柄自己的 close 完成，仍保留强引用。
+        assert failed.wait(1) and closed.wait(1) and retained[0].fileno() == -1
     assert server._lanes._thread.is_alive()
     assert server._request_slots._value == server.max_outstanding_requests
     with request(server, 'GET', '/ordinary') as client:

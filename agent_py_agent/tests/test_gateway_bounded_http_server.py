@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import http.client
 import json
+import select
 import socket
 import threading
 import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler
+
+import pytest
 
 from agent_py_agent.agent.gateway_parts.bounded_http_server import (
     GatewayBoundedHTTPServer,
@@ -203,3 +207,74 @@ def test_expired_queue_never_enters_product_handler():
         client.close()
         accepted.close()
         server.server_close()
+
+@pytest.mark.parametrize("entry", ["_reject_overloaded_request", "_reject_without_wait"])
+def test_overload_half_close_preserves_response_for_late_request_bytes(entry):
+    # 真实 TCP：先接受并拒绝，客户端读到完整 503 后才把请求尾部送达。
+    # Win32 立即完全关闭会让在途字节产生 RST，客户端甚至读不到状态行。
+    with _TinyBoundedServer(("127.0.0.1", 0), _BlockingHandler) as server:
+        with socket.create_connection(server.server_address, timeout=2) as client:
+            accepted, _ = server.get_request()
+            try:
+                getattr(server, entry)(accepted)
+                with http.client.HTTPResponse(client) as response:
+                    response.begin()
+                    assert response.status == 503 and response.getheader("Retry-After") == "1"
+                    assert json.loads(response.read())["error_code"] == "GATEWAY_HTTP_BUSY"
+                assert accepted.fileno() == -1
+                tail, = server._reject_drains
+                assert tail.getpeername() == client.getsockname()
+                client.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                client.shutdown(socket.SHUT_WR)
+                for _ in range(3):
+                    if tail.fileno() < 0:
+                        break
+                    assert select.select([tail], [], [], 2)[0]
+                    server.service_actions()
+                assert tail.fileno() == -1 and not server._reject_drains
+            finally:
+                accepted.close()
+
+
+def test_overload_retirement_is_bounded_and_shutdown_releases_silent_peers():
+    server = _TinyBoundedServer(("127.0.0.1", 0), _BlockingHandler)
+    clients, accepted = [], []
+    try:
+        for _ in range(server.max_request_workers + 2):
+            clients.append(socket.create_connection(server.server_address, timeout=2))
+            connection, _ = server.get_request()
+            accepted.append(connection)
+            server._reject_without_wait(connection)
+        assert all(sock.fileno() == -1 for sock in accepted)
+        tails = tuple(server._reject_drains)
+        assert len(tails) == server.max_request_workers and all(tail.fileno() >= 0 for tail in tails)
+        assert not server._request_executor._threads
+        server.server_close()
+        assert all(tail.fileno() == -1 for tail in tails)
+    finally:
+        for sock in clients + accepted:
+            sock.close()
+        server.server_close()
+
+
+def test_overload_silent_peer_expires_without_worker(monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.gateway_parts import bounded_http_server as transport
+
+    with _TinyBoundedServer(("127.0.0.1", 0), _BlockingHandler) as server:
+        with socket.create_connection(server.server_address, timeout=2) as client:
+            client.settimeout(2)
+            accepted, _ = server.get_request()
+            try:
+                now = [10.0]
+                monkeypatch.setattr(transport, "time", SimpleNamespace(monotonic=lambda: now[0]))
+                server._reject_without_wait(accepted)
+                tail, = server._reject_drains
+                server.service_actions()
+                assert accepted.fileno() == -1 and tail.fileno() >= 0
+                now[0] += server.request_queue_timeout + 1
+                server.service_actions()
+                assert tail.fileno() == -1 and not server._request_executor._threads
+            finally:
+                accepted.close()
