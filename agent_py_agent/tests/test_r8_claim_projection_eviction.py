@@ -221,3 +221,102 @@ def test_small_directory_same_stat_never_reuses_old_activity(tmp_path, monkeypat
               {'status': 'running', 'thread_id': 'thread'})
         expected = 'foreground_active'
     assert view.claim_activity_state(store.storage, 'thread') == expected
+
+
+@pytest.fixture
+def isolated_portable_projection(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(view, '_CACHE', None)
+    monkeypatch.setattr(view, '_PORTABLE', {})
+    monkeypatch.setattr(view, '_NATIVE', False)
+    monkeypatch.setattr(view, '_supports_dir_fd', lambda: False)
+    now = [1000.0]
+    monkeypatch.setattr(view, 'time', SimpleNamespace(
+        monotonic=lambda: now[0], monotonic_ns=lambda: int(now[0] * 1e9)))
+    read = view._read_claim_report
+    def slow_read(path):
+        now[0] += .006
+        return read(path)
+    monkeypatch.setattr(view, '_read_claim_report', slow_read)
+    yield now
+    for stream, _accessed in view._PORTABLE.values():
+        stream.close()
+    if view._CACHE is not None:
+        view._CACHE[2].close()
+        view._CACHE[1].cleanup()
+
+
+def _occupy_portable_slots(tmp_path):
+    stores = []
+    for number in range(8):
+        store = ConversationStore(tmp_path / f'resident-{number}')
+        for item in range(17):
+            write(store.storage.background_claims_dir / f'{item}.json',
+                  {'status': 'finished', 'thread_id': 'thread'})
+        assert view.claim_activity_state(store.storage, 'thread') == 'activity_unknown'
+        stores.append(store)
+    assert len(view._PORTABLE) == 8
+    return stores
+
+
+def test_small_portable_directory_does_not_wait_for_unrelated_streams(tmp_path, isolated_portable_projection):
+    _occupy_portable_slots(tmp_path)
+    store = ConversationStore(tmp_path / 'small')
+    assert view.claim_activity_state(store.storage, 'thread') == ''
+    write(store.storage.background_claims_dir / 'live.json', {'status': 'running', 'thread_id': 'thread'})
+    assert view.claim_activity_state(store.storage, 'thread') == 'foreground_active'
+    assert len(view._PORTABLE) <= 8
+
+
+def test_portable_waiter_advances_residents_even_when_they_are_not_polled(tmp_path, isolated_portable_projection):
+    _occupy_portable_slots(tmp_path)
+    store = ConversationStore(tmp_path / 'waiting')
+    for item in range(17):
+        write(store.storage.background_claims_dir / f'{item}.json',
+              {'status': 'finished', 'thread_id': 'thread'})
+    for _ in range(30):
+        state = view.claim_activity_state(store.storage, 'thread')
+        assert len(view._PORTABLE) <= 8
+        if state == '':
+            break
+    assert state == '', '等待者须帮助已有有界流推进，不能依赖驻留owner再次被调用'
+
+
+def test_portable_budget_yield_preserves_already_observed_busy_proof(tmp_path, isolated_portable_projection):
+    store = ConversationStore(tmp_path / 'busy')
+    for item in range(17):
+        write(store.storage.background_claims_dir / f'{item}.json',
+              {'status': 'running', 'thread_id': 'thread'})
+    assert view.claim_activity_state(store.storage, 'thread') == 'activity_unknown'
+    key = str(store.storage.background_claims_dir.absolute())
+    with view._LOCK:
+        conn = view._connection()
+        assert conn.execute('SELECT 1 FROM scans WHERE store=? AND complete=0', (key,)).fetchone()
+        assert conn.execute('SELECT 1 FROM busy WHERE store=? AND thread=?', (key, 'thread')).fetchone()
+    for _ in range(10):
+        state = view.claim_activity_state(store.storage, 'thread')
+        if state == 'foreground_active':
+            break
+    assert state == 'foreground_active'
+
+
+@pytest.mark.parametrize('wait_seconds', [0, 6])
+def test_small_finished_scan_can_validate_on_next_slice_without_replaying_body(
+    tmp_path, monkeypatch, isolated_portable_projection, wait_seconds,
+):
+    store = ConversationStore(tmp_path / 'slow-small')
+    write(store.storage.background_claims_dir / 'done.json', {'status': 'finished', 'thread_id': 'thread'})
+    read = view._read_claim_report
+    bodies = []
+    def very_slow(path):
+        bodies.append(path)
+        isolated_portable_projection[0] += .026
+        return read(path)
+    monkeypatch.setattr(view, '_read_claim_report', very_slow)
+    assert view.claim_activity_state(store.storage, 'thread') == 'activity_unknown'
+    isolated_portable_projection[0] += wait_seconds
+    if wait_seconds:
+        # 未核完的source快照也不能越过原5秒TTL；过期必须重读canonical。
+        assert view.claim_activity_state(store.storage, 'thread') == 'activity_unknown'
+    assert view.claim_activity_state(store.storage, 'thread') == ''
+    assert len(bodies) == (2 if wait_seconds else 1)
