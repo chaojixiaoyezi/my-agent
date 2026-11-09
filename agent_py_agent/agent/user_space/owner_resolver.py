@@ -115,11 +115,24 @@ class OwnerHomeResult:
     audit_log_jsonl: Path
 
 
-def resolve_owner_home(root: str | Path, identity: OwnerIdentity | None = None) -> OwnerHomeResult:
+@dataclass(frozen=True)
+class OwnerHomeLocation:
+    """同一规范路径解析的轻量结果；不装配业务路径，也不认证owner。"""
+
+    root: Path
+    identity: OwnerIdentity
+    owner_home_dir: Path
+
+
+def resolve_owner_home_location(root: str | Path, identity: OwnerIdentity | None = None) -> OwnerHomeLocation:
     home = Path(root).expanduser().resolve()
     resolved = identity or OwnerIdentity.local_main()
-    owner_home = _owner_home_dir(home, resolved)
-    return _owner_home_result(home, resolved, owner_home)
+    return OwnerHomeLocation(home, resolved, _owner_home_dir(home, resolved))
+
+
+def resolve_owner_home(root: str | Path, identity: OwnerIdentity | None = None) -> OwnerHomeResult:
+    location = resolve_owner_home_location(root, identity)
+    return _owner_home_result(location.root, location.identity, location.owner_home_dir)
 
 
 # LLM: 仅原C/默认owner物化者调用；规范根内子目录显式no-follow新建0700，种子排他0600，既有目录不chmod，不给W补建能力。

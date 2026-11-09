@@ -28,6 +28,11 @@ def maintenance_clock(monkeypatch):
 def _controller(tmp_path, monkeypatch, maintenance_clock, count, *, partial=()):
     home = ensure_my_agent_home(tmp_path)
     owners = [ensure_owner_home(home.root, OwnerIdentity.provider_user('feishu', f'owner-{i:03d}')) for i in range(count)]
+    # 每拍逻辑now递增1秒；夹具明确每秒到期，原访问/服务断言继续针对真正due的owner。
+    for owner in owners:
+        policy = json.loads(owner.retention_json.read_text())
+        policy['maintenance_interval_seconds'] = 1
+        owner.retention_json.write_text(json.dumps(policy))
     calls = []
     agent = SimpleNamespace(home_paths=home, config=SimpleNamespace(
         owner_maintenance_scan_interval_seconds=60, owner_agent_pool_max_agents=64))
@@ -562,3 +567,119 @@ def test_base_cleanup_clock_failure_does_not_replace_source_exception(tmp_path, 
         controller.tick(now=200_000)
     assert raised.value is source_error
     assert controller._base_yield and controller._discovery_debt
+
+
+def test_not_due_owner_avoids_full_path_assembly_but_refreshes_hint(tmp_path, monkeypatch, maintenance_clock):
+    controller, home, owners, calls = _controller(tmp_path, monkeypatch, maintenance_clock, 1)
+    controller.tick(now=200_000)
+    assembled, notices = [], []
+
+    def forbidden(*args, **kwargs):
+        assembled.append(1)
+        raise AssertionError('not_due must not assemble business paths')
+
+    monkeypatch.setattr(gateway_loops, 'resolve_owner_home', forbidden)
+    monkeypatch.setattr(gateway_loops, 'home_paths_with_owner', forbidden)
+    controller._wake_hints = SimpleNamespace(note_maintenance=lambda owner, path, **kwargs: notices.append((owner, path)))
+    calls.clear()
+    reports = []
+    controller._run_scoped_owner(owners[0].identity, 200_000, reports)
+    assert not assembled and not calls
+    assert len(reports) == 1 and not reports[0].ran and reports[0].status == 'not_due'
+    assert notices == [(('feishu', 'user', 'owner-000'), owners[0].home_dir)]
+
+
+@pytest.mark.parametrize('unknown', [None, 0, 'error'])
+def test_unknown_due_probe_keeps_original_execution_and_error_isolation(tmp_path, monkeypatch, maintenance_clock, unknown):
+    controller, home, owners, calls = _controller(tmp_path, monkeypatch, maintenance_clock, 1)
+
+    def unavailable(*args, **kwargs):
+        if unknown == 'error':
+            raise OSError('synthetic due source unavailable')
+        return unknown
+
+    monkeypatch.setattr(gateway_loops, 'owner_maintenance_due', unavailable)
+    reports = []
+    controller._run_scoped_owner(owners[0].identity, 200_000, reports)
+    assert calls == [owners[0].home_dir]
+    assert len(reports) == 1 and reports[0].ran
+
+
+def test_not_due_preflight_keeps_exact_worker_owner_gate(tmp_path, monkeypatch, maintenance_clock):
+    from agent_py_agent.agent.gateway_parts import request_entry_admission
+    from agent_py_agent.agent.gateway_parts.multiprocess_dispatch import WorkerDispatchError
+    from agent_py_agent.agent.gateway_parts.multiprocess_execution import worker_execution_scope
+
+    controller, home, owners, calls = _controller(tmp_path, monkeypatch, maintenance_clock, 1)
+    original = request_entry_admission.require_request_execution
+    refusals = []
+
+    def checked(**kwargs):
+        try:
+            return original(**kwargs)
+        except WorkerDispatchError as error:
+            refusals.append(error.reason)
+            raise
+
+    monkeypatch.setattr(request_entry_admission, 'require_request_execution', checked)
+    monkeypatch.setattr(gateway_loops, 'owner_maintenance_due', lambda *args, **kwargs: pytest.fail('owner gate must run first'))
+    reports = []
+    with worker_execution_scope(SimpleNamespace(), SimpleNamespace(home_paths=home)):
+        controller._run_scoped_owner(owners[0].identity, 200_000, reports)
+    assert refusals == ['execution_agent_mismatch']
+    assert not reports and not calls and not controller._priority
+
+
+def test_not_due_race_rechecks_new_canonical_continuation(tmp_path, monkeypatch, maintenance_clock):
+    controller, home, owners, calls = _controller(tmp_path, monkeypatch, maintenance_clock, 1)
+    controller.tick(now=200_000)
+    original = gateway_loops.owner_maintenance_due
+    probes = []
+
+    def changed(owner_home, *, now):
+        due = original(owner_home, now=now)
+        probes.append(due)
+        if len(probes) == 1:
+            path = owners[0].data_dir / 'maintenance.json'
+            marker = json.loads(path.read_text())
+            marker['maintenance_partial'] = True
+            path.write_text(json.dumps(marker))
+        return due
+
+    monkeypatch.setattr(gateway_loops, 'owner_maintenance_due', changed)
+    reports = []
+    controller._run_scoped_owner(owners[0].identity, 200_000, reports)
+    assert probes == [False, True]
+    assert len(reports) == 1 and not reports[0].ran
+    assert list(controller._priority) == [('feishu', 'user', 'owner-000')]
+
+
+@pytest.mark.parametrize('identity', [OwnerIdentity.local_main(), OwnerIdentity.local_user('alice'),
+    OwnerIdentity.provider_user('feishu', 'alice'), OwnerIdentity.provider_group('dingtalk', 'group')])
+def test_light_owner_location_uses_original_canonical_path(tmp_path, identity):
+    from agent_py_agent.agent.user_space.owner_resolver import (
+        resolve_owner_home,
+        resolve_owner_home_location,
+    )
+
+    location = resolve_owner_home_location(tmp_path, identity)
+    complete = resolve_owner_home(tmp_path, identity)
+    assert location.root == complete.root and location.identity == complete.identity
+    assert location.owner_home_dir == complete.home_dir
+    assert not location.owner_home_dir.exists()
+
+
+def test_deleted_owner_is_not_hidden_by_a_previous_not_due_probe(tmp_path, monkeypatch, maintenance_clock):
+    import shutil
+
+    from agent_py_agent.agent.user_space import owner_maintenance
+
+    controller, home, owners, calls = _controller(tmp_path, monkeypatch, maintenance_clock, 1)
+    controller.tick(now=200_000)
+    assert not gateway_loops.owner_maintenance_due(owners[0].home_dir, now=200_000)
+    shutil.rmtree(owners[0].home_dir)
+    monkeypatch.setattr(gateway_loops, 'run_owner_retention_if_due', owner_maintenance.run_owner_retention_if_due)
+    reports = []
+    controller._run_scoped_owner(owners[0].identity, 200_001, reports)
+    assert owners[0].home_dir.is_dir() and (owners[0].data_dir / 'maintenance.json').is_file()
+    assert len(reports) == 1 and reports[0].ran

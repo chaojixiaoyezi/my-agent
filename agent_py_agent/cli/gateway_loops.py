@@ -97,6 +97,7 @@ from ..agent.user_space.owner_resolver import (
     home_paths_with_owner,
     owner_identity_from_config,
     resolve_owner_home,
+    resolve_owner_home_location,
 )
 from .gateway_lane_retry import BackgroundLaneRetry
 from .gateway_loop_backoff import LoopErrorBackoff
@@ -2549,18 +2550,31 @@ class _GatewayOwnerMaintenanceController:
     # 函数用途: 维护一个 scoped owner 并登记下拍需要优先续作的对象。
     def _run_scoped_owner(self, identity, current, reports) -> None:
         try:
-            owner = resolve_owner_home(self._base_home.root, identity)
-            scoped_home = home_paths_with_owner(self._base_home, owner)
-            from ..agent.user_space.owner_maintenance import invoke_owner_maintenance
+            from ..agent.gateway_parts.request_entry_admission import require_request_execution
 
-            reports.append(invoke_owner_maintenance(run_owner_retention_if_due, scoped_home,
-                now=current, config=getattr(self._base_agent, "config", None)))
+            location = resolve_owner_home_location(self._base_home.root, identity)
+            require_request_execution(home=location)
+            try:
+                due = owner_maintenance_due(location.owner_home_dir, now=current)
+            except Exception:
+                due = None  # 优化探测未知时仍走原正式入口，不将源错误当not_due。
+            if due is False:
+                reports.append(OwnerMaintenanceResult(False, 'not_due'))
+                owner_home = location.owner_home_dir
+            else:
+                owner = resolve_owner_home(self._base_home.root, identity)
+                scoped_home = home_paths_with_owner(self._base_home, owner)
+                from ..agent.user_space.owner_maintenance import invoke_owner_maintenance
+
+                reports.append(invoke_owner_maintenance(run_owner_retention_if_due, scoped_home,
+                    now=current, config=getattr(self._base_agent, "config", None)))
+                owner_home = scoped_home.owner_home_dir
         except Exception as exc:
             label = "/".join((identity.provider, identity.owner_kind, identity.owner_id))
             _print_gateway_loop_error("gateway_owner_maintenance.owner", label, exc)
             return
         try:
-            due = owner_maintenance_due(scoped_home.owner_home_dir, now=current)
+            due = owner_maintenance_due(owner_home, now=current)
         except Exception:
             # best-effort: 无法确认续作状态时不入优先队列，留给普通分页重试。
             return
@@ -2576,7 +2590,7 @@ class _GatewayOwnerMaintenanceController:
             budget = current_tick_budget()
             not_before = current + max(self.interval, FTS_UPGRADE_INTERVAL_SECONDS) if budget is not None and budget.exhausted() else None
             hints.note_maintenance((identity.provider, identity.owner_kind, identity.owner_id),
-                                   scoped_home.owner_home_dir, not_before=not_before)
+                                   owner_home, not_before=not_before)
 
 
 # LLM: 摘要只打印、不落盘，没有持久化读取方。failed 只算整次被拒（apply_outcome=refused，即 retention 用
