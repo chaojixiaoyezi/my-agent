@@ -71,17 +71,6 @@ jobs:
           -k "not real_gateway_complete_request_still_requires_authentication"
 
       # 隔离 Gateway 的测试宿主用 POSIX 进程组回收；Win32 在上一步实测原生 socket 生命周期。
-      # 仅本次诊断分支：真实 CLI 子进程在 readiness 到期前写 Python 栈到自己的夹具日志。
-      - name: Arm the isolated macOS Gateway startup trace
-        if: runner.os == 'macOS'
-        shell: python
-        run: |
-          from pathlib import Path
-          script = Path("sitecustomize.py")
-          with script.open("x") as output:
-              output.write("import sys\nif sys.orig_argv[-2:] == ['gateway', 'run']:\n"
-                           "    import faulthandler\n    faulthandler.dump_traceback_later(23)\n")
-
       - name: Verify macOS Gateway admission and authenticated receipt
         if: runner.os == 'macOS'
         run: >-
