@@ -680,7 +680,7 @@ class ObservationIndex:
 
     # LLM: 每次 SQL 最多 128 个活跃候选；limit<=0 的旧调用合同只放开活跃结果量，不触碰 handled 历史。
     # 函数用途: 通过 keyset 分页取请求涉及的 pending 引用。
-    def _candidates(self, conn, limit, wake=None):
+    def _candidates(self, conn, limit, wake=None, thread_id=None):
         rows, after = [], None
         while limit <= 0 or len(rows) < limit:
             size = min(128, limit - len(rows)) if limit > 0 else 128
@@ -688,6 +688,9 @@ class ObservationIndex:
             args = (*after, size) if after else (size,)
             where = "needs_main=1" if wake is None else "wake=?"
             args = args if wake is None else (wake, *args)
+            if thread_id is not None:
+                where = "thread=? AND " + where
+                args = (thread_id, *args)
             page = conn.execute("SELECT * FROM pending WHERE " + where + " AND status='pending'" + clause + " ORDER BY due,id LIMIT ?", args).fetchall()
             rows.extend(page)
             if len(page) < size:
@@ -697,9 +700,9 @@ class ObservationIndex:
 
     # LLM: LIMIT 下推到 pending 索引，仅读候选 canonical 字节；未知 legacy 覆盖明确拒绝，不用空表推断未处理。
     # 函数用途: 返回指定数量的活跃待处理观察，不扫描历史；旧 limit<=0 返回全部活跃项。
-    def pending(self, limit, *, wake=None):
+    def pending(self, limit, *, wake=None, thread_id=None):
         work = {"bytes_read": 0, "bytes_written": 0, "json_decodes": 0}
-        scope = (limit, wake)
+        scope = (limit, wake, thread_id)
         signature = self._quiet_signature(scope)
         if self._quiet_hit(scope, signature):
             self.last_work = {**work, "candidate_rows": 0}
@@ -708,13 +711,13 @@ class ObservationIndex:
         with self._connection() as conn:
             synced = self._sync(conn, work)
             sources = self._refresh(conn, work) if synced else False
-            rows = self._candidates(conn, 1, wake)
+            rows = self._candidates(conn, 1, wake, thread_id)
             # 没有候选也必须推进 migration；现代 ack 已知完整时才可忽略坏旧图。
             legacy = self._legacy(conn, work) if synced and rows else True
             complete = synced and sources and legacy
             if complete:
                 # 本批 legacy 可能刚移除前页 handled 引用，重取同一个有界页面，不能误报空待处理。
-                rows = self._candidates(conn, limit, wake)
+                rows = self._candidates(conn, limit, wake, thread_id)
                 for row in rows:
                     ack = conn.execute("SELECT at FROM acks WHERE id=?", (row["id"],)).fetchone()
                     if ack and ack[0] > 0:
@@ -731,7 +734,8 @@ class ObservationIndex:
                         self._source(conn, path)
                         complete = False
                         continue
-                    if event.observation_id != row["id"]:
+                    if (event.observation_id != row["id"]
+                            or (thread_id is not None and event.thread_id != thread_id)):
                         conn.execute("UPDATE sources SET offset=0,complete=0 WHERE path=?", (row["path"],))
                         complete = False
                     elif event.handled_at <= 0 and ((wake is not None and event.wake_signal_id == wake) or

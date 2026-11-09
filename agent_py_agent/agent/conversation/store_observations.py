@@ -469,6 +469,19 @@ class ObservationStore:
         events.sort(key=lambda item: item.observed_at)
         return events if limit <= 0 else events[:limit]
 
+    def unhandled_requiring_main_report(
+        self, thread_id: str, *, limit: int = 0,
+    ) -> tuple[list[ObservationEvent], list[dict[str, Any]]]:
+        """按线程读取全部或指定数量的未处理活动项；恢复未追平时明确返回未知。"""
+        try:
+            if type(thread_id) is not str or not thread_id or type(limit) is not int or limit < 0:
+                raise ValueError("未处理观察需要准确线程身份和非负数量")
+            return self._index.pending(limit, thread_id=thread_id), []
+        except Exception as exc:  # noqa: BLE001 - report边界保留原异常类型，不以空结果签发完整性
+            error = runtime_error_report(exc, context="conversation.observations.thread_pending")
+            error["coverage"] = "partial"
+            return [], [error]
+
     # LLM: 旧 ScanIndex 的小集合记忆化保留，但准入先有界探测 16 个分片/合计 64KiB；大历史只能走 pending。
     # 函数用途: 判断当前数据能否在固定预算内沿原读取口完成精确快照。
     def _small_legacy_snapshot(self):
