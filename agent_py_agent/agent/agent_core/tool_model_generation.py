@@ -6,9 +6,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import time
 import uuid
-from contextvars import copy_context
+from contextvars import Context, copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -1360,7 +1361,10 @@ def _generate_through_wall_guard(
 
     try:
         execution_context = copy_context()
-        worker = Thread(target=execution_context.run, args=(_target,), name="my-agent-model-generate-timeout-guard", daemon=True)
+        # 业务Context只由原execution_context.run传播；3.14隐式再继承会让已退出Thread保留整份请求与后台片循环。
+        thread_kwargs = {"context": Context()} if hasattr(sys.flags, "thread_inherit_context") else {}
+        worker = Thread(target=execution_context.run, args=(_target,), name="my-agent-model-generate-timeout-guard",
+                        daemon=True, **thread_kwargs)
     except BaseException:
         # 尚未调用原启动入口，确定没有 worker；启动尝试后的异常则不能这样释放。
         worker_retention.release()
