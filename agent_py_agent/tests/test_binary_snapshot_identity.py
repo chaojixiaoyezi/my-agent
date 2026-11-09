@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -93,9 +94,20 @@ def test_backdated_mtime_still_changes_actual_descriptor_generation(tmp_path, mo
         monkeypatch.setattr(fs, '_supports_dir_fd', lambda: False)
     path = tmp_path / 'leaf'
     path.write_bytes(b'old bytes')
+    # 首个样本必须越过原两秒粗时钟保护窗；同 tick 改写本就不能取得缓存资格。
+    time.sleep(2.05)
     original = fs.read_bytes_snapshot_beneath(tmp_path, ('leaf',), max_bytes=100)
+    from agent_py_agent.agent.conversation.message_cursor_slice import source_stamp_is_trustworthy
+    from agent_py_agent.agent.io.cursor_cache import file_stamp
+    assert source_stamp_is_trustworthy(file_stamp(original.stat), original.changed_ns)
     path.write_bytes(b'new bytes')
     os.utime(path, ns=(original.stat.st_atime_ns, original.stat.st_mtime_ns))
     current = fs.inspect_file_snapshot_beneath(tmp_path, ('leaf',))
     assert current.stat.st_mtime_ns == original.stat.st_mtime_ns
     assert current.changed_ns is not None and current.changed_ns != original.changed_ns
+    assert not source_stamp_is_trustworthy(file_stamp(current.stat), current.changed_ns)
+    actual = fs.read_bytes_snapshot_beneath(tmp_path, ('leaf',), max_bytes=100)
+    assert original.content == b'old bytes' and actual.content == b'new bytes'
+    assert (actual.stat.st_dev, actual.stat.st_ino, actual.changed_ns) == (
+        current.stat.st_dev, current.stat.st_ino, current.changed_ns,
+    )
