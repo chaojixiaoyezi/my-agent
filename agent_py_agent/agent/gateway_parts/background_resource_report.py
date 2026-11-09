@@ -37,6 +37,18 @@ _POLL_SECONDS = 0.1
 _MEMORY_DIAGNOSTICS_LOCK = threading.RLock()
 
 
+def _allocation_tracing_unavailable():
+    enabled = getattr(sys, "_is_gil_enabled", None)
+    return enabled is not None and enabled() is False
+
+
+def _unavailable_tracing_metadata():
+    return {"tracemalloc_scope": "unavailable_free_threaded",
+            "tracemalloc_unavailable_reason": "free_threaded_runtime",
+            "tracemalloc_message": "当前free-threaded运行时未提供分配追踪",
+            "tracemalloc_started_at": None}
+
+
 class GatewayMemoryTracing:
     """本Gateway生命周期的追踪所有权；只同步进程内诊断状态，不保留Agent或配置。"""
 
@@ -50,6 +62,10 @@ class GatewayMemoryTracing:
             if self.closed:
                 raise RuntimeError("gateway memory tracing is closed")
             enabled = bool(getattr(config, "enable_gateway_memory_diagnostics", False))
+            if _allocation_tracing_unavailable():
+                # 诊断不能让宿主在分配器/导入交错中死锁，也不接管外部-X追踪。
+                self.metadata = _unavailable_tracing_metadata() if enabled else None
+                return self.metadata
             existing = tracemalloc.is_tracing()
             if not enabled and self.owned:
                 tracemalloc.stop()
@@ -82,9 +98,9 @@ class GatewayMemoryTracing:
             if self.closed:
                 return
             self.closed = True
-            if self.owned:
+            if self.owned and not _allocation_tracing_unavailable():
                 tracemalloc.stop()
-                self.owned = False
+            self.owned = False
             self.metadata = None
 
 
@@ -119,6 +135,11 @@ def collect_runtime_memory_diagnostics(
         else bool(include_tracemalloc)
     )
     with _MEMORY_DIAGNOSTICS_LOCK:
+        if _allocation_tracing_unavailable():
+            # 不调用任何tracemalloc API；外部追踪仍由原启动者负责。
+            return {"rss_peak_bytes": _rss_peak_bytes(), "rss_source": "resource.ru_maxrss (peak)",
+                    "gc_counts": list(gc.get_count()), "owner_pool": _owner_pool_memory_gauges(owner_pool),
+                    **_unavailable_tracing_metadata()}
         already_tracing = tracemalloc.is_tracing()
         started_here = effective_include_tracemalloc and not already_tracing
         if started_here:

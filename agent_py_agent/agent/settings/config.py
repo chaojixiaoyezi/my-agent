@@ -553,7 +553,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     gateway_global_inflight_limit: int = 500
     # Gateway同时在途的不同Owner数量上限；0跟随owner_agent_pool_max_agents，实际准入由Gateway消费。
     gateway_owner_inflight_limit: int = 0
-    # 显式诊断：启动前或原服务tick热启追踪，SIGUSR1输出位置/计数；默认关闭，热启只覆盖后续分配。
+    # 显式诊断：带GIL时追踪分配；free-threaded仅输出RSS/GC/池计数及追踪不可用原因，默认关闭。
     enable_gateway_memory_diagnostics: bool = False
     gateway_processing_timeout_seconds: int = 900
     # 仅计 processing 租约失效的失败次数；服务重启续接不计，0 不限，副作用未知仍禁止盲目重放。

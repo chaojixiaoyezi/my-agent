@@ -300,8 +300,16 @@ def test_fixed_capacity_replay_and_normal_exit(tmp_path):
     report = tmp_path / "residency.json"
     home = tmp_path / "isolated-home"
     home.mkdir()
-    completed = subprocess.run([
-        sys.executable, "-m", "agent_py_agent.tests.test_r5a_w5_memory_residency",
+    command = [sys.executable]
+    if getattr(sys, '_is_gil_enabled', lambda: True)() is False:
+        diagnostics = collect_runtime_memory_diagnostics(include_tracemalloc=True)
+        assert diagnostics['tracemalloc_scope'] == 'unavailable_free_threaded'
+        assert diagnostics['tracemalloc_unavailable_reason'] == 'free_threaded_runtime'
+        assert len(diagnostics['gc_counts']) == 3 and 'rss_peak_bytes' in diagnostics
+        assert 'tracemalloc_top' not in diagnostics
+        # 完整分配回放明确运行在带GIL子进程；原生FT只验真实不可用边界，不伪装支持。
+        command += ['-X', 'gil=1']
+    completed = subprocess.run([*command, "-m", "agent_py_agent.tests.test_r5a_w5_memory_residency",
         "--replay", "--root", str(home / "work"), "--report", str(report),
     ], cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=240,
         env={**os.environ, "HOME": str(home), "MY_AGENT_HOME": str(home), "PYTHONDONTWRITEBYTECODE": "1"})

@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import sys
 import threading
 import time
 import tracemalloc
@@ -228,6 +229,12 @@ def test_memory_diagnostics_tracemalloc_is_bounded_and_preserves_trace_owner():
     was_tracing = tracemalloc.is_tracing()
     report = collector(include_tracemalloc=True, top_n=3)
     assert tracemalloc.is_tracing() is was_tracing
+    if getattr(sys, '_is_gil_enabled', lambda: True)() is False:
+        assert report['tracemalloc_scope'] == 'unavailable_free_threaded'
+        assert report['tracemalloc_unavailable_reason'] == 'free_threaded_runtime'
+        assert len(report['gc_counts']) == 3 and 'rss_peak_bytes' in report
+        assert 'tracemalloc_top' not in report
+        return
     assert 0 < len(report["tracemalloc_top"]) <= 3
     for row in report["tracemalloc_top"]:
         assert set(row) == {"location", "size_bytes", "block_count"}
@@ -243,6 +250,14 @@ def test_memory_diagnostics_preserves_existing_tracemalloc():
     collector = getattr(resources, "collect_runtime_memory_diagnostics", None)
     assert callable(collector)
     was_tracing = tracemalloc.is_tracing()
+    if getattr(sys, '_is_gil_enabled', lambda: True)() is False:
+        report = collector(top_n=2)
+        assert tracemalloc.is_tracing() is was_tracing
+        assert report['tracemalloc_scope'] == 'unavailable_free_threaded'
+        assert report['tracemalloc_unavailable_reason'] == 'free_threaded_runtime'
+        assert len(report['gc_counts']) == 3 and 'rss_peak_bytes' in report
+        assert 'tracemalloc_top' not in report
+        return
     if not was_tracing:
         tracemalloc.start()
     try:

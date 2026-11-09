@@ -13,11 +13,14 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def _child(tmp_path, source, *, external=False):
+def _child(tmp_path, source, *, external=False, supported_mode=True):
     home = tmp_path / 'home'
     home.mkdir()
     env = {**os.environ, 'HOME': str(home), 'MY_AGENT_HOME': str(home)}
     command = [sys.executable, '-I']
+    if supported_mode and getattr(sys, '_is_gil_enabled', lambda: True)() is False:
+        # 旧分配成功合同明确在带GIL子进程验证；不把它算作free-threaded追踪通过。
+        command += ['-X', 'gil=1']
     if external:
         command += ['-X', 'tracemalloc=1']
     command += ['-c', f'import sys; sys.path.insert(0, {str(ROOT)!r})\n' + textwrap.dedent(source).replace("{{", "{").replace("}}", "}")]
@@ -418,3 +421,104 @@ def test_live_disable_serializes_with_snapshot_and_closed_state_never_reopens(tm
         assert not tracemalloc.is_tracing()
         print(json.dumps({'ok':True}))
     ''') == {'ok': True}
+
+
+def test_unavailable_runtime_never_calls_tracemalloc_and_keeps_numeric_diagnostics(tmp_path):
+    assert _child(tmp_path, '''
+        import json,sys,tracemalloc
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from contextlib import ExitStack
+        from agent_py_agent.agent.gateway_parts.background_resource_report import (
+            GatewayMemoryTracing, collect_runtime_memory_diagnostics)
+        def forbidden(*args,**kwargs):raise AssertionError('unsafe tracemalloc API called')
+        with ExitStack() as patches:
+            patches.enter_context(patch.object(sys,'_is_gil_enabled',return_value=False,create=True))
+            for name in ('start','stop','is_tracing','take_snapshot','get_traced_memory',
+                         'get_tracemalloc_memory','get_traceback_limit'):
+                patches.enter_context(patch.object(tracemalloc,name,side_effect=forbidden))
+            tracing=GatewayMemoryTracing()
+            assert tracing.refresh(SimpleNamespace(enable_gateway_memory_diagnostics=False)) is None
+            assert tracing.report() is None
+            assert tracing.refresh(SimpleNamespace(enable_gateway_memory_diagnostics=True))['tracemalloc_scope']=='unavailable_free_threaded'
+            for report in (tracing.report(),collect_runtime_memory_diagnostics(include_tracemalloc=True)):
+                assert report['tracemalloc_unavailable_reason']=='free_threaded_runtime'
+                assert report['tracemalloc_started_at'] is None
+                assert len(report['gc_counts'])==3 and 'rss_peak_bytes' in report
+                assert 'tracemalloc_top' not in report and 'tracemalloc_current_bytes' not in report
+            tracing.close()
+        print(json.dumps({'ok':True}))
+    ''', supported_mode=False) == {'ok': True}
+
+
+def test_native_runtime_guard_survives_concurrent_standard_library_imports(tmp_path):
+    result = _child(tmp_path, '''
+        import importlib,json,sys,threading
+        from types import SimpleNamespace
+        from agent_py_agent.agent.gateway_parts.background_resource_report import gateway_memory_tracing
+        config=SimpleNamespace(enable_gateway_memory_diagnostics=True)
+        barrier=threading.Barrier(8)
+        errors=[]
+        def worker(name):
+            try:
+                barrier.wait(10)
+                importlib.import_module(name)
+            except BaseException as error:errors.append(type(error).__name__)
+        with gateway_memory_tracing(config) as tracing:
+            threads=[threading.Thread(target=worker,args=(name,)) for name in (
+                'http.server','concurrent.futures','asyncio','pathlib','email.policy',
+                'urllib.request','unittest.mock','xml.dom.minidom')]
+            for thread in threads:thread.start()
+            for thread in threads:thread.join(10)
+            assert not errors and all(not thread.is_alive() for thread in threads)
+            report=tracing.report()
+            native_free_threaded=getattr(sys,'_is_gil_enabled',lambda:True)() is False
+            if native_free_threaded:
+                assert report['tracemalloc_scope']=='unavailable_free_threaded'
+                assert report['tracemalloc_unavailable_reason']=='free_threaded_runtime'
+                assert 'tracemalloc_top' not in report
+            else:
+                assert report['tracemalloc_scope']=='gateway_before_agent' and report['tracemalloc_top']
+            assert len(report['gc_counts'])==3 and 'rss_peak_bytes' in report
+        print(json.dumps({'native_free_threaded':native_free_threaded,'ok':True}))
+    ''', supported_mode=False)
+    assert result == {'native_free_threaded': getattr(sys, '_is_gil_enabled', lambda: True)() is False, 'ok': True}
+
+
+def test_native_runtime_diagnostic_gateway_reaches_ready_and_formally_stops(tmp_path):
+    import time
+
+    home = tmp_path / 'native-home'
+    home.mkdir()
+    config = tmp_path / 'native.yaml'
+    config.write_text(f'model_backend: echo\nmy_agent_home: {home}\nenable_plugins: false\n'
+                      'gateway_worker_process_count: 0\ngateway_port: 0\n'
+                      'enable_gateway_memory_diagnostics: true\n', encoding='utf-8')
+    env = {**os.environ, 'HOME': str(home), 'MY_AGENT_HOME': str(home)}
+    prefix = f'import sys;sys.path.insert(0,{str(ROOT)!r});'
+    run = (prefix + 'import faulthandler,runpy;faulthandler.dump_traceback_later(25,exit=True);'
+           f'sys.argv=["my-agent","--config",{str(config)!r},"gateway","run"];'
+           'runpy.run_module("agent_py_agent",run_name="__main__")')
+    log = tmp_path / 'native-run.log'
+    with log.open('w') as output:
+        process = subprocess.Popen([sys.executable, '-I', '-c', run], cwd=tmp_path, env=env,
+                                   stdout=output, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 20
+            while process.poll() is None and 'status=running' not in log.read_text():
+                assert time.monotonic() < deadline, log.read_text()
+                time.sleep(.02)
+            assert process.poll() is None, log.read_text()
+            stop = prefix + (f'from agent_py_agent.__main__ import main;'
+                             f'raise SystemExit(main(["--config",{str(config)!r},"gateway","stop"]))')
+            with subprocess.Popen([sys.executable, '-I', '-c', stop], cwd=tmp_path, env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as stopping:
+                # 本测试正是Gateway的父进程，必须并行回收退出证明，不能让stop等待未回收僵尸。
+                assert process.wait(timeout=20) == 0, log.read_text()
+                stdout, stderr = stopping.communicate(timeout=10)
+                assert stopping.returncode == 0, stderr + stdout
+            assert 'drain_complete=true' in log.read_text()
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=5)

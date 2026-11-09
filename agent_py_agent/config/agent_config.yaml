@@ -585,6 +585,7 @@ gateway_global_inflight_limit: 500
 gateway_owner_inflight_limit: 0
 # 显式诊断：启动前或原服务tick热启追踪，SIGUSR1输出位置/计数；默认关闭，热启只覆盖后续分配。
 # 追踪和全堆分配快照有额外CPU/内存开销；top条数只限制输出，不限制采集成本，不含对象正文。
+# free-threaded运行时仅输出RSS/GC/池计数及明确不可用原因，不启动或采集分配追踪，也不接管外部追踪。
 enable_gateway_memory_diagnostics: false
 # 一个请求开始处理之后，超过这个秒数还没结束就认为它卡住了（可以被重新安排）。
 # 正常请求远快于此；如果你有跑很久的合法任务被误判成卡住，可以调大。
