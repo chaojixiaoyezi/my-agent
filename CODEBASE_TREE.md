@@ -1116,6 +1116,8 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_r8_local_store_stage_timing.py # 原审计锁/事务分段、并发隔离和资源退出异常保持
 |-- agent_py_agent/tests/test_gateway_request_stage_timing.py # 请求准备与收尾耗时、原停止及结束时间边界回归
 |-- agent_py_agent/tests/test_probe_cancellation_wait.py # 工具与视觉探针单飞等待的可取消性和锁所有权回归
+|-- agent_py_agent/tests/support/fd_lifetime.py # 测试自身扫描缓存收口与严格FD资源身份采样
+|-- agent_py_agent/tests/test_fd_lifetime_boundaries.py # 真实泄漏、计数抵消及跨owner缓存隔离回归
 |-- agent_py_agent/tests/test_cancel_receipt_identity.py # 错源取消诊断不签发退出证明、不改变终态的回归
 |-- agent_py_agent/tests/test_cancel_stop_reconciliation.py # 取消执行时保留结构化诊断及未知结果的回归
 |-- agent_py_agent/tests/test_r8_usage_source_maintenance.py # 旧用量维护追平、目录重启续点与合法保留门验证
@@ -1742,6 +1744,7 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 - `local_storage/diagnostics.py`：只在调用方范围内记录数值分段，闭合后不再持有或改写结果，诊断错误不替代业务异常。
 - `test_r8_local_store_stage_timing.py`、`test_gateway_request_stage_timing.py`：验证分段来源与异常边界，不改审计持久化或请求状态。
 - `test_probe_cancellation_wait.py`：以确定性交错验证等待者取消不依赖另一请求释放探针锁。
+- `support/fd_lifetime.py` 与 `test_fd_lifetime_boundaries.py`：明确测试自己的缓存生命周期；结束处不做GC，数量和身份双重检查仍能发现真实句柄泄漏。
 - `test_cancel_receipt_identity.py` 与 `test_cancel_stop_reconciliation.py`：诊断回执不构成恢复授权，缺源或错源不能改变 UNKNOWN、父失败和子取消。
 
 ### R8 长期历史与运行资源（2026-11-08）
