@@ -10,6 +10,8 @@ import stat
 from collections import Counter
 from collections.abc import Callable
 from contextlib import ExitStack
+from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 
 from ..common.json_io import read_json_object_report
@@ -17,6 +19,7 @@ from ..common.nofollow_fs import open_readonly_file_beneath
 from ..gateway_parts.io import cleanup_orphan_lock_files, locked_file_transition
 from ..memory_store.retired_thread_journal import iter_retired_threads, retired_thread_state
 from ..runtime_errors import DataCorruptionError
+from ..user_space.directory_paging import directory_page
 from ..user_space.storage_lanes import (
     STORAGE_LANE_CURSOR_MAX_BYTES,
     STORAGE_LANE_RECEIPT_MAX_ERRORS_COUNT,
@@ -24,8 +27,6 @@ from ..user_space.storage_lanes import (
     STORAGE_LANE_SLICE_ENTRIES,
     STORAGE_LANE_SLICE_MS,
     StorageLaneRequest,
-    lane_cursor_window,
-    owner_conversation_roots,
 )
 from .models import WakeSignal
 from .store_guidance_records import GuidanceOnceReceipt
@@ -509,11 +510,10 @@ def _purge_quarantine_archive(storage, name, *, now, run_write):
 
 # LLM: 目录逐级no-follow复核，窗口只保留有限名称；不递归、不建立第二份索引。
 # 函数用途: 读取续点之后的一片JSON名称。
-def _window(scope, directory, after, limit, *, suffix=".json"):
+def _window(scope, directory, cursor, limit):
     if scope.info(directory, directory=True) is None:
-        return []
-    with os.scandir(directory) as entries:
-        return lane_cursor_window({"after": after}, (entry.name for entry in entries if entry.name.endswith(suffix)), limit)
+        return [], {}, True
+    return directory_page(scope.owner, directory.relative_to(scope.owner).parts, cursor, limit, require_dir_fd=False)
 
 
 # LLM: 原页API不附行offset且不限字节；先用no-follow FD限长探一行，再以原API按单行纯解析，批最多64行。
@@ -650,6 +650,7 @@ def _cursor(request):
         result["locks"] = True
     if len(json.dumps(result, allow_nan=False).encode("utf-8")) > STORAGE_LANE_CURSOR_MAX_BYTES:
         return {"root": 0, "phase": "handled", "after": "", "journal_offset": offset, "batch": {}}
+    result['scan'] = deepcopy(raw.get('scan', {})) if isinstance(raw.get('scan', {}), dict) else {}
     return result
 
 
@@ -664,7 +665,7 @@ def _finish(result):
 
 # LLM: 单个冻结请求入口；legal_hold零I/O零commit，单片封顶128条/8MiB/25ms，所有变更沿原写门和原锁。
 # 函数用途: 逐根逐阶段清理会话侧账，并通过回执续扫退休证明。
-def maintain_conversation_ledgers_lane(request: StorageLaneRequest) -> dict:
+def _maintain_ledger_retirement_page(request: StorageLaneRequest, *, roots: tuple, guidance: bool = False) -> dict:
     if request.legal_hold:
         return {"cursor": dict(request.cursor), "complete": True, "items": 0, "bytes": 0, "deferred_reason": "legal_hold"}
     cursor = _cursor(request)
@@ -674,7 +675,6 @@ def maintain_conversation_ledgers_lane(request: StorageLaneRequest) -> dict:
         return result
     budget = request.budget.capped(items=STORAGE_LANE_SLICE_ENTRIES, size=STORAGE_LANE_SLICE_BYTES, ms=STORAGE_LANE_SLICE_MS)
     owner = Path(request.home.owner_home_dir)
-    roots = owner_conversation_roots(request.home)
     scopes = {}
     proofs = {}
 
@@ -738,7 +738,9 @@ def maintain_conversation_ledgers_lane(request: StorageLaneRequest) -> dict:
                 return _finish(result)
         else:
             if cursor["root"] >= len(roots):
-                cursor.update(root=0, phase="guidance", after="")
+                if not guidance:
+                    return _finish(result)
+                cursor.update(root=0, phase="guidance", after="", scan={})
                 continue
             root = roots[cursor["root"]]
             try:
@@ -766,7 +768,7 @@ def maintain_conversation_ledgers_lane(request: StorageLaneRequest) -> dict:
         if limit <= 0:
             break
         try:
-            names = _window(scope, directory, cursor["after"], limit, suffix=".json.lock" if locking else ".json")
+            names, scan, directory_complete = _window(scope, directory, cursor.get('scan', {}), 1)
         except (OSError, ValueError, _Keep):
             result["protected"]["unsafe_directory"] += 1
             if phase == "guidance":
@@ -774,12 +776,17 @@ def maintain_conversation_ledgers_lane(request: StorageLaneRequest) -> dict:
                 result["backlog"] += 1
                 result["deferred_reason"] = "guidance_retry"
                 return result
-            names = []
+            result['deferred_reason'] = 'directory_unknown'
+            return result
         for name in names:
             if budget.exhausted(result["items"], result["bytes"]):
                 result["backlog"] += 1
                 return result
             result["items"] += 1
+            suffix = '.json.lock' if locking else '.json'
+            if not name.endswith(suffix):
+                cursor['scan'] = scan
+                continue
             try:
                 status = scope.attempt(operation, name)
                 if phase == "guidance" and status in {"busy", "kept_journal_changed"}:
@@ -796,9 +803,14 @@ def maintain_conversation_ledgers_lane(request: StorageLaneRequest) -> dict:
                     result["deferred_reason"] = "guidance_retry"
                     return result
             cursor["after"] = name
-        if len(names) < limit:
+            cursor['scan'] = scan
+        if not names:
+            result['items'] += 1
+            cursor['scan'] = scan
+        if directory_complete:
+            cursor['scan'] = {}
             if phase in {"ledger_policies", "ledger_claims"} and not locking:
-                cursor.update(locks=True, after="")
+                cursor.update(locks=True, after="", scan={})
                 continue
             cursor.pop("locks", None)
             cursor["after"] = ""
@@ -811,4 +823,87 @@ def maintain_conversation_ledgers_lane(request: StorageLaneRequest) -> dict:
                 else:
                     cursor["phase"] = _PHASES[next_phase]
     result["deferred_reason"] = "budget"
+    return result
+
+
+def maintain_conversation_ledgers_lane(request: StorageLaneRequest) -> dict:
+    """规范根、原退休阶段和初始GC共用持久lane续点与一份预算。"""
+    if request.legal_hold:
+        return {"cursor": dict(request.cursor), "complete": True, "items": 0, "bytes": 0,
+                "deferred_reason": "legal_hold"}
+    from .store import ConversationStore
+
+    raw = request.cursor
+    state = deepcopy(raw) if raw.get('version') == 2 else {
+        'version': 2, 'discovery': 'direct', 'stage': 'retire', 'inner': deepcopy(raw),
+        'journal_offset': raw.get('journal_offset', 0),
+    }
+    result = _receipt(state)
+    if request.budget.exhausted():
+        result['deferred_reason'] = 'budget'
+        return result
+    budget = request.budget.capped(items=128, size=8 * 1024 * 1024, ms=25)
+    owner = Path(request.home.owner_home_dir)
+    workspace_parts = Path(request.home.owner_workspace_dir).relative_to(owner).parts + ('runtime', 'workspaces')
+    while not budget.exhausted(result['items'], result['bytes']):
+        discovery = state.get('discovery', 'direct')
+        if discovery not in {'direct', 'workspaces', 'guidance'}:
+            raise ValueError('invalid_ledger_root_cursor')
+        if discovery == 'workspaces' and not state.get('workspace'):
+            names, scan, complete = directory_page(owner, workspace_parts, state.get('roots', {}), 1, require_dir_fd=False)
+            state['roots'] = scan
+            result['items'] += max(1, scan.pop('last_scanned', len(names)))
+            if not names:
+                if complete:
+                    state.update(discovery='guidance', inner={'phase': 'guidance', 'journal_offset': state.get('journal_offset', 0)})
+                    for key in ('roots', 'workspace', 'stage'):
+                        state.pop(key, None)
+                continue
+            state['workspace'] = names[0]
+            if budget.exhausted(result['items'], result['bytes']):
+                break
+        name = state.get('workspace', '')
+        if discovery == 'workspaces' and (not isinstance(name, str) or name in {'', '.', '..'}
+                or any(part in name for part in ('/', '\\', '\x00'))):
+            raise ValueError('invalid_ledger_workspace')
+        parts = ('conversations',) if discovery == 'direct' else (*workspace_parts, name, 'conversations')
+        root = owner.joinpath(*parts)
+        remaining = budget.max_items - result['items']
+        child = replace(request, cursor=state.get('inner', {}),
+                        budget=replace(budget, max_items=remaining, max_bytes=budget.max_bytes - result['bytes']))
+        if discovery == 'guidance' or state.get('stage', 'retire') == 'retire':
+            report = _maintain_ledger_retirement_page(child, roots=() if discovery == 'guidance' else (root,),
+                                                     guidance=discovery == 'guidance')
+        else:
+            # 创建只读布局，只有实际精确候选动作进入既有协调写门。
+            store = ConversationStore(root, initialize=False)
+            report = store.gc_stale_ledger_records(now=request.now, cursor=child.cursor,
+                       max_items=remaining, deadline=budget.deadline, run_write=request.run_write,
+                       max_bytes=budget.max_bytes - result['bytes'])
+        result['items'] += report['items']
+        result['bytes'] += report.get('bytes', 0)
+        for key in ('deleted_items', 'freed_bytes'):
+            result[key] += report.get(key, 0)
+        for key in ('protected', 'skipped'):
+            result[key].update(report.get(key, {}))
+        result['errors'].extend(report.get('errors', [])[:max(0, 16 - len(result['errors']))])
+        state['inner'] = report['cursor']
+        if discovery == 'guidance':
+            state['journal_offset'] = report['cursor'].get('journal_offset', state.get('journal_offset', 0))
+        if not report['complete'] and not report.get('scan_complete'):
+            result['deferred_reason'] = report.get('deferred_reason', 'budget')
+            return result
+        if not report['complete']:
+            state['unknown_seen'] = True
+        if discovery == 'guidance':
+            result['complete'] = not state.get('unknown_seen', False)
+            result['cursor'] = {'version': 2, 'discovery': 'direct', 'stage': 'retire',
+                                'journal_offset': state.get('journal_offset', 0)}
+            return result
+        if state.get('stage', 'retire') == 'retire':
+            state.update(stage='gc', inner={})
+        else:
+            state.update(discovery='workspaces', stage='retire', inner={})
+            state.pop('workspace', None)
+    result['deferred_reason'] = 'budget'
     return result

@@ -14,17 +14,48 @@ _SCAN_STREAMS: OrderedDict = OrderedDict()
 _SCAN_LOCK = RLock()
 
 
+def _native_directory_supported():
+    return os.name != 'nt' and bool(getattr(os, 'O_NOFOLLOW', 0) and getattr(os, 'O_DIRECTORY', 0))
+
+
 def _require_entry_name(name):
     if type(name) is not str or name in {'', '.', '..'} or any(value in name for value in ('/', '\\', '\x00')):
         raise ValueError('invalid_directory_entry')
 
 
-def directory_page(root: Path, parts: tuple, cursor: dict, limit: int) -> tuple[list[str], dict, bool]:
+def directory_page(root: Path, parts: tuple, cursor: dict, limit: int, *,
+                   require_dir_fd: bool = True) -> tuple[list[str], dict, bool]:
     # 复用现有配额枚举器的惰性dirent能力，不调用配额账、不改其锁或持久状态。
     from ..user_space.owner_quota import _quota_scandir
 
     if limit <= 0:
         return [], cursor, False
+    if not _native_directory_supported() and not require_dir_fd:
+        from ..common.nofollow_fs import (
+            NoFollowPathError,
+            _portable_directory,
+            _validate_relative_parts,
+        )
+
+        _validate_relative_parts(parts, allow_empty=True)
+
+        try:
+            directory = _portable_directory(root, parts, create=False)
+            info = directory.lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            return [], {}, True
+        identity = [info.st_dev, info.st_ino]
+        state = deepcopy(cursor) if cursor.get('directory_identity') == identity else {}
+        key = (os.getpid(), str(root), parts, *identity)
+        result = _portable_page(key, os.scandir(directory), state, identity, limit)
+        latest = _portable_directory(root, parts, create=False).lstat()
+        if (latest.st_dev, latest.st_ino) != tuple(identity):
+            with _SCAN_LOCK:
+                cached = _SCAN_STREAMS.pop(key, None)
+                if cached is not None:
+                    cached[0].close()
+            raise NoFollowPathError('directory changed during portable enumeration')
+        return result
     try:
         descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
     except (FileNotFoundError, NotADirectoryError):

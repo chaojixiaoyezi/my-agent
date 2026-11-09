@@ -447,7 +447,9 @@ def test_multilink_metadata_is_protected_without_commit(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "lstat", lstat)
     rows = _drain(home, time.time() + 366 * DAY, commit=commit)
     assert _count(rows, "protected", "unsafe_path") == 1
-    assert _count(rows, "deleted_items") == _count(rows, "freed_bytes") == _count(rows, "bytes") == 0
+    assert _count(rows, "deleted_items") == _count(rows, "freed_bytes") == 0
+    # 同lane新增GC会读取其它正常线程元数据；坏目标仍未读，不能把全局读取预算再断言为零。
+    assert all(row['bytes'] <= 8 * 1024 * 1024 for row in rows)
     assert commits == [] and path.read_bytes() == snapshot
     assert original(path).st_nlink == 1
 
@@ -507,13 +509,13 @@ def test_guidance_restored_between_slices_is_preserved(tmp_path):
     receipt, _, _ = _guidance(store, "restore")
     _retired(home, store)
     cursor = None
-    for _ in range(32):
+    for _ in range(256):
         row = maintain_conversation_ledgers_lane(_request(home, now=time.time() + 31 * DAY, cursor=cursor,
             budget=StorageLaneBudget(1, None, None)))
         cursor = row["cursor"]
-        if cursor.get("batch"):
+        if cursor.get("inner", {}).get("batch"):
             break
-    assert cursor["batch"] and receipt.exists()
+    assert cursor["inner"]["batch"] and receipt.exists()
     store.threads.write(ConversationThread(thread_id="thread-a", canonical_user_id="test"))
     _drain(home, time.time() + 31 * DAY, cursor=cursor)
     assert receipt.exists()
@@ -595,15 +597,17 @@ def test_guidance_directory_error_preserves_journal_retry(tmp_path, monkeypatch)
     home, store = _owner(tmp_path)
     receipt, _, _ = _guidance(store, "directory-retry", status="rejected")
     _retired(home, store)
-    original, failed = os.scandir, []
+    from agent_py_agent.agent.conversation import store_ledger_retention
 
-    def fail_once(path):
-        if Path(path) == store.storage.guidance_dedupe_dir and not failed:
+    original, failed = store_ledger_retention.directory_page, []
+
+    def fail_once(root, parts, cursor, limit, **kwargs):
+        if root.joinpath(*parts) == store.storage.guidance_dedupe_dir and not failed:
             failed.append(True)
             raise OSError("simulated guidance directory read failure")
-        return original(path)
+        return original(root, parts, cursor, limit, **kwargs)
 
-    monkeypatch.setattr(os, "scandir", fail_once)
+    monkeypatch.setattr(store_ledger_retention, "directory_page", fail_once)
     cursor = None
     for _ in range(32):
         row = maintain_conversation_ledgers_lane(_request(home, now=time.time() + 31 * DAY, cursor=cursor))
@@ -629,7 +633,9 @@ def test_guidance_restored_at_commit_keeps_all_references(tmp_path):
         store.threads.write(ConversationThread(thread_id="thread-a", canonical_user_id="test"))
         return operation()
 
-    _drain(home, time.time() + 31 * DAY, commit=commit)
+    # 精确验证guidance原写门；新增初始GC另有孤儿锁动作，不让它提前触发本例的恢复。
+    _drain(home, time.time() + 31 * DAY, commit=commit,
+           cursor={'version': 2, 'discovery': 'guidance', 'inner': {'phase': 'guidance'}})
     assert commits == [True]
     assert all(path.exists() for path in paths)
 

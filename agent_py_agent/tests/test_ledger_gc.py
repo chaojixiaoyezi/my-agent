@@ -254,13 +254,18 @@ def test_ledger_gc_wired_into_scheduler_tick(tmp_path):
         }
     )
     store.progress.disable(policy.policy_id, now=now - 8 * 24 * 3600)
-    # 预置 gc 基线:首 tick 不触发(now - last < 6h),验证控频而非首次立即跑
-    scheduler._ledger_last_gc_at = now
-
+    # 首拍沿原owner维护写入口推进，周期及partial续作由其持久marker控制，不再另存进程GC时钟。
     scheduler.tick(now=now)
-    assert store.storage.policy_path(policy.policy_id).exists(), "距上次 gc 未满 6h,不应归档"
-    scheduler.tick(now=now + 7 * 3600)
-    assert not store.storage.policy_path(policy.policy_id).exists(), "超过 6h 间隔应归档"
+    assert not store.storage.policy_path(policy.policy_id).exists(), "正式维护lane应归档过期策略"
+    import json
+
+    from agent_py_agent.agent.user_space.owner_maintenance import _maintenance_state_path
+
+    marker = json.loads(_maintenance_state_path(agent.home_paths.owner_home_dir).read_text())
+    assert marker['last_attempt_at'] == now
+    scheduler.tick(now=now + 1)
+    assert not store.storage.policy_path(policy.policy_id).exists()
+    assert (store.storage.root / '.ledger_archive' / 'policies' / f'{policy.policy_id}.json').exists()
 
 
 def test_gc_stale_ledger_records_cleans_orphan_lock_sidecars(tmp_path):

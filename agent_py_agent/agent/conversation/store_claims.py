@@ -433,15 +433,17 @@ class ClaimStore:
     #   锁、读、检查点或 rename 失败都只保留原 claim 与锁文件，原身份不被替换，下次维护重试。
     # 函数用途: 在原 claim 锁内复核并只移动 JSON 正文，返回本次是否确实移入归档。
     def _archive_released_claim(self, path: Path, archive_dir: Path, *, current: float,
-                                retention_seconds: float) -> bool:
+                                retention_seconds: float, blocking: bool = True) -> bool:
         moved = False
         try:
-            with locked_file_transition(path):
+            with locked_file_transition(path, blocking=blocking):
                 if not self._retained_for_cancellation(path, current=current, retention_seconds=retention_seconds):
                     archive_dir.mkdir(parents=True, exist_ok=True)
                     path.rename(archive_dir / path.name)
                     moved = True
         except Exception as exc:  # noqa: BLE001 - 维护失败只保留原claim，不丢证据也不中断其它归档
+            if not blocking:
+                raise
             _STORE_LOGGER.warning("background claim retained: archive transition failed path=%s error=%r",
                                   path, exc)
         return moved

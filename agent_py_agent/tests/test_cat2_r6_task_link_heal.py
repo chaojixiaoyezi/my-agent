@@ -96,21 +96,21 @@ def test_gc_never_quarantines_permission_errors_or_symlinks(case, monkeypatch, f
 def test_gc_rechecks_ghost_file_after_directory_snapshot(case, monkeypatch):
     _link(case, "old", "completed")
     path = case.store.storage.task_path("old")
+    raw = path.read_bytes()
+    path.unlink()
     thread_path = case.store.storage.thread_path(case.thread.thread_id)
     before = thread_path.read_bytes()
-    original = os.listdir
+    original = TaskStore._prune_ghost_task_ids
     snapshots = []
 
-    def without_recreated_link(directory):
-        names = original(directory)
-        if Path(directory) == case.store.storage.tasks_dir:
-            snapshots.append(names)
-            return [name for name in names if name != path.name]
-        return names
+    def recreate_before_original_lock(store, thread_id, ghosts):
+        snapshots.append(set(ghosts))
+        path.write_bytes(raw)
+        return original(store, thread_id, ghosts)
 
-    monkeypatch.setattr(os, "listdir", without_recreated_link)
+    monkeypatch.setattr(TaskStore, "_prune_ghost_task_ids", recreate_before_original_lock)
     summary = case.store.gc_stale_ledger_records(now=time.time())
-    assert snapshots and path.is_file()
+    assert snapshots == [{"old"}] and path.is_file()
     assert summary["quarantined_task_links"] == summary["pruned_task_ids"] == 0
     assert thread_path.read_bytes() == before
 
@@ -221,15 +221,21 @@ def test_ghost_prune_preserves_newly_active_id_and_concurrent_thread_fields(case
 
 
 def test_thread_scan_failure_keeps_completed_gc_counts(case, monkeypatch, caplog):
-    def unavailable(**kwargs):
-        raise PermissionError("simulated directory read error")
+    from agent_py_agent.agent.conversation import ledger_gc
 
-    monkeypatch.setattr(case.store.threads, "list_report", unavailable)
+    original = ledger_gc.directory_page
+    def unavailable(root, parts, cursor, limit, **kwargs):
+        if parts == ('threads',):
+            raise PermissionError("simulated directory read error")
+        return original(root, parts, cursor, limit, **kwargs)
+
+    monkeypatch.setattr(ledger_gc, "directory_page", unavailable)
     with caplog.at_level(logging.WARNING):
         summary = case.store.gc_stale_ledger_records(now=time.time())
     assert summary["quarantined_task_links"] == summary["pruned_task_ids"] == 0
     assert "archived_policies" in summary and "archived_claims" in summary
-    assert "TASK_LINK_HEAL_SKIPPED error_type=PermissionError" in caplog.text
+    assert not summary['complete'] and summary['errors'][0]['error_type'] == 'PermissionError'
+    assert "TASK_LINK_HEAL_FAILED" in caplog.text
 
 
 def test_gc_wall_time_for_1000_threads_with_200_historical_ids(tmp_path, capsys):
@@ -249,5 +255,8 @@ def test_gc_wall_time_for_1000_threads_with_200_historical_ids(tmp_path, capsys)
         with capsys.disabled():
             print("R6_GC_TIMING=" + json.dumps({"threads": 1000, "ids_per_thread": 200,
                 "filesystem": "tmpfs" if use_tmpfs else "temporary_directory", "seconds": elapsed,
-                "summary": summary}, sort_keys=True))
-        assert summary["quarantined_task_links"] == 0 and summary["pruned_task_ids"] == 200000
+                "summary": {key: value for key, value in summary.items() if key != "cursor"},
+                "cursor_bytes": len(json.dumps(summary["cursor"]).encode())}, sort_keys=True))
+        # 旧版本一次清空20万ID会随库存放大；现在每次只检查固定物理页，续点留给原lane。
+        assert summary["items"] <= 128 and not summary['complete'] and summary['cursor']
+        assert summary["quarantined_task_links"] == 0 and summary["pruned_task_ids"] <= 128

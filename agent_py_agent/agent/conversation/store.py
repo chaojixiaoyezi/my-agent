@@ -8,7 +8,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ..gateway_parts.io import cleanup_orphan_lock_files
 from .goal_clock import shared_goal_clocks
 from .models import MODEL_HIDDEN_THREAD_FIELDS
 from .session_pair_rate import SessionPairRateLimiter
@@ -24,7 +23,6 @@ from .store_progress import ProgressStore
 from .store_tasks import TaskStore
 from .store_threads import ThreadStore
 from .store_usage import ModelUsageStore
-from .store_wake_quarantine_archive import archive_stale_wake_quarantine
 from .store_wakes import WakeStore
 
 logger = logging.getLogger(__name__)
@@ -98,33 +96,15 @@ class ConversationStore:
     def gc_stale_ledger_records(
         self, *, now: float | None = None,
         retention_seconds: float = _LEDGER_GC_RETENTION_SECONDS,
-    ) -> dict[str, int]:
-        current = now if now is not None else time.time()
-        archived_policies = self.progress.archive_stale(
-            current=current, retention_seconds=retention_seconds,
-        )
-        archived_claims = self.claims.archive_stale(
-            current=current, retention_seconds=retention_seconds,
-        )
-        archived_wake_quarantine = archive_stale_wake_quarantine(self.storage, current=current)
-        cleaned_orphan_locks = sum(
-            cleanup_orphan_lock_files(directory, now=current)
-            for directory in self.storage.lock_sidecar_dirs()
-        )
-        try:
-            threads, _thread_errors = self.threads.list_report(limit=0)
-            quarantined_task_links, pruned_task_ids = self.tasks.heal_broken_links(threads)
-        except Exception as exc:  # noqa: BLE001 - 自愈步骤失败不影响前面已完成的归档统计
-            logger.warning("TASK_LINK_HEAL_SKIPPED error_type=%s", type(exc).__name__)
-            quarantined_task_links = pruned_task_ids = 0
-        return {
-            "archived_policies": archived_policies,
-            "archived_claims": archived_claims,
-            "archived_wake_quarantine": archived_wake_quarantine,
-            "cleaned_orphan_locks": cleaned_orphan_locks,
-            "quarantined_task_links": quarantined_task_links,
-            "pruned_task_ids": pruned_task_ids,
-        }
+        cursor: dict | None = None, max_items: int = 128, deadline: float | None = None,
+        run_write=None, max_bytes: int | None = None,
+    ) -> dict:
+        """显式维护也只推进一片；普通入口由owner lane持久化同一续点。"""
+        from .ledger_gc import ledger_gc_page
+
+        return ledger_gc_page(self, current=time.time() if now is None else now,
+                              retention_seconds=retention_seconds, cursor=cursor,
+                              max_items=max_items, deadline=deadline, run_write=run_write, max_bytes=max_bytes)
 
     # LLM: 只组装既有领域读取结果；严格处理坏账的调用方使用 context_bundle_report，不建立第二份状态。
     # 函数用途: 为旧有正文上下文调用返回跨领域快照，不写盘或标记已消费。

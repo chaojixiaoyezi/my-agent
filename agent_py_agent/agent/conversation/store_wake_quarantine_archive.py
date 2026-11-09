@@ -44,12 +44,13 @@ def archive_stale_wake_quarantine(
 # LLM: 在这条唤醒的结案锁里重读记录再判断，避免与并发的结案或重放交错；文件名不是合法唤醒 ID 的杂项文件不碰。
 #   记录移走后再移它的坏账留档（有才移），两者都在同一把锁里。
 # 函数用途: 判断一条顶层结案记录是否超过保留期，超过就连同坏账留档一起移进归档；返回移动的文件数。
-def _archive_record(storage: ConversationStorage, path: Path, current: float, retention_seconds: float) -> int:
+def _archive_record(storage: ConversationStorage, path: Path, current: float, retention_seconds: float,
+                    *, blocking: bool = True) -> int:
     try:
         lock_path = storage.wake_quarantine_path(path.stem)
     except ValueError:
         return 0
-    with locked_file_transition(lock_path):
+    with locked_file_transition(lock_path, blocking=blocking):
         if not path.exists():
             return 0
         payload, error = read_json_object_report(path, context="conversation.wake_quarantine.archive")

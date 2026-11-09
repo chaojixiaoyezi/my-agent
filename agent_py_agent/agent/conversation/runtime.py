@@ -3033,7 +3033,6 @@ _MIN_PROGRESS_POLICY_CATCHUP_SECONDS = 7200
 _MAX_PROGRESS_POLICY_CATCHUP_INTERVALS_COUNT = 4
 
 # 陈旧账本 gc 节奏:tick ~2 分钟一次,这里最多 6 小时跑一趟归档(问题8)。
-_LEDGER_GC_INTERVAL_SECONDS = 6 * 3600
 
 
 # LLM: 只在 scheduler 构造时读取原配置并交付数值，Gateway/CLI 的实例寿命保持；联测供应冷却和就绪筛选。
@@ -4022,9 +4021,9 @@ class _BackgroundSchedulerThreadLaneMixin:
 
         current = now if now is not None else __import__("time").time()
         reconcile_process_completions(self.runtime.agent)
-        self._maybe_gc_ledger(now=current)
         self._process_collaboration_cases(now=current)
         if include_orphan_supervision:
+            self._maybe_gc_ledger(now=current)
             _maybe_supervise_orphans(self, current)
         self._enqueue_scheduler_runs(now=current)
         self._reclaim_orphaned_attempts(now=current)
@@ -4106,29 +4105,13 @@ class _BackgroundSchedulerTickMixin:
     """Tick maintenance and durable scheduling helpers."""
 
     def _maybe_gc_ledger(self, *, now: float) -> None:
-        """低频归档陈旧账本(disabled policy / finished claim),治目录无限累积。
-        tick 每 ~2 分钟一次,这里最多 6 小时跑一趟;归档是移动非删除,可回滚。"""
-        last = getattr(self, "_ledger_last_gc_at", 0.0)
-        if now - last < _LEDGER_GC_INTERVAL_SECONDS:
-            return
-        self._ledger_last_gc_at = now
+        """独立调度沿原owner维护入口续作；Gateway由其独立维护lane推进。"""
+        from ..user_space.owner_maintenance import maybe_run_cli_owner_maintenance
+
         try:
-            summary = self.store.gc_stale_ledger_records(now=now)
-        except Exception:  # noqa: BLE001 - 归档是增强,失败绝不影响 tick 主流程
+            maybe_run_cli_owner_maintenance(self.runtime.agent, now=now)
+        except Exception:  # noqa: BLE001 - 增强维护失败不阻断正常调度
             return
-        if (
-            summary.get("archived_policies")
-            or summary.get("archived_claims")
-            or summary.get("archived_wake_quarantine")
-            or summary.get("cleaned_orphan_locks")
-        ):
-            logging.getLogger("agent.conversation.runtime").info(
-                "ledger gc archived policies=%s claims=%s wake_quarantine=%s orphan_locks=%s",
-                summary.get("archived_policies"),
-                summary.get("archived_claims"),
-                summary.get("archived_wake_quarantine"),
-                summary.get("cleaned_orphan_locks"),
-            )
 
     def _process_collaboration_cases(self, *, now: float) -> None:
         if self.collaboration_store is None:

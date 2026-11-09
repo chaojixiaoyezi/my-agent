@@ -717,27 +717,59 @@ class TaskStore:
     #   移入 tasks/.ledger_archive，读路径随后按“活动链接缺失”降级；身份不符、权限错误仍拒绝。历史 id 的链接文件已不存在时
     #   在线程锁内从 task_ids 剔除（活动 id、其它字段与 updated_at 不变）。单个线程失败只记日志，整体不抛异常。
     # 函数用途: 自愈长寿会话里的坏活动任务链接与幽灵历史链接，返回 (隔离数, 剔除数)。
-    def heal_broken_links(self, threads: Iterable[ConversationThread]) -> tuple[int, int]:
-        try:
-            present = set(os.listdir(self.storage.tasks_dir))
-        except FileNotFoundError:
-            present = set()
-        except OSError as exc:
-            _STORE_LOGGER.warning("TASK_LINK_HEAL_SKIPPED error_type=%s", type(exc).__name__)
-            return 0, 0
-        quarantined = pruned = 0
-        for thread in threads:
-            try:
-                for task_id in thread.active_task_ids:
-                    quarantined += self._quarantine_corrupt_active_link(thread.thread_id, task_id)
-                ghosts = {task_id for task_id in self.iter_task_ids(thread.thread_id)
-                          if task_id not in thread.active_task_ids and f"{task_id}.json" not in present}
-                if ghosts:
-                    pruned += self._prune_ghost_task_ids(thread.thread_id, ghosts)
-            except Exception as exc:  # noqa: BLE001 - 单个线程坏账不阻断其它线程的维护
-                _STORE_LOGGER.warning("TASK_LINK_HEAL_FAILED thread=%s error_type=%s",
-                                      thread.thread_id, type(exc).__name__)
-        return quarantined, pruned
+    def heal_broken_links(
+        self, thread: ConversationThread, *, cursor: dict | None = None, limit: int = 128, run_write=None,
+    ) -> dict:
+        """维护只消费一页活动/历史定位；续点不授予删除权。"""
+        if type(limit) is not int or not 0 < limit <= 128:
+            raise ValueError("invalid_task_link_heal_limit")
+        position = dict(cursor or {})
+        active = position.get("active", 0)
+        history = position.get("history", 0)
+        if any(type(value) is not int or value < 0 for value in (active, history)):
+            raise ValueError("invalid_task_link_heal_cursor")
+        result = {"quarantined_task_links": 0, "pruned_task_ids": 0,
+                  "items": 0, "cursor": position, "complete": False}
+        write = run_write or (lambda operation: operation())
+        if thread.task_history_version == 0 and (thread.task_ids or thread.active_task_ids):
+            # 首次维护显式迁移旧库存；先固定完整物理位置，再分页剔除，后继不重放旧大tuple。
+            def migrate():
+                def update(data):
+                    latest = ConversationThread.from_dict(data)
+                    if latest.task_history_version != 0:
+                        return data
+                    path = self.storage.thread_path(latest.thread_id)
+                    task_history.initialize(path, latest)
+                    recent = task_history.recent(path, latest)
+                    return replace(latest, task_ids=tuple(dict.fromkeys((*recent, *latest.active_task_ids))),
+                                   task_history_version=1).to_dict()
+                return ConversationThread.from_dict(update_json_file_atomic(
+                    self.storage.thread_path(thread.thread_id), update, require_existing=True))
+            thread = write(migrate)
+        for task_id in thread.active_task_ids[active:active + limit]:
+            error = self.load_report(task_id)[1]
+            if (error is not None and error.get('error_type') in {
+                    'JSONDecodeError', 'UnicodeDecodeError', 'DataCorruptionError'}
+                    and not self.storage.task_path(task_id).is_symlink()):
+                result["quarantined_task_links"] += write(
+                    lambda: self._quarantine_corrupt_active_link(thread.thread_id, task_id))
+            active += 1
+            result["items"] += 1
+            position["active"] = active
+        remaining = limit - result["items"]
+        if active < len(thread.active_task_ids) or remaining <= 0:
+            return result
+        ids, next_cursor = task_history.page(
+            self.storage.thread_path(thread.thread_id), thread, cursor=history, limit=remaining,
+        )
+        result["items"] += remaining
+        ghosts = {task_id for task_id in ids if task_id not in thread.active_task_ids
+                  and not self.storage.task_path(task_id).exists()}
+        if ghosts:
+            result["pruned_task_ids"] = write(lambda: self._prune_ghost_task_ids(thread.thread_id, ghosts))
+        position["history"] = next_cursor if next_cursor is not None else history + len(ids)
+        result["complete"] = next_cursor is None
+        return result
 
     # LLM: 先无锁读一次，只有读出坏账才进原 JSON 锁（非阻塞，忙就留到下个维护周期）复核并移动；字节保留在归档目录。
     # 函数用途: 把一条无法解析的活动任务链接移入归档目录，返回隔离条数（0 或 1）。
@@ -748,9 +780,11 @@ class TaskStore:
         with locked_json_path(path, blocking=False):
             _link, error = self.load_report(task_id)
             if (path.is_symlink() or error is None
-                    or error.get("error_type") not in {"JSONDecodeError", "UnicodeDecodeError", "DataCorruptionError"}
-                    or not archive_ledger_file(path, self.storage.tasks_dir / LEDGER_ARCHIVE_DIR)):
+                    or error.get("error_type") not in {"JSONDecodeError", "UnicodeDecodeError", "DataCorruptionError"}):
                 return 0
+            archive_dir = self.storage.tasks_dir / LEDGER_ARCHIVE_DIR
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            path.rename(archive_dir / path.name)
         _STORE_LOGGER.warning("TASK_LINK_QUARANTINED thread=%s task=%s error_type=%s",
                               thread_id, task_id, error.get("error_type"))
         return 1
