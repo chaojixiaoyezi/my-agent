@@ -590,3 +590,80 @@ def test_native_generation_unknown_or_changed_never_advances_checkpoint(tmp_path
         module.migrate_legacy(tmp_path, max_records=1)
     assert module._load_progress(tmp_path) == before
     assert anchors._read_ready(tmp_path) is None
+
+
+def test_cutover_closes_source_readers_before_replace_and_recovers_published_fence(tmp_path, monkeypatch):
+    module = _migration()
+    _legacy(tmp_path, 3)
+    monkeypatch.setattr(anchors, '_supports_dir_fd', lambda: False)
+    opened = set()
+    real_open, real_close = module._open_source, os.close
+    real_write, real_ready = anchors._write, module._publish_ready
+    fences = []
+    def observe_open(root):
+        fd = real_open(root)
+        opened.add(fd)
+        return fd
+    def observe_close(fd):
+        real_close(fd)
+        opened.discard(fd)
+    def require_closed(root, data):
+        if not data['alert_key']:
+            assert not opened, 'Windows cannot replace a source with live migration readers'
+            fences.append(data['migration_id'])
+        return real_write(root, data)
+    def crash_before_ready(root, state):
+        raise OSError('after durable fence')
+    monkeypatch.setattr(module, '_open_source', observe_open)
+    monkeypatch.setattr(module.os, 'close', observe_close)
+    monkeypatch.setattr(anchors, '_write', require_closed)
+    monkeypatch.setattr(module, '_publish_ready', crash_before_ready)
+    with pytest.raises(OSError, match='after durable fence'):
+        _finish(tmp_path, max_records=1)
+    assert len(fences) == 1 and not opened and anchors._read_ready(tmp_path) is None
+    state = module._load_progress(tmp_path)
+    assert state['phase'] == 'publish'
+    assert anchors._read(tmp_path) == anchors._record('', state)
+    monkeypatch.setattr(module, '_publish_ready', real_ready)
+    assert module.migrate_legacy(tmp_path, max_records=1)['complete']
+    assert len(fences) == 1 and not opened
+    for index in range(3):
+        row, first, dispatch = anchors._reserve_for_delivery(tmp_path, _key(index), now='retry')
+        assert row == _row(index) and not first and dispatch == f'original-dispatch-{index}'
+
+
+def test_cutover_rechecks_changed_source_after_closing_initial_reader(tmp_path, monkeypatch):
+    module = _migration()
+    path = _legacy(tmp_path, 3)
+    real_finish = module._finish_publish
+    monkeypatch.setattr(module, '_finish_publish', lambda root, state: None)
+    for _ in range(20):
+        module.migrate_legacy(tmp_path, max_records=1)
+        if module._load_progress(tmp_path)['phase'] == 'publish':
+            break
+    else:
+        pytest.fail('source never reached cutover checkpoint')
+    before = module._load_progress(tmp_path)
+    monkeypatch.setattr(module, '_finish_publish', real_finish)
+    real_open, real_close = module._open_source, os.close
+    tracked, changed = set(), []
+    def observe_open(root):
+        fd = real_open(root)
+        tracked.add(fd)
+        return fd
+    def change_after_close(fd):
+        owned = fd in tracked
+        real_close(fd)
+        tracked.discard(fd)
+        if owned and not changed:
+            changed.append(True)
+            # 合法同大小新来源不能被旧断点覆盖成fence；无需重放任一导入副作用。
+            path.write_bytes(path.read_bytes().replace(b'om_rr', b'om_ss'))
+    monkeypatch.setattr(module, '_open_source', observe_open)
+    monkeypatch.setattr(module.os, 'close', change_after_close)
+    with pytest.raises(ValueError, match='source changed'):
+        module.migrate_legacy(tmp_path, max_records=1)
+    assert changed and not tracked
+    assert module._load_progress(tmp_path) == before
+    assert anchors._read_ready(tmp_path) is None
+    assert json.loads(path.read_bytes())['schema_version'] == 'alert_topic_anchors.v1'

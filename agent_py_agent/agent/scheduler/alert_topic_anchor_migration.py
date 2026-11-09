@@ -334,11 +334,12 @@ def _publish_ready(root, state):
 # 函数用途: 完成旧格式栅栏和就绪发布，避免切换窗口被误判成空 Owner。
 def _finish_publish(root, state):
     if state['kind'] == 'legacy':
+        publish_fence = False
         descriptor = _open_source(root)
         try:
             if _seal(descriptor) == state['source']:
                 _verify_source(root, descriptor, state)
-                anchors._write(root, anchors._record('', state))
+                publish_fence = True
             else:
                 # Only this exact, bounded, already-committed cutover fence is resumable.
                 if os.fstat(descriptor).st_size > 4096:
@@ -348,6 +349,14 @@ def _finish_publish(root, state):
                     raise ValueError('legacy alert source changed before cutover')
         finally:
             os.close(descriptor)
+        if publish_fence:
+            # Windows默认只读句柄禁止replace；同一旧writer锁内关闭后重新核来源，不删开文件。
+            descriptor = _open_source(root)
+            try:
+                _verify_source(root, descriptor, state)
+            finally:
+                os.close(descriptor)
+            anchors._write(root, anchors._record('', state))
     else:
         fence = anchors._read(root)
         anchors._validate_record(fence, state['primary_key'], state, staging=True)
