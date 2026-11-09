@@ -254,6 +254,8 @@ class _Wire:
 
 @needs_macos
 def test_model_sees_the_boundary_facts_on_its_next_request(tmp_path, monkeypatch):
+    from uuid import uuid4
+
     from agent_py_agent.agent.backends import http
     from agent_py_agent.agent.concurrency.interrupt import register_interruptible
     from agent_py_agent.agent.conversation.control_commands import (
@@ -262,6 +264,7 @@ def test_model_sees_the_boundary_facts_on_its_next_request(tmp_path, monkeypatch
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.gateway_parts import request_execution
     from agent_py_agent.agent.gateway_parts.paths import gateway_paths
+    from agent_py_agent.agent.settings.model_profiles import execute_model_profile_operation
 
     agent = SimpleAgent(AgentConfig(
         model_backend="openai_compatible", api_base="http://127.0.0.1:9/v1", model_name="sb-scripted",
@@ -270,6 +273,13 @@ def test_model_sees_the_boundary_facts_on_its_next_request(tmp_path, monkeypatch
         gateway_workspace="gateway", orphan_supervision_interval_seconds=0, memory_curator_enabled=False,
         enable_self_learning=False,
     ), tmp_path / "root")
+    # 有Home的真实请求只采用owner模型目录；离线传输仍由下方wire截获。
+    profile_id = str(uuid4())
+    execute_model_profile_operation(agent, "add", {"profile_id": profile_id, "profile": {
+        "model_backend": "openai_compatible", "api_base": "http://127.0.0.1:9/v1", "model_name": "sb-scripted",
+        "api_key": "sb-fake-key-not-a-credential", "model_context_window_tokens": 200_000,
+    }})
+    execute_model_profile_operation(agent, "set_default", {"profile_id": profile_id})
     owner = Path(agent.home_paths.owner_home_dir)
     other = Path(agent.home_paths.root) / "owners" / "providers" / "feishu" / "users" / "other"
     other.mkdir(parents=True)
@@ -294,7 +304,7 @@ def test_model_sees_the_boundary_facts_on_its_next_request(tmp_path, monkeypatch
     with register_interruptible(conversation_request_interrupt_name("sb-1")):
         response = request_execution._handle_gateway_request(agent, path)
 
-    assert response.get("ok") is True, response
+    assert response.get("ok") is True, json.dumps(response, ensure_ascii=False)
     tool_messages = [m for m in wire.payloads[-1]["messages"] if isinstance(m, dict) and m.get("role") == "tool"]
     text = "\n".join(str(m.get("content") or "") for m in tool_messages)
     assert "[runtime-sandbox-facts]" in text
