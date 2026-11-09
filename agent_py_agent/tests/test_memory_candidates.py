@@ -213,7 +213,7 @@ def test_curator_replayed_observation_skips_unchanged_ledger(tmp_path):
 def test_curator_creates_missing_empty_candidate_ledger(tmp_path):
     service, committer, request = batch_case(tmp_path)
     committer.commit(request)
-    assert service.path.is_file() and service.path.read_bytes() == b""
+    assert service.path.is_file() and service.list() == []
 
 
 # LLM: 冷热模型由真实观察/审核生成，只有测试显式改旧时间，紧接审核的记录必须保留完整详情。

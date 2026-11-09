@@ -278,6 +278,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             Path(context.home.owner_retention_json),
             Path(context.home.owner_workspace_dir) / "runtime/workspaces",
             Path(context.home.owner_memory_candidates_jsonl),
+            Path(context.home.owner_memory_candidates_jsonl).with_name('candidates.jsonl.records'),
             Path(context.home.owner_memory_candidates_jsonl).parent / "candidates_archive",
             Path(context.home.owner_memory_curator_runs_dir), Path(context.home.owner_memory_curator_runs_dir).parent / "state.json",
             Path(context.home.owner_compact_dir) / "conversations", *_recovery_roots(context.home),
@@ -407,6 +408,18 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             yield
         yield
         return b"".join(chunks) if self.sources[path][0] is not None else None
+
+    def _candidate_rows(self, path):
+        from .candidate_ledger import CandidateRows, read_manifest
+        header = read_manifest(path)
+        if header is None:
+            yield from self._rows(path)
+            return
+        raw = yield from self._read(path)
+        if raw is None or json.loads(raw) != header:
+            raise _PinReadChanged(11, "candidate generation changed", str(path))
+        for candidate in CandidateRows(path, header):
+            yield candidate.to_record()
 
     def _rows(self, path, *, required=False, jsonl=None, strict_lines=False):
         if not (path.suffix == ".jsonl" if jsonl is None else jsonl):
@@ -743,7 +756,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
         yield from self._formal(pins)
         candidate_path = Path(self.home.owner_memory_candidates_jsonl)
         seen, cold_cache = set(), {}
-        for row in self._rows(candidate_path):
+        for row in self._candidate_rows(candidate_path):
             if row is None:
                 yield 0
                 continue
@@ -2118,7 +2131,8 @@ def _conversation_actions(
                     )
                 )
                 continue
-            if thread.active_task_ids or held_task_ids.intersection(thread.task_ids):
+            from ..conversation.task_history import contains
+            if thread.active_task_ids or any(contains(thread_path, thread, identifier) for identifier in held_task_ids):
                 continue
             if thread.thread_id in bound:
                 continue
@@ -2218,6 +2232,8 @@ def _conversation_related_paths(
     root: Path,
     thread: ConversationThread,
 ) -> tuple[tuple[Path, ...], list[MemoryRetentionError]]:
+    from ..conversation.task_history import iter_all, member_paths
+
     thread_id = thread.thread_id
     errors: list[MemoryRetentionError] = []
     candidates = [
@@ -2229,7 +2245,8 @@ def _conversation_related_paths(
         root / "background_claims" / f"{thread_id}.json",
         root / "guidance" / f"thread.{thread_id}.jsonl",
         *_conversation_usage_paths(root, thread_id, errors),
-        *(root / "tasks" / f"{task_id}.json" for task_id in thread.task_ids),
+        *(root / "tasks" / f"{task_id}.json" for task_id in iter_all(root / "threads" / f"{thread_id}.json", thread)),
+        *member_paths(root / "threads" / f"{thread_id}.json"),
         *(root / "wake_queue" / "dedupe").glob(f"{thread_id}.*.json"),
     ]
     messages = root / "messages" / f"{thread_id}.jsonl"
@@ -3237,7 +3254,14 @@ def _current_retention_pins_once(home: object, roots: tuple[Path, ...], errors: 
         candidate_ids: set[str] = set()
         # 同一次投影内每个冷归档月只读一次并整份校验；逐候选重读整月使维护成本为 候选数×月行数。
         cold_cache: dict = {}
-        for row in _pin_rows(candidate_path):
+        from .candidate_ledger import CandidateRows, read_manifest
+        header = read_manifest(candidate_path)
+        if header is not None:
+            watch_pin_source(candidate_path)
+            source_rows = (candidate.to_record() for candidate in CandidateRows(candidate_path, header))
+        else:
+            source_rows = _pin_rows(candidate_path)
+        for row in source_rows:
             candidate = MemoryCandidate.from_record(row)
             candidate_id = candidate.candidate_id
             if candidate_id in candidate_ids:

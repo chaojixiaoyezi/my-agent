@@ -675,6 +675,8 @@ def _rollback_unpublished_successor(store, successor, *, prior_workspace_id):
     # LLM: 仅移除本次任务的索引；其它任务和并发工作区选择均保留，只有仍指向待删任务时恢复原显示指针。
     # 函数用途: 在原线程锁内合并回滚成员关系，避免用旧线程快照覆盖并发更新。
     def restore_thread(thread):
+        from .task_history import remove
+        remove(store.storage.thread_path(thread.thread_id), thread, successor.task_id)
         return replace(thread,
             task_ids=tuple(item for item in thread.task_ids if item != successor.task_id),
             active_task_ids=tuple(item for item in thread.active_task_ids if item != successor.task_id),

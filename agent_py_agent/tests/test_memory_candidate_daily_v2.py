@@ -375,11 +375,9 @@ def test_legacy_record_without_promotion_mode_uses_current_host_policy(
     original = service.observe(replace(_user_observation(), promotion_mode="auto_eligible"))
     path = tmp_path / "candidates.jsonl"
     # 模拟旧版本写入的无权限行:从落库记录中删掉 promotion_mode 字段。
-    legacy_rows: list[dict[str, object]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        row = json.loads(line)
-        row.pop("promotion_mode", None)
-        legacy_rows.append(row)
+    legacy_row = original.to_record()
+    legacy_row.pop("promotion_mode", None)
+    legacy_rows = [legacy_row]
     path.write_text(
         "\n".join(json.dumps(item, ensure_ascii=False) for item in legacy_rows) + "\n",
         encoding="utf-8",

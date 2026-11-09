@@ -104,8 +104,8 @@ def test_real_remove_crash_recovers_without_private_candidate(tmp_path, point, e
     retry = agent.memory_promotion.promote(removed.candidate_id, automatic=True)
     assert retry.promoted, retry
     assert agent.memory.path.read_bytes() == before_formal
-    assert '项目使用 UTC 保存时间' not in agent.memory_candidates.path.read_text()
-    assert '项目新方案保留两份备份' not in agent.memory_candidates.path.read_text()
+    assert '项目使用 UTC 保存时间' not in ''.join(path.read_text() for path in agent.memory_candidates.path.with_name(agent.memory_candidates.path.name + '.records').rglob('*') if path.is_file() and path.suffix in {'.jsonl', '.json', '.row'})
+    assert '项目新方案保留两份备份' not in ''.join(path.read_text() for path in agent.memory_candidates.path.with_name(agent.memory_candidates.path.name + '.records').rglob('*') if path.is_file() and path.suffix in {'.jsonl', '.json', '.row'})
     for row in agent.memory_candidates.list():
         assert not row.content and row.content_redacted_at
         assert not any([row.evidence_refs, row.source_message_refs, row.source_tool_refs,

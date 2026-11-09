@@ -1452,8 +1452,8 @@ class _PreparedOutputs:
 def _without_identity_conflicts(candidate_service: CandidateService, prepared: _PreparedOutputs) -> _PreparedOutputs:
     if not prepared.candidates:
         return prepared
-    rows = retain_rejected_target_bindings(candidate_service.readonly_rows(), prepared.rejected_target_bindings)
-    kept, dropped = split_identity_conflicts(rows, prepared.candidates)
+    kept, dropped = candidate_service.filter_observation_conflicts(prepared.candidates,
+        rejected_bindings=prepared.rejected_target_bindings)
     if not dropped:
         return prepared
     _LOGGER.warning("memory curator dropped %d candidate(s) whose observation identity conflicts", dropped)

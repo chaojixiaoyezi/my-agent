@@ -67,7 +67,7 @@ def observe_harvest_parent(agent, state):
     if (thread is None or link.task_id != state.audit_root_task_id or link.thread_id != thread.thread_id
             or link.status != 'active' or link.work_kind != 'audit'
             or type(link.run_epoch) is not int or link.run_epoch != state.audit_run_epoch
-            or thread.task_ids.count(link.task_id) != 1):
+            or not agent.conversation_store.tasks.contains_task(thread.thread_id, link.task_id)):
         return None
     snapshot = HarvestParentSnapshot(link.task_id, link.run_epoch, thread.thread_id,
                                      tuple(thread.task_ids), hashlib.sha256(raw).hexdigest())
@@ -98,6 +98,6 @@ def check_harvest_parent(agent, state, snapshot):
     if (hashlib.sha256(raw).hexdigest() != snapshot.link_sha256 or thread is None
             or link.task_id != snapshot.audit_id or link.thread_id != snapshot.thread_id
             or thread.thread_id != snapshot.thread_id or tuple(thread.task_ids) != snapshot.task_ids
-            or thread.task_ids.count(snapshot.audit_id) != 1 or link.run_epoch != snapshot.epoch):
+            or not agent.conversation_store.tasks.contains_task(thread.thread_id, snapshot.audit_id) or link.run_epoch != snapshot.epoch):
         raise BackgroundSourceChanged()
     return True

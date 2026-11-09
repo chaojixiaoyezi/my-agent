@@ -321,9 +321,8 @@ def test_subagent_candidate_carries_tag_and_lineage(tmp_path):
     assert item.learning_source["can_learn"] is True
     assert item.learning_source["source_run_ids"] == ["run-1"]
     assert item.learning_source["source_task_ids"] == ["project-root"]
-    raw = json.loads(
-        (tmp_path / "owner" / "memory" / "candidates.jsonl").read_text(encoding="utf-8").splitlines()[0]
-    )
+    from agent_py_agent.agent.memory_store.candidates import CandidateService
+    raw = CandidateService(tmp_path / "owner" / "memory" / "candidates.jsonl").get(item.candidate_id).to_record()
     assert raw["learning_source"]["can_learn"] is True
 
 

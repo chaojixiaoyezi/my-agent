@@ -2,12 +2,19 @@
 # 模块用途: 固定允许分享的记忆候选，并在同一接收事务写原candidates.jsonl，失败/崩溃不留活动记忆副本。
 from __future__ import annotations
 
-import json
 from contextlib import contextmanager
 
 from ..common.json_io import locked_json_path, write_private_text_file_atomic_unlocked
+from ..memory_store.candidate_ledger import CandidateRows, read_manifest
 from ..memory_store.candidate_models import CandidateObservation
-from ..memory_store.candidates import CandidateService, merge_candidate_observations
+from ..memory_store.candidates import (
+    CandidateService,
+    _drop_candidate_load_cache,
+    _finish_candidate_cleanup,
+    _prepare_observations,
+    candidate_incremental_plan,
+    merge_candidate_observations,
+)
 from ..user_space.owner_quota import OwnerQuotaChange
 from .skill_transfer_manifest import SkillTransferError, manifest_hash, safe_payload
 
@@ -58,12 +65,16 @@ def memory_import_transaction(host, manifest, operation_id, admission):
     service = CandidateService(path)
     with locked_json_path(path):
         before = service._load_unlocked()
-        existing = [row for row in before if row.subject_key.startswith('transfer:' + operation_id + ':')]
+        observations = _observations(manifest, operation_id)
+        if isinstance(before, CandidateRows):
+            indices = [before.index_for(identifier, None) for _, identifier, _ in _prepare_observations(observations)]
+            existing = [before[index] for index in indices if index is not None]
+        else:
+            existing = [row for row in before if row.subject_key.startswith('transfer:' + operation_id + ':')]
         expected = {'transfer:' + operation_id + ':' + row['source_candidate_id']: row['content'] for row in manifest['memory_candidates']}
         if any(row.status not in {'pending_review', 'observed', 'blocked_missing_evidence'} or row.content != expected.get(row.subject_key) for row in existing):
             raise SkillTransferError('SKILL_TRANSFER_OPERATION_CONFLICT')
-        baseline = [row for row in before if row not in existing]
-        observations = _observations(manifest, operation_id)
+        baseline = before
         merged, selected = merge_candidate_observations(baseline, observations) if observations else (baseline, [])
         plan = _MemoryImport(path, baseline, merged, selected, admission)
         try:
@@ -81,15 +92,11 @@ class _MemoryImport:
     def __init__(self, path, before, after, selected, admission):
         self.path, self.before, self.after, self.admission = path, before, after, admission
         self.ids = [row.candidate_id for row in selected]
-        self.text = self._text(after)
-        self.changes = [OwnerQuotaChange(path, len(self.text.encode()))] if selected else []
+        self.planned = candidate_incremental_plan(path, after) if selected else {}
+        self.original = path.read_text(encoding='utf-8') if path.exists() else None
+        self.created = [target for target in self.planned if target != path and not target.exists()]
+        self.changes = [OwnerQuotaChange(target, len(text.encode())) for target, text in self.planned.items()]
         self.applied = self.finished = False
-
-    # LLM: 与原CandidateService相同JSONL schema/排序，不引入影子格式。
-    # 函数用途: 将已校验候选序列化为原账本。
-    @staticmethod
-    def _text(rows):
-        return ''.join(json.dumps(row.to_record(), ensure_ascii=False, sort_keys=True) + '\n' for row in rows)
 
     # LLM: 写前标记可能已发生副作用，异常也触发同锁回滚；空记忆清单不重写原文件。
     # 函数用途: 保存原候选批次，仍未宣称整个复刻成功。
@@ -97,14 +104,25 @@ class _MemoryImport:
         if self.ids:
             self.admission.check(self.changes)
             self.applied = True
-            write_private_text_file_atomic_unlocked(self.path, self.text)
+            for target, text in self.planned.items():
+                write_private_text_file_atomic_unlocked(target, text)
+            _drop_candidate_load_cache(self.path)
 
     # LLM: 只在registry同批committed已可读后调用，不单独扣一次复刻计数。
     # 函数用途: 解除本事务的回滚标志。
     def finish(self):
         self.finished = True
+        header = read_manifest(self.path)
+        if header is not None:
+            _finish_candidate_cleanup(self.path, header, coordinator_io=False)
 
     # LLM: 原锁下恢复准确前像，不会删除其它并发候选；外层state仍保护同一操作。
     # 函数用途: 撤销未提交复刻对原候选文件的修改。
     def restore(self):
-        write_private_text_file_atomic_unlocked(self.path, self._text(self.before))
+        if self.original is None:
+            self.path.unlink(missing_ok=True)
+        else:
+            write_private_text_file_atomic_unlocked(self.path, self.original)
+        for target in self.created:
+            target.unlink(missing_ok=True)
+        _drop_candidate_load_cache(self.path)

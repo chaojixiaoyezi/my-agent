@@ -39,6 +39,15 @@ from ..common.nofollow_fs import (
 from ..common.text_norm import fold_key
 from ..user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaChange, OwnerQuotaEnforcer
 from .candidate_commit_lock import candidate_commit_lock, candidate_redaction_lock
+from .candidate_ledger import (
+    CandidateIdPositions,
+    CandidateRows,
+    IndexedBindings,
+    ObservationPositions,
+    manifest_text,
+    read_manifest,
+    seal_cleanup,
+)
 from .candidate_models import (
     CANDIDATE_ORIGINS,
     CANDIDATE_SCHEMA_VERSION,
@@ -205,6 +214,14 @@ def _cached_candidate_rows(path: Path, probe, *, evict_on_miss: bool) -> tuple[M
 # LLM: 借用入口保持全表校验和加载覆盖；仅复用同一元组代次的ID索引，返回值深复制，不向外泄漏缓存模型。
 # 函数用途: 持候选文件锁按ID常数时间查询，缓存超预算时保留完整加载后的遍历。
 def _load_one_candidate_unlocked(service: CandidateService, candidate_id: str) -> MemoryCandidate | None:
+    manifest = read_manifest(service.path)
+    if manifest is not None:
+        rows = CandidateRows(service.path, manifest)
+        try:
+            position = rows.index_for(candidate_id, None)
+            return _hydrate_candidate(service.path, rows[position]) if position is not None else None
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            raise CandidateStoreCorruptError('candidate indexed ledger is unreadable') from error
     rows = _borrow_candidate_readonly_rows(service)
     if rows is None:
         return next((row for row in service._load_unlocked() if row.candidate_id == candidate_id), None)
@@ -345,6 +362,11 @@ class CandidateService:
         limit: int = 0,
     ) -> list[MemoryCandidate]:
         with self._locked_candidates():
+            header = read_manifest(self.path)
+            if (header is not None and statuses is not None and '_load_unlocked' not in self.__dict__
+                    and getattr(self._load_unlocked, '__func__', None) is CandidateService._load_unlocked):
+                selected = CandidateRows(self.path, header).select_statuses(statuses)
+                return deepcopy(_candidate_read_slice(selected, statuses, limit))
             borrowed = _borrow_candidate_readonly_rows(self)
             if borrowed is None:
                 loaded = self._load_unlocked()
@@ -361,11 +383,21 @@ class CandidateService:
                 or getattr(self._load_unlocked, "__func__", None) is not CandidateService._load_unlocked):
             return tuple(self.list(statuses=statuses, limit=limit))
         with self._locked_candidates():
+            header = read_manifest(self.path)
+            if header is not None and statuses is not None:
+                return tuple(_candidate_read_slice(CandidateRows(self.path, header).select_statuses(statuses), statuses, limit))
             return tuple(_candidate_read_slice(_borrow_candidate_readonly_rows(self), statuses, limit))
 
     # LLM: candidate_id 是唯一定位键；禁止按正文或 subject 模糊选中审核目标。
     #   默认走锁内单条定位，命中缓存时只深拷贝目标候选而不再深拷贝和排序全表；若 list 被外部替身替换则保留原遍历。
     # 函数用途: 读取一个候选，不存在时抛出精确 KeyError。
+    def filter_observation_conflicts(self, observations, *, rejected_bindings=()):
+        """在原候选锁内按索引预演观察，不复制全部历史或提前写入。"""
+        from .curator_rejected_bindings import retain_rejected_target_bindings
+        with self._locked_candidates():
+            rows = retain_rejected_target_bindings(self._load_unlocked(), rejected_bindings)
+            return split_identity_conflicts(rows, observations)
+
     def get(self, candidate_id: str) -> MemoryCandidate:
         target = str(candidate_id or "").strip()
         if "list" in self.__dict__ or getattr(self.list, "__func__", None) is not CandidateService.list:
@@ -465,7 +497,7 @@ class CandidateService:
         _unique_candidate_batch([item[0] for item in changes])
         with _quota_admission(self.quota_enforcer) as admission, self._locked_candidates():
             rows = self._load_unlocked()
-            indices = {row.candidate_id: i for i, row in enumerate(rows)}
+            indices = CandidateIdPositions(rows) if isinstance(rows, CandidateRows) else {row.candidate_id: i for i, row in enumerate(rows)}
             results, changed = [], False
             for expected, status, options in changes:
                 try:
@@ -496,7 +528,7 @@ class CandidateService:
         with _quota_admission(self.quota_enforcer) as admission, candidate_redaction_lock(
                 self.path, **({} if not self.coordinator_io else {"coordinator_io": True})):
             rows, results, hashes = self._load_unlocked(), [], set()
-            indices = {row.candidate_id: i for i, row in enumerate(rows)}
+            indices = CandidateIdPositions(rows) if isinstance(rows, CandidateRows) else {row.candidate_id: i for i, row in enumerate(rows)}
             changed = False
             for expected in expected_candidates:
                 try:
@@ -615,6 +647,9 @@ class CandidateService:
             return 0
         now = utc_now_iso()
         with candidate_redaction_lock(self.path, **({} if not self.coordinator_io else {"coordinator_io": True})):
+            header = read_manifest(self.path)
+            if header is not None:
+                _finish_candidate_cleanup(self.path, header, coordinator_io=self.coordinator_io)
             candidates = self._load_unlocked()
             replacements = [
                 _redacted_candidate(item, hashes=hashes, excluded=excluded,
@@ -716,6 +751,18 @@ class CandidateService:
             candidates: Iterable[MemoryCandidate] = self.list()
         else:
             with self._locked_candidates():
+                header = read_manifest(self.path)
+                if (header is not None and '_load_unlocked' not in self.__dict__
+                        and getattr(self._load_unlocked, '__func__', None) is CandidateService._load_unlocked):
+                    rows = CandidateRows(self.path, header)
+                    counts = rows.index.get(rows.root, 'counts') or {'statuses': {}, 'types': {}}
+                    if (set(counts) != {'statuses', 'types'} or any(not isinstance(values, dict)
+                            or any(type(key) is not str or type(value) is not int or value < 0 for key, value in values.items())
+                            or sum(values.values()) != header['count'] for values in counts.values())):
+                        raise CandidateStoreCorruptError('candidate counters are invalid')
+                    return {'schema_version': CANDIDATE_SCHEMA_VERSION, 'total': header['count'],
+                            'by_status': dict(sorted(counts['statuses'].items())),
+                            'by_type': dict(sorted(counts['types'].items()))}
                 borrowed = _borrow_candidate_readonly_rows(self)
                 candidates = borrowed if borrowed is not None else self._load_unlocked()
         return _candidate_stats_from_rows(candidates)
@@ -729,6 +776,9 @@ class CandidateService:
     # LLM: 热缓存只复制写方所需的独占模型；冷解析直接归写方，不再为了缓存复制整账本。
     # 函数用途: 在原文件锁内取得可安全修改的候选列表，读侧缓存由只读解析独立建立。
     def _load_unlocked(self) -> list[MemoryCandidate]:
+        manifest = read_manifest(self.path)
+        if manifest is not None:
+            return CandidateRows(self.path, manifest)
         probe = _candidate_load_probe(self.path)
         cached = _cached_candidate_rows(self.path, probe, evict_on_miss=True)
         if cached is not None:
@@ -818,9 +868,10 @@ def merge_candidate_observations(
     observations: list[CandidateObservation] | tuple[CandidateObservation, ...],
 ) -> tuple[list[MemoryCandidate], list[MemoryCandidate]]:
     prepared = _prepare_observations(observations)
-    result = list(candidates)
-    bindings = TargetEvidenceVersionBindings(result)
-    by_id = {item.candidate_id: index for index, item in enumerate(result)}
+    result = candidates.fork() if isinstance(candidates, CandidateRows) else list(candidates)
+    bindings = IndexedBindings(result) if isinstance(result, CandidateRows) else TargetEvidenceVersionBindings(result)
+    by_id = CandidateIdPositions(result) if isinstance(result, CandidateRows) else {
+        item.candidate_id: index for index, item in enumerate(result)}
     by_observation = _observation_index(result)
     committed: list[MemoryCandidate] = []
     for item in prepared:
@@ -831,6 +882,8 @@ def merge_candidate_observations(
 # LLM: 预演和正式合并共用一次索引构建，拒绝草稿不占用合法观察身份。
 # 函数用途: 将独立观察键映射到所有已有候选位置，不改原模型。
 def _observation_index(rows: list[MemoryCandidate]) -> dict[str, set[int]]:
+    if isinstance(rows, CandidateRows):
+        return ObservationPositions(rows)
     result: dict[str, set[int]] = {}
     for index, item in enumerate(rows):
         if not _rejected_draft(item):
@@ -930,9 +983,10 @@ def split_identity_conflicts(
     candidates: list[MemoryCandidate],
     observations: list[CandidateObservation] | tuple[CandidateObservation, ...],
 ) -> tuple[tuple[CandidateObservation, ...], int]:
-    merged = list(candidates)
-    bindings = TargetEvidenceVersionBindings(merged)
-    by_id = {item.candidate_id: index for index, item in enumerate(merged)}
+    merged = candidates.fork() if isinstance(candidates, CandidateRows) else list(candidates)
+    bindings = IndexedBindings(merged) if isinstance(merged, CandidateRows) else TargetEvidenceVersionBindings(merged)
+    by_id = CandidateIdPositions(merged) if isinstance(merged, CandidateRows) else {
+        item.candidate_id: index for index, item in enumerate(merged)}
     by_observation = _observation_index(merged)
     kept: list[CandidateObservation] = []
     for observation in observations:
@@ -987,7 +1041,7 @@ def _require_promotable_binding(current: MemoryCandidate, ref: str) -> None:
 # 函数用途: 一次组装晋升终态及其必须清除的全部同hash隐私。
 def _promoted_rows(candidates, index, review):
     reviewer, promotion_ref, review_note = review
-    rows = list(candidates)
+    rows = candidates.fork() if isinstance(candidates, CandidateRows) else list(candidates)
     current = rows[index]
     now = utc_now_iso()
     if current.status != "promoted":
@@ -1082,27 +1136,8 @@ def _write_candidates_unlocked(
     cold_changes: dict[str, str] | None = None,
     cold_redaction: dict | None = None,
 ) -> None:
-    owned = deepcopy(candidates)
-    redacted = [row for row in owned if row.content_redacted_at and not row._raw_json_line]
-    options = cold_redaction or {"hashes": {row.content_hash for row in redacted},
-        "excluded": {row.candidate_id for row in owned if row.content}, "reviewer": "memory-hard-delete", "now": utc_now_iso()}
-    archives = dict(cold_changes or {})
-    archives.update(_cold_redaction_plan(path, options, archives))
-    text = _serialize_candidates(owned)
-    admission.check([OwnerQuotaChange(path, len(text.encode("utf-8"))), *[
-        OwnerQuotaChange(path.parent / "candidates_archive" / name, len(content.encode("utf-8")))
-        for name, content in archives.items()]])
-    _drop_candidate_load_cache(path)
-    try:
-        _write_cold_changes(path, archives, coordinator_io=coordinator_io)
-        if coordinator_io:
-            _coordinator_candidate_write(lambda: write_private_text_file_atomic_unlocked(path, text, replace_once=True))
-        else:
-            write_private_text_file_atomic_unlocked(path, text)
-        _publish_written_candidates(path, text, owned)
-    except BaseException:
-        _drop_candidate_load_cache(path)
-        raise
+    _write_incremental_candidates(path, candidates, admission=admission, coordinator_io=coordinator_io,
+                                  cold_changes=cold_changes, cold_redaction=cold_redaction)
 
 
 # LLM: 仅散列正式字段的完整逻辑状态；pickle只作进程内指纹编码，从不反序列化或落盘。
@@ -1167,7 +1202,10 @@ def _mark_excluded_candidates(
     now: str,
 ) -> int:
     changed = 0
-    for index, item in enumerate(candidates):
+    selected = ((candidates.index_for(identifier, None), identifier) for identifier in ids) if isinstance(candidates, CandidateRows) else None
+    positions = (position for position, _ in selected if position is not None) if selected is not None else range(len(candidates))
+    for index in positions:
+        item = candidates[index]
         if item.candidate_id not in ids:
             continue
         if str(item.promotion_exclusion or "").strip() == code:
@@ -1586,6 +1624,8 @@ def _status_event(status: str, *, actor: str, note: object, at: str) -> dict[str
 # 函数用途: 返回候选在当前列表中的索引。
 def _candidate_index(candidates: list[MemoryCandidate], candidate_id: str) -> int:
     target = str(candidate_id or "").strip()
+    if isinstance(candidates, CandidateRows):
+        return candidates.index_for(target)
     for index, item in enumerate(candidates):
         if item.candidate_id == target:
             return index
@@ -1750,6 +1790,18 @@ def _hydrate_candidate(path: Path, item: MemoryCandidate, cold_cache: dict | Non
 # LLM: 只对可能命中的冷行回填并解除ref，不让每次写操作全表读取冷详情；pure merge仍不承担I/O。
 # 函数用途: 在观察合并前恢复其涉及的候选详情，避免重放丢历史或旧ref遮住新证据。
 def _hydrate_observation_targets(path: Path, rows: list[MemoryCandidate], observations) -> list[MemoryCandidate]:
+    if isinstance(rows, CandidateRows):
+        positions = set()
+        for normalized, identifier, key in _prepare_observations(observations):
+            for target in (identifier, normalized.link_candidate_id):
+                index = rows.index_for(target, None) if target else None
+                if index is not None:
+                    positions.add(index)
+            positions.update(rows.observation_positions(key))
+        for index in positions:
+            if rows[index].cold_detail_ref:
+                rows[index] = replace(_hydrate_candidate(path, rows[index]), cold_detail_ref="")
+        return rows
     if not observations or not any(row.cold_detail_ref for row in rows):
         return rows
     prepared = _prepare_observations(observations)
@@ -1850,6 +1902,10 @@ def _write_cold_changes(path: Path, changes: dict[str, str], *, coordinator_io: 
 # LLM: 默认持原锁同FD流式校验；显式旧读取器覆盖仍只读此FD，重复ID/坏行及schema全部拒绝，不改变热缓存规则。
 # 函数用途: 单遍构造模型和稳定磁盘探针，避免整表原文及中间字典列表同时驻留。
 def _parse_candidate_ledger(path: Path):
+    manifest = read_manifest(path)
+    if manifest is not None:
+        records = list(CandidateRows(path, manifest))
+        return _candidate_load_probe(path), records
     stamp = _candidate_load_stamp(path)
     records = []
     digest, ids = hashlib.blake2b(digest_size=16), set()
@@ -1922,3 +1978,142 @@ def _candidate_snapshot_matches(path: Path, current: MemoryCandidate, expected: 
     if current == expected:
         return True
     return bool(current.cold_detail_ref and _hydrate_candidate(path, current) == expected)
+
+
+def _candidate_node_family(index, root):
+    """显式全表维护回收旧根家族；常规单条提交不调用此遍历。"""
+    pending = [root] if root is not None else []
+    while pending:
+        reference = pending.pop()
+        yield reference['ref']['ref']
+        node = index._load(reference)
+        if 'children' in node:
+            pending.extend(node['children'].values())
+        else:
+            for key, value in node['entries'].items():
+                if key.startswith('statusroot/') and value is not None:
+                    pending.append(value)
+                if key.startswith('row/') and value:
+                    yield value['record']['ref']
+
+
+def _finish_candidate_cleanup(path, manifest, *, coordinator_io):
+    """完成已发表当前态的旧正文删除义务；失败保留头中义务供原锁下重试。"""
+    from ..common.nofollow_fs import unlink_file_beneath
+    cleanup = manifest.get('cleanup', ())
+    cleanup_parts = None
+    if isinstance(cleanup, dict):
+        from ..common.nofollow_fs import read_bytes_beneath
+        digest, name = cleanup.get('sha256'), cleanup.get('ref')
+        if (type(digest) is not str or len(digest) != 64 or any(ch not in '0123456789abcdef' for ch in digest)
+                or name != digest + '.cleanup' or type(cleanup.get('byte_length')) is not int):
+            raise CandidateStoreCorruptError('candidate cleanup reference is invalid')
+        cleanup_parts = (path.name + '.records', name)
+        raw = read_bytes_beneath(path.parent, cleanup_parts, max_bytes=cleanup['byte_length'])
+        if raw is None:
+            return  # 成功清理在逐项fsync后最后移除义务文件，缺失表示已完成。
+        if len(raw) != cleanup['byte_length'] or hashlib.sha256(raw).hexdigest() != digest:
+            raise CandidateStoreCorruptError('candidate cleanup digest mismatches')
+        cleanup = json.loads(raw)
+        if not isinstance(cleanup, list):
+            raise CandidateStoreCorruptError('candidate cleanup shape is invalid')
+    for name in cleanup:
+        if (type(name) is not str or '/' in name or '\\' in name or name.startswith('.')):
+            raise CandidateStoreCorruptError('candidate cleanup reference is invalid')
+        def operation(name=name):
+            return unlink_file_beneath(path.parent, (path.name + '.records', name))
+        try:
+            _coordinator_candidate_write(operation) if coordinator_io else operation()
+        except FileNotFoundError:
+            pass
+    if cleanup_parts is not None:
+        def operation():
+            return unlink_file_beneath(path.parent, cleanup_parts)
+        _coordinator_candidate_write(operation) if coordinator_io else operation()
+
+
+def _write_incremental_candidates(path, candidates, *, admission, coordinator_io, cold_changes, cold_redaction):
+    from ..common.nofollow_fs import write_bytes_atomic_beneath
+    original_stamp = _candidate_load_stamp(path)
+    previous = read_manifest(path)
+    if previous is not None:
+        _finish_candidate_cleanup(path, previous, coordinator_io=coordinator_io)
+    if isinstance(candidates, CandidateRows):
+        rows = candidates
+        redacted = [row for _, row, _ in rows.changed() if row.content_redacted_at and not row._raw_json_line]
+    else:
+        # 旧账首次迁移或显式保留/硬删除整表规划；普通mutation始终传递惰性工作副本。
+        rows = CandidateRows(path, {'root': None, 'count': 0})
+        for item in candidates:
+            rows.append(item)
+        redacted = [row for row in candidates if row.content_redacted_at and not row._raw_json_line]
+    options = cold_redaction or {'hashes': {row.content_hash for row in redacted},
+        'excluded': {row.candidate_id for _, row, _ in rows.changed() if row.content},
+        'reviewer': 'memory-hard-delete', 'now': utc_now_iso()}
+    archives = dict(cold_changes or {})
+    archives.update(_cold_redaction_plan(path, options, archives))
+    if isinstance(candidates, CandidateRows) and not rows.changed() and not archives:
+        return
+    root, writes, cleanup = rows.plan()
+    if not isinstance(candidates, CandidateRows) and previous is not None:
+        old = CandidateRows(path, previous)
+        family = set(_candidate_node_family(old.index, previous['root']))
+        cleanup = sorted(family - set(writes))
+    cleanup = seal_cleanup(writes, cleanup)
+    text = manifest_text(root, len(rows), cleanup)
+    changes = [OwnerQuotaChange(path, len(text.encode())), *[
+        OwnerQuotaChange(path.parent / (path.name + '.records') / name, len(raw)) for name, raw in writes.items()], *[
+        OwnerQuotaChange(path.parent / 'candidates_archive' / name, len(content.encode()))
+        for name, content in archives.items()]]
+    admission.check(changes)
+    _drop_candidate_load_cache(path)
+    created = []
+    try:
+        _write_cold_changes(path, archives, coordinator_io=coordinator_io)
+        for name, raw in writes.items():
+            def operation(name=name, raw=raw):
+                from ..common.nofollow_fs import read_bytes_beneath
+                ensure_private_dir(path.parent)
+                parts = (path.name + '.records', name)
+                existing = read_bytes_beneath(path.parent, parts, max_bytes=len(raw))
+                if existing is not None:
+                    if existing != raw:
+                        raise CandidateStoreCorruptError('candidate immutable node changed')
+                    return False
+                write_bytes_atomic_beneath(path.parent, parts, raw)
+                return True
+            born = _coordinator_candidate_write(operation) if coordinator_io else operation()
+            if born:
+                created.append(name)
+        def publish():
+            write_private_text_file_atomic_unlocked(path, text, **({'replace_once': True} if coordinator_io else {}))
+        _coordinator_candidate_write(publish) if coordinator_io else publish()
+        _publish_written_candidates(path, text, [])
+        _finish_candidate_cleanup(path, {'cleanup': cleanup}, coordinator_io=coordinator_io)
+        # 头的cleanup只包含已幂等完成的相对名字；保留它无需第二次权威写入。
+    except BaseException:
+        _drop_candidate_load_cache(path)
+        # 原头身份未变才证明本次没有发表；已发表或结果未知时保留新根及恢复义务。
+        if _candidate_load_stamp(path) == original_stamp:
+            try:
+                _finish_candidate_cleanup(path, {'cleanup': created}, coordinator_io=coordinator_io)
+            except BaseException:
+                pass  # 保留最初失败；未发表的孤立节点不具有当前态权威。
+        raise
+
+
+def candidate_incremental_plan(path, records):
+    """供已有跨文件事务规划候选叶和唯一头，规划阶段不写入或清理旧根。"""
+    rows = records
+    if not isinstance(rows, CandidateRows):
+        rows = CandidateRows(path, {'root': None, 'count': 0})
+        for record in records:
+            rows.append(record)
+    root, writes, cleanup = rows.plan()
+    if not isinstance(records, CandidateRows) and (previous := read_manifest(path)) is not None:
+        old = CandidateRows(path, previous)
+        cleanup = sorted(set(_candidate_node_family(old.index, previous['root'])) - set(writes))
+    cleanup = seal_cleanup(writes, cleanup)
+    changes = {path.parent / (path.name + '.records') / name: raw.decode() for name, raw in writes.items()}
+    changes[path] = manifest_text(root, len(rows), cleanup)
+    return changes

@@ -16,6 +16,17 @@ def _rows(tmp_path, count):
     return service, rows
 
 
+def _durable_rows(path, text=None):
+    """从真实新头读取当前态；故障注入仍发生在候选头发表之前。"""
+    import json
+
+    from agent_py_agent.agent.memory_store.candidate_ledger import CandidateRows, read_manifest
+    header = json.loads(text) if text is not None else read_manifest(path)
+    if header is not None and header.get('candidate_ledger'):
+        return [row.to_record() for row in CandidateRows(path, header)]
+    return [row.to_record() for row in ledger.CandidateService(path)._load_unlocked()]
+
+
 def _observe_writes(monkeypatch, path):
     original = ledger.write_private_text_file_atomic_unlocked
     writes = []
@@ -39,7 +50,7 @@ def test_batch_uses_two_real_candidate_flushes(tmp_path, monkeypatch, count):
     original = service._commit_target
 
     def commit(row, context):
-        durable = [json.loads(line) for line in service.candidates.path.read_text().splitlines()]
+        durable = _durable_rows(service.candidates.path)
         assert len(writes) == 1
         assert all(item["status"] == "approved" and item["commit_obligation"] for item in durable)
         return original(row, context)
@@ -61,7 +72,7 @@ def test_final_flush_failure_preserves_obligations_and_retry_is_idempotent(tmp_p
     failed = []
 
     def write(path, text, **kwargs):
-        records = [json.loads(line) for line in text.splitlines()] if path == service.candidates.path else []
+        records = _durable_rows(path, text) if path == service.candidates.path else []
         if records and any(row["status"] == "promoted" for row in records) and not failed:
             failed.append(True)
             raise OSError("injected terminal receipt failure")
@@ -187,7 +198,7 @@ def test_curator_tick_archives_old_terminal_details_only(tmp_path, status):
     curator.candidate_service = service.candidates
     before = {row.candidate_id: row for row in service.candidates.list()}
     curator.run_if_due(now=now)
-    hot = {row["candidate_id"]: row for line in service.candidates.path.read_text().splitlines() if (row := json.loads(line))}
+    hot = {row["candidate_id"]: row for row in _durable_rows(service.candidates.path)}
     # candidate_models的现行schema只允许三类终态持cold_detail_ref，不能越过白名单去放松该合同。
     assert bool(hot[rejected.candidate_id].get("cold_detail_ref")) is (status in {"rejected", "superseded"})
     assert not hot[rows[0].candidate_id].get("cold_detail_ref")
@@ -209,7 +220,7 @@ def test_failed_evidence_block_never_reports_unpersisted_state_or_adds_obligatio
 
     def write(path, text, **kwargs):
         if (path == service.candidates.path and not failed
-                and any(json.loads(line)["status"] == "blocked_missing_evidence" for line in text.splitlines())):
+                and any(row["status"] == "blocked_missing_evidence" for row in _durable_rows(path, text))):
             failed.append(True)
             raise OSError("evidence rejection receipt write failed")
         return original(path, text, **kwargs)
@@ -269,7 +280,7 @@ def test_conflict_receipt_io_failure_does_not_erase_other_success(tmp_path, monk
 
     def write(path, text, **kwargs):
         if (path == service.candidates.path and not failed
-                and any(json.loads(line)["status"] == "blocked_conflict" for line in text.splitlines())):
+                and any(row["status"] == "blocked_conflict" for row in _durable_rows(path, text))):
             failed.append(True)
             raise OSError("conflict receipt unavailable once")
         return original(path, text, **kwargs)

@@ -39,9 +39,9 @@ def observe_qualified(candidates: object, verifier: object, observations: list) 
 # LLM: 调用方持quota与候选锁；先冻结拒绝观察的版本约束，再合并合法观察；拒绝来源不能贡献晋升资格。
 # 函数用途: 生成一次原子候选写入及原序逐操作回执，保留后续拒绝和混合批次中的旧版本责任。
 def assemble_evidence_batch(rows: list, observations: list, failures: list[str]) -> tuple[list, list]:
+    from .candidate_ledger import CandidateRows
     from .candidates import merge_candidate_observations
-
-    rows = list(rows)
+    rows = rows.fork() if isinstance(rows, CandidateRows) else list(rows)
     rejected = {}
     for index, (item, failure) in enumerate(zip(observations, failures, strict=True)):
         if not failure:
@@ -64,10 +64,13 @@ def assemble_evidence_batch(rows: list, observations: list, failures: list[str])
 def _retain_rejected_binding(rows: list, candidate: object, failure: str) -> None:
     from dataclasses import replace
 
+    from .candidate_ledger import CandidateRows
     from .candidate_models import utc_now_iso
     from .candidate_target_binding import binding_history
-
-    for index, current in enumerate(rows):
+    position = rows.index_for(candidate.candidate_id, None) if isinstance(rows, CandidateRows) else None
+    positions = (() if position is None else (position,)) if isinstance(rows, CandidateRows) else range(len(rows))
+    for index in positions:
+        current = rows[index]
         if current.candidate_id != candidate.candidate_id:
             continue
         history = [*binding_history(current), *binding_history(candidate)]

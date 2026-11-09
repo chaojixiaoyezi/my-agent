@@ -254,7 +254,8 @@ def test_condense_actual_native_is_not_washed_into_promoted_success(tmp_path, mo
         remember_explicit(ExplicitRememberServices(service.candidates, service, service.long_term), "原正式写已完成")
     assert caught.value is error
     assert service.long_term.all()
-    assert json.loads(service.candidates.path.read_text().splitlines()[0])["status"] == "promoted"
+    from agent_py_agent.agent.memory_store.candidates import CandidateService
+    assert CandidateService(service.candidates.path).list()[0].status == "promoted"
 
 
 def test_ordinary_condense_oserror_keeps_original_success(tmp_path, monkeypatch):

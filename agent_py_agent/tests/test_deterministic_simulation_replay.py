@@ -663,3 +663,31 @@ def test_current_worker_range_falsifies_validator_bypass(tmp_path, monkeypatch):
     monkeypatch.setattr(routes, 'validate_published_route', accept_out_of_range)
     with pytest.raises(AssertionError, match='current_worker_range_accepted'):
         _current_worker_range_scenario(tmp_path, 2)
+
+
+def test_r8_thread_history_seeded_terminal_projection_replay(tmp_path):
+    """固定随机种子的迟到bind/投影/完成序列，逐步核对确切身份和终态类别。"""
+    from random import Random
+
+    from agent_py_agent.tests.test_r8_record_ledgers import _thread
+
+    random = Random(20261108)
+    store, thread = _thread(tmp_path)
+    terminals = {}
+    for number in range(12):
+        store.tasks.bind({'thread_id': thread.thread_id, 'task_id': f'task-{number}'})
+    for _ in range(120):
+        identifier = f'task-{random.randrange(12)}'
+        action = random.choice(('bind', 'project', 'done', 'failed'))
+        if action == 'bind':
+            store.tasks.bind({'thread_id': thread.thread_id, 'task_id': identifier})
+        elif action == 'project':
+            store.tasks.update_thread_index(thread.thread_id, identifier, 'active', 1)
+        else:
+            store.tasks.update_status({'task_id': identifier, 'status': action})
+            terminals[identifier] = action
+        assert store.tasks.load(identifier).status == terminals.get(identifier, 'active')
+        current = store.threads.require(thread.thread_id)
+        assert not set(current.active_task_ids).intersection(terminals)
+        assert store.tasks.contains_task(thread.thread_id, identifier)
+    assert len(tuple(store.tasks.iter_task_ids(thread.thread_id))) == 12

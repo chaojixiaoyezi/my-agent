@@ -537,6 +537,7 @@ class ConversationThread:
     updated_at: float = 0.0
     channel_bindings: tuple[ChannelBinding, ...] = ()
     task_ids: tuple[str, ...] = ()
+    task_history_version: int = 0
     active_task_ids: tuple[str, ...] = ()
     workspace_task_id: str = ""
     # The trusted client cwd is thread state. workspace_task_id is the latest task projection for
@@ -689,6 +690,7 @@ class ConversationThread:
                     else []
                 )
             ),
+            task_history_version=1 if data.get("task_history_version") == 1 else 0,
             active_task_ids=tuple(
                 str(item) for item in (active_task_ids if isinstance(active_task_ids, list) else [])
             ),

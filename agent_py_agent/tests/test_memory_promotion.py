@@ -110,7 +110,7 @@ def test_m2_default_target_and_approval_share_one_precommit_write(tmp_path, monk
     # 函数用途: 检查耐久批准后继续原正式写入。
     def commit(row, context):
         assert writes == [[("approved", "long_term")]]
-        durable = [json.loads(line) for line in service.candidates.path.read_text().splitlines()]
+        durable = [item.to_record() for item in service.candidates._load_unlocked()]
         assert durable[0]["status"] == "approved" and durable[0]["promotion_target"] == "long_term"
         return original_target(row, context)
 

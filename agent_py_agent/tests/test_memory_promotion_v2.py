@@ -416,8 +416,8 @@ def test_approved_candidate_with_noncanonical_scope_blocks_at_promotion_boundary
     # 模拟旧版本落账的脏 scope：直接改写候选账本文件（绕过观察入口校验）。
     path = tmp_path / "owner" / "memory" / "candidates.jsonl"
     rewritten: list[dict[str, object]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        row = json.loads(line)
+    for item in service.candidates.list():
+        row = item.to_record()
         if row.get("candidate_id") == candidate.candidate_id:
             row["scope"]["scope_key"] = "local"
         rewritten.append(row)

@@ -62,7 +62,7 @@ def test_legacy_tombstone_recovers_all_linked_candidate_versions(tmp_path):
     outcome = agent.memory_promotion.promote(removed.candidate_id, automatic=True)
     assert outcome.promoted, outcome
     assert all(not c.content for c in agent.memory_candidates.list())
-    assert '项目使用 UTC 保存时间' not in agent.memory_candidates.path.read_text()
+    assert '项目使用 UTC 保存时间' not in ''.join(path.read_text() for path in agent.memory_candidates.path.with_name(agent.memory_candidates.path.name + '.records').rglob('*') if path.is_file() and path.suffix in {'.jsonl', '.json', '.row'})
 
 
 # LLM: 真实SQLite/FTS和外置正文先有命中，恢复后不得残留旧索引；正式召回过滤不能代替擦除。

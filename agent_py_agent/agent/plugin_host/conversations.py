@@ -446,7 +446,7 @@ class ConversationDomain:
             if error or child is None or child.metadata.get("succession_published") is not True:
                 raise HostAPIError("THREAD_BUSY", 409)
 
-        scopes = [row.thread_id, *(detached_task_claim_scope_id(row.thread_id, task_id) for task_id in row.task_ids)]
+        scopes = [row.thread_id, *(detached_task_claim_scope_id(row.thread_id, task_id) for task_id in store.tasks.iter_task_ids(row.thread_id))]
         activity_locks.enter_context(locked_file_transition(store.storage.goal_path(row.thread_id)))
         for scope in scopes:
             activity_locks.enter_context(locked_file_transition(store.storage.background_claim_path(scope)))

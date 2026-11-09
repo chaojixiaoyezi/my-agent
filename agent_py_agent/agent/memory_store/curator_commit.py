@@ -13,7 +13,6 @@ import json
 import logging
 import shutil
 from contextlib import ExitStack, contextmanager
-from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,12 +32,14 @@ from ..common.request_execution_ports import (
     gateway_transaction_writer,
 )
 from ..user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaChange, OwnerQuotaLockContention
+from .candidate_ledger import CandidateRows, read_manifest
 from .candidate_models import CandidateObservation, MemoryCandidate, utc_now_iso
 from .candidates import (
     CandidateService,
     _drop_candidate_load_cache,
+    _finish_candidate_cleanup,
     _hydrate_observation_targets,
-    _serialize_candidates,
+    candidate_incremental_plan,
     merge_candidate_observations,
 )
 from .curator_rejected_bindings import retain_rejected_target_bindings
@@ -76,8 +77,13 @@ logger = logging.getLogger(__name__)
 # 函数用途: 在原候选事务内让跨线程广播仅计一次观察，跨批重放仍保留全部来源。
 def _merge_broadcast_observations(before, observations):
     rows, committed = merge_candidate_observations(before, observations)
-    previous = {row.candidate_id: set(row.observation_keys) for row in before}
-    sources = {row.candidate_id: list(row.source_message_refs) for row in before}
+    if isinstance(before, CandidateRows):
+        ids = {row.candidate_id for row in committed}
+        selected = [before[index] for identifier in ids if (index := before.index_for(identifier, None)) is not None]
+    else:
+        selected = before
+    previous = {row.candidate_id: set(row.observation_keys) for row in selected}
+    sources = {row.candidate_id: list(row.source_message_refs) for row in selected}
     suppressed = {}
     for observation, snapshot in zip(observations, committed, strict=True):
         candidate_id = snapshot.candidate_id
@@ -94,7 +100,9 @@ def _merge_broadcast_observations(before, observations):
             sources[candidate_id] = combined
         previous[candidate_id] = keys
     final = {}
-    for index, row in enumerate(rows):
+    positions = (rows.index_for(identifier) for identifier in suppressed) if isinstance(rows, CandidateRows) else range(len(rows))
+    for index in positions:
+        row = rows[index]
         if row.candidate_id in suppressed:
             keys = [key for key in row.observation_keys if key not in suppressed[row.candidate_id]]
             rows[index] = replace(row, observation_keys=keys, occurrence_count=len(keys))
@@ -219,6 +227,9 @@ class CuratorBatchCommitter:
                         ) from rollback_exc
                     _cleanup_transaction(_transaction_directory(transaction))
                     raise CuratorBatchCommitError("curator batch commit failed") from exc
+                header = read_manifest(self.candidates.path)
+                if header is not None:
+                    _finish_candidate_cleanup(self.candidates.path, header, coordinator_io=self.candidates.coordinator_io)
                 _cleanup_committed_best_effort(_transaction_directory(transaction))
             return CuratorBatchCommitResult(tuple(daily_events), tuple(candidates))
 
@@ -289,7 +300,8 @@ class CuratorBatchCommitter:
         if request.candidate_observations:
             rows = _hydrate_observation_targets(self.candidates.path, rows, request.candidate_observations)
             rows, committed = _merge_broadcast_observations(rows, request.candidate_observations)
-        changes = {self.candidates.path: _candidate_text(rows)} if rows != before or not exists else {}
+        changed = bool(rows.changed()) if isinstance(rows, CandidateRows) else rows != before
+        changes = candidate_incremental_plan(self.candidates.path, rows) if changed or not exists else {}
         return changes, committed
 
     # LLM: Each date shard receives its entire sub-batch in model order while sequence remains
@@ -366,7 +378,7 @@ class CuratorBatchCommitter:
     # 函数用途: 按 Daily、Candidate、run audit、state 最后提交的顺序替换文件。
     def _apply_changes(self, changes: dict[Path, str]) -> None:
         ordered = [path for path in changes if path != self.state.path]
-        ordered.sort(key=lambda item: str(item.resolve(strict=False)))
+        ordered.sort(key=lambda item: (item == self.candidates.path, str(item.resolve(strict=False))))
         ordered.append(self.state.path)
         for path in ordered:
             self._write_target(path, changes[path])
@@ -661,6 +673,9 @@ def _recover_directory(committer: CuratorBatchCommitter, directory: Path, plan: 
     state = committer.state._load_unlocked()
     run_id = str(manifest["run_id"])
     if state.last_committed_run_id == run_id:
+        header = read_manifest(committer.candidates.path)
+        if header is not None:
+            _finish_candidate_cleanup(committer.candidates.path, header, coordinator_io=committer.candidates.coordinator_io)
         _cleanup_transaction(directory)
         return 0
     if _same_live_lease(state.active_lease, run_id=run_id, now=plan.current):
@@ -705,12 +720,6 @@ def _check_admissions(
         handle.admission.check(
             [*target_changes, OwnerQuotaChange(transaction_probe, backup_bytes)]
         )
-
-
-# LLM: 复用候选共用原行编码器；owned副本防to_record归一化或缓存字段污染事务返回值。
-# 函数用途: 序列化候选当前态完整 JSONL。
-def _candidate_text(records: list[MemoryCandidate]) -> str:
-    return _serialize_candidates(deepcopy(records))
 
 
 # LLM: Daily serialization preserves authoritative sequence order already assigned by the pure

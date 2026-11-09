@@ -23,6 +23,7 @@ from ..gateway_parts.io import (
     update_json_file_atomic,
 )
 from ..runtime_errors import DataCorruptionError, runtime_error_report
+from . import task_history
 from .capability_selection_state import TaskCapabilitySelection
 from .host_actor import HostActorError, HostChannelActor
 from .host_message_context import HostMessageContextBinding
@@ -102,8 +103,7 @@ def named_work_name_matches(link: ThreadTaskLink, work_kind: str, work_name: str
 def _thread_with_task(
     thread: ConversationThread, task_id: str, updated_at: float
 ) -> ConversationThread:
-    task_ids = tuple(dict.fromkeys((*thread.task_ids, task_id)))
-    active_task_ids = tuple(dict.fromkeys((*thread.active_task_ids, task_id)))
+    task_ids, active_task_ids = task_history.window(thread, task_id, active=True)
     return replace(
         thread,
         task_ids=task_ids,
@@ -117,8 +117,7 @@ def _thread_with_task(
 def _thread_without_task(
     thread: ConversationThread, task_id: str, updated_at: float
 ) -> ConversationThread:
-    task_ids = tuple(dict.fromkeys((*thread.task_ids, task_id)))
-    active_task_ids = tuple(item for item in thread.active_task_ids if item != task_id)
+    task_ids, active_task_ids = task_history.window(thread, task_id, active=False)
     return replace(
         thread,
         task_ids=task_ids,
@@ -689,11 +688,19 @@ class TaskStore:
             latest = ConversationThread.from_dict(data)
             if latest.thread_id != thread_id:
                 raise DataCorruptionError(f"conversation thread identity is invalid: {thread_id}")
+            # 线程锁内重读精确TaskLink，晚到的bind/status投影不能把终态重新放回活动集。
+            canonical, error = _read_task_link(self.storage.task_path(task_id), task_id)
+            actual_status = canonical.status if canonical is not None and canonical.thread_id == thread_id else status
+            if error is not None and error.get('error_type') != 'FileNotFoundError':
+                raise DataCorruptionError(f"conversation task link is unreadable: {task_id}")
+            task_history.add(self.storage.thread_path(thread_id), latest, task_id)
             updated = (
                 _thread_without_task(latest, task_id, current)
-                if str(status or "").strip().lower() in THREAD_TASK_LINK_INACTIVE_STATUSES
+                if str(actual_status or "").strip().lower() in THREAD_TASK_LINK_INACTIVE_STATUSES
                 else _thread_with_task(latest, task_id, current)
             )
+            recent = task_history.recent(self.storage.thread_path(thread_id), latest)
+            updated = replace(updated, task_ids=tuple(dict.fromkeys((*recent, *updated.active_task_ids))), task_history_version=1)
             if updated.task_ids == latest.task_ids and updated.active_task_ids == latest.active_task_ids:
                 return data
             return updated.to_dict()
@@ -723,7 +730,7 @@ class TaskStore:
             try:
                 for task_id in thread.active_task_ids:
                     quarantined += self._quarantine_corrupt_active_link(thread.thread_id, task_id)
-                ghosts = {task_id for task_id in thread.task_ids
+                ghosts = {task_id for task_id in self.iter_task_ids(thread.thread_id)
                           if task_id not in thread.active_task_ids and f"{task_id}.json" not in present}
                 if ghosts:
                     pruned += self._prune_ghost_task_ids(thread.thread_id, ghosts)
@@ -757,9 +764,29 @@ class TaskStore:
         def updater(data: dict[str, Any]) -> dict[str, Any]:
             nonlocal removed
             latest = ConversationThread.from_dict(data)
-            kept = tuple(task_id for task_id in latest.task_ids if task_id not in ghosts
-                         or task_id in latest.active_task_ids or self.storage.task_path(task_id).exists())
-            removed = len(latest.task_ids) - len(kept)
+            from .run_claim import detached_task_claim_scope_id
+            from .store_claims import _read_claim_report
+            removable = set()
+            for identifier in ghosts:
+                if identifier in latest.active_task_ids or self.storage.task_path(identifier).exists():
+                    continue
+                scope = detached_task_claim_scope_id(thread_id, identifier)
+                claim, error = _read_claim_report(self.storage.background_claim_path(scope))
+                if error is None and claim.get('status') not in {'running', 'claimed'}:
+                    removable.add(identifier)
+            kept = tuple(identifier for identifier in latest.task_ids if identifier not in removable)
+            thread_path = self.storage.thread_path(thread_id)
+            history_exists = task_history._read(task_history.history_root(thread_path), ('index.json',)) is not None
+            if history_exists:
+                for identifier in removable:
+                    if task_history.contains(thread_path, latest, identifier):
+                        task_history.remove(thread_path, latest, identifier)
+                        removed += 1
+            else:
+                # 迁移前显式清理的幽灵无需先写数十万个成员文件再删除。
+                removed = len(latest.task_ids) - len(kept)
+                if removed:
+                    task_history.initialize(thread_path, replace(latest, task_ids=kept))
             return replace(latest, task_ids=kept).to_dict() if removed else data
 
         update_json_file_atomic(self.storage.thread_path(thread_id), updater, require_existing=True)
@@ -882,7 +909,7 @@ class TaskStore:
             latest = ConversationThread.from_dict(data)
             if latest.thread_id != thread_id:
                 raise DataCorruptionError(f"conversation thread identity is invalid: {thread_id}")
-            if task_id not in latest.task_ids:
+            if not self.contains_task(thread_id, task_id):
                 raise ValueError(
                     f"task {task_id} is not indexed by conversation thread {thread_id}"
                 )
@@ -901,6 +928,25 @@ class TaskStore:
 
     # LLM: store_tasks 的持久化合同：读取线程全部历史任务关联，需要坏账信息时使用 list_report；修改须同步本领域调用方与存储回归。
     # 函数用途: 读取线程全部历史任务关联，需要坏账信息时使用 list_report。
+    def task_ids_page(self, thread_id: str, *, cursor: int = 0, limit: int = 128):
+        """只读有界历史页，返回 (ids, next_cursor)。"""
+        thread = self._require_thread(thread_id)
+        return task_history.page(self.storage.thread_path(thread_id), thread, cursor=cursor, limit=limit)
+
+    def iter_task_ids(self, thread_id: str):
+        """显式完整历史遍历；热查询使用 contains_task 或 task_ids_page。"""
+        thread = self._require_thread(thread_id)
+        yield from task_history.iter_all(self.storage.thread_path(thread_id), thread)
+
+    def contains_task(self, thread_id: str, task_id: str) -> bool:
+        thread = self._require_thread(thread_id)
+        link, error = _read_task_link(self.storage.task_path(task_id), task_id)
+        if link is not None:
+            return link.thread_id == thread_id
+        if error is not None and error.get('error_type') != 'FileNotFoundError':
+            raise DataCorruptionError(f"conversation task link is unreadable: {task_id}")
+        return task_history.contains(self.storage.thread_path(thread_id), thread, task_id)
+
     def list(self, thread_id: str) -> list[ThreadTaskLink]:
         links, _load_errors = self.list_report(thread_id)
         return links
@@ -976,7 +1022,10 @@ class TaskStore:
     # 函数用途: 从线程历史任务身份读取关联及错误，不扫描其它线程。
     def list_report(self, thread_id: str, *, classify_missing: bool = False):
         thread = self._require_thread(thread_id)
-        links, errors = self._links_for_ids(thread.task_ids)
+        try:
+            links, errors = self._links_for_ids(tuple(self.iter_task_ids(thread_id)))
+        except (OSError, ValueError, TypeError) as error:
+            links, errors = [], [runtime_error_report(error, context='conversation.task_history.read')]
         if not classify_missing:
             return links, errors
         # 只给显式选择分级的历史消费者附带 warnings；活动索引、损坏及权限故障保持阻断。
@@ -1092,7 +1141,7 @@ def _update_task_status(store: TaskStore, request: dict) -> ThreadTaskLink | Non
             and (not expected_status or str(cached_link.status or "").strip().lower() == expected_status)):
         thread, _ = store._load_thread_report(cached_link.thread_id)
         should_be_inactive = requested_status.strip().lower() in THREAD_TASK_LINK_INACTIVE_STATUSES
-        if (thread is not None and task_id in thread.task_ids
+        if (thread is not None and store.contains_task(thread.thread_id, task_id)
                 and should_be_inactive == (task_id not in thread.active_task_ids)):
             sync_task_workspace_status(cached_link, current, owner_home=thread.owner_home)
             if str(cached_link.status or "").strip().lower() in THREAD_TASK_LINK_NON_RESURRECTABLE_STATUSES:

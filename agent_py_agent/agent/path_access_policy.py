@@ -109,7 +109,7 @@ HOST_STATE_OWNER_FILES: tuple[tuple[str, ...], ...] = (
 HOST_STATE_OWNER_DIRS: tuple[tuple[str, ...], ...] = (
     ("capability_requests",), ("temporary_grants",), ("compact",), ("logs",), ("audit",), ("workspace", "runtime"),
     ("data",), ("agents",),
-    ("memory", "curator"), ("memory_archive",), ("cache",), ("trash",), ("skills",), (".agents", "skills"),
+    ("memory", "curator"), ("memory", "candidates.jsonl.records"), ("memory_archive",), ("cache",), ("trash",), ("skills",), (".agents", "skills"),
 )
 HOST_STATE_OWNER_SQLITE: tuple[str, ...] = ("runtime.db",)
 SQLITE_SIDECAR_SUFFIXES: tuple[str, ...] = ("-wal", "-shm", "-journal")

@@ -192,7 +192,7 @@ def test_a_candidate_conflicting_with_the_ledger_is_dropped_and_the_batch_still_
     assert service.run(reason="admin").processed_messages == 0
     # 另一条写入路径留下的同一观察身份、但主题不同的候选（直接改账本模拟）。
     ledger = tmp_path / "memory" / "candidates.jsonl"
-    [row] = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
+    [row] = [item.to_record() for item in service.candidate_service.list()]
     ledger.write_text(json.dumps({**row, "subject_key": "diet.preference"}, ensure_ascii=False) + "\n", encoding="utf-8")
 
     result = service.run(reason="admin")

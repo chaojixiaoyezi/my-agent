@@ -955,3 +955,33 @@ def test_wait_graph_oracle_uses_actual_transitions_not_mutation_switch(actual_bl
         state = _step(actual, state, action)
     assert observed.wait_cycle(state) is actual_blocking
     assert (check_model(observed)["deadlock_states"] > 0) is actual_blocking
+
+
+def test_r8_thread_history_projection_bfs_never_resurrects_terminal(tmp_path):
+    """穷举三步回调交错，实际TaskStore的活动投影必须服从当前终态。"""
+    from collections import deque
+
+    from agent_py_agent.tests.test_r8_record_ledgers import _thread
+
+    pending = deque([()])
+    number = 0
+    while pending:
+        actions = pending.popleft()
+        store, thread = _thread(tmp_path / str(number))
+        number += 1
+        store.tasks.bind({'thread_id': thread.thread_id, 'task_id': 'task'})
+        terminal = False
+        for action in actions:
+            if action == 'finish':
+                store.tasks.update_status({'task_id': 'task', 'status': 'done'})
+                terminal = True
+            elif action == 'late_bind':
+                store.tasks.bind({'thread_id': thread.thread_id, 'task_id': 'task'})
+            else:
+                store.tasks.update_thread_index(thread.thread_id, 'task', 'active', 1)
+            current = store.threads.require(thread.thread_id)
+            assert store.tasks.load('task').status == ('done' if terminal else 'active')
+            assert ('task' in current.active_task_ids) is not terminal
+            assert tuple(store.tasks.iter_task_ids(thread.thread_id)) == ('task',)
+        if len(actions) < 3:
+            pending.extend((*actions, action) for action in ('finish', 'late_bind', 'late_projection'))

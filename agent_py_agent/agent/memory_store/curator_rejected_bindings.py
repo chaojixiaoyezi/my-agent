@@ -14,20 +14,24 @@ from .candidate_target_binding import binding_history, validate_binding_history
 # 函数用途: 把被拒绝观察的版本责任写入同一候选账本中的无正文终态记录。
 def retain_rejected_target_bindings(rows: list, bindings: tuple | list) -> list:
     validate_binding_history(list(bindings))
-    result = list(rows)
+    from .candidate_ledger import CandidateRows
+    result = rows.fork() if isinstance(rows, CandidateRows) else list(rows)
     grouped: dict[str, list] = {}
     for binding in bindings:
         grouped.setdefault(binding['key'][0], []).append(binding)
     for target, history in grouped.items():
         cid = 'memory-candidate-binding-' + hashlib.sha256(target.encode()).hexdigest()[:24]
-        current = next((row for row in result if row.candidate_id == cid), None)
+        position = result.index_for(cid, None) if isinstance(result, CandidateRows) else None
+        current = (result[position] if position is not None else None) if isinstance(result, CandidateRows) else next(
+            (row for row in result if row.candidate_id == cid), None)
         if current is None:
             current = _binding_record(cid)
             result.append(current)
         if current.candidate_type != 'discard' or current.status != 'rejected' or current.content:
             raise ValueError('invalid rejected target binding record')
         merged = replace(current, target_evidence_bindings=[*binding_history(current), *history])
-        result[result.index(current)] = replace(merged, target_evidence_bindings=binding_history(merged))
+        position = result.index_for(cid) if isinstance(result, CandidateRows) else result.index(current)
+        result[position] = replace(merged, target_evidence_bindings=binding_history(merged))
     return result
 
 
