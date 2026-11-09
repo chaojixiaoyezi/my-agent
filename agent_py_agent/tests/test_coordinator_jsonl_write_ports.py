@@ -268,7 +268,10 @@ def test_actual_delete_cleanup_native_preserves_formal_and_not_fake_pending(tmp_
         mem.remove(record.entry_id)
     assert caught.value is error and not mem.all()
     assert not isinstance(caught.value, bridge.RemovalCleanupError)
-    assert all(not row["content"] for row in (json.loads(line) for line in mem.candidate_service.path.read_text().splitlines()))
+    # 候选头是增量 manifest；沿正式读口核对原候选正文已经脱敏。
+    with commits.global_write_commit_scope(door):
+        candidates = mem.candidate_service.list()
+    assert candidates and all(not row.content for row in candidates)
 
 
 def test_no_embedder_delete_uses_same_c_vector_and_text_cache_objects(tmp_path):
