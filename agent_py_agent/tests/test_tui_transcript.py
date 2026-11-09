@@ -133,7 +133,7 @@ def test_transcript_search_cancel_restores_anchor_and_resize_clears_query() -> N
     assert snapshot.match_count == 0
 
 
-# LLM: 使用真实块缓存与provider，刻意让两模式块条目互相淘汰；前缀布局仍必须分别存活。
+# LLM: 两模式前缀合计六块留在总预算内；第三宽度真实驱逐块LRU，前缀布局仍必须分别存活。
 # 函数用途: 验证Ctrl+O反复进出不丢两种布局，也不再次发生块缓存miss。
 def test_ctrlo_toggle_keeps_normal_and_detailed_prefixes():
     from agent_py_agent.cli.chat_parts.tui_block_renderer import TuiBlockRenderCache
@@ -144,14 +144,21 @@ def test_ctrlo_toggle_keeps_normal_and_detailed_prefixes():
         store.publish(seq.emit('assistant_completed', 'completed', f'a-{index}', {'text': f'answer {index}'}))
     state = TuiTranscriptModeState()
     provider = _provider(store, state)
-    provider.block_cache = TuiBlockRenderCache(max_entries=3)
+    provider.block_cache = TuiBlockRenderCache(max_entries=6)
     normal_frame = provider.frame(80)
+    normal_entries = set(provider.block_cache._entries)
     normal_prefix = provider.block_cache._stable_prefix
     state.enter(store.snapshot())
     detailed_frame = provider.frame(80)
     detailed_prefix = provider.block_cache._stable_prefix
+    assert provider.block_cache.stats().misses == 6
+    # 第三宽度只进入独立block LRU，不占稳定布局槽；真实逐块淘汰原普通模式条目。
+    from agent_py_agent.cli.chat_parts.tui_block_renderer import TuiRenderContext
+    for block in store.snapshot().stable_blocks:
+        provider.block_cache.render(block, TuiRenderContext(width=81))
+    assert normal_entries.isdisjoint(provider.block_cache._entries)
     misses = provider.block_cache.stats().misses
-    assert misses == 6
+    assert misses == 9
     for _ in range(3):
         state.exit()
         assert provider.frame(80) == normal_frame

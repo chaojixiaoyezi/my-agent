@@ -533,7 +533,7 @@ def _rendered_char_count(lines: tuple[FormattedLine, ...]) -> int:
     return sum(len(str(fragment[1])) for line in lines for fragment in line)
 
 
-# LLM: 每个context只保留一份有界前缀，缓存至多四个context；chars只计已接受行，块顺序与锚点一起失效。
+# LLM: 每个context只保留一份前缀，至多四份共用字符和已缓存块预算；chars只计已接受行。
 # 类用途: 保存稳定布局及其字符记账，允许模式切换复用和有序尾部扩展。
 @dataclass(frozen=True)
 class _StableBlockPrefix:
@@ -558,7 +558,7 @@ def _stable_prefix_context_key(context: TuiRenderContext) -> tuple[Any, ...]:
 # LLM: 块 LRU 与稳定前缀都只缓存显示值，前缀按相同字符预算有界，任何正文/模式/顺序变化均失效。
 # 类用途: 复用已净化块与历史布局，减少每帧遍历，同时保留活动内容和插话顺序。
 class TuiBlockRenderCache:
-    # LLM: block LRU仍按条数/字符淘汰；独立前缀最多四个context，每份也受同一预算限制，不改持久历史。
+    # LLM: block LRU与全部稳定前缀分别受条数/字符总预算限制；前缀另限四context，不改持久历史。
     # 函数用途: 初始化支持普通/详情布局共存的有界渲染缓存。
     def __init__(self, *, max_entries: int = 20_000, max_chars: int = 24_000_000) -> None:
         self.max_entries = max(1, int(max_entries or 1))
@@ -648,7 +648,10 @@ class TuiBlockRenderCache:
             prefix = self._build_stable_prefix(blocks, context, ordered, tuple(map(_block_sort_key, ordered)))
         self._stable_prefixes[key] = prefix
         self._stable_prefixes.move_to_end(key)
-        while len(self._stable_prefixes) > 4:
+        # 只读取至多四份前缀的既有计数；不为宽度/详情切换重复保留四倍布局正文。
+        while (len(self._stable_prefixes) > 4
+               or sum(item.chars for item in self._stable_prefixes.values()) > self.max_chars
+               or sum(len(item.line_ends) for item in self._stable_prefixes.values()) > self.max_entries):
             self._stable_prefixes.popitem(last=False)
         self._stable_prefix = prefix
         return prefix
