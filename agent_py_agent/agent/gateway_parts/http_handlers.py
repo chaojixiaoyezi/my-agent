@@ -69,7 +69,7 @@ from ..conversation.control_commands import (
     parse_conversation_control,
     parse_conversation_task_command,
 )
-from ..conversation.message_stream import NoticeDisplayCapabilities, read_background_response_page
+from ..conversation.message_stream import NoticeDisplayCapabilities
 from ..conversation.store_usage import unknown_purpose_key_counts
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .channel_health import adapter_process_facts
@@ -1605,37 +1605,6 @@ def handle_control_status(handler, server) -> None:
 # 通知长轮询协议上限：单连接最多等25秒，不是可调业务策略。
 NOTICES_MAX_WAIT_SECONDS = 25
 _NOTICE_ARGUMENT_UNSET = object()
-_IDLE_NOTICE_REUSE: dict = {}  # (owner, 会话, 游标, 能力) -> (主题标记, 读取时刻, 空投影)，条数受主题容量约束
-_IDLE_NOTICE_REUSE_LOCK = threading.Lock()
-
-
-# LLM: 只复用完全空闲的上次空投影：游标不变、owner 主题自那次读取后无新提交事件、未超配置时长；任何事件、游标变化、
-#   非空结果都完整重读。主题标记在读取前取，读取期间发生的事件让下一次必然重读。
-# 函数用途: 让空闲 TUI 的通知轮询 O(1) 返回；配置为 0 时与原读口完全相同。
-def _read_idle_notices_reusing(reader, agent, hub, kwargs):
-    window = float(getattr(getattr(agent, "config", None), "gateway_idle_notice_reuse_seconds", 0) or 0)
-    scope = kwargs.get("scope")
-    if window <= 0 or scope is None:
-        return reader(agent, **kwargs)
-    from ..user_space.owner_resolver import resolve_owner_home
-    from .control_service import resolve_gateway_scope_owner
-    owner_id = resolve_owner_home(agent.home_paths.root, resolve_gateway_scope_owner(agent, scope)).owner_id
-    key = (owner_id, scope.user_id, scope.channel, scope.conversation_id, scope.all_user_access, kwargs.get("after"),
-           kwargs.get("event_after"), kwargs.get("event_stream_id"), kwargs.get("interactive_approvals"), repr(kwargs.get("display")))
-    mark, now = hub.topic_mark(("owner", owner_id)), time.monotonic()
-    with _IDLE_NOTICE_REUSE_LOCK:
-        cached = _IDLE_NOTICE_REUSE.pop(key, None)
-    if cached is not None and cached[0][0] is mark[0] and cached[0][1] == mark[1] and now - cached[1] < window:
-        result, mark, now = dict(cached[2]), cached[0], cached[1]
-    else:
-        result = reader(agent, **kwargs)
-    if isinstance(result, dict) and result.get("ok") is True and not any(result.get(name) for name in (
-            "notices", "transcript_events", "agent_permission_requests", "active_task_count", "events_truncated")):
-        with _IDLE_NOTICE_REUSE_LOCK:
-            _IDLE_NOTICE_REUSE[key] = (mark, now, dict(result))
-            while len(_IDLE_NOTICE_REUSE) > max(1, hub.topic_capacity):
-                _IDLE_NOTICE_REUSE.pop(next(iter(_IDLE_NOTICE_REUSE)))
-    return result
 
 
 # LLM: Optional wait changes no cursor/payload when absent. Subscribe before the first read; all owner resolution and I/O remain outside the hub lock.
@@ -1660,7 +1629,7 @@ def _read_client_notices_with_wait(
     if hub is None:
         return reader(agent, **kwargs)
     if not seconds:
-        return _read_idle_notices_reusing(reader, agent, hub, kwargs)
+        return reader(agent, **kwargs)
     from ..user_space.owner_resolver import resolve_owner_home
     from .control_service import resolve_gateway_scope_owner
     owner = resolve_gateway_scope_owner(agent, kwargs["scope"])
@@ -2069,9 +2038,10 @@ def read_gateway_client_notices(
     )
     activity = conversation_agent_activity(owner_agent, store, thread_id)
     activity_payload = activity.to_dict()
-    notices, cursor, notices_ok = read_background_response_page(
-        store, thread_id, after=after, include_foreground=display.foreground_messages,
-        include_display_checkpoints=display.display_checkpoints,
+    from .idle_notice_page import read_idle_message_page
+
+    notices, cursor, notices_ok = read_idle_message_page(
+        owner_agent, store, thread_id, scope=scope, after=after, display=display,
     )
     payload = {
         "ok": notices_ok,
@@ -2172,9 +2142,10 @@ def _read_cold_owner_notice_projection(
     thread_id = str(getattr(thread, "thread_id", "") or "").strip()
     payload["thread_id"] = thread_id
     payload["binding_state"] = "confirmed"
-    notices, cursor, notices_ok = read_background_response_page(
-        store, thread_id, after=after, include_foreground=display.foreground_messages,
-        include_display_checkpoints=display.display_checkpoints,
+    from .idle_notice_page import read_idle_message_page
+
+    notices, cursor, notices_ok = read_idle_message_page(
+        base_agent, store, thread_id, scope=scope, after=after, display=display,
     )
     if not notices_ok:
         payload["ok"] = False
