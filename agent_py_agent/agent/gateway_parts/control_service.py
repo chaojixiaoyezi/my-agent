@@ -982,7 +982,7 @@ def _stop_session_leftovers(
 def _session_protected_task_ids(store: object, thread_id: str) -> frozenset[str]:
     from ..conversation.task_promotion import conversation_thread_execution_state
 
-    links, load_errors = store.tasks.list_report(thread_id)
+    links, load_errors = store.tasks.active_report(thread_id)
     execution = conversation_thread_execution_state(store, thread_id)
     if load_errors or execution.get("state_available") is not True:
         raise ValueError("会话任务或执行状态读不出，不能确认哪些资源仍归运行中的任务")
@@ -1741,17 +1741,16 @@ def _active_conversation_task(
         )
         if thread is None:
             return None
-        if task_id:
-            links, load_errors, _warnings = store.tasks.list_report(thread.thread_id, classify_missing=True)
-        else:
-            links, load_errors = store.tasks.list_report(thread.thread_id)
+        links, load_errors, execution = _control_conversation_links_snapshot(
+            store, thread.thread_id, task_id=task_id,
+        )
     except Exception:
         return None
     if load_errors:
         return None
     active = _root_control_links(
         owner_agent,
-        _control_active_conversation_links(store, thread.thread_id, links),
+        _control_active_conversation_links(store, thread.thread_id, links, execution=execution),
     )
     if ordinary_only:
         active = [
@@ -1793,10 +1792,38 @@ def _active_conversation_task(
 
 # LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
 # 函数用途: 结合任务投影与耐久执行状态筛选仍可控制的会话任务。
+def _control_conversation_links_snapshot(store, thread_id, *, task_id=""):
+    """控制只读活动集与准确运行身份；completed交接不依赖历史窗口或全账扫描。"""
+    from ..conversation.task_promotion import conversation_thread_execution_state
+
+    links, errors = store.tasks.active_report(thread_id)
+    links, errors = list(links), list(errors)
+    execution = conversation_thread_execution_state(store, thread_id)
+    running = (execution.get("running_task_ids") or []) if execution.get("state_available") is True else []
+    known = {str(getattr(link, "task_id", "") or "") for link in links}
+    selected = dict.fromkeys([*running, task_id] if task_id else running)
+    for identifier in selected:
+        if identifier in known:
+            continue
+        link, error = store.tasks.link_report(thread_id, identifier)
+        if error is not None:
+            errors.append(error)
+        elif link is not None:
+            links.append(link)
+            known.add(identifier)
+        elif identifier in running and store.tasks.contains_task(thread_id, identifier):
+            # claim也可属于未晋升的入站回合；仅已知线程成员缺链接才是历史坏账。
+            errors.append({"error_type": "FileNotFoundError", "task_id": identifier,
+                           "context": "gateway.control.running_task_link"})
+    return links, errors, execution
+
+
 def _control_active_conversation_links(
     store: object,
     thread_id: str,
     links: list[object],
+    *,
+    execution: dict[str, object] | None = None,
 ) -> list[object]:
     """Resolve control-active roots from task projection plus durable execution state.
 
@@ -1810,7 +1837,8 @@ def _control_active_conversation_links(
         is_reusable_conversation_workspace,
     )
 
-    execution = conversation_thread_execution_state(store, thread_id)
+    if execution is None:
+        execution = conversation_thread_execution_state(store, thread_id)
     running_task_ids = execution.get("running_task_ids")
     running_task_ids = (
         {str(item) for item in running_task_ids}
@@ -2361,7 +2389,9 @@ def _durable_task_is_current(owner_agent: object, active: _GatewayRequestRecord)
         # still rejects a real task switch.
     thread_id = str(active.payload.get("conversation_thread_id") or "").strip()
     try:
-        links, load_errors = owner_agent.conversation_store.tasks.list_report(thread_id)
+        links, load_errors, execution = _control_conversation_links_snapshot(
+            owner_agent.conversation_store, thread_id, task_id=task_id,
+        )
     except Exception:
         return False
     if load_errors:
@@ -2370,6 +2400,7 @@ def _durable_task_is_current(owner_agent: object, active: _GatewayRequestRecord)
         owner_agent.conversation_store,
         thread_id,
         links,
+        execution=execution,
     )
     if not candidates:
         return False
@@ -3091,7 +3122,7 @@ def _named_durable_statuses(
         if thread is None:
             links, goals = [], []
         else:
-            links, link_errors = store.tasks.list_report(thread.thread_id)
+            links, link_errors = store.tasks.active_report(thread.thread_id)
             goals = store.goals.list(thread.thread_id)
             if link_errors:
                 return ()

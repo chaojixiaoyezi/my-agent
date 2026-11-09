@@ -5174,3 +5174,79 @@ def test_stop_fixture_late_ready_observation_cannot_pass_startup(tmp_path, monke
     assert caught.value.child_reaped and caught.value.child_returncode is not None
     record_property("failure_stage", caught.value.stage)
     record_property("child_reaped", caught.value.child_reaped)
+
+
+@pytest.mark.parametrize('explicit', [False, True])
+def test_controls_keep_old_completed_running_claim_without_reading_terminal_history(tmp_path, monkeypatch, explicit):
+    agent = SimpleAgent(AgentConfig(model_backend='echo', gateway_per_user_owner_scoping=False), tmp_path)
+    paths = gateway_paths(agent)
+    thread, link = _bind_durable_task(agent, 'old-handoff')
+    assert agent.conversation_store.claims.acquire({'thread_id': thread.thread_id, 'task_id': link.task_id,
+        'reason': 'user_guidance', 'lease_seconds': 300}) is not None
+    agent.conversation_store.tasks.update_status({'task_id': link.task_id, 'status': 'completed', 'expected_status': 'active'})
+    for number in range(160):
+        _, historical = _bind_durable_task(agent, f'terminal-{number}')
+        agent.conversation_store.tasks.update_status({'task_id': historical.task_id, 'status': 'completed', 'expected_status': 'active'})
+    latest = agent.conversation_store.threads.load(thread.thread_id)
+    assert link.task_id not in latest.task_ids and link.task_id not in latest.active_task_ids
+    tasks = agent.conversation_store.tasks
+    monkeypatch.setattr(tasks, 'list_report', lambda *a, **k: pytest.fail('控制不得读取终态全史'))
+    calls = {'policies': 0, 'claims': 0, 'links': 0}
+    policies = agent.conversation_store.progress.list_report
+    claims = agent.conversation_store.claims.load_report
+    point = tasks.link_report
+    def read_policies(*args, **kwargs):
+        calls['policies'] += 1
+        return policies(*args, **kwargs)
+    def read_claims(*args, **kwargs):
+        calls['claims'] += 1
+        return claims(*args, **kwargs)
+    def read_point(*args, **kwargs):
+        calls['links'] += 1
+        return point(*args, **kwargs)
+    monkeypatch.setattr(agent.conversation_store.progress, 'list_report', read_policies)
+    monkeypatch.setattr(agent.conversation_store.claims, 'load_report', read_claims)
+    monkeypatch.setattr(tasks, 'link_report', read_point)
+    active = control_service._active_conversation_task(agent, _scope(), task_id=link.task_id if explicit else '')
+    assert active is not None and active.payload['id'] == link.task_id
+    assert calls == {'policies': 1, 'claims': 1, 'links': 1}
+    assert control_service._durable_task_is_current(agent, active)
+    assert link.task_id in control_service._session_protected_task_ids(agent.conversation_store, thread.thread_id)
+    assert control_service._named_durable_statuses(agent, paths, _scope()) == ()
+    steered = execute_gateway_conversation_control(agent, paths, _command('/btw 补充隔离测试要求'), _scope())
+    assert steered.ok and steered.request_id == link.task_id
+    assert [entry.message for entry in agent.conversation_store.guidance.pending('task', link.task_id)] == ['补充隔离测试要求']
+    scope = _scope()
+    if explicit:
+        paths.processing.mkdir(parents=True, exist_ok=True)
+        payload = _request('handoff-ingress')
+        payload['conversation_runtime'] = {'thread_id': thread.thread_id, 'task_id': link.task_id, 'task_path': ''}
+        write_json_file(paths.processing / 'handoff-ingress.json', payload)
+        scope = replace(scope, metadata={'expected_turn_id': 'handoff-ingress'})
+    stopped = execute_gateway_conversation_control(agent, paths, _command('/stop'), scope)
+    assert stopped.ok and stopped.request_id == ('handoff-ingress' if explicit else link.task_id)
+    assert tasks.load(link.task_id).status == 'interrupted'
+    assert tasks.load('terminal-159').status == 'completed'
+
+
+def test_control_active_link_corruption_still_refuses_target_and_leftover_stop(tmp_path, monkeypatch):
+    agent = SimpleAgent(AgentConfig(model_backend='echo', gateway_per_user_owner_scoping=False), tmp_path)
+    thread, link = _bind_durable_task(agent, 'broken-active')
+    agent.conversation_store.storage.task_path(link.task_id).write_text('{broken')
+    monkeypatch.setattr(agent.conversation_store.tasks, 'list_report', lambda *a, **k: pytest.fail('不得全史回退'))
+    assert control_service._active_conversation_task(agent, _scope()) is None
+    with pytest.raises(ValueError):
+        control_service._session_protected_task_ids(agent.conversation_store, thread.thread_id)
+
+
+def test_control_running_identity_without_its_link_stays_unknown(tmp_path, monkeypatch):
+    agent = SimpleAgent(AgentConfig(model_backend='echo', gateway_per_user_owner_scoping=False), tmp_path)
+    thread, link = _bind_durable_task(agent, 'missing-handoff')
+    assert agent.conversation_store.claims.acquire({'thread_id': thread.thread_id, 'task_id': link.task_id,
+        'reason': 'user_guidance', 'lease_seconds': 300}) is not None
+    agent.conversation_store.tasks.update_status({'task_id': link.task_id, 'status': 'completed', 'expected_status': 'active'})
+    agent.conversation_store.storage.task_path(link.task_id).unlink()
+    monkeypatch.setattr(agent.conversation_store.tasks, 'list_report', lambda *a, **k: pytest.fail('不得全史回退'))
+    assert control_service._active_conversation_task(agent, _scope(), task_id=link.task_id) is None
+    links, errors, state = control_service._control_conversation_links_snapshot(agent.conversation_store, thread.thread_id)
+    assert not links and errors and state['running_task_ids'] == [link.task_id]
