@@ -27,10 +27,14 @@ def local_store_stage_timing_scope(stages: dict[str, float]):
         yield
     finally:
         _TIMING.reset(token)
-        with timing.lock:
-            timing.closed = True
-            for name, milliseconds in timing.values.items():
-                stages[name] = round(stages.get(name, 0.0) + milliseconds, 3)
+        try:
+            with timing.lock:
+                timing.closed = True
+                for name, milliseconds in timing.values.items():
+                    stages[name] = round(stages.get(name, 0.0) + milliseconds, 3)
+        except Exception:
+            # 诊断合并不能遮住业务异常；范围已退出，不重试也不写额外日志。
+            pass
 
 
 @contextmanager
@@ -40,14 +44,22 @@ def local_store_stage(name: str):
     if timing is None or timing.closed:
         yield
         return
-    started = time.monotonic()
+    try:
+        started = time.monotonic()
+    except Exception:
+        started = None
     try:
         yield
     finally:
-        milliseconds = max(0.0, (time.monotonic() - started) * 1000)
-        with timing.lock:
-            if not timing.closed:
-                timing.values[name] = timing.values.get(name, 0.0) + milliseconds
+        if started is not None:
+            try:
+                milliseconds = max(0.0, (time.monotonic() - started) * 1000)
+                with timing.lock:
+                    if not timing.closed:
+                        timing.values[name] = timing.values.get(name, 0.0) + milliseconds
+            except Exception:
+                # 只隔离采样/累计；yield的业务体与BaseException仍按原路径传播。
+                pass
 
 
 class LocalStoreConnectionTimingStack(ExitStack):

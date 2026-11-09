@@ -139,3 +139,114 @@ def test_connection_release_timing_preserves_exit_exception_and_suppression(monk
         assert raised.value is original
     assert received[0][0] is OSError and received[0][1] is original and received[0][2] is not None
     assert stages == {'local_store_connection_release_ms': 125.0}
+
+
+@pytest.mark.parametrize('fault', ['entry', 'finish', 'accumulate', 'merge'])
+@pytest.mark.parametrize('business_error', [False, True])
+def test_diagnostic_exception_never_replaces_business_body(monkeypatch, fault, business_error):
+    class BrokenValues(dict):
+        def get(self, *args):
+            raise ValueError('diagnostic mapping failure')
+
+    calls = []
+    def clock():
+        calls.append(None)
+        if fault == 'entry' or fault == 'finish' and len(calls) == 2:
+            raise ValueError('diagnostic clock failure')
+        return float(len(calls))
+    monkeypatch.setattr(diagnostics, 'time', SimpleNamespace(monotonic=clock))
+    original = OSError('original business failure')
+    stages = BrokenValues() if fault == 'merge' else {}
+    entered = []
+    def run():
+        with local_store_stage_timing_scope(stages):
+            with local_store_stage('operation_ms'):
+                entered.append(True)
+                if fault == 'accumulate':
+                    diagnostics._TIMING.get().values = BrokenValues()
+                if business_error:
+                    raise original
+    if business_error:
+        with pytest.raises(OSError) as raised:
+            run()
+        assert raised.value is original
+    else:
+        run()
+    assert entered == [True]
+    assert diagnostics._TIMING.get() is None
+
+
+def test_diagnostic_error_cannot_replace_resource_exit_exception(monkeypatch):
+    from agent_py_agent.agent.local_storage.diagnostics import LocalStoreConnectionTimingStack
+
+    calls = []
+    def clock():
+        calls.append(None)
+        if len(calls) == 2:
+            raise ValueError('diagnostic finish failure')
+        return 1.0
+    monkeypatch.setattr(diagnostics, 'time', SimpleNamespace(monotonic=clock))
+    original, closing = OSError('body'), RuntimeError('resource exit')
+    class Resource:
+        def __enter__(self):
+            return self
+        def __exit__(self, kind, value, traceback):
+            assert value is original
+            raise closing
+    with pytest.raises(RuntimeError) as raised:
+        with local_store_stage_timing_scope({}):
+            with LocalStoreConnectionTimingStack() as resources:
+                resources.enter_context(Resource())
+                raise original
+    assert raised.value is closing and closing.__context__ is original
+
+
+@pytest.mark.parametrize('fault', ['entry', 'finish', 'merge'])
+def test_diagnostic_base_exception_is_not_swallowed(monkeypatch, fault):
+    calls = []
+    original = KeyboardInterrupt('stop diagnostic observer')
+    def clock():
+        calls.append(None)
+        if fault == 'entry' or fault == 'finish' and len(calls) == 2:
+            raise original
+        return float(len(calls))
+    class StopValues(dict):
+        def get(self, *args):
+            raise original
+    monkeypatch.setattr(diagnostics, 'time', SimpleNamespace(monotonic=clock))
+    with pytest.raises(KeyboardInterrupt) as raised:
+        with local_store_stage_timing_scope(StopValues() if fault == 'merge' else {}):
+            with local_store_stage('operation_ms'):
+                pass
+    assert raised.value is original
+
+
+@pytest.mark.parametrize('suppress', [False, True])
+def test_exit_stack_suppression_survives_broken_diagnostic_clock(monkeypatch, suppress):
+    from agent_py_agent.agent.local_storage.diagnostics import LocalStoreConnectionTimingStack
+
+    calls = []
+    def clock():
+        calls.append(None)
+        if len(calls) == 2:
+            raise ValueError('diagnostic finish failure')
+        return 1.0
+    monkeypatch.setattr(diagnostics, 'time', SimpleNamespace(monotonic=clock))
+    original = OSError('body')
+    class Resource:
+        def __enter__(self):
+            return self
+        def __exit__(self, kind, value, traceback):
+            assert kind is OSError and value is original and traceback is not None
+            return suppress
+    def run():
+        with local_store_stage_timing_scope({}):
+            with LocalStoreConnectionTimingStack() as resources:
+                resources.enter_context(Resource())
+                raise original
+    if suppress:
+        run()
+    else:
+        with pytest.raises(OSError) as raised:
+            run()
+        assert raised.value is original
