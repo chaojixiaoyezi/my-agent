@@ -6,6 +6,7 @@ import os
 import stat
 import sys
 import threading
+import time
 import traceback
 from contextlib import contextmanager
 from contextvars import Context
@@ -55,15 +56,21 @@ class _BoundedLogCapture:
         self.identity = (info.st_dev, info.st_ino)
         self.seen, self.retained = info.st_size, min(info.st_size, limit)
         self.eof, self.errors = set(), {}
+        self._next_publish = 0.0
         # 父启动口给的是非APPEND、唯一launch的新FD；原文件不换inode，初始化前已有输出也纳入计量。
         os.ftruncate(descriptor, self.retained)
         os.lseek(descriptor, self.retained, os.SEEK_SET)
-        self._publish()
+        self._publish(force=True)
 
     def stopping(self):
         return False  # 只由真实EOF/读错结束，不因达到容量停止排空或给子进程制造SIGPIPE。
 
-    def _publish(self):
+    def _publish(self, *, force=False):
+        now = time.monotonic()
+        if not force and now < self._next_publish:
+            return
+        # 即使元数据写失败也不按输出块重试fsync；首写、首次新错误和最终EOF强制发表。
+        self._next_publish = now + 1.0
         try:
             info = self.path.lstat()
             if ((info.st_dev, info.st_ino) != self.identity or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
@@ -90,21 +97,26 @@ class _BoundedLogCapture:
                 self.retained += written
                 remaining = remaining[written:]
         except OSError as error:
-            self.errors.setdefault('sink', type(error).__name__)
+            if 'sink' not in self.errors:
+                self.errors['sink'] = type(error).__name__
+                self._publish(force=True)
+                return
         self._publish()
 
     def record_eof(self, name):
         self.eof.add(name)
 
     def record_error(self, name, error):
-        self.errors.setdefault(name, type(error).__name__)
+        if name not in self.errors:
+            self.errors[name] = type(error).__name__
+            self._publish(force=True)
 
     def record_ended(self, name):
         pass
 
     def close(self):
         try:
-            self._publish()
+            self._publish(force=True)
         finally:
             os.close(self.descriptor)  # 原stdout租约持至真实输出EOF及末次计量发表。
 
@@ -128,7 +140,7 @@ def bounded_stdio_from_environment():
         path = Path(os.environ.get(BOUNDED_STDIO_PATH_ENV, ''))
     except (ValueError, TypeError):
         limit, path = 0, None
-    if limit <= 0 or limit > 1024 * 1024 * 1024 or path is None or not path.is_absolute():
+    if limit <= 0 or path is None or not path.is_absolute():
         yield
         return
     try:
@@ -143,7 +155,7 @@ def bounded_stdio_from_environment():
     _flush_stdio()
     descriptor = os.dup(1)
     reader = writer = null = None
-    capture = pump = thread = None
+    capture = pump = thread = stream = None
     redirected = False
     try:
         capture = _BoundedLogCapture(path, descriptor, limit)
@@ -191,6 +203,8 @@ def bounded_stdio_from_environment():
             if pump is not None:
                 pump._close_streams()
                 pump.close()
+            elif stream is not None:
+                stream.close()
             capture.close()
         elif descriptor is not None:
             os.close(descriptor)

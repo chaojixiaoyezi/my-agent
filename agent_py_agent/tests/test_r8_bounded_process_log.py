@@ -140,3 +140,66 @@ with bounded_stdio_from_environment(): os.write(1,b'12345')
     stats = json.loads(capture_path(log).read_text())
     assert log.read_bytes() == b'1'
     assert stats['retained_bytes'] == 1 and stats['discarded_bytes'] == 4
+
+
+def test_metadata_publications_are_clock_bounded_but_final_counts_exact(tmp_path, monkeypatch):
+    from agent_py_agent.agent.io import bounded_process_log as module
+
+    now = [100.0]
+    monkeypatch.setattr(module.time, 'monotonic', lambda: now[0])
+    published = []
+    original = module.write_private_json_file_atomic_unlocked
+    def publish(path, value):
+        published.append(dict(value))
+        original(path, value)
+    monkeypatch.setattr(module, 'write_private_json_file_atomic_unlocked', publish)
+    path = tmp_path / 'bounded.log'
+    capture = module._BoundedLogCapture(path, os.open(path, os.O_CREAT | os.O_WRONLY, 0o600), 4)
+    for _ in range(1000):
+        capture.record_data('stdout', b'12345678')
+    assert len(published) == 1  # 已超容量也不按每块触发元数据fsync。
+    now[0] += 1.0
+    capture.record_data('stdout', b'abc')
+    assert len(published) == 2
+    capture.record_error('stdout', OSError())
+    assert len(published) == 3
+    capture.record_error('stdout', OSError())
+    assert len(published) == 3
+    capture.record_eof('stdout')
+    capture.record_eof('stderr')
+    capture.close()
+    assert len(published) == 4
+    assert published[-1]['eof'] and published[-1]['seen_bytes'] == 8003
+    assert published[-1]['retained_bytes'] == 4 and published[-1]['discarded_bytes'] == 7999
+
+
+def test_positive_limit_above_one_gib_keeps_capture_enabled(tmp_path):
+    script = '''
+import os
+from agent_py_agent.agent.io.bounded_process_log import bounded_stdio_from_environment
+with bounded_stdio_from_environment(): os.write(1,b'small output')
+'''
+    limit = 1024 * 1024 * 1024 + 1
+    log = _worker(tmp_path, script, limit=limit)
+    stats = json.loads(capture_path(log).read_text())
+    assert stats['max_bytes'] == limit and stats['seen_bytes'] == 12 and stats['eof']
+    assert stats['discarded_bytes'] == 0 and log.read_bytes() == b'small output'
+
+
+def test_pipe_pump_constructor_failure_closes_owned_stream(tmp_path):
+    script = '''
+import os
+from agent_py_agent.agent.io import bounded_process_log as module
+streams=[]
+def fail(capture, sources):
+    streams.append(sources['stdout'])
+    raise RuntimeError('pump construction failure')
+module.ProcessPipePump=fail
+try:
+    with module.bounded_stdio_from_environment(): raise AssertionError('must not enter')
+except RuntimeError: pass
+assert len(streams)==1 and streams[0].closed
+os.write(1,b'failure remained visible')
+'''
+    log = _worker(tmp_path, script)
+    assert log.read_bytes() == b'failure remained visible'
