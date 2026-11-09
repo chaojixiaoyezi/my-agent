@@ -12,6 +12,7 @@ from pathlib import Path
 from ..common.json_io import write_private_json_file_atomic_unlocked
 from ..common.nofollow_fs import read_bytes_beneath
 
+# 每页任务身份上限，同时约束线程元数据展示窗口，不能随历史累计增长。
 PAGE_SIZE = 128
 
 

@@ -15,7 +15,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+# 单次监听器响应的字节上限；超限必须回到完整核对，不能截断后签发完整变化集。
 _QUERY_BYTES = 16 * 1024 * 1024
+# 等待原生cookie屏障的毫秒预算；超时不授予增量覆盖证明。
 _SYNC_MS = 5000
 _CONFIG = b'{"ignore_dirs":[],"ignore_vcs":[]}\n'
 

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1408,
+  "count": 1413,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -3404,6 +3404,14 @@
       "description": "进程内所有检查点缓存合计最多保留的行偏移量数。"
     },
     {
+      "name": "_MIGRATION_BATCH_COUNT",
+      "file": "agent_py_agent/agent/conversation/compact_index_lifecycle.py",
+      "value": 128,
+      "unit": "个",
+      "category": "比例阈值",
+      "description": "常规写入与维护只接触固定数量 checkpoint/节点，迁移继续位置保存在事务仓。"
+    },
+    {
       "name": "_MIN_CLIP_TOKENS",
       "file": "agent_py_agent/agent/conversation/compact_landmarks.py",
       "value": 200,
@@ -4412,6 +4420,14 @@
       "description": "唤醒信号模型进程内缓存的最大条目数。"
     },
     {
+      "name": "PAGE_SIZE",
+      "file": "agent_py_agent/agent/conversation/task_history.py",
+      "value": 128,
+      "unit": "个",
+      "category": "其它",
+      "description": "每页任务身份上限，同时约束线程元数据展示窗口，不能随历史累计增长。"
+    },
+    {
       "name": "TASK_LOCATOR_SCAN_MAX_FILES",
       "file": "agent_py_agent/agent/conversation/task_locator.py",
       "value": 128,
@@ -4754,6 +4770,14 @@
       "unit": "字节",
       "category": "其它",
       "description": "就绪分类时最多窥视的请求首行字节数：只用于选择车道，首行更长时按普通车道处理，不影响请求本身。"
+    },
+    {
+      "name": "_EMPTY_PAGE_CAPACITY_COUNT",
+      "file": "agent_py_agent/agent/gateway_parts/idle_notice_page.py",
+      "value": 512,
+      "unit": "个",
+      "category": "其它",
+      "description": "进程内只保存空页和源版本，不保存通知正文；独立事件中心容量，默认ring=0同样生效。"
     },
     {
       "name": "_CONSUMED_RECEIPT_STAMP_MAX_ENTRIES",
@@ -7004,6 +7028,22 @@
       "description": "同一进程两次检查遥测封口卷到期的最短间隔秒数。"
     },
     {
+      "name": "_QUERY_BYTES",
+      "file": "agent_py_agent/agent/owner_change_journal.py",
+      "value": 16777216,
+      "unit": "字节",
+      "category": "其它",
+      "description": "单次监听器响应的字节上限；超限必须回到完整核对，不能截断后签发完整变化集。"
+    },
+    {
+      "name": "_SYNC_MS",
+      "file": "agent_py_agent/agent/owner_change_journal.py",
+      "value": 5000,
+      "unit": "毫秒",
+      "category": "其它",
+      "description": "等待原生cookie屏障的毫秒预算；超时不授予增量覆盖证明。"
+    },
+    {
       "name": "OWNER_SNAPSHOT_RACY_MTIME_SECONDS",
       "file": "agent_py_agent/agent/owner_snapshot_index.py",
       "value": 2.0,
@@ -7081,7 +7121,7 @@
       "value": 30.0,
       "unit": "秒",
       "category": "其它",
-      "description": "(多租户/多测试目录)把缓存撑大。"
+      "description": "目录元数据变化即时触发重新核对，TTL补充粗粒度时间戳下的外部变化。"
     },
     {
       "name": "_SUBAGENT_SCAN_MAX_DIRS",

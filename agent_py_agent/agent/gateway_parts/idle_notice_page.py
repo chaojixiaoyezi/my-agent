@@ -14,7 +14,7 @@ from ..conversation.store import ConversationStore
 from ..conversation.store_messages import MessageStore
 
 # 进程内只保存空页和源版本，不保存通知正文；独立事件中心容量，默认ring=0同样生效。
-_EMPTY_PAGE_CAPACITY = 512
+_EMPTY_PAGE_CAPACITY_COUNT = 512
 _EMPTY_PAGES = OrderedDict()
 _EMPTY_PAGES_LOCK = threading.Lock()
 
@@ -83,6 +83,6 @@ def read_idle_message_page(agent, store, thread_id, *, scope, after, display):
     if before == after_stamp:
         with _EMPTY_PAGES_LOCK:
             _EMPTY_PAGES[key] = (before, now, cursor)
-            while len(_EMPTY_PAGES) > _EMPTY_PAGE_CAPACITY:
+            while len(_EMPTY_PAGES) > _EMPTY_PAGE_CAPACITY_COUNT:
                 _EMPTY_PAGES.popitem(last=False)
     return result

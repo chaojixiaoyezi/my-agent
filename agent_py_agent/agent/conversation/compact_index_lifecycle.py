@@ -11,7 +11,7 @@ from .store_io import ImmutableJsonIndex
 
 _INDEX_FIELDS = ('messages', 'tools', 'scope_heads', 'readable_bases', 'checkpoint_lineage')
 # 常规写入与维护只接触固定数量 checkpoint/节点，迁移继续位置保存在事务仓。
-_MIGRATION_BATCH = 128
+_MIGRATION_BATCH_COUNT = 128
 
 
 def _stores(root, tid):
@@ -75,7 +75,7 @@ def _recover_chain(work, root, thread, stores):
                     'generation': thread.compact_generation, 'sealed': sealed}
     count = 0
     while progress['next'] != sealed:
-        if work.exhausted() or count >= _MIGRATION_BATCH:
+        if work.exhausted() or count >= _MIGRATION_BATCH_COUNT:
             return False
         current = progress['next']
         if not current:
@@ -120,8 +120,8 @@ def _migrate_files(work, root, tid, stores):
 
     for store in stores:
         with _Directory(store.path.parent) as directory:
-            names = list(islice((name for name in directory.names() if name.endswith('.json')), _MIGRATION_BATCH + 1))
-            window = names[:_MIGRATION_BATCH]
+            names = list(islice((name for name in directory.names() if name.endswith('.json')), _MIGRATION_BATCH_COUNT + 1))
+            window = names[:_MIGRATION_BATCH_COUNT]
             for name in window:
                 if work.exhausted():
                     return False
@@ -147,7 +147,7 @@ def _migrate_files(work, root, tid, stores):
                 if not work.request.run_write(migrate):
                     return False
                 work.items += 1
-        if len(names) > _MIGRATION_BATCH:
+        if len(names) > _MIGRATION_BATCH_COUNT:
             return False
     for store in stores:
         with store.connection() as conn:
@@ -160,7 +160,7 @@ def _sweep_objects(work, root, tid, store):
     from .hamt_reachability import HAMT_SWEEP_GRACE_SECONDS, _Directory, _quarantine_one, _regular
 
     cutoff = work.request.now - HAMT_SWEEP_GRACE_SECONDS
-    candidates = store.garbage_files(cutoff, _MIGRATION_BATCH)
+    candidates = store.garbage_files(cutoff, _MIGRATION_BATCH_COUNT)
     for namespace, name in candidates:
         if work.exhausted():
             return False
@@ -191,7 +191,7 @@ def _sweep_objects(work, root, tid, store):
         except FileNotFoundError:
             work.request.run_write(lambda: (store.forget_file(namespace, name), True)[1])
         work.items += 1
-    return len(candidates) < _MIGRATION_BATCH
+    return len(candidates) < _MIGRATION_BATCH_COUNT
 
 
 def maintain_index_store(work, root, thread):
@@ -206,7 +206,7 @@ def maintain_index_store(work, root, thread):
     for store in stores:
         if work.exhausted():
             return False
-        limit = min(_MIGRATION_BATCH, max(0, work._active_budget().max_items - work.items))
+        limit = min(_MIGRATION_BATCH_COUNT, max(0, work._active_budget().max_items - work.items))
         result = work.request.run_write(lambda: store.collect(generation=thread.compact_generation,
                                                               cutoff=work.request.now - HAMT_SWEEP_GRACE_SECONDS, limit=limit))
         if result is False:

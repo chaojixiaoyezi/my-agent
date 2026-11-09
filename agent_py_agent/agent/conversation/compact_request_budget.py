@@ -170,7 +170,8 @@ def generate_bounded_compact_response(
     media_reserve_tokens: int = 0,
     calibration: CompactRequestCalibration | None = None,
 ) -> object:
-    interval = float(getattr(request.agent.config, 'memory_compact_progress_heartbeat_seconds', 5.0))
+    config = getattr(request.agent, 'config', None)
+    interval = float(getattr(config, 'memory_compact_progress_heartbeat_seconds', 5.0))
     with compact_progress_pulse(source_progress, interval=interval) as source_progress:
         if message_source is not None and request.messages is not None:
             raise ValueError('compact summary requires one message source')
