@@ -7,6 +7,7 @@
 - [发现、空闲核对及进度](docs/design/R8_DISCOVERY_AND_PROGRESS.md)：owner目录分片排序、孤立claim有界核对、日志游标签名派生、真实模型等待展示心跳。
 - [Compact历史存储](docs/design/R8_COMPACT_HISTORY.md)：事务内容仓与引用队列、提交链pin恢复、跨进程持久地址投影；必要历史仍保留，不能将页复用冒充磁盘释放。
 - [线程与候选账本](docs/design/R8_RECORD_LEDGERS.md)：128项历史页、活动集合与精确成员索引，候选当前根增量写及原quota/回滚边界。
+- [旧账维护续作](docs/design/R8_LEDGER_GC.md)：初始归档、链接自愈与退休共用既有owner维护通道；原生目录位置和任务历史页保存续点，稳定锁不随归档迁移。
 - [SQLite恢复与退役](docs/design/R8_RECOVERY_RETENTION.md)：四文件保全、完整候选验证、输入引用与已终态来源清理、后台日志退出证明。
 - [业务来源分页](docs/design/R8_OBSERVATION_SOURCES.md)：SQL来源keyset与用量时间索引，后台原维护车道分片补建旧来源；读口不迁移、不把unknown当空。
 
@@ -14,6 +15,8 @@
 - [分布式快照差量](docs/design/R8_OWNER_SNAPSHOT_CHANGES.md)：监听器配置与进程寿命归宿主控制目录，跨节点变化由PostgreSQL代次与墓碑传递；无法证明监听完整性时完整核对。
 
 上述实现已整合。可重建投影也经过同一SQLite代次排他与原件保全；Windows后台日志同步CRT与原生标准句柄，沿已有阻塞reader排空。最终组合、实机与远端验证仍分别记账。
+
+普通请求只选择近期窗口、全部活动集与准确引用；子代理未处理交付不会被普通事件挤掉，历史未知即使空窗也公开coverage。审批查询按当前子run分页发现终态父根，成员代次不随心跳变化，根轮次独立续作且闲置回收。版本字段由正式writer补齐；运行版本切换仍需核对同索引写者，不能把只读缓存作为旧writer已升级的证明。
 
 状态：本地分片及Linux回归进行中，未推送或切换运行版本；远端成功状态仅在最终提交检查完成后登记。
 

@@ -632,6 +632,7 @@ agent_py_agent/
 - `docs/tasks/R8_AUDIT_FOLLOWUPS.md`：14项功能、历史失败、最终验收与交付的统一状态入口。
 - `conversation/immutable_node_store.py`、`checkpoint_offset_store.py`、`task_history.py`：历史节点共享与回收、冷读定位和任务分页。
 - `conversation/usage_sources.py`、`usage_source_maintenance.py`、`user_space/directory_paging.py`：来源时间索引与可续作后台维护，读口不迁移。
+- `conversation/ledger_gc.py`：旧账归档和链接自愈的有界片，续点归原 owner maintenance 通道。
 - `io/sqlite_recovery.py`、`io/bounded_process_log.py`：原件保全与代次恢复、真实进程输出的容量及退出证明。
 - `docs/tasks/R8_LOCAL_TUI_TEST.md`：长期历史上的十TUI单轮实测、停止规则及资源外推边界。
 
@@ -1063,6 +1064,7 @@ agent_py_agent/
 |-- agent_py_agent/agent/conversation/compact_index_lifecycle.py # Compact 节点仓的提交 pin、可续迁移与有界回收；不以时间猜测提交链。
 |-- agent_py_agent/agent/conversation/compact_progress_pulse.py # 摘要等待展示心跳：复用共享调度器，只重报真实覆盖数，不签发完成事实。
 |-- agent_py_agent/agent/conversation/immutable_node_store.py # 内容寻址节点的事务仓库：历史根共享节点，零引用队列代替全历史标记。
+|-- agent_py_agent/agent/conversation/ledger_gc.py # 旧账精确归档、锁保留及任务自愈的有界维护片
 |-- agent_py_agent/agent/conversation/task_history.py # 线程任务历史的分页权威；线程 JSON 仅保存有界展示窗口。
 |-- agent_py_agent/agent/conversation/usage_source_maintenance.py # 原owner存储维护通道内分片补建用量来源
 |-- agent_py_agent/agent/conversation/usage_sources.py # 规范用量来源的时间投影、待提交证明及持久目录续点
@@ -1090,6 +1092,7 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_r8_idle_notice_http.py # 真实HTTP通知页缓存、权限及跨进程失效往返
 |-- agent_py_agent/tests/test_r8_input_turn_retention.py # 输入引用终态、原锁、出生交错和有界目录预算。
 |-- agent_py_agent/tests/test_r8_log_cursor_lifetime.py # 日志分页签名在多 owner 轮换后的真实 HTTP 回归。
+|-- agent_py_agent/tests/test_r8_ledger_gc_pages.py # 旧账物理枚举上界、持久续点、并发取消与字节预算
 |-- agent_py_agent/tests/test_r8_observation_sources.py # 深页来源读取、用量窗口、跨进程待提交及覆盖真实性回归
 |-- agent_py_agent/tests/test_r8_observation_thread_pending.py # 同线程待交付活动集、投影追平和跨线程拒绝
 |-- agent_py_agent/tests/test_r8_owner_directory_paging.py # 冷目录发现分片推进，分页不能通过截断未排序目录来漏掉旧owner。
@@ -1098,6 +1101,7 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_r8_owner_snapshot_changes.py # 快照差量、失效重建及真实监听器生命周期
 |-- agent_py_agent/tests/test_r8_owner_snapshot_postgres.py # PostgreSQL跨节点快照代次与删除传播
 |-- agent_py_agent/tests/test_r8_projection_generation_recovery.py # 可重建投影的代次锁、原件保全与来源验证
+|-- agent_py_agent/tests/test_r8_pending_current_discovery.py # 待审批当前集合、心跳稳定代次、公平轮次及闲置回收
 |-- agent_py_agent/tests/test_r8_record_ledgers.py # 记录账本增量写入、历史分页与并发终态的行为回归。
 |-- agent_py_agent/tests/test_r8_sqlite_recovery.py # 通用库恢复以真实SQLite验证，不将损坏、未知或缺行当作空库。
 |-- agent_py_agent/tests/test_r8_task_context_window.py # 活动集、准确引用与历史窗口在冷启动后的覆盖和读取上界
@@ -1109,6 +1113,7 @@ agent_py_agent/
 |-- docs/design/R8_OBSERVATION_SOURCES.md # R8-09 业务观察来源分页与用量范围索引
 |-- docs/design/R8_OWNER_SNAPSHOT_CHANGES.md # 分布式快照变化来源与降级边界
 |-- docs/design/R8_RECORD_LEDGERS.md # R8 线程任务历史与候选当前态增量账本
+|-- docs/design/R8_LEDGER_GC.md # 旧账初始归档与退休共用原维护通道和持久续点
 |-- docs/design/R8_RECOVERY_RETENTION.md # R8 SQLite恢复与派生文件生命周期
 |-- docs/tasks/R8_AUDIT_FOLLOWUPS.md # R8 历次审计遗漏补修
 |-- deploy/install_watchman.py # 固定官方发行摘要的文件监听器安装

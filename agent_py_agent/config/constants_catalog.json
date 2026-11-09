@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1414,
+  "count": 1416,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -3140,6 +3140,14 @@
       "description": "子代理工具审批：轮询间隔 0.05 秒（20 次/秒），足够灵敏又不烧 CPU。"
     },
     {
+      "name": "_PENDING_DISCOVERY_WINDOW_ROOTS_COUNT",
+      "file": "agent_py_agent/agent/conversation/agent_tool_approval.py",
+      "value": 128,
+      "unit": "个",
+      "category": "其它",
+      "description": ""
+    },
+    {
       "name": "AGENT_TRANSCRIPT_MAX_BYTES",
       "file": "agent_py_agent/agent/conversation/agent_transcript.py",
       "value": 8388608,
@@ -4154,14 +4162,6 @@
       "unit": "个",
       "category": "上限预算",
       "description": "只在这里保留一处定义；消费上限 0 表示不限，合并窗口 0 表示不合并，语义与降级前一致。"
-    },
-    {
-      "name": "_LEDGER_GC_INTERVAL_SECONDS",
-      "file": "agent_py_agent/agent/conversation/runtime.py",
-      "value": 21600,
-      "unit": "秒",
-      "category": "其它",
-      "description": "陈旧账本 gc 节奏:tick ~2 分钟一次,这里最多 6 小时跑一趟归档(问题8)。"
     },
     {
       "name": "_MAX_PROGRESS_POLICY_CATCHUP_INTERVALS_COUNT",
@@ -7362,6 +7362,22 @@
       "unit": "字节",
       "category": "上限预算",
       "description": "单个内部位置快照的JSON字节上限。"
+    },
+    {
+      "name": "_PENDING_DISCOVERY_CACHE_IDLE_SECONDS",
+      "file": "agent_py_agent/agent/plugin_host/gateway_pending.py",
+      "value": 60.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": ""
+    },
+    {
+      "name": "_PENDING_DISCOVERY_CACHE_LIMIT_COUNT",
+      "file": "agent_py_agent/agent/plugin_host/gateway_pending.py",
+      "value": 64,
+      "unit": "个",
+      "category": "上限预算",
+      "description": ""
     },
     {
       "name": "RUNTIME_OBSERVATION_MAX_COUNT",
