@@ -426,6 +426,8 @@ def test_shell_lists_host_files_per_mode(tmp_path):
     state = (*_STATE_FILES, *(f"{name}.lock" for name in _STATE_FILES),
              "runtime.db", "runtime.db-wal", "runtime.db-shm", "runtime.db-journal",
              "capability_requests", "temporary_grants", "compact", "logs", "audit", "workspace/runtime", "memory/curator",
+             "memory/candidates.jsonl.records", "conversations/.model_usage_sources", "sessions/.model_usage_sources",
+             "sessions/conversations/.model_usage_sources",
              "memory_archive", "cache", "trash", "skills", ".agents/skills", "data", "agents")
 
     scoped = set(host_readonly_paths_for(str(main), ""))
@@ -758,10 +760,12 @@ def test_host_memory_tool_still_writes_its_own_files(tmp_path, monkeypatch):
                                             "subject_key": "preference.brief",
                                             "scope": {"scope_type": "personal", "scope_key": "personal"}})
 
-    assert remembered.ok and candidates.exists() and "preference.brief" in candidates.read_text(encoding="utf-8")
+    rows = agent.memory_candidates.list()
+    assert remembered.ok and candidates.exists() and any(row.subject_key == "preference.brief" for row in rows)
+    before = candidates.read_bytes()
     blocked = tools["write_file"].execute({"path": str(candidates), "content": "forged"})
     assert (blocked.ok, blocked.error_code) == (False, STATE_CODE)
-    assert "forged" not in candidates.read_text(encoding="utf-8")
+    assert agent.memory_candidates.list() == rows and candidates.read_bytes() == before
 
 
 # ---------------------------------------------------------------- 命令在任务树外（ae 块 4 发现，2026-10-02）
