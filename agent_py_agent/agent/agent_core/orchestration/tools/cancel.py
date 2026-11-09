@@ -289,8 +289,33 @@ def _cancel_payload_result(request: _CancelPayloadRequest) -> ToolHandlerOutcome
         request.ok,
         json.dumps(payload, ensure_ascii=False, indent=2),
         effect_outcome=effect_outcome,
+        result_envelope={"stop_receipts": _stop_receipts(request)},
     )
 
+
+
+def _stop_receipts(request: _CancelPayloadRequest) -> dict[str, object]:
+    # 只保存本次执行的诊断；未绑定原operation/canonical来源，不签发恢复或退出许可。
+    records = []
+    failures = [row for row in request.failed if not row.get("stop_receipt")]
+    for root in (*request.cancelled, *request.failed):
+        descendants = root.get("descendants") or {}
+        failures.extend(descendants.get("failed") or ())
+        for row in (root, *(descendants.get("cancelled") or ())):
+            receipt = row.get("stop_receipt")
+            if not isinstance(receipt, dict):
+                continue
+            resources = row.get("resources") or {}
+            pty = resources.get("pty") or {}
+            records.append({**receipt,
+                "authority_closed": (row.get("runtime_authority") or {}).get("authority_closed") is True,
+                "resources_confirmed": resources.get("background_confirmed") is True
+                    and pty.get("status") == "not_selected"
+                    and not pty.get("error_type"),
+                "runner_confirmed": not any(f.get("run_id") == row.get("run_id") for f in failures),
+            })
+    return {"schema": "stop-operation.v1", "purpose": "diagnostic_only", "records": records,
+            "failure_codes": [str(row.get("error_code") or "") for row in failures]}
 
 def _resolve_run_ids(agent: SimpleAgent, params: dict[str, object]) -> _ResolveRunIdsResult:
     explicit = _explicit_run_ids(params)

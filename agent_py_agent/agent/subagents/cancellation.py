@@ -118,9 +118,14 @@ def prepare_subagent_stops(
         for run_id, authority in closed.items():
             request = selected[run_id]
             runner = freeze_runner_stop(request.task, tasks, set(closed), kill_process=request.kill_process)
-            report = {"run_id": run_id, "runtime_authority": authority, "thread_interrupt": signals[run_id]}
+            report = {"run_id": run_id, "runtime_authority": authority, "thread_interrupt": signals[run_id],
+                      "stop_receipt": {"schema": "runner-stop.v1", "run_id": run_id,
+                          "attempt_id": str(authority.get("attempt_id") or request.task.runner_active_attempt_id or ""),
+                          "pid": runner.pid, "birth_token": runner.birth_token,
+                          "launch_id": str(((request.task.attributes or {}).get("background_start") or {}).get("launch_id") or ""),
+                          "runner_status": str(runner.report.get("status") or "")}}
             try:
-                report.update(_close_projection(agent, request, authority))
+                report.update(_close_projection(agent, request, authority, stop_receipt=report["stop_receipt"]))
             except Exception as exc:
                 failed.append(_failure(run_id, exc, "subagent_stop.projection"))
             resources = None
@@ -281,7 +286,7 @@ def _close_authority(manager: object, request: CancelSubagentTaskRequest) -> dic
 #   显式 PAUSED/ABANDONED 投影只核同一代 requested 回执后改写这一 run，不写 cancel_subagents、取消失败类型或取消经验；
 #   暂停保留未决授权申请、必要输入和原 runner 会话句柄，句柄由原宿主收尾随正向清理证明结束。
 # 函数用途: 暂停精确子目标、取消其必要输入并记录投影；兄弟输入和既有业务终态保持。
-def _close_projection(agent: object, request: CancelSubagentTaskRequest, authority: dict) -> dict[str, object]:
+def _close_projection(agent: object, request: CancelSubagentTaskRequest, authority: dict, *, stop_receipt=None) -> dict[str, object]:
     task = request.task
     projection = request.projection
     now, closed_requests = time.time(), []
@@ -316,6 +321,7 @@ def _close_projection(agent: object, request: CancelSubagentTaskRequest, authori
                 "cancelled_at": now, "previous_status": str(current.status), "previous_failure_type": str(current.failure_type),
                 "abandoned_attempt_id": attempt_id, "closed_capability_request_ids": closed_requests,
                 "findings_ledger": findings_ledger, "findings_recorded": findings_recorded,
+                "stop_receipt": dict(stop_receipt or {}),
             }
             session = attrs.get("runner_session")
             if isinstance(session, dict):
