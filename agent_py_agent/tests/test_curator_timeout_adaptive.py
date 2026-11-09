@@ -11,6 +11,7 @@ warnings=['failure_diagnostic={"error_type":"ProviderTimeoutError"}']。同一 p
 """
 
 import json
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -329,21 +330,40 @@ def test_timeout_classification_reads_type_not_provider_text() -> None:
 
 # 函数用途: 锁定主机侧等待上限仍然生效(不是把超时关掉),并抛稳定超时类型。
 def test_call_backend_with_timeout_still_enforces_host_bound() -> None:
+    from agent_py_agent.agent.backends.bounded_call import bounded_call_drain_snapshot
+
+    release = threading.Event()
+
     class _SleepingBackend:
+        worker = None
+
         def generate_structured(self, prompt: str, *, response_schema: dict[str, object]):
             del prompt, response_schema
-            time.sleep(5)
+            self.worker = threading.current_thread()
+            release.wait(5)
             return SimpleNamespace(text="{}")
 
+    backend = _SleepingBackend()
     started = time.monotonic()
-    with pytest.raises(CuratorModelTimeoutError):
-        call_backend_with_timeout(
-            _SleepingBackend(),
-            prompt="prompt",
-            response_schema={},
-            timeout_seconds=1,
-        )
-    assert time.monotonic() - started < 5
+    try:
+        with pytest.raises(CuratorModelTimeoutError):
+            call_backend_with_timeout(
+                backend,
+                prompt="prompt",
+                response_schema={},
+                timeout_seconds=1,
+            )
+        assert time.monotonic() - started < 5
+        assert backend.worker is not None and backend.worker.is_alive()
+        # 超时只结束逻辑调用；原worker仍活时P6必须继续看见它，不能把timeout当退出证明。
+        assert any(call.worker is backend.worker for call in bounded_call_drain_snapshot())
+    finally:
+        release.set()
+        if backend.worker is not None:
+            backend.worker.join(timeout=5)
+            assert not backend.worker.is_alive()
+    # 仅确认自己创建的真实Thread已退出，不清全局表、不以结果Event替代join。
+    assert not any(call.worker is backend.worker for call in bounded_call_drain_snapshot())
 
 
 # 函数用途: (c) 无超时时行为逐字一致——同 prompt、同自适应超时、原快照原样返回。
