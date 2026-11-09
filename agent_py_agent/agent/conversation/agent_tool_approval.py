@@ -826,7 +826,7 @@ class _BoundedJsonDirectoryScan:
 
     # LLM: visitor每次只消费一项；预算检查覆盖非JSON前缀，出错时释放本目录原生句柄。
     # 函数用途: 在共同绝对deadline内推进一片，返回是否已扫到真实目录尾。
-    def scan(self, directory, visitor, *, deadline: float, max_entries: int):
+    def scan(self, directory, visitor, *, deadline: float, max_entries: int, work=None):
         if max_entries <= 0 or time.monotonic() >= deadline:
             return False
         if not self._lock.acquire(blocking=False):
@@ -854,6 +854,8 @@ class _BoundedJsonDirectoryScan:
                 except StopIteration:
                     self._slices.pop(key)[0].close()
                     return True
+                if work is not None:
+                    work["entries"] = work.get("entries", 0) + 1
                 if entry.name.endswith(".json") and not entry.name.startswith(".") and entry.is_file(follow_symlinks=False):
                     visitor(Path(entry.path))
             return False
@@ -865,6 +867,13 @@ class _BoundedJsonDirectoryScan:
         finally:
             self._lock.release()
 
+    def discard(self, directory):
+        """代次变化或调用方LRU淘汰时释放本目录游标，不影响其它消费者。"""
+        with self._lock:
+            row = self._slices.pop(str(directory), None)
+            if row is not None:
+                row[0].close()
+
     # LLM: 只释放自身持有的枚举租约，不删除文件；正常完成、闲置及atexit均可重复调用。
     # 函数用途: 显式关闭全部未完成的目录上下文。
     def close(self):
@@ -874,6 +883,115 @@ class _BoundedJsonDirectoryScan:
 
 
 _retirement_scans = _BoundedJsonDirectoryScan()
+
+
+class AgentToolApprovalDiscoveryUnavailable(RuntimeError):
+    """审批发现尚未覆盖或源未知，调用方不能展示为空。"""
+
+
+_PENDING_DISCOVERY_WINDOW_ROOTS_COUNT = 128
+_pending_discovery_scans = _BoundedJsonDirectoryScan()
+_pending_discovery_windows = OrderedDict()
+_pending_discovery_lock = threading.RLock()
+
+
+def _approval_directory_stamp(directory):
+    try:
+        info = directory.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    import stat
+    if not stat.S_ISDIR(info.st_mode):
+        raise AgentToolApprovalDiscoveryUnavailable("approval directory is unreadable")
+    return info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns
+
+
+def _strict_pending_approval(agent, root, path):
+    from ..common.nofollow_fs import read_bytes_beneath
+
+    try:
+        raw = read_bytes_beneath(path.parent, (path.name,), max_bytes=4 * 1024 * 1024)
+        if raw is None:
+            raise AgentToolApprovalDiscoveryUnavailable("approval disappeared during discovery")
+        row = json.loads(raw)
+        if not isinstance(row, dict):
+            raise ValueError("approval is not an object")
+        if row.get("status") != "pending":
+            return None
+        if row.get("schema_version") != AGENT_TOOL_APPROVAL_SCHEMA or row.get("root_task_id") != root:
+            raise ValueError("pending approval identity is invalid")
+        return _public_pending_record(agent, root, row, strict=True)
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError) as error:
+        raise AgentToolApprovalDiscoveryUnavailable("approval record or execution is unreadable") from error
+
+
+def list_pending_agent_tool_approvals_report(agent, *, root_task_id, deadline, scan_limit=128, scan_progress=None):
+    """独立游标推进当前根的发现；完整前不签空，完成后逐项重核scope和attempt。
+
+    仅记忆至多32个有效pending路径，历史终态不驻留。目录代次变化或LRU淘汰
+    整窗失效；不与退休消费者共用枚举位置，也不保存授权结果。
+    """
+    root = validate_opaque_id(root_task_id, kind="root_task_id")
+    directory = _approval_root(agent, root)
+    key = str(directory)
+    if type(scan_limit) is not int or scan_limit <= 0:
+        raise ValueError("positive approval scan budget required")
+    if time.monotonic() >= deadline or not _pending_discovery_lock.acquire(blocking=False):
+        return [], False
+    try:
+        stamp = _approval_directory_stamp(directory)
+        old = _pending_discovery_windows.get(key)
+        if old is not None and (old["stamp"] != stamp or
+                                not old["complete"] and time.monotonic() - old["touched"] >= 60):
+            # close只影响本发现器；下一拍重新从目录头覆盖，不借退休位置续读。
+            _pending_discovery_scans.discard(directory)
+            _pending_discovery_windows.pop(key, None)
+            old = None
+        if old is None:
+            if len(_pending_discovery_windows) >= _PENDING_DISCOVERY_WINDOW_ROOTS_COUNT:
+                evicted, _ = _pending_discovery_windows.popitem(last=False)
+                _pending_discovery_scans.discard(Path(evicted))
+            old = {"stamp": stamp, "paths": [], "complete": stamp is None, "touched": time.monotonic()}
+            _pending_discovery_windows[key] = old
+        _pending_discovery_windows.move_to_end(key)
+        old["touched"] = time.monotonic()
+        if not old["complete"]:
+            def collect(path):
+                if _strict_pending_approval(agent, root, path) is not None:
+                    if len(old["paths"]) >= AGENT_TOOL_APPROVAL_MAX_PENDING_COUNT:
+                        raise AgentToolApprovalDiscoveryUnavailable("approval capacity coverage is unknown")
+                    old["paths"].append(path)
+            work = {"entries": 0}
+            old["complete"] = _pending_discovery_scans.scan(directory, collect, deadline=deadline, max_entries=scan_limit, work=work)
+            if scan_progress is not None:
+                scan_progress["entries"] = work["entries"]
+        if stamp != _approval_directory_stamp(directory):
+            _pending_discovery_scans.discard(directory)
+            _pending_discovery_windows.pop(key, None)
+            return [], False
+        if not old["complete"]:
+            return [], False
+        rows, references = [], []
+        for path in old["paths"]:
+            if time.monotonic() >= deadline:
+                return [], False
+            row = _strict_pending_approval(agent, root, path)
+            if row is not None:
+                rows.append(row)
+                references.append(path)
+        if stamp != _approval_directory_stamp(directory):
+            _pending_discovery_scans.discard(directory)
+            _pending_discovery_windows.pop(key, None)
+            return [], False
+        if scan_progress is not None:
+            scan_progress.update(references=tuple(references), source_stamp=stamp)
+        return rows, True
+    except BaseException:
+        _pending_discovery_scans.discard(directory)
+        _pending_discovery_windows.pop(key, None)
+        raise
+    finally:
+        _pending_discovery_lock.release()
 
 
 # LLM: 有界列表只投影 owner 的一个 root 目录；每行重验原始请求及当前归属，返回公开字段与展示标签。
@@ -1089,15 +1207,21 @@ def _public_pending_record(
     agent: object,
     root_task_id: str,
     payload: object,
+    *,
+    strict: bool = False,
 ) -> dict[str, object] | None:
     if not isinstance(payload, Mapping) or str(payload.get("status") or "") != "pending":
         return None
     try:
         run_id = validate_opaque_id(str(payload.get("run_id") or ""), kind="run_id")
         request = _approval_request(payload.get("request") if isinstance(payload.get("request"), Mapping) else {})
-        scope = tool_approval_scope(agent, run_id)
         deadline = approval_deadline(request, payload.get("expires_at"))
+        if time.time() >= deadline:
+            return None
+        scope = tool_approval_scope(agent, run_id)
     except (FileNotFoundError, OSError, RuntimeError, TypeError, ValueError):
+        if strict:
+            raise
         return None
     if time.time() >= deadline:
         return None

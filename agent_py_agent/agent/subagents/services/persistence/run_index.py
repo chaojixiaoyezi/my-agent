@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import sqlite3
 import stat
 from contextlib import ExitStack, contextmanager
@@ -108,6 +109,7 @@ class SubagentRunIndex:
                         run_id TEXT PRIMARY KEY, recovery TEXT NOT NULL, was_published INTEGER NOT NULL
                     );
         """)
+        self._ensure_membership_revision(db)
         if db.execute("SELECT value FROM meta WHERE key='schema'").fetchone() != (4,):
             with os.scandir(self.workspace) as entries:
                 sampled = list(islice(entries, 8))
@@ -116,6 +118,22 @@ class SubagentRunIndex:
             db.executemany("INSERT OR REPLACE INTO meta VALUES (?,?)",
                            [("complete", int(not legacy)), ("offset", 0),
                             ("inventory_ready", int(not legacy)), ("schema", 4)])
+
+    @staticmethod
+    def _ensure_membership_revision(db):
+        # 首次建立用随机持久代次，缺失不等同旧缓存中的零；不改变原覆盖完成证明。
+        db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES ('current_membership_revision',?)",
+                   (secrets.randbits(62) + 1,))
+
+    def current_membership_revision(self):
+        """短事务读取当前选择集合的持久代次；未知迁移/pending绝不返回默认零。"""
+        with self.connect() as db:
+            db.execute("BEGIN")
+            self._require_complete(db)
+            row = db.execute("SELECT value FROM meta WHERE key='current_membership_revision'").fetchone()
+            if row is None or type(row[0]) is not int or row[0] <= 0:
+                raise SubagentRunIndexUnavailable("current membership generation is unavailable")
+            return row[0]
 
     # LLM: 每连接只点查schema键；缺表或未完成种子复用原安装器，异常不能伪装成空库存。
     # 函数用途: 补未初始化的表及元数据，返回是否实际重装，由调用者复核身份后提交。
@@ -288,6 +306,8 @@ class SubagentRunIndex:
         connection.execute("INSERT INTO runs VALUES (?,?,?,?,0) ON CONFLICT(run_id) DO UPDATE SET "
                            "active=excluded.active,audit_epoch=excluded.audit_epoch,updated=excluded.updated,pending=0",
                            (run_id, active, epoch, task.updated_at or task.created_at or 0))
+        previous_members = set(connection.execute(
+            "SELECT scope_id,kind,run_id FROM membership WHERE run_id=? AND kind IN ('status','thread','lineage')", (run_id,)))
         connection.execute("DELETE FROM membership WHERE run_id=?", (run_id,))
         lineage = {run_id, str(task.root_id or "").strip(), str(task.parent_id or "").strip(),
                    str(attrs.get("conversation_task_id") or "").strip()}
@@ -309,6 +329,14 @@ class SubagentRunIndex:
         if request:
             rows.append((request, "request", run_id))
         connection.executemany("INSERT INTO membership VALUES (?,?,?)", rows)
+        current_members = {row for row in rows if row[1] in {'status', 'thread', 'lineage'}}
+        if any(row[1] == 'status' and row[0] in SUBAGENT_ENDED_STATUSES for row in previous_members):
+            previous_members = set()
+        if not active:
+            current_members = set()
+        if current_members != previous_members:
+            self._ensure_membership_revision(connection)
+            connection.execute("UPDATE meta SET value=value+1 WHERE key='current_membership_revision'")
         parent = text_value(task.parent_id)
         cover_open = int(not task_status_in(task.status, SUBAGENT_RECOVERY_CLOSED_STATUSES))
         connection.execute("INSERT INTO run_lookup VALUES (?,?,?) ON CONFLICT(run_id) DO UPDATE SET "
@@ -644,7 +672,10 @@ class SubagentRunIndex:
         with self.connect() as db:
             if db.execute("SELECT 1 FROM run_lookup WHERE run_id=?", (run_id,)).fetchone():
                 raise ValueError("published run cannot be discarded")
-            db.execute("DELETE FROM membership WHERE run_id=?", (run_id,))
+            changed = db.execute("DELETE FROM membership WHERE run_id=?", (run_id,)).rowcount
+            if changed:
+                self._ensure_membership_revision(db)
+                db.execute("UPDATE meta SET value=value+1 WHERE key='current_membership_revision'")
             db.execute("DELETE FROM runs WHERE run_id=? AND pending=1", (run_id,))
             db.execute("DELETE FROM pending_commits WHERE run_id=?", (run_id,))
 
