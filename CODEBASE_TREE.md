@@ -1071,11 +1071,14 @@ agent_py_agent/
 |-- agent_py_agent/agent/io/bounded_process_log.py # 实际worker的有界日志前缀、持续排空及字节和EOF证明
 |-- agent_py_agent/agent/io/sqlite_recovery.py # 非 runtime SQLite 的无损恢复：误报解锁，损坏保全，仅完整重建可发表。
 |-- agent_py_agent/agent/memory_store/candidate_ledger.py # 候选当前态增量账本：唯一头指向当前树，所有节点均先规划后准入。
+|-- agent_py_agent/agent/owner_change_journal.py # 私有文件监听器的变化水位与宿主退出回收
+|-- agent_py_agent/agent/owner_snapshot_cache.py # 分布式快照的本地有界差量清单
 |-- agent_py_agent/agent/runtime_db/current_obligations.py # 按当前执行及未决义务索引核对退出，避免遍历全部终态历史
 |-- agent_py_agent/agent/user_space/directory_paging.py # 可跨进程续作的有界目录页，复用原生dirent能力
 |-- agent_py_agent/agent/user_space/home_index_retirement.py # 全局索引退役只接受 canonical 消失及原运行权威终态；仍可定位历史保持原引用。
 |-- agent_py_agent/agent/user_space/owner_directory_index.py # 可丢弃的 owner 目录分页投影；目录事实仍是发现与权限的唯一来源。
 |-- agent_py_agent/tests/test_r8_bounded_process_log.py # 真实子进程日志限额、输出继承、元数据频率及描述符回收
+|-- agent_py_agent/tests/test_r8_claim_projection_eviction.py # 多store续点、可丢弃缓存和fork交错回归
 |-- agent_py_agent/tests/test_r8_compact_history_store.py # R8：持久历史根、分叉、崩溃搬迁与冷启动定位的运行时回归。
 |-- agent_py_agent/tests/test_r8_compact_progress_pulse.py # 摘要等待可观察、覆盖数不虚增，退出后不再发表旧进度。
 |-- agent_py_agent/tests/test_r8_current_obligations.py # 当前义务查询复杂度与精确attempt收口回归
@@ -1087,16 +1090,26 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_r8_log_cursor_lifetime.py # 日志分页签名在多 owner 轮换后的真实 HTTP 回归。
 |-- agent_py_agent/tests/test_r8_observation_sources.py # 深页来源读取、用量窗口、跨进程待提交及覆盖真实性回归
 |-- agent_py_agent/tests/test_r8_owner_directory_paging.py # 冷目录发现分片推进，分页不能通过截断未排序目录来漏掉旧owner。
+|-- agent_py_agent/tests/owner_snapshot_native_probe.py # 真实文件监听器、cookie与父进程退出验收共用探针
+|-- agent_py_agent/tests/test_r8_owner_observer_installer.py # 固定监听器资产校验与安装边界
+|-- agent_py_agent/tests/test_r8_owner_snapshot_changes.py # 快照差量、失效重建及真实监听器生命周期
+|-- agent_py_agent/tests/test_r8_owner_snapshot_postgres.py # PostgreSQL跨节点快照代次与删除传播
+|-- agent_py_agent/tests/test_r8_projection_generation_recovery.py # 可重建投影的代次锁、原件保全与来源验证
 |-- agent_py_agent/tests/test_r8_record_ledgers.py # 记录账本增量写入、历史分页与并发终态的行为回归。
 |-- agent_py_agent/tests/test_r8_sqlite_recovery.py # 通用库恢复以真实SQLite验证，不将损坏、未知或缺行当作空库。
 |-- agent_py_agent/tests/test_r8_usage_source_maintenance.py # 旧用量维护追平、目录重启续点与合法保留门验证
 |-- docs/design/R8_COMPACT_HISTORY.md # R8：Compact 历史节点与冷读定位
+|-- docs/design/R8_CLAIM_ACTIVITY_PROJECTION.md # 多store活动扫描的有界临时投影
 |-- docs/design/R8_DISCOVERY_AND_PROGRESS.md # R8 发现、空闲核对与展示进度
 |-- docs/design/R8_IDLE_NOTICE_CACHE.md # R8 空通知消息页缓存
 |-- docs/design/R8_OBSERVATION_SOURCES.md # R8-09 业务观察来源分页与用量范围索引
+|-- docs/design/R8_OWNER_SNAPSHOT_CHANGES.md # 分布式快照变化来源与降级边界
 |-- docs/design/R8_RECORD_LEDGERS.md # R8 线程任务历史与候选当前态增量账本
 |-- docs/design/R8_RECOVERY_RETENTION.md # R8 SQLite恢复与派生文件生命周期
 |-- docs/tasks/R8_AUDIT_FOLLOWUPS.md # R8 历次审计遗漏补修
+|-- deploy/install_watchman.py # 固定官方发行摘要的文件监听器安装
+|-- deploy/verify_owner_observer.py # 容器实际ABI与cookie探针入口
+|-- deploy/WATCHMAN_NOTICES.md # 文件监听器许可、发行来源与适用平台
 `-- docs/tasks/R8_LOCAL_TUI_TEST.md # R8 基础回归与本机 TUI 实测
 ```
 
@@ -1700,6 +1713,14 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 ```
 
 ## 关键文件说明
+
+### R8 长期历史与运行资源（2026-11-08）
+
+- `conversation/claim_activity_projection.py`：临时SQLite保存多store续点，内存和目录句柄有界，fork后独立重建。
+- `owner_change_journal.py`、`owner_snapshot_cache.py`：规范变化事实驱动快照差量，缺少可靠监听证明时明确完整核对。
+- `io/sqlite_recovery.py`：规范库和可重建投影共用代次锁与原件保全；投影重建需要原来源证明。
+- `io/bounded_process_log.py`：实际worker持续排空输出；POSIX管道与Windows原生标准句柄共用容量及EOF计量。
+- `docs/tasks/R8_AUDIT_FOLLOWUPS.md`：十四项实现、Linux失败、最终组合和发布验收的唯一状态入口。
 
 ### 普通回合业务工具与展示（2026-11-07）
 

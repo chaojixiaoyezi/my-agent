@@ -10,7 +10,10 @@
 - [SQLite恢复与退役](docs/design/R8_RECOVERY_RETENTION.md)：四文件保全、完整候选验证、输入引用与已终态来源清理、后台日志退出证明。
 - [业务来源分页](docs/design/R8_OBSERVATION_SOURCES.md)：SQL来源keyset与用量时间索引，后台原维护车道分片补建旧来源；读口不迁移、不把unknown当空。
 
-整合中：可重建投影也必须经过同一SQLite代次排他与原件保全；监听器配置/进程寿命归宿主控制目录，不能被业务缓存清理破坏；部分目录扫描不能因多个store轮换永久失去进度。上述边界的整合验证尚未完成。
+- [活动扫描投影](docs/design/R8_CLAIM_ACTIVITY_PROJECTION.md)：多store续点落临时SQLite，fork与活跃SQL串行，有限目录句柄不淘汰未完成扫描。
+- [分布式快照差量](docs/design/R8_OWNER_SNAPSHOT_CHANGES.md)：监听器配置与进程寿命归宿主控制目录，跨节点变化由PostgreSQL代次与墓碑传递；无法证明监听完整性时完整核对。
+
+上述实现已整合。可重建投影也经过同一SQLite代次排他与原件保全；Windows后台日志同步CRT与原生标准句柄，沿已有阻塞reader排空。最终组合、实机与远端验证仍分别记账。
 
 状态：本地分片及Linux回归进行中，未推送或切换运行版本；远端成功状态仅在最终提交检查完成后登记。
 
