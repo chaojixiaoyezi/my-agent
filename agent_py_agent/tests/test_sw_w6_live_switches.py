@@ -765,3 +765,32 @@ def test_settled_generation_republishes_externally_replaced_provenance(tmp_path)
     child = replace(config)
     live.register_live_config(child)
     assert child._live_switch_binding.applied == config._live_switch_binding.applied
+
+
+def test_failed_guard_refresh_does_not_retain_old_file_config_generation(tmp_path, monkeypatch):
+    path, config = _config(tmp_path)
+    copies = [config, replace(config), replace(config)]
+    for candidate in copies:
+        live.register_live_config(candidate)
+    live.refresh_live_switches(config)
+    source = config._live_switch_binding.source
+    previous = weakref.ref(source.fresh)
+    previous_revision = source.revision
+    _write(path, "enable_tools: false\n")
+    original = live._refresh_guard
+    calls = []
+
+    def fail_first(*args, **kwargs):
+        calls.append(args[0])
+        raise OSError("injected guard read failure")
+
+    monkeypatch.setattr(live, "_refresh_guard", fail_first)
+    with pytest.raises(OSError, match="injected guard read failure"):
+        live.refresh_live_switches(config)
+    assert len(calls) == 1
+    assert source.revision > previous_revision
+    assert any(candidate._live_switch_binding.settled_revision == previous_revision for candidate in copies)
+    assert previous() is None, "延迟绑定只能保留轻量代次，不能钉住旧配置"
+    monkeypatch.setattr(live, "_refresh_guard", original)
+    live.refresh_live_switches(config)
+    assert all(candidate.enable_tools is False for candidate in copies)

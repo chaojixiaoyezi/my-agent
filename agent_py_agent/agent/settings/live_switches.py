@@ -75,6 +75,7 @@ class _FileConfigs:
     signature: tuple | None
     configs: weakref.WeakSet = field(default_factory=weakref.WeakSet)
     policies: dict = field(default_factory=dict)
+    revision: int = 0
 
 
 @dataclass(eq=False)
@@ -84,7 +85,7 @@ class _ConfigBinding:
     applied: dict[str, bool]
     guard_applied: dict[str, bool]
     raw_path: str | Path
-    settled_fresh: AgentConfig | None = None
+    settled_revision: int | None = None
     published_provenance: dict | None = None
 
 
@@ -180,6 +181,7 @@ def refresh_live_switches(config=None, *, path=None, force=False) -> frozenset[s
         if force or not trustworthy or signature != source.signature:
             fresh = load_config(source.path)
             source.fresh = fresh
+            source.revision += 1
             source.signature = signature if trustworthy else None
         changed = set()
         checked_policies = {}
@@ -187,13 +189,13 @@ def refresh_live_switches(config=None, *, path=None, force=False) -> frozenset[s
             candidate = registered.config()
             if candidate is None:
                 continue
-            apply_switches = force or registered.settled_fresh is not source.fresh
+            apply_switches = force or registered.settled_revision != source.revision
             guard_before = registered.guard_applied.copy()
             try:
                 if apply_switches:
                     changed.update(_apply_switches(candidate, registered, source.fresh))
                     # 只有全部文件基线都已采用，外部局部覆盖才不可能产生待补的文件更新。
-                    registered.settled_fresh = source.fresh if all(
+                    registered.settled_revision = source.revision if all(
                         previous == getattr(source.fresh, key) for key, previous in registered.applied.items()
                     ) else None
                 changed.update(_refresh_guard(candidate, registered, checked_policies, force=force))
