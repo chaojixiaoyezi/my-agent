@@ -42,3 +42,16 @@ jobs:
         shell: pwsh
         run: |
           python -I .github/diagnostics/win_hot_snapshot.py --source "$env:GITHUB_WORKSPACE" --output "$env:RUNNER_TEMP/hot-source.json"
+      - name: Install isolated test dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Verify byte cursors, upgrade and overload responses
+        run: >-
+          python -m pytest -q --timeout=60 --tb=short
+          agent_py_agent/tests/test_binary_snapshot_identity.py
+          agent_py_agent/tests/test_r8_windows_hot_slice.py
+          agent_py_agent/tests/test_r8_windows_tail_clocks.py
+          agent_py_agent/tests/test_v15_rework_r3_delivery_recovery.py::test_portable_source_uses_fd_clock_and_binary_bytes
+          agent_py_agent/tests/test_v15_rework_r3_delivery_recovery.py::test_old_five_field_checkpoint_resumes_byte_exact_portable_source
+          agent_py_agent/tests/test_v15_rework_r3_delivery_recovery.py::test_native_generation_unknown_or_changed_never_advances_checkpoint
+          agent_py_agent/tests/test_gateway_bounded_http_server.py
+          agent_py_agent/tests/test_s1w1_http_lanes.py::test_replay_setup_failure_closes_original_socket_without_gc

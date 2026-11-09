@@ -27,6 +27,7 @@ from typing import Any
 from ..common.http_listener import BoundAddressMixin
 from ..concurrency import DurableDaemonThreadPoolExecutor
 from ..settings.config import AgentConfig
+from .http_body_readiness import HTTP_READY_PREFIX_BYTES
 from .http_lanes import HTTPLaneRouter
 from .multiprocess_http_transport import (
     HTTPBirthGateBusy,
@@ -34,6 +35,30 @@ from .multiprocess_http_transport import (
     original_http_birth,
     require_http_worker_source,
 )
+
+
+# 503 的正文不含任何用户身份，所有满载连接复用同一份有限报文。
+def _busy_response_bytes():
+    payload = json.dumps(
+        {
+            "ok": False,
+            "error_code": "GATEWAY_HTTP_BUSY",
+            "message": "Gateway 当前连接繁忙，请稍后重试。",
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return (
+        f"HTTP/1.1 {HTTPStatus.SERVICE_UNAVAILABLE.value} "
+        f"{HTTPStatus.SERVICE_UNAVAILABLE.phrase}\r\n"
+        "Content-Type: application/json; charset=utf-8\r\n"
+        f"Content-Length: {len(payload)}\r\n"
+        "Retry-After: 1\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+    ).encode("ascii") + payload
+
+
+_BUSY_RESPONSE = _busy_response_bytes()
 
 
 # LLM: 仅原正式handler读取已有唯一宿主指针；容量配置不是认证或HTTP工作来源，独立server/子类不借其它宿主配置。
@@ -97,6 +122,10 @@ class GatewayBoundedHTTPServer(BoundAddressMixin, HTTPServer):
         workers = max(1, int(self.max_request_workers))
         capacity = max(workers, int(self.max_outstanding_requests))
         self._request_slots = threading.BoundedSemaphore(capacity)
+        # 已拒绝的连接不占工作线程。只保留有限数量的只读尾端，超额仍立即释放。
+        self._reject_drain_capacity = min(workers, 32)
+        self._reject_lock = threading.Lock()
+        self._reject_drains: dict[socket.socket, tuple[float, int]] = {}
         with original_http_birth(drain_runtime):
             self._request_executor = DurableDaemonThreadPoolExecutor(
                 max_workers=workers,
@@ -217,67 +246,78 @@ class GatewayBoundedHTTPServer(BoundAddressMixin, HTTPServer):
     # credential-free 503 with Retry-After and never enter a product handler.
     # 函数用途: 在 HTTP 层明确告知客户端网关繁忙，让现有退避逻辑稍后重连。
     def _reject_overloaded_request(self, request: socket.socket) -> None:
-        payload = json.dumps(
-            {
-                "ok": False,
-                "error_code": "GATEWAY_HTTP_BUSY",
-                "message": "Gateway 当前连接繁忙，请稍后重试。",
-            },
-            ensure_ascii=False,
-        ).encode("utf-8")
-        response = (
-            f"HTTP/1.1 {HTTPStatus.SERVICE_UNAVAILABLE.value} "
-            f"{HTTPStatus.SERVICE_UNAVAILABLE.phrase}\r\n"
-            "Content-Type: application/json; charset=utf-8\r\n"
-            f"Content-Length: {len(payload)}\r\n"
-            "Retry-After: 1\r\n"
-            "Connection: close\r\n"
-            "\r\n"
-        ).encode("ascii") + payload
+        self._send_busy_and_retire(request, nonblocking=False)
+
+    def _reject_without_wait(self, request: socket.socket) -> None:
+        self._send_busy_and_retire(request, nonblocking=True)
+
+    def _send_busy_and_retire(self, request: socket.socket, *, nonblocking: bool) -> None:
+        # HTTP/1.1 §9.6：有请求字节在途时，立即完全关闭可能让 TCP RST 抹掉已经发送的 503。
         try:
-            request.settimeout(0.2)
-            request.sendall(response)
+            if nonblocking:
+                request.setblocking(False)
+                if request.send(_BUSY_RESPONSE) != len(_BUSY_RESPONSE):
+                    return
+            else:
+                request.settimeout(0.2)
+                request.sendall(_BUSY_RESPONSE)
+            if isinstance(request, ssl.SSLSocket):
+                return
+            with self._reject_lock:
+                if not self._closing.is_set() and len(self._reject_drains) < self._reject_drain_capacity:
+                    # 原票据必须立即且恰好关闭一次；副本只保 TCP 接收端，不持回放前缀、票据或执行权。
+                    tail = request.dup()
+                    try:
+                        tail.setblocking(False)
+                        self._reject_drains[tail] = (
+                            time.monotonic() + min(self.request_queue_timeout, 1.0), HTTP_READY_PREFIX_BYTES)
+                    except BaseException:
+                        tail.close()
+                        raise
         except OSError:
             pass
         finally:
+            # 标准 shutdown_request 先 SHUT_WR 再关闭原句柄；接收端若仍有预算，由 service_actions 退役。
             self.shutdown_request(request)
 
-    # LLM: 就绪和过期路径不能阻塞选择器或接收线程；单次尽力发送后仍关闭连接。
-    # 函数用途: 用与原过载响应相同的报文非阻塞拒绝连接。
-    def _reject_without_wait(self, request: socket.socket) -> None:
-        payload = json.dumps(
-            {
-                "ok": False,
-                "error_code": "GATEWAY_HTTP_BUSY",
-                "message": "Gateway 当前连接繁忙，请稍后重试。",
-            },
-            ensure_ascii=False,
-        ).encode("utf-8")
-        response = (
-            f"HTTP/1.1 {HTTPStatus.SERVICE_UNAVAILABLE.value} "
-            f"{HTTPStatus.SERVICE_UNAVAILABLE.phrase}\r\n"
-            "Content-Type: application/json; charset=utf-8\r\n"
-            f"Content-Length: {len(payload)}\r\n"
-            "Retry-After: 1\r\n"
-            "Connection: close\r\n"
-            "\r\n"
-        ).encode("ascii") + payload
-        try:
-            request.setblocking(False)
-            request.send(response)
-        except OSError:
-            pass
-        finally:
-            self.shutdown_request(request)
+    def service_actions(self) -> None:
+        # 沿原 serve_forever 的周期收尾，不开线程、不等待客户端。每个拒绝连接只丢弃有限字节。
+        with self._reject_lock:
+            if not self._reject_drains:
+                return
+            pending = tuple(self._reject_drains.items())
+        now = time.monotonic()
+        for request, (deadline, remaining) in pending:
+            consumed = 0
+            if now < deadline:
+                try:
+                    consumed = len(request.recv(remaining))
+                except (BlockingIOError, InterruptedError):
+                    continue
+                except OSError:
+                    pass
+            with self._reject_lock:
+                if request not in self._reject_drains:
+                    continue
+                if 0 < consumed < remaining:
+                    self._reject_drains[request] = (deadline, remaining - consumed)
+                    continue
+                del self._reject_drains[request]
+            request.close()
 
     # LLM: Stop admission before cancelling queued work. Running daemon workers
     # may finish their current durable handler, matching the former daemon-thread
     # shutdown boundary without an interpreter-wide join.
     # 函数用途: 停止接收新请求，取消尚未执行的排队请求并关闭监听套接字。
     def server_close(self) -> None:
+        self._closing.set()
         if self._lanes is not None:
             self._lanes.close()
-        self._closing.set()
+        with self._reject_lock:
+            retiring = tuple(self._reject_drains)
+            self._reject_drains.clear()
+        for request in retiring:
+            request.close()
         self._request_executor.shutdown(wait=False, cancel_futures=True)
         super().server_close()
 

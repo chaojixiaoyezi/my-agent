@@ -3,7 +3,7 @@ import argparse,json,os,platform,sys,tempfile,time
 from pathlib import Path
 p=argparse.ArgumentParser();p.add_argument('--source',required=True);p.add_argument('--output',required=True);args=p.parse_args()
 sys.path.insert(0,str(Path(args.source).resolve()))
-from agent_py_agent.agent.common.nofollow_fs import file_descriptor_change_ns
+from agent_py_agent.agent.common.nofollow_fs import file_descriptor_change_ns, file_identity_snapshot
 from agent_py_agent.agent.conversation.message_cursor_slice import read_after_slice,MessageReadAllowance,source_stamp_is_trustworthy
 from agent_py_agent.agent.io.cursor_cache import file_stamp
 from agent_py_agent.agent.memory_store.retention_scan_budget import RetentionScanBudget
@@ -17,7 +17,13 @@ with tempfile.TemporaryDirectory(prefix='r8-win-hot-slice-') as directory:
  old=time.time()-10;os.utime(path,(old,old));time.sleep(2.05)
  with path.open('rb') as handle:
   before=os.fstat(handle.fileno());changed=file_descriptor_change_ns(handle.fileno(),before)
-  result['initial']={'fd':view(before),'path':view(path.stat()),'native_changed_ns':changed,'trusted':source_stamp_is_trustworthy(file_stamp(before),changed)}
+  path_before=path.stat()
+  result['initial']={'fd':view(before),'path':view(path_before),'native_changed_ns':changed,'trusted':source_stamp_is_trustworthy(file_stamp(before),changed),'raw_path_fd_different_fields':[k for k in fields if getattr(before,k,None)!=getattr(path_before,k,None)]}
+  try:
+   checked,checked_change=file_identity_snapshot(path)
+   result['canonical_path_snapshot']={'fd':view(checked),'native_changed_ns':checked_change,'same_read_fd_stamp':file_stamp(checked)==file_stamp(before),'same_read_fd_native_change':checked_change==changed}
+  except Exception as error:
+   result['canonical_path_snapshot']={'exception_type':type(error).__name__}
  for _ in range(5):
   budget=RetentionScanBudget.default()
   try:

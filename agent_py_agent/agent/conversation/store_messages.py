@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from ..common.json_io import append_private_jsonl_records_unlocked, locked_json_path
+from ..common.nofollow_fs import file_descriptor_change_ns, file_identity_snapshot
 from ..gateway_parts.io import (
     locked_file_transition,
 )
@@ -118,6 +119,7 @@ def canonical_message_tail_marker(path: Path, thread_id: str) -> dict[str, Any]:
         size, last = 0, ''
         handle.seek(0)
         before = os.fstat(handle.fileno())
+        changed = file_descriptor_change_ns(handle.fileno(), before)
         for raw in handle:
             digest = hashlib.sha256(digest + raw).digest()
             size += len(raw)
@@ -129,9 +131,14 @@ def canonical_message_tail_marker(path: Path, thread_id: str) -> dict[str, Any]:
                 raise DataCorruptionError("canonical message tail is invalid")
             count += 1
             last = row["message_id"]
-        after = path.stat()
-        keys = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
-        if size != before.st_size or any(getattr(before, key) != getattr(after, key) for key in keys):
+        # 路径投影和读 FD 使用同一种时钟；末次 FD 探测覆盖路径核验期间的原位修改。
+        current, current_changed = file_identity_snapshot(path)
+        after = os.fstat(handle.fileno())
+        final_changed = file_descriptor_change_ns(handle.fileno(), after)
+        keys = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (size != before.st_size or changed is None or changed != current_changed or changed != final_changed
+                or any(getattr(before, key) != getattr(after, key) or getattr(current, key) != getattr(after, key)
+                       for key in keys)):
             raise DataCorruptionError("canonical message source changed during tail observation")
     return {"message_count": count, "last_message_id": last, "byte_size": base + size, "sha256": digest.hex()}
 

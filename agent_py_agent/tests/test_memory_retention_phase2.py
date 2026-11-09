@@ -86,8 +86,29 @@ def test_pin_append_retry_and_domain_isolation(tmp_path, monkeypatch):
                 writer.write(b"{}\n")
         return source
 
+    from itertools import count
+
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
+
     monkeypatch.setattr(scan, "_fingerprint_source", racing_open)
-    report = service.apply(now=NOW)
+    # 先让真实 apply 耗尽第一片并保存续点，不能要求已暂停的扫描报告尚未观察到的竞争。
+    with monkeypatch.context() as first_slice:
+        ticks = iter((0.0,))
+        first_slice.setattr(budgets, "time", SimpleNamespace(monotonic=lambda: next(ticks, 1.0)))
+        pending = service.apply(now=NOW)
+    assert pending.applied and pending.scan_partial and pending.scan_cursor and not pending.errors
+    assert budgets.load_scan_cursor(home) == pending.scan_cursor
+
+    # 后续预算时钟单调推进，不把 CI 调度延迟当成文件竞争；条目和字节预算、FD 与实际追加均保留。
+    ticks_after_resume = count()
+    monkeypatch.setattr(budgets, "time", SimpleNamespace(monotonic=lambda: next(ticks_after_resume) / 1_000_000))
+    for _ in range(3):
+        report = service.apply(now=NOW)
+        if report.errors:
+            break
+        # 跨片来源变化可丢弃旧续点、下一片重建；这一步仍不是完成。
+        assert report.applied and report.scan_partial
+        assert budgets.load_scan_cursor(home) == report.scan_cursor
     assert report.applied and report.errors
     assert not scratch.exists(), "unrelated task tmp must not be blocked by racing pin"
     assert len(calls) >= 3, "concurrent append was not retried"

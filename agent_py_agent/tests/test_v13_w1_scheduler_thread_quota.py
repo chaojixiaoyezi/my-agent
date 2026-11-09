@@ -406,17 +406,31 @@ else:
             admission.check([quota_rework.OwnerQuotaChange(target, 1)], bounded_control_growth_bytes=10)
 
 
-def test_quota_rework_non_growth_preserves_failed_baseline(tmp_path):
+@pytest.mark.parametrize('invalidate_first', [False, True])
+def test_quota_rework_non_growth_preserves_failed_baseline(tmp_path, invalidate_first):
     enforcer = quota_rework_drift(tmp_path)
     target = tmp_path / 'payload-000'
     with enforcer.admission() as admission:
+        if invalidate_first:
+            # 真正尝试增长才执行root前置核验，并持久化已失败的基线事实。
+            with pytest.raises(quota_rework.OwnerQuotaUnavailable):
+                admission.check([quota_rework.OwnerQuotaChange(tmp_path / 'denied', 1)],
+                                bounded_control_growth_bytes=10)
+            quota_rework_assert_invalid(tmp_path)
         admission.check([quota_rework.OwnerQuotaChange(target, 0)], bounded_control_growth_bytes=10)
         target.write_bytes(b'')
+    # 非增长可省略root前置扫描；结算实读发现外写后仍必须持久失效，不能借自己的rename恢复权威。
     ledger = quota_rework_assert_invalid(tmp_path)
+    assert not quota_rework._verified_quota_baseline(tmp_path, ledger)
     assert ledger['used_bytes'] == 159
-    with enforcer.admission() as admission:
-        with pytest.raises(quota_rework.OwnerQuotaUnavailable):
+    # 新准入实例不能靠先前非增长或账本rename恢复增长权，外写的64字节仍须精确补账。
+    fresh = quota_rework.OwnerQuotaEnforcer(tmp_path, max_bytes=170)
+    with fresh.admission() as admission:
+        with pytest.raises(quota_rework.OwnerQuotaUnavailable) as error:
             admission.check([quota_rework.OwnerQuotaChange(tmp_path / 'later', 1)], bounded_control_growth_bytes=10)
+        assert error.value.reason_code == 'reconciliation_pending'
+    assert not (tmp_path / 'later').exists()
+    assert quota_rework.owner_logical_usage_bytes(tmp_path, exact=True) == 223
     assert quota_rework_reconcile(tmp_path)['used_bytes'] == 223
 
 
@@ -454,3 +468,25 @@ def test_quota_rework_verification_cancellation_is_not_quota_failure(tmp_path, m
         with enforcer.admission() as admission:
             admission.check([quota_rework.OwnerQuotaChange(tmp_path / 'state', 1)], bounded_control_growth_bytes=10)
     assert not (tmp_path / 'state').exists()
+
+
+def test_quota_rework_non_growth_failed_active_pass_keeps_cursor_but_revokes_growth(tmp_path):
+    enforcer = quota_rework_drift(tmp_path)
+    started = quota_rework.reconcile_owner_quota_slice(tmp_path, max_entries=1, max_ms=1000)
+    assert not started['complete']
+    epoch = started['cursor']['epoch']
+    with enforcer.admission() as admission:
+        admission.check([quota_rework.OwnerQuotaChange(tmp_path / 'payload-000', 0)],
+                        bounded_control_growth_bytes=10)
+        (tmp_path / 'payload-000').write_bytes(b'')
+    ledger = quota_rework._read_quota_ledger(tmp_path)
+    assert ledger['dirty_since'] is not None and ledger['usage_authoritative'] is False
+    assert ledger['reconcile_cursor']['epoch'] == epoch
+    assert ledger['used_bytes'] == 159 and not ledger['reservations']
+    with quota_rework.OwnerQuotaEnforcer(tmp_path, max_bytes=170).admission() as admission:
+        with pytest.raises(quota_rework.OwnerQuotaUnavailable):
+            admission.check([quota_rework.OwnerQuotaChange(tmp_path / 'later', 1)],
+                            bounded_control_growth_bytes=10)
+    finished = quota_rework_reconcile(tmp_path)
+    assert finished['used_bytes'] == quota_rework.owner_logical_usage_bytes(tmp_path, exact=True) == 223
+    assert finished['cursor']['epoch'] == epoch

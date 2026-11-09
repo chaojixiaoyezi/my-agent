@@ -590,13 +590,18 @@ class OwnerQuotaAdmission:
                     if _refresh_quota_baseline(root, cursor, self._before_children):
                         cursor['ledger_revision'] = ledger['revision']
                     else:
+                        # 实读已发现未声明外写，不能只置dirty后仍借旧权威批准bounded增长。
                         ledger['dirty_since'] = time.time()
+                        ledger['usage_authoritative'] = False
+                        _drop_quota_metadata(cursor, invalidated=True)
             elif synced and cursor.get('complete') is False:
                 # 进行中的对账不因受控写重来：已扫过的路径补差额，变过目录项的窗口作废重枚举；目录核对不通过即置脏。
                 if not _apply_quota_pass_changes(root, cursor, {
                         path: (self._before[path], after[path], self._before_inodes[path], after_inodes[path])
                         for path in self._before}, self._before_children):
                     ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
+                    # 保留在途扫描续点，但失败旧计数不再是控制增长的来源证明。
+                    ledger['usage_authoritative'] = False
                 cursor['ledger_revision'] = ledger['revision']
             self._pending = (ledger['revision'], after, after_inodes, ledger)
             _write_quota_ledger(root, ledger)

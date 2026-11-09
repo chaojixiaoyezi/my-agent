@@ -373,15 +373,60 @@ def _portable_snapshot_parents(root, parts):
                  (_portable_directory(root, parts[:length], create=False).lstat() for length in range(len(parts))))
 
 
-def _portable_snapshot_identity(target, before, opened):
-    current = target.lstat()
-    fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+def _snapshot_stat_fields_match(left, right, *, cross_windows=False):
+    fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns")
+    if not cross_windows:
+        fields += ("st_ctime_ns",)
+    if any(getattr(left, field) != getattr(right, field) for field in fields):
+        return False
+    # Windows 3.12 的路径ctime是创建时间，FD ctime却可能是ChangeTime；创建身份另比同名字段。
+    return not cross_windows or not all(hasattr(value, "st_birthtime_ns") for value in (left, right)) or (
+        left.st_birthtime_ns == right.st_birthtime_ns)
+
+
+def _portable_snapshot_identity(target, before, opened, before_changed, opened_changed):
+    current, current_changed = file_identity_snapshot(target)
     if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
             or not stat.S_ISREG(current.st_mode) or current.st_nlink != 1
-            or any(getattr(before, field) != getattr(opened, field)
-                   or getattr(current, field) != getattr(opened, field) for field in fields)):
+            or not _snapshot_stat_fields_match(before, opened)
+            or not _snapshot_stat_fields_match(current, opened)
+            or before_changed is None or before_changed != opened_changed
+            or current_changed != opened_changed):
         raise NoFollowPathError("managed snapshot source changed")
 
+
+def file_identity_snapshot(path):
+    """只读叶身份，不授父链权限；Windows以真实句柄元数据避免混比路径与FD的ctime语义。"""
+    if os.name != "nt":
+        info = Path(path).lstat()
+        return info, info.st_ctime_ns
+    return _windows_file_identity_snapshot(Path(path))
+
+
+def _windows_file_identity_snapshot(target):
+    before = target.lstat()
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise NoFollowPathError("managed snapshot leaf is not regular single-link")
+    descriptor = os.open(target, os.O_RDONLY | getattr(os, "O_BINARY", 0)
+                         | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    try:
+        opened = os.fstat(descriptor)
+        changed_before = file_descriptor_change_ns(descriptor, opened)
+        observed = os.fstat(descriptor)
+        changed_after = file_descriptor_change_ns(descriptor, observed)
+        current = target.lstat()
+        if (not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1
+                or not _snapshot_stat_fields_match(before, current)
+                or not _snapshot_stat_fields_match(before, opened, cross_windows=True)
+                or not _snapshot_stat_fields_match(current, observed, cross_windows=True)
+                or not _snapshot_stat_fields_match(opened, observed)
+                or changed_before is None or changed_before != changed_after):
+            raise NoFollowPathError("managed snapshot source changed")
+    except BaseException as error:
+        _close_snapshot_fds([descriptor], error)
+        raise
+    _close_snapshot_fds([descriptor])
+    return observed, changed_after
 
 
 @lru_cache(maxsize=1)
@@ -413,14 +458,14 @@ def file_descriptor_change_ns(descriptor, info):
     except OSError:
         return None
     # Win32 FILETIME为1601起100ns；无法读取不是可缓存的旧内容证明。
-    return (value.change - 116444736000000000) * 100 if success else None
+    return (value.change - 116444736000000000) * 100 if success and value.change > 0 else None
 
 
 def _portable_binary_snapshot(root, parts, max_bytes, read_content):
     try:
         parents = _portable_snapshot_parents(root, parts)
         target = _portable_path(root, parts, create=False)
-        before = target.lstat()
+        before, before_changed = file_identity_snapshot(target)
     except FileNotFoundError:
         return None
     if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
@@ -428,12 +473,12 @@ def _portable_binary_snapshot(root, parts, max_bytes, read_content):
     descriptor = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
     try:
         opened = os.fstat(descriptor)
-        _portable_snapshot_identity(target, before, opened)
         changed_before = file_descriptor_change_ns(descriptor, opened)
+        _portable_snapshot_identity(target, before, opened, before_changed, changed_before)
         content = _read_descriptor(descriptor, max_bytes) if read_content else b""
         observed = os.fstat(descriptor)
-        _portable_snapshot_identity(target, before, observed)
         changed_after = file_descriptor_change_ns(descriptor, observed)
+        _portable_snapshot_identity(target, before, observed, before_changed, changed_after)
         if changed_before != changed_after:
             raise NoFollowPathError("managed snapshot file generation changed")
         if parents != _portable_snapshot_parents(root, parts):

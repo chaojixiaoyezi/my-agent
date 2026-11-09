@@ -344,7 +344,7 @@ class _BackgroundProcessWaitOwner:
             raise RuntimeError('background_wait_owner_already_bound')
         self._process = process
 
-    def __exit__(self, *_error):
+    def __exit__(self, _exc_type, _exc_value, _traceback):
         self._setup_done.set()
 
     def _consume(self):
