@@ -52,6 +52,7 @@ from .compact_message_source import (
     shrink_tool_outputs,
     summary_source_message,
 )
+from .compact_progress_pulse import compact_progress_pulse
 from .compact_text_source import CompactTextSource
 from .input_media import InputMediaError
 
@@ -169,33 +170,35 @@ def generate_bounded_compact_response(
     media_reserve_tokens: int = 0,
     calibration: CompactRequestCalibration | None = None,
 ) -> object:
-    if message_source is not None and request.messages is not None:
-        raise ValueError('compact summary requires one message source')
-    if request.tools and request.tool_choice is None:
-        # 后端对 None 本就发送 auto；只补等价的显式默认，不覆盖前台已选策略。
-        request = replace(request, tool_choice=ToolChoice.auto('compact_cache_surface'))
-    raise_if_compact_interrupted(interrupt_check)
-    if vision_summary:
-        return _generate_vision_summary_response(request, message_source, compact_summary_budget(request.agent), interrupt_check, media_reserve_tokens,
-                                                calibration=calibration)
-    shared_prefix = message_source is not None and message_source.preserve_prefix
-    # 完整前缀只需能容纳完整窗口；尚未使用的80%分段几何不能提前否决它。
-    single_budget = (compact_cache_surface_budget(request.agent) if request.tools or shared_prefix
-                     else compact_summary_budget(request.agent))
-    attempt = _CompactAttemptContext(single_budget, interrupt_check, preserve_complete_fallback, message_source,
-                                     calibration=calibration)
-    cached_source = _single_request_source(request, message_source, _SurfaceBudget(single_budget, calibration))
-    result = (_try_cached_compact_requests(request, replace(attempt, message_source=cached_source.source, budget=single_budget))
-              if cached_source is not None else None)
-    if result is not None:
-        if result.response is not None:
-            return result.response
-    if message_source is not None and message_source.preserve_prefix:
-        return _prefix_failure_or_tool_reply(attempt)
-    budget = compact_summary_budget(request.agent)
-    attempt = replace(attempt, budget=min(budget, result.budget) if result is not None else budget,
-                      tool_call_reply=result.tool_call_reply if result is not None else None)
-    return _summarize_or_return_tool_call(request, attempt, source_progress)
+    interval = float(getattr(request.agent.config, 'memory_compact_progress_heartbeat_seconds', 5.0))
+    with compact_progress_pulse(source_progress, interval=interval) as source_progress:
+        if message_source is not None and request.messages is not None:
+            raise ValueError('compact summary requires one message source')
+        if request.tools and request.tool_choice is None:
+            # 后端对 None 本就发送 auto；只补等价的显式默认，不覆盖前台已选策略。
+            request = replace(request, tool_choice=ToolChoice.auto('compact_cache_surface'))
+        raise_if_compact_interrupted(interrupt_check)
+        if vision_summary:
+            return _generate_vision_summary_response(request, message_source, compact_summary_budget(request.agent), interrupt_check, media_reserve_tokens,
+                                                    calibration=calibration)
+        shared_prefix = message_source is not None and message_source.preserve_prefix
+        # 完整前缀只需能容纳完整窗口；尚未使用的80%分段几何不能提前否决它。
+        single_budget = (compact_cache_surface_budget(request.agent) if request.tools or shared_prefix
+                         else compact_summary_budget(request.agent))
+        attempt = _CompactAttemptContext(single_budget, interrupt_check, preserve_complete_fallback, message_source,
+                                         calibration=calibration)
+        cached_source = _single_request_source(request, message_source, _SurfaceBudget(single_budget, calibration))
+        result = (_try_cached_compact_requests(request, replace(attempt, message_source=cached_source.source, budget=single_budget))
+                  if cached_source is not None else None)
+        if result is not None:
+            if result.response is not None:
+                return result.response
+        if message_source is not None and message_source.preserve_prefix:
+            return _prefix_failure_or_tool_reply(attempt)
+        budget = compact_summary_budget(request.agent)
+        attempt = replace(attempt, budget=min(budget, result.budget) if result is not None else budget,
+                          tool_call_reply=result.tool_call_reply if result is not None else None)
+        return _summarize_or_return_tool_call(request, attempt, source_progress)
 
 
 # LLM: 此入口只接收已证明的冻结主前缀，媒体不走旧存档的非文本检查；工具回执仍交原机械回退。

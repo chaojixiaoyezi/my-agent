@@ -627,6 +627,14 @@ agent_py_agent/
 
 ### 关键文件说明
 
+### R8 审计补修（2026-11-08）
+
+- `docs/tasks/R8_AUDIT_FOLLOWUPS.md`：14项范围、验收与交付状态的唯一任务导航。
+- `agent_py_agent/agent/conversation/immutable_node_store.py`：内容寻址节点、引用与回收事务；checkpoint仍拥有提交事实。
+- `agent_py_agent/agent/conversation/task_history.py`、`agent_py_agent/agent/memory_store/candidate_ledger.py`：任务历史分页和单条候选增量写；原线程/候选唯一提交头与权限边界保持。
+- `agent_py_agent/agent/io/sqlite_recovery.py`：非runtime结构损坏的原文件保全及完整候选恢复，不用空库替代未知数据。
+- `agent_py_agent/agent/user_space/owner_directory_index.py`、`agent_py_agent/agent/conversation/claim_activity_projection.py`：可丢弃只读发现投影及分片核对；未完/未知不签发空闲许可。
+
 `test_nofollow_fstat_publication.py`固定真实fstat完成至current stat之间的发表交错；通用reader只复采已知原FD，新增节点须两平台包运行，不能替领域权限或真实生命周期验收。
 
 - `agent_py_agent/tests/test_native_refusal_lease_pin_ownership.py`：独立原pin API同owner漏读反例，保持评审原字节。
@@ -1037,6 +1045,38 @@ agent_py_agent/
 # Codebase Tree
 
 ## Tree
+
+### 2026-11-08 R8 审计补修文件
+
+```text
+|-- agent_py_agent/agent/agent_core/orchestration/background/log_retention.py # 派工日志随实际进程退出留存；未知执行体和未收口业务证据永不按年龄删除。
+|-- agent_py_agent/agent/conversation/checkpoint_offset_store.py # 检查点物理行地址的可重建投影；只封存已完成严格扫描的固定源水位。
+|-- agent_py_agent/agent/conversation/claim_activity_projection.py # 只读分片核对当前 claim 目录；未完成或变化中的扫描不能签发空闲事实。
+|-- agent_py_agent/agent/conversation/compact_index_lifecycle.py # Compact 节点仓的提交 pin、可续迁移与有界回收；不以时间猜测提交链。
+|-- agent_py_agent/agent/conversation/compact_progress_pulse.py # 摘要等待展示心跳：复用共享调度器，只重报真实覆盖数，不签发完成事实。
+|-- agent_py_agent/agent/conversation/immutable_node_store.py # 内容寻址节点的事务仓库：历史根共享节点，零引用队列代替全历史标记。
+|-- agent_py_agent/agent/conversation/task_history.py # 线程任务历史的分页权威；线程 JSON 仅保存有界展示窗口。
+|-- agent_py_agent/agent/gateway_parts/input_turn_retention.py # 分片退役输入回合引用；只接受原请求终态与已消费 canonical 双重证明。
+|-- agent_py_agent/agent/io/sqlite_recovery.py # 非 runtime SQLite 的无损恢复：误报解锁，损坏保全，仅完整重建可发表。
+|-- agent_py_agent/agent/memory_store/candidate_ledger.py # 候选当前态增量账本：唯一头指向当前树，所有节点均先规划后准入。
+|-- agent_py_agent/agent/user_space/home_index_retirement.py # 全局索引退役只接受 canonical 消失及原运行权威终态；仍可定位历史保持原引用。
+|-- agent_py_agent/agent/user_space/owner_directory_index.py # 可丢弃的 owner 目录分页投影；目录事实仍是发现与权限的唯一来源。
+|-- agent_py_agent/tests/test_r8_compact_history_store.py # R8：持久历史根、分叉、崩溃搬迁与冷启动定位的运行时回归。
+|-- agent_py_agent/tests/test_r8_compact_progress_pulse.py # 摘要等待可观察、覆盖数不虚增，退出后不再发表旧进度。
+|-- agent_py_agent/tests/test_r8_dispatch_log_retention.py # 真实stdout SH锁、退出证明与canonical业务终态共同约束日志保留。
+|-- agent_py_agent/tests/test_r8_global_index_retirement.py # 唯一历史key按canonical消失证明退役，未知及可定位历史保持。
+|-- agent_py_agent/tests/test_r8_idle_claim_history.py # 历史任务窗口化以后，孤立旧 claim 仍必须阻止闲置压缩。
+|-- agent_py_agent/tests/test_r8_input_turn_retention.py # 输入引用终态、原锁、出生交错和有界目录预算。
+|-- agent_py_agent/tests/test_r8_log_cursor_lifetime.py # 日志分页签名在多 owner 轮换后的真实 HTTP 回归。
+|-- agent_py_agent/tests/test_r8_owner_directory_paging.py # 冷目录发现分片推进，分页不能通过截断未排序目录来漏掉旧owner。
+|-- agent_py_agent/tests/test_r8_record_ledgers.py # 记录账本增量写入、历史分页与并发终态的行为回归。
+|-- agent_py_agent/tests/test_r8_sqlite_recovery.py # 通用库恢复以真实SQLite验证，不将损坏、未知或缺行当作空库。
+|-- docs/design/R8_COMPACT_HISTORY.md # R8：Compact 历史节点与冷读定位
+|-- docs/design/R8_DISCOVERY_AND_PROGRESS.md # R8 发现、空闲核对与展示进度
+|-- docs/design/R8_RECORD_LEDGERS.md # R8 线程任务历史与候选当前态增量账本
+|-- docs/design/R8_RECOVERY_RETENTION.md # R8 SQLite恢复与派生文件生命周期
+`-- docs/tasks/R8_AUDIT_FOLLOWUPS.md # R8 历次审计遗漏补修
+```
 
 ### 2026-11-07 本地搜索存活预算回归
 

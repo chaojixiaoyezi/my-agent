@@ -135,33 +135,24 @@ def test_planner_and_capability_sweep_prefilters_consume_agent_frozen_guard(tmp_
     _policy(first, 0, revision=2)
     _policy(other, 0, revision=2)
 
-    eligible_task = SimpleNamespace(
-        id="run-eligible",
-        attributes={},
-        status="BLOCKED",
-        failure_type="transient_error",
-        runner_attempts=6,
-        channel_status="",
-        capability_requests=[],
-        capability_gaps=[],
-        runner_active_attempt_id="",
-        runner_session_pid=0,
-        child_ids=[],
-    )
-    exhausted_task = SimpleNamespace(
-        id="run-exhausted",
-        attributes={},
-        status="BLOCKED",
-        failure_type="transient_error",
-        runner_attempts=8,
-        channel_status="",
-        capability_requests=[],
-        capability_gaps=[],
-        runner_active_attempt_id="",
-        runner_session_pid=0,
-        child_ids=[],
-    )
-    monkeypatch.setattr(agent.subagents, "list_runs", lambda: [eligible_task, exhausted_task])
+    # 请求级重派使用真实规范记录和索引；夹具显式给出已核对恢复计数。
+    from agent_py_agent.tests.test_subagent_listruns_cache import _selected_task_file
+
+    request_id = 'frozen-guard-request'
+    agent._current_run_params = SimpleNamespace(request_id=request_id)
+    tasks = []
+    for name, attempts in (('run-eligible', 6), ('run-exhausted', 8)):
+        path = _selected_task_file(agent.subagents, name, 'BLOCKED')
+        payload = json.loads(path.read_text())
+        payload.update(failure_type='transient_error', runner_attempts=attempts,
+                       provider_retry_count=attempts - 1, failure_retry_count=0,
+                       no_progress_count=0, recovery_history_unknown_count=0)
+        payload['attributes']['conversation_request_id'] = request_id
+        path.write_text(json.dumps(payload))
+        task = agent.subagents.load(name)
+        agent.subagents.persistence.run_index.upsert(task)
+        tasks.append(task)
+    eligible_task, exhausted_task = tasks
     monkeypatch.setattr(
         agent.subagents,
         "board",
@@ -175,7 +166,7 @@ def test_planner_and_capability_sweep_prefilters_consume_agent_frozen_guard(tmp_
         agent,
         PlannerStateParams(cfg=CapabilityConfig(), limit=10, max_runners=10, reviewer="", note=""),
     )
-    assert [t.id for t in ctx.runner_candidates] == ["run-eligible"]
+    assert [t.id for t in ctx.runner_candidates] == [eligible_task.id]
 
     _policy(first, 20, revision=3)
     _policy(other, 20, revision=3)
@@ -199,4 +190,4 @@ def test_planner_and_capability_sweep_prefilters_consume_agent_frozen_guard(tmp_
     monkeypatch.setattr(agent, "dispatch_subagents", _fake_dispatch)
     started = _redispatch_stalled_subagents(agent)
     assert started == 1
-    assert dispatched_ids == [["run-eligible"]]
+    assert dispatched_ids == [[eligible_task.id]]

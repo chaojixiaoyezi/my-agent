@@ -257,6 +257,8 @@ force_compact_trigger_percent: false
 memory_compact_idle_trigger_percent: 60
 # 距最后真实用户发言静默多久才尝试闲置压缩，默认2小时；0关闭，启用时最短60秒。
 memory_compact_idle_seconds: 7200
+# 压缩摘要等待期间每隔多少秒更新已覆盖进度和真实耗时；0关闭，不增加模型请求或伪造进度比例。
+memory_compact_progress_heartbeat_seconds: 5.0
 # 每拍最多检查的会话数，默认2；0关闭扫描，不迁移会话模型选择。
 memory_compact_idle_max_per_tick: 2
 # 自动压缩触发线的绝对上限（单位 tokens），和上面的百分比取小：实际触发线 = min(模型窗口 × 百分比, 这个数)。

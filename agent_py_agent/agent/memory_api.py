@@ -110,11 +110,15 @@ def _store_messages_activity(store_root: Path) -> str:
 # LLM: 只读消息/候选/audit元数据；沿原有界三态扫描和存储根，禁学线程不参与，未知不推为空。
 # 函数用途: 确认周期整理是否有非空可学输入，只有审计记录的冷owner也能唤醒。
 def _cold_curator_activity(home: Path) -> str:
+    from .memory_store.candidate_ledger import read_manifest
+
     try:
         candidate = home / "memory" / "candidates.jsonl"
         if candidate.exists() and candidate.stat().st_size:
-            return "due"
-    except OSError:
+            manifest = read_manifest(candidate)
+            if manifest is None or manifest['count'] > 0:
+                return "due"
+    except (OSError, ValueError, TypeError, KeyError):
         return "unknown"
     from .owner_wake_discovery import _store_roots
 

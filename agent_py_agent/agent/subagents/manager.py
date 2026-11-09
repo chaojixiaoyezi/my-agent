@@ -450,11 +450,15 @@ def select_recovery_runs(manager: Any, predicate: Callable[[Any], bool] | None =
     return [task for task in report.runs if predicate is None or predicate(task)]
 
 
-def select_current_runs(manager: Any, predicate: Callable[[Any], bool] | None = None, **selection) -> list[Any]:
+def select_current_runs(manager: Any, predicate: Callable[[Any], bool] | None = None, *,
+                        statuses: tuple[str, ...] = (), thread_id: str = "",
+                        include_unbound_thread: bool = False,
+                        include_open_capabilities: bool = False) -> list[Any]:
     """状态/线程义务不能冒充 recovery 集；旧内存适配器只保留自己的列表协议。"""
     if not isinstance(manager, SubAgentManager):
         return select_manager_runs(manager, predicate or (lambda task: True))
-    report = manager.list_current_runs_report(**selection)
+    report = manager.list_current_runs_report(statuses=statuses, thread_id=thread_id,
+        include_unbound_thread=include_unbound_thread, include_open_capabilities=include_open_capabilities)
     if report.load_errors:
         error = SubagentRunIndexUnavailable("subagent current canonical/index unavailable")
         error.load_errors = report.load_errors

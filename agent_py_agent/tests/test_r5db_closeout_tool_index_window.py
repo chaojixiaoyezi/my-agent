@@ -130,8 +130,10 @@ def test_fallbacks_rescan_whole_index(tmp_path: Path, decoded, variant: str) -> 
     time.sleep(0.01)
     if variant == "replaced_inode":
         data = index.read_bytes()
-        index.unlink()
-        index.write_bytes(data)
+        replacement = index.with_suffix('.replacement')
+        replacement.write_bytes(data)
+        assert replacement.stat().st_ino != index.stat().st_ino
+        replacement.replace(index)
     _externalize(root, SCOPE, "now-1")
     assert _update(root, bundle)["artifact_count"] == 1
     assert decoded["lines"] == HISTORY_ROWS + 1

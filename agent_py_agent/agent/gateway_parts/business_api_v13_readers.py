@@ -13,7 +13,6 @@ import math
 import os
 import re
 import sqlite3
-import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -148,23 +147,17 @@ def default_observation_readers(owner_home, owner_id, store, runtime, *, resourc
 
 class _OwnerReaders:
     """绑定一个owner的只读来源；游标签名不保存业务事实。"""
-    # LLM: 默认root会刷新可用来源；签名状态按物理库/home/owner保存，不依赖临时Store对象身份。
-    # 这只是最多256项的进程内游标签名状态，不记录日志、权限、结果或业务账本。
-    _cursor_keys = {}
-    _cursor_lock = threading.Lock()
+    # 同一进程用固定秘密派生各命名空间密钥；分页寿命不受其它 owner 的访问量影响。
+    # 不保存 owner 列表，内存恒定；重启仍沿原合同使进程内游标失效。
+    _cursor_secret = os.urandom(32)
 
-    # LLM: 不构造执行器；同namespace复用密钥，首次插入到达上限时淘汰最早条目。
-    # 函数用途: 保存源引用和有界的owner日志游标密钥，确保跨HTTP分页仍能验签。
+    # 函数用途: 绑定来源并派生隔离的日志游标签名，不创建执行器或持久账本。
     def __init__(self, home, owner, store, repo, *, resource_provider=None):
         self.home, self.owner, self.store, self.repo = home, owner, store, repo
         self.resource_provider = resource_provider
         namespace = (str(Path(store.storage.root)) if store is not None else '', str(home), owner)
-        with self._cursor_lock:
-            if namespace not in self._cursor_keys:
-                if len(self._cursor_keys) >= 256:
-                    self._cursor_keys.pop(next(iter(self._cursor_keys)))
-                self._cursor_keys[namespace] = os.urandom(32)
-            self.key = self._cursor_keys[namespace]
+        self.key = hmac.digest(self._cursor_secret,
+            json.dumps(namespace, ensure_ascii=False, separators=(',', ':')).encode(), 'sha256')
         self.runtime_artifacts = self.opens_table('artifact_records')
 
     # LLM: 来源不存在或无法打开时保持未就绪。

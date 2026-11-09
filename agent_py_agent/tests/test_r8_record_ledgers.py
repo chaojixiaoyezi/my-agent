@@ -209,3 +209,12 @@ def test_removed_then_readded_thread_task_has_one_history_position(tmp_path):
     history.remove(path, latest, 'task')
     store.tasks.update_thread_index(thread.thread_id, 'task', 'active', 1)
     assert tuple(store.tasks.iter_task_ids(thread.thread_id)) == ('task',)
+def test_cold_curator_empty_current_ledger_is_not_due_and_corrupt_is_unknown(tmp_path):
+    from agent_py_agent.agent.memory_api import _cold_curator_activity
+
+    path = tmp_path / 'memory' / 'candidates.jsonl'
+    path.parent.mkdir()
+    path.write_text('{"candidate_ledger":"memory-candidates-v2","count":0,"root":null,"cleanup":[]}')
+    assert _cold_curator_activity(tmp_path) == 'not_due'
+    path.write_text('{"candidate_ledger":"memory-candidates-v2","count":-1,"root":null,"cleanup":[]}')
+    assert _cold_curator_activity(tmp_path) == 'unknown'

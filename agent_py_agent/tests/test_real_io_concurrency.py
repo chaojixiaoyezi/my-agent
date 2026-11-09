@@ -632,8 +632,15 @@ def test_create_delete_task_dirs_with_concurrent_listing_does_not_raise(tmp_path
                 report = manager.list_runs_report()
                 assert isinstance(report.runs, list)
                 assert isinstance(report.load_errors, list)  # 结构化记录是允许的。
-                selected = manager.indexing.select_runs(None)
-                assert isinstance(selected, list)
+                from agent_py_agent.agent.subagents.manager import SubagentRunIndexUnavailable
+                try:
+                    selected = manager.indexing.select_runs(None)
+                except SubagentRunIndexUnavailable as error:
+                    # R7 的派工选择遇到消失/变化的 canonical 必须阻断；保留结构化坏读证据。
+                    assert error.load_errors and all(isinstance(row, dict) and row.get('error_type')
+                                                     for row in error.load_errors)
+                else:
+                    assert isinstance(selected, list)
                 list_iterations[slot] += 1
             except BaseException:  # noqa: BLE001 - 任何裸抛(含 FileNotFoundError)都算失败。
                 with reader_errors_guard:

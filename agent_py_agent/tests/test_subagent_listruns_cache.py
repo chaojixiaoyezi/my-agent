@@ -669,7 +669,7 @@ def test_audit_watch_snapshot_is_lazy_and_empty_snapshot_is_reused(tmp_path, mon
     # 函数用途: 提供首个非空state之前的关闭来源。
     def opened(home, row):
         events.append(row)
-        return None if row == "closed" else SimpleNamespace(watch_id=row)
+        return None if row == "closed" else SimpleNamespace(watch_id=row, audit_root_task_id="audit-root")
 
     # LLM: 不创建或派发worker，只记录该来源收到的实际快照对象。
     # 函数用途: 核对两个来源共享同一有效空列表。
@@ -681,7 +681,7 @@ def test_audit_watch_snapshot_is_lazy_and_empty_snapshot_is_reused(tmp_path, mon
     monkeypatch.setattr(module, "_reconcile_one_audit_source_worker", reconciled)
     monkeypatch.setattr(module, "_record_source_reconcile_result", lambda *args: None)
     report = module.reconcile_audit_source_workers(agent)
-    assert events == ["closed", "first", "runs", "second"]
+    assert events == ["closed", "first", "second", "runs"]
     assert snapshots == [[], []] and snapshots[0] is snapshots[1]
     assert len(report["workers"]) == 2
 

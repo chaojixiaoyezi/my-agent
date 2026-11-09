@@ -916,7 +916,7 @@ def _paged_targets(
 
 
 def test_paged_sweep_enumerates_all_owner_homes_only_once(snapshots, monkeypatch, tmp_path) -> None:
-    """owner 数 > 页大小:整轮 7 页只做一次全量枚举,且每页仍只取自己那段。"""
+    """冷建按128项推进；一个准备页后7个数据页，整轮只消费一次目录。"""
     owners = tmp_path / "owners"
     expected = {f"u{index:03d}" for index in range(200)}
     for owner_id in expected:
@@ -934,7 +934,7 @@ def test_paged_sweep_enumerates_all_owner_homes_only_once(snapshots, monkeypatch
         if cursor is None:
             break
 
-    assert pages == 7  # 200 / 32
+    assert pages == 8  # 一个有续扫游标的冷建页，加ceil(200 / 32)个数据页。
     assert counter["calls"] == 1
     assert len(seen) == 200 == len(set(seen))
     assert set(seen) == expected
@@ -1044,7 +1044,7 @@ def test_single_page_matches_full_enumeration_order(snapshots, monkeypatch, tmp_
         (provider, owner_kind, owner_home.name)
         for provider, owner_kind, owner_home in sorted(
             snapshots._candidate_owner_homes(owners / "providers"),
-            key=lambda item: snapshots._owner_cursor(item[0], item[1], item[2].name),
+            key=lambda item: (item[0], item[1], item[2].name),
         )
     ]
     assert expected == [

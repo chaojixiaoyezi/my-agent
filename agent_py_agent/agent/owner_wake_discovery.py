@@ -21,11 +21,9 @@ enabled 的 policy 文件存在 / wake_queue 待处理信号文件存在 / 在�
 不恢复、数据源游标冻死——PENDING run 不发 wake 信号,盯守 policy 又可能已被退休,
 只有这两样的 owner 对旧口径完全隐形,永不入表 → 名下 supervision/续派/唤醒全部不跑)。
 
-分页发现不再每页重扫全部 owner home:``discover_owner_home_page`` 读一份有界目录快照
-(一次枚举 + 整体排序,供同一轮分页的相邻页复用),失效口径 = 目录结构签名
-(mtime_ns + inode + 条目数)变化,或复用超过 ``_SNAPSHOT_TTL_SECONDS``。快照只是查询
-投影,不是第二套权威状态:进程重启后缓存为空、首次调用就是一次全新枚举;游标始终是
-排序键(不是下标),owner 增删只会把续页位置对齐到键边界,不会丢项或重复。
+分页发现使用可丢弃的临时SQLite排序投影：一次最多消费128个目录项，内存页缓存固定。
+首次尚未枚举完整时返回空准备页和非空续扫游标；完成后按身份键直接取limit+1。
+新增/删除目录使下一片重新核对，长期兜底也分片推进；查询从不创建owner目录。
 
 事实判定(``_owner_fact_kind``)同样按"结构化签名 + 时间边界"复用:签名覆盖 owner home
 下判定读取的路径；小目录和活跃状态每轮现读，大目录稳定终态复用最多60秒，
@@ -45,7 +43,6 @@ import os
 import sqlite3
 import threading
 import time
-from bisect import bisect_right
 from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
@@ -69,6 +66,7 @@ from .runtime_db.repository import (
 )
 from .runtime_db.schema import runtime_db_path
 from .runtime_db.user_interrupt import user_interrupt_resume_until
+from .user_space.owner_directory_index import OwnerDirectoryProjection
 from .user_space.run_workspace import FinishRunWorkspaceRequest, finish_run_workspace
 
 _LOGGER = logging.getLogger(__name__)
@@ -90,14 +88,12 @@ _LEGACY_LOCAL_PROVIDER = "local"
 _LEGACY_LOCAL_USER_BUCKET = "users"
 OwnerWakeCursor = tuple[str, str, str]
 
-# 分页目录快照:一次「枚举 + 整体排序」的结果投影,供同一轮分页的相邻页复用。
-# 两个复用上界都必须成立才算命中——结构签名一致(TTL 内)+ 未超过 TTL。快照不是权威
-# 状态:进程重启后缓存为空,首次调用与「无缓存」逐字一致;条目数上界防止路径种类
-# (多租户/多测试目录)把缓存撑大。
+# 临时目录索引最多四份；每份SQLite页缓存固定1MiB，过期核对仍按128项推进。
+# 目录元数据变化即时触发重新核对，TTL补充粗粒度时间戳下的外部变化。
 _SNAPSHOT_TTL_SECONDS = 30.0
 # wake 快照最多保留的条目数；快照只用于本轮判定，多了无意义。
 _SNAPSHOT_MAX_ENTRY_COUNT = 4
-_OWNER_HOME_SNAPSHOTS: OrderedDict[str, _OwnerHomeSnapshot] = OrderedDict()
+_OWNER_HOME_SNAPSHOTS: OrderedDict[str, OwnerDirectoryProjection] = OrderedDict()
 _SNAPSHOT_LOCK = threading.Lock()
 
 # 事实判定缓存:同一 owner home 的硬/软事实结论,绑定"相关文件的结构化签名"(mtime_ns/尺寸/
@@ -292,23 +288,6 @@ class _OwnerHomeDiagnosticLedger:
             return True
 
 
-@dataclass(frozen=True)
-class _OwnerHomeSnapshot:
-    """providers 根目录的一次枚举投影:已排序候选 + 预计算排序键 + 失效签名。
-
-    LLM: ``candidates`` 与 ``keys`` 必须同序同源(同一份 candidates 派生),分页的
-    bisect 定位只依赖 keys;每个候选是「唯一身份 + 该身份的规范 home」,游标键就是
-    身份键——同一身份只出现一次,续页既不重复也不跳过规范位置。快照是不可变值对象,
-    复用期间不得原地修改。
-    类用途: 让「取第 N 页」不再重新枚举排序全部 owner home 的只读缓存条目。
-    """
-
-    signature: tuple[Any, ...]
-    created_at: float
-    candidates: tuple[tuple[Any, Path], ...]
-    keys: tuple[OwnerWakeCursor, ...]
-    quick_signature: tuple[Any, ...] = ()
-
 
 def discover_wake_pending_owners(owners_dir: str | Path, *, limit: int = 64) -> list[Any]:
     """扫 owners/providers/<provider>/{users,groups}/<id> 找「有待消费调度事实」的 owner。
@@ -380,77 +359,40 @@ def discover_owner_home_page(
     providers_root = Path(owners_dir) / "providers"
     if not providers_root.is_dir() and not (Path(owners_dir) / "local").is_dir():
         return OwnerHomeDiscoveryPage((), None, 0)
-    snapshot = _owner_home_snapshot(providers_root)
-    candidates = snapshot.candidates
-    start = _candidate_start(snapshot.keys, after_cursor)
-    scanned = 0
-    targets: list[OwnerHomeDiscoveryTarget] = []
-    page_size = max(1, limit)
-    end = min(len(candidates), start + page_size)
-    for index in range(start, end):
-        identity, owner_home = candidates[index]
-        scanned += 1
-        targets.append(
-            OwnerHomeDiscoveryTarget(
-                identity=identity,
-                home_dir=owner_home,
-            )
-        )
-    next_cursor: OwnerWakeCursor | None = None
-    if end > start and end < len(candidates):
-        identity, _owner_home = candidates[end - 1]
-        next_cursor = _identity_cursor(identity)
-    return OwnerHomeDiscoveryPage(tuple(targets), next_cursor, scanned)
-
-
-def _owner_home_snapshot(providers_root: Path) -> _OwnerHomeSnapshot:
-    """取 providers 根的有界目录快照:命中即复用,否则重新枚举并整体排序。
-
-    LLM: 失效有两个上界,必须同时成立才复用——① 结构签名(_owner_home_signature)与当前
-    磁盘一致;② 距快照生成不超过 _SNAPSHOT_TTL_SECONDS(monotonic 计时,不受系统改钟影响)。
-    签名在枚举之前计算,因此「枚举期间目录又变了」只会让下次校验失效,不会存下一个比内容
-    更新的签名。多线程安全:目录 I/O 在锁外做,只有缓存读写持锁。
-    重建快照时才做旧位置扫描:诊断每进程每个身份只报一次,重复扫描不会刷屏。
-    函数用途: 让相邻页(网关在 owner 数 > 页大小时相邻 tick 连跑)共享同一次全量枚举排序;
-    缓存条目按 _SNAPSHOT_MAX_ENTRY_COUNT 淘汰,不随路径种类无限增长。
-    """
-    cache_key = str(providers_root)
-    now = time.monotonic()
     with _ACTIVITY_BINDING_LOCK:
-        activity = _ACTIVITY_BINDINGS.get(str(providers_root.parent.resolve()))
-    quick_signature = _owner_home_quick_signature(providers_root) if activity is not None else ()
-    if activity is not None:
-        with _SNAPSHOT_LOCK:
-            cached = _OWNER_HOME_SNAPSHOTS.get(cache_key)
-            if (cached is not None and cached.quick_signature == quick_signature
-                    and now - cached.created_at <= min(_SNAPSHOT_TTL_SECONDS, activity.freshness_seconds)):
-                _OWNER_HOME_SNAPSHOTS.move_to_end(cache_key)
-                return cached
-    signature = _owner_home_signature(providers_root) if activity is None else quick_signature
+        activity = _ACTIVITY_BINDINGS.get(str(Path(owners_dir).resolve()))
+    with _owner_home_snapshot(providers_root) as projection:
+        rows, cursor, _scanned = projection.page(
+            signature=_owner_home_quick_signature(providers_root),
+            stream=lambda: _canonical_owner_candidates(providers_root), cursor=after_cursor,
+            limit=max(1, limit), scan_budget=128,
+            rescan_seconds=activity.sweep_seconds if activity is not None else _SNAPSHOT_TTL_SECONDS,
+        )
+    targets = tuple(OwnerHomeDiscoveryTarget(_identity(provider, kind, identifier), Path(path))
+                    for provider, kind, identifier, path in rows
+                    if Path(path).is_dir() and not Path(path).is_symlink())
+    return OwnerHomeDiscoveryPage(targets, cursor, len(rows))
+
+
+@contextmanager
+def _owner_home_snapshot(providers_root: Path):
+    """只建立有界内存的临时排序投影；目录枚举由每次page的固定预算推进。"""
+    key = str(providers_root)
     with _SNAPSHOT_LOCK:
-        cached = _OWNER_HOME_SNAPSHOTS.get(cache_key)
-        if (
-            cached is not None
-            and now - cached.created_at <= _SNAPSHOT_TTL_SECONDS
-            and cached.signature == signature
-        ):
-            _OWNER_HOME_SNAPSHOTS.move_to_end(cache_key)
-            return cached
-    _report_legacy_local_user_homes(providers_root)
-    candidates = _canonical_owner_candidates(providers_root)
-    snapshot = _OwnerHomeSnapshot(
-        signature=signature,
-        created_at=now,
-        candidates=candidates,
-        keys=tuple(_identity_cursor(identity) for identity, _home in candidates),
-        quick_signature=quick_signature,
-    )
-    with _SNAPSHOT_LOCK:
-        _OWNER_HOME_SNAPSHOTS[cache_key] = snapshot
-        _OWNER_HOME_SNAPSHOTS.move_to_end(cache_key)
+        projection = _OWNER_HOME_SNAPSHOTS.get(key)
+        if projection is None:
+            projection = OwnerDirectoryProjection()
+            _OWNER_HOME_SNAPSHOTS[key] = projection
+        _OWNER_HOME_SNAPSHOTS.move_to_end(key)
+        # 借用通过projection自己的锁与淘汰串行；缓存不拥有任何owner权限。
         while len(_OWNER_HOME_SNAPSHOTS) > _SNAPSHOT_MAX_ENTRY_COUNT:
-            _OWNER_HOME_SNAPSHOTS.popitem(last=False)
-    return snapshot
+            _, retired = _OWNER_HOME_SNAPSHOTS.popitem(last=False)
+            retired.close()
+        projection.lock.acquire()
+    try:
+        yield projection
+    finally:
+        projection.lock.release()
 
 
 def _owner_home_quick_signature(providers_root: Path) -> tuple[Any, ...]:
@@ -459,6 +401,7 @@ def _owner_home_quick_signature(providers_root: Path) -> tuple[Any, ...]:
     元数据变化立即失效；粗粒度mtime风险仍由原快照TTL和扫描兜底限制。
     """
     return (_dir_own_signature(providers_root), _dir_own_signature(providers_root.parent / "local"),
+            _dir_own_signature(providers_root / "local" / "users"),
             tuple((str(bucket), _dir_own_signature(bucket))
                   for _provider, _kind, bucket in _provider_buckets(providers_root)))
 
@@ -470,7 +413,7 @@ def _owner_home_signature(providers_root: Path) -> tuple[Any, ...]:
 
     LLM: 与 _candidate_owner_homes 复用同一个 _provider_buckets 迭代器,保证签名覆盖枚举
     读到的每一个目录(口径漂移会漏失效,改 _candidate_owner_homes 必须同步这里)。只读目录
-    元数据,不逐条目 stat,因此成本与 owner 数近似无关。
+    元数据，不枚举owner名字，成本不随owner历史量增加。
     旧位置(providers/local/users)虽然不进候选,但它决定迁移诊断,必须一并计入签名:
     新增/删除旧目录时快照要失效,诊断才能跟上真实目录状态。
     函数用途: 判断上一轮枚举结果能否继续复用;新增/删除/替换 owner 目录都会改变签名。
@@ -499,11 +442,7 @@ def _bucket_signature(bucket_dir: Path) -> tuple[int, int, int]:
         status = bucket_dir.stat()
     except OSError:
         return (-1, -1, -1)
-    try:
-        count = len(os.listdir(bucket_dir))
-    except OSError:
-        count = -1
-    return (status.st_mtime_ns, status.st_ino, count)
+    return (status.st_mtime_ns, status.st_ino, status.st_ctime_ns)
 
 
 # LLM: The cursor is a sort key, never an index: resuming is "first key strictly greater than
@@ -511,22 +450,7 @@ def _bucket_signature(bucket_dir: Path) -> tuple[int, int, int]:
 # the boundary, never duplicate or skip an owner that is still present. keys and candidates
 # must come from the same snapshot.
 # 函数用途: 在已排序键上定位续页起点;after_cursor 为 None 表示从头开始。
-def _candidate_start(
-    keys: tuple[OwnerWakeCursor, ...],
-    after_cursor: OwnerWakeCursor | None,
-) -> int:
-    if after_cursor is None:
-        return 0
-    return bisect_right(keys, after_cursor)
 
-
-def _owner_cursor(provider: str, owner_kind: str, owner_id: str) -> OwnerWakeCursor:
-    return provider, owner_kind, owner_id
-
-
-# LLM: 游标是去重后的唯一身份键，不是目录名也不是下标：同一个身份只出现一次，
-# 续页定位才能既不重复也不跳过规范位置（旧位置与规范位置同键时曾互相吞掉）。
-# 函数用途: 由身份生成稳定游标键。
 def _identity_cursor(identity: Any) -> OwnerWakeCursor:
     return identity.provider, identity.owner_kind, identity.owner_id
 
@@ -540,44 +464,54 @@ def _owner_identity_key(identity: Any) -> str:
 # LLM: 保留provider枚举原顺序，本地用户经过同一分页排序，main和链接不进入新候选。
 # 函数用途: 合并两类规范owner目录作为原发现器的候选输入。
 def _candidate_owner_homes(providers_root: Path):
+    # 一条目录项就消耗一个扫描额度，包括无效文件和链接；不能先排序整个owner目录。
     for provider_dir, owner_kind, bucket_dir in _provider_buckets(providers_root):
-        for owner_home in _dirs_of(bucket_dir):
-            yield provider_dir.name, owner_kind, owner_home
-    for home in _iter_owner_user_dirs(providers_root.parent.parent):
-        yield "local", "user", home
+        if bucket_dir.is_symlink() or not bucket_dir.is_dir():
+            continue
+        with os.scandir(bucket_dir) as entries:
+            for entry in entries:
+                yield ((provider_dir.name, owner_kind, Path(entry.path))
+                       if entry.is_dir(follow_symlinks=False) else None)
+    local = providers_root.parent / "local"
+    if local.is_dir() and not local.is_symlink():
+        with os.scandir(local) as entries:
+            for entry in entries:
+                yield (("local", "user", Path(entry.path))
+                       if entry.name != "main" and not entry.name.startswith(".")
+                       and entry.is_dir(follow_symlinks=False) else None)
+    # 历史位置只诊断，仍按目录项计量，绝不种入第二份owner。
+    legacy = providers_root / _LEGACY_LOCAL_PROVIDER / _LEGACY_LOCAL_USER_BUCKET
+    if legacy.is_dir() and not legacy.is_symlink():
+        with os.scandir(legacy) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    identity = _identity("local", "user", entry.name)
+                    canonical = _canonical_owner_home(providers_root.parent.parent, identity)
+                    if canonical is not None:
+                        if canonical.is_dir():
+                            _report_owner_home_conflict(identity, Path(entry.path), canonical)
+                        else:
+                            _report_owner_home_legacy(identity, Path(entry.path), canonical)
+                yield None
 
 
-# LLM: 同一身份只保留一个 home，且优先规范位置：发现端的事实判定必须和消费端
-# (pool.get -> resolve_owner_home / release_idle_owner_agents)落在同一个目录，
-# 否则旧位置上的事实永远不会被消费到，实例被种入又被逐出形成空转。
-# 函数用途: 枚举候选 owner home，按身份键去重并归一到规范位置。
-def _canonical_owner_candidates(providers_root: Path) -> tuple[tuple[Any, Path], ...]:
+def _canonical_owner_candidates(providers_root: Path):
+    """流式归一化候选，身份去重与排序由临时SQLite主键完成。"""
     root = providers_root.parent.parent
-    selected: dict[Any, tuple[Any, Path]] = {}
-    for provider, owner_kind, home in _candidate_owner_homes(providers_root):
-        identity = _identity(provider, owner_kind, home.name)
+    for candidate in _candidate_owner_homes(providers_root):
+        if candidate is None:
+            yield None
+            continue
+        provider, kind, home = candidate
+        identity = _identity(provider, kind, home.name)
         canonical = _canonical_owner_home(root, identity)
-        chosen = canonical if canonical is not None and canonical.is_dir() else home
-        existing = selected.get(identity)
-        if existing is None:
-            selected[identity] = (identity, chosen)
+        if canonical is None or canonical.is_symlink():
+            yield None
             continue
-        if existing[1] == chosen:
-            continue
-        # 同一身份落在两个位置：规范位置优先，并发冲突诊断（不删除任何目录）。
-        _report_owner_home_conflict(
-            identity,
-            existing[1],
-            canonical if canonical is not None else chosen,
-        )
-        if canonical is not None and chosen == canonical:
-            selected[identity] = (identity, chosen)
-    return tuple(sorted(selected.values(), key=lambda item: _identity_cursor(item[0])))
+        chosen = canonical if canonical.is_dir() else home
+        yield (*_identity_cursor(identity), str(chosen))
 
 
-# LLM: 规范路径只读解析，复用 owner_resolver 的唯一权威实现；这里不创建、不改写目录，
-# 身份非法（例如 local/main）时返回 None 表示「没有规范位置」。
-# 函数用途: 取某身份在消费端使用的规范 home 路径。
 def _canonical_owner_home(root: Path, identity: Any) -> Path | None:
     from .user_space.owner_resolver import _owner_home_dir
 
@@ -585,25 +519,6 @@ def _canonical_owner_home(root: Path, identity: Any) -> Path | None:
         return _owner_home_dir(root, identity)
     except ValueError:
         return None
-
-
-# LLM: 只枚举已物化的owners/local直接子目录；跳过main、隐藏项及任一链接，不创建账号或执行工作。
-# 函数用途: 找出本地普通用户的真实目录供原后台发现链复用。
-def _iter_owner_user_dirs(root_home: Path):
-    local = root_home / "owners" / "local"
-    if local.is_symlink() or not local.is_dir():
-        return
-    for home in sorted(local.iterdir()):
-        if home.name != "main" and not home.name.startswith(".") and not home.is_symlink() and home.is_dir():
-            yield home
-
-
-# LLM: 旧位置只诊断不种入：发现端若种入旧位置的身份，消费端解析到的是尚不存在的规范
-# home，唤醒信号永远消费不到。旧目录保持原样（不删除、不迁移、不扩大身份权限）。
-# 函数用途: 枚举 local 用户的旧位置目录，只用于迁移诊断。
-def _iter_legacy_local_user_homes(providers_root: Path):
-    legacy_bucket = providers_root / _LEGACY_LOCAL_PROVIDER / _LEGACY_LOCAL_USER_BUCKET
-    yield from _dirs_of(legacy_bucket)
 
 
 # LLM: 每进程每个身份只报一次，避免周期扫描反复刷屏；诊断只描述位置事实。
@@ -648,22 +563,6 @@ def _report_owner_home_conflict(identity: Any, legacy_home: Path, canonical_home
             }
         },
     )
-
-
-# LLM: 旧位置不进入候选，只产出迁移诊断：仅旧位置 → OWNER_HOME_LEGACY_LOCATION；
-# 新旧并存 → OWNER_HOME_LOCATION_CONFLICT（规范位置仍然生效）。
-# 函数用途: 扫描 local 用户的旧位置目录，逐个给出迁移或冲突诊断。
-def _report_legacy_local_user_homes(providers_root: Path) -> None:
-    root = providers_root.parent.parent
-    for legacy_home in _iter_legacy_local_user_homes(providers_root):
-        identity = _identity(_LEGACY_LOCAL_PROVIDER, "user", legacy_home.name)
-        canonical_home = _canonical_owner_home(root, identity)
-        if canonical_home is None:
-            continue
-        if canonical_home.is_dir():
-            _report_owner_home_conflict(identity, legacy_home, canonical_home)
-        else:
-            _report_owner_home_legacy(identity, legacy_home, canonical_home)
 
 
 def _provider_buckets(providers_root: Path):

@@ -410,6 +410,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 闲置压缩：任一为0即关闭；百分比0..95，启用后的最短静默时间60秒。
     memory_compact_idle_trigger_percent: int = 60
     memory_compact_idle_seconds: int = 7200
+    # 压缩摘要等待期间重报真实已覆盖进度的间隔；0关闭，不增加模型调用。
+    memory_compact_progress_heartbeat_seconds: float = field(default=5.0, metadata={"bounds": (0.0, 300.0), "unit": "秒"})
     # 每个维护拍最多检查的会话数；0关闭该维护拍，不扫描或迁移线程。
     memory_compact_idle_max_per_tick: int = 2
     # 自动压缩触发线的绝对 token 上限，与上面的百分比取小；0 表示不封顶（默认，行为不变）。1M 这类大窗口下百分比最低只到 50%，靠它把压缩提前。

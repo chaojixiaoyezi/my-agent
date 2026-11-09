@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from ..common.cancellation import ToolCancelled
 from ..common.json_io import read_json_object_report
 from ..conversation.background_process_view import list_background_processes
+from ..conversation.claim_activity_projection import claim_activity_state
 from ..conversation.compact import (
     ConversationCompactOptions,
     inspect_conversation_context,
@@ -20,7 +21,7 @@ from ..conversation.compact_threshold_policy import (
     compact_policy_scope,
     resolve_thread_compact_policy,
 )
-from ..conversation.run_claim import detached_task_claim_scope_id, user_input_turn_on_lane
+from ..conversation.run_claim import user_input_turn_on_lane
 from ..conversation.store_threads import IdleCompactActivityChanged
 from ..io.bounded_directory import DirectoryCursor
 from ..settings.config_layers import compact_idle_parameters
@@ -34,15 +35,16 @@ from .background_resource_report import session_background_processes
 def idle_compact_busy_state(agent, store, thread):
     if user_input_turn_on_lane(store, thread.thread_id) or thread.active_task_ids:
         return "foreground_active"
-    scopes = [thread.thread_id, *(detached_task_claim_scope_id(thread.thread_id, task) for task in thread.task_ids)]
-    for scope in scopes:
-        claim, error = store.claims.load_report(thread.thread_id, claim_scope_id=scope)
-        if error:
-            return "activity_unknown"
-        if claim.get("status") in {"running", "claimed"}:
-            return "foreground_active"
+    claim, error = store.claims.load_report(thread.thread_id)
+    if error:
+        return "activity_unknown"
+    if claim.get("status") in {"running", "claimed"}:
+        return "foreground_active"
+    claim_state = claim_activity_state(store.storage, thread.thread_id)
+    if claim_state:
+        return claim_state
     try:
-        _tasks, task_errors = store.tasks.list_report(thread.thread_id)
+        _tasks, task_errors = store.tasks.active_report(thread.thread_id)
         report = _idle_subagent_report(agent.subagents, thread)
         if task_errors or report.load_errors:
             return "activity_unknown"
@@ -75,15 +77,15 @@ def idle_compact_busy_state(agent, store, thread):
     return ""
 
 
-# LLM: 真实管理器只读运行索引的当前集合与本会话任务谱系，再逐 id 回读 canonical；坏索引/坏行原样进 load_errors。
+# LLM: 真实管理器只读运行索引的恢复集合与当前义务，再逐 id 回读 canonical；坏索引/坏行原样进 load_errors。
 #   旧适配器（无索引读口）沿原全量报告；状态与审批判据仍由调用方按原规则逐条裁决。
-# 函数用途: 为闲置判定取得本会话相关子代理，成本随本会话任务数而非 owner 全部历史 run 增长。
+# 函数用途: 为闲置判定取得相关当前子代理，不遍历线程历史任务谱系。
 def _idle_subagent_report(manager, thread):
     indexed = getattr(manager, "list_recovery_runs_report", None)
     if not callable(indexed):
         return manager.list_runs_report()
     runs, errors = {}, []
-    reports = [indexed(), *(indexed(root_id=task_id) for task_id in dict.fromkeys(thread.task_ids))]
+    reports = [indexed()]
     current = getattr(manager, "list_current_runs_report", None)
     if callable(current):
         # 恢复集不含终态待批；无绑定线程的义务仍须让所有会话保守让位。

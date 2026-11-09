@@ -171,7 +171,7 @@ def test_activity_store_errors_fail_closed(conversation, tmp_path, monkeypatch, 
         list_runs=lambda: [], list_runs_report=lambda: SimpleNamespace(runs=[], load_errors=[])))
     monkeypatch.setattr(idle, "list_background_processes", lambda *_, **__: {"projection_ok": True, "items": []})
     if source == "tasks":
-        monkeypatch.setattr(store.tasks, "list_report", lambda *_: ([], [{"code": "READ_FAILED"}]))
+        monkeypatch.setattr(store.tasks, "active_report", lambda *_: ([], [{"code": "READ_FAILED"}]))
     else:
         monkeypatch.setattr(store.claims, "load_report", lambda *_, **__: ({}, {"code": "READ_FAILED"}))
     assert idle.idle_compact_busy_state(agent, store, row) == "activity_unknown"
