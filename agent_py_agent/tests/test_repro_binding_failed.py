@@ -488,21 +488,23 @@ def test_large_candidate_list_get_snapshot_share_probe_and_invalidate_on_write(t
     service = CandidateService(path)
     records = service.observe_many([CandidateObservation(candidate_type='project', subject_key=f'large.probe.{index}',
         content=f'大候选{index} ' + 'x' * 1900, scope=MemoryScope('personal', 'personal'), origin='reviewed')
-        for index in range(512)])
+        for index in range(576)])
     expected = records[0]
-    assert path.stat().st_size >= 1024 * 1024
+    assert sum(len(row.content.encode()) for row in records) >= 1024 * 1024
+    assert path.stat().st_size < 4096
     reads = _count_probe_reads(monkeypatch, path)
     assert {row.candidate_id for row in service.list()} == {row.candidate_id for row in records}
     assert service.get(expected.candidate_id) == expected
     with service.locked_snapshot(expected) as actual:
         assert actual == expected and actual is not expected
     assert service.list()[0] is not expected
-    assert len(reads) == 0
+    # 完整正文超过1MiB，但共享探针只读取有界manifest，不再反复摘要整账本。
+    assert len(reads) == 3 and path.stat().st_size < 4096
     updated = service.transition(expected.candidate_id, 'rejected', reviewer='test-reviewer')
     after_write = len(reads)
     assert service.get(expected.candidate_id) == updated
     assert len(reads) == after_write
-    assert updated in service.list() and len(reads) == after_write
+    assert updated in service.list() and len(reads) == after_write + 2
 
 
 # LLM: 五元stamp中任一字段变化都拒绝复用；直接替换stat投影以确定性覆盖每个维度，不等待系统时钟。

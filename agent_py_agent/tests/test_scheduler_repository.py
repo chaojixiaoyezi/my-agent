@@ -605,7 +605,8 @@ def test_opt7_candidates_cache_skips_parse_and_deep_clones(tmp_path, monkeypatch
     first.status_history[-1]["status"] = "caller"
     assert service.get(candidate.candidate_id) == candidate
     assert candidates_module.CandidateService(service.path).list() == [candidate]
-    assert len(calls) == len(reads) == 1
+    # list共享已验头缓存，get只精确解析目标行；不能要求新索引复用整表模型。
+    assert len(calls) == 2 and reads == []
 
 
 # LLM: 摘要必须识别同inode/尺寸/mtime的原位改写；时间戳本身不能替代候选内容版本。
@@ -613,14 +614,44 @@ def test_opt7_candidates_cache_skips_parse_and_deep_clones(tmp_path, monkeypatch
 @pytest.mark.parametrize("change", ["same-size", "replace", "truncate", "missing"])
 def test_opt7_candidates_cache_invalidates_on_external_changes(tmp_path, monkeypatch, change):
     service, _observation, candidate = _opt7_candidate_case(tmp_path)
+    from dataclasses import replace
+
+    from agent_py_agent.agent.common.json_io import write_private_text_file_atomic_unlocked
+    from agent_py_agent.agent.memory_store.candidates import candidate_incremental_plan
+
     calls = _candidate_model_spy(monkeypatch)
+    if change == 'same-size':
+        raw = service.path.read_bytes()
+        service.path.write_bytes(raw + b' ' * (4096 - len(raw)))
     assert service.list() == [candidate]
     before = service.path.stat()
-    updated = service.path.read_text().replace('"confidence": 0.99', '"confidence": 0.98')
+    if change == 'same-size':
+        # 外部writer生成合法新节点/头；同inode场景只让头原位发表，不能改manifest里不存在的正文。
+        with service._locked_candidates():
+            rows = service._load_unlocked()
+            rows[0] = replace(rows[0], confidence=0.98)
+            changes = candidate_incremental_plan(service.path, rows)
+        for target, text in changes.items():
+            if target != service.path:
+                write_private_text_file_atomic_unlocked(target, text)
+        updated = changes[service.path]
+        if change == 'same-size':
+            updated += ' ' * (before.st_size - len(updated.encode()))
     if change == "replace":
-        replacement = service.path.with_suffix(".new")
-        replacement.write_text(updated)
-        replacement.replace(service.path)
+        import subprocess
+        import sys
+        script = """from dataclasses import replace
+from pathlib import Path
+import sys
+from agent_py_agent.agent.memory_store.candidates import CandidateService, _NullAdmission, _write_candidates_unlocked
+service = CandidateService(Path(sys.argv[1]))
+with service._locked_candidates():
+    rows = service._load_unlocked()
+    rows[0] = replace(rows[0], confidence=0.98)
+    _write_candidates_unlocked(service.path, rows, admission=_NullAdmission())
+"""
+        subprocess.run([sys.executable, '-B', '-c', script, str(service.path)], check=True,
+                       cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=30)
     elif change == "same-size":
         service.path.write_text(updated)
         os.utime(service.path, ns=(before.st_atime_ns, before.st_mtime_ns))
@@ -653,13 +684,16 @@ def test_opt7_candidates_cache_never_hides_corruption(tmp_path, monkeypatch, bad
         with pytest.raises(candidates_module.CandidateStoreCorruptError) as error:
             service.list()
         messages.append(str(error.value))
+        assert service.path.read_bytes() == corrupt
+        if bad == 'duplicate':
+            assert isinstance(error.value.__cause__, json.JSONDecodeError)
     assert messages[0] == messages[1]
-    assert len(reads) == 2
+    assert len(reads) == (0 if bad == "duplicate" else 2)
     service.path.write_bytes(original)
     calls = _candidate_model_spy(monkeypatch)
     assert service.get(candidate.candidate_id) == candidate
     assert service.get(candidate.candidate_id) == candidate
-    assert len(calls) == 1
+    assert len(calls) == 2  # 每个精确get只解析目标行，不复用旧整表模型。
 
 
 # LLM: 原写入和配额锁不能被缓存绕过；写后读取必须反映原合并规则的新状态。
@@ -676,10 +710,11 @@ def test_opt7_candidate_writes_invalidate_cached_models(tmp_path, monkeypatch):
     calls = _candidate_model_spy(monkeypatch)
     assert service.get(candidate.candidate_id) == updated
     assert service.get(candidate.candidate_id) == updated
-    assert len(calls) == 1
-    reviewed = service.transition(candidate.candidate_id, "approved", reviewer="test")
-    assert service.get(candidate.candidate_id) == reviewed
     assert len(calls) == 2
+    reviewed = service.transition(candidate.candidate_id, "approved", reviewer="test")
+    after_write = len(calls)
+    assert service.get(candidate.candidate_id) == reviewed
+    assert len(calls) == after_write + 1
 
 
 # LLM: 缓存总路径数和原始字节预算都必须有界，超预算仅丢性能，不丢候选或关闭校验。
@@ -994,7 +1029,7 @@ def test_history_deleted_after_seen_restarts_empty(tmp_path, caplog):
 
 
 # LLM: 单条查询(get/locked_snapshot)命中缓存时只复制匹配项，避免大候选账本在晋升循环中每次深拷贝全量列表。
-# 函数用途: 验证128MiB候选缓存上限，以及get/locked_snapshot只深拷贝目标候选。
+# 函数用途: 验证128MiB缓存上限，以及新索引get/locked_snapshot只解析目标、返回互相隔离对象。
 def test_candidate_get_and_locked_snapshot_single_deepcopy_on_cache_hit(tmp_path, monkeypatch):
     assert candidates_module._CANDIDATE_LOAD_CACHE_MAX_BYTES == 128 * 1024 * 1024
     service, _observation, _first = _opt7_candidate_case(tmp_path / "single-copy")
@@ -1020,6 +1055,7 @@ def test_candidate_get_and_locked_snapshot_single_deepcopy_on_cache_hit(tmp_path
     )
     assert len(service.list()) == 2
     real_deepcopy = candidates_module.deepcopy
+    parsed = _candidate_model_spy(monkeypatch)
     copied_ids: list[str] = []
 
     def spy_deepcopy(value, *args, **kwargs):
@@ -1027,7 +1063,12 @@ def test_candidate_get_and_locked_snapshot_single_deepcopy_on_cache_hit(tmp_path
             copied_ids.append(value.candidate_id)
         return real_deepcopy(value, *args, **kwargs)
 
+    from agent_py_agent.agent.memory_store import candidate_ledger
     monkeypatch.setattr(candidates_module, "deepcopy", spy_deepcopy)
+    monkeypatch.setattr(candidate_ledger, "deepcopy", spy_deepcopy)
+    def no_history(_rows):
+        raise AssertionError('exact candidate lookup must not iterate history')
+    monkeypatch.setattr(candidate_ledger.CandidateRows, '__iter__', no_history)
     monkeypatch.setattr(
         candidates_module,
         "read_jsonl_objects_report",
@@ -1035,12 +1076,14 @@ def test_candidate_get_and_locked_snapshot_single_deepcopy_on_cache_hit(tmp_path
     )
     fetched = service.get(second.candidate_id)
     assert fetched == second
-    assert copied_ids == [second.candidate_id]
+    assert copied_ids == [second.candidate_id] and len(parsed) == 1
+    assert parsed[0]["candidate_id"] == second.candidate_id
     fetched.content = "mutated-by-caller"
     copied_ids.clear()
     with service.locked_snapshot(second) as current:
         assert current == second
         assert current.content == second.content
-    assert copied_ids == [second.candidate_id]
+    assert copied_ids == [second.candidate_id] and len(parsed) == 2
+    assert parsed[-1]["candidate_id"] == second.candidate_id
     with pytest.raises(KeyError):
         service.get("mc_missing")

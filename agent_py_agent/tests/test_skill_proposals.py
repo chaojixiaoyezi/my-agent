@@ -249,11 +249,18 @@ def _occupied_target(ctx: SimpleNamespace) -> int:
 
 
 def _changed_candidate(ctx: SimpleNamespace) -> int:
-    path = ctx.home.owner_memory_candidates_jsonl
-    row = json.loads(path.read_text(encoding="utf-8"))
-    row["content"] = "候选正文已被改写。"
-    row["content_hash"] = memory_content_hash(row["content"])
-    path.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+    from dataclasses import replace
+
+    from agent_py_agent.agent.memory_store import candidates
+
+    # 模拟另一规范writer改写源记录；索引/摘要仍合法，拒绝原因必须是SOURCE_CHANGED而非坏账。
+    service = ctx.candidates
+    with service._locked_candidates():
+        rows = service._load_unlocked()
+        position = rows.index_for(ctx.proposal.source.candidate_id)
+        content = "候选正文已被改写。"
+        rows[position] = replace(rows[position], content=content, content_hash=memory_content_hash(content))
+        candidates._write_candidates_unlocked(service.path, rows, admission=candidates._NullAdmission())
     return 1
 
 

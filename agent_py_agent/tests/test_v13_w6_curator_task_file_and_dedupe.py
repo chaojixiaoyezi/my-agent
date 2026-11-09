@@ -285,8 +285,11 @@ def test_rule_notice_large_valid_publications_remain_self_readable(tmp_path):
 def _persist_candidate_observations(committer, observations):
     changes, committed = committer._candidate_changes(SimpleNamespace(candidate_observations=tuple(observations),
         rejected_target_bindings=()))
+    from agent_py_agent.agent.common.json_io import write_private_text_file_atomic_unlocked
+
+    # 真实增量计划先建/写节点再发表唯一头，目录由正式私有writer建立。
     for path, text in changes.items():
-        path.write_text(text)
+        write_private_text_file_atomic_unlocked(path, text)
     return committed
 
 

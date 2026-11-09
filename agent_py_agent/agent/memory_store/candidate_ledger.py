@@ -18,6 +18,14 @@ FORMAT = 'memory-candidates-v2'
 
 
 def read_manifest(path: Path):
+    try:
+        return _read_manifest(path)
+    except (ValueError, TypeError, KeyError) as error:
+        from .candidates import CandidateStoreCorruptError
+        raise CandidateStoreCorruptError('candidate indexed header is unreadable') from error
+
+
+def _read_manifest(path: Path):
     # 旧JSONL首行可能非常大；只探测格式前缀，不对旧库额外整文件读。
     import os
 
