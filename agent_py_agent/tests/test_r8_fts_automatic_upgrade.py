@@ -135,18 +135,28 @@ def test_source_rejection_preserves_original_identity_and_no_completion(tmp_path
     assert {r.id for r in store._search_fts('searchable', limit=10, source_type=None, visibility=None)} == {r.id for r in items}
 
 
-def test_fts_disabled_configuration_does_not_mutate_existing_index(tmp_path, monkeypatch):
-    home, store, _ = _legacy(tmp_path)
+@pytest.mark.parametrize('coordinator', [False, True])
+def test_retired_fts_configuration_cannot_disable_formal_index_upgrade(tmp_path, coordinator):
+    from agent_py_agent.agent.memory_store.owner_resources import build_owner_local_store
+
+    home, store, items = _legacy(tmp_path)
     policy = json.loads(home.owner_retention_json.read_text())
     policy['maintenance_enabled'] = False
     home.owner_retention_json.write_text(json.dumps(policy))
-    def forbidden(*args, **kwargs):
-        pytest.fail('disabled FTS must not start an index job')
-    monkeypatch.setattr(LocalStore, 'rebuild_fts_step', forbidden)
-    run_owner_retention_if_due(home, now=1000, config=SimpleNamespace(local_store_fts_enabled=False))
-    assert not _aligned(store)
-    with store._connection() as conn:
-        assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='maintenance_fts_job'").fetchone() is None
+    # 上层性能开关已退役；正式写者常开，维护不能独自复活旧配置门。
+    config = SimpleNamespace(local_store_fts_enabled=False)
+    formal = build_owner_local_store(config, {'local_store_path': store.db_path,
+        'local_store_files_dir': store.files_dir, 'local_store_events_path': store.events_path})
+    assert formal.enable_fts and formal.fts_available
+    options = {'commit_transition': lambda operation: operation(), 'include_global_indexes': False} if coordinator else {}
+    for turn in range(30):
+        with fts_upgrade_tick_scope(deadline=time.monotonic() + 20, max_steps=1):
+            run_owner_retention_if_due(home, now=1000 + turn * 61, config=config, **options)
+        if _aligned(formal):
+            break
+    assert _aligned(formal)
+    assert {row.id for row in formal._search_fts('searchable', limit=10,
+        source_type=None, visibility=None)} == {item.id for item in items}
 
 
 @pytest.mark.parametrize('size', [1000, 20000])

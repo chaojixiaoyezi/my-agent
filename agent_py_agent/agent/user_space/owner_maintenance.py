@@ -150,19 +150,10 @@ def _owner_pressure(home) -> dict | None:
     return _owner_pressure_for_root(home.owner_home_dir)
 
 
-# LLM: 原关闭/间隔规则优先；已提交partial沿同一maintenance.json下一拍续作，不重新等待整周期。
-#   建过配额账（受有限配额准入）的owner账脏或一轮未走完时同样下一拍续作对账，不让一次准入外写入拒绝增长一整天。
-# 函数用途: 判断原维护是否到期，包含有游标的未完成片与待追赶的配额对账。
-def _advance_local_fts_projection(home, previous, current, *, commit=None, config=None):
+# 正式LocalStore默认启用FTS；结构维护沿同一owner根和写门，不复活已退役的上层性能开关。
+def _advance_local_fts_projection(home, previous, current, *, commit=None):
     from ..local_storage.fts_upgrade import advance_upgrade
 
-    if getattr(config, 'local_store_fts_enabled', True) is False:
-        from ..local_storage.fts_upgrade import FTS_UPGRADE_INTERVAL_SECONDS, next_upgrade_at
-        due = next_upgrade_at(home.owner_home_dir, previous, current)
-        if due is None or due > current:
-            return None
-        return {**previous.get('local_store_fts_upgrade', {}), 'status': 'disabled',
-                'next_at': current + FTS_UPGRADE_INTERVAL_SECONDS}
     return advance_upgrade(home.owner_home_dir, previous, current, commit=commit)
 
 
@@ -284,7 +275,7 @@ def run_owner_retention_if_due(
         previous = _read_fts_maintenance_state(state_path)
         maintenance_fence(previous)
         maintenance_fence(previous.get('storage_maintenance', {}))
-        projection = _advance_local_fts_projection(home, previous, current, config=config)
+        projection = _advance_local_fts_projection(home, previous, current)
         if not _retention_maintenance_due(home.owner_home_dir, now=current):
             return _write_local_fts_projection(state_path, previous, projection)
         if projection is not None:

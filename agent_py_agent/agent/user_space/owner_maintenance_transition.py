@@ -80,7 +80,7 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
         return transition(execute)
 
     runtime_cleanup = _cleanup_owner_runtime(home, now=now, commit_transition=commit)
-    projection = _advance_local_fts_projection(home, header, now, commit=commit, config=config)
+    projection = _advance_local_fts_projection(home, header, now, commit=commit)
     if not _retention_maintenance_due(home.owner_home_dir, now=now):
         return commit(lambda: _write_local_fts_projection(path, header, projection)) if projection is not None else OwnerMaintenanceResult(False, 'not_due')
     if projection is not None:
