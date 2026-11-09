@@ -1,3 +1,7 @@
+## 2026-11-08 R8 审计补修验证（整合中）
+
+范围、组件与Linux原失败、逐项复验统一见[R8补修台账](docs/tasks/R8_AUDIT_FOLLOWUPS.md)。组件计数不相加冒充全仓验收；最终同源组合、本机十TUI与GitHub CI尚未完成。原非root 2C4G Linux先验386项中378通过、8失败，保留原证据，后继修复独立记账。
+
 ## 2026-11-06 S2-INT：并行配置接线回归
 
 来源：`plan-s2-int-go.md`及`steer-fast-commit.md`。在保留旧配置/拓扑校验器和写权限边界的前提下，接通五个Stage 2部署参数。新增`test_s2_int_stage2_parameters.py`覆盖默认三方一致、数值夹取告警、非法类型与非有限数、Cell加载、模型/聊天拒绝、部署CLI唯一栅栏写入、派生值，以及YAML热刷新后真实ClaimStore终态拒绝和重新放行。

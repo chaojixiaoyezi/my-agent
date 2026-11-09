@@ -2,10 +2,15 @@
 
 本轮统一核对14项遗漏，采用原规范来源、结构化版本与有界索引；不以历史列表截断替代完整性证明。范围及验收记录见[补修台账](docs/tasks/R8_AUDIT_FOLLOWUPS.md)。
 
+用户明确长期容量目标，并将本轮验收收敛为本机既有历史上的十TUI单轮实测、资源增量相乘估算；不把外推称作五千用户实压。LLM算力不纳入，但后台常驻、历史增长及停止回落须实测。模型/用例/停止边界见[本机实测](docs/tasks/R8_LOCAL_TUI_TEST.md)。
+
 - [发现、空闲核对及进度](docs/design/R8_DISCOVERY_AND_PROGRESS.md)：owner目录分片排序、孤立claim有界核对、日志游标签名派生、真实模型等待展示心跳。
 - [Compact历史存储](docs/design/R8_COMPACT_HISTORY.md)：事务内容仓与引用队列、提交链pin恢复、跨进程持久地址投影；必要历史仍保留，不能将页复用冒充磁盘释放。
 - [线程与候选账本](docs/design/R8_RECORD_LEDGERS.md)：128项历史页、活动集合与精确成员索引，候选当前根增量写及原quota/回滚边界。
 - [SQLite恢复与退役](docs/design/R8_RECOVERY_RETENTION.md)：四文件保全、完整候选验证、输入引用与已终态来源清理、后台日志退出证明。
+- [业务来源分页](docs/design/R8_OBSERVATION_SOURCES.md)：SQL来源keyset与用量时间索引，后台原维护车道分片补建旧来源；读口不迁移、不把unknown当空。
+
+整合中：可重建投影也必须经过同一SQLite代次排他与原件保全；监听器配置/进程寿命归宿主控制目录，不能被业务缓存清理破坏；部分目录扫描不能因多个store轮换永久失去进度。上述边界的整合验证尚未完成。
 
 状态：本地分片及Linux回归进行中，未推送或切换运行版本；远端成功状态仅在最终提交检查完成后登记。
 

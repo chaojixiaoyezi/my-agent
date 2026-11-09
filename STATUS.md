@@ -1,3 +1,7 @@
+## 2026-11-08 当前 R8 审计补修（工作分支，尚未发布）
+
+当前任务为历次审计14项遗漏的补修及长期历史验收，统一入口见[R8台账](docs/tasks/R8_AUDIT_FOLLOWUPS.md)。仍在收口同类恢复、扫描续点与分布式快照联调；未更新日常运行版本、未提交远端或完成十TUI实测。下方历史结果不继承为本轮PASS。
+
 ## 2026-11-01 当前 MEGA 状态入口（W16，未发布）
 
 当前唯一派工、逐片 SHA、局部门与跨片欠账见 [MEGA_DISPATCH_PROGRESS](docs/tasks/MEGA_DISPATCH_PROGRESS.md)，架构见 [MEGA 统一设计](docs/design/MEGA_ARCHITECTURE_A4BC8B818.md)，验收/最终封包见 [MEGA_ACCEPTANCE](docs/tasks/MEGA_ACCEPTANCE.md)。本文件不再另列一套活跃分片状态。

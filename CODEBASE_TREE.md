@@ -627,6 +627,14 @@ agent_py_agent/
 
 ### 关键文件说明
 
+### R8 历史审计补修（2026-11-08）
+
+- `docs/tasks/R8_AUDIT_FOLLOWUPS.md`：14项功能、历史失败、最终验收与交付的统一状态入口。
+- `conversation/immutable_node_store.py`、`checkpoint_offset_store.py`、`task_history.py`：历史节点共享与回收、冷读定位和任务分页。
+- `conversation/usage_sources.py`、`usage_source_maintenance.py`、`user_space/directory_paging.py`：来源时间索引与可续作后台维护，读口不迁移。
+- `io/sqlite_recovery.py`、`io/bounded_process_log.py`：原件保全与代次恢复、真实进程输出的容量及退出证明。
+- `docs/tasks/R8_LOCAL_TUI_TEST.md`：长期历史上的十TUI单轮实测、停止规则及资源外推边界。
+
 ### R8 审计补修（2026-11-08）
 
 - `docs/tasks/R8_AUDIT_FOLLOWUPS.md`：14项范围、验收与交付状态的唯一任务导航。
@@ -1056,26 +1064,40 @@ agent_py_agent/
 |-- agent_py_agent/agent/conversation/compact_progress_pulse.py # 摘要等待展示心跳：复用共享调度器，只重报真实覆盖数，不签发完成事实。
 |-- agent_py_agent/agent/conversation/immutable_node_store.py # 内容寻址节点的事务仓库：历史根共享节点，零引用队列代替全历史标记。
 |-- agent_py_agent/agent/conversation/task_history.py # 线程任务历史的分页权威；线程 JSON 仅保存有界展示窗口。
+|-- agent_py_agent/agent/conversation/usage_source_maintenance.py # 原owner存储维护通道内分片补建用量来源
+|-- agent_py_agent/agent/conversation/usage_sources.py # 规范用量来源的时间投影、待提交证明及持久目录续点
+|-- agent_py_agent/agent/gateway_parts/idle_notice_page.py # 空闲通知页缓存及跨进程目录版本失效，不授予读取权限
 |-- agent_py_agent/agent/gateway_parts/input_turn_retention.py # 分片退役输入回合引用；只接受原请求终态与已消费 canonical 双重证明。
+|-- agent_py_agent/agent/io/bounded_process_log.py # 实际worker的有界日志前缀、持续排空及字节和EOF证明
 |-- agent_py_agent/agent/io/sqlite_recovery.py # 非 runtime SQLite 的无损恢复：误报解锁，损坏保全，仅完整重建可发表。
 |-- agent_py_agent/agent/memory_store/candidate_ledger.py # 候选当前态增量账本：唯一头指向当前树，所有节点均先规划后准入。
+|-- agent_py_agent/agent/runtime_db/current_obligations.py # 按当前执行及未决义务索引核对退出，避免遍历全部终态历史
+|-- agent_py_agent/agent/user_space/directory_paging.py # 可跨进程续作的有界目录页，复用原生dirent能力
 |-- agent_py_agent/agent/user_space/home_index_retirement.py # 全局索引退役只接受 canonical 消失及原运行权威终态；仍可定位历史保持原引用。
 |-- agent_py_agent/agent/user_space/owner_directory_index.py # 可丢弃的 owner 目录分页投影；目录事实仍是发现与权限的唯一来源。
+|-- agent_py_agent/tests/test_r8_bounded_process_log.py # 真实子进程日志限额、输出继承、元数据频率及描述符回收
 |-- agent_py_agent/tests/test_r8_compact_history_store.py # R8：持久历史根、分叉、崩溃搬迁与冷启动定位的运行时回归。
 |-- agent_py_agent/tests/test_r8_compact_progress_pulse.py # 摘要等待可观察、覆盖数不虚增，退出后不再发表旧进度。
+|-- agent_py_agent/tests/test_r8_current_obligations.py # 当前义务查询复杂度与精确attempt收口回归
 |-- agent_py_agent/tests/test_r8_dispatch_log_retention.py # 真实stdout SH锁、退出证明与canonical业务终态共同约束日志保留。
 |-- agent_py_agent/tests/test_r8_global_index_retirement.py # 唯一历史key按canonical消失证明退役，未知及可定位历史保持。
 |-- agent_py_agent/tests/test_r8_idle_claim_history.py # 历史任务窗口化以后，孤立旧 claim 仍必须阻止闲置压缩。
+|-- agent_py_agent/tests/test_r8_idle_notice_http.py # 真实HTTP通知页缓存、权限及跨进程失效往返
 |-- agent_py_agent/tests/test_r8_input_turn_retention.py # 输入引用终态、原锁、出生交错和有界目录预算。
 |-- agent_py_agent/tests/test_r8_log_cursor_lifetime.py # 日志分页签名在多 owner 轮换后的真实 HTTP 回归。
+|-- agent_py_agent/tests/test_r8_observation_sources.py # 深页来源读取、用量窗口、跨进程待提交及覆盖真实性回归
 |-- agent_py_agent/tests/test_r8_owner_directory_paging.py # 冷目录发现分片推进，分页不能通过截断未排序目录来漏掉旧owner。
 |-- agent_py_agent/tests/test_r8_record_ledgers.py # 记录账本增量写入、历史分页与并发终态的行为回归。
 |-- agent_py_agent/tests/test_r8_sqlite_recovery.py # 通用库恢复以真实SQLite验证，不将损坏、未知或缺行当作空库。
+|-- agent_py_agent/tests/test_r8_usage_source_maintenance.py # 旧用量维护追平、目录重启续点与合法保留门验证
 |-- docs/design/R8_COMPACT_HISTORY.md # R8：Compact 历史节点与冷读定位
 |-- docs/design/R8_DISCOVERY_AND_PROGRESS.md # R8 发现、空闲核对与展示进度
+|-- docs/design/R8_IDLE_NOTICE_CACHE.md # R8 空通知消息页缓存
+|-- docs/design/R8_OBSERVATION_SOURCES.md # R8-09 业务观察来源分页与用量范围索引
 |-- docs/design/R8_RECORD_LEDGERS.md # R8 线程任务历史与候选当前态增量账本
 |-- docs/design/R8_RECOVERY_RETENTION.md # R8 SQLite恢复与派生文件生命周期
-`-- docs/tasks/R8_AUDIT_FOLLOWUPS.md # R8 历次审计遗漏补修
+|-- docs/tasks/R8_AUDIT_FOLLOWUPS.md # R8 历次审计遗漏补修
+`-- docs/tasks/R8_LOCAL_TUI_TEST.md # R8 基础回归与本机 TUI 实测
 ```
 
 ### 2026-11-07 本地搜索存活预算回归

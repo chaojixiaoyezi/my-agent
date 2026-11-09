@@ -1,3 +1,7 @@
+## 2026-11-08 R8 已整合组件（尚未整体验收或部署）
+
+历史节点与任务分页、候选增量账、输入及索引退役、通知缓存、游标签名和有界日志已进入工作分支。用量来源与后台维护整合134项通过，Compact及日志在本机自由线程解释器39项通过；这些计数仅对应组件。剩余恢复入口与快照联调、最终Linux组合、严格门、十TUI和GitHub结果见[R8台账](tasks/R8_AUDIT_FOLLOWUPS.md)。
+
 ## 2026-11-01 MEGA 已落地记录导航（不是产品完成票）
 
 本轮实现纳入、分片 gate 与未验证边界统一见 [MEGA_DISPATCH_PROGRESS](tasks/MEGA_DISPATCH_PROGRESS.md)。本文件不另维护已完成分片表，不因本地代码存在、生成器一致或旧 PASS 就宣称产品完成。架构见 [MEGA 统一设计](design/MEGA_ARCHITECTURE_A4BC8B818.md)，当前/最终验收条件见 [MEGA_ACCEPTANCE](tasks/MEGA_ACCEPTANCE.md)。

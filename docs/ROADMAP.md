@@ -1,3 +1,7 @@
+## 2026-11-08 R8 审计补修与长期历史验收（进行中）
+
+解决历次审计遗漏的14项历史增长、恢复、分页与生命周期缺口。分片补丁正在统一集成，Linux首轮失败仍在复验；本机升级、十TUI一轮实测及GitHub全绿尚未完成。准确状态统一见[R8补修台账](tasks/R8_AUDIT_FOLLOWUPS.md)，不以组件通过替代发布验收。
+
 ## 2026-11-01 MEGA 后续工作唯一入口
 
 本轮待办/依赖/阻碍统一维护在 [MEGA_DISPATCH_PROGRESS](tasks/MEGA_DISPATCH_PROGRESS.md)，不在本文件重复派工。总控先收 W16 修订提交与 W15，然后冻结同一组合 candidate；10项元数据已按 W16-fix 明确接受为待整改基线，后续整改仍归原 owner，不冒充源处已修复。最终矩阵、全仓、封包与双审按 [MEGA_ACCEPTANCE](tasks/MEGA_ACCEPTANCE.md) 执行，不用旧 PASS 续签。
