@@ -418,3 +418,82 @@ def test_data_fd_is_closed_if_fdopen_fails_before_ownership_transfer(tmp_path, m
             os.close(opened[0])
         except OSError:
             pass
+
+
+def test_retention_flushes_one_directory_page_before_receipt(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation import session_pair_rate as module
+
+    home, limiter = _fixture(tmp_path / "host")
+    now = time.time()
+    paths = [_seed(limiter, str(index), now - WINDOW_SECONDS * 4) for index in range(12)]
+    flushed = []
+    original = os.fsync
+
+    def sync(descriptor):
+        # 真正执行刷盘，同时证明一页全部删除先于唯一耐久提交。
+        flushed.append(sum(path.exists() for path in paths))
+        return original(descriptor)
+
+    monkeypatch.setattr(module, "os", SimpleNamespace(**{**vars(os), "fsync": sync}))
+    report = _slice(home, now)
+    assert report["deleted"] == 12 and report["locks_deleted"] == 12
+    assert flushed == [0]
+
+
+def test_retention_failed_page_sync_does_not_publish_cursor(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation import session_pair_rate as module
+
+    home, limiter = _fixture(tmp_path / "host")
+    now = time.time()
+    path = _seed(limiter, "expired", now - WINDOW_SECONDS * 4)
+    original, flushed = os.fsync, []
+
+    def sync(descriptor):
+        original(descriptor)
+        flushed.append(not path.exists())
+        raise OSError("page sync failed")
+
+    monkeypatch.setattr(module, "os", SimpleNamespace(**{**vars(os), "fsync": sync}))
+    cursor = {}
+    with pytest.raises(OSError, match="page sync failed"):
+        _slice(home, now, cursor)
+    assert cursor == {} and flushed == [True]
+    monkeypatch.setattr(module, "os", os)
+    assert _slice(home, now, cursor)["complete"]
+
+
+def test_retention_partial_page_error_still_flushes_deleted_entries(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation import session_pair_rate as module
+
+    home, limiter = _fixture(tmp_path / "host")
+    now = time.time()
+    for index in range(4):
+        _seed(limiter, str(index), now - WINDOW_SECONDS * 4)
+    remove, sync = module._remove_expired_pair, os.fsync
+    deleted, flushed = [], []
+    failure = OSError("later entry failed")
+
+    def remove_one(*args):
+        if deleted:
+            raise failure
+        result = remove(*args)
+        deleted.append(result)
+        return result
+
+    def flush(descriptor):
+        sync(descriptor)
+        flushed.append(True)
+
+    monkeypatch.setattr(module, "_remove_expired_pair", remove_one)
+    monkeypatch.setattr(module, "os", SimpleNamespace(**{**vars(os), "fsync": flush}))
+    cursor = {}
+    with pytest.raises(OSError) as caught:
+        _slice(home, now, cursor)
+    assert caught.value is failure and cursor == {}
+    assert deleted[0][0] == "deleted" and flushed == [True]

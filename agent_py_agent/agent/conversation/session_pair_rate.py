@@ -111,6 +111,8 @@ def _clean_pair_directory(root, parts, position, result, limit, request):
     except (FileNotFoundError, NotADirectoryError):
         position["pair_scan"] = {}
         return True
+    sync_pending = False
+    primary = None
     try:
         for name in names:
             _require_pair_entry_name(name)
@@ -118,8 +120,10 @@ def _clean_pair_directory(root, parts, position, result, limit, request):
                 tail.append(name)
                 continue
             if name.endswith(".json.lock"):
+                sync_pending = True
                 result["locks_deleted"] += int(_cleanup_orphan_lock_at(descriptor, name, current=request.now))
             elif name.endswith(".json"):
+                sync_pending = True
                 outcome, size = _remove_expired_pair(descriptor, root.joinpath(*parts, name), request.now,
                                                      request.max_bytes - result["bytes"])
                 result["bytes"] += size
@@ -133,8 +137,20 @@ def _clean_pair_directory(root, parts, position, result, limit, request):
         scan.update(retry=tail, scan_complete=complete)
         position["pair_scan"] = scan
         return complete and not tail
+    except BaseException as error:
+        primary = error
+        raise
     finally:
-        os.close(descriptor)
+        try:
+            # 同一固定目录的一片删除共同持久化；回执发表前必须成功，不为每个历史桶串行刷盘。
+            if sync_pending:
+                os.fsync(descriptor)
+        except BaseException as cleanup:
+            if primary is None:
+                raise
+            primary.session_pair_sync_error = cleanup
+        finally:
+            os.close(descriptor)
 
 
 def _pair_file_version(info) -> tuple:
@@ -180,7 +196,6 @@ def _remove_expired_pair(directory_fd, path, now, remaining_bytes):
             if data["window_start"] + WINDOW_SECONDS * 2 > now:
                 return "active", len(raw)
             os.unlink(path.name, dir_fd=directory_fd)
-            os.fsync(directory_fd)
             return "deleted", len(raw)
     except FileNotFoundError:
         return "missing", 0
