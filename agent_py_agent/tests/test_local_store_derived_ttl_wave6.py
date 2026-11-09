@@ -13,6 +13,12 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.local_storage import LocalStore
+from agent_py_agent.tests.support.fd_lifetime import (
+    assert_fd_unchanged,
+    capture_fd_snapshot,
+    close_owner_quota_scan,
+    fd_baseline,
+)
 
 NOW = 2_000_000_000.0
 CUTOFF = NOW - 30 * 86400
@@ -963,18 +969,63 @@ def test_holistic_gateway_event_mirror_gate(attribute, configured, enabled):
 
 
 @pytest.fixture
-def reference_fd_guard(record_property):
+def reference_fd_guard(record_property, tmp_path):
+    directory = next((path for path in (Path('/dev/fd'), Path('/proc/self/fd')) if path.is_dir()), None)
+    before = fd_baseline() if directory else None
+    yield before
+    if before is not None:
+        owner = tmp_path / 'home/owners/local/main'
+        # 跨片配额游标是本owner主动保留的缓存，显式退休它；终点绝不GC其它资源。
+        if owner.is_dir():
+            close_owner_quota_scan(owner)
+        record_property('fd_delta', capture_fd_snapshot().count - before.count)
+        assert_fd_unchanged(before)
+
+
+def test_reference_fd_guard_releases_only_owned_partial_quota_cursor(tmp_path, monkeypatch, reference_fd_guard):
+    import errno
     import gc
 
-    gc.collect()
-    directory = next((path for path in (Path('/dev/fd'), Path('/proc/self/fd')) if path.is_dir()), None)
-    before = len(os.listdir(directory)) if directory else None
-    yield
-    gc.collect()
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    case = _reference_case(tmp_path)
+    before = capture_fd_snapshot() if reference_fd_guard is not None else None
+    report = quota.reconcile_owner_quota_slice(case.home.owner_home_dir, max_entries=1, max_ms=1000)
+    key = (os.getpid(), str(case.home.owner_home_dir.resolve()))
+    assert not report['complete'] and key in quota._QUOTA_SCANS
+    opened = ({int(fd): target for fd, target in capture_fd_snapshot().targets.items()
+               if before.targets.get(fd) != target} if before is not None else {})
     if before is not None:
-        delta = len(os.listdir(directory)) - before
-        record_property('fd_delta', delta)
-        assert delta == 0
+        assert opened and all(str(case.home.owner_home_dir) in target[3] for target in opened.values())
+    checkpoint = (case.home.owner_home_dir / quota._QUOTA_LEDGER).read_bytes()
+    monkeypatch.setattr(gc, 'collect', lambda: pytest.fail('终点不得用GC掩盖资源未释放'))
+    close_owner_quota_scan(case.home.owner_home_dir)
+    assert key not in quota._QUOTA_SCANS
+    assert (case.home.owner_home_dir / quota._QUOTA_LEDGER).read_bytes() == checkpoint
+    for descriptor in opened:
+        with pytest.raises(OSError) as raised:
+            os.fstat(descriptor)
+        assert raised.value.errno == errno.EBADF
+
+
+def test_reference_fd_guard_still_rejects_unclosed_pipe_without_gc(monkeypatch, reference_fd_guard):
+    import gc
+
+    monkeypatch.setattr(gc, 'collect', lambda: pytest.fail('终点不得用GC掩盖真实pipe泄漏'))
+    handles = os.pipe()
+    try:
+        if reference_fd_guard is not None:
+            with pytest.raises(AssertionError, match='new_resources'):
+                assert_fd_unchanged(reference_fd_guard)
+        else:
+            # 没有FD目录的平台仍核实际pipe关闭，不伪称支持全进程差分。
+            assert all(os.fstat(descriptor) for descriptor in handles)
+    finally:
+        for descriptor in handles:
+            os.close(descriptor)
+    for descriptor in handles:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
 
 
 def _reference_case(tmp_path, *, count=1, extra_refs=()):

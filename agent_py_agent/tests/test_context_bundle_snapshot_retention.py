@@ -14,6 +14,9 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.memory_store.candidates import CandidateService
 from agent_py_agent.agent.memory_store.retention import MemoryRetentionService
@@ -26,6 +29,14 @@ NOW = datetime(2026, 8, 4, tzinfo=timezone.utc)
 DAY = 86_400
 OLD = NOW.timestamp() - 31 * DAY
 FRESH = NOW.timestamp() - 29 * DAY
+
+
+@pytest.fixture
+def complete_slice_clock(monkeypatch):
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
+
+    # TOCTOU资格用例须先获得完整动作，不能把25ms内的机器吞吐当成竞态前置条件。
+    monkeypatch.setattr(budgets, 'time', SimpleNamespace(monotonic=lambda: 0.0))
 
 
 def _runtime(tmp_path: Path, name: str = "home"):
@@ -205,7 +216,7 @@ def test_two_owners_clean_their_own_archives_only(tmp_path: Path):
     assert len(_trash_containers(home_b, "context_bundle_snapshot")) == 2
 
 
-def test_apply_skips_snapshot_changed_after_plan(tmp_path: Path, monkeypatch):
+def test_apply_skips_snapshot_changed_after_plan(tmp_path: Path, monkeypatch, complete_slice_clock):
     from agent_py_agent.agent.memory_store import retention as retention_module
 
     home, service = _runtime(tmp_path)
@@ -218,6 +229,8 @@ def test_apply_skips_snapshot_changed_after_plan(tmp_path: Path, monkeypatch):
     original = retention_module.execute_retention_plan
 
     def _change_then_execute(**kwargs):
+        assert not kwargs['plan'].scan_partial
+        assert {changed_json, bumped_json} <= {action.path for action in kwargs['plan'].actions}
         # 在 apply 内部重规划之后、真正执行之前动手：一个改内容（mtime 仍是旧的），一个刷新 mtime。
         changed_json.write_text(changed_json.read_text(encoding="utf-8") + " ", encoding="utf-8")
         os.utime(changed_json, (OLD, OLD))
@@ -272,7 +285,7 @@ def test_unreadable_kept_snapshot_blocks_manifest_cleanup(tmp_path: Path):
     assert orphan.exists(), "引用集合不完整时不动任何清单"
 
 
-def test_changed_old_snapshot_keeps_its_manifest_during_apply(tmp_path: Path, monkeypatch):
+def test_changed_old_snapshot_keeps_its_manifest_during_apply(tmp_path: Path, monkeypatch, complete_slice_clock):
     from agent_py_agent.agent.memory_store import retention as retention_module
 
     home, service = _runtime(tmp_path)
@@ -282,6 +295,8 @@ def test_changed_old_snapshot_keeps_its_manifest_during_apply(tmp_path: Path, mo
     original = retention_module.execute_retention_plan
 
     def change_then_execute(**kwargs):
+        assert not kwargs['plan'].scan_partial
+        assert {snapshot, manifest} <= {action.path for action in kwargs['plan'].actions}
         snapshot.write_text(snapshot.read_text() + ' ', encoding='utf-8')
         os.utime(snapshot, (OLD, OLD))
         return original(**kwargs)
@@ -295,7 +310,7 @@ def test_changed_old_snapshot_keeps_its_manifest_during_apply(tmp_path: Path, mo
     assert snapshot.exists() and manifest.exists()
 
 
-def test_failed_snapshot_move_keeps_its_manifest(tmp_path: Path, monkeypatch):
+def test_failed_snapshot_move_keeps_its_manifest(tmp_path: Path, monkeypatch, complete_slice_clock):
     from agent_py_agent.agent.memory_store import retention_apply
 
     home, service = _runtime(tmp_path)
@@ -312,13 +327,14 @@ def test_failed_snapshot_move_keeps_its_manifest(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(retention_apply.shutil, 'move', move)
     applied = service.apply(now=NOW)
 
+    assert not applied.scan_partial
     statuses = {action.path: action.status for action in applied.actions}
     assert statuses[snapshot] == 'failed'
     assert statuses[manifest] == 'state_changed'
     assert snapshot.exists() and manifest.exists()
 
 
-def test_snapshot_created_after_plan_protects_manifest(tmp_path: Path, monkeypatch):
+def test_snapshot_created_after_plan_protects_manifest(tmp_path: Path, monkeypatch, complete_slice_clock):
     from agent_py_agent.agent.memory_store import retention as retention_module
 
     home, service = _runtime(tmp_path)
@@ -327,6 +343,8 @@ def test_snapshot_created_after_plan_protects_manifest(tmp_path: Path, monkeypat
     original = retention_module.execute_retention_plan
 
     def add_then_execute(**kwargs):
+        assert not kwargs['plan'].scan_partial
+        assert manifest in {action.path for action in kwargs['plan'].actions}
         _write_snapshot(home, ('2026-08-04', 'new'), NOW.timestamp(), (sha, '/new-ref'))
         return original(**kwargs)
 
@@ -338,7 +356,7 @@ def test_snapshot_created_after_plan_protects_manifest(tmp_path: Path, monkeypat
     assert manifest.exists()
 
 
-def test_live_manifest_reference_scan_runs_once_per_apply(tmp_path: Path, monkeypatch):
+def test_live_manifest_reference_scan_runs_once_per_apply(tmp_path: Path, monkeypatch, complete_slice_clock):
     from agent_py_agent.agent.memory_store import retention_apply
 
     home, service = _runtime(tmp_path)
@@ -354,8 +372,31 @@ def test_live_manifest_reference_scan_runs_once_per_apply(tmp_path: Path, monkey
     monkeypatch.setattr(retention_apply, 'current_tool_manifest_references', scan)
     applied = service.apply(now=NOW)
 
+    assert not applied.scan_partial
     assert applied.ok
     assert len(calls) == 1
+
+
+def test_budget_pause_before_manifest_plan_is_partial_without_fabricating_state_change(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
+
+    home, service = _runtime(tmp_path)
+    manifest = _write_manifest(home, '7' * 64, OLD)
+    clock = [0.0]
+    monkeypatch.setattr(budgets, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    original = budgets.RetentionScanBudget.default
+
+    def elapsed_default(cls, config=None):
+        budget = original(config)
+        assert (budget.max_entries, budget.max_bytes, budget.deadline) == (128, 8 * 1024 * 1024, .025)
+        clock[0] = .025
+        return budget
+
+    monkeypatch.setattr(budgets.RetentionScanBudget, 'default', classmethod(elapsed_default))
+    report = service.apply(now=NOW)
+    assert report.scan_partial and report.scan_cursor['pins:projection']
+    assert not any(action.path == manifest for action in report.actions)
+    assert manifest.exists() and not report.errors
 
 
 def test_task_legal_hold_protects_snapshot_pair_and_manifest(tmp_path: Path):
