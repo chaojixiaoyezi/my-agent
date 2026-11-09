@@ -111,6 +111,7 @@ def _store_messages_activity(store_root: Path) -> str:
 # 函数用途: 确认周期整理是否有非空可学输入，只有审计记录的冷owner也能唤醒。
 def _cold_curator_activity(home: Path) -> str:
     from .memory_store.candidate_ledger import read_manifest
+    from .memory_store.candidates import CandidateStoreCorruptError
 
     try:
         candidate = home / "memory" / "candidates.jsonl"
@@ -118,7 +119,7 @@ def _cold_curator_activity(home: Path) -> str:
             manifest = read_manifest(candidate)
             if manifest is None or manifest['count'] > 0:
                 return "due"
-    except (OSError, ValueError, TypeError, KeyError):
+    except (CandidateStoreCorruptError, OSError, ValueError, TypeError, KeyError):
         return "unknown"
     from .owner_wake_discovery import _store_roots
 

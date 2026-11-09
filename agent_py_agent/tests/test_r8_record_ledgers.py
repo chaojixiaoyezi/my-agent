@@ -209,15 +209,38 @@ def test_removed_then_readded_thread_task_has_one_history_position(tmp_path):
     history.remove(path, latest, 'task')
     store.tasks.update_thread_index(thread.thread_id, 'task', 'active', 1)
     assert tuple(store.tasks.iter_task_ids(thread.thread_id)) == ('task',)
-def test_cold_curator_empty_current_ledger_is_not_due_and_corrupt_is_unknown(tmp_path):
+@pytest.mark.parametrize('bad', ['count', 'json', 'cleanup', 'root'])
+def test_cold_curator_empty_current_ledger_is_not_due_and_corrupt_is_unknown(tmp_path, bad):
     from agent_py_agent.agent.memory_api import _cold_curator_activity
 
     path = tmp_path / 'memory' / 'candidates.jsonl'
     path.parent.mkdir()
-    path.write_text('{"candidate_ledger":"memory-candidates-v2","count":0,"root":null,"cleanup":[]}')
+    valid = '{"candidate_ledger":"memory-candidates-v2","count":0,"root":null,"cleanup":[]}'
+    path.write_text(valid)
     assert _cold_curator_activity(tmp_path) == 'not_due'
-    path.write_text('{"candidate_ledger":"memory-candidates-v2","count":-1,"root":null,"cleanup":[]}')
-    assert _cold_curator_activity(tmp_path) == 'unknown'
+    broken = {'count': valid.replace('"count":0', '"count":-1'), 'json': valid + valid,
+              'cleanup': valid.replace('"cleanup":[]', '"cleanup":null'),
+              'root': valid.replace('"count":0', '"count":1')}[bad]
+    path.write_text(broken)
+    before = {item.relative_to(tmp_path): item.read_bytes() for item in tmp_path.rglob('*') if item.is_file()}
+    assert _cold_curator_activity(tmp_path) == _cold_curator_activity(tmp_path) == 'unknown'
+    assert {item.relative_to(tmp_path): item.read_bytes() for item in tmp_path.rglob('*') if item.is_file()} == before
+
+
+def test_cold_curator_does_not_swallow_unrelated_runtime_failure(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_api import _cold_curator_activity
+    from agent_py_agent.agent.memory_store import candidate_ledger
+
+    path = tmp_path / 'memory/candidates.jsonl'
+    path.parent.mkdir()
+    path.write_text('existing source')
+    failure = RuntimeError('unrelated runtime failure')
+    def fail(_path):
+        raise failure
+    monkeypatch.setattr(candidate_ledger, 'read_manifest', fail)
+    with pytest.raises(RuntimeError) as caught:
+        _cold_curator_activity(tmp_path)
+    assert caught.value is failure
 
 
 def test_candidate_node_cleanup_preserves_real_quota_baseline(tmp_path):
