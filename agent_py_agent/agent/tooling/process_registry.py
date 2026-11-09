@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import logging
 import os
@@ -916,11 +917,17 @@ def _safe_popen_kill(proc: subprocess.Popen | None) -> None:
         pass
 
 
-# LLM: Linux默认单遍proc；普通POSIX观察可共享缓存，终止须经fresh包装；map替身调用形状与完整性不变。
+# LLM: Darwin默认限定原生父/组枚举，Linux单遍proc；其它POSIX共享观察缓存，终止仍须fresh，map替身合同不变。
 # 函数用途: 只读采集原进程树及已换父进程的同组后代出生标识，供本次终止和退出核对共用。
 def _process_tree_snapshot(root_pid: int) -> tuple[dict[int, str], bool]:
     if root_pid <= 0:
         return {}, False
+    if (_native_posix_probe_enabled() and _process_parent_map is _DEFAULT_PROCESS_PARENT_MAP
+            and _process_group_map is _DEFAULT_PROCESS_GROUP_MAP):
+        from ..gateway_parts import multiprocess_native_host_observation as native
+
+        if native.sys.platform == "darwin":
+            return _darwin_process_tree_snapshot(root_pid)
     children: dict[int, list[int]] = {}
     if (Path("/proc").is_dir() and _process_parent_map is _DEFAULT_PROCESS_PARENT_MAP
             and _process_group_map is _DEFAULT_PROCESS_GROUP_MAP):
@@ -950,6 +957,145 @@ def _process_tree_snapshot(root_pid: int) -> tuple[dict[int, str], bool]:
     snapshot = {current: capture_process_birth_token(current) for current in ordered}
     complete = complete and all(token or _process_instance_terminated(pid, "") for pid, token in snapshot.items())
     return snapshot, complete
+
+
+def _darwin_zombie_root_info(pid: int) -> tuple[int, str] | None:
+    """libproc不返回zombie的BSD身份；仅按原PID读取同一C日期/状态/组，不枚举主机。"""
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "pid=,pgid=,stat=,lstart="],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=1, check=False,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+        if result.returncode != 0 or len(result.stdout.strip().splitlines()) != 1:
+            return None
+        observed_pid, group, state, started = result.stdout.strip().split(maxsplit=3)
+        if int(observed_pid) != pid or int(group) <= 0 or not state.startswith("Z") or not started:
+            return None
+        return int(group), "host:" + started
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
+def _darwin_process_tree_snapshot(root_pid: int) -> tuple[dict[int, str], bool]:
+    """仅查选定父/独立组；关系与微秒身份同拍复核，失败不回退全机ps或借TTL授信。"""
+    from ..gateway_parts import multiprocess_native_host_observation as native
+
+    def info(pid):
+        row, error = native._darwin_info(pid)
+        if error or row is None or row.prefix[3] != pid or row.start_sec <= 0:
+            return None
+        return row
+
+    def birth(row):
+        return row.start_sec, row.start_usec
+
+    # 与原生固定枚举缓冲同界；总节点/排队项饱和时不能签完整。
+    max_count = 8192
+    root_row, root_error = native._darwin_info(root_pid)
+    root = root_row if (root_row is not None and not root_error
+                        and root_row.prefix[3] == root_pid and root_row.start_sec > 0) else None
+    root_token = ""
+    if root is None:
+        # Darwin的TBSDINFO拒读未回收zombie；只保留原精确PID的身份/状态接口，ESRCH本身不证明退出。
+        zombie = _darwin_zombie_root_info(root_pid) if root_error == errno.ESRCH else None
+        if zombie is None:
+            return {root_pid: ""}, False
+        root_group, root_token = zombie
+        if not _same_process(root_pid, root_token):
+            return {root_pid: ""}, False
+        root_birth = None
+    else:
+        root_group, root_birth = root.scope[1], birth(root)
+        root_token = capture_process_birth_token(root_pid)
+        if not root_token or not root_token.endswith(f"#kb={root.start_sec}:{root.start_usec:06d}"):
+            return {root_pid: ""}, False
+
+    def root_unchanged():
+        if root is not None:
+            current, error = native._darwin_info(root_pid)
+            if current is not None and not error:
+                return (current.prefix[3] == root_pid and birth(current) == root_birth
+                        and current.scope[1] == root_group)
+            if error != errno.ESRCH:
+                return False
+        current = _darwin_zombie_root_info(root_pid)
+        try:
+            return (current is not None and current[0] == root_group
+                    and _birth_token_matches(root_pid, root_token, current[1]))
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return False
+
+    snapshot: dict[int, str] = {}
+    pending = [(root_pid, 0, root_birth)]
+    queued = {root_pid}
+    seen: set[int] = set()
+    complete = True
+    if root_group == root_pid and root_pid != os.getpgrp():
+        members, observed = native._darwin_members(2, root_pid)
+        complete = complete and observed
+        for pid in members:
+            if pid not in queued:
+                if len(pending) >= max_count:
+                    complete = False
+                    break
+                queued.add(pid)
+                pending.append((pid, -root_pid, root_birth))
+    while pending:
+        pid, parent, parent_birth = pending.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        if pid == root_pid and (root is None or info(pid) is None):
+            if root_unchanged():
+                snapshot[pid] = root_token
+            else:
+                complete = False
+            # zombie的子进程已换父；原独立组成员仍需逐实例复核，不从ESRCH制造完整关系。
+            children, observed = native._darwin_members(6, pid)
+            complete = complete and observed and not children
+            continue
+        row = info(pid)
+        if abs(parent) == root_pid or not parent:
+            authority_matches = root_unchanged()
+        else:
+            authority = info(parent)
+            authority_matches = authority is not None and birth(authority) == parent_birth
+        if (row is None or not authority_matches
+                or parent > 0 and row.prefix[4] != parent
+                or parent < 0 and row.scope[1] != root_pid):
+            complete = False
+            continue
+        token = capture_process_birth_token(pid)
+        kernel_suffix = f"#kb={row.start_sec}:{row.start_usec:06d}"
+        if not token or not token.endswith(kernel_suffix):
+            complete = False
+            continue
+        # 旧指纹投影仍走原入口；若这期间PID已复用，不得把新出生配给旧关系。
+        current = info(pid)
+        if (current is None or birth(current) != birth(row)
+                or current.prefix[4] != row.prefix[4] or current.scope[1] != row.scope[1]):
+            complete = False
+            continue
+        snapshot[pid] = token
+        children, observed = native._darwin_members(6, pid)
+        complete = complete and observed
+        after = info(pid)
+        if after is None or birth(after) != birth(row):
+            complete = False
+            continue
+        for child in children:
+            if child in queued:
+                continue
+            if len(queued) >= max_count:
+                complete = False
+                break
+            queued.add(child)
+            pending.append((child, pid, birth(row)))
+    if not root_unchanged():
+        # 组长换代时撤销这拍全部关系资格，不将错误树交给原信号出口。
+        return {}, False
+    return snapshot, complete and bool(snapshot.get(root_pid))
 
 
 # LLM: 前台等待仅在T/2T调用；使用新鲜树关系并复核根与每个成员出生身份，只增nice，不发送信号或修改隔离边界。

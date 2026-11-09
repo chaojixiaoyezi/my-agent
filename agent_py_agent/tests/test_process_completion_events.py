@@ -914,6 +914,13 @@ def test_native_relation_cache_never_authorizes_recycled_child_signals(native_pr
     assert module._process_parent_map()[0][654] == 321
     assert module._process_group_map()[0][654] == 321
     current[0] = True
+    # 新鲜Darwin树走限定内核枚举；预热的旧ps关系仍不能成为信号来源。
+    probe.birth = "1792929600:000001"
+    monkeypatch.setattr(probe.native, "_darwin_info", lambda pid: (SimpleNamespace(
+        prefix=[0, 2, 0, pid, 1 if pid == 321 else 999], scope=[0, 321 if pid == 321 else 999],
+        start_sec=1792929600, start_usec=1), 0))
+    monkeypatch.setattr(probe.native, "_darwin_members", lambda kind, identifier:
+                        ([321] if kind == 2 and identifier == 321 else [], True))
     monkeypatch.setattr(module.os, "getpgrp", lambda: 9999)
     monkeypatch.setattr(module.os, "getpgid", lambda pid: 321 if pid == 321 else 999)
     monkeypatch.setattr(module.os, "killpg", lambda pgid, sig: signals.append(("group", pgid)))
