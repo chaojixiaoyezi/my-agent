@@ -1003,27 +1003,31 @@ def _parsed_artifact_index(source, *, literal_ref: str | None = None):
         before = _blob_stat_signature(os.fstat(handle.fileno()))
         key = str(getattr(source, "root", "")), str(getattr(source, "path", source)), *before
         local_read = _PREPARE_INDEX_READ.get()
+        witnesses = []
         if local_read and local_read[:2] == (key, literal_ref):
-            # stat可在同一时钟刻度内不变；必须校验当前同FD的全部字节，才能省去第二次JSON解析。
-            digest = hashlib.sha256()
-            while block := handle.read(64 * 1024):
-                digest.update(block)
-            if (digest.digest() == local_read[2]
-                    and _blob_stat_signature(os.fstat(handle.fileno())) == before):
-                return (), {}
-            handle.seek(0)
+            witnesses.append((local_read[2], ((), {})))
         cached = _ARTIFACT_INDEX_CACHE.get(key)
         if cached is not None:
-            return cached
-        # 原文字节已超缓存预算时解析树必然入不了缓存：字面查找只解码预筛命中行（转义行仍保留），并跳过驻留体积遍历。
+            witnesses.append(cached)
+        # 保持原容量和字面查询边界；缓存只省JSON解析，不能省当前索引的内容验证。
         oversized = before[2] > _ARTIFACT_INDEX_CACHE.max_bytes
         prescreen = tool_index_prescreen_pattern((literal_ref,)) if oversized and literal_ref else None
         slot = _OVERSIZED_LITERAL_SLOT[0]
         if prescreen is not None and slot is not None and slot[0] == (key, literal_ref):
-            return slot[1]
-        hashed_read = _HashedArtifactIndexRead(handle) if local_read == () else None
+            witnesses.append((slot[1], slot[2]))
+        if witnesses:
+            digest = hashlib.sha256()
+            while block := handle.read(64 * 1024):
+                digest.update(block)
+            if _blob_stat_signature(os.fstat(handle.fileno())) == before:
+                for expected, parsed in witnesses:
+                    if digest.digest() == expected:
+                        return parsed
+            handle.seek(0)
+        # 原解析顺序读取同FD时顺带哈希，不加第二份源文本或整表副本。
+        hashed_read = _HashedArtifactIndexRead(handle)
         rows = tuple(row for _, row in iter_decoded_tool_index_objects(
-            _OpenArtifactIndex(hashed_read if hashed_read is not None else handle), prescreen))
+            _OpenArtifactIndex(hashed_read), prescreen))
         by_literal: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
             for ref in {str(row.get(field, "") or "") for field in _INDEX_LITERAL_FIELDS}:
@@ -1036,9 +1040,9 @@ def _parsed_artifact_index(source, *, literal_ref: str | None = None):
             _PREPARE_INDEX_READ.set((key, literal_ref, hashed_read.digest.digest()))
         if stable and (literal_ref is None or literal_ref in by_literal):
             if not oversized:
-                _ARTIFACT_INDEX_CACHE.put(key, result)
+                _ARTIFACT_INDEX_CACHE.put(key, (hashed_read.digest.digest(), result))
             elif prescreen is not None:
-                _OVERSIZED_LITERAL_SLOT[0] = (key, literal_ref), result
+                _OVERSIZED_LITERAL_SLOT[0] = (key, literal_ref), hashed_read.digest.digest(), result
         return result
 
 

@@ -159,3 +159,84 @@ def test_prepare_negative_token_keeps_no_parsed_source_rows(tmp_path, monkeypatc
     monkeypatch.setattr(reader, "tool_output_index_paths_for_lookup", inspect)
     assert reader.prepare_tool_output_artifact_read(
         reader.ReadToolOutputArtifactRequest(tmp_path, "absent:call")).record is None
+
+
+@pytest.mark.parametrize("cache_bytes", [128, 16 * 1024 * 1024])
+def test_positive_index_cache_verifies_bytes_with_identical_stat(tmp_path, monkeypatch, cache_bytes):
+    index = tmp_path / "index.jsonl"
+    ref = "wanted:call"
+    line = json.dumps({"scoped_call_id": ref, "marker": "old", "pad": "x" * 8192}) + "\n"
+    index.write_text(line)
+    monkeypatch.setattr(reader, "_ARTIFACT_INDEX_CACHE", reader._VerifiedArtifactCache(cache_bytes))
+    monkeypatch.setattr(reader, "_OVERSIZED_LITERAL_SLOT", [None])
+    signature = reader._blob_stat_signature
+    monkeypatch.setattr(reader, "_blob_stat_signature", lambda info: (*signature(info)[:3], 0, 0))
+    decoded = []
+    original = reader.iter_decoded_tool_index_objects
+
+    def count(*args, **kwargs):
+        decoded.append(1)
+        yield from original(*args, **kwargs)
+
+    monkeypatch.setattr(reader, "iter_decoded_tool_index_objects", count)
+    cold = reader._parsed_artifact_index(index, literal_ref=ref)
+    assert cold[1][ref][0]["marker"] == "old"
+    assert reader._parsed_artifact_index(index, literal_ref=ref) is cold
+    assert len(decoded) == 1
+    index.write_text(line.replace('"old"', '"new"'))
+    fresh = reader._parsed_artifact_index(index, literal_ref=ref)
+    assert fresh[1][ref][0]["marker"] == "new" and len(decoded) == 2
+    assert reader._parsed_artifact_index(index, literal_ref=ref) is fresh
+    assert len(decoded) == 2
+    # 同一物理长度也可变成资源损坏；旧正结果不能掩盖原严格解析错误。
+    index.write_text('{"bad":' + "1" * 5000 + '}' + " " * (len(line) - 5009) + "\n")
+    assert index.stat().st_size == len(line.encode())
+    with pytest.raises(ValueError):
+        reader._parsed_artifact_index(index, literal_ref=ref)
+    assert len(decoded) == 3
+    index.write_text(line.replace(ref, "newest:call"))
+    newest = reader._parsed_artifact_index(index, literal_ref="newest:call")
+    assert newest[1]["newest:call"][0]["marker"] == "old"
+
+
+@pytest.mark.parametrize("cache_bytes", [128, 16 * 1024 * 1024])
+def test_positive_cache_hot_hit_still_reads_current_index_bytes(tmp_path, monkeypatch, cache_bytes):
+    from contextlib import contextmanager
+
+    index = tmp_path / "index.jsonl"
+    ref = "wanted:call"
+    index.write_text(json.dumps({"scoped_call_id": ref, "pad": "x" * 8192}) + "\n")
+    monkeypatch.setattr(reader, "_ARTIFACT_INDEX_CACHE", reader._VerifiedArtifactCache(cache_bytes))
+    monkeypatch.setattr(reader, "_OVERSIZED_LITERAL_SLOT", [None])
+    consumed = []
+
+    class MeasuredRead:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def fileno(self):
+            return self.handle.fileno()
+
+        def seek(self, offset):
+            return self.handle.seek(offset)
+
+        def read(self, size):
+            assert 0 < size <= 64 * 1024
+            block = self.handle.read(size)
+            consumed.append(len(block))
+            return block
+
+    class Source:
+        path = index
+
+        @contextmanager
+        def open(self, mode):
+            with index.open(mode) as handle:
+                yield MeasuredRead(handle)
+
+    source = Source()
+    cold = reader._parsed_artifact_index(source, literal_ref=ref)
+    assert sum(consumed) == index.stat().st_size
+    consumed.clear()
+    assert reader._parsed_artifact_index(source, literal_ref=ref) is cold
+    assert sum(consumed) == index.stat().st_size
