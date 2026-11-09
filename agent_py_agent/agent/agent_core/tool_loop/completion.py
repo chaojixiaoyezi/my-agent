@@ -658,9 +658,14 @@ def _delegated_work_facts(agent: object, params: ToolLoopExecuteParams) -> dict[
         run_ids = {
             str(item) for item in agent.subagent_run_ids_for_request(task_id) if str(item).strip()
         }
+        # 请求索引已给出精确 id；每轮收口只回读这些 run，不扫描全部历史。
+        by_ids = getattr(agent.subagents, "list_runs_by_ids_report", None)
+        report = by_ids(sorted(run_ids)) if callable(by_ids) else None
+        if report is not None and report.load_errors:
+            return {}
         runs = [
             run
-            for run in agent.subagents.list_runs()
+            for run in (report.runs if callable(by_ids) else agent.subagents.list_runs())
             if str(getattr(run, "id", "") or "") in run_ids
         ]
     except Exception:

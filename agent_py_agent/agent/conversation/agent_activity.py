@@ -1156,10 +1156,8 @@ def _child_subagent_rows(
     ], warnings
 
 
-# LLM: The SQLite control plane is only a bounded lookup index. It selects exact run ids for the
-# requested root/parent/depth relation, then the persistence service reloads those ids from
-# canonical task files. If either adapter is unavailable, legacy/fake agents retain the full-scan
-# compatibility path; prompt text, titles, and status prose never participate in selection.
+# SQLite 只按 root/parent/depth 选 ID，持久层仍回读 canonical；生产投影不可用时保持未知。
+# 只有未提供精确读口的旧适配器保留兼容行为，不以正文、名称或状态文案决定范围。
 # 函数用途: 先按结构化父子关系查索引，再只读取命中的子代理，避免每个 TUI 快照复制全部历史 run。
 def _related_subagent_tasks(
     agent: object,
@@ -1174,7 +1172,9 @@ def _related_subagent_tasks(
     local_store = getattr(manager, "local_store", None)
     tree_reader = getattr(local_store, "list_agent_tree", None)
     selected_reader = getattr(manager, "list_runs_by_ids_report", None)
-    if callable(tree_reader) and callable(selected_reader):
+    if callable(selected_reader):
+        if not callable(tree_reader):
+            return None, ["subagent_runs_unavailable"]
         try:
             selected_ids = _indexed_related_run_ids(
                 tree_reader,
@@ -1183,13 +1183,12 @@ def _related_subagent_tasks(
                 depth=depth,
             )
             report = selected_reader(selected_ids)
-            tasks = list(getattr(report, "runs", ()) or ())
+            tasks = list(report.runs or ())
             load_errors = list(getattr(report, "load_errors", ()) or ())
             return tasks, (["subagent_run_load_error"] if load_errors else [])
         except Exception:
-            # Canonical full-scan fallback preserves existing/fake deployments when the optional
-            # lookup projection is unavailable; it is not a second result authority.
-            pass
+            # 索引读口已装配时，读失败只把本次子代理投影标为未知；被动轮询绝不退回全历史扫描。
+            return None, ["subagent_runs_unavailable"]
     return _all_subagent_tasks(agent)
 
 
