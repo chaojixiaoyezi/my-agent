@@ -16,12 +16,13 @@ import weakref
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 from ..common.authenticated_http import open_authenticated_request
+from ..common.http_listener import BoundThreadingHTTPServer
 from ..common.nofollow_fs import write_bytes_atomic_beneath
 from .base import BaseChannelAdapter
 from .feishu_attachment import FeishuAttachmentMixin
@@ -806,7 +807,7 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
         self._bot_identity_retry_at = 0.0
         self._bot_identity_lock = threading.Lock()
 
-        self._server: ThreadingHTTPServer | None = None
+        self._server: BoundThreadingHTTPServer | None = None
         self._server_thread: threading.Thread | None = None
         self._ws_client: Any = None
         self._ws_thread: threading.Thread | None = None
@@ -933,7 +934,7 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
         return _feishu_runtime_health(self)
 
     def _start_webhook_server(self) -> None:
-        self._server = ThreadingHTTPServer(
+        self._server = BoundThreadingHTTPServer(
             ("0.0.0.0", self.callback_port),
             _FeishuCallbackHandler,
         )

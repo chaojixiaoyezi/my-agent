@@ -63,6 +63,29 @@ def _wait_until_slots_are_full(server: _TinyBoundedServer) -> None:
     raise AssertionError("bounded HTTP request slots did not fill")
 
 
+def test_bound_listener_serves_http_without_reverse_dns(monkeypatch):
+    def unavailable(*_):
+        raise AssertionError("绑定监听端口不应依赖反向 DNS")
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(204)
+            self.end_headers()
+
+    monkeypatch.setattr(socket, "getfqdn", unavailable)
+    with _TinyBoundedServer(("127.0.0.1", 0), Handler) as server:
+        assert (server.server_name, server.server_port) == server.socket.getsockname()
+        serving = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
+        serving.start()
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=2) as response:
+                assert response.status == 204
+        finally:
+            server.shutdown()
+            serving.join(timeout=2)
+        assert not serving.is_alive()
+
+
 def test_gateway_http_pool_reuses_workers_and_rejects_overload() -> None:
     server = _TinyBoundedServer(("127.0.0.1", 0), _BlockingHandler)
     server.test_lock = threading.Lock()
