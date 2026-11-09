@@ -88,7 +88,7 @@ def test_no_bound_sink_marks_missing_full_text_and_nonrich_stays_private(tmp_pat
 
 
 def test_long_commentary_is_already_complete_at_gateway_tool_boundary(tmp_path):
-    agent, _store, thread, writer = _writer(tmp_path)
+    agent, store, thread, writer = _writer(tmp_path)
     text = "\n".join(f"第{index}段：完整模型正文" for index in range(2000))
     writer.write_model(text)
     _commit_writer_fixture(writer, text, call_id="test_long_commentary_is_already_complete_at_gateway_tool_boundary:0")
@@ -96,4 +96,49 @@ def test_long_commentary_is_already_complete_at_gateway_tool_boundary(tmp_path):
     events = [json.loads(line) for line in writer.chunk_path.read_text().splitlines()]
     assert next(event for event in events if event["kind"] == "assistant_commentary")["text"] == text
     live = read_background_transcript_events(agent, thread_id=thread.thread_id, after=0)["events"]
-    assert next(event for event in live if event["kind"] == "assistant_completed")["payload"]["text"] == text
+    completed = next(event for event in live if event["kind"] == "assistant_completed")
+    assert completed["payload"]["text"] != text
+    assert completed["payload"]["process"] is True
+    assert completed["payload"]["history_incomplete"] is True
+    reference = completed["payload"]["display_archive_ref"]
+    parts = [part for page in range(reference["page_count"])
+             for part in read_display_archive_page(store, reference, page)["rows"]]
+    assert "".join(part["text"] for part in parts) == text
+    history = store.messages.page_after_offset_report(thread.thread_id, after=0)[0]
+    checkpoint = next(event for event in display_checkpoint_events(history) if event["kind"] == "assistant_completed")
+    assert checkpoint["payload"]["text"] == text
+    assert checkpoint["payload"]["display_archive_ref"] == reference
+    from agent_py_agent.cli.chat_parts.tui_complete_detail import build_complete_detail_pages
+    from agent_py_agent.cli.chat_parts.tui_events import TuiEventSequencer
+    from agent_py_agent.cli.chat_parts.tui_view_model import TuiStateStore
+
+    view = TuiStateStore()
+    sequence = TuiEventSequencer("archive-replay")
+    view.publish(sequence.emit(completed["kind"], completed["phase"], completed["block_id"], completed["payload"]))
+    pages = build_complete_detail_pages(view.snapshot())
+    assert pages[0].reference == reference
+    assert len(pages) == reference["page_count"]
+
+
+def test_long_committed_commentary_archive_failure_keeps_complete_checkpoint(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation import display_archive
+
+    agent, store, thread, writer = _writer(tmp_path)
+    text = '已提交的完整正文🙂' * 4000
+
+    def failed(*args, **kwargs):
+        raise OSError('private-owner-path')
+
+    monkeypatch.setattr(display_archive, 'archive_display_rows', failed)
+    writer.write_model(text)
+    _commit_writer_fixture(writer, text, call_id='archive-failure:0')
+    writer.write_progress({'phase': 'started', 'tool': 'read_file', 'round': 1, 'call_index': 1}, '')
+    live = read_background_transcript_events(agent, thread_id=thread.thread_id, after=0)
+    completed = next(event for event in live['events'] if event['kind'] == 'assistant_completed')
+    assert live['truncated'] and completed['payload']['history_incomplete']
+    assert 'display_archive_ref' not in completed['payload']
+    assert 'private-owner-path' not in json.dumps(live)
+    history = store.messages.page_after_offset_report(thread.thread_id, after=0)[0]
+    saved = next(event for event in display_checkpoint_events(history) if event['kind'] == 'assistant_completed')
+    assert saved['payload']['text'] == text
+    assert saved['payload']['history_incomplete']

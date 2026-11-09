@@ -592,6 +592,18 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
         block_id: str,
         payload: Mapping[str, object],
     ) -> None:
+        # 已提交assistant正文也须在易失预览裁剪前发表可分页全文；环形缓存不是全文权威。
+        text = payload.get("text")
+        if (kind == "assistant_completed" and type(text) is str
+                and sys.getsizeof(text) > BACKGROUND_TRANSCRIPT_EVENT_MAX_BYTES // 4):
+            try:
+                from .display_archive import archive_display_rows
+
+                reference = archive_display_rows(self.agent, thread_id=self.thread_id,
+                    rows=({"kind": "text", "text": text},))
+                payload = {**payload, "display_archive_ref": reference}
+            except Exception:  # noqa: BLE001 展示归档失败不重跑模型，保留原正文检查点与显式未知。
+                payload = {**payload, "history_incomplete": True}
         if self._display_history is not None:
             self._display_history.record(kind, phase, block_id, payload)
         failed = self._checkpoint_writer.record({
@@ -875,6 +887,8 @@ def _bounded_display_payload(payload, thread_id):
         # 超大或读时变化的展示不能代替原页；保留同线程的规范引用供重连分页。
         result = {"history_incomplete": True, "truncated": True}
         if type(payload) is dict:
+            if type(payload.get("process")) is bool:
+                result["process"] = payload["process"]
             for key in ("tool", "status", "error_code", "text"):
                 value = payload.get(key)
                 if type(value) is str:
