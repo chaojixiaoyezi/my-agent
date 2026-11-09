@@ -278,7 +278,7 @@ def test_standalone_entry_never_spawns_after_unexpected_cleanup(tmp_path, monkey
                 "unresolved_operation_refs": [{"operation_id": "pending"}]}
     monkeypatch.setattr(process, "_cmd_gateway_run_cleanup", cleanup)
     monkeypatch.setattr(process, "hand_over_to_successor", lambda *a, **k: spawned.append(k) or 0)
-    def service_loop(_context):
+    def service_loop(_context, *, memory_tracing=None):
         assert entered.wait(2)
         request = service.submit_restart_request(context.paths, target_pid=os.getpid(), requester={},
             reason="fixture", cooldown_seconds=0)["request"]

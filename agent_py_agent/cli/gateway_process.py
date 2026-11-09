@@ -56,7 +56,6 @@ from ..agent.gateway_parts import (
 from ..agent.gateway_parts.background_resource_report import (
     DEFAULT_BACKGROUND_STOP_TIMEOUT_SECONDS,
     background_store_root,
-    collect_runtime_memory_diagnostics,
     gateway_memory_tracing,
     list_running_background_processes,
     stop_background_processes,
@@ -852,7 +851,7 @@ def _gateway_context_process_identity(context: GatewayRunContext) -> dict[str, o
 # malformed files remain observable on disk but cannot terminate a freshly started Gateway.
 # A safe-restart request targeting this pid is drained here (stop requests win over restarts).
 # 函数用途: 等待真正发给当前 Gateway 的停止请求，或执行指向本进程的安全重启排空；忽略上一代遗留文件。
-def _run_gateway_service_loop(context: GatewayRunContext) -> object:
+def _run_gateway_service_loop(context: GatewayRunContext, *, memory_tracing=None) -> object:
     """Keep the Gateway alive without running a global model-driven planner.
 
     Active user turns run in the request pool and durable continuations run in
@@ -861,10 +860,25 @@ def _run_gateway_service_loop(context: GatewayRunContext) -> object:
     records, so the service thread only waits for the explicit stop record.
     """
     process_identity = _gateway_context_process_identity(context)
+    memory_refresh_error = None
     # 启动阶段的常驻对象移入永久代，第 2 代回收不再反复扫描它们；引用计数照常释放对象。
     gc.freeze()
     try:
         while True:
+            if memory_tracing is not None:
+                from ..agent.settings.live_switches import refresh_live_switches
+
+                try:
+                    refresh_live_switches(context.config)
+                    memory_tracing.refresh(context.config)
+                except (OSError, ValueError, TypeError, RuntimeError) as exc:
+                    # 配置短暂不可读不能终止服务；只报异常类型，不回显配置正文或秘密。
+                    error_type = type(exc).__name__
+                    if memory_refresh_error != error_type:
+                        _print_gateway_loop_error("gateway.memory.config_refresh", "gateway", RuntimeError(error_type))
+                    memory_refresh_error = error_type
+                else:
+                    memory_refresh_error = None
             if context.paths.stop_request.exists():
                 payload = read_json_file(context.paths.stop_request)
                 if stop_request_targets_process(
@@ -919,8 +933,9 @@ class _GatewayStackDumper:
                 try:
                     # 复用原私有日志及旋转，不另存堆对象、快照或无限诊断文件。
                     report = memory_report()
-                    sys.stderr.write("Gateway SIGUSR1 memory " + json.dumps(report, ensure_ascii=False) + "\n")
-                    sys.stderr.flush()
+                    if report is not None:
+                        sys.stderr.write("Gateway SIGUSR1 memory " + json.dumps(report, ensure_ascii=False) + "\n")
+                        sys.stderr.flush()
                 except Exception as exc:
                     _print_gateway_loop_error("gateway.diagnostics.memory", "gateway", exc)
                 finally:
@@ -1413,8 +1428,8 @@ def cmd_gateway_run(args) -> int:
                       + ", ".join(row["c_run_id"] for row in retired["generations"]), file=sys.stderr)
             require_standalone_sources(paths, lifecycle)
             _heal_runtime_db_before_agent(args)
-            with gateway_memory_tracing(getattr(args, "_gateway_frozen_config", None)) as memory_trace:
-                args._gateway_memory_trace = memory_trace
+            with gateway_memory_tracing(getattr(args, "_gateway_frozen_config", None)) as memory_tracing:
+                args._gateway_memory_trace = memory_tracing
                 return _run_standalone_gateway(args, lifecycle)
     except StandaloneLifecycleUnavailable as exc:
         return coordinated_refusal(exc.error_code, reason=str(exc))
@@ -1471,14 +1486,14 @@ def _run_standalone_gateway(args, lifecycle) -> int:
         _record_gateway_run_failed(paths, agent, pid, exc, context=run_context)
         return 2
 
-    memory_trace = getattr(args, "_gateway_memory_trace", None)
+    memory_tracing = getattr(args, "_gateway_memory_trace", None)
     memory_kwargs = {}
-    if memory_trace is not None:
+    if memory_tracing is not None:
         def memory_report():
-            report = collect_runtime_memory_diagnostics(owner_pool=getattr(agent, "_owner_pool", None))
-            trace_metadata = memory_trace if "tracemalloc_scope" in report else {"tracemalloc_scope": "not_tracing"}
-            return {"schema": "gateway-memory.v1", "pid": os.getpid(), "observed_at": time.time(),
-                    **report, **trace_metadata}
+            report = memory_tracing.report(owner_pool=getattr(agent, "_owner_pool", None))
+            if report is None:
+                return None
+            return {"schema": "gateway-memory.v1", "pid": os.getpid(), "observed_at": time.time(), **report}
         memory_kwargs["memory_report"] = memory_report
     previous_signal_handlers = _install_gateway_signal_handlers(
         paths, _gateway_context_process_identity(run_context), **memory_kwargs,
@@ -1490,7 +1505,7 @@ def _run_standalone_gateway(args, lifecycle) -> int:
     cleanup_report: dict[str, object] = {}
     planned_marker = None
     try:
-        report = _run_gateway_service_loop(run_context)
+        report = _run_gateway_service_loop(run_context, memory_tracing=memory_tracing)
         termination = _classify_gateway_service_return(run_context, report)
         planned_marker = report.get("restart") if isinstance(report, dict) else None
         termination_kind = termination.kind

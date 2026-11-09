@@ -114,7 +114,7 @@ class _ParkedTurn:
 
 def _restart_service_loop(turn, *, reopen_gate=False):
     """服务循环替身：前台回合在途后提交重启并跑真实两段排空；reopen_gate 模拟排空后意外重开关口。"""
-    def service_loop(context):
+    def service_loop(context, *, memory_tracing=None):
         assert turn.started.wait(_WAIT)
         restart_service.submit_restart_request(context.paths, target_pid=os.getpid(), requester={"kind": "cli"},
             reason="fixture", cooldown_seconds=0)
@@ -215,7 +215,7 @@ def test_plain_stop_with_foreground_turn_in_flight_still_fails_drain(tmp_path, m
 
     stop = {"target_process": dict(context.process_identity), "reason": "fixture stop", "requested_at": time.time()}
 
-    def service_loop(_context):
+    def service_loop(_context, *, memory_tracing=None):
         assert started.wait(_WAIT)
         return {"summary": "stop requested", "stop_request": stop}
 

@@ -34,28 +34,69 @@ DEFAULT_BACKGROUND_STOP_TIMEOUT_SECONDS = 10.0
 # 资源报告轮询间隔 0.1 秒：接近实时又不过度占 CPU。
 _POLL_SECONDS = 0.1
 # tracemalloc是进程全局设施；本入口串行短快照，不能互相停止对方的追踪窗口。
-_MEMORY_DIAGNOSTICS_LOCK = threading.Lock()
+_MEMORY_DIAGNOSTICS_LOCK = threading.RLock()
+
+
+class GatewayMemoryTracing:
+    """本Gateway生命周期的追踪所有权；只同步进程内诊断状态，不保留Agent或配置。"""
+
+    def __init__(self):
+        self.owned = False
+        self.closed = False
+        self.metadata = None
+
+    def refresh(self, config, *, before_agent=False):
+        with _MEMORY_DIAGNOSTICS_LOCK:
+            if self.closed:
+                raise RuntimeError("gateway memory tracing is closed")
+            enabled = bool(getattr(config, "enable_gateway_memory_diagnostics", False))
+            existing = tracemalloc.is_tracing()
+            if not enabled and self.owned:
+                tracemalloc.stop()
+                self.owned = existing = False
+                self.metadata = None
+            if enabled and not existing:
+                tracemalloc.start(1)
+                self.owned = True
+                self.metadata = {
+                    "tracemalloc_scope": "gateway_before_agent" if before_agent else "gateway_live_window",
+                    "tracemalloc_started_at": time.time(),
+                }
+            elif existing and not self.owned:
+                self.metadata = {"tracemalloc_scope": "existing_trace", "tracemalloc_started_at": None}
+            elif not existing:
+                self.metadata = None
+            return self.metadata
+
+    def report(self, *, owner_pool=None):
+        # 开关关闭与整份快照串行；关闭后到达的旧事件不能偷偷重开追踪或采空窗口。
+        with _MEMORY_DIAGNOSTICS_LOCK:
+            if self.closed or self.metadata is None:
+                return None
+            report = collect_runtime_memory_diagnostics(owner_pool=owner_pool, include_tracemalloc=False)
+            metadata = self.metadata if "tracemalloc_scope" in report else {"tracemalloc_scope": "not_tracing"}
+            return {**report, **metadata}
+
+    def close(self):
+        with _MEMORY_DIAGNOSTICS_LOCK:
+            if self.closed:
+                return
+            self.closed = True
+            if self.owned:
+                tracemalloc.stop()
+                self.owned = False
+            self.metadata = None
 
 
 @contextmanager
 def gateway_memory_tracing(config: object):
-    """显式诊断从 Agent 构造前追踪；只关闭本生命周期开启的全局追踪。"""
-    with _MEMORY_DIAGNOSTICS_LOCK:
-        enabled = bool(getattr(config, "enable_gateway_memory_diagnostics", False))
-        existing = tracemalloc.is_tracing()
-        owned = enabled and not existing
-        if owned:
-            tracemalloc.start(1)
-        metadata = ({
-            "tracemalloc_scope": "gateway_before_agent" if owned else "existing_trace",
-            "tracemalloc_started_at": time.time() if owned else None,
-        } if enabled or existing else None)
+    """启动前打开追踪，并把原生命周期内的热开关所有权交给同一个控制器。"""
+    state = GatewayMemoryTracing()
+    state.refresh(config, before_agent=True)
     try:
-        yield metadata
+        yield state
     finally:
-        if owned:
-            with _MEMORY_DIAGNOSTICS_LOCK:
-                tracemalloc.stop()
+        state.close()
 
 
 # LLM: 仅宿主显式调用；ru_maxrss是历史峰值而非当前RSS，显式追踪只覆盖本次窗口，原已开启追踪不关闭。
@@ -392,6 +433,7 @@ __all__ = [
     "collect_runtime_memory_diagnostics",
     "freeze_session_leftover_processes",
     "gateway_memory_tracing",
+    "GatewayMemoryTracing",
     "list_running_background_processes",
     "session_background_processes",
     "stop_background_processes",

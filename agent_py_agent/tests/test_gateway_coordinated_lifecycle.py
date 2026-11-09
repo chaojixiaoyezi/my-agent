@@ -122,7 +122,7 @@ def test_c_only_incomplete_cleanup_publishes_failure_without_fake_agent(tmp_path
         context = _context(agent, gate)
         request = GatewayRunCleanupRequest(context, os.getpid(), threading.Event(), None, None, None, None)
         monkeypatch.setattr(api, "_install_gateway_signal_handlers", lambda *_: {})
-        monkeypatch.setattr(api, "_run_gateway_service_loop", lambda *_: {"summary": "unexpected return"})
+        monkeypatch.setattr(api, "_run_gateway_service_loop", lambda *_, memory_tracing=None: {"summary": "unexpected return"})
         monkeypatch.setattr(api, "_cmd_gateway_run_cleanup", lambda *_: {
             "drain_complete": False, "drain_blockers": [{"kind": "foreground", "reason": "unknown"}]})
         assert coordinated._serve_coordinated_gateway(request) == 2

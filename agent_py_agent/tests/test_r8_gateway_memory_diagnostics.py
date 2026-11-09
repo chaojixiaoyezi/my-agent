@@ -103,7 +103,7 @@ def test_cmd_gateway_trace_starts_before_agent_and_releases_only_owned_trace(tmp
             observed['tracing_at_agent'] = tracemalloc.is_tracing()
             marker = bytearray(4096)
             observed['marker_tracked'] = tracemalloc.get_object_traceback(marker) is not None
-            observed['metadata'] = arguments._gateway_memory_trace
+            observed['metadata'] = arguments._gateway_memory_trace.metadata
             if {fail!r}: raise ExpectedFailure()
             return marker
         real_run = gp._run_standalone_gateway
@@ -275,8 +275,9 @@ def test_standalone_service_passes_real_collector_and_start_metadata_to_signal_p
         def install(paths,identity,**kwargs):
             observed.update(kwargs['memory_report']())
             raise ReachedSignalPort()
-        with gateway_memory_tracing(config) as metadata, ExitStack() as stack:
-            args._gateway_memory_trace=metadata
+        with gateway_memory_tracing(config) as tracing, ExitStack() as stack:
+            metadata=tracing.metadata
+            args._gateway_memory_trace=tracing
             replacements=[('make_agent',make_agent),
                 ('gateway_paths',lambda agent:SimpleNamespace(root=Path.cwd())),
                 ('_gateway_run_context_from_args',lambda request:object()),
@@ -295,6 +296,125 @@ def test_standalone_service_passes_real_collector_and_start_metadata_to_signal_p
             assert observed['tracemalloc_scope']=='gateway_before_agent'
             assert observed['tracemalloc_started_at']==metadata['tracemalloc_started_at']
             assert observed['tracemalloc_current_bytes'] >= len(retained[0])
+        assert not tracemalloc.is_tracing()
+        print(json.dumps({'ok':True}))
+    ''') == {'ok': True}
+
+
+@pytest.mark.parametrize('external', [False, True])
+def test_service_tick_applies_real_config_file_switches_without_snapshot_polling(tmp_path, external):
+    result = _child(tmp_path, '''
+        import json,queue,threading,tracemalloc
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from agent_py_agent.cli import gateway_process as gp
+        from agent_py_agent.agent.settings.config import load_config
+        from agent_py_agent.agent.settings.live_switches import register_live_config
+        from agent_py_agent.agent.gateway_parts.background_resource_report import gateway_memory_tracing
+        path=Path.cwd()/'agent.yaml'
+        def write(value):
+            pending=path.with_suffix('.pending')
+            pending.write_text('enable_gateway_memory_diagnostics: '+str(value).lower()+'\\n',encoding='utf-8')
+            pending.replace(path)
+        write(False);config=load_config(path);register_live_config(config)
+        context=SimpleNamespace(config=config,paths=SimpleNamespace(stop_request=Path.cwd()/'no-stop'),process_started_at=0)
+        states=queue.Queue();advance=threading.Event();errors=[];snapshots=[];warnings=[]
+        original_snapshot=tracemalloc.take_snapshot
+        def snapshot():
+            snapshots.append(1)
+            return original_snapshot()
+        with gateway_memory_tracing(config) as tracing:
+            prior=bytearray(4096)
+            def drain(*args):
+                states.put((tracemalloc.is_tracing(),tracing.metadata))
+                assert advance.wait(10)
+                advance.clear()
+                return {'summary':'fixture complete'} if len(observed)==6 else None
+            def run():
+                try:gp._run_gateway_service_loop(context,memory_tracing=tracing)
+                except BaseException as error:errors.append(error)
+            observed=[]
+            with patch.object(gp,'_gateway_context_process_identity',return_value={}), \
+                 patch.object(gp,'drain_for_requested_restart',side_effect=drain), \
+                 patch.object(gp.time,'sleep',return_value=None), \
+                 patch.object(gp,'_print_gateway_loop_error',side_effect=lambda *a:warnings.append(str(a[2]))), \
+                 patch.object(tracemalloc,'take_snapshot',side_effect=snapshot):
+                thread=threading.Thread(target=run);thread.start()
+                try:
+                    for enabled_next in (True,None,None,False,True,True):
+                        observed.append(states.get(timeout=10))
+                        if len(observed)==2:
+                            current=bytearray(4096)
+                            assert tracemalloc.get_object_traceback(current) is not None
+                            if not bool(__import__("sys")._xoptions.get("tracemalloc")):
+                                assert tracemalloc.get_object_traceback(prior) is None
+                        assert snapshots==[], 'service tick took a diagnostic heap snapshot'
+                        if enabled_next is None:
+                            path.unlink(missing_ok=True)
+                        else:
+                            write(enabled_next)
+                        advance.set()
+                    thread.join(10)
+                    assert not thread.is_alive() and not errors
+                    assert config.enable_gateway_memory_diagnostics is True
+                    assert warnings==['FileNotFoundError']
+                    marker=bytearray(1024*1024)
+                    report=tracing.report()
+                    assert report['tracemalloc_current_bytes']>=len(marker)
+                    assert len(snapshots)==1
+                    assert report['tracemalloc_scope'] in {'gateway_live_window','existing_trace'}
+                finally:
+                    advance.set();thread.join(10)
+        print(json.dumps({'states':observed,'after_close':tracemalloc.is_tracing()}))
+    ''', external=external)
+    assert [state[0] for state in result['states']] == ([True] * 6 if external else [False, True, True, True, False, True])
+    assert result['after_close'] is external
+    if external:
+        assert all(state[1]['tracemalloc_scope'] == 'existing_trace' for state in result['states'])
+    else:
+        assert result['states'][0][1] is None and result['states'][4][1] is None
+        assert result['states'][1][1]['tracemalloc_scope'] == 'gateway_live_window'
+        assert result['states'][5][1]['tracemalloc_scope'] == 'gateway_live_window'
+        assert result['states'][5][1]['tracemalloc_started_at'] >= result['states'][1][1]['tracemalloc_started_at']
+
+
+def test_live_disable_serializes_with_snapshot_and_closed_state_never_reopens(tmp_path):
+    assert _child(tmp_path, '''
+        import json,threading,tracemalloc
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from agent_py_agent.agent.gateway_parts.background_resource_report import gateway_memory_tracing
+        entered=threading.Event();release=threading.Event();disabling=threading.Event();disabled=threading.Event()
+        failures=[];reports=[]
+        with gateway_memory_tracing(SimpleNamespace(enable_gateway_memory_diagnostics=True)) as tracing:
+            original=tracemalloc.take_snapshot
+            def snapshot():
+                entered.set();assert release.wait(10)
+                return original()
+            def read():
+                try:reports.append(tracing.report())
+                except BaseException as error:failures.append(error)
+            def disable():
+                disabling.set()
+                try:tracing.refresh(SimpleNamespace(enable_gateway_memory_diagnostics=False))
+                except BaseException as error:failures.append(error)
+                disabled.set()
+            with patch.object(tracemalloc,'take_snapshot',side_effect=snapshot):
+                reader=threading.Thread(target=read);reader.start();assert entered.wait(10)
+                writer=threading.Thread(target=disable);writer.start();assert disabling.wait(10)
+                try:
+                    assert not disabled.is_set() and tracemalloc.is_tracing()
+                finally:
+                    release.set();reader.join(10);writer.join(10)
+                assert disabled.is_set() and not failures and reports
+                assert not tracemalloc.is_tracing()
+                assert tracing.report() is None
+        tracing.close()
+        assert tracing.report() is None
+        try:tracing.refresh(SimpleNamespace(enable_gateway_memory_diagnostics=True))
+        except RuntimeError:pass
+        else:raise AssertionError('closed controller reopened tracing')
         assert not tracemalloc.is_tracing()
         print(json.dumps({'ok':True}))
     ''') == {'ok': True}
