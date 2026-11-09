@@ -38,8 +38,69 @@ def _wait_marker(process, marker):
         time.sleep(0.01)
 
 
+@pytest.fixture
+def ready_stop_control(monkeypatch):
+    """只在原读事务证明pending拒绝且尚未广播时续作，不代替产品的未知门。"""
+    from agent_py_agent.agent.subagents import cancellation
+    from agent_py_agent.agent.subagents.services.persistence.run_index import (
+        SubagentRunIndex,
+        SubagentRunIndexUnavailable,
+    )
+
+    signals, refusals = [], []
+    denied = threading.Event()
+    signal = cancellation.signal_runner_attempt
+    require_complete = SubagentRunIndex._require_complete
+
+    def observed_signal(run_id, attempt_id):
+        signals.append((run_id, attempt_id))
+        return signal(run_id, attempt_id)
+
+    def observed_complete(index, db):
+        try:
+            return require_complete(index, db)
+        except SubagentRunIndexUnavailable as error:
+            # request_ids已BEGIN；同一快照内采样，不能拿后来的就绪状态猜原错误原因。
+            error.stop_test_index_state = {
+                'complete': db.execute("SELECT value FROM meta WHERE key='complete'").fetchone() == (1,),
+                'pending': db.execute('SELECT 1 FROM runs WHERE pending=1 LIMIT 1').fetchone() is not None,
+            }
+            refusals.append(error.stop_test_index_state)
+            denied.set()
+            raise
+
+    monkeypatch.setattr(cancellation, 'signal_runner_attempt', observed_signal)
+    monkeypatch.setattr(SubagentRunIndex, '_require_complete', observed_complete)
+
+    def prepare(agent, requests):
+        deadline = time.monotonic() + 5
+        while True:
+            signal_count = len(signals)
+            try:
+                return prepare_subagent_stops(agent, requests)  # 默认include_descendants保持原协议。
+            except SubagentRunIndexUnavailable as error:
+                if (getattr(error, 'stop_test_index_state', None) != {'complete': True, 'pending': True}
+                        or len(signals) != signal_count):
+                    raise
+                while True:
+                    if time.monotonic() >= deadline:
+                        raise
+                    state = agent.subagents.persistence.run_index.readiness()
+                    if state['complete'] is not True:
+                        raise
+                    if state['pending'] is False:
+                        break
+                    time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+                if time.monotonic() >= deadline:
+                    raise
+
+    return SimpleNamespace(prepare=prepare, signals=signals, refusals=refusals, denied=denied)
+
+
 @pytest.mark.parametrize("resume_before_observation", [False, True])
-def test_separate_host_relays_exact_cancel_without_interrupting_sibling(tmp_path, running, resume_before_observation):
+def test_separate_host_relays_exact_cancel_without_interrupting_sibling(
+    tmp_path, running, resume_before_observation, ready_stop_control,
+):
     manager, tasks = running
     script = '''
 import sys, threading
@@ -69,7 +130,7 @@ for thread in threads: thread.join()
     try:
         _wait_marker(process, tmp_path / "ready-0")
         _wait_marker(process, tmp_path / "ready-1")
-        batch = prepare_subagent_stops(agent, [CancelSubagentTaskRequest(
+        batch = ready_stop_control.prepare(agent, [CancelSubagentTaskRequest(
             manager.load(tasks[0].id), "conversation_user_stop", kill_process=False,
         )])
         assert not batch.unconfirmed and batch.stops[0].report["thread_interrupt"] == "not_found"
@@ -81,7 +142,7 @@ for thread in threads: thread.join()
         assert manager.load(tasks[1].id).runner_active_attempt_id == tasks[1].runner_active_attempt_id
         if resume_before_observation:
             assert manager.load(tasks[0].id).runner_active_attempt_id == resumed.runner_active_attempt_id
-        prepare_subagent_stops(agent, [CancelSubagentTaskRequest(manager.load(tasks[1].id), "test", kill_process=False)])
+        ready_stop_control.prepare(agent, [CancelSubagentTaskRequest(manager.load(tasks[1].id), "test", kill_process=False)])
         _wait_marker(process, tmp_path / "stopped-1")
         process.wait(timeout=5)
         assert process.returncode == 0, process.stderr.read()
@@ -184,3 +245,87 @@ def test_cancel_between_control_read_and_heartbeat_write_is_still_relayed(runnin
         interrupt_by_name(token)
         runner.join(3)
     assert not runner.is_alive()
+
+
+def test_pending_sibling_commit_refuses_before_broadcast_and_retries_exact_attempt(running, ready_stop_control, monkeypatch):
+    from agent_py_agent.agent.subagents.services.persistence import service
+
+    manager, tasks = running
+    original_prepare = manager.persistence.prepare_run_index
+    original_write = service.write_agent_run_state
+    marked, failures = threading.Event(), []
+
+    def pause_before_canonical(state):
+        if threading.current_thread() is writer:
+            marked.set()  # mark_pending已耐久提交，但canonical写及upsert尚未发生。
+            assert ready_stop_control.denied.wait(5)
+        return original_write(state)
+
+    def save_sibling():
+        try:
+            manager.save(tasks[0])
+        except BaseException as error:
+            failures.append(error)
+
+    writer = threading.Thread(target=save_sibling)
+    started = False
+    def prepare_then_start_pending():
+        nonlocal started
+        result = original_prepare()
+        if not started:
+            started = True
+            writer.start()
+            assert marked.wait(5)
+        return result
+
+    monkeypatch.setattr(service, 'write_agent_run_state', pause_before_canonical)
+    monkeypatch.setattr(manager.persistence, 'prepare_run_index', prepare_then_start_pending)
+    try:
+        request = CancelSubagentTaskRequest(tasks[1], 'test', kill_process=False)
+        batch = ready_stop_control.prepare(SimpleNamespace(subagents=manager), [request])
+        assert not batch.unconfirmed
+        assert ready_stop_control.refusals == [{'complete': True, 'pending': True}]
+        assert ready_stop_control.signals == [(tasks[1].id, tasks[1].runner_active_attempt_id)]
+        assert runner_attempt_cancelled(manager, tasks[1].id, tasks[1].runner_active_attempt_id)
+        assert not runner_attempt_cancelled(manager, tasks[0].id, tasks[0].runner_active_attempt_id)
+        assert manager.load(tasks[0].id).runner_active_attempt_id == tasks[0].runner_active_attempt_id
+    finally:
+        ready_stop_control.denied.set()
+        if started:
+            writer.join(5)
+    assert not writer.is_alive() and failures == []
+
+
+def test_pending_index_error_after_broadcast_is_never_retried(running, ready_stop_control, monkeypatch):
+    from agent_py_agent.agent.subagents import cancellation
+    from agent_py_agent.agent.subagents.services.persistence.run_index import (
+        SubagentRunIndexUnavailable,
+    )
+
+    manager, tasks = running
+    calls = []
+    original_errors = []
+
+    def fail_after_signal(agent, requests):
+        calls.append(requests)
+        request = requests[0]
+        cancellation.signal_runner_attempt(request.task.id, request.task.runner_active_attempt_id)
+        index = manager.persistence.run_index
+        index.mark_pending(tasks[0].id, task=tasks[0])
+        with index.connect() as db:
+            db.execute('BEGIN')
+            try:
+                index._require_complete(db)
+            except SubagentRunIndexUnavailable as error:
+                original_errors.append(error)
+                raise
+        pytest.fail('真实pending必须拒绝')
+
+    monkeypatch.setattr(sys.modules[__name__], 'prepare_subagent_stops', fail_after_signal)
+    with pytest.raises(SubagentRunIndexUnavailable) as caught:
+        ready_stop_control.prepare(SimpleNamespace(subagents=manager), [
+            CancelSubagentTaskRequest(tasks[1], 'test', kill_process=False),
+        ])
+    assert len(calls) == 1 and original_errors == [caught.value]
+    assert ready_stop_control.signals == [(tasks[1].id, tasks[1].runner_active_attempt_id)]
+    assert ready_stop_control.refusals == [{'complete': True, 'pending': True}]
