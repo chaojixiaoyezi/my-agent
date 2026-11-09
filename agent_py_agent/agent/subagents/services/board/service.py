@@ -76,11 +76,29 @@ class SubAgentBoardService:
         *,
         options: SubAgentBoardOptions | None = None,
         recent_limit: int = 20,
+        candidate_ids: list[str] | None = None,
     ) -> SubAgentBoard:
         """Build the subagent traffic light board."""
         board_options = make_board_options(options, recent_limit=recent_limit)
-        tasks = self._manager.list_runs()
+        status = board_options.status.upper()
+        tasks = _board_tasks(self._manager, candidate_ids, root_id=board_options.root_id, status=status)
+        tasks = [task for task in tasks if (not status or task.status == status)
+                 and (not board_options.owner or board_options.owner in (task.owner, task.supervisor, task.final_owner))
+                 and (not board_options.root_id or (task.root_id or task.id) == board_options.root_id)]
         task_index = {task.id: task for task in tasks} if board_options.include_child_status_counts else None
+        reader = getattr(self._manager, "list_runs_by_ids_report", None)
+        if task_index and callable(reader):
+            child_ids = {child_id for task in tasks for child_id in task.child_ids} - task_index.keys()
+            if child_ids:
+                report = reader(child_ids)
+                errors = [error for error in report.load_errors if error.get("error_type") != "FileNotFoundError"]
+                if errors:
+                    from ..persistence.run_index import SubagentRunIndexUnavailable
+
+                    error = SubagentRunIndexUnavailable("board child canonical unavailable")
+                    error.load_errors = errors
+                    raise error
+                task_index.update((task.id, task) for task in report.runs)
         items = [
             to_board_item(
                 self._manager,
@@ -138,6 +156,7 @@ class SubAgentBoardService:
         root_id: str = "",
         include_run_ids: list[str] | None = None,
         exclude_run_ids: list[str] | None = None,
+        candidate_ids: list[str] | None = None,
     ) -> DueCheckReport:
         """Inspect all subagent runs to find issues needing parent intervention."""
         if params is not None:
@@ -148,7 +167,8 @@ class SubAgentBoardService:
             exclude_run_ids = options.exclude_run_ids
         now = time.time()
         settings = due_check_settings(config, now)
-        tasks = scoped_due_check_tasks(self._manager.list_runs(), root_id, include_run_ids, exclude_run_ids)
+        tasks = _board_tasks(self._manager, candidate_ids, root_id=root_id, include_run_ids=include_run_ids)
+        tasks = scoped_due_check_tasks(tasks, root_id, include_run_ids, exclude_run_ids)
         issues = inspect_due_tasks(self._manager, tasks, settings)
 
         issues.sort(key=lambda issue: (-_issue_weight(issue), issue.run_id, issue.kind))
@@ -180,6 +200,7 @@ class SubAgentBoardService:
         root_id: str = "",
         include_run_ids: list[str] | None = None,
         exclude_run_ids: list[str] | None = None,
+        candidate_ids: list[str] | None = None,
     ) -> ActionPlanReport:
         """Convert due-check issues into a dry-run action plan."""
         if params is not None:
@@ -193,6 +214,7 @@ class SubAgentBoardService:
             root_id=root_id,
             include_run_ids=include_run_ids,
             exclude_run_ids=exclude_run_ids,
+            candidate_ids=candidate_ids,
         )
         return build_action_plan_report(self._manager, due_report)
 
@@ -221,6 +243,32 @@ class SubAgentBoardService:
             run_id=run_id,
             limit=limit,
         )
+
+
+def _board_tasks(manager, candidate_ids, *, root_id="", include_run_ids=None, status=""):
+    from ...manager import SubAgentManager, request_scope_runs, select_current_runs
+    from ..persistence.run_index import SubagentRunIndexUnavailable
+
+    ids = candidate_ids if candidate_ids is not None else include_run_ids
+    if ids == [] and candidate_ids is not None:
+        return []
+    if not isinstance(manager, SubAgentManager) or getattr(manager.list_runs, "__func__", None) is not SubAgentManager.list_runs:
+        # 自定义列表适配器保留原协议；正式 manager 的索引未知绝不走此分支。
+        allowed = set(ids) if ids else None
+        return [task for task in manager.list_runs() if allowed is None or task.id in allowed]
+    if ids is not None and (candidate_ids is not None or ids):
+        report = manager.list_runs_by_ids_report(ids)
+        if report.load_errors:
+            error = SubagentRunIndexUnavailable("board canonical candidates unavailable")
+            error.load_errors = report.load_errors
+            raise error
+        return report.runs
+    if root_id:
+        return request_scope_runs(manager, (root_id,), "", None)
+    if status:
+        return select_current_runs(manager, lambda task: task.status == status, statuses=(status,))
+    # None 且没有范围是原来的显式历史诊断，空候选绝不走这里。
+    return manager.list_runs()
 
 
 def _due_check_options(

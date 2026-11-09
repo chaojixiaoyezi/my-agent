@@ -75,10 +75,13 @@ def build_subagent_run_budget_report(request: SubagentRunBudgetRequest) -> Subag
 
 
 def _scoped_tasks(request: SubagentRunBudgetRequest) -> list[Any]:
+    from .manager import request_scope_runs
+
     root_id = str(request.root_id or "").strip()
-    tasks = list(request.manager.list_runs())
     if not root_id:
-        return tasks
+        # 无范围的预算报告是显式历史诊断；轮询必须提供根身份。
+        return list(request.manager.list_runs())
+    tasks = request_scope_runs(request.manager, (root_id,), "", None)
     return [task for task in tasks if (str(getattr(task, "root_id", "") or getattr(task, "id", ""))) == root_id]
 
 

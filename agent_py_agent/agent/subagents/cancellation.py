@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -89,7 +90,7 @@ def prepare_subagent_stops(
 ) -> FrozenSubagentStops:
     manager = agent.subagents
     with manager.creation_guard():
-        tasks = list(manager.list_runs())
+        tasks = _stop_scope_tasks(manager, requests, include_descendants)
         by_id = {task.id: task for task in tasks}
         selected: dict[str, CancelSubagentTaskRequest] = {}
         for request in requests:
@@ -133,6 +134,31 @@ def prepare_subagent_stops(
                     failed.append(_failure(run_id, exc, "subagent_stop.resources"))
             stops.append(FrozenSubagentStop(report, runner, resources))
         return FrozenSubagentStops(tuple(stops), tuple(failed))
+
+
+def _stop_scope_tasks(manager, requests, include_descendants):
+    from ..memory_store.retention_scan_budget import RETENTION_SCAN_SLICE_ENTRIES
+    from .manager import SubAgentManager, request_scope_runs, select_recovery_runs
+
+    if not isinstance(manager, SubAgentManager):
+        return list(manager.list_runs())
+    # 在原创建锁内重读授权身份；索引坏账必须在广播中断以前失败。
+    selected = {request.task.id: manager.load(request.task.id) for request in requests}
+    for request in requests:
+        if _control_identity(selected[request.task.id]) != _control_identity(request.task):
+            raise RuntimeConflictError("停止目标执行身份已变化，不能沿旧请求选择新的执行轮")
+    if include_descendants:
+        frontier = deque(selected)
+        while frontier:
+            page = [frontier.popleft() for _ in range(min(len(frontier), RETENTION_SCAN_SLICE_ENTRIES))]
+            tasks = request_scope_runs(manager, page, "", None)
+            frontier.extend(task.id for task in tasks if task.id not in selected)
+            selected.update((task.id, task) for task in tasks)
+    if any(request.kill_process for request in requests):
+        # 共享宿主的其它活跃轮/未结清理仍参与排他性判定，终态后代保留在原停止范围。
+        for task in select_recovery_runs(manager):
+            selected.setdefault(task.id, task)
+    return list(selected.values())
 
 
 # LLM: 这些都是原 canonical 字段；不用进度版本作代次，也不把 projection 的空活动编号补成 later current。

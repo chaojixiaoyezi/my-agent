@@ -123,8 +123,10 @@ class SubagentKernel:
 
     def snapshot(self, query: SubagentKernelQuery | None = None) -> SubagentKernelSnapshot:
         query = query or SubagentKernelQuery()
-        all_tasks, load_errors = self._safe_list_runs_report()
+        all_tasks, load_errors = self._safe_list_runs_report(query)
         selected, warnings = _select_tasks(all_tasks, query)
+        if not (query.root_id or query.run_id) and query.scope not in {"conversation_thread", "task_workspace"}:
+            warnings.append("owner_history_diagnostic")
         if load_errors:
             warnings.extend(_load_error_warning(error) for error in load_errors)
         rows = [_task_to_kernel_run(task, include_refs=query.include_refs, all_tasks=selected) for task in selected]
@@ -153,15 +155,41 @@ class SubagentKernel:
             load_errors=load_errors,
         )
 
-    def _safe_list_runs_report(self) -> tuple[list[SubAgentTask], list[dict[str, object]]]:
+    def _safe_list_runs_report(self, query: SubagentKernelQuery) -> tuple[list[SubAgentTask], list[dict[str, object]]]:
+        from ..common.json_io import read_json_object_report
+        from ..runtime_errors import runtime_error_report
+        from .manager import SubAgentManager, request_scope_runs, select_current_runs
+
         try:
+            if isinstance(self.manager, SubAgentManager):
+                root_id = query.root_id or query.run_id
+                if query.scope == "conversation_thread":
+                    seeds = select_current_runs(self.manager, thread_id=query.conversation_thread_id) if query.conversation_thread_id else []
+                    roots = {task.root_id or task.id for task in seeds}
+                    return request_scope_runs(self.manager, roots, "", None) if roots else [], []
+                if query.scope == "task_workspace":
+                    identity = read_json_object_report(Path(query.task_workspace_dir) / "work" / "run_workspace.json")
+                    if identity.load_error:
+                        return [], [identity.load_error]
+                    if identity.payload.get("schema_version") != "run_workspace.v1" or not identity.payload.get("task_id"):
+                        raise ValueError("task workspace identity unavailable")
+                    return request_scope_runs(self.manager, (identity.payload.get(key, "") for key in ("task_id", "run_id", "request_id")), "", None), []
+                elif query.run_id and not query.root_id:
+                    try:
+                        task = self.manager.load(query.run_id)
+                        root_id = task.root_id or task.id
+                    except FileNotFoundError:
+                        pass  # 主请求可能不是子代理行，仍用显式请求身份查索引。
+                if root_id:
+                    return request_scope_runs(self.manager, (root_id,), "", None), []
+                # 没有任何查询身份才是显式全历史诊断。
             report_method = getattr(self.manager, "list_runs_report", None)
             if callable(report_method):
                 report = report_method()
                 return list(report.runs), list(report.load_errors)
             return list(self.manager.list_runs()), []
-        except FileNotFoundError:
-            return [], []
+        except Exception as exc:
+            return [], list(getattr(exc, "load_errors", ()) or [runtime_error_report(exc, context="subagent.kernel.scope")])
 
 
 def _load_error_warning(error: dict[str, object]) -> str:

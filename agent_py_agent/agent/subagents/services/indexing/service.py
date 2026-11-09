@@ -194,10 +194,14 @@ class SubAgentIndexingService:
 
     def select_runs(self, run_ids: list[str] | None) -> list[SubAgentTask]:
         """Select runs by id, filtering out ineligible statuses."""
-        from ...models import DISPATCH_INELIGIBLE_STATUSES
+        from ...manager import select_current_runs
+        from ...models import DISPATCH_INELIGIBLE_STATUSES, SUBAGENT_TASK_STATUSES
+
         if run_ids is None:
-            all_runs = self.manager.list_runs()
-            return [r for r in all_runs if r.status not in DISPATCH_INELIGIBLE_STATUSES]
+            return select_current_runs(
+                self.manager, lambda task: task.status not in DISPATCH_INELIGIBLE_STATUSES,
+                statuses=tuple(sorted(SUBAGENT_TASK_STATUSES - DISPATCH_INELIGIBLE_STATUSES)),
+            )
         if not run_ids:
             return []
         runs: list[SubAgentTask] = []

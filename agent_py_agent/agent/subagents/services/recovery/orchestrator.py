@@ -89,6 +89,8 @@ def _strategies_for_request(
     manager: Any,
     request: RecoveryOrchestrationRequest,
 ) -> tuple[list[SubagentRecoveryStrategy], list[dict[str, object]]]:
+    from ...manager import request_scope_runs
+
     load_errors: list[dict[str, object]] = []
     if request.strategies:
         return list(request.strategies)[: _positive_limit(request.max_items)], load_errors
@@ -97,12 +99,7 @@ def _strategies_for_request(
     if not run_ids:
         run_ids, recoverable_errors = _recoverable_run_ids(manager, _positive_limit(request.max_items))
         load_errors.extend(recoverable_errors)
-    try:
-        all_tasks = manager.list_runs()
-    except Exception as exc:
-        all_tasks = []
-        load_errors.append(_runtime_load_error(exc, "subagent_recovery_orchestration.list_all_tasks"))
-    strategies: list[SubagentRecoveryStrategy] = []
+    selected = []
     for run_id in run_ids[: _positive_limit(request.max_items)]:
         try:
             task = manager.load(run_id)
@@ -110,6 +107,22 @@ def _strategies_for_request(
             continue
         except Exception as exc:
             load_errors.append(_runtime_load_error(exc, "subagent_recovery_orchestration.load_task", run_id=run_id))
+            continue
+        selected.append(task)
+    if not selected:
+        return [], load_errors
+    try:
+        all_tasks = request_scope_runs(manager, {task.root_id or task.id for task in selected}, "", None)
+    except Exception as exc:
+        load_errors.append(_runtime_load_error(exc, "subagent_recovery_orchestration.list_all_tasks"))
+        return [], load_errors
+    by_id = {task.id: task for task in all_tasks}
+    strategies: list[SubagentRecoveryStrategy] = []
+    for prior in selected:
+        task = by_id.get(prior.id)
+        if task is None or (task.root_id or task.id) != (prior.root_id or prior.id):
+            load_errors.append(_runtime_load_error(ValueError("recovery lineage changed"),
+                               "subagent_recovery_orchestration.load_task", run_id=prior.id))
             continue
         strategies.append(
             build_subagent_recovery_strategy(SubagentRecoveryStrategyRequest(
@@ -120,8 +133,10 @@ def _strategies_for_request(
 
 
 def _recoverable_run_ids(manager: Any, limit: int) -> tuple[list[str], list[dict[str, object]]]:
+    from ...manager import select_recovery_runs
+
     try:
-        tasks = manager.list_runs()
+        tasks = select_recovery_runs(manager)
     except Exception as exc:
         return [], [_runtime_load_error(exc, "subagent_recovery_orchestration.list_recoverable_runs")]
     ids: list[str] = []
