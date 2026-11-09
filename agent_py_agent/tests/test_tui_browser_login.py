@@ -36,7 +36,11 @@ def get(url):
         return exc.code, exc.read().decode()
 
 
-def test_callback_accepts_only_this_login_and_never_prints_the_code(capfd):
+def test_callback_accepts_only_this_login_and_never_prints_the_code(capfd, monkeypatch):
+    def no_reverse_dns(*_):
+        raise AssertionError("回环登录不应查询 PTR")
+
+    monkeypatch.setattr(socket, "getfqdn", no_reverse_dns)
     callback = LoopbackCallback((0,))
     try:
         callback.expect(STATE)

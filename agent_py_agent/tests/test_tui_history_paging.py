@@ -14,6 +14,7 @@ from agent_py_agent.cli.chat_parts.tui_markdown import fragments_text
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 from agent_py_agent.cli.chat_parts.tui_view import make_tui_transcript_view
 from agent_py_agent.cli.chat_parts.tui_view_model import TuiStateStore, TuiViewModelReducer
+from agent_py_agent.tests.support.fd_lifetime import capture_fd_snapshot
 
 
 # LLM: helper 只构造公开静态显示事件，使用持久消息形状的稳定 ID，无模型或控制动作。
@@ -216,19 +217,27 @@ def _run_history_reader_inline(monkeypatch):
                         lambda **kwargs: SimpleNamespace(start=lambda: kwargs["target"](*kwargs["args"])))
 
 
-def _fd_count():
-    # Linux/macOS 核对描述符零增量，其它平台仍执行分页行为断言。
-    for directory in ("/proc/self/fd", "/dev/fd"):
-        if os.path.isdir(directory):
-            return len(os.listdir(directory))
+def _fd_snapshot():
+    # 只观察真实FD身份；本case不开FD，不能把别的线程自然关闭误算成分页缺陷。
+    if any(os.path.isdir(directory) for directory in ("/proc/self/fd", "/dev/fd")):
+        return capture_fd_snapshot()
     return None
+
+
+def _assert_no_new_fds(before):
+    if before is None:
+        return
+    after = capture_fd_snapshot()
+    added = {fd: identity for fd, identity in after.targets.items()
+             if before.targets.get(fd) != identity}
+    assert not added, {"added": added, "count_delta": after.count - before.count}
 
 
 @pytest.mark.parametrize(("live", "expected_reads"), [(440, [500]), (460, [])])
 def test_older_page_that_cannot_fit_the_window_is_not_spliced_in(monkeypatch, live, expected_reads):
     """窗口已满（460 live）或补入会溢出（440 live）时：不裁阅读位置、不拼接不连续正文、不消费旧游标。"""
     _run_history_reader_inline(monkeypatch)
-    before_fd = _fd_count()
+    before_fd = _fd_snapshot()
     pager, runtime, view, reads = _windowed_pager(live)
     before = runtime.store.snapshot()
     anchor = view.control.history_anchor()
@@ -247,14 +256,12 @@ def test_older_page_that_cannot_fit_the_window_is_not_spliced_in(monkeypatch, li
     view.control.create_content(60, 5)
     # 重绘会把控件游标归一到视口底行；阅读位置应检查实际滚动顶行。
     assert view.control.preferred_vertical_scroll(view.window) == 0
-    if before_fd is not None:
-        fd_delta = _fd_count() - before_fd
-        assert fd_delta == 0
+    _assert_no_new_fds(before_fd)
 
 
 def test_older_page_that_fits_the_window_stays_contiguous(monkeypatch):
     _run_history_reader_inline(monkeypatch)
-    before_fd = _fd_count()
+    before_fd = _fd_snapshot()
     pager, runtime, view, reads = _windowed_pager(100)
     anchor = view.control.history_anchor()
     pager.request()
@@ -267,6 +274,52 @@ def test_older_page_that_fits_the_window_stays_contiguous(monkeypatch):
     assert not pager._loading
     view.control.create_content(60, 5)
     assert view.control.history_anchor()[0] == anchor[0]
-    if before_fd is not None:
-        fd_delta = _fd_count() - before_fd
-        assert fd_delta == 0
+    _assert_no_new_fds(before_fd)
+
+
+@pytest.mark.parametrize("leak", [False, True])
+def test_paging_fd_guard_distinguishes_unrelated_close_from_new_resource(tmp_path, leak):
+    """旧资源关闭可与分页交错；有新资源时即使总数未增加也必须拒绝。"""
+    if _fd_snapshot() is None:
+        return
+    previous = (tmp_path / "previous").open("wb")
+    retained = None
+    try:
+        before = _fd_snapshot()
+        pager, runtime, view, _reads = _windowed_pager(460)
+        anchor = view.control.history_anchor()
+        if leak:
+            retained = (tmp_path / "new-resource").open("wb")
+        previous.close()
+        pager.request()
+        pager._apply(500, False, GatewayChatHistorySnapshot(
+            display_events=_events("older", 40), before_message_cursor=0,
+        ))
+        assert runtime.history_before_cursor == 500
+        assert view.control.history_anchor() == anchor
+        view.control.create_content(60, 5)
+        assert view.control.preferred_vertical_scroll(view.window) == 0
+        if leak:
+            with pytest.raises(AssertionError, match="new-resource"):
+                _assert_no_new_fds(before)
+        else:
+            _assert_no_new_fds(before)
+    finally:
+        previous.close()
+        if retained is not None:
+            retained.close()
+
+
+def test_paging_fd_guard_rejects_same_number_reused_for_different_file(tmp_path):
+    if _fd_snapshot() is None:
+        return
+    previous = (tmp_path / "previous").open("wb")
+    retained = (tmp_path / "replacement").open("wb")
+    try:
+        before = _fd_snapshot()
+        os.dup2(retained.fileno(), previous.fileno())
+        with pytest.raises(AssertionError, match="replacement"):
+            _assert_no_new_fds(before)
+    finally:
+        previous.close()
+        retained.close()

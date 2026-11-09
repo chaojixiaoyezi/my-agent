@@ -745,6 +745,7 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_coordinator_owner_management_source.py # 冷规则领域及原来源/异常边界回归
 |-- agent_py_agent/tests/test_coordinator_agents_domain_review_edges.py # 冷规则领域及原来源/异常边界回归
 |-- agent_py_agent/agent/common/owner_write_errors.py # 原owner写拒绝类型唯一规范位置，无权限副作用
+|-- agent_py_agent/agent/common/http_listener.py # HTTP 监听复用实际绑定地址与端口，启动不依赖反向 DNS
 `-- agent_py_agent/tests/test_owner_write_errors.py # 冷规则领域及原来源/异常边界回归
 ```
 
@@ -1113,6 +1114,7 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_r8_global_index_retirement.py # 唯一历史key按canonical消失证明退役，未知及可定位历史保持。
 |-- agent_py_agent/tests/test_r8_idle_claim_history.py # 历史任务窗口化以后，孤立旧 claim 仍必须阻止闲置压缩。
 |-- agent_py_agent/tests/test_r8_idle_notice_http.py # 真实HTTP通知页缓存、权限及跨进程失效往返
+|-- agent_py_agent/tests/test_r8_notice_tree_read_cost.py # 单次代理树报告只读连接、来源替换和错误关闭回归
 |-- agent_py_agent/tests/test_r8_input_turn_retention.py # 输入引用终态、原锁、出生交错和有界目录预算。
 |-- agent_py_agent/tests/test_r8_log_cursor_lifetime.py # 日志分页签名在多 owner 轮换后的真实 HTTP 回归。
 |-- agent_py_agent/tests/test_r8_ledger_gc_pages.py # 旧账物理枚举上界、持久续点、并发取消与字节预算
@@ -1775,6 +1777,8 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 - `test_r8_artifact_lookup_work.py`：只复用同次已验证负命中，不保无关源行或跨请求负缓存；完整历史定位仍须设计收口。
 - `test_r8_tui_explicit_stream.py`：从正式writer经真实HTTP客户端进入TUI，候选可撤回、终稿唯一、迟到拒绝不走其它渲染出口。
 - `test_r8_local_store_stage_timing.py`、`test_gateway_request_stage_timing.py`：验证分段来源与异常边界，不改审计持久化或请求状态。
+- `test_r8_notice_tree_read_cost.py`：完整树报告在同一短连接查询运行记录和汇总；每次报告重新核对来源，不保留授权或旧连接。
+- `common/http_listener.py`：Gateway、飞书 webhook 和 TUI 登录回调共用数字绑定地址；认证保持在各自原处理器。
 - `test_probe_cancellation_wait.py`：以确定性交错验证等待者取消不依赖另一请求释放探针锁。
 - `support/fd_lifetime.py` 与 `test_fd_lifetime_boundaries.py`：明确测试自己的缓存生命周期；结束处不做GC，数量和身份双重检查仍能发现真实句柄泄漏。
 - `test_cancel_receipt_identity.py` 与 `test_cancel_stop_reconciliation.py`：诊断回执不构成恢复授权，缺源或错源不能改变 UNKNOWN、父失败和子取消。

@@ -10,8 +10,10 @@ import ssl
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+
+from agent_py_agent.agent.common.http_listener import BoundThreadingHTTPServer
 
 
 class FakeProvider:
@@ -67,7 +69,7 @@ class FakeProvider:
         provider = self
         context = self._tls_context() if self.https else None
 
-        class Server(ThreadingHTTPServer):
+        class Server(BoundThreadingHTTPServer):
             daemon_threads = True
             # LLM: Register before thread startup so teardown cannot miss a not-yet-running handler.
             # 函数用途: Track every owned client connection across its entire handler lifetime.

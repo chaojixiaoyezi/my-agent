@@ -270,7 +270,11 @@ class TestFeishuSendMessage:
 class TestFeishuLifecycle:
     """测试飞书适配器启停。"""
 
-    def test_start_stop_clean(self) -> None:
+    def test_start_stop_clean(self, monkeypatch) -> None:
+        def no_reverse_dns(*_):
+            raise AssertionError("飞书回调启动不能等待反向 DNS")
+
+        monkeypatch.setattr("socket.getfqdn", no_reverse_dns)
         with tempfile.TemporaryDirectory() as td:
             adapter = FeishuAdapter(
                 # 显式 webhook：这里只测回调服务启停。默认长连接会在 daemon 线程里建真实 lark 客户端，

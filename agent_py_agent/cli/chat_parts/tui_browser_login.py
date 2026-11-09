@@ -12,13 +12,14 @@ import socket
 import sys
 import threading
 import webbrowser
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from typing import NamedTuple
 from urllib.parse import parse_qs, urlsplit
 
 from prompt_toolkit.layout import HSplit
 from prompt_toolkit.widgets import Label
 
+from ...agent.common.http_listener import BoundThreadingHTTPServer
 from ...agent.settings.model_oauth_schema import CHATGPT_CALLBACK_PORTS
 from ...agent.settings.model_oauth_wire import BROWSER_LOGIN_SECONDS
 from .tui_model_menu import _dialog, _request, _request_data
@@ -122,7 +123,7 @@ class LoopbackCallback:
 
 # LLM: 接受的连接有界且有读写期限；取消先关闭它们再等待请求线程退出，不把半开连接留给后台守护线程。
 # 类用途: 让本次回环登录的监听和已接受连接一起回收。
-class _CallbackHTTPServer(ThreadingHTTPServer):
+class _CallbackHTTPServer(BoundThreadingHTTPServer):
     daemon_threads = False
 
     # LLM: 连接集合只归本次监听所有；不保存授权码或账号，不创建额外服务。
@@ -179,7 +180,7 @@ class _CallbackHTTPServer(ThreadingHTTPServer):
 
 # LLM: 端口顺序即优先级；SO_REUSEADDR 只帮助刚关闭的端口，不会和正在监听的程序共用端口。
 # 函数用途: 在登记端口里找一个能绑定的，都不行就抛 OSError。
-def _bind(ports: tuple[int, ...]) -> ThreadingHTTPServer:
+def _bind(ports: tuple[int, ...]) -> _CallbackHTTPServer:
     error: OSError | None = None
     for port in ports:
         try:

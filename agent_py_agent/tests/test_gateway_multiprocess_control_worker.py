@@ -275,6 +275,7 @@ def test_stream_steer_stop_new_next_conversation_survives_readiness_pause(tmp_pa
     from agent_py_agent.agent.backends import ModelResponse, get_backend
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.gateway_parts import multiprocess_worker as worker
+    from agent_py_agent.agent.gateway_parts import multiprocess_worker_dispatch as dispatch
     from agent_py_agent.agent.gateway_parts.io import (
         GATEWAY_REQUEST_FINGERPRINT_SCHEMA,
         gateway_request_fingerprint,
@@ -320,11 +321,23 @@ def test_stream_steer_stop_new_next_conversation_survives_readiness_pause(tmp_pa
     control_committed, release_control = threading.Event(), threading.Event()
     hold_lane, lane_held, release_lane = threading.Event(), threading.Event(), threading.Event()
     paused_poll, healthy_published = threading.Event(), threading.Event()
+    first_worker_returned, release_first_worker = threading.Event(), threading.Event()
     calls, notices = [], []
     acknowledged = []
     active, high_water = [0], [0]
     counter_lock = threading.Lock()
     original_poll = pump.controls.poll
+    original_request_execute = dispatch.execute_worker_claim
+
+    # 原请求完整返回与Future.done之间仍可被调度暂停；canonical终态不代表执行槽已空。
+    def execute_request_then_wait(snapshot, claim, owner_pool):
+        result = original_request_execute(snapshot, claim, owner_pool)
+        if claim.request_id == 'mp-r3-stream':
+            first_worker_returned.set()
+            assert release_first_worker.wait(10)
+        return result
+
+    monkeypatch.setattr(dispatch, 'execute_worker_claim', execute_request_then_wait)
 
     # LLM: 透传原poll，仅记录原线程实际经过暂停门后的事实。
     # 函数用途: 等待独立控制线程在不健康阶段完成一次轮询。
@@ -530,7 +543,16 @@ def test_stream_steer_stop_new_next_conversation_survives_readiness_pause(tmp_pa
         next_thread = agent.conversation_store.threads.resolve(
             channel='feishu', channel_conversation_id='room', channel_user_id='alice')
         assert next_thread.thread_id != first_thread
+        assert first_worker_returned.wait(10)
+        assert not original_claims[0][0].done()
         next_request = submit('mp-r3-next')
+        assert pump.poll() == 0
+        assert next_request.exists()
+        assert not (case.paths.terminal / next_request.name).exists()
+        release_first_worker.set()
+        assert original_claims[0][0].result(timeout=10) is True
+        pump._reap()
+        assert not pump._active
         assert pump.poll() == 1
         _mp_r3_wait(lambda: (case.paths.terminal / next_request.name).exists(), pump=pump)
         next_terminal = read_json_file(case.paths.terminal / next_request.name)
@@ -552,6 +574,7 @@ def test_stream_steer_stop_new_next_conversation_survives_readiness_pause(tmp_pa
         release_steered.set()
         release_control.set()
         release_lane.set()
+        release_first_worker.set()
         try:
             lane.close()
         finally:

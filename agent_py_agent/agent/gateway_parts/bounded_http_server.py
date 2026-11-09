@@ -24,6 +24,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
+from ..common.http_listener import BoundAddressMixin
 from ..concurrency import DurableDaemonThreadPoolExecutor
 from ..settings.config import AgentConfig
 from .http_lanes import HTTPLaneRouter
@@ -52,7 +53,7 @@ def _gateway_http_config(handler):
 # together; never infer owner identity from an unauthenticated socket/header.
 # Handlers retain all authorization and durable per-owner operation semantics; 原work仅绑定本设施寿命，不扩大任何owner业务权限。
 # 类用途: 用固定工作线程和有界排队承接多个 TUI，避免每次轮询都新建系统线程。
-class GatewayBoundedHTTPServer(HTTPServer):
+class GatewayBoundedHTTPServer(BoundAddressMixin, HTTPServer):
     request_queue_size = getattr(AgentConfig, "gateway_http_listen_backlog", 128)
     max_request_workers = getattr(AgentConfig, "gateway_http_max_request_workers", 32)
     max_outstanding_requests = getattr(AgentConfig, "gateway_http_max_outstanding_requests", 256)
