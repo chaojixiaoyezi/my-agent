@@ -43,6 +43,9 @@ jobs:
         run: >
           python -m pytest
           agent_py_agent/tests/test_process_control.py
+          agent_py_agent/tests/test_binary_snapshot_identity.py::test_binary_snapshot_preserves_bytes_and_captured_fd_identity
+          agent_py_agent/tests/test_binary_snapshot_identity.py::test_backdated_mtime_still_changes_actual_descriptor_generation
+          agent_py_agent/tests/test_curator_message_slices.py::test_large_hot_target_then_small_message_resumes_after_suffix_anchor
           agent_py_agent/tests/test_windows_process_observation.py
           agent_py_agent/tests/test_dispatch_host_wait_start_failures.py
           agent_py_agent/tests/test_darwin_process_tree_snapshot.py

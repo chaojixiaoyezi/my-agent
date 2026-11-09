@@ -28,6 +28,9 @@ TRANSCRIPT_ROTATE_ROWS = 128
 # 会话转录封存段的目标字节上限，完整消息行不拆分。
 _TRANSCRIPT_SEGMENT_BYTES = 1024 * 1024
 
+# 单个 canonical 冷段及完整消息原子记录的既有字节上限；冷热有界读取共用，禁止平行设置。
+TRANSCRIPT_MAX_SEGMENT_BYTES = 64 * 1024 * 1024
+
 # 消息去重索引最多缓存的线程文件数量。
 _MAX_DEDUPE_INDEX_FILES = 64
 # 单个消息文件去重索引最多保留的幂等键数量。
@@ -76,6 +79,20 @@ def _dedupe_file_lock(cache_key: str) -> threading.Lock:
 # 类用途: 明确区分单行超过本次读取预算与JSON损坏，原文件保持可读。
 class MessagePageBudgetExceeded(RecoverableRuntimeError):
     category = "resource_limit"
+
+
+class MessageReadDeferred(Exception):
+    """本片字节/时间未借到，不是损坏或EOF，原消费者可从同一位置续办。"""
+
+
+@dataclass(frozen=True)
+class ColdSegmentObservation:
+    parts: tuple[str, ...]
+    stat: os.stat_result
+    parents: tuple
+    changed_ns: int | None
+    start: int
+    end: int
 
 
 # LLM: 只检查物理LF与当前描述符长度，不能证明文件未被等长改写；调用方依赖canonical append-only合同。
@@ -595,10 +612,12 @@ class TranscriptReader:
     # LLM: 默认冻结完整LF尾界；先核逻辑前缀，同次FD/路径复核防打开竞态，不将持久dev/ino当新布局身份。
     #   可选受信root：热文件、清单、冷段与索引全部从该存储根逐段no-follow读取（拒链接与硬链接）；省略时原路径语义不变。
     # 函数用途: 冻结当前冷热布局及两种尾界，后续轮转不重绑定这个读取快照。
-    def __init__(self, path: Path, *, complete_only=True, root: Path | None = None):
+    def __init__(self, path: Path, *, complete_only=True, root: Path | None = None, read_budget=None):
         from .store_io import ImmutableJsonIndex
 
         self.path, self.root = path, root
+        self.read_budget = read_budget
+        self.observed_segments: dict[tuple, ColdSegmentObservation] = {}
         self._base, self._parts = _transcript_base(path, root)
         # 省略root时按原单参数形式调用，保持模块级清单读取入口的原调用合同。
         manifest = (lambda: transcript_manifest(path)) if root is None else (lambda: transcript_manifest(path, root=root))
@@ -674,14 +693,31 @@ class TranscriptReader:
                 low = sequence + 1
             else:
                 size = descriptor['end'] - descriptor['start']
-                if not 0 < size <= 64 * 1024 * 1024:
+                if not 0 < size <= TRANSCRIPT_MAX_SEGMENT_BYTES:
                     raise DataCorruptionError('canonical transcript segment exceeds byte budget')
-                raw = read_bytes_beneath(self._base, (*self._parts, 'archive', self.manifest['thread_id'], f'seg-{sequence:020d}.jsonl'),
-                                         max_bytes=size, require_dir_fd=self.root is not None)
+                parts = (*self._parts, 'archive', self.manifest['thread_id'], f'seg-{sequence:020d}.jsonl')
+                observation = None
+                if self.read_budget is not None:
+                    budget = self.read_budget
+                    claim = getattr(budget, 'claim_atomic_record', None)
+                    if budget.exhausted() or (size > budget.max_bytes - budget.size
+                            and (not callable(claim) or not claim())):
+                        raise MessageReadDeferred
+                    from ..common.nofollow_fs import read_bytes_snapshot_beneath
+
+                    observation = read_bytes_snapshot_beneath(self._base, parts, max_bytes=size,
+                                                               require_dir_fd=self.root is not None)
+                    raw = observation.content if observation is not None else None
+                    budget.charge(size=len(raw) if raw is not None else 0)
+                else:
+                    raw = read_bytes_beneath(self._base, parts, max_bytes=size, require_dir_fd=self.root is not None)
                 if raw is None:
                     raise TranscriptColdSegmentMissing(descriptor['end'])
                 if len(raw) != size or hashlib.sha256(raw).hexdigest() != descriptor['sha256']:
                     raise DataCorruptionError('canonical transcript segment digest or length mismatches')
+                if observation is not None:
+                    self.observed_segments[parts] = ColdSegmentObservation(parts, observation.stat,
+                        observation.parents, observation.changed_ns, descriptor['start'], descriptor['end'])
                 self.cached = descriptor, raw
                 return self.cached
         raise DataCorruptionError('message cursor is outside canonical segments')
@@ -853,7 +889,7 @@ def rotate_committed_transcript(storage, thread, *, compact_root: str | Path | N
         start, lines, length = base, [], 0
         while handle.tell() < cut:
             raw = handle.readline(cut - handle.tell())
-            if len(raw) > 64 * 1024 * 1024:
+            if len(raw) > TRANSCRIPT_MAX_SEGMENT_BYTES:
                 raise MessagePageBudgetExceeded('canonical message row exceeds cold segment budget')
             if lines and length + len(raw) > _TRANSCRIPT_SEGMENT_BYTES:
                 _save_transcript_segment(path, after, index, start, b''.join(lines))

@@ -49,6 +49,34 @@ _THREAD_CACHE_MAX_TOTAL_BYTES = 32 * 1024 * 1024
 _THREAD_RECORD_CACHE_LOCK = threading.Lock()
 
 
+@dataclass(frozen=True)
+class ThreadRecordObservation:
+    parts: tuple[str, ...]
+    stat: object
+    parents: tuple
+    changed_ns: int | None
+
+
+@dataclass(frozen=True)
+class ThreadRecordSnapshot:
+    """原记录的同FD读视图；predecessor未核验前不等于已发表的可学习线程。"""
+    record: ConversationThread
+    observation: ThreadRecordObservation
+    predecessor: tuple | None
+
+
+def _thread_predecessor(thread):
+    predecessor = thread.metadata.get("predecessor_thread_id") if thread is not None else None
+    if predecessor and thread.metadata.get("succession_published") is not True:
+        return predecessor, thread.metadata.get("predecessor_binding", thread.metadata.get("succession_binding"))
+    return None
+
+
+def thread_publication_matches(thread_id, prior, scope):
+    """与正式load共享原指针条件，调用者必须先读取真实前驱记录，函数不授写入权。"""
+    return prior is not None and _succession_target(prior, scope) == thread_id
+
+
 # LLM: 仅内存缓存条目，字节来自同次稳定文件指纹，不是精确Python堆占用或新的状态权威。
 # 类用途: 保存线程快照、版本指纹及总预算核算用的原始字节数。
 @dataclass(frozen=True)
@@ -548,6 +576,57 @@ class ThreadStore:
     ) -> tuple[list[ConversationThread], list[dict[str, Any]]]:
         return _workspace_thread_report(self, limit=limit, workspace_dir=workspace_dir)
 
+    def page_report(self, *, cursor: dict | None = None, limit: int = 16, budget):
+        """后台只分页发现规范ID；正文由同一Store的快照读口在剩余预算读取。"""
+        from ..user_space.directory_paging import directory_page
+
+        state = dict(cursor or {})
+        pending = list(state.get("pending", ()))
+        directory = state.get("directory", {})
+        complete = bool(state.get("complete", False))
+        rows = []
+        if budget.exhausted():
+            return rows, [], state, False
+        if not pending:
+            pending, directory, complete = directory_page(
+                self.storage.root, ("threads",), directory, max(1, min(16, limit)), require_dir_fd=False,
+            )
+        while pending and not budget.exhausted():
+            name = pending.pop(0)
+            budget.charge(entries=1)
+            if not name.endswith('.json'):
+                continue
+            try:
+                validate_opaque_id(name[:-5], kind="thread_id")
+            except ValueError:
+                continue
+            rows.append(name[:-5])
+        return rows, [], {"directory": directory, "pending": pending, "complete": complete}, complete and not pending
+
+    def record_snapshot_report(self, thread_id: str, *, max_bytes: int):
+        """只读取原记录与同FD身份；返回明确的前驱义务，不能把候选记录当作已发表线程。"""
+        from ..common.nofollow_fs import read_bytes_snapshot_beneath
+        from .store_io import json_row
+
+        path = self.storage.thread_path(thread_id)
+        parts = ("threads", path.name)
+        try:
+            snapshot = read_bytes_snapshot_beneath(self.storage.root, parts, max_bytes=max_bytes)
+            if snapshot is None:
+                return None, None
+            payload, error = json_row(snapshot.content.decode('utf-8'), context="conversation.thread.read", path=path, line_number=0)
+            if error is not None:
+                return None, {"thread_id": thread_id, **error}
+            if not payload:
+                return None, None
+            thread = ConversationThread.from_dict(payload)
+            if thread.thread_id != thread_id:
+                raise DataCorruptionError("conversation thread identity is invalid")
+            observation = ThreadRecordObservation(parts, snapshot.stat, snapshot.parents, snapshot.changed_ns)
+            return ThreadRecordSnapshot(thread, observation, _thread_predecessor(thread)), None
+        except Exception as exc:
+            return None, {"thread_id": thread_id, **runtime_error_report(exc, context="conversation.thread.read", path=path)}
+
     # LLM: 摘要更新只拥有摘要及活动时间，不能用陈旧完整线程覆盖最新记录。
     # 函数用途: 原子更新会话摘要，不覆盖同时发生的任务目录、压缩游标或通道变化。
     def update_summary(
@@ -975,16 +1054,16 @@ class ThreadStore:
         clone: bool = True,
     ) -> tuple[ConversationThread | None, dict[str, Any] | None]:
         thread, error = _read_thread_record_report(path, thread_id=thread_id, clone=clone)
-        predecessor = thread.metadata.get("predecessor_thread_id") if thread is not None else None
-        if predecessor and thread.metadata.get("succession_published") is not True:
+        pending = _thread_predecessor(thread)
+        if pending is not None:
+            predecessor, scope = pending
             try:
                 prior, prior_error = _read_thread_record_report(self.storage.thread_path(predecessor), thread_id=predecessor)
             except (TypeError, ValueError) as exc:
                 return None, runtime_error_report(exc, context="conversation.thread.predecessor")
             if prior_error:
                 return None, prior_error
-            scope = thread.metadata.get("predecessor_binding", thread.metadata.get("succession_binding"))
-            if prior is None or _succession_target(prior, scope) != thread.thread_id:
+            if not thread_publication_matches(thread.thread_id, prior, scope):
                 return None, None
         return thread, error
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import time
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -35,6 +36,11 @@ _SUCCESS_TOOL_STATUSES = frozenset(
 _INCOMPLETE_TOOL_EFFECTS = frozenset({"unknown", "not_started", "failed"})
 # 可覆盖生产万级冷线程；仅保存文件指纹与游标，淘汰只会恢复原只读扫描。
 _COLD_THREAD_EOF = CursorCache(16_384)
+# 线程发现每个来源根只存一个目录续点；与逐线程EOF分开，避免旧线程大量命中挤掉owner公平续点。
+_CURATOR_THREAD_DISCOVERY_MAX_ROOTS_COUNT = 16_384
+_THREAD_DISCOVERY = CursorCache(_CURATOR_THREAD_DISCOVERY_MAX_ROOTS_COUNT)
+# 每个来源根最多暂存一份待服务资格投影；不保留title/summary/整份metadata或消息正文。
+_CURATOR_THREAD_OBSERVATION_MAX_BYTES = 8 * 1024
 
 ToolReferenceQuery = Callable[[Path, tuple[str, ...], int], dict[str, object]]
 
@@ -235,6 +241,8 @@ class CuratorInputBatch:
     # 消息级 learning_excluded 连续前缀被宿主核验跳过的线程游标；坏线程不写入此表。
     skipped_message_cursors: dict[str, str] = field(default_factory=dict)
     candidate_anchors: tuple[dict[str, object], ...] = ()
+    message_scan_partial: bool = False
+    message_scan_reasons: tuple[str, ...] = ()
 
     # LLM: 原始消息/游标完整保留，仅模型视图聚合跨线程广播；标签和关系仍核原来源hash与正式版本。
     # 函数用途: 生成一次后台模型调用的完整结构化输入。
@@ -382,14 +390,17 @@ def collect_curator_inputs(
     config: MemoryCuratorConfig,
     formal_memories: tuple[CuratorFormalMemoryInput, ...] = (),
     tool_reference_source: CuratorToolReferenceSource | None = None,
+    scan_budget=None,
 ) -> CuratorInputBatch:
     skipped_message_cursors: dict[str, str] = {}
+    scan_state = {"partial": False, "reasons": ()}
     messages, message_errors = _collect_messages(
         source=message_source,
         cursors=state.per_thread_cursors,
         limit=config.batch_message_limit,
         max_chars=config.max_input_chars,
         skipped_cursors=skipped_message_cursors,
+        budget=scan_budget, scan_state=scan_state,
     )
     remaining_chars = max(
         1_000,
@@ -428,6 +439,8 @@ def collect_curator_inputs(
         load_errors=(*message_errors, *audit_errors, *tool_reference_errors),
         skipped_audit_cursor=skipped_audit_cursor,
         skipped_message_cursors=skipped_message_cursors,
+        message_scan_partial=scan_state["partial"],
+        message_scan_reasons=scan_state["reasons"],
     )
     if tool_reference_source is not None:
         from .task_file_evidence import attach_task_file_evidence
@@ -513,14 +526,24 @@ def _collect_messages(
     limit: int,
     max_chars: int,
     skipped_cursors: dict[str, str] | None = None,
+    budget=None, scan_state=None,
 ) -> tuple[list[CuratorMessageInput], list[dict[str, object]]]:
     conversation_store = source.conversation_store
     list_report = getattr(getattr(conversation_store, 'threads', None), 'list_report', None)
     after_report = getattr(getattr(conversation_store, 'messages', None), 'after_report', None)
-    if not callable(list_report) or not callable(after_report):
-        raise TypeError("ConversationStore lacks incremental Memory Curator read contract")
-    threads, thread_errors = list_report(limit=0)
-    unreadable_thread_ids = {str(item["thread_id"]) for item in thread_errors if item.get("thread_id")}
+    if budget is None:
+        if not callable(list_report) or not callable(after_report):
+            raise TypeError("ConversationStore lacks incremental Memory Curator read contract")
+    elif not all(callable(method) for method in (getattr(conversation_store.threads, 'page_report', None),
+            getattr(conversation_store.threads, 'record_snapshot_report', None),
+            getattr(conversation_store.messages, 'after_slice_report', None))):
+        raise TypeError("ConversationStore lacks bounded Memory Curator read contract")
+    window = None
+    if budget is not None:
+        threads, thread_errors, window = _message_thread_window(conversation_store, budget)
+    else:
+        threads, thread_errors = list_report(limit=0)
+    unreadable_thread_ids = {str(item["thread_id"]) for item in thread_errors if item.get("thread_id") and not item.get("partial_reason")}
     errors: list[dict[str, object]] = [dict(item) for item in thread_errors if not item.get("thread_id")]
     if source.excluded_conversation_ids is None:
         # fail-closed：名单不可读时本轮不学任何会话；消息留在原游标后，名单修复后重放。
@@ -535,17 +558,216 @@ def _collect_messages(
         "selected": selected,
         "errors": errors,
         "skipped_cursors": skipped_cursors,
+        "budget": budget, "scan_partial": bool(thread_errors) if budget is not None else False,
+        "scan_reasons": {str(item["partial_reason"]) for item in thread_errors if item.get("partial_reason")},
     }
-    for thread in sorted(threads, key=lambda item: (float(item.updated_at), str(item.thread_id))):
-        if len(selected) >= limit or int(state["used_chars"]) >= max_chars:
+    ordered = threads if window is not None else sorted(threads, key=lambda item: (float(item.updated_at), str(item.thread_id)))
+    serviced = 0
+    for index, thread in enumerate(ordered):
+        if (len(selected) >= limit or int(state["used_chars"]) >= max_chars
+                or (budget is not None and budget.exhausted())):
             break
+        serviced += 1
         if (str(thread.thread_id) in unreadable_thread_ids or _thread_learning_excluded(thread)
                 or thread_is_excluded(thread, source.excluded_conversation_ids)):
             continue
         # 单线程至多 16 页按上一页末条 ID 续读；作用域内复用本次刚读过的热文件位置，不改游标或页合同。
         with pass_position_scope():
-            _collect_thread_messages(state, thread, str(cursors.get(str(thread.thread_id)) or ""))
+            if budget is None:
+                _collect_thread_messages(state, thread, str(cursors.get(str(thread.thread_id)) or ""))
+            else:
+                from .retention_scan_budget import RetentionScanBudget
+
+                remaining = max(1, len(ordered) - index)
+                child = RetentionScanBudget(max(1, (budget.max_entries - budget.entries) // remaining),
+                    max(1, budget.max_bytes - budget.size),
+                    min(budget.deadline, time.monotonic() + max(0, budget.deadline - time.monotonic()) / remaining))
+                from ..conversation.message_cursor_slice import MessageReadAllowance
+
+                if "allowance" not in state:
+                    state["allowance"] = MessageReadAllowance(budget)
+                state["read_slice"] = MessageReadAllowance(child, state["allowance"])
+                try:
+                    _collect_thread_messages(state, thread, str(cursors.get(str(thread.thread_id)) or ""))
+                finally:
+                    budget.charge(entries=child.entries, size=child.size)
+    if window is not None:
+        key, checkpoint = window
+        checkpoint["waiting"] = [thread.thread_id for thread in ordered[serviced:]] + checkpoint.pop("unloaded", [])
+        candidate = checkpoint.pop("memo_candidate", None)
+        if (candidate is not None and checkpoint["waiting"] and candidate["thread_id"] == checkpoint["waiting"][0]
+                and _thread_packet_trusted(candidate)):
+            checkpoint["memo"] = candidate
+        else:
+            checkpoint.pop("memo", None)
+            if checkpoint["waiting"] and serviced == 0 and ordered:
+                # 易变或无法缓存的超大来源转下一轮，保持partial；不能永远占住本页后续线程。
+                checkpoint["waiting"] = checkpoint["waiting"][1:]
+                state["scan_partial"] = True
+        try:
+            current_directory = file_stamp(conversation_store.storage.threads_dir.lstat())
+        except FileNotFoundError:
+            current_directory = None
+        changed = current_directory != checkpoint.get("directory_stamp")
+        partial = bool(state["scan_partial"] or changed or checkpoint["waiting"] or not checkpoint["complete"])
+        checkpoint["round_partial"] = bool(checkpoint.get("round_partial") or state["scan_partial"] or changed)
+        if checkpoint["complete"] and not checkpoint["waiting"]:
+            partial = partial or checkpoint["round_partial"]
+            checkpoint = {"cursor": {}, "waiting": [], "complete": False, "round_partial": False}
+        _THREAD_DISCOVERY.put(key, checkpoint)
+        if scan_state is not None:
+            scan_state["partial"] = partial
+            scan_state["reasons"] = tuple(sorted(state["scan_reasons"]))
     return selected, errors
+
+
+def _thread_packet(frame):
+    thread = frame.record
+    metadata = getattr(thread, "metadata", {}) or {}
+    projected = {"learning_excluded": metadata.get("learning_excluded") is True,
+                 "bot_mode": "query_readonly" if metadata.get("bot_mode") == "query_readonly" else ""}
+    derived = derive_source_projection(metadata)
+    if derived is not None:
+        projected["learning_source"] = derived
+    payload = {"thread_id": thread.thread_id, "updated_at": thread.updated_at,
+        "canonical_user_id": thread.canonical_user_id, "channel_bindings": [row.to_dict() for row in thread.channel_bindings],
+        "learning_source": thread.learning_source, "metadata": projected, "_pending_predecessor": frame.predecessor}
+    raw = json.dumps(payload, ensure_ascii=False)
+    if len(raw.encode('utf-8')) > _CURATOR_THREAD_OBSERVATION_MAX_BYTES:
+        return None
+    return {"thread_id": thread.thread_id, "payload": raw, "sources": (frame.observation,)}
+
+
+def _thread_packet_trusted(packet):
+    from ..conversation.message_cursor_slice import source_stamp_is_trustworthy
+
+    return all(source_stamp_is_trustworthy(file_stamp(source.stat), source.changed_ns) for source in packet["sources"])
+
+
+def _restore_thread_packet(store, packet, budget):
+    from ..common.nofollow_fs import inspect_file_snapshot_beneath
+
+    if not _thread_packet_trusted(packet):
+        return False
+    for source in packet["sources"]:
+        if budget.exhausted():
+            return None
+        actual = inspect_file_snapshot_beneath(store.storage.root, source.parts)
+        if (actual is None or file_stamp(actual.stat) != file_stamp(source.stat)
+                or actual.parents != source.parents or actual.changed_ns != source.changed_ns):
+            return False
+    return True
+
+
+def _thread_from_packet(store, packet, budget):
+    from ..conversation.models import ConversationThread
+    from ..conversation.store_threads import thread_publication_matches
+
+    payload = json.loads(packet["payload"])
+    pending = payload.pop("_pending_predecessor", None)
+    if pending is not None:
+        if budget.exhausted():
+            return None, packet, {"partial_reason": "slice_budget"}
+        predecessor, scope = pending
+        path = store.storage.thread_path(predecessor)
+        try:
+            amount = path.stat().st_size
+        except FileNotFoundError:
+            return None, None, None
+        if amount > budget.max_bytes:
+            return None, None, {"partial_reason": "publication_record_exceeds_supported_limit"}
+        if amount > budget.max_bytes - budget.size:
+            return None, packet, {"partial_reason": "publication_read_budget"}
+        frame, error = store.threads.record_snapshot_report(predecessor, max_bytes=budget.max_bytes - budget.size)
+        budget.charge(size=frame.observation.stat.st_size if frame is not None else amount)
+        if error is not None:
+            return None, packet, error
+        if frame is None or not thread_publication_matches(payload["thread_id"], frame.record, scope):
+            return None, None, None
+        packet = {**packet, "payload": json.dumps(payload, ensure_ascii=False),
+                  "sources": (*packet["sources"], frame.observation)}
+    return ConversationThread.from_dict(payload), packet, None
+
+
+def _message_thread_window(store, budget):
+    key = ("curator-thread-discovery", str(store.storage.root))
+    checkpoint = dict(_THREAD_DISCOVERY.get(key) or {"cursor": {}, "waiting": [], "complete": False, "round_partial": False})
+    try:
+        current = file_stamp(store.storage.threads_dir.lstat())
+    except FileNotFoundError:
+        current = None
+    previous = checkpoint.get("directory_stamp")
+    if previous is not None and current != previous:
+        checkpoint["round_partial"] = True
+        if current is None or not current.same_file(previous):
+            checkpoint.update(cursor={}, waiting=[], complete=False, memo=None)
+    checkpoint["directory_stamp"] = current
+    waiting = list(checkpoint["waiting"])
+    rows, errors = [], []
+    if not waiting:
+        waiting, errors, cursor, complete = store.threads.page_report(cursor=checkpoint["cursor"], budget=budget)
+        checkpoint.update(cursor=cursor, complete=complete)
+    memo = checkpoint.get("memo")
+    checkpoint["memo_candidate"] = None
+    visited = 0
+    while waiting and not budget.exhausted() and visited < min(16, budget.max_entries):
+        tid = waiting.pop(0)
+        visited += 1
+        packet = memo if memo is not None and memo["thread_id"] == tid else None
+        if packet is not None:
+            try:
+                restored = _restore_thread_packet(store, packet, budget)
+            except OSError as exc:
+                from ..runtime_errors import runtime_error_report
+
+                errors.append({"thread_id": tid, **runtime_error_report(exc, context="conversation.threads.page")})
+                continue
+            if restored is None:
+                waiting.insert(0, tid)
+                break
+            if not restored:
+                packet = None
+        reused = packet is not None
+        if packet is None:
+            path = store.storage.thread_path(tid)
+            try:
+                amount = path.stat().st_size
+            except FileNotFoundError:
+                continue
+            if amount > budget.max_bytes:
+                errors.append({"thread_id": tid, "partial_reason": "thread_record_exceeds_supported_limit"})
+                continue
+            if amount > budget.max_bytes - budget.size:
+                waiting.insert(0, tid)
+                break
+            frame, error = store.threads.record_snapshot_report(tid, max_bytes=budget.max_bytes - budget.size)
+            budget.charge(size=frame.observation.stat.st_size if frame is not None else amount)
+            if error is not None:
+                errors.append(error)
+                continue
+            if frame is None:
+                continue
+            packet = _thread_packet(frame)
+            if packet is None:
+                errors.append({"thread_id": tid, "partial_reason": "thread_observation_exceeds_supported_limit"})
+                continue
+        thread, packet, error = _thread_from_packet(store, packet, budget)
+        if error is not None:
+            errors.append({"thread_id": tid, **error})
+        if packet is not None and checkpoint["memo_candidate"] is None:
+            checkpoint["memo_candidate"] = packet
+        if thread is not None:
+            rows.append(thread)
+        elif packet is not None:
+            waiting.insert(0, tid)
+            break
+        if reused:
+            # 已付过整头字节的候选必须先服务，不先加载另一个大头又把全部额度花完。
+            break
+    checkpoint["unloaded"] = waiting
+    checkpoint["waiting"] = []
+    rows.sort(key=lambda item: (float(item.updated_at), str(item.thread_id)))
+    return rows, errors, (key, checkpoint)
 
 
 # LLM: 单线程有界多页读取：跨过 learning_excluded=True 的消息并记录连续前缀跳过游标，遇读错即清空跳过记录。
@@ -565,13 +787,28 @@ def _collect_thread_messages(state: dict[str, object], thread: object, cursor: s
     limit = int(state["limit"])
     for _page in range(16):
         page_limit = max(1, limit - len(selected))
-        entries, load_errors = after_report(thread_id, after_message_id=scan_cursor, limit=page_limit)  # type: ignore[operator]
+        partial = False
+        if state.get("budget") is not None:
+            read_slice = state["read_slice"]
+            if read_slice.exhausted():
+                state["scan_partial"] = True
+                break
+            outcome = state["store"].messages.after_slice_report(thread_id,
+                after_message_id=scan_cursor, limit=page_limit, budget=read_slice)
+            entries, load_errors, partial = outcome.rows, outcome.load_errors, outcome.partial or outcome.has_more
+            if outcome.reason:
+                state["scan_reasons"].add(outcome.reason)
+            state["scan_partial"] = bool(state["scan_partial"] or partial)
+        else:
+            entries, load_errors = after_report(thread_id, after_message_id=scan_cursor, limit=page_limit)  # type: ignore[operator]
         errors.extend(dict(item) for item in load_errors)
         if load_errors:
             if skipped_cursors is not None:
                 skipped_cursors.pop(thread_id, None)
             break
         if not entries:
+            if partial:
+                break
             if not thread_selected and scan_cursor == cursor and eof_key is not None and eof_key == _cold_thread_key(state["store"], thread_id, cursor):
                 _COLD_THREAD_EOF.put(eof_key, True)
             break

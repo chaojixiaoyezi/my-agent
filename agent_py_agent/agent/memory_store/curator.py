@@ -291,11 +291,14 @@ class _CuratorLifecycleMixin:
         precollected = _PrecollectedBatch(batch, state, config_revision, excluded_ids, exclusions_revision)
         if batch.load_errors:
             return self.run(reason="interval", now=current, precollected_batch=precollected)
+        if batch.message_scan_partial and not batch.messages and not batch.audit_events:
+            return self._result(status="busy", reason="interval", warnings=_message_scan_warnings(batch))
         if batch.user_turns() >= self.config.turn_threshold:
             return self.run(reason="turn_threshold", now=current, precollected_batch=precollected)
         if _interval_due(batch, state, current, self.config.interval_seconds):
             return self.run(reason="interval", now=current, precollected_batch=precollected)
-        return self._result(status="not_due", reason="interval")
+        return self._result(status="busy" if batch.message_scan_partial else "not_due", reason="interval",
+                            warnings=_message_scan_warnings(batch) if batch.message_scan_partial else ())
 
     # LLM: 冷却只约束已持久化的失败待办请求；限制供应商重试但不删触发原因、不跳过输入。退避时长与 owner_wake_discovery 共用
     # curator_failure_retry_seconds：普通失败沿维护周期（30–300 秒），CURATOR_MODEL_NOT_CONFIGURED 等一小时，
@@ -548,6 +551,9 @@ class _CuratorExecutionMixin:
         if batch.load_errors:
             raise CuratorInputError(_load_error_code(batch.load_errors))
         if not batch.messages and not batch.audit_events:
+            if batch.message_scan_partial:
+                # 原_run_leased先停心跳再释放本lease；pending原因及全部消费游标保留。
+                return self._result(status="busy", reason=context.reason, warnings=_message_scan_warnings(batch))
             return self._commit_batch(
                 context, batch, None, extra_warnings=preflight_warnings
             )
@@ -628,6 +634,9 @@ class _CuratorExecutionMixin:
                 self.config.max_input_chars - 7_000 - formal_chars,
             ),
         )
+        from .retention_scan_budget import RetentionScanBudget
+
+        scan_budget = RetentionScanBudget.default(self.config)
         batch = collect_curator_inputs(
             message_source=CuratorMessageSource(
                 conversation_store=self.conversation_store,
@@ -638,6 +647,7 @@ class _CuratorExecutionMixin:
             config=input_config,
             formal_memories=formal,
             tool_reference_source=self.tool_reference_source,
+            scan_budget=scan_budget,
         )
         from .curator_learning_source import attach_audit_sources
 
@@ -672,6 +682,10 @@ class _CuratorExecutionMixin:
         extra_warnings: tuple[str, ...] = (),
     ) -> CuratorRunResult:
         # LLM: 先统一提取候选的落点输出（含来源/身份事实），再做身份冲突过滤；两步都在租约内完成。
+        if batch.message_scan_partial:
+            # 通过原reason代次保留续办义务；成功只提交本批确已读取的其它线程，不签全部扫描完成。
+            self.state_store.request(context.reason)
+            extra_warnings = (*extra_warnings, *_message_scan_warnings(batch))
         outputs = _prepare_outputs(
             context, batch, extraction, owner=self.dependencies.identity.owner_id
         )
@@ -695,11 +709,11 @@ class _CuratorExecutionMixin:
             context,
             prepared,
             finished_at=finished_at,
-            finalize_date=_finalize_date(
+            finalize_date=("" if batch.message_scan_partial else _finalize_date(
                 context.reason,
                 self.timezone_name,
                 started_at=context.started_at,
-            ),
+            )),
         )
         try:
             committed = self.committer.commit(
@@ -1957,6 +1971,10 @@ def _pending_reason(reasons: list[str]) -> str:
 # LLM: 间隔到期还必须有实际未处理消息或审计输入，并使用带时区的持久成功时间。被整窗排除的 audit 窗口只剩 skipped_audit_cursor 作输入证据，也
 # 必须算「有输入」：否则游标停摆，只能等每日收尾才越过（mc4-3105）。
 # 函数用途: 判断增量输入是否达到时间触发条件。
+def _message_scan_warnings(batch: CuratorInputBatch) -> tuple[str, ...]:
+    return ("message_scan_partial", *(f"message_scan_partial:{reason}" for reason in batch.message_scan_reasons))
+
+
 def _interval_due(
     batch: CuratorInputBatch,
     state: MemoryCuratorState,

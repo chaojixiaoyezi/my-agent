@@ -52,6 +52,7 @@ class MessageCursor:
     end: int
     seen: bytes
     empty_tail: bool = False
+    changed_ns: int | None = None
 
 
 # LLM: 完整stamp在粗时间片内也可能碰撞；共享信任窗口未过必须冷扫，同尺寸变更不能只核锚行而吞前缀损坏。
@@ -256,9 +257,9 @@ def _tail_row(line: bytes, path: Path):
 
 # LLM: 接受同次已冻结位图直接共享，旧bytearray调用沿统一冻结入口；空ID不占初始空尾键，不缓存正文或异常。
 # 函数用途: 为非空消息ID记录首位置，避免空ID行的中间偏移污染从头读取。
-def _save_positions(path: Path, stamp: FileStamp, seen: bytearray | bytes, positions: list) -> None:
+def _save_positions(path: Path, stamp: FileStamp, seen: bytearray | bytes, positions: list, *, changed_ns=None) -> None:
     frozen = _freeze_seen(seen) if isinstance(seen, bytearray) else seen
     for target, start, end in positions:
         if not target:
             continue
-        _remember(path, target, MessageCursor(stamp, start, end, frozen))
+        _remember(path, target, MessageCursor(stamp, start, end, frozen, changed_ns=changed_ns))

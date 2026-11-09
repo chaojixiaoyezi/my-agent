@@ -782,6 +782,34 @@ class MessageStore:
         except Exception as exc:
             return [], [jsonl_error(exc, "conversation.messages.after", path=path)]
 
+    def after_slice_report(self, thread_id: str, *, after_message_id: str = "", limit: int = 100, budget):
+        """后台读口显式区分partial与EOF；不修改同步after_report或持久消费ID。"""
+        from .message_cursor_slice import MessageReadOutcome, read_after_slice
+
+        path = self.storage.message_path(thread_id)
+        try:
+            path.stat()
+        except FileNotFoundError:
+            try:
+                path.with_suffix('.manifest.json').stat()
+                cold_layout = True
+            except FileNotFoundError:
+                cold_layout = False
+            except OSError as exc:
+                return MessageReadOutcome(load_errors=(jsonl_error(exc, "conversation.messages.after", path=path),))
+            if after_message_id or cold_layout:
+                error = DataCorruptionError("canonical message source is missing during bounded read")
+                return MessageReadOutcome(load_errors=(jsonl_error(error, "conversation.messages.after", path=path),))
+            return MessageReadOutcome()
+        except OSError as exc:
+            return MessageReadOutcome(load_errors=(jsonl_error(exc, "conversation.messages.after", path=path),))
+        try:
+            outcome = read_after_slice(path, after_message_id, max(1, min(1000, int(limit or 100))), budget)
+            entries, errors = _message_entries(outcome.rows)
+            return replace(outcome, rows=tuple(entries), load_errors=(*outcome.load_errors, *errors))
+        except Exception as exc:
+            return MessageReadOutcome(load_errors=(jsonl_error(exc, "conversation.messages.after", path=path),))
+
     # LLM: Persona/Memory证据复用canonical字节索引，前缀损坏仍拒绝；不使用派生搜索库或改变owner路径。
     # 函数用途: 按原消息首地址读取单条记录，并返回目标前的结构化读取错误。
     def by_id_report(

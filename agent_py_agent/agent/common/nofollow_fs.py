@@ -12,6 +12,8 @@ import os
 import secrets
 import stat
 from contextvars import ContextVar
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 _LAST_APPEND_PRE_STAMP: ContextVar[tuple[int, int, int, int, int] | None] = ContextVar(
@@ -265,7 +267,7 @@ def _snapshot_leaf_identity(parent_fd, name, before, opened, descriptor):
 
 # LLM: 初始regular0在open前丢弃，读前后0link均不授bytes；同一原FD有界读/复采及清理保持，初次缺叶可None，重读后missing硬拒。
 # 函数用途: 尝试取得完整单链接版本；零链接copyout只耗既有预算，未打开时不读正文，已打开的所有出口归还原叶FD。
-def _read_snapshot_leaf(parent_fd, name, max_bytes, allow_missing):
+def _read_snapshot_leaf(parent_fd, name, max_bytes, allow_missing, *, observation=None, read_content=True):
     try:
         before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError:
@@ -280,8 +282,15 @@ def _read_snapshot_leaf(parent_fd, name, max_bytes, allow_missing):
     descriptor = os.open(name, flags, 0o600, dir_fd=parent_fd)
     try:
         _snapshot_leaf_identity(parent_fd, name, before, os.fstat(descriptor), descriptor)
-        content = _read_descriptor(descriptor, max_bytes)
-        _snapshot_leaf_identity(parent_fd, name, before, os.fstat(descriptor), descriptor)
+        generation_before = file_descriptor_change_ns(descriptor, os.fstat(descriptor)) if observation is not None else None
+        content = _read_descriptor(descriptor, max_bytes) if read_content else b""
+        observed = os.fstat(descriptor)
+        _snapshot_leaf_identity(parent_fd, name, before, observed, descriptor)
+        if observation is not None:
+            generation_after = file_descriptor_change_ns(descriptor, observed)
+            if generation_before != generation_after:
+                raise NoFollowPathError("managed snapshot file generation changed")
+            observation.append((observed, generation_after))
     except BaseException as error:
         _close_snapshot_fds([descriptor], error)
         raise
@@ -314,6 +323,126 @@ def _read_snapshot_beneath(root, parts, max_bytes, retries):
         raise
     _close_snapshot_fds([parent_fd])
     return content
+
+
+@dataclass(frozen=True)
+class BinaryFileSnapshot:
+    """正文和首末核验通过的同一FD身份；父链身份不来自调用方的路径猜测。"""
+    content: bytes
+    stat: os.stat_result
+    parents: tuple
+    changed_ns: int | None
+
+
+def read_bytes_snapshot_beneath(root, relative_parts, *, max_bytes, require_dir_fd=False):
+    """保留原字节口，额外为显式来源续点返回同一读取FD身份；没有重试或写入。"""
+    return _binary_file_snapshot(root, relative_parts, max_bytes, require_dir_fd, True)
+
+
+def inspect_file_snapshot_beneath(root, relative_parts, *, require_dir_fd=False):
+    """只打开原普通文件核FD/父链，不读正文；不单凭路径stat认证旧内容。"""
+    return _binary_file_snapshot(root, relative_parts, None, require_dir_fd, False)
+
+
+def _binary_file_snapshot(root, parts, max_bytes, require_dir_fd, read_content):
+    _validate_relative_parts(parts)
+    if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
+        raise ValueError("managed read limit must be a nonnegative integer")
+    if not _supports_dir_fd():
+        if require_dir_fd:
+            raise NoFollowPathError("strict no-follow reading is unavailable")
+        return _portable_binary_snapshot(root, parts, max_bytes, read_content)
+    parent_fd, bindings = _snapshot_parent(root, parts)
+    if parent_fd is None:
+        return None
+    observed = []
+    try:
+        _verify_snapshot_parents(root, parts, bindings)
+        content = _read_snapshot_leaf(parent_fd, parts[-1], max_bytes, True,
+                                      observation=observed, read_content=read_content)
+        _verify_snapshot_parents(root, parts, bindings)
+    except BaseException as error:
+        _close_snapshot_fds([parent_fd], error)
+        raise
+    _close_snapshot_fds([parent_fd])
+    return BinaryFileSnapshot(content, observed[0][0], tuple(bindings), observed[0][1]) if observed else None
+
+
+def _portable_snapshot_parents(root, parts):
+    return tuple((info.st_dev, info.st_ino) for info in
+                 (_portable_directory(root, parts[:length], create=False).lstat() for length in range(len(parts))))
+
+
+def _portable_snapshot_identity(target, before, opened):
+    current = target.lstat()
+    fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+            or not stat.S_ISREG(current.st_mode) or current.st_nlink != 1
+            or any(getattr(before, field) != getattr(opened, field)
+                   or getattr(current, field) != getattr(opened, field) for field in fields)):
+        raise NoFollowPathError("managed snapshot source changed")
+
+
+
+@lru_cache(maxsize=1)
+def _windows_change_query():
+    import ctypes
+    from ctypes import wintypes
+
+    class BasicInfo(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_int64) for name in
+                    ("creation", "access", "write", "change")] + [("attributes", wintypes.DWORD)]
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    query = kernel.GetFileInformationByHandleEx
+    query.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
+    query.restype = wintypes.BOOL
+    return query, BasicInfo
+
+
+def file_descriptor_change_ns(descriptor, info):
+    """Windows的st_ctime可能仍是创建时间，实际变更代次只取同一FD的FILE_BASIC_INFO。"""
+    if os.name != "nt":
+        return info.st_ctime_ns
+    import ctypes
+    import msvcrt
+
+    try:
+        query, basic_info = _windows_change_query()
+        value = basic_info()
+        success = query(msvcrt.get_osfhandle(descriptor), 0, ctypes.byref(value), ctypes.sizeof(value))
+    except OSError:
+        return None
+    # Win32 FILETIME为1601起100ns；无法读取不是可缓存的旧内容证明。
+    return (value.change - 116444736000000000) * 100 if success else None
+
+
+def _portable_binary_snapshot(root, parts, max_bytes, read_content):
+    try:
+        parents = _portable_snapshot_parents(root, parts)
+        target = _portable_path(root, parts, create=False)
+        before = target.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise NoFollowPathError("managed snapshot leaf is not regular single-link")
+    descriptor = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+    try:
+        opened = os.fstat(descriptor)
+        _portable_snapshot_identity(target, before, opened)
+        changed_before = file_descriptor_change_ns(descriptor, opened)
+        content = _read_descriptor(descriptor, max_bytes) if read_content else b""
+        observed = os.fstat(descriptor)
+        _portable_snapshot_identity(target, before, observed)
+        changed_after = file_descriptor_change_ns(descriptor, observed)
+        if changed_before != changed_after:
+            raise NoFollowPathError("managed snapshot file generation changed")
+        if parents != _portable_snapshot_parents(root, parts):
+            raise NoFollowPathError("managed snapshot parent changed")
+    except BaseException as error:
+        _close_snapshot_fds([descriptor], error)
+        raise
+    _close_snapshot_fds([descriptor])
+    return BinaryFileSnapshot(content, observed, parents, changed_after)
 
 
 # LLM: Validation probes may ask only whether a bounded regular file exists. Symlinks, hardlinks,

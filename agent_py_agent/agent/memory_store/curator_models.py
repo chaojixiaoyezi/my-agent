@@ -24,6 +24,11 @@ from .curator_schema import (
     validate_curator_response_payload,
 )
 from .daily import DailyMemoryEvent
+from .retention_scan_budget import (
+    RETENTION_SCAN_SLICE_BYTES,
+    RETENTION_SCAN_SLICE_ENTRIES,
+    RETENTION_SCAN_SLICE_MS,
+)
 
 CURATOR_STATE_SCHEMA_VERSION = "my-agent.memory-curator-state.v1"
 CURATOR_RUN_SCHEMA_VERSION = "my-agent.memory-curator-run.v2"
@@ -70,6 +75,10 @@ class MemoryCuratorConfig:
     hot_min_occurrences: int = 3
     task_file_evidence_max_chars: int = 4000
     cross_thread_dedupe_window_seconds: int = 600
+    # 宿主已有预算原值透传；同一次消息发现/定位共用，不能由批量大小抬高小配置。
+    retention_scan_slice_entries: int = RETENTION_SCAN_SLICE_ENTRIES
+    retention_scan_slice_bytes: int = RETENTION_SCAN_SLICE_BYTES
+    retention_scan_slice_ms: int = RETENTION_SCAN_SLICE_MS
 
     # LLM: 只从已 normalize 的 AgentConfig 读取固定引用、门槛和证据/去重预算，0值原样保留，不另解析配置文件。
     # 函数用途: 构造一次运行不可变配置，让 Curator 收集与晋升使用真实配置值。
@@ -97,12 +106,19 @@ class MemoryCuratorConfig:
             hot_min_occurrences=max(3, int(getattr(config, "memory_hot_min_occurrences", 3) or 3)),
             task_file_evidence_max_chars=int(getattr(config, "memory_curator_task_file_evidence_max_chars", 4000)),
             cross_thread_dedupe_window_seconds=int(getattr(config, "memory_curator_cross_thread_dedupe_window_seconds", 600)),
+            retention_scan_slice_entries=getattr(config, "retention_scan_slice_entries", RETENTION_SCAN_SLICE_ENTRIES),
+            retention_scan_slice_bytes=getattr(config, "retention_scan_slice_bytes", RETENTION_SCAN_SLICE_BYTES),
+            retention_scan_slice_ms=getattr(config, "retention_scan_slice_ms", RETENTION_SCAN_SLICE_MS),
         )
 
     # LLM: revision 反映策展语义/预算；新增字段为默认值时剔除，保持既有state的修订哈希，非默认值仍参与计算。
     # 函数用途: 生成短配置修订号。
     def revision(self) -> str:
         payload = asdict(self)
+        for name, default in (("retention_scan_slice_entries", RETENTION_SCAN_SLICE_ENTRIES),
+                ("retention_scan_slice_bytes", RETENTION_SCAN_SLICE_BYTES), ("retention_scan_slice_ms", RETENTION_SCAN_SLICE_MS)):
+            if payload.get(name) == default:
+                payload.pop(name, None)
         if payload.get("lesson_min_occurrences") == 2:
             payload.pop("lesson_min_occurrences", None)
         if payload.get("hot_min_occurrences") == 3:
