@@ -3145,7 +3145,7 @@
       "value": 128,
       "unit": "个",
       "category": "其它",
-      "description": ""
+      "description": "独立审批目录发现最多缓存的根数量；轮次续点不依赖这些缓存永久驻留。"
     },
     {
       "name": "AGENT_TRANSCRIPT_MAX_BYTES",
@@ -7369,7 +7369,7 @@
       "value": 60.0,
       "unit": "秒",
       "category": "其它",
-      "description": ""
+      "description": "未在使用的轮次空闲超过此秒数后允许释放；重建仍从unknown开始。"
     },
     {
       "name": "_PENDING_DISCOVERY_CACHE_LIMIT_COUNT",
@@ -7377,7 +7377,7 @@
       "value": 64,
       "unit": "个",
       "category": "上限预算",
-      "description": ""
+      "description": "单进程保留当前审批发现轮次的最大作用域数量，避免闲置owner累积内存。"
     },
     {
       "name": "RUNTIME_OBSERVATION_MAX_COUNT",

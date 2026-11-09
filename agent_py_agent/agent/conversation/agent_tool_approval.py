@@ -889,6 +889,7 @@ class AgentToolApprovalDiscoveryUnavailable(RuntimeError):
     """审批发现尚未覆盖或源未知，调用方不能展示为空。"""
 
 
+# 独立审批目录发现最多缓存的根数量；轮次续点不依赖这些缓存永久驻留。
 _PENDING_DISCOVERY_WINDOW_ROOTS_COUNT = 128
 _pending_discovery_scans = _BoundedJsonDirectoryScan()
 _pending_discovery_windows = OrderedDict()

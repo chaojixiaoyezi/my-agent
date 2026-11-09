@@ -62,7 +62,9 @@ def pending_inputs(services, authorized, context, thread_id):
     return result
 
 
+# 单进程保留当前审批发现轮次的最大作用域数量，避免闲置owner累积内存。
 _PENDING_DISCOVERY_CACHE_LIMIT_COUNT = 64
+# 未在使用的轮次空闲超过此秒数后允许释放；重建仍从unknown开始。
 _PENDING_DISCOVERY_CACHE_IDLE_SECONDS = 60.0
 _pending_cache_clock = time.monotonic
 _current_approval_roots = OrderedDict()
