@@ -655,69 +655,96 @@ def test_scoped_lock_process_singleton_reentrant_threads_and_cross_process_mutex
 # ---------------------------------------------------------------------------
 
 
-def test_create_delete_task_dirs_with_concurrent_listing_does_not_raise(tmp_path: Path) -> None:
-    """一个线程循环 create_run+rmtree,两个线程并发列表;列表只能记 load_errors,不能裸抛。"""
+def test_create_delete_task_dirs_with_concurrent_listing_does_not_raise(tmp_path: Path, monkeypatch) -> None:
+    """25轮真实写删；每轮两个读者都先发现locator，再在真实删除后继续读取。"""
 
     manager = _fresh_manager(tmp_path)
-    stop = threading.Event()
+    rounds = 25
+    deadline = time.monotonic() + 55.0  # 外层仍为60s，失败汇报/线程退出保留余量。
+    begin, located, removed, finished = (threading.Barrier(3) for _ in range(4))
+    barriers = (begin, located, removed, finished)
     writer_error: list[str] = []
     reader_errors: list[str] = []
     reader_errors_guard = threading.Lock()
     list_iterations = [0, 0]
+    window_reads = [0, 0]
+    snapshot_reader = threading.local()
+    current_run_id = ''
+    original_ref = manager.persistence._cached_run_ref
 
-    def writer() -> None:
-        try:
-            for i in range(25):
-                task = manager.create_run(goal=f"churn-{i}", thought="t", plan=["p"])
-                # 先删任务工作目录(canonical_state.json 所在),再删 workspace 下的
-                # locator 目录,制造 glob 与 load 之间文件消失的竞态窗口。
-                for path in (task.task_dir, task.task_workspace_dir, manager.workspace / task.id):
-                    try:
-                        shutil.rmtree(path)
-                    except FileNotFoundError:
-                        pass  # 规范工作目录可能已随父级task目录删除；其它删除错误不能吞掉。
-        except BaseException:  # noqa: BLE001
-            writer_error.append(traceback.format_exc())
-        finally:
-            stop.set()
+    def rendezvous(barrier):
+        barrier.wait(timeout=max(0.0, deadline - time.monotonic()))
+
+    def abort_round():
+        for barrier in barriers:
+            barrier.abort()
+
+    def read_after_removal(run_id, task_file):
+        if getattr(snapshot_reader, 'active', False) and run_id == current_run_id:
+            window_reads[snapshot_reader.slot] += 1
+            rendezvous(located)  # 两个真实glob都已发现本轮locator，且尚未读文件。
+            rendezvous(removed)
+        return original_ref(run_id, task_file)  # 不替换IO/结果，真实stat必须面对刚消失的文件。
+
+    monkeypatch.setattr(manager.persistence, '_cached_run_ref', read_after_removal)
 
     def reader(slot: int) -> None:
-        while not stop.is_set():
-            try:
-                report = manager.list_runs_report()
-                assert isinstance(report.runs, list)
-                assert isinstance(report.load_errors, list)  # 结构化记录是允许的。
+        snapshot_reader.slot = slot
+        try:
+            for _ in range(rounds):
+                rendezvous(begin)
+                snapshot_reader.active = True
+                try:
+                    report = manager.list_runs_report()
+                finally:
+                    snapshot_reader.active = False
+                assert isinstance(report.runs, list) and isinstance(report.load_errors, list)
+                assert any(row.get('run_id') == current_run_id and row.get('error_type') == 'FileNotFoundError'
+                           for row in report.load_errors), report.load_errors
                 from agent_py_agent.agent.subagents.manager import SubagentRunIndexUnavailable
                 try:
                     selected = manager.indexing.select_runs(None)
                 except SubagentRunIndexUnavailable as error:
-                    # R7 的派工选择遇到消失/变化的 canonical 必须阻断；保留结构化坏读证据。
+                    # 当前选择不能将canonical消失当作空集合，仍须给出typed unavailable及坏读证据。
                     assert error.load_errors and all(isinstance(row, dict) and row.get('error_type')
                                                      for row in error.load_errors)
                 else:
                     assert isinstance(selected, list)
                 list_iterations[slot] += 1
-            except BaseException:  # noqa: BLE001 - 任何裸抛(含 FileNotFoundError)都算失败。
-                with reader_errors_guard:
-                    reader_errors.append(traceback.format_exc())
-                return
+                rendezvous(finished)
+        except BaseException:  # noqa: BLE001 - 包括裸FileNotFoundError，均保留完整失败栈。
+            with reader_errors_guard:
+                reader_errors.append(traceback.format_exc())
+            abort_round()
 
     readers = [threading.Thread(target=reader, args=(slot,), daemon=True) for slot in range(2)]
     for thread in readers:
         thread.start()
-    # 两个读者仍并行；主线程完成全部25轮写删后才观察最终空集，不猜CI用时。
-    writer()
-    for thread in readers:
-        thread.join(timeout=15)
+    try:
+        for i in range(rounds):
+            task = manager.create_run(goal=f"churn-{i}", thought="t", plan=["p"])
+            current_run_id = task.id
+            rendezvous(begin)
+            rendezvous(located)
+            for path in (task.task_dir, task.task_workspace_dir, manager.workspace / task.id):
+                try:
+                    shutil.rmtree(path)
+                except FileNotFoundError:
+                    pass  # canonical工作目录可能已随父级删除；其它删除错误仍直接失败。
+            rendezvous(removed)
+            rendezvous(finished)
+    except BaseException:  # noqa: BLE001
+        writer_error.append(traceback.format_exc())
+        abort_round()
+    finally:
+        for thread in readers:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
     assert all(not thread.is_alive() for thread in readers), "列表线程未退出"
-
     assert writer_error == [], "创建/删除线程不应抛出异常:\n" + "\n".join(writer_error)
     assert reader_errors == [], (
-        "列表操作在目录消失竞态下裸抛了异常(应转为 load_errors 结构化记录):\n"
-        + "\n".join(reader_errors)
+        "列表操作在目录消失竞态下裸抛了异常(应转为 load_errors 结构化记录):\n" + "\n".join(reader_errors)
     )
-    assert min(list_iterations) >= 1, "读线程没有真正跑起来,竞态未被覆盖"
-    # 收尾确定性断言:全部任务已删除,列表应回到干净状态。
+    assert list_iterations == window_reads == [rounds, rounds], "每轮两个读者都必须实际读取消失窗口"
     final_report = manager.list_runs_report()
     assert final_report.runs == []
     assert final_report.load_errors == []
