@@ -62,5 +62,20 @@ jobs:
           agent_py_agent/tests/test_sandbox_output_capture.py::test_reader_failure_exposes_stream_error_and_missing_eof
           -q
 
+      - name: Verify native HTTP socket ownership and ordinary admission
+        run: >-
+          python -m pytest -q
+          agent_py_agent/tests/test_s1w1_http_lanes.py
+          agent_py_agent/tests/test_gateway_bounded_http_server.py
+          -k "not real_gateway_complete_request_still_requires_authentication"
+
+      # 隔离 Gateway 的测试宿主用 POSIX 进程组回收；Win32 在上一步实测原生 socket 生命周期。
+      - name: Verify macOS Gateway admission and authenticated receipt
+        if: runner.os == 'macOS'
+        run: >-
+          python -m pytest -q
+          agent_py_agent/tests/test_s1w1_http_lanes.py::test_real_gateway_complete_request_still_requires_authentication
+          agent_py_agent/tests/slo/test_slo_cliff.py
+
       - name: Check formatting whitespace
         run: git diff --check
