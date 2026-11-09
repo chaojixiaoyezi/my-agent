@@ -56,12 +56,17 @@ class CheckpointOffsetStore:
                     opened = os.fstat(descriptor)
                     def identity(value):
                         return (value.st_dev, value.st_ino, value.st_mode, value.st_nlink, value.st_size,
-                                value.st_mtime_ns, value.st_ctime_ns)
+                                value.st_mtime_ns)
+                    def version(value):
+                        return (*identity(value), value.st_ctime_ns)
+                    # Windows的path ctime是创建时间，FD ctime是元数据变更时间。
+                    # 身份跨读口核对，版本只在各自读口前后比较，不能把两种时钟当成相同事实。
+                    cross_identity = identity if os.name == 'nt' else version
                     if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
-                            or identity(opened) != identity(before)
+                            or cross_identity(opened) != cross_identity(before)
                             or os.read(descriptor, 16) != b'SQLite format 3\x00'
-                            or identity(os.fstat(descriptor)) != identity(opened)
-                            or identity(self.path.lstat()) != identity(opened)):
+                            or version(os.fstat(descriptor)) != version(opened)
+                            or version(self.path.lstat()) != version(before)):
                         raise OSError('untrusted checkpoint offset projection header')
                 finally:
                     os.close(descriptor)

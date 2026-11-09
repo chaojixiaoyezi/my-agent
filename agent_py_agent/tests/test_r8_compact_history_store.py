@@ -569,3 +569,90 @@ def test_projection_header_without_o_nofollow_still_checks_real_identity(tmp_pat
     for descriptor in opened:
         with pytest.raises(OSError):
             os.fstat(descriptor)
+
+
+@pytest.mark.parametrize('change', ['none', 'fd_ctime', 'path_ctime', 'fd_mtime', 'path_mtime', 'same_inode_rewrite',
+                                    'fd_identity', 'replace_before_open', 'replace_after_read', 'posix_clock_mismatch'])
+def test_projection_header_keeps_each_stat_clock_stable_without_cross_comparing_ctime(tmp_path, monkeypatch, change):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation import checkpoint_offset_store as module
+
+    path = tmp_path / 'ledger.jsonl'
+    path.write_bytes(b'{"checkpoint_id":"one"}\n')
+    with scan.checkpoint_row_lookup(path, publish_projection=True):
+        pass
+    store = module.CheckpointOffsetStore(path)
+    original_open, original_read, original_fstat, original_lstat = os.open, os.read, os.fstat, Path.lstat
+    descriptors = []
+    read_finished = []
+    stamp = store.path.stat()
+    replacement = tmp_path / 'replacement.sqlite3'
+    replacement.write_bytes(store.path.read_bytes())
+
+    def altered(value, **changes):
+        keys = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+        return SimpleNamespace(**{**{key: getattr(value, key) for key in keys}, **changes})
+
+    def opened(name, flags, *args, **kwargs):
+        if Path(name) == store.path and change == 'replace_before_open':
+            os.replace(replacement, store.path)
+        descriptor = original_open(name, flags, *args, **kwargs)
+        if Path(name) == store.path:
+            descriptors.append(descriptor)
+        return descriptor
+
+    def fstat(descriptor):
+        value = original_fstat(descriptor)
+        if descriptor not in descriptors:
+            return value
+        # 同一真实FD，模拟CPython Windows把ChangeTime用于fstat、BirthTime用于lstat。
+        fields = {'st_ctime_ns': value.st_ctime_ns + 1000000}
+        if change == 'fd_identity':
+            fields['st_ino'] = value.st_ino + 1
+        if read_finished and change in {'fd_ctime', 'same_inode_rewrite'}:
+            fields['st_ctime_ns'] += 1
+        if read_finished and change == 'fd_mtime':
+            fields['st_mtime_ns'] = value.st_mtime_ns + 1
+        return altered(value, **fields)
+
+    def lstat(value, *args, **kwargs):
+        actual = original_lstat(value, *args, **kwargs)
+        if value != store.path or not read_finished:
+            return actual
+        if change == 'path_ctime':
+            return altered(actual, st_ctime_ns=actual.st_ctime_ns + 1)
+        if change == 'path_mtime':
+            return altered(actual, st_mtime_ns=actual.st_mtime_ns + 1)
+        return actual
+
+    def read(descriptor, size):
+        raw = original_read(descriptor, size)
+        if descriptor in descriptors:
+            if change == 'replace_after_read' and not read_finished:
+                os.replace(replacement, store.path)
+            if change == 'same_inode_rewrite' and not read_finished:
+                # 保留SQLite magic/长度/mtime的真实原inode写入，仍必须被FD变更时钟拒绝。
+                with store.path.open('r+b') as stream:
+                    stream.seek(100)
+                    prior = stream.read(1)
+                    stream.seek(100)
+                    stream.write(bytes([prior[0] ^ 1]))
+                os.utime(store.path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+            read_finished.append(True)
+        return raw
+
+    proxy = {key: value for key, value in vars(os).items() if key != 'O_NOFOLLOW'}
+    monkeypatch.setattr(module, 'os', SimpleNamespace(**{**proxy, 'name': 'posix' if change == 'posix_clock_mismatch' else 'nt', 'open': opened, 'read': read, 'fstat': fstat}))
+    monkeypatch.setattr(Path, 'lstat', lstat)
+    if change == 'none':
+        with store.connection(write=False) as conn:
+            assert conn.execute('SELECT count(*) FROM offsets').fetchone()[0] == 1
+    else:
+        pattern = None if change.startswith('replace_') else 'untrusted checkpoint offset projection header'
+        with pytest.raises(OSError, match=pattern):
+            with store.connection(write=False):
+                raise AssertionError('changed projection was accepted')
+    for descriptor in descriptors:
+        with pytest.raises(OSError):
+            original_fstat(descriptor)
