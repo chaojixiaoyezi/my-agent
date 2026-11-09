@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 import tracemalloc
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -303,14 +303,24 @@ class SessionLeftoverStop:
 # 函数用途: 冻结本会话遗留后台进程的停止意图，返回选中的进程事实、已冻结批次和没冻结成的记录。
 def freeze_session_leftover_processes(
     owner_home: str, thread_id: str, protected_root_task_ids: frozenset[str],
+    *, task_link_report: Callable[[str], tuple[object | None, dict | None]],
 ) -> SessionLeftoverStop:
     running, errors = list_running_background_processes(background_store_root(owner_home, owner_home))
     if errors:
         raise ValueError("后台进程登记表存在读不出的记录")
-    selected = tuple(
-        row for row in session_background_processes(running, thread_id)
-        if str(row.get("root_task_id") or "") not in protected_root_task_ids
-    )
+    mine = session_background_processes(running, thread_id)
+    protected = set(protected_root_task_ids)
+    # 活动索引不包含已取消的任务；停止前仍须核对资源实际引用的准确链接。
+    # 先核完全部来源再写任何停止意图，坏账不能变成“任务已无主”。
+    for task_id in dict.fromkeys(str(row.get("root_task_id") or "") for row in mine):
+        if not task_id or task_id in protected:
+            continue
+        link, error = task_link_report(task_id)
+        if error is not None or (link is not None and getattr(link, "thread_id", "") != thread_id):
+            raise ValueError("后台资源的任务归属暂不可确认")
+        if link is not None and getattr(link, "status", "") == "active":
+            protected.add(task_id)
+    selected = tuple(row for row in mine if str(row.get("root_task_id") or "") not in protected)
     owners = dict.fromkeys((str(row.get("root_task_id") or ""), str(row.get("run_id") or "")) for row in selected)
     batches = tuple(
         freeze_process_stop(ProcessExecutionScope(

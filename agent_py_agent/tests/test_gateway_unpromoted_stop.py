@@ -206,7 +206,7 @@ def test_promoted_task_cannot_be_reclassified_as_unpromoted_on_lookup_failure(ho
     hot.agent.conversation_store.tasks.bind({"task_id": "task", "thread_id": hot.scope.thread_id, "goal": "继续", "status": "active"})
     hot.agent.conversation_store.goals.create({"task_id": "task", "thread_id": hot.scope.thread_id, "objective": "继续"})
     if not late_link:
-        monkeypatch.setattr(hot.agent.conversation_store.tasks, "list_report", Mock(side_effect=OSError("unreadable")))
+        monkeypatch.setattr(hot.agent.conversation_store.tasks, "active_report", Mock(side_effect=OSError("unreadable")))
     result = _stop(hot)
     assert not result.ok and result.delivery_status == "unknown"
     assert hot.repo.get_attempt(hot.record["attempt_id"])["status"] == "running"

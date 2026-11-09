@@ -90,10 +90,23 @@ def test_restore_verifies_hash_and_rejects_path_escape(tmp_path) -> None:
         store.restore("acme", "user", "u1", tmp_path)
 
 
-def test_bucket_versioning_is_startup_hard_gate() -> None:
+def test_bucket_versioning_is_startup_hard_gate(monkeypatch) -> None:
+    from agent_py_agent.agent.owner_change_journal import OwnerChangeJournal
+
+    # 此例的对象存储为内存假后端；原生监听器安装门另有真实/缺失路径回归。
+    monkeypatch.setattr(OwnerChangeJournal, "require_available", staticmethod(lambda: None))
     client = _Objects()
     store = _store(client)
     store.require_ready()
     client.versioning = "Suspended"
     with pytest.raises(RuntimeError, match="versioning"):
         store.require_ready()
+
+
+def test_linux_missing_watcher_still_blocks_object_store_startup(monkeypatch) -> None:
+    from agent_py_agent.agent import owner_change_journal as journal
+
+    monkeypatch.setattr(journal.sys, "platform", "linux")
+    monkeypatch.setattr(journal.shutil, "which", lambda _command: None)
+    with pytest.raises(RuntimeError, match="Watchman"):
+        _store(_Objects()).require_ready()

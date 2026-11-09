@@ -75,7 +75,8 @@ def test_context_ids_use_lightweight_run_summaries():
         list_run_summaries=Mock(return_value=[SimpleNamespace(id="child", root_id="root"),
                                             SimpleNamespace(id="foreign", root_id="other")]),
         list_runs=Mock(side_effect=AssertionError("full copy scan must not run")))
-    state = SimpleNamespace(task_id="current", agent=SimpleNamespace(subagents=manager))
+    state = background_context.BackgroundContextLoad(agent=SimpleNamespace(subagents=manager),
+        store=None, thread=None, task_id="current", config=None, policy_request=None, load_errors=[])
     assert background_context._task_context_ids(state) == {"root", "current", "child"}
     manager.list_run_summaries.assert_called_once_with()
     manager.list_runs.assert_not_called()

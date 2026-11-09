@@ -173,6 +173,42 @@ def test_unreadable_task_links_fail_closed(agent, cleanups):
     assert cleanups == []
 
 
+def test_leftover_stop_validates_all_referenced_tasks_before_any_stop(agent, cleanups, monkeypatch):
+    thread = _thread(agent)
+    for task_id in ("good", "broken"):
+        _link(agent, thread.thread_id, task_id, {"status": "cancelled"})
+        _seed_running(agent, "bg-" + task_id, (thread.thread_id, task_id, task_id))
+    agent.conversation_store.storage.task_path("broken").write_text("{broken", encoding="utf-8")
+    monkeypatch.setattr(agent.conversation_store.tasks, "list_report",
+                        lambda *_a, **_kw: pytest.fail("must not scan historical task links"))
+    result = _control(agent, "/stop")
+    assert not result.ok and result.error_code == "TASK_RESOURCE_STOP_UNCONFIRMED"
+    assert not _stop_requested(agent, "bg-good") and not _stop_requested(agent, "bg-broken")
+    assert cleanups == []
+
+
+@pytest.mark.parametrize("state", ["active", "foreign"])
+def test_leftover_stop_rechecks_exact_link_after_active_projection(agent, cleanups, monkeypatch, state):
+    from dataclasses import replace
+
+    thread = _thread(agent)
+    link = _link(agent, thread.thread_id, "late", {"status": "cancelled"})
+    _seed_running(agent, "bg-late", (thread.thread_id, "late", "late"))
+    original = agent.conversation_store.tasks.load_report
+
+    def report(task_id):
+        if task_id != "late":
+            return original(task_id)
+        return (replace(link, status="active") if state == "active"
+                else replace(link, thread_id="another-thread")), None
+
+    monkeypatch.setattr(agent.conversation_store.tasks, "load_report", report)
+    result = _control(agent, "/stop")
+    assert not result.ok and not _stop_requested(agent, "bg-late") and cleanups == []
+    if state == "foreign":
+        assert result.error_code == "TASK_RESOURCE_STOP_UNCONFIRMED"
+
+
 def test_stop_with_nothing_left_still_says_none(agent, cleanups):
     _thread(agent)
 

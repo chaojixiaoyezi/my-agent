@@ -952,6 +952,7 @@ def _stop_session_leftovers(
         owner_home = str(Path(str(owner_agent.home_paths.owner_home_dir)).expanduser().resolve(strict=False))
         frozen = freeze_session_leftover_processes(
             owner_home, thread.thread_id, _session_protected_task_ids(store, thread.thread_id),
+            task_link_report=store.tasks.load_report,
         )
     except (AttributeError, KeyError, OSError, RuntimeError, TypeError, ValueError):
         return ConversationControlResult(

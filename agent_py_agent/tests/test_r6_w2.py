@@ -5,7 +5,10 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.agent_core.orchestration.dispatch import capability_auto_sweep as sweep
-from agent_py_agent.agent.conversation.background_context import _task_context_ids
+from agent_py_agent.agent.conversation.background_context import (
+    BackgroundContextLoad,
+    _task_context_ids,
+)
 from agent_py_agent.agent.subagents import manager as managers
 from agent_py_agent.agent.subagents.services import runtime_closeout
 from agent_py_agent.tests.test_audit_source_worker import _agent, _bind_audit_workspace, _watch
@@ -103,10 +106,14 @@ def test_background_lineage_uses_exact_scope_and_reports_bad_canonical(tmp_path,
     root = manager.create_run(goal="root")
     child = manager.create_run(goal="child", root_id=root.id, parent_id=root.id)
     manager.create_run(goal="other")
-    state = SimpleNamespace(task_id=child.id, agent=SimpleNamespace(subagents=manager), load_errors=[])
+    state = BackgroundContextLoad(agent=SimpleNamespace(subagents=manager), store=None, thread=None,
+                                  task_id=child.id, config=None, policy_request=None, load_errors=[])
     monkeypatch.setattr(manager, "list_run_summaries", lambda: pytest.fail("historical scan"))
     assert _task_context_ids(state) == {root.id, child.id} and not state.load_errors
     (manager.workspace / root.id / "task.json").write_text("{broken")
+    # 同一次准备冻结范围；下一次准备才读取后来发生的canonical损坏。
+    state = BackgroundContextLoad(agent=state.agent, store=None, thread=None, task_id=child.id,
+                                  config=None, policy_request=None, load_errors=[])
     assert _task_context_ids(state) == {root.id, child.id} and state.load_errors
 
 

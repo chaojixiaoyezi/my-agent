@@ -58,6 +58,12 @@ def _claim_fixture(monkeypatch):
             cancellation_scope="detached" if state.detached else "thread",
         )], []
 
+    def link_report(thread_id, task_id):
+        assert task_id == "task"
+        rows, errors = links(thread_id)
+        assert not errors
+        return rows[0], None
+
     def acquire(payload):
         event("acquire")
         records["acquire"].append(dict(payload))
@@ -116,7 +122,7 @@ def _claim_fixture(monkeypatch):
             require=lambda thread_id: {thread.thread_id: thread}[thread_id],
         ),
         claims=SimpleNamespace(acquire=acquire, finish=finish),
-        tasks=SimpleNamespace(list_report=links),
+        tasks=SimpleNamespace(link_report=link_report),
         wakes=SimpleNamespace(mark_handled=retire, pending_one=lambda _wake_id: None),
         progress=SimpleNamespace(disable=retire),
         # 夹具补全：产品代码直接读 store.guidance（不藏 getattr 兜底），替身也得有这个属性。
