@@ -978,6 +978,24 @@ class _OpenArtifactIndex:
         return nullcontext(self.handle)
 
 
+# 解析时顺带计算原始字节指纹，不额外物化源文件；索引共用读取器只从0开始顺序read。
+@dataclass
+class _HashedArtifactIndexRead:
+    handle: Any
+    digest: Any = field(default_factory=hashlib.sha256)
+
+    def seek(self, offset):
+        if offset != 0:
+            raise ValueError("artifact index verification must start at zero")
+        self.digest = hashlib.sha256()
+        return self.handle.seek(0)
+
+    def read(self, size):
+        block = self.handle.read(size)
+        self.digest.update(block)
+        return block
+
+
 # LLM: 原32键/16MiB及FD/stat失效不变；逻辑查找只准入命中索引，负命中仍完整解析，不缓存权限或失败。
 # 函数用途: 建立字面引用查找表并保留真正热索引，避免历史噪声撑大驻留内存或驱逐命中。
 def _parsed_artifact_index(source, *, literal_ref: str | None = None):
@@ -985,10 +1003,15 @@ def _parsed_artifact_index(source, *, literal_ref: str | None = None):
         before = _blob_stat_signature(os.fstat(handle.fileno()))
         key = str(getattr(source, "root", "")), str(getattr(source, "path", source)), *before
         local_read = _PREPARE_INDEX_READ.get()
-        if (local_read and local_read == (key, literal_ref)
-                and _blob_stat_signature(os.fstat(handle.fileno())) == before):
-            # 仍由source.open认证父链/owner/叶子；同一打开FD的身份未变才复用本轮负命中。
-            return (), {}
+        if local_read and local_read[:2] == (key, literal_ref):
+            # stat可在同一时钟刻度内不变；必须校验当前同FD的全部字节，才能省去第二次JSON解析。
+            digest = hashlib.sha256()
+            while block := handle.read(64 * 1024):
+                digest.update(block)
+            if (digest.digest() == local_read[2]
+                    and _blob_stat_signature(os.fstat(handle.fileno())) == before):
+                return (), {}
+            handle.seek(0)
         cached = _ARTIFACT_INDEX_CACHE.get(key)
         if cached is not None:
             return cached
@@ -998,7 +1021,9 @@ def _parsed_artifact_index(source, *, literal_ref: str | None = None):
         slot = _OVERSIZED_LITERAL_SLOT[0]
         if prescreen is not None and slot is not None and slot[0] == (key, literal_ref):
             return slot[1]
-        rows = tuple(row for _, row in iter_decoded_tool_index_objects(_OpenArtifactIndex(handle), prescreen))
+        hashed_read = _HashedArtifactIndexRead(handle) if local_read == () else None
+        rows = tuple(row for _, row in iter_decoded_tool_index_objects(
+            _OpenArtifactIndex(hashed_read if hashed_read is not None else handle), prescreen))
         by_literal: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
             for ref in {str(row.get(field, "") or "") for field in _INDEX_LITERAL_FIELDS}:
@@ -1008,7 +1033,7 @@ def _parsed_artifact_index(source, *, literal_ref: str | None = None):
         if (stable and local_read == () and literal_ref is not None
                 and len(literal_ref) <= 4096 and len(key[0]) <= 4096 and len(key[1]) <= 4096
                 and literal_ref not in by_literal):
-            _PREPARE_INDEX_READ.set((key, literal_ref))
+            _PREPARE_INDEX_READ.set((key, literal_ref, hashed_read.digest.digest()))
         if stable and (literal_ref is None or literal_ref in by_literal):
             if not oversized:
                 _ARTIFACT_INDEX_CACHE.put(key, result)

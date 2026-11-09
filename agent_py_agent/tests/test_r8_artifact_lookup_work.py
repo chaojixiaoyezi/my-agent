@@ -57,12 +57,15 @@ def test_prepare_negative_reuse_expires_at_request_boundary(tmp_path, monkeypatc
     assert reader.prepare_tool_output_artifact_read(request).record is not None
 
 
-@pytest.mark.parametrize("change", ["append", "replace", "truncate", "same_size_mtime", "corrupt"])
+@pytest.mark.parametrize("change", ["append", "replace", "truncate", "same_size_mtime", "same_observed_stamp", "corrupt"])
 def test_prepare_reopens_and_revalidates_changed_primary(tmp_path, monkeypatch, change):
     index = tmp_path / "blobs/tool_outputs/index.jsonl"
     index.parent.mkdir(parents=True)
     index.write_text(json.dumps({"pad": "x" * 4096}) + "\n", encoding="utf-8")
     monkeypatch.setattr(reader, "_ARTIFACT_INDEX_CACHE", reader._VerifiedArtifactCache(128))
+    if change == "same_observed_stamp":
+        signature = reader._blob_stat_signature
+        monkeypatch.setattr(reader, "_blob_stat_signature", lambda info: (*signature(info)[:3], 0, 0))
     discover = reader.tool_output_index_paths_for_lookup
     seen = []
     original = reader.iter_decoded_tool_index_objects
@@ -82,7 +85,7 @@ def test_prepare_reopens_and_revalidates_changed_primary(tmp_path, monkeypatch, 
             replacement.replace(index)
         elif change == "truncate":
             index.write_text(data)
-        elif change == "same_size_mtime":
+        elif change in {"same_size_mtime", "same_observed_stamp"}:
             before = index.stat()
             index.write_text(data.rstrip() + " " * (before.st_size - len(data)) + "\n")
             os.utime(index, ns=(before.st_atime_ns, before.st_mtime_ns))
@@ -146,8 +149,9 @@ def test_prepare_negative_token_keeps_no_parsed_source_rows(tmp_path, monkeypatc
 
     def inspect(root):
         token = reader._PREPARE_INDEX_READ.get()
-        assert type(token) is tuple and len(token) == 2
-        identity, literal = token
+        assert type(token) is tuple and len(token) == 3
+        identity, literal, digest = token
+        assert type(digest) is bytes and len(digest) == 32
         assert all(type(item) in (str, int) for item in identity)
         assert literal == "absent:call"
         return original(root)
