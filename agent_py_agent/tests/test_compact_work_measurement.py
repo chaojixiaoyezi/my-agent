@@ -84,6 +84,7 @@ def install_counters(monkeypatch, local, counts):
 
     def measured_connect(*args, **kwargs):
         counts['sqlite_connects'] += 1
+        counts['connect_paths'][str(args[0]).split('?')[0]] += 1
         frame = sys._getframe(1)
         names = []
         for _ in range(5):
@@ -116,11 +117,18 @@ def install_counters(monkeypatch, local, counts):
 
 
 def measure_compaction(agent, thread, monkeypatch, rows: int = 20_000):
-    counts = Counter(connect_sites=Counter(), get_record_calls=0, retrieved_body_bytes=0, comparison_body_bytes=0)
+    counts = Counter(connect_sites=Counter(), connect_paths=Counter(), get_record_calls=0, retrieved_body_bytes=0, comparison_body_bytes=0)
     install_counters(monkeypatch, agent.local_store, counts)
     install_scan_counters(monkeypatch, counts, rows)
-    monkeypatch.setattr(compact_request_budget, 'generate_auxiliary_model_response',
-                        lambda _r: ModelResponse(text='保留合成测试工作及其原始来源。', backend='fake'))
+    def summarize(_request):
+        from agent_py_agent.agent.io.sqlite_scope import _SQLITE_ACTIVE_SCOPE
+
+        scope = _SQLITE_ACTIVE_SCOPE.get()
+        assert scope is not None
+        assert all(not entry.in_use and not entry.conn.in_transaction for entry in scope.entries.values())
+        return ModelResponse(text='保留合成测试工作及其原始来源。', backend='fake')
+
+    monkeypatch.setattr(compact_request_budget, 'generate_auxiliary_model_response', summarize)
     gc.collect()
     tracemalloc.start()
     try:
@@ -194,7 +202,13 @@ def _assert_compaction_work_bounded(tmp_path, monkeypatch, count: int, min_sourc
     violations = {
         'full_parse_passes': counts['full_parse_passes'] > 44,
         'canonical_json_calls': counts['canonical_json_calls'] > count * 50,
-        'sqlite_connects': counts['sqlite_connects'] > 1,
+        # local.db 原批次预算不变；新增两个持久节点库各独立 ro/rw 代次租约。
+        'sqlite_connects': counts['connect_paths'][str(tmp_path / 'local.db')] > 1,
+        'compact_sqlite_connects': any(
+            not path.endswith(('/indexes/.nodes.sqlite3', '/timeline/.nodes.sqlite3')) or calls > 2
+            for path, calls in counts['connect_paths'].items() if path != str(tmp_path / 'local.db')
+        ),
+        'compact_database_count': len(counts['connect_paths']) > 3,
         'get_record_calls': counts['get_record_calls'] > 0,
         # 峰值不随来源线性增长：来源的一半再加 4 MB 固定开销余量（小规模时解释器/索引的固定开销占大头）。
         'tracemalloc_peak': counts['tracemalloc_peak'] >= counts['source_bytes'] // 2 + 4_000_000,

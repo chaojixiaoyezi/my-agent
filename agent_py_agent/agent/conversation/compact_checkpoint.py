@@ -27,7 +27,6 @@ from ..common.nofollow_fs import (
     write_bytes_atomic_beneath,
     write_text_atomic_beneath,
 )
-from ..io.sqlite_scope import sqlite_connection_scope
 from .compact_scope import THREAD_COMPACT_SCOPE, CompactScope
 from .compact_tool_identity import compact_tool_refs
 from .message_replay import message_rows_iterator
@@ -671,7 +670,6 @@ def _readability_key(record):
 
 # LLM: 新锚点只继承实际summary_base的覆盖，提交前驱只更新可选scope目录；所有根都由新候选ID封印。
 # 函数用途: 把累计覆盖和scope/后端回退目录改成固定深度不可变根，热行仅保留有界近期引用。
-@sqlite_connection_scope(enabled=True)
 def _prepare_carried_view(agent, request, row):
     from .compact_summary_view import resolve_compact_summary_view
     from .store_io import ImmutableJsonIndex

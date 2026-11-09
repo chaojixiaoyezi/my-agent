@@ -102,3 +102,12 @@ CAS 后 pin 登记失败恢复、收走的未发表节点禁止晚到发表、�
 建议下一步：先在集成提交上跑 Compact/scope/索引/线程 CAS 与 SQLite 恢复 focused 组合，
 再跑远端严格 gate 和 CI；读审可并行，节点库及其迁移协议不适合多个 agent 同时修改。
 真实 owner 数据迁移、在线模型与 Gateway 长期运行尚未作为本轮验收来源。
+
+
+## 连接成本作用域
+
+实际 prepare_conversation_context 操作共用原 SQLite 请求作用域，carried builder 不另建内层缓存。
+各调用归还前完成事务并复核文件代次；摘要等待只保留空闲、无事务连接，scope退出沿原guard关闭。
+首次无旧checkpoint压缩由原local.db一条连接、indexes/timeline各独立ro/rw两条组成，总计5条；
+不能再把新增持久库误计为原local.db批次的一条预算。成本探针保留local<=1，节点库逐路径<=2且仅两个路径；
+独立1/240/10000历史回归证明连接数不随根或重复读取增长，权限/代次租约不合并。

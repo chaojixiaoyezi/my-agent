@@ -466,3 +466,35 @@ def test_node_batch_refuses_copied_context_on_another_thread(tmp_path):
                 future.result(timeout=5)
         assert index.get(reference, 'key') is True
     assert index.get(reference, 'key') is True
+
+
+@pytest.mark.parametrize('history', [1, 240, 10000])
+def test_persistent_node_read_write_connections_do_not_grow_with_history(tmp_path, monkeypatch, history):
+    import sqlite3
+
+    index = ImmutableJsonIndex(tmp_path, ('nodes',), durable_nodes=True)
+    store = ImmutableNodeStore(tmp_path, ('nodes',))
+    first, reference = None, None
+    with store.batch():
+        for generation in range(history):
+            reference = index.put(reference, 'value', generation)
+            first = first or reference
+            store.pin(str(generation), generation, [reference], committed=True)
+    original, opened = sqlite3.connect, []
+
+    def connect(*args, **kwargs):
+        conn = original(*args, **kwargs)
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(sqlite3, 'connect', connect)
+    with sqlite_connection_scope(enabled=True):
+        for _ in range(4):
+            assert index.get(first, 'value') == 0
+            assert index.get(reference, 'value') == history - 1
+            store.pin('new-candidate', history + 1, [reference])
+        assert len(opened) == 2  # 独立 ro/rw，不把写权限借给只读调用。
+        assert not any(conn.in_transaction for conn in opened)
+    for conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute('SELECT 1')

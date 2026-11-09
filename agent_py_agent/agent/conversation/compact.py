@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from ..backends.request_content import compact_source_supported
 from ..common.cancellation import ToolCancelled
+from ..io.sqlite_scope import sqlite_connection_scope
 from ..memory_archive import estimate_tokens
 from ..tooling.runtime_contracts import ToolChoice
 from .channels import project_user_reply
@@ -387,6 +388,7 @@ def conversation_scope(
 
 # LLM: 使用原只读来源或本次加载的来源生成候选；summarizer仅由可信宿主提供，typed取消及原checkpoint/CAS边界不变。
 # 函数用途: 计量并一次提交会话摘要，保留原游标及失败边界；不替宿主再次准备恢复请求。
+@sqlite_connection_scope(enabled=True)
 def prepare_conversation_context(
     agent: SimpleAgent,
     store: ConversationStore,
