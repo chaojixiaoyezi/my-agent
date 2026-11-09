@@ -1113,6 +1113,10 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_r8_gateway_memory_diagnostics.py # 正式内存追踪生命周期、信号导出与隐私边界回归
 |-- agent_py_agent/tests/test_tui_render_cache_lifetime.py # 离场与换版正文释放、空窗口别名及完整渲染等价回归
 |-- agent_py_agent/agent/local_storage/diagnostics.py # 本次审计的瞬时数字计时与诊断故障隔离，不保存业务正文
+|-- agent_py_agent/agent/local_storage/fts_upgrade.py # 原owner维护内渐进升级旧FTS，保留旧active与唯一SQLite重建job
+|-- agent_py_agent/tests/test_r8_fts_automatic_upgrade.py # 旧库冷构造、覆盖完整性、自动续作与业务连接隔离回归
+|-- agent_py_agent/tests/test_r8_artifact_lookup_work.py # 同次归档负命中复用的源变化、内存上界与并发隔离回归
+|-- agent_py_agent/tests/test_r8_tui_explicit_stream.py # 真实HTTP正文流往返、撤回、去重及连续控制交错回归
 |-- agent_py_agent/tests/test_r8_local_store_stage_timing.py # 原审计锁/事务分段、并发隔离和资源退出异常保持
 |-- agent_py_agent/tests/test_gateway_request_stage_timing.py # 请求准备与收尾耗时、原停止及结束时间边界回归
 |-- agent_py_agent/tests/test_probe_cancellation_wait.py # 工具与视觉探针单飞等待的可取消性和锁所有权回归
@@ -1130,6 +1134,8 @@ agent_py_agent/
 |-- docs/design/R8_RECORD_LEDGERS.md # R8 线程任务历史与候选当前态增量账本
 |-- docs/design/R8_LEDGER_GC.md # 旧账初始归档与退休共用原维护通道和持久续点
 |-- docs/design/R8_RECOVERY_RETENTION.md # R8 SQLite恢复与派生文件生命周期
+|-- docs/design/R8_FTS_AUTOMATIC_UPGRADE.md # 旧FTS自动升级的覆盖、预算和真实迁移验收边界
+|-- docs/design/R8_ARTIFACT_LOOKUP_PROJECTION_DRAFT.md # 历史归档有界定位草案，成员完整性协议尚未实现
 |-- docs/tasks/R8_AUDIT_FOLLOWUPS.md # R8 历次审计遗漏补修
 |-- deploy/install_watchman.py # 固定官方发行摘要的文件监听器安装
 |-- deploy/verify_owner_observer.py # 容器实际ABI与cookie探针入口
@@ -1742,6 +1748,9 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 - `test_r8_gateway_memory_diagnostics.py`：用独立进程验证正式启动与信号导出，覆盖追踪所有权、私密正文不输出及停止后释放回调。
 - `test_tui_render_cache_lifetime.py`：确认旧宽度/模式不再强持离场正文，完整显示和历史分页保持。
 - `local_storage/diagnostics.py`：只在调用方范围内记录数值分段，闭合后不再持有或改写结果，诊断错误不替代业务异常。
+- `local_storage/fts_upgrade.py`：复用原owner维护发现与短片预算，进度权威仍归SQLite job，未完整投影不能签发完整检索。
+- `test_r8_artifact_lookup_work.py`：只复用同次已验证负命中，不保无关源行或跨请求负缓存；完整历史定位仍须设计收口。
+- `test_r8_tui_explicit_stream.py`：从正式writer经真实HTTP客户端进入TUI，候选可撤回、终稿唯一、迟到拒绝不走其它渲染出口。
 - `test_r8_local_store_stage_timing.py`、`test_gateway_request_stage_timing.py`：验证分段来源与异常边界，不改审计持久化或请求状态。
 - `test_probe_cancellation_wait.py`：以确定性交错验证等待者取消不依赖另一请求释放探针锁。
 - `support/fd_lifetime.py` 与 `test_fd_lifetime_boundaries.py`：明确测试自己的缓存生命周期；结束处不做GC，数量和身份双重检查仍能发现真实句柄泄漏。

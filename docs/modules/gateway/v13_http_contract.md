@@ -99,6 +99,10 @@
 
 正文增量只在有效档位 `stream` 持久化，经跨块 holdback 脱敏；重试、取消和工具边界产生 reset，旧调用迟到数据不能污染新调用。不能复用 TUI 原始计量流 `model_delta` 作为公开正文。完整 stdout/stderr 不内联进度；沿原 owner/thread 权限通过 `display_archive_ref` 和 `/client/display-page` 分页读取。
 
+TUI 的 `/verbose stream` 将公开增量显示在当前活动候选块中，默认 `off` 仍等待完整采纳正文；模型端 `stream_enabled` 是独立设置。候选不是已完成答复，重试、插话、停止、重连恢复可以撤回；`done` 不冻结会话，最终由原 commit/summary 校正并唯一收口。IM 的100字符预览限制不裁剪TUI候选或最终答复。TUI最多跟踪128个流调用和256个采纳去重身份，候选超过字符/工作预算时只放弃临时展示，终稿保持可达。
+
+显式正文流订阅的已采纳过程消息可携带 `model_source: {call_id}`，只透传候选已使用的同一调用编号，不带其它执行来源。不订阅正文流时不增加此字段。TUI明确拒绝的旧代、错源正文使用 `StreamEventDisposition.REJECTED`，禁止再经plain出口显示；普通观察回调的 `False`/`None` 仍表示未处理，保持原兼容行为。
+
 候选缓冲默认保留末尾 256 字符，累计 128 字符后合批投影（小 holdback 会相应缩小合批阈值）。同调用保留完整投影上下文，未闭合标签属性不提前发送；合法但投影为空的 terminal 也会撤回旧候选并发 done。单调用最多保留 1,048,576 字符，累计处理字符预算默认为 16,777,216，切点扫描、投影与前缀比较按每次候选长度的三倍计费。容量或预算耗尽时发送 `superseded` reset，本调用停止候选投影，最终只发 done；客户端须继续读取权威 `/result`，不能把该回退解释为请求失败。这是工作量上限，不是延迟或外部吞吐保证。
 
 **真实调用绑定：** `agent_core/tool_model_generation.py` 在原账本分配物理 `call_id` 后、发送提供方请求前，通过 writer 的 `bind_model_call` 冻结同一个编号到流回调。每次重试和后续工具轮重新分配并绑定，旧回调始终携带旧编号；该编号与最终 sealed-call 的 `model_source.call_id` 一致。普通回调与不支持绑定的旧出口保持原行为。
