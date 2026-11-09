@@ -14,6 +14,7 @@ from ..io.cursor_cache import FileStamp, cursor_key, file_stamp
 from ..runtime_errors import DataCorruptionError
 from . import message_cursor as cursor_io
 from .display_checkpoint import is_display_checkpoint
+from .message_prefix_proof import HOT_PREFIXES
 from .message_scan import (
     TRANSCRIPT_MAX_SEGMENT_BYTES,
     ColdSegmentObservation,
@@ -228,75 +229,95 @@ def read_after_slice(path: Path, target: str, limit: int, budget: MessageScanBud
         seen = bytearray(progress.seen)
         handle = reader.hot if progress.phase == 'locate' else reader
         handle.seek(progress.offset)
-        anchor = progress.anchor
-        phase = progress.phase
-        eof = False
-        reason = ""
-        while not budget.exhausted() and len(rows) < limit:
-            start = handle.tell()
-            try:
-                raw = _line(handle, budget)
-            except MessageReadDeferred:
-                break
-            except _RecordOutsideBound:
-                reason = "record_exceeds_supported_limit"
-                break
-            if raw is None:
-                break
-            if not raw:
-                if phase == 'locate':
-                    raise DataCorruptionError(f'conversation compact message cursor is missing from transcript: {target}')
-                eof = True
-                break
-            anchor = _anchor(start, raw)
-            if phase == 'locate':
+        prefix = (None if reader.manifest else HOT_PREFIXES.begin(
+            path, stamp, changed_ns, progress.offset,
+            trusted=source_stamp_is_trustworthy(stamp, changed_ns)))
+        prefix_verified = False
+        try:
+            anchor = progress.anchor
+            phase = progress.phase
+            eof = False
+            reason = ""
+            while not budget.exhausted() and len(rows) < limit:
+                start = handle.tell()
                 try:
-                    row = json.loads(raw.decode('utf-8'))
-                except (ValueError, UnicodeError) as exc:
-                    raise DataCorruptionError(f'conversation transcript contains an unreadable row: {path}') from exc
-                if cursor_io._note_row(seen, row) == target:
-                    physical_end = handle.tell()
-                    exact = cursor_io.MessageCursor(stamp, start, physical_end, cursor_io._freeze_seen(seen), changed_ns=changed_ns)
-                    if source_stamp_is_trustworthy(stamp, changed_ns):
-                        cursor_io._remember(path, target, exact)
-                    handle = reader
-                    handle.seek(physical_end + reader.base)
-                    anchor = (anchor[0] + reader.base, anchor[1] + reader.base, anchor[2])
-                    phase = 'tail'
-                continue
-            row, error = cursor_io._tail_row(raw, path)
-            if error is not None:
-                errors.append(error)
-                break
-            if row is None:
-                seen[:] = b"\xff" * len(seen)
-            else:
-                cursor_io._note_tail_position(row, seen, positions, (start, handle.tell()))
-                if not is_display_checkpoint(row):
-                    rows.append(row)
-        if (file_stamp(os.fstat(reader.hot.fileno())) != stamp or file_stamp(path.stat()) != stamp
-                or reader.manifest != transcript_manifest(path) or directory != _cold_directory(reader)
-                or file_descriptor_change_ns(reader.hot.fileno(), os.fstat(reader.hot.fileno())) != changed_ns):
-            # 不把变动中一片的局部读取授予覆盖；下一拍从原消费ID重新核验。
-            return MessageReadOutcome(partial=True, reason="source_changed")
-        if not errors and not reader.manifest and source_stamp_is_trustworthy(stamp, changed_ns):
-            cursor_io._save_positions(path, stamp, seen, positions, changed_ns=changed_ns)
-        unfinished = not eof and not errors and len(rows) < limit
-        # 有完整真实消息时是一页可提交数据；partial只表示尚无可提交页，不能由空页推导EOF。
-        partial = unfinished and not rows
-        has_more = unfinished and bool(rows)
-        target_address = progress.cold_target
-        sources = _selected_sources(reader, target_address, anchor)
-        continuation = MessageReadContinuation(stamp, layout, phase, handle.tell(), cursor_io._freeze_seen(seen),
-            anchor, reason, changed_ns, target_address, sources, directory) if unfinished else None
-        # 仅可信mtime/ctime/实际变更代次的来源进入跨拍缓存；没有正文或活FD。
-        trusted = source_stamp_is_trustworthy(stamp, changed_ns) and all(source_stamp_is_trustworthy(file_stamp(source.stat), source.changed_ns) for source in sources)
-        cursor_io._MESSAGE_CURSORS.put(key, continuation if partial and not rows and trusted else None)
-        if eof and not rows and not errors and not reader.manifest and target:
-            exact = cursor_io._MESSAGE_CURSORS.get(cursor_key(path, target))
-            if isinstance(exact, cursor_io.MessageCursor) and source_stamp_is_trustworthy(stamp, changed_ns):
-                cursor_io._remember(path, target, replace(exact, stamp=stamp, empty_tail=True))
-        return MessageReadOutcome(tuple(rows), tuple(errors), partial, has_more, continuation, reason)
+                    raw = _line(handle, budget)
+                except MessageReadDeferred:
+                    break
+                except _RecordOutsideBound:
+                    reason = "record_exceeds_supported_limit"
+                    break
+                if raw is None:
+                    break
+                if not raw:
+                    if phase == 'locate':
+                        raise DataCorruptionError(f'conversation compact message cursor is missing from transcript: {target}')
+                    eof = True
+                    break
+                anchor = _anchor(start, raw)
+                if phase == 'locate':
+                    try:
+                        row = json.loads(raw.decode('utf-8'))
+                    except (ValueError, UnicodeError) as exc:
+                        raise DataCorruptionError(f'conversation transcript contains an unreadable row: {path}') from exc
+                    observed_id = cursor_io._note_row(seen, row)
+                    if prefix is not None:
+                        prefix.observe(start, handle.tell(), observed_id)
+                    if observed_id == target:
+                        physical_end = handle.tell()
+                        exact = cursor_io.MessageCursor(stamp, start, physical_end, cursor_io._freeze_seen(seen), changed_ns=changed_ns)
+                        if source_stamp_is_trustworthy(stamp, changed_ns):
+                            cursor_io._remember(path, target, exact)
+                        handle = reader
+                        handle.seek(physical_end + reader.base)
+                        anchor = (anchor[0] + reader.base, anchor[1] + reader.base, anchor[2])
+                        phase = 'tail'
+                    continue
+                row, error = cursor_io._tail_row(raw, path)
+                if error is not None:
+                    errors.append(error)
+                    break
+                if row is None:
+                    seen[:] = b"\xff" * len(seen)
+                    if prefix is not None:
+                        prefix.observe(start, handle.tell(), None)
+                else:
+                    first = (prefix is not None and prefix.observe(
+                        start, handle.tell(), str(row.get('message_id') or '')))
+                    previous_positions = len(positions)
+                    cursor_io._note_tail_position(row, seen, positions, (start, handle.tell()))
+                    if first and len(positions) == previous_positions:
+                        positions.append((str(row.get('message_id') or ''), start, handle.tell()))
+                    if not is_display_checkpoint(row):
+                        rows.append(row)
+            if (file_stamp(os.fstat(reader.hot.fileno())) != stamp or file_stamp(path.stat()) != stamp
+                    or reader.manifest != transcript_manifest(path) or directory != _cold_directory(reader)
+                    or file_descriptor_change_ns(reader.hot.fileno(), os.fstat(reader.hot.fileno())) != changed_ns):
+                # 不把变动中一片的局部读取授予覆盖；下一拍从原消费ID重新核验。
+                return MessageReadOutcome(partial=True, reason="source_changed")
+            prefix_verified = not errors and source_stamp_is_trustworthy(stamp, changed_ns)
+            if not errors and not reader.manifest and source_stamp_is_trustworthy(stamp, changed_ns):
+                cursor_io._save_positions(path, stamp, seen, positions, changed_ns=changed_ns)
+            unfinished = not eof and not errors and len(rows) < limit
+            # 有完整真实消息时是一页可提交数据；partial只表示尚无可提交页，不能由空页推导EOF。
+            partial = unfinished and not rows
+            has_more = unfinished and bool(rows)
+            target_address = progress.cold_target
+            sources = _selected_sources(reader, target_address, anchor)
+            continuation = MessageReadContinuation(stamp, layout, phase, handle.tell(), cursor_io._freeze_seen(seen),
+                anchor, reason, changed_ns, target_address, sources, directory) if unfinished else None
+            # 仅可信mtime/ctime/实际变更代次的来源进入跨拍缓存；没有正文或活FD。
+            trusted = source_stamp_is_trustworthy(stamp, changed_ns) and all(source_stamp_is_trustworthy(file_stamp(source.stat), source.changed_ns) for source in sources)
+            cursor_io._MESSAGE_CURSORS.put(key, continuation if partial and not rows and trusted else None)
+            if eof and not rows and not errors and not reader.manifest and target:
+                exact = cursor_io._MESSAGE_CURSORS.get(cursor_key(path, target))
+                if isinstance(exact, cursor_io.MessageCursor) and source_stamp_is_trustworthy(stamp, changed_ns):
+                    cursor_io._remember(path, target, replace(exact, stamp=stamp, empty_tail=True))
+            return MessageReadOutcome(tuple(rows), tuple(errors), partial, has_more, continuation, reason)
+
+        finally:
+            if prefix is not None:
+                prefix.close(verified=prefix_verified)
 
 
 def _start(reader, path, target, stamp, changed_ns, layout, budget):
