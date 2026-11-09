@@ -293,7 +293,7 @@ class AuditStore:
         selected: ThreadTaskLink,
         task_id: str,
     ) -> bool:
-        links, errors = self.tasks.list_report(selected.thread_id)
+        links, errors = self.tasks.active_report(selected.thread_id)
         if errors:
             raise DataCorruptionError("conversation task links are unavailable")
         return any(

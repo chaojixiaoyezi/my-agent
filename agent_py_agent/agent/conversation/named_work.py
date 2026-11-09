@@ -190,7 +190,7 @@ def _resolve_named_work_kind(
         if str(getattr(goal, "name", "") or "").casefold() == name.casefold()
         and str(getattr(goal, "status", "") or "") != "complete"
     ]
-    links, errors = store.tasks.list_report(thread_id)
+    links, errors = store.tasks.active_report(thread_id)
     if errors:
         return "", "CONVERSATION_TASK_STATE_UNAVAILABLE"
     audit_matches = [
@@ -233,7 +233,7 @@ def _remove_named_goal(store: object, thread_id: str, name: str) -> tuple[str, s
 
 
 def _select_named_audit(store: object, thread_id: str, name: str) -> tuple[str, str]:
-    links, errors = store.tasks.list_report(thread_id)
+    links, errors = store.tasks.active_report(thread_id)
     if errors:
         return "", "CONVERSATION_TASK_STATE_UNAVAILABLE"
     matching = [

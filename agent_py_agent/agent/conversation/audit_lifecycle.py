@@ -223,7 +223,7 @@ def start_named_audit(
 def resolve_exact_active_audit(store: object, thread_id: str, name: str):
     """Resolve one exact case-sensitive nonterminal Audit or fail closed."""
 
-    links, errors = store.tasks.list_report(thread_id)
+    links, errors = store.tasks.active_report(thread_id)
     if errors:
         raise AuditLifecycleError("Audit 状态当前不可用，请稍后重试")
     matches = [

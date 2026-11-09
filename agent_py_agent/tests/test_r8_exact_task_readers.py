@@ -140,3 +140,49 @@ def test_exact_task_readers_reject_foreign_thread(tmp_path, monkeypatch, reader)
     assert _call(reader, store, other.thread_id, target.task_id) == _unavailable(
         reader, missing=True
     )
+
+
+_ACTIVE_READERS = ("named_kind", "named_select", "exact_audit", "audit_conflict")
+
+
+def _active_call(reader, store, thread_id, target):
+    from agent_py_agent.agent.conversation import audit_lifecycle, named_work
+
+    if reader == "named_kind":
+        return named_work._resolve_named_work_kind(store, thread_id, target.work_name)
+    if reader == "named_select":
+        return named_work._select_named_audit(store, thread_id, target.work_name)
+    if reader == "exact_audit":
+        return audit_lifecycle.resolve_exact_active_audit(store, thread_id, target.work_name)
+    return store.audits._active_named_work_conflict(target, target.task_id)
+
+
+@pytest.mark.parametrize("reader", _ACTIVE_READERS)
+def test_active_named_readers_exclude_terminal_history(tmp_path, monkeypatch, reader):
+    store, thread, target, calls = _case(tmp_path, monkeypatch)
+    result = _active_call(reader, store, thread.thread_id, target)
+    expected = {
+        "named_kind": ("audit", ""),
+        "named_select": (target.task_id, ""),
+        "exact_audit": target,
+        "audit_conflict": False,
+    }
+    assert result == expected[reader]
+    assert calls == [target.task_id]
+
+
+@pytest.mark.parametrize("reader", _ACTIVE_READERS)
+def test_active_named_readers_reject_corrupt_active_link(tmp_path, monkeypatch, reader):
+    from agent_py_agent.agent.conversation.audit_lifecycle import AuditLifecycleError
+    from agent_py_agent.agent.runtime_errors import DataCorruptionError
+
+    store, thread, target, _calls = _case(tmp_path, monkeypatch)
+    store.storage.task_path(target.task_id).write_text("{broken", encoding="utf-8")
+    if reader in {"named_kind", "named_select"}:
+        assert _active_call(reader, store, thread.thread_id, target) == (
+            "",
+            "CONVERSATION_TASK_STATE_UNAVAILABLE",
+        )
+    else:
+        with pytest.raises(AuditLifecycleError if reader == "exact_audit" else DataCorruptionError):
+            _active_call(reader, store, thread.thread_id, target)
