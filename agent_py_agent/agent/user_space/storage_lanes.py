@@ -47,12 +47,13 @@ LANE_BINDINGS: dict[str, str] = {
     "runtime_history": "runtime_db.history_retention:maintain_runtime_history_lane",
     "gateway_history": "gateway_parts.gateway_history_index:maintain_gateway_history_lane",
     "gateway_input_refs": "gateway_parts.input_turn_retention:maintain_input_turn_refs_lane",
+    "usage_sources": "conversation.usage_source_maintenance:maintain_usage_sources_lane",
 }
 # 压力只调整既有合格候选的通道次序，不缩短保留期。
 LANE_EVICTION_ORDER = (
     "display_archives", "conversation_messages", "compact_checkpoints", "local_events",
     "conversation_ledgers", "tool_outputs", "subagents", "asset_auxiliary",
-    "session_task_payloads", "process_sessions", "runtime_history", "gateway_history", "gateway_input_refs",
+    "session_task_payloads", "process_sessions", "runtime_history", "gateway_history", "gateway_input_refs", "usage_sources",
 )
 # 回执必须提供的计量和续点字段。
 _RECEIPT_REQUIRED = ("cursor", "complete", "items", "bytes")

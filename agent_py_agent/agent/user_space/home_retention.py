@@ -125,6 +125,8 @@ _STORAGE_LIFECYCLES = (
     ('gateway_history', 'gateway', 'gateway_parts.gateway_history_index', 'audit_days after terminal',
      'pending/replay/UNKNOWN/current segment', ('preserve', 'seal', 'policy-delete')),
     ('gateway_input_refs', 'gateway', 'input turn lookup projections', 'consumed closed turn seven day lifecycle', 'active/unknown turn and ref birth locks', ('preserve', 'policy-delete')),
+    ('usage_sources', 'workspace', 'conversation.model_usage canonical ledger', 'bounded source projection maintenance',
+     'pending append/source revision/coverage', ('preserve', 'index')),
 )
 
 
@@ -153,7 +155,7 @@ _PRESERVATION_ANCHORS = {
     'process_sessions': 'owner_data_dir', 'legacy_layout': 'owner_home_dir',
     'display_archives': 'owner_workspace_dir', 'conversation_ledgers': 'owner_workspace_dir',
     'asset_auxiliary': 'owner_data_dir', 'session_task_payloads': 'owner_workspace_dir',
-    'runtime_history': 'owner_home_dir', 'gateway_history': 'owner_workspace_dir', 'gateway_input_refs': 'owner_workspace_dir',
+    'runtime_history': 'owner_home_dir', 'gateway_history': 'owner_workspace_dir', 'gateway_input_refs': 'owner_workspace_dir', 'usage_sources': 'owner_workspace_dir',
 }
 
 

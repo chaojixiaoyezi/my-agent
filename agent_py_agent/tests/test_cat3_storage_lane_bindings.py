@@ -51,13 +51,14 @@ assert 'agent_py_agent.agent.gateway_parts.gateway_history_index' not in sys.mod
 
 def test_history_lanes_append_without_reordering_existing_eviction_lanes():
     actual_order = storage_lanes.LANE_EVICTION_ORDER
-    assert actual_order == (*_ORIGINAL_EVICTION_ORDER, *_HISTORY_LANES)
+    assert actual_order == (*_ORIGINAL_EVICTION_ORDER, *_HISTORY_LANES, "usage_sources")
 
 
 def test_history_registration_reduces_unbound_kinds_through_real_dispatch(tmp_path):
     home = ensure_my_agent_home(tmp_path / "home")
     registry = {kind.kind: kind for kind in home_retention.storage_kind_registry()}
-    assert tuple(registry)[-len(_HISTORY_LANES):] == _HISTORY_LANES
+    assert tuple(registry)[-len(_HISTORY_LANES)-1:-1] == _HISTORY_LANES
+    assert tuple(registry)[-1] == "usage_sources"
     for name in ("runtime_events", "gateway_logs", *_HISTORY_LANES):
         assert "policy-delete" in registry[name].actions
     assert registry["runtime_events"].policy_ref == "audit_days / tool_output_days_after_terminal after terminal"

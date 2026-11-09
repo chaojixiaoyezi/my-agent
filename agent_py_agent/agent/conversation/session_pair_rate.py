@@ -10,22 +10,19 @@ import math
 import os
 import stat
 import time
-from collections import OrderedDict
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from threading import RLock
 
 from ..common.nofollow_fs import open_directory_beneath
 from ..gateway_parts.io import read_json_file_report, update_json_file_atomic
+from ..user_space.directory_paging import directory_page
 from .store_io import safe_file_stem
 
 # 窗口长度（秒）：一小时，与配置键 session_pair_hourly_limit 的语义一致。
 WINDOW_SECONDS = 3600.0
 # 一片维护的总目录项预算；宽限沿原小时桶长度，不加常驻定时器。
 SESSION_PAIR_RETENTION_MAX_FILES = 128
-_PAIR_SCAN_STREAMS: OrderedDict = OrderedDict()
-_PAIR_SCAN_LOCK = RLock()
 
 
 @dataclass(frozen=True)
@@ -63,7 +60,7 @@ def cleanup_session_pair_rates(request: SessionPairRetentionRequest) -> dict:
             raise ValueError("invalid_session_pair_retention_phase")
         workspace = position.get("workspace")
         if phase == "workspaces" and workspace is None:
-            names, scan, complete = _pair_scan_page(root, workspaces, position.get("workspace_scan", {}), 1)
+            names, scan, complete = directory_page(root, workspaces, position.get("workspace_scan", {}), 1)
             position["workspace_scan"] = scan
             result["items"] += max(1, scan.pop("last_scanned", len(names)))
             if not names:
@@ -91,87 +88,6 @@ def _require_pair_entry_name(name: str) -> None:
         raise ValueError("invalid_session_pair_entry")
 
 
-def _pair_scan_page(root: Path, parts: tuple, cursor: dict, limit: int) -> tuple[list[str], dict, bool]:
-    # 复用现有配额枚举器的惰性dirent能力，不调用配额账、不改其锁或持久状态。
-    from ..user_space.owner_quota import _quota_scandir
-
-    if limit <= 0:
-        return [], cursor, False
-    try:
-        descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
-    except (FileNotFoundError, NotADirectoryError):
-        return [], {}, True
-    try:
-        info = os.fstat(descriptor)
-        identity = [info.st_dev, info.st_ino]
-        state = deepcopy(cursor) if cursor.get("directory_identity") == identity else {}
-        offset = state.get("offset", 0)
-        if type(offset) is not int or offset < 0:
-            raise ValueError("invalid_session_pair_directory_offset")
-        os.lseek(descriptor, offset, os.SEEK_SET)
-        names, complete = [], False
-        entries = _quota_scandir(descriptor)
-        if not callable(getattr(entries, "checkpoint", None)):
-            return _pair_portable_page((os.getpid(), str(root), parts, *identity), entries, state, identity, limit)
-        with entries:
-            if state.get("pending"):
-                entries.restore(state["pending"])
-            for _ in range(limit):
-                try:
-                    entry = next(entries)
-                except StopIteration:
-                    complete = True
-                    break
-                _require_pair_entry_name(entry.name)
-                names.append(entry.name)
-            saved = entries.checkpoint()
-        return names, {"directory_identity": identity, "last_scanned": len(names), **saved}, complete
-    finally:
-        os.close(descriptor)
-
-
-def _pair_portable_page(key, opened, state, identity, limit):
-    """最多32个惰性目录流；冷恢复逐片有界重放，原生后端直接持久化checkpoint。"""
-    target = state.get("visited", 0)
-    if type(target) is not int or target < 0:
-        opened.close()
-        raise ValueError("invalid_session_pair_directory_replay")
-    with _PAIR_SCAN_LOCK:
-        cached = _PAIR_SCAN_STREAMS.pop(key, None)
-        if cached is None or cached[1] != target:
-            if cached is not None:
-                cached[0].close()
-            cached = [opened, target, target]
-        else:
-            opened.close()
-        names, scanned, complete = [], 0, False
-        try:
-            for _ in range(limit):
-                try:
-                    entry = next(cached[0])
-                except StopIteration:
-                    complete = True
-                    break
-                scanned += 1
-                if cached[2]:
-                    cached[2] -= 1
-                    continue
-                _require_pair_entry_name(entry.name)
-                names.append(entry.name)
-                cached[1] += 1
-        except BaseException:
-            cached[0].close()
-            raise
-        if complete:
-            cached[0].close()
-        else:
-            _PAIR_SCAN_STREAMS[key] = cached
-        while len(_PAIR_SCAN_STREAMS) > 32:
-            _old_key, old = _PAIR_SCAN_STREAMS.popitem(last=False)
-            old[0].close()
-        return names, {"directory_identity": identity, "offset": 0, "visited": cached[1],
-                       "last_scanned": scanned}, complete
-
 
 def _clean_pair_directory(root, parts, position, result, limit, request):
     from ..gateway_parts.io import _cleanup_orphan_lock_at
@@ -187,7 +103,7 @@ def _clean_pair_directory(root, parts, position, result, limit, request):
         names, scan, complete = retry[:remaining], {**saved, "retry": []}, saved.get("scan_complete", False)
         tail = retry[remaining:]
     else:
-        names, scan, complete = _pair_scan_page(root, parts, saved, remaining)
+        names, scan, complete = directory_page(root, parts, saved, remaining)
         tail = []
     result["items"] += max(1, scan.pop("last_scanned", len(names)))
     try:

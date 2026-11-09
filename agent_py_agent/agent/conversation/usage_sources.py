@@ -269,7 +269,7 @@ class UsageSourceIndex:
 
     def _prepare(self, store, *, limit=16, deadline=None):
         """最多limit个目录/源步骤；目录cookie持久化在本索引meta，重启不重扫前缀。"""
-        from .session_pair_rate import _pair_scan_page
+        from ..user_space.directory_paging import directory_page
 
         if type(limit) is not int or not 1 <= limit <= 128:
             raise ValueError('usage source prepare limit must be 1..128')
@@ -324,7 +324,7 @@ class UsageSourceIndex:
                         break
                     continue
                 parts = (self.directory.name,) if state['phase'] == 0 else (self.directory.name, 'archive')
-                names, cookie, finished = _pair_scan_page(self.directory.parent, parts, state['cursor'], limit - work)
+                names, cookie, finished = directory_page(self.directory.parent, parts, state['cursor'], limit - work)
                 work += max(1, cookie.pop('last_scanned', len(names)))
                 state['cursor'] = cookie
                 for name in names:
