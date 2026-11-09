@@ -451,6 +451,8 @@ def test_legacy_request_without_queue_timestamp_keeps_stable_order(
 def pending_scan_cache(monkeypatch):
     cache = OrderedDict()
     monkeypatch.setattr(rw, "_PENDING_SCAN_CACHE", cache, raising=False)
+    # 其它Agent构造会登记进程级并发容量；本夹具独立验证原条目/字节下限，退出恢复原槽位。
+    monkeypatch.setitem(rw.cache_capacity._SLOTS, "global_inflight", 0)
     return cache
 
 
