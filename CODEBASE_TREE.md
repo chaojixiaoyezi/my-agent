@@ -1115,6 +1115,7 @@ agent_py_agent/
 |-- agent_py_agent/agent/local_storage/diagnostics.py # 本次审计的瞬时数字计时与诊断故障隔离，不保存业务正文
 |-- agent_py_agent/agent/local_storage/fts_upgrade.py # 原owner维护内渐进升级旧FTS，保留旧active与唯一SQLite重建job
 |-- agent_py_agent/tests/test_r8_fts_automatic_upgrade.py # 旧库冷构造、覆盖完整性、自动续作与业务连接隔离回归
+|-- agent_py_agent/tests/test_r8_fts_catchup.py # 原维护tick内有限追赶、全局公平预算、片间释锁与辅助表退休完整性回归
 |-- agent_py_agent/tests/test_r8_artifact_lookup_work.py # 同次归档负命中复用的源变化、内存上界与并发隔离回归
 |-- agent_py_agent/tests/test_r8_tui_explicit_stream.py # 真实HTTP正文流往返、撤回、去重及连续控制交错回归
 |-- agent_py_agent/tests/test_r8_local_store_stage_timing.py # 原审计锁/事务分段、并发隔离和资源退出异常保持
@@ -1749,6 +1750,7 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 - `test_tui_render_cache_lifetime.py`：确认旧宽度/模式不再强持离场正文，完整显示和历史分页保持。
 - `local_storage/diagnostics.py`：只在调用方范围内记录数值分段，闭合后不再持有或改写结果，诊断错误不替代业务异常。
 - `local_storage/fts_upgrade.py`：复用原owner维护发现与短片预算，进度权威仍归SQLite job，未完整投影不能签发完整检索。
+- `test_r8_fts_catchup.py`：以确定性交错验证写者可在片间进入，整体预算耗尽仍保留未服务owner次序，辅助表未清空不能结束升级。
 - `test_r8_artifact_lookup_work.py`：只复用同次已验证负命中，不保无关源行或跨请求负缓存；完整历史定位仍须设计收口。
 - `test_r8_tui_explicit_stream.py`：从正式writer经真实HTTP客户端进入TUI，候选可撤回、终稿唯一、迟到拒绝不走其它渲染出口。
 - `test_r8_local_store_stage_timing.py`、`test_gateway_request_stage_timing.py`：验证分段来源与异常边界，不改审计持久化或请求状态。
