@@ -1,6 +1,7 @@
 """Cat2-R5：坏行可降级，文件级错误和全坏历史仍拒绝后台续接。"""
 from __future__ import annotations
 
+import json
 import logging
 from types import SimpleNamespace
 
@@ -14,6 +15,25 @@ from agent_py_agent.agent.conversation.background_history_seed import (
 from agent_py_agent.agent.conversation.history_seed import seed_text_messages
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
+
+
+def test_history_unavailable_traceback_has_bounded_safe_structured_sources():
+    errors = [{"context": "subagents.load_root_index", "error_type": "SubagentRunIndexUnavailable",
+               "category": "runtime_error", "error_code": "INDEX_PARTIAL", "sqlite_error_code": 11,
+               "message": "private user content", "path": "/private/secret",
+               "scope_resolution": "/private/secret"} for _ in range(17)]
+    error = BackgroundHistoryUnavailableError("unreadable", load_errors=errors, detail="private detail")
+    summary = json.loads(error.__notes__[0].split(": ", 1)[1])
+    assert str(error) == "unreadable" and error.load_errors == errors and error.detail == "private detail"
+    assert summary["load_error_count"] == 17 and summary["sources_truncated"] is True
+    assert len(summary["sources"]) == 16
+    assert summary["sources"][0] == {
+        "context": "subagents.load_root_index", "error_type": "SubagentRunIndexUnavailable",
+        "category": "runtime_error", "error_code": "INDEX_PARTIAL", "sqlite_error_code": 11}
+    assert "private" not in error.__notes__[0]
+    invalid = BackgroundHistoryUnavailableError("unreadable", load_errors=[{
+        "context": "x" * 129, "error_code": True, "sqlite_error_code": True, "category": "正文"}])
+    assert json.loads(invalid.__notes__[0].split(": ", 1)[1])["sources"] == [{}]
 
 
 @pytest.fixture

@@ -2,6 +2,7 @@
 # 模块用途: 一次加载并冻结后台历史范围，纯投影原生历史；不推进调度、压缩或消息投递状态。
 from __future__ import annotations
 
+import json
 import logging
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -108,6 +109,27 @@ class BackgroundHistoryUnavailableError(RuntimeError):
         self.error_code = "BACKGROUND_HISTORY_UNAVAILABLE"
         self.load_errors = list(load_errors or [])
         self.detail = str(detail or "")
+        # 短 traceback 也须保留可定位来源；不把正文、路径或任意异常文案写入日志。
+        sources = []
+        for error in self.load_errors[:16]:
+            if type(error) is not dict:
+                continue
+            source = {}
+            for key in ("context", "error_type", "category", "error_code", "scope_resolution"):
+                value = error.get(key)
+                if (type(value) is str and 0 < len(value) <= 128
+                        and all(char.isascii() and (char.isalnum() or char in "_.:-") for char in value)):
+                    source[key] = value
+            code = error.get("sqlite_error_code")
+            if type(code) is int and 0 <= code <= 65535:
+                source["sqlite_error_code"] = code
+            sources.append(source)
+        self.add_note("后台历史读取诊断: " + json.dumps({
+            "error_code": self.error_code,
+            "load_error_count": len(self.load_errors),
+            "sources": sources,
+            "sources_truncated": len(self.load_errors) > 16,
+        }, ensure_ascii=False, sort_keys=True))
 
 
 # LLM: 范围只来自同次已成功加载的bundle；复制锚点/lineage和thread投影，不让后续任务变化或渲染重新扩大权限。
