@@ -147,10 +147,10 @@ def test_index_first_discovery_matches_full_sweep_and_preserves_unknown(tmp_path
         binding.close()
 
 
-# LLM: 观察Path的目录枚举边界，避免把Python版本选择listdir/scandir的细节当成发现合同。
+# LLM: 观察实际目录流入口；分页只续读原流，不重复枚举整个bucket。
 # 函数用途: 验证相邻页只枚举一次bucket，结构变化仍立即重建。
 def test_bound_discovery_reuses_topology_within_a_page_budget(tmp_path, monkeypatch):
-    from pathlib import Path
+    import os
 
     from agent_py_agent.agent import owner_wake_discovery as discovery
     owners = tmp_path / "owners"
@@ -160,14 +160,14 @@ def test_bound_discovery_reuses_topology_within_a_page_budget(tmp_path, monkeypa
     index = OwnerActivityIndex(tmp_path / "activity.sqlite3")
     binding = discovery.bind_owner_activity_index(owners, index, sweep_seconds=1800, freshness_seconds=60)
     calls = []
-    original = Path.iterdir
+    original = os.scandir
 
-    def iterdir(path):
+    def scandir(path):
         if path == bucket:
             calls.append(path)
-        yield from original(path)
+        return original(path)
 
-    monkeypatch.setattr(Path, "iterdir", iterdir)
+    monkeypatch.setattr(os, "scandir", scandir)
     try:
         cursor, seen = None, set()
         while True:

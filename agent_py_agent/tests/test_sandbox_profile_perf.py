@@ -65,7 +65,15 @@ def test_many_owners_profile_is_bounded(owners, scoped, compact):
     root, homes = owners
     profile = _profile(_spec(root, homes[0], scoped=scoped, compact=compact))
     assert len(profile.splitlines()) < 80, len(profile.splitlines())
-    assert len(profile.encode()) < 8192, len(profile.encode())
+    # 约束规则体积，而非pytest临时根的随机长度；只规范化准确root的两种SBPL编码。
+    normalized = profile
+    root_forms = {json.dumps(value, ensure_ascii=False)[1:-1] for value in (str(root), re.escape(str(root)))}
+    occurrences = 0
+    for encoded in sorted(root_forms, key=len, reverse=True):
+        occurrences += normalized.count(encoded)
+        normalized = normalized.replace(encoded, "<ROOT>")
+    assert 0 < occurrences < 80
+    assert len(normalized.encode()) < 8192, len(normalized.encode())
 
 
 # LLM: spy只统计真实枚举入口，Linux仍核对具体路径，不替换保护集合。

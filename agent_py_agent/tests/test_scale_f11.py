@@ -194,8 +194,9 @@ def test_invalid_discovery_names_do_not_block_valid_responsibilities(tmp_path, k
 def test_projection_parent_is_private_before_sqlite_connect(tmp_path, monkeypatch, mode):
     from agent_py_agent.agent.gateway_parts import recovery_pending_index as pending
 
-    directory = tmp_path / "projection_state"
-    directory.mkdir()
+    # 可收紧的受管目录属于.my-agent；普通外部组写目录仍须通过独立祖先信任门。
+    directory = tmp_path / ".my-agent" / "projection_state"
+    directory.mkdir(parents=True)
     directory.chmod(mode)
     path = directory / "sample.sqlite3"
     real_connect = pending.sqlite3.connect
