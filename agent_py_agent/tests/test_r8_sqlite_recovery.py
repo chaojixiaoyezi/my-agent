@@ -221,3 +221,68 @@ def test_automatic_consumer_rechecks_intent_under_ex_before_unlock(tmp_path, mon
         selected.set()
         thread.join(5)
     assert not thread.is_alive()
+
+
+def test_factory_close_failure_retains_physical_guard_until_creator_confirms_close(tmp_path):
+    from agent_py_agent.agent.runtime_db.recovery_guard import runtime_db_generation_guard
+    path = tmp_path / 'local.db'
+    _database(path)
+    failed, release = threading.Event(), threading.Event()
+    captured = []
+    class CloseFails(sqlite3.Connection):
+        def close(self):
+            if not release.is_set():
+                raise sqlite3.OperationalError('physical close unconfirmed')
+            return super().close()
+    original = sqlite3.DatabaseError('initialization failed')
+    def creator():
+        def factory():
+            conn = sqlite3.connect(path, factory=CloseFails)
+            try:
+                raise original
+            except BaseException as error:
+                try:
+                    conn.close()
+                except BaseException as cleanup:
+                    error.sqlite_cleanup_error = cleanup
+                    error.sqlite_unclosed_factory_connection = conn
+                raise
+        try:
+            guarded_runtime_connect(path, factory)
+        except BaseException as error:
+            captured.append(error)
+            failed.set()
+            assert release.wait(5)
+            close_runtime_connection(error.sqlite_unclosed_factory_connection)
+    thread = threading.Thread(target=creator)
+    thread.start()
+    assert failed.wait(5)
+    try:
+        assert captured == [original]
+        assert isinstance(original.sqlite_cleanup_error, sqlite3.OperationalError)
+        with pytest.raises(sqlite3.OperationalError):
+            with runtime_db_generation_guard(path, exclusive=True):
+                raise AssertionError('unclosed factory conn must retain SH')
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive()
+    with runtime_db_generation_guard(path, exclusive=True):
+        pass
+
+
+def test_factory_close_exception_after_physical_close_does_not_leak_guard(tmp_path):
+    from agent_py_agent.agent.runtime_db.recovery_guard import runtime_db_generation_guard
+    path = tmp_path / 'local.db'
+    _database(path)
+    original = sqlite3.DatabaseError('initialization failed')
+    def factory():
+        conn = sqlite3.connect(path)
+        conn.close()
+        original.sqlite_unclosed_factory_connection = conn
+        raise original
+    with pytest.raises(sqlite3.DatabaseError) as error:
+        guarded_runtime_connect(path, factory)
+    assert error.value is original
+    with runtime_db_generation_guard(path, exclusive=True):
+        pass

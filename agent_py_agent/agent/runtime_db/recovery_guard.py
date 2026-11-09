@@ -195,9 +195,27 @@ def guarded_runtime_connect(path, connect):
     guard.__enter__()
     try:
         conn = connect()
-    except BaseException:
-        guard.__exit__(None, None, None)
+    except BaseException as error:
+        unclosed = getattr(error, 'sqlite_unclosed_factory_connection', None)
+        if isinstance(unclosed, sqlite3.Connection):
+            try:
+                sqlite3.Connection.in_transaction.__get__(unclosed)
+            except sqlite3.ProgrammingError:
+                # close可能在C层成功后才抛错；只有该物理证明允许结束本次SH。
+                guard.__exit__(None, None, None)
+            else:
+                try:
+                    _register_runtime_connection(path, unclosed, guard, idle=True)
+                except RuntimeDatabaseDeferred as conflict:
+                    error.sqlite_guard_error = conflict  # 原物理登记仍保门；路径冲突不能覆盖初始化首因。
+        else:
+            guard.__exit__(None, None, None)
         raise
+    return _register_runtime_connection(path, conn, guard)
+
+
+def _register_runtime_connection(path, conn, guard, *, idle=False):
+    """工厂成功与初始化关闭失败共用同一物理寿命登记，不把失败连接交给调用者执行。"""
     by_id, by_path = _records()
     existing = by_id.get(id(conn))
     if existing is not None:
@@ -206,7 +224,7 @@ def guarded_runtime_connect(path, connect):
             raise RuntimeDatabaseDeferred("connection_generation_conflict")
         return conn
     record = dict(conn=conn, path=_path(path), guard=guard, pid=os.getpid(),
-                  thread=threading.current_thread(), idle=False, detach=None)
+                  thread=threading.current_thread(), idle=idle, detach=None)
     by_id[id(conn)] = record
     by_path.setdefault(record["path"], {})[id(conn)] = record
     # 线程退出不是物理关闭证明；未确认的连接与门保留到显式 close 或进程死亡。

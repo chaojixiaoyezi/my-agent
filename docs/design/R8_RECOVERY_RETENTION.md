@@ -11,7 +11,7 @@
 
 ## SQLite无损边界
 
-同一generation SH/EX协议覆盖物理连接寿命。消费者先证明排空并流式保全原DB、WAL、SHM、journal，然后重新检查源完整性。误报只解锁，不执行旧请求。
+同一generation SH/EX协议覆盖物理连接寿命。工厂初始化失败须先关闭raw连接；若close本身失败，原异常携带真实`sqlite_unclosed_factory_connection`及`sqlite_cleanup_error`，guard仍登记并持有该物理连接SH，直到创建者确认关闭；不能因工厂没有正常返回就放行EX。消费者先证明排空并流式保全原DB、WAL、SHM、journal，然后重新检查源完整性。误报只解锁，不执行旧请求。
 
 真正损坏时只接受完整耗尽的SQL dump。源与候选逐项核对全部schema、逐表完整行数、按原生类型编码的内容摘要，以及可见rowid；同时核对user_version、application_id、完整性与外键。虚表、坏页、行缺失、rowid改变、候选替换、未确认关闭或排他门失败均拒绝发表。候选以原阶段journal和摘要恢复；dump中断留下的未发表半成品须在候选EX和SQLite排空证明后，仅清理原journal绑定的候选四文件再重建，源库及备份不动；不丢弃原证据，不把未知建成空库。
 
