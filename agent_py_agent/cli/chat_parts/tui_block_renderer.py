@@ -578,10 +578,20 @@ class TuiBlockRenderCache:
         """稳定窗口换代才回收离场块，活动增量帧保持常数开销。"""
         if snapshot.stable_blocks is self._retained_stable_blocks:
             return
-        retained_ids = {block.block_id for block in (*snapshot.stable_blocks, *snapshot.active_blocks)}
+        retained = (*snapshot.stable_blocks, *snapshot.active_blocks)
+        retained_ids = {block.block_id for block in retained}
+        versions = {(block.block_id, block.updated_seq, block.phase) for block in retained}
         for key in tuple(self._entries):
-            if key[0] not in retained_ids:
+            if key[:3] not in versions:
                 self._drop_entry(key)
+        # 其它宽度/模式的前缀也会强持source及已排版正文；离场或换版时一并释放。
+        # 有序追加仍保留原前缀，Ctrl+O和宽度切换继续复用当前窗口的布局。
+        identities = {id(block) for block in snapshot.stable_blocks}
+        for context_key, prefix in tuple(self._stable_prefixes.items()):
+            if any(id(block) not in identities for block in prefix.source):
+                del self._stable_prefixes[context_key]
+        if not any(self._stable_prefix is prefix for prefix in self._stable_prefixes.values()):
+            self._stable_prefix = None
         for identity in tuple(self._live_last_key):
             if identity not in retained_ids:
                 self._live_last_key.pop(identity, None)
