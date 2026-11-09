@@ -2,9 +2,15 @@
 from __future__ import annotations
 
 import contextvars
+import gc
 import json
+import sys
 import threading
 import time
+import weakref
+from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.gateway_parts.stream_writer import BufferedChunkStreamWriter
 
@@ -93,3 +99,77 @@ def test_shared_deferred_calls_order_cancel_errors_and_context():
     assert done.wait(TAIL_WAIT_SECONDS)
     assert [item[0] for item in seen] == ["early", "late"]
     assert all(item[1] == "scheduled" and item[2] == "r5a-w1-test-timer" for item in seen)
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_idle_deferred_worker_releases_completed_callback_and_context(monkeypatch, fails):
+    """已完成回调的闭包和 owner context 不得被常驻线程留到下一次调度。"""
+    from agent_py_agent.agent.concurrency import daemon_executor as module
+
+    class StopWorker(BaseException):
+        pass
+
+    idle, stop, ran, raised = (threading.Event() for _ in range(4))
+
+    class ObservedCondition(threading.Condition):
+        def wait(self, timeout=None):
+            if stop.is_set():
+                raise StopWorker
+            idle.set()
+            return super().wait(timeout)
+
+    class TestScheduler(module.SharedDeferredCalls):
+        def _run(self):
+            try:
+                super()._run()
+            except StopWorker:
+                return
+
+    class Payload:
+        def __init__(self, role):
+            self.role = role
+
+    # 只替换此模块的异常报告引用，不污染其它线程使用的全局 sys。
+    monkeypatch.setattr(module, "sys", SimpleNamespace(
+        flags=sys.flags, exc_info=sys.exc_info,
+        excepthook=lambda *_: raised.set(),
+    ))
+    scheduler = TestScheduler("completed-callback-release")
+    scheduler._cv = ObservedCondition()
+    marker = contextvars.ContextVar("completed_callback_owner")
+
+    def enqueue():
+        captured, contextual = Payload("closure"), Payload("context")
+        refs = weakref.ref(captured), weakref.ref(contextual)
+
+        def callback():
+            assert captured.role == "closure"
+            assert marker.get().role == "context"
+            ran.set()
+            if fails:
+                raise ValueError("expected callback failure")
+
+        token = marker.set(contextual)
+        try:
+            call = module.DeferredCall(callback)
+        finally:
+            marker.reset(token)
+        scheduler.start(call, 0)
+        return refs
+
+    refs = enqueue()
+    try:
+        assert ran.wait(TAIL_WAIT_SECONDS)
+        assert idle.wait(TAIL_WAIT_SECONDS)
+        if fails:
+            assert raised.is_set()
+        # free-threaded 构建可能延迟引用计数合并；这里只验证存活引用，不以 RSS 代替对象事实。
+        gc.collect()
+        assert all(ref() is None for ref in refs)
+        assert scheduler._thread.is_alive()
+    finally:
+        with scheduler._cv:
+            stop.set()
+            scheduler._cv.notify()
+        scheduler._thread.join(TAIL_WAIT_SECONDS)
+        assert not scheduler._thread.is_alive()

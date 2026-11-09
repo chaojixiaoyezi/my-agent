@@ -84,8 +84,8 @@ class DurableDaemonThreadPoolExecutor(ThreadPoolExecutor):
         self._threads.add(thread)
 
 
-# LLM: 3.14t 每条短命线程退出后，其 mimalloc 堆里仍被别的线程引用的页无法回收，按线程创建次数线性涨 RSS；短延时回调
-#   统一挂在一条常驻守护线程上，不再一次回调一条 threading.Timer。回调须短小、不阻塞；在创建句柄时的 context 里执行
+# LLM: 短延时回调统一挂在一条常驻守护线程上，避免每次新建 threading.Timer 的线程和分配器开销；线程退出本身不证明归还 RSS。
+#   回调须短小、不阻塞；在创建句柄时的 context 里执行
 #   （同 3.14t Timer 的继承语义）；cancel 只丢引用，已经开始执行的回调不撤回（同 Timer）。
 # 类用途: 一次延时回调的句柄，用法同 threading.Timer：先建句柄、再登记、可取消。
 class DeferredCall:
@@ -119,11 +119,15 @@ class SharedDeferredCalls:
                     self._cv.wait(self._heap[0][0] - _monotonic() if self._heap else None)
                 call = heapq.heappop(self._heap)[2]
             fn, context = call.fn, call.context
-            if fn is not None and context is not None:
-                try:
+            try:
+                if fn is not None and context is not None:
                     context.run(fn)
-                except Exception:
-                    sys.excepthook(*sys.exc_info())
+            except Exception:
+                sys.excepthook(*sys.exc_info())
+            finally:
+                # 常驻线程下一轮可能永久空闲，不能把上轮闭包及 owner context 留在栈上。
+                # 只释放调度器的局部引用；调用方保留的句柄仍可按原语义再次登记。
+                del fn, context, call
 
 
 __all__ = ["DeferredCall", "DurableDaemonThreadPoolExecutor", "SharedDeferredCalls"]
