@@ -85,11 +85,14 @@ def test_owner_and_global_deadlines_are_shared_without_restarting_clock(tmp_path
     with upgrade.fts_upgrade_tick_scope(deadline=1004):
         first = upgrade.advance_upgrade(home.owner_home_dir, {}, 1000)
         assert first['catchup']['steps'] == 4
-        assert set(calls) == {1002.0}
+        assert calls[0] == pytest.approx(1000.025)
+        assert set(calls[1:]) == {1002.0}
         calls.clear()
+        second_started = clock.now
         second = upgrade.advance_upgrade(home.owner_home_dir, {}, 1000)
         assert second['catchup']['steps'] == 3
-        assert set(calls) == {1004.0}
+        assert calls[0] == pytest.approx(second_started + .025)
+        assert set(calls[1:]) == {1004.0}
         assert upgrade.advance_upgrade(home.owner_home_dir, {}, 1000) is None
 
 

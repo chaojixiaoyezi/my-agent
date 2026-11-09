@@ -18,6 +18,8 @@ from ..user_space.directory_paging import directory_page
 
 # 与原owner维护轮询同一节流；不建立线程、队列或另一个重建checkpoint。
 FTS_UPGRADE_INTERVAL_SECONDS = 60
+# 一次冷发现机会最多核8项；共同借首片25ms，不扩张热提示或待办份额。
+FTS_UPGRADE_DISCOVERY_MAX_PAGES_COUNT = 8
 # 单owner一次追赶最多调用的有界片数；仍同时受单owner时间和整拍预算约束。
 FTS_UPGRADE_CATCHUP_MAX_STEPS_COUNT = 1024
 # 单owner一次追赶的合作式毫秒预算；每片释放连接和业务锁后再续。
@@ -183,6 +185,7 @@ def _candidate(home, cursor, *, selected_only=False):
     """最多核三个固定库和一个目录项；游标仅负责发现，job仍在原库内。"""
     from ..user_space.owner_maintenance import _local_store_candidate_exists
 
+    cursor.pop('_discovery_complete', None)
     selected = cursor.pop('selected', None)
     if selected is not None:
         if not isinstance(selected, str):
@@ -214,6 +217,7 @@ def _candidate(home, cursor, *, selected_only=False):
     if complete:
         cursor.pop('directory', None)
         cursor['fixed'] = 0
+        cursor['_discovery_complete'] = True
     for name in names:
         path = home.joinpath(*_WORKSPACES, name, 'local_store', 'local.db')
         if _local_store_candidate_exists(home, path, include_event_files=False):
@@ -230,7 +234,7 @@ def _retain_pending_store(cursor, relative):
 
 
 @sqlite_connection_scope(enabled=False)
-def _advance_upgrade_slice(home, previous, now, *, commit=None, deadline=None, resume_only=False):
+def _advance_upgrade_slice(home, previous, now, *, commit=None, deadline=None, resume_only=False, cold_only=False):
     """一拍一个原job；独立短连接不借用或改动业务缓存连接的等待策略。"""
     from contextlib import nullcontext
     from copy import deepcopy
@@ -252,8 +256,10 @@ def _advance_upgrade_slice(home, previous, now, *, commit=None, deadline=None, r
 
     deadline = min(time.monotonic() + STORAGE_LANE_SLICE_MS / 1000,
                    deadline if deadline is not None else float("inf"))
+    if cold_only and time.monotonic() >= deadline:
+        return None
     due = next_upgrade_at(home, previous, now)
-    if due is None or (not resume_only and now < due):
+    if due is None or (not resume_only and not cold_only and now < due):
         return None
     saved = previous.get('local_store_fts_upgrade', {})
     cursor = deepcopy(saved.get('cursor', {}))
@@ -274,23 +280,31 @@ def _advance_upgrade_slice(home, previous, now, *, commit=None, deadline=None, r
     cursor.pop('selected', None)
     if resume_only and not pending:
         return None
+    before_discovery = (cursor.get('fixed', 0), cursor.get('directory', {}))
+    selection = 'pending'
     if pending and (resume_only or not discover):
         path = _candidate(home, {'selected': pending.pop(0)})
         cursor['discover_next'] = True
     else:
         try:
-            hinted = _take_active_store(home, pending) if hot_next and len(pending) < 8 else None
+            hinted = _take_active_store(home, pending) if not cold_only and hot_next and len(pending) < 8 else None
         except Exception:  # noqa: BLE001 可丢提示失败只回到原冷发现，不吞扫描或原提交异常。
             hinted = None
         if hinted is not None:
+            selection = 'hot'
             path = _candidate(home, {'selected': hinted}, selected_only=True)
             cursor['hot_next'] = False
         else:
+            selection = 'cold'
             path = _candidate(home, cursor)
             cursor['hot_next'] = True
         cursor['discover_next'] = False
     cursor['pending'] = pending
-    report = {'cursor': cursor, 'next_at': now + FTS_UPGRADE_INTERVAL_SECONDS,
+    discovery_complete = cursor.pop('_discovery_complete', False)
+    discovery_advanced = before_discovery != (cursor.get('fixed', 0), cursor.get('directory', {}))
+    report = {'cursor': cursor, 'selection': selection,
+              'discovery_complete': discovery_complete, 'discovery_advanced': discovery_advanced,
+              'next_at': now + FTS_UPGRADE_INTERVAL_SECONDS,
               'scope': 'selected_store' if path is not None else 'discovery_page',
               'status': 'discovery', 'complete': False, 'progressed': False}
     if path is None:
@@ -298,6 +312,10 @@ def _advance_upgrade_slice(home, previous, now, *, commit=None, deadline=None, r
     relative = path.relative_to(home).as_posix()
     report['store'] = relative
     pending[:] = [entry for entry in pending if entry != relative]
+    if selection == 'cold' and time.monotonic() >= deadline:
+        # 目录/路径单次I/O可以超时，但已到期后不能再开SQLite；续点只保候选，不推断job事实。
+        _retain_pending_store(cursor, relative)
+        return {**report, 'status': 'budget_exhausted'}
     source_failure = []
     original_commit = commit
     def guarded_commit(operation):
@@ -417,13 +435,18 @@ def advance_upgrade(home, previous, now, *, commit=None):
     budget = current_tick_budget()
     deadline = min(time.monotonic() + FTS_UPGRADE_CATCHUP_MAX_MS / 1000,
                    budget.deadline if budget is not None else float('inf'))
+    from ..user_space.storage_lanes import STORAGE_LANE_SLICE_MS
+
+    discovery_deadline = min(deadline, time.monotonic() + STORAGE_LANE_SLICE_MS / 1000)
+    cold_followup, cold_pages = False, 0
     working, report, attempts, progressed, single_bytes = previous, None, 0, False, 0
     for step in range(FTS_UPGRADE_CATCHUP_MAX_STEPS_COUNT):
         if time.monotonic() >= deadline or (budget is not None and not budget.reserve()):
             break
         attempts += 1
         result = _advance_upgrade_slice(home, working, now, commit=commit,
-                                        deadline=deadline, resume_only=step > 0)
+                                        deadline=discovery_deadline if step == 0 or cold_followup else deadline,
+                                        resume_only=step > 0 and not cold_followup, cold_only=cold_followup)
         if result is None:
             break
         report = result
@@ -431,8 +454,16 @@ def advance_upgrade(home, previous, now, *, commit=None):
         single_bytes = max(single_bytes, result.get('single_document_bytes', 0))
         working = {**previous, 'local_store_fts_upgrade': result}
         pending = result['cursor'].get('pending', [])
+        cold_pages += int(result.get('selection') == 'cold')
         if not pending:
+            if (result.get('selection') == 'cold' and result['status'] in {'current', 'discovery'}
+                    and result.get('discovery_advanced') and not result.get('discovery_complete')
+                    and cold_pages < FTS_UPGRADE_DISCOVERY_MAX_PAGES_COUNT
+                    and time.monotonic() < discovery_deadline):
+                cold_followup = True
+                continue
             break
+        cold_followup = False
         if result['progressed'] or (result['status'] == 'current' and result['complete']):
             continue
         # 初次有界发现没选中库时，仍给既有pending一次机会；之后零进展立即让出。
@@ -444,5 +475,5 @@ def advance_upgrade(home, previous, now, *, commit=None):
         return None
     report['cursor']['discover_next'] = True
     report['catchup'] = {'steps': attempts, 'progressed': progressed,
-                         'single_document_max_bytes': single_bytes}
+                         'single_document_max_bytes': single_bytes, 'cold_pages': cold_pages}
     return report
