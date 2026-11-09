@@ -97,3 +97,27 @@ def test_hold_or_exhausted_budget_does_not_create_projection(tmp_path, held):
     result = validate_lane_receipt(maintain_usage_sources_lane(request))
     assert result['items'] == 0
     assert sorted(str(path.relative_to(root)) for path in root.rglob('*')) == before
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='原生owner维护目录FD合同为POSIX')
+def test_missing_usage_directories_do_not_enter_write_lane(tmp_path):
+    home = ensure_my_agent_home(tmp_path / 'host')
+    root = home.owner_workspace_dir / 'runtime/workspaces/empty-project/conversations'
+    root.mkdir(parents=True)
+    before = sorted(str(path.relative_to(home.owner_home_dir)) for path in home.owner_home_dir.rglob('*'))
+    commits, cursor = [], {}
+    def commit(operation):
+        commits.append(operation)
+        return operation()
+    for _ in range(8):
+        request = StorageLaneRequest('usage_sources', home, time.time(), cursor,
+                                    StorageLaneBudget(4, 8192, time.monotonic() + 1), False, True, None, commit)
+        result = validate_lane_receipt(maintain_usage_sources_lane(request))
+        assert not result.get('errors')
+        cursor = result['cursor']
+        if result['complete']:
+            break
+    else:
+        pytest.fail('empty usage source discovery did not finish')
+    assert commits == []
+    assert sorted(str(path.relative_to(home.owner_home_dir)) for path in home.owner_home_dir.rglob('*')) == before

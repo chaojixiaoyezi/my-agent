@@ -14,6 +14,12 @@ from .store import ConversationStore
 
 def _prepare(request, parts, limit, deadline):
     owner = Path(request.home.owner_home_dir)
+    # 缺源是纯读空事实，不消耗协调写门；真正写入前仍重新开目录核实。
+    try:
+        descriptor = open_directory_beneath(owner, (*parts, 'model_usage'), require_dir_fd=True)
+    except (FileNotFoundError, NotADirectoryError):
+        return {'coverage': 'complete', 'sources_examined': 0, 'errors': []}
+    os.close(descriptor)
     # 缺失目录不因后台索引维护而重建；每次真正写前重新核实owner内路径。
     def write():
         try:

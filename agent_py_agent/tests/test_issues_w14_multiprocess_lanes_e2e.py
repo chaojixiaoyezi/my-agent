@@ -282,6 +282,21 @@ def test_foreign_thread_io_is_not_attributed_to_transition(tmp_path, monkeypatch
 @pytest.mark.parametrize('quota_entries', [None, 32])
 def test_transition_wires_all_lanes_and_fences_real_mutations(lane_world, monkeypatch, quota_entries):
     world = lane_world
+    import shutil
+    from pathlib import Path
+
+    from agent_py_agent.agent.gateway_parts import input_delivery_service
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.agent.user_space.runtime_paths import runtime_paths_for_agent
+    from agent_py_agent.tests.test_r8_input_turn_retention import _case
+
+    # 新登记的输入引用车道也应有真实过期可退役样本；缺源通道本应纯读。
+    seeded_paths, receipt, seeded_ref = _case(world.home.root / 'expired-input-fixture')
+    gateway_root = Path(runtime_paths_for_agent(None, world.home.owner_home_dir, world.home)['gateway_workspace'])
+    shutil.copytree(seeded_paths.root, gateway_root, dirs_exist_ok=True)
+    retired_ref = gateway_root / seeded_ref.relative_to(seeded_paths.root)
+    assert input_delivery_service.read_gateway_input_receipt(
+        gateway_paths_from_root(gateway_root), receipt.request_id) is not None
     transition = _RecordingTransition(world.home)
     before = owner_logical_usage_bytes(world.home.owner_home_dir, exact=True)
     seen, revisited = set(), set()
@@ -319,6 +334,7 @@ def test_transition_wires_all_lanes_and_fences_real_mutations(lane_world, monkey
     assert repeated_all
     # LocalStore 经 global_write_commit_scope 使用相同原写门；含真实过期历史的其余车道均经 run_write。
     assert lane_writes == set(LANE_BINDINGS) - {'local_events'}
+    assert not retired_ref.exists()
     assert transition.commits.count('state') == tick + 1
     assert len(state_writes) == tick + 1
     _assert_retired(world)
