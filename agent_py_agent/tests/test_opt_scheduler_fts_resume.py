@@ -67,7 +67,8 @@ def test_fts_low_space_preserves_active_and_pending(tmp_path, monkeypatch):
 
 # LLM: 正文读取时尝试另一真实连接的零等待写锁；旧BEGIN包住全量正文读取会被客观检出。
 # 函数用途: 证明准备正文发生在短写事务之外，而不是靠SQL语句数推测锁已缩短。
-def test_fts_body_reads_outside_sqlite_write_transaction(tmp_path, monkeypatch):
+@pytest.mark.parametrize('first_batch_expired', [False, True])
+def test_fts_body_reads_outside_sqlite_write_transaction(tmp_path, monkeypatch, first_batch_expired):
     store = seeded(tmp_path)
     original = store._read_content
     observations = []
@@ -89,7 +90,27 @@ def test_fts_body_reads_outside_sqlite_write_transaction(tmp_path, monkeypatch):
         return original(item)
 
     monkeypatch.setattr(store, '_read_content', observed)
-    assert store.rebuild_fts() == 3
+    if first_batch_expired:
+        limits = maintenance._fts_limits
+        calls = 0
+        def expired_first(max_rows, max_bytes, max_ms, max_records):
+            nonlocal calls
+            result = limits(max_rows, max_bytes, max_ms, max_records)
+            calls += 1
+            return (*result[:2], 0.0) if calls == 1 else result
+        monkeypatch.setattr(maintenance, '_fts_limits', expired_first)
+    # 同步包装允许当前批无进展时明确延期；保留原250ms产品预算并沿持久job续作。
+    rebuilt, deferred = None, 0
+    for _ in range(16):
+        try:
+            rebuilt = store.rebuild_fts()
+            break
+        except maintenance._FtsRebuildDeferred as error:
+            if error.args != ('fts rebuild deferred: batch budget exhausted',):
+                raise
+            deferred += 1
+    assert rebuilt == 3
+    assert not first_batch_expired or deferred > 0
     assert observations and all(observations)
 
 

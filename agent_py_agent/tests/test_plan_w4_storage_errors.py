@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
@@ -24,6 +25,7 @@ from agent_py_agent.agent.local_storage.tool_operations import (
 from agent_py_agent.agent.runtime_db.managed_operation_store import ManagedOperationStore
 from agent_py_agent.agent.runtime_db.recovery_guard import (
     RuntimeDatabaseDeferred,
+    runtime_db_corruption_recovery_pending,
     runtime_db_generation_guard,
 )
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
@@ -462,9 +464,19 @@ def test_structural_rollback_error_survives_cleanup_without_replacing_body(tmp_p
             assert diagnostic["cleanup_error"]["sqlite_primary_code"] == code
         else:
             assert diagnostic["sqlite_primary_code"] == code
-        _assert_fenced_until_exclusive_recovery(path, False, connect)
+        assert runtime_db_corruption_recovery_pending(path)
+        # 只读不能消费错误意图；下一写口须先经EX证实这是注入的误报，而非永久跳过恢复。
+        with pytest.raises(RuntimeDatabaseDeferred, match="recovery_pending"):
+            with scoped_connection(path, True, connect):
+                pytest.fail("只读请求不能清除损坏意图")
+        identity = (path.stat().st_dev, path.stat().st_ino)
+        assert len(opened) == 1
         with scoped_connection(path, False, connect) as fresh:
             assert fresh.execute("SELECT count(*) FROM rollback_probe").fetchone()[0] == 0
+        recovery = json.loads(path.with_name(path.name + '.recovery-result.json').read_text())
+        assert recovery['status'] == 'healthy'
+        assert (path.stat().st_dev, path.stat().st_ino) == identity
+        assert not runtime_db_corruption_recovery_pending(path)
         assert len(opened) == 2
 
 
