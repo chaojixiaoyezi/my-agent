@@ -53,4 +53,67 @@ def test_cache_sqlite_memory_and_scan_descriptors_are_fixed():
         conn = view._connection()
         assert conn.execute('PRAGMA cache_size').fetchone()[0] == -256
         assert conn.execute('PRAGMA mmap_size').fetchone()[0] == 0
+        assert conn.execute('PRAGMA journal_mode').fetchone()[0] == 'memory'
+        assert conn.execute('PRAGMA synchronous').fetchone()[0] == 0
         assert len(view._PORTABLE) <= 8
+
+
+def test_projection_transaction_failure_never_signs_idle(tmp_path, monkeypatch):
+    import sqlite3
+    store = ConversationStore(tmp_path / 'failure')
+    original = view._cleanup
+    def fail(conn):
+        original(conn)
+        raise sqlite3.OperationalError('temporary projection failure')
+    monkeypatch.setattr(view, '_cleanup', fail)
+    assert view.claim_activity_state(store.storage, 'thread') == 'activity_unknown'
+    monkeypatch.setattr(view, '_cleanup', original)
+    assert view.claim_activity_state(store.storage, 'thread') == ''
+
+
+@pytest.mark.skipif(not hasattr(__import__('os'), 'fork'), reason='requires POSIX fork')
+def test_child_rebuild_keeps_parent_cache_directory(tmp_path):
+    import os
+    from pathlib import Path
+    store = ConversationStore(tmp_path / 'fork')
+    assert view.claim_activity_state(store.storage, 'thread') == ''
+    parent_directory = Path(view._CACHE[1].name)
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.close(read_fd)
+            assert view._CACHE is None and not view._PORTABLE
+            assert view.claim_activity_state(store.storage, 'thread') == ''
+            assert Path(view._CACHE[1].name) != parent_directory
+            view._CACHE[1].cleanup()
+            os.write(write_fd, b'ok')
+        finally:
+            os._exit(0)
+    os.close(write_fd)
+    result = os.read(read_fd, 2)
+    os.close(read_fd)
+    _, status = os.waitpid(pid, 0)
+    assert status == 0 and result == b'ok'
+    assert parent_directory.is_dir()
+    assert view.claim_activity_state(store.storage, 'thread') == ''
+
+
+def test_projection_commit_failure_overrides_idle_result(tmp_path, monkeypatch):
+    import sqlite3
+    store = ConversationStore(tmp_path / 'commit-failure')
+    original = view._connection
+    conn = original()
+    class FailedCommit:
+        def __enter__(self):
+            conn.__enter__()
+            return self
+        def __exit__(self, *_args):
+            conn.rollback()
+            raise sqlite3.OperationalError('cache commit failed')
+        def __getattr__(self, name):
+            return getattr(conn, name)
+    monkeypatch.setattr(view, '_connection', lambda: FailedCommit())
+    assert view.claim_activity_state(store.storage, 'thread') == 'activity_unknown'
+    monkeypatch.setattr(view, '_connection', original)
+    assert view.claim_activity_state(store.storage, 'thread') == ''

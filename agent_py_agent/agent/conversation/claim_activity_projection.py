@@ -26,6 +26,23 @@ def _signature(path):
         return None
 
 
+def _after_fork():
+    global _LOCK, _CACHE
+    _LOCK = threading.RLock()
+    if _CACHE is not None:
+        # child 不拥有父进程临时目录：先解绑继承的 finalizer，再丢弃连接副本。
+        _CACHE[1]._finalizer.detach()
+        _CACHE[2].close()
+        _CACHE = None
+    for stream, _ in _PORTABLE.values():
+        stream.close()
+    _PORTABLE.clear()
+
+
+if hasattr(os, 'register_at_fork'):
+    os.register_at_fork(after_in_child=_after_fork)
+
+
 def _connection():
     global _CACHE
     if _CACHE is None or _CACHE[0] != os.getpid():
@@ -33,6 +50,8 @@ def _connection():
         directory = tempfile.TemporaryDirectory(prefix='my-agent-claim-view-')
         conn = sqlite3.connect(os.path.join(directory.name, 'projection.sqlite3'),
                                check_same_thread=False, timeout=0)
+        conn.execute('PRAGMA journal_mode=MEMORY')
+        conn.execute('PRAGMA synchronous=OFF')
         conn.execute('PRAGMA cache_size=-256')
         conn.execute('PRAGMA mmap_size=0')
         conn.executescript('''
