@@ -292,7 +292,8 @@ def test_server_machine_reason_distinguishes_binding_from_page(tmp_path, monkeyp
     if failure == "binding":
         store.storage.bindings_path.write_text("broken-index")
     else:
-        monkeypatch.setattr(http, "read_background_response_page", lambda *a, **kw: ([], 0, False))
+        # 从规范消息源制造真实坏页；冷/热读口都应保留已确认绑定并报告读取失败。
+        store.storage.message_path(thread.thread_id).write_text("broken-message\n", encoding="utf-8")
     agent = SimpleNamespace(home_paths=SimpleNamespace(root=tmp_path, owner_home_dir=home), conversation_store=store)
     monkeypatch.setattr(http, "resolve_loaded_gateway_scope_agent", lambda *a: None if cold else agent)
     payload = http.read_gateway_client_notices(agent,
