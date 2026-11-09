@@ -106,3 +106,46 @@ def test_readonly_entry_does_not_turn_intent_into_mutating_recovery(tmp_path):
         with scoped_connection(path, True, lambda: sqlite3.connect(path)):
             pass
     assert not list(tmp_path.glob('*.damaged-*'))
+
+
+def test_interrupted_dump_retires_only_bound_partial_candidate_and_retries(tmp_path, monkeypatch):
+    from agent_py_agent.agent.io import sqlite_recovery
+    path = tmp_path / 'local.db'
+    _database(path)
+    with closing(sqlite3.connect(path)) as conn:
+        page = conn.execute("SELECT rootpage FROM sqlite_master WHERE name='records_value'").fetchone()[0]
+        size = conn.execute('PRAGMA page_size').fetchone()[0]
+    with path.open('r+b') as stream:
+        stream.seek((page - 1) * size)
+        stream.write(b'\0' * size)
+    original_source = path.read_bytes()
+    original_connect = sqlite3.connect
+    class InterruptedConnection(sqlite3.Connection):
+        statements = 0
+        def execute(self, statement, parameters=()):
+            self.statements += 1
+            if self.statements == 6:
+                raise KeyboardInterrupt('interrupted in full dump')
+            return super().execute(statement, parameters)
+    def connect(database, *args, **kwargs):
+        if '.salvage-' in str(database) and str(database).endswith(tuple('0123456789abcdef')):
+            kwargs['factory'] = InterruptedConnection
+        return original_connect(database, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(sqlite_recovery.sqlite3, 'connect', connect)
+        with pytest.raises(KeyboardInterrupt):
+            recover_sqlite_database(path)
+    import json
+
+    from agent_py_agent.agent.runtime_db.schema import SALVAGE_REQUEST_SUFFIX
+    state = json.loads(Path(str(path) + SALVAGE_REQUEST_SUFFIX).read_text())
+    candidate = path.with_name(state['candidate'])
+    backup = path.with_name(state['backup'])
+    assert state['phase'] == 'building_candidate' and candidate.exists()
+    assert path.read_bytes() == backup.read_bytes() == original_source
+    receipt = recover_sqlite_database(path)
+    assert receipt['status'] == 'recovered', receipt
+    assert backup.read_bytes() == original_source
+    with closing(sqlite3.connect(path)) as conn:
+        assert conn.execute('SELECT count(*) FROM records').fetchone() == (1499,)
+        assert conn.execute('PRAGMA integrity_check').fetchall() == [('ok',)]

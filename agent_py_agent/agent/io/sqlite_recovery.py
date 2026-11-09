@@ -72,6 +72,24 @@ def _build_candidate(db, candidate):
     return {'schema_objects': len(schema), 'table_rows': counts, 'table_digests': digests, 'complete': True}
 
 
+def _discard_unpublished_candidate(db, state):
+    """只退役原journal绑定、尚未发表的半成品；源与四文件备份始终不动。"""
+    candidate = salvage._artifact(db, state, 'candidate')
+    if not os.path.lexists(candidate):
+        return
+    if state.get('phase') not in {'backed_up', 'building_candidate'}:
+        raise ValueError('sqlite_unpublished_candidate_phase_unknown')
+    if salvage._source_signature(db) != state['source_signature']:
+        raise ValueError('sqlite_source_changed_before_candidate_retry')
+    with runtime_db_generation_guard(candidate, exclusive=True):
+        require_plain_sqlite_files(candidate, beneath=db.parent)
+        # 同线程、其它线程或非托管SQLite读取者均需先证明排空，不能先unlink再猜已关闭。
+        with sqlite_connections_locked_out(candidate):
+            for suffix in ('-wal', '-shm', '-journal', ''):
+                Path(str(candidate) + suffix).unlink(missing_ok=True)
+            json_io._sync_parent_directory(candidate)
+
+
 def recover_sqlite_database(path: Path) -> dict:
     """按原代次非阻塞恢复；无法完整读取时永久保留源/四文件备份和操作说明。"""
     db, state = Path(path).absolute(), {}
@@ -119,6 +137,8 @@ def recover_sqlite_database(path: Path) -> dict:
                 if state.get('phase') == 'requires_recovery' and same_source:
                     raise salvage._RecoveryStopped({**state, 'status': 'requires_recovery'})
                 state['corruption_confirmed'] = True
+                _discard_unpublished_candidate(db, state)
+                salvage._save_state(db, state, 'building_candidate')
                 try:
                     state['receipt'] = _build_candidate(db, salvage._artifact(db, state, 'candidate'))
                 except (sqlite3.Error, ValueError) as error:
