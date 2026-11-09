@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from itertools import islice
 from pathlib import Path
 
 from ..common.json_io import write_private_json_file_atomic_unlocked
@@ -41,6 +42,7 @@ def contains(thread_path: Path, thread, task_id: str) -> bool:
 def _contains_member(root, manifest, task_id, *, position=None):
     record = _read(root, _member_parts(task_id))
     return bool(record and record['task_id'] == task_id and record['position'] < manifest['count']
+                and record.get('copy_epoch') == manifest.get('copy_epoch')
                 and not record.get('removed') and (position is None or record['position'] == position))
 
 
@@ -72,7 +74,7 @@ def add(thread_path: Path, thread, task_id: str) -> None:
     page = page[:position % PAGE_SIZE] + [task_id]
     write_private_json_file_atomic_unlocked(page_path, page)
     write_private_json_file_atomic_unlocked(root.joinpath(*_member_parts(task_id)),
-                                           {'task_id': task_id, 'position': position})
+                                           {'task_id': task_id, 'position': position, **({'copy_epoch': manifest['copy_epoch']} if manifest.get('copy_epoch') else {})})
     write_private_json_file_atomic_unlocked(root / 'index.json', {**manifest, 'count': position + 1, 'generation': manifest.get('generation', 0) + 1})
 
 
@@ -90,7 +92,8 @@ def remove(thread_path: Path, thread, task_id: str) -> None:
             {**manifest, 'generation': manifest.get('generation', 0) + 1})
 
 
-def page(thread_path: Path, thread, *, cursor: int = 0, limit: int = PAGE_SIZE, allow_incomplete: bool = False):
+def page(thread_path: Path, thread, *, cursor: int = 0, limit: int = PAGE_SIZE, allow_incomplete: bool = False,
+         with_positions: bool = False):
     """返回 (ids, next_cursor)，游标是稳定物理位置；None表示已到末尾。"""
     if type(cursor) is not int or cursor < 0 or type(limit) is not int or not 0 < limit <= PAGE_SIZE:
         raise ValueError('任务历史分页需要非负游标及1至128的页大小')
@@ -102,7 +105,7 @@ def page(thread_path: Path, thread, *, cursor: int = 0, limit: int = PAGE_SIZE, 
     if manifest is None:
         ids = thread.task_ids[cursor:cursor + limit]
         end = cursor + len(ids)
-        return ids, end if end < len(thread.task_ids) else None
+        return (tuple(enumerate(ids, cursor)) if with_positions else ids), end if end < len(thread.task_ids) else None
     count = manifest['count']
     stop = min(count, cursor + limit)
     result = []
@@ -115,7 +118,7 @@ def page(thread_path: Path, thread, *, cursor: int = 0, limit: int = PAGE_SIZE, 
         end = min(stop, (number + 1) * PAGE_SIZE)
         for slot, identifier in enumerate(rows[position % PAGE_SIZE:position % PAGE_SIZE + end - position], position):
             if _contains_member(root, manifest, identifier, position=slot):
-                result.append(identifier)
+                result.append((slot, identifier) if with_positions else identifier)
         position = end
     return tuple(result), stop if stop < count else None
 
@@ -158,3 +161,33 @@ def member_paths(thread_path: Path):
             raise ValueError('任务历史分页缺失')
         for identifier in rows:
             yield root.joinpath(*_member_parts(identifier))
+
+
+def append_copy_window(thread_path: Path, identifiers, *, should_stop):
+    """目标线程锁内追加一页范围；成员先写，页和manifest随后发表，返回已消费前缀长度。"""
+    root = history_root(thread_path)
+    manifest = _read(root, ('index.json',))
+    if not manifest or not manifest.get('incomplete') or not manifest.get('copy_epoch'):
+        raise ValueError('task history copy is not prepared')
+    identifiers = tuple(islice(identifiers, PAGE_SIZE + 1))
+    position = manifest['count']
+    if len(identifiers) > PAGE_SIZE - position % PAGE_SIZE:
+        raise ValueError('task history copy window crosses page boundary')
+    page_path = root / 'pages' / f'{position // PAGE_SIZE}.json'
+    rows = (_read(root, ('pages', page_path.name)) or [])[:position % PAGE_SIZE]
+    consumed, added = 0, 0
+    for identifier in identifiers:
+        if should_stop():
+            break
+        # 上片页已发表但handoff续点尚未写时，准确成员位置允许幂等重放。
+        if not _contains_member(root, manifest, identifier):
+            write_private_json_file_atomic_unlocked(root.joinpath(*_member_parts(identifier)),
+                {'task_id': identifier, 'position': position + added, 'copy_epoch': manifest['copy_epoch']})
+            rows.append(identifier)
+            added += 1
+        consumed += 1
+    if added:
+        write_private_json_file_atomic_unlocked(page_path, rows)
+        write_private_json_file_atomic_unlocked(root / 'index.json',
+            {**manifest, 'count': position + added, 'generation': manifest.get('generation', 0) + 1})
+    return consumed

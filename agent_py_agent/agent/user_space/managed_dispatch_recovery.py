@@ -6,12 +6,15 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 HANDOFF_SCHEMA = "managed_dispatch_handoff.v1"
 _HANDOFF_PARTS = ("data", "managed_dispatch_handoffs")
+# 单个旧线程每拍最多复制16个物理历史位置，原max_ms同时限制墙钟。
+_HISTORY_COPY_SLICE_ITEMS_COUNT = 16
 _DISPATCH_REASON = "admin_dispatched_task"
 _DISPATCH_FIELDS = ("dispatched_by", "target_owner_id", "execution_owner_id", "request_id", "task_id")
 
@@ -90,14 +93,18 @@ def reconcile_managed_dispatches(home, *, commit_transition, limit=32, max_ms=50
             break
         handled += 1
         try:
-            reason = _hand_off(home, legacy, signal, commit_transition)
+            reason = _hand_off(home, legacy, signal, commit_transition, deadline=deadline)
         except (OSError, ValueError, KeyError, TypeError, DataCorruptionError) as error:
             reason = "handoff_error:" + type(error).__name__
         if reason:
+            if reason == "history_copy_pending":
+                report["truncated"] = True
             report["retained"].append({"task_id": signal.root_task_id, "wake_signal_id": signal.wake_signal_id,
                                        "reason": reason})
         else:
             report["handed_off"].append(signal.root_task_id)
+        if reason == "history_copy_pending":
+            break
     return report
 
 
@@ -140,7 +147,7 @@ def _legacy_retention_reason(legacy, signal, task_id):
 
 # LLM: 回执跨进程锁覆盖本派单完整交接；阶段prepared→published→completed单调推进，冲突身份或损坏回执保留原工作。
 # 函数用途: 交接一条旧派单；返回空串表示已完成交接，否则返回保留原因。
-def _hand_off(home, legacy, signal, commit_transition):
+def _hand_off(home, legacy, signal, commit_transition, *, deadline=None):
     from ..common.json_io import locked_json_path
     from ..common.nofollow_fs import ensure_private_dir
 
@@ -166,8 +173,12 @@ def _hand_off(home, legacy, signal, commit_transition):
             reason = _legacy_retention_reason(legacy, signal, task_id)
             if reason:
                 return reason
-            prepared = {**expected, "phase": "prepared", "updated_at": time.time()}
-            commit_transition(lambda: _prepare_and_publish(path, phase, prepared, home, legacy, signal, identity))
+            prepared = {**expected, "phase": "prepared", "updated_at": time.time(),
+                        **({"history_copy": receipt["history_copy"]} if receipt is not None and "history_copy" in receipt else {})}
+            ready = commit_transition(lambda: _prepare_and_publish(path, phase, prepared, home, legacy, signal, identity,
+                                                                  deadline=deadline))
+            if ready is False:
+                return "history_copy_pending"
         status = _verified_canonical_status(home, signal)
         if status not in {"pending", "handled"}:
             return "canonical_publication_unverified"
@@ -195,7 +206,7 @@ def _read_receipt(path):
 # LLM: 在原提交门内先落prepared意图，再按线程→消息→任务→唤醒发布；每步按原身份幂等，已存在的规范发布不重写。
 #   规范任务与新派单同为可运行active；仅把从未运行过的queued原链接CAS为active，终态或其它状态原样保留不复活。
 # 函数用途: 记录交接意图并把旧派单按原身份发布到规范库。
-def _prepare_and_publish(path, phase, prepared, home, legacy, signal, identity):
+def _prepare_and_publish(path, phase, prepared, home, legacy, signal, identity, *, deadline=None):
     from ..common.json_io import write_private_json_file_atomic_unlocked
     from ..conversation.store_wake_publication import publish_deduped
 
@@ -213,9 +224,21 @@ def _prepare_and_publish(path, phase, prepared, home, legacy, signal, identity):
         return
     thread = canonical.threads.load(thread_id)
     if thread is None:
-        thread = legacy.threads.require(thread_id)
-        _require_owner_thread(home, thread)
-        canonical.threads.write(thread)
+        from ..common.json_io import locked_json_path
+
+        with locked_json_path(legacy.storage.thread_path(thread_id)):
+            thread = canonical.threads.load(thread_id)
+            if thread is None:
+                thread = legacy.threads.require(thread_id)
+                _require_owner_thread(home, thread)
+                if not _copy_history_slice(path, prepared, legacy, canonical, thread, deadline):
+                    return False
+                if deadline is not None and time.monotonic() >= deadline:
+                    return False
+                from ..conversation.task_history import PAGE_SIZE
+
+                thread = replace(thread, task_ids=thread.task_ids[-PAGE_SIZE:], task_history_version=1)
+                canonical.threads.write(thread)
     _require_owner_thread(home, thread)
     link = legacy.tasks.load(task_id)
     metadata = {key: identity[key] for key in _DISPATCH_FIELDS}
@@ -228,6 +251,7 @@ def _prepare_and_publish(path, phase, prepared, home, legacy, signal, identity):
     else:
         canonical.tasks.update_status({"task_id": task_id, "status": "active", "expected_status": "queued"})
     publish_deduped(canonical.storage, replace(signal, status="pending", handled_at=0.0))
+    return True
 
 
 # LLM: 只读核对规范库线程归属、任务链接和同键唤醒发布回执；prepared或缺失都不算已发布。
@@ -259,3 +283,100 @@ def _retire_legacy_wake(path, published, legacy, signal):
 def _require_owner_thread(home, thread):
     if thread.owner_id != home.owner_id or Path(thread.owner_home) != home.home_dir:
         raise ValueError("managed_dispatch_owner_conflict")
+
+
+def _copy_history_slice(receipt_path, prepared, legacy, canonical, thread, deadline):
+    """源线程锁内冻结完整性代次；目标未发表页按原handoff游标续作，不扫描/删除整树。"""
+    from ..common.json_io import locked_json_path, write_private_json_file_atomic_unlocked
+    from ..conversation import task_history
+
+    source = legacy.storage.thread_path(thread.thread_id)
+    source_manifest = task_history.history_root(source) / 'index.json'
+
+    def stamp(path):
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return None
+        return [info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+
+    def source_identity():
+        manifest = task_history._read(task_history.history_root(source), ('index.json',))
+        generation = ({key: manifest.get(key) for key in ('version', 'count', 'generation', 'incomplete', 'copy_epoch')}
+                      if manifest is not None else None)
+        return [stamp(source), stamp(source_manifest), generation]
+
+    source_stamp = source_identity()
+    # 先读取一项验证完整性；不能从缺失索引/线程窗口声称完整迁移。
+    task_history.page(source, thread, cursor=0, limit=1)
+    target = canonical.storage.thread_path(thread.thread_id)
+    root = task_history.history_root(target)
+    progress = prepared.get('history_copy')
+    if 'history_copy' in prepared and not _valid_history_copy_progress(progress):
+        raise ValueError('invalid managed history copy progress')
+    with locked_json_path(target):
+        manifest = task_history._read(root, ('index.json',))
+        if (not progress or progress.get('source_stamp') != source_stamp or manifest is None
+                or manifest.get('copy_epoch') != progress.get('epoch')):
+            progress = {'source_stamp': source_stamp, 'epoch': uuid.uuid4().hex, 'cursor': 0, 'done': False}
+            # 新epoch使旧中断成员失效，按原散列位置覆盖，不为每次重启建新目录或rmtree。
+            manifest = {'version': 1, 'count': 0, 'generation': 0, 'incomplete': True,
+                        'copy_epoch': progress['epoch']}
+            write_private_json_file_atomic_unlocked(root / 'index.json', manifest)
+        position = progress['cursor']
+        if not progress['done']:
+            remaining = min(_HISTORY_COPY_SLICE_ITEMS_COUNT, task_history.PAGE_SIZE - manifest['count'] % task_history.PAGE_SIZE)
+            records, next_cursor = task_history.page(source, thread, cursor=position, limit=remaining, with_positions=True)
+            def stop():
+                return deadline is not None and time.monotonic() >= deadline
+
+            consumed = task_history.append_copy_window(target, (identifier for _, identifier in records), should_stop=stop)
+            if consumed == len(records):
+                progress = {**progress, 'cursor': next_cursor, 'done': next_cursor is None}
+            elif consumed:
+                progress = {**progress, 'cursor': records[consumed - 1][0] + 1}
+        # 复制循环不改变源；再次核原代次后才发表本片续点/完整证明。
+        if source_identity() != source_stamp:
+            raise ValueError('legacy task history changed during copy')
+        prepared['history_copy'] = progress
+        write_private_json_file_atomic_unlocked(receipt_path, prepared)
+        if progress['done']:
+            manifest = task_history._read(root, ('index.json',))
+            write_private_json_file_atomic_unlocked(root / 'index.json', {**manifest, 'incomplete': False})
+        return progress['done']
+
+
+def _valid_history_copy_progress(progress):
+    return (type(progress) is dict and type(progress.get('done')) is bool
+            and type(progress.get('epoch')) is str and len(progress['epoch']) == 32
+            and all(char in '0123456789abcdef' for char in progress['epoch'])
+            and isinstance(progress.get('source_stamp'), list) and len(progress['source_stamp']) == 3
+            and ((progress['done'] and progress.get('cursor') is None)
+                 or (not progress['done'] and type(progress.get('cursor')) is int and progress['cursor'] >= 0)))
+
+
+def history_copy_pending(home_dir, ref, source, canonical_store):
+    """只读精确handoff事实仅允许延期，绝不授权改投或运行旧库。"""
+    from ..common.nofollow_fs import read_bytes_beneath
+    from ..common.opaque_id import validate_opaque_id
+
+    task_id = source.get('root_task_id')
+    validate_opaque_id(task_id, kind='task_id')
+    raw = read_bytes_beneath(home_dir, (*_HANDOFF_PARTS, task_id + '.json'), max_bytes=65536)
+    if raw is None:
+        return False
+    receipt = json.loads(raw)
+    metadata = source.get('metadata') or {}
+    expected = {'schema': HANDOFF_SCHEMA, 'phase': 'prepared', 'task_id': task_id,
+                'thread_id': ref['thread_id'], 'legacy_wake_signal_id': ref['source_id'],
+                'legacy_store': ref['store_ref'], 'canonical_store': canonical_store,
+                'owner_id': metadata.get('target_owner_id'), 'request_id': metadata.get('request_id')}
+    owner = ref.get('owner') or {}
+    return (isinstance(receipt, dict) and owner.get('provider') == 'local' and owner.get('owner_kind') == 'user'
+            and receipt.get('owner_id') == 'local/' + str(owner.get('owner_id'))
+            and source.get('wake_signal_id') == ref['source_id'] and source.get('thread_id') == ref['thread_id']
+            and source.get('dedupe_key') == task_id and metadata.get('dispatched_by') == 'local/main'
+            and all(receipt.get(key) == value for key, value in expected.items())
+            and metadata.get('execution_owner_id') == receipt['owner_id']
+            and metadata.get('task_id') == task_id
+            and _valid_history_copy_progress(receipt.get('history_copy')))

@@ -181,3 +181,25 @@ flowchart TB
 3. **Step 3（跨受管用户资产直接配发与派单督办）**：复用 `CROSS_OWNER_ASSET_DELIVERY.md` 的依赖闭包打包器，增加针对受管用户的免确认直接配发入口 `provision_bundle` 与跨账号会话派单服务。
 4. **Step 4（通用提审队列 `ReviewQueueService` 与断点续跑联动）**：实现 `review_queue.jsonl` 状态机，打通脚本/工作流步骤挂起、主 Admin Agent 调用 `decide_review` 审批放行或打回重做闭环。
 5. **Step 5（装配主 Admin Agent 工具与 12 个 Host v2 动作）**：注册工具与 Host v2 动作并补齐隔离单测（重点验证：主 Admin 管自建 `local/<uid>` 全通、主 Admin 试图用该接口改 `providers/feishu/users/<id>` 必拒、普通用户 `local/u1` 试图管 `local/u2` 必拒）。
+
+
+## 旧派单完整任务历史的有界迁移
+
+`task_ids` 是近期128项加活动任务的窗口，`task_history/` 才是完整身份权威，不能复制窗口后声称已迁移。
+旧派单沿唯一 `managed_dispatch_handoff.v1` 的 prepared 记录保存 history_copy：源线程及索引的文件身份、
+count/generation、目标 copy_epoch、原物理 cursor 与 done。每拍最多16个物理身份位置，同时遵守原
+reconcile max_ms；源/目标线程锁及原 commit_transition 仅覆盖这一小片。只读取一个有界页，批量成员
+先耐久写入，页及manifest随后提交，最后记handoff续点；崩溃最多重放本片，准确成员去重，不重扫前缀。
+
+目标索引保持 incomplete，线程、消息、任务、规范wake必须等完整源证明后才发表。源线程或索引代次变化
+会重置cursor和copy_epoch重新验证；旧成员按原hash位置覆盖，epoch不符的成员不可见，不rmtree、不新建每代
+目录，不删活锁。文件数量按曾见独立身份及最大页数线性增长，不因重启次数复制目录。旧schema无epoch的正常
+读写不变；完整迁移后的常规 add/remove 继续保留同一epoch，单个权威manifest不另建第二清单。
+
+W遇到精确匹配owner/thread/task/wake/原source store及prepared回执的复制中来源，仅返回原pending并经原
+requeue协议重排，源ref保持不变、不执行legacy、不改投canonical；unknown或不匹配记录仍按原错库拒绝。
+
+本机隔离真实IO测量：旧逐ID复制130项一拍136.8ms/391次JSON耐久写，1000项一拍1282.2ms/3001次；
+分片后最终测量130项9拍最大24.6ms、1000项63拍最大27.4ms；copy及原handoff记录入口单拍最多21次JSON耐久写，
+最终thread/message/task/wake发表仍是原固定数量写入。max_ms仍为50ms，
+不以墙钟波动替代硬项数；截止后不启动新成员写入，正在进行的单次文件/小片提交不具备内核IO抢占能力。

@@ -302,7 +302,11 @@ def test_frozen_legacy_wake_request_sees_source_changed_after_handoff(home):
     ref = freeze_source(home.root, owner, legacy.storage.wake_signal_path(dispatch.legacy_wake), "wake")
     assert ref["store_ref"] == "conversations" and ref["source_id"] == dispatch.legacy_wake.wake_signal_id
     read_source(home.root, ref)
-    reconcile_managed_dispatches(home, commit_transition=lambda operation: operation())
+    for _ in range(16):
+        report = reconcile_managed_dispatches(home, commit_transition=lambda operation: operation())
+        if not report["truncated"]:
+            break
+    assert report["handed_off"] == [dispatch.task_id], report
     with pytest.raises(BackgroundSourceChanged):
         read_source(home.root, ref)
     # 冻结请求不被改投：规范库发布的是另一个来源位置上的同一原唤醒。
@@ -339,3 +343,148 @@ def test_coordinator_discovery_hands_off_then_scans_only_canonical_store(home, m
 
     monkeypatch.setattr(managed_owner_runtime, "managed_local_user_id", unreadable)
     assert list(CoordinatorBackgroundRequests._owner_sources(stub, SimpleNamespace(identity=owner, home_dir=home.home_dir))) == []
+
+
+def test_unpublished_task_history_restarts_exactly_after_source_changes(home, monkeypatch):
+    from agent_py_agent.agent.common.json_io import locked_json_path
+    from agent_py_agent.agent.conversation import task_history
+
+    dispatch = _legacy_dispatch(home, "Resume exact history")
+    legacy = open_legacy_conversation_store(home)
+    legacy.tasks.bind({"thread_id": dispatch.thread_id, "task_id": "removed-history", "goal": "old", "status": "completed"})
+    original, copied = task_history.append_copy_window, []
+
+    def interrupted(path, identifiers, **kwargs):
+        result = original(path, identifiers, **kwargs)
+        copied.append(result)
+        raise OSError("history copy interrupted")
+
+    monkeypatch.setattr(task_history, 'append_copy_window', interrupted)
+    report = reconcile_managed_dispatches(home, commit_transition=lambda operation: operation(), max_ms=1000)
+    assert report['retained'][0]['reason'] == 'handoff_error:OSError'
+    canonical = open_canonical_conversation_store(home, initialize=False)
+    assert canonical.threads.load(dispatch.thread_id) is None
+    assert legacy.wakes.pending()
+    monkeypatch.setattr(task_history, 'append_copy_window', original)
+    source = legacy.threads.require(dispatch.thread_id)
+    path = legacy.storage.thread_path(dispatch.thread_id)
+    with locked_json_path(path):
+        task_history.remove(path, source, 'removed-history')
+    legacy.tasks.bind({"thread_id": dispatch.thread_id, "task_id": "new-history", "goal": "new", "status": "completed"})
+    report = reconcile_managed_dispatches(home, commit_transition=lambda operation: operation(), max_ms=1000)
+    assert report['handed_off'] == [dispatch.task_id]
+    assert tuple(canonical.tasks.iter_task_ids(dispatch.thread_id)) == tuple(legacy.tasks.iter_task_ids(dispatch.thread_id))
+    assert not canonical.tasks.contains_task(dispatch.thread_id, 'removed-history')
+
+
+@pytest.mark.parametrize('history', [130, 1000])
+def test_history_copy_limits_real_writes_and_never_publishes_partial_thread(home, monkeypatch, history):
+    import shutil
+    from dataclasses import replace
+
+    from agent_py_agent.agent.conversation import task_history
+
+    dispatch = _legacy_dispatch(home, "Bounded history")
+    legacy = open_legacy_conversation_store(home)
+    thread = legacy.threads.require(dispatch.thread_id)
+    source = legacy.storage.thread_path(thread.thread_id)
+    identifiers = (dispatch.task_id, *(f"history-{number}" for number in range(history - 1)))
+    shutil.rmtree(task_history.history_root(source))
+    complete = replace(thread, task_ids=identifiers, task_history_version=0)
+    task_history.initialize(source, complete)
+    legacy.threads.write(replace(thread, task_ids=identifiers[-128:], task_history_version=1))
+    original, writes = task_history.write_private_json_file_atomic_unlocked, []
+
+    def write(path, payload):
+        writes.append(path)
+        return original(path, payload)
+
+    monkeypatch.setattr(task_history, 'write_private_json_file_atomic_unlocked', write)
+    canonical = open_canonical_conversation_store(home, initialize=False)
+    counts = []
+    for _ in range(history // recovery._HISTORY_COPY_SLICE_ITEMS_COUNT + 16):
+        before = len(writes)
+        report = reconcile_managed_dispatches(home, commit_transition=lambda operation: operation())
+        counts.append(len(writes) - before)
+        assert counts[-1] <= recovery._HISTORY_COPY_SLICE_ITEMS_COUNT + 3
+        if report['handed_off']:
+            break
+        assert report['truncated'] and canonical.threads.load(thread.thread_id) is None
+        assert legacy.wakes.pending()
+        target = task_history.history_root(canonical.storage.thread_path(thread.thread_id))
+        if (target / 'index.json').exists():
+            assert json.loads((target / 'index.json').read_text())['incomplete'] is True
+    assert report['handed_off'] == [dispatch.task_id]
+    assert len(counts) > 1 and tuple(canonical.tasks.iter_task_ids(thread.thread_id)) == identifiers
+    published = canonical.threads.require(thread.thread_id)
+    assert len(set(published.task_ids) - set(published.active_task_ids)) <= 128
+    assert set(thread.active_task_ids) <= set(published.active_task_ids)
+    canonical.tasks.bind({"thread_id": thread.thread_id, "task_id": "after-copy", "goal": "new", "status": "completed"})
+    assert tuple(canonical.tasks.iter_task_ids(thread.thread_id)) == (*identifiers, 'after-copy')
+    from agent_py_agent.agent.common.json_io import locked_json_path
+
+    target = canonical.storage.thread_path(thread.thread_id)
+    with locked_json_path(target):
+        task_history.remove(target, canonical.threads.require(thread.thread_id), 'after-copy')
+    assert not task_history.contains(target, canonical.threads.require(thread.thread_id), 'after-copy')
+    assert tuple(canonical.tasks.iter_task_ids(thread.thread_id)) == identifiers
+
+
+def test_history_copy_stops_new_member_writes_at_original_deadline(home, monkeypatch):
+    from agent_py_agent.agent.conversation import task_history
+
+    dispatch = _legacy_dispatch(home, "Deadline history")
+    legacy = open_legacy_conversation_store(home)
+    for number in range(4):
+        legacy.tasks.bind({"thread_id": dispatch.thread_id, "task_id": f"old-{number}", "goal": "old", "status": "completed"})
+    clock = SimpleNamespace(**vars(recovery.time))
+    now = [1000.0]
+    clock.monotonic = lambda: now[0]
+    monkeypatch.setattr(recovery, 'time', clock)
+    original, member_writes = task_history.write_private_json_file_atomic_unlocked, []
+
+    def write(path, payload):
+        result = original(path, payload)
+        if 'members' in path.parts:
+            member_writes.append(path)
+            now[0] += 0.006
+        return result
+
+    monkeypatch.setattr(task_history, 'write_private_json_file_atomic_unlocked', write)
+    report = reconcile_managed_dispatches(home, commit_transition=lambda operation: operation(), max_ms=10)
+    assert report['truncated'] and report['retained'][0]['reason'] == 'history_copy_pending'
+    assert len(member_writes) == 2
+    assert _receipt(home, dispatch.task_id)['history_copy']['cursor'] == 2
+    assert open_canonical_conversation_store(home, initialize=False).threads.load(dispatch.thread_id) is None
+    assert legacy.wakes.pending()
+
+
+def test_history_source_generation_change_restarts_without_old_members_becoming_live(home):
+    from agent_py_agent.agent.common.json_io import locked_json_path
+    from agent_py_agent.agent.conversation import task_history
+
+    dispatch = _legacy_dispatch(home, "Changing history")
+    legacy = open_legacy_conversation_store(home)
+    for number in range(20):
+        legacy.tasks.bind({"thread_id": dispatch.thread_id, "task_id": f"old-{number}", "goal": "old", "status": "completed"})
+    report = reconcile_managed_dispatches(home, commit_transition=lambda operation: operation())
+    assert report['truncated'] and report['retained'][0]['reason'] == 'history_copy_pending'
+    before = _receipt(home, dispatch.task_id)['history_copy']
+    assert before['cursor'] == recovery._HISTORY_COPY_SLICE_ITEMS_COUNT
+    path = legacy.storage.thread_path(dispatch.thread_id)
+    with locked_json_path(path):
+        task_history.remove(path, legacy.threads.require(dispatch.thread_id), 'old-0')
+    legacy.tasks.bind({"thread_id": dispatch.thread_id, "task_id": "new-source-id", "goal": "new", "status": "completed"})
+    report = reconcile_managed_dispatches(home, commit_transition=lambda operation: operation())
+    assert report['truncated']
+    changed = _receipt(home, dispatch.task_id)['history_copy']
+    assert changed['epoch'] != before['epoch'] and changed['source_stamp'] != before['source_stamp']
+    canonical = open_canonical_conversation_store(home, initialize=False)
+    assert canonical.threads.load(dispatch.thread_id) is None and legacy.wakes.pending()
+    for _ in range(8):
+        report = reconcile_managed_dispatches(home, commit_transition=lambda operation: operation())
+        if report['handed_off']:
+            break
+    assert report['handed_off'] == [dispatch.task_id]
+    assert tuple(canonical.tasks.iter_task_ids(dispatch.thread_id)) == tuple(legacy.tasks.iter_task_ids(dispatch.thread_id))
+    assert not canonical.tasks.contains_task(dispatch.thread_id, 'old-0')

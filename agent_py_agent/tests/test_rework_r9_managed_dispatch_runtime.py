@@ -154,7 +154,7 @@ def test_count0_cold_and_warm_dispatch_execute_once_on_canonical_store(host, cal
     assert legacy is None or legacy.threads.load(first["thread_id"]) is None
 
     second = service.dispatch_task("alice", "Summarize the second notes", title="Second")
-    assert _drive_until(supervisor, lambda: len(calls) >= 2)
+    assert _drive_until(supervisor, lambda: len(calls) >= 2 and store.tasks.load(second["task_id"]).status == "completed")
     assert managed.hard_agents() == [agent] and managed.gauges()["cached"] == 1
     assert len(calls) == 2 and "Summarize the second notes" in calls[1]["messages"]
     assert store.tasks.load(second["task_id"]).status == "completed"
@@ -282,6 +282,14 @@ def test_countn_claims_run_on_managed_pool_without_retargeting_frozen_legacy_wak
         assert managed.gauges()["pinned"] == 1
         processed.append(execute_background_request({"agent": agent, "request": json.loads(path.read_text()),
                                                      "request_path": path, "request_id": claim.request_id}))
+        if processed[-1]['outcome'] == 'pending':
+            from agent_py_agent.agent.gateway_parts.multiprocess_background_execution import (
+                requeue_pending_background_request,
+            )
+
+            assert requeue_pending_background_request({'background_result': processed[-1]}, agent)
+            pending = countn.paths.inbox / path.name
+            assert json.loads(pending.read_text())['metadata']['background_source'] == frozen_ref
         return True
 
     monkeypatch.setattr(request_worker, "_process_claimed_gateway_request_path", process)
@@ -298,15 +306,38 @@ def test_countn_claims_run_on_managed_pool_without_retargeting_frozen_legacy_wak
 
     legacy = open_legacy_conversation_store(countn.managed_home)
     wake_id = countn.dispatch.legacy_wake.wake_signal_id
+    # 超过线程窗口，证明迁移完整分页身份，不能只拷task_ids使旧历史丢失或incomplete。
+    for number in range(129):
+        legacy.tasks.bind({"thread_id": countn.dispatch.legacy_wake.thread_id,
+                           "task_id": f"old-history-{number}", "goal": "已完成历史", "status": "completed"})
+    history = tuple(legacy.tasks.iter_task_ids(countn.dispatch.legacy_wake.thread_id))
+    assert len(history) == 130
     frozen_ref = freeze_source(countn.home, countn.good, legacy.storage.wake_signal_path(countn.dispatch.legacy_wake), "wake")
     assert run_claim("r9-frozen-legacy", frozen_ref) is True
-    assert processed == [{"source_kind": "wake", "source_id": wake_id, "outcome": "source_changed"}]
+    assert processed == [{"source_kind": "wake", "source_id": wake_id, "outcome": "pending",
+                          "report_count": 0}]
     [agent] = managed.hard_agents()
     assert checked and all(item is agent for item in checked)
     assert managed.gauges()["pinned"] == 0 and current_managed_owner_generation() is None
     canonical = agent.conversation_store
+    receipt = agent.home_paths.owner_data_dir / 'managed_dispatch_handoffs' / (countn.dispatch.task_id + '.json')
+    original_receipt = receipt.read_bytes()
+    for field, invalid in (('phase', 'unknown.v99'), ('owner_id', 'local/other'), ('legacy_store', 'wrong-store'), ('history_copy', {})):
+        row = json.loads(original_receipt)
+        receipt.write_text(json.dumps({**row, field: invalid}))
+        with pytest.raises(ValueError, match='background_source_store_mismatch'):
+            run_claim('r9-invalid-' + field, frozen_ref)
+        assert calls == [] and canonical.threads.load(countn.dispatch.legacy_wake.thread_id) is None
+    receipt.write_bytes(original_receipt)
+    for step in range(32):
+        if canonical.wakes.pending():
+            break
+        assert calls == [] and canonical.threads.load(countn.dispatch.legacy_wake.thread_id) is None
+        assert run_claim(f"r9-history-{step}", frozen_ref) is True
+        assert processed[-1]["outcome"] in {"pending", "source_changed"}
     assert [wake.wake_signal_id for wake in canonical.wakes.pending()] == [wake_id]
     assert legacy.wakes.pending() == [] and calls == []
+    assert tuple(canonical.tasks.iter_task_ids(countn.dispatch.legacy_wake.thread_id)) == history
 
     canonical_ref = freeze_source(countn.home, countn.good, canonical.storage.wake_signal_path(canonical.wakes.pending()[0]), "wake")
     assert canonical_ref["source_id"] == wake_id and canonical_ref["store_ref"] != frozen_ref["store_ref"]

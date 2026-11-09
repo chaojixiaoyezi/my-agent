@@ -438,6 +438,12 @@ def _execute_wake(agent, ref):
 
     actual = Path(agent.conversation_store.storage.root).relative_to(agent.home_paths.owner_home_dir).as_posix()
     if actual != ref["store_ref"]:
+        from ..user_space.managed_dispatch_recovery import history_copy_pending
+
+        if ref['kind'] == 'wake' and history_copy_pending(agent.home_paths.owner_home_dir, ref,
+                                                         read_source(agent.home_paths.root, ref), actual):
+            return {"source_kind": "wake", "source_id": ref['source_id'], "outcome": "pending",
+                    "report_count": 0}
         raise ValueError("background_source_store_mismatch")
     block = source_recovery_block(agent.home_paths.owner_home_dir, ref["kind"], read_source(agent.home_paths.root, ref))
     if block is not None:
