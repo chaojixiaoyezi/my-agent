@@ -97,13 +97,19 @@ def test_business_writer_progresses_between_real_slices(tmp_path, monkeypatch):
     home, store, items = _home(tmp_path, 400)
     original, calls = upgrade._advance_upgrade_slice, []
     ready, written, errors = Event(), Event(), []
+    writer_after = []
     def observed(*args, **kwargs):
         result = original(*args, **kwargs)
         calls.append(result)
-        if len(calls) == 1:
-            assert result['progressed']
-            ready.set()
-            assert written.wait(3)
+        if not ready.is_set():
+            if result['progressed']:
+                # 冷首片可能只提交job或耗尽准备预算；在真实复制进展后才交错writer。
+                assert result['progressed']
+                writer_after.append(len(calls))
+                ready.set()
+                assert written.wait(3)
+            else:
+                assert result['status'] in {'partial', 'budget_exhausted', 'discovery'}
         return result
     def write():
         try:
@@ -119,20 +125,31 @@ def test_business_writer_progresses_between_real_slices(tmp_path, monkeypatch):
     worker = Thread(target=write)
     worker.start()
     try:
-        report = upgrade.advance_upgrade(home.owner_home_dir, {}, 1000)
+        state = {}
+        for turn in range(8):
+            maintenance_now = 1000 + turn * 61
+            report = upgrade.advance_upgrade(home.owner_home_dir, state, maintenance_now)
+            state = {'local_store_fts_upgrade': report}
+            if ready.is_set():
+                break
+        assert ready.is_set(), calls
     finally:
         written.set()
         worker.join(5)
-    assert not worker.is_alive() and not errors and len(calls) > 1
+    assert not worker.is_alive() and not errors and writer_after
     for turn in range(30):
         with store._connection() as conn:
             value = conn.execute("SELECT value FROM metadata WHERE key='records_fts_rowid_aligned'").fetchone()
         if value is not None and value[0] == 'true':
             break
-        report = upgrade.advance_upgrade(home.owner_home_dir, {'local_store_fts_upgrade': report}, 1061 + turn * 61)
+        report = upgrade.advance_upgrade(home.owner_home_dir, {'local_store_fts_upgrade': report}, maintenance_now + 61 + turn * 61)
     assert {row.id for row in store._search_fts('betweenstepsneedle', limit=5,
         source_type=None, visibility=None)} == {items[0].id}
     assert store.get_record(items[1].id) is None
+    assert any(result['progressed'] for result in calls[writer_after[0]:]), calls
+    with store._connection() as conn:
+        assert {row[0] for row in conn.execute('SELECT id FROM records_fts')} == {
+            item.id for item in items if item.id != items[1].id}
 
 
 def test_exhausted_index_budget_does_not_consume_ttl_permission_or_work(tmp_path):
@@ -146,8 +163,20 @@ def test_exhausted_index_budget_does_not_consume_ttl_permission_or_work(tmp_path
         os.utime(cache, (1, 1))
     with upgrade.fts_upgrade_tick_scope(deadline=time.monotonic() + 20, max_steps=1) as budget:
         for home in homes:
-            run_owner_retention_if_due(home, now=200_000)
+            outcome = run_owner_retention_if_due(home, now=200_000)
+            assert outcome.ran and outcome.apply_outcome == 'applied'
+            if (home.owner_cache_dir / 'expired.tmp').exists():
+                assert outcome.retention is not None and outcome.retention.scan_partial
         assert budget.remaining_steps == 0
+        # TTL沿原partial/due后继推进；同一已耗尽FTS预算不能吞掉清理权限或要求一次扫完。
+        for turn in range(8):
+            if all(not (home.owner_cache_dir / 'expired.tmp').exists() for home in homes):
+                break
+            for home in homes:
+                if (home.owner_cache_dir / 'expired.tmp').exists():
+                    outcome = run_owner_retention_if_due(home, now=200_001 + turn)
+                    assert outcome.ran and outcome.apply_outcome == 'applied'
+            assert budget.remaining_steps == 0
     assert all(not (home.owner_cache_dir / 'expired.tmp').exists() for home in homes)
     second = LocalStore(homes[1].owner_data_dir / 'local_store' / 'local.db')
     with second._connection() as conn:
