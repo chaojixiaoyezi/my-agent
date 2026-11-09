@@ -540,6 +540,27 @@ class BusinessObservationService:
                 ' ORDER BY aa.rowid LIMIT ?', [*values, 2 if selected_run is not None else limit]).fetchall()
         if runtime_source_revision(self.runtime.db_path) != revision:
             raise BusinessError('CURSOR_EXPIRED')
+        return self._execution_page(raw, more=more, revision=revision, source_paged=True, next_position=next_position)
+
+    def _event_execution_page(self, conn, events):
+        """事件只查本页显式attempt；与事件行共用读事务，不借历史页版本拒绝无关append。"""
+        identifiers = tuple(dict.fromkeys(row['attempt_id'] for row in events if row['attempt_id']))
+        if len(identifiers) > 100:
+            raise BusinessError('OBSERVATION_SOURCE_INVALID')
+        if not identifiers:
+            return ObservationPage()
+        marks = ','.join('?' for _ in identifiers)
+        raw = conn.execute('SELECT ar.run_id,ar.current_attempt_id,ar.parent_agent_run_id,pa.run_id AS parent_run_id,'
+            't.thread_id,tr.metadata_json,aa.attempt_id,aa.status,aa.started_at,aa.ended_at,aa.metadata_json AS attempt_metadata '
+            'FROM agent_attempts aa JOIN agent_runs ar ON ar.agent_run_id=aa.agent_run_id '
+            'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id '
+            'LEFT JOIN agent_runs pa ON pa.agent_run_id=ar.parent_agent_run_id AND pa.task_run_id=ar.task_run_id '
+            'WHERE aa.attempt_id IN (' + marks + ') AND t.owner_id=? ORDER BY aa.rowid',
+            [*identifiers, self.owner_id]).fetchall()
+        return self._execution_page(raw)
+
+    def _execution_page(self, raw, *, more=False, revision='', source_paged=False, next_position=None):
+        """列表分页及事件点查共用原字段/owner/context校验，来源选择不改变公开执行投影。"""
         rows, incomplete = [], False
         for row in raw:
             metadata = json.loads(row['metadata_json'])
@@ -558,7 +579,8 @@ class BusinessObservationService:
                 '_parent_run_id': row['parent_run_id'] or None}
             rows.append(ObservationRecord(value, self.owner_id, value['space_id'], context.project_ref if context else None,
                 value['task_id'], value['thread_id'], value['run_id'], value['attempt_id']))
-        return ObservationPage(tuple(rows), 'partial' if incomplete or more else 'complete', revision, True, next_position)
+        return ObservationPage(tuple(rows), 'partial' if incomplete or more else 'complete',
+                               revision, source_paged, next_position)
 
     # LLM: 线程原对象与其它本请求观察共用读取，节点/边仍逐条授权，不跨请求保存。
     # 函数用途: 从规范执行和线程生成准确范围的观察树。
@@ -785,8 +807,11 @@ class BusinessObservationService:
                 raise BusinessError('CURSOR_EXPIRED')
             after = position['after']
         events, coverage = [], 'unknown'
+        native_execution = 'executions' not in self.readers
         if self.runtime is not None and generation != 'unavailable':
             with self.runtime._runtime_connection() as conn:
+                if native_execution:
+                    conn.execute('BEGIN')
                 first, last = self._event_bounds(conn)
                 retained_after = first - 1 if first is not None else last
                 if position is not None and not retained_after <= after <= last:
@@ -811,7 +836,12 @@ class BusinessObservationService:
                     'LEFT JOIN task_runs tr ON tr.task_run_id=COALESCE(NULLIF(e.task_run_id,\'\'),ar.task_run_id) '
                     'LEFT JOIN tasks t ON t.task_id=tr.task_id WHERE e.seq>? ORDER BY e.seq LIMIT ?',
                     (after, params.get('limit', 50))).fetchall()
-            execution_page = self._source('executions', params)
+                if native_execution:
+                    execution_page = self._event_execution_page(conn, raw)
+            if self._event_generation() != generation:
+                raise BusinessError('CURSOR_EXPIRED')
+            if not native_execution:
+                execution_page = self._source('executions', params)
             execution = {(row.run_id, row.attempt_id): row for row in execution_page.records}
             coverage = execution_page.coverage
             for source in raw:

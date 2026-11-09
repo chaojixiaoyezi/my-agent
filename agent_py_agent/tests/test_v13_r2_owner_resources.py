@@ -93,6 +93,20 @@ def test_real_run_usage_event_reaches_default_http_usage_and_costs(tmp_path, mon
         assert events[0].request_id == 'resource-request'
         assert events[0].model_calls['physical_model_attempt_count'] == 1
         assert events[0].model_calls['usage_breakdown']['provider']['input_tokens'] == 37
+        # 当前资源独立可读；历史来源尚未追平时仍明确unknown，不借资源0捏造完整用量。
+        status, partial_usage = v13_call(server, 'usage.get', {}, user='business-alice')
+        assert status == 200 and partial_usage['data']['resource_usage']['active_model_calls'] == 0, partial_usage
+        if 'usage_source_unavailable' in partial_usage['data']['unknown']:
+            assert partial_usage['data']['actual']['coverage'] == 'unknown'
+            assert partial_usage['data']['actual']['input_tokens'] is None
+        # 原生追加不替历史目录发现签complete；沿真实有界维护口追平后再核原费用读口。
+        for _ in range(32):
+            prepared = agent.conversation_store.model_usage.prepare_window_sources(limit=16,
+                deadline=time.monotonic() + 0.25)
+            assert not prepared['errors'], prepared
+            if prepared['coverage'] == 'complete':
+                break
+        assert prepared['coverage'] == 'complete', prepared
         status, usage = v13_call(server, 'usage.get', {}, user='business-alice')
         assert status == 200, usage
         assert usage['state'] == 'completed' and usage['error'] is None
@@ -250,6 +264,10 @@ def test_default_reader_accepts_matching_public_source_without_private_gauge(tmp
     agent = _agent(tmp_path / 'home')
     provider = _provider(agent)
     monkeypatch.setattr(counters, '_METRICS', None)
+    source_index = agent.conversation_store.model_usage._source_index()
+    assert not source_index.path.exists()
+    with pytest.raises(ValueError):
+        agent.conversation_store.model_usage.window_source_plan()
     for readers in (_readers(agent), _readers(agent, resource_provider=provider)):
         assert 'resource_usage' in readers
         row = readers['resource_usage']({}).records[0]
@@ -257,6 +275,7 @@ def test_default_reader_accepts_matching_public_source_without_private_gauge(tmp
         assert row.value['active_model_calls'] == 0
         with counters.owner_model_activity_scope(agent):
             assert readers['resource_usage']({}).records[0].value['active_model_calls'] == 1
+    assert not source_index.path.exists(), '资源读口不能隐式补建历史用量索引'
 
 
 # LLM: 显式无效来源不得借已有owner标签成功；bool、小数和无穷不是合法物理计数。

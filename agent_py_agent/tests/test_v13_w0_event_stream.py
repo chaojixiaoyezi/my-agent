@@ -1,4 +1,7 @@
 """W0事件流：原运行库、确定性时钟及真实HTTP共同验证有界交付与恢复。"""
+import socket
+import threading
+import traceback
 from types import SimpleNamespace
 
 import pytest
@@ -249,7 +252,8 @@ def test_event_signal_wakes_immediately(tmp_path):
 
 # LLM: 此用例走真实HTTP，不能用编译或typed生成器替代连接观察点。
 # 函数用途: 验证同一NDJSON连接跨越130条突发仍能交付新事件。
-def test_native_http_stream_keeps_connection_across_burst(background_http):
+@pytest.mark.parametrize('small_send_buffer', [False, True])
+def test_native_http_stream_keeps_connection_across_burst(background_http, monkeypatch, small_send_buffer):
     import json
 
     params, agent = create_background(background_http)
@@ -257,17 +261,43 @@ def test_native_http_stream_keeps_connection_across_burst(background_http):
         if value.owner_id.endswith('/business-alice')]
     task = seed_task(services, params['space_id'], agent['agent_id'])
     runtime, run = seed_observed_runtime(services, task)
+    with runtime._runtime_connection() as conn:
+        initial_ids = [row[0] for row in conn.execute('SELECT event_id FROM runtime_events ORDER BY seq')]
+    if small_send_buffer:
+        pool = background_http[0].business_stream_pool
+        submit = pool.submit
+        def bounded_socket(ticket, sock, iterator, encode=None, check=None):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+            return submit(ticket, sock, iterator, encode, check)
+        monkeypatch.setattr(pool, 'submit', bounded_socket)
     connection, response = open_native_observation(background_http, {'request_id': 'w0-burst-http', 'filter': {}})
+    transport = response.fp.raw._sock
+    frames, failures = [], []
+    reader = None
     try:
         assert response.status == 200
         assert response.getheader('Connection') == 'close'
         assert response.getheader('Content-Type').startswith('application/x-ndjson')
         assert json.loads(response.readline())['stream_item'] == 'snapshot'
+        # 持续消费真实连接，不让fixture的130次fsync把自己变成超过原sendall预算的慢消费者。
+        def consume():
+            try:
+                for _ in range(len(initial_ids) + 130):
+                    line = response.readline()
+                    assert line, '突发事件尚未读完，原生连接已EOF'
+                    frames.append(json.loads(line))
+            except BaseException:
+                failures.append(traceback.format_exc())
+        reader = threading.Thread(target=consume, daemon=True)
+        reader.start()
         expected = [runtime.append_event(event_type='attempt.progress', attempt_id=run['attempt_id'],
             agent_run_id=run['agent_run_id'], task_run_id=run['task_run_id'])['event_id'] for _ in range(130)]
         with runtime._runtime_connection() as conn:
             all_ids = [row[0] for row in conn.execute('SELECT event_id FROM runtime_events ORDER BY seq')]
-        frames = [json.loads(response.readline()) for _ in all_ids]
+        reader.join(timeout=20)
+        assert not reader.is_alive() and failures == [], failures
+        assert all_ids == initial_ids + expected
+        assert len(frames) == len(all_ids)
         assert all(frame['stream_item'] == 'event' for frame in frames)
         assert [frame['event_id'] for frame in frames] == all_ids
         assert all_ids[-130:] == expected
@@ -275,5 +305,35 @@ def test_native_http_stream_keeps_connection_across_burst(background_http):
             agent_run_id=run['agent_run_id'], task_run_id=run['task_run_id'])
         assert json.loads(response.readline())['event_id'] == later['event_id']
     finally:
+        try:
+            transport.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        if reader is not None and reader.ident is not None:
+            reader.join(timeout=5)
+            assert not reader.is_alive(), '原生读取线程未回收'
         response.close()
         connection.close()
+
+
+def test_event_attempt_snapshot_survives_concurrent_append_without_expiring_history_cursor(tmp_path, monkeypatch):
+    case = fixture(tmp_path)
+    baseline = case.service.query('events.list', {'filter': {'space_id': 'space-a'}}, actor=case.actor)
+    first = append(case)
+    original = case.service._event_execution_page
+    later = []
+    selected = []
+    def concurrent_append(conn, rows):
+        selected.append(tuple(dict.fromkeys(row['attempt_id'] for row in rows if row['attempt_id'])))
+        assert len(selected[-1]) <= 100
+        if not later:
+            later.append(append(case))  # 真实独立WAL写事务，发生在事件读取与attempt批量join之间。
+        return original(conn, rows)
+    monkeypatch.setattr(case.service, '_event_execution_page', concurrent_append)
+    page = case.service.query('events.list', {'filter': {'space_id': 'space-a'},
+        'cursor': baseline['next_cursor'], 'limit': 100}, actor=case.actor)
+    assert [row['event_id'] for row in page['events']] == [first['event_id']]
+    following = case.service.query('events.list', {'filter': {'space_id': 'space-a'},
+        'cursor': page['next_cursor'], 'limit': 100}, actor=case.actor)
+    assert [row['event_id'] for row in following['events']] == [later[0]['event_id']]
+    assert selected == [(case.root['attempt_id'],), (case.root['attempt_id'],)]

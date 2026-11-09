@@ -691,8 +691,7 @@ class _OwnerReaders:
         value = self.model_activity()
         if value is None:
             return None
-        # 一次线程列表为任务两端点读提供规范对象，避免重复读取同一线程文件。
-        self.selected_threads({})
+        # 当前资源只读取规范任务及其准确端点；历史用量来源索引不提供资源身份或授权。
         tasks, errors = _observation_cached((self.store.session_tasks, 'list', None),
             lambda: self.store.session_tasks.list_report(limit=0))
         if errors:
