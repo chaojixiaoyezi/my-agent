@@ -633,6 +633,7 @@ agent_py_agent/
 
 - `model_request_capabilities.py` 是出站思考及工具选择的能力来源；关闭、强制选择与不兼容结果均有线级回归。
 - `R8_OPERATION_CONFIRMATION_DRAFT.md` 记录未知副作用继续硬停与可证明未来收口的边界；未实现自动确认。
+- `R8_QUOTA_ROOT_MEMBERSHIP.md` 说明有限配额的根成员证明、检查范围和大目录成本。
 - `R8_HOST_WAIT_OWNERSHIP.md` 区分宿主实际等待、只读判活和持久控制效果的证明。
 - `gateway_parts/http_body_readiness.py` 只预读有界传输前缀，保留原套接字与 HTTP 处理器；详见 `R8_HTTP_BODY_READINESS.md`。
 
@@ -1074,10 +1075,12 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_r8_context_memo_bounds.py # 长历史临时计量键的内存上限、完整正文与迟到结果的并发回归。
 |-- agent_py_agent/tests/test_darwin_process_tree_snapshot.py # macOS 命令树限定枚举、换代及未知退出回归。
 |-- docs/design/R8_OPERATION_CONFIRMATION_DRAFT.md # 等待确证退出的操作合同草案；旧未知不能补签。
+|-- docs/design/R8_QUOTA_ROOT_MEMBERSHIP.md # 有限配额根目录成员核验、分片与超上限行为。
 |-- docs/design/R8_HOST_WAIT_OWNERSHIP.md # 自有子进程的等待归属与退出证明边界。
 |-- docs/design/R8_HTTP_BODY_READINESS.md # 慢正文准入、正常请求保留容量与套接字回放。
 |-- agent_py_agent/agent/gateway_parts/http_body_readiness.py # 有界 HTTP 前缀分类及原生 socket 的读取顺序。
 |-- agent_py_agent/tests/test_dispatch_host_wait_ownership.py # 只读判活、直接子进程的真实退出码及等待异常。
+|-- agent_py_agent/tests/test_dispatch_host_wait_start_failures.py # 子进程出生/登记交错及日志文件打开失败时，等待权和真实退出码不丢失。
 |-- agent_py_agent/tests/test_windows_process_observation.py # Win32 只读句柄判活、拒权未知与原生退出码。
 |-- agent_py_agent/tests/test_r8_model_activity_cost.py # 流 chunk 活动明细与累计统计的差分及并发验证。
 |-- agent_py_agent/tests/test_r8_fts_cold_discovery.py # 无热提示的旧库发现、首片预算和多owner公平性。
@@ -1115,6 +1118,7 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_r8_idle_claim_history.py # 历史任务窗口化以后，孤立旧 claim 仍必须阻止闲置压缩。
 |-- agent_py_agent/tests/test_r8_idle_notice_http.py # 真实HTTP通知页缓存、权限及跨进程失效往返
 |-- agent_py_agent/tests/test_r8_notice_tree_read_cost.py # 单次代理树报告只读连接、来源替换和错误关闭回归
+|-- agent_py_agent/tests/test_r8_quota_root_settlement.py # 时间戳碰撞与账本换名时，分片核准根目录新增用量。
 |-- agent_py_agent/tests/test_r8_input_turn_retention.py # 输入引用终态、原锁、出生交错和有界目录预算。
 |-- agent_py_agent/tests/test_r8_log_cursor_lifetime.py # 日志分页签名在多 owner 轮换后的真实 HTTP 回归。
 |-- agent_py_agent/tests/test_r8_ledger_gc_pages.py # 旧账物理枚举上界、持久续点、并发取消与字节预算

@@ -34,13 +34,10 @@ def settled(monkeypatch):
 
 def _reap(agent, request, returncode):
     process = SimpleNamespace(returncode=returncode, pid=4242, wait=lambda: returncode)
-    dispatch._start_background_process_reaper(agent, request, process)
-    # 回收线程是 daemon：测试里等它结束再断言。
-    import threading
-
-    for thread in threading.enumerate():
-        if thread.name == f"my-agent-reap-{request.launch_id}":
-            thread.join(timeout=10)
+    with dispatch._BackgroundProcessWaitOwner(agent, request) as owner:
+        owner.bind(process)
+    owner.thread.join(timeout=10)
+    assert not owner.thread.is_alive()
     return process
 
 

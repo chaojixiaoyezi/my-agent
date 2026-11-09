@@ -24,7 +24,7 @@ from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, resolv
 def isolated_caches(monkeypatch):
     cache_capacity.reset_for_tests()
     for module, names in (
-        (quota, ("_QUOTA_SCANS", "_QUOTA_ROOT_STAMPS", "_QUOTA_FINITE_ROOTS", "_DISPLAY_USAGE_CACHE")),
+        (quota, ("_QUOTA_SCANS", "_QUOTA_FINITE_ROOTS", "_DISPLAY_USAGE_CACHE")),
         (scheduler, ("_WAITING_PROJECTION_CACHE", "_STORE_PROJECTION_CACHE")),
         (request_worker, ("_PENDING_SCAN_CACHE",)),
         (plugin_registration, ("_INSTALLATION_SNAPSHOTS",)),
@@ -245,7 +245,7 @@ def test_scheduler_owner_rotation_hits_after_warmup(tmp_path, kind, owners):
 def test_unconfigured_capacity_keeps_every_original_floor():
     for floor in (scheduler._WAITING_PROJECTION_MAX_ENTRIES_COUNT,
                   scheduler._STORE_PROJECTION_MAX_ENTRIES_COUNT, quota._QUOTA_SCAN_CACHE_SIZE,
-                  quota._QUOTA_ROOT_STAMP_CACHE_SIZE, quota._DISPLAY_USAGE_CACHE_MAX_ENTRIES,
+                  quota._QUOTA_FINITE_ROOT_CACHE_SIZE, quota._DISPLAY_USAGE_CACHE_MAX_ENTRIES,
                   plugin_registration._PLUGIN_CACHE_MAX_ENTRIES):
         assert cache_capacity.resident_owners(floor) == floor
     assert cache_capacity.global_inflight(request_worker._PENDING_SCAN_CACHE_MAX_ENTRIES) == (
@@ -254,7 +254,7 @@ def test_unconfigured_capacity_keeps_every_original_floor():
 
 @pytest.mark.parametrize("owners", [0, 4])
 def test_quota_auxiliary_caches_follow_owner_capacity(tmp_path, monkeypatch, owners):
-    monkeypatch.setattr(quota, "_QUOTA_ROOT_STAMP_CACHE_SIZE", 2)
+    monkeypatch.setattr(quota, "_QUOTA_FINITE_ROOT_CACHE_SIZE", 2)
     monkeypatch.setattr(quota, "_DISPLAY_USAGE_CACHE_MAX_ENTRIES", 2)
     _configure(owners=owners)
     capacity = max(2, owners)
@@ -266,7 +266,6 @@ def test_quota_auxiliary_caches_follow_owner_capacity(tmp_path, monkeypatch, own
         quota._write_quota_ledger(root, quota._read_quota_ledger(root))
         quota._remember_quota_finite_root(root)
         assert quota._directory_usage_bytes(root, root, [], cached=True) == 0
-    assert list(quota._QUOTA_ROOT_STAMPS) == [str(root) for root in roots[1:]]
     assert list(quota._QUOTA_FINITE_ROOTS) == roots[1:]
     assert list(quota._DISPLAY_USAGE_CACHE) == roots[1:]
 

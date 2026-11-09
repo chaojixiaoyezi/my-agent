@@ -1,6 +1,6 @@
 # 原宿主等待与确认义务的前置边界
 
-状态：已集成到补修分支；只保护原Popen退出状态和wait返回值，不启用操作确认阶段。完整目标见[R8_OPERATION_CONFIRMATION_DRAFT.md](R8_OPERATION_CONFIRMATION_DRAFT.md)。旧c9、UNKNOWN、失败父回合及取消子回合不迁移、不重开。
+状态：只读判活、原 wait 返回值和启动期单一 wait 拥有者已集成到补修分支，尚未随正式 main 更新。不启用操作确认阶段。完整目标见[R8_OPERATION_CONFIRMATION_DRAFT.md](R8_OPERATION_CONFIRMATION_DRAFT.md)。旧c9、UNKNOWN、失败父回合及取消子回合不迁移、不重开。
 
 ## 已落地的小片
 
@@ -14,13 +14,23 @@ Linux保留原`/proc`僵尸观察；Darwin复用原`process_registry._process_is
 
 ## 同类调用与回收拥有者
 
-- `orchestration/background/dispatch`唯一实际Popen出生点，正常启动与启动窗口即退两条分支均登记同一原`_start_background_process_reaper`；原reaper持句柄直到wait返回。进程内启动没有子进程等待义务。
+- `orchestration/background/dispatch`唯一实际Popen出生点，正常启动与启动窗口即退两条分支共享原`_BackgroundProcessWaitOwner`；唯一reaper在Popen前预约，持同一原句柄直到wait返回。进程内启动没有子进程等待义务。
 - `subagents/shell_gateway_execution._run_subprocess_with_budget`自行持Popen；正常、取消、超时均沿原wait返回并收集输出，不依赖判活观察偷reap。
 - `background_start_record_stale`、`cancellation_hosts.cleanup_runner_stop`、`capability_auto_sweep`只观察原派工宿主；`startup_recovery`也可能观察另一进程或已换父宿主，不能成为其wait拥有者。非本进程child仍由其原父/OS拥有等待责任。
 - Gateway 判活、调度租约、运行库 holder、适配器与心跳在 Windows 复用同一个只读原语；原生进程等待与出生身份比较仍各归其原拥有者。
 - 同族原生waitpid点仍在`multiprocess_native_host_observation`、`multiprocess_native_host_session`及`multiprocess_drain_darwin_waitid`；它们由原Popen/宿主生命周期锁及直接child来源调用，不从本片新授权。
 
-既有spawn成功后到reaper登记前的异常窗口、Thread.start失败的退出责任仍需按正式源单独评审；本片没有用判活或诊断掩盖它们，也不宣称所有异常启动均有完整持久退出证明。
+## 启动窗口的唯一wait拥有者（独立源码候选）
+
+原实现可在Popen成功后因fstat/marker/poll/registry错误离开，而尚未启动reaper；Thread.start在Popen之后失败也会丢等待责任。真实exit(7)故障注入红例保留在仓外交接，不依赖下次spawn、CPython惰性清理或GC。
+
+现在每个原launch在Popen前预约同一条原daemon reaper，显式空Context，不新增周期线程或待清理队列。Popen返回后的第一个拥有者动作是一次性bind强引用；日志metadata或后续登记异常仍经finally放行该拥有者。Thread.start失败（包括已出生后抛错）时尚未Popen，线程被唤醒空退，不再起fallback线程、不在Gateway线程wait/join。
+
+reaper先等原setup-finally门，保留marker→原Popen.poll→registry的原登记顺序，不在marker前先reap导致PID观察失去原对象。真实快速exit(7)由同一Popen.poll先取得时，后续唯一wait仍须返回7，不能补0；setup失败时门同样释放。正常快退的原同步失败结算先完成，reaper仍只对原准确attempt中尚pending者结算，已激活/终态不重开。完成后显式释放原agent/request/process引用。
+
+私有producer的wait_owner为必传且必须是当前agent/request、已启动、尚未绑定的原拥有者；不保留None自递归或Popen后再起线程的旧入口。直接回归同样先进入该context。log通过标准FileIO工厂与原O_EXCL/NOFOLLOW/0600 opener直接取得所有权，消除裸os.open→fdopen异常空窗。显式关闭保护主异常，次生关闭失败只追加有界类型note，不能取代主错误。
+
+本片不主动杀掉可能已经在执行原任务的child，不重新执行副作用、不改变旧UNKNOWN/c9或operation账；wait本身失败仍原None/未知，不从缓存补成功，也没有新增其持久自愈协议。只有已经成功返回并被原producer接纳的Popen受此拥有者合同；原生Popen构造内部失败与宿主致命退出仍归标准库/OS。Zombie本身不保留原用户进程RSS，不能把回收补强当作既往大内存峰的归因。
 
 ## 下一片可复用事实与尚缺合同
 

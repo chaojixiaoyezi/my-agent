@@ -245,7 +245,7 @@ def test_start_background_dispatch_marks_channel_failure_on_immediate_process_ex
     task = manager.create_run(goal="立即退出")
     agent = SimpleNamespace(config=SimpleNamespace(model_backend="minimax"), subagents=manager)
     monkeypatch.setattr(background_dispatch, "_auto_start_dispatch_args", lambda *_a, **_k: (object(), object(), DispatchParams()))
-    monkeypatch.setattr(background_dispatch, "_spawn_background_dispatch_process", lambda *_: SimpleNamespace(pid=12345, poll=lambda: 2))
+    monkeypatch.setattr(background_dispatch, "_spawn_background_dispatch_process", lambda *_a, **_k: SimpleNamespace(pid=12345, poll=lambda: 2))
     result = background_dispatch._start_background_dispatch(agent, [task.id])
     assert result["status"] == "failed"
     assert result["failure_type"] == "background_dispatch_startup"
@@ -279,7 +279,7 @@ def test_start_background_dispatch_persists_pid_before_startup_poll(tmp_path, mo
     monkeypatch.setattr(
         background_dispatch,
         "_spawn_background_dispatch_process",
-        lambda _agent, _request: SimpleNamespace(
+        lambda _agent, _request, **_options: SimpleNamespace(
             pid=12345,
             poll=lambda: events.append("poll") or None,
         ),
@@ -311,15 +311,16 @@ def test_background_process_reaper_waits_child_and_records_exit():
         cfg=object(),
         params=object(),
     )
-    process = subprocess.Popen(
-        [sys.executable, "-c", "pass"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    with background_dispatch._BackgroundProcessWaitOwner(agent, request) as owner:
+        process = subprocess.Popen(
+            [sys.executable, "-c", "pass"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
 
-    background_dispatch._start_background_process_reaper(agent, request, process)
+        owner.bind(process)
     deadline = time.time() + 5
     while time.time() < deadline:
         if agent._background_subagent_dispatches[launch_id]["status"] != "running":

@@ -92,15 +92,15 @@ def test_real_dispatch_exit_proof_uses_original_attempt_and_stdout_inode(tmp_pat
     request = dispatch._BackgroundDispatchRequest(agent=agent, run_ids=['run'], launch_id='actual', router=None, cfg=None,
         params=SimpleNamespace(expected_attempt_ids={'run': 'attempt'}))
     monkeypatch.setattr(dispatch, '_background_dispatch_command', lambda *_args: [sys.executable, '-c', 'from agent_py_agent.agent.io.bounded_process_log import bounded_stdio_from_environment\nwith bounded_stdio_from_environment(): print("actual stdout")'])
-    process = dispatch._spawn_background_dispatch_process(agent, request)
-    dispatch._remember_background_dispatch(agent, 'actual', ['wrong-display-run'], 'display-only')
-    settled = threading.Event()
-    original = log_retention.record_dispatch_log_exit
-    def record(*args, **kwargs):
-        original(*args, **kwargs)
-        settled.set()
-    monkeypatch.setattr(log_retention, 'record_dispatch_log_exit', record)
-    dispatch._start_background_process_reaper(agent, request, process)
+    with dispatch._BackgroundProcessWaitOwner(agent, request) as wait_owner:
+        process = dispatch._spawn_background_dispatch_process(agent, request, wait_owner=wait_owner)
+        dispatch._remember_background_dispatch(agent, 'actual', ['wrong-display-run'], 'display-only')
+        settled = threading.Event()
+        original = log_retention.record_dispatch_log_exit
+        def record(*args, **kwargs):
+            original(*args, **kwargs)
+            settled.set()
+        monkeypatch.setattr(log_retention, 'record_dispatch_log_exit', record)
     assert settled.wait(5)
     marker = folder / 'actual.exit.json'
     row = json.loads(marker.read_text())
