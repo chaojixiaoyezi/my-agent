@@ -124,7 +124,8 @@ def test_subagent_projection_changed_after_plan_is_kept(tmp_path):
 
 # LLM: usage家族按精确安全线程名整体移动，不搬共享锁及append-once侧车；永久清除只在宽限后。
 # 函数用途: 验证模型usage的完整清单、字节保持和31天后真实purge。
-def test_retirement_moves_usage_family_and_purges_after_grace(tmp_path):
+def test_retirement_moves_usage_family_and_purges_after_grace(tmp_path, entry_budget_clock):
+    # 本例核完整退休清单与宽限期，不把25ms磁盘吞吐当作单拍完成的前提。
     home, service = _runtime(tmp_path)
     thread, path = _thread(home)
     root = path.parent.parent
@@ -139,6 +140,7 @@ def test_retirement_moves_usage_family_and_purges_after_grace(tmp_path):
         item.write_bytes(b"shared sidecar")
     before = {item.relative_to(root): item.read_bytes() for item in paths}
     report = service.apply(now=NOW)
+    assert not report.scan_partial, report.scan_cursor
     moved = next(action for action in report.actions if action.record_id == thread.thread_id)
     assert moved.status == "trashed"
     assert not any(item.exists() for item in paths)
@@ -146,6 +148,7 @@ def test_retirement_moves_usage_family_and_purges_after_grace(tmp_path):
     assert all(item.exists() for item in sidecars)
     assert not [action for action in service.plan(now=NOW).actions if action.path == moved.destination]
     later = service.apply(now=NOW + timedelta(days=31))
+    assert not later.scan_partial, later.scan_cursor
     assert any(action.path == moved.destination and action.status == "deleted" for action in later.actions)
     assert not moved.destination.exists()
 
@@ -549,7 +552,7 @@ def test_unreadable_snapshot_branch_preserves_other_progress(tmp_path, monkeypat
 
 # LLM: 用真实公共writer生成canonical JSONL及合法SQLite，回收后仍能校验库；不是用占位文本冒充用量库。
 # 函数用途: 验证真实模型账本、索引及原锁侧车的退休链路。
-def test_real_usage_writer_ledger_and_sqlite_survive_retirement(tmp_path):
+def test_real_usage_writer_ledger_and_sqlite_survive_retirement(tmp_path, entry_budget_clock):
     import sqlite3
 
     home, service = _runtime(tmp_path)
@@ -571,6 +574,7 @@ def test_real_usage_writer_ledger_and_sqlite_survive_retirement(tmp_path):
     assert sidecars
     before = {path.relative_to(root): path.read_bytes() for path in (ledger, database)}
     report = service.apply(now=NOW)
+    assert not report.scan_partial, report.scan_cursor
     moved = next(action for action in report.actions if action.record_id == thread.thread_id)
     assert moved.status == "trashed" and not ledger.exists() and not database.exists()
     assert {relative: (moved.destination / "payload" / relative).read_bytes() for relative in before} == before
