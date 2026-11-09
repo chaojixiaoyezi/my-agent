@@ -23,7 +23,7 @@ SCENARIOS = [json.loads(path.read_text()) for path in sorted((HERE / "scenarios"
 
 def _atomic_temporary(name):
     """只排除原子发表的暂存名，正式账本、锁和其它隐藏文件仍是证据。"""
-    return any(fnmatchcase(name, pattern) for pattern in (".persona-ledger-*", "*.tmp", "*.tmp.*", ".tmp-*"))
+    return any(fnmatchcase(name, pattern) for pattern in (".persona-ledger-*", ".persona-snapshot-*", "*.tmp", "*.tmp.*", ".tmp-*"))
 
 
 def replay_paths(root, pattern):
@@ -138,12 +138,13 @@ def test_recorder_ignores_atomic_staging_directories(tmp_path, staging_name):
     assert [event["content"] for event in recorder.events] == ["committed"]
 
 
-def test_replay_scan_does_not_enter_disappearing_atomic_directory(tmp_path, monkeypatch):
+@pytest.mark.parametrize("staging_name", [".persona-ledger-deadbeef", ".persona-snapshot-deadbeef"])
+def test_replay_scan_does_not_enter_disappearing_atomic_directory(tmp_path, monkeypatch, staging_name):
     home = tmp_path / "home"
     root = home / "gateway"
     root.mkdir(parents=True)
     (root / "gateway_state.json").write_text("{}")
-    staging = home / ".persona-ledger-deadbeef"
+    staging = home / staging_name
     staging.mkdir()
     entered = []
     scandir = os.scandir
@@ -171,6 +172,8 @@ def test_replay_paths_preserves_committed_files_and_ignores_temporary_files(tmp_
 
 @pytest.mark.parametrize("name,error_type,ignored", [
     (".persona-ledger-123", FileNotFoundError, True),
+    (".persona-snapshot-123", FileNotFoundError, True),
+    (".persona-snapshot-123", PermissionError, False),
     ("write.tmp", FileNotFoundError, True),
     ("write.tmp.123", FileNotFoundError, True),
     (".tmp-123", FileNotFoundError, True),
