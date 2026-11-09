@@ -402,7 +402,7 @@ def test_history_copy_limits_real_writes_and_never_publishes_partial_thread(home
     monkeypatch.setattr(task_history, 'write_private_json_file_atomic_unlocked', write)
     canonical = open_canonical_conversation_store(home, initialize=False)
     counts = []
-    for _ in range(history // recovery._HISTORY_COPY_SLICE_ITEMS_COUNT + 16):
+    for _ in range(history + 16):
         before = len(writes)
         report = reconcile_managed_dispatches(home, commit_transition=lambda operation: operation())
         counts.append(len(writes) - before)
@@ -459,7 +459,7 @@ def test_history_copy_stops_new_member_writes_at_original_deadline(home, monkeyp
     assert legacy.wakes.pending()
 
 
-def test_history_source_generation_change_restarts_without_old_members_becoming_live(home):
+def test_history_source_generation_change_restarts_without_old_members_becoming_live(home, monkeypatch):
     from agent_py_agent.agent.common.json_io import locked_json_path
     from agent_py_agent.agent.conversation import task_history
 
@@ -467,10 +467,28 @@ def test_history_source_generation_change_restarts_without_old_members_becoming_
     legacy = open_legacy_conversation_store(home)
     for number in range(20):
         legacy.tasks.bind({"thread_id": dispatch.thread_id, "task_id": f"old-{number}", "goal": "old", "status": "completed"})
+    canonical = open_canonical_conversation_store(home, initialize=False)
+    target = canonical.storage.thread_path(dispatch.thread_id)
+    target_members = task_history.history_root(target) / 'members'
+    clock = SimpleNamespace(**vars(recovery.time))
+    now = [1000.0]
+    clock.monotonic = lambda: now[0]
+    monkeypatch.setattr(recovery, 'time', clock)
+    original = task_history.write_private_json_file_atomic_unlocked
+
+    def write(path, payload):
+        result = original(path, payload)
+        # 保留真实耐久IO，只将目标成员写入计为6ms，让原50ms预算确定性地在满片前停止。
+        if path.is_relative_to(target_members):
+            now[0] += 0.006
+        return result
+
+    monkeypatch.setattr(task_history, 'write_private_json_file_atomic_unlocked', write)
     report = reconcile_managed_dispatches(home, commit_transition=lambda operation: operation())
     assert report['truncated'] and report['retained'][0]['reason'] == 'history_copy_pending'
     before = _receipt(home, dispatch.task_id)['history_copy']
-    assert before['cursor'] == recovery._HISTORY_COPY_SLICE_ITEMS_COUNT
+    assert 0 < before['cursor'] < recovery._HISTORY_COPY_SLICE_ITEMS_COUNT
+    assert task_history.contains(target, legacy.threads.require(dispatch.thread_id), 'old-0')
     path = legacy.storage.thread_path(dispatch.thread_id)
     with locked_json_path(path):
         task_history.remove(path, legacy.threads.require(dispatch.thread_id), 'old-0')
@@ -479,6 +497,7 @@ def test_history_source_generation_change_restarts_without_old_members_becoming_
     assert report['truncated']
     changed = _receipt(home, dispatch.task_id)['history_copy']
     assert changed['epoch'] != before['epoch'] and changed['source_stamp'] != before['source_stamp']
+    assert not task_history.contains(target, legacy.threads.require(dispatch.thread_id), 'old-0')
     canonical = open_canonical_conversation_store(home, initialize=False)
     assert canonical.threads.load(dispatch.thread_id) is None and legacy.wakes.pending()
     for _ in range(8):

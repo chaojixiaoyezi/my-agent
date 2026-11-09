@@ -329,7 +329,7 @@ def test_countn_claims_run_on_managed_pool_without_retargeting_frozen_legacy_wak
             run_claim('r9-invalid-' + field, frozen_ref)
         assert calls == [] and canonical.threads.load(countn.dispatch.legacy_wake.thread_id) is None
     receipt.write_bytes(original_receipt)
-    for step in range(32):
+    for step in range(len(history) + 16):
         if canonical.wakes.pending():
             break
         assert calls == [] and canonical.threads.load(countn.dispatch.legacy_wake.thread_id) is None
