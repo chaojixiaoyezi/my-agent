@@ -197,8 +197,10 @@ def test_legal_hold_keeps_deletion_disabled_but_index_progresses(tmp_path, monke
     assert _aligned(store)
 
 
-def test_low_space_index_does_not_starve_original_retention(tmp_path, monkeypatch):
+def test_low_space_index_does_not_starve_original_retention(tmp_path, monkeypatch, request):
     import os
+
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
 
     home, store, _ = _legacy(tmp_path)
     policy = json.loads(home.owner_retention_json.read_text())
@@ -216,14 +218,44 @@ def test_low_space_index_does_not_starve_original_retention(tmp_path, monkeypatc
     proxy = SimpleNamespace(**vars(maintenance.os))
     proxy.statvfs = lambda path: SimpleNamespace(f_bavail=0, f_frsize=4096)
     monkeypatch.setattr(maintenance, 'os', proxy)
-    run_owner_retention_if_due(home, now=200_000)
+    clock = [0.0]
+
+    def monotonic():
+        clock[0] += .03
+        return clock[0]
+
+    # 首拍真实默认deadline先耗尽，必须保存partial，不能把未扫到cache误当饥饿。
+    with monkeypatch.context() as patch:
+        patch.setattr(budgets, 'time', SimpleNamespace(monotonic=monotonic))
+        run_owner_retention_if_due(home, now=200_000)
     state = json.loads((home.owner_data_dir / 'maintenance.json').read_text())
-    assert state['local_store_fts_upgrade']['status'] == 'deferred'
+    assert cache.exists() and state['retention_scan_partial'] is True
+    assert state['maintenance_partial'] is True
+    assert state['load_errors'] == []
+    assert state['local_store_fts_upgrade']['status'] in {'deferred', 'budget_exhausted', 'discovery'}
+    seen_deferred = state['local_store_fts_upgrade']['status'] == 'deferred'
+    # 后继完成性只隔离保留发现的磁盘吞吐；条目/字节和所有事件/FTS预算仍保持原值。
+    monkeypatch.setattr(budgets, 'time', SimpleNamespace(monotonic=lambda: 0.0))
+    for turn in range(32):
+        run_owner_retention_if_due(home, now=200_061 + turn * 61)
+        state = json.loads((home.owner_data_dir / 'maintenance.json').read_text())
+        assert state['load_errors'] == []
+        status = state['local_store_fts_upgrade']['status']
+        assert status in {'deferred', 'budget_exhausted', 'discovery'}, state['local_store_fts_upgrade']
+        seen_deferred |= status == 'deferred'
+        with store._connection() as conn:
+            remaining = conn.execute("SELECT COUNT(*) FROM events WHERE event_type='seed'").fetchone()[0]
+        event_result = state.get('local_store_events_maintenance', {})
+        if (not cache.exists() and remaining < 20_010 and not state['retention_scan_partial']
+                and event_result.get('ok') is True and event_result.get('partial', False) is False):
+            break
+    assert seen_deferred, 'the original low-space gate must actually be reached'
     assert not cache.exists()
-    with store._connection() as conn:
-        remaining = conn.execute("SELECT COUNT(*) FROM events WHERE event_type='seed'").fetchone()[0]
     assert remaining < 20_010
+    assert state['retention_scan_partial'] is False
+    assert event_result.get('ok') is True and event_result.get('partial', False) is False
     assert not _aligned(store)
+    request.node.user_properties.append(('retention_resume_turns', turn + 1))
 
 
 def test_event_interleaving_keeps_original_job_and_final_exact_content(tmp_path, monkeypatch):
