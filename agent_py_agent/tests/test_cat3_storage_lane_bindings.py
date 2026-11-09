@@ -104,7 +104,8 @@ def test_runtime_history_receipt_still_rejects_unknown_fields():
                                              "slimmed": 0, "unregistered_counter": 0})
 
 
-def test_owner_maintenance_publishes_both_real_history_lane_receipts(tmp_path):
+@pytest.mark.parametrize('single_adapter_slice', [False, True])
+def test_owner_maintenance_publishes_both_real_history_lane_receipts(tmp_path, monkeypatch, single_adapter_slice):
     from agent_py_agent.agent.gateway_parts.gateway_history_index import GatewayHistoryIndex
     from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
     from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
@@ -128,16 +129,41 @@ def test_owner_maintenance_publishes_both_real_history_lane_receipts(tmp_path):
     # 只提供已完成的保留报告；调度、领域策略、数据库写入和回执校验均用真实实现。
     retention = SimpleNamespace(applied=True, legal_hold=False, load_errors=[])
     previous = {"storage_maintenance": {"continuation_pending": True, "pending_kinds": list(_HISTORY_LANES)}}
-    state = owner_maintenance.run_owner_storage_maintenance_slice(home, previous, retention,
-        now=200 * 86400, quota_max_ms=1000, quota_max_entries=4096)
-    assert not state["errors"]
-    assert set(state["lane_reports"]) == set(_HISTORY_LANES)
-    assert not set(_HISTORY_LANES).intersection(state["lane_fallback_kinds"])
-    for kind in _HISTORY_LANES:
-        receipt = {"cursor": state["cursors"][kind], **state["lane_reports"][kind]}
-        assert storage_lanes.validate_lane_receipt(receipt) == receipt
-        assert {"cursor", "complete", "items", "bytes"} <= receipt.keys()
-        assert receipt["complete"]
-    runtime = state["lane_reports"]["runtime_history"]
-    assert runtime["slimmed"] == runtime["deleted_events"] == runtime["deleted_llm_records"] == 1
-    assert runtime["bytes"] > 0
+    if single_adapter_slice:
+        run_slice = owner_maintenance.run_storage_maintenance_slice
+        def yielded_slice(*args, **kwargs):
+            checks = 0
+            def should_yield():
+                nonlocal checks
+                checks += 1
+                return checks > 1
+            return run_slice(*args, **kwargs, should_yield=should_yield)
+        monkeypatch.setattr(owner_maintenance, 'run_storage_maintenance_slice', yielded_slice)
+
+    # 回执只描述本片；真实fsync可能耗尽额度，按同一pending/next_kind继续，不能要求一片走完整轮。
+    reports, completed, fallbacks = {}, set(), set()
+    runtime_totals = dict.fromkeys((*_RUNTIME_COUNTERS, 'bytes'), 0)
+    for _ in range(len(_HISTORY_LANES) * 8):
+        state = owner_maintenance.run_owner_storage_maintenance_slice(home, previous, retention,
+            now=200 * 86400, quota_max_ms=1000, quota_max_entries=4096)
+        assert not state['errors']
+        fallbacks.update(state['lane_fallback_kinds'])
+        for kind, report in state['lane_reports'].items():
+            receipt = {'cursor': state['cursors'][kind], **report}
+            assert storage_lanes.validate_lane_receipt(receipt) == receipt
+            assert {'cursor', 'complete', 'items', 'bytes'} <= receipt.keys()
+            reports[kind] = receipt
+            if receipt['complete']:
+                completed.add(kind)
+            if kind == 'runtime_history':
+                for key in runtime_totals:
+                    runtime_totals[key] += receipt.get(key, 0)
+        if not state['continuation_pending']:
+            break
+        previous = {'storage_maintenance': state}
+    assert not state['continuation_pending'], state
+    assert set(reports) == completed == set(_HISTORY_LANES)
+    assert not set(_HISTORY_LANES).intersection(fallbacks)
+    assert all(receipt['complete'] for receipt in reports.values())
+    assert runtime_totals['slimmed'] == runtime_totals['deleted_events'] == runtime_totals['deleted_llm_records'] == 1
+    assert runtime_totals['bytes'] > 0

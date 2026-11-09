@@ -100,15 +100,30 @@ def test_lane_dto_budget_and_run_write(monkeypatch, lane_home):
 
 
 # 函数用途: 所有缺失通道均有保留回执，不制造未绑定类别或永久续作。
-def test_all_missing_lanes_fall_back_and_finish(lane_home):
-    state = _run(lane_home)
-    for _ in range(8):
+@pytest.mark.parametrize('single_adapter_slice', [False, True])
+def test_all_missing_lanes_fall_back_and_finish(lane_home, monkeypatch, single_adapter_slice):
+    if single_adapter_slice:
+        run_slice = owner_maintenance.run_storage_maintenance_slice
+        def yielded_slice(*args, **kwargs):
+            checks = 0
+            def should_yield():
+                nonlocal checks
+                checks += 1
+                return checks > 1
+            return run_slice(*args, **kwargs, should_yield=should_yield)
+        monkeypatch.setattr(owner_maintenance, 'run_storage_maintenance_slice', yielded_slice)
+    previous, fallbacks = None, set()
+    # fallback列表是本片事实；确定性每片只准入一个adapter，验证整轮续作不会遗失前片回执。
+    for _ in range(len(home_retention.storage_kind_registry()) * 2):
+        state = _run(lane_home, previous)
+        assert state['errors'] == [] and state['unbound_kinds'] == []
+        assert state['lane_reports'] == {}
+        fallbacks.update(state['lane_fallback_kinds'])
         if not state['continuation_pending']:
             break
-        state = _run(lane_home, {'storage_maintenance': state})
-    assert state['unbound_kinds'] == [] and not state['continuation_pending']
-    assert state['lane_fallback_kinds'] == sorted(storage_lanes.LANE_BINDINGS)
-    assert state['lane_reports'] == {}
+        previous = {'storage_maintenance': state}
+    assert not state['continuation_pending'], state
+    assert sorted(fallbacks) == sorted(storage_lanes.LANE_BINDINGS)
 
 
 # 函数用途: 验证单进程DTO、hold透传和真实调度器发布的游标与可选计量。
