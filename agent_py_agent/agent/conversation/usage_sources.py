@@ -16,8 +16,7 @@ from pathlib import Path
 
 from ..common.json_io import locked_json_path, write_private_json_file_atomic_unlocked
 from ..common.nofollow_fs import ensure_private_dir, read_bytes_beneath, unlink_file_beneath
-from ..io.sqlite_probe import sqlite_readonly_probe_uri
-from ..io.sqlite_scope import scoped_connection
+from ..io.sqlite_scope import connect_projection_sqlite, scoped_connection
 from .observation_index import _identity
 
 
@@ -73,7 +72,7 @@ class UsageSourceIndex:
                 'pending': _stamp(self.pending_directory)}
 
     def _open(self):
-        conn = sqlite3.connect(self.path.as_uri() + '?mode=rw', uri=True, timeout=0.0)
+        conn = connect_projection_sqlite(self.path, timeout=0.0)
         try:
             conn.row_factory = sqlite3.Row
             conn.execute('PRAGMA journal_mode=WAL')
@@ -103,7 +102,8 @@ class UsageSourceIndex:
                 fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
                 os.close(fd)
             _identity(self.path)
-            with scoped_connection(self.path, False, self._open) as conn:
+            with scoped_connection(self.path, False, self._open,
+                                   rebuild_projection=self._projection_rebuild_proof) as conn:
                 conn.execute('BEGIN IMMEDIATE')
                 try:
                     yield conn
@@ -118,7 +118,7 @@ class UsageSourceIndex:
         if before is None:
             raise ValueError('usage source index unavailable; coverage=unknown')
         def connect():
-            conn = sqlite3.connect(sqlite_readonly_probe_uri(self.path), uri=True, timeout=0.0)
+            conn = connect_projection_sqlite(self.path, read_only=True, timeout=0.0)
             try:
                 conn.row_factory = sqlite3.Row
                 return conn

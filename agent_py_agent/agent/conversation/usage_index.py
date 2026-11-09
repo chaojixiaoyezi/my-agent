@@ -5,6 +5,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 
+from ..io.sqlite_scope import connect_projection_sqlite
 from ..runtime_errors import DataCorruptionError
 from .models import ThreadModelUsageEvent
 from .observation_index import ObservationIndex, _identity, _reader
@@ -44,7 +45,7 @@ class UsageIndex(ObservationIndex):
     # LLM: 事件表只保存身份/位置；范围和总量为增量数字投影，可从原账重建。
     # 函数用途: 初始化私有数据库及主键索引。
     def _open(self):
-        conn = sqlite3.connect(f"{self.path.as_uri()}?mode=rw", uri=True, timeout=5)
+        conn = connect_projection_sqlite(self.path, timeout=5)
         try:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA busy_timeout=5000")
@@ -327,7 +328,6 @@ class UsageIndex(ObservationIndex):
     @contextmanager
     def _range_connection(self):
         """只读时间索引定位后核原行；坏/未完成投影明确unknown，绝不读全历史兜底。"""
-        from ..io.sqlite_probe import sqlite_readonly_probe_uri
         from ..io.sqlite_scope import scoped_connection
 
         before, archive = _identity(self.source), archive_stamp(self.source)
@@ -335,7 +335,7 @@ class UsageIndex(ObservationIndex):
         if database is None:
             raise DataCorruptionError('model usage time index unavailable; coverage=unknown')
         def connect():
-            conn = sqlite3.connect(sqlite_readonly_probe_uri(self.path), uri=True, timeout=0.0)
+            conn = connect_projection_sqlite(self.path, read_only=True, timeout=0.0)
             try:
                 conn.row_factory = sqlite3.Row
                 return conn

@@ -439,6 +439,8 @@ def test_usage_factory_close_failure_keeps_primary_and_unclosed_proof(tmp_path, 
     module = usage_index if kind == 'events' else usage_sources
     instance = (usage_index.UsageIndex(tmp_path / 'usage/thread.jsonl', 'thread') if kind == 'events'
                 else usage_sources.UsageSourceIndex(tmp_path / 'model_usage'))
+    instance.path.parent.mkdir(parents=True, exist_ok=True)
+    instance.path.touch()
     monkeypatch.setattr(module.sqlite3, 'connect', connect)
     try:
         with pytest.raises(sqlite3.DatabaseError) as caught:
