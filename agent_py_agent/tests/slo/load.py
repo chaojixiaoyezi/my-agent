@@ -71,16 +71,43 @@ def durable_receipt(body, paths=None):
 
 # LLM: Each request owns a short-lived client; identity is explicit and authentication remains real.
 # 函数用途: Perform one loopback JSON HTTP request without retries or status masking.
-def json_request(base_url, path, body=None, *, headers=None, timeout=10.0):
+def json_request(base_url, path, body=None, *, headers=None, timeout=10.0, timings=None):
     parsed = urlsplit(base_url)
-    connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=timeout)
+    connection_type = http.client.HTTPConnection
+    if timings is not None:
+        started = time.monotonic()
+        timings["clock"] = "client_monotonic"
+
+        class TimedConnection(http.client.HTTPConnection):
+            def connect(self):
+                before = time.monotonic()
+                try:
+                    super().connect()
+                finally:
+                    timings["connect_ms"] = (time.monotonic() - before) * 1000
+
+        connection_type = TimedConnection
+    connection = connection_type(parsed.hostname, parsed.port, timeout=timeout)
     try:
         wire = json.dumps(body).encode() if body is not None else None
         connection.request("POST" if body is not None else "GET", path, wire,
                            {"Content-Type": "application/json", **(headers or {})})
+        if timings is not None:
+            sent = time.monotonic()
+            timings["request_sent_ms"] = (sent - started) * 1000
         response = connection.getresponse()
+        if timings is not None:
+            received = time.monotonic()
+            timings["response_headers_ms"] = (received - started) * 1000
+            timings["sent_to_headers_ms"] = (received - sent) * 1000
         payload = response.read()
-        return response.status, json.loads(payload) if payload else {}
+        if timings is not None:
+            read = time.monotonic()
+            timings["body_read_ms"] = (read - received) * 1000
+        decoded = json.loads(payload) if payload else {}
+        if timings is not None:
+            timings["json_parse_ms"] = (time.monotonic() - read) * 1000
+        return response.status, decoded
     finally:
         connection.close()
 

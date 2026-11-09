@@ -23,6 +23,7 @@ def run_cliff(scenario_id, isolated_gateway, slo_data, slo_report, *, slow_body)
     profile = scenario["load_profile"]
     endpoint = urlsplit(base)
     sockets = []
+    ask_timings, status_timings = {}, {}
     try:
         for _ in range(GatewayBoundedHTTPServer.max_request_workers + profile["extra_connections"]):
             sock = socket.create_connection((endpoint.hostname, endpoint.port), timeout=profile["timeout_ms"] / 1000)
@@ -38,14 +39,15 @@ def run_cliff(scenario_id, isolated_gateway, slo_data, slo_report, *, slow_body)
         def submit(_arrival):
             status, body = json_request(base, "/ask", {"prompt": "cliff-fixture", "conversation_id": scenario_id,
                 "metadata": {"message_id": scenario_id}, "delivery_intent": "queue"}, headers=headers,
-                timeout=profile["timeout_ms"] / 1000)
+                timeout=profile["timeout_ms"] / 1000, timings=ask_timings)
             return status, body, durable_receipt(body)
         with concurrent.futures.ThreadPoolExecutor() as executor:
             # LLM: Control latency ends at its own response, not when the concurrent ask finishes.
             # 函数用途: Timestamp the status probe independently on the common monotonic clock.
             def status_probe():
                 before = time.monotonic()
-                status, body = json_request(base, "/status", headers=headers, timeout=profile["timeout_ms"] / 1000)
+                status, body = json_request(base, "/status", headers=headers, timeout=profile["timeout_ms"] / 1000,
+                                            timings=status_timings)
                 return status, body, (time.monotonic() - before) * 1000
             status_future = executor.submit(status_probe)
             samples = open_loop(profile, submit)
@@ -55,7 +57,12 @@ def run_cliff(scenario_id, isolated_gateway, slo_data, slo_report, *, slow_body)
                 status_code, status_body, status_ms = 0, {}, profile["timeout_ms"]
         report = slo_report(scenario_id, profile, samples, control_status={"status": status_code,
             "code": status_body.get("error_code"), "latency_ms": status_ms},
-            connected_sockets=len(sockets), max_request_workers=GatewayBoundedHTTPServer.max_request_workers)
+            connected_sockets=len(sockets), max_request_workers=GatewayBoundedHTTPServer.max_request_workers,
+            transport_stages={"ask": ask_timings, "status": status_timings,
+                # queued disposition证明已入账；现有响应没有服务端提交起止，不能用客户端等待冒充fsync。
+                "server_receipt_commit_ms": None,
+                "server_receipt_commit_coverage": "unavailable_no_server_commit_span",
+                "sent_to_headers_coverage": "combined_server_queue_handler_commit_and_transport"})
     finally:
         for sock in sockets:
             sock.close()
