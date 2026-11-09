@@ -20,7 +20,7 @@ def resume_session(agent: SimpleAgent, session_id: str) -> dict:
     if session is None:
         return {"session": None, "error": f"会话 {session_id} 不存在"}
     recent_memories, recent_memory_load_errors = _load_recent_memories_report(agent.config, session_id)
-    subagent_context = _load_subagent_context(agent, session_id)
+    subagent_context = _load_subagent_context(agent, session_id, metadata=session.metadata)
     return {
         "session": session,
         "recent_memories": recent_memories,
@@ -105,7 +105,7 @@ def _memory_load_error(
     return report
 
 
-def _load_subagent_context(agent: SimpleAgent, session_id: str) -> list[dict]:
+def _load_subagent_context(agent: SimpleAgent, session_id: str, *, metadata: dict | None = None) -> list[dict]:
     """Load subagent context for a session."""
     subagent_context: list[dict] = []
     manager = getattr(agent, "subagents", None)
@@ -113,7 +113,10 @@ def _load_subagent_context(agent: SimpleAgent, session_id: str) -> list[dict]:
     if not callable(list_runs):
         return subagent_context
     try:
-        tasks = list_runs()
+        from ..subagents.manager import SubAgentManager
+
+        tasks = (_recent_session_runs(manager, session_id, metadata or {})
+                 if isinstance(manager, SubAgentManager) else list_runs()[-5:])
     except Exception as exc:
         subagent_context.append({
             "type": "subagent_context_load_error",
@@ -122,13 +125,43 @@ def _load_subagent_context(agent: SimpleAgent, session_id: str) -> list[dict]:
         return subagent_context
     if not isinstance(tasks, list | tuple):
         return subagent_context
-    for item in tasks[-5:]:
-        _append_subagent_context_item(subagent_context, item, session_id)
+    for item in tasks:
+        _append_subagent_context_item(subagent_context, item, session_id, metadata=metadata)
     return subagent_context
 
 
-def _append_subagent_context_item(subagent_context: list[dict], item, session_id: str) -> None:
-    if not _subagent_belongs_to_session(item, session_id):
+def _recent_session_runs(manager, session_id, metadata):
+    from ..subagents.manager import creation_run_index
+    from ..subagents.services.persistence.run_index import SubagentRunIndexUnavailable
+
+    identity = manager.persistence._run_index_identity()
+    index = creation_run_index(manager)
+    refs = _session_task_refs(metadata)
+    threads = {session_id, str(metadata.get("conversation_thread_id") or "").strip()} - {""}
+    selectors = [(value, kind) for value in refs for kind in ("lineage", "request")]
+    selectors.extend((thread, "thread") for thread in threads)
+    with index.connect() as db:
+        db.execute("BEGIN")
+        index._require_complete(db)
+        sql = " UNION ".join("SELECT run_id FROM membership WHERE scope_id=? AND kind=?" for _ in selectors)
+        ids = [row[0] for row in db.execute("SELECT r.run_id FROM runs r JOIN (" + sql +
+               ") m ON m.run_id=r.run_id ORDER BY r.updated DESC,r.run_id LIMIT 5",
+               tuple(value for pair in selectors for value in pair))]
+    manager.persistence._require_run_index_identity(identity)
+    report = manager.list_runs_by_ids_report(ids)
+    if report.load_errors or any(not _subagent_belongs_to_session(task, session_id, metadata=metadata) for task in report.runs):
+        error = SubagentRunIndexUnavailable("session subagent canonical/index unavailable")
+        error.load_errors = report.load_errors
+        raise error
+    return report.runs
+
+
+def _session_task_refs(metadata):
+    return {str(metadata.get(key) or "").strip() for key in ("task_id", "root_task_id", "conversation_task_id", "run_id", "request_id")} - {""}
+
+
+def _append_subagent_context_item(subagent_context: list[dict], item, session_id: str, *, metadata=None) -> None:
+    if not _subagent_belongs_to_session(item, session_id, metadata=metadata):
         return
     subagent_context.append({
         "id": item.id,
@@ -137,7 +170,14 @@ def _append_subagent_context_item(subagent_context: list[dict], item, session_id
     })
 
 
-def _subagent_belongs_to_session(item, session_id: str) -> bool:
+def _subagent_belongs_to_session(item, session_id: str, *, metadata=None) -> bool:
+    attrs = getattr(item, "attributes", None) or {}
+    refs = _session_task_refs(metadata or {})
+    lineage = {str(value or "") for value in (getattr(item, "id", ""), getattr(item, "root_id", ""), getattr(item, "parent_id", ""),
+                                             attrs.get("conversation_task_id"), attrs.get("conversation_request_id"))}
+    thread_id = str(getattr(item, "conversation_thread_id", "") or getattr(item, "thread_id", "") or attrs.get("conversation_thread_id") or "")
+    if refs & lineage or thread_id and thread_id in {session_id, (metadata or {}).get("conversation_thread_id")}:
+        return True
     metadata = getattr(item, "metadata", None)
     if isinstance(metadata, dict) and metadata.get("session_id") == session_id:
         return True

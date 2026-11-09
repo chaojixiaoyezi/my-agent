@@ -67,8 +67,13 @@ class SubAgentLeadershipRecoveryPlanner:
         self.manager = manager
 
     def plan(self, request: SubAgentLeadershipRecoveryPlanOptions) -> LeadershipRecoveryPlanReport:
-        stale_coordinators = self._stale_coordinators(request)
-        failed_parents = self._failed_parent_sources(request, stale_coordinators)
+        from ...manager import request_scope_runs, select_recovery_runs
+
+        roots = {request.root_id} if request.root_id else {
+            task.root_id or task.id for task in select_recovery_runs(self.manager)}
+        tasks = request_scope_runs(self.manager, roots, "", None) if roots else []
+        stale_coordinators = self._stale_coordinators(request, tasks)
+        failed_parents = self._failed_parent_sources(request, stale_coordinators, tasks)
         coordinators = _top_level_sources(self.manager, _unique_sources([*stale_coordinators, *failed_parents]))
         leaders = self._candidate_leaders(request)
         assignments, unassigned = _assign_coordinator_children(coordinators, leaders)
@@ -90,9 +95,10 @@ class SubAgentLeadershipRecoveryPlanner:
             candidate_leader_ids=[leader.task.id for leader in leaders],
         )
 
-    def _stale_coordinators(self, request: SubAgentLeadershipRecoveryPlanOptions) -> list[SubAgentTask]:
+    def _stale_coordinators(self, request: SubAgentLeadershipRecoveryPlanOptions, tasks) -> list[SubAgentTask]:
         due_report = self.manager.board.due_check(
-            params=SubAgentDueCheckOptions(config=request.config, root_id=request.root_id)
+            params=SubAgentDueCheckOptions(config=request.config, root_id=request.root_id),
+            candidate_ids=[task.id for task in tasks],
         )
         coordinators: list[SubAgentTask] = []
         for issue in due_report.issues:
@@ -111,10 +117,11 @@ class SubAgentLeadershipRecoveryPlanner:
         self,
         request: SubAgentLeadershipRecoveryPlanOptions,
         stale_coordinators: list[SubAgentTask],
+        tasks,
     ) -> list[SubAgentTask]:
         stale_ids = {task.id for task in stale_coordinators}
         failed: list[SubAgentTask] = []
-        for task in self.manager.list_runs():
+        for task in tasks:
             if task.id in stale_ids or not task.child_ids:
                 continue
             if not _leader_matches_scope(task, request.root_id):

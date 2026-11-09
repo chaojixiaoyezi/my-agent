@@ -118,8 +118,16 @@ def _existing_takeover(manager: Any, source: SubAgentTask) -> tuple[SubAgentTask
 
 
 def _existing_takeover_by_source_ref(manager: Any, source_run_id: str) -> tuple[SubAgentTask | None, dict[str, object]]:
+    from ...manager import SubAgentManager, request_scope_runs, select_recovery_runs
+
     try:
-        tasks = manager.list_runs()
+        if not isinstance(manager, SubAgentManager) or getattr(manager.list_runs, "__func__", None) is not SubAgentManager.list_runs:
+            tasks = manager.list_runs()  # 自定义适配器保留原列表协议。
+        else:
+            source = manager.load(source_run_id)
+            tasks = request_scope_runs(manager, (source.root_id or source.id,), "", None)
+            # 老来源指针可能尚未回写；另一个根下的活跃接替者仍须按结构化来源去重。
+            tasks = list({task.id: task for task in [*tasks, *select_recovery_runs(manager)]}.values())
     except Exception as exc:
         return None, _takeover_load_error(exc, "subagent_takeover_run.list_existing_takeovers", run_id=source_run_id)
     source_id = str(source_run_id or "").strip()

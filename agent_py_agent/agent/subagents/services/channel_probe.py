@@ -67,7 +67,24 @@ class SubAgentChannelProbeService:
         limit: int = 0,
     ) -> ChannelProbeReport:
         options = channel_probe_options(params, run_ids=run_ids, limit=limit)
-        selected = options.run_ids or [task.id for task in self.manager.list_runs()]
+        selected = options.run_ids
+        index = None
+        if not selected and options.limit > 0:
+            from ..manager import creation_run_index
+
+            identity = self.manager.persistence._run_index_identity() if hasattr(self.manager, "persistence") else None
+            index = creation_run_index(self.manager)
+            if index is not None:
+                with index.connect() as db:
+                    db.execute("BEGIN")
+                    index._require_complete(db)
+                    # 有界诊断按原 run_id 索引取页，不为限额探测加载全部任务正文。
+                    selected = [row[0] for row in db.execute("SELECT run_id FROM runs ORDER BY run_id DESC LIMIT ?", (options.limit,))]
+                self.manager.persistence._require_run_index_identity(identity)
+        if not selected and options.limit <= 0:
+            selected = [task.id for task in self.manager.list_runs()]  # 显式不限额历史诊断。
+        elif not selected and index is None:
+            selected = [task.id for task in self.manager.list_runs()]  # 旧内存适配器。
         if options.limit > 0:
             selected = selected[: options.limit]
         results: list[ChannelProbeResult] = []
