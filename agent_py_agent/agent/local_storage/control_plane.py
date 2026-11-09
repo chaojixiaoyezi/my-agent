@@ -72,9 +72,22 @@ class LocalStoreControlPlaneMixin:
         return task_rollup_from_row(row) if row else None
 
     def list_agent_tree(self, task_id: str) -> AgentTreeReport:
-        runs = self._agent_runs_for_task(task_id)
-        rollup = self.get_task_rollup(task_id)
-        return AgentTreeReport(task_id=task_id, runs=runs, rollup=rollup)
+        # 同一份报告只借一次原只读短连接；不跨请求缓存连接、身份或查询结果。
+        with self._passive_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM legacy_agent_runs
+                WHERE root_task_id = ?
+                ORDER BY depth ASC, created_at ASC, run_id ASC
+                """,
+                (task_id,),
+            ).fetchall()
+            row = conn.execute("SELECT * FROM task_rollups WHERE task_id = ?", (task_id,)).fetchone()
+        return AgentTreeReport(
+            task_id=task_id,
+            runs=[agent_run_from_row(item) for item in rows],
+            rollup=task_rollup_from_row(row) if row else None,
+        )
 
     def list_subtree(self, run_id: str) -> AgentTreeReport:
         root = self.get_agent_run(run_id)
