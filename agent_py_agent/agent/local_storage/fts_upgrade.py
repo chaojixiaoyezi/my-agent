@@ -222,6 +222,13 @@ def _candidate(home, cursor, *, selected_only=False):
     return None
 
 
+def _retain_pending_store(cursor, relative):
+    # 热提示/发现游标已经交出这个候选；预算到期也须把原责任交给同一个有界续点。
+    pending = cursor['pending']
+    if relative not in pending and len(pending) < 8:
+        pending.append(relative)
+
+
 @sqlite_connection_scope(enabled=False)
 def _advance_upgrade_slice(home, previous, now, *, commit=None, deadline=None, resume_only=False):
     """一拍一个原job；独立短连接不借用或改动业务缓存连接的等待策略。"""
@@ -334,6 +341,7 @@ def _advance_upgrade_slice(home, previous, now, *, commit=None, deadline=None, r
             cursor.pop('selected', None)
             return {**report, 'status': 'current', 'complete': True}
         if time.monotonic() >= deadline:
+            _retain_pending_store(cursor, relative)
             return {**report, 'status': 'budget_exhausted'}
         scope = global_write_commit_scope(commit) if commit is not None else nullcontext()
         timeout_token = _LOCAL_CONNECTION_TIMEOUT.set(0.0)
@@ -351,6 +359,7 @@ def _advance_upgrade_slice(home, previous, now, *, commit=None, deadline=None, r
                 try:
                     remaining_ms = max(0, (deadline - time.monotonic()) * 1000)
                     if remaining_ms <= 0:
+                        _retain_pending_store(cursor, relative)
                         return {**report, 'status': 'budget_exhausted'}
                     if needed:
                         result = store.rebuild_fts_step(max_rows=STORAGE_LANE_SLICE_ENTRIES,
@@ -387,9 +396,7 @@ def _advance_upgrade_slice(home, previous, now, *, commit=None, deadline=None, r
                 except _FtsRebuildDeferred as exc:
                     report.update(status='deferred', reason=str(exc))
             if report['status'] in {'partial', 'complete', 'retiring', 'budget_exhausted'}:
-                relative = path.relative_to(home).as_posix()
-                if relative not in pending and len(pending) < 8:
-                    pending.append(relative)
+                _retain_pending_store(cursor, relative)
             cursor.pop('selected', None)
             return report
         finally:

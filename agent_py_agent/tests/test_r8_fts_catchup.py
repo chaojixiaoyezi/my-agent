@@ -468,3 +468,48 @@ def test_legacy_write_refreshes_only_hint_without_extra_sql_queries(tmp_path, mo
     assert seen == [store.db_path]
     assert [text for text in sql if text.startswith(('SELECT', 'PRAGMA'))] == []
     assert {row.id for row in store.search('newneedle')} == {item.id}
+
+
+@pytest.mark.parametrize('slow_stage', ['precheck', 'constructor'])
+def test_consumed_hot_hint_keeps_selected_store_when_slice_expires(tmp_path, monkeypatch, slow_stage):
+    from agent_py_agent.agent.local_storage import maintenance
+
+    home = ensure_my_agent_home(tmp_path)
+    hot, item = _workspace_legacy(home, 'hot')
+    LocalStore(hot.db_path)
+    relative = hot.db_path.relative_to(home.owner_home_dir).as_posix()
+    clock = SimpleNamespace(now=time.monotonic())
+    proxy = SimpleNamespace(**vars(upgrade.time))
+    proxy.monotonic = lambda: clock.now
+    original_check = maintenance._local_events_alignment_needed
+    original_init = LocalStore.__init__
+
+    def check(connection):
+        result = original_check(connection)
+        if slow_stage == 'precheck':
+            clock.now += .03
+        return result
+
+    def initialize(current, db_path, *args, **kwargs):
+        original_init(current, db_path, *args, **kwargs)
+        if slow_stage == 'constructor' and current.db_path == hot.db_path:
+            clock.now += .03
+
+    with monkeypatch.context() as patch:
+        patch.setattr(upgrade, 'time', proxy)
+        patch.setattr(maintenance, '_local_events_alignment_needed', check)
+        patch.setattr(LocalStore, '__init__', initialize)
+        report = upgrade.advance_upgrade(home.owner_home_dir, {}, 1000)
+    assert report['store'] == relative and report['status'] == 'budget_exhausted'
+    assert report['cursor']['pending'] == [relative], 'consumed hot hint must retain its canonical candidate'
+    assert upgrade._take_active_store(home.owner_home_dir, ()) is None
+    with hot._connection() as connection:
+        assert connection.execute("SELECT 1 FROM sqlite_master WHERE name='maintenance_fts_job'").fetchone() is None
+    for turn in range(3):
+        report = upgrade.advance_upgrade(home.owner_home_dir, {'local_store_fts_upgrade': report}, 1061 + turn * 61)
+        if report['complete']:
+            break
+    assert report['complete']
+    with hot._connection() as connection:
+        assert connection.execute("SELECT value FROM metadata WHERE key='records_fts_rowid_aligned'").fetchone()[0] == 'true'
+    assert {row.id for row in hot.search('hothintneedle')} == {item.id}
