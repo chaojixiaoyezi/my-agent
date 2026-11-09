@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -692,9 +693,16 @@ def test_curator_skips_invalid_anchor_scope_without_losing_valid_scopes(tmp_path
 # LLM: 使用真实规划和首阶段回收，不直接调用私有trash写者；NOW时原文件确实具备回收资格。
 # 函数用途: 为引用复核测试生成tool_manifest原路径和真实已提交的回收容器。
 def _trash_tool_manifests(home, service, names):
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
+
     root = Path(home.owner_home_dir) / "memory_archive/snapshots/tool_manifests"
     sources = [old_file(root / f"{name}.json") for name in names]
-    report = service.apply(now=NOW)
+    # 这里只创建后续竞态测试需要的已退休夹具；不让单拍25ms吞吐决定夹具是否存在。
+    # 原默认条目/字节预算与真实执行保留，退出本块立即恢复，后续引用/腐坏复核沿真实时钟。
+    with pytest.MonkeyPatch.context() as preparation:
+        preparation.setattr(budgets, "time", SimpleNamespace(monotonic=lambda: 0.0))
+        report = service.apply(now=NOW)
+    assert not report.scan_partial and report.scan_cursor == {}
     moved = [next(action for action in report.actions if action.path == source) for source in sources]
     assert report.ok and all(action.status == "trashed" for action in moved)
     assert all(not action.path.exists() and action.destination.is_dir() for action in moved)

@@ -7,6 +7,7 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,6 +24,17 @@ from agent_py_agent.agent.memory_store.retention import (
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
 NOW = datetime(2026, 11, 5, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def entry_budget_clock(monkeypatch):
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
+
+    # 完成性按默认条目/字节预算验证，不把机器25ms内的磁盘吞吐当成功能合同。
+    # 真实默认deadline的暂停行为由独立的可控时钟用例验证。
+    monkeypatch.setattr(budgets, "time", SimpleNamespace(monotonic=lambda: 0.0))
+    budget = budgets.RetentionScanBudget.default()
+    assert (budget.max_entries, budget.max_bytes, budget.deadline) == (128, 8 * 1024 * 1024, .025)
 
 
 # LLM: 只创建真实pytest临时Owner，服务与生产解析、执行、门禁不替换。
@@ -61,7 +73,7 @@ def _projection(home, projection_run_id="subagent-abc", **updates):
     ({"consume_pending": True}, False), ({"callback_pending": True}, False),
     ({"run_id": "subagent-other"}, False), ({"ended_at": None}, False),
 ])
-def test_subagent_fast_path_requires_positive_settled_projection(tmp_path, projection, expected):
+def test_subagent_fast_path_requires_positive_settled_projection(tmp_path, projection, expected, entry_budget_clock):
     home, service = _runtime(tmp_path)
     thread, path = _thread(home, "thread-subagent-abc", days=4)
     _, normal = _thread(home, "thread-normal", days=4)
@@ -140,7 +152,7 @@ def test_retirement_moves_usage_family_and_purges_after_grace(tmp_path):
 
 # LLM: 观察真实thread解析上下文；不能把mtime当预筛选，不能用跳过或替身删除凑出分片通过。
 # 函数用途: 验证300个旧业务线程在默认预算下有界推进并最终完整退休。
-def test_three_hundred_threads_resume_and_finish(tmp_path, monkeypatch):
+def test_three_hundred_threads_resume_and_finish(tmp_path, monkeypatch, entry_budget_clock):
     home, _service = _runtime(tmp_path)
     paths = [_thread(home, f"thread-{index:04d}")[1] for index in range(300)]
     original, parsed = scan.read_json_object_report, []
@@ -173,7 +185,7 @@ def test_three_hundred_threads_resume_and_finish(tmp_path, monkeypatch):
 
 # LLM: 默认入口只推进一片，调用方沿返回的scan_partial重复调用才能完成全部权威。
 # 函数用途: 验证默认预算模式可续扫完成300线程，没有慢路开关。
-def test_default_budgeted_path_resumes_to_finish(tmp_path):
+def test_default_budgeted_path_resumes_to_finish(tmp_path, entry_budget_clock):
     home, _service = _runtime(tmp_path)
     paths = [_thread(home, f"thread-{index:04d}")[1] for index in range(300)]
     report = apply_owner_retention(home, now=NOW)
@@ -187,6 +199,33 @@ def test_default_budgeted_path_resumes_to_finish(tmp_path):
     assert not report.scan_partial and report.scan_cursor == {}
     assert retired == 300
     assert not any(path.exists() for path in paths)
+
+
+def test_default_twenty_five_ms_deadline_pauses_before_next_thread(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
+
+    home, service = _runtime(tmp_path)
+    paths = [_thread(home, f"thread-{index:04d}")[1] for index in range(3)]
+    clock = [0.0]
+    monkeypatch.setattr(budgets, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    budget = budgets.RetentionScanBudget.default()
+    assert (budget.max_entries, budget.max_bytes, budget.deadline) == (128, 8 * 1024 * 1024, .025)
+    original, parsed = scan.read_json_object_report, []
+
+    def consume_slice(path, **kwargs):
+        report = original(path, **kwargs)
+        if kwargs.get("context") == "memory_retention.conversation_thread":
+            parsed.append(path)
+            clock[0] = .025
+        return report
+
+    monkeypatch.setattr(scan, "read_json_object_report", consume_slice)
+    report = service.plan(now=NOW, scan_budget=budget)
+    assert report.scan_partial and report.actions == ()
+    assert parsed == [paths[0]] and budget.entries == 1
+    cursor = report.scan_cursor["conversation:conversations"]
+    assert cursor["after"] == paths[0].name and cursor["window"] == [path.name for path in paths[1:]]
+    assert all(path.exists() for path in paths)
 
 
 # LLM: 游标损坏只触发安全重扫；callback写游标必须经过真实提交门，不能门外偷写。
