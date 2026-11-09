@@ -132,4 +132,3 @@ def _portable_page(key, opened, state, identity, limit):
             old[0].close()
         return names, {"directory_identity": identity, "offset": 0, "visited": cached[1],
                        "last_scanned": scanned}, complete
-
