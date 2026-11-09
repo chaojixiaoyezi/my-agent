@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from .multiprocess_executor_identity import _ProcBSDInfo, process_birth
+from .multiprocess_executor_identity import _darwin_proc_pidinfo, _ProcBSDInfo, process_birth
 from .multiprocess_worker_commit import WorkerCommitRejected
 
 
@@ -77,9 +77,7 @@ def kernel_terminated(pid):
 # 函数用途: Read one selected macOS process's kernel state and retain the actual errno.
 def _darwin_info(pid):
     try:
-        query = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True).proc_pidinfo
-        query.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
-        query.restype = ctypes.c_int
+        query = _darwin_proc_pidinfo()
         info = _ProcBSDInfo()
         ctypes.set_errno(0)
         size = query(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))

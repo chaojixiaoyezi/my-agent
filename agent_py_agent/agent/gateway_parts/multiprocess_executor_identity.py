@@ -2,6 +2,7 @@
 # 模块用途: 为等待垫片读取可跨 exec 保持的进程身份，未知由 P0 校验拒绝。
 import ctypes
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -38,13 +39,21 @@ class _ProcBSDInfo(ctypes.Structure):
                 ("start_sec", ctypes.c_uint64), ("start_usec", ctypes.c_uint64)]
 
 
+@lru_cache(maxsize=1)
+def _darwin_proc_pidinfo():
+    # 只缓存完成ABI装配的函数，不缓存PID/出生值；失败不入缓存，后继仍可重试加载。
+    # 冷并发可各自构造完整绑定后竞争发表；不跨内核调用持锁，fork继承的绑定也无进程身份。
+    query = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True).proc_pidinfo
+    query.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+    query.restype = ctypes.c_int
+    return query
+
+
 # LLM: PROC_PIDTBSDINFO=3 只读调用必须完整返回结构，失败或零出生值为未知；不启动辅助进程。
 # 函数用途: 用原生 proc_pidinfo 读取 macOS 精确出生身份。
 def _darwin_birth(pid: int):
     try:
-        query = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True).proc_pidinfo
-        query.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
-        query.restype = ctypes.c_int
+        query = _darwin_proc_pidinfo()
         info = _ProcBSDInfo()
         size = ctypes.sizeof(info)
         if query(pid, 3, 0, ctypes.byref(info), size) != size or info.start_sec == 0:
