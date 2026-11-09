@@ -888,7 +888,7 @@ def _prompt_history_projection_key(params, prompt, history, conversation, projec
                                               getattr(params, "compact_degradation_stubs", None) or {}))
     except (AttributeError, TypeError, ValueError, RecursionError):
         return None
-    return (scope, content, id(projector)) if content is not None else None
+    return (content, id(projector)) if content is not None else None
 
 
 # LLM: 精确类型标签加不可变值树；容器复制结构，字符串只借不可变值，NaN/负零保float表示；不调用hash压缩身份。
@@ -898,6 +898,10 @@ def _prompt_history_projection_key(params, prompt, history, conversation, projec
 _CONTEXT_MEMO_KEY_MAX_BYTES = 256 * 1024
 # 一次身份核对最多4096节点；宽容器不能先线性装箱再判预算。
 _CONTEXT_MEMO_KEY_MAX_NODES = 4096
+# 固定二元组/空元组布局只读一次，计量不得为每个节点再分配临时身份tuple。
+_CONTEXT_MEMO_PAIR_BYTES = sys.getsizeof((None, None))
+# 空tuple基准由当前解释器实际布局决定，不以固定宿主字节数替代跨平台计量。
+_CONTEXT_MEMO_EMPTY_TUPLE_BYTES = sys.getsizeof(())
 
 
 def _context_value_fingerprint(value: object, *, _depth: int = 0, _budget=None) -> tuple | None:
@@ -908,7 +912,7 @@ def _context_value_fingerprint(value: object, *, _depth: int = 0, _budget=None) 
     kind = type(value)
     if kind in (str, bytes, int, bool, type(None), float):
         leaf = value.hex() if kind is float else value
-        budget[0] -= sys.getsizeof(leaf) + sys.getsizeof((kind, leaf))
+        budget[0] -= sys.getsizeof(leaf) + _CONTEXT_MEMO_PAIR_BYTES
         return (kind, leaf) if budget[0] >= 0 else None
     if kind in (dict, list, tuple) and len(value) > budget[1]:
         return None
@@ -923,12 +927,12 @@ def _context_value_fingerprint(value: object, *, _depth: int = 0, _budget=None) 
     else:
         return None
     # 每条pair及最终tuple槽位预付，构造期间也不越过同一预算。
-    budget[0] -= sys.getsizeof((kind, ())) + sys.getsizeof(())
+    budget[0] -= _CONTEXT_MEMO_PAIR_BYTES + _CONTEXT_MEMO_EMPTY_TUPLE_BYTES
     parts = []
     for key, item in entries:
         if kind is dict and type(key) is not str:
             return None
-        budget[0] -= sys.getsizeof(key) + sys.getsizeof((key, None)) + 16
+        budget[0] -= sys.getsizeof(key) + _CONTEXT_MEMO_PAIR_BYTES + 16
         if budget[0] < 0 or budget[1] <= 0:
             return None
         part = _context_value_fingerprint(item, _depth=_depth + 1, _budget=budget)
@@ -957,7 +961,7 @@ def _context_estimate_key(params, projection, history, guidance, forwarded, surf
         return None
     if content is None:
         return None
-    return (scope, surface, content, media_token_reserve(), id(estimate_tokens),
+    return (surface, content, media_token_reserve(), id(estimate_tokens),
             id(projected_model_context_components), id(classify_nontext_content))
 
 

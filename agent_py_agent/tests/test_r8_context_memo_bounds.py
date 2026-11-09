@@ -141,3 +141,20 @@ def test_large_projection_forgets_once_and_late_small_projection_cannot_republis
     # 同请求完整key重新核验后，新一代仍可正常发表，未关闭缓存能力。
     pressure.project_request_prompt_history(params, 'short complete prompt')
     assert memo.prompt_projection() is not None
+
+
+def test_key_accounting_does_not_allocate_temporary_size_tuples(monkeypatch):
+    import sys
+
+    source = {'history': [{'role': 'user', 'text': 'complete'}], 'number': float('nan')}
+    expected = pressure._context_value_fingerprint(source)
+    tuple_queries = []
+
+    def measured(value):
+        if type(value) is tuple:
+            tuple_queries.append(value)
+        return sys.getsizeof(value)
+
+    monkeypatch.setattr(pressure, 'sys', SimpleNamespace(getsizeof=measured))
+    assert pressure._context_value_fingerprint(source) == expected
+    assert tuple_queries == []
