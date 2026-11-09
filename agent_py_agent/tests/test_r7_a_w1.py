@@ -81,7 +81,8 @@ def test_passive_tree_has_only_selects_and_no_filesystem_writers(populated, monk
         after = {str(path.relative_to(store.root)): (path.stat().st_mode, path.stat().st_size,
                  path.stat().st_mtime_ns) for path in store.root.rglob("*")}
         assert report.runs == [run] and before == after
-    assert len(connections) == 2 and len(statements) == 2
+    # 树和汇总共享一次只读连接，两条查询的写权限与关闭证明仍分别核验。
+    assert len(connections) == 1 and len(statements) == 2
     assert all(sql.lstrip().upper().startswith("SELECT") for sql in statements)
     for args, kwargs, conn in connections:
         assert "mode=ro" in args[0] and "immutable" not in args[0] and kwargs["uri"] is True
@@ -243,6 +244,6 @@ def test_selected_tree_opens_are_independent_of_unrelated_history(populated, mon
     monkeypatch.setattr(schema.sqlite3, "connect", connect)
     before = door.calls
     assert store.list_agent_tree("task").runs == [run]
-    assert len(opened) == 2 and door.calls == before
+    assert len(opened) == 1 and door.calls == before
     record_property("history_rows", history)
     record_property("passive_connects", len(opened))
