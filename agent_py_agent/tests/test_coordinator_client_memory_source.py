@@ -79,7 +79,7 @@ def test_actual_source_current_owner_no_management_receipt_and_no_held_source(
         assert runtime is server.drain_runtime
 
 
-@pytest.mark.parametrize("change", ["body", "holder", "lifetime", "middleware", "agent"])
+@pytest.mark.parametrize("change", ["body", "holder", "lifetime", "middleware", "agent", "owner"])
 def test_actual_source_first_native_persists_after_condition_restored(
     tmp_path, monkeypatch, change
 ):
@@ -114,6 +114,13 @@ def test_actual_source_first_native_persists_after_condition_restored(
 
             def restore():
                 return setattr(facts.handler, "_auth_middleware", old)
+        elif change == "owner":
+            old = facts.control.config.gateway_per_user_owner_scoping
+            assert old and facts.owner.provider == "feishu"
+            facts.control.config.gateway_per_user_owner_scoping = False
+
+            def restore():
+                return setattr(facts.control.config, "gateway_per_user_owner_scoping", old)
         else:
             old = facts.server.agent
             facts.server.agent = object()

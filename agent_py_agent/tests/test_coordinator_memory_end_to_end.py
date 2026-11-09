@@ -16,6 +16,33 @@ def memory_post(server, actor, *, operation="search", query="", content=""):
         "query": query, "content": content}, route="/client/memory", actor=actor)
 
 
+def test_http_commit_rechecks_policy_without_rebuilding_unused_resource_configuration(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import owner_resources
+
+    with original_case(tmp_path, monkeypatch) as (_agent, _path, row, _body, server, _runtime):
+        server.control_plane.config.memory_semantic_recall = False
+        original = owner_resources.resolve_owner_resource_configuration
+        calls = []
+
+        def resolve(control, owner):
+            result = original(control, owner)
+            calls.append(result)
+            return result
+
+        monkeypatch.setattr(owner_resources, "resolve_owner_resource_configuration", resolve)
+        monkeypatch.setattr(client_memory, "resolve_owner_resource_configuration", resolve)
+        actor = row["actor_id"]
+        assert memory_post(server, actor, operation="remember", content="current policy fact")[1]["ok"]
+        assert memory_post(server, actor, query="current policy")[1]["ok"]
+        domain = next(iter(server.coordinator_memory_resources._entries.values())).future.result()
+        assert len(calls) == 1 and calls[0][0] == domain.home
+        before = domain.long_term.path.read_bytes()
+        domain.home.owner_memory_policy_json.write_text('{"enabled":false}', encoding="utf-8")
+        status, rejected = memory_post(server, actor, operation="remember", content="must stay rejected")
+        assert status == 200 and not rejected["ok"] and not rejected["records"]
+        assert domain.long_term.path.read_bytes() == before and len(calls) == 1
+
+
 @pytest.mark.parametrize("healthy", [False, True])
 def test_original_http_remember_search_reuses_actual_domain_and_flushes_once(tmp_path, monkeypatch, healthy):
     with original_case(tmp_path, monkeypatch) as (agent, _path, row, _body, server, _runtime):

@@ -118,7 +118,9 @@ def _initialize_original_source_refs(source, agent, paths, context, lease, pin, 
 def _capture_client_memory_facts(handler, server, body):
     from ..auth.models import Permission
     from ..backends.request_scope import _DEADLINE
+    from ..user_space.home_layout import home_paths
     from ..user_space.owner_policy import resolve_effective_owner_policy
+    from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
     from .control_plane import GatewayControlPlane
     from .control_service import _scope_request_payload
     from .coordinator_memory_resources import (
@@ -128,7 +130,6 @@ def _capture_client_memory_facts(handler, server, body):
     from .http_handlers import _gateway_control_scope, _request_channel, _request_identity
     from .http_service import GatewayHTTPHandler, GatewayHTTPServer
     from .multiprocess_http_transport import capture_http_handler_work
-    from .owner_resources import resolve_owner_resource_configuration
     from .request_worker import _resolve_request_owner_from_config
 
     if (type(server) is not GatewayHTTPServer or not isinstance(handler, GatewayHTTPHandler)
@@ -150,7 +151,9 @@ def _capture_client_memory_facts(handler, server, body):
         raise LocalControlCoordinatorUnavailable('client memory current conversation is unavailable')
     control = server.control_plane
     owner = _resolve_request_owner_from_config(control.config, _scope_request_payload(scope), control.home_root)
-    home, _config, _paths = resolve_owner_resource_configuration(control, owner)
+    # 末写只重核规范home与当前policy；完整配置/工作区路径仅在资源装配时解析。
+    # 不缓存home或授权，仍由本次认证owner沿原权威解析器重新取得同一位置。
+    home = home_paths_with_owner(home_paths(control.home_root), resolve_owner_home(control.home_root, owner))
     policy = resolve_effective_owner_policy(home)
     holder = server.coordinator_memory_resources
     if type(holder) is not CoordinatorMemoryResources or policy.load_errors or not policy.memory_enabled:
