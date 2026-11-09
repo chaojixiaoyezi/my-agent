@@ -1068,6 +1068,7 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_r8_background_transcript_bytes.py # 多线程展示字节预算、归档重读与慢读者交错。
 |-- agent_py_agent/tests/test_r8_model_call_exact_lookup.py # 模型准确调用ID的定值查询、保留/淘汰与错误合同。
 |-- agent_py_agent/tests/test_r8_model_worker_context_release.py # 模型线程退出证明与请求Context释放。
+|-- agent_py_agent/tests/test_r8_context_memo_bounds.py # 长历史临时计量键的内存上限、完整正文与迟到结果的并发回归。
 |-- agent_py_agent/tests/test_darwin_process_tree_snapshot.py # macOS 命令树限定枚举、换代及未知退出回归。
 |-- docs/design/R8_OPERATION_CONFIRMATION_DRAFT.md # 等待确证退出的操作合同草案；旧未知不能补签。
 |-- agent_py_agent/agent/agent_core/orchestration/background/log_retention.py # 派工日志随实际进程退出留存；未知执行体和未收口业务证据永不按年龄删除。

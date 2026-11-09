@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1426,
+  "count": 1428,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -370,6 +370,22 @@
       "unit": "个",
       "category": "上限预算",
       "description": "每个 owner 最多留这么多个分词身份（按最近观测保留），文件永远很小。"
+    },
+    {
+      "name": "_CONTEXT_MEMO_KEY_MAX_BYTES",
+      "file": "agent_py_agent/agent/agent_core/model/context_pressure.py",
+      "value": 262144,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "临时memo身份树总预算256KiB；包含结构和所引用的叶子，不能钉住完整大历史。"
+    },
+    {
+      "name": "_CONTEXT_MEMO_KEY_MAX_NODES",
+      "file": "agent_py_agent/agent/agent_core/model/context_pressure.py",
+      "value": 4096,
+      "unit": "个节点",
+      "category": "上限预算",
+      "description": "一次身份核对最多4096节点；宽容器不能先线性装箱再判预算。"
     },
     {
       "name": "_MAX_INLINE_JSON_CHARS",
