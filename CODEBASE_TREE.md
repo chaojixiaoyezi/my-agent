@@ -627,6 +627,8 @@ agent_py_agent/
 
 ### 关键文件说明
 
+- `test_r8_candidate_pin_stream.py`：只读候选流保持原正文校验和全量覆盖，验证候选对象及时释放及 closed 投影不可继续使用。
+
 ### R8 历史审计补修（2026-11-08）
 
 - `docs/tasks/R8_AUDIT_FOLLOWUPS.md`：14项功能、历史失败、最终验收与交付的统一状态入口。
@@ -1106,6 +1108,11 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_r8_record_ledgers.py # 记录账本增量写入、历史分页与并发终态的行为回归。
 |-- agent_py_agent/tests/test_r8_sqlite_recovery.py # 通用库恢复以真实SQLite验证，不将损坏、未知或缺行当作空库。
 |-- agent_py_agent/tests/test_r8_task_context_window.py # 活动集、准确引用与历史窗口在冷启动后的覆盖和读取上界
+|-- agent_py_agent/tests/test_r8_candidate_pin_stream.py # 候选只读遍历持有上界、完整性与关闭周期释放的行为回归
+|-- agent_py_agent/tests/test_r8_retention_directory_fds.py # 维护目录分页续点、暂停句柄释放及关闭链的真实FD回归
+|-- agent_py_agent/tests/test_r8_gateway_memory_diagnostics.py # 正式内存追踪生命周期、信号导出与隐私边界回归
+|-- agent_py_agent/tests/test_cancel_receipt_identity.py # 错源取消诊断不签发退出证明、不改变终态的回归
+|-- agent_py_agent/tests/test_cancel_stop_reconciliation.py # 取消执行时保留结构化诊断及未知结果的回归
 |-- agent_py_agent/tests/test_r8_usage_source_maintenance.py # 旧用量维护追平、目录重启续点与合法保留门验证
 |-- docs/design/R8_COMPACT_HISTORY.md # R8：Compact 历史节点与冷读定位
 |-- docs/design/R8_CLAIM_ACTIVITY_PROJECTION.md # 多store活动扫描的有界临时投影
@@ -1723,6 +1730,10 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 ```
 
 ## 关键文件说明
+
+- `test_r8_candidate_pin_stream.py` 与 `test_r8_retention_directory_fds.py`：验证候选只读流和维护扫描释放临时对象/目录句柄，同时保留全部保护引用与代次校验。
+- `test_r8_gateway_memory_diagnostics.py`：用独立进程验证正式启动与信号导出，覆盖追踪所有权、私密正文不输出及停止后释放回调。
+- `test_cancel_receipt_identity.py` 与 `test_cancel_stop_reconciliation.py`：诊断回执不构成恢复授权，缺源或错源不能改变 UNKNOWN、父失败和子取消。
 
 ### R8 长期历史与运行资源（2026-11-08）
 
