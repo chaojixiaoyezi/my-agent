@@ -653,19 +653,23 @@ def _delegated_work_facts(agent: object, params: ToolLoopExecuteParams) -> dict[
     if not task_id:
         return {}
     try:
+        from ...subagents.manager import SubAgentManager
         from ...subagents.models import normalize_task_status
 
         run_ids = {
             str(item) for item in agent.subagent_run_ids_for_request(task_id) if str(item).strip()
         }
-        runs = [
-            run
-            for run in agent.subagents.list_runs()
-            if str(getattr(run, "id", "") or "") in run_ids
-        ]
-    except Exception:
-        return {}
-    if not runs:
+        if isinstance(agent.subagents, SubAgentManager):
+            report = agent.subagents.list_runs_by_ids_report(run_ids)
+            runs, load_errors = report.runs, report.load_errors
+        else:
+            runs = [run for run in agent.subagents.list_runs() if str(getattr(run, "id", "") or "") in run_ids]
+            load_errors = []
+    except Exception as exc:
+        from ...runtime_errors import runtime_error_report
+
+        runs, load_errors = [], getattr(exc, "load_errors", None) or [runtime_error_report(exc, context="completion.delegated_work")]
+    if not runs and not load_errors:
         return {}
     status_counts: dict[str, int] = {}
     for run in runs:
@@ -680,6 +684,7 @@ def _delegated_work_facts(agent: object, params: ToolLoopExecuteParams) -> dict[
         "total": len(runs),
         "status_counts": dict(sorted(status_counts.items())),
         "topology": _delegated_work_topology(task_id, runs),
+        **({"coverage": "partial", "total_is_minimum": True, "load_errors": load_errors} if load_errors else {}),
     }
 
 

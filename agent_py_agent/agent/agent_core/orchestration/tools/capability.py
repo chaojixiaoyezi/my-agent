@@ -409,11 +409,14 @@ def _no_pending_result(task: Any, run_id: str, decision: str) -> ToolHandlerOutc
 # LLM: 名册只展示当前请求方的直接下级，不能因报错把兄弟树或孙代理 ID 泄露给模型。
 # 函数用途: run_id 打错时给出真实直属子代理名册，供模型自纠。
 def _known_children_hint(agent: Any) -> str:
+    from ..dispatch.params import DispatchParams
+    from ..dispatch.refs import dispatch_scope_tasks
+
+    requester_run_id = _model_requester_run_id(agent)
     try:
-        tasks = agent.subagents.list_runs()
+        tasks = dispatch_scope_tasks(agent, DispatchParams(parent_run_id=requester_run_id), limit=12)
     except Exception:
         return ""
-    requester_run_id = _model_requester_run_id(agent)
     rows: list[tuple[int, int, str, str]] = []
     for task in tasks:
         if requester_run_id and str(getattr(task, "parent_id", "") or "") != requester_run_id:

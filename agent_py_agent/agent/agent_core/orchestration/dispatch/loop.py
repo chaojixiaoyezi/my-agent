@@ -249,10 +249,11 @@ def _final_pending_runner_count(agent) -> tuple[int, dict[str, object]]:
             _dispatch_runner_candidates,
             runner_failure_retry_limit,
         )
+        from .refs import dispatch_scope_tasks
         from .tool_helpers import _dispatch_capability_config
 
         candidates = _dispatch_runner_candidates(
-            agent.subagents.list_runs(),
+            dispatch_scope_tasks(agent),
             max_runners=999,
             policy=RunnerCandidatePolicy(
                 runner_retry_limit=runner_failure_retry_limit(agent.config),

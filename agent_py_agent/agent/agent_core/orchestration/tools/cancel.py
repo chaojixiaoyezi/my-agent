@@ -301,13 +301,13 @@ def _resolve_run_ids(agent: SimpleAgent, params: dict[str, object]) -> _ResolveR
     status_filter = status_filter_result.statuses
     ids = list(explicit)
     if root_id:
-        tasks_result = _list_runs_for_cancel(agent)
+        tasks_result = _list_runs_for_cancel(agent, root_id=root_id)
         if not tasks_result.ok:
             return _ResolveRunIdsResult(False, [], tasks_result.error_payload)
         tasks = tasks_result.tasks
         ids.extend(subtree_run_ids(tasks, root_id))
     if status_filter and not explicit and not root_id:
-        tasks_result = _list_runs_for_cancel(agent)
+        tasks_result = _list_runs_for_cancel(agent, statuses=status_filter)
         if not tasks_result.ok:
             return _ResolveRunIdsResult(False, [], tasks_result.error_payload)
         tasks = tasks_result.tasks
@@ -350,9 +350,30 @@ def _explicit_target_is_absent(agent: SimpleAgent, run_id: str) -> bool:
     return False
 
 
-def _list_runs_for_cancel(agent: SimpleAgent) -> _ListRunsForCancelResult:
+def _list_runs_for_cancel(agent: SimpleAgent, *, root_id: str = "", statuses=()) -> _ListRunsForCancelResult:
     try:
-        tasks = agent.subagents.list_runs()
+        from itertools import islice
+
+        from ....memory_store.retention_scan_budget import RETENTION_SCAN_SLICE_ENTRIES
+        from ....subagents.manager import SubAgentManager, request_scope_runs, select_current_runs
+
+        manager = agent.subagents
+        if (not isinstance(manager, SubAgentManager)
+                or getattr(manager.list_runs, "__func__", None) is not SubAgentManager.list_runs):
+            tasks = manager.list_runs()
+        elif root_id:
+            # 非根节点的孙代理仍沿 canonical parent 边展开，每层只读索引命中的本子树。
+            pending, by_id = {root_id}, {}
+            while pending:
+                batch = set(islice(pending, RETENTION_SCAN_SLICE_ENTRIES))
+                pending.difference_update(batch)
+                rows = request_scope_runs(manager, batch, "", None)
+                new = {task.id: task for task in rows if task.id not in by_id}
+                by_id.update(new)
+                pending.update(new)
+            tasks = list(by_id.values())
+        else:
+            tasks = select_current_runs(manager, statuses=tuple(sorted(statuses)))
     except Exception as exc:
         return _ListRunsForCancelResult(
             False,

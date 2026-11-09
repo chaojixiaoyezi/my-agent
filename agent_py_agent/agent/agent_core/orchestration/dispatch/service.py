@@ -19,6 +19,8 @@ from ....subagents.models import (
 )
 from ....subagents.services.actions import ActionApplyOptions
 from ....subagents.services.dispatch.params import DispatchRecordParams, DispatchWatchRecordParams
+from .refs import candidate_ids_kwargs, dispatch_scope_tasks
+from .runner_selection import scoped_runner_tasks
 
 if TYPE_CHECKING:
     from agent_py_agent.agent.core import SimpleAgent
@@ -45,18 +47,16 @@ _PATCH_REVIEW_ACTIONS = {
 # LLM: 按上下文根节点和包含/排除 ID 检查到期问题；仅 mutate_state 为真时写检查报告，记录本身不代表已执行修复。
 # 函数用途: 为单轮派工生成到期扫描结果及报告路径引用。
 def make_due_check_record(agent: Any, ctx: Any):
+    candidate_ids = _scoped_run_ids(agent, ctx)
     options = SubAgentDueCheckOptions(
         config=ctx.cfg,
         write_report=ctx.mutate_state,
         root_id=ctx.root_id,
-        include_run_ids=list(ctx.include_run_ids or []),
+        include_run_ids=candidate_ids,
         exclude_run_ids=list(ctx.exclude_run_ids or []),
     )
-    due_report = (
-        agent.subagents.board.write_due_check(params=options)
-        if ctx.mutate_state
-        else agent.subagents.board.due_check(params=options)
-    )
+    method = agent.subagents.board.write_due_check if ctx.mutate_state else agent.subagents.board.due_check
+    due_report = method(params=options, **candidate_ids_kwargs(method, candidate_ids))
     return agent.subagents.dispatch.make_dispatch_record(
         params=DispatchRecordParams(
             step="due_check",
@@ -103,7 +103,10 @@ def make_leadership_recovery_plan_record(agent, cfg):
 # 函数用途: 将本轮子代理动作处理结果汇总为统一派工记录列表。
 def make_action_apply_records(agent: Any, ctx: Any):
     records = []
-    action_options = _action_apply_options(ctx)
+    candidate_ids = _scoped_run_ids(agent, ctx)
+    if not candidate_ids:
+        return records
+    action_options = _action_apply_options(ctx, candidate_ids=candidate_ids)
     action_report = _action_apply_report(agent, ctx, action_options)
     for item in action_report.records:
         records.append(_action_apply_dispatch_record(agent, item))
@@ -112,14 +115,14 @@ def make_action_apply_records(agent: Any, ctx: Any):
 
 # LLM: 复制包含/排除 ID，并传递接管人、文件锁和条数限制；这里只创建选项，不执行动作或写报告。
 # 函数用途: 为动作服务封装当前派工范围与是否应用变更的参数。
-def _action_apply_options(ctx: Any) -> ActionApplyOptions:
+def _action_apply_options(ctx: Any, *, candidate_ids=None) -> ActionApplyOptions:
     return ActionApplyOptions(
         apply=ctx.mutate_state,
         take_over_by=ctx.take_over_by or "",
         locked_files=ctx.locked_files or [],
         limit=ctx.limit,
         root_id=ctx.root_id,
-        include_run_ids=list(ctx.include_run_ids or []),
+        include_run_ids=list(ctx.include_run_ids or []) if candidate_ids is None else candidate_ids,
         exclude_run_ids=list(ctx.exclude_run_ids or []),
     )
 
@@ -158,6 +161,7 @@ def make_capability_route_records(agent: Any, ctx: Any, *, mutate_state: bool | 
     should_apply = ctx.mutate_state if mutate_state is None else bool(mutate_state)
     options = SubAgentCapabilityRouteOptions(
         apply=should_apply,
+        run_ids=_scoped_run_ids(agent, ctx),
         limit=ctx.limit,
     )
     route_report = (
@@ -192,6 +196,10 @@ def make_capability_route_records(agent: Any, ctx: Any, *, mutate_state: bool | 
             )
         )
     return records
+
+
+def _scoped_run_ids(agent, ctx) -> list[str]:
+    return [task.id for task in scoped_runner_tasks(dispatch_scope_tasks(agent, ctx), ctx)]
 
 
 # LLM: 空任务列表直接返回空记录；正式路径应用审阅并写报告，预演路径只审阅，逐项保留实际决策与应用结果。
@@ -254,7 +262,7 @@ def _patch_review_action(decision: object) -> str:
 
 # LLM: 与正式派工共用候选闸；失败预算和能力配置无进展阈值分别传入，保留0关闭，不启动runner。
 # 函数用途: 告诉派工循环是否还有子代理 run 需要启动或重跑。
-def update_pending_work_state(agent) -> bool:
+def update_pending_work_state(agent, *, ctx=None) -> bool:
     from ...runner.dispatch import (
         RunnerCandidatePolicy,
         _dispatch_runner_candidates,
@@ -262,8 +270,9 @@ def update_pending_work_state(agent) -> bool:
     )
     from .tool_helpers import _dispatch_capability_config
 
+    tasks = dispatch_scope_tasks(agent, ctx)
     candidates = _dispatch_runner_candidates(
-        agent.subagents.list_runs(),
+        scoped_runner_tasks(tasks, ctx) if ctx is not None else tasks,
         max_runners=999,
         policy=RunnerCandidatePolicy(
             runner_retry_limit=runner_failure_retry_limit(agent.config),
