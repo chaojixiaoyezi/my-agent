@@ -6,8 +6,11 @@ import json
 import os
 import sqlite3
 import stat
+import threading
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..common import nofollow_fs as fs
@@ -44,6 +47,22 @@ CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 '''
 
 
+@dataclass
+class _NodeBatch:
+    connection: object
+    pid: int
+    thread: object
+    active: bool = True
+
+    def require_connection(self):
+        if not self.active or self.pid != os.getpid() or self.thread is not threading.current_thread():
+            raise OSError('immutable node batch lease is no longer owned')
+        return self.connection
+
+
+_NODE_BATCHES = ContextVar('immutable_node_batches', default=None)
+
+
 class ImmutableNodeStore:
     """只存放索引节点；checkpoint/thread CAS 仍是提交事实源。"""
 
@@ -61,7 +80,28 @@ class ImmutableNodeStore:
         return True
 
     @contextmanager
+    def batch(self):
+        key = str(self.path.absolute())
+        current = (_NODE_BATCHES.get() or {}).get(key)
+        if current is not None:
+            current.require_connection()
+            yield
+            return
+        with self.connection(write=True) as conn:
+            lease = _NodeBatch(conn, os.getpid(), threading.current_thread())
+            token = _NODE_BATCHES.set({**(_NODE_BATCHES.get() or {}), key: lease})
+            try:
+                yield
+            finally:
+                lease.active = False
+                _NODE_BATCHES.reset(token)
+
+    @contextmanager
     def connection(self, *, write=False):
+        batch = (_NODE_BATCHES.get() or {}).get(str(self.path.absolute()))
+        if batch is not None:
+            yield batch.require_connection()
+            return
         # 所有物理连接共用 generation 租约；只读不创建目录、数据库或 schema。
         if write:
             self.root.mkdir(parents=True, exist_ok=True, mode=0o700)

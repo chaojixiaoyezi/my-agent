@@ -17,12 +17,26 @@ from agent_py_agent.agent.conversation.store_io import ImmutableJsonIndex
 from agent_py_agent.agent.io.sqlite_scope import sqlite_connection_scope
 
 
+def _drive_compact_lane(case, *, predicate=lambda: True, cursor=None, **kwargs):
+    from agent_py_agent.agent.conversation.compact_reachability import (
+        maintain_compact_reachability_lane,
+    )
+    from agent_py_agent.tests.test_issues_w3_compact_reachability import home_for, request_for
+
+    cursor = cursor or {}
+    for _ in range(128):
+        result = maintain_compact_reachability_lane(request_for(home_for(case), cursor=cursor, **kwargs))
+        cursor = result['cursor']
+        if result['complete'] and predicate():
+            return result
+    raise AssertionError(f'bounded maintenance slices did not converge: {result}')
+
 def test_ten_thousand_checkpoint_roots_use_constant_inodes_and_keep_branches(tmp_path):
     index = ImmutableJsonIndex(tmp_path, ('nodes',), durable_nodes=True)
     store = ImmutableNodeStore(tmp_path, ('nodes',))
     snapshots = []
     reference = None
-    with sqlite_connection_scope(enabled=True):
+    with sqlite_connection_scope(enabled=True), store.batch():
         for generation in range(1, 10001):
             # 每一代都是可单独恢复的 checkpoint pin；每隔一代从旧根分叉。
             base = reference if generation % 2 else (snapshots[generation // 2 - 1] if snapshots else None)
@@ -180,10 +194,8 @@ def test_legacy_migration_crash_keeps_source_and_resumes_without_full_mark(compa
     assert result['errors'] and interrupted, json.dumps(result)
     assert all(path.exists() for path in legacy_paths)
     monkeypatch.setattr(ImmutableNodeStore, 'save', original)
-    for _ in range(30):
-        result = compact_reachability.maintain_compact_reachability_lane(request_for(home_for(case), cursor=result['cursor'], items=3))
-        if result['complete']:
-            break
+    result = _drive_compact_lane(case, cursor=result['cursor'], items=3,
+                                 predicate=lambda: not any(path.exists() for path in legacy_paths))
     assert result['complete'] and not result['errors']
     assert not any(path.exists() for path in legacy_paths)
     assert resolve_compact_summary_view(case.agent, first, THREAD_COMPACT_SCOPE).summary == '第一代'
@@ -209,7 +221,8 @@ def test_cas_commit_pin_failure_is_pending_and_gc_recovers_before_releasing_cand
     assert head.compact_checkpoint_id == identity
     assert head.metadata['compact_index_maintenance']['status'] == 'pending'
     monkeypatch.setattr(compact_index_lifecycle, 'commit_index_checkpoint', original)
-    result = compact_reachability.maintain_compact_reachability_lane(request_for(home_for(case)))
+    result = _drive_compact_lane(case, predicate=lambda: ImmutableNodeStore(
+        case.root / 'compact', ('evidence', case.thread_id, 'indexes')).state('sealed_head') == identity)
     assert result['complete'] and not result['errors']
     store = ImmutableNodeStore(case.root / 'compact', ('evidence', case.thread_id, 'indexes'))
     assert store.state('sealed_head') == identity
@@ -297,7 +310,7 @@ def test_object_gc_rechecks_pin_in_transaction_without_enumerating_history(compa
         return operation()
 
     monkeypatch.setattr(_Directory, 'names', bounded_names)
-    result = compact_reachability.maintain_compact_reachability_lane(request_for(home_for(case), commit=commit))
+    result = _drive_compact_lane(case, commit=commit, predicate=lambda: bool(raced))
     assert result['complete'] and not result['errors'] and raced
     assert path.exists()
     assert result['deleted_items'] == 0
@@ -410,3 +423,46 @@ def test_initialization_close_failure_retains_generation_until_creator_retires(t
     assert not thread.is_alive()
     with runtime_db_generation_guard(store.path, exclusive=True):
         assert retained[0].__traceback__ is not None
+
+
+def test_node_batch_is_atomic_across_instances_and_cannot_be_revived(tmp_path):
+    from contextvars import copy_context
+
+    index = ImmutableJsonIndex(tmp_path, ('nodes',), durable_nodes=True)
+    store = ImmutableNodeStore(tmp_path, ('nodes',))
+    traces = []
+    with store.batch():
+        with store.connection(write=True) as conn:
+            conn.set_trace_callback(traces.append)
+        first = index.put(None, 'first', 1)
+        with ImmutableNodeStore(tmp_path, ('nodes',)).batch():
+            second = index.put(first, 'second', 2)
+            store.pin('checkpoint', 1, [second], committed=True)
+        assert index.get(second, 'first') == 1 and index.get(second, 'second') == 2
+        retained = copy_context()
+    assert sum(statement == 'COMMIT' for statement in traces) == 1
+    assert index.get(second, 'first') == 1
+    with pytest.raises(OSError, match='no longer owned'):
+        retained.run(index.get, second, 'first')
+    with pytest.raises(RuntimeError, match='abort logical root'):
+        with index.write_batch():
+            rejected = index.put(second, 'never committed', True)
+            raise RuntimeError('abort logical root')
+    assert store.read(rejected['ref']['ref']) is None
+    assert index.get(second, 'never committed') is None
+
+
+def test_node_batch_refuses_copied_context_on_another_thread(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from contextvars import copy_context
+
+    index = ImmutableJsonIndex(tmp_path, ('nodes',), durable_nodes=True)
+    with index.write_batch():
+        reference = index.put(None, 'key', True)
+        inherited = copy_context()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(inherited.run, index.get, reference, 'key')
+            with pytest.raises(OSError, match='no longer owned'):
+                future.result(timeout=5)
+        assert index.get(reference, 'key') is True
+    assert index.get(reference, 'key') is True

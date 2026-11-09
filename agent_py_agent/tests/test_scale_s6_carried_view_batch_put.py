@@ -182,3 +182,24 @@ def test_batch_writes_only_nodes_reachable_from_final_roots(
     assert not orphaned, f'{len(orphaned)} 个中间版本节点不属于最终根'
     assert len(dict(index.items(carried['messages']))) == (80 if mode == 'existing' else 64)
     assert len(dict(index.items(carried['tools']))) == (80 if mode == 'existing' else 64)
+
+
+def test_carried_builder_publishes_many_nodes_in_one_owned_transaction(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation.immutable_node_store import ImmutableNodeStore
+
+    original = ImmutableNodeStore._insert
+    physical = []
+
+    def record_transaction(conn, *args):
+        physical.append(conn)
+        return original(conn, *args)
+
+    monkeypatch.setattr(ImmutableNodeStore, '_insert', staticmethod(record_transaction))
+    index = _index(tmp_path)
+    carried = _prepare(index, monkeypatch, views.CompactSummaryView(),
+                       [f'message-{number}' for number in range(64)],
+                       [_ref(f'tool-{number}') for number in range(64)])
+    assert len(physical) > 8
+    assert len({id(conn) for conn in physical}) == 1
+    assert len(dict(index.items(carried['messages']))) == 64
+    assert len(dict(index.items(carried['tools']))) == 64

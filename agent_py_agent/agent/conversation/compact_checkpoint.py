@@ -679,75 +679,76 @@ def _prepare_carried_view(agent, request, row):
     root, thread_id = _compact_root(agent, row['thread_id']), row['thread_id']
     index = ImmutableJsonIndex(root, ('evidence', thread_id, 'indexes'), durable_nodes=True)
     timeline = ImmutableJsonIndex(root, ('evidence', thread_id, 'timeline'), ordered=True, durable_nodes=True)
-    view = resolve_compact_summary_view(agent, request.thread, request.scope)
-    base = view.carried_metadata
-    previous = load_latest_committed_compact_checkpoint(agent, request.thread)
-    previous_meta = previous.get('carried_view', {}) if previous is not None else {}
-    scopes, times = previous_meta.get('scope_heads'), previous_meta.get('thread_timeline')
-    if previous is not None:
-        if not previous_meta:
-            # 旧格式仅在首次新写入时完整验证、建目录；后续代次不再重复历史链。
-            for old in reversed(tuple(iter_committed_compact_checkpoints(agent, request.thread, hydrate=False))):
-                _save_checkpoint_copy(root, old)
-                descriptor = _checkpoint_descriptor(old)
-                from .compact_summary_view import _checkpoint_scope
+    with index.write_batch(), timeline.write_batch():
+        view = resolve_compact_summary_view(agent, request.thread, request.scope)
+        base = view.carried_metadata
+        previous = load_latest_committed_compact_checkpoint(agent, request.thread)
+        previous_meta = previous.get('carried_view', {}) if previous is not None else {}
+        scopes, times = previous_meta.get('scope_heads'), previous_meta.get('thread_timeline')
+        if previous is not None:
+            if not previous_meta:
+                # 旧格式仅在首次新写入时完整验证、建目录；后续代次不再重复历史链。
+                for old in reversed(tuple(iter_committed_compact_checkpoints(agent, request.thread, hydrate=False))):
+                    _save_checkpoint_copy(root, old)
+                    descriptor = _checkpoint_descriptor(old)
+                    from .compact_summary_view import _checkpoint_scope
 
-                old_scope = _checkpoint_scope(old)
-                scopes = index.put(scopes, _scope_key(old_scope), descriptor)
-                if old_scope == THREAD_COMPACT_SCOPE:
-                    times = timeline.put(times, _timeline_key(old['created_at'], old['generation']), descriptor)
-        else:
-            descriptor = _checkpoint_descriptor(previous)
-            scopes = index.put(scopes, _scope_key(CompactScope.from_dict(previous['scope'])), descriptor)
-            if CompactScope.from_dict(previous['scope']) == THREAD_COMPACT_SCOPE:
-                times = timeline.put(times, _timeline_key(previous['created_at'], previous['generation']), descriptor)
-    messages, tools = base.get('messages'), base.get('tools')
-    message_count, tool_count = int(base.get('message_count', 0)), int(base.get('tool_count', 0))
-    # LLM: 批量put_absent与逐键put根字节相同（树形只由键集合决定），只省去中间版本节点文件
-    if not base and view.checkpoint_id:
-        legacy_messages = dict.fromkeys(view.source_message_ids, True)
-        messages = index.put_absent(messages, legacy_messages.items())
-        message_count += len(view.source_message_ids)
-        legacy_tools = {}
-        for ref in view.source_tool_refs:
-            legacy_tools[json.dumps(ref, sort_keys=True)] = {'ref': ref, 'order': tool_count}
-            tool_count += 1
-        tools = index.put_absent(tools, legacy_tools.items())
-    new_messages = {}
-    for identity in row['source_message_ids']:
-        if identity not in new_messages and index.get(messages, identity) is None:
-            new_messages[identity] = True
-    messages = index.put_absent(messages, new_messages.items())
-    message_count += len(new_messages)
-    new_tools = {}
-    for ref in row['source_tool_refs']:
-        key = json.dumps(ref, sort_keys=True)
-        if key not in new_tools and index.get(tools, key) is None:
-            new_tools[key] = {'ref': ref, 'order': tool_count}
-            tool_count += 1
-    tools = index.put_absent(tools, new_tools.items())
-    recent_messages = list(dict.fromkeys([*(base['recent_messages'] if base else tuple(view.source_message_ids)),
-                                        *row['source_message_ids']]))[-256:]
-    recent_tools = {json.dumps(ref, sort_keys=True): ref for ref in (
-        *(base['recent_tools'] if base else view.source_tool_refs), *row['source_tool_refs'],
-    )}
-    variants = base.get('readable_bases')
-    lineage = base.get('checkpoint_lineage')
-    if view.checkpoint_id:
-        lineage = index.put(lineage, view.checkpoint_id, True)
-        old = _cold_checkpoint(root, thread_id, view.checkpoint_id)
-        if old is not None:
-            variants = index.put(variants, _readability_key(old.get('provider_compaction_info', old.get('provider_compaction'))),
-                                 _checkpoint_descriptor(old))
-    return {
-        'schema': 'conversation_carried_view.v1', 'base_checkpoint_id': row['summary_base_checkpoint_id'],
-        'scope': row['scope'], 'messages': messages, 'tools': tools,
-        'message_count': message_count, 'tool_count': tool_count,
-        'recent_messages': recent_messages, 'recent_tools': list(recent_tools.values())[-128:],
-        'legacy_message_end_ids': list(view.legacy_message_end_ids),
-        'scope_heads': scopes, 'thread_timeline': times, 'readable_bases': variants,
-        'checkpoint_lineage': lineage,
-    }
+                    old_scope = _checkpoint_scope(old)
+                    scopes = index.put(scopes, _scope_key(old_scope), descriptor)
+                    if old_scope == THREAD_COMPACT_SCOPE:
+                        times = timeline.put(times, _timeline_key(old['created_at'], old['generation']), descriptor)
+            else:
+                descriptor = _checkpoint_descriptor(previous)
+                scopes = index.put(scopes, _scope_key(CompactScope.from_dict(previous['scope'])), descriptor)
+                if CompactScope.from_dict(previous['scope']) == THREAD_COMPACT_SCOPE:
+                    times = timeline.put(times, _timeline_key(previous['created_at'], previous['generation']), descriptor)
+        messages, tools = base.get('messages'), base.get('tools')
+        message_count, tool_count = int(base.get('message_count', 0)), int(base.get('tool_count', 0))
+        # LLM: 批量put_absent与逐键put根字节相同（树形只由键集合决定），只省去中间版本节点文件
+        if not base and view.checkpoint_id:
+            legacy_messages = dict.fromkeys(view.source_message_ids, True)
+            messages = index.put_absent(messages, legacy_messages.items())
+            message_count += len(view.source_message_ids)
+            legacy_tools = {}
+            for ref in view.source_tool_refs:
+                legacy_tools[json.dumps(ref, sort_keys=True)] = {'ref': ref, 'order': tool_count}
+                tool_count += 1
+            tools = index.put_absent(tools, legacy_tools.items())
+        new_messages = {}
+        for identity in row['source_message_ids']:
+            if identity not in new_messages and index.get(messages, identity) is None:
+                new_messages[identity] = True
+        messages = index.put_absent(messages, new_messages.items())
+        message_count += len(new_messages)
+        new_tools = {}
+        for ref in row['source_tool_refs']:
+            key = json.dumps(ref, sort_keys=True)
+            if key not in new_tools and index.get(tools, key) is None:
+                new_tools[key] = {'ref': ref, 'order': tool_count}
+                tool_count += 1
+        tools = index.put_absent(tools, new_tools.items())
+        recent_messages = list(dict.fromkeys([*(base['recent_messages'] if base else tuple(view.source_message_ids)),
+                                            *row['source_message_ids']]))[-256:]
+        recent_tools = {json.dumps(ref, sort_keys=True): ref for ref in (
+            *(base['recent_tools'] if base else view.source_tool_refs), *row['source_tool_refs'],
+        )}
+        variants = base.get('readable_bases')
+        lineage = base.get('checkpoint_lineage')
+        if view.checkpoint_id:
+            lineage = index.put(lineage, view.checkpoint_id, True)
+            old = _cold_checkpoint(root, thread_id, view.checkpoint_id)
+            if old is not None:
+                variants = index.put(variants, _readability_key(old.get('provider_compaction_info', old.get('provider_compaction'))),
+                                     _checkpoint_descriptor(old))
+        return {
+            'schema': 'conversation_carried_view.v1', 'base_checkpoint_id': row['summary_base_checkpoint_id'],
+            'scope': row['scope'], 'messages': messages, 'tools': tools,
+            'message_count': message_count, 'tool_count': tool_count,
+            'recent_messages': recent_messages, 'recent_tools': list(recent_tools.values())[-128:],
+            'legacy_message_end_ids': list(view.legacy_message_end_ids),
+            'scope_heads': scopes, 'thread_timeline': times, 'readable_bases': variants,
+            'checkpoint_lineage': lineage,
+        }
 
 
 # LLM: 目录值不复制摘要或证据，原ID和generation将由读取者核对；候选未提交不会进入获胜者的目录。

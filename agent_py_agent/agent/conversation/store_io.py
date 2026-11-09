@@ -9,6 +9,7 @@ import logging
 import time
 from collections import deque
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
@@ -324,6 +325,17 @@ class ImmutableJsonIndex:
     def __init__(self, root: Path, parts: tuple[str, ...], *, ordered: bool = False, durable_nodes: bool = False):
         self.root, self.parts, self.ordered = root, parts, ordered
         self.durable_nodes = durable_nodes
+
+    @contextmanager
+    def write_batch(self):
+        """同一逻辑根构造只提交一次；嵌套访问不能提前提交外层事务。"""
+        if self.durable_nodes:
+            from .immutable_node_store import ImmutableNodeStore
+
+            with ImmutableNodeStore(self.root, self.parts).batch():
+                yield
+        else:
+            yield
 
     # LLM: SHA256路由固定64层，每叶最多8个键；有序索引的键必须已是64位十六进制字串。
     # 函数用途: 生成固定宽度路由，避免索引深度随历史代次无界增长。
