@@ -1,4 +1,8 @@
 """冷目录发现分片推进，分页不能通过截断未排序目录来漏掉旧owner。"""
+import stat
+from pathlib import Path
+from types import SimpleNamespace
+
 from agent_py_agent.agent import owner_wake_discovery as discovery
 
 
@@ -45,3 +49,44 @@ def test_removed_owner_not_returned_during_reconciliation(tmp_path):
     page = discovery.discover_owner_home_page(owners, limit=4)
     assert all(target.identity.owner_id != 'u0000' for target in page.targets)
     assert page.next_cursor is not None
+
+
+def _coarse_directory_clock(monkeypatch):
+    original = Path.stat
+
+    def measured(path, *args, **kwargs):
+        result = original(path, *args, **kwargs)
+        if not stat.S_ISDIR(result.st_mode):
+            return result
+        fields = {name: getattr(result, name) for name in dir(result) if name.startswith('st_')}
+        fields.update(st_mtime_ns=1, st_ctime_ns=1)
+        return SimpleNamespace(**fields)
+
+    monkeypatch.setattr(Path, 'stat', measured)
+
+
+def test_owner_add_remove_invalidates_even_inside_one_filesystem_clock_tick(tmp_path, monkeypatch):
+    owners = tmp_path / 'owners'
+    bucket = owners / 'providers' / 'feishu' / 'users'
+    (bucket / 'first').mkdir(parents=True)
+    _coarse_directory_clock(monkeypatch)
+    assert [row.identity.owner_id for row in discovery.discover_owner_home_page(owners).targets] == ['first']
+    (bucket / 'second').mkdir()
+    assert [row.identity.owner_id for row in discovery.discover_owner_home_page(owners).targets] == ['first', 'second']
+    (bucket / 'first').rmdir()
+    assert [row.identity.owner_id for row in discovery.discover_owner_home_page(owners).targets] == ['second']
+
+
+def test_new_run_is_detected_with_unchanged_directory_timestamps(tmp_path, monkeypatch):
+    import json
+
+    from agent_py_agent.tests.test_owner_wake_discovery import _settled_history, _write_link
+
+    _coarse_directory_clock(monkeypatch)
+    _settled, active = _settled_history(tmp_path)
+    assert discovery.unfinished_task_ids(tmp_path) == ['task-100']
+    new = active.parents[2] / 'new-run' / 'work' / 'state.json'
+    new.parent.mkdir(parents=True)
+    new.write_text(json.dumps({'task_id': 'new', 'status': 'RUNNING'}))
+    _write_link(tmp_path, 'new', 'active')
+    assert set(discovery.unfinished_task_ids(tmp_path)) == {'task-100', 'new'}

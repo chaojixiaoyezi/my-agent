@@ -418,7 +418,7 @@ def _owner_home_signature(providers_root: Path) -> tuple[Any, ...]:
     新增/删除旧目录时快照要失效,诊断才能跟上真实目录状态。
     函数用途: 判断上一轮枚举结果能否继续复用;新增/删除/替换 owner 目录都会改变签名。
     """
-    entries: list[tuple[str, str, tuple[int, int, int]]] = []
+    entries: list[tuple[str, str, tuple[int, ...]]] = []
     for provider_dir, owner_kind, bucket_dir in _provider_buckets(providers_root):
         entries.append((provider_dir.name, owner_kind, _bucket_signature(bucket_dir)))
     entries.append(("local", "user", _bucket_signature(providers_root.parent / "local")))
@@ -430,19 +430,19 @@ def _owner_home_signature(providers_root: Path) -> tuple[Any, ...]:
     return tuple(entries)
 
 
-def _bucket_signature(bucket_dir: Path) -> tuple[int, int, int]:
-    """单个 owner bucket 目录的 (mtime_ns, inode, 条目数) 指纹。
+def _directory_metadata(status) -> tuple[int, ...]:
+    # ext4同一时钟tick内mtime/ctime可以完全相同；目录链接数覆盖子目录增删，尺寸覆盖可见结构变化。
+    # 这仍是一次stat的失效提示，不能替代原有界重扫或授权事实。
+    return (status.st_dev, status.st_ino, status.st_mtime_ns, status.st_ctime_ns,
+            status.st_size, status.st_nlink)
 
-    LLM: mtime_ns 覆盖「目录内条目增删改名」,inode 覆盖「整目录被删除后重建」,条目数覆盖
-    时间戳粒度粗的文件系统上同一时刻内的增删。任一维度不可读用 -1 占位:不可读状态自身也
-    是可比签名,恢复可读后指纹必然变化,不会永久误命中。
-    函数用途: 给 _owner_home_signature 提供单目录指纹;不做递归,只有 stat + 一次 listdir。
-    """
+
+def _bucket_signature(bucket_dir: Path) -> tuple[int, ...]:
+    """单次stat取得目录结构指纹；不读取或排序整个owner名字集合。"""
     try:
-        status = bucket_dir.stat()
+        return _directory_metadata(bucket_dir.stat())
     except OSError:
-        return (-1, -1, -1)
-    return (status.st_mtime_ns, status.st_ino, status.st_ctime_ns)
+        return (-1,)
 
 
 # LLM: The cursor is a sort key, never an index: resuming is "first key strictly greater than
@@ -846,13 +846,12 @@ def _dir_entries_signature(root: Path, pattern: str) -> tuple[Any, ...]:
     return (entries, _dir_own_signature(root))
 
 
-def _dir_own_signature(root: Path) -> tuple[int, int]:
-    """目录自身指纹 (mtime_ns, inode);不可读用 (-1, -1) 占位。"""
+def _dir_own_signature(root: Path) -> tuple[int, ...]:
+    """目录结构指纹包含链接数，避免粗粒度时钟下新增用户等到TTL才发现。"""
     try:
-        status = root.stat()
+        return _directory_metadata(root.stat())
     except OSError:
-        return (-1, -1)
-    return (status.st_mtime_ns, status.st_ino)
+        return (-1,)
 
 
 def _owner_has_hard_facts(owner_home: Path, *, deadline_out: list[float] | None = None) -> bool:
@@ -1393,7 +1392,7 @@ def _directory_fp(root: Path) -> tuple[int, ...]:
         st = root.stat()
     except FileNotFoundError:
         return ()
-    return st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size
+    return _directory_metadata(st)
 
 
 # LLM: DirEntry类型信息来自目录枚举；仅在目录指纹变化时重枚举运行名或匹配文件名。
