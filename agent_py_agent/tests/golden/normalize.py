@@ -22,6 +22,33 @@ TIMESTAMP_KEYS = frozenset({"at", "timestamp", "created_at", "updated_at", "star
 GENERATED_LABEL = re.compile(r"gwreq-msg-[0-9a-f]{32}|gateway-attempt-[0-9a-f]{32}|tool_operation:[0-9a-f]{32}|thread-[0-9a-f]{16}|wake-[0-9a-f]{16}|(?:agentrun|taskrun|attempt|subagent)-[0-9]+-[0-9a-f]+")
 
 
+_RUNTIME_POSITIVE_BYTES = "runtime_positive_bytes"
+
+
+def _runtime_measurements(value):
+    """只归一宿主结构化投影的物理测量；字节预算仍由产品有界工作测试守护。"""
+    lines = value.split("\n")
+    for index, line in enumerate(lines):
+        try:
+            row = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(row, dict) or row.get("schema") != "conversation-subagent-completions.v1":
+            continue
+        coverage = row.get("coverage")
+        if not isinstance(coverage, dict) or "bytes_read_upper_bound" not in coverage:
+            continue
+        measurement = coverage["bytes_read_upper_bound"]
+        if measurement == _RUNTIME_POSITIVE_BYTES:
+            continue
+        assert type(measurement) is int and measurement >= 0, "invalid runtime byte measurement"
+        if measurement:
+            # observed_at等已归一的身份/时间会改变原JSON字节数；不伪造精确预算。
+            coverage["bytes_read_upper_bound"] = _RUNTIME_POSITIVE_BYTES
+            lines[index] = json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "\n".join(lines)
+
+
 # LLM: Timestamp ordering uses numerical or ISO instants, not dictionary visitation order.
 # 函数用途: Parse a recorded timestamp while refusing invalid or non-finite observations.
 def _instant(value):
@@ -84,7 +111,7 @@ def normalize(trace):
 
     # LLM: 日期只在本事件声明的fixture根路径内处理；源码日期、伪根文本与普通文件名保持可比较。
     # 函数用途: Preserve provider prompt text while making its generated labels repeatable.
-    def text(value, event, *, tool_header=False):
+    def text(value, event, *, tool_header=False, runtime_measurements=False):
         root = event.get("fixture_root")
         if root:
             value = re.sub(r"(?<![\w/.-])((?:/private)?" + re.escape(root) + r")(/[^\s\"'<>\\]*)", fixture_dates, value)
@@ -116,6 +143,8 @@ def normalize(trace):
                        lambda match: match.group(1) + "-" + identity("artifact_nonce", match.group(2)) + "-" + match.group(3), value)
         value = re.sub(r"(/runs/date#\d+/)([0-9a-f]{24})", lambda match: match.group(1) + identity("run_dir_id", match.group(2)), value)
         value = re.sub(r'("observed_at":\s*)\d+(?:\.\d+)?', r"\g<1>1", value)
+        if runtime_measurements:
+            value = _runtime_measurements(value)
         if "[RUNTIME_TASK_EVENTS]" in value:
             value = re.sub(r'("created_at":\s*)\d+(?:\.\d+)?', r"\g<1>1", value)
         for digest, (canonical_digest, canonical_size, original_size) in event.get("_output_aliases", {}).items():
@@ -151,10 +180,15 @@ def normalize(trace):
 
     # LLM: Nested values keep all epoch/state/count fields; only declared volatile identity/time fields change.
     # 函数用途: Recursively normalize a complete event without deleting payload fields.
-    def visit(value, stream, event, key="", *, tool_header=False):
+    def visit(value, stream, event, key="", *, tool_header=False, runtime_measurements=False):
         if isinstance(value, dict):
             actual_tool = value.get("role") == "tool" and any(value is message for message in event.get("body", {}).get("messages", []))
-            return {name: visit(child, stream, event, name, tool_header=actual_tool and name == "content") for name, child in value.items()}
+            actual_runtime = (event.get("source") == "provider" and event.get("kind") == "model_request"
+                              and value.get("role") == "user"
+                              and any(value is message for message in event.get("body", {}).get("messages", []))
+                              and str(value.get("content") or "").startswith("# Runtime Injection\n# Conversation Context\n"))
+            return {name: visit(child, stream, event, name, tool_header=actual_tool and name == "content",
+                                runtime_measurements=actual_runtime and name == "content") for name, child in value.items()}
         if isinstance(value, list):
             return [visit(child, stream, event, key) for child in value]
         if key in ID_NAMESPACES:
@@ -162,7 +196,7 @@ def normalize(trace):
         if key in TIMESTAMP_KEYS and value is not None:
             return ordinals[stream][_instant(value)]
         if isinstance(value, str) and key != "body_hash":
-            return text(value, event, tool_header=tool_header)
+            return text(value, event, tool_header=tool_header, runtime_measurements=runtime_measurements)
         return value
 
     result = []

@@ -695,3 +695,49 @@ def test_replay_calendar_keeps_partitions_stable_across_utc_midnight(tmp_path, c
         assert time.time is wall_clock and time.monotonic is monotonic_clock
     assert context_bundle.date is original_date
     assert storage._date_key is original_archive_key and run_workspace._date_key is original_run_key
+
+
+def _measurement_request(value=2097, *, prefix='# Runtime Injection\n# Conversation Context\n', **fields):
+    import hashlib
+
+    coverage = {'bytes_read_upper_bound': value, 'status': 'complete', 'limit': 128,
+                'requested_window_complete': True, 'source_exhausted': True,
+                'history_coverage': 'complete', 'pending_coverage': 'complete', 'reason_codes': [], **fields}
+    projection = {'schema': 'conversation-subagent-completions.v1', 'coverage': coverage,
+                  'items': [{'summary': 'business bytes 2097'}]}
+    body = {'messages': [{'role': 'user', 'content': prefix + json.dumps(projection, sort_keys=True, separators=(',', ':'))}]}
+    return {'source': 'provider', 'kind': 'model_request', 'body': body,
+            'body_hash': hashlib.sha256(json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()}
+
+
+def test_runtime_byte_measurement_is_structural_positive_and_idempotent():
+    first = normalize([_measurement_request(2097)])
+    assert first == normalize([_measurement_request(2098)])
+    assert normalize(first) == first
+    text = first[0]['body']['messages'][0]['content']
+    assert 'runtime_positive_bytes' in text and 'business bytes 2097' in text
+    assert first != normalize([_measurement_request(0)])
+    assert normalize([_measurement_request(2097, prefix='business example\n')]) != normalize([
+        _measurement_request(2098, prefix='business example\n')])
+
+
+@pytest.mark.parametrize('value', [True, False, -1, 1.5, '2097', None])
+def test_runtime_byte_measurement_rejects_invalid_values(value):
+    with pytest.raises(AssertionError, match='invalid runtime byte measurement'):
+        normalize([_measurement_request(value)])
+
+
+@pytest.mark.parametrize('change', [
+    {'status': 'partial'}, {'limit': 127}, {'reason_codes': ['tail_range_incomplete']},
+    {'history_coverage': 'unknown'}, {'pending_coverage': 'unknown'},
+    {'source_exhausted': False}, {'requested_window_complete': False},
+])
+def test_runtime_measurement_preserves_coverage_semantics(change):
+    assert normalize([_measurement_request()]) != normalize([_measurement_request(**change)])
+
+
+def test_runtime_measurement_never_repairs_an_invalid_original_body_hash():
+    request = _measurement_request()
+    request['body']['messages'][0]['content'] += 'tampered'
+    with pytest.raises(AssertionError, match='provider content/hash mismatch'):
+        normalize([request])
