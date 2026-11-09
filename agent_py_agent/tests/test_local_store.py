@@ -1101,6 +1101,9 @@ def test_b2_r3_owner_background_maintenance_prunes_existing_events(tmp_path, mon
     monkeypatch.setattr(session_pair_rate, "time", clock)
     # W6预算与owner期限使用同一单调时钟，不能让冻结期限与真实时钟相减后永久过期。
     monkeypatch.setattr(storage_lanes, "time", clock)
+    # 会话账本 lane 继续把同一绝对期限交给底层 GC，测试时钟必须一致。
+    from agent_py_agent.agent.conversation import ledger_gc
+    monkeypatch.setattr(ledger_gc, "time", clock)
     home, store = _r3_owner_store(tmp_path, layout)
     options = {"include_global_indexes": False}
     if transition:
