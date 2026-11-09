@@ -16,20 +16,48 @@ from agent_py_agent.agent.business_spaces.v13_store import V13Store
 from agent_py_agent.agent.conversation.business_access import BusinessError
 
 
-# LLM: 只构造升级前的规范快照；热路径测量开始前先完成一次真实事务升级。
-# 函数用途: 固定目标大小，仅增长本 owner 的运行、审计和回执历史。
-def _legacy(home, count):
-    root = home / 'data' / 'business_v13'
-    root.mkdir(parents=True)
+def _historical_states(home, count):
     for collection in ('script_runs', 'async_jobs', 'audit_log'):
         records = {f'old-{index:05}': {'id': f'old-{index:05}', 'state': 'completed'}
                    for index in range(count)}
         receipts = {hashlib.sha256(str(index).encode()).hexdigest():
                     {'fingerprint': 'a' * 64, 'result': {'index': index}}
                     for index in range(count)} if collection != 'audit_log' else {}
-        state = {'schema_version': 'business-v13.v1', 'owner_id': home.name,
-                 'collection': collection, 'revision': count, 'records': records, 'receipts': receipts}
-        (root / (collection + '.json')).write_bytes(storage._encode(state))
+        yield {'schema_version': 'business-v13.v1', 'owner_id': home.name,
+               'collection': collection, 'revision': count, 'records': records, 'receipts': receipts}
+
+
+def _legacy(home, count):
+    root = home / 'data' / 'business_v13'
+    root.mkdir(parents=True)
+    for state in _historical_states(home, count):
+        (root / (state['collection'] + '.json')).write_bytes(storage._encode(state))
+
+
+def _seed_published_history(store, count):
+    """生成已发布的真实历史文件；冷迁移、配额、断电续传分别走下方独立用例。"""
+    home = store.owner_home
+    root = home / 'data' / 'business_v13'
+    root.mkdir(parents=True)
+    for state in _historical_states(home, count):
+        collection = state['collection']
+        rows = store._rows(collection)
+        for kind in ('records', 'receipts'):
+            if not state[kind]:
+                continue
+            home.joinpath(*rows.base, kind).mkdir(parents=True)
+            for key, value in state[kind].items():
+                parts, raw = rows.payload(kind, key, value)
+                home.joinpath(*parts).write_bytes(raw)
+        (root / (collection + '.json')).write_bytes(storage._encode(store._snapshot(state)))
+        # 真正由新 Store 读出头尾，防止夹具退化成只有修订号的空目录。
+        cold = V13Store(home)
+        for index in (0, count - 1):
+            key = f'old-{index:05}'
+            assert cold.get(collection, key) == state['records'][key]
+            if state['receipts']:
+                receipt = hashlib.sha256(str(index).encode()).hexdigest()
+                assert cold._rows(collection).get('receipts', receipt) == state['receipts'][receipt]
 
 
 # LLM: 使用真实 FD fstat，目录采样器自身先关闭；不存在的描述符不计入快照。
@@ -107,8 +135,8 @@ def test_transaction_io_is_independent_of_history(tmp_path, monkeypatch):
     observed = []
     for count in (1000, 10000):
         home = tmp_path / f'owner-{count}'
-        _legacy(home, count)
         store = V13Store(home, action='run')
+        _seed_published_history(store, count)
         store.transaction('script_runs', lambda rows: rows.update(live={'state': 'running'}) or {'accepted': True},
                           idempotency_key='warm', params_digest='warm')
         with monkeypatch.context() as patch:
