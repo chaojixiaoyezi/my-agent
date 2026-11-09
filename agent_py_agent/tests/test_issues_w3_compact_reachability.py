@@ -211,7 +211,9 @@ def test_compact_preserves_all_committed_generations_and_collects_only_orphan(co
     )
     validate_lane_receipt(result)
     assert result["deleted_items"] == 1 and not orphan_path.exists()
-    assert all((index.root.joinpath(*index.parts) / name).exists() for name in old_nodes)
+    from agent_py_agent.agent.conversation.immutable_node_store import ImmutableNodeStore
+    node_store = ImmutableNodeStore(index.root, index.parts)
+    assert all(node_store.read(name) is not None for name in old_nodes)
     assert ledger.read_bytes() == before and commits
     assert all(path.read_bytes() == b"preserved archive metadata\n" for path in sentinels)
     assert (
@@ -237,8 +239,9 @@ def test_incomplete_compact_refuses_every_deletion(compact_case, damage):
     target = root.joinpath(*index.parts, orphan["ref"]["ref"])
     aged(target)
     if damage == "node":
-        row = checkpoints.load_latest_committed_compact_checkpoint(case.agent, first)
-        root.joinpath(*index.parts, row["carried_view"]["messages"]["ref"]["ref"]).unlink()
+        from agent_py_agent.agent.conversation.immutable_node_store import ImmutableNodeStore
+        database = ImmutableNodeStore(root, index.parts).path
+        database.write_bytes(b'corrupt node database')
     else:
         (root / "conversations" / f"{case.thread_id}.jsonl").write_bytes(b"{\n")
     commits = []
@@ -300,7 +303,7 @@ def test_retired_thread_requires_positive_journal_and_preserves_lock(compact_cas
         if result["complete"]:
             break
     assert result["complete"] and not ledger.exists()
-    assert not (root / "evidence" / case.thread_id).exists()
+    assert all(path.name.endswith('.lock') for path in (root / "evidence" / case.thread_id).rglob('*') if path.is_file())
     assert not (root / "archive" / case.thread_id).exists()
     assert lock.exists() and cursor["journal_offset"] > 0
 
@@ -347,10 +350,11 @@ def test_small_slices_advance_past_fresh_candidates_without_starving_old_orphans
     case = compact_case
     committed_pair(case)
     index = ImmutableJsonIndex(case.root / "compact", ("evidence", case.thread_id, "indexes"))
-    paths = []
+    paths, references = [], []
     for number in range(12):
         reference = index._save({"entries": {"uncommitted": number}})
         paths.append(index.root.joinpath(*index.parts, reference["ref"]["ref"]))
+        references.append(reference)
     paths.sort()
     old = paths[-2:]
     for path in old:
@@ -366,7 +370,8 @@ def test_small_slices_advance_past_fresh_candidates_without_starving_old_orphans
         if result["complete"]:
             break
     assert result["complete"] and all(not path.exists() for path in old)
-    assert all(path.exists() for path in paths[:-2])
+    fresh_names = {path.name for path in paths[:-2]}
+    assert all(index._load(reference)['entries'] for reference in references if reference['ref']['ref'] in fresh_names)
     assert len(json.dumps(cursor).encode()) < 16384
 
 
@@ -678,7 +683,8 @@ def test_retired_lookahead_with_one_item_budget_keeps_progress(compact_case):
         cursor = result["cursor"]
         if result["complete"]:
             break
-    assert result["complete"] and not (case.root / "compact/evidence" / case.thread_id).exists()
+    assert result["complete"]
+    assert all(path.name.endswith('.lock') for path in (case.root / "compact/evidence" / case.thread_id).rglob('*') if path.is_file())
 
 
 def test_retirement_generation_is_rechecked_inside_commit(compact_case):

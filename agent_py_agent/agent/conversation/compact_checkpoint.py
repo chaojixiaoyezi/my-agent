@@ -27,6 +27,7 @@ from ..common.nofollow_fs import (
     write_bytes_atomic_beneath,
     write_text_atomic_beneath,
 )
+from ..io.sqlite_scope import sqlite_connection_scope
 from .compact_scope import THREAD_COMPACT_SCOPE, CompactScope
 from .compact_tool_identity import compact_tool_refs
 from .message_replay import message_rows_iterator
@@ -154,6 +155,9 @@ def _write_cold_payload(root, thread_id, payload):
         write_text_atomic_beneath(root, parts, text)
     else:
         _touch_node(root, parts, raw)
+    from .immutable_node_store import ImmutableNodeStore
+
+    ImmutableNodeStore(root, ('evidence', thread_id, 'indexes')).track_file('payload', parts[-1])
     return {'sha256': digest, 'byte_length': len(raw), 'ref': parts[-1]}
 
 
@@ -305,6 +309,9 @@ def _append_checkpoint(agent, row: dict[str, object]) -> str:
         raise ValueError('conversation compact checkpoint record exceeds byte budget')
     # 私有追加：0600/0700，存量宽权限 checkpoint 账本下次写入即收紧；内容逐字节不变。
     _save_checkpoint_copy(root, row)
+    from .compact_index_lifecycle import pin_checkpoint_indexes
+
+    pin_checkpoint_indexes(root, row)
     path = root / 'conversations' / f"{row['thread_id']}.jsonl"
     with locked_json_path(path):
         _seal_torn_ledger_tail(path)
@@ -502,6 +509,9 @@ def _save_checkpoint_copy(root, row):
         write_bytes_atomic_beneath(root, parts, raw)
     else:
         _touch_node(root, parts, raw)
+    from .immutable_node_store import ImmutableNodeStore
+
+    ImmutableNodeStore(root, ('evidence', thread_id, 'indexes')).track_file('copy', name)
 
 
 # LLM: 冷副本缺失才按精确ID查热账本；刚查过热账本的调用方禁重试；任何已有冷副本损坏不回退。
@@ -661,13 +671,14 @@ def _readability_key(record):
 
 # LLM: 新锚点只继承实际summary_base的覆盖，提交前驱只更新可选scope目录；所有根都由新候选ID封印。
 # 函数用途: 把累计覆盖和scope/后端回退目录改成固定深度不可变根，热行仅保留有界近期引用。
+@sqlite_connection_scope(enabled=True)
 def _prepare_carried_view(agent, request, row):
     from .compact_summary_view import resolve_compact_summary_view
     from .store_io import ImmutableJsonIndex
 
     root, thread_id = _compact_root(agent, row['thread_id']), row['thread_id']
-    index = ImmutableJsonIndex(root, ('evidence', thread_id, 'indexes'))
-    timeline = ImmutableJsonIndex(root, ('evidence', thread_id, 'timeline'), ordered=True)
+    index = ImmutableJsonIndex(root, ('evidence', thread_id, 'indexes'), durable_nodes=True)
+    timeline = ImmutableJsonIndex(root, ('evidence', thread_id, 'timeline'), ordered=True, durable_nodes=True)
     view = resolve_compact_summary_view(agent, request.thread, request.scope)
     base = view.carried_metadata
     previous = load_latest_committed_compact_checkpoint(agent, request.thread)

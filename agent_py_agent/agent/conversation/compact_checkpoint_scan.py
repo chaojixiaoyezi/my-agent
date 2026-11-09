@@ -7,9 +7,10 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import threading
 from collections import OrderedDict
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -105,7 +106,7 @@ def _checkpoint_byte_rows(handle, through):
 
 # LLM: 新尾全部校验；同inode严格增长复用，近期mtime不触发全扫。旧无LF末行从行首重读，重复ID仍last-wins。
 # 函数用途: 构造独立有界地址窗口，原缓存只读，扫描失败不发布部分索引。
-def _scan_index(handle, stamp, cached, validator=None):
+def _scan_index(handle, stamp, cached, validator=None, persistent=None):
     offsets = OrderedDict(cached.offsets) if cached is not None else OrderedDict()
     start = cached.resume_from if cached is not None else 0
     complete = cached.complete if cached is not None else True
@@ -113,6 +114,10 @@ def _scan_index(handle, stamp, cached, validator=None):
         for key in tuple(offsets):
             if offsets[key][0] >= start:
                 del offsets[key]
+    if persistent is not None:
+        from .checkpoint_offset_store import CheckpointOffsetStore
+
+        CheckpointOffsetStore.begin(persistent, start)
     handle.seek(start)
     resume = start
     for offset, raw in _checkpoint_byte_rows(handle, stamp[2]):
@@ -121,6 +126,8 @@ def _scan_index(handle, stamp, cached, validator=None):
             validator(row)
         checkpoint_id = str(row.get('checkpoint_id') or '').strip() if row is not None else ''
         if checkpoint_id:
+            if persistent is not None:
+                CheckpointOffsetStore.add(persistent, checkpoint_id, offset, raw)
             offsets[checkpoint_id] = (offset, len(raw), hashlib.sha256(raw).digest())
             offsets.move_to_end(checkpoint_id)
             if len(offsets) > _MAX_CACHED_OFFSETS:
@@ -171,13 +178,37 @@ def checkpoint_row_lookup(path: Path, *, validator=None):
             return None
         yield missing
         return
-    with handle:
+    with handle, ExitStack() as stack:
+        from .checkpoint_offset_store import CheckpointOffsetStore
+
+        persistent = None
+        failed_projection = False
+        projection_read_only = False
+        projection = CheckpointOffsetStore(path)
+        try:
+            projection_read_only = projection.path.exists()
+            persistent = stack.enter_context(projection.connection(write=not projection_read_only))
+            saved = projection.load(persistent, validator)
+        except (OSError, sqlite3.Error):
+            failed_projection = True
+            saved = None
+            persistent = None
         stamp = cache_stat_signature(os.fstat(handle.fileno()))
         through = stamp[2]
         with _CHECKPOINT_OFFSETS_LOCK:
             cached = _CHECKPOINT_OFFSETS.get(str(path))
             if cached is not None:
                 _CHECKPOINT_OFFSETS.move_to_end(str(path))
+        if persistent is not None:
+            # 冷启动不装载全部地址；SQLite 索引按准确 ID 寻址，近期窗口仍可留在进程内。
+            if saved is not None:
+                try:
+                    cached = _CheckpointIndex(tuple(saved['stamp']), OrderedDict(), saved['resume'], False,
+                                              bytes.fromhex(saved['tail']), bytes.fromhex(saved['head']), validator)
+                except (ValueError, TypeError):
+                    cached = None
+            else:
+                cached = None
         if cached is not None and (
             cached.stamp[:2] != stamp[:2] or cached.stamp[2] > through
             or _tail_digest(handle, cached.stamp[2]) != cached.tail_digest
@@ -188,17 +219,28 @@ def checkpoint_row_lookup(path: Path, *, validator=None):
         if cached is not None and cached.stamp == stamp:
             index = cached
         else:
+            if persistent is not None and projection_read_only:
+                persistent = stack.enter_context(projection.connection(write=True))
+                projection_read_only = False
             if cached is not None and not (cached.stamp[:2] == stamp[:2] and cached.stamp[2] < through):
                 cached = None
-            index = _scan_index(handle, stamp, cached, validator)
+            index = _scan_index(handle, stamp, cached, validator, persistent)
             if cache_stat_signature(os.fstat(handle.fileno())) == stamp:
                 _cache_offsets(path, index)
+
+        if persistent is not None:
+            if cache_stat_signature(os.fstat(handle.fileno())) != stamp:
+                raise OSError('conversation compact checkpoint source changed during reading')
+            if not projection_read_only:
+                projection.publish(persistent, index, validator)
 
         # LLM: 同一已扫描述符按原字节hash复查选中行，旧代内容变动不能生成覆盖；追加不改变固定范围。
         # 函数用途: 返回原行的新解析对象，正文只随调用方当前消费而存活；缺ID由链验证器处理。
         def lookup(checkpoint_id):
             address = index.offsets.get(checkpoint_id)
-            if address is None and not index.complete:
+            if address is None and persistent is not None:
+                address = projection.lookup(persistent, checkpoint_id, stamp)
+            elif address is None and not index.complete:
                 address = _historical_address(handle, through, checkpoint_id)
             if address is None:
                 return None
@@ -207,6 +249,17 @@ def checkpoint_row_lookup(path: Path, *, validator=None):
             raw = handle.read(length)
             if len(raw) != length or hashlib.sha256(raw).digest() != digest:
                 raise OSError('conversation compact checkpoint source changed during reading')
-            return _parse_row(raw)
+            row = _parse_row(raw)
+            if row is None or str(row.get('checkpoint_id') or '').strip() != checkpoint_id:
+                raise OSError('checkpoint offset projection identity mismatches')
+            return row
 
         yield lookup
+
+    if failed_projection:
+        # 只有源固定快照已完整校验、lookup 正常退出后才退休坏投影；校验失败不得洗白。
+        try:
+            if cache_stat_signature(path.stat()) == stamp:
+                projection.retire_broken()
+        except (OSError, sqlite3.Error):
+            logger.warning('COMPACT_OFFSET_PROJECTION_REPAIR_PENDING')

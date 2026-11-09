@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import logging
+import sqlite3
 import stat
 import threading
 import time
@@ -683,6 +684,26 @@ class ThreadStore:
                 if not unchanged:
                     raise IdleCompactActivityChanged("canonical messages changed before idle commit")
             updated = self.update_atomic(thread_id, apply)
+            if compact_root is not None:
+                try:
+                    from .compact_index_lifecycle import commit_index_checkpoint
+
+                    commit_index_checkpoint(compact_root, updated)
+                except (OSError, ValueError, TypeError, sqlite3.Error) as exc:
+                    # CAS 已提交；索引登记失败只能留下待恢复事实，不能倒称摘要提交失败。
+                    error_type = type(exc).__name__
+
+                    def index_maintenance_pending(latest):
+                        if latest.compact_checkpoint_id != updated.compact_checkpoint_id:
+                            return latest
+                        metadata = dict(latest.metadata)
+                        metadata['compact_index_maintenance'] = {
+                            'status': 'pending', 'error_type': error_type,
+                            'checkpoint_id': updated.compact_checkpoint_id,
+                        }
+                        return replace(latest, metadata=metadata)
+
+                    updated = self.update_atomic(thread_id, index_maintenance_pending)
             if commit.publish_thread_view:
                 try:
                     rotation = rotate_committed_transcript(self.storage, updated, compact_root=compact_root)

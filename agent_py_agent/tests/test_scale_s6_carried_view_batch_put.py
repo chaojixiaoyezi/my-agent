@@ -1,4 +1,4 @@
-"""批量构建 carried HAMT 保持原根字节、重复项语义及近期窗口，并减少实际节点文件。"""
+"""批量构建 carried HAMT 保持原根字节、重复项语义及近期窗口，并减少实际存储节点。"""
 from __future__ import annotations
 
 import json
@@ -61,7 +61,14 @@ def _seed_view(index, count):
 
 
 def _node_files(index):
-    return {path.name for path in index.root.joinpath(*index.parts).glob('*.json')}
+    from agent_py_agent.agent.conversation.immutable_node_store import ImmutableNodeStore
+
+    names = {path.name for path in index.root.joinpath(*index.parts).glob('*.json')}
+    store = ImmutableNodeStore(index.root, index.parts)
+    if store.exists():
+        with store.connection() as conn:
+            names.update(row[0] for row in conn.execute('SELECT name FROM nodes WHERE raw IS NOT NULL'))
+    return names
 
 
 def _reachable_nodes(index, carried):

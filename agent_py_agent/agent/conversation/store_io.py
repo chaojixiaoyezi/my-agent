@@ -321,8 +321,9 @@ class ImmutableIndexNodeMissing(FileNotFoundError):
 class ImmutableJsonIndex:
     # LLM: 固定根和命名空间由领域代码提供，不能把任意输入路径解释成授权。
     # 函数用途: 绑定不可变节点的所有者目录。
-    def __init__(self, root: Path, parts: tuple[str, ...], *, ordered: bool = False):
+    def __init__(self, root: Path, parts: tuple[str, ...], *, ordered: bool = False, durable_nodes: bool = False):
         self.root, self.parts, self.ordered = root, parts, ordered
+        self.durable_nodes = durable_nodes
 
     # LLM: SHA256路由固定64层，每叶最多8个键；有序索引的键必须已是64位十六进制字串。
     # 函数用途: 生成固定宽度路由，避免索引深度随历史代次无界增长。
@@ -356,7 +357,11 @@ class ImmutableJsonIndex:
         if (type(digest) is not str or len(digest) != 64 or any(ch not in '0123456789abcdef' for ch in digest)
                 or type(size) is not int or not 0 < size <= 1024 * 1024 or ref['ref'] != f'{digest}.json'):
             raise OSError('immutable index reference is invalid')
-        raw = read_bytes_beneath(self.root, (*self.parts, ref['ref']), max_bytes=size)
+        from .immutable_node_store import ImmutableNodeStore
+
+        raw = ImmutableNodeStore(self.root, self.parts).read(ref['ref'])
+        if raw is None:
+            raw = read_bytes_beneath(self.root, (*self.parts, ref['ref']), max_bytes=size)
         if raw is None:
             raise ImmutableIndexNodeMissing('immutable index node is missing')
         if len(raw) != size or hashlib.sha256(raw).hexdigest() != digest:
@@ -384,14 +389,19 @@ class ImmutableJsonIndex:
             raise ValueError('immutable index node exceeds byte budget')
         digest = hashlib.sha256(raw).hexdigest()
         parts = (*self.parts, f'{digest}.json')
-        previous = read_bytes_beneath(self.root, parts, max_bytes=len(raw))
-        if previous is not None and previous != raw:
-            raise OSError('immutable index node digest mismatches')
-        if previous is None:
-            self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-            write_bytes_atomic_beneath(self.root, parts, raw)
+        if self.durable_nodes:
+            from .immutable_node_store import ImmutableNodeStore, node_children
+
+            ImmutableNodeStore(self.root, self.parts).save(parts[-1], raw, node_children(raw))
         else:
-            _touch_node(self.root, parts, raw)
+            previous = read_bytes_beneath(self.root, parts, max_bytes=len(raw))
+            if previous is not None and previous != raw:
+                raise OSError('immutable index node digest mismatches')
+            if previous is None:
+                self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+                write_bytes_atomic_beneath(self.root, parts, raw)
+            else:
+                _touch_node(self.root, parts, raw)
         values = node.get('entries', {}).values() if 'entries' in node else (
             child.get('maximum') for child in node['children'].values()
         )

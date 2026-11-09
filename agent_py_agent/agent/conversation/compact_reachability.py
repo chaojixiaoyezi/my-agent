@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -214,6 +215,27 @@ def _sweep_spaces(work, root, tid, marks, *, preview):
 # LLM: 锁出生前必须既有完整根又有到期叶；锁内重收根，不能用无锁观察授权删除。
 # 函数用途: 无变更零写门，有变更才在原账本锁下清扫活线程。
 def _live_thread(work, root, tid, thread):
+    from .compact_index_lifecycle import maintain_index_store
+    from .immutable_node_store import ImmutableNodeStore
+
+    stores = [ImmutableNodeStore(root, ('evidence', tid, name)) for name in ('indexes', 'timeline')]
+    indexed = any(store.exists() for store in stores)
+    if not indexed and thread.compact_checkpoint_id:
+        from .compact_checkpoint import load_latest_committed_compact_checkpoint
+
+        head = load_latest_committed_compact_checkpoint(SimpleNamespace(home_paths=work.request.home), thread)
+        indexed = head is not None and 'carried_view' in head
+    if indexed:
+        from .compact_index_lifecycle import index_store_due
+
+        if not index_store_due(work, root, thread, stores):
+            return True
+        ledger = root / 'conversations' / (tid + '.jsonl')
+        with locked_json_path(ledger, blocking=False, birth_commit=work.request.run_write):
+            current = _thread_record(work, tid)
+            if current is None:
+                raise OSError('thread record disappeared')
+            return maintain_index_store(work, root, current)
     marks = _collect_roots(work, root, thread)
     stage = _sweep_spaces(work, root, tid, marks, preview=True)
     if stage != "ready":
@@ -384,10 +406,15 @@ def _retired_tree_entries(path, depth=0):
                 child = path / name
                 if stat.S_ISDIR(info.st_mode):
                     yield from _retired_tree_entries(child, depth + 1)
-                elif _regular(info) and not name.endswith(".lock"):
-                    yield child, info, False
+                elif _regular(info):
+                    if not name.endswith('.lock'):
+                        yield child, info, False
                 else:
                     raise OSError("untrusted retired compact leaf")
+        # generation 锁锚永不换 inode；仅剩锁锚的目录也必须保留。
+        with _Directory(path) as remaining:
+            if any(remaining.names()):
+                return
         with _Directory(path.parent) as parent:
             yield path, parent.stamp(path.name), True
     except FileNotFoundError:
@@ -423,7 +450,14 @@ def _delete_retired_entry(work, row, path, initial, directory, proof):
         else:
             if not _regular(current):
                 return False
-            parent.unlink(path.name)
+            if path.name.startswith('.nodes.sqlite3') and not path.name.endswith('.lock'):
+                from ..runtime_db.recovery_guard import runtime_db_generation_guard
+
+                database = path.with_name('.nodes.sqlite3')
+                with runtime_db_generation_guard(database, exclusive=True):
+                    parent.unlink(path.name)
+            else:
+                parent.unlink(path.name)
         work.deleted += 1
         work.freed += 0 if directory else current.st_size
     return True
@@ -634,7 +668,7 @@ def maintain_compact_reachability_lane(request: StorageLaneRequest) -> dict:
                         return work.receipt(cursor, False, "budget_exhausted")
                     work.sweep_state = None
                     work.skip("mark_budget_exceeded")
-                except (OSError, ValueError, KeyError, TypeError):
+                except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
                     work.error("compact_reachability_incomplete", "conversations/" + name)
                     incomplete = True
                 if work.items == before:
@@ -653,6 +687,6 @@ def maintain_compact_reachability_lane(request: StorageLaneRequest) -> dict:
         return work.receipt(cursor, False, "budget_exhausted")
     except FileNotFoundError:
         return work.receipt(cursor, True)
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
         work.error("compact_reachability_incomplete", "compact")
         return work.receipt(cursor, False, "reachability_incomplete")

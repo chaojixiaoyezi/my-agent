@@ -72,6 +72,7 @@ def _commit_transcript(case, *, scope, summary, content, publish, base=None):
             publish_thread_view=publish,
         ),
         expected_generation=thread.compact_generation, now=case.clock[0],
+        compact_root=case.root / "compact",
     )
     return updated, row, checkpoint_id
 
