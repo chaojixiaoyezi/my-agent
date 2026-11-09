@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ..common.nofollow_fs import open_directory_beneath
 from ..io.sqlite_probe import require_plain_sqlite_files, sqlite_readonly_probe_uri
+from ..runtime_db.current_obligations import closed_task_ids
 from ..runtime_db.operations import AGENT_RUN_TERMINAL_STATUSES
 from ..runtime_db.schema import runtime_db_path
 
@@ -86,22 +87,9 @@ def retirement_candidates(target, prefix_len, latest, *, now, after=(), limit=12
                 task_ids = list({row.get('task_id') for _, row in entries} - {None, ''})
                 if not task_ids:
                     continue
-                marks = ','.join('?' for _ in task_ids)
-                runs = conn.execute(f'SELECT task_id,status FROM task_runs WHERE task_id IN ({marks})', task_ids).fetchall()
-                states = defaultdict(list)
-                for task, status in runs:
-                    states[task].append(status)
-                agents = conn.execute(f'SELECT t.task_id,a.status FROM task_runs t JOIN agent_runs a ON a.task_run_id=t.task_run_id WHERE t.task_id IN ({marks})', task_ids).fetchall()
-                for task, status in agents:
-                    states[task].append(status)
-                # 所有同task运行必须已结，无任何待唤醒；不根据投影status替canonical作判断。
-                debts = set()
-                if conn.execute("SELECT 1 FROM sqlite_master WHERE name='wake_queue'").fetchone():
-                    debts = {row[0] for row in conn.execute(f"SELECT root_task_id FROM wake_queue WHERE root_task_id IN ({marks}) "
-                        "AND status NOT IN ('consumed','cancelled','done')", task_ids)}
+                closed = closed_task_ids(conn, task_ids)
                 for index, row in entries:
-                    task = row.get('task_id')
-                    if states[task] and all(status in AGENT_RUN_TERMINAL_STATUSES for status in states[task]) and task not in debts:
+                    if row.get('task_id') in closed:
                         retired[index] = row
         except (OSError, ValueError, TypeError, sqlite3.Error):
             continue

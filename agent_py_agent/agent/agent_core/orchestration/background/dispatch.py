@@ -338,6 +338,8 @@ def _spawn_background_dispatch_process(agent, request: _BackgroundDispatchReques
             start_new_session=True,
             env=child_env,
         )
+        info = os.fstat(log_handle.fileno())
+        process._my_agent_background_log_identity = (info.st_dev, info.st_ino)
         log_handle.close()
         return process
     except Exception:
@@ -374,10 +376,15 @@ def _start_background_process_reaper(
     """
     if not callable(getattr(process, "wait", None)):
         return
+    attempts = getattr(getattr(request, 'params', None), 'expected_attempt_ids', None)
+    run_ids = getattr(request, 'run_ids', ())
+    run_attempts = (tuple((run_id, attempts[run_id]) for run_id in run_ids)
+                    if isinstance(attempts, dict) and set(attempts) == set(run_ids) else None)
     thread = threading.Thread(
         target=Context().run,
         name=f"my-agent-reap-{request.launch_id}",
-        args=(_reap_then_settle_unactivated_exit, agent, request, process),
+        args=(_reap_then_settle_unactivated_exit, agent, request, process,
+              run_attempts),
         daemon=True,
     )
     thread.start()
@@ -387,9 +394,24 @@ def _start_background_process_reaper(
 #   与"启动期即退"同一结论，沿原launch/attempt条件写启动失败与通道失败，孤儿巡查不再每拍重派同一个必崩启动。
 #   已激活的轮次由runner自己收口，这里不碰；轮次读不到（库不可读/无运行库）按未知保守跳过。
 # 函数用途: 回收后台派工子进程，并把"未进入runner就退出"收敛为持久启动失败。
-def _reap_then_settle_unactivated_exit(agent, request: _BackgroundDispatchRequest, process: subprocess.Popen) -> None:
+def _reap_then_settle_unactivated_exit(agent, request: _BackgroundDispatchRequest, process: subprocess.Popen,
+                                     run_attempts=None) -> None:
     _reap_background_process(agent, request.launch_id, process)
     returncode = getattr(process, "returncode", None)
+    identity = getattr(process, '_my_agent_background_log_identity', None)
+    if type(returncode) is int and run_attempts and isinstance(identity, tuple) and len(identity) == 2:
+        from ....user_space.runtime_paths import runtime_owner_root
+        from .log_retention import record_dispatch_log_exit, retire_dispatch_logs_slice
+
+        try:
+            record_dispatch_log_exit(_background_log_path(agent, request.launch_id), returncode=returncode,
+                run_ids=[run_id for run_id, _attempt in run_attempts] if run_attempts else [],
+                attempt_ids=dict(run_attempts) if run_attempts else None,
+                expected_identity=identity,
+                owner_home=runtime_owner_root(agent))
+            retire_dispatch_logs_slice(Path(_background_log_path(agent, request.launch_id)).parent)
+        except (OSError, ValueError, TypeError):
+            pass  # 留存失败保持未知日志；不影响原进程回收及任务收口。
     getter = getattr(getattr(getattr(agent, "subagents", None), "runtime_db", None), "get_attempt", None)
     if type(returncode) is not int or returncode == 0 or not callable(getter):
         return
@@ -414,17 +436,6 @@ def _reap_background_process(agent, launch_id: str, process: subprocess.Popen) -
         returncode = None
         error = f"{type(exc).__name__}: {exc}"
     registry = getattr(agent, "_background_subagent_dispatches", None)
-    if returncode is not None:
-        from ....user_space.runtime_paths import runtime_owner_root
-        from .log_retention import record_dispatch_log_exit, retire_dispatch_logs_slice
-
-        try:
-            record_dispatch_log_exit(_background_log_path(agent, launch_id), returncode=returncode,
-                run_ids=(registry.get(launch_id) or {}).get('run_ids', []) if isinstance(registry, dict) else [],
-                owner_home=runtime_owner_root(agent))
-            retire_dispatch_logs_slice(Path(_background_log_path(agent, launch_id)).parent)
-        except (OSError, ValueError, TypeError):
-            pass  # 留存失败保持未知日志；不影响原进程回收及任务收口。
     if not isinstance(registry, dict):
         return
     item = dict(registry.get(launch_id) or {})

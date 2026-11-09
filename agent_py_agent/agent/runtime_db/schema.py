@@ -34,6 +34,7 @@ from ..contracts.optimization_contracts import require_schema_generation
 from ..io.sqlite_connection import TrackedSQLiteConnection, sqlite_error_details
 from ..io.sqlite_schema import schema_fingerprint, schema_is_current, stamp_schema
 from ..io.sqlite_scope import scoped_guarded_connection, sqlite_connection_factory
+from .current_obligations import CURRENT_OBLIGATION_INDEX_SQL
 from .maintenance import execute_runtime_statement
 from .recovery_guard import (
     RuntimeDatabaseDeferred,
@@ -515,6 +516,7 @@ _RUNTIME_MIGRATION_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_resource_locks_attempt ON resource_locks(attempt_id)",
     "CREATE INDEX IF NOT EXISTS idx_runtime_events_task_run ON runtime_events(task_run_id, seq)",
     "CREATE INDEX IF NOT EXISTS idx_resource_mutations_state ON resource_mutations(state)",
+    *CURRENT_OBLIGATION_INDEX_SQL,
 )
 
 
