@@ -653,6 +653,7 @@ def _delegated_work_facts(agent: object, params: ToolLoopExecuteParams) -> dict[
     if not task_id:
         return {}
     try:
+        from ...subagents.manager import SubAgentManager
         from ...subagents.models import normalize_task_status
 
         run_ids = {
@@ -660,14 +661,23 @@ def _delegated_work_facts(agent: object, params: ToolLoopExecuteParams) -> dict[
         }
         # 请求索引已给出精确 id；每轮收口只回读这些 run，不扫描全部历史。
         by_ids = getattr(agent.subagents, "list_runs_by_ids_report", None)
-        report = by_ids(sorted(run_ids)) if callable(by_ids) else None
-        if report is not None and report.load_errors:
-            return {}
-        runs = [
-            run
-            for run in (report.runs if callable(by_ids) else agent.subagents.list_runs())
-            if str(getattr(run, "id", "") or "") in run_ids
-        ]
+        if callable(by_ids):
+            report = by_ids(sorted(run_ids))
+            if report is None:
+                return {}
+            runs = [
+                run
+                for run in report.runs
+                if str(getattr(run, "id", "") or "") in run_ids
+            ]
+            load_errors = list(getattr(report, "load_errors", ()) or ())
+        else:
+            runs = [
+                run
+                for run in agent.subagents.list_runs()
+                if str(getattr(run, "id", "") or "") in run_ids
+            ]
+            load_errors = []
     except Exception:
         return {}
     if not runs:
@@ -685,6 +695,7 @@ def _delegated_work_facts(agent: object, params: ToolLoopExecuteParams) -> dict[
         "total": len(runs),
         "status_counts": dict(sorted(status_counts.items())),
         "topology": _delegated_work_topology(task_id, runs),
+        **({"coverage": "partial", "total_is_minimum": True, "load_errors": load_errors} if load_errors else {}),
     }
 
 

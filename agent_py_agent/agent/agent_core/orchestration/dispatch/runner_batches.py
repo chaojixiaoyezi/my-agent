@@ -2,6 +2,8 @@
 # 模块用途: 组织子代理批次，固定执行身份；过期坏账候选不得入队或取得启动权。
 from __future__ import annotations
 
+from dataclasses import replace
+
 """Runner candidate collection and batch execution for dispatch mixins."""
 
 from ....subagents.services.lifecycle_runner_attempts import RunnerRecoveryHistoryUnknownError
@@ -30,6 +32,7 @@ from .collaboration_candidates import (
 from .conversation_lifecycle_gate import conversation_lifecycle_decisions
 from .limiter import limit_runner_jobs
 from .params import DispatchContext, DispatchParams, RunnerBatchContext
+from .refs import dispatch_scope_tasks
 from .runner_candidates import (
     _is_explicit_recovery_dispatch,
     _runner_candidates_for_context,
@@ -83,7 +86,7 @@ def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) 
 
     records = list(batch.records)
     runner_retry_limit = runner_failure_retry_limit(agent.config)
-    all_tasks = agent.subagents.list_runs()
+    all_tasks = dispatch_scope_tasks(agent, ctx)
     active_run_ids = remembered_orchestration_run_ids(agent)
     scoped_tasks = scoped_current_turn_runner_tasks(
         scoped_runner_tasks(all_tasks, ctx),
@@ -92,6 +95,9 @@ def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) 
     )
     selection_record = invalid_include_run_ids_record(agent, ctx, all_tasks, scoped_tasks)
     if selection_record is not None:
+        # 只有无效 include 才补当前 scope 名册，保留原排除和后缀诊断，不读其它请求历史。
+        visible = dispatch_scope_tasks(agent, replace(ctx, include_run_ids=None))
+        selection_record = invalid_include_run_ids_record(agent, ctx, visible, scoped_tasks)
         records.append(selection_record)
         return records
     runner_candidates = _runner_candidates_for_context(

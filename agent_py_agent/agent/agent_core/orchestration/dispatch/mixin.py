@@ -300,11 +300,11 @@ class _DispatchCollectionBase:
 
 class _DispatchReportMixin:
 
-    def _build_and_write_report(self, records, execution_plan: DispatchExecutionPlan):
+    def _build_and_write_report(self, records, execution_plan: DispatchExecutionPlan, *, ctx=None):
         mutate_state = bool(execution_plan.mutate_state)
         report = self.subagents.dispatch.build_dispatch_report(records, dry_run=not mutate_state)
         report = self.subagents.dispatch.write_dispatch_report(report, append_log=mutate_state)
-        self._has_pending_work = update_pending_work_state(self)
+        self._has_pending_work = update_pending_work_state(self, ctx=ctx)
         return report
 
 
@@ -372,7 +372,7 @@ def _run_dispatch_from_params(
     records = run_post_runner_capability_followup(agent, (ctx, params, records))
     ctx.records = records
     records = agent._finalize_dispatch(params, records)
-    return agent._build_and_write_report(records, params.execution_plan)
+    return agent._build_and_write_report(records, params.execution_plan, ctx=ctx)
 
 
 def _dispatch_params_from_call(
@@ -495,7 +495,9 @@ def _finalize_scoped_tasks(agent, params: DispatchParams) -> list:
         router=router,
         execution_plan=params.execution_plan,
     )
-    return scoped_runner_tasks(agent.subagents.list_runs(), ctx)
+    from .refs import dispatch_scope_tasks
+
+    return scoped_runner_tasks(dispatch_scope_tasks(agent, ctx), ctx)
 
 
 def _planner_dispatch_overrides(params: DispatchParams, records):

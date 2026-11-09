@@ -98,6 +98,7 @@ def build_parent_planner_state(
 
 
 def _collect_parent_planner_context(agent: SimpleAgent, params: PlannerStateParams) -> tuple[Any, PlannerInputContext]:
+    from .orchestration.dispatch.refs import candidate_ids_kwargs, dispatch_scope_tasks
     from .runner.dispatch import (
         RunnerCandidatePolicy,
         _dispatch_patch_review_run_ids,
@@ -105,11 +106,15 @@ def _collect_parent_planner_context(agent: SimpleAgent, params: PlannerStatePara
         _limit_items,
     )
 
-    tasks = agent.subagents.list_runs()
+    tasks = dispatch_scope_tasks(agent)
+    candidate_ids = [task.id for task in tasks]
     board_limit = params.limit if params.limit > 0 else len(tasks)
-    board = agent.subagents.board.build_board(options=SubAgentBoardOptions(recent_limit=board_limit))
-    due_report = agent.subagents.board.due_check(params=SubAgentDueCheckOptions(config=params.cfg))
-    action_plan = agent.subagents.board.plan_actions(params.cfg)
+    board = agent.subagents.board.build_board(options=SubAgentBoardOptions(recent_limit=board_limit),
+        **candidate_ids_kwargs(agent.subagents.board.build_board, candidate_ids))
+    due_report = agent.subagents.board.due_check(params=SubAgentDueCheckOptions(config=params.cfg),
+        **candidate_ids_kwargs(agent.subagents.board.due_check, candidate_ids))
+    action_plan = agent.subagents.board.plan_actions(params.cfg,
+        **candidate_ids_kwargs(agent.subagents.board.plan_actions, candidate_ids))
     frozen_policy = getattr(agent, "runtime_guard_policy", None) or getattr(
         getattr(agent, "config", None), "runtime_guard_policy", None
     )
