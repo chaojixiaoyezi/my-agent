@@ -45,6 +45,13 @@ jobs:
           agent_py_agent/tests/test_process_control.py
           agent_py_agent/tests/test_binary_snapshot_identity.py
           agent_py_agent/tests/test_r8_windows_hot_slice.py
+          agent_py_agent/tests/test_r8_windows_tail_clocks.py
+          agent_py_agent/tests/test_r8_observation_portable_tail.py
+          agent_py_agent/tests/test_v15_rework_r3_delivery_recovery.py::test_portable_source_uses_fd_clock_and_binary_bytes
+          agent_py_agent/tests/test_v15_rework_r3_delivery_recovery.py::test_old_five_field_checkpoint_resumes_byte_exact_portable_source
+          agent_py_agent/tests/test_v15_rework_r3_delivery_recovery.py::test_native_generation_unknown_or_changed_never_advances_checkpoint
+          agent_py_agent/tests/test_v15_rework_r3_delivery_recovery.py::test_cutover_closes_source_readers_before_replace_and_recovers_published_fence
+          agent_py_agent/tests/test_v15_rework_r3_delivery_recovery.py::test_cutover_rechecks_changed_source_after_closing_initial_reader
           agent_py_agent/tests/test_curator_message_slices.py::test_large_hot_target_then_small_message_resumes_after_suffix_anchor
           agent_py_agent/tests/test_curator_message_slices.py::test_duplicate_id_keeps_first_match_and_prefix_blank_error
           agent_py_agent/tests/test_curator_message_slices.py::test_exact_metadata_byte_budget_defers_once_then_serves_big_and_small
