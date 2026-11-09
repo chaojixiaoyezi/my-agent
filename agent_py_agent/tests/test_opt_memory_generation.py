@@ -984,7 +984,7 @@ def _r2_quota_remove_worker(root, recovery):
         prepare_committed_remove,
         recover_prepared_remove,
     )
-    from agent_py_agent.agent.user_space.owner_quota import OwnerQuotaEnforcer
+    from agent_py_agent.agent.user_space.owner_quota import reconcile_owner_quota_slice
     from agent_py_agent.tests.memory_confirmation_fixtures import ConfirmedRememberWorkflow
     from agent_py_agent.tests.test_remember_learning_source_review import _agent
 
@@ -996,11 +996,22 @@ def _r2_quota_remove_worker(root, recovery):
     agent.memory.migrate_tiers()
     store = MemoryGenerationStore(agent.memory.path)
     before = store.manifest()
-    agent.memory.quota_enforcer = OwnerQuotaEnforcer(agent.memory.path.parents[2], max_bytes=1048576)
+    # 同 owner 的候选/正式记忆复用原配额对象，不能只替换正式库而让候选仍沿无限配额写入。
+    quota = agent.owner_quota
+    assert agent.memory.quota_enforcer is quota and agent.memory_candidates.quota_enforcer is quota
+    # 完整宿主schema已接近1MiB；本例守锁序/恢复，有限额度须容纳真实根与屏障的共存峰值。
+    quota.max_bytes = 4 * 1048576
     params = agent._current_run_params
     params.request_id, params.run_id = "req-r2-remove", "run-r2-remove"
     agent.conversation_store.messages.append(dict(thread_id=params.task_attributes["conversation_thread_id"],
         role="user", content="删除项目保存时间规则", metadata={"gateway_request_id": params.request_id}))
+    # 本例验证正配额下删除与恢复锁序；真实分片补齐旧库存基线，不能借缺账零计数授权临时增长。
+    for _ in range(64):
+        report = reconcile_owner_quota_slice(agent.memory.quota_enforcer.owner_root, max_entries=128, max_ms=1000)
+        if report['complete']:
+            break
+    else:
+        raise AssertionError('quota baseline reconciliation did not complete')
     writer = jsonl.write_private_text_file_atomic_unlocked
 
     # LLM: 不伪造墓碑或候选；失败前其它正式字节均由生产writer提交。

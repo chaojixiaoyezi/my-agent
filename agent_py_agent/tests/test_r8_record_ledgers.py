@@ -218,3 +218,80 @@ def test_cold_curator_empty_current_ledger_is_not_due_and_corrupt_is_unknown(tmp
     assert _cold_curator_activity(tmp_path) == 'not_due'
     path.write_text('{"candidate_ledger":"memory-candidates-v2","count":-1,"root":null,"cleanup":[]}')
     assert _cold_curator_activity(tmp_path) == 'unknown'
+
+
+def test_candidate_node_cleanup_preserves_real_quota_baseline(tmp_path):
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    service = memory.CandidateService(tmp_path / 'memory/candidates.jsonl')
+    target = service.observe(_user_observation())
+    for number in range(160):
+        (tmp_path / f'payload-{number}').write_bytes(b'x')
+    for _ in range(16):
+        result = quota.reconcile_owner_quota_slice(tmp_path, max_entries=128, max_ms=1000)
+        if result['complete']:
+            break
+    assert result['complete'] and quota._read_quota_ledger(tmp_path)['usage_authoritative'] is True
+    service.quota_enforcer = quota.OwnerQuotaEnforcer(tmp_path, max_bytes=1024 * 1024)
+    service.transition(target.candidate_id, 'approved', reviewer='quota-test')
+    ledger = quota._read_quota_ledger(tmp_path)
+    assert ledger['dirty_since'] is None and ledger['usage_authoritative'] is True
+    assert ledger['used_bytes'] == quota.owner_logical_usage_bytes(tmp_path, exact=True)
+
+
+def test_candidate_quota_does_not_precredit_obsolete_node_deletion(tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    body = 'x' * 2000
+    service = memory.CandidateService(tmp_path / 'memory/candidates.jsonl')
+    target = service.observe(replace(_user_observation(), content=body))
+    before = {path: path.read_bytes() for path in (tmp_path / 'memory').rglob('*') if path.is_file()}
+    from agent_py_agent.agent.memory_store.candidate_ledger import manifest_text, seal_cleanup
+    with service._locked_candidates():
+        rows = service._load_unlocked()
+        rows[0] = memory._transition_candidate(target, 'approved', reviewer='quota-test')
+        root, writes, obsolete = rows.plan()
+    family = service.path.with_name(service.path.name + '.records')
+    reclaimed = sum((family / name).stat().st_size for name in obsolete if (family / name).exists())
+    cleanup = seal_cleanup(writes, obsolete)
+    header = manifest_text(root, len(rows), cleanup).encode()
+    peak_growth = len(header) - service.path.stat().st_size + sum(
+        len(raw) - ((family / name).stat().st_size if (family / name).exists() else 0)
+        for name, raw in writes.items())
+    # 若把未来删除收益混入首次准入，这个不足以容纳新旧正文共存的配额反而会放行。
+    available = (max(0, peak_growth - reclaimed) + peak_growth) // 2
+    assert peak_growth - reclaimed < available < peak_growth
+    used = quota.owner_logical_usage_bytes(tmp_path, exact=True)
+    service.quota_enforcer = quota.OwnerQuotaEnforcer(tmp_path, max_bytes=used + available,
+        config=SimpleNamespace(owner_quota_permanent_headroom_percent=0))
+    with pytest.raises(quota.OwnerQuotaExceeded):
+        service.transition(target.candidate_id, 'approved', reviewer='quota-test')
+    assert {path: path.read_bytes() for path in (tmp_path / 'memory').rglob('*') if path.is_file()} == before
+    assert service.get(target.candidate_id) == target
+
+
+def test_pending_condense_control_update_keeps_payload_quota_baseline(tmp_path):
+    from agent_py_agent.agent.memory_store.promotion import _write_condense_marker
+    from agent_py_agent.agent.user_space import owner_quota as quota
+
+    marker = tmp_path / 'memory/curator/pending_condense.json'
+    payload = {'schema': 'memory.pending_condense.v1', 'formal': 'long_term/memory.jsonl',
+               'pending': False, 'generation': 'a' * 32, 'through': None}
+    _write_condense_marker(marker, payload, False)
+    for number in range(160):
+        (tmp_path / f'payload-{number}').write_bytes(b'x')
+    for _ in range(16):
+        report = quota.reconcile_owner_quota_slice(tmp_path, max_entries=128, max_ms=1000)
+        if report['complete']:
+            break
+    assert report['complete'] and quota._read_quota_ledger(tmp_path)['usage_authoritative'] is True
+    _write_condense_marker(marker, {**payload, 'pending': True, 'generation': 'b' * 32}, False)
+    target = tmp_path / 'memory/allowed.md'
+    with quota.OwnerQuotaEnforcer(tmp_path, max_bytes=1024 * 1024).reserve([quota.OwnerQuotaChange(target, 1)]):
+        target.write_bytes(b'x')
+    ledger = quota._read_quota_ledger(tmp_path)
+    assert ledger['usage_authoritative'] is True and ledger['dirty_since'] is None
+    # marker仍计费，只排除固定宿主控制写对辅助目录摘要的影响。
+    assert quota.owner_logical_usage_bytes(tmp_path, exact=True) >= marker.stat().st_size + 161

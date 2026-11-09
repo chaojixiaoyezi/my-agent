@@ -187,8 +187,12 @@ def test_quota_hardlinked_growth_does_not_underreserve(tmp_path, monkeypatch):
 
 
 # LLM: 多owner缓存必须有界且按LRU关闭淘汰迭代器；两个owner不能相互淘汰。
-# 函数用途: 验证第十七个owner到来后最早扫描栈被关闭。
-def test_quota_scan_cache_evicts_and_closes_previous_stack(tmp_path):
+# 函数用途: 验证配置容量加一个owner到来后最早扫描栈被关闭。
+@pytest.mark.parametrize("capacity", [16, 24])
+def test_quota_scan_cache_evicts_and_closes_previous_stack(tmp_path, monkeypatch, capacity):
+    # 隔离原容量配置而非替换扫描器；验证默认下限与并发owner扩容都按真实LRU关闭。
+    monkeypatch.setattr(quota.cache_capacity, "_SLOTS", dict(quota.cache_capacity._SLOTS))
+    quota.cache_capacity.configure_from_config(SimpleNamespace(gateway_owner_inflight_limit=capacity))
     for value in quota._QUOTA_SCANS.values():
         value['iterator'].close()
     quota._QUOTA_SCANS.clear()
@@ -200,12 +204,12 @@ def test_quota_scan_cache_evicts_and_closes_previous_stack(tmp_path):
     old = next(value['iterator'] for key, value in quota._QUOTA_SCANS.items() if key[1] == str(first))
     _reconcile(second, max_entries=1, max_ms=1000)
     assert old.gi_frame is not None
-    for index in range(15):
+    for index in range(capacity - 1):
         root = tmp_path / f'extra-{index}'
         root.mkdir()
         (root / 'data').write_bytes(b'x')
         _reconcile(root, max_entries=1, max_ms=1000)
-    assert len(quota._QUOTA_SCANS) == 16
+    assert len(quota._QUOTA_SCANS) == capacity
     assert old.gi_frame is None
 
 

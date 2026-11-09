@@ -70,7 +70,8 @@ _QUOTA_RUNTIME_FILES = frozenset(('cache', 'owner_read_index.sqlite3' + suffix) 
 # 宿主在准入外维护的owner状态文件（运行库及SQLite伴随文件、审计日志、维护状态）：照常计费，但不进目录摘要，
 #   宿主自己的写入不被前台核验当成准入外篡改；准入外的字节变化由后台对账计入。
 _QUOTA_HOST_FILES = frozenset({*(('runtime.db' + suffix,) for suffix in ('', '-wal', '-shm', '-journal')),
-                               ('audit_log.jsonl',), ('data', 'maintenance.json')})
+                               ('audit_log.jsonl',), ('data', 'maintenance.json'),
+                               ('memory', 'curator', 'pending_condense.json')})
 # 宿主在准入外维护的整棵owner子树（对话压缩归档）：同样照常计费、不进目录摘要。
 _QUOTA_HOST_TREES = frozenset({'compact'})
 _QUOTA_SCANS: OrderedDict = OrderedDict()

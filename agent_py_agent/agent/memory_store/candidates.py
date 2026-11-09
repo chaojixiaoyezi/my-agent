@@ -649,7 +649,7 @@ class CandidateService:
         with candidate_redaction_lock(self.path, **({} if not self.coordinator_io else {"coordinator_io": True})):
             header = read_manifest(self.path)
             if header is not None:
-                _finish_candidate_cleanup(self.path, header, coordinator_io=self.coordinator_io)
+                _finish_candidate_cleanup(self.path, header, coordinator_io=self.coordinator_io, admissions=(admission,))
             candidates = self._load_unlocked()
             replacements = [
                 _redacted_candidate(item, hashes=hashes, excluded=excluded,
@@ -1997,7 +1997,7 @@ def _candidate_node_family(index, root):
                     yield value['record']['ref']
 
 
-def _finish_candidate_cleanup(path, manifest, *, coordinator_io):
+def _finish_candidate_cleanup(path, manifest, *, coordinator_io, admissions=()):
     """完成已发表当前态的旧正文删除义务；失败保留头中义务供原锁下重试。"""
     from ..common.nofollow_fs import unlink_file_beneath
     cleanup = manifest.get('cleanup', ())
@@ -2020,6 +2020,14 @@ def _finish_candidate_cleanup(path, manifest, *, coordinator_io):
     for name in cleanup:
         if (type(name) is not str or '/' in name or '\\' in name or name.startswith('.')):
             raise CandidateStoreCorruptError('candidate cleanup reference is invalid')
+    # 旧节点直到新头发表后才回收：按零追加登记原大小，不能在峰值准入前预支删除收益。
+    tracked = [path.parent / (path.name + '.records') / name for name in cleanup]
+    if cleanup_parts is not None:
+        tracked.append(path.parent.joinpath(*cleanup_parts))
+    if tracked:
+        for admission in admissions:
+            admission.check([OwnerQuotaChange(target, 0, append=True) for target in tracked])
+    for name in cleanup:
         def operation(name=name):
             return unlink_file_beneath(path.parent, (path.name + '.records', name))
         try:
@@ -2037,7 +2045,7 @@ def _write_incremental_candidates(path, candidates, *, admission, coordinator_io
     original_stamp = _candidate_load_stamp(path)
     previous = read_manifest(path)
     if previous is not None:
-        _finish_candidate_cleanup(path, previous, coordinator_io=coordinator_io)
+        _finish_candidate_cleanup(path, previous, coordinator_io=coordinator_io, admissions=(admission,))
     if isinstance(candidates, CandidateRows):
         rows = candidates
         redacted = [row for _, row, _ in rows.changed() if row.content_redacted_at and not row._raw_json_line]
@@ -2089,14 +2097,14 @@ def _write_incremental_candidates(path, candidates, *, admission, coordinator_io
             write_private_text_file_atomic_unlocked(path, text, **({'replace_once': True} if coordinator_io else {}))
         _coordinator_candidate_write(publish) if coordinator_io else publish()
         _publish_written_candidates(path, text, [])
-        _finish_candidate_cleanup(path, {'cleanup': cleanup}, coordinator_io=coordinator_io)
+        _finish_candidate_cleanup(path, {'cleanup': cleanup}, coordinator_io=coordinator_io, admissions=(admission,))
         # 头的cleanup只包含已幂等完成的相对名字；保留它无需第二次权威写入。
     except BaseException:
         _drop_candidate_load_cache(path)
         # 原头身份未变才证明本次没有发表；已发表或结果未知时保留新根及恢复义务。
         if _candidate_load_stamp(path) == original_stamp:
             try:
-                _finish_candidate_cleanup(path, {'cleanup': created}, coordinator_io=coordinator_io)
+                _finish_candidate_cleanup(path, {'cleanup': created}, coordinator_io=coordinator_io, admissions=(admission,))
             except BaseException:
                 pass  # 保留最初失败；未发表的孤立节点不具有当前态权威。
         raise

@@ -229,7 +229,8 @@ class CuratorBatchCommitter:
                     raise CuratorBatchCommitError("curator batch commit failed") from exc
                 header = read_manifest(self.candidates.path)
                 if header is not None:
-                    _finish_candidate_cleanup(self.candidates.path, header, coordinator_io=self.candidates.coordinator_io)
+                    _finish_candidate_cleanup(self.candidates.path, header, coordinator_io=self.candidates.coordinator_io,
+                                              admissions=tuple(handle.admission for handle in admissions))
                 _cleanup_committed_best_effort(_transaction_directory(transaction))
             return CuratorBatchCommitResult(tuple(daily_events), tuple(candidates))
 
@@ -240,8 +241,8 @@ class CuratorBatchCommitter:
     def recover_incomplete(self, *, now: datetime | None = None) -> int:
         with gateway_short_transaction("recover_incomplete"):
             plan = _recovery_plan(self, now)
-            with _recovery_section(self, plan):
-                return _recover_locked(self, plan)
+            with _recovery_section(self, plan) as admissions:
+                return _recover_locked(self, plan, admissions)
 
     # LLM: 前台服务使用这个完整接管入口；任一目标锁竞争立即 busy，不等待持锁清理的对端。
     # 函数用途: 在同一临界区恢复旧事务并领取新租约，模型执行在解锁之后。
@@ -251,8 +252,8 @@ class CuratorBatchCommitter:
         with gateway_short_transaction("recover_and_acquire"):
             plan = replace(_recovery_plan(self, request.now), blocking=False)
             try:
-                with _recovery_section(self, plan):
-                    _recover_locked(self, plan)
+                with _recovery_section(self, plan) as admissions:
+                    _recover_locked(self, plan, admissions)
                     return self.state._acquire_unlocked(request)
             except _CuratorRecoveryBusy:
                 return None
@@ -609,8 +610,9 @@ def _recovery_plan(committer: CuratorBatchCommitter, now: datetime | None):
 # 函数用途: 依既有 quota→有序规范文件锁进入接管临界区，并保证失败释放完整锁集合。
 def _enter_recovery_locks(stack: ExitStack, committer: CuratorBatchCommitter, plan: _RecoveryPlan):
     try:
-        stack.enter_context(committer._admissions(blocking=plan.blocking))
+        admissions = stack.enter_context(committer._admissions(blocking=plan.blocking))
         stack.enter_context(_locked_paths(list(plan.paths), blocking=plan.blocking))
+        return tuple(handle.admission for handle in admissions)
     except (BlockingIOError, OwnerQuotaLockContention) as exc:
         raise _CuratorRecoveryBusy("curator recovery locks are busy") from exc
 
@@ -621,8 +623,8 @@ def _enter_recovery_locks(stack: ExitStack, committer: CuratorBatchCommitter, pl
 def _recovery_section(committer: CuratorBatchCommitter, plan: _RecoveryPlan):
     with ExitStack() as stack:
         try:
-            _enter_recovery_locks(stack, committer, plan)
-            yield
+            admissions = _enter_recovery_locks(stack, committer, plan)
+            yield admissions
         except (CuratorStateCorruptError, CuratorCommitRecoveryError):
             raise
         except Exception as exc:
@@ -631,11 +633,11 @@ def _recovery_section(committer: CuratorBatchCommitter, plan: _RecoveryPlan):
 
 # LLM: 发现后若又出现未锁住的事务则退出重试；等待者只处理锁内仍存在且已严格复核的清单。
 # 函数用途: 持完整锁集合后重新枚举权威事务目录并恢复尚未处理的事务。
-def _recover_locked(committer: CuratorBatchCommitter, plan: _RecoveryPlan) -> int:
+def _recover_locked(committer: CuratorBatchCommitter, plan: _RecoveryPlan, admissions=()) -> int:
     directories = _transaction_directories(committer, warn=False)
     if set(directories) - plan.manifests.keys():
         raise _CuratorRecoveryBusy("curator recovery discovery changed")
-    return sum(_recover_directory(committer, directory, plan) for directory in directories)
+    return sum(_recover_directory(committer, directory, plan, admissions) for directory in directories)
 
 
 # LLM: 缺失仅在规范锁内复核后跳过；真实清理失败不吞。换代目标不得绕过发现阶段的锁集合。
@@ -666,7 +668,7 @@ def _recovery_time(committer: CuratorBatchCommitter, plan: _RecoveryPlan) -> str
 
 # LLM: 复核、恢复、清理及审计都必须留在完整临界区；随后锁内领取会再次重读恢复后的 state。
 # 函数用途: 根据当前提交标记和共享死亡判据恢复一个事务，不触碰仍活跃的运行。
-def _recover_directory(committer: CuratorBatchCommitter, directory: Path, plan: _RecoveryPlan) -> int:
+def _recover_directory(committer: CuratorBatchCommitter, directory: Path, plan: _RecoveryPlan, admissions=()) -> int:
     manifest = _read_recovery_manifest(committer, directory, plan)
     if manifest is None:
         return 0
@@ -675,7 +677,8 @@ def _recover_directory(committer: CuratorBatchCommitter, directory: Path, plan: 
     if state.last_committed_run_id == run_id:
         header = read_manifest(committer.candidates.path)
         if header is not None:
-            _finish_candidate_cleanup(committer.candidates.path, header, coordinator_io=committer.candidates.coordinator_io)
+            _finish_candidate_cleanup(committer.candidates.path, header, coordinator_io=committer.candidates.coordinator_io,
+                                      admissions=admissions)
         _cleanup_transaction(directory)
         return 0
     if _same_live_lease(state.active_lease, run_id=run_id, now=plan.current):

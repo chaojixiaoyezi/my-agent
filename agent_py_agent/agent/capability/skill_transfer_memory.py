@@ -114,7 +114,7 @@ class _MemoryImport:
         self.finished = True
         header = read_manifest(self.path)
         if header is not None:
-            _finish_candidate_cleanup(self.path, header, coordinator_io=False)
+            _finish_candidate_cleanup(self.path, header, coordinator_io=False, admissions=(self.admission,))
 
     # LLM: 原锁下恢复准确前像，不会删除其它并发候选；外层state仍保护同一操作。
     # 函数用途: 撤销未提交复刻对原候选文件的修改。
