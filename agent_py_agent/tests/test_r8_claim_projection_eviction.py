@@ -8,7 +8,8 @@ from agent_py_agent.agent.conversation.store import ConversationStore
 
 @pytest.mark.parametrize("portable,count", [(False, 6), (True, 12)])
 def test_six_large_stores_round_robin_converge(tmp_path, monkeypatch, portable, count):
-    monkeypatch.setattr(view, "_NATIVE", not portable)
+    # 只在支持目录FD的平台启用原生cookie；Windows同时覆盖6/12个store的实际后端。
+    monkeypatch.setattr(view, "_NATIVE", view._NATIVE and not portable)
     stores = []
     for number in range(count):
         store = ConversationStore(tmp_path / str(number))
