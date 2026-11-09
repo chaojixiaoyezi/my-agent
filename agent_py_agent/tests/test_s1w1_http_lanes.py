@@ -694,26 +694,49 @@ def test_closed_replay_releases_prefix_even_with_strong_socket_reference():
 
 
 def test_fragmented_header_search_only_revisits_boundary_suffix(server, monkeypatch):
+    from queue import Queue
+    from types import SimpleNamespace
+
     from agent_py_agent.agent.gateway_parts import http_lanes
 
     original = http_lanes.complete_request_length
-    work = []
+    work, progress = [], Queue()
+    epoch, ticks, clock_lock = time.monotonic(), [0], threading.Lock()
+
+    def budget_now():
+        # 资格只证明逐段解析的线性工作量，不要求20次TCP往返挤进TinyServer的0.3s。
+        # 仍是有界单调时钟；原真实截止/迟到header/过载由下方独立用例验证。
+        with clock_lock:
+            ticks[0] += 1
+            return epoch + ticks[0] / 1_000_000
+
+    monkeypatch.setattr(http_lanes, 'time', SimpleNamespace(**{**vars(time), 'monotonic': budget_now}))
 
     def observe(prefix, **options):
         work.append(len(prefix) - options['search_from'])
-        return original(prefix, **options)
+        result = original(prefix, **options)
+        progress.put(len(prefix))
+        return result
+
+    def acknowledged(expected):
+        # 每段仍须真实selector/parser确认；不靠sleep猜处理完成，不让TCP合并吞掉分段覆盖。
+        deadline, received = time.monotonic() + 1, 0
+        while received < expected:
+            received = progress.get(timeout=max(0, deadline - time.monotonic()))
+            assert received <= expected
 
     monkeypatch.setattr(http_lanes, 'complete_request_length', observe)
     head = b'GET /ordinary HTTP/1.1\r\nX-Fixture: '
     with connect(server, head) as client:
-        eventually(lambda: any(len(p) == len(head) for p in server._lanes._prefixes.copy().values()))
+        acknowledged(len(head))
         sent = len(head)
         for _ in range(20):
             client.sendall(b'x' * 100)
             sent += 100
-            eventually(lambda: any(len(p) == sent for p in server._lanes._prefixes.copy().values()))
+            acknowledged(sent)
         client.sendall(b'\r\n\r\n')
-        assert b'200 OK' in response(client)
+        assert b'200 OK' in response(client), (len(work), sum(work), ticks[0])
+    assert len(work) >= 22
     assert sum(work) <= sent + 4 + 3 * len(work)
 
 
