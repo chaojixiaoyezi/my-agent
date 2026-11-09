@@ -583,7 +583,8 @@ gateway_user_inflight_limit: 128
 gateway_global_inflight_limit: 500
 # Gateway同时在途的不同Owner数量上限；0表示跟随owner_agent_pool_max_agents。
 gateway_owner_inflight_limit: 0
-# 是否开启Gateway内存与对象池诊断快照；默认关闭，不自动常驻tracemalloc。
+# 显式诊断：启动时追踪内存分配，SIGUSR1输出位置/计数；默认关闭，更改后需重启Gateway。
+# 追踪和全堆分配快照有额外CPU/内存开销；top条数只限制输出，不限制采集成本，不含对象正文。
 enable_gateway_memory_diagnostics: false
 # 一个请求开始处理之后，超过这个秒数还没结束就认为它卡住了（可以被重新安排）。
 # 正常请求远快于此；如果你有跑很久的合法任务被误判成卡住，可以调大。

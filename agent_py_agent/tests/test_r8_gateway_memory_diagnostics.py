@@ -26,6 +26,50 @@ def _child(tmp_path, source, *, external=False):
     return json.loads(result.stdout)
 
 
+def test_revoke_failure_keeps_stack_port_without_retaining_memory_owner(tmp_path):
+    assert _child(tmp_path, '''
+        import gc,io,json,signal,threading,time,weakref
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from agent_py_agent.cli import gateway_process as gp
+        called=threading.Event()
+        class Reporter:
+            def __call__(self):
+                called.set()
+                return {'completed':True}
+        reporter=Reporter()
+        reference=weakref.ref(reporter)
+        output=io.StringIO()
+        paths=SimpleNamespace(root=Path.cwd(),state=Path.cwd()/'state.json')
+        identity={'pid':123}
+        previous=gp._GatewaySignalHandlers(paths,identity)
+        previous.diagnostic_published=True
+        dumper=gp._GatewayStackDumper()
+        previous.stack_dumper=dumper
+        dumper.memory_report=reporter
+        with patch.object(gp.sys,'stderr',output),patch.object(gp.hang_diagnostics,'close'):
+            dumper.thread.start()
+            try:
+                dumper.pending.set()
+                assert called.wait(3)
+                deadline=time.monotonic()+3
+                while 'Gateway SIGUSR1 memory ' not in output.getvalue():
+                    assert time.monotonic()<deadline
+                    time.sleep(.01)
+                with patch.object(gp,'_publish_gateway_diagnostic_signal',return_value=False):
+                    gp._restore_gateway_signal_handlers(previous)
+                assert dumper.thread.is_alive()
+                assert dumper.memory_report is None
+                del reporter
+                gc.collect()
+                assert reference() is None
+            finally:
+                dumper.close()
+        print(json.dumps({'ok':True}))
+    ''') == {'ok': True}
+
+
 @pytest.mark.parametrize('enabled', [False, True])
 @pytest.mark.parametrize('external', [False, True])
 @pytest.mark.parametrize('fail', [False, True])

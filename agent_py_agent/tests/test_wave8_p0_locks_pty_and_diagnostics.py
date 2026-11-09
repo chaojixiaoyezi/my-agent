@@ -230,7 +230,7 @@ def test_memory_diagnostics_tracemalloc_is_bounded_and_preserves_trace_owner():
     assert tracemalloc.is_tracing() is was_tracing
     assert 0 < len(report["tracemalloc_top"]) <= 3
     for row in report["tracemalloc_top"]:
-        assert set(row) == {"location", "size_bytes"}
+        assert set(row) == {"location", "size_bytes", "block_count"}
         assert int(row["location"].rsplit(":", 1)[1]) >= 0
         assert row["size_bytes"] >= 0
         assert "/" not in row["location"]

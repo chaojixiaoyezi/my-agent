@@ -320,7 +320,7 @@ def test_fixed_capacity_replay_and_normal_exit(tmp_path):
     assert {row["phase"] for row in data["samples"] if row["full_snapshot"]} == {
         "positive_retained", "released_after_gc"}
     assert all(row["rss_current_source"] != row["rss_peak_source"] for row in data["samples"])
-    assert all(set(row) == {"location", "size_bytes"} for sample in data["samples"]
+    assert all(set(row) == {"location", "size_bytes", "block_count"} for sample in data["samples"]
                for row in sample["allocation_top"])
     assert "offline residency probe" not in report.read_text()
 

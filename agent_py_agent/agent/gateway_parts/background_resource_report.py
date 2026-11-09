@@ -13,7 +13,7 @@ import threading
 import time
 import tracemalloc
 from collections.abc import Callable, Mapping
-from contextlib import nullcontext
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +35,27 @@ DEFAULT_BACKGROUND_STOP_TIMEOUT_SECONDS = 10.0
 _POLL_SECONDS = 0.1
 # tracemalloc是进程全局设施；本入口串行短快照，不能互相停止对方的追踪窗口。
 _MEMORY_DIAGNOSTICS_LOCK = threading.Lock()
+
+
+@contextmanager
+def gateway_memory_tracing(config: object):
+    """显式诊断从 Agent 构造前追踪；只关闭本生命周期开启的全局追踪。"""
+    with _MEMORY_DIAGNOSTICS_LOCK:
+        enabled = bool(getattr(config, "enable_gateway_memory_diagnostics", False))
+        existing = tracemalloc.is_tracing()
+        owned = enabled and not existing
+        if owned:
+            tracemalloc.start(1)
+        metadata = ({
+            "tracemalloc_scope": "gateway_before_agent" if owned else "existing_trace",
+            "tracemalloc_started_at": time.time() if owned else None,
+        } if enabled or existing else None)
+    try:
+        yield metadata
+    finally:
+        if owned:
+            with _MEMORY_DIAGNOSTICS_LOCK:
+                tracemalloc.stop()
 
 
 # LLM: 仅宿主显式调用；ru_maxrss是历史峰值而非当前RSS，显式追踪只覆盖本次窗口，原已开启追踪不关闭。
@@ -70,9 +91,14 @@ def collect_runtime_memory_diagnostics(
             }
             if effective_include_tracemalloc or already_tracing:
                 report["tracemalloc_scope"] = "existing_trace" if already_tracing else "snapshot_window"
+                current, peak = tracemalloc.get_traced_memory()
+                report["tracemalloc_current_bytes"] = current
+                report["tracemalloc_peak_bytes"] = peak
+                report["tracemalloc_overhead_bytes"] = tracemalloc.get_tracemalloc_memory()
+                report["tracemalloc_frame_limit"] = tracemalloc.get_traceback_limit()
                 report["tracemalloc_top"] = [
                     {"location": f"{Path(stat.traceback[0].filename).name}:{stat.traceback[0].lineno}",
-                     "size_bytes": stat.size}
+                     "size_bytes": stat.size, "block_count": stat.count}
                     for stat in tracemalloc.take_snapshot().statistics("lineno")[:max(0, int(top_n))]
                 ]
             return report
@@ -92,7 +118,7 @@ def _rss_peak_bytes() -> int | None:
     return int(usage.ru_maxrss * (1 if sys.platform == "darwin" else 1024))
 
 
-# LLM: 现有owner池在原锁内直接一次原子统计四份容器和非零pin对象数，避免持锁再调会重入同把非递归锁的公开property；替身对象在锁外读取公开数值计数。
+# LLM: 原池锁只尝试获取；诊断不得等待业务锁或在锁内调用公开property。忙时缺省计数表示未知，不能伪造0。
 # 函数用途: 投影可取得的hard、soft、retired和pinned数量，缺失指标不猜成0。
 def _owner_pool_memory_gauges(owner_pool: object | None) -> dict[str, int]:
     result: dict[str, int] = {}
@@ -100,12 +126,18 @@ def _owner_pool_memory_gauges(owner_pool: object | None) -> dict[str, int]:
         ("hard_count", "_hard_agents"), ("soft_count", "_soft_agents"),
         ("retired_count", "_retired_agents"), ("pinned_count", "_pins"),
     )
-    with getattr(owner_pool, "_lock", None) or nullcontext():
+    lock = getattr(owner_pool, "_lock", None)
+    if lock is not None and not lock.acquire(blocking=False):
+        return result
+    try:
         for name, attribute in fields:
             values = getattr(owner_pool, attribute, None)
             if isinstance(values, Mapping):
                 result[name] = (sum(1 for count in values.values() if count > 0)
                                 if name == "pinned_count" else len(values))
+    finally:
+        if lock is not None:
+            lock.release()
     for name, _attribute in fields:
         if name not in result:
             value = getattr(owner_pool, name, None)
@@ -359,6 +391,7 @@ __all__ = [
     "cleanup_session_leftover_processes",
     "collect_runtime_memory_diagnostics",
     "freeze_session_leftover_processes",
+    "gateway_memory_tracing",
     "list_running_background_processes",
     "session_background_processes",
     "stop_background_processes",

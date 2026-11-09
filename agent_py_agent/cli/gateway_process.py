@@ -56,6 +56,8 @@ from ..agent.gateway_parts import (
 from ..agent.gateway_parts.background_resource_report import (
     DEFAULT_BACKGROUND_STOP_TIMEOUT_SECONDS,
     background_store_root,
+    collect_runtime_memory_diagnostics,
+    gateway_memory_tracing,
     list_running_background_processes,
     stop_background_processes,
 )
@@ -887,6 +889,7 @@ class _GatewayStackDumper:
     def __init__(self) -> None:
         self.pending = threading.Event()
         self.stopping = threading.Event()
+        self.memory_report = None
         self.thread = threading.Thread(target=self._run, name="gateway-sigusr1-dumper", daemon=True)
 
     def _run(self) -> None:
@@ -911,8 +914,21 @@ class _GatewayStackDumper:
                     del frame
             except Exception as exc:  # 诊断失败不能杀掉下一次信号的导出能力。
                 _print_gateway_loop_error("gateway.diagnostics.sigusr1", "gateway", exc)
+            memory_report = self.memory_report
+            if memory_report is not None:
+                try:
+                    # 复用原私有日志及旋转，不另存堆对象、快照或无限诊断文件。
+                    report = memory_report()
+                    sys.stderr.write("Gateway SIGUSR1 memory " + json.dumps(report, ensure_ascii=False) + "\n")
+                    sys.stderr.flush()
+                except Exception as exc:
+                    _print_gateway_loop_error("gateway.diagnostics.memory", "gateway", exc)
+                finally:
+                    # 守护线程下一次等待不能继续钉住已清理的Agent或上一份报告。
+                    memory_report = report = None
 
     def close(self) -> None:
+        self.memory_report = None
         self.stopping.set()
         self.pending.set()
         if self.thread.ident is not None:
@@ -951,7 +967,9 @@ def _publish_gateway_diagnostic_signal(previous: _GatewaySignalHandlers, enabled
 
 # LLM: TERM/INT只写绑定启动原身份的停止请求；USR1只置事件并公告，持久诊断只装文件/GC不抢信号。
 # 函数用途: 安装停止处理及全线程栈导出，返回原handler供原生命周期恢复。
-def _install_gateway_signal_handlers(paths: GatewayPaths, process_identity: dict[str, object]) -> dict[int, object]:
+def _install_gateway_signal_handlers(
+    paths: GatewayPaths, process_identity: dict[str, object], *, memory_report=None,
+) -> dict[int, object]:
     previous = _GatewaySignalHandlers(paths, process_identity)
     try:
         hang_diagnostics.install(paths.root, register_signal=False)
@@ -973,6 +991,7 @@ def _install_gateway_signal_handlers(paths: GatewayPaths, process_identity: dict
     if hasattr(signal, "SIGUSR1"):
         old_usr1 = signal.getsignal(signal.SIGUSR1)
         dumper = _GatewayStackDumper()
+        dumper.memory_report = memory_report
         pending = dumper.pending
 
         # 函数用途: 信号上下文只发安全标记，栈采集、格式化和IO全部留给守护线程。
@@ -1002,6 +1021,9 @@ def _restore_gateway_signal_handlers(previous: dict[int, object]) -> None:
         if signum != usr1 or not keep_usr1:
             signal.signal(signum, handler)
     if isinstance(previous, _GatewaySignalHandlers):
+        if previous.stack_dumper is not None:
+            # 公告撤销失败时只保留原栈出口，不能因此保留旧Agent的内存采集闭包。
+            previous.stack_dumper.memory_report = None
         if previous.stack_dumper is not None and not keep_usr1:
             previous.stack_dumper.close()
         try:
@@ -1391,7 +1413,9 @@ def cmd_gateway_run(args) -> int:
                       + ", ".join(row["c_run_id"] for row in retired["generations"]), file=sys.stderr)
             require_standalone_sources(paths, lifecycle)
             _heal_runtime_db_before_agent(args)
-            return _run_standalone_gateway(args, lifecycle)
+            with gateway_memory_tracing(getattr(args, "_gateway_frozen_config", None)) as memory_trace:
+                args._gateway_memory_trace = memory_trace
+                return _run_standalone_gateway(args, lifecycle)
     except StandaloneLifecycleUnavailable as exc:
         return coordinated_refusal(exc.error_code, reason=str(exc))
 
@@ -1447,7 +1471,18 @@ def _run_standalone_gateway(args, lifecycle) -> int:
         _record_gateway_run_failed(paths, agent, pid, exc, context=run_context)
         return 2
 
-    previous_signal_handlers = _install_gateway_signal_handlers(paths, _gateway_context_process_identity(run_context))
+    memory_trace = getattr(args, "_gateway_memory_trace", None)
+    memory_kwargs = {}
+    if memory_trace is not None:
+        def memory_report():
+            report = collect_runtime_memory_diagnostics(owner_pool=getattr(agent, "_owner_pool", None))
+            trace_metadata = memory_trace if "tracemalloc_scope" in report else {"tracemalloc_scope": "not_tracing"}
+            return {"schema": "gateway-memory.v1", "pid": os.getpid(), "observed_at": time.time(),
+                    **report, **trace_metadata}
+        memory_kwargs["memory_report"] = memory_report
+    previous_signal_handlers = _install_gateway_signal_handlers(
+        paths, _gateway_context_process_identity(run_context), **memory_kwargs,
+    )
     exit_code = 0
     termination_status = "failed"
     termination_reason = "gateway run ended before termination was classified"
