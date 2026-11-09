@@ -1835,8 +1835,8 @@ def _bounded_quota_snapshot(root, *, max_entries, max_ms):
 
 
 # LLM: 一轮枚举走完时，本轮已计入的目录若在走过之后又有增删（目录戳与首次打开时不同），按当前内容重扫其直接子项并补正
-#   总量与目录行：消失或换身份的子目录减去整棵子树行，新出现的子目录补扫。root目录戳因账本替换必变，只在本轮连续推进中
-#   不能证明它只被本进程写账本改动时才重扫。上一轮留下而本轮未走到的旧行（目录已不存在）直接丢弃。
+#   总量与目录行：消失或换身份的子目录减去整棵子树行，新出现的子目录补扫。root直接项每轮必须重扫：账本rename后的
+#   目录戳不能排除同tick外写或核对至rename之间的外写；重扫仍逐项使用原结算额度。上一轮留下而本轮未走到的旧行直接丢弃。
 #   每轮只建一次清点生成器：首步逐行比目录戳（行数受目录表字节上限约束）；之后重扫的每个目录项、补扫的每个排序项都交还
 #   一次对账片，受本片条目与时间额度约束，额度用尽即暂停到下一片续作，单片工作不随漂移规模增长。已重扫完的目录换上新戳，
 #   冷恢复后不再重扫；重扫到一半遇冷恢复的目录不再从头重扫，本轮照常发布但置脏，由下一轮正常扫描补正，避免反复冷恢复时
@@ -1859,8 +1859,7 @@ def _settle_quota_pass_drift(root, scan):
         root_fd = open_directory_beneath(root, (), require_dir_fd=True)
         try:
             changed = [(rel, row) for rel, row in sorted(rows.items())
-                       if (not _quota_scan_root_clean(root, scan) if not rel
-                           else not _quota_stamp_unchanged(root_fd, rel, row))]
+                       if not rel or not _quota_stamp_unchanged(root_fd, rel, row)]
         finally:
             os.close(root_fd)
         children = {}
@@ -1885,26 +1884,6 @@ def _settle_quota_pass_drift(root, scan):
     if _quota_metadata_bytes(state) > _QUOTA_MAX_METADATA_BYTES:
         _drop_quota_metadata(state)
     state.pop('metadata_bytes', None)
-
-
-# LLM: root目录戳因每片账本原子替换必变。本进程连续推进同一轮时记下每次写账本后的root戳，片首、清点与写账本前都核对
-#   root只被本进程写账本改动过（新一轮首片以扫描首次打开root时的行戳为准）；任一次不符、冷恢复或续扫都按有准入外增删处理，
-#   清点照常重扫root。核对与账本改名之间的窗口内的增删会并入账本写入，与准入的root戳链同一口径。
-# 函数用途: 判断本轮扫描期间root目录项是否只被本进程写账本改动。
-def _quota_scan_root_clean(root, scan):
-    if scan.get('root_clean'):
-        expected = scan.get('root_stamp')
-        if expected is None:
-            state = scan['state']
-            row = (state.get('scan_rows') or {}).get('') or (state.get('dir_stamps') or {}).get('')
-            expected = row[:4] if row else None
-        try:
-            info = root.stat(follow_symlinks=False)
-        except OSError:
-            info = None
-        scan['root_clean'] = info is not None and expected == [info.st_dev, info.st_ino, info.st_mtime_ns,
-                                                               info.st_ctime_ns]
-    return scan.get('root_clean', False)
 
 
 # LLM: 目录已不存在或换了身份时由父目录重扫处理；若轮到自身仍未由父目录消解或中途消失/换身份/子树变化，
@@ -2032,7 +2011,7 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
                     'used': cursor.get('partial_used_bytes', 0), 'inodes': cursor.get('partial_inode_count', 0),
                     'scanned': cursor.get('scanned', 0), 'epoch': cursor.get('epoch', uuid.uuid4().hex),
                     'started_at': cursor.get('started_at', time.time()), 'state': state,
-                    'settling': cursor.get('settling') is True, 'root_clean': not cursor, 'root_stamp': None,
+                    'settling': cursor.get('settling') is True,
                     'retry_rel': cursor.get('settling_rel'), 'dirty': cursor.get('metadata_invalidated') is True}
             # 枚举已走完、正在清点漂移的一轮直接续清点，不再重放已走完的枚举。
             scan['iterator'] = (_settle_quota_pass_drift(root, scan) if scan['settling'] else
@@ -2042,7 +2021,6 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
                 _drop_quota_metadata(scan['state'], invalidated=bool(previous.get('metadata_invalidated')))
                 if previous.get('metadata_invalidated'):
                     scan['dirty'] = True
-            _quota_scan_root_clean(root, scan)
         complete, scanned, enumerated, settled = False, 0, 0, 0
         enumeration_budget = max(1024, max_entries * 4)
         # 重放也计入枚举；旧前缀吃满普通预算时，额外只给该持久前缀一次重放额度。
@@ -2135,8 +2113,6 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
             else:
                 if scan.get('dirty'):
                     ledger['dirty_since'] = ledger.get('dirty_since') or time.time()
-                # 账本替换会掩盖本片内root的其它改动，必须在写账本前核对。
-                _quota_scan_root_clean(root, scan)
             ledger['reconcile_cursor'] = cursor_payload
         except BaseException:
             scan_cleanup.close()
@@ -2156,9 +2132,6 @@ def reconcile_owner_quota_slice(owner_root, *, max_entries=128, max_ms=20, block
             # 未完成的一轮不改变账本可信度：干净账继续按受控写代次准入，脏账保持脏直到本轮完成。
             _write_quota_ledger(root, ledger)
             ledger_written = True
-            if not complete and scan['root_clean']:
-                info = root.stat(follow_symlinks=False)
-                scan['root_stamp'] = [info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns]
         except BaseException:
             scan_cleanup.close()
             if not ledger_written and (scan['state'].get('metadata_invalidated') or scan.get('dirty')):
