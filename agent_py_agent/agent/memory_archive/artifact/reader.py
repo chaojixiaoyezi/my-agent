@@ -14,6 +14,7 @@ from bisect import bisect_left, bisect_right
 from collections import OrderedDict
 from collections.abc import Mapping
 from contextlib import nullcontext
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from errno import ELOOP
@@ -38,6 +39,9 @@ from .read_modes import (
     _read_chars_limit,
     read_artifact_content_by_mode,
 )
+
+# 本次prepare仅保存已验证负命中的身份，不留源行/候选；不可变值避免复制context跨线程共享扩张。
+_PREPARE_INDEX_READ: ContextVar[tuple | None] = ContextVar("artifact_prepare_index_read", default=None)
 
 
 # LLM: Cache only verified content/index objects; locks guard LRU mutations, never filesystem IO, hashing or parsing.
@@ -164,24 +168,28 @@ def prepare_tool_output_artifact_read(request: ReadToolOutputArtifactRequest) ->
     artifact_ref = str(request.artifact_ref or "").strip()
     if not artifact_ref:
         return PreparedToolOutputArtifactRead(request, root, "", (), None)
-    primary = root / "blobs" / "tool_outputs" / "index.jsonl"
-    paths = (primary,) if _primary_index_has_scoped_ref(root, artifact_ref, request) else tuple(tool_output_index_paths_for_lookup(root))
-    open_errors: list[str] = []
+    token = _PREPARE_INDEX_READ.set(())
     try:
-        record = _find_index_record(root, artifact_ref, request, index_paths=paths, open_errors=open_errors)
-    except TypeError:
-        record = _find_index_record(root, artifact_ref, request, index_paths=paths)
-    read_error = ""
-    if record is None:
-        read_error = open_errors[0] if open_errors else _verify_trusted_artifact_root(Path(request.root).expanduser())
-    return PreparedToolOutputArtifactRead(
-        request,
-        root,
-        artifact_ref,
-        paths,
-        dict(record) if record is not None else None,
-        read_error=read_error,
-    )
+        primary = root / "blobs" / "tool_outputs" / "index.jsonl"
+        paths = (primary,) if _primary_index_has_scoped_ref(root, artifact_ref, request) else tuple(tool_output_index_paths_for_lookup(root))
+        open_errors: list[str] = []
+        try:
+            record = _find_index_record(root, artifact_ref, request, index_paths=paths, open_errors=open_errors)
+        except TypeError:
+            record = _find_index_record(root, artifact_ref, request, index_paths=paths)
+        read_error = ""
+        if record is None:
+            read_error = open_errors[0] if open_errors else _verify_trusted_artifact_root(Path(request.root).expanduser())
+        return PreparedToolOutputArtifactRead(
+            request,
+            root,
+            artifact_ref,
+            paths,
+            dict(record) if record is not None else None,
+            read_error=read_error,
+        )
+    finally:
+        _PREPARE_INDEX_READ.reset(token)
 
 
 # LLM: 只允许同root/ref及逐字段一致的宿主scope复用；内容窗口可变，不把旧scope判断当授权缓存。
@@ -976,6 +984,11 @@ def _parsed_artifact_index(source, *, literal_ref: str | None = None):
     with source.open("rb") as handle:
         before = _blob_stat_signature(os.fstat(handle.fileno()))
         key = str(getattr(source, "root", "")), str(getattr(source, "path", source)), *before
+        local_read = _PREPARE_INDEX_READ.get()
+        if (local_read and local_read == (key, literal_ref)
+                and _blob_stat_signature(os.fstat(handle.fileno())) == before):
+            # 仍由source.open认证父链/owner/叶子；同一打开FD的身份未变才复用本轮负命中。
+            return (), {}
         cached = _ARTIFACT_INDEX_CACHE.get(key)
         if cached is not None:
             return cached
@@ -991,7 +1004,12 @@ def _parsed_artifact_index(source, *, literal_ref: str | None = None):
             for ref in {str(row.get(field, "") or "") for field in _INDEX_LITERAL_FIELDS}:
                 by_literal.setdefault(ref, []).append(row)
         result = rows, by_literal
-        if _blob_stat_signature(os.fstat(handle.fileno())) == before and (literal_ref is None or literal_ref in by_literal):
+        stable = _blob_stat_signature(os.fstat(handle.fileno())) == before
+        if (stable and local_read == () and literal_ref is not None
+                and len(literal_ref) <= 4096 and len(key[0]) <= 4096 and len(key[1]) <= 4096
+                and literal_ref not in by_literal):
+            _PREPARE_INDEX_READ.set((key, literal_ref))
+        if stable and (literal_ref is None or literal_ref in by_literal):
             if not oversized:
                 _ARTIFACT_INDEX_CACHE.put(key, result)
             elif prescreen is not None:
