@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import copy
+import sys
 import threading
 import time
 from collections import OrderedDict, deque
@@ -32,6 +33,12 @@ from .tool_input_progress import ToolInputProgressSinkMixin
 
 BACKGROUND_TRANSCRIPT_SCHEMA = "background_transcript_event.v1"
 BACKGROUND_TRANSCRIPT_MAX_EVENTS = 1024
+# 单Agent全部线程共用8MiB展示预算；单事件64KiB，canonical正文与终态不在此缓存中。
+BACKGROUND_TRANSCRIPT_MAX_BYTES = 8 * 1024 * 1024
+BACKGROUND_TRANSCRIPT_EVENT_MAX_BYTES = 64 * 1024
+# 大对象计量也受节点/深度门约束，不能先展开或序列化全集再决定丢弃。
+BACKGROUND_TRANSCRIPT_PAYLOAD_MAX_NODES = 1024
+BACKGROUND_TRANSCRIPT_PAYLOAD_MAX_DEPTH = 32
 # 后台转录最多跟踪 256 个线程：防止失控并发把事件环挤满。
 BACKGROUND_TRANSCRIPT_MAX_THREADS_COUNT = 256
 # 单条后台转录正文最多 12000 字符：截断后保留头部，避免单条超长撑爆存储。
@@ -128,6 +135,8 @@ class TranscriptSource:
 # 类用途: 保存一个会话当前任务的易失展示事件和连续游标。
 @dataclass
 class _ThreadTranscriptState:
+    retained_bytes: int = 0
+    sizes: deque[int] = field(default_factory=deque)
     task_id: str = ""
     next_seq: int = 0
     truncated_through_seq: int = 0
@@ -799,10 +808,57 @@ def begin_background_transcript_turn(
         state = _background_thread_state(rows, thread_key)
         if task_key and state.task_id and state.task_id != task_key:
             state.events.clear()
+            state.sizes.clear()
+            state.retained_bytes = 0
             state.truncated_through_seq = 0
         if task_key:
             state.task_id = task_key
         return f"bg-main:{thread_key}:{uuid4().hex}"
+
+
+def _display_payload_size(value, *, remaining, depth=0, nodes=None):
+    """有界核算容器与叶子内存；未知/循环/过深结构沿不完整展示路径。"""
+    nodes = [BACKGROUND_TRANSCRIPT_PAYLOAD_MAX_NODES] if nodes is None else nodes
+    nodes[0] -= 1
+    if nodes[0] < 0 or depth > BACKGROUND_TRANSCRIPT_PAYLOAD_MAX_DEPTH:
+        raise ValueError("display payload exceeds projection budget")
+    size = sys.getsizeof(value)
+    if size > remaining:
+        raise ValueError("display payload exceeds projection budget")
+    if type(value) in (str, int, float, bool, type(None)):
+        return size
+    if type(value) not in (dict, list, tuple):
+        raise ValueError("unsupported display payload")
+    entries = ((part for pair in value.items() for part in pair) if type(value) is dict else iter(value))
+    for child in entries:
+        size += _display_payload_size(child, remaining=remaining-size, depth=depth+1, nodes=nodes)
+    return size
+
+
+def _bounded_display_payload(payload):
+    try:
+        size = _display_payload_size(payload, remaining=BACKGROUND_TRANSCRIPT_EVENT_MAX_BYTES // 2)
+    except ValueError:
+        # 保留最后帧的生命周期与有限正文预览；完整内容仍沿canonical/归档读取。
+        result = {"history_incomplete": True, "truncated": True}
+        if type(payload) is dict:
+            for key in ("text", "tool", "status", "error_code", "display_archive_ref"):
+                value = payload.get(key)
+                if type(value) is str:
+                    result[key] = value[:BACKGROUND_TRANSCRIPT_TEXT_LIMIT_CHARS // 4]
+        try:
+            size = _display_payload_size(result, remaining=BACKGROUND_TRANSCRIPT_EVENT_MAX_BYTES // 2)
+        except ValueError:
+            result = {"history_incomplete": True, "truncated": True}
+            size = _display_payload_size(result, remaining=BACKGROUND_TRANSCRIPT_EVENT_MAX_BYTES // 2)
+        return result, size, True
+    return copy.deepcopy(payload), size, False
+
+
+def _drop_display_event(state):
+    event = state.events.popleft()
+    state.retained_bytes -= state.sizes.popleft()
+    state.truncated_through_seq = max(state.truncated_through_seq, int(event["seq"]))
 
 
 # LLM: Append accepts only the frozen public event vocabulary and scalar
@@ -838,12 +894,15 @@ def append_background_transcript_event(
         state = _background_thread_state(rows, thread_key)
         if task_key and state.task_id and state.task_id != task_key:
             state.events.clear()
+            state.sizes.clear()
+            state.retained_bytes = 0
             state.truncated_through_seq = 0
         if task_key:
             state.task_id = task_key
         next_seq = max(0, _safe_int(getattr(agent, _TRANSCRIPT_SEQ_ATTR, 0))) + 1
         setattr(agent, _TRANSCRIPT_SEQ_ATTR, next_seq)
         state.next_seq = next_seq
+        bounded_payload, payload_bytes, incomplete = _bounded_display_payload(payload if payload is not None else {})
         event = {
             "schema": BACKGROUND_TRANSCRIPT_SCHEMA,
             "seq": next_seq,
@@ -853,15 +912,31 @@ def append_background_transcript_event(
             "kind": event_kind,
             "phase": event_phase,
             "block_id": block_key,
-            "payload": copy.deepcopy(dict(payload or {})),
+            "payload": bounded_payload,
             **({"gateway_request_id": source.gateway_request_id} if source.gateway_request_id else {}),
         }
-        if len(state.events) >= BACKGROUND_TRANSCRIPT_MAX_EVENTS and state.events:
-            state.truncated_through_seq = max(
-                state.truncated_through_seq,
-                int(state.events[0]["seq"]),
-            )
+        event_bytes = payload_bytes + sys.getsizeof(event) + sum(
+            sys.getsizeof(key) + sys.getsizeof(value) for key, value in event.items() if key != "payload"
+        )
+        if event_bytes > BACKGROUND_TRANSCRIPT_EVENT_MAX_BYTES:
+            state.truncated_through_seq = max(state.truncated_through_seq, next_seq)
+            return next_seq
+        if len(state.events) >= BACKGROUND_TRANSCRIPT_MAX_EVENTS:
+            _drop_display_event(state)
+        total = sum(item.retained_bytes for item in rows.values())
+        # 每条事件只入队/淘汰一次；查找至多原256个当前线程，绝不遍历历史正文。
+        while total + event_bytes > BACKGROUND_TRANSCRIPT_MAX_BYTES:
+            oldest = next((item for item in rows.values() if item.events), None)
+            if oldest is None:
+                break
+            before = oldest.retained_bytes
+            _drop_display_event(oldest)
+            total -= before - oldest.retained_bytes
         state.events.append(event)
+        state.sizes.append(event_bytes)
+        state.retained_bytes += event_bytes
+        if incomplete:
+            state.truncated_through_seq = max(state.truncated_through_seq, next_seq)
         return next_seq
 
 
