@@ -1491,10 +1491,12 @@ def _directory_scan(root: Path, mode: str, pattern: str = "*.json") -> _Director
 def _refresh_directory_projection(root, mode, pattern, cached):
     fp, now = _directory_fp(root), time.monotonic()
     same_dir = cached is not None and cached.dir_fp == fp
-    names = cached.run_names if same_dir else _scan_names(root, mode, pattern)
     limit = 64 if mode == "flat" else 32
     ttl = _FLAT_REVERIFY_SECONDS if mode == "flat" else _HISTORY_REVERIFY_SECONDS
-    full = not same_dir or len(names) <= limit or now - cached.verified_at >= ttl
+    full = not same_dir or len(cached.run_names) <= limit or now - cached.verified_at >= ttl
+    # 普通文件增删不改变目录nlink，粗时钟下size也可能相同；小目录及到期复核必须重新取名字。
+    # 只复核旧名字会让新链接永久不可见，即使TTL已过也无法自愈。
+    names = _scan_names(root, mode, pattern) if full else cached.run_names
     check_names = names if full else cached.live_names
     updates = {}
     for name in check_names:

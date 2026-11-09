@@ -90,3 +90,29 @@ def test_new_run_is_detected_with_unchanged_directory_timestamps(tmp_path, monke
     new.write_text(json.dumps({'task_id': 'new', 'status': 'RUNNING'}))
     _write_link(tmp_path, 'new', 'active')
     assert set(discovery.unfinished_task_ids(tmp_path)) == {'task-100', 'new'}
+
+
+def test_large_link_cache_reenumerates_names_at_ttl_even_when_metadata_collides(tmp_path, monkeypatch):
+    import json
+    import os
+    import time
+
+    folder = tmp_path / 'links'
+    folder.mkdir()
+    old_ns = time.time_ns() - 120_000_000_000
+    for index in range(100):
+        path = folder / f'task-{index}.json'
+        path.write_text(json.dumps({'task_id': f'task-{index}', 'status': 'completed'}))
+        os.utime(path, ns=(old_ns, old_ns))
+    _coarse_directory_clock(monkeypatch)
+    first = discovery._directory_scan(folder, 'link')
+    (folder / 'task-0.json').unlink()
+    replacement = folder / 'new-task.json'
+    replacement.write_text(json.dumps({'task_id': 'new', 'status': 'active'}))
+    # 同数量文件替换可保持全部目录元数据；模拟这种合法文件系统结果，不伪造文件内容。
+    monkeypatch.setattr(discovery, '_directory_fp', lambda root: first.dir_fp)
+    assert discovery._directory_scan(folder, 'link').run_names == first.run_names
+    monkeypatch.setattr(discovery.time, 'monotonic', lambda: first.verified_at + 61)
+    refreshed = discovery._directory_scan(folder, 'link')
+    assert 'task-0.json' not in refreshed.run_names
+    assert ('new', 'active', replacement) in refreshed.active_rows
