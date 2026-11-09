@@ -1,5 +1,5 @@
 # LLM: 仅为无排空运行时的明文连接分类；鉴权和业务授权仍由原处理器负责。
-# 模块用途: 用单选择器等待首字节，为控制请求保留独立线程和容量，并主动回收排队超时。
+# 模块用途: 用单选择器有界预读运输前缀，分别保护控制与完整普通请求容量，并主动回收排队超时。
 from __future__ import annotations
 
 import selectors
@@ -11,6 +11,7 @@ from functools import partial
 from queue import Queue
 
 from ..concurrency import DurableDaemonThreadPoolExecutor
+from .http_body_readiness import HTTP_READY_PREFIX_BYTES, PrefetchedSocket, complete_request_length
 from .http_routes import match_gateway_http_route
 
 # 就绪分类时最多窥视的请求首行字节数：只用于选择车道，首行更长时按普通车道处理，不影响请求本身。
@@ -52,6 +53,7 @@ class _LaneTicket:
         self.accepted_at = accepted_at
         self.lane = lane
         self.future = None
+        self.executor = None
         self.state = 'QUEUED'
         self._lock = threading.Lock()
         self._closed = False
@@ -170,7 +172,7 @@ class _CancellableWorkQueue(Queue):
 
 
 # LLM: selector仅由readiness线程注册和注销；锁仅保护有界队列与表，不跨submit或handler。
-# 类用途: 等待首字节后把明文连接送往独立的控制或普通车道。
+# 类用途: 按有界前缀的完整程度，把明文连接送往原独立车道及普通保留位置。
 class HTTPLaneRouter:
     # LLM: 容量与期限由组合根注入；唤醒使用跨平台socketpair，不增加周期轮询。
     # 函数用途: 建立独立控制池并启动唯一就绪观察线程。
@@ -184,7 +186,22 @@ class HTTPLaneRouter:
         self._closing = threading.Event()
         self._incoming = deque()
         self._pending = {}
-        self._queued = {'general': deque(), 'control': deque()}
+        self._prefixes = {}
+        self._frame_lengths = {}
+        self._classifications = {}
+        self._mixed_admitted = 0
+        workers = server.max_request_workers
+        self._body_readiness = workers > 1
+        self._mixed_workers = workers - 1 if self._body_readiness else workers
+        self._single_request = bool(getattr(server.RequestHandlerClass, 'single_request_connection', False)
+                                    or server.RequestHandlerClass.protocol_version == 'HTTP/1.0')
+        self._ready_executor = None
+        if self._body_readiness:
+            server._request_executor._max_workers = self._mixed_workers
+            self._ready_executor = DurableDaemonThreadPoolExecutor(
+                max_workers=1, thread_name_prefix='gateway-http-ready')
+
+        self._queued = {'general': deque(), 'control': deque(), 'ready': deque()}
         self._selector = selectors.DefaultSelector()
         self._wake_read, self._wake_write = socket.socketpair()
         self._wake_read.setblocking(False)
@@ -195,6 +212,8 @@ class HTTPLaneRouter:
         # 构造期尚无worker，队列必须在首次submit前固定，原执行器及类属性不变。
         server._request_executor._work_queue = _CancellableWorkQueue()
         self._control_executor._work_queue = _CancellableWorkQueue()
+        if self._ready_executor is not None:
+            self._ready_executor._work_queue = _CancellableWorkQueue()
         self._control_slots = threading.BoundedSemaphore(control_capacity)
         self._thread = threading.Thread(target=self._loop, name='gateway-http-readiness', daemon=True)
         self._thread.start()
@@ -235,7 +254,7 @@ class HTTPLaneRouter:
                 self._drop_pending(sock)
 
     # LLM: pending只由选择器增删；实际关闭不持路由锁。
-    # 函数用途: 注销一个等待首字节的连接并可选关闭。
+    # 函数用途: 注销一个等待前缀的连接、释放预读状态并可选关闭。
     def _drop_pending(self, sock, *, close=True) -> None:
         try:
             self._selector.unregister(sock)
@@ -243,26 +262,71 @@ class HTTPLaneRouter:
             pass
         with self._lock:
             self._pending.pop(sock, None)
+        self._prefixes.pop(sock, None)
+        self._frame_lengths.pop(sock, None)
+        self._classifications.pop(sock, None)
         if close:
             self.server.shutdown_request(sock)
 
-    # LLM: 从未分类表移交时不消费请求字节，未读满的首行交回普通handler继续读取。
-    # 函数用途: 处理一次可读通知并把可处理连接送入车道。
+    # LLM: 预读字节只由同FD包装器原样回放；超窗、持久或模糊请求仍交原普通handler。
+    # 函数用途: 每次只消费本前缀剩余预算，完整后或须走原路径时移交连接。
     def _read_ready(self, sock, addr, accepted_at) -> None:
         if time.monotonic() >= accepted_at + self.header_timeout_seconds:
             self._drop_pending(sock)
             return
+        if not self._body_readiness:
+            try:
+                data = sock.recv(HTTP_CONTROL_PEEK_BYTES, socket.MSG_PEEK)
+            except BlockingIOError:
+                return
+            except OSError:
+                self._drop_pending(sock)
+                return
+            lane = classify_peeked_request(data)
+            self._drop_pending(sock, close=lane == 'eof')
+            if lane != 'eof':
+                self._submit(lane, sock, addr, accepted_at)
+            return
+        prefix = self._prefixes.setdefault(sock, bytearray())
         try:
-            data = sock.recv(HTTP_CONTROL_PEEK_BYTES, socket.MSG_PEEK)
+            data = sock.recv(HTTP_READY_PREFIX_BYTES - len(prefix))
         except BlockingIOError:
             return
         except OSError:
             self._drop_pending(sock)
             return
-        lane = classify_peeked_request(data)
-        self._drop_pending(sock, close=lane == 'eof')
-        if lane != 'eof':
-            self._submit(lane, sock, addr, accepted_at)
+        prefix.extend(data)
+        lane = self._classifications.get(sock, 'general')
+        if sock not in self._classifications and b'\n' in data:
+            lane = self._classifications[sock] = classify_peeked_request(prefix)
+        if not prefix:
+            self._drop_pending(sock)
+            return
+        if lane != 'control':
+            if sock not in self._frame_lengths:
+                length = complete_request_length(
+                    prefix, single_request=self._single_request,
+                    search_from=max(0, len(prefix) - len(data) - 3),
+                )
+                if length is not None:
+                    self._frame_lengths[sock] = length
+            length = self._frame_lengths.get(sock)
+            if length and len(prefix) >= length:
+                lane = 'ready'
+            elif data and len(prefix) < HTTP_READY_PREFIX_BYTES and length != 0:
+                return
+            else:
+                lane = 'general'
+        self._drop_pending(sock, close=False)
+        try:
+            replay = PrefetchedSocket(sock, prefix)
+        except (OSError, ValueError):
+            self.server.shutdown_request(sock)
+            return
+        except BaseException:
+            self.server.shutdown_request(sock)
+            raise
+        self._submit(lane, replay, addr, accepted_at)
 
     # LLM: 期限取已接受时间；队列只保留QUEUED，避免长worker挡住队首后积累完成历史。
     # 函数用途: 回收过期连接和票据，并计算最近的真实截止时间。
@@ -315,7 +379,7 @@ class HTTPLaneRouter:
                 incoming, self._incoming = self._incoming, deque()
                 pending = tuple(self._pending)
                 tickets = [ticket for queue in self._queued.values() for ticket in queue]
-                self._queued = {'general': deque(), 'control': deque()}
+                self._queued = {'general': deque(), 'control': deque(), 'ready': deque()}
             for sock, _addr, _accepted_at in incoming:
                 self.server.shutdown_request(sock)
             for sock in pending:
@@ -327,14 +391,24 @@ class HTTPLaneRouter:
             self._wake_write.close()
 
     # LLM: 两车道分别非阻塞领取自己的容量；submit与错误上报均在路由锁外。
-    # 函数用途: 将有首字节的连接移交固定池并登记一次性释放回调。
+    # 函数用途: 在原普通总worker数内保留完整请求机会，并登记一次性释放回调。
     def _submit(self, lane, sock, addr, accepted_at) -> None:
-        executor = self._control_executor if lane == 'control' else self.server._request_executor
+        with self._lock:
+            if lane == 'ready' and self._mixed_admitted < self._mixed_workers:
+                lane = 'general'
+            if lane == 'general':
+                self._mixed_admitted += 1
+        executor = (self._control_executor if lane == 'control' else
+                    self._ready_executor if lane == 'ready' else self.server._request_executor)
         slots = self._control_slots if lane == 'control' else self.server._request_slots
         if self._closing.is_set() or not slots.acquire(blocking=False):
+            if lane == 'general':
+                with self._lock:
+                    self._mixed_admitted -= 1
             self.server._reject_without_wait(sock)
             return
         ticket = _LaneTicket(sock, addr, accepted_at, lane)
+        ticket.executor = executor
         try:
             sock.settimeout(self.server.request_socket_timeout)
             ticket.future = executor.submit(self._run_ticket, ticket)
@@ -346,6 +420,9 @@ class HTTPLaneRouter:
             finally:
                 ticket._ready.set()
                 slots.release()
+                if lane == 'general':
+                    with self._lock:
+                        self._mixed_admitted -= 1
                 if isinstance(error, (RuntimeError, OSError)):
                     ticket.reject_once(self.server)
                 else:
@@ -389,12 +466,14 @@ class HTTPLaneRouter:
     def _ticket_finished(self, ticket, slots, future) -> None:
         try:
             if future.cancelled():
-                executor = self._control_executor if ticket.lane == 'control' else self.server._request_executor
-                executor._work_queue.discard(future)
+                ticket.executor._work_queue.discard(future)
                 ticket.close_once(self.server)
             ticket.mark_done()
         finally:
             slots.release()
+            if ticket.lane == 'general':
+                with self._lock:
+                    self._mixed_admitted -= 1
             self._wake()
 
     # LLM: 先关准入并唤醒，再等待有界选择器退出；运行中的handler沿原服务器生命周期收口。
@@ -405,3 +484,5 @@ class HTTPLaneRouter:
         self._wake()
         self._thread.join(timeout=self.header_timeout_seconds)
         self._control_executor.shutdown(wait=False, cancel_futures=True)
+        if self._ready_executor is not None:
+            self._ready_executor.shutdown(wait=False, cancel_futures=True)

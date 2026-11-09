@@ -126,6 +126,8 @@ def _generate_request_id() -> str:
 class GatewayHTTPHandler(BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
+    # 原JSON/文件/流响应均明确Connection:close；运输预读可据此只接一条完整请求。
+    single_request_connection = True
 
     def log_message(self, format: str, *args: Any) -> None:
         pass

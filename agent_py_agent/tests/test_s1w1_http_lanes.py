@@ -151,11 +151,11 @@ def test_eof_does_not_submit_or_take_a_slot(server):
     assert server._request_slots._value == server.max_outstanding_requests
 
 
-def test_partial_first_line_uses_general_lane_and_preserves_bytes(server):
+def test_partial_first_line_waits_without_worker_and_preserves_bytes(server):
     with connect(server, b'GET /sta') as client:
-        eventually(lambda: server._request_slots._value == server.max_outstanding_requests - 1)
-        # 容量领取先于Thread.start及_threads发表，不能把前者当作线程已发表的证明。
-        eventually(lambda: bool(server._request_executor._threads))
+        eventually(lambda: bool(server._lanes._prefixes))
+        assert server._request_slots._value == server.max_outstanding_requests
+        assert not server._request_executor._threads
         assert not server._lanes._control_executor._threads
         client.sendall(b'tus HTTP/1.1\r\nHost: localhost\r\n\r\n')
         assert b'200 OK' in response(client)
@@ -180,8 +180,12 @@ def test_queued_request_expires_while_workers_remain_blocked(server):
     eventually(lambda: server._request_slots._value == server.max_outstanding_requests)
 
 
-@pytest.mark.parametrize('winner', ['worker', 'expiry'])
-def test_expiry_worker_cas_has_one_owner_close_and_slot_release(server, monkeypatch, winner):
+@pytest.mark.parametrize('winner, reserved', [('worker', False), ('expiry', False), ('worker', True), ('expiry', True)],
+                         ids=['worker', 'expiry', 'ready-worker', 'ready-expiry'])
+def test_expiry_worker_cas_has_one_owner_close_and_slot_release(server, monkeypatch, winner, reserved):
+    blocker = request(server, 'POST', '/ask') if reserved else None
+    if blocker is not None:
+        eventually(lambda: server.started == 1)
     worker_entered, expiry_entered = threading.Event(), threading.Event()
     worker_go, expiry_go = threading.Event(), threading.Event()
     running, expired = _LaneTicket.claim_running, _LaneTicket.claim_expired
@@ -195,6 +199,8 @@ def test_expiry_worker_cas_has_one_owner_close_and_slot_release(server, monkeypa
         return running(ticket)
 
     def claim_expired(ticket):
+        if reserved and ticket.lane != 'ready':
+            return expired(ticket)
         expiry_entered.set()
         assert expiry_go.wait(2)
         return expired(ticket)
@@ -218,8 +224,12 @@ def test_expiry_worker_cas_has_one_owner_close_and_slot_release(server, monkeypa
     finally:
         worker_go.set()
         expiry_go.set()
+        if blocker is not None:
+            server.release.set()
+            blocker.close()
     eventually(lambda: server._request_slots._value == server.max_outstanding_requests)
     assert len(tickets) == 1
+    assert (tickets[0].lane == 'ready') is reserved
     assert closes[tickets[0].request] == 1
     assert tickets[0].state == 'DONE'
 
@@ -423,3 +433,273 @@ def test_cancel_queue_discards_original_work_item_identity(layout):
     queue.discard(future if layout == 'future' else ticket)
     assert queue.qsize() == 1
     assert queue.get_nowait() is retained
+
+
+def test_partial_bodies_leave_original_general_capacity_for_complete_request(server):
+    """同一普通路由的部分正文不得占满原池；不用控制路由兜底。"""
+    original = Handler.do_POST
+    entered = threading.Event()
+    calls = []
+
+    def read_body(handler):
+        entered.set()
+        body = handler.rfile.read(int(handler.headers['Content-Length']))
+        calls.append(body)
+        handler.do_GET()
+
+    Handler.do_POST = read_body
+    clients = []
+    try:
+        for _ in range(server.max_request_workers + 3):
+            clients.append(connect(server, b'POST /ordinary HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4096\r\n\r\n{'))
+        with connect(server, b'POST /ordinary HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}') as complete:
+            assert b'200 OK' in response(complete)
+        assert calls == [b'{}']
+        assert not server._lanes._control_executor._threads
+        assert len(server._request_executor._threads) + len(server._lanes._ready_executor._threads) <= server.max_request_workers
+    finally:
+        Handler.do_POST = original
+        for client in clients:
+            client.close()
+
+
+def test_segmented_body_uses_no_worker_until_exact_completion(server, monkeypatch):
+    seen = []
+
+    def read_body(handler):
+        seen.append(handler.rfile.read(int(handler.headers['Content-Length'])))
+        handler.do_GET()
+
+    monkeypatch.setattr(Handler, 'do_POST', read_body)
+    with connect(server, b'POST /ordinary HTTP/1.1\r\nHost: localhost\r\nContent-Length: 6\r\n\r\nab') as client:
+        eventually(lambda: any(p.endswith(b'ab') for p in server._lanes._prefixes.values()))
+        assert not server._request_executor._threads
+        client.sendall(b'cd')
+        eventually(lambda: any(p.endswith(b'abcd') for p in server._lanes._prefixes.values()))
+        assert not server._request_executor._threads
+        client.sendall(b'ef')
+        assert b'200 OK' in response(client)
+    assert seen == [b'abcdef']
+    eventually(lambda: not server._lanes._prefixes and not server._lanes._frame_lengths)
+
+
+def test_large_body_keeps_original_payload_and_general_worker(server, monkeypatch):
+    from agent_py_agent.agent.gateway_parts.http_body_readiness import HTTP_READY_PREFIX_BYTES
+
+    entered = threading.Event()
+    seen = []
+    body = b'x' * (HTTP_READY_PREFIX_BYTES + 100)
+
+    def read_body(handler):
+        entered.set()
+        seen.append(handler.rfile.read(int(handler.headers['Content-Length'])))
+        handler.do_GET()
+
+    monkeypatch.setattr(Handler, 'do_POST', read_body)
+    with connect(server, f'POST /ordinary HTTP/1.1\r\nHost: localhost\r\nContent-Length: {len(body)}\r\n\r\n'.encode() + body[:1]) as client:
+        assert entered.wait(1)
+        assert not server._lanes._ready_executor._threads
+        client.sendall(body[1:])
+        assert b'200 OK' in response(client)
+    assert seen == [body]
+
+
+@pytest.mark.parametrize('framing', [
+    b'Content-Length: 2\r\nContent-Length: 3',
+    b'Content-Length: +2',
+    b'Content-Length: ' + b'9' * 5000,
+    b'Transfer-Encoding: chunked',
+    b'Expect: 100-continue\r\nContent-Length: 2',
+])
+def test_ambiguous_framing_never_signs_complete(framing):
+    from agent_py_agent.agent.gateway_parts.http_body_readiness import complete_request_length
+
+    prefix = bytearray(b'POST /ordinary HTTP/1.1\r\n' + framing + b'\r\n\r\n{}')
+    assert complete_request_length(prefix, single_request=True) == 0
+
+
+def test_keepalive_second_partial_request_cannot_take_reserved_worker(monkeypatch):
+    import http.client
+
+    class PersistentHandler(BaseHTTPRequestHandler):
+        protocol_version = 'HTTP/1.1'
+
+        def log_message(self, *_args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers['Content-Length']))
+            self.send_response(200)
+            self.send_header('Content-Length', '2')
+            if self.headers.get('Connection') == 'close':
+                self.send_header('Connection', 'close')
+            self.end_headers()
+            self.wfile.write(b'{}')
+
+    server = TinyServer(('127.0.0.1', 0), PersistentHandler, control_lane_workers=2)
+    thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.01})
+    thread.start()
+    client = connect(server, b'POST /ordinary HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}')
+    try:
+        first = http.client.HTTPResponse(client)
+        first.begin()
+        assert first.status == 200 and first.read() == b'{}'
+        assert not server._lanes._ready_executor._threads
+        client.sendall(b'POST /ordinary HTTP/1.1\r\nHost: localhost\r\nContent-Length: 6\r\n\r\na')
+        with connect(server, b'POST /ordinary HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}') as complete:
+            assert b'200 OK' in response(complete)
+        client.sendall(b'bcdef')
+        second = http.client.HTTPResponse(client)
+        second.begin()
+        assert second.status == 200 and second.read() == b'{}'
+    finally:
+        client.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(1)
+        assert not thread.is_alive() and not server._lanes._thread.is_alive()
+
+
+def test_pending_prefixes_are_bounded_do_not_spin_and_release_on_eof(server, monkeypatch):
+    from agent_py_agent.agent.gateway_parts.http_body_readiness import HTTP_READY_PREFIX_BYTES
+
+    observed = []
+    original = server._lanes._read_ready
+
+    def observe(*args):
+        observed.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(server._lanes, '_read_ready', observe)
+    clients = [connect(server, b'POST /ordinary HTTP/1.1\r\nContent-Length: 4000\r\n\r\nx') for _ in range(5)]
+    try:
+        eventually(lambda: len(server._lanes._prefixes) == len(clients))
+        count = len(observed)
+        threading.Event().wait(0.03)
+        assert len(observed) == count  # 已消费的前缀不再让level-trigger selector反复就绪。
+        assert all(len(p) <= HTTP_READY_PREFIX_BYTES for p in server._lanes._prefixes.values())
+        assert sum(map(len, server._lanes._prefixes.values())) <= server._lanes.pending_limit * HTTP_READY_PREFIX_BYTES
+        assert not server._request_executor._threads and not server._lanes._ready_executor._threads
+    finally:
+        for client in clients:
+            client.close()
+    eventually(lambda: not server._lanes._pending and not server._lanes._prefixes)
+    eventually(lambda: server._request_slots._value == server.max_outstanding_requests)
+
+
+def test_real_gateway_complete_request_still_requires_authentication(tmp_path):
+    import json
+    from pathlib import Path
+
+    from agent_py_agent.tests.slo.fake_provider import FakeProvider
+    from agent_py_agent.tests.slo.load import GatewayProcess, durable_receipt, json_request
+    from agent_py_agent.tests.support.ci_authenticated_gateway import authenticated_headers
+
+    parameters = json.loads((Path(__file__).parent / 'slo' / 'slo_targets.json').read_text())['fixture']
+    with FakeProvider(tmp_path / 'provider', teardown_seconds=parameters['teardown_seconds']) as provider:
+        gateway = GatewayProcess(tmp_path / 'gateway', provider, parameters, {'gateway_http_control_lane_workers': 4})
+        clients = []
+        try:
+            gateway.start()
+            for _ in range(52):
+                endpoint = gateway.base_url.rsplit(':', 1)
+                client = socket.create_connection(('127.0.0.1', int(endpoint[1])), timeout=2)
+                client.sendall(b'POST /ask HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4096\r\n\r\n{')
+                clients.append(client)
+            body = {'prompt': 'isolated-auth-boundary', 'conversation_id': 'ready-auth',
+                    'delivery_intent': 'queue', 'metadata': {'message_id': 'ready-auth'}}
+            denied, response_body = json_request(gateway.base_url, '/ask', body, headers={'X-Gateway-Token': 'invalid-fixture-token'})
+            assert denied == 403 and not durable_receipt(response_body)
+            accepted, response_body = json_request(gateway.base_url, '/ask', body, headers=authenticated_headers(gateway.home))
+            assert accepted == 202 and durable_receipt(response_body)
+        finally:
+            for client in clients:
+                client.close()
+            gateway.close()
+
+
+def test_prefix_replay_preserves_pipeline_bytes_and_peek_without_consuming():
+    from agent_py_agent.agent.gateway_parts.http_body_readiness import PrefetchedSocket
+
+    left, right = socket.socketpair()
+    prefix = bytearray(b'first\r\nsecond\r\n')
+    wrapped = PrefetchedSocket(left, prefix)
+    try:
+        assert left.fileno() == -1
+        assert wrapped.recv(5, socket.MSG_PEEK) == b'first'
+        right.sendall(b'kernel\r\n')
+        with wrapped.makefile('rb') as reader:
+            assert reader.readline() == b'first\r\n'
+            assert reader.readline() == b'second\r\n'
+            assert reader.readline() == b'kernel\r\n'
+        assert wrapped._prefix is None
+    finally:
+        wrapped.close()
+        right.close()
+
+
+def test_ready_framing_does_not_guess_keepalive_close_tokens():
+    from agent_py_agent.agent.gateway_parts.http_body_readiness import complete_request_length
+
+    for value in (b'keep-alive', b'close, keep-alive', b'close '):
+        prefix = bytearray(b'POST /ordinary HTTP/1.1\r\nConnection: ' + value + b'\r\nContent-Length: 0\r\n\r\n')
+        assert complete_request_length(prefix, single_request=False) == 0
+
+
+def test_replay_initialization_failure_closes_detached_socket_without_gc(server, monkeypatch):
+    from agent_py_agent.agent.gateway_parts.http_body_readiness import PrefetchedSocket
+
+    failed = threading.Event()
+    retained = []
+
+    def fail_timeout(wrapped, _timeout):
+        retained.append(wrapped)
+        failed.set()
+        raise OSError('isolated-replay-initialization')
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(PrefetchedSocket, 'settimeout', fail_timeout)
+        with request(server, 'GET', '/ordinary') as client:
+            assert client.recv(1) == b''
+        assert failed.wait(1) and retained[0].fileno() == -1
+    assert server._lanes._thread.is_alive()
+    assert server._request_slots._value == server.max_outstanding_requests
+    with request(server, 'GET', '/ordinary') as client:
+        assert b'200 OK' in response(client)
+
+
+def test_closed_replay_releases_prefix_even_with_strong_socket_reference():
+    from agent_py_agent.agent.gateway_parts.http_body_readiness import PrefetchedSocket
+
+    left, right = socket.socketpair()
+    wrapped = PrefetchedSocket(left, bytearray(b'not-yet-read'))
+    try:
+        wrapped.close()
+        assert wrapped.fileno() == -1 and wrapped._prefix is None
+    finally:
+        wrapped.close()
+        right.close()
+
+
+def test_fragmented_header_search_only_revisits_boundary_suffix(server, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import http_lanes
+
+    original = http_lanes.complete_request_length
+    work = []
+
+    def observe(prefix, **options):
+        work.append(len(prefix) - options['search_from'])
+        return original(prefix, **options)
+
+    monkeypatch.setattr(http_lanes, 'complete_request_length', observe)
+    head = b'GET /ordinary HTTP/1.1\r\nX-Fixture: '
+    with connect(server, head) as client:
+        eventually(lambda: any(len(p) == len(head) for p in server._lanes._prefixes.copy().values()))
+        sent = len(head)
+        for _ in range(20):
+            client.sendall(b'x' * 100)
+            sent += 100
+            eventually(lambda: any(len(p) == sent for p in server._lanes._prefixes.copy().values()))
+        client.sendall(b'\r\n\r\n')
+        assert b'200 OK' in response(client)
+    assert sum(work) <= sent + 4 + 3 * len(work)
