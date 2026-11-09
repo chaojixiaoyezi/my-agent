@@ -1628,8 +1628,8 @@ def test_r8_public_maintenance_forwards_explicit_quota_budget(tmp_path, monkeypa
     assert calls[0]['max_entries'] == 7 and calls[0]['max_ms'] <= 5
 
 
-# LLM: R7-Q4：配额关闭（max_disk_mb=0）时无论retention是否带load_errors，维护都保持每天一次且不置待续；
-#   配额开启时追赶期间每拍只推进轻量配额片，apply_owner_retention每天只跑一次。
+# LLM: R7-Q4：保留发现完成后，配额开关与load_errors均不得重复日维护；配额关闭不产生配额欠账。
+#   领域通道可按真实预算续片；配额开启时追赶也只续轻量片，不重置日节拍。
 # LLM: 调度仓库的真实索引在维护前初始化；不能在干净基线后新增未受控文件，再要求配额放过增长。
 # 函数用途: 验证配额关闭与配额开启在正常路径与延期路径下的维护节拍与保留调用次数。
 @pytest.mark.parametrize('quota_enabled', [False, True])
@@ -1637,10 +1637,14 @@ def test_r8_public_maintenance_forwards_explicit_quota_budget(tmp_path, monkeypa
 def test_r8_quota_disabled_and_enabled_continuation_cadence(tmp_path, monkeypatch, quota_enabled, load_error):
     import dataclasses
 
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
     from agent_py_agent.agent.memory_store.retention_models import MemoryRetentionError
     from agent_py_agent.agent.user_space import owner_maintenance as maintenance
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
+    # 本例核配额续片的日节拍，不要求真实文件系统在25ms内完成保留发现。
+    # 默认deadline暂停及保留续片义务由下方独立用例验证，条目/字节预算仍真实生效。
+    monkeypatch.setattr(budgets, 'time', SimpleNamespace(monotonic=lambda: 0.0))
     _r7_clear_scans()
     home = ensure_my_agent_home(tmp_path / 'home')
     owner = home.owner_home_dir
@@ -1675,11 +1679,31 @@ def test_r8_quota_disabled_and_enabled_continuation_cadence(tmp_path, monkeypatc
 
     monkeypatch.setattr(maintenance, 'apply_owner_retention', counted_apply)
     start = 3_000_000_000
-    day1_runs = [tick for tick in range(30)
-                 if maintenance.run_owner_retention_if_due(home, now=start + tick * 60).ran]
+
+    def daily_runs(day):
+        runs, full_runs = [], []
+        for tick in range(30):
+            path = owner / 'data' / 'maintenance.json'
+            before = json.loads(path.read_text()) if path.exists() else {}
+            result = maintenance.run_owner_retention_if_due(home, now=day + tick * 60)
+            if not result.ran:
+                continue
+            runs.append(tick)
+            if result.retention is not None:
+                full_runs.append(tick)
+            else:
+                # 通道的真实墙钟预算也可产生续片；它必须继承原欠账与日节拍，不能另跑日维护。
+                assert tick > 0
+                assert before['maintenance_partial'] is True or quota_enabled
+                after = json.loads(path.read_text())
+                assert before['last_attempt_at'] == after['last_attempt_at'] == day
+        assert full_runs == [0]
+        return runs
+
+    day1_runs = daily_runs(start)
     state = json.loads((owner / 'data' / 'maintenance.json').read_text())
     if not quota_enabled:
-        assert day1_runs == [0]
+        assert day1_runs[0] == 0
         assert retention_calls[0] == 1
         assert state['maintenance_partial'] is False
     else:
@@ -1688,11 +1712,10 @@ def test_r8_quota_disabled_and_enabled_continuation_cadence(tmp_path, monkeypatc
         assert state['maintenance_partial'] is False
         ledger = json.loads((owner / '.owner-quota-ledger.json').read_text())
         assert ledger['dirty_since'] is None and ledger['reconcile_cursor']['complete'] is True
-    day2_runs = [tick for tick in range(30)
-                 if maintenance.run_owner_retention_if_due(home, now=start + 86400 + tick * 60).ran]
+    day2_runs = daily_runs(start + 86400)
     assert retention_calls[0] == 2
     if not quota_enabled:
-        assert day2_runs == [0]
+        assert day2_runs[0] == 0
     else:
         maint_cursor = state['storage_maintenance'].get('cursors', {}).get('cache_tmp_trash') or {}
         assert not any(
@@ -1710,6 +1733,51 @@ def test_r8_quota_disabled_and_enabled_continuation_cadence(tmp_path, monkeypatc
             and quota._parse_quota_disk_mb(True) == 0
             and quota._parse_quota_disk_mb(float('inf')) == 0
         )
+
+
+def test_quota_continuation_reenters_partial_retention_before_daily_cadence(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.memory_store import retention_scan_budget as budgets
+    from agent_py_agent.agent.memory_store.retention_models import MemoryRetentionError
+    from agent_py_agent.agent.user_space import owner_maintenance as maintenance
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / 'home')
+    policy = json.loads((home.owner_home_dir / 'quota.json').read_text())
+    policy['max_disk_mb'] = 1024
+    (home.owner_home_dir / 'quota.json').write_text(json.dumps(policy))
+    original = maintenance.apply_owner_retention
+    plans = []
+
+    def counted(*args, **kwargs):
+        clock = [0.0]
+
+        def monotonic():
+            clock[0] += .03
+            return clock[0]
+
+        # 两次真实默认deadline暂停，再允许按原条目/字节预算完成。
+        with monkeypatch.context() as patch:
+            patch.setattr(budgets, 'time', SimpleNamespace(
+                monotonic=monotonic if len(plans) < 2 else lambda: 0.0))
+            plan = original(*args, **kwargs)
+        plans.append(plan)
+        return replace(plan, errors=(*plan.errors, MemoryRetentionError(
+            'MEMORY_RETENTION_PIN_SOURCE_UNREADABLE', 'memory/x.jsonl', 'OSError')))
+
+    monkeypatch.setattr(maintenance, 'apply_owner_retention', counted)
+    start = 3_000_000_000
+    for tick in range(30):
+        maintenance.run_owner_retention_if_due(home, now=start + tick * 60)
+        state = json.loads((home.owner_data_dir / 'maintenance.json').read_text())
+        if tick < 2:
+            assert len(plans) == tick + 1 and plans[-1].scan_partial is True
+            assert state['retention_scan_partial'] is True and state['maintenance_partial'] is True
+    assert [plan.scan_partial for plan in plans] == [True, True, False]
+    assert state['retention_scan_partial'] is False and state['maintenance_partial'] is False
+    ledger = _r7_ledger(home.owner_home_dir)
+    assert ledger['dirty_since'] is None and ledger['reconcile_cursor']['complete'] is True
 
 
 # LLM: R8-QUOTA-01/02：漂移补扫期间发生真实文件删除竞态或异常时必须保留dirty并拒绝增长；已有大目录漂移补扫的真实scandir迭代必须逐项受单片预算上限约束。
