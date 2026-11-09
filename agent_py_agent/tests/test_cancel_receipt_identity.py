@@ -124,3 +124,33 @@ def test_missing_source_binding_never_attaches_confirmation(tmp_path, monkeypatc
             ).fetchone()[0]
             == "cancelled"
         )
+
+
+def test_owned_process_exit_does_not_upgrade_unbound_legacy_receipt(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    # 原Popen句柄确证本测试自己的进程退出，仍不能补出operation→授权目标的持久绑定。
+    process = subprocess.Popen([sys.executable, '-c', 'import sys;sys.stdin.buffer.read()'],
+                               stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        repo, _parent, _child = _database(tmp_path, 1)
+        with repo.transaction() as conn:
+            payload = json.loads(conn.execute('SELECT outcome_json FROM tool_operations').fetchone()[0])
+            payload['result']['result_envelope']['stop_receipts']['records'][0]['pid'] = process.pid
+            original = json.dumps(payload)
+            conn.execute('UPDATE tool_operations SET outcome_json=?', (original,))
+        process.stdin.close()
+        assert process.wait(timeout=5) == 0
+        monkeypatch.setattr('os.kill', lambda *_args: pytest.fail('legacy diagnostic cannot authorize PID observations'))
+        report = _cleanup_owner_runtime(SimpleNamespace(owner_home_dir=tmp_path), now=1,
+                                        commit_transition=lambda action: action())
+        assert report['executed'] is True and 'stop_reconciliation' not in report
+        with repo._runtime_connection() as conn:
+            row = conn.execute('SELECT status,outcome_json FROM tool_operations').fetchone()
+            assert row['status'] == 'UNKNOWN' and row['outcome_json'] == original
+    finally:
+        if process.stdin is not None and not process.stdin.closed:
+            process.stdin.close()
+        if process.poll() is None:
+            process.wait(timeout=5)
