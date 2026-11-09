@@ -222,7 +222,11 @@ def test_other_thread_commit_does_not_consume_partial_reason(tmp_path):
 def test_verified_audit_skip_commits_during_unfinished_message_scan(tmp_path, scheduled):
     from datetime import datetime, timezone
 
-    from agent_py_agent.tests.test_memory_curator_v2 import _service, _StaticStructuredBackend, _valid_output
+    from agent_py_agent.tests.test_memory_curator_v2 import (
+        _service,
+        _StaticStructuredBackend,
+        _valid_output,
+    )
 
     store, tid, rows = make_messages(tmp_path, count=1000)
     skipped = store.threads.create()

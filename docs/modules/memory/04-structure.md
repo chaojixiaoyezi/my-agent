@@ -1,3 +1,7 @@
+## 2026-11-09 后台整理的历史读取
+
+常规 `MemoryCuratorService` 用原维护预算发现线程，并沿 `MessageStore.after_slice_report` 定位消息；`partial` 不授权推进消息游标或完成日终。审计只点查本页的线程身份，身份未知时不推进审计游标。持久化消费位置、资格与提交仍由原有记忆事务负责。[读取合同与上限](../../design/R8_CURATOR_MESSAGE_SLICES.md)。
+
 ## 2026-10-29 e905-sol-4：记忆代际目录清单、旧版归并恢复与检索控制源修订快照结构
 
 - `generation_manifest.py` 的真实类型为 `MemoryGenerationStore`、`StorageTombstones`、`MemoryPolicyV2`、`ContextBudget`；manifest 保存 generation/operation_id 与 active/cold 分片描述。`publish` 先提交永久屏障再发表根，根失败可能已部分提交；同字节永久账跳过重写，物理 GC 由 `collect_unreferenced` 在维护路径负责。

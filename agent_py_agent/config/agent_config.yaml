@@ -1325,11 +1325,11 @@ curator_daily_quota: 5000
 runner_role_limits: {}
 # 请求提交传输阶段的等待上限，单位秒，0.1..300；与 gateway_request_timeout 取较小值，不是结果等待超时，重启加载。
 gateway_submission_timeout_cap_seconds: 30.0
-# 留存扫描每片最多处理的条目数，单位条，至少1；宿主预算，保留现有游标与状态机，重启加载。
+# 留存扫描和记忆整理读取会话历史时，每片最多处理的条目数，至少 1；重启加载。
 retention_scan_slice_entries: 128
-# 留存扫描每片字节预算，单位字节，至少1024，默认8 MiB；宿主预算，重启加载。
+# 同一维护分片的读取字节预算，至少 1024，默认 8 MiB；未处理的历史留待后续，重启加载。
 retention_scan_slice_bytes: 8388608
-# 留存扫描每片时间预算，单位毫秒，至少1；不与条目/字节预算合并，宿主预算，重启加载。
+# 同一维护分片的协作让出时间，单位毫秒，至少 1；已开始的单次文件读取可以超过此时间，重启加载。
 retention_scan_slice_ms: 25
 # 记忆引用 pin source 的分块读取尺寸，单位字节，至少1024，默认64 KiB；宿主参数，重启加载。
 memory_reference_pin_chunk_bytes: 65536

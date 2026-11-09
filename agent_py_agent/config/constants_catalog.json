@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1430,
+  "count": 1436,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -4060,6 +4060,38 @@
       "description": "每份首ID过滤器8KiB，32768份极端上界256MiB；同一次读取的多个位置共享不可变过滤器。"
     },
     {
+      "name": "_HOT_PREFIX_FILTER_BYTES",
+      "file": "agent_py_agent/agent/conversation/message_prefix_proof.py",
+      "value": 262144,
+      "unit": "字节",
+      "category": "其它",
+      "description": "每个热源的位图256KiB，不保存消息ID或正文。"
+    },
+    {
+      "name": "_HOT_PREFIX_MAX_SOURCES_COUNT",
+      "file": "agent_py_agent/agent/conversation/message_prefix_proof.py",
+      "value": 16,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "全进程最多16源，位图驻留总量不超过4MiB；借用中的条目不可淘汰。"
+    },
+    {
+      "name": "_HOT_PREFIX_MIN_SOURCE_BYTES",
+      "file": "agent_py_agent/agent/conversation/message_prefix_proof.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "其它",
+      "description": "小文件沿原定位缓存即可，不为其建立大位图。"
+    },
+    {
+      "name": "TRANSCRIPT_MAX_SEGMENT_BYTES",
+      "file": "agent_py_agent/agent/conversation/message_scan.py",
+      "value": 67108864,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单个 canonical 冷段及完整消息原子记录的既有字节上限；冷热有界读取共用，禁止平行设置。"
+    },
+    {
       "name": "TRANSCRIPT_ROTATE_BYTES",
       "file": "agent_py_agent/agent/conversation/message_scan.py",
       "value": 1048576,
@@ -6746,6 +6778,22 @@
       "unit": "字符",
       "category": "其它",
       "description": "审计事件预览最多 1000 字符：事件详情截断，保留判定要点。"
+    },
+    {
+      "name": "_CURATOR_THREAD_DISCOVERY_MAX_ROOTS_COUNT",
+      "file": "agent_py_agent/agent/memory_store/curator_inputs.py",
+      "value": 16384,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "线程发现每个来源根只存一个目录续点；与逐线程EOF分开，避免旧线程大量命中挤掉owner公平续点。"
+    },
+    {
+      "name": "_CURATOR_THREAD_OBSERVATION_MAX_BYTES",
+      "file": "agent_py_agent/agent/memory_store/curator_inputs.py",
+      "value": 8192,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "每个来源根最多暂存一份待服务资格投影；不保留title/summary/整份metadata或消息正文。"
     },
     {
       "name": "_MESSAGE_PREVIEW_CHARS",
