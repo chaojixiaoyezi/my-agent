@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1413,
+  "count": 1414,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -9930,6 +9930,14 @@
       "unit": "个文件",
       "category": "上限预算",
       "description": "通道身份来源目录允许收集的绑定文件数量上限。"
+    },
+    {
+      "name": "_HISTORY_COPY_SLICE_ITEMS_COUNT",
+      "file": "agent_py_agent/agent/user_space/managed_dispatch_recovery.py",
+      "value": 16,
+      "unit": "个",
+      "category": "其它",
+      "description": "单个旧线程每拍最多复制16个物理历史位置，原max_ms同时限制墙钟。"
     },
     {
       "name": "_COMPACT_POLICY_CACHE_MAX",
