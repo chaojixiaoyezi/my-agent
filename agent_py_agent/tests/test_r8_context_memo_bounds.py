@@ -22,7 +22,7 @@ def test_large_leaf_and_wide_identity_tree_decline_cache_with_bounded_visits(mon
 
     monkeypatch.setattr(pressure, '_context_value_fingerprint', observed)
     assert observed({str(i): i for i in range(100_000)}) is None
-    assert len(calls) <= pressure._CONTEXT_MEMO_KEY_MAX_NODES
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize('memo_available', [False, True])
@@ -32,7 +32,7 @@ def test_uncacheable_projection_does_not_construct_output_key_and_keeps_full_his
     _agent, params = _context_case()
     params.tool_ir_history = [UserTurn('x' * 300_000)]
     memo = ContextEstimateMemo()
-    memo.remember_prompt_projection(('old', 'old-output', 'old-prompt', ()))
+    memo.remember_prompt_projection(('old', 'old-output', 'old-prompt', ()), revision=memo.context_revision())
     monkeypatch.setattr(context_estimate_cache, 'estimate_memo_for', lambda params: memo if memo_available else None)
     calls = []
     original = pressure._prompt_history_projection_key
@@ -80,7 +80,7 @@ def test_uncacheable_input_releases_previous_projection_leaf_without_gc():
     reference = weakref.ref(leaf)
     memo = ContextEstimateMemo()
     params._context_estimate_memo = memo
-    memo.remember_prompt_projection(('old-key', 'old-output-key', leaf, ()))
+    memo.remember_prompt_projection(('old-key', 'old-output-key', leaf, ()), revision=memo.context_revision())
     del leaf
     assert reference() is not None
     params.tool_ir_history = [UserTurn('x' * 300_000)]
@@ -97,3 +97,47 @@ def test_large_history_estimate_still_counts_complete_content():
     assert large > small + 50_000
     assert params._context_estimate_memo._last is None
     assert params._context_estimate_memo.prompt_projection() is None
+
+
+def test_large_projection_forgets_once_and_late_small_projection_cannot_republish(monkeypatch):
+    from copy import copy
+
+    from agent_py_agent.agent.agent_core import tool_ir_history
+
+    _agent, params = _context_case()
+    memo = ContextEstimateMemo()
+    params._context_estimate_memo = memo
+    large = copy(params)
+    large.tool_ir_history = [UserTurn('x' * 300_000)]
+    entered, release = Event(), Event()
+    original = tool_ir_history.project_native_prompt_history
+    original_forget = memo.forget_context
+    forgets = []
+
+    def tracked_forget():
+        forgets.append(1)
+        original_forget()
+
+    def projected(value, prompt, **kwargs):
+        if prompt == 'short complete prompt':
+            entered.set()
+            assert release.wait(3)
+        return original(value, prompt, **kwargs)
+
+    monkeypatch.setattr(memo, 'forget_context', tracked_forget)
+    monkeypatch.setattr(tool_ir_history, 'project_native_prompt_history', projected)
+    with ThreadPoolExecutor(1) as pool:
+        pending = pool.submit(pressure.project_request_prompt_history, params, 'short complete prompt')
+        assert entered.wait(3)
+        try:
+            big_prompt, big_history = pressure.project_request_prompt_history(large, 'large complete prompt')
+            assert big_prompt == 'large complete prompt' and len(big_history[0].text) == 300_000
+        finally:
+            release.set()
+        small_prompt, small_history = pending.result(3)
+    assert small_prompt == 'short complete prompt' and small_history == params.tool_ir_history
+    assert memo.prompt_projection() is None
+    assert forgets == [1]
+    # 同请求完整key重新核验后，新一代仍可正常发表，未关闭缓存能力。
+    pressure.project_request_prompt_history(params, 'short complete prompt')
+    assert memo.prompt_projection() is not None

@@ -843,8 +843,10 @@ def project_request_prompt_history(params, prompt):
     history = getattr(params, "tool_ir_history", None) or []
     conversation = conversation_runtime_state_section(params)
     memo = estimate_memo_for(params)
+    revision = memo.context_revision() if memo is not None else None
     key = _prompt_history_projection_key(params, prompt, history, conversation, project_native_prompt_history) if memo is not None else None
-    if memo is not None and key is None:
+    forgotten = memo is not None and key is None
+    if forgotten:
         memo.forget_context()
     cached = memo.prompt_projection() if memo is not None else None
     if key is not None and cached is not None and (key == cached[0] or key == cached[1]):
@@ -864,10 +866,10 @@ def project_request_prompt_history(params, prompt):
     if memo is not None and key is not None:
         output_key = _prompt_history_projection_key(params, projected, result, conversation, project_native_prompt_history)
         if output_key is not None and key == _prompt_history_projection_key(params, prompt, getattr(params, "tool_ir_history", None) or [], conversation, project_native_prompt_history):
-            memo.remember_prompt_projection((key, output_key, projected, tuple(result)))
+            memo.remember_prompt_projection((key, output_key, projected, tuple(result)), revision=revision)
         else:
             memo.forget_context()
-    elif memo is not None:
+    elif memo is not None and not forgotten:
         memo.forget_context()
     return projected, result
 
@@ -908,6 +910,8 @@ def _context_value_fingerprint(value: object, *, _depth: int = 0, _budget=None) 
         leaf = value.hex() if kind is float else value
         budget[0] -= sys.getsizeof(leaf) + sys.getsizeof((kind, leaf))
         return (kind, leaf) if budget[0] >= 0 else None
+    if kind in (dict, list, tuple) and len(value) > budget[1]:
+        return None
     if kind is dict:
         entries = value.items()
     elif kind in (list, tuple):

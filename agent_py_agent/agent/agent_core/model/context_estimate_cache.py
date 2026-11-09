@@ -46,11 +46,17 @@ class ContextEstimateMemo:
         with self._lock:
             return self._prompt_projection
 
+    def context_revision(self):
+        """只借同锁轻量代次，昂贵投影和内容复核仍在锁外。"""
+        with self._lock:
+            return self._revision
+
     # LLM: 只保留最新投影；共享holder使frozen参数及同轮replace都能复用，不改归档字典。
     # 函数用途: 原子发表一次通过内容核验的纯投影。
-    def remember_prompt_projection(self, projection):
+    def remember_prompt_projection(self, projection, *, revision):
         with self._lock:
-            self._prompt_projection = projection
+            if revision == self._revision:
+                self._prompt_projection = projection
 
     # LLM: 批次取原模型turn身份，预算变动不丢未提交预留；只按真实IR中已提交的call_id结算，同调用重试不重复扣。
     # 函数用途: 原子结算同批内联占用并预留本条结果，新批次显式重置。
