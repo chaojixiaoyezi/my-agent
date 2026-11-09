@@ -1068,6 +1068,7 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_r8_background_transcript_bytes.py # 多线程展示字节预算、归档重读与慢读者交错。
 |-- agent_py_agent/tests/test_r8_model_call_exact_lookup.py # 模型准确调用ID的定值查询、保留/淘汰与错误合同。
 |-- agent_py_agent/tests/test_r8_model_worker_context_release.py # 模型线程退出证明与请求Context释放。
+|-- agent_py_agent/tests/test_darwin_process_tree_snapshot.py # macOS 命令树限定枚举、换代及未知退出回归。
 |-- docs/design/R8_OPERATION_CONFIRMATION_DRAFT.md # 等待确证退出的操作合同草案；旧未知不能补签。
 |-- agent_py_agent/agent/agent_core/orchestration/background/log_retention.py # 派工日志随实际进程退出留存；未知执行体和未收口业务证据永不按年龄删除。
 |-- agent_py_agent/agent/conversation/checkpoint_offset_store.py # 检查点物理行地址的可重建投影；只封存已完成严格扫描的固定源水位。
@@ -1760,6 +1761,7 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 - `local_storage/diagnostics.py`：只在调用方范围内记录数值分段，闭合后不再持有或改写结果，诊断错误不替代业务异常。
 - `local_storage/fts_upgrade.py`：复用原owner维护发现与短片预算，进度权威仍归SQLite job，未完整投影不能签发完整检索。
 - `test_r8_fts_catchup.py`：以确定性交错验证写者可在片间进入，整体预算耗尽仍保留未服务owner次序，辅助表未清空不能结束升级。
+- `test_darwin_process_tree_snapshot.py`：只采集目标后代和独立组，覆盖宿主组、进程复用、僵尸、权限及枚举饱和，不授予新信号或退出确认。
 - `test_r8_artifact_lookup_work.py`：只复用同次已验证负命中，不保无关源行或跨请求负缓存；完整历史定位仍须设计收口。
 - `test_r8_tui_explicit_stream.py`：从正式writer经真实HTTP客户端进入TUI，候选可撤回、终稿唯一、迟到拒绝不走其它渲染出口。
 - `test_r8_local_store_stage_timing.py`、`test_gateway_request_stage_timing.py`：验证分段来源与异常边界，不改审计持久化或请求状态。
