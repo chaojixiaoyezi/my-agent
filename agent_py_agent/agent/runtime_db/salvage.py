@@ -382,10 +382,10 @@ def _validate_candidate(candidate, receipt, facts):
     json_io._sync_parent_directory(candidate)
 
 
-def _complete_recovery(db, state, status):
+def _complete_recovery(db, state, status, *, preserve_evidence=False):
     report = {**state, "status": status, "path": str(db), "published_identity": runtime_db_identity(db)}
     json_io.write_private_json_file_atomic_unlocked(Path(f"{db}.recovery-result.json"), report)
-    if status == "healthy":
+    if status == "healthy" and not preserve_evidence:
         # 瞬态故障清除时只移除本次 journal 明确列出的产物，不扫描历史归档。
         for key in ("candidate", "backup"):
             if key in state:

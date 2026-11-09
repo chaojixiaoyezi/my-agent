@@ -41,6 +41,7 @@ from ..conversation.store_guidance_recovery import (
 )
 from ..conversation.task_state import conversation_task_link_is_terminal
 from ..runtime_errors import DataCorruptionError, RecoverableRuntimeError, runtime_error_report
+from .input_turn_retention import guard_turn_ref_birth
 from .io import (
     _read_json_dict_unlocked_report,
     gateway_response_path,
@@ -1195,6 +1196,7 @@ def gateway_input_status_payload(receipt: GatewayInputReceipt) -> dict[str, obje
 # 函数用途: 保存一条活动回合到普通消息回执的索引引用。
 # LLM: 可选deadline随原reader/writer到锁后末提交，不将预ref当授权；Count0 None保持原字节。
 # 函数用途: 写原turn查找投影，过期或锁忙保原欠账。
+@guard_turn_ref_birth
 def _write_active_turn_ref(paths: GatewayPaths, receipt: GatewayInputReceipt, *, blocking: bool = True,
                            target_turn_id: str | None = None, deadline: float | None = None) -> None:
     turn_id = receipt.target_turn_id if target_turn_id is None else target_turn_id
@@ -1221,6 +1223,7 @@ def _write_active_turn_ref(paths: GatewayPaths, receipt: GatewayInputReceipt, *,
 # 函数用途: 严格列出一个原回合已发布的input查找引用，不扫描共享receipt域。
 # LLM: 每个本turn ref读前后核同一纯deadline；过期抛资源忙，由原source处理，不能返回空列表。
 # 函数用途: 在原定位目录检查全部ref，普通读延迟后不越过预算。
+@guard_turn_ref_birth
 def transport_turn_input_references(paths: GatewayPaths, target_turn_id: str, *, deadline: float | None = None) -> tuple[dict, ...]:
     turn_digest = hashlib.sha256(target_turn_id.encode('utf-8')).hexdigest()
     folder = paths.root / 'input_receipts' / 'by_turn' / turn_digest
@@ -1246,6 +1249,7 @@ def transport_turn_input_references(paths: GatewayPaths, target_turn_id: str, *,
 # LLM: Turn refs只发现本回合输入，不授权执行；逐引用读取错误记入原summary，不能把发现失败当空账。
 # 函数用途: 返回精确回合的可读请求ID，并保留坏引用的补交欠账。
 # LLM: 原by_turn只是查找投影；坏行计原errors，不能因为漏读输入就宣布结算追平，不新建索引权威。
+@guard_turn_ref_birth
 def _turn_input_request_ids(paths: GatewayPaths, target_turn_id: str, summary: dict[str, int]) -> tuple[str, ...]:
     turn_id = str(target_turn_id or "").strip()
     if not turn_id:

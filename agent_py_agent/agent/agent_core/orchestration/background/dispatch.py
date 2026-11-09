@@ -186,6 +186,8 @@ def _start_background_dispatch(
     # typed startup-failure state.
     mark_errors.extend(mark_background_start(request, status="running", pid=process.pid))
     if (returncode := process_startup_returncode(process)) is not None:
+        _remember_background_dispatch(agent, launch_id, run_ids, f"pid:{process.pid}")
+        _start_background_process_reaper(agent, request, process)
         return _with_reused_starts(_background_process_startup_failure(
             _ProcessStartupFailureRequest(agent, request, process, returncode, mark_errors)
         ), reused)
@@ -315,6 +317,9 @@ def _start_inprocess_dispatch(
 def _spawn_background_dispatch_process(agent, request: _BackgroundDispatchRequest) -> subprocess.Popen:
     log_path = Path(_background_log_path(agent, request.launch_id))
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    from .log_retention import pin_dispatch_log, retire_dispatch_logs_slice
+
+    retire_dispatch_logs_slice(log_path.parent)
     log_handle = log_path.open("a", encoding="utf-8")
     command = _background_dispatch_command(agent, request)
     # 标记后台派工子进程:子进程里记录的 runner 会话据此标 in_process=False,宿主已死回收对它
@@ -323,6 +328,7 @@ def _spawn_background_dispatch_process(agent, request: _BackgroundDispatchReques
 
     child_env = {**os.environ, RUNNER_SUBPROCESS_ENV: "1"}
     try:
+        pin_dispatch_log(log_handle)
         process = subprocess.Popen(
             command,
             cwd=str(_project_root()),
@@ -408,6 +414,17 @@ def _reap_background_process(agent, launch_id: str, process: subprocess.Popen) -
         returncode = None
         error = f"{type(exc).__name__}: {exc}"
     registry = getattr(agent, "_background_subagent_dispatches", None)
+    if returncode is not None:
+        from ....user_space.runtime_paths import runtime_owner_root
+        from .log_retention import record_dispatch_log_exit, retire_dispatch_logs_slice
+
+        try:
+            record_dispatch_log_exit(_background_log_path(agent, launch_id), returncode=returncode,
+                run_ids=(registry.get(launch_id) or {}).get('run_ids', []) if isinstance(registry, dict) else [],
+                owner_home=runtime_owner_root(agent))
+            retire_dispatch_logs_slice(Path(_background_log_path(agent, launch_id)).parent)
+        except (OSError, ValueError, TypeError):
+            pass  # 留存失败保持未知日志；不影响原进程回收及任务收口。
     if not isinstance(registry, dict):
         return
     item = dict(registry.get(launch_id) or {})

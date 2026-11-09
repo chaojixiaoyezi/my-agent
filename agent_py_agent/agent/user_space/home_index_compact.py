@@ -134,6 +134,7 @@ class IndexCompactResult:
 #   放在索引同目录的一个小 sidecar 里（派生数据，丢了按"无记录"处理）。
 _LAST_COMPACT_BYTES: dict[str, int] = {}
 _LAST_COMPACT_AT: dict[str, float] = {}
+_LAST_RETIRE_KEY: dict[str, tuple[str, ...]] = {}
 # 两份派生缓存成对更新、读取与淘汰；512项容纳近期索引，不随历史owner永久增长。
 _MAX_COMPACT_CACHE_ENTRIES = 512
 _COMPACT_CACHE_LOCK = threading.RLock()
@@ -152,6 +153,7 @@ def _remember_compact_state(key: str, size: int, at: float) -> None:
             oldest = next(iter(_LAST_COMPACT_BYTES))
             _LAST_COMPACT_BYTES.pop(oldest)
             _LAST_COMPACT_AT.pop(oldest, None)
+            _LAST_RETIRE_KEY.pop(oldest, None)
 
 
 # LLM: sidecar 与索引同目录；只存路径→大小/时间，不含任何正文。
@@ -184,6 +186,10 @@ def load_compact_state(path: str | Path) -> None:
     except (TypeError, ValueError):
         return
     _remember_compact_state(key, size, at)
+    cursor = record.get("retire_after", [])
+    if isinstance(cursor, list) and all(isinstance(item, str) for item in cursor):
+        with _COMPACT_CACHE_LOCK:
+            _LAST_RETIRE_KEY[key] = tuple(cursor)
 
 
 # LLM: sidecar是原派生冷却事实；先拒W/受限host，缓存锁内取成对快照，C提交门与普通OSError尽力语义保持。
@@ -198,7 +204,8 @@ def save_compact_state(path: str | Path) -> None:
     with _COMPACT_CACHE_LOCK:
         if key not in _LAST_COMPACT_BYTES and key not in _LAST_COMPACT_AT:
             return
-        record = {"bytes": int(_LAST_COMPACT_BYTES.get(key, 0)), "at": float(_LAST_COMPACT_AT.get(key, 0.0))}
+        record = {"bytes": int(_LAST_COMPACT_BYTES.get(key, 0)), "at": float(_LAST_COMPACT_AT.get(key, 0.0)),
+                  "retire_after": list(_LAST_RETIRE_KEY.get(key, ()))}
     entries: dict[str, dict[str, object]] = {}
     try:
         raw = json.loads(sidecar.read_text(encoding="utf-8"))
@@ -340,7 +347,7 @@ def _still_same_file(target: Path, stat0: object, prefix_len: int) -> bool:
 #   所以拿到锁之后必须再核一次，这才是真正关严的那一道。
 # 函数用途: 锁内核对身份后接上窗口期新追加的字节并替换目标文件；返回新大小或失败原因。
 def _append_tail_and_replace(
-    target: Path, tmp: Path, prefix_len: int, stat0: object
+    target: Path, tmp: Path, prefix_len: int, stat0: object, *, validate_sources=None
 ) -> tuple[int | None, str]:
     """把 prefix_len 之后的追加字节接到 tmp 尾部，再原子替换目标文件。"""
     from ..common.json_io import locked_json_path
@@ -349,6 +356,8 @@ def _append_tail_and_replace(
         with locked_json_path(target):
             if not _still_same_file(target, stat0, prefix_len):
                 return None, "identity_changed"
+            if validate_sources is not None and not validate_sources():
+                return None, "canonical_changed"
             _copy_tail(target, tmp, prefix_len)
             after_bytes = tmp.stat().st_size
             tmp.replace(target)
@@ -371,7 +380,7 @@ def _copy_tail(target: Path, tmp: Path, prefix_len: int) -> None:
 
 # LLM: 原两遍/LF/锁内inode与tail算法不变；长扫描在原C门外，callback仅运输唯一提交leaf而不授写权，拒绝只清本次staging并同对象上抛。
 # 函数用途: 压缩一份原索引，沿真实C同步末门提交canonical和sidecar，默认Count0保持原顺序。
-def compact_index_file(path: str | Path, *, now: float | None = None, commit_transition=None) -> IndexCompactResult:
+def compact_index_file(path: str | Path, *, now: float | None = None, commit_transition=None, retire_stale_keys=False) -> IndexCompactResult:
     _require_coordinator_writer()
     from ..common.json_io import locked_json_path
 
@@ -387,8 +396,15 @@ def compact_index_file(path: str | Path, *, now: float | None = None, commit_tra
 
     last_line_for_key, line_count, bad_lines = _scan_last_line_per_key(target, prefix_len, key_fields)
 
+    retired, next_cursor = {}, ()
+    if retire_stale_keys:
+        from .home_index_retirement import retirement_candidates
+        with _COMPACT_CACHE_LOCK:
+            cursor = _LAST_RETIRE_KEY.get(str(target), ())
+        retired, next_cursor = retirement_candidates(target, prefix_len, last_line_for_key,
+            now=float(now if now is not None else time.time()), after=cursor)
     tmp = target.with_name(f"{target.name}.{uuid4().hex}.compact")
-    kept = _write_kept_lines(target, prefix_len, set(last_line_for_key.values()), tmp)
+    kept = _write_kept_lines(target, prefix_len, set(last_line_for_key.values()) - retired.keys(), tmp)
     if kept is None:
         _discard(tmp)
         return IndexCompactResult(target, False, "io_error", before_bytes=prefix_len, bad_lines=bad_lines)
@@ -401,6 +417,10 @@ def compact_index_file(path: str | Path, *, now: float | None = None, commit_tra
     # LLM: 同一原producer末门只调用该同步leaf；不保存或运行另一个Context，不把callback视为可重放许可。
     # 函数用途: 在长扫描完成后提交原尾部、替换及冷却记录。
     def operation():
+        if retire_stale_keys:
+            from .home_index_retirement import sources_still_missing
+            return _commit_compacted_file(target, tmp, (prefix_len, stat0), now,
+                validate_sources=lambda: sources_still_missing(target, retired.values()), retire_after=next_cursor)
         return _commit_compacted_file(target, tmp, (prefix_len, stat0), now)
 
     try:
@@ -428,13 +448,16 @@ def compact_index_file(path: str | Path, *, now: float | None = None, commit_tra
 
 # LLM: 原锁内inode/tail/rename及C末门不改；缓存成对更新到sidecar保存期间不允许被其它路径淘汰。
 # 函数用途: 完成一次短提交，保留main原Count0写入顺序和派生冷却语义。
-def _commit_compacted_file(target, tmp, source, now):
+def _commit_compacted_file(target, tmp, source, now, *, validate_sources=None, retire_after=None):
     prefix_len, stat0 = source
-    after_bytes, failure = _append_tail_and_replace(target, tmp, prefix_len, stat0)
+    options = {} if validate_sources is None else {'validate_sources': validate_sources}
+    after_bytes, failure = _append_tail_and_replace(target, tmp, prefix_len, stat0, **options)
     if after_bytes is not None:
         current = float(now if now is not None else time.time())
         with _COMPACT_CACHE_LOCK:
             _remember_compact_state(str(target), after_bytes, current)
+            if retire_after is not None:
+                _LAST_RETIRE_KEY[str(target)] = retire_after
             save_compact_state(target)
     return after_bytes, failure
 
@@ -469,7 +492,15 @@ def compact_global_indexes_if_due(home: object, *, now: float | None = None, com
             continue
         try:
             options = {} if commit_transition is None else {"commit_transition": commit_transition}
-            results.append(compact_index_if_due(target, now=now, **options))
+            # 低于字节阈值也按六小时原冷却推进退役游标，历史唯一key不能永久躲过维护。
+            load_compact_state(target)
+            with _COMPACT_CACHE_LOCK:
+                last_at = _LAST_COMPACT_AT.get(str(target), 0.0)
+            current = float(now if now is not None else time.time())
+            if not last_at or current - last_at >= COMPACT_COOLDOWN_SECONDS:
+                results.append(compact_index_file(target, now=now, retire_stale_keys=True, **options))
+            else:
+                results.append(compact_index_if_due(target, now=now, **options))
         except Exception as error:
             _raise_index_contract_error(error)
             results.append(IndexCompactResult(Path(target), False, "io_error"))

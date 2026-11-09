@@ -14,7 +14,7 @@ import pytest
 from agent_py_agent.agent.user_space import home_retention, owner_maintenance, storage_lanes
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
-_HISTORY_LANES = ("runtime_history", "gateway_history")
+_HISTORY_LANES = ("runtime_history", "gateway_history", "gateway_input_refs")
 _ORIGINAL_EVICTION_ORDER = (
     "display_archives", "conversation_messages", "compact_checkpoints", "local_events",
     "conversation_ledgers", "tool_outputs", "subagents", "asset_auxiliary",
@@ -26,6 +26,7 @@ _RUNTIME_COUNTERS = ("slimmed", "deleted_events", "deleted_llm_records")
 @pytest.mark.parametrize(("kind", "module", "name"), [
     ("runtime_history", "runtime_db.history_retention", "maintain_runtime_history_lane"),
     ("gateway_history", "gateway_parts.gateway_history_index", "maintain_gateway_history_lane"),
+    ("gateway_input_refs", "gateway_parts.input_turn_retention", "maintain_input_turn_refs_lane"),
 ])
 def test_history_lanes_resolve_existing_domain_entrypoints(kind, module, name):
     lane = storage_lanes.resolve_storage_lane(kind)
@@ -56,7 +57,7 @@ def test_history_lanes_append_without_reordering_existing_eviction_lanes():
 def test_history_registration_reduces_unbound_kinds_through_real_dispatch(tmp_path):
     home = ensure_my_agent_home(tmp_path / "home")
     registry = {kind.kind: kind for kind in home_retention.storage_kind_registry()}
-    assert tuple(registry)[-2:] == _HISTORY_LANES
+    assert tuple(registry)[-len(_HISTORY_LANES):] == _HISTORY_LANES
     for name in ("runtime_events", "gateway_logs", *_HISTORY_LANES):
         assert "policy-delete" in registry[name].actions
     assert registry["runtime_events"].policy_ref == "audit_days / tool_output_days_after_terminal after terminal"
@@ -78,7 +79,7 @@ def test_history_registration_reduces_unbound_kinds_through_real_dispatch(tmp_pa
     current = owner_maintenance.run_storage_maintenance_slice({}, adapters, max_seconds=0)
     assert not previous["errors"] and not current["errors"]
     assert set(previous["unbound_kinds"]) - set(current["unbound_kinds"]) == set(_HISTORY_LANES)
-    assert len(current["unbound_kinds"]) == len(previous["unbound_kinds"]) - 2
+    assert len(current["unbound_kinds"]) == len(previous["unbound_kinds"]) - len(_HISTORY_LANES)
 
 
 @pytest.mark.parametrize("value", [0, 3])

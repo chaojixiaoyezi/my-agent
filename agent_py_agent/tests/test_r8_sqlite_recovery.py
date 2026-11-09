@@ -1,0 +1,108 @@
+"""通用库恢复以真实SQLite验证，不将损坏、未知或缺行当作空库。"""
+import sqlite3
+import threading
+from contextlib import closing
+from pathlib import Path
+
+import pytest
+
+from agent_py_agent.agent.io.sqlite_recovery import recover_sqlite_database
+from agent_py_agent.agent.io.sqlite_scope import scoped_connection
+from agent_py_agent.agent.runtime_db.recovery_guard import (
+    close_runtime_connection,
+    guarded_runtime_connect,
+    request_runtime_db_recovery,
+    runtime_db_recovery_pending,
+)
+
+
+def _database(path):
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute('CREATE TABLE records(id INTEGER PRIMARY KEY, value BLOB)')
+        conn.executemany('INSERT INTO records VALUES(?,?)', [(i, ('record-' + str(i)).encode()) for i in range(1, 1500)])
+        conn.execute('CREATE INDEX records_value ON records(value)')
+        conn.execute('PRAGMA user_version=7')
+        conn.commit()
+
+
+def test_false_corruption_intent_is_consumed_at_original_write_entry(tmp_path):
+    path = tmp_path / 'local.db'
+    _database(path)
+    request_runtime_db_recovery(path)
+    with scoped_connection(path, False, lambda: sqlite3.connect(path)) as conn:
+        assert conn.execute('SELECT count(*) FROM records').fetchone() == (1499,)
+    assert not runtime_db_recovery_pending(path)
+    assert not list(tmp_path.glob('local.db.damaged-*'))
+
+
+def test_actual_notadb_preserves_all_evidence_and_blocks_reentry(tmp_path):
+    path = tmp_path / 'run-index.sqlite3'
+    path.write_bytes(b'not a sqlite database' * 100)
+    files = {'': path.read_bytes(), '-wal': b'original wal', '-shm': b'original shm', '-journal': b'\0' * 8 + b'original journal'}
+    for suffix, raw in files.items():
+        Path(str(path) + suffix).write_bytes(raw)
+    request_runtime_db_recovery(path)
+    report = recover_sqlite_database(path)
+    assert report['status'] == 'requires_recovery', report
+    assert 'next_action' in report
+    assert runtime_db_recovery_pending(path)
+    backup = path.with_name(report['backup'])
+    for suffix, raw in files.items():
+        assert Path(str(backup) + suffix).read_bytes() == raw
+    before = {p.name for p in tmp_path.iterdir()}
+    assert recover_sqlite_database(path)['status'] == 'requires_recovery'
+    assert before == {p.name for p in tmp_path.iterdir()}
+
+
+def test_real_damaged_index_rebuilt_without_record_loss(tmp_path):
+    path = tmp_path / 'local.db'
+    _database(path)
+    with closing(sqlite3.connect(path)) as conn:
+        page = conn.execute("SELECT rootpage FROM sqlite_master WHERE name='records_value'").fetchone()[0]
+        size = conn.execute('PRAGMA page_size').fetchone()[0]
+        original = conn.execute('SELECT * FROM records NOT INDEXED').fetchall()
+    with path.open('r+b') as stream:
+        stream.seek((page - 1) * size)
+        stream.write(b'\0' * size)
+    request_runtime_db_recovery(path)
+    report = recover_sqlite_database(path)
+    assert report['status'] == 'recovered', report
+    assert not runtime_db_recovery_pending(path)
+    with closing(sqlite3.connect(path)) as conn:
+        assert conn.execute('SELECT * FROM records NOT INDEXED').fetchall() == original
+        assert conn.execute('PRAGMA user_version').fetchone() == (7,)
+        assert conn.execute('PRAGMA integrity_check').fetchall() == [('ok',)]
+    assert path.with_name(report['backup']).exists()
+
+
+def test_live_generation_prevents_recovery_until_physical_close(tmp_path):
+    path = tmp_path / 'local.db'
+    _database(path)
+    entered, release = threading.Event(), threading.Event()
+    def reader():
+        conn = guarded_runtime_connect(path, lambda: sqlite3.connect(path))
+        entered.set()
+        assert release.wait(5)
+        close_runtime_connection(conn)
+    thread = threading.Thread(target=reader)
+    thread.start()
+    assert entered.wait(5)
+    try:
+        request_runtime_db_recovery(path)
+        assert recover_sqlite_database(path)['status'] == 'deferred'
+        assert runtime_db_recovery_pending(path)
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive()
+    assert recover_sqlite_database(path)['status'] == 'healthy'
+
+
+def test_readonly_entry_does_not_turn_intent_into_mutating_recovery(tmp_path):
+    path = tmp_path / 'local.db'
+    _database(path)
+    request_runtime_db_recovery(path)
+    with pytest.raises(sqlite3.OperationalError):
+        with scoped_connection(path, True, lambda: sqlite3.connect(path)):
+            pass
+    assert not list(tmp_path.glob('*.damaged-*'))

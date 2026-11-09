@@ -56,7 +56,7 @@ def test_registry_appends_four_kinds_without_changing_original_order():
         'capability_grants', 'media_inputs', 'persona_versions', 'outbox_delivery', 'process_sessions', 'cache_tmp_trash',
         'legacy_layout', 'session_pair_rate')
     appended = ('display_archives', 'conversation_ledgers', 'asset_auxiliary', 'session_task_payloads',
-        'runtime_history', 'gateway_history')
+        'runtime_history', 'gateway_history', 'gateway_input_refs')
     registry = home_retention.storage_kind_registry()
     assert len(registry) == len({kind.kind for kind in registry}) == len(original) + len(appended)
     assert tuple(kind.kind for kind in registry[:32]) == original

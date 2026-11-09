@@ -302,6 +302,14 @@ def _scope_connection(scope: _ConnectionScope, key: tuple[int, int, Path, bool],
 @contextmanager
 def scoped_connection(path: Path, read_only: bool, connect: Callable[[], sqlite3.Connection]) -> Iterator[sqlite3.Connection]:
     """原始工厂适配层：每条新物理连接只登记一次代次门。"""
+    if not read_only and runtime_db_recovery_pending(path) and not runtime_db_exclusive_owned(path):
+        from .sqlite_recovery import recover_sqlite_database
+
+        report = recover_sqlite_database(path)
+        if report['status'] not in {'healthy', 'recovered', 'superseded'}:
+            error = RuntimeDatabaseDeferred(str(report.get('reason', report['status'])))
+            error.sqlite_recovery = report
+            raise error
     with scoped_guarded_connection(path, read_only, lambda: guarded_runtime_connect(path, connect)) as conn:
         yield conn
 
