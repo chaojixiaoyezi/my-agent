@@ -483,46 +483,59 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             return
         if not stat.S_ISDIR(stamp[2]):
             raise OSError(22, "pin discovery root is not a directory", str(path))
-        descriptor = (open_directory_beneath(path.parent, (path.name,))
-                      if os.scandir in os.supports_fd else None)
-        try:
-            if descriptor is not None and reference_pins._metadata_stamp(os.fstat(descriptor)) != stamp:
-                raise _PinReadChanged(11, "pin directory changed", str(path))
-            # 交换律摘要不需要整目录排序；每项含名称和inode，与原快照监视同一成员身份。
-            total = count = 0
-            scope = "settled" if reference_pins._is_settled(stamp) else self.contents["pass_token"]
-            with os.scandir(descriptor if descriptor is not None else path) as entries:
-                for entry in entries:
-                    scope = "settled" if reference_pins._is_settled(stamp) else self.contents["pass_token"]
-                    name = os.fsencode(entry.name)
-                    total = (total + int.from_bytes(hashlib.sha256(
-                        name + b"\0" + str(entry.inode()).encode()).digest(), "big")) % (1 << 256)
-                    count += 1
-                    member = entry.stat(follow_symlinks=False)
-                    if not (stat.S_ISREG(member.st_mode) or stat.S_ISDIR(member.st_mode)):
-                        child = path / entry.name
-                        if path in self.inventory and not self._pin_related(child):
-                            yield child, False
-                            continue
-                        raise OSError(22, "unsafe pin discovery member", str(path / entry.name))
-                    yield path / entry.name, stat.S_ISDIR(member.st_mode)
-            if ((descriptor is not None and reference_pins._metadata_stamp(os.fstat(descriptor)) != stamp)
-                    or self._stamp(path) != stamp):
-                raise _PinReadChanged(11, "pin directory changed", str(path))
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
+        # 页先关闭原生目录FD再交出成员；partial快照只保留有界名字和原生续点。
+        total = count = 0
+        scope = "settled" if reference_pins._is_settled(stamp) else self.contents["pass_token"]
+        with closing(self._directory_members(path, stamp)) as members:
+            for name, member in members:
+                scope = "settled" if reference_pins._is_settled(stamp) else self.contents["pass_token"]
+                total = (total + int.from_bytes(hashlib.sha256(
+                    os.fsencode(name) + b"\0" + str(member.st_ino).encode()).digest(), "big")) % (1 << 256)
+                count += 1
+                if not (stat.S_ISREG(member.st_mode) or stat.S_ISDIR(member.st_mode)):
+                    child = path / name
+                    if path in self.inventory and not self._pin_related(child):
+                        yield child, False
+                        continue
+                    raise OSError(22, "unsafe pin discovery member", str(path / name))
+                yield path / name, stat.S_ISDIR(member.st_mode)
+        if self._stamp(path) != stamp:
+            raise _PinReadChanged(11, "pin directory changed", str(path))
         self._remember(path, stamp, (total, count))
         if verifying:
             self.post_scopes[path] = scope or self.contents["pass_token"]
 
+    def _directory_members(self, path, stamp):
+        from ..user_space.directory_paging import _native_directory_supported, directory_page
+
+        if _native_directory_supported():
+            cursor, complete = {}, False
+            while not complete:
+                self._check_parents(path)
+                if self._stamp(path) != stamp:
+                    raise _PinReadChanged(11, "pin directory changed", str(path))
+                names, cursor, complete = directory_page(path.parent, (path.name,), cursor,
+                    max(1, min(RETENTION_SCAN_SLICE_ENTRIES,
+                        self.budget.max_entries - self.budget.entries)))
+                if (cursor.get("directory_identity") != [stamp[0], stamp[1]]
+                        or self._stamp(path) != stamp):
+                    raise _PinReadChanged(11, "pin directory changed", str(path))
+                for name in names:
+                    yield name, (path / name).stat(follow_symlinks=False)
+            return
+        # 非原生平台保留原枚举及nofollow成员语义；所有拥有者显式close，不依赖GC。
+        with os.scandir(path) as members:
+            for member in members:
+                yield member.name, member.stat(follow_symlinks=False)
+
     def _walk(self, root):
-        for path, directory in self._entries(root):
-            yield None
-            if directory:
-                yield from self._walk(path)
-            else:
-                yield path
+        with closing(self._entries(root)) as stream:
+            for path, directory in stream:
+                yield None
+                if directory:
+                    yield from self._walk(path)
+                else:
+                    yield path
 
     def _verify_source(self, path):
         stamp, _digest = self.sources[path]
@@ -530,8 +543,9 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             raise _PinReadChanged(11, "pin source generation changed", str(path))
         if stamp is not None:
             if stat.S_ISDIR(stamp[2]):
-                for _ in self._entries(path, verifying=True):
-                    yield 0
+                with closing(self._entries(path, verifying=True)) as stream:
+                    for _ in stream:
+                        yield 0
             else:
                 for _ in self._chunks(path, verifying=True):
                     yield 0
@@ -728,42 +742,49 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
     def _task_states(self):
         owner = Path(self.home.owner_home_dir)
         for root in _recovery_roots(self.home):
-            for child, directory in self._entries(root):
-                yield None
-                if not directory:
-                    continue
-                for base in self._task_bases(child):
-                    if base is None:
-                        yield None
+            with closing(self._entries(root)) as stream:
+                for child, directory in stream:
+                    yield None
+                    if not directory:
                         continue
-                    if canonical_task_root(owner, base) is None:
-                        continue
-                    work = base / "work"
-                    # 缺失work/state也监视；不进入tmp/inputs等运行内容树。
-                    for _ in self._entries(work):
-                        yield None
-                    state = work / "state.json"
-                    if self._stamp(state) is None:
-                        self._remember(state, None, None)
-                    else:
-                        yield state
+                    with closing(self._task_bases(child)) as stream:
+                        for base in stream:
+                            if base is None:
+                                yield None
+                                continue
+                            if canonical_task_root(owner, base) is None:
+                                continue
+                            work = base / "work"
+                            # 缺失work/state也监视；不进入tmp/inputs等运行内容树。
+                            with closing(self._entries(work)) as stream:
+                                for _ in stream:
+                                    yield None
+                            state = work / "state.json"
+                            if self._stamp(state) is None:
+                                self._remember(state, None, None)
+                            else:
+                                yield state
 
     def _task_bases(self, child):
         yield child
-        for nested, directory in self._entries(child):
-            yield nested if directory else None
+        with closing(self._entries(child)) as stream:
+            for nested, directory in stream:
+                yield nested if directory else None
 
     def _build(self, policy):
         pins = _RetentionPins(Path(self.home.owner_home_dir))
-        for _ in self._entries(pins.home):
-            yield 0
+        with closing(self._entries(pins.home)) as stream:
+            for _ in stream:
+                yield 0
         runtime = Path(self.home.owner_workspace_dir) / "runtime/workspaces"
-        for workspace, directory in self._entries(runtime):
-            if directory:
-                self.inventory.add(workspace)
-                for _ in self._entries(workspace):
-                    yield 0
-            yield 0
+        with closing(self._entries(runtime)) as stream:
+            for workspace, directory in stream:
+                if directory:
+                    self.inventory.add(workspace)
+                    with closing(self._entries(workspace)) as stream:
+                        for _ in stream:
+                            yield 0
+                yield 0
         # 策略读取与后续各源一样绑定字节代次，不能沿用固定前奏中的旧策略。
         raw = yield from self._read(Path(self.home.owner_retention_json))
         if raw is None or MemoryRetentionPolicy.from_payload(json.loads(raw)) != policy:
@@ -799,61 +820,64 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                 row = candidate.to_record()
             yield from pins.collect_steps(row, candidate_path)
             yield 1
-        for path in self._task_states():
-            if path is None:
-                yield 0
-                continue
-            for row in self._rows(path, required=True):
-                if row is None:
-                    yield 0
-                    continue
-                status = str(row.get("status") or "").upper()
-                reconciled = (status == "RUNNING" and path.is_relative_to(pins.home / "runs")
-                    and row.get("task_id") not in policy.legal_hold_task_ids
-                    and runtime_terminal(self.home, path.parent.parent, row, self.now) is not None)
-                if reconciled or status not in TASK_TERMINAL_STATUSES or row.get("task_id") in policy.legal_hold_task_ids:
-                    if not reconciled:
-                        pins.paths.add(path.parent.parent.resolve(strict=False))
-                    yield from pins.collect_steps(row, path)
-                yield 0
-        for root in self.roots:
-            for path in self._walk(root / "threads"):
+        with closing(self._task_states()) as stream:
+            for path in stream:
                 if path is None:
                     yield 0
-                    continue
-                if path.suffix != ".json":
                     continue
                 for row in self._rows(path, required=True):
                     if row is None:
                         yield 0
                         continue
-                    thread = ConversationThread.from_dict(row)
-                    if not thread.thread_id or thread.thread_id != path.stem:
-                        raise ValueError("pin thread identity mismatches")
-                    yield from pins.collect_steps(row, path)
+                    status = str(row.get("status") or "").upper()
+                    reconciled = (status == "RUNNING" and path.is_relative_to(pins.home / "runs")
+                        and row.get("task_id") not in policy.legal_hold_task_ids
+                        and runtime_terminal(self.home, path.parent.parent, row, self.now) is not None)
+                    if reconciled or status not in TASK_TERMINAL_STATUSES or row.get("task_id") in policy.legal_hold_task_ids:
+                        if not reconciled:
+                            pins.paths.add(path.parent.parent.resolve(strict=False))
+                        yield from pins.collect_steps(row, path)
                     yield 0
-                    if thread.compact_checkpoint_id:
-                        checkpoint = Path(self.home.owner_compact_dir) / "conversations" / f"{thread.thread_id}.jsonl"
-                        pins.paths.add(checkpoint.resolve(strict=False))
-                        for item in self._rows(checkpoint, required=True):
-                            if item is not None:
-                                yield from pins.collect_steps(item, checkpoint)
-                            yield int(item is not None)
+        for root in self.roots:
+            with closing(self._walk(root / "threads")) as stream:
+                for path in stream:
+                    if path is None:
+                        yield 0
+                        continue
+                    if path.suffix != ".json":
+                        continue
+                    for row in self._rows(path, required=True):
+                        if row is None:
+                            yield 0
+                            continue
+                        thread = ConversationThread.from_dict(row)
+                        if not thread.thread_id or thread.thread_id != path.stem:
+                            raise ValueError("pin thread identity mismatches")
+                        yield from pins.collect_steps(row, path)
+                        yield 0
+                        if thread.compact_checkpoint_id:
+                            checkpoint = Path(self.home.owner_compact_dir) / "conversations" / f"{thread.thread_id}.jsonl"
+                            pins.paths.add(checkpoint.resolve(strict=False))
+                            for item in self._rows(checkpoint, required=True):
+                                if item is not None:
+                                    yield from pins.collect_steps(item, checkpoint)
+                                yield int(item is not None)
         curator = Path(self.home.owner_memory_curator_runs_dir)
-        for path in self._walk(curator):
-            if path is None:
-                yield 0
-                continue
-            if path.suffix not in {".json", ".jsonl"}:
-                continue
-            for row in self._rows(path, required=True):
-                if row is not None:
-                    yield from pins.collect_steps(row, path)
-                    warnings = row.get("warnings", ())
-                    if isinstance(warnings, (list, tuple)) and any(isinstance(value, str)
-                        and value.startswith((_CURSOR_CHECKPOINT, _CURSOR_DELTA)) for value in warnings):
-                        pins.paths.add(path.resolve(strict=False))
-                yield int(row is not None)
+        with closing(self._walk(curator)) as stream:
+            for path in stream:
+                if path is None:
+                    yield 0
+                    continue
+                if path.suffix not in {".json", ".jsonl"}:
+                    continue
+                for row in self._rows(path, required=True):
+                    if row is not None:
+                        yield from pins.collect_steps(row, path)
+                        warnings = row.get("warnings", ())
+                        if isinstance(warnings, (list, tuple)) and any(isinstance(value, str)
+                            and value.startswith((_CURSOR_CHECKPOINT, _CURSOR_DELTA)) for value in warnings):
+                            pins.paths.add(path.resolve(strict=False))
+                    yield int(row is not None)
         path = curator.parent / "state.json"
         for row in self._rows(path):
             if row is not None:
