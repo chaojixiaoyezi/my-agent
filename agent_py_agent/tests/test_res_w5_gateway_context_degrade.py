@@ -114,7 +114,7 @@ def test_torn_observation_with_workspace_lineage_is_only_a_warning(case, caplog)
         context = _context(case)
     assert context.workspace_task.task_id == "live"
     assert context.load_errors == ()
-    assert any(row.get("context") == "conversation.observations.read" for row in context.load_warnings)
+    assert any(row.get("context") == "conversation.observations.window" for row in context.load_warnings)
     assert len(_events(caplog, "GATEWAY_CONTEXT_DEGRADED")) == 1
     assert path.read_text(encoding="utf-8") == "{torn observation\n"
     _require_gateway_conversation_ready(case.request, context)

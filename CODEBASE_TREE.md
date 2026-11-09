@@ -1082,6 +1082,8 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_r8_compact_history_store.py # R8：持久历史根、分叉、崩溃搬迁与冷启动定位的运行时回归。
 |-- agent_py_agent/tests/test_r8_compact_progress_pulse.py # 摘要等待可观察、覆盖数不虚增，退出后不再发表旧进度。
 |-- agent_py_agent/tests/test_r8_current_obligations.py # 当前义务查询复杂度与精确attempt收口回归
+|-- agent_py_agent/tests/test_r8_exact_task_readers.py # 已知任务引用和活动命名工作只读准确链接的行为回归
+|-- agent_py_agent/tests/test_r8_gateway_context_bounds.py # 普通请求历史窗口、当前交付保留和结构化标识脱敏
 |-- agent_py_agent/tests/test_r8_dispatch_log_retention.py # 真实stdout SH锁、退出证明与canonical业务终态共同约束日志保留。
 |-- agent_py_agent/tests/test_r8_global_index_retirement.py # 唯一历史key按canonical消失证明退役，未知及可定位历史保持。
 |-- agent_py_agent/tests/test_r8_idle_claim_history.py # 历史任务窗口化以后，孤立旧 claim 仍必须阻止闲置压缩。
@@ -1089,6 +1091,7 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_r8_input_turn_retention.py # 输入引用终态、原锁、出生交错和有界目录预算。
 |-- agent_py_agent/tests/test_r8_log_cursor_lifetime.py # 日志分页签名在多 owner 轮换后的真实 HTTP 回归。
 |-- agent_py_agent/tests/test_r8_observation_sources.py # 深页来源读取、用量窗口、跨进程待提交及覆盖真实性回归
+|-- agent_py_agent/tests/test_r8_observation_thread_pending.py # 同线程待交付活动集、投影追平和跨线程拒绝
 |-- agent_py_agent/tests/test_r8_owner_directory_paging.py # 冷目录发现分片推进，分页不能通过截断未排序目录来漏掉旧owner。
 |-- agent_py_agent/tests/owner_snapshot_native_probe.py # 真实文件监听器、cookie与父进程退出验收共用探针
 |-- agent_py_agent/tests/test_r8_owner_observer_installer.py # 固定监听器资产校验与安装边界
@@ -1097,6 +1100,7 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_r8_projection_generation_recovery.py # 可重建投影的代次锁、原件保全与来源验证
 |-- agent_py_agent/tests/test_r8_record_ledgers.py # 记录账本增量写入、历史分页与并发终态的行为回归。
 |-- agent_py_agent/tests/test_r8_sqlite_recovery.py # 通用库恢复以真实SQLite验证，不将损坏、未知或缺行当作空库。
+|-- agent_py_agent/tests/test_r8_task_context_window.py # 活动集、准确引用与历史窗口在冷启动后的覆盖和读取上界
 |-- agent_py_agent/tests/test_r8_usage_source_maintenance.py # 旧用量维护追平、目录重启续点与合法保留门验证
 |-- docs/design/R8_COMPACT_HISTORY.md # R8：Compact 历史节点与冷读定位
 |-- docs/design/R8_CLAIM_ACTIVITY_PROJECTION.md # 多store活动扫描的有界临时投影

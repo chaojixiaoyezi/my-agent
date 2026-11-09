@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from ..concurrency.interrupt import is_interrupted
 from ..contracts.subagent_completion import (
+    CONVERSATION_SUBAGENT_COMPLETIONS_SCHEMA_VERSION,
     DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT,
     subagent_completion_context_from_observations,
 )
@@ -135,11 +136,17 @@ def _degrade(load_errors: list[dict], error: dict) -> None:
         load_errors.append(error)
 
 
-def _gateway_task_links(store, thread_id, load_errors):
-    """统一消费显式分级报告；同一缺失链接在各目录投影中只登记一次。"""
-    links, errors, warnings = store.tasks.list_report(thread_id, classify_missing=True)
+def _gateway_task_links(store, thread_id, load_errors, *, required_task_ids=()):
+    """常规请求只读近期窗口、活动集与准确引用，不随终态历史增长而全扫。"""
+    links, errors, warnings, coverage = store.tasks.context_report(
+        thread_id, required_task_ids=required_task_ids,
+    )
     if isinstance(load_errors, _GatewayLoadErrors):
         for warning in warnings:
+            if warning not in load_errors.warnings:
+                load_errors.warnings.append(warning)
+        if coverage.get('recent_from', 0) > 0:
+            warning = {'code': 'task_context_window', 'coverage': coverage}
             if warning not in load_errors.warnings:
                 load_errors.warnings.append(warning)
     return links, errors
@@ -566,7 +573,7 @@ def _gateway_named_work(
 ) -> tuple[dict[str, str], ...]:
     """Project only active user-visible names, never an implicit current objective."""
     try:
-        links, link_errors = _gateway_task_links(store, thread_id, load_errors)
+        links, link_errors = store.tasks.active_report(thread_id)
         goals, goal_error = store.goals.list_report(thread_id)
     except Exception as exc:
         _degrade(load_errors, runtime_error_report(exc, context="gateway.conversation.named_work"))
@@ -629,26 +636,35 @@ def _gateway_subagent_completion_context(
     load_errors: list[dict],
 ) -> dict[str, object]:
     workspace_task_id = str(getattr(workspace_task, "task_id", "") or "").strip()
-    root_task_ids = _gateway_workspace_lineage_task_ids(
-        store,
-        thread_id,
-        workspace_task,
-        load_errors,
-    )
-    if not root_task_ids:
+    if not workspace_task_id:
         return {}
     try:
-        observations, errors = store.observations.recent_report(
-            thread_id,
-            limit=0,
-            include_handled=True,
-        )
+        observations, errors, coverage = store.observations.recent_window_report(thread_id, limit=128)
     except Exception as exc:
         _degrade(load_errors, runtime_error_report(exc, context="gateway.conversation.subagent_completions"))
         return {}
     for error in errors:
         if isinstance(error, dict):
             _degrade(load_errors, error)
+    # 未处理回执属于当前义务，不能被后续普通状态事件挤出历史展示窗口。
+    try:
+        pending, pending_errors = store.observations.unhandled_requiring_main_report(thread_id)
+    except Exception as exc:
+        pending, pending_errors = [], [runtime_error_report(
+            exc, context='gateway.conversation.subagent_completions.pending')]
+    for error in pending_errors:
+        _degrade(load_errors, error)
+    coverage = {**coverage, 'pending_coverage': 'unknown' if pending_errors else 'complete'}
+    observations = list({event.observation_id: event for event in (*observations, *pending)}.values())
+    # 近期回执可指向窗口外的旧根；准确读取其canonical链接并核同目录，不能漏掉迟到交付。
+    roots = tuple(dict.fromkeys(root for event in observations
+                                if getattr(event, 'event_type', '') == 'subagent_runner_finished'
+                                if (root := str(getattr(event, 'root_task_id', '') or '').strip())))
+    root_task_ids = _gateway_workspace_lineage_task_ids(
+        store, thread_id, workspace_task, load_errors, required_task_ids=roots,
+    )
+    if not root_task_ids:
+        return {}
     context, issues = subagent_completion_context_from_observations(
         observations,
         root_task_ids=root_task_ids,
@@ -658,6 +674,13 @@ def _gateway_subagent_completion_context(
     )
     for issue in issues:
         _degrade(load_errors, runtime_error_report(ValueError(issue), context="gateway.conversation.subagent_completions"))
+    if not context and (coverage.get('history_coverage') != 'complete' or pending_errors):
+        context = {'schema': CONVERSATION_SUBAGENT_COMPLETIONS_SCHEMA_VERSION,
+                   'workspace_task_id': workspace_task_id, 'completion_root_task_ids': [],
+                   'total': 0, 'visible_count': 0, 'omitted_count': 0, 'items': []}
+    if context:
+        # 计数只描述当前义务和已观察窗口；空窗口也保留未知覆盖，不能冒充全部已交付。
+        context['coverage'] = coverage
     return context
 
 
@@ -669,13 +692,17 @@ def _gateway_workspace_lineage_task_ids(
     thread_id: str,
     workspace_task: GatewayWorkspaceSelection | None,
     load_errors: list[dict],
+    *,
+    required_task_ids: tuple[str, ...] = (),
 ) -> set[str]:
     current_task_id = str(getattr(workspace_task, "task_id", "") or "").strip()
     task_path = _existing_gateway_workspace_path(getattr(workspace_task, "task_path", ""))
     if not current_task_id or not task_path:
         return set()
     try:
-        links, errors = _gateway_task_links(store, thread_id, load_errors)
+        links, errors = _gateway_task_links(
+            store, thread_id, load_errors, required_task_ids=(current_task_id, *required_task_ids),
+        )
     except Exception as exc:
         _degrade(load_errors, runtime_error_report(exc, context="gateway.conversation.subagent_completion_lineage"))
         return {current_task_id}
@@ -715,8 +742,17 @@ def _gateway_workspace_task(
     request_id: str = "",
 ) -> GatewayWorkspaceSelection | None:
     thread_id = str(getattr(thread, "thread_id", "") or "").strip()
+    exact_id = request_binding.gateway_bound_request_task_id(
+        request, request_id=request_id, thread_id=thread_id,
+    )
+    goal_id = str((thread_goal or {}).get('task_id') or '').strip()
     try:
-        links, errors = _gateway_task_links(store, thread_id, load_errors)
+        # 真正丢失的旧成员可降级；从未登记的绑定不能被required窗口制造成“历史缺失”。
+        required = tuple(value for value in (exact_id, goal_id)
+                         if value and store.tasks.contains_task(thread_id, value))
+        links, errors = _gateway_task_links(
+            store, thread_id, load_errors, required_task_ids=required,
+        )
     except Exception as exc:
         load_errors.append(runtime_error_report(exc, context="gateway.conversation.workspace_task"))
         return None

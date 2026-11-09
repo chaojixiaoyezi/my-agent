@@ -2634,7 +2634,9 @@ def test_workspace_reentry_does_not_skip_other_terminal_or_unknown_successor(sta
         SimpleNamespace(task_id="req-reentry", task_path="/owner/tasks/b", status="active"),
         SimpleNamespace(task_id=derived, task_path="/owner/tasks/a", status=status),
     ]
-    store = SimpleNamespace(tasks=SimpleNamespace(list_report=lambda _thread: (rows, [])))
+    store = SimpleNamespace(tasks=SimpleNamespace(
+        link_report=lambda _thread, task_id: (next((row for row in rows if row.task_id == task_id), None), None),
+        context_report=lambda _thread, **_kwargs: ([], [], [], {'history_positions': len(rows)})))
     assert _terminal_successor_task_id(
         store, "thread", base_id="req-reentry", source_id="old-a", task_path="/owner/tasks/a",
     ) == ""
@@ -2653,7 +2655,9 @@ def test_terminal_root_reuses_active_visit_after_prior_finished(base_status, pri
     rows = [SimpleNamespace(task_id='root', task_path='/owner/tasks/a', status=base_status),
             SimpleNamespace(task_id=derived, task_path='/owner/tasks/a', status=prior_status),
             SimpleNamespace(task_id=derived + '-visit-2', task_path='/owner/tasks/a', status='active')]
-    store = SimpleNamespace(tasks=SimpleNamespace(list_report=lambda _thread: (rows, [])))
+    store = SimpleNamespace(tasks=SimpleNamespace(
+        link_report=lambda _thread, task_id: (next((row for row in rows if row.task_id == task_id), None), None),
+        context_report=lambda _thread, **_kwargs: ([], [], [], {'history_positions': len(rows)})))
     assert _terminal_successor_task_id(store, 'thread', base_id='root', source_id='root',
                                       task_path='/owner/tasks/a') == derived + '-visit-2'
 
@@ -2670,7 +2674,9 @@ def test_terminal_root_still_rejects_unsafe_successor(status, same_path):
     derived = 'root-continue-' + hashlib.sha256(b'root').hexdigest()[:8]
     rows = [SimpleNamespace(task_id='root', task_path='/owner/tasks/a', status='completed'),
             SimpleNamespace(task_id=derived, task_path='/owner/tasks/a' if same_path else '/other', status=status)]
-    store = SimpleNamespace(tasks=SimpleNamespace(list_report=lambda _thread: (rows, [])))
+    store = SimpleNamespace(tasks=SimpleNamespace(
+        link_report=lambda _thread, task_id: (next((row for row in rows if row.task_id == task_id), None), None),
+        context_report=lambda _thread, **_kwargs: ([], [], [], {'history_positions': len(rows)})))
     assert _terminal_successor_task_id(store, 'thread', base_id='root', source_id='root', task_path='/owner/tasks/a') == ''
 
 

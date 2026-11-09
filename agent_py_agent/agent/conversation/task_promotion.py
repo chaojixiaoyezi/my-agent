@@ -739,17 +739,11 @@ def _terminal_successor_task_id(
 ) -> str:
     """Choose a stable request-local successor id without mutating an existing other task."""
     try:
-        links, errors = store.tasks.list_report(thread_id)
+        base_existing, error = store.tasks.link_report(thread_id, base_id)
     except Exception:
         return ""
-    if errors:
+    if error:
         return ""
-    by_id = {
-        str(getattr(item, "task_id", "") or ""): item
-        for item in links
-        if str(getattr(item, "task_id", "") or "")
-    }
-    base_existing = by_id.get(base_id)
     if base_existing is None:
         return base_id
     base_status = str(getattr(base_existing, 'status', '') or '').strip().lower()
@@ -763,11 +757,24 @@ def _terminal_successor_task_id(
         allowed_prior_statuses.add('interrupted')
     suffix = hashlib.sha256(source_id.encode("utf-8")).hexdigest()[:8]
     derived = f"{base_id}-continue-{suffix}"
-    # 已占用编号数不超过任务数，因此这段有界扫描必能发现空槽或明确的状态/路径冲突。
+    # 只从manifest读物理位置总数作拒绝上界；候选点查不加载无关历史TaskLink。
+    try:
+        _links, errors, _warnings, coverage = store.tasks.context_report(thread_id, recent_limit=1)
+        positions = coverage.get('history_positions')
+    except Exception:
+        return ""
+    if errors or type(positions) is not int or positions < 0:
+        return ""
+    # 已占用编号数不超过任务数，因此只探测本次请求的冲突编号，直到空槽或明确冲突。
     # 同一请求切走的真实目录以interrupted结束，返回后再原子发表该代的继任边；不跳过失败/取消或未知状态。
-    for visit in range(len(by_id) + 1):
+    for visit in range(positions + 1):
         candidate = derived if visit == 0 else f"{derived}-visit-{visit + 1}"
-        existing = by_id.get(candidate)
+        try:
+            existing, error = store.tasks.link_report(thread_id, candidate)
+        except Exception:
+            return ""
+        if error:
+            return ""
         if existing is None:
             return candidate
         if str(getattr(existing, "task_path", "") or "") != task_path:
@@ -805,34 +812,33 @@ def _supersede_prior_current(
 # 函数用途: 从认证会话的任务关联中解析可复用当前代次。
 def _reusable_conversation_workspace_link(store: object, thread_id: str, task_id: str):
     try:
-        links, errors = store.tasks.list_report(thread_id)
+        link, error = store.tasks.link_report(thread_id, task_id)
     except Exception:
         return None
-    if errors:
+    if error:
         return None
-    link = next((item for item in links if item.task_id == task_id and item.thread_id == thread_id), None)
     if link is not None and link.status == 'superseded':
-        return _resolve_superseded_successor_link(store, links, link, thread_id=thread_id)
+        return _resolve_superseded_successor_link(store, link, thread_id=thread_id)
     return link if link is not None and is_reusable_conversation_workspace(link) else None
 
 
-# LLM: 最多16跳，每条边均须存在于同线程快照且重新读取权威记录；环、缺边、跨路径和不安全状态立即拒绝。
+# LLM: 最多16跳，每条边均须存在于同线程权威记录；环、缺边、跨路径和不安全状态立即拒绝。
 # 函数用途: 沿持久继任链恢复原根当前代次，不授予新工作区或新执行权。
-def _resolve_superseded_successor_link(store, links, link, *, thread_id):
+def _resolve_superseded_successor_link(store, link, *, thread_id):
     workspace = _selected_task_workspace(link.task_path)
     if workspace is None or not workspace.is_dir() or link.task_id.lower().startswith(('subagent-', 'bg-main-')):
         return None
-    by_id, visited = {item.task_id: item for item in links}, {link.task_id}
+    visited = {link.task_id}
     for _ in range(16):
         next_id = getattr(link, 'superseded_by_task_id', '')
-        if not isinstance(next_id, str) or not next_id or next_id in visited or next_id not in by_id:
+        if not isinstance(next_id, str) or not next_id or next_id in visited:
             return None
         visited.add(next_id)
         try:
-            link = store.tasks.load(next_id)
+            link, error = store.tasks.link_report(thread_id, next_id)
         except Exception:
             return None
-        if (link is None or link.task_id != next_id or link.thread_id != thread_id
+        if (error is not None or link is None or link.task_id != next_id or link.thread_id != thread_id
                 or _selected_task_workspace(link.task_path) != workspace):
             return None
         if link.status != 'superseded':

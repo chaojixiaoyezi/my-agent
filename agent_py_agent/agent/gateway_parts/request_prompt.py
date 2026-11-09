@@ -254,6 +254,7 @@ def _append_subagent_completions_prompt(
             "假设和未核对部分，不要原样粘贴这些字段名。",
             "- 汇总时先消费这些回复和引用，不要猜 child_outputs、内部 runner 文件或遍历受管状态目录。",
             "- omitted_count 大于 0 时使用正式子代理树/结果索引补读，不要搜索内部状态路径。",
+            "- coverage.history_coverage 为 unknown 时，total/omitted_count 只计当前未处理义务和近期窗口；更早历史数量未知。pending_coverage 为 unknown 时，当前未处理交付也未核全，不能宣称已覆盖全部交付。",
             json.dumps(
                 completions,
                 ensure_ascii=False,

@@ -338,6 +338,7 @@ def gateway_identifier_redactions(
     result: object | None = None,
 ) -> tuple[tuple[object, str], ...]:
     pairs: list[tuple[object, str]] = [(context.request_id, "当前请求")]
+    required_task_ids: list[str] = []
     for source in (
         context.request,
         context.request.get("metadata"),
@@ -347,6 +348,8 @@ def gateway_identifier_redactions(
     ):
         if not isinstance(source, dict):
             continue
+        if source.get('task_id'):
+            required_task_ids.append(str(source['task_id']))
         pairs.extend(
             (source.get(key), label)
             for key, label in _IDENTIFIER_PUBLIC_LABELS.items()
@@ -363,6 +366,8 @@ def gateway_identifier_redactions(
             )
         )
     if isinstance(conversation.thread_goal, dict):
+        if conversation.thread_goal.get('task_id'):
+            required_task_ids.append(str(conversation.thread_goal['task_id']))
         pairs.extend(
             (
                 (conversation.thread_goal.get("goal_id"), "当前目标"),
@@ -370,10 +375,29 @@ def gateway_identifier_redactions(
             )
         )
     if conversation.workspace_task is not None:
+        required_task_ids.append(conversation.workspace_task.task_id)
         pairs.append((conversation.workspace_task.task_id, "当前任务"))
+    completions = conversation.subagent_completions
+    if isinstance(completions, dict):
+        roots = completions.get('completion_root_task_ids') or ()
+        for identifier in roots if isinstance(roots, (list, tuple)) else ():
+            if isinstance(identifier, str) and identifier:
+                required_task_ids.append(identifier)
+                pairs.append((identifier, '当前任务'))
+        items = completions.get('items') or ()
+        for item in items if isinstance(items, (list, tuple)) else ():
+            if not isinstance(item, dict):
+                continue
+            for key, label in (('root_task_id', '当前任务'), ('task_id', '子代理任务')):
+                identifier = item.get(key)
+                if isinstance(identifier, str) and identifier:
+                    pairs.append((identifier, label))
     store = getattr(context.agent, "conversation_store", None)
     if store is not None and conversation.thread_id:
-        links, _load_errors = store.tasks.list_report(conversation.thread_id)
+        # 与本轮模型上下文同一有界候选集；准确请求/目标/工作区引用已从结构字段保留。
+        links, _load_errors, _warnings, _coverage = store.tasks.context_report(
+            conversation.thread_id, required_task_ids=tuple(dict.fromkeys(required_task_ids)),
+        )
         for link in links:
             task_id = str(getattr(link, "task_id", "") or "").strip()
             if not task_id:
