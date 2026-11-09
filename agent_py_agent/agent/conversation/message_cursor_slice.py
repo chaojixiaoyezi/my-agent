@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ..common.cache_freshness import cache_entry_trustworthy
-from ..common.nofollow_fs import file_descriptor_change_ns, inspect_file_snapshot_beneath
+from ..common.nofollow_fs import (
+    file_descriptor_change_ns,
+    file_identity_snapshot,
+    inspect_file_snapshot_beneath,
+)
 from ..io.cursor_cache import FileStamp, cursor_key, file_stamp
 from ..runtime_errors import DataCorruptionError
 from . import message_cursor as cursor_io
@@ -290,9 +294,15 @@ def read_after_slice(path: Path, target: str, limit: int, budget: MessageScanBud
                         positions.append((str(row.get('message_id') or ''), start, handle.tell()))
                     if not is_display_checkpoint(row):
                         rows.append(row)
-            if (file_stamp(os.fstat(reader.hot.fileno())) != stamp or file_stamp(path.stat()) != stamp
+            final_info = os.fstat(reader.hot.fileno())
+            path_info, path_changed_ns = file_identity_snapshot(path)
+            # Windows path的ctime可仍是创建时间；规范helper返回实际FD时钟，不能跨时钟比较或省掉ctime。
+            if (file_stamp(final_info) != stamp or file_stamp(path_info) != stamp
+                    or (final_info.st_mode, final_info.st_nlink) != (info.st_mode, info.st_nlink)
+                    or (path_info.st_mode, path_info.st_nlink) != (info.st_mode, info.st_nlink)
                     or reader.manifest != transcript_manifest(path) or directory != _cold_directory(reader)
-                    or file_descriptor_change_ns(reader.hot.fileno(), os.fstat(reader.hot.fileno())) != changed_ns):
+                    or file_descriptor_change_ns(reader.hot.fileno(), os.fstat(reader.hot.fileno())) != changed_ns
+                    or path_changed_ns != changed_ns):
                 # 不把变动中一片的局部读取授予覆盖；下一拍从原消费ID重新核验。
                 return MessageReadOutcome(partial=True, reason="source_changed")
             prefix_verified = not errors and source_stamp_is_trustworthy(stamp, changed_ns)
