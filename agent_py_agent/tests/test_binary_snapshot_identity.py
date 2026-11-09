@@ -111,3 +111,59 @@ def test_backdated_mtime_still_changes_actual_descriptor_generation(tmp_path, mo
     assert (actual.stat.st_dev, actual.stat.st_ino, actual.changed_ns) == (
         current.stat.st_dev, current.stat.st_ino, current.changed_ns,
     )
+
+
+def _path_with_creation_ctime(path, *, mutate=None):
+    """模拟Windows原生路径ctime=创建时刻；FD仍由真实临时文件提供。"""
+    from types import SimpleNamespace
+    fields = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+    class Target:
+        calls = 0
+        def __fspath__(self):
+            return os.fspath(path)
+        def lstat(self):
+            self.calls += 1
+            info = path.lstat()
+            values = {key: getattr(info, key) for key in fields}
+            values['st_ctime_ns'] = 1  # 与同一文件真实FD的ChangeTime刻意不同。
+            if mutate is not None and self.calls > 1:
+                mutate(values)
+            return SimpleNamespace(**values)
+    return Target()
+
+
+def test_windows_identity_uses_fd_clock_without_forging_stat(tmp_path):
+    path = tmp_path / 'leaf'
+    path.write_bytes(b'first\r\n\x1asecond')
+    actual, changed = fs._windows_file_identity_snapshot(_path_with_creation_ctime(path))
+    assert actual.st_ino == path.stat().st_ino
+    assert actual.st_ctime_ns != 1 and changed is not None and changed > 0
+
+
+@pytest.mark.parametrize('field', ['st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns'])
+def test_windows_identity_keeps_every_path_generation_gate(tmp_path, field):
+    path = tmp_path / 'leaf'
+    path.write_bytes(b'unchanged')
+    target = _path_with_creation_ctime(path, mutate=lambda values: values.__setitem__(field, values[field] + 1))
+    with pytest.raises(fs.NoFollowPathError):
+        fs._windows_file_identity_snapshot(target)
+
+
+@pytest.mark.parametrize('changes', [(None, None), (1, 2)])
+def test_windows_identity_unknown_or_changing_generation_closes_handle(tmp_path, monkeypatch, changes):
+    path = tmp_path / 'leaf'
+    path.write_bytes(b'unchanged')
+    observed = []
+    original_open = os.open
+    def capture(*args, **kwargs):
+        fd = original_open(*args, **kwargs)
+        observed.append(fd)
+        return fd
+    monkeypatch.setattr(fs.os, 'open', capture)
+    samples = iter(changes)
+    monkeypatch.setattr(fs, 'file_descriptor_change_ns', lambda fd, info: next(samples))
+    with pytest.raises(fs.NoFollowPathError):
+        fs._windows_file_identity_snapshot(_path_with_creation_ctime(path))
+    assert len(observed) == 1
+    with pytest.raises(OSError):
+        os.fstat(observed[0])
