@@ -30,6 +30,16 @@ def _tick_after_startup_grace(controller, clock):
     return controller.tick(now=200_000)
 
 
+@pytest.fixture
+def retention_slice_clock(monkeypatch):
+    """分片时间由测试推进；条目、字节预算和真正的目录/状态读取保持原样。"""
+    from agent_py_agent.agent.memory_store import retention_scan_budget
+
+    clock = SimpleNamespace(now=1000.0)
+    monkeypatch.setattr(retention_scan_budget, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    return clock
+
+
 # LLM: 业务分页用例观察保护期结束后的真实tick，不删除或替换生产启动保护判定。
 # 函数用途: 验证后台维护按owner分页运行而不创建scoped agent。
 def test_gateway_owner_maintenance_pages_without_creating_scoped_agents(
@@ -80,7 +90,7 @@ def test_gateway_owner_maintenance_pages_without_creating_scoped_agents(
 # LLM: 只推进测试观测到原180秒保护期之后，保留全部汇总和实际执行断言。
 # 函数用途: 验证拒绝与局部隔离错误分别进入正确的维护摘要计数。
 def test_gateway_owner_maintenance_summary_separates_refused_from_isolated(
-    tmp_path: Path, monkeypatch, capsys, maintenance_clock,
+    tmp_path: Path, monkeypatch, capsys, maintenance_clock, retention_slice_clock,
 ) -> None:
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, ensure_owner_home
@@ -119,7 +129,11 @@ def _controller_for(base_home, monkeypatch):
     return gateway_loops._GatewayOwnerMaintenanceController(SimpleNamespace())
 
 
-def test_gateway_owner_maintenance_isolated_only_is_not_failed(tmp_path: Path, monkeypatch, maintenance_clock) -> None:
+@pytest.mark.parametrize("pause_first_slice", [False, True], ids=["single-slice", "resume"])
+def test_gateway_owner_maintenance_isolated_only_is_not_failed(
+    tmp_path: Path, monkeypatch, maintenance_clock, retention_slice_clock, pause_first_slice,
+) -> None:
+    from agent_py_agent.agent.memory_store.retention_scan_budget import RetentionScanBudget
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, ensure_owner_home
 
@@ -129,12 +143,35 @@ def test_gateway_owner_maintenance_isolated_only_is_not_failed(tmp_path: Path, m
     work.mkdir(parents=True)
     (work / "state.json").write_text("{broken", encoding="utf-8")
 
-    summary = _tick_after_startup_grace(_controller_for(base_home, monkeypatch), maintenance_clock)
+    controller = _controller_for(base_home, monkeypatch)
+    marker_path = owner.data_dir / "maintenance.json"
+    if pause_first_slice:
+        original_budget = RetentionScanBudget.default
+
+        def elapsed_first_budget(config=None):
+            budget = original_budget(config)
+            # 模拟发出 25ms 分片后被调度器换出；原有的结束判定必须自行生效。
+            retention_slice_clock.now = budget.deadline + 0.001
+            return budget
+
+        with monkeypatch.context() as first:
+            first.setattr(RetentionScanBudget, "default", staticmethod(elapsed_first_budget))
+            partial = _tick_after_startup_grace(controller, maintenance_clock)
+        assert partial == {"scanned": 1, "ran": 2, "failed": 0, "refused": 0, "isolated": 0}
+        assert json.loads(marker_path.read_bytes())["retention_scan_partial"] is True
+        assert (work / "state.json").read_text() == "{broken"
+        maintenance_clock.now += 60
+        summary = controller.tick(now=200_060)
+    else:
+        summary = _tick_after_startup_grace(controller, maintenance_clock)
 
     assert summary == {"scanned": 1, "ran": 2, "failed": 0, "refused": 0, "isolated": 1}
     # 持久化的 status 仍按旧口径记 policy_unavailable，摘要不影响它。
-    marker = json.loads((owner.data_dir / "maintenance.json").read_text(encoding="utf-8"))
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
     assert (marker["status"], marker["apply_outcome"]) == ("policy_unavailable", "applied")
+    # 摘要按 owner 计一次；同一坏文件可以被多个规范来源分别报告。
+    assert marker["isolated_error_count"] > 0 and marker["failed_action_count"] == 0
+    assert (work / "state.json").read_text() == "{broken"
 
 
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root 可以删只读目录里的文件，造不出执行期失败")
