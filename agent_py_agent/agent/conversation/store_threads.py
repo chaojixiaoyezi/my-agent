@@ -587,11 +587,18 @@ class ThreadStore:
         rows = []
         if budget.exhausted():
             return rows, [], state, False
-        if not pending:
-            pending, directory, complete = directory_page(
-                self.storage.root, ("threads",), directory, max(1, min(16, limit)), require_dir_fd=False,
-            )
-        while pending and not budget.exhausted():
+        page_size = max(1, min(16, limit))
+        while len(rows) < page_size and not budget.exhausted():
+            if not pending:
+                if complete:
+                    break
+                # 锁文件等目录成员也记入原预算，但不挤占线程名额或提前切开同一小批。
+                pending, directory, complete = directory_page(
+                    self.storage.root, ("threads",), directory,
+                    min(page_size - len(rows), budget.max_entries - budget.entries), require_dir_fd=False,
+                )
+                if not pending:
+                    break  # 便携目录后端可先偿还旧游标；空物理页不等于读取完成。
             name = pending.pop(0)
             budget.charge(entries=1)
             if not name.endswith('.json'):

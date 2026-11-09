@@ -291,7 +291,7 @@ class _CuratorLifecycleMixin:
         precollected = _PrecollectedBatch(batch, state, config_revision, excluded_ids, exclusions_revision)
         if batch.load_errors:
             return self.run(reason="interval", now=current, precollected_batch=precollected)
-        if batch.message_scan_partial and not batch.messages and not batch.audit_events:
+        if batch.message_scan_partial and not _has_committable_input(batch):
             return self._result(status="busy", reason="interval", warnings=_message_scan_warnings(batch))
         if batch.user_turns() >= self.config.turn_threshold:
             return self.run(reason="turn_threshold", now=current, precollected_batch=precollected)
@@ -551,7 +551,7 @@ class _CuratorExecutionMixin:
         if batch.load_errors:
             raise CuratorInputError(_load_error_code(batch.load_errors))
         if not batch.messages and not batch.audit_events:
-            if batch.message_scan_partial:
+            if batch.message_scan_partial and not _has_committable_input(batch):
                 # 原_run_leased先停心跳再释放本lease；pending原因及全部消费游标保留。
                 return self._result(status="busy", reason=context.reason, warnings=_message_scan_warnings(batch))
             return self._commit_batch(
@@ -1975,18 +1975,18 @@ def _message_scan_warnings(batch: CuratorInputBatch) -> tuple[str, ...]:
     return ("message_scan_partial", *(f"message_scan_partial:{reason}" for reason in batch.message_scan_reasons))
 
 
+def _has_committable_input(batch: CuratorInputBatch) -> bool:
+    # 经宿主核实的排除前缀可以独立提交；不能因为另一来源还在续片就反复重读它。
+    return bool(batch.messages or batch.audit_events or batch.skipped_audit_cursor or batch.skipped_message_cursors)
+
+
 def _interval_due(
     batch: CuratorInputBatch,
     state: MemoryCuratorState,
     now: datetime,
     interval_seconds: int,
 ) -> bool:
-    if (
-        not batch.messages
-        and not batch.audit_events
-        and not batch.skipped_audit_cursor
-        and not batch.skipped_message_cursors
-    ):
+    if not _has_committable_input(batch):
         return False
     return interval_elapsed(state, now, interval_seconds)
 

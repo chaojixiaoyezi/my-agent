@@ -218,6 +218,33 @@ def test_other_thread_commit_does_not_consume_partial_reason(tmp_path):
     assert backend.calls == 1
 
 
+@pytest.mark.parametrize('scheduled', [False, True])
+def test_verified_audit_skip_commits_during_unfinished_message_scan(tmp_path, scheduled):
+    from datetime import datetime, timezone
+
+    from agent_py_agent.tests.test_memory_curator_v2 import _service, _StaticStructuredBackend, _valid_output
+
+    store, tid, rows = make_messages(tmp_path, count=1000)
+    skipped = store.threads.create()
+    store.threads.update_atomic(skipped.thread_id, lambda row: replace(row, metadata={'learning_excluded': True}))
+    backend = _StaticStructuredBackend(_valid_output(tid, rows[-1].message_id, rows[-1].content))
+    service = _service(tmp_path, backend, store)
+    _seed_cursor(service, {tid: rows[-1].message_id})
+    service.audit_dir.mkdir(exist_ok=True, parents=True)
+    (service.audit_dir / '2026-01-01.jsonl').write_text(json.dumps({
+        'event_id': 'excluded-on-purpose', 'thread_id': skipped.thread_id}) + '\n', encoding='utf-8')
+    if scheduled:
+        result = service.run_if_due(now=datetime(2026, 1, 5, 10, tzinfo=timezone.utc))
+    else:
+        service.request('daily_finalize')
+        result = service.run(reason='daily_finalize')
+    state = service.state_store.load()
+    assert result.status == 'succeeded' and 'message_scan_partial' in result.warnings
+    assert state.last_processed_audit_event_id == 'excluded-on-purpose' and backend.calls == 0
+    assert state.per_thread_cursors == {tid: rows[-1].message_id}
+    assert state.pending_reasons and not state.last_daily_finalize_date
+
+
 @pytest.mark.parametrize('portable', [False, True])
 def test_discovery_pages_all_threads_without_loading_entire_history(tmp_path, monkeypatch, portable):
     from agent_py_agent.agent.memory_store import curator_inputs

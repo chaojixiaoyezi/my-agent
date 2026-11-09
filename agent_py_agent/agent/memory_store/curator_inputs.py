@@ -558,7 +558,9 @@ def _collect_messages(
         "selected": selected,
         "errors": errors,
         "skipped_cursors": skipped_cursors,
-        "budget": budget, "scan_partial": bool(thread_errors) if budget is not None else False,
+        # 已精确隔离的坏线程不会变成永久未结；延后读取与无身份错误仍保留义务。
+        "budget": budget, "scan_partial": budget is not None and any(
+            item.get("partial_reason") or not item.get("thread_id") for item in thread_errors),
         "scan_reasons": {str(item["partial_reason"]) for item in thread_errors if item.get("partial_reason")},
     }
     ordered = threads if window is not None else sorted(threads, key=lambda item: (float(item.updated_at), str(item.thread_id)))
