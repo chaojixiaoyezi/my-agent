@@ -2,7 +2,7 @@
 # 子代理结束页同步投影 canonical thread/message ID；显示层不得从正文猜最终回复身份。
 # Goal 时间从共享 goal_clock 只读查询，不建立展示页自己的计时基线。
 # 前台与后台 main 共用唯一数值/阶段投影，显式审批等待仍属于活动回合；历史正文和生命周期不得由此驱动。
-# 模块用途: 投影主子任务及物理排队状态，接续后台原审批和进度；上下文数字仍独立读取 canonical thread。
+# 模块用途: 投影主子任务及物理排队状态，接续后台原审批和进度；同次展示复用 canonical thread。
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ..agent_core.runtime.task_identity import task_path_progress_ledger_id
+from ..common.request_execution_ports import raise_if_transport_uncertain
 from ..subagents.direct_parent_lifecycle import parent_wait_blocks_dispatch
 from ..subagents.kernel import replaced_by_view
 from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
@@ -35,7 +36,7 @@ from .background_transcript import BackgroundTranscriptSink
 from .channels import project_user_reply, redact_host_absolute_paths
 from .context_usage import context_usage_from_thread
 from .context_usage import public_context_usage as _public_context_usage
-from .model_metrics import model_metrics_from_thread
+from .model_metrics import model_metrics_from_thread, public_model_metrics
 from .models import (
     THREAD_TASK_LINK_ACTIVE_STATUS,
     THREAD_TASK_LINK_INACTIVE_STATUSES,
@@ -448,13 +449,22 @@ class ConversationAgentActivity:
 
 # LLM: 空闲和活动页共用同一会话数值与目标读取，不因 active link 缺失丢失统计。
 # 函数用途: 读取无运行副作用的公共显示部分，避免两个分支分别维护重复字段。
-def _conversation_display_state(store: object, thread_id: str) -> tuple[ConversationAgentActivity, list[str], list[str]]:
-    compact_count, context_usage, compact_warnings = _conversation_context_state(store, thread_id)
+def _conversation_display_state(
+    store: object, thread_id: str, thread_snapshot: tuple[object | None, list[str]],
+) -> tuple[ConversationAgentActivity, list[str], list[str]]:
+    compact_count, context_usage, compact_warnings = _conversation_context_state(
+        store, thread_id, thread_snapshot=thread_snapshot)
+    thread, _warnings = thread_snapshot
     goals, goal_warnings = _conversation_goal_rows(store, thread_id)
+    try:
+        metrics = public_model_metrics(getattr(thread, 'model_metrics', None))
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise_if_transport_uncertain(error)
+        metrics = {}
     return ConversationAgentActivity(
         compact_count=compact_count,
         context_usage=context_usage,
-        model_metrics=model_metrics_from_thread(store, thread_id),
+        model_metrics=metrics,
         context_usage_projection_ok=not compact_warnings,
         goals=tuple(goals),
         goal_projection_ok=not goal_warnings,
@@ -470,15 +480,18 @@ def conversation_agent_activity(
     store: object,
     thread_id: str,
 ) -> ConversationAgentActivity:
-    display, compact_warnings, goal_warnings = _conversation_display_state(store, thread_id)
+    # 只在本次展示调用内复用同一canonical线程；任务/claim/progress授权仍走原独立读口。
+    thread_snapshot = _conversation_display_thread(store, thread_id)
+    thread, _thread_warnings = thread_snapshot
+    display, compact_warnings, goal_warnings = _conversation_display_state(store, thread_id, thread_snapshot)
     active_links, link_warnings = _active_task_links(store, thread_id)
-    workspace_task_id = _conversation_workspace_task_id(store, thread_id)
+    workspace_task_id = str(getattr(thread, 'workspace_task_id', '') or '').strip()
     active_task_ids = [
         str(getattr(link, "task_id", "") or "").strip() for link in active_links
     ]
     display_links = list(active_links)
     if not display_links:
-        retained_link, retained_warnings = _retained_workspace_task_link(store, thread_id)
+        retained_link, retained_warnings = _retained_workspace_task_link(store, thread_id, thread_snapshot)
         link_warnings.extend(retained_warnings)
         if retained_link is not None:
             display_links.append(retained_link)
@@ -523,7 +536,7 @@ def conversation_agent_activity(
     ) = _task_progress_items_from_links(
         agent,
         display_links,
-        preferred_task_id=_conversation_workspace_task_id(store, thread_id),
+        preferred_task_id=workspace_task_id,
         hidden_item_ids=_row_run_ids(rows),
     )
     if _todo_panel_should_collapse(display_links, rows):
@@ -860,17 +873,28 @@ def conversation_agent_view(
 def _conversation_context_state(
     store: object,
     thread_id: str,
+    *,
+    thread_snapshot: tuple[object | None, list[str]] | None = None,
 ) -> tuple[int, dict[str, object], list[str]]:
+    thread, warnings = (_conversation_display_thread(store, thread_id)
+                        if thread_snapshot is None else thread_snapshot)
+    count = max(0, _safe_int(getattr(thread, "compact_generation", 0)))
+    return count, context_usage_from_thread(thread) if thread is not None else {}, warnings
+
+
+def _conversation_display_thread(store: object, thread_id: str) -> tuple[object | None, list[str]]:
+    """只读一次展示事实；未知不借坏对象选任务，原执行未知不降级。"""
     loader = getattr(getattr(store, 'threads', None), 'load_report', None)
     if not callable(loader):
-        return 0, {}, []
+        return None, []
     try:
         thread, load_error = loader(thread_id)
-    except Exception:
-        return 0, {}, ["conversation_thread_unavailable"]
-    count = max(0, _safe_int(getattr(thread, "compact_generation", 0)))
-    warnings = ["conversation_thread_load_error"] if load_error else []
-    return count, context_usage_from_thread(thread) if not load_error else {}, warnings
+    except Exception as error:
+        raise_if_transport_uncertain(error)
+        return None, ["conversation_thread_unavailable"]
+    if load_error or (getattr(thread, 'thread_id', thread_id) != thread_id):
+        return None, ["conversation_thread_load_error"]
+    return thread, []
 
 
 # LLM: active_task_ids is only a resumability index; every returned row is
@@ -902,18 +926,15 @@ def _active_task_links(store: object, thread_id: str) -> tuple[list[object], lis
 def _retained_workspace_task_link(
     store: object,
     thread_id: str,
+    thread_snapshot: tuple[object | None, list[str]],
 ) -> tuple[object | None, list[str]]:
-    loader = getattr(getattr(store, 'threads', None), 'load_report', None)
+    thread, thread_warnings = thread_snapshot
     link_loader = getattr(getattr(store, 'tasks', None), 'load_report', None)
-    if not callable(loader) or not callable(link_loader):
+    if not callable(link_loader):
         return None, []
-    try:
-        thread, thread_error = loader(thread_id)
-    except Exception:
-        return None, ["conversation_thread_unavailable"]
     task_id = str(getattr(thread, "workspace_task_id", "") or "").strip()
     if not task_id:
-        return None, ["conversation_thread_load_error"] if thread_error else []
+        return None, list(thread_warnings)
     try:
         link, link_error = link_loader(task_id)
     except Exception:
@@ -925,7 +946,7 @@ def _retained_workspace_task_link(
     ):
         return None, ["conversation_workspace_task_mismatch"]
     warnings = []
-    if thread_error or link_error:
+    if thread_warnings or link_error:
         warnings.append("conversation_task_link_load_error")
     return link, warnings
 
@@ -1048,21 +1069,6 @@ def _task_progress_items_from_links(
         if len(rows) >= _MAX_PROJECTED_PROGRESS_ITEMS_COUNT:
             break
     return tuple(rows), generation_id, plan_revision, []
-
-
-# LLM: Todo ownership is an exact join to ConversationThread.workspace_task_id.
-# Missing legacy/fake store support returns no preference and lets the bounded
-# link reader keep its previous fallback; prompt text and task paths are never parsed.
-# 函数用途: 从会话权威记录读取当前主任务 ID，防止较晚创建的子代理抢走 Todo 面板。
-def _conversation_workspace_task_id(store: object, thread_id: str) -> str:
-    loader = getattr(getattr(store, 'threads', None), 'load_report', None)
-    if not callable(loader):
-        return ""
-    try:
-        thread, _load_error = loader(thread_id)
-    except Exception:
-        return ""
-    return str(getattr(thread, "workspace_task_id", "") or "").strip()
 
 
 # LLM: Child identity joins are exact run-id joins. This helper must never use

@@ -1196,3 +1196,49 @@ def test_background_main_activity_sink_shows_registered_final_retry_status_text(
     activity = background_main_activity(agent, "thread-retry", {"task-retry"})
     assert activity["phase"] == "retrying"
     assert activity["activity"] == PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED_STATUS_TEXT
+
+
+def test_activity_single_thread_read_preserves_original_transport_uncertain():
+    import pytest
+
+    from agent_py_agent.agent.common.request_execution_ports import (
+        RequestExecutionOutcomeUncertainError,
+    )
+    from agent_py_agent.agent.conversation.agent_activity import conversation_agent_activity
+
+    error = RequestExecutionOutcomeUncertainError({'id': 'request', 'execution_attempt_id': 'attempt',
+        'lease_epoch': 7, 'lease_owner': 'owner'}, 'activity-read')
+    calls = []
+
+    def unavailable(_thread_id):
+        calls.append(True)
+        raise error
+
+    with pytest.raises(RequestExecutionOutcomeUncertainError) as caught:
+        conversation_agent_activity(SimpleNamespace(), SimpleNamespace(
+            threads=SimpleNamespace(load_report=unavailable)), 'thread')
+    assert caught.value is error and calls == [True]
+    assert error.phase == 'activity-read' and error.lease_epoch == 7
+
+
+def test_activity_does_not_select_workspace_from_failed_thread_report():
+    from agent_py_agent.agent.conversation.agent_activity import conversation_agent_activity
+
+    calls = []
+    damaged = SimpleNamespace(thread_id='thread', compact_generation=9, workspace_task_id='untrusted',
+                              model_metrics={'schema': 'model_runtime_metrics.v1', 'model_rounds': 99})
+
+    def load(_thread_id):
+        calls.append(True)
+        return damaged, {'error_type': 'DataCorruptionError'}
+
+    def task(_task_id):
+        raise AssertionError('坏线程不能提供保留任务偏好')
+
+    activity = conversation_agent_activity(SimpleNamespace(), SimpleNamespace(
+        threads=SimpleNamespace(load_report=load),
+        tasks=SimpleNamespace(active_report=lambda _: ([], []), load_report=task)), 'thread')
+    assert calls == [True]
+    assert activity.compact_count == 0 and activity.model_metrics == {} and activity.context_usage == {}
+    assert activity.context_usage_projection_ok is False
+    assert 'conversation_thread_load_error' in activity.warnings
