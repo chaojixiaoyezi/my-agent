@@ -699,3 +699,69 @@ def test_model_projected_normal_turns_refresh_before_tool_preparation(tmp_path, 
     if owner_override:
         assert agent.config.enable_tools is initial
         assert agent.config.config_source_for("enable_tools") == {"source": str(overlay), "priority": 30}
+
+
+@pytest.mark.parametrize("holders", [1, 17, 100])
+def test_settled_generation_skips_switch_projection_but_updates_every_copy(tmp_path, monkeypatch, holders):
+    from concurrent.futures import ThreadPoolExecutor
+
+    path, config = _config(tmp_path)
+    copies = [config, *(replace(config) for _ in range(holders - 1))]
+    for candidate in copies:
+        live.register_live_config(candidate)
+    live.refresh_live_switches(config)
+    applied = []
+    original = live._apply_switches
+
+    def tracked(*args):
+        applied.append(id(args[0]))
+        return original(*args)
+
+    monkeypatch.setattr(live, "_apply_switches", tracked)
+    with ThreadPoolExecutor(max_workers=17) as pool:
+        assert list(pool.map(lambda index: live.refresh_live_switches(copies[index % holders]), range(34))) == [frozenset()] * 34
+    assert applied == []
+    _write(path, "enable_tools: false\n")
+    assert "enable_tools" in live.refresh_live_switches(config)
+    assert set(applied) == {id(candidate) for candidate in copies}
+    assert all(candidate.enable_tools is False for candidate in copies)
+
+
+def test_unsettled_override_is_reconsidered_without_another_file_change(tmp_path):
+    path, config = _config(tmp_path)
+    child = replace(config, enable_tools=False)
+    live.register_live_config(config)
+    live.register_live_config(child)
+    _write(path, "enable_tools: false\n")
+    live.refresh_live_switches(config)
+    child.enable_tools = True
+    assert "enable_tools" in live.refresh_live_switches(config)
+    assert child.enable_tools is False
+
+
+def test_settled_switches_still_detect_replaced_guard_source(tmp_path):
+    _path, config = _config(tmp_path)
+    first = tmp_path / "first-host"
+    second = tmp_path / "second-host"
+    config.runtime_guard_policy = runtime_guard_policy(home_root=first)
+    live.register_live_config(config)
+    live.refresh_live_switches(config)
+    config.runtime_guard_policy = runtime_guard_policy(home_root=second)
+    _write(second / "config" / "deployment_policy.json", json.dumps({
+        "schema_version": "deployment-policy.v1", "revision": 1,
+        "runtime_guards": {"terminal_block_enabled": True},
+    }))
+    assert "terminal_block_enabled" in live.refresh_live_switches(config)
+    assert config.runtime_guard_policy.terminal_block_enabled is True
+
+
+def test_settled_generation_republishes_externally_replaced_provenance(tmp_path):
+    _path, config = _config(tmp_path)
+    live.register_live_config(config)
+    live.refresh_live_switches(config)
+    config.config_sources = dict(config.config_sources)
+    live.refresh_live_switches(config)
+    assert isinstance(config.config_sources, live._ConfigSources)
+    child = replace(config)
+    live.register_live_config(child)
+    assert child._live_switch_binding.applied == config._live_switch_binding.applied

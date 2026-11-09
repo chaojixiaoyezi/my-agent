@@ -84,6 +84,8 @@ class _ConfigBinding:
     applied: dict[str, bool]
     guard_applied: dict[str, bool]
     raw_path: str | Path
+    settled_fresh: AgentConfig | None = None
+    published_provenance: dict | None = None
 
 
 # 来源字典的公开键值不变；replace 保留本进程来源对象，下一份配置可继承原文件基线。
@@ -144,12 +146,14 @@ def _publish_provenance(config, binding) -> None:
     previous = config.config_sources
     if (isinstance(previous, _ConfigSources) and getattr(previous, "path", None) == binding.source.path
             and previous.applied == applied and previous.guard_applied == guard_applied):
+        binding.published_provenance = previous
         return
     provenance = _ConfigSources(previous)
     provenance.path = binding.source.path
     provenance.applied = applied
     provenance.guard_applied = guard_applied
     config.config_sources = provenance
+    binding.published_provenance = provenance
 
 
 # LLM: AuthManager 构造时声明本进程具备认证流水线；不创建 middleware，不增加身份或写权限。
@@ -183,12 +187,21 @@ def refresh_live_switches(config=None, *, path=None, force=False) -> frozenset[s
             candidate = registered.config()
             if candidate is None:
                 continue
+            apply_switches = force or registered.settled_fresh is not source.fresh
+            guard_before = registered.guard_applied.copy()
             try:
-                changed.update(_apply_switches(candidate, registered, source.fresh))
+                if apply_switches:
+                    changed.update(_apply_switches(candidate, registered, source.fresh))
+                    # 只有全部文件基线都已采用，外部局部覆盖才不可能产生待补的文件更新。
+                    registered.settled_fresh = source.fresh if all(
+                        previous == getattr(source.fresh, key) for key, previous in registered.applied.items()
+                    ) else None
                 changed.update(_refresh_guard(candidate, registered, checked_policies, force=force))
             finally:
                 # 策略加载失败不能丢掉已经采用的 YAML 基线；无变化时发布器不分配新来源对象。
-                _publish_provenance(candidate, registered)
+                if (apply_switches or guard_before != registered.guard_applied
+                        or candidate.config_sources is not registered.published_provenance):
+                    _publish_provenance(candidate, registered)
         return frozenset(changed)
 
 
