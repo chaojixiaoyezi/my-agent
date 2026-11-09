@@ -203,3 +203,13 @@ requeue协议重排，源ref保持不变、不执行legacy、不改投canonical�
 分片后最终测量130项9拍最大24.6ms、1000项63拍最大27.4ms；copy及原handoff记录入口单拍最多21次JSON耐久写，
 最终thread/message/task/wake发表仍是原固定数量写入。max_ms仍为50ms，
 不以墙钟波动替代硬项数；截止后不启动新成员写入，正在进行的单次文件/小片提交不具备内核IO抢占能力。
+
+
+同源完成checkpoint还保存目标target_count。成员→页→manifest→prepared(done/cursor/count)→索引complete→
+thread/message/task/wake的耐久顺序不变；允许索引完整但thread尚未发表。恢复时重核源指纹、epoch、count及
+complete后直接进入后继发表，不重写相同prepared/complete标记。无进展的相同checkpoint也不做耐久重写。
+旧prepared缺target_count证明时从源重新有界复制；manifest已领先但prepared尚未前进的崩溃仍只重放本片。
+
+隔离2C4G Linux计量显示，冷canonical初始化约44ms（索引初始化约39ms），第一拍可为cursor0；温拍开库约2–4ms，
+1000项来源随后实际按0→4→8→12→16等游标推进，并非永久零进展。原50ms是新成员写入准入截止，必要的小片
+原子耐久提交不可中断，实测整拍80–97ms，不宣称硬墙钟50ms；任何重复写造成的恢复饥饿不得以扩大预算掩盖。

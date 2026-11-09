@@ -312,13 +312,27 @@ def _copy_history_slice(receipt_path, prepared, legacy, canonical, thread, deadl
     target = canonical.storage.thread_path(thread.thread_id)
     root = task_history.history_root(target)
     progress = prepared.get('history_copy')
+    saved_progress = progress
     if 'history_copy' in prepared and not _valid_history_copy_progress(progress):
         raise ValueError('invalid managed history copy progress')
     with locked_json_path(target):
         manifest = task_history._read(root, ('index.json',))
+        # 旧resume没有目标count证明时从源重新分片，不由旧窗口推断完整性。
+        if progress is not None and 'target_count' not in progress:
+            progress = None
+        if (progress and progress['done'] and progress['source_stamp'] == source_stamp
+                and isinstance(manifest, dict) and manifest.get('version') == 1
+                and manifest.get('copy_epoch') == progress['epoch']
+                and type(manifest.get('count')) is int and manifest['count'] == progress['target_count']
+                and manifest.get('incomplete') is False):
+            if source_identity() != source_stamp:
+                raise ValueError('legacy task history changed during copy')
+            return True
         if (not progress or progress.get('source_stamp') != source_stamp or manifest is None
-                or manifest.get('copy_epoch') != progress.get('epoch')):
-            progress = {'source_stamp': source_stamp, 'epoch': uuid.uuid4().hex, 'cursor': 0, 'done': False}
+                or manifest.get('copy_epoch') != progress.get('epoch')
+                or type(manifest.get('count')) is not int or manifest['count'] < progress['target_count']
+                or (progress['done'] and manifest['count'] != progress['target_count'])):
+            progress = {'source_stamp': source_stamp, 'epoch': uuid.uuid4().hex, 'cursor': 0, 'done': False, 'target_count': 0}
             # 新epoch使旧中断成员失效，按原散列位置覆盖，不为每次重启建新目录或rmtree。
             manifest = {'version': 1, 'count': 0, 'generation': 0, 'incomplete': True,
                         'copy_epoch': progress['epoch']}
@@ -338,10 +352,14 @@ def _copy_history_slice(receipt_path, prepared, legacy, canonical, thread, deadl
         # 复制循环不改变源；再次核原代次后才发表本片续点/完整证明。
         if source_identity() != source_stamp:
             raise ValueError('legacy task history changed during copy')
+        manifest = task_history._read(root, ('index.json',))
+        if (type(manifest.get('count')) is not int or manifest.get('copy_epoch') != progress['epoch']):
+            raise ValueError('managed history copy target changed')
+        progress = {**progress, 'target_count': manifest['count']}
         prepared['history_copy'] = progress
-        write_private_json_file_atomic_unlocked(receipt_path, prepared)
-        if progress['done']:
-            manifest = task_history._read(root, ('index.json',))
+        if progress != saved_progress:
+            write_private_json_file_atomic_unlocked(receipt_path, prepared)
+        if progress['done'] and manifest.get('incomplete') is not False:
             write_private_json_file_atomic_unlocked(root / 'index.json', {**manifest, 'incomplete': False})
         return progress['done']
 
@@ -351,6 +369,7 @@ def _valid_history_copy_progress(progress):
             and type(progress.get('epoch')) is str and len(progress['epoch']) == 32
             and all(char in '0123456789abcdef' for char in progress['epoch'])
             and isinstance(progress.get('source_stamp'), list) and len(progress['source_stamp']) == 3
+            and ('target_count' not in progress or (type(progress['target_count']) is int and progress['target_count'] >= 0))
             and ((progress['done'] and progress.get('cursor') is None)
                  or (not progress['done'] and type(progress.get('cursor')) is int and progress['cursor'] >= 0)))
 

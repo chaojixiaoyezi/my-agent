@@ -73,6 +73,18 @@ def _receipt(home, task_id):
     return json.loads((home.home_dir / "data" / "managed_dispatch_handoffs" / f"{task_id}.json").read_text())
 
 
+def _until_settled(home, transition):
+    """沿原50ms入口续作；仅pending/预算结束可重试，错误必须回给原断言。"""
+    for attempt in range(16):
+        report = reconcile_managed_dispatches(home, commit_transition=transition)
+        if report['truncated'] and (not report['retained'] or all(
+            row['reason'] == 'history_copy_pending' for row in report['retained']
+        )):
+            continue
+        return report, attempt + 1
+    raise AssertionError(f'handoff did not settle: {report}')
+
+
 class _RecordingBackend(BaseBackend):
     name = "recording"
 
@@ -95,9 +107,9 @@ class _RecordingBackend(BaseBackend):
 def test_legacy_only_dispatch_hands_off_once_with_original_identity(home):
     dispatch = _legacy_dispatch(home, "Sort the inbox")
     log = []
-    report = reconcile_managed_dispatches(home, commit_transition=_commit(log))
+    report, attempts = _until_settled(home, _commit(log))
     assert report == {"handed_off": [dispatch.task_id], "retained": [], "load_errors": 0, "truncated": False}
-    assert len(log) == 2
+    assert len(log) == attempts + 1
     canonical = open_canonical_conversation_store(home, initialize=False)
     assert canonical.storage.root == canonical_conversation_root(home)
     [wake] = canonical.wakes.pending()
@@ -117,7 +129,7 @@ def test_legacy_only_dispatch_hands_off_once_with_original_identity(home):
     assert (receipt["request_id"], receipt["legacy_wake_signal_id"]) == (dispatch.request_id, dispatch.legacy_wake.wake_signal_id)
 
     again = reconcile_managed_dispatches(home, commit_transition=_commit(log))
-    assert again["handed_off"] == [] and again["retained"] == [] and len(log) == 2
+    assert again["handed_off"] == [] and again["retained"] == [] and len(log) == attempts + 1
     assert len(canonical.wakes.pending()) == 1 and len(canonical.messages.recent(dispatch.thread_id)) == 1
 
 
@@ -208,11 +220,14 @@ def test_commit_refusal_leaves_original_dispatch_untouched(home):
 @pytest.mark.parametrize("stop_at", ["before_retire", "inside_retire"])
 def test_interrupted_handoff_resumes_from_durable_receipt(home, monkeypatch, stop_at):
     dispatch = _legacy_dispatch(home, "Resume me")
-    calls = []
+    calls, injected = [], []
 
     def flaky(operation):
         calls.append(operation)
-        if stop_at == "before_retire" and len(calls) == 2:
+        canonical = open_canonical_conversation_store(home, initialize=False)
+        if (stop_at == "before_retire" and not injected
+                and canonical.wakes.delivery_receipt(dispatch.thread_id, dispatch.task_id) == 'pending'):
+            injected.append(True)
             raise OSError("simulated commit window loss")
         return operation()
 
@@ -220,17 +235,19 @@ def test_interrupted_handoff_resumes_from_durable_receipt(home, monkeypatch, sto
     if stop_at == "inside_retire":
         def stop_once(self, wake_signal_id, **kwargs):
             monkeypatch.setattr(WakeStore, "mark_handled", original)
+            injected.append(True)
             raise OSError("simulated stop before legacy wake retirement")
 
         monkeypatch.setattr(WakeStore, "mark_handled", stop_once)
-    first = reconcile_managed_dispatches(home, commit_transition=flaky)
+    first, _attempts = _until_settled(home, flaky)
+    assert injected
     assert first["handed_off"] == [] and first["retained"][0]["reason"] == "handoff_error:OSError"
     assert _receipt(home, dispatch.task_id)["phase"] == ("prepared" if stop_at == "before_retire" else "published")
     canonical = open_canonical_conversation_store(home, initialize=False)
     assert [wake.wake_signal_id for wake in canonical.wakes.pending()] == [dispatch.legacy_wake.wake_signal_id]
     assert len(open_legacy_conversation_store(home).wakes.pending()) == 1
 
-    second = reconcile_managed_dispatches(home, commit_transition=lambda operation: operation())
+    second, _attempts = _until_settled(home, lambda operation: operation())
     assert second["handed_off"] == [dispatch.task_id] and second["retained"] == []
     assert _receipt(home, dispatch.task_id)["phase"] == "completed"
     assert [wake.wake_signal_id for wake in canonical.wakes.pending()] == [dispatch.legacy_wake.wake_signal_id]
@@ -329,14 +346,17 @@ def test_coordinator_discovery_hands_off_then_scans_only_canonical_store(home, m
         memory_curator_enabled=False, enable_self_learning=False, owner_maintenance_scan_interval_seconds=0)))
     stub.commit = lambda target, operation: commits.append(target) or operation()
     stub._managed_canonical_root = lambda target: CoordinatorBackgroundRequests._managed_canonical_root(stub, target)
-    refs = list(CoordinatorBackgroundRequests._owner_sources(stub, SimpleNamespace(identity=owner, home_dir=home.home_dir)))
-    assert commits == [owner, owner]
+    for attempt in range(16):
+        refs = list(CoordinatorBackgroundRequests._owner_sources(stub, SimpleNamespace(identity=owner, home_dir=home.home_dir)))
+        if any(ref['kind'] == 'wake' for ref in refs):
+            break
+    assert commits == [owner] * (attempt + 2)
     canonical = canonical_conversation_root(home).relative_to(home.home_dir).as_posix()
     wakes = [ref for ref in refs if ref["kind"] == "wake"]
     assert [(ref["source_id"], ref["store_ref"]) for ref in wakes] == [(dispatch.legacy_wake.wake_signal_id, canonical)]
     assert all(ref["store_ref"] in {"", canonical} for ref in refs)
     assert CoordinatorBackgroundRequests._managed_canonical_root(stub, OwnerIdentity.local_main()) is None
-    assert commits == [owner, owner]
+    assert commits == [owner] * (attempt + 2)
 
     def unreadable(*_args):
         raise OSError("account store unreadable")
@@ -413,7 +433,15 @@ def test_history_copy_limits_real_writes_and_never_publishes_partial_thread(home
         assert legacy.wakes.pending()
         target = task_history.history_root(canonical.storage.thread_path(thread.thread_id))
         if (target / 'index.json').exists():
-            assert json.loads((target / 'index.json').read_text())['incomplete'] is True
+            manifest = json.loads((target / 'index.json').read_text())
+            if manifest['incomplete'] is False:
+                # 完整页先耐久、thread随后发表；截止时允许停在这两者之间。
+                progress = _receipt(home, dispatch.task_id)['history_copy']
+                assert progress['done'] is True and progress['cursor'] is None
+                assert progress['target_count'] == manifest['count']
+                assert progress['epoch'] == manifest['copy_epoch']
+            else:
+                assert manifest['incomplete'] is True
     assert report['handed_off'] == [dispatch.task_id]
     assert len(counts) > 1 and tuple(canonical.tasks.iter_task_ids(thread.thread_id)) == identifiers
     published = canonical.threads.require(thread.thread_id)
@@ -507,3 +535,83 @@ def test_history_source_generation_change_restarts_without_old_members_becoming_
     assert report['handed_off'] == [dispatch.task_id]
     assert tuple(canonical.tasks.iter_task_ids(dispatch.thread_id)) == tuple(legacy.tasks.iter_task_ids(dispatch.thread_id))
     assert not canonical.tasks.contains_task(dispatch.thread_id, 'old-0')
+
+
+@pytest.mark.parametrize('damage', ['none', 'count', 'epoch'])
+def test_done_history_checkpoint_does_not_spend_next_slice_rewriting_itself(home, monkeypatch, damage):
+    from agent_py_agent.agent.common import json_io
+    from agent_py_agent.agent.conversation import task_history
+
+    dispatch = _legacy_dispatch(home, "Complete after checkpoint")
+    canonical = open_canonical_conversation_store(home, initialize=False)
+    index = task_history.history_root(canonical.storage.thread_path(dispatch.thread_id)) / 'index.json'
+    receipt = home.home_dir / 'data/managed_dispatch_handoffs' / (dispatch.task_id + '.json')
+    now, completed_writes = [1000.0], []
+    clock = SimpleNamespace(**vars(recovery.time))
+    clock.monotonic = lambda: now[0]
+    monkeypatch.setattr(recovery, 'time', clock)
+    original = json_io.write_private_json_file_atomic_unlocked
+
+    def write(path, payload, **kwargs):
+        result = original(path, payload, **kwargs)
+        if ((path == receipt and payload.get('history_copy', {}).get('done') is True)
+                or (path == index and payload.get('incomplete') is False)):
+            completed_writes.append(path)
+            now[0] += 0.030
+        return result
+
+    monkeypatch.setattr(json_io, 'write_private_json_file_atomic_unlocked', write)
+    first = reconcile_managed_dispatches(home, commit_transition=lambda operation: operation())
+    assert first['truncated'] and _receipt(home, dispatch.task_id)['history_copy']['done'] is True
+    before = json.loads(index.read_text())
+    assert before['incomplete'] is False and before['count'] == 1
+    assert canonical.threads.load(dispatch.thread_id) is None and len(completed_writes) == 2
+    if damage != 'none':
+        index.write_text(json.dumps({**before, **({'count': 0} if damage == 'count' else {'copy_epoch': 'f' * 32})}))
+    second = reconcile_managed_dispatches(home, commit_transition=lambda operation: operation())
+    if damage != 'none':
+        assert second['truncated'] and canonical.threads.load(dispatch.thread_id) is None
+        assert _receipt(home, dispatch.task_id)['history_copy']['epoch'] != before['copy_epoch']
+        second = reconcile_managed_dispatches(home, commit_transition=lambda operation: operation())
+    assert second['handed_off'] == [dispatch.task_id]
+    assert len(completed_writes) == (2 if damage == 'none' else 4)
+    assert tuple(canonical.tasks.iter_task_ids(dispatch.thread_id)) == (dispatch.task_id,)
+
+
+def test_unchanged_zero_progress_history_slice_does_not_rewrite_checkpoint(home, monkeypatch):
+    from agent_py_agent.agent.common import json_io
+    from agent_py_agent.agent.conversation import task_history
+
+    dispatch = _legacy_dispatch(home, "No progress budget")
+    canonical = open_canonical_conversation_store(home, initialize=False)
+    index = task_history.history_root(canonical.storage.thread_path(dispatch.thread_id)) / 'index.json'
+    receipt = home.home_dir / 'data/managed_dispatch_handoffs' / (dispatch.task_id + '.json')
+    now, writes = [1000.0], []
+    clock = SimpleNamespace(**vars(recovery.time))
+    clock.monotonic = lambda: now[0]
+    monkeypatch.setattr(recovery, 'time', clock)
+    original_page = task_history.page
+
+    def page(*args, **kwargs):
+        result = original_page(*args, **kwargs)
+        if kwargs.get('with_positions'):
+            now[0] += 0.060
+        return result
+
+    original_write = json_io.write_private_json_file_atomic_unlocked
+
+    def write(path, payload, **kwargs):
+        if path in {index, receipt}:
+            writes.append(path)
+        return original_write(path, payload, **kwargs)
+
+    monkeypatch.setattr(task_history, 'page', page)
+    monkeypatch.setattr(json_io, 'write_private_json_file_atomic_unlocked', write)
+    first = reconcile_managed_dispatches(home, commit_transition=lambda operation: operation())
+    assert first['truncated'] and _receipt(home, dispatch.task_id)['history_copy']['cursor'] == 0
+    previous = {path: path.read_bytes() for path in (index, receipt)}
+    count = len(writes)
+    second = reconcile_managed_dispatches(home, commit_transition=lambda operation: operation())
+    assert second['truncated'] and len(writes) == count
+    assert all(path.read_bytes() == raw for path, raw in previous.items())
+    assert canonical.threads.load(dispatch.thread_id) is None
