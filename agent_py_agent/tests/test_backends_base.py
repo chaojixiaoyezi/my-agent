@@ -20,6 +20,7 @@ from agent_py_agent.agent.backends.factory import get_backend
 from agent_py_agent.agent.backends.http import HttpBackend
 from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
 from agent_py_agent.agent.backends.responses import OpenAIResponsesBackend
+from agent_py_agent.agent.settings.config import AgentConfig
 
 _DEFAULT_OPTIONS = BackendOptions(
     api_base="https://api.example.com",
@@ -663,38 +664,26 @@ class TestGetBackend:
             get_backend("unknown_backend", config=MagicMock(model_auth_ref={}))
 
     def test_get_backend_openai_with_config(self):
-        config = MagicMock(model_auth_ref={})
-        config.api_base = "https://api.example.com"
-        config.api_key = "key"
-        config.model_name = "gpt-4"
-        config.request_timeout = 60
-        config.max_tokens = 1024
-        config.model_context_window_tokens = 234567
-        config.temperature = "0.7"
-        config.top_p = None
-        config.stream_enabled = True
+        config = AgentConfig(api_base="https://api.example.com", api_key="key",
+                             model_name="gpt-4", request_timeout=60, max_tokens=1024,
+                             model_context_window_tokens=234567, temperature="0.7", stream_enabled=True)
 
         backend = get_backend("openai_compatible", config)
         assert isinstance(backend, OpenAICompatibleBackend)
         assert backend.context_window_tokens == 234567
+        assert backend.thinking_requirement == "optional"
 
     def test_get_backend_anthropic_with_config(self):
-        config = MagicMock(model_auth_ref={})
-        config.api_base = "https://api.example.com"
-        config.api_key = "key"
-        config.model_name = "claude-3"
-        config.request_timeout = 60
-        config.max_tokens = 1024
-        config.model_context_window_tokens = 200000
-        config.temperature = "0.7"
-        config.top_p = None
-        config.stream_enabled = True
-        config.anthropic_prompt_cache_enabled = False
+        config = AgentConfig(api_base="https://api.example.com", api_key="key",
+                             model_name="claude-3", request_timeout=60, max_tokens=1024,
+                             model_context_window_tokens=200000, temperature="0.7", stream_enabled=True,
+                             anthropic_prompt_cache_enabled=False)
 
         backend = get_backend("anthropic_compatible", config)
         assert isinstance(backend, AnthropicCompatibleBackend)
         assert backend.context_window_tokens == 200000
         assert backend.prompt_cache_enabled is False
+        assert backend.thinking_requirement == "optional"
 
 
 def test_probe_reraises_provider_quota_error(tmp_path):

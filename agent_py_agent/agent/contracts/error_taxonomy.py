@@ -2471,6 +2471,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint="模型供应商配置无效；检查已脱敏的端点、模型名与凭据来源后再启动请求。",
     ),
+    "MODEL_CAPABILITY_MISMATCH": ErrorContract(
+        code="MODEL_CAPABILITY_MISMATCH",
+        category="model",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="请求未发送；核对所选模型支持的思考档位和工具选择，修正设置后再发起请求。",
+    ),
     "PROVIDER_CONNECTION_FAILED": ErrorContract(
         code="PROVIDER_CONNECTION_FAILED",
         category="model",

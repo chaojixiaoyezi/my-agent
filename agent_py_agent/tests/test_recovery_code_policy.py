@@ -109,6 +109,18 @@ def test_stale_owner_epoch_preserves_fence_without_automatic_retry():
     assert "重放" in contract.recovery_hint and "代次" in contract.recovery_hint
 
 
+def test_incompatible_model_controls_report_before_sending_without_automatic_retry():
+    from agent_py_agent.agent.backends.errors import ProviderModelCapabilityError
+    from agent_py_agent.agent.contracts.error_taxonomy import error_contract
+    from agent_py_agent.agent.gateway_parts.request_errors import gateway_client_error_message
+
+    error = ProviderModelCapabilityError("forced_tool_choice_not_supported")
+    contract = error_contract(error.error_code)
+    assert contract.code == error.error_code and contract.category == "model"
+    assert contract.retryable is False and contract.recommended_action == RecoveryAction.REPORT_BLOCKER.value
+    assert "未发送" in contract.recovery_hint and "未发送" in gateway_client_error_message(contract.code)
+
+
 def test_history_read_and_task_binding_errors_have_distinct_recovery():
     from agent_py_agent.agent.contracts.error_taxonomy import error_contract
 

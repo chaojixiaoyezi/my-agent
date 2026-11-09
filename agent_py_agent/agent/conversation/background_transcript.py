@@ -36,8 +36,9 @@ BACKGROUND_TRANSCRIPT_MAX_EVENTS = 1024
 # 单Agent全部线程共用8MiB展示预算；单事件64KiB，canonical正文与终态不在此缓存中。
 BACKGROUND_TRANSCRIPT_MAX_BYTES = 8 * 1024 * 1024
 BACKGROUND_TRANSCRIPT_EVENT_MAX_BYTES = 64 * 1024
-# 大对象计量也受节点/深度门约束，不能先展开或序列化全集再决定丢弃。
+# 每次最多计量的节点数，不能为了判断展示大小而先展开整个对象。
 BACKGROUND_TRANSCRIPT_PAYLOAD_MAX_NODES = 1024
+# 展示数据逐层遍历的深度上限，避免深嵌套对象耗尽递归栈。
 BACKGROUND_TRANSCRIPT_PAYLOAD_MAX_DEPTH = 32
 # 后台转录最多跟踪 256 个线程：防止失控并发把事件环挤满。
 BACKGROUND_TRANSCRIPT_MAX_THREADS_COUNT = 256

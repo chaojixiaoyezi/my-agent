@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1423,
+  "count": 1426,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -3300,12 +3300,36 @@
       "description": "挤满有界环并拖慢 reducer，合到短批次后仍能保持肉眼连续更新。"
     },
     {
+      "name": "BACKGROUND_TRANSCRIPT_MAX_BYTES",
+      "file": "agent_py_agent/agent/conversation/background_transcript.py",
+      "value": 8388608,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单Agent全部线程共用8MiB展示预算；单事件64KiB，canonical正文与终态不在此缓存中。"
+    },
+    {
       "name": "BACKGROUND_TRANSCRIPT_MAX_THREADS_COUNT",
       "file": "agent_py_agent/agent/conversation/background_transcript.py",
       "value": 256,
       "unit": "个",
       "category": "上限预算",
       "description": "后台转录最多跟踪 256 个线程：防止失控并发把事件环挤满。"
+    },
+    {
+      "name": "BACKGROUND_TRANSCRIPT_PAYLOAD_MAX_DEPTH",
+      "file": "agent_py_agent/agent/conversation/background_transcript.py",
+      "value": 32,
+      "unit": "层",
+      "category": "上限预算",
+      "description": "展示数据逐层遍历的深度上限，避免深嵌套对象耗尽递归栈。"
+    },
+    {
+      "name": "BACKGROUND_TRANSCRIPT_PAYLOAD_MAX_NODES",
+      "file": "agent_py_agent/agent/conversation/background_transcript.py",
+      "value": 1024,
+      "unit": "个节点",
+      "category": "上限预算",
+      "description": "每次最多计量的节点数，不能为了判断展示大小而先展开整个对象。"
     },
     {
       "name": "BACKGROUND_TRANSCRIPT_TEXT_LIMIT_CHARS",

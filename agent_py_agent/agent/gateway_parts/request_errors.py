@@ -274,6 +274,10 @@ def gateway_client_error_message(error_code: object) -> str:
         "PROVIDER_CONFIGURATION_INVALID": (
             "模型服务配置不可用。请检查接口地址、模型名称和密钥是否属于同一服务后重试。"
         ),
+        "MODEL_CAPABILITY_MISMATCH": (
+            "所选模型不支持本次思考或工具设置，这次模型请求未发送。"
+            "请按诊断调整设置；此前已执行的工作仍保留。"
+        ),
         "PROVIDER_CONNECTION_FAILED": "无法连接模型服务，请检查网络、代理和接口地址后重试。",
         "TOOL_PROTOCOL_CAPABILITY_UNAVAILABLE": (
             "模型工具能力检查未通过，当前任务尚未开始。请检查模型是否支持原生工具调用。"
