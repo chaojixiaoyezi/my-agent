@@ -37,7 +37,9 @@ def learning_protection_for_agent(agent, *, scan_limit=1000):
     except Exception:
         complete = False
     try:
-        report = agent.subagents.list_runs_report()
+        # 只需未结束子代理：真实管理器读当前集合索引，旧适配器沿原全量报告。
+        reader = getattr(agent.subagents,'list_recovery_runs_report',None)
+        report = reader() if callable(reader) else agent.subagents.list_runs_report()
         complete = complete and not report.load_errors
         for child in report.runs:
             if not task_status_in(child.status,SUBAGENT_ENDED_STATUSES):

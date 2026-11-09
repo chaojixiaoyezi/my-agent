@@ -15,9 +15,12 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
+from .memory_store.retention_scan_budget import RETENTION_SCAN_SLICE_ENTRIES
 from .runtime_errors import runtime_error_report
+from .subagents.manager import SubAgentManager, SubagentRunIndexUnavailable, creation_run_index
 from .subagents.models import SubAgentBoardOptions, TaskStatus, task_status_in
 
 if TYPE_CHECKING:
@@ -46,6 +49,7 @@ class ActiveWorkSummary:
     orphan_processes: list[dict] = None
     crashed_tasks: list[dict] = None  # RUNNING 且结构化 runner 会话已失联的任务
     detection_errors: list[dict] = None
+    orphan_scan_partial: bool = False
 
     def __post_init__(self) -> None:
         if self.recent_tasks is None:
@@ -80,12 +84,19 @@ def _detect_processing_requests(paths, summary):
 def _detect_active_tasks(agent, summary):
     """检测未完成的子代理任务和最近任务列表。"""
     try:
-        board = agent.subagents.board.build_board(
-            options=SubAgentBoardOptions(
-                recent_limit=3,
-                include_child_status_counts=False,
-            )
-        )
+        if isinstance(agent.subagents, SubAgentManager):
+            from .subagents.services.board.items import to_board_item
+
+            report = agent.subagents.list_current_runs_report(
+                statuses=("RUNNING", "PENDING", "PLANNING", "PAUSED", "BLOCKED", "CHANNEL_ERROR", "WAITING_APPROVAL"),
+                include_open_capabilities=True)
+            if report.load_errors:
+                raise SubagentRunIndexUnavailable("startup current run coverage unavailable")
+            items = [to_board_item(agent.subagents, task, include_child_status_counts=False) for task in report.runs]
+            board = SimpleNamespace(hot_list=[item for item in items if item.risk_flags], recent=items[:3])
+        else:
+            board = agent.subagents.board.build_board(
+                options=SubAgentBoardOptions(recent_limit=3, include_child_status_counts=False))
         final_statuses = frozenset({
             TaskStatus.DONE.value,
             TaskStatus.FAILED.value,
@@ -110,7 +121,7 @@ def _detect_active_tasks(agent, summary):
             }
             for item in board.recent[:3]
         ]
-    except (AttributeError, TypeError) as exc:
+    except (AttributeError, TypeError, RuntimeError, OSError, ValueError) as exc:
         summary.active_task_count = 0
         summary.recent_tasks = []
         _append_detection_error(summary, exc, "startup_recovery.active_tasks")
@@ -151,7 +162,7 @@ def _detect_orphan_processes(agent, summary) -> None:
     from .subagents.process_control import is_pid_alive
 
     try:
-        tasks = list(agent.subagents.list_runs() or [])
+        tasks = _startup_run_candidates(agent, summary, terminal_window=True)
     except Exception as exc:
         _append_detection_error(summary, exc, "startup_recovery.orphan_processes")
         return
@@ -198,7 +209,7 @@ def _detect_crashed_running_tasks(agent, summary) -> None:
     )
 
     try:
-        tasks = list(agent.subagents.list_runs() or [])
+        tasks = _startup_run_candidates(agent, summary)
     except Exception as exc:
         _append_detection_error(summary, exc, "startup_recovery.crashed_tasks")
         return
@@ -298,6 +309,30 @@ def detect_active_work(agent: SimpleAgent) -> ActiveWorkSummary:
     return summary
 
 
+def _startup_run_candidates(agent, summary, *, terminal_window=False):
+    """当前运行点查；终态进程凭据按原索引游标有界巡检，仍由 canonical/PID 判据裁决。"""
+    manager = agent.subagents
+    if not isinstance(manager, SubAgentManager):
+        return list(manager.list_runs() or [])
+    if terminal_window:
+        from .contracts.state_machine import TERMINAL_STATES
+
+        identity = manager.persistence._run_index_identity()
+        after = str(getattr(agent, "_startup_orphan_after", "") or "")
+        run_ids, following = creation_run_index(manager).candidate_ids(
+            statuses=tuple(TERMINAL_STATES), after=after, limit=RETENTION_SCAN_SLICE_ENTRIES)
+        manager.persistence._require_run_index_identity(identity)
+        report = manager.list_runs_by_ids_report(run_ids)
+        summary.orphan_scan_partial = bool(after or following)
+        if not report.load_errors:
+            agent._startup_orphan_after = following
+    else:
+        report = manager.list_current_runs_report(statuses=("RUNNING",))
+    if report.load_errors:
+        raise SubagentRunIndexUnavailable("startup run candidates unavailable")
+    return report.runs
+
+
 def _render_orphan_processes(summary: ActiveWorkSummary) -> list[str]:
     """渲染孤儿派工进程段(任务已终态但进程仍活)。无则空。从 format 抽出以控行数。"""
     if not summary.orphan_processes:
@@ -343,6 +378,8 @@ def format_active_work_summary(summary: ActiveWorkSummary) -> str:
 
     if summary.active_task_count > 0:
         lines.append(f"✓ 发现 {summary.active_task_count} 个近期未收口任务（含运行、等待或阻塞）")
+    elif any(error.get("context") == "startup_recovery.active_tasks" for error in summary.detection_errors):
+        lines.append("⚠ 近期未收口任务状态未知")
     else:
         lines.append("✓ 没有近期未收口任务")
 
@@ -356,6 +393,8 @@ def format_active_work_summary(summary: ActiveWorkSummary) -> str:
         lines.append("  是否继续？使用 my-agent daemon --continue 继续调度")
 
     lines.extend(_render_orphan_processes(summary))
+    if summary.orphan_scan_partial:
+        lines.append("ℹ 孤儿进程检查为有界窗口，后续查询继续核对终态进程凭据。")
     lines.extend(_render_crashed_tasks(summary))
 
     if summary.detection_errors:
@@ -390,6 +429,8 @@ def has_active_work(summary: ActiveWorkSummary) -> bool:
         or summary.dispatch_pending
         or bool(summary.orphan_processes)
         or bool(summary.crashed_tasks)
+        or summary.orphan_scan_partial
+        or bool(summary.detection_errors)
     )
 
 

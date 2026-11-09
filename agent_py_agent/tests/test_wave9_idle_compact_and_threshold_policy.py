@@ -1,5 +1,6 @@
 # LLM: Round2用真实Store/摘要提交链验证只读、审批和消息竞争；只有供应商和容量观察为本地替身。
 # 模块用途: 防止闲置维护覆盖新消息，或把查询、等待确认和坏账当可压缩状态。
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -152,6 +153,10 @@ def test_corrupted_subagent_persistence_is_not_idle(tmp_path):
     row = store.threads.create()
     task_file = agent.subagents.persistence.workspace / "broken-run" / "task.json"
     task_file.parent.mkdir(parents=True)
+    # R7-W4：忙态只回读运行索引中的当前集合，损坏须发生在已登记的在途 run 上才属于本判定。
+    task_file.write_text(json.dumps({"id": "broken-run", "goal": "fixture", "thought": "", "plan": [],
+                                     "status": "RUNNING", "created_at": 1.0, "updated_at": 2.0}), encoding="utf-8")
+    agent.subagents.persistence.run_index.upsert(agent.subagents.load("broken-run"))
     task_file.write_text("{invalid json", encoding="utf-8")
     assert agent.subagents.list_runs_report().load_errors
     assert idle.idle_compact_busy_state(agent, store, row) == "activity_unknown"
