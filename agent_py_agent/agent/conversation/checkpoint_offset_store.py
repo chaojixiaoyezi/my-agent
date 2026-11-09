@@ -49,10 +49,19 @@ class CheckpointOffsetStore:
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                     raise OSError('untrusted checkpoint offset projection')
             if not write:
-                descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, 'O_NONBLOCK', 0))
+                before = self.path.lstat()
+                descriptor = os.open(self.path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+                                     | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0))
                 try:
                     opened = os.fstat(descriptor)
-                    if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or os.read(descriptor, 16) != b'SQLite format 3\x00':
+                    def identity(value):
+                        return (value.st_dev, value.st_ino, value.st_mode, value.st_nlink, value.st_size,
+                                value.st_mtime_ns, value.st_ctime_ns)
+                    if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                            or identity(opened) != identity(before)
+                            or os.read(descriptor, 16) != b'SQLite format 3\x00'
+                            or identity(os.fstat(descriptor)) != identity(opened)
+                            or identity(self.path.lstat()) != identity(opened)):
                         raise OSError('untrusted checkpoint offset projection header')
                 finally:
                     os.close(descriptor)

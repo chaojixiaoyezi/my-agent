@@ -246,3 +246,18 @@ def test_degrade_preserves_plain_list_behavior():
     classified = context_module._GatewayLoadErrors()
     context_module._degrade(classified, error)
     assert classified == [] and classified.warnings == [error]
+
+
+def test_missing_history_index_error_keeps_identity_free_diagnostic_blocking(case):
+    import shutil
+
+    from agent_py_agent.agent.conversation.task_history import history_root
+
+    _link(case, "live", "active")
+    root = history_root(case.store.storage.thread_path(case.thread.thread_id))
+    shutil.rmtree(root)
+    _links, errors, warnings = case.store.tasks.list_report(case.thread.thread_id, classify_missing=True)
+    assert not warnings
+    assert errors and errors[0]["error_type"] == "FileNotFoundError" and not errors[0].get("task_id")
+    _bundle, context_errors = case.store.context_bundle_report(case.thread.thread_id)
+    assert errors == context_errors

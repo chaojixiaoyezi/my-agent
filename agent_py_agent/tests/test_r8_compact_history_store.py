@@ -517,3 +517,55 @@ def test_read_only_checkpoint_lookup_never_births_or_repairs_projection(tmp_path
     with scan.checkpoint_row_lookup(path) as lookup:
         assert lookup('one')['checkpoint_id'] == 'one'
     assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+
+@pytest.mark.parametrize('kind', ['regular', 'symlink', 'replace_before_open', 'replace_after_read'])
+def test_projection_header_without_o_nofollow_still_checks_real_identity(tmp_path, monkeypatch, kind):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation import checkpoint_offset_store as module
+
+    path = tmp_path / 'ledger.jsonl'
+    path.write_bytes(b'{"checkpoint_id":"one"}\n')
+    with scan.checkpoint_row_lookup(path, publish_projection=True):
+        pass
+    store = module.CheckpointOffsetStore(path)
+    replacement = tmp_path / 'replacement.sqlite3'
+    replacement.write_bytes(store.path.read_bytes())
+    original_open, original_read = os.open, os.read
+    opened = []
+    changed = []
+
+    def swap():
+        os.replace(replacement, store.path)
+        changed.append(True)
+
+    def open_file(name, flags, *args, **kwargs):
+        if Path(name) == store.path and kind == 'replace_before_open' and not changed:
+            swap()
+        descriptor = original_open(name, flags, *args, **kwargs)
+        if Path(name) == store.path:
+            opened.append(descriptor)
+        return descriptor
+
+    def read_file(descriptor, size):
+        raw = original_read(descriptor, size)
+        if descriptor in opened and kind == 'replace_after_read' and not changed:
+            swap()
+        return raw
+
+    proxy = {key: value for key, value in vars(os).items() if key != 'O_NOFOLLOW'}
+    monkeypatch.setattr(module, 'os', SimpleNamespace(**{**proxy, 'open': open_file, 'read': read_file}))
+    if kind == 'symlink':
+        store.path.unlink()
+        store.path.symlink_to(replacement)
+    if kind == 'regular':
+        with store.connection(write=False) as conn:
+            assert conn.execute('SELECT count(*) FROM offsets').fetchone()[0] == 1
+    else:
+        with pytest.raises(OSError):
+            with store.connection(write=False):
+                raise AssertionError('unsafe projection was opened')
+    for descriptor in opened:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)

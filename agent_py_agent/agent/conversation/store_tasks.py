@@ -1031,7 +1031,8 @@ class TaskStore:
         # 只给显式选择分级的历史消费者附带 warnings；活动索引、损坏及权限故障保持阻断。
         warnings = [{"code": "missing_historical_task_link", "id": error["task_id"]}
                     for error in errors if error.get("error_type") == "FileNotFoundError"
-                    and error.get("task_id") not in thread.active_task_ids]
+                    and isinstance(error.get("task_id"), str) and error["task_id"]
+                    and error["task_id"] not in thread.active_task_ids]
         missing = {row["id"] for row in warnings}
         return links, [error for error in errors if error.get("task_id") not in missing], warnings
 

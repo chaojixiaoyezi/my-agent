@@ -125,3 +125,6 @@ CAS 后 pin 登记失败恢复、收走的未发表节点禁止晚到发表、�
 只允许显式publish_projection写路径，生产沿原checkpoint追加锁与已有宿主写门调用。
 单条回查仍核源行hash及identity；未知/partial不被当成完整。原只读SQLite可能维护其非权威WAL/SHM，
 它们不能计作canonical正文或借此授权生产写入。
+
+只读投影头的便携打开使用可选O_NOFOLLOW，并以打开前lstat、实际fstat和读后路径/FD完整身份
+共同拒绝symlink、硬链接和同窗口替换；Windows缺该flag不代表可以取消身份核验。
