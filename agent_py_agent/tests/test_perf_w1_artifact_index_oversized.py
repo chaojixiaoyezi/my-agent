@@ -1,5 +1,5 @@
 # LLM: PERF-W1 回归：超缓存预算的工具索引不得整表物化或做驻留体积遍历，字面命中结果须与整表解析完全一致。
-# 模块用途: 固定超预算索引的预筛查找、转义行兜底与不入缓存合同。
+# 模块用途: 固定超预算索引的预筛查找、转义行兜底与候选预算合同。
 from __future__ import annotations
 
 import json
@@ -33,7 +33,14 @@ def oversized_index(tmp_path, monkeypatch):
 
 def test_oversized_literal_lookup_matches_full_parse_without_size_walk(oversized_index, monkeypatch):
     full_rows, full_literals = reader._parsed_artifact_index(oversized_index)  # literal_ref=None: full parse
-    monkeypatch.setattr(reader, "_retained_tree_bytes", lambda *_a, **_k: pytest.fail("size walk on oversized index"))
+    measure = reader._retained_tree_bytes
+
+    def measure_candidates(value, seen):
+        candidate_rows = value[1][1][0]
+        assert len(candidate_rows) == 2  # 计量仅限真命中，不遍历200条历史噪声。
+        return measure(value, seen)
+
+    monkeypatch.setattr(reader, "_retained_tree_bytes", measure_candidates)
     rows, literals = reader._parsed_artifact_index(oversized_index, literal_ref=REF)
     assert literals[REF] == full_literals[REF]
     assert len(literals[REF]) == 2  # 普通命中 + 转义写法命中

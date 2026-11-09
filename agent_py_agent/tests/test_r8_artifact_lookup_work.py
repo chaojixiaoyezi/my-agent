@@ -161,14 +161,14 @@ def test_prepare_negative_token_keeps_no_parsed_source_rows(tmp_path, monkeypatc
         reader.ReadToolOutputArtifactRequest(tmp_path, "absent:call")).record is None
 
 
-@pytest.mark.parametrize("cache_bytes", [128, 16 * 1024 * 1024])
+@pytest.mark.parametrize("cache_bytes", [4096, 16 * 1024 * 1024])
 def test_positive_index_cache_verifies_bytes_with_identical_stat(tmp_path, monkeypatch, cache_bytes):
     index = tmp_path / "index.jsonl"
     ref = "wanted:call"
-    line = json.dumps({"scoped_call_id": ref, "marker": "old", "pad": "x" * 8192}) + "\n"
+    line = (json.dumps({"scoped_call_id": ref, "marker": "old"}) + "\n"
+            + json.dumps({"scoped_call_id": "noise:call", "pad": "x" * 8192}) + "\n")
     index.write_text(line)
     monkeypatch.setattr(reader, "_ARTIFACT_INDEX_CACHE", reader._VerifiedArtifactCache(cache_bytes))
-    monkeypatch.setattr(reader, "_OVERSIZED_LITERAL_SLOT", [None])
     signature = reader._blob_stat_signature
     monkeypatch.setattr(reader, "_blob_stat_signature", lambda info: (*signature(info)[:3], 0, 0))
     decoded = []
@@ -199,15 +199,15 @@ def test_positive_index_cache_verifies_bytes_with_identical_stat(tmp_path, monke
     assert newest[1]["newest:call"][0]["marker"] == "old"
 
 
-@pytest.mark.parametrize("cache_bytes", [128, 16 * 1024 * 1024])
+@pytest.mark.parametrize("cache_bytes", [4096, 16 * 1024 * 1024])
 def test_positive_cache_hot_hit_still_reads_current_index_bytes(tmp_path, monkeypatch, cache_bytes):
     from contextlib import contextmanager
 
     index = tmp_path / "index.jsonl"
     ref = "wanted:call"
-    index.write_text(json.dumps({"scoped_call_id": ref, "pad": "x" * 8192}) + "\n")
+    index.write_text(json.dumps({"scoped_call_id": ref}) + "\n"
+                     + json.dumps({"scoped_call_id": "noise:call", "pad": "x" * 8192}) + "\n")
     monkeypatch.setattr(reader, "_ARTIFACT_INDEX_CACHE", reader._VerifiedArtifactCache(cache_bytes))
-    monkeypatch.setattr(reader, "_OVERSIZED_LITERAL_SLOT", [None])
     consumed = []
 
     class MeasuredRead:
@@ -240,3 +240,96 @@ def test_positive_cache_hot_hit_still_reads_current_index_bytes(tmp_path, monkey
     consumed.clear()
     assert reader._parsed_artifact_index(source, literal_ref=ref) is cold
     assert sum(consumed) == index.stat().st_size
+
+
+def test_oversized_literal_retains_only_structured_candidates_in_shared_budget(tmp_path, monkeypatch):
+    index = tmp_path / "index.jsonl"
+    ref = "wanted:call"
+    noise = [{"scoped_call_id": f"noise:{i}", "pad": ref + "x" * 512} for i in range(256)]
+    expected = {"scoped_call_id": ref, "run_id": "wanted", "path": ""}
+    index.write_text("".join(json.dumps(row) + "\n" for row in [*noise, expected]))
+    cache = reader._VerifiedArtifactCache(4096)
+    monkeypatch.setattr(reader, "_ARTIFACT_INDEX_CACHE", cache)
+    result = reader._parsed_artifact_index(index, literal_ref=ref)
+    assert result[0] == (expected,)
+    assert result[1][ref] == [expected]
+    assert 0 < cache.bytes <= cache.max_bytes and len(cache.entries) == 1
+    assert reader._parsed_artifact_index(index, literal_ref=ref) is result
+
+
+def test_oversized_literal_over_budget_keeps_all_matches_without_caching(tmp_path, monkeypatch):
+    index = tmp_path / "index.jsonl"
+    ref = "wanted:call"
+    rows = [{"scoped_call_id": ref, "sequence": i, "pad": "x" * 512} for i in range(128)]
+    index.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    cache = reader._VerifiedArtifactCache(4096)
+    monkeypatch.setattr(reader, "_ARTIFACT_INDEX_CACHE", cache)
+    decoded = []
+    original = reader.iter_decoded_tool_index_objects
+
+    def count(*args, **kwargs):
+        decoded.append(1)
+        yield from original(*args, **kwargs)
+
+    monkeypatch.setattr(reader, "iter_decoded_tool_index_objects", count)
+    for _ in range(2):
+        result = reader._parsed_artifact_index(index, literal_ref=ref)
+        assert list(result[0]) == rows and result[1][ref] == rows
+        assert cache.bytes == 0 and not cache.entries
+    assert len(decoded) == 2
+
+
+def test_oversized_literal_filter_preserves_unrelated_decode_resource_errors(tmp_path, monkeypatch):
+    index = tmp_path / "index.jsonl"
+    ref = "wanted:call"
+    index.write_text(json.dumps({"scoped_call_id": ref, "path": ""}) + "\n"
+                     + '{"bad":' + "1" * 5000 + '}\n')
+    cache = reader._VerifiedArtifactCache(4096)
+    monkeypatch.setattr(reader, "_ARTIFACT_INDEX_CACHE", cache)
+    with pytest.raises(ValueError):
+        reader._parsed_artifact_index(index, literal_ref=ref)
+    assert not cache.entries and cache.bytes == 0
+
+
+def test_literal_and_full_results_use_separate_shared_budget_entries(tmp_path, monkeypatch):
+    index = tmp_path / "index.jsonl"
+    refs = ["wanted:one", "wanted:two"]
+    records = [{"scoped_call_id": ref, "path": ""} for ref in refs]
+    index.write_text("".join(json.dumps(row) + "\n" for row in records)
+                     + json.dumps({"pad": "x" * 8192}) + "\n")
+    cache = reader._VerifiedArtifactCache(4096)
+    monkeypatch.setattr(reader, "_ARTIFACT_INDEX_CACHE", cache)
+    results = [reader._parsed_artifact_index(index, literal_ref=ref) for ref in refs]
+    assert [result[0] for result in results] == [(records[0],), (records[1],)]
+    for ref, result in zip(refs, results):
+        assert reader._parsed_artifact_index(index, literal_ref=ref) is result
+    assert 0 < cache.bytes <= 4096 and len(cache.entries) == 2
+    full = reader._parsed_artifact_index(index)
+    assert len(full[0]) == 3
+    assert cache.bytes <= 4096 and len(cache.entries) == 2
+
+
+def test_concurrent_oversized_literal_cache_keeps_ref_partitions(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    index = tmp_path / "index.jsonl"
+    refs = ["wanted:one", "wanted:two"]
+    index.write_text("".join(json.dumps({"scoped_call_id": ref, "path": ""}) + "\n" for ref in refs)
+                     + json.dumps({"pad": "x" * 8192}) + "\n")
+    cache = reader._VerifiedArtifactCache(4096)
+    monkeypatch.setattr(reader, "_ARTIFACT_INDEX_CACHE", cache)
+    original = reader.iter_decoded_tool_index_objects
+    barrier = threading.Barrier(2)
+
+    def simultaneous(*args, **kwargs):
+        barrier.wait(timeout=5)
+        yield from original(*args, **kwargs)
+
+    monkeypatch.setattr(reader, "iter_decoded_tool_index_objects", simultaneous)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda ref: reader._parsed_artifact_index(index, literal_ref=ref), refs))
+    for ref, result in zip(refs, results):
+        assert [row["scoped_call_id"] for row in result[0]] == [ref]
+        assert reader._parsed_artifact_index(index, literal_ref=ref) is result
+    assert cache.bytes <= 4096 and len(cache.entries) == 2

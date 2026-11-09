@@ -1,5 +1,5 @@
 # LLM: PERF-R2-W1 回归：超预算工具索引同一引用的准备与读取只解码一次；索引追加（stat变化）、换引用或负命中都必须重新解码。
-# 模块用途: 固定超预算字面查找的单槽复用、失效与整表查找隔离合同。
+# 模块用途: 固定超预算字面查找的共享预算复用、失效与整表查找隔离合同。
 from __future__ import annotations
 
 import json
@@ -22,7 +22,7 @@ def _write_index(path):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-# LLM: 只计数共享解码器被调用的次数，不改变其输出；缓存预算压到1 KiB使索引必然超预算。
+# LLM: 只计数共享解码器被调用的次数，不改变其输出；缓存预算压到4 KiB使源索引超预算、精确候选仍可入预算。
 # 函数用途: 返回每次索引解码的预筛参数列表。
 @pytest.fixture
 def decodes(monkeypatch):
@@ -34,7 +34,7 @@ def decodes(monkeypatch):
         return real(source, prescreen, **kwargs)
 
     monkeypatch.setattr(reader, "iter_decoded_tool_index_objects", counting)
-    monkeypatch.setattr(reader, "_ARTIFACT_INDEX_CACHE", reader._VerifiedArtifactCache(1024))
+    monkeypatch.setattr(reader, "_ARTIFACT_INDEX_CACHE", reader._VerifiedArtifactCache(4096))
     return calls
 
 
@@ -48,7 +48,8 @@ def test_prepare_decodes_oversized_index_once_for_scoped_ref(tmp_path, decodes):
     assert prepared.record is not None and prepared.record["scoped_call_id"] == REF
     assert len(prepared.index_paths) == 1
     assert len(decodes) == 1 and decodes[0] is not None
-    assert reader._ARTIFACT_INDEX_CACHE.entries == {}
+    assert 0 < reader._ARTIFACT_INDEX_CACHE.bytes <= 4096
+    assert len(reader._ARTIFACT_INDEX_CACHE.entries) == 1
 
 
 def test_index_append_or_other_ref_decodes_again(tmp_path, decodes):

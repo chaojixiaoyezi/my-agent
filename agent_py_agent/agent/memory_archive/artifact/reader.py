@@ -86,8 +86,6 @@ _INLINE_ARTIFACT_CACHE = _VerifiedArtifactCache(16 * 1024 * 1024)
 _BLOB_INDEX_CACHE = _VerifiedArtifactCache(8 * 1024 * 1024)
 _ARTIFACT_INDEX_CACHE = _VerifiedArtifactCache(16 * 1024 * 1024)
 _INDEX_LITERAL_FIELDS = ("path", "sha256", "scoped_call_id", "call_id", "artifact_id", "file_path", "archive_path", "source_ref", "uri")
-# 超预算索引的预筛命中结果不进LRU；单槽只给同一次准备与读取的第二次同键同引用查找复用，索引stat一变即失效。
-_OVERSIZED_LITERAL_SLOT: list = [None]
 # 外置blob流式解码字符偏移检查点的间隔字符数
 _BLOB_CHECKPOINT_CHARS = 4096
 
@@ -1002,6 +1000,11 @@ def _parsed_artifact_index(source, *, literal_ref: str | None = None):
     with source.open("rb") as handle:
         before = _blob_stat_signature(os.fstat(handle.fileno()))
         key = str(getattr(source, "root", "")), str(getattr(source, "path", source)), *before
+        oversized = before[2] > _ARTIFACT_INDEX_CACHE.max_bytes
+        prescreen = tool_index_prescreen_pattern((literal_ref,)) if oversized and literal_ref else None
+        literal_only = prescreen is not None
+        if literal_only:
+            key = (*key, literal_ref)
         local_read = _PREPARE_INDEX_READ.get()
         witnesses = []
         if local_read and local_read[:2] == (key, literal_ref):
@@ -1009,12 +1012,6 @@ def _parsed_artifact_index(source, *, literal_ref: str | None = None):
         cached = _ARTIFACT_INDEX_CACHE.get(key)
         if cached is not None:
             witnesses.append(cached)
-        # 保持原容量和字面查询边界；缓存只省JSON解析，不能省当前索引的内容验证。
-        oversized = before[2] > _ARTIFACT_INDEX_CACHE.max_bytes
-        prescreen = tool_index_prescreen_pattern((literal_ref,)) if oversized and literal_ref else None
-        slot = _OVERSIZED_LITERAL_SLOT[0]
-        if prescreen is not None and slot is not None and slot[0] == (key, literal_ref):
-            witnesses.append((slot[1], slot[2]))
         if witnesses:
             digest = hashlib.sha256()
             while block := handle.read(64 * 1024):
@@ -1026,8 +1023,11 @@ def _parsed_artifact_index(source, *, literal_ref: str | None = None):
             handle.seek(0)
         # 原解析顺序读取同FD时顺带哈希，不加第二份源文本或整表副本。
         hashed_read = _HashedArtifactIndexRead(handle)
+        # 字节预筛不授予身份：无关字段包含ref或转义兜底的行仍完整解码，但立即释放假阳性。
         rows = tuple(row for _, row in iter_decoded_tool_index_objects(
-            _OpenArtifactIndex(hashed_read), prescreen))
+            _OpenArtifactIndex(hashed_read), prescreen)
+            if not literal_only or any(str(row.get(name, "") or "") == literal_ref
+                                       for name in _INDEX_LITERAL_FIELDS))
         by_literal: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
             for ref in {str(row.get(field, "") or "") for field in _INDEX_LITERAL_FIELDS}:
@@ -1039,10 +1039,9 @@ def _parsed_artifact_index(source, *, literal_ref: str | None = None):
                 and literal_ref not in by_literal):
             _PREPARE_INDEX_READ.set((key, literal_ref, hashed_read.digest.digest()))
         if stable and (literal_ref is None or literal_ref in by_literal):
-            if not oversized:
+            if not oversized or literal_only:
+                # 所有驻留结果共享原16MiB/32键；拒绝缓存只影响重解码，不截断完整候选。
                 _ARTIFACT_INDEX_CACHE.put(key, (hashed_read.digest.digest(), result))
-            elif prescreen is not None:
-                _OVERSIZED_LITERAL_SLOT[0] = (key, literal_ref), hashed_read.digest.digest(), result
         return result
 
 
