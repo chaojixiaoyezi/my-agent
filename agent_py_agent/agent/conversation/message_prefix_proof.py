@@ -105,19 +105,28 @@ class HotPrefixCache:
                 self._entries[key] = entry
             if not entry.lock.acquire(blocking=False):
                 return None
-            if entry.identity != identity or start == 0 or len(entry.bits) != self.filter_bytes:
-                entry.bits.clear()
-                entry.offset = 0
-                entry.identity = identity
-                if start:
+            try:
+                if entry.identity != identity or start == 0 or len(entry.bits) != self.filter_bytes:
+                    entry.bits.clear()
+                    entry.offset = 0
+                    entry.identity = identity
+                    if start:
+                        entry.lock.release()
+                        return None
+                    entry.bits = bytearray(self.filter_bytes)
+                if entry.offset != start:
                     entry.lock.release()
                     return None
-                entry.bits = bytearray(self.filter_bytes)
-            if entry.offset != start:
+                self._entries.move_to_end(key)
+                return PrefixSession(entry, start)
+            except BaseException as error:
+                entry.bits.clear()
+                entry.offset = 0
                 entry.lock.release()
-                return None
-            self._entries.move_to_end(key)
-            return PrefixSession(entry, start)
+                if isinstance(error, MemoryError):
+                    return None
+                raise
+
 
     def usage(self):
         if self._pid != os.getpid():

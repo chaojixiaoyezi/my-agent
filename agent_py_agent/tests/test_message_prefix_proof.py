@@ -260,3 +260,28 @@ def test_inherited_pid_abstains_without_touching_parent_lock(monkeypatch):
             assert cache.usage() == (1, 64)
     assert one.observe(0, 10, 'parent')
     one.close(verified=True)
+
+
+def test_allocation_or_session_failure_releases_hint_slot(monkeypatch):
+    import builtins
+
+    from agent_py_agent.agent.conversation import message_prefix_proof as proof
+
+    for stage in ('bitmap', 'session'):
+        cache = HotPrefixCache(filter_bytes=64, min_source_bytes=0)
+        with monkeypatch.context() as failure:
+            if stage == 'bitmap':
+                def allocate(*args):
+                    if args:
+                        raise MemoryError('fixture bitmap allocation failed')
+                    return builtins.bytearray()
+                failure.setattr(proof, 'bytearray', allocate, raising=False)
+            else:
+                def construct(*_args):
+                    raise MemoryError('fixture session allocation failed')
+                failure.setattr(proof, 'PrefixSession', construct)
+            assert _begin(cache) is None
+        one = _begin(cache)
+        assert one is not None and one.observe(0, 10, 'recovered')
+        one.close(verified=True)
+        assert cache.usage() == (1, 64)
