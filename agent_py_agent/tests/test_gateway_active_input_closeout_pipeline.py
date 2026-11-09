@@ -1,5 +1,10 @@
 """实际claimed runner的正常封口/未知出口；fake provider与临时localhost，不是native验收。"""
 
+import threading
+import time
+from contextlib import nullcontext
+from types import SimpleNamespace
+
 import pytest
 
 from agent_py_agent.agent.backends import get_backend
@@ -28,9 +33,13 @@ from agent_py_agent.tests.test_gateway_active_input_transport import (
 )
 
 
-@pytest.mark.parametrize("release_busy", [True, False])
+@pytest.mark.parametrize(
+    "release_busy, expires_before_unlock",
+    [(True, False), (False, False), (True, True)],
+    ids=["True", "False", "release-after-deadline"],
+)
 def test_actual_finally_closeout_resumes_or_preserves_unknown_and_same_p3(
-    tmp_path, monkeypatch, release_busy
+    tmp_path, monkeypatch, release_busy, expires_before_unlock
 ):
     with c_http(tmp_path, monkeypatch) as (
         agent,
@@ -70,6 +79,14 @@ def test_actual_finally_closeout_resumes_or_preserves_unknown_and_same_p3(
         original_p3 = p3.read_bytes()
         calls, ingress, errors, busy = [], [], [], []
         holder = {}
+        unlocked = threading.Event()
+        clock = [time.monotonic()]
+
+        def budget_time():
+            # 只隔离成功夹具的磁盘吞吐；仍为有限、单调且共享的原0.2秒截止。
+            clock[0] += 0.001
+            return clock[0]
+
         original_settle = request_execution._settle_pending_gateway_guidance
         original_queue = OriginalPendingTurnInput._queue_unseen
 
@@ -85,7 +102,11 @@ def test_actual_finally_closeout_resumes_or_preserves_unknown_and_same_p3(
             except BlockingIOError:
                 busy.append(True)
                 if release_busy:
+                    assert len(busy) == 1
+                    if expires_before_unlock:
+                        clock[0] += 0.21
                     holder["release"].set()
+                    assert unlocked.wait(5), "实际资源锁尚未退出"
                 raise
 
         monkeypatch.setattr(OriginalPendingTurnInput, "_queue_unseen", observe_queue)
@@ -95,10 +116,30 @@ def test_actual_finally_closeout_resumes_or_preserves_unknown_and_same_p3(
             code, incoming = send(server, message="arrived-at-live-closeout")
             assert code == 202 and incoming["input_state"] == "pending"
             ingress.append(incoming["request_id"])
-            with held_lock(inputs.gateway_input_transition(gate.paths, ingress[0])) as release:
+            with held_lock(
+                inputs.gateway_input_transition(gate.paths, ingress[0]), released=unlocked
+            ) as release:
                 holder["release"] = release
-                with provider_request_budget(0.2):
-                    return original_settle(actual_agent, request_id, failure, request_kind=request_kind)
+                # 截止来源和三处消费各自持有time模块；局部代理避免污染其他线程/全局时钟。
+                timing = monkeypatch.context() if release_busy else nullcontext()
+                with timing as scoped:
+                    if release_busy:
+                        from agent_py_agent.agent.backends import request_scope
+                        from agent_py_agent.agent.common import json_io
+                        from agent_py_agent.agent.conversation import input_resource_retry
+                        from agent_py_agent.agent.gateway_parts import multiprocess_active_input
+
+                        for module in (
+                            request_scope, json_io, input_resource_retry, multiprocess_active_input
+                        ):
+                            scoped.setattr(
+                                module, "time",
+                                SimpleNamespace(**{**vars(module.time), "monotonic": budget_time}),
+                            )
+                    with provider_request_budget(0.2):
+                        return original_settle(
+                            actual_agent, request_id, failure, request_kind=request_kind
+                        )
 
         monkeypatch.setattr(request_execution, "_settle_pending_gateway_guidance", late_input)
         finished = None
@@ -112,8 +153,10 @@ def test_actual_finally_closeout_resumes_or_preserves_unknown_and_same_p3(
         assert busy and calls == [1]
         incoming = inputs.read_gateway_input_receipt(gate.paths, ingress[0])
         assert p3.read_bytes() == original_p3
-        if release_busy:
-            assert not errors and finished is True
+        if release_busy and not expires_before_unlock:
+            assert not errors and finished is True, [
+                (type(error).__name__, getattr(error, "phase", None)) for error in errors
+            ]
             assert incoming.state == "queued"
             assert (
                 read_json_file(gate.paths.inbox / (incoming.request_id + ".json"))

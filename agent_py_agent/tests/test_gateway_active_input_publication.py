@@ -44,7 +44,7 @@ def ref_path(paths, receipt, turn_id):
 # LLM: 只持本测试合成路径的原合法锁，finally释放并确认原Thread退出；不修改canonical或伪造权限。
 # 函数用途: 让断言在普通资源仍被占有时执行，避免watchdog先释放造成假通过。
 @contextmanager
-def held_lock(lock):
+def held_lock(lock, *, released=None):
     entered, release = threading.Event(), threading.Event()
     errors = []
 
@@ -53,6 +53,8 @@ def held_lock(lock):
             with lock:
                 entered.set()
                 release.wait(10)
+            if released is not None:
+                released.set()
         except BaseException as error:
             errors.append(error)
             entered.set()
