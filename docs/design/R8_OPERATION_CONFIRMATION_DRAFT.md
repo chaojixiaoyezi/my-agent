@@ -81,3 +81,28 @@
 未做：上述新阶段、持久绑定、可信宿主退出回执、维护消费者、资源完整证明、回合等待协议和数据格式迁移。不能称 UNKNOWN 已自愈。它们需要一条完整合同切片，不适合用一个 PID 轮询补丁替代。
 
 建议下一步：根先评审新非终态确认阶段及 proof-only CAS 的职责，再按“原操作绑定→真实宿主证明→有界消费者→回合等待”顺序实现；可并行审阅原宿主退出证据和状态机，但同一 operation schema/结算接口应单点修改。保持旧 UNKNOWN 与失败历史不变。
+
+## 增量评估：保留 RUNNING，能否避免新增 SQL 状态
+
+可以作为更小的数据表示方案，但**现有 running/checkpoint 本身不等价于已实现的等待协议**。沿原接口的可执行反例已补在 `test_tool_operation_idempotency`：handler 保存 diagnostic checkpoint 后返回 `TOOL_OPERATION_IN_FLIGHT + effect_outcome=unknown`，原 coordinator 仍合法结算 UNKNOWN；重复请求不再调用 handler。错误码或 `phase=awaiting_exit` 字段不能签发延后权限。
+
+准确阻碍：
+
+1. `_execute_claimed_operation` 对每个返回结果立即调用 finish；没有“已执行、尚未确认、非终态”的返回分支。将 effect 改为 `not_started` 会谎报未执行，改 ok=true 会错误终结并释放锁。
+2. `_invoke_with_lease_renewal` 只在原 invoke 寿命内续租，返回后停止。仅留下 running 行而没有已提交的确认责任与消费者，会在后续 holder/lease 判断中变 UNKNOWN。
+3. `record_tool_operation_dispatch` 能持久保存组件数据，但 `merge_tool_operation_dispatch` 当前仅固定组件 ID、message_key 和首次时间；任意 receipt 的 target/phase 字段并非不可变授权绑定，不能直接采用为原停止身份。
+4. 原回合在已执行且未知时 hard stop；现有通用 reconciliation 又要求活跃 current attempt。仅补取消 reconciler 并不能在父 failed 后获得合法收口权，也不能靠它重新执行。
+
+**推荐的完整最小垂直片**可保留 SQL `RUNNING`，在原 outcome 内引入受严格版本/摘要校验的 `effect_confirmation` 变体；仍须一次性实现以下生产消费者，缺任何一项不得接入：
+
+| 顺序 | 现有拥有者 | 最小必要变化 |
+| --- | --- | --- |
+| 1 | coordinator/operation store | 原 holder 在副作用前提交不可变 target/resource 绑定；专用 defer CAS 在 handler 返回前交接确认责任，不能用任意 handler envelope 触发 |
+| 2 | claim/renew/recovery | 验证该变体后只返回 pending，不重新领取 handler；等待责任由原 owner 维护续作，原资源锁仍归原 operation；租约/重启不授予重执行 |
+| 3 | cancel canonical control | 冻结批次中记录原 operation 绑定引用，后续原停止实例的退出回执可对拍；诊断与 canonical 证明分开，不能让新 attempt 填旧绑定 |
+| 4 | 原有界 owner 维护 | 只观察原 target/resource，proof-only CAS 确认，不发信号；当前 pending 集部分索引/keyset续作，不扫历史 UNKNOWN |
+| 5 | 工具结果/原回合等待 | 显式非终态 DTO 与原 operation 依赖：模型不收到成功，父回合不因合法待确认被改 failed；完成后仅唤醒原仍可续的父回合，取消/失败父回合不重开 |
+
+这种方案不新增权威 registry/队列，也不需新增 SQL status，但仍是一条跨 coordinator、store、控制、维护和回合的状态合同。旧安装不理解新变体时至多回到保守 UNKNOWN，不能假定具备续作能力；必须验证其原 outcome/组件字段保留及降级行为，不能直接承诺无损二进制回退。
+
+本增量只沉淀可独立合并的保护合同：diagnostic checkpoint/IN_FLIGHT 不会成为成功或新的执行许可；failed 与 cancelled 权威在 claim 前、claim 后都不得结算旧 UNKNOWN。没有新增 producer、无人消费的 phase、后台线程或生产状态，因此不与本轮 CPU 补丁发布互相阻塞。

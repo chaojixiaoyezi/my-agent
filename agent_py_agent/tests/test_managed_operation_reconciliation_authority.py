@@ -70,11 +70,12 @@ def test_reconciliation_rejects_wrong_identity_without_mutating_original(tmp_pat
     assert not json.loads(row['outcome_json']).get('reconciliation_claim')
 
 
+@pytest.mark.parametrize('status', ['cancelled', 'failed'])
 @pytest.mark.parametrize('timing', ['before_claim','after_claim'])
-def test_cancelled_authority_cannot_claim_or_settle_old_unknown(tmp_path, timing):
+def test_terminal_authority_cannot_claim_or_settle_old_unknown(tmp_path, timing, status):
     repo, store, chain, _old, _holder, _previous, request = _case(tmp_path)
     claimed = store.claim_tool_operation_reconciliation(request) if timing == 'after_claim' else None
-    repo.settle_agent_run(agent_run_id=str(chain['agent_run_id']), status='cancelled', attempt_id=request.authority_attempt_id)
+    repo.settle_agent_run(agent_run_id=str(chain['agent_run_id']), status=status, attempt_id=request.authority_attempt_id)
     if claimed:
         with pytest.raises(RuntimeConflictError):
             store.finish_tool_operation(ToolOperationCompletionRequest(owner_id='owner-a', run_id='run-one', operation_id='op-original',

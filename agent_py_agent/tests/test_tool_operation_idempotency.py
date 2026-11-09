@@ -1340,3 +1340,29 @@ def _claim_request(
         lease_expires_at=lease_expires_at,
         now=now,
     )
+
+
+def test_dispatch_checkpoint_and_in_flight_label_do_not_create_deferred_authority(tmp_path):
+    from agent_py_agent.agent.tooling.tool_operation_coordinator import (
+        record_tool_operation_dispatch,
+    )
+
+    class ReportedWaitTool(_CountingTool):
+        def execute(self, params):
+            self.calls += 1
+            record_tool_operation_dispatch('unbound-stop-diagnostic', dispatch_started=False,
+                receipt={'purpose': 'diagnostic_only', 'phase': 'awaiting_exit'})
+            return ToolHandlerOutcome('counting_write', False, 'diagnostic only',
+                error_code='TOOL_OPERATION_IN_FLIGHT', effect_outcome='unknown')
+
+    store = LocalStore(tmp_path / 'local.db', enable_fts=False)
+    tool = ReportedWaitTool()
+    registry = _registry(tmp_path, store, tool)
+    call = _call('run-1', 'call-1', 7)
+    first, repeated = _execute(registry, call), _execute(registry, call)
+    assert first.error_code == repeated.error_code == 'TOOL_OPERATION_OUTCOME_UNKNOWN'
+    assert first.ok is False and repeated.ok is False and tool.calls == 1
+    record = store.get_tool_operation(owner_id='owner-a', run_id='run-1', operation_id=call.operation_id)
+    assert record.status == 'unknown'
+    assert record.component_receipts[0]['purpose'] == 'diagnostic_only'
+    assert record.component_receipts[0]['phase'] == 'awaiting_exit'
