@@ -17,7 +17,7 @@ from pathlib import Path
 from ..common.json_io import locked_json_path, write_private_json_file_atomic_unlocked
 from ..common.nofollow_fs import ensure_private_dir, read_bytes_beneath, unlink_file_beneath
 from ..io.sqlite_probe import sqlite_readonly_probe_uri
-from ..io.sqlite_scope import scoped_guarded_connection
+from ..io.sqlite_scope import scoped_connection
 from .observation_index import _identity
 
 
@@ -64,6 +64,14 @@ class UsageSourceIndex:
         pending = _stamp(self.pending_directory)
         return _text((_stamp(self.directory), _stamp(self.directory / 'archive'), pending[:2] if pending else None))
 
+    def _projection_rebuild_proof(self):
+        """EX重建只允许绑定仍存在的canonical来源；新投影仍须prepare，不能把丢源变空完整。"""
+        directory = _stamp(self.directory)
+        if directory is None:
+            return None
+        return {'directory': directory, 'archive': _stamp(self.directory / 'archive'),
+                'pending': _stamp(self.pending_directory)}
+
     def _open(self):
         conn = sqlite3.connect(self.path.as_uri() + '?mode=rw', uri=True, timeout=0.0)
         try:
@@ -79,11 +87,12 @@ class UsageSourceIndex:
             conn.execute('CREATE INDEX IF NOT EXISTS sources_epoch ON sources(epoch,thread_id)')
             conn.commit()
             return conn
-        except BaseException:
+        except BaseException as error:
             try:
                 conn.close()
-            except BaseException:
-                pass
+            except BaseException as cleanup:
+                object.__setattr__(error, 'sqlite_cleanup_error', cleanup)
+                object.__setattr__(error, 'sqlite_unclosed_factory_connection', conn)
             raise
 
     @contextmanager
@@ -94,7 +103,7 @@ class UsageSourceIndex:
                 fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
                 os.close(fd)
             _identity(self.path)
-            with scoped_guarded_connection(self.path, False, self._open) as conn:
+            with scoped_connection(self.path, False, self._open) as conn:
                 conn.execute('BEGIN IMMEDIATE')
                 try:
                     yield conn
@@ -113,13 +122,14 @@ class UsageSourceIndex:
             try:
                 conn.row_factory = sqlite3.Row
                 return conn
-            except BaseException:
+            except BaseException as error:
                 try:
                     conn.close()
-                except BaseException:
-                    pass
+                except BaseException as cleanup:
+                    object.__setattr__(error, 'sqlite_cleanup_error', cleanup)
+                    object.__setattr__(error, 'sqlite_unclosed_factory_connection', conn)
                 raise
-        with scoped_guarded_connection(self.path, True, connect) as conn:
+        with scoped_connection(self.path, True, connect) as conn:
             conn.execute('PRAGMA query_only=ON')
             conn.execute('BEGIN')
             try:

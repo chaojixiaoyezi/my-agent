@@ -34,6 +34,13 @@ class UsageIndex(ObservationIndex):
         self.path = path.parent / f".{path.stem}-usage.sqlite3"
         self.last_work = {}
 
+    def _projection_rebuild_proof(self):
+        """活动叶被删后仍承认canonical冷清单；两者皆缺失时禁止重建为空完整索引。"""
+        active, archived = _identity(self.source), archive_stamp(self.source)
+        if active is None and archived[1] is None:
+            return None
+        return {'active': active, 'archive': archived}
+
     # LLM: 事件表只保存身份/位置；范围和总量为增量数字投影，可从原账重建。
     # 函数用途: 初始化私有数据库及主键索引。
     def _open(self):
@@ -66,11 +73,12 @@ class UsageIndex(ObservationIndex):
             conn.execute("CREATE INDEX IF NOT EXISTS archives_work ON archives(complete,file)")
             conn.commit()
             return conn
-        except BaseException:
+        except BaseException as error:
             try:
                 conn.close()
-            except BaseException:
-                pass
+            except BaseException as cleanup:
+                object.__setattr__(error, 'sqlite_cleanup_error', cleanup)
+                object.__setattr__(error, 'sqlite_unclosed_factory_connection', conn)
             raise
 
     # LLM: 不把created_at当重放身份；首次原账时间仍由精确行返回。
@@ -320,7 +328,7 @@ class UsageIndex(ObservationIndex):
     def _range_connection(self):
         """只读时间索引定位后核原行；坏/未完成投影明确unknown，绝不读全历史兜底。"""
         from ..io.sqlite_probe import sqlite_readonly_probe_uri
-        from ..io.sqlite_scope import scoped_guarded_connection
+        from ..io.sqlite_scope import scoped_connection
 
         before, archive = _identity(self.source), archive_stamp(self.source)
         database = _identity(self.path)
@@ -331,13 +339,14 @@ class UsageIndex(ObservationIndex):
             try:
                 conn.row_factory = sqlite3.Row
                 return conn
-            except BaseException:
+            except BaseException as error:
                 try:
                     conn.close()
-                except BaseException:
-                    pass
+                except BaseException as cleanup:
+                    object.__setattr__(error, 'sqlite_cleanup_error', cleanup)
+                    object.__setattr__(error, 'sqlite_unclosed_factory_connection', conn)
                 raise
-        with scoped_guarded_connection(self.path, True, connect) as conn:
+        with scoped_connection(self.path, True, connect) as conn:
             conn.execute('PRAGMA query_only=ON')
             conn.execute('PRAGMA temp_store=MEMORY')
             conn.execute('BEGIN')

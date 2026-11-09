@@ -20,6 +20,7 @@ from pathlib import Path
 
 from ..common.log_redaction import redact_sensitive_value
 from ..plugin_host.business_action_specs import business_defs
+from ..runtime_db.recovery_guard import RuntimeDatabaseDeferred
 from ..runtime_db.repository import AGENT_RUN_TERMINAL_STATUSES, RuntimeRepository
 from .background_team_lifecycle import background_identity
 from .business_access import (
@@ -267,7 +268,7 @@ class BusinessObservationService:
             if error.code == 'CURSOR_EXPIRED':
                 raise
             return ObservationPage(coverage='unknown')
-        except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
+        except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, RuntimeDatabaseDeferred):
             # 缺来源、坏账和短暂读不到不冒充空的完整查询；公开响应不携底层路径。
             return ObservationPage(coverage='unknown')
 
@@ -680,7 +681,7 @@ class BusinessObservationService:
                 values.append(validate_result('usage.get', redact_sensitive_value(_copy(page.records[0].value))))
         except BusinessError:
             raise
-        except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
+        except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, RuntimeDatabaseDeferred):
             raise BusinessError('HOST_NOT_READY') from None
         for request, page in zip(requests, pages):
             self.authorize_call('usage.get', request, actor=actor)

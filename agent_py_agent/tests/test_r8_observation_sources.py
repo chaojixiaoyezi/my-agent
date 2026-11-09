@@ -408,3 +408,67 @@ def test_partial_execution_window_never_claims_a_missing_tree_root_is_absent(tmp
     assert result['coverage'] == 'partial' and result['has_more_descendants'] is True
     with pytest.raises(BusinessError, match='HOST_NOT_READY'):
         case.service.query('agent_tree.get', {'space_id': 'space-a', 'root_agent_id': 'not-in-window'}, actor=case.actor)
+
+
+def test_readonly_runtime_recovery_intent_is_unknown_not_empty_complete(tmp_path):
+    from agent_py_agent.agent.runtime_db.recovery_guard import request_runtime_db_recovery
+    case = observation_case(tmp_path)
+    request_runtime_db_recovery(case.runtime.db_path)
+    result = case.service.query('executions.list', {}, actor=case.actor)
+    assert result['items'] == [] and result['coverage'] == 'unknown'
+
+
+@pytest.mark.parametrize('kind', ['events', 'sources'])
+def test_usage_factory_close_failure_keeps_primary_and_unclosed_proof(tmp_path, monkeypatch, kind):
+    import sqlite3
+
+    from agent_py_agent.agent.conversation import usage_index, usage_sources
+    primary = sqlite3.DatabaseError('factory schema failure')
+    cleanup = OSError('close not proved')
+    original = sqlite3.connect
+    opened = []
+    class Connection(sqlite3.Connection):
+        def execute(self, *_args, **_kwargs):
+            raise primary
+        def close(self):
+            raise cleanup
+    def connect(*_args, **_kwargs):
+        connection = original(':memory:', factory=Connection)
+        opened.append(connection)
+        return connection
+    module = usage_index if kind == 'events' else usage_sources
+    instance = (usage_index.UsageIndex(tmp_path / 'usage/thread.jsonl', 'thread') if kind == 'events'
+                else usage_sources.UsageSourceIndex(tmp_path / 'model_usage'))
+    monkeypatch.setattr(module.sqlite3, 'connect', connect)
+    try:
+        with pytest.raises(sqlite3.DatabaseError) as caught:
+            instance._open()
+        assert caught.value is primary and primary.sqlite_cleanup_error is cleanup
+        assert primary.sqlite_unclosed_factory_connection is opened[0]
+    finally:
+        for connection in opened:
+            sqlite3.Connection.close(connection)
+
+
+def test_usage_projection_rebuild_proof_requires_existing_canonical_directory(tmp_path):
+    from agent_py_agent.agent.conversation.usage_sources import UsageSourceIndex
+    directory = tmp_path / 'model_usage'
+    index = UsageSourceIndex(directory)
+    assert index._projection_rebuild_proof() is None
+    directory.mkdir()
+    before = index._projection_rebuild_proof()
+    assert before['directory'] and before['archive'] is None
+    (directory / 'canonical.jsonl').write_text('record')
+    assert index._projection_rebuild_proof() != before
+
+
+def test_usage_rebuild_proof_retains_cold_manifest_when_active_leaf_is_deleted(tmp_path):
+    from agent_py_agent.agent.conversation.thread_ledger_segments import archive_dir_for
+    active = tmp_path / 'model_usage/thread.jsonl'
+    index = UsageIndex(active, 'thread')
+    assert index._projection_rebuild_proof() is None
+    archive = archive_dir_for(active)
+    archive.mkdir(parents=True)
+    (archive / 'manifest.json').write_text('{}')
+    proof = index._projection_rebuild_proof()
+    assert proof['active'] is None and proof['archive'][1] is not None
