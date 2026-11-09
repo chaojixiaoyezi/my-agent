@@ -17,6 +17,7 @@ import json
 import logging
 import threading
 import time
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -59,6 +60,7 @@ from ..conversation.host_notices import (
 from ..conversation.learning_source import LEARNING_SOURCE_KEY, thread_source_projection
 from ..conversation.turn_resume_notice import PROVIDER_RESUME_LIMIT_NOTICE, turn_resumed_notice_text
 from ..gateway_compact_context import build_gateway_compact_load_request
+from ..local_storage.diagnostics import local_store_stage_timing_scope
 from ..runtime_errors import fallback_error_code
 from ..tooling.mcp_client import sanitize_credentials
 from ..tooling.operation_verification import public_operation_verification
@@ -128,7 +130,24 @@ def _record_gateway_stage(
 ) -> None:
     if stages is None:
         return
-    stages[key] = round((time.monotonic() - started_mono) * 1000, 1)
+    try:
+        stages[key] = round((time.monotonic() - started_mono) * 1000, 1)
+    except Exception:  # 诊断失败不替换原执行错误，也不阻断租约和输入收口。
+        pass
+
+
+@contextmanager
+def _measure_gateway_stage(stages: dict[str, float] | None, key: str):
+    """只细分原请求的局部耗时，异常仍交给原收口，数字不参与状态裁决。"""
+    try:
+        started_mono = time.monotonic()
+    except Exception:
+        started_mono = None
+    try:
+        yield
+    finally:
+        if started_mono is not None:
+            _record_gateway_stage(stages, key, started_mono)
 
 
 # LLM: 同一请求跨 Compact 重试继续使用当前上下文与完整归档；本包不拥有独立状态。
@@ -1278,9 +1297,12 @@ def _execute_gateway_request_body(context: dict, on_chunk) -> None:
 # LLM: 队列读取失败必须产生可审计响应并跳过执行；身份和响应路径只按原文件及结构化字段解析。
 # 函数用途: 读取本轮持久请求、创建响应并记录 processing 审计。
 def _prepare_gateway_request_context(agent: SimpleAgent, request_path: Path) -> dict:
-    request_report = read_json_file_report(
-        request_path, context="gateway.request_execution.request.read"
-    )
+    stages: dict[str, float] = {}
+    with _measure_gateway_stage(stages, "request_json_read_ms"):
+        request_report = read_json_file_report(
+            request_path, context="gateway.request_execution.request.read"
+        )
+    build_started_mono = time.monotonic()
     if request_report.load_error is not None:
         started_at = time.time()
         response = gateway_request_load_error_response(
@@ -1297,8 +1319,11 @@ def _prepare_gateway_request_context(agent: SimpleAgent, request_path: Path) -> 
             "response_path": gateway_response_path(gateway_paths(agent), request_path.stem),
             "response": response,
             "skip_execution": True,
+            "stage_timings": stages,
         }
-        audit_request_processing(agent, context)
+        _record_gateway_stage(stages, "request_context_build_ms", build_started_mono)
+        with _measure_gateway_stage(stages, "request_audit_ms"), local_store_stage_timing_scope(stages):
+            audit_request_processing(agent, context)
         return context
     request = request_report.payload
     request_id = str(request.get("id") or request_path.stem)
@@ -1316,8 +1341,11 @@ def _prepare_gateway_request_context(agent: SimpleAgent, request_path: Path) -> 
         "request_path": request_path,
         "response_path": response_path,
         "response": response,
+        "stage_timings": stages,
     }
-    audit_request_processing(agent, context)
+    _record_gateway_stage(stages, "request_context_build_ms", build_started_mono)
+    with _measure_gateway_stage(stages, "request_audit_ms"), local_store_stage_timing_scope(stages):
+        audit_request_processing(agent, context)
     return context
 
 # LLM: 插话持久操作经 guidance 领域组件； 收尾窗口里到达的插话可能还没被任何模型安全点认领；用户消息不能因为"那一轮刚好结束"而
@@ -1339,9 +1367,13 @@ def _release_unclaimed_turn_guidance(context: dict) -> None:
 # LLM: 收尾先释放尚未认领的引导，再读取最终租约；阶段耗时只作诊断，不参与成功判定。
 # 函数用途: 释放待续接输入并补齐响应时间和阶段日志，实际投递仍由原出口完成。
 def _finalize_gateway_response(context: dict, response: dict) -> None:
-    _release_unclaimed_turn_guidance(context)
+    started_mono = time.monotonic()
+    stages = context.get("stage_timings")
+    with _measure_gateway_stage(stages, "guidance_release_ms"):
+        _release_unclaimed_turn_guidance(context)
     ended_at = time.time()
-    _copy_final_lease_fields(response, context["request_path"])
+    with _measure_gateway_stage(stages, "final_request_read_ms"):
+        _copy_final_lease_fields(response, context["request_path"])
     response["ended_at"] = ended_at
     response["duration_seconds"] = round(ended_at - context["started_at"], 3)
     # 原 worker 的真实结果随唯一终态一起提交，不能留下上一执行片的压缩/等待文案。
@@ -1352,7 +1384,7 @@ def _finalize_gateway_response(context: dict, response: dict) -> None:
         response.update(status_phase="completed", status_message="已完成")
     else:
         response.update(status_phase="failed", status_message="执行失败")
-    stages = context.get("stage_timings")
+    _record_gateway_stage(stages, "finalize_ms", started_mono)
     if stages:
         response["stages_ms"] = dict(stages)
         logger.info(
@@ -1380,15 +1412,20 @@ def _project_observed_gateway_run_facts(
 def _complete_gateway_request_audit(
     agent: SimpleAgent, context: dict, request_path: Path, response: dict
 ) -> None:
-    audit_request_completed(
-        agent,
-        params=AuditRequestCompletedParams(
-            response=response,
-            request=context["request"],
-            request_path=request_path,
-            response_path=context["response_path"],
-        ),
-    )
+    stages = context.get("stage_timings")
+    with _measure_gateway_stage(stages, "completed_audit_ms"):
+        audit_request_completed(
+            agent,
+            params=AuditRequestCompletedParams(
+                response=response,
+                request=context["request"],
+                request_path=request_path,
+                response_path=context["response_path"],
+            ),
+        )
+    if stages:
+        # 完成审计发生在 ended_at 之后；单列耗时，不回写业务结束时间或旧 total_ms 口径。
+        response["stages_ms"] = dict(stages)
 
 
 # LLM: 执行 owner 只取宿主为本请求解析出的 agent.home_paths.owner_id（规范编号，与 audit_records/admin_controls 同源），
@@ -1462,10 +1499,8 @@ def _handle_gateway_request(
 ) -> dict:
     started_mono = time.monotonic()
     context = _prepare_gateway_request_context(agent, request_path)
-    stage_timings: dict[str, float] = {
-        "request_read_ms": round((time.monotonic() - started_mono) * 1000, 1)
-    }
-    context["stage_timings"] = stage_timings
+    stage_timings: dict[str, float] = context.setdefault("stage_timings", {})
+    _record_gateway_stage(stage_timings, "request_read_ms", started_mono)
     response = context["response"]
     response["owner_id"] = _executing_owner_id(agent)
     if context.get("skip_execution"):
@@ -1477,6 +1512,7 @@ def _handle_gateway_request(
         _finalize_gateway_response(context, response)
         _complete_gateway_request_audit(agent, context, request_path, response)
         return response
+    runtime_setup_started_mono = time.monotonic()
     lease_stop, lease_thread = _start_gateway_request_lease(
         _GatewayLeaseStartContext(
             agent,
@@ -1498,9 +1534,11 @@ def _handle_gateway_request(
     )
 
     chunk_writer.im_approval_agent = agent
+    _record_gateway_stage(stage_timings, "request_runtime_setup_ms", runtime_setup_started_mono)
     execution_started_mono = time.monotonic()
-    event_context = turn_started(agent, context['request'],
-                                 thread_id_of=lambda: _gateway_turn_thread_id(agent, context, chunk_writer))
+    with _measure_gateway_stage(stage_timings, "turn_started_ms"):
+        event_context = turn_started(agent, context['request'],
+                                     thread_id_of=lambda: _gateway_turn_thread_id(agent, context, chunk_writer))
     failure: Exception | None = None
     uncertain = False
     from ..conversation.agent_tool_approval import approval_retirement_request_observation
@@ -1510,30 +1548,36 @@ def _handle_gateway_request(
     with approval_retirement_request_observation(agent, request_path, context["request"],
             gateway_request_fingerprint(context["request"], context["request_id"])) as retirement_observation:
         try:
-            _publish_gateway_turn_resumed(chunk_writer, context["request"], context["request_id"])
-            _execute_gateway_request_body({**context, "agent": agent}, chunk_writer)
+            with _measure_gateway_stage(stage_timings, "execution_body_ms"):
+                _publish_gateway_turn_resumed(chunk_writer, context["request"], context["request_id"])
+                _execute_gateway_request_body({**context, "agent": agent}, chunk_writer)
         except Exception as exc:
             failure = exc
-            uncertain = _observe_gateway_execution_failure(agent, context, response, exc)
+            with _measure_gateway_stage(stage_timings, "execution_error_ms"):
+                uncertain = _observe_gateway_execution_failure(agent, context, response, exc)
             if uncertain:
                 raise
         finally:
-            _stop_gateway_request_lease(lease_stop, lease_thread)
-            chunk_writer.close()
+            with _measure_gateway_stage(stage_timings, "lease_stop_ms"):
+                _stop_gateway_request_lease(lease_stop, lease_thread)
+            with _measure_gateway_stage(stage_timings, "chunk_close_ms"):
+                chunk_writer.close()
             # 原Call/心跳出处已核实的unknown在本线程清理后仍未结；source随finally失效不能反向变成可结算的普通结束。
             cleanup_only = retirement_observation.pending_error is failure and failure is not None
-            restart_marker = None if uncertain or cleanup_only else _host_shutdown_resume_marker(failure, request_path, context["request_id"])
-            resume_marker = None if uncertain or cleanup_only else restart_marker if restart_marker is not None else _provider_transient_turn_resume_marker(
-                agent, context, response, chunk_writer
-            )
+            with _measure_gateway_stage(stage_timings, "resume_check_ms"):
+                restart_marker = None if uncertain or cleanup_only else _host_shutdown_resume_marker(failure, request_path, context["request_id"])
+                resume_marker = None if uncertain or cleanup_only else restart_marker if restart_marker is not None else _provider_transient_turn_resume_marker(
+                    agent, context, response, chunk_writer
+                )
             resume_field = "restart_resume" if restart_marker is not None else "provider_transient_resume"
             # 回合结束必收口未消费的补充消息（会话运行时 语义：pending input 不得挂在已结束
             # turn 上占 conversation lane；否则同 thread 后续请求全部排队挂起——#7 实证）。
             # 留给重启/续跑的回合不收口：和进程消失一样，由恢复按死掉的 attempt 释放预留，续跑回合再认领。
             if resume_marker is None and not uncertain:
-                _settle_pending_gateway_guidance(
-                    agent, context["request_id"], failure, request_kind=context["kind"]
-                )
+                with _measure_gateway_stage(stage_timings, "guidance_close_ms"):
+                    _settle_pending_gateway_guidance(
+                        agent, context["request_id"], failure, request_kind=context["kind"]
+                    )
             _record_gateway_stage(stage_timings, "execution_ms", execution_started_mono)
             stage_timings["total_ms"] = round((time.monotonic() - started_mono) * 1000, 1)
     if resume_marker is not None:

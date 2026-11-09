@@ -4,7 +4,7 @@
 
 十 TUI 只派发一轮，最后记录为五条正常完成、三条中断、一条额度耗尽、一条工具结果未知而阻塞。原十个 TUI 进程均已退出，继续观察十多分钟 Gateway 仍约 20.94 GiB；内存和取消阻塞未验收通过。后继已补只读候选缓存、关闭周期引用、目录 FD、重复配置构造及正式内存诊断，但尚未部署，不宣称已解释或解决全部 20 GiB。Linux `20261109.1` 离线候选包仍准确绑定 `e5e6be3ce`，已通过非 root 断网首装、旧版同 prefix 更新、资料哨兵和 Gateway 就绪/退出；容器 namespace 限制不算宿主沙箱通过。
 
-[PR #190](https://github.com/chaojixiaoyezi/my-agent/pull/190) 为草稿，尚未合入 main；旧 head 的 Test/Cross-platform/Full Tests 有失败。后继 Linux 维护与目录 FD 已通过两轮，130-owner HTTP 从原 60 秒超时降至 43.771 秒；原生 Windows 和完整线上 CI 待重跑。取消只新增诊断回执，未实现失败父回合自动恢复。用户取消备份的决定保持，采样结束后已继续清理本轮未完成副本，未新建备份。
+[PR #190](https://github.com/chaojixiaoyezi/my-agent/pull/190) 为草稿，尚未合入 main；59fa 的 Cross-platform/Free-threaded 已通过，Lint/Test/Full Tests 仍有失败。后继内存诊断热开关、可取消能力探针等待和请求分段计时已补，待统一部署与CI。Linux 维护与目录 FD 已通过两轮，130-owner HTTP 从原 60 秒超时降至 43.771 秒；原生 sandbox FD 失败仍在查。取消只新增诊断回执，未实现失败父回合自动恢复。本轮未完成备份副本已清理，未新建备份。
 
 ## 2026-11-08 当前 R8 审计补修（工作分支，尚未发布）
 
