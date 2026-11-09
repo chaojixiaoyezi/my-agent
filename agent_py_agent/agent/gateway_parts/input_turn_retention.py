@@ -8,7 +8,6 @@ import math
 import os
 import time
 from contextlib import ExitStack, contextmanager
-from functools import wraps
 from pathlib import Path
 
 from ..common import json_io
@@ -45,15 +44,6 @@ def turn_ref_birth(paths, *, blocking=True, exclusive=False, create=False):
         yield True
     finally:
         os.close(descriptor)
-
-
-def guard_turn_ref_birth(function):
-    @wraps(function)
-    def guarded(paths, *args, **kwargs):
-        blocking = kwargs.get('blocking', function.__name__ != 'transport_turn_input_references')
-        with turn_ref_birth(paths, blocking=blocking, create=function.__name__ == '_write_active_turn_ref'):
-            return function(paths, *args, **kwargs)
-    return guarded
 
 
 def _terminal(paths, request_id, before):
