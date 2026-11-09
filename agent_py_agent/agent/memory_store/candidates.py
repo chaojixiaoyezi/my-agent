@@ -1997,6 +1997,20 @@ def _candidate_node_family(index, root):
                     yield value['record']['ref']
 
 
+def _candidate_cleanup_missing(path, parts):
+    """只用严格nofollow打开证明缺失；不支持时保留原末门，不猜空或吞路径错误。"""
+    from ..common.nofollow_fs import _supports_dir_fd
+
+    if not (_supports_dir_fd() and getattr(os, 'O_NOFOLLOW', 0) and getattr(os, 'O_DIRECTORY', 0)):
+        return False
+    try:
+        descriptor = open_readonly_file_beneath(path.parent, parts)
+    except FileNotFoundError:
+        return True
+    os.close(descriptor)
+    return False
+
+
 def _finish_candidate_cleanup(path, manifest, *, coordinator_io, admissions=()):
     """完成已发表当前态的旧正文删除义务；失败保留头中义务供原锁下重试。"""
     from ..common.nofollow_fs import unlink_file_beneath
@@ -2028,6 +2042,10 @@ def _finish_candidate_cleanup(path, manifest, *, coordinator_io, admissions=()):
         for admission in admissions:
             admission.check([OwnerQuotaChange(target, 0, append=True) for target in tracked])
     for name in cleanup:
+        # 规划内被覆盖但从未发表的中间节点也在幂等义务中；不存在时没有写效果，
+        # 无需重复G1核验。已存在或缺失不能证明的节点仍逐叶进入原末门。
+        if coordinator_io and _candidate_cleanup_missing(path, (path.name + '.records', name)):
+            continue
         def operation(name=name):
             return unlink_file_beneath(path.parent, (path.name + '.records', name))
         try:
