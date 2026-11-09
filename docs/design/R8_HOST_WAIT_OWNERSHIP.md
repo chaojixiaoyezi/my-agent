@@ -1,6 +1,6 @@
 # 原宿主等待与确认义务的前置边界
 
-状态：只读判活/原wait返回值前片已集成到补修分支；下述启动拥有者加强是独立源码候选，待根评审集成。不启用操作确认阶段。完整目标见[R8_OPERATION_CONFIRMATION_DRAFT.md](R8_OPERATION_CONFIRMATION_DRAFT.md)。旧c9、UNKNOWN、失败父回合及取消子回合不迁移、不重开。
+状态：只读判活、原 wait 返回值和启动期单一 wait 拥有者已集成到补修分支，尚未随正式 main 更新。不启用操作确认阶段。完整目标见[R8_OPERATION_CONFIRMATION_DRAFT.md](R8_OPERATION_CONFIRMATION_DRAFT.md)。旧c9、UNKNOWN、失败父回合及取消子回合不迁移、不重开。
 
 ## 已落地的小片
 
