@@ -191,10 +191,15 @@ def test_pipe_pump_constructor_failure_closes_owned_stream(tmp_path):
 import os
 from agent_py_agent.agent.io import bounded_process_log as module
 streams=[]
-def fail(capture, sources):
-    streams.append(sources['stdout'])
-    raise RuntimeError('pump construction failure')
-module.ProcessPipePump=fail
+original_fdopen=module.os.fdopen
+def fdopen(fd,*args,**kwargs):
+    stream=original_fdopen(fd,*args,**kwargs)
+    if args and args[0]=='rb' and kwargs.get('buffering')==0: streams.append(stream)
+    return stream
+module.os.fdopen=fdopen
+def fail(*args,**kwargs): raise RuntimeError('collector construction failure')
+if os.name=='posix': module.ProcessPipePump=fail
+else: module.threading.Thread.start=fail
 try:
     with module.bounded_stdio_from_environment(): raise AssertionError('must not enter')
 except RuntimeError: pass
@@ -203,3 +208,99 @@ os.write(1,b'failure remained visible')
 '''
     log = _worker(tmp_path, script)
     assert log.read_bytes() == b'failure remained visible'
+
+
+_NATIVE_WRITE = '''
+import os
+if os.name=='nt':
+    import ctypes
+    from ctypes import wintypes
+    kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+    kernel.GetStdHandle.argtypes=(wintypes.DWORD,)
+    kernel.GetStdHandle.restype=wintypes.HANDLE
+    kernel.WriteFile.argtypes=(wintypes.HANDLE,ctypes.c_void_p,wintypes.DWORD,ctypes.POINTER(wintypes.DWORD),ctypes.c_void_p)
+    kernel.WriteFile.restype=wintypes.BOOL
+    def native(fd,data):
+        handle=kernel.GetStdHandle((-11 if fd==1 else -12)&0xffffffff)
+        count=wintypes.DWORD()
+        buffer=ctypes.create_string_buffer(data)
+        if not kernel.WriteFile(handle,buffer,len(data),ctypes.byref(count),None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        assert count.value==len(data)
+else:
+    native=os.write
+'''
+
+
+@pytest.mark.parametrize('explicit_inheritance', [False, True])
+@pytest.mark.parametrize('blocking_reader', [False, True])
+def test_native_standard_handles_and_descendants_share_bounded_output(tmp_path, explicit_inheritance, blocking_reader):
+    descendant = _NATIVE_WRITE + "\nimport time;time.sleep(0.1);native(1,b'child-out\\n');native(2,b'child-err\\n')"
+    script = _NATIVE_WRITE + f'''
+import subprocess,sys
+from agent_py_agent.agent.io import bounded_process_log as module
+if {blocking_reader!r}: module.ProcessPipePump=lambda *args,**kwargs:None
+with module.bounded_stdio_from_environment():
+    native(1,b'parent-out\\n')
+    native(2,b'parent-err\\n')
+    kwargs={{'stdout':sys.stdout,'stderr':subprocess.STDOUT}} if {explicit_inheritance!r} else {{}}
+    subprocess.Popen([sys.executable,'-c',{descendant!r}],**kwargs)
+'''
+    expected = b'parent-out\nparent-err\nchild-out\nchild-err\n'
+    log = _worker(tmp_path, script, limit=25)
+    stats = json.loads(capture_path(log).read_text())
+    assert log.read_bytes() == expected[:25]
+    assert stats['seen_bytes'] == len(expected) and stats['retained_bytes'] == 25
+    assert stats['discarded_bytes'] == len(expected) - 25 and stats['eof']
+    assert stats['error_types'] == []
+
+
+def test_reader_thread_start_failure_closes_stream_and_original_sink(tmp_path):
+    script = '''
+import os
+from agent_py_agent.agent.io import bounded_process_log as module
+streams=[]
+original_fdopen=module.os.fdopen
+original_close=module.os.close
+closed=[]
+def fdopen(fd,*args,**kwargs):
+    stream=original_fdopen(fd,*args,**kwargs)
+    if args and args[0]=='rb' and kwargs.get('buffering')==0: streams.append(stream)
+    return stream
+def close(fd):
+    closed.append(fd)
+    return original_close(fd)
+def fail(*args,**kwargs): raise RuntimeError('thread start failure')
+module.os.fdopen=fdopen
+module.os.close=close
+module.threading.Thread.start=fail
+try:
+    with module.bounded_stdio_from_environment(): raise AssertionError('must not enter')
+except RuntimeError: pass
+assert len(streams)==1 and streams[0].closed and len(closed)>=3
+os.write(1,b'initialization failed visibly')
+'''
+    log = _worker(tmp_path, script)
+    assert log.read_bytes() == b'initialization failed visibly'
+
+
+def test_native_handle_sync_cleanup_failure_still_releases_pipe_reader(tmp_path):
+    script = '''
+import os,threading
+from agent_py_agent.agent.io import bounded_process_log as module
+original=module._redirect_stdio
+calls=0
+def redirect(fd):
+    global calls
+    calls+=1
+    if calls==2: raise OSError('native standard handle synchronization failure')
+    return original(fd)
+module._redirect_stdio=redirect
+try:
+    with module.bounded_stdio_from_environment(): os.write(1,b'actual data')
+except OSError: pass
+assert len(threading.enumerate())==1
+'''
+    log = _worker(tmp_path, script)
+    stats = json.loads(capture_path(log).read_text())
+    assert log.read_bytes() == b'actual data' and stats['seen_bytes'] == 11 and stats['eof']

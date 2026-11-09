@@ -14,6 +14,7 @@ from pathlib import Path
 
 from ..common.json_io import write_private_json_file_atomic_unlocked
 from ..common.nofollow_fs import read_bytes_beneath
+from ..tooling.process_output_capture import ProcessOutputCapture
 from ..tooling.process_pipe_pump import ProcessPipePump
 
 BOUNDED_STDIO_LIMIT_ENV = 'MY_AGENT_BOUNDED_STDIO_MAX_BYTES'
@@ -57,6 +58,7 @@ class _BoundedLogCapture:
         self.seen, self.retained = info.st_size, min(info.st_size, limit)
         self.eof, self.errors = set(), {}
         self._next_publish = 0.0
+        self._stop = threading.Event()
         # 父启动口给的是非APPEND、唯一launch的新FD；原文件不换inode，初始化前已有输出也纳入计量。
         os.ftruncate(descriptor, self.retained)
         os.lseek(descriptor, self.retained, os.SEEK_SET)
@@ -129,6 +131,30 @@ def _flush_stdio():
             pass
 
 
+def _redirect_stdio(descriptor):
+    """CRT和原生标准句柄保持一致；Windows后代的默认继承不能绕回原无限日志。"""
+    os.dup2(descriptor, 1)
+    os.dup2(descriptor, 2)
+    if os.name == 'nt':
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.SetStdHandle.argtypes = (wintypes.DWORD, wintypes.HANDLE)
+        kernel.SetStdHandle.restype = wintypes.BOOL
+        kernel.GetStdHandle.argtypes = (wintypes.DWORD,)
+        kernel.GetStdHandle.restype = wintypes.HANDLE
+        for number, code in ((1, -11), (2, -12)):
+            msvcrt.setmode(number, os.O_BINARY)
+            handle = msvcrt.get_osfhandle(number)
+            os.set_handle_inheritable(handle, True)
+            if not kernel.SetStdHandle(code & 0xffffffff, handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if kernel.GetStdHandle(code & 0xffffffff) != handle:
+                raise OSError('Windows standard output handle was not redirected')
+
+
 @contextmanager
 def bounded_stdio_from_environment():
     """仅实际进程退出边界使用；结束时关本进程PIPE写端，继承输出仍由本worker采集至EOF。
@@ -158,24 +184,33 @@ def bounded_stdio_from_environment():
     capture = pump = thread = stream = None
     redirected = False
     try:
+        if os.name == 'nt':
+            import msvcrt
+            msvcrt.setmode(descriptor, os.O_BINARY)
         capture = _BoundedLogCapture(path, descriptor, limit)
         descriptor = None  # capture接管，线程finally关闭；启动失败由本作用域关闭。
         null = os.open(os.devnull, os.O_WRONLY)
         reader, writer = os.pipe()
         stream = os.fdopen(reader, 'rb', buffering=0)
         reader = None
-        pump = ProcessPipePump(capture, {'stdout': stream, 'stderr': None})
+        if os.name == 'posix':
+            pump = ProcessPipePump(capture, {'stdout': stream, 'stderr': None})
+        if pump is None:
+            capture.record_eof('stderr')
         def collect():
             try:
-                pump.run()
+                if pump is not None:
+                    pump.run()
+                else:
+                    # Windows沿已有阻塞reader；两流已合一，不在管道上注册POSIX selector。
+                    ProcessOutputCapture._read(capture, 'stdout', stream, blocking=True)
             finally:
                 capture.close()
         # 每个真实durable worker一条，非daemon保证主逻辑结束后继承stdout仍有原reader；不挂在Gateway父进程。
         thread = threading.Thread(target=Context().run, args=(collect,), name='bounded-worker-output', daemon=False)
         thread.start()
-        os.dup2(writer, 1)
-        redirected = True
-        os.dup2(writer, 2)
+        redirected = True  # 任一步失败也须关闭部分重定向的PIPE写端。
+        _redirect_stdio(writer)
         os.close(writer)
         writer = None
         try:
@@ -187,10 +222,20 @@ def bounded_stdio_from_environment():
                 print(error.code, file=sys.stderr)
             raise
     finally:
+        original_error = sys.exception()
+        cleanup_error = None
         if redirected:
-            _flush_stdio()
-            os.dup2(null, 1)
-            os.dup2(null, 2)
+            try:
+                _flush_stdio()
+                _redirect_stdio(null)
+            except BaseException as error:
+                cleanup_error = error
+                # 原生句柄同步失败也先关闭本进程CRT写端，让reader完成EOF并回收。
+                for number in (1, 2):
+                    try:
+                        os.close(number)
+                    except OSError:
+                        pass
         if null is not None:
             os.close(null)
         if writer is not None:
@@ -208,3 +253,7 @@ def bounded_stdio_from_environment():
             capture.close()
         elif descriptor is not None:
             os.close(descriptor)
+        if cleanup_error is not None:
+            if original_error is None:
+                raise cleanup_error
+            original_error.bounded_stdio_cleanup_error = cleanup_error

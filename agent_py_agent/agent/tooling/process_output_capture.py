@@ -57,14 +57,14 @@ class ProcessOutputCapture:
 
     # LLM: Windows保留双流读取路径；POSIX不调用此函数，计数与EOF均委托共同账本。
     # 函数用途: 在旧平台持续排空一条输出，不改变原有限前缀语义。
-    def _read(self, name: str, stream) -> None:
+    def _read(self, name: str, stream, *, blocking: bool = False) -> None:
         try:
             if stream is None:
                 self.record_eof(name)
                 return
             fd = stream.fileno()
             try:
-                os.set_blocking(fd, False)
+                os.set_blocking(fd, blocking)
             except (OSError, ValueError):
                 pass
             while not self._stop.is_set():
