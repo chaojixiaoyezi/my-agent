@@ -53,7 +53,7 @@ def _page(conn, key, directory, cursor):
         return directory_page(directory.parent, (directory.name,), cursor, 1)
     # Windows 没有可恢复的 dir_fd cookie：固定槽只接纳队首，不淘汰进行中的流。
     for stored, (stream, accessed) in list(_PORTABLE.items()):
-        if time.monotonic() - accessed > 60:
+        if stored != key and time.monotonic() - accessed > 60:
             stream.close()
             del _PORTABLE[stored]
             conn.execute('INSERT OR IGNORE INTO retired SELECT store,generation FROM scans WHERE store=?', (stored,))
@@ -107,7 +107,8 @@ def claim_activity_state(storage, thread_id):
                                    'FROM scans WHERE store=?', (key,)).fetchone()
                 if row is None:
                     generation, cursor, complete, unknown, checked = time.monotonic_ns(), {}, False, False, 0
-                elif row[0] != signature or row[3] and time.monotonic() - row[5] >= 5:
+                elif (row[0] != signature or row[3] and time.monotonic() - row[5] >= 5
+                      or key in _PORTABLE and time.monotonic() - _PORTABLE[key][1] > 60):
                     conn.execute('INSERT OR IGNORE INTO retired VALUES (?,?)', (key, row[1]))
                     portable = _PORTABLE.pop(key, None)
                     if portable:
