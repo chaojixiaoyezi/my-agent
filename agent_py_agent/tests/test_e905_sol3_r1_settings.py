@@ -158,12 +158,18 @@ def test_http_timeout_and_externalization_have_the_correct_tiers():
 # 函数用途: 核证当前目录的精确分层、新池与拓扑边界、部署守卫拆分和后台身份默认上限。
 def test_listed_parameter_classification_has_exact_counts():
     registry = listed_parameters()
-    # TUI 消息块窗口及工具发现缓存钉住开关已登记为高级参数，计数覆盖全部正式目录项。
-    assert Counter(spec.tier for spec in registry.values()) == {"common": 14, "advanced": 213, "deployment": 146}
+    # 摘要进度心跳归高级，后台日志容量归部署；计数覆盖全部正式目录项。
+    assert Counter(spec.tier for spec in registry.values()) == {"common": 14, "advanced": 214, "deployment": 147}
     assert sum(spec.source == "runtime_guard" for spec in registry.values()) == 23
-    assert len(DEPLOYMENT_ONLY_KEYS) == 123
+    assert len(DEPLOYMENT_ONLY_KEYS) == 124
     assert registry.keys() >= DEPLOYMENT_ONLY_KEYS
-    assert len(registry) == 373
+    assert len(registry) == 375
+    pulse = registry["memory_compact_progress_heartbeat_seconds"]
+    assert pulse.tier == "advanced" and pulse.writable and pulse.user_editable
+    assert pulse.default == AgentConfig().memory_compact_progress_heartbeat_seconds == 5.0
+    logs = registry["background_dispatch_log_max_bytes"]
+    assert logs.tier == "deployment" and not logs.writable and not logs.user_editable
+    assert logs.default == AgentConfig().background_dispatch_log_max_bytes == 4 * 1024 * 1024
     pin = registry["tool_discovery_cache_pin_enabled"]
     assert pin.tier == "advanced" and pin.writable and pin.user_editable
     assert pin.value_type == "bool" and pin.default is False and pin.effect == "immediate"
