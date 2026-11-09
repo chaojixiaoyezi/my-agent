@@ -37,7 +37,8 @@ class PrefixSession:
         entry = self._entry
         if entry is None or self._pid != os.getpid() or self._thread != get_ident() or self._blocked:
             return False
-        if start != self._next or end <= start or not isinstance(target, str):
+        if (type(start) is not int or type(end) is not int or start != self._next
+                or end <= start or not isinstance(target, str)):
             self._blocked = True
             return False
         self._next = end
@@ -77,9 +78,10 @@ class HotPrefixCache:
 
     def begin(self, path, stamp, changed_ns, start, *, trusted):
         if self._pid != os.getpid():
-            # fork后的单线程新生代不获取父进程遗留锁，也不继承父提示。
-            self._entries, self._lock, self._pid = OrderedDict(), Lock(), os.getpid()
-        if (not trusted or type(changed_ns) is not int or type(start) is not int or start < 0
+            # 继承进程只放弃提示：不取父锁，也不另分配一套位图；新解释器自然建立自己的缓存。
+            return None
+        if (trusted is not True or type(changed_ns) is not int or changed_ns < 0
+                or type(start) is not int or start < 0
                 or stamp.size < self.min_source_bytes):
             return None
         key = os.path.abspath(path)
@@ -118,6 +120,8 @@ class HotPrefixCache:
             return PrefixSession(entry, start)
 
     def usage(self):
+        if self._pid != os.getpid():
+            return len(self._entries), sum(len(entry.bits) for entry in self._entries.values())
         with self._lock:
             return len(self._entries), sum(len(entry.bits) for entry in self._entries.values())
 
