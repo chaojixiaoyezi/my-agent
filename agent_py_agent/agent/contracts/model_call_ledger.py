@@ -732,7 +732,8 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
                     + max(0, int(params.output_tokens_seen))
                 ),
             )
-            self._replace(updated)
+            # 此入口只改活动时钟/观察到的输出；两字段均不进入累计usage/latency，不能每chunk重算四个桶。
+            self._replace(updated, activity_only=True)
             return updated
 
     # LLM: 首个终态获胜；重复成功和取消后迟到成功均不改写原状态、用量或时间，字段来源随首次收尾冻结。
@@ -972,13 +973,14 @@ class ModelCallLedger(ModelCallInputBudgetMethods):
             aggregate.observe_new(record)
         self._trim_records()
 
-    # LLM: 所有生命周期更新必须经过此入口，先计算 aggregate delta，再原子替换 retained detail。
-    # 函数用途: 更新同一调用的状态、时延或 HTTP 尝试，同时保持累计统计准确。
-    def _replace(self, record: ModelCallRecord) -> None:
+    # LLM: 生命周期更新共用原锁与scope LRU；activity仅改两个非累计字段，其它状态/时延/HTTP变化仍完整计算delta。
+    # 函数用途: 原子替换调用明细，并只在统计事实变化的入口更新累计桶。
+    def _replace(self, record: ModelCallRecord, *, activity_only: bool = False) -> None:
         index = self._index[record.call_id]
         previous = self._records[index]
         for aggregate in self._aggregates_for(record):
-            aggregate.observe_update(previous, record)
+            if not activity_only:
+                aggregate.observe_update(previous, record)
         self._records[index] = record
 
     # LLM: 原 scope 容器身份不随 pin 改变；保留调用的 request/run 在物理观察结束前不得被 LRU 淘汰。
