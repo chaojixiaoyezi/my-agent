@@ -142,13 +142,20 @@ def test_unchanged_file_costs_one_stat_and_no_parse(tmp_path, monkeypatch):
     live.refresh_live_switches(config)
     calls = []
     real_stat = os.stat
+    caller = threading.current_thread()
 
     def stat(*args, **kwargs):
-        calls.append(args[0])
+        # 只计此次同步调用的全部文件访问；同进程其它任务可并发读自己的文件。
+        if threading.current_thread() is caller:
+            calls.append(args[0])
         return real_stat(*args, **kwargs)
 
+    loader = live.load_config
+
     def forbidden_parse(*args, **kwargs):
-        pytest.fail("未变文件不能重新解析")
+        if threading.current_thread() is caller:
+            pytest.fail("未变文件不能重新解析")
+        return loader(*args, **kwargs)
 
     monkeypatch.setattr(os, "stat", stat)
     monkeypatch.setattr(live, "load_config", forbidden_parse)
@@ -262,13 +269,18 @@ def test_capability_unchanged_snapshot_uses_one_stat_and_no_read(tmp_path, monke
     config = capability.capability_config_for_agent(agent)
     calls = []
     stat = os.stat
+    reader = Path.read_bytes
+    caller = threading.current_thread()
 
     def counted(*args, **kwargs):
-        calls.append(args[0])
+        if threading.current_thread() is caller:
+            calls.append(args[0])
         return stat(*args, **kwargs)
 
     def forbidden(*args, **kwargs):
-        pytest.fail("未变能力快照不能重读正文")
+        if threading.current_thread() is caller:
+            pytest.fail("未变能力快照不能重读正文")
+        return reader(*args, **kwargs)
 
     monkeypatch.setattr(os, "stat", counted)
     monkeypatch.setattr(Path, "read_bytes", forbidden)
