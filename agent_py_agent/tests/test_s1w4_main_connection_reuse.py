@@ -519,13 +519,14 @@ def test_error_body_remains_readable_without_retaining_a_connection_socket(path,
             error.close()
 
 
+@pytest.mark.parametrize('debuglevel', [0, 2])
 @pytest.mark.parametrize('timed_response', [False, True])
 @pytest.mark.parametrize('reused', [False, True])
 @pytest.mark.parametrize('received', [b'', b'HTTP/1.', b'HTTP/1.1 200 OK\r\nX-Test: ',
                                        b'HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nx',
                                        b'HTTP/1.1 100 Continue\r\n\r\n'])
 @pytest.mark.parametrize('failure', [ConnectionResetError, BrokenPipeError, http.client.RemoteDisconnected, TimeoutError])
-def test_pooled_response_marks_only_zero_byte_reused_peer_close(timed_response, reused, received, failure, monkeypatch):
+def test_pooled_response_marks_only_zero_byte_reused_peer_close(debuglevel, timed_response, reused, received, failure, monkeypatch):
     original = failure('peer stopped before response completed')
     sent, dropped = [], []
     class PeerBytes(io.FileIO):
@@ -558,6 +559,13 @@ def test_pooled_response_marks_only_zero_byte_reused_peer_close(timed_response, 
         timing = AttemptTiming(lambda event: None)
         transport.instrument_connection(connection, timing, tls=False)
         timing.skip_connection(tunnel=False, tls=False)
+    constructed = []
+    class RecordedResponse(connection.response_class):
+        def __init__(self, sock, debuglevel=0, method=None):
+            super().__init__(sock, debuglevel, method=method)
+            constructed.append((self.debuglevel, method))
+    connection.response_class = RecordedResponse
+    connection.set_debuglevel(debuglevel)
     response_class = connection.response_class
     pool = SimpleNamespace(checkout=lambda route: connection if reused else None, drop_idle=dropped.append)
     route = transport.KeepAliveRoute('http', '127.0.0.1', 80)
@@ -579,5 +587,35 @@ def test_pooled_response_marks_only_zero_byte_reused_peer_close(timed_response, 
     assert dropped == ([route] if stale else [])
     assert len(sent) == 1 and connection.sock is None and raw.closed
     assert connection.response_class is response_class
+    assert constructed == [(debuglevel, 'GET')]
     with pytest.raises(OSError):
         os.fstat(owned_fd)
+
+
+@pytest.mark.parametrize('debuglevel', [0, 2])
+@pytest.mark.parametrize('timed', [False, True])
+def test_reused_response_preserves_stdlib_debug_and_timing_on_success(debuglevel, timed, monkeypatch, capsys):
+    pool = transport.main_connection_pool(4)
+    opened, prepared = [], []
+    original_new, original_prepare = transport._new_connection, transport._prepare_reused
+    def create(route, options):
+        connection = original_new(route, options)
+        connection.set_debuglevel(debuglevel)
+        opened.append(connection)
+        return connection
+    def prepare(connection, route, options):
+        original_prepare(connection, route, options)
+        prepared.append(connection.response_class)
+    monkeypatch.setattr(transport, '_new_connection', create)
+    monkeypatch.setattr(transport, '_prepare_reused', prepare)
+    with _serve() as state:
+        with gateway.provider_attempt_observer(lambda event: None, transport_timing=timed):
+            request = _request(state, pool)
+            assert gateway.post_json(request)['ok'] is True
+            assert gateway.post_json(request)['ok'] is True
+        assert len(state.requests) == 2 and len(state.accepted) == 1
+        assert len(opened) == len(prepared) == 1
+        assert opened[0].response_class is prepared[0]
+        assert ('reply:' in capsys.readouterr().out) is bool(debuglevel)
+    pool.close_all()
+    assert opened[0].sock is None

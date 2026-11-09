@@ -204,9 +204,9 @@ def pooled_urlopen(target: KeepAliveTarget, req: urllib.request.Request, options
         probe_response = reused and isinstance(response_class, type) and issubclass(response_class, http.client.HTTPResponse)
         if probe_response:
             # 只对复用连接预读同一缓冲区：见过任何字节后，状态行/100/headers失败都不能再算陈旧。
-            def open_response(*args, **kwargs):
+            def open_response(sock, debuglevel=0, method=None):
                 nonlocal response_started
-                opened = response_class(*args, **kwargs)
+                opened = response_class(sock, debuglevel, method=method)
                 try:
                     peek = getattr(opened.fp, "peek", None)
                     if callable(peek):
