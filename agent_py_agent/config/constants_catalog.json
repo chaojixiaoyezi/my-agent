@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1416,
+  "count": 1420,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -6074,6 +6074,38 @@
       "unit": "个",
       "category": "上限预算",
       "description": "防长跑进程随历史租户数无界增长(审计 #16)。真·活跃且在限流中的租户是工作集不是泄漏,保留。"
+    },
+    {
+      "name": "FTS_UPGRADE_CATCHUP_MAX_MS",
+      "file": "agent_py_agent/agent/local_storage/fts_upgrade.py",
+      "value": 2000,
+      "unit": "毫秒",
+      "category": "上限预算",
+      "description": "单owner一次追赶的合作式毫秒预算；每片释放连接和业务锁后再续。"
+    },
+    {
+      "name": "FTS_UPGRADE_CATCHUP_MAX_STEPS_COUNT",
+      "file": "agent_py_agent/agent/local_storage/fts_upgrade.py",
+      "value": 1024,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "单owner一次追赶最多调用的有界片数；仍同时受单owner时间和整拍预算约束。"
+    },
+    {
+      "name": "FTS_UPGRADE_INTERVAL_SECONDS",
+      "file": "agent_py_agent/agent/local_storage/fts_upgrade.py",
+      "value": 60,
+      "unit": "秒",
+      "category": "其它",
+      "description": "与原owner维护轮询同一节流；不建立线程、队列或另一个重建checkpoint。"
+    },
+    {
+      "name": "FTS_UPGRADE_TICK_MAX_STEPS_COUNT",
+      "file": "agent_py_agent/agent/local_storage/fts_upgrade.py",
+      "value": 4096,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "原维护整拍跨owner共享的最大有界片数，防止各owner重复获得整拍额度。"
     },
     {
       "name": "LOCAL_STORE_CATCHUP_MAX_STEPS_COUNT",

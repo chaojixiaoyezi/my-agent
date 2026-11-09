@@ -17,8 +17,11 @@ from ..user_space.directory_paging import directory_page
 
 # 与原owner维护轮询同一节流；不建立线程、队列或另一个重建checkpoint。
 FTS_UPGRADE_INTERVAL_SECONDS = 60
+# 单owner一次追赶最多调用的有界片数；仍同时受单owner时间和整拍预算约束。
 FTS_UPGRADE_CATCHUP_MAX_STEPS_COUNT = 1024
+# 单owner一次追赶的合作式毫秒预算；每片释放连接和业务锁后再续。
 FTS_UPGRADE_CATCHUP_MAX_MS = 2000
+# 原维护整拍跨owner共享的最大有界片数，防止各owner重复获得整拍额度。
 FTS_UPGRADE_TICK_MAX_STEPS_COUNT = 4096
 
 
