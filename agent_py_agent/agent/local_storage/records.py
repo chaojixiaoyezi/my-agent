@@ -18,6 +18,7 @@ import sqlite3
 import time
 import uuid
 from collections.abc import Collection
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +31,7 @@ from ..common.json_io import (
     write_private_text_file_atomic_unlocked,
 )
 from ..common.nofollow_fs import open_readonly_file_beneath, unlink_file_beneath
+from .diagnostics import local_store_stage
 from .models import PREVIEW_CHARS, LocalSearchResult
 from .search import fts_rowid_aligned
 
@@ -713,21 +715,27 @@ def _derived_mutation_lock(store):
 # LLM: 保持原body→records/FTS/event→commit算法和C固定事务，只额外与TTL清理互斥，不复制写入权威。
 # 函数用途: 在正文发表全程保护同一命名空间，防止并发文件丢失。
 def _upsert_record_serialized(store, params):
-    with _derived_mutation_lock(store):
+    with ExitStack() as locks:
+        with local_store_stage("local_store_derived_lock_acquire_ms"):
+            locks.enter_context(_derived_mutation_lock(store))
         if store.coordinator_io:
             return store._upsert_record_coordinator(params)
-        prepared = store._prepare_record(params)
+        with local_store_stage("local_store_body_write_ms"):
+            prepared = store._prepare_record(params)
         with store._connection() as conn:
-            created_at = store._existing_created_at(conn, prepared.record_id, prepared.now)
-            store._upsert_record_row(conn, prepared, created_at)
-            if store.fts_available:
-                rowid = conn.execute("SELECT rowid FROM records WHERE id = ?", (prepared.record_id,)).fetchone()[0]
-                if fts_rowid_aligned(conn):
-                    store._replace_fts_row_at(conn, rowid, prepared.record_id, prepared.title, prepared.content)
-                else:
-                    store._replace_fts_row(conn, prepared.record_id, prepared.title, prepared.content)
+            with local_store_stage("local_store_record_sql_ms"):
+                created_at = store._existing_created_at(conn, prepared.record_id, prepared.now)
+                store._upsert_record_row(conn, prepared, created_at)
+            with local_store_stage("local_store_fts_ms"):
+                if store.fts_available:
+                    rowid = conn.execute("SELECT rowid FROM records WHERE id = ?", (prepared.record_id,)).fetchone()[0]
+                    if fts_rowid_aligned(conn):
+                        store._replace_fts_row_at(conn, rowid, prepared.record_id, prepared.title, prepared.content)
+                    else:
+                        store._replace_fts_row(conn, prepared.record_id, prepared.title, prepared.content)
             store._record_upsert_event(conn, prepared)
-            conn.commit()
+            with local_store_stage("local_store_commit_ms"):
+                conn.commit()
         return store._prepared_record_result(prepared, created_at)
 
 

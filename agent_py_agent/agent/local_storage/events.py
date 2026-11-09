@@ -26,6 +26,7 @@ from ..common.json_io import (
 from ..common.nofollow_fs import ensure_private_dir
 from ..memory_archive._storage_dates import _coerce_datetime, _date_key
 from ..user_space.storage_lanes import STORAGE_LANE_SLICE_BYTES, STORAGE_LANE_SLICE_ENTRIES
+from .diagnostics import local_store_stage
 from .models import LocalStoreEvent, LocalTimelineItem
 
 # 只保留最近一个文件身份；多 Store 交错时整份替换，避免热路径缓存随历史增长。
@@ -180,7 +181,8 @@ class LocalStoreEventMixin:
 
         with self._connection() as conn:
             event = self._record_event(conn, event_type, record_id, payload or {})
-            conn.commit()
+            with local_store_stage("local_store_commit_ms"):
+                conn.commit()
         return event
 
     # LLM: 事件先落 SQLite、再私有追加 JSONL（0600/0700）；两条通道用同一 event 构造，JSONL 失败不静默。
@@ -203,13 +205,14 @@ class LocalStoreEventMixin:
             created_at=time.time(),
         )
         payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        conn.execute(
-            """
-            INSERT INTO events(event_id, event_type, record_id, payload_json, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (event.event_id, event.event_type, event.record_id, payload_json, event.created_at),
-        )
+        with local_store_stage("local_store_event_sql_ms"):
+            conn.execute(
+                """
+                INSERT INTO events(event_id, event_type, record_id, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (event.event_id, event.event_type, event.record_id, payload_json, event.created_at),
+            )
         # 私有追加：0600/0700，存量宽权限事件流水下次写入即收紧；内容逐字节不变。
         records = [{
             "event_id": event.event_id,
@@ -218,13 +221,14 @@ class LocalStoreEventMixin:
             "payload": event.payload,
             "created_at": event.created_at,
         }]
-        if append_records is None:
-            # 保持 SQL 写事务在先、JSONL 锁在后；封存和追加共用原锁，不能嵌套自取锁。
-            with locked_json_path(self.events_path):
-                rotate_event_jsonl_if_due_unlocked(self.events_path)
-                append_private_jsonl_records_unlocked(self.events_path, records, sort_keys=True)
-        else:
-            append_records(self.events_path, records, sort_keys=True)
+        with local_store_stage("local_store_event_jsonl_ms"):
+            if append_records is None:
+                # 保持 SQL 写事务在先、JSONL 锁在后；封存和追加共用原锁，不能嵌套自取锁。
+                with locked_json_path(self.events_path):
+                    rotate_event_jsonl_if_due_unlocked(self.events_path)
+                    append_private_jsonl_records_unlocked(self.events_path, records, sort_keys=True)
+            else:
+                append_records(self.events_path, records, sort_keys=True)
         return event
 
     def _timeline_row(self, row: sqlite3.Row) -> LocalTimelineItem:

@@ -24,6 +24,7 @@ from ..io.sqlite_connection import sqlite_error_details
 from ..io.sqlite_probe import require_plain_sqlite_files, sqlite_readonly_probe_uri
 from ..io.sqlite_schema import schema_fingerprint, schema_is_current, stamp_schema
 from ..io.sqlite_scope import scoped_connection, sqlite_connection_factory
+from .diagnostics import LocalStoreConnectionTimingStack, local_store_stage
 from .events import rotate_event_jsonl_if_due_unlocked
 
 logger = logging.getLogger(__name__)
@@ -539,7 +540,9 @@ class LocalStoreSchemaMixin:
             finally:
                 existing.rollback()
             return
-        with scoped_connection(self.db_path, False, self._connect) as conn:
+        with LocalStoreConnectionTimingStack() as resources:
+            with local_store_stage("local_store_connection_acquire_ms"):
+                conn = resources.enter_context(scoped_connection(self.db_path, False, self._connect))
             yield conn
 
 

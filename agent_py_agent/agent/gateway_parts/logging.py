@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..local_storage.diagnostics import local_store_stage
 from ..local_storage.records import DERIVED_RECORD_TTL_SECONDS, derived_terminal_expired
 from ..runtime_errors import runtime_error_report
 from ..settings.config import AgentConfig
@@ -70,20 +71,18 @@ def log_gateway_payload(
     try:
         status = str(payload.get("status") or "queued")
         kind = str(payload.get("kind") or "unknown")
+        with local_store_stage("gateway_audit_render_ms"):
+            context = _GatewayPayloadRenderContext(
+                payload, request_id, kind, status, log_params.request_path, log_params.response_path
+            )
+            content = _gateway_payload_content(context)
+            metadata = _gateway_payload_metadata(context)
         agent.local_store.log_record(
             source_type="gateway_request",
             source_id=request_id,
             title=f"Gateway {kind} {status} {request_id}",
-            content=_gateway_payload_content(
-                _GatewayPayloadRenderContext(
-                    payload, request_id, kind, status, log_params.request_path, log_params.response_path
-                )
-            ),
-            metadata=_gateway_payload_metadata(
-                _GatewayPayloadRenderContext(
-                    payload, request_id, kind, status, log_params.request_path, log_params.response_path
-                )
-            ),
+            content=content,
+            metadata=metadata,
             event_type=log_params.event_type,
         )
     except Exception as exc:
