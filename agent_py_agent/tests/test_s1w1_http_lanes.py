@@ -463,24 +463,35 @@ def test_partial_bodies_leave_original_general_capacity_for_complete_request(ser
             client.close()
 
 
-def test_segmented_body_uses_no_worker_until_exact_completion(server, monkeypatch):
+def test_segmented_body_under_saturation_waits_for_exact_completion(server, monkeypatch):
     seen = []
+    blocker_entered = threading.Event()
 
     def read_body(handler):
-        seen.append(handler.rfile.read(int(handler.headers['Content-Length'])))
+        if handler.path == '/blocker':
+            blocker_entered.set()
+        body = handler.rfile.read(int(handler.headers['Content-Length']))
+        if handler.path != '/blocker':
+            seen.append(body)
         handler.do_GET()
 
     monkeypatch.setattr(Handler, 'do_POST', read_body)
-    with connect(server, b'POST /ordinary HTTP/1.1\r\nHost: localhost\r\nContent-Length: 6\r\n\r\nab') as client:
-        eventually(lambda: any(p.endswith(b'ab') for p in server._lanes._prefixes.values()))
-        assert not server._request_executor._threads
-        client.sendall(b'cd')
-        eventually(lambda: any(p.endswith(b'abcd') for p in server._lanes._prefixes.values()))
-        assert not server._request_executor._threads
-        client.sendall(b'ef')
-        assert b'200 OK' in response(client)
-    assert seen == [b'abcdef']
-    eventually(lambda: not server._lanes._prefixes and not server._lanes._frame_lengths)
+    blocker = connect(server, b'POST /blocker HTTP/1.1\r\nContent-Length: 9000\r\n\r\nx')
+    try:
+        assert blocker_entered.wait(1)
+        with connect(server, b'POST /ordinary HTTP/1.1\r\nHost: localhost\r\nContent-Length: 6\r\n\r\nab') as client:
+            eventually(lambda: any(p.endswith(b'ab') for p in server._lanes._prefixes.copy().values()))
+            assert len(server._request_executor._threads) == 1
+            assert not server._lanes._ready_executor._threads
+            client.sendall(b'cd')
+            eventually(lambda: any(p.endswith(b'abcd') for p in server._lanes._prefixes.copy().values()))
+            assert not server._lanes._ready_executor._threads
+            client.sendall(b'ef')
+            assert b'200 OK' in response(client)
+        assert seen == [b'abcdef']
+        eventually(lambda: not server._lanes._prefixes and not server._lanes._frame_lengths)
+    finally:
+        blocker.close()
 
 
 def test_large_body_keeps_original_payload_and_general_worker(server, monkeypatch):
@@ -571,7 +582,7 @@ def test_pending_prefixes_are_bounded_do_not_spin_and_release_on_eof(server, mon
         return original(*args)
 
     monkeypatch.setattr(server._lanes, '_read_ready', observe)
-    clients = [connect(server, b'POST /ordinary HTTP/1.1\r\nContent-Length: 4000\r\n\r\nx') for _ in range(5)]
+    clients = [connect(server, b'POST /ordinary HTTP/1.1\r\nContent-Length: 4000\r\nX-Fixture: x') for _ in range(5)]
     try:
         eventually(lambda: len(server._lanes._prefixes) == len(clients))
         count = len(observed)
@@ -579,7 +590,8 @@ def test_pending_prefixes_are_bounded_do_not_spin_and_release_on_eof(server, mon
         assert len(observed) == count  # 已消费的前缀不再让level-trigger selector反复就绪。
         assert all(len(p) <= HTTP_READY_PREFIX_BYTES for p in server._lanes._prefixes.values())
         assert sum(map(len, server._lanes._prefixes.values())) <= server._lanes.pending_limit * HTTP_READY_PREFIX_BYTES
-        assert not server._request_executor._threads and not server._lanes._ready_executor._threads
+        assert len(server._request_executor._threads) <= server._lanes._mixed_workers
+        assert not server._lanes._ready_executor._threads
     finally:
         for client in clients:
             client.close()
@@ -625,7 +637,7 @@ def test_prefix_replay_preserves_pipeline_bytes_and_peek_without_consuming():
     prefix = bytearray(b'first\r\nsecond\r\n')
     wrapped = PrefetchedSocket(left, prefix)
     try:
-        assert left.fileno() == -1
+        assert left.fileno() == wrapped.fileno() and wrapped._socket is left
         assert wrapped.recv(5, socket.MSG_PEEK) == b'first'
         right.sendall(b'kernel\r\n')
         with wrapped.makefile('rb') as reader:
@@ -646,7 +658,7 @@ def test_ready_framing_does_not_guess_keepalive_close_tokens():
         assert complete_request_length(prefix, single_request=False) == 0
 
 
-def test_replay_initialization_failure_closes_detached_socket_without_gc(server, monkeypatch):
+def test_replay_setup_failure_closes_original_socket_without_gc(server, monkeypatch):
     from agent_py_agent.agent.gateway_parts.http_body_readiness import PrefetchedSocket
 
     failed = threading.Event()
@@ -660,7 +672,7 @@ def test_replay_initialization_failure_closes_detached_socket_without_gc(server,
     with monkeypatch.context() as scoped:
         scoped.setattr(PrefetchedSocket, 'settimeout', fail_timeout)
         with request(server, 'GET', '/ordinary') as client:
-            assert client.recv(1) == b''
+            assert b'GATEWAY_HTTP_BUSY' in response(client)
         assert failed.wait(1) and retained[0].fileno() == -1
     assert server._lanes._thread.is_alive()
     assert server._request_slots._value == server.max_outstanding_requests
@@ -703,3 +715,144 @@ def test_fragmented_header_search_only_revisits_boundary_suffix(server, monkeypa
         client.sendall(b'\r\n\r\n')
         assert b'200 OK' in response(client)
     assert sum(work) <= sent + 4 + 3 * len(work)
+
+
+@pytest.fixture
+def patient_body_server():
+    class PatientServer(TinyServer):
+        request_socket_timeout = 5.0
+        request_queue_timeout = 2.0
+
+    class BodyHandler(Handler):
+        def do_POST(self):
+            self.server.body_entered.set()
+            self.server.received.append(self.rfile.read(int(self.headers['Content-Length'])))
+            self.do_GET()
+
+    result = PatientServer(('127.0.0.1', 0), BodyHandler, control_lane_workers=2)
+    result.body_entered = threading.Event()
+    result.handled = threading.Event()
+    result.received = []
+    thread = threading.Thread(target=result.serve_forever, kwargs={'poll_interval': 0.01})
+    thread.start()
+    try:
+        yield result
+    finally:
+        result.shutdown()
+        result.server_close()
+        thread.join(1)
+        assert not thread.is_alive() and not result._lanes._thread.is_alive()
+
+
+def test_early_headers_with_original_mixed_capacity_keep_slow_small_body_success(patient_body_server):
+    server = patient_body_server
+    with connect(server, b'POST /ordinary HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{') as client:
+        assert server.body_entered.wait(1), '原混合席位可用时应及时进入原body reader'
+        # 故意跨原queue=2s，但在原socket=5s内完整；不是提高产品预算或成功重试。
+        threading.Event().wait(2.1)
+        client.sendall(b'}')
+        assert b'200 OK' in response(client)
+    assert server.received == [b'{}']
+
+
+@pytest.mark.parametrize('late_headers', [False, True])
+def test_original_queue_deadline_is_not_refreshed_for_overload_or_late_headers(patient_body_server, monkeypatch, late_headers):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.gateway_parts import http_lanes
+
+    server = patient_body_server
+    clock = [time.monotonic()]
+    monkeypatch.setattr(http_lanes, 'time', SimpleNamespace(**{**vars(time), 'monotonic': lambda: clock[0]}))
+    blocker = None
+    try:
+        if not late_headers:
+            blocker = connect(server, b'POST /ordinary HTTP/1.1\r\nContent-Length: 9000\r\n\r\nx')
+            assert server.body_entered.wait(1)
+        prefix = b'POST /ordinary HTTP/1.1\r\nContent-Length: 2\r\n'
+        if not late_headers:
+            prefix += b'\r\n{'
+        with connect(server, prefix) as client:
+            eventually(lambda: bool(server._lanes._prefixes))
+            if not late_headers:
+                eventually(lambda: bool(server._lanes._headers_ready_at))
+            clock[0] += 2.1
+            if late_headers:
+                client.sendall(b'\r\n{}')
+            server._lanes._wake()
+            assert b'GATEWAY_HTTP_BUSY' in response(client)
+        assert server.received == []
+        assert not server._lanes._ready_executor._threads or late_headers
+    finally:
+        if blocker is not None:
+            blocker.close()
+
+
+def test_body_waiting_before_original_deadline_uses_newly_freed_mixed_capacity(patient_body_server):
+    server = patient_body_server
+    blocker = connect(server, b'POST /ordinary HTTP/1.1\r\nContent-Length: 9000\r\n\r\nx')
+    try:
+        assert server.body_entered.wait(1)
+        server.body_entered.clear()
+        with connect(server, b'POST /ordinary HTTP/1.1\r\nContent-Length: 2\r\n\r\n{') as client:
+            eventually(lambda: bool(server._lanes._headers_ready_at))
+            blocker.close()
+            assert server.body_entered.wait(1), '原截止前释放席位须唤醒并推进已完整header的责任'
+            client.sendall(b'}')
+            assert b'200 OK' in response(client)
+        assert server.received[-1] == b'{}'
+    finally:
+        blocker.close()
+
+
+def test_replay_factory_never_reconstructs_or_detaches_native_socket(monkeypatch):
+    from agent_py_agent.agent.gateway_parts.http_body_readiness import PrefetchedSocket
+
+    left, right = socket.socketpair()
+    original_descriptor = left.fileno()
+
+    def forbidden_constructor(*_args, **_options):
+        raise AssertionError('回放不应重建原生socket')
+
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(socket, 'socket', forbidden_constructor)
+            wrapped = PrefetchedSocket(left, bytearray(b'prefix'))
+            assert wrapped._socket is left and left.fileno() == original_descriptor
+            assert wrapped.recv(6) == b'prefix'
+        right.sendall(b'native')
+        assert wrapped.recv(6) == b'native'
+        wrapped.close()
+        assert left.fileno() == -1
+        # 再次close只作用于同一已关闭原生对象，不对旧descriptor数字做盲close。
+        other_left, other_right = socket.socketpair()
+        try:
+            wrapped.close()
+            other_left.sendall(b'live')
+            assert other_right.recv(4) == b'live'
+        finally:
+            other_left.close()
+            other_right.close()
+    finally:
+        left.close()
+        right.close()
+
+
+def test_replay_file_reference_preserves_original_native_lifetime():
+    from agent_py_agent.agent.gateway_parts.http_body_readiness import PrefetchedSocket
+
+    left, right = socket.socketpair()
+    wrapped = PrefetchedSocket(left, bytearray(b'prefix\n'))
+    reader = wrapped.makefile('rb')
+    try:
+        wrapped.close()
+        assert left.fileno() >= 0
+        assert reader.readline() == b'prefix\n'
+        right.sendall(b'native\n')
+        assert reader.readline() == b'native\n'
+        reader.close()
+        assert left.fileno() == -1 and wrapped._prefix is None
+    finally:
+        reader.close()
+        wrapped.close()
+        right.close()

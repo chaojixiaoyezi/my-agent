@@ -189,6 +189,7 @@ class HTTPLaneRouter:
         self._prefixes = {}
         self._frame_lengths = {}
         self._classifications = {}
+        self._headers_ready_at = {}
         self._mixed_admitted = 0
         workers = server.max_request_workers
         self._body_readiness = workers > 1
@@ -265,6 +266,7 @@ class HTTPLaneRouter:
         self._prefixes.pop(sock, None)
         self._frame_lengths.pop(sock, None)
         self._classifications.pop(sock, None)
+        self._headers_ready_at.pop(sock, None)
         if close:
             self.server.shutdown_request(sock)
 
@@ -310,13 +312,30 @@ class HTTPLaneRouter:
                 )
                 if length is not None:
                     self._frame_lengths[sock] = length
+                    if length:
+                        self._headers_ready_at[sock] = time.monotonic()
             length = self._frame_lengths.get(sock)
             if length and len(prefix) >= length:
                 lane = 'ready'
+            elif length and self._can_admit_body(accepted_at, self._headers_ready_at[sock]):
+                lane = 'general'
             elif data and len(prefix) < HTTP_READY_PREFIX_BYTES and length != 0:
                 return
             else:
                 lane = 'general'
+        self._handoff_pending(sock, addr, accepted_at, lane)
+
+    def _can_admit_body(self, accepted_at, headers_ready_at):
+        # 这里只是瞬时容量观察；真正准入仍由_submit领取原槽位、worker再核原deadline。
+        deadline = accepted_at + self.queue_timeout_seconds
+        if headers_ready_at >= deadline or time.monotonic() >= deadline:
+            return False
+        with self._lock:
+            return (self._mixed_admitted < self._mixed_workers
+                    and self.server._request_slots._value > 0)
+
+    def _handoff_pending(self, sock, addr, accepted_at, lane):
+        prefix = self._prefixes.get(sock, bytearray())
         self._drop_pending(sock, close=False)
         try:
             replay = PrefetchedSocket(sock, prefix)
@@ -334,14 +353,26 @@ class HTTPLaneRouter:
         now = time.monotonic()
         with self._lock:
             pending = tuple(self._pending.items())
-            queued = {lane: tuple(tickets) for lane, tickets in self._queued.items()}
         deadlines = []
-        for sock, (_addr, accepted_at) in pending:
+        for sock, (addr, accepted_at) in pending:
             deadline = accepted_at + self.header_timeout_seconds
             if deadline <= now:
                 self._drop_pending(sock)
-            else:
-                deadlines.append(deadline)
+                continue
+            if sock in self._headers_ready_at:
+                queue_deadline = accepted_at + self.queue_timeout_seconds
+                if queue_deadline <= now:
+                    self._drop_pending(sock, close=False)
+                    self.server._reject_without_wait(sock)
+                    continue
+                if self._can_admit_body(accepted_at, self._headers_ready_at[sock]):
+                    self._handoff_pending(sock, addr, accepted_at, 'general')
+                    continue
+                deadline = min(deadline, queue_deadline)
+            deadlines.append(deadline)
+        # 上面可能准入一条有原混合空席的慢正文；之后才捕获队列，不能覆盖刚加入的票据。
+        with self._lock:
+            queued = {lane: tuple(tickets) for lane, tickets in self._queued.items()}
         for lane, tickets in queued.items():
             keep = deque()
             for ticket in tickets:

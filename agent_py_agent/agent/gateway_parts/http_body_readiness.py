@@ -41,22 +41,27 @@ def complete_request_length(prefix: bytearray, *, single_request: bool, search_f
     return length if length <= HTTP_READY_PREFIX_BYTES else 0
 
 
-class PrefetchedSocket(socket.socket):
-    """接管同一FD，消费过的唯一前缀先原样回放，再从内核读取；无第二份正文。"""
+class PrefetchedSocket:
+    """唯一持有原生socket；不转移FD，用标准SocketIO回放前缀。"""
+
+    # socket.makefile是标准库Python实现；SocketIO只依赖recv_into/send/fileno和引用回收接口。
+    makefile = socket.socket.makefile
+    __enter__ = socket.socket.__enter__
+    __exit__ = socket.socket.__exit__
+    _decref_socketios = socket.socket._decref_socketios
 
     def __init__(self, original: socket.socket, prefix: bytearray):
-        timeout = original.gettimeout()
-        super().__init__(original.family, original.type, original.proto, fileno=original.detach())
-        try:
-            self.settimeout(timeout)
-            self._prefix = prefix
-            self._prefix_offset = 0
-        except BaseException as error:
-            try:
-                super().close()
-            except BaseException as cleanup:
-                error.socket_cleanup_error = cleanup
-            raise
+        self._socket = original
+        self._prefix = prefix
+        self._prefix_offset = 0
+        self._io_refs = 0
+        self._closed = False
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, '_socket'), name)
+
+    def settimeout(self, timeout):
+        return self._socket.settimeout(timeout)
 
     def recv_into(self, buffer, nbytes=0, flags=0):
         if self._prefix:
@@ -70,19 +75,27 @@ class PrefetchedSocket(socket.socket):
                 if self._prefix_offset == len(self._prefix):
                     self._prefix = None
             return count
-        return super().recv_into(buffer, nbytes, flags)
+        return self._socket.recv_into(buffer, nbytes, flags)
 
     def recv(self, buffersize, flags=0):
         if self._prefix:
             result = bytearray(min(buffersize, len(self._prefix) - self._prefix_offset))
             count = self.recv_into(result, flags=flags)
             return bytes(result[:count])
-        return super().recv(buffersize, flags)
+        return self._socket.recv(buffersize, flags)
+
+    def detach(self):
+        if self._prefix:
+            raise ValueError('prefetched_bytes_not_consumed')
+        descriptor = self._socket.detach()
+        self._closed = True
+        return descriptor
 
     def close(self):
-        try:
-            super().close()
-        finally:
-            # Future回调可暂留已结束票据；已无file reader时不把其正文前缀一起保留。
-            if not getattr(self, '_io_refs', 0):
+        self._closed = True
+        if self._io_refs <= 0:
+            try:
+                self._socket.close()
+            finally:
+                # Future可暂留票据，关闭后不随之保留正文；file reader存在时沿标准socket寿命延后。
                 self._prefix = None
