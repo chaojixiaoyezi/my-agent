@@ -33,6 +33,7 @@ import sys
 import threading
 import time
 import traceback
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -58,7 +59,11 @@ from agent_py_agent.agent.subagents.services.lifecycle import (
 # ---------------------------------------------------------------------------
 
 
-def _run_threads(worker, count: int, *, join_timeout: float = 15.0) -> list[str]:
+def _run_threads(
+    worker, count: int, *, join_timeout: float = 15.0,
+    progress: Callable[[], int] | None = None, stall_timeout: float = 15.0,
+    deadline: float | None = None,
+) -> list[str]:
     """启动 count 个线程跑 worker(idx),返回各线程捕获的异常 traceback 列表。"""
 
     errors: list[str] = []
@@ -74,13 +79,50 @@ def _run_threads(worker, count: int, *, join_timeout: float = 15.0) -> list[str]
     threads = [threading.Thread(target=_wrapped, args=(i,), daemon=True) for i in range(count)]
     for thread in threads:
         thread.start()
-    deadline = time.monotonic() + join_timeout
-    for thread in threads:
-        thread.join(timeout=max(0.1, deadline - time.monotonic()))
+    deadline = time.monotonic() + join_timeout if deadline is None else deadline
+    stalled = False
+    if progress is None:
+        for thread in threads:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+    else:
+        completed = progress()
+        last_progress = time.monotonic()
+        while any(thread.is_alive() for thread in threads):
+            current = time.monotonic()
+            observed = progress()
+            if observed != completed:
+                completed, last_progress = observed, current
+            stalled = current - last_progress >= stall_timeout
+            if stalled or current >= deadline:
+                break
+            for thread in threads:
+                thread.join(timeout=min(0.01, max(0.0, deadline - time.monotonic())))
     alive = [t.name for t in threads if t.is_alive()]
     if alive:
-        errors.append(f"threads still alive after {join_timeout}s: {alive}")
+        reason = f"no completed save for {stall_timeout}s" if stalled else f"total budget {join_timeout}s"
+        frames = sys._current_frames()
+        stacks = "\n".join(
+            f"[{thread.name}]\n{''.join(traceback.format_stack(frames[thread.ident]))}"
+            for thread in threads if thread.is_alive() and thread.ident in frames
+        )
+        errors.append(f"threads still alive ({reason}): {alive}\n{stacks}")
     return errors
+
+
+def test_thread_runner_stall_budget_reports_exact_alive_stack() -> None:
+    release, ended = threading.Event(), threading.Event()
+    def stalled(_):
+        try:
+            release.wait()
+        finally:
+            ended.set()
+    try:
+        errors = _run_threads(stalled, 1, join_timeout=1.0, stall_timeout=0.05, progress=lambda: 0)
+        assert len(errors) == 1 and "no completed save for 0.05s" in errors[0]
+        assert "stalled" in errors[0] and "release.wait()" in errors[0]
+    finally:
+        release.set()
+        assert ended.wait(timeout=1.0)
 
 
 def _fresh_manager(tmp_path: Path) -> SubAgentManager:
@@ -109,16 +151,29 @@ def test_concurrent_save_same_task_keeps_canonical_state_atomic(tmp_path: Path) 
         f"writer-{idx:02d}-round-{r}-{payload_tail}" for idx in range(thread_count) for r in range(rounds)
     }
     barrier = threading.Barrier(thread_count)
+    completed_saves = 0
+    deadline = time.monotonic() + 45.0
+    progress_guard = threading.Lock()
+
+    def progress() -> int:
+        with progress_guard:
+            return completed_saves
 
     def worker(idx: int) -> None:
+        nonlocal completed_saves
         for r in range(rounds):
             copy = manager.load(run_id)
             copy.latest_summary = f"writer-{idx:02d}-round-{r}-{payload_tail}"
-            barrier.wait(timeout=10)
+            barrier.wait(timeout=max(0.0, deadline - time.monotonic()))
             manager.save(copy)
+            with progress_guard:
+                completed_saves += 1
 
-    errors = _run_threads(worker, thread_count)
+    # 2C Linux真实1668次fsync单例已耗12.293s；保留12×3负载，另守15s无完成进展门。
+    # 总预算留15s给外层60s超时及失败栈；不能只把死锁等待从15s延到45s。
+    errors = _run_threads(worker, thread_count, join_timeout=45.0, progress=progress, deadline=deadline)
     assert errors == [], "并发 save 不应抛出异常:\n" + "\n".join(errors)
+    assert progress() == thread_count * rounds, "并发保存必须全部完成"
 
     # 1) canonical_state.json 必须是完整合法 JSON(无半截文件、无 JSONDecodeError)。
     raw = canonical_path.read_text(encoding="utf-8")
