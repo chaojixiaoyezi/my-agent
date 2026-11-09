@@ -85,6 +85,9 @@ class MemoryBackend:
                     self.head["inc"], self.head["expires"] = None, 0
                 else:
                     self.head["expires"] = time.monotonic() + params["ttl"]
+        elif sql.startswith("SELECT version FROM owner_snapshot_head"):
+            assert params["tenant"] == self.tenant
+            value = self.head["version"] if self.head else None
         elif sql.startswith("INSERT INTO owner_file_manifest"):
             rows = {row.relative_path: row for row in self.store.rows}
             for row in params:

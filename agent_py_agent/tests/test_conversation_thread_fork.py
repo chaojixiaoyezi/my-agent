@@ -498,6 +498,13 @@ def test_fork_publish_failure_leaves_no_partial_branch(case, monkeypatch, phase)
     persona.write_text(json.dumps({"schema_version": 1, "epoch": {"compact_generation": 1,
         "model_profile_id": "", "protocol": ["echo", "native"]},
         "sections": {"agents": "规则", "soul": "人格", "user": "用户", "diagnostics": ""}}))
+    # 只允许原source的精确SQLite派生投影变化；目标branch任何新文件仍须回滚。
+    from agent_py_agent.agent.conversation.checkpoint_offset_store import CheckpointOffsetStore
+
+    source_projection = CheckpointOffsetStore(
+        case.home / "compact" / "conversations" / f"{case.thread.thread_id}.jsonl").path
+    projection_files = {source_projection, *(source_projection.with_name(source_projection.name + suffix)
+                                            for suffix in ("-wal", "-shm"))}
     before = {path: path.read_bytes() for path in case.home.rglob("*") if path.is_file()}
     write = service.write_private_text_file_atomic
 
@@ -520,7 +527,8 @@ def test_fork_publish_failure_leaves_no_partial_branch(case, monkeypatch, phase)
     with pytest.raises(OSError, match="fork publish fault"):
         _fork(case.store, source_thread_id=case.thread.thread_id, owner_home=case.home)
     after = {path: path.read_bytes() for path in case.home.rglob("*") if path.is_file() and path.suffix != ".lock"}
-    assert after == {path: content for path, content in before.items() if path.suffix != ".lock"}
+    assert {path: content for path, content in after.items() if path not in projection_files} == {
+        path: content for path, content in before.items() if path.suffix != ".lock" and path not in projection_files}
 
 
 # LLM: 改写临时已提交检查点后重新封印并更新真实head，不用mock绕过原Compact读取器。
