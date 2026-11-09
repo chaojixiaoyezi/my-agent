@@ -91,7 +91,7 @@ def test_real_dispatch_exit_proof_uses_original_attempt_and_stdout_inode(tmp_pat
     agent = SimpleNamespace(root=owner, subagents=SimpleNamespace(workspace=tmp_path))
     request = dispatch._BackgroundDispatchRequest(agent=agent, run_ids=['run'], launch_id='actual', router=None, cfg=None,
         params=SimpleNamespace(expected_attempt_ids={'run': 'attempt'}))
-    monkeypatch.setattr(dispatch, '_background_dispatch_command', lambda *_args: [sys.executable, '-c', 'print("actual stdout")'])
+    monkeypatch.setattr(dispatch, '_background_dispatch_command', lambda *_args: [sys.executable, '-c', 'from agent_py_agent.agent.io.bounded_process_log import bounded_stdio_from_environment\nwith bounded_stdio_from_environment(): print("actual stdout")'])
     process = dispatch._spawn_background_dispatch_process(agent, request)
     dispatch._remember_background_dispatch(agent, 'actual', ['wrong-display-run'], 'display-only')
     settled = threading.Event()
@@ -108,6 +108,7 @@ def test_real_dispatch_exit_proof_uses_original_attempt_and_stdout_inode(tmp_pat
     assert tuple(row['identity']) == process._my_agent_background_log_identity
     retire_dispatch_logs_slice(folder, now=time.time() + 31 * 86400)
     assert not (folder / 'actual.log').exists() and not marker.exists()
+    assert not (folder / 'actual.capture.json').exists()
 
 
 def test_unrelated_old_replica_does_not_permanently_hold_current_launch(tmp_path):

@@ -320,13 +320,17 @@ def _spawn_background_dispatch_process(agent, request: _BackgroundDispatchReques
     from .log_retention import pin_dispatch_log, retire_dispatch_logs_slice
 
     retire_dispatch_logs_slice(log_path.parent)
-    log_handle = log_path.open("a", encoding="utf-8")
+    descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    log_handle = os.fdopen(descriptor, 'wb', buffering=0)
     command = _background_dispatch_command(agent, request)
     # 标记后台派工子进程:子进程里记录的 runner 会话据此标 in_process=False,宿主已死回收对它
     # 保留原 pid-liveness(不被网关重启的 epoch 换代判据误杀——它是独立进程,不随网关死)。
+    from ....io.bounded_process_log import BOUNDED_STDIO_LIMIT_ENV, BOUNDED_STDIO_PATH_ENV
     from ....subagents.process_control import RUNNER_SUBPROCESS_ENV
 
-    child_env = {**os.environ, RUNNER_SUBPROCESS_ENV: "1"}
+    limit = int(getattr(getattr(agent, 'config', None), 'background_dispatch_log_max_bytes', 4 * 1024 * 1024))
+    child_env = {**os.environ, RUNNER_SUBPROCESS_ENV: "1", BOUNDED_STDIO_LIMIT_ENV: str(limit),
+                 BOUNDED_STDIO_PATH_ENV: str(log_path.absolute())}
     try:
         pin_dispatch_log(log_handle)
         process = subprocess.Popen(
@@ -340,6 +344,7 @@ def _spawn_background_dispatch_process(agent, request: _BackgroundDispatchReques
         )
         info = os.fstat(log_handle.fileno())
         process._my_agent_background_log_identity = (info.st_dev, info.st_ino)
+        process._my_agent_bounded_capture_expected = limit > 0
         log_handle.close()
         return process
     except Exception:
@@ -408,6 +413,7 @@ def _reap_then_settle_unactivated_exit(agent, request: _BackgroundDispatchReques
                 run_ids=[run_id for run_id, _attempt in run_attempts] if run_attempts else [],
                 attempt_ids=dict(run_attempts) if run_attempts else None,
                 expected_identity=identity,
+                capture_expected=bool(getattr(process, '_my_agent_bounded_capture_expected', False)),
                 owner_home=runtime_owner_root(agent))
             retire_dispatch_logs_slice(Path(_background_log_path(agent, request.launch_id)).parent)
         except (OSError, ValueError, TypeError):

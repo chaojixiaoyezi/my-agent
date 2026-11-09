@@ -56,7 +56,7 @@ _HOST_CAPACITY_KEYS = frozenset({
 })
 DEPLOYMENT_ONLY_KEYS = _HOST_CAPACITY_KEYS | frozenset({
     # 持久记录容量与可执行命令目录仅由部署者配置，不向模型开放资源或进程边界。
-    "llm_call_records_max_rows", "acp_bridge_agents",
+    "llm_call_records_max_rows", "acp_bridge_agents", "background_dispatch_log_max_bytes",
     "model_http_max_idle_connections", "scale_owner_snapshot_mode", "gateway_edge_identity_required",
     "gateway_event_hub_ring_events", "gateway_event_fallback_poll_seconds", "conversation_actor_workers",
     "owner_epoch_fence_enabled", "background_owner_wake_rescan_seconds",
@@ -163,7 +163,7 @@ _CATEGORIES = (
     (("decision_",), "决策模型 Jev"),
     (("tool_", "shell_", "web_", "read_", "write_"), "工具"),
     (("subagent", "max_subagents", "task_", "acceptance_"), "子代理与任务"),
-    (("gateway_", "daemon_", "runner_", "lease_", "scheduler_"), "Gateway 与调度"),
+    (("gateway_", "daemon_", "runner_", "lease_", "scheduler_", "background_dispatch_"), "Gateway 与调度"),
     (("feishu_", "qq_", "wechat_", "im_", "adapter_"), "IM 通道"),
     (("skill", "self_learning", "enable_self_learning", "capability_"), "技能与自学习"),
 )

@@ -382,6 +382,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     tui_idle_poll_max_seconds: float = field(default=30.0, metadata={"bounds": (8.0, 300.0), "unit": "秒"})
     # Gateway 只复用已验证空的普通canonical消息页；不依赖事件中心，其它权限/活动/事件仍逐请求重核，0关闭。
     gateway_idle_notice_reuse_seconds: float = field(default=120.0, metadata={"bounds": (0.0, 3600.0), "unit": "秒"})
+    # durable后台派工进程诊断stdout/stderr最多保留的字节；超限继续排空并记录真实丢弃，0显式不限制。
+    background_dispatch_log_max_bytes: int = field(default=4194304, metadata={"bounds": (0, 1073741824), "unit": "字节"})
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     # 只给普通主会话追加执行中沟通软引导，不额外采样、不改变历史或执行终态。
     assistant_progress_updates_enabled: bool = True
