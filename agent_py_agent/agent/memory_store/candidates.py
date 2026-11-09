@@ -44,6 +44,7 @@ from .candidate_ledger import (
     CandidateRows,
     IndexedBindings,
     ObservationPositions,
+    iter_candidate_rows,
     manifest_text,
     read_manifest,
     seal_cleanup,
@@ -1904,7 +1905,7 @@ def _write_cold_changes(path: Path, changes: dict[str, str], *, coordinator_io: 
 def _parse_candidate_ledger(path: Path):
     manifest = read_manifest(path)
     if manifest is not None:
-        records = list(CandidateRows(path, manifest))
+        records = list(iter_candidate_rows(path, manifest))
         return _candidate_load_probe(path), records
     stamp = _candidate_load_stamp(path)
     records = []

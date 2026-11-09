@@ -295,9 +295,24 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             try:
                 self.steps.close()
             finally:
-                reference_pins._close_source_descriptors(self.contents["fds"])
+                try:
+                    reference_pins._close_source_descriptors(self.contents["fds"])
+                finally:
+                    # 关闭表示该周期已退休；断开context回边和临时正文，返回给调用者的pins集合不清空。
+                    self.context = None
+                    self.value = self.pending = None
+                    self.sources.clear()
+                    self.contents["files"].clear()
+                    self.contents["bytes"] = 0
+                    for key in ("digest_bytes", "verified", "recheck"):
+                        self.contents[key].clear()
+                    self.queued_actions.clear()
+                    self.post_scopes.clear()
+                    self.index_revisions.clear()
 
     def _current(self, errors, *, target=None):
+        if self.closed:
+            raise OSError("pin projection is closed")
         discovery = self.context.discovery_context
         if (discovery is not None and not self.discovery_done
                 and (self.value is not None or not self.queued_actions)):
@@ -410,7 +425,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
         return b"".join(chunks) if self.sources[path][0] is not None else None
 
     def _candidate_rows(self, path):
-        from .candidate_ledger import CandidateRows, read_manifest
+        from .candidate_ledger import iter_candidate_rows, read_manifest
         header = read_manifest(path)
         if header is None:
             yield from self._rows(path)
@@ -418,7 +433,7 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
         raw = yield from self._read(path)
         if raw is None or json.loads(raw) != header:
             raise _PinReadChanged(11, "candidate generation changed", str(path))
-        for candidate in CandidateRows(path, header):
+        for candidate in iter_candidate_rows(path, header):
             yield candidate.to_record()
 
     def _rows(self, path, *, required=False, jsonl=None, strict_lines=False):
@@ -3254,11 +3269,11 @@ def _current_retention_pins_once(home: object, roots: tuple[Path, ...], errors: 
         candidate_ids: set[str] = set()
         # 同一次投影内每个冷归档月只读一次并整份校验；逐候选重读整月使维护成本为 候选数×月行数。
         cold_cache: dict = {}
-        from .candidate_ledger import CandidateRows, read_manifest
+        from .candidate_ledger import iter_candidate_rows, read_manifest
         header = read_manifest(candidate_path)
         if header is not None:
             watch_pin_source(candidate_path)
-            source_rows = (candidate.to_record() for candidate in CandidateRows(candidate_path, header))
+            source_rows = (candidate.to_record() for candidate in iter_candidate_rows(candidate_path, header))
         else:
             source_rows = _pin_rows(candidate_path)
         for row in source_rows:

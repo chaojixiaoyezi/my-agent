@@ -41,7 +41,10 @@ def _read_manifest(path: Path):
         raw = prefix + stream.read(1024 * 1024)
         if stream.read(1):
             raise ValueError('候选索引头超出预算')
-    record = json.loads(raw)
+    return _validate_manifest(json.loads(raw))
+
+
+def _validate_manifest(record):
     if (type(record) is not dict or set(record) != {'candidate_ledger', 'count', 'root', 'cleanup'}
             or record.get('candidate_ledger') != FORMAT or type(record.get('count')) is not int or record['count'] < 0
             or (record['count'] > 0 and not isinstance(record['root'], dict))
@@ -55,6 +58,40 @@ def manifest_text(root, count, cleanup=()):
     # 固定首字段允许只读探测识别格式；不依赖自然语言或文件扩展名。
     return json.dumps({'candidate_ledger': FORMAT, 'count': count, 'root': root,
                        'cleanup': cleanup if isinstance(cleanup, dict) else list(cleanup)}, ensure_ascii=False, separators=(',', ':')) + '\n'
+
+
+def _read_candidate_row(index, reference, *, staged=None, loaded=None):
+    name = reference['ref']
+    digest = reference['sha256']
+    if (type(digest) is not str or len(digest) != 64 or any(ch not in '0123456789abcdef' for ch in digest)
+            or name != digest + '.row' or type(reference['byte_length']) is not int
+            or reference['byte_length'] <= 0):
+        raise ValueError('候选正文引用损坏')
+    raw = (staged or {}).get(name)
+    if raw is None:
+        raw = read_bytes_beneath(index.root, (*index.parts, name), max_bytes=reference['byte_length'])
+        if loaded is not None:
+            loaded.add(name)
+    if raw is None or len(raw) != reference['byte_length'] or hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError('候选正文缺失或摘要不符')
+    from .candidates import _parse_candidate_line
+    return _parse_candidate_line(raw.decode())
+
+
+def iter_candidate_rows(path: Path, manifest):
+    """只读完整位置流；正文逐条释放，不保留修改基线、历史行或已读节点集合。"""
+    header = _validate_manifest(manifest)
+    index = ImmutableJsonIndex(path.parent, (path.name + ".records",))
+    root = header["root"]
+    for position in range(header["count"]):
+        identifier = index.get(root, "pos/" + str(position))
+        entry = index.get(root, "row/" + identifier) if identifier else None
+        if not entry or entry["position"] != position:
+            raise ValueError("候选序号索引损坏")
+        row = _read_candidate_row(index, entry["record"])
+        if row.candidate_id != identifier:
+            raise ValueError("候选身份索引损坏")
+        yield row
 
 
 class PlannedIndex(ImmutableJsonIndex):
@@ -120,20 +157,7 @@ class PlannedIndex(ImmutableJsonIndex):
         return {'ref': name, 'sha256': digest, 'byte_length': len(raw)}
 
     def read_row(self, reference):
-        name = reference['ref']
-        digest = reference['sha256']
-        if (type(digest) is not str or len(digest) != 64 or any(ch not in '0123456789abcdef' for ch in digest)
-                or name != digest + '.row' or type(reference['byte_length']) is not int
-                or reference['byte_length'] <= 0):
-            raise ValueError('候选正文引用损坏')
-        raw = self.staged.get(name)
-        if raw is None:
-            raw = read_bytes_beneath(self.root, (*self.parts, name), max_bytes=reference['byte_length'])
-            self.loaded.add(name)
-        if raw is None or len(raw) != reference['byte_length'] or hashlib.sha256(raw).hexdigest() != digest:
-            raise ValueError('候选正文缺失或摘要不符')
-        from .candidates import _parse_candidate_line
-        return _parse_candidate_line(raw.decode())
+        return _read_candidate_row(self, reference, staged=self.staged, loaded=self.loaded)
 
     def finish(self, root):
         """仅发表新根可达暂存节点；被重写路径和正文在发表后可安全回收。"""
