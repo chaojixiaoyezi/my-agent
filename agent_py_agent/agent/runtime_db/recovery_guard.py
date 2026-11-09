@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import sqlite3
 import threading
@@ -57,15 +58,32 @@ def runtime_db_exclusive_owned(path):
                 (_path(path), (os.getpid(), threading.current_thread())))
 
 
-def request_runtime_db_recovery(path):
+def request_runtime_db_recovery(path, *, reason=None):
     """意图跨进程持久保留；失败的 EX 不清除它，也不借 TTL 推断执行体死亡。"""
     intent = _intent_path(path)
     try:
         with json_io.locked_json_path(intent, blocking=False):
             if not os.path.lexists(intent):
-                json_io.write_private_text_file_atomic_unlocked(intent, '{"schema":"runtime_db_recovery_intent.v1"}\n')
+                payload = {'schema': 'runtime_db_recovery_intent.v1'}
+                if reason is not None:
+                    payload['reason'] = reason
+                json_io.write_private_json_file_atomic_unlocked(intent, payload)
     except BlockingIOError as error:
         raise RuntimeDatabaseDeferred("recovery_intent_busy") from error
+
+
+def runtime_db_corruption_recovery_pending(path):
+    """只有结构异常签发的意图可被写入口自动消费；显式排空与旧未知意图仍须原控制者完成。"""
+    from ..common.nofollow_fs import read_bytes_beneath
+
+    intent = _intent_path(path)
+    try:
+        raw = read_bytes_beneath(intent.parent, (intent.name,), max_bytes=8192)
+        row = json.loads(raw) if raw is not None else None
+    except (OSError, ValueError, TypeError):
+        return False
+    return (isinstance(row, dict) and row.get('schema') == 'runtime_db_recovery_intent.v1'
+            and row.get('reason') == 'sqlite_structural_error')
 
 
 class _WindowsOverlapped(ctypes.Structure):
@@ -240,7 +258,7 @@ def close_runtime_connection(conn):
 def record_runtime_corruption(conn):
     record = _records()[0].get(id(conn))
     if record is not None and record["pid"] == os.getpid() and record["thread"] is threading.current_thread():
-        request_runtime_db_recovery(record["path"])
+        request_runtime_db_recovery(record["path"], reason="sqlite_structural_error")
 
 
 def retire_idle_runtime_connections(path):

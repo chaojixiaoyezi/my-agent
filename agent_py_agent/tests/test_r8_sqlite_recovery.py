@@ -28,7 +28,7 @@ def _database(path):
 def test_false_corruption_intent_is_consumed_at_original_write_entry(tmp_path):
     path = tmp_path / 'local.db'
     _database(path)
-    request_runtime_db_recovery(path)
+    request_runtime_db_recovery(path, reason="sqlite_structural_error")
     with scoped_connection(path, False, lambda: sqlite3.connect(path)) as conn:
         assert conn.execute('SELECT count(*) FROM records').fetchone() == (1499,)
     assert not runtime_db_recovery_pending(path)
@@ -149,3 +149,25 @@ def test_interrupted_dump_retires_only_bound_partial_candidate_and_retries(tmp_p
     with closing(sqlite3.connect(path)) as conn:
         assert conn.execute('SELECT count(*) FROM records').fetchone() == (1499,)
         assert conn.execute('PRAGMA integrity_check').fetchall() == [('ok',)]
+
+
+def test_real_generic_structural_error_marks_only_corruption_recovery_intent(tmp_path):
+    from agent_py_agent.agent.runtime_db.recovery_guard import (
+        runtime_db_corruption_recovery_pending,
+    )
+    path = tmp_path / 'local.db'
+    path.write_bytes(b'not a sqlite database' * 100)
+    factory_calls = []
+    def connect():
+        factory_calls.append(True)
+        return sqlite3.connect(path)
+    with pytest.raises(sqlite3.DatabaseError) as error:
+        with scoped_connection(path, False, connect) as conn:
+            conn.execute('SELECT name FROM sqlite_master').fetchall()
+    assert error.value.sqlite_errorcode & 0xff == 26
+    assert runtime_db_corruption_recovery_pending(path)
+    with pytest.raises(sqlite3.OperationalError) as deferred:
+        with scoped_connection(path, False, connect):
+            raise AssertionError('damaged source must not be admitted')
+    assert deferred.value.sqlite_recovery['status'] == 'requires_recovery'
+    assert factory_calls == [True]

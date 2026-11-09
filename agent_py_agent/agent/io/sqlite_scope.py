@@ -19,6 +19,7 @@ from ..runtime_db.recovery_guard import (
     mark_runtime_connection_idle,
     request_runtime_db_recovery,
     retire_idle_runtime_connections,
+    runtime_db_corruption_recovery_pending,
     runtime_db_exclusive_owned,
     runtime_db_recovery_pending,
 )
@@ -302,7 +303,8 @@ def _scope_connection(scope: _ConnectionScope, key: tuple[int, int, Path, bool],
 @contextmanager
 def scoped_connection(path: Path, read_only: bool, connect: Callable[[], sqlite3.Connection]) -> Iterator[sqlite3.Connection]:
     """原始工厂适配层：每条新物理连接只登记一次代次门。"""
-    if not read_only and runtime_db_recovery_pending(path) and not runtime_db_exclusive_owned(path):
+    if (not read_only and runtime_db_recovery_pending(path) and runtime_db_corruption_recovery_pending(path)
+            and not runtime_db_exclusive_owned(path)):
         from .sqlite_recovery import recover_sqlite_database
 
         report = recover_sqlite_database(path)
@@ -332,7 +334,7 @@ def scoped_guarded_connection(path: Path, read_only: bool, connect: Callable[[],
             yield conn
     except BaseException as error:
         if sqlite_error_details(error).get("category") == "structural":
-            _cleanup_preserving_error(lambda: request_runtime_db_recovery(path), error)
+            _cleanup_preserving_error(lambda: request_runtime_db_recovery(path, reason="sqlite_structural_error"), error)
         raise
 
 

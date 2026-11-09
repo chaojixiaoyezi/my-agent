@@ -328,6 +328,9 @@ def exclusive_generation_backend(monkeypatch):
     native = json_io.fcntl
     if native is not None:
         def lock(descriptor, mode):
+            # 替身只将SH准入改作真实EX竞争；LOCK_UN必须原样传递，UN|EX在Linux是非法模式。
+            if mode & native.LOCK_UN:
+                return native.flock(descriptor, mode)
             attempts.append(descriptor)
             native.flock(descriptor, (mode & ~native.LOCK_SH) | native.LOCK_EX)
 
