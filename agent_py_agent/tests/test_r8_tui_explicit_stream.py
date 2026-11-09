@@ -208,7 +208,7 @@ def test_reset_retracts_candidate_and_only_tool_boundary_can_commit(reason):
     assert _visible(runtime) == ''
     event = {'kind': 'assistant_commentary', 'model_source': {'call_id': 'call'}, 'text': '已采纳工具说明'}
     accepted = turn.on_gateway_event(event)
-    assert accepted is (reason == 'tool_call')
+    assert bool(accepted) is (reason == 'tool_call')
     assert _visible(runtime) == ('已采纳工具说明' if reason == 'tool_call' else '')
 
 
@@ -226,3 +226,177 @@ def test_final_adoption_reuses_candidate_block_and_summary_freezes_once():
     runtime.complete_turn('r', TuiTurnSummary(response_text='校正终稿'))
     blocks = [block for block in runtime.store.snapshot().stable_blocks if block.role == 'assistant']
     assert len(blocks) == 1 and blocks[0].block_id == block_id
+
+
+@pytest.mark.parametrize('retired', [True, False])
+def test_real_wire_rejected_committed_source_never_reaches_plain_fallback(live_gateway, retired):  # noqa: F811
+    paths = live_gateway['paths']
+    runtime = TuiRuntime('rejected-wire')
+    turn = runtime.begin_turn('r')
+    writer = BufferedChunkStreamWriter(gateway_chunk_path(paths, 'r'), text_delta_holdback_chars=8)
+    writer.set_verbose_level('stream')
+    writer.bind_model_call('old')('原候选。' * 100)
+    if retired:
+        writer.reset_model_text('superseded', model_call_id='old')
+    else:
+        # 第一次真实采纳允许显示；后续同来源重放在新call活动时必须拒绝。
+        writer.commit_model_response({'schema': 'assistant_messages.v1', 'source': {'call_id': 'old'},
+            'boundary': 'tools', 'messages': [{'text': '已采纳旧说明'}], 'final_text': ''})
+    writer.bind_model_call('new')('当前候选。' * 100)
+    if retired:
+        writer.commit_model_response({'schema': 'assistant_messages.v1', 'source': {'call_id': 'old',
+            'run_id': 'must-not-leak'}, 'boundary': 'tools',
+            'messages': [{'text': '取消后迟到说明'}], 'final_text': ''})
+    writer.flush()
+    if not retired:
+        rows = gateway_chunk_path(paths, 'r').read_text().splitlines()
+        genuine = next(row for row in rows if json.loads(row).get('kind') == 'assistant_commentary')
+        with gateway_chunk_path(paths, 'r').open('a') as handle:
+            handle.write(genuine + '\n')
+    record = paths.processing / 'r.json'
+    record.write_text(json.dumps({'id': 'r', 'execution_attempt_id': 'a', 'user_id': 'alice', 'channel': 'chat'}))
+    archive_request(paths, record, paths.done, 'r', terminal_response={'ok': True, 'response': '权威终稿',
+        'id': 'r', 'request_id': 'r', 'user_id': 'alice', 'channel': 'chat', 'execution_attempt_id': 'a'})
+    live_gateway['start']()
+    agent = SimpleNamespace(config=SimpleNamespace(gateway_port=live_gateway['port'],
+        gateway_request_timeout=10, gateway_auth_token=''))
+    rejected, fallback = [], []
+    def consume(event):
+        result = turn.on_gateway_event(event)
+        if not result and event['kind'] == 'assistant_commentary':
+            rejected.append(event)
+        return result
+    observer = NetworkGatewayObserver(agent, f"http://127.0.0.1:{live_gateway['port']}")
+    result = observer(GatewayChunkPollRequest(gateway_chunk_path(paths, 'r'), paths.terminal / 'r.json',
+        time.time() + 10, fallback.append, [0], [0], on_event=consume))
+    assert result['ok'] and rejected
+    assert rejected[-1]['model_source'] == {'call_id': 'old'}
+    assert not fallback
+    assert '取消后迟到说明' not in _visible(runtime)
+    runtime.complete_turn('r', TuiTurnSummary(response_text=result['response']))
+    assert _visible(runtime) == ('' if retired else '已采纳旧说明') + '权威终稿'
+
+
+def test_committed_display_identity_window_has_fixed_capacity_without_truncating_final():
+    runtime = TuiRuntime('bounded-identities')
+    turn = runtime.begin_turn('r')
+    _delta(turn, 'call', 0, '候选')
+    for index in range(600):
+        turn.on_gateway_event({'kind': 'assistant_final', 'model_source': {'call_id': 'call'},
+            'text': f'完整采纳版本{index}'})
+    assert len(turn._public_text_commits) == 256
+    assert _visible(runtime) == '完整采纳版本599'
+    final = '完整终稿。' * 300_000
+    runtime.complete_turn('r', TuiTurnSummary(response_text=final))
+    assert _visible(runtime) == final
+
+
+@pytest.mark.parametrize('boundary', ['stop', 'steer', 'finish'])
+@pytest.mark.parametrize('stream_first', [True, False])
+def test_event_controlled_stream_and_control_share_adapter_lock(monkeypatch, boundary, stream_first):
+    import threading
+
+    import agent_py_agent.cli.chat_parts.tui_runtime as module
+
+    runtime = TuiRuntime('interleaving')
+    turn = runtime.begin_turn('r')
+    _delta(turn, 'call', 0, '已有候选')
+    entered, release, attempted, finished = (threading.Event() for _ in range(4))
+    failures = []
+    original = module._consume_public_text_event
+    def consume(adapter, payload):
+        if stream_first:
+            entered.set()
+            assert release.wait(5)
+        return original(adapter, payload)
+    monkeypatch.setattr(module, '_consume_public_text_event', consume)
+    def control():
+        attempted.set()
+        if boundary == 'steer':
+            turn.begin_active_turn_input(('actual-steer',))
+        else:
+            runtime.complete_turn('r', TuiTurnSummary(response_text='完整终稿' if boundary == 'finish' else '',
+                interrupted=boundary == 'stop'))
+        finished.set()
+    def guarded(operation):
+        try:
+            operation()
+        except BaseException as exc:
+            failures.append(exc)
+    def emit():
+        if not stream_first:
+            attempted.set()
+        _delta(turn, 'call', 1, '交错候选')
+    def held_control():
+        with turn._lock:
+            control()
+            entered.set()
+            assert release.wait(5)
+    first = threading.Thread(target=lambda: guarded(emit if stream_first else held_control))
+    second = threading.Thread(target=lambda: guarded(control if stream_first else emit))
+    try:
+        first.start()
+        assert entered.wait(5)
+        attempted.clear()
+        second.start()
+        assert attempted.wait(5)
+        # 第一方明确持有原adapter锁；无需靠睡眠猜测交错点。
+        acquired = turn._lock.acquire(blocking=False)
+        if acquired:
+            turn._lock.release()
+        assert not acquired
+        if stream_first:
+            assert not finished.is_set()
+        release.set()
+        first.join(5)
+        second.join(5)
+        assert not first.is_alive() and not second.is_alive() and not failures
+        assert _visible(runtime) == ('完整终稿' if boundary == 'finish' else '')
+        _delta(turn, 'call', 2, '晚到不能复活')
+        assert _visible(runtime) == ('完整终稿' if boundary == 'finish' else '')
+    finally:
+        release.set()
+        first.join(5)
+        if second.ident is not None:
+            second.join(5)
+
+
+@pytest.mark.parametrize('kind', ['assistant_final', 'assistant_commentary'])
+def test_explicit_rejection_never_falls_back_but_optional_observer_keeps_plain_contract(kind):
+    from agent_py_agent.agent.gateway_parts.response_renderer import StreamEventDisposition
+    from agent_py_agent.cli.chat_parts.gateway_client import _emit_chunk_line
+
+    row = json.dumps({'kind': kind, 'text': '完整公开正文'})
+    plain = []
+    assert _emit_chunk_line(row, plain.append, lambda event: StreamEventDisposition.REJECTED) == (1, 0)
+    assert not plain
+    _emit_chunk_line(row, plain.append, lambda event: None)
+    _emit_chunk_line(row, plain.append)
+    _emit_chunk_line(row, plain.append, lambda event: False)
+    assert plain == ['完整公开正文'] * 3
+
+
+def test_tool_progress_before_full_adoption_only_retracts_tentative_text():
+    runtime = TuiRuntime('tool-adoption')
+    turn = runtime.begin_turn('r')
+    _delta(turn, 'call', 0, '工具前候选')
+    turn.write_progress({'phase': 'started', 'tool': 'read_file', 'round': 1, 'call_index': 0})
+    assert _visible(runtime) == ''
+    assert turn.on_gateway_event({'kind': 'assistant_commentary', 'model_source': {'call_id': 'call'},
+        'text': '完整已采纳工具说明'}) is True
+    assert _visible(runtime) == '完整已采纳工具说明'
+
+
+def test_superseded_predecessor_does_not_reject_next_tool_call_without_any_delta():
+    runtime = TuiRuntime('superseded-next')
+    turn = runtime.begin_turn('r')
+    _delta(turn, 'old', 0, '旧候选')
+    turn.on_gateway_event({'kind': 'assistant_text_reset', 'model_call_id': 'old', 'reason': 'superseded'})
+    assert not turn._public_text_call
+    # 工具调用可没有任何正文delta；宿主仍先发该call的tool reset再采纳完整说明。
+    turn.on_gateway_event({'kind': 'assistant_text_reset', 'model_call_id': 'next', 'reason': 'tool_call'})
+    assert turn.on_gateway_event({'kind': 'assistant_commentary', 'model_source': {'call_id': 'next'},
+        'text': '新工具调用完整说明'}) is True
+    assert _visible(runtime) == '新工具调用完整说明'
+    assert not turn.on_gateway_event({'kind': 'assistant_commentary', 'model_source': {'call_id': 'old'},
+        'text': '旧调用不可复活'})

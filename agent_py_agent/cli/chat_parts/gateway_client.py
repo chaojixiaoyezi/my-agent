@@ -19,6 +19,7 @@ from ...agent.gateway_parts.paths import gateway_chunk_path, gateway_chunk_path_
 from ...agent.gateway_parts.request_client import GatewayAskParams, submit_gateway_ask
 from ...agent.gateway_parts.response_renderer import (
     GatewayResponsePollState,
+    StreamEventDisposition,
     current_context_token_estimate,
     project_gateway_stream_chunk,
     read_gateway_terminal_response_file_when_ready,
@@ -352,7 +353,11 @@ def _emit_chunk_line(
         return 1, 0
     if callable(on_event):
         try:
-            if on_event(cobj) is True:
+            consumed = on_event(cobj)
+            if consumed is StreamEventDisposition.REJECTED:
+                # typed消费者明确拒绝的正文不能绕回plain渲染；拒绝也不证明终稿已展示。
+                return 1, 0
+            if consumed is True:
                 terminal = str(cobj.get("kind") or "") == "assistant_final"
                 return 1, 1 if terminal else 0
         except Exception as exc:  # noqa: BLE001 UI consumer 失败不能中断 Gateway 主链

@@ -27,6 +27,7 @@ from ...agent.conversation.display_checkpoint import gateway_display_recovery
 from ...agent.conversation.model_metrics import newer_model_metrics, public_model_metrics
 from ...agent.conversation.tool_input_progress import ToolInputProgressEventProjector
 from ...agent.conversation.turn_resume_notice import turn_resumed_notice_text
+from ...agent.gateway_parts.response_renderer import StreamEventDisposition
 from .tui_events import JournalAppendResult, TuiEvent, TuiEventSequencer
 from .tui_identity_window import TuiIdentityWindow
 from .tui_permission_queue import (
@@ -2276,7 +2277,7 @@ class TuiTurnEventAdapter:
         self._public_text_calls: dict[str, int] = {}
         self._public_text_call = ""
         self._public_text_work = 0
-        self._public_text_commits: set[tuple[str, str, str]] = set()
+        self._public_text_commits = TuiIdentityWindow(maximum=256)
         self._terminal_response_text = ""
         self._displayed_response_text = ""
         self._display_block_ids: set[str] = set()
@@ -2744,13 +2745,13 @@ class TuiTurnEventAdapter:
                 if self._complete_thinking():
                     self._late_thinking_completion_expected = True
                 self._tool_input_projector.clear()
-            _retire_public_text_candidate(self)
+            _retire_public_text_candidate(self, reject_commit=False)
             self._complete_active_assistant(process=True)
             self._publish_tool_progress(progress)
 
     # LLM: 退休Gateway回合仅可收口仍保留的精确审批；其余typed行须命中当前显示代次，不由正文猜类型。
     # 函数用途: 接收一个 Gateway chunk object 并映射为 TUI event。
-    def on_gateway_event(self, payload: dict[str, Any]) -> bool:
+    def on_gateway_event(self, payload: dict[str, Any]) -> bool | StreamEventDisposition:
         with self._permissions.deferred_release():
             with self._lock, self.runtime._lock:
                 if not self._display_current():
@@ -2760,7 +2761,8 @@ class TuiTurnEventAdapter:
                             and overlay is not None and pending is not None
                             and payload.get("permission_id") == overlay.permission_id == pending.request.permission_id):
                         return self._permissions.accept_gateway_resolution(payload)
-                    return False
+                    return (StreamEventDisposition.REJECTED if payload.get("kind") in
+                            {"assistant_commentary", "assistant_final"} else False)
                 return _consume_gateway_turn_event(self, payload)
 
     # LLM: finalize 只使用结构化 summary；技术失败仍保留已收到的响应正文，失败提示另列，不能伪装完整成功。
@@ -3057,11 +3059,12 @@ class TuiTurnEventAdapter:
 def _consume_gateway_turn_event(
     adapter: TuiTurnEventAdapter,
     payload: dict[str, Any],
-) -> bool:
+) -> bool | StreamEventDisposition:
     kind = str(payload.get("kind") or "")
     with adapter.runtime._lock:
         if not _accept_thread_frame(adapter.runtime, payload, kind, own_stream=True):
-            return False
+            return (StreamEventDisposition.REJECTED if kind in
+                    {"assistant_commentary", "assistant_final"} else False)
     if kind == "tool_progress" and isinstance(payload.get("progress"), dict):
         adapter.write_progress(dict(payload["progress"]))
         return True
@@ -3537,10 +3540,11 @@ def _clear_public_text_candidate(adapter: TuiTurnEventAdapter) -> None:
         adapter._model_candidate_text = ""
 
 
-def _retire_public_text_candidate(adapter: TuiTurnEventAdapter) -> None:
+def _retire_public_text_candidate(adapter: TuiTurnEventAdapter, *, reject_commit: bool = True) -> None:
     _clear_public_text_candidate(adapter)
     if adapter._public_text_call:
-        adapter._public_text_calls[adapter._public_text_call] = -2
+        if adapter._public_text_calls.get(adapter._public_text_call) != -2:
+            adapter._public_text_calls[adapter._public_text_call] = -2 if reject_commit else -1
         adapter._public_text_call = ""
 
 
@@ -3562,6 +3566,8 @@ def _consume_public_text_event(adapter: TuiTurnEventAdapter, payload: dict[str, 
             return False
         if adapter._public_text_call == call:
             _clear_public_text_candidate(adapter)
+            if reason != "retry":
+                adapter._public_text_call = ""
         calls[call] = 0 if reason == "retry" else (-1 if reason == "tool_call" else -2)
         return True
     seq = payload.get("seq")
@@ -3606,15 +3612,15 @@ def _consume_public_text_event(adapter: TuiTurnEventAdapter, payload: dict[str, 
 
 # LLM: committed入口在defer后复用原thinking完成/late标记；fallback显式public_stream，final待summary唯一freeze，不覆写stable或续接旧call正文。
 # 函数用途: 将确认过程和终答落到原TUI块，终态summary可更正同一final块而不双发。
-def _consume_committed_assistant_event(adapter: TuiTurnEventAdapter, payload: dict[str, Any]) -> bool:
+def _consume_committed_assistant_event(adapter: TuiTurnEventAdapter, payload: dict[str, Any]) -> bool | StreamEventDisposition:
     kind = str(payload.get("kind") or "")
     source = payload.get("model_source")
     source_call = source.get("call_id") if isinstance(source, dict) else None
     if isinstance(source_call, str) and source_call in adapter._public_text_calls:
         if adapter._public_text_calls[source_call] == -2:
-            return False
+            return StreamEventDisposition.REJECTED
         if adapter._public_text_call and source_call != adapter._public_text_call:
-            return False
+            return StreamEventDisposition.REJECTED
         key = (source_call, kind, hashlib.sha256(str(payload.get("text") or "").encode()).hexdigest())
         if key in adapter._public_text_commits:
             return True

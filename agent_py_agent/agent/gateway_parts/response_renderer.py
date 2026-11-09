@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,15 @@ from .request_errors import gateway_client_error_message, gateway_response_load_
 @dataclass
 class GatewayResponsePollState:
     stat_signature: tuple[int, int, int, int, int] | None = None
+
+
+class StreamEventDisposition(Enum):
+    """显式拒绝不能降为不支持事件；falsey仍保消费者原布尔查询语义。"""
+
+    REJECTED = "rejected"
+
+    def __bool__(self) -> bool:
+        return False
 
 
 def project_gateway_stream_chunk(payload: dict[str, Any]) -> tuple[str, bool]:

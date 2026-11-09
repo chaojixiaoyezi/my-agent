@@ -567,6 +567,7 @@ def _project_public_progress_rows(lines, *, channel="", include=frozenset(), pre
             ).strip()
             if text:
                 events.append({"kind": str(row["kind"]), "text": text,
+                               **_public_committed_call(row, include=include),
                                **_progress_preview_limit(row),
                                **_progress_update_time(row),
                                **({"level": "stream"} if row.get("verbose_level") == "stream" else {})})
@@ -609,6 +610,17 @@ def _project_public_progress_rows(lines, *, channel="", include=frozenset(), pre
             continue
         events.append({"level": level, **progress, **_progress_preview_limit(row), **_progress_update_time(row), "kind": "tool_progress"})
     return events, next_cursor
+
+
+def _public_committed_call(row: dict, *, include: frozenset[str]) -> dict:
+    """仅透传公开候选已有的调用编号，不公开其余执行来源字段。"""
+    if not include.intersection({"assistant_text_delta", "assistant_text_reset", "assistant_text_done"}):
+        return {}
+    source = row.get("model_source")
+    call = source.get("call_id") if isinstance(source, dict) else None
+    if isinstance(call, str) and call.strip() and len(call) <= 240:
+        return {"model_source": {"call_id": call}}
+    return {}
 
 
 # LLM: 扩展事件必须显式订阅；只投影合同键，正文增量仍由 writer 的跨块脱敏门负责。
