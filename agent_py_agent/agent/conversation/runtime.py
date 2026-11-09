@@ -1784,15 +1784,12 @@ def _background_task_link_status(
     if not task_id or selected_store is None:
         return ""
     try:
-        links, load_errors = selected_store.tasks.list_report(request.thread_id)
+        link, error = selected_store.tasks.link_report(request.thread_id, task_id)
     except Exception:
         return ""
-    if load_errors:
+    if error is not None or link is None:
         return ""
-    for link in links:
-        if str(getattr(link, "task_id", "") or "").strip() == task_id:
-            return str(getattr(link, "status", "") or "").strip().lower()
-    return ""
+    return str(getattr(link, "status", "") or "").strip().lower()
 
 
 def _internal_subagent_continuation(request: BackgroundRunRequest) -> bool:
@@ -2951,14 +2948,10 @@ def _background_conversation_task_link(agent: object | None, thread_id: str, tas
     if store is None or not thread_id or not task_id:
         return None
     try:
-        links, errors = store.tasks.list_report(thread_id)
+        link, error = store.tasks.link_report(thread_id, task_id)
     except Exception:
         return None
-    if errors:
-        return None
-    return next(
-        (item for item in links if str(getattr(item, "task_id", "") or "") == task_id), None
-    )
+    return link if error is None else None
 
 
 def ledger_open_progress_item_count(agent: object | None, task_id: str) -> int:
@@ -5226,22 +5219,11 @@ def _background_claim_scope_id(
     if not selected_thread or not selected_task:
         return ""
     try:
-        if callable(getattr(getattr(store, 'tasks', None), 'list_report', None)):
-            links, errors = store.tasks.list_report(selected_thread)
-            if errors:
-                return ""
-        else:
-            links = store.tasks.list(selected_thread)
+        link, error = store.tasks.link_report(selected_thread, selected_task)
+        if error is not None:
+            return ""
     except Exception:
         return ""
-    link = next(
-        (
-            item
-            for item in links
-            if str(getattr(item, "task_id", "") or "").strip() == selected_task
-        ),
-        None,
-    )
     if (
         link is None
         or str(getattr(link, "cancellation_scope", "") or "").strip().lower() != "detached"

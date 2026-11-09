@@ -550,15 +550,10 @@ def _sync_conversation_task_workspace(agent, run_params, task_id: str, task_root
 
 def _conversation_task_link(store: object, thread_id: str, task_id: str):
     try:
-        links, errors = store.tasks.list_report(thread_id)
+        link, error = store.tasks.link_report(thread_id, task_id)
     except Exception:
         return None
-    if errors:
-        return None
-    return next(
-        (item for item in links if str(getattr(item, "task_id", "") or "") == task_id),
-        None,
-    )
+    return link if error is None else None
 
 
 # LLM: 标题优先显式结构化值和 goal，普通运行回退 root prompt，不能用 compact 续接提示覆盖原任务名。

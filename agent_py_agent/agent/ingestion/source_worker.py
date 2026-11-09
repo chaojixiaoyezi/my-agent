@@ -1729,20 +1729,13 @@ def audit_parent_reconcile_state(
         thread_id = str(getattr(thread, "thread_id", "") or "").strip()
         if not thread_id:
             return False, "inactive"
-        if callable(getattr(getattr(store, 'tasks', None), 'list_report', None)):
-            links, errors = store.tasks.list_report(thread_id)
-            if errors:
-                return False, "unavailable"
-        else:
-            links = store.tasks.list(thread_id)
+        link, error = store.tasks.link_report(thread_id, selected)
+        if error is not None:
+            return False, "unavailable"
     except Exception:
         return False, "unavailable"
-    matches = [
-        link for link in links if str(getattr(link, "task_id", "") or "").strip() == selected
-    ]
-    if len(matches) != 1:
-        return False, "unavailable" if len(matches) > 1 else "inactive"
-    link = matches[0]
+    if link is None:
+        return False, "inactive"
     # ``expires_at`` is the collection deadline, not the destruction time of
     # already-durable work.  The harvester performs its final boundary read and
     # stops; the exact active Audit link continues authorizing its source

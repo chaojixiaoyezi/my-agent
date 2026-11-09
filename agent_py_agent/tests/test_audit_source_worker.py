@@ -562,7 +562,14 @@ def test_expired_active_parent_remains_authorized_while_durable_backlog_drains(
         work_kind="audit",
         expires_at=99.0,
     )
-    store = SimpleNamespace(tasks=SimpleNamespace(thread_for=lambda _task_id: SimpleNamespace(thread_id="thread-expired"), list=lambda _thread_id: [link]))
+    store = SimpleNamespace(tasks=SimpleNamespace(
+        thread_for=lambda _task_id: SimpleNamespace(thread_id="thread-expired"),
+        link_report=lambda thread_id, task_id: (
+            (link, None)
+            if (thread_id, task_id) == ("thread-expired", link.task_id)
+            else (None, None)
+        ),
+    ))
     agent = SimpleNamespace(conversation_store=store)
     monkeypatch.setattr(source_worker_module.time, "time", lambda: 100.0)
 

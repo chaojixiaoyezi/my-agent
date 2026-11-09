@@ -312,21 +312,17 @@ def _matching_audit_prepare_link(
     work_name: str,
 ) -> object | None:
     try:
-        links, errors = store.tasks.list_report(thread_id)
+        link, error = store.tasks.link_report(thread_id, task_id)
     except Exception:
         return None
-    if errors:
+    if (
+        error is not None
+        or link is None
+        or str(getattr(link, "work_kind", "") or "").strip().lower() != "audit"
+        or str(getattr(link, "work_name", "") or "").strip() != work_name
+    ):
         return None
-    return next(
-        (
-            item
-            for item in links
-            if str(getattr(item, "task_id", "") or "").strip() == task_id
-            and str(getattr(item, "work_kind", "") or "").strip().lower() == "audit"
-            and str(getattr(item, "work_name", "") or "").strip() == work_name
-        ),
-        None,
-    )
+    return link
 
 
 def _audit_prepare_named_work(
@@ -443,21 +439,18 @@ def _active_named_audit_facts(
     if store is None:
         return {}
     try:
-        if callable(getattr(getattr(store, 'tasks', None), 'list_report', None)):
-            links, errors = store.tasks.list_report(thread_id)
-            if errors:
-                return (
-                    {
-                        "task_id": task_id,
-                        "work_kind": "audit",
-                        "state_available": False,
-                        "continues_without_more_user_input": True,
-                    }
-                    if str(attrs.get(CONVERSATION_WORK_KIND_ATTR) or "").lower() == "audit"
-                    else {}
-                )
-        else:
-            links = store.tasks.list(thread_id)
+        link, error = store.tasks.link_report(thread_id, task_id)
+        if error is not None:
+            return (
+                {
+                    "task_id": task_id,
+                    "work_kind": "audit",
+                    "state_available": False,
+                    "continues_without_more_user_input": True,
+                }
+                if str(attrs.get(CONVERSATION_WORK_KIND_ATTR) or "").lower() == "audit"
+                else {}
+            )
     except Exception:
         return (
             {
@@ -469,17 +462,11 @@ def _active_named_audit_facts(
             if str(attrs.get(CONVERSATION_WORK_KIND_ATTR) or "").lower() == "audit"
             else {}
         )
-    link = next(
-        (
-            item
-            for item in links
-            if str(getattr(item, "task_id", "") or "").strip() == task_id
-            and str(getattr(item, "status", "") or "").strip().lower() == "active"
-            and str(getattr(item, "work_kind", "") or "").strip().lower() == "audit"
-        ),
-        None,
-    )
-    if link is None:
+    if (
+        link is None
+        or str(getattr(link, "status", "") or "").strip().lower() != "active"
+        or str(getattr(link, "work_kind", "") or "").strip().lower() != "audit"
+    ):
         return {}
     now = time.time()
     try:
