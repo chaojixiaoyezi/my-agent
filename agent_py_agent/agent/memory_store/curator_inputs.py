@@ -396,8 +396,7 @@ def collect_curator_inputs(
         config.max_input_chars
         - len(json.dumps([item.to_model() for item in messages], ensure_ascii=False)),
     )
-    audit_thread_ids = _excluded_audit_thread_ids(message_source)
-    if audit_thread_ids is None:
+    if message_source.excluded_conversation_ids is None:
         # fail-closed：名单不可读时本轮不消费任何 audit，也不推进游标，修复后整段重放。
         audit_events, audit_errors, skipped_audit_cursor = [], [], ""
     else:
@@ -407,7 +406,13 @@ def collect_curator_inputs(
             limit=config.batch_message_limit,
             max_chars=remaining_chars,
         )
-        audit_events, skipped_audit_cursor = _filter_excluded_audit(audit_events, audit_thread_ids)
+        audit_thread_ids, scope_errors = _audit_window_excluded_thread_ids(message_source, audit_events)
+        audit_errors.extend(scope_errors)
+        if audit_thread_ids is None:
+            # 未核对的身份整页保留，不能借后面的健康事件把原游标跨过去。
+            audit_events, skipped_audit_cursor = [], ""
+        else:
+            audit_events, skipped_audit_cursor = _filter_excluded_audit(audit_events, audit_thread_ids)
     tool_reference_errors: list[dict[str, object]] = []
     if tool_reference_source is not None and audit_events:
         refs, tool_reference_errors = tool_reference_source.read(
@@ -656,8 +661,44 @@ def _thread_learning_excluded(thread: object) -> bool:
     )
 
 
+# 原有界候选页只点查不同的非空线程身份；空thread_id宿主事件保留原合同，不枚举库存。
+# 精确归属的坏线程沿原隔离规则跳过；缺源、无身份错误或错配仍未知，整页不消费。
+def _audit_window_excluded_thread_ids(
+    source: CuratorMessageSource, events: list[CuratorAuditInput],
+) -> tuple[frozenset[str] | None, list[dict[str, object]]]:
+    if source.excluded_conversation_ids is None:
+        return None, []
+    thread_ids = sorted({event.thread_id for event in events if event.thread_id})
+    if not thread_ids:
+        return frozenset(), []
+    loader = getattr(source.conversation_store.threads, 'load_report', None)
+    excluded = set()
+    for thread_id in thread_ids:
+        failure = {"context": "memory_curator.audit_thread", "error_code": "AUDIT_THREAD_UNAVAILABLE",
+                   "error_type": "LookupError", "thread_id": thread_id, "scope_resolution": "thread_unknown"}
+        if not callable(loader):
+            return None, [failure]
+        try:
+            thread, error = loader(thread_id)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            return None, [{**failure, "error_type": type(exc).__name__}]
+        if error is not None:
+            if not isinstance(error, dict) or error.get('thread_id') != thread_id:
+                return None, [failure]
+            excluded.add(thread_id)
+            continue
+        if thread is None:
+            return None, [failure]
+        if str(getattr(thread, 'thread_id', '') or '') != thread_id:
+            return None, [{**failure, "scope_resolution": "thread_mismatch"}]
+        if (_thread_learning_excluded(thread)
+                or thread_is_excluded(thread, source.excluded_conversation_ids)):
+            excluded.add(thread_id)
+    return frozenset(excluded), []
+
+
 # LLM: audit与消息共用名单及线程metadata门；逐记录读错只排除该线程，名单或无身份错误仍阻断游标。
-# 函数用途: 排除只读、不可学习及不可读线程的审计事件，不让一个坏线程卡住其它线程。
+# 函数用途: 显式全量历史请求的排除集合；普通有界审计窗口使用上方规范点查。
 def _excluded_audit_thread_ids(source: CuratorMessageSource) -> frozenset[str] | None:
     if source.excluded_conversation_ids is None:
         return None
