@@ -1,7 +1,6 @@
 """本地归档剪枝、部分搜索结果及真实静默管道的有界回收，不访问用户数据。"""
 from __future__ import annotations
 
-import gc
 import json
 import os
 import shlex
@@ -11,6 +10,8 @@ import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from threading import Thread
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,28 +20,19 @@ from agent_py_agent.agent.tooling import _filesystem_helpers as helpers
 from agent_py_agent.agent.tooling import _filesystem_search as search
 from agent_py_agent.agent.tooling import shell
 from agent_py_agent.agent.tooling._filesystem_read import FileSystemAccessOptions
+from agent_py_agent.tests.support.fd_lifetime import assert_fd_unchanged, fd_baseline
 
 ARCHIVES = ('runs', 'compact', 'memory_archive', 'blobs', '.background_jobs', 'releases',
             '.git', 'node_modules', '__pycache__', '.venv')
 
 
-def _fd_count():
-    gc.collect()
-    directory = Path('/dev/fd') if Path('/dev/fd').is_dir() else Path('/proc/self/fd')
-    if not directory.is_dir():
-        return None
-    with os.scandir(directory) as entries:
-        return len(list(entries))
-
-
 @pytest.fixture
 def fd_balance():
-    gc.collect()
-    before = _fd_count()
+    directory = Path('/dev/fd') if Path('/dev/fd').is_dir() else Path('/proc/self/fd')
+    before = fd_baseline() if directory.is_dir() else None
     yield
     if before is not None:
-        gc.collect()
-        assert _fd_count() - before <= 0
+        assert_fd_unchanged(before)
 
 
 def _tool(root, kind):
@@ -63,7 +55,8 @@ def test_runtime_archives_are_pruned_before_descent_but_explicit_paths_work(tmp_
     if backend == 'rg' and not shutil.which('rg'):
         pytest.skip('本机没有 rg；Python 路径由另一个参数覆盖')
     if backend == 'python':
-        monkeypatch.setattr(shutil, 'which', lambda _name: None)
+        for module in (find, search):
+            monkeypatch.setattr(module, 'shutil', SimpleNamespace(**(vars(shutil) | {'which': lambda _name: None})))
     hidden = [tmp_path / name for name in ARCHIVES]
     hidden.append(tmp_path / 'owners/local/main/workspace/runtime')
     for directory in hidden:
@@ -77,7 +70,7 @@ def test_runtime_archives_are_pruned_before_descent_but_explicit_paths_work(tmp_
         entered.append(Path(path))
         return scandir(path)
 
-    monkeypatch.setattr(helpers.os, 'scandir', record)
+    monkeypatch.setattr(helpers, 'os', SimpleNamespace(**(vars(os) | {'scandir': record})))
     tool = _tool(tmp_path, kind)
     result = tool.execute(_request(kind))
     assert result.ok and 'visible.txt' in result.output and 'hidden.txt' not in result.output
@@ -107,9 +100,12 @@ def test_python_scan_budget_keeps_partial_matches_and_offending_directory(tmp_pa
 
     tool = _tool(tmp_path, kind)
     with monkeypatch.context() as patch:
-        patch.setattr(shutil, 'which', lambda _name: None)
-        patch.setattr(helpers.time, 'monotonic', lambda: clock[0])
-        patch.setattr(helpers.os, 'scandir', advance)
+        fake_time = SimpleNamespace(**(vars(time) | {'monotonic': lambda: clock[0]}))
+        for module in (find, search):
+            patch.setattr(module, 'shutil', SimpleNamespace(**(vars(shutil) | {'which': lambda _name: None})))
+            patch.setattr(module, 'time', fake_time)
+        patch.setattr(helpers, 'time', fake_time)
+        patch.setattr(helpers, 'os', SimpleNamespace(**(vars(os) | {'scandir': advance})))
         result = tool.execute(_request(kind))
     facts = _facts(result, kind)
     assert result.ok and 'a/match.txt' in result.output and 'z/late.txt' not in result.output
@@ -124,25 +120,52 @@ def test_snapshot_directory_fingerprint_is_also_budgeted(tmp_path, monkeypatch, 
     for index in range(32):
         (tmp_path / f'{index}.txt').write_text('needle\n', encoding='utf-8')
     scandir, clock, seen = os.scandir, [0.0], []
+    lifecycle = []
 
     @contextmanager
     def timed_entries(path):
-        with scandir(path) as entries:
-            def ticks():
-                for entry in entries:
-                    seen.append(entry.name)
-                    clock[0] += 1
-                    yield entry
-            yield ticks()
+        lifecycle.append('opened')
+        try:
+            with scandir(path) as entries:
+                def ticks():
+                    for entry in entries:
+                        seen.append(entry.name)
+                        clock[0] += 1
+                        yield entry
+                yield ticks()
+        finally:
+            lifecycle.append('closed')
 
     tool = _tool(tmp_path, 'find')
+    # 同进程不相关消费者必须仍可直接迭代系统scandir、读取真实单调时钟。
+    observed = []
+    started = time.monotonic()
+    def unrelated_observer():
+        try:
+            entries = os.scandir(tmp_path)
+            try:
+                next(entries)
+            finally:
+                close = getattr(entries, 'close', None)
+                if callable(close):
+                    close()
+            observed.append(time.monotonic() >= started)
+        except Exception as error:
+            observed.append(type(error).__name__)
     with monkeypatch.context() as patch:
-        patch.setattr(find.time, 'monotonic', lambda: clock[0])
-        patch.setattr(find.os, 'scandir', timed_entries)
+        fake_time = SimpleNamespace(**(vars(time) | {'monotonic': lambda: clock[0]}))
+        patch.setattr(find, 'time', fake_time)
+        patch.setattr(helpers, 'time', fake_time)
+        patch.setattr(find, 'os', SimpleNamespace(**(vars(os) | {'scandir': timed_entries})))
+        observer = Thread(target=unrelated_observer)
+        observer.start()
+        observer.join(2)
+        assert not observer.is_alive() and observed == [True]
         result = tool.execute(_request('find', snapshot=True))
     assert not result.ok and result.error_code == 'STALE_VERSION'
     assert result.result_envelope['snapshot']['limit_reason'] == 'validation_budget'
     assert len(seen) < 32 and '缩小' in result.output
+    assert lifecycle == ['opened', 'closed']
 
 
 @pytest.mark.parametrize('kind', ['find', 'search', 'count'])
@@ -154,7 +177,7 @@ def test_native_search_silent_pipe_has_a_deadline_and_reaps(tmp_path, monkeypatc
     monotonic = time.monotonic
     monkeypatch.setattr(helpers, '_FALLBACK_SCAN_MAX_SECONDS', 0.8)
     if kind == 'find':
-        monkeypatch.setattr(shutil, 'which', lambda _name: 'rg')
+        monkeypatch.setattr(find, 'shutil', SimpleNamespace(**(vars(shutil) | {'which': lambda _name: 'rg'})))
     event = str(source) if kind == 'find' else json.dumps({'type': 'match', 'data': {
         'path': {'text': str(source)}, 'lines': {'text': 'needle\n'}, 'line_number': 1}})
 

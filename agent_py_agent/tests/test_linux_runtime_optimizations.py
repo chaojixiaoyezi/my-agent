@@ -5,6 +5,7 @@ import os
 import stat
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -153,7 +154,7 @@ def test_find_prunes_runtime_before_descent(tmp_path, monkeypatch, backend):
         assert Path(path) != runtime, "runtime must be pruned before scandir"
         return original(path)
 
-    monkeypatch.setattr(helpers.os, "scandir", scandir)
+    monkeypatch.setattr(helpers, "os", SimpleNamespace(**(vars(os) | {"scandir": scandir})))
     if backend == "python":
         monkeypatch.setattr(find, "_find_directory_matches_with_rg", lambda *_: None)
     params = {"pattern": "*.py", "include_ignored": False, "snapshot": backend == "snapshot"}

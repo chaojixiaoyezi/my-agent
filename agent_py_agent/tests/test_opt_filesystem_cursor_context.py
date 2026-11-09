@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -282,7 +283,7 @@ def test_rg_only_receives_admitted_files(tmp_path, monkeypatch, kind):
         return original_popen(args, **kwargs)
 
     monkeypatch.setattr(tool, 'resolve_path', resolve)
-    monkeypatch.setattr(helpers.os, 'scandir', scandir)
+    monkeypatch.setattr(helpers, 'os', SimpleNamespace(**(vars(helpers.os) | {'scandir': scandir})))
     monkeypatch.setattr(subprocess, 'Popen', popen)
     params = {'pattern': '*.txt'} if kind == 'find' else {'query': 'needle', 'literal': True}
     result = tool.execute(params)
