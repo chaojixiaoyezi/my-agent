@@ -401,8 +401,7 @@ def _start_background_process_reaper(
 # 函数用途: 回收后台派工子进程，并把"未进入runner就退出"收敛为持久启动失败。
 def _reap_then_settle_unactivated_exit(agent, request: _BackgroundDispatchRequest, process: subprocess.Popen,
                                      run_attempts=None) -> None:
-    _reap_background_process(agent, request.launch_id, process)
-    returncode = getattr(process, "returncode", None)
+    returncode = _reap_background_process(agent, request.launch_id, process)
     identity = getattr(process, '_my_agent_background_log_identity', None)
     if type(returncode) is int and run_attempts and isinstance(identity, tuple) and len(identity) == 2:
         from ....user_space.runtime_paths import runtime_owner_root
@@ -434,16 +433,18 @@ def _reap_then_settle_unactivated_exit(agent, request: _BackgroundDispatchReques
             agent, replace(request, run_ids=pending), process, returncode, []))
 
 
-def _reap_background_process(agent, launch_id: str, process: subprocess.Popen) -> None:
+def _reap_background_process(agent, launch_id: str, process: subprocess.Popen) -> int | None:
     try:
-        returncode = int(process.wait())
+        returncode = process.wait()
+        if type(returncode) is not int:
+            raise RuntimeError("background_wait_returncode_unavailable")
         error = ""
     except Exception as exc:
         returncode = None
         error = f"{type(exc).__name__}: {exc}"
     registry = getattr(agent, "_background_subagent_dispatches", None)
     if not isinstance(registry, dict):
-        return
+        return returncode
     item = dict(registry.get(launch_id) or {})
     item.update(
         {
@@ -455,6 +456,7 @@ def _reap_background_process(agent, launch_id: str, process: subprocess.Popen) -
     if error:
         item["reap_error"] = error
     registry[launch_id] = item
+    return returncode
 
 
 # LLM: 通道失败也须按原 launch/attempt 条件提交，不能用失败回执覆盖新轮任务状态。

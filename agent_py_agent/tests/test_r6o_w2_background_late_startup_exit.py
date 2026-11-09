@@ -27,7 +27,7 @@ def _agent(statuses, *, broken=()):
 @pytest.fixture
 def settled(monkeypatch):
     calls = []
-    monkeypatch.setattr(dispatch, "_reap_background_process", lambda agent, launch_id, process: None)
+    monkeypatch.setattr(dispatch, "_reap_background_process", lambda agent, launch_id, process: process.returncode)
     monkeypatch.setattr(dispatch, "_background_process_startup_failure", calls.append)
     return calls
 

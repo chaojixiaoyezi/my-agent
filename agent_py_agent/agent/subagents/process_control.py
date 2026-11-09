@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import asdict, dataclass
 
 # SIGTERM 后给进程的清理宽限。
@@ -31,7 +32,7 @@ def running_in_dispatch_subprocess() -> bool:
     return bool(os.environ.get(RUNNER_SUBPROCESS_ENV))
 
 
-# LLM: 存活探测唯一入口(kill -0 形态,长期助手 _is_host_pid_alive 同款)。
+# LLM: 判活只观察；真实wait只属于持原Popen的宿主reaper，不能偷走child退出状态导致其wait伪报0。
 #   先尝试非阻塞 reap:被信号终止的直接子进程在父进程 wait 前是 zombie,
 #   kill -0 对 zombie 仍成功——出口回收恰好发生在父进程内(dispatch 进程是
 #   主代理的直接子进程),不 reap 会把已死进程误判为活、白等宽限再误升 SIGKILL。
@@ -40,10 +41,13 @@ def running_in_dispatch_subprocess() -> bool:
 def is_pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
-    if _reap_if_exited_child(pid):
-        return False
     if _linux_process_is_zombie(pid):
         return False
+    if sys.platform == "darwin":
+        from ..tooling.process_registry import _process_is_zombie
+
+        if _process_is_zombie(pid):
+            return False
     try:
         os.kill(pid, 0)
     except PermissionError:
@@ -77,20 +81,6 @@ def _linux_process_is_zombie(pid: int) -> bool:
     tail = stat[closing_paren + 1 :].strip()
     state = tail.split(maxsplit=1)[0] if tail else ""
     return state in {"Z", "X"}
-
-
-# LLM: 非阻塞回收:waitpid(WNOHANG) 对活着的子进程返回 (0,0) 无副作用,对已
-#   退出未回收的子进程 reap 并返回 True;非自己子进程(跨进程回收场景)抛
-#   ChildProcessError,按 False 处理交给 kill -0 判定。
-# 函数用途: 自己拉起的子进程死了先收尸,别把僵尸当活人。
-def _reap_if_exited_child(pid: int) -> bool:
-    if not hasattr(os, "waitpid") or not hasattr(os, "WNOHANG"):
-        return False
-    try:
-        waited, _status = os.waitpid(pid, os.WNOHANG)
-    except (ChildProcessError, OSError):
-        return False
-    return waited == pid
 
 
 # LLM: 调用方须先证明该独立宿主没有应保留的活动兄弟；本入口会终止整棵后代树。
