@@ -6,6 +6,8 @@ import json
 import os
 import shutil
 import sys
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -259,19 +261,58 @@ def test_journal_pages_by_complete_physical_lines_and_byte_offsets(tmp_path):
 
 # LLM: A failed append cannot undo committed retirement; absence of a journal row gives consumers no deletion authority.
 # 函数用途: 验证台账追加失败只告警，不把成功回收倒回或伪造台账。
-def test_journal_append_failure_keeps_committed_trash(tmp_path, monkeypatch, caplog):
+@pytest.mark.parametrize('expired_first_slice', [False, True])
+def test_journal_append_failure_keeps_committed_trash(tmp_path, monkeypatch, caplog, expired_first_slice):
     home, service = _runtime(tmp_path)
     store, thread = _thread(home)
+    original_thread = store.storage.thread_path(thread.thread_id).read_bytes()
+    from agent_py_agent.agent.memory_store.retention_scan_budget import (
+        RetentionScanBudget,
+        load_scan_cursor,
+    )
+    original_budget = RetentionScanBudget.default
+    budgets = []
+    journal_calls = []
+    def scan_budget(cls, config=None):
+        budget = original_budget(config=config)
+        budgets.append(budget)
+        if expired_first_slice and len(budgets) == 1:
+            # 模拟冷I/O或调度等待耗尽首片；保留真实128项/8MiB/25ms预算及真实续点。
+            threading.Event().wait(max(0.0, budget.deadline - time.monotonic()) + 0.005)
+        return budget
+    monkeypatch.setattr(RetentionScanBudget, 'default', classmethod(scan_budget))
 
     # LLM: Replace the actual append call site only; real source moves, tombstone publication and index checks still execute.
     # 函数用途: 在提交后的台账追加入口模拟普通写入失败。
     def unavailable(*args, **kwargs):
+        journal_calls.append(kwargs['thread_id'])
         raise OSError('simulated journal append failure')
 
     monkeypatch.setattr(apply, 'append_retired_thread', unavailable, raising=False)
-    report = service.apply(now=NOW)
-    action = next(action for action in report.actions if action.record_id == thread.thread_id)
+    actions = {}
+    for turn in range(512):
+        report = service.apply(now=NOW)
+        if expired_first_slice and turn == 0:
+            assert report.scan_partial and not report.actions and not journal_calls
+            assert (Path(home.owner_data_dir) / 'retention_scan_cursor.json').exists()
+            assert load_scan_cursor(home) == report.scan_cursor
+        for current in report.actions:
+            assert current.action_id not in actions, '续扫不得重复应用已提交动作'
+            actions[current.action_id] = current
+        assert not report.errors and not report.legal_hold
+        # 只续正常partial；锁冲突、状态变化和写失败不能被轮询洗成通过。
+        assert not any(current.status in {'state_changed', 'failed', 'busy'} for current in report.actions)
+        matches = [current for current in actions.values() if current.record_id == thread.thread_id]
+        if matches:
+            break
+        assert report.scan_partial, '扫描已完成却未产生目标动作'
+    else:
+        pytest.fail('512个原预算片内未产生目标动作')
+    action, = matches
+    assert not expired_first_slice or len(budgets) > 1
+    assert journal_calls == [thread.thread_id]
     assert action.status == 'trashed' and action.destination.exists()
+    assert (action.destination / 'payload' / 'threads' / f'{thread.thread_id}.json').read_bytes() == original_thread
     assert store.threads.load(thread.thread_id) is None
     assert 'RETIRED_THREAD_JOURNAL_APPEND_FAILED' in caplog.text
     assert not (Path(home.owner_data_dir) / 'retention' / 'retired_threads.jsonl').exists()
