@@ -23,7 +23,21 @@ def history_root(thread_path: Path) -> Path:
 
 def _read(root: Path, parts: tuple[str, ...]):
     raw = read_bytes_beneath(root, parts)
-    return None if raw is None else json.loads(raw)
+    if raw is None:
+        return None
+    value = json.loads(raw)
+    # 所有读写入口共用manifest拒绝边界；未知版本/坏计数不能当v1继续复制或覆盖。
+    if parts == ('index.json',) and (
+        type(value) is not dict or type(value.get('version')) is not int or value['version'] != 1
+        or type(value.get('count')) is not int or value['count'] < 0
+        or ('incomplete' in value and type(value['incomplete']) is not bool)
+        or ('generation' in value and (type(value['generation']) is not int or value['generation'] < 0))
+        or ('copy_epoch' in value and (type(value.get('incomplete')) is not bool
+            or type(value['copy_epoch']) is not str or len(value['copy_epoch']) != 32
+            or any(char not in '0123456789abcdef' for char in value['copy_epoch'])))
+    ):
+        raise ValueError('invalid task history index schema')
+    return value
 
 
 def _member_parts(task_id: str) -> tuple[str, ...]:

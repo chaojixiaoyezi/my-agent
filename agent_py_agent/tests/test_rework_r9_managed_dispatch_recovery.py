@@ -537,7 +537,9 @@ def test_history_source_generation_change_restarts_without_old_members_becoming_
     assert not canonical.tasks.contains_task(dispatch.thread_id, 'old-0')
 
 
-@pytest.mark.parametrize('damage', ['none', 'count', 'epoch'])
+@pytest.mark.parametrize('damage', ['none', 'count', 'epoch', 'unknown_version', 'bool_version',
+                                    'version_type', 'negative_count', 'bool_count', 'count_type', 'manifest_type',
+                                    'complete_type', 'generation_type', 'epoch_type'])
 def test_done_history_checkpoint_does_not_spend_next_slice_rewriting_itself(home, monkeypatch, damage):
     from agent_py_agent.agent.common import json_io
     from agent_py_agent.agent.conversation import task_history
@@ -566,6 +568,19 @@ def test_done_history_checkpoint_does_not_spend_next_slice_rewriting_itself(home
     before = json.loads(index.read_text())
     assert before['incomplete'] is False and before['count'] == 1
     assert canonical.threads.load(dispatch.thread_id) is None and len(completed_writes) == 2
+    invalid = {'unknown_version': {'version': 99}, 'bool_version': {'version': True},
+               'version_type': {'version': '1'}, 'negative_count': {'count': -1},
+               'bool_count': {'count': True}, 'count_type': {'count': '1'}, 'complete_type': {'incomplete': 0},
+               'generation_type': {'generation': '0'}, 'epoch_type': {'copy_epoch': {}}}
+    if damage in invalid or damage == 'manifest_type':
+        index.write_text(json.dumps([] if damage == 'manifest_type' else {**before, **invalid[damage]}))
+        index_bytes, receipt_bytes = index.read_bytes(), receipt.read_bytes()
+        second = reconcile_managed_dispatches(home, commit_transition=lambda operation: operation())
+        assert not second['handed_off'] and second['retained'][0]['reason'] == 'handoff_error:ValueError'
+        assert index.read_bytes() == index_bytes and receipt.read_bytes() == receipt_bytes
+        assert canonical.threads.load(dispatch.thread_id) is None and canonical.wakes.pending() == []
+        assert open_legacy_conversation_store(home).wakes.pending()
+        return
     if damage != 'none':
         index.write_text(json.dumps({**before, **({'count': 0} if damage == 'count' else {'copy_epoch': 'f' * 32})}))
     second = reconcile_managed_dispatches(home, commit_transition=lambda operation: operation())
@@ -615,3 +630,25 @@ def test_unchanged_zero_progress_history_slice_does_not_rewrite_checkpoint(home,
     assert second['truncated'] and len(writes) == count
     assert all(path.read_bytes() == raw for path, raw in previous.items())
     assert canonical.threads.load(dispatch.thread_id) is None
+
+
+@pytest.mark.parametrize('invalid', [{'version': 99}, {'version': True}, {'version': '1'},
+                                    {'count': -1}, {'count': True}, {'count': '1'}, {'incomplete': 0},
+                                    {'generation': '0'}, {'copy_epoch': {}}])
+def test_unknown_source_history_schema_is_not_copied_or_rewritten(home, invalid):
+    from agent_py_agent.agent.conversation import task_history
+
+    dispatch = _legacy_dispatch(home, "Unknown source schema")
+    legacy = open_legacy_conversation_store(home)
+    source = legacy.storage.thread_path(dispatch.thread_id)
+    index = task_history.history_root(source) / 'index.json'
+    before = json.loads(index.read_text())
+    index.write_text(json.dumps({**before, **invalid}))
+    original = index.read_bytes()
+    with pytest.raises(ValueError):
+        task_history.page(source, legacy.threads.require(dispatch.thread_id))
+    report = reconcile_managed_dispatches(home, commit_transition=lambda operation: operation())
+    assert not report['handed_off'] and report['retained'][0]['reason'] == 'handoff_error:ValueError'
+    canonical = open_canonical_conversation_store(home, initialize=False)
+    assert canonical.threads.load(dispatch.thread_id) is None and canonical.wakes.pending() == []
+    assert index.read_bytes() == original and legacy.wakes.pending()
