@@ -168,7 +168,7 @@ def _historical_address(handle, through, checkpoint_id):
 # LLM: 固定快照先验证全部新行，索引只在原inode追加合同下复用；选中行hash仍沿同FD核对，历史窗口不授予覆盖。
 # 函数用途: 复用或建立有界检查点行地址，作用域退出关闭文件，不写账本或提前跳过坏orphan。
 @contextmanager
-def checkpoint_row_lookup(path: Path, *, validator=None):
+def checkpoint_row_lookup(path: Path, *, validator=None, publish_projection=False):
     try:
         handle = path.open('rb', buffering=0)
     except FileNotFoundError:
@@ -186,8 +186,13 @@ def checkpoint_row_lookup(path: Path, *, validator=None):
         projection_read_only = False
         projection = CheckpointOffsetStore(path)
         try:
-            projection_read_only = projection.path.exists()
-            persistent = stack.enter_context(projection.connection(write=not projection_read_only))
+            projection_read_only = not publish_projection
+            if projection_read_only and not all(
+                projection.path.with_name(projection.path.name + suffix).exists()
+                for suffix in ('', '.generation.lock')
+            ):
+                raise FileNotFoundError(projection.path)
+            persistent = stack.enter_context(projection.connection(write=publish_projection))
             saved = projection.load(persistent, validator)
         except (OSError, sqlite3.Error):
             failed_projection = True
@@ -220,8 +225,8 @@ def checkpoint_row_lookup(path: Path, *, validator=None):
             index = cached
         else:
             if persistent is not None and projection_read_only:
-                persistent = stack.enter_context(projection.connection(write=True))
-                projection_read_only = False
+                # 只读入口可严格验证尾部，但不升级连接或改变生产投影。
+                persistent = None
             if cached is not None and not (cached.stamp[:2] == stamp[:2] and cached.stamp[2] < through):
                 cached = None
             index = _scan_index(handle, stamp, cached, validator, persistent)
@@ -256,7 +261,7 @@ def checkpoint_row_lookup(path: Path, *, validator=None):
 
         yield lookup
 
-    if failed_projection:
+    if failed_projection and publish_projection:
         # 只有源固定快照已完整校验、lookup 正常退出后才退休坏投影；校验失败不得洗白。
         try:
             if cache_stat_signature(path.stat()) == stamp:

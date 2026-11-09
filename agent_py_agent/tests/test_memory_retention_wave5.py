@@ -1338,8 +1338,19 @@ def _r5_hot_thread(tmp_path, monkeypatch, size_kib, offset_kib=300):
 def test_r5_hot_large_source_mid_build_rewrite_never_publishes_stale_pins(
     tmp_path, monkeypatch, size_kib, offset_kib, timing
 ):
-    from agent_py_agent.agent.memory_store import reference_pins
+    # 本例验证来源改写接缝；用可前进的确定性扫描时钟，避免宿主IO使25ms片在注入前结束。
+    # 条目/字节预算与外层60秒限制保持，真实解析/写入/源CAS均执行。
+    from types import SimpleNamespace
 
+    from agent_py_agent.agent.memory_store import reference_pins, retention_scan_budget
+
+    ticks = [0.0]
+
+    def scan_time():
+        ticks[0] += 0.000001
+        return ticks[0]
+
+    monkeypatch.setattr(retention_scan_budget, 'time', SimpleNamespace(monotonic=scan_time))
     home, service, path, target, payload = _r5_hot_thread(tmp_path, monkeypatch, size_kib, offset_kib)
     for index in range(24):
         old_file(home.owner_memory_daily_dir / f"a-drive-{index:02d}.jsonl")

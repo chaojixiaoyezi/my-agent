@@ -48,6 +48,14 @@ class CheckpointOffsetStore:
             else:
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                     raise OSError('untrusted checkpoint offset projection')
+            if not write:
+                descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, 'O_NONBLOCK', 0))
+                try:
+                    opened = os.fstat(descriptor)
+                    if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or os.read(descriptor, 16) != b'SQLite format 3\x00':
+                        raise OSError('untrusted checkpoint offset projection header')
+                finally:
+                    os.close(descriptor)
             mode = 'rw' if write else 'ro'
             conn = sqlite3.connect(self.path.absolute().as_uri() + '?mode=' + mode, uri=True, timeout=5,
                                    factory=sqlite_connection_factory())

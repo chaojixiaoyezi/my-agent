@@ -108,10 +108,20 @@ CAS 后 pin 登记失败恢复、收走的未发表节点禁止晚到发表、�
 
 实际 prepare_conversation_context 操作共用原 SQLite 请求作用域，carried builder 不另建内层缓存。
 各调用归还前完成事务并复核文件代次；摘要等待只保留空闲、无事务连接，scope退出沿原guard关闭。
-首次无旧checkpoint压缩由原local.db一条连接、indexes/timeline各独立ro/rw两条组成，总计5条；
-不能再把新增持久库误计为原local.db批次的一条预算。成本探针保留local<=1，节点库逐路径<=2且仅两个路径；
+首次无旧checkpoint压缩由原local.db一条连接、indexes/timeline各独立ro/rw两条，
+以及原追加写门内发表offset投影的一条连接组成，总计6条；
+不能再把新增持久库误计为原local.db批次的一条预算。成本探针保留local<=1，节点库逐路径<=2且仅两个路径，offset发表独立<=1；
 独立1/240/10000历史回归证明连接数不随根或重复读取增长，权限/代次租约不合并。
 
 维护lane也以一片为连接复用/关闭边界，避免零引用预筛和事务仓读取反复开关同库耗尽25ms。
 退休完成后只允许保留每库精确的空generation/recovery-intent锁锚；它们不代表业务节点仍存在，
 直接unlink会破坏并发出生/恢复互斥。原载荷、checkpoint和节点库内容仍必须清除。
+
+
+## 持久地址发表与只读来源边界
+
+普通checkpoint查询默认只消费已有、同源有效的只读投影；缺失或需要重校验时仅在内存完整验证，
+不出生generation锁/SQLite、不执行DELETE或退休坏投影。持久投影的建立、增量发表和损坏退休
+只允许显式publish_projection写路径，生产沿原checkpoint追加锁与已有宿主写门调用。
+单条回查仍核源行hash及identity；未知/partial不被当成完整。原只读SQLite可能维护其非权威WAL/SHM，
+它们不能计作canonical正文或借此授权生产写入。

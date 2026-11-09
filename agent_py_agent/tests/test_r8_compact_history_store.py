@@ -85,7 +85,7 @@ def test_cold_offset_projection_survives_process_restart_and_window_eviction(tmp
     path.write_bytes(b''.join(json.dumps({'checkpoint_id': str(i), 'payload': 'x' * 64}).encode() + b'\n'
                               for i in range(5000)))
     monkeypatch.setattr(scan, '_MAX_CACHED_OFFSETS', 2)
-    with scan.checkpoint_row_lookup(path) as lookup:
+    with scan.checkpoint_row_lookup(path, publish_projection=True) as lookup:
         assert lookup('0')['checkpoint_id'] == '0'
     scan._CHECKPOINT_OFFSETS.clear()
     code = '''
@@ -110,7 +110,7 @@ with scan.checkpoint_row_lookup(Path(sys.argv[1])) as lookup:
 def test_persisted_offset_does_not_hide_new_bad_validator_rows_or_source_replacement(tmp_path):
     path = tmp_path / 'checkpoints.jsonl'
     path.write_bytes(b'{"checkpoint_id":"old"}\n')
-    with scan.checkpoint_row_lookup(path):
+    with scan.checkpoint_row_lookup(path, publish_projection=True):
         pass
     with path.open('ab') as handle:
         handle.write(b'{"checkpoint_id":"bad"}\n')
@@ -136,7 +136,7 @@ def test_index_address_tamper_is_not_returned_as_a_different_checkpoint(tmp_path
     path = tmp_path / 'checkpoints.jsonl'
     rows = [b'{"checkpoint_id":"one"}\n', b'{"checkpoint_id":"two"}\n']
     path.write_bytes(b''.join(rows))
-    with scan.checkpoint_row_lookup(path):
+    with scan.checkpoint_row_lookup(path, publish_projection=True):
         pass
     projection = CheckpointOffsetStore(path)
     with projection.connection() as conn:
@@ -240,16 +240,16 @@ def test_structurally_bad_projection_is_retired_only_after_strict_source_scan(tm
 
     path = tmp_path / 'ledger.jsonl'
     path.write_bytes(b'{"checkpoint_id":"one"}\n')
-    with scan.checkpoint_row_lookup(path):
+    with scan.checkpoint_row_lookup(path, publish_projection=True):
         pass
     projection = CheckpointOffsetStore(path)
     projection.path.write_bytes(b'not a sqlite projection')
     scan._CHECKPOINT_OFFSETS.clear()
-    with scan.checkpoint_row_lookup(path) as lookup:
+    with scan.checkpoint_row_lookup(path, publish_projection=True) as lookup:
         assert lookup('one')['checkpoint_id'] == 'one'
     assert not projection.path.exists()
     assert list(tmp_path.glob('*.damaged-*'))
-    with scan.checkpoint_row_lookup(path):
+    with scan.checkpoint_row_lookup(path, publish_projection=True):
         pass
     scan._CHECKPOINT_OFFSETS.clear()
 
@@ -321,7 +321,7 @@ def test_unchanged_cold_projection_uses_only_read_only_connection(tmp_path, monk
 
     path = tmp_path / 'ledger.jsonl'
     path.write_bytes(b'{"checkpoint_id":"one"}\n')
-    with scan.checkpoint_row_lookup(path):
+    with scan.checkpoint_row_lookup(path, publish_projection=True):
         pass
     projection = CheckpointOffsetStore(path)
     before = projection.path.stat().st_mtime_ns
@@ -498,3 +498,22 @@ def test_persistent_node_read_write_connections_do_not_grow_with_history(tmp_pat
     for conn in opened:
         with pytest.raises(sqlite3.ProgrammingError):
             conn.execute('SELECT 1')
+
+
+def test_read_only_checkpoint_lookup_never_births_or_repairs_projection(tmp_path):
+    from agent_py_agent.agent.conversation.checkpoint_offset_store import CheckpointOffsetStore
+
+    path = tmp_path / 'ledger.jsonl'
+    path.write_bytes(b'{"checkpoint_id":"one"}\n')
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+    with scan.checkpoint_row_lookup(path) as lookup:
+        assert lookup('one')['checkpoint_id'] == 'one'
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+    with scan.checkpoint_row_lookup(path, publish_projection=True):
+        pass
+    projection = CheckpointOffsetStore(path)
+    projection.path.write_bytes(b'bad sqlite content')
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+    with scan.checkpoint_row_lookup(path) as lookup:
+        assert lookup('one')['checkpoint_id'] == 'one'
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before

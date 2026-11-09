@@ -296,10 +296,22 @@ def test_original_jsonl_cache_callback_keeps_actual_error(tmp_path, monkeypatch,
 
 @pytest.mark.parametrize('change', ['policy', 'state'])
 def test_source_change_after_retention_keeps_partial_effects_but_never_overwrites_new_state(tmp_path, monkeypatch, change):
+    # 本例验证来源改写接缝；用可前进的确定性扫描时钟，避免宿主IO使25ms片在注入前结束。
+    # 条目/字节预算与外层60秒限制保持，真实解析/写入/源CAS均执行。
+    from types import SimpleNamespace
+
     from agent_py_agent.agent.gateway_parts.io import gateway_turn_transition
     from agent_py_agent.agent.gateway_parts.multiprocess_admission import reservation_file
+    from agent_py_agent.agent.memory_store import retention_scan_budget
     from agent_py_agent.agent.user_space import owner_maintenance
 
+    ticks = [0.0]
+
+    def scan_time():
+        ticks[0] += 0.000001
+        return ticks[0]
+
+    monkeypatch.setattr(retention_scan_budget, 'time', SimpleNamespace(monotonic=scan_time))
     with curator_case(tmp_path, monkeypatch, source_kind='maintenance') as (agent, _, _, gate, claim, _):
         original = owner_maintenance._reclaim_text_vector_cache_orphans
         stale = agent.home_paths.owner_cache_dir / 'old.tmp'
@@ -320,7 +332,7 @@ def test_source_change_after_retention_keeps_partial_effects_but_never_overwrite
 
         monkeypatch.setattr(owner_maintenance, '_reclaim_text_vector_cache_orphans', intervene)
         response = run_original(agent, gate, claim)
-        assert response['ok'] is False and observed
+        assert response['ok'] is False and observed, response
         assert _marker_bytes(agent.home_paths) == observed[0]
         assert not stale.exists() and p3.read_bytes() == before
         assert not (gate.paths.terminal / claim.path.name).exists()

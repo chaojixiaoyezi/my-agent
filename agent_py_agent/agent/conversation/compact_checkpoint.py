@@ -292,7 +292,7 @@ def _seal_torn_ledger_tail(path: Path) -> str:
 # LLM: 唯一追加路径先落私有冷载荷并封印；持原锁封闭残尾后追加候选，head仍仅由原CAS发布。
 # 函数用途: 将带冷证据引用的候选写入原owner检查点账本，拒绝不可读超长行且不更新线程。
 def _append_checkpoint(agent, row: dict[str, object]) -> str:
-    from .compact_checkpoint_scan import _CHECKPOINT_ROW_MAX_BYTES
+    from .compact_checkpoint_scan import _CHECKPOINT_ROW_MAX_BYTES, checkpoint_row_lookup
 
     root = _compact_root(agent, row['thread_id'])
     for name in _COLD_PAYLOAD_FIELDS:
@@ -316,6 +316,9 @@ def _append_checkpoint(agent, row: dict[str, object]) -> str:
         _seal_torn_ledger_tail(path)
         append_private_jsonl_records_unlocked(path, [row], sort_keys=True)
         _maintain_active_checkpoints(root, row['thread_id'], path)
+        # 持久地址只在原追加写门内发表；普通来源读取不得出生/修复SQLite。
+        with checkpoint_row_lookup(path, publish_projection=True):
+            pass
     return row["checkpoint_id"]
 
 

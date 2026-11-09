@@ -205,10 +205,11 @@ def _assert_compaction_work_bounded(tmp_path, monkeypatch, count: int, min_sourc
         # local.db 原批次预算不变；新增两个持久节点库各独立 ro/rw 代次租约。
         'sqlite_connects': counts['connect_paths'][str(tmp_path / 'local.db')] > 1,
         'compact_sqlite_connects': any(
-            not path.endswith(('/indexes/.nodes.sqlite3', '/timeline/.nodes.sqlite3')) or calls > 2
+            (not path.endswith(('/indexes/.nodes.sqlite3', '/timeline/.nodes.sqlite3', '.jsonl.offsets.sqlite3'))
+             or calls > (1 if path.endswith('.jsonl.offsets.sqlite3') else 2))
             for path, calls in counts['connect_paths'].items() if path != str(tmp_path / 'local.db')
         ),
-        'compact_database_count': len(counts['connect_paths']) > 3,
+        'compact_database_count': len(counts['connect_paths']) > 4,
         'get_record_calls': counts['get_record_calls'] > 0,
         # 峰值不随来源线性增长：来源的一半再加 4 MB 固定开销余量（小规模时解释器/索引的固定开销占大头）。
         'tracemalloc_peak': counts['tracemalloc_peak'] >= counts['source_bytes'] // 2 + 4_000_000,
