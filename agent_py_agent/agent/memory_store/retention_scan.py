@@ -380,38 +380,40 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
             return
         if not stat.S_ISREG(stamp[2]):
             raise OSError(22, "pin source is not a regular file", str(path))
-        with closing(_fingerprint_source(path)) as source:
-            opened = os.fstat(source.fileno())
-            if opened.st_nlink != 1:
-                raise OSError(22, "pin source is not a private regular file", str(path))
-            if reference_pins._metadata_stamp(opened) != stamp:
-                raise _PinReadChanged(11, "pin source changed before reading", str(path))
-            digest = hashlib.sha256()
-            scope = None
-            while True:
-                # 热源post不能拼接不同current的验证片；转冷后沿原粗时钟合同才可跨片续验。
-                current_scope = "settled" if reference_pins._is_settled(stamp) else self.contents["pass_token"]
-                if verifying and scope is not None and scope != current_scope:
-                    source.seek(0)
-                    digest = hashlib.sha256()
-                scope = current_scope
-                count = min(self.contents["chunk_bytes"], self.budget.max_bytes - self.budget.size)
-                if count <= 0:
-                    if source.tell() == stamp[3]:
-                        break
-                    yield b""
-                    continue
-                raw = source.read1(count)
-                self.budget.charge(size=len(raw))
-                if not raw:
-                    break
-                digest.update(raw)
-                yield raw
-            after = os.fstat(source.fileno())
-            if (after.st_nlink != 1 or reference_pins._metadata_stamp(after) != stamp
-                    or self._stamp(path) != stamp):
-                raise _PinReadChanged(11, "pin source changed while reading", str(path))
+        digest = hashlib.sha256()
+        scope = None
+        offset = 0
+        while True:
+            # 跨预算片只保留位置和摘要；不能让全局续办投影占住用户文件FD。
+            current_scope = "settled" if reference_pins._is_settled(stamp) else self.contents["pass_token"]
+            if verifying and scope is not None and scope != current_scope:
+                offset = 0
+                digest = hashlib.sha256()
+            scope = current_scope
+            count = min(self.contents["chunk_bytes"], self.budget.max_bytes - self.budget.size)
+            if count <= 0 and offset != stamp[3]:
+                yield b""
+                continue
             self._check_parents(path)
+            with closing(_fingerprint_source(path)) as source:
+                opened = os.fstat(source.fileno())
+                if opened.st_nlink != 1:
+                    raise OSError(22, "pin source is not a private regular file", str(path))
+                if reference_pins._metadata_stamp(opened) != stamp:
+                    raise _PinReadChanged(11, "pin source changed before reading", str(path))
+                source.seek(offset)
+                raw = source.read1(count) if count > 0 else b""
+                after = os.fstat(source.fileno())
+                if (after.st_nlink != 1 or reference_pins._metadata_stamp(after) != stamp
+                        or self._stamp(path) != stamp):
+                    raise _PinReadChanged(11, "pin source changed while reading", str(path))
+                self._check_parents(path)
+            self.budget.charge(size=len(raw))
+            if not raw:
+                break
+            offset += len(raw)
+            digest.update(raw)
+            yield raw
         self._remember(path, stamp, digest.digest())
         if verifying:
             self.post_scopes[path] = scope
