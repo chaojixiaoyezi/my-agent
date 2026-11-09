@@ -126,13 +126,14 @@ def test_advancing_clock_still_discovers_one_page_and_advances_cursor(tmp_path, 
 
     monkeypatch.setattr(gateway_loops.time, 'monotonic', jump)
     assert controller.tick(now=200_001)['scanned'] == 4
-    assert calls == [home.owner_home_dir, *(o.home_dir for o in owners[4:8])]
+    assert calls == []  # 每次观测跳25秒：base准入前deadline已尽，也不能再启动。
+    assert [key[2] for key in controller._priority] == [f'owner-{i:03d}' for i in range(4, 8)]
     assert controller._cursor is not None and controller._cursor != cursor
     monkeypatch.setattr(gateway_loops.time, 'monotonic', lambda: maintenance_clock.now)
     calls.clear()
     assert controller.tick(now=200_002)['scanned'] == 2
-    assert calls == [home.owner_home_dir, *(o.home_dir for o in owners[8:])]
-    assert controller._cursor is None
+    assert calls == [home.owner_home_dir, *(o.home_dir for o in owners[4:])]
+    assert not controller._priority and controller._cursor is None
 
 
 # LLM: 真实优先续作过程中由维护回调耗尽时间；发现仍处理一页，但不重复执行已经优先访问的 owner。
@@ -154,8 +155,12 @@ def test_priority_overrun_preserves_fifo_and_discovery_deduplication(tmp_path, m
     monkeypatch.setattr(gateway_loops, 'run_owner_retention_if_due', slow)
     calls.clear()
     assert controller.tick(now=200_001)['scanned'] == 3
-    assert calls == [home.owner_home_dir, *(o.home_dir for o in owners)]
+    assert calls == [home.owner_home_dir, owners[0].home_dir]
     assert [k[2] for k in controller._priority] == ['owner-001', 'owner-002', 'owner-000']
+    calls.clear()
+    controller.tick(now=200_002)
+    assert calls == [home.owner_home_dir, owners[1].home_dir, owners[2].home_dir, owners[0].home_dir]
+    assert len(calls) == len(set(calls))
 
 
 # LLM: 普通分页和due保持真实；单owner业务失败不入优先队列也不得中止后续owner。
@@ -216,10 +221,25 @@ def test_priority_cannot_starve_discovery(tmp_path, monkeypatch, maintenance_clo
     calls.clear()
     result = controller.tick(now=200_001)
     assert result['scanned'] == 4
-    assert calls == [home.owner_home_dir, owners[6].home_dir, *(owner.home_dir for owner in owners[:4])]
+    expected = [home.owner_home_dir, owners[6].home_dir]
+    if elapsed < gateway_loops._OWNER_MAINTENANCE_TICK_BUDGET_SECONDS:
+        expected.extend(owner.home_dir for owner in owners[:4])
+    assert calls == expected
     assert controller._cursor is not None
-    assert [key[2] for key in controller._priority] == ['owner-007', 'owner-008', 'owner-009', 'owner-006']
+    pending = ['owner-007', 'owner-008', 'owner-009', 'owner-006']
+    if elapsed >= gateway_loops._OWNER_MAINTENANCE_TICK_BUDGET_SECONDS:
+        pending.extend(f'owner-{i:03d}' for i in range(4))
+    assert [key[2] for key in controller._priority] == pending
     assert len(calls) == len(set(calls))
+    if elapsed >= gateway_loops._OWNER_MAINTENANCE_TICK_BUDGET_SECONDS:
+        # 继续保持旧owner每次25秒overrun，四个发现债务仍须在至多五拍获得服务。
+        served = set()
+        for tick in range(5):
+            calls.clear()
+            controller.tick(now=200_002 + tick)
+            assert len(calls) == len(set(calls)) and len(controller._priority) <= 64
+            served.update(calls)
+        assert all(owner.home_dir in served for owner in owners[:4])
 
 
 # LLM: 真实维护先填满64项优先队列，再让每次维护消耗1秒；分页和入队仍用原实现。
@@ -241,13 +261,14 @@ def test_sixty_four_priority_owners_leave_half_budget_for_discovery(tmp_path, mo
     calls.clear()
     summary = controller.tick(now=200_001)
     assert summary['scanned'] == 4
-    assert calls == [home.owner_home_dir, *(owner.home_dir for owner in owners[6:16]),
+    # base同样计入整体预算：1秒base+9秒优先项恰到半拍，仍留一页发现。
+    assert calls == [home.owner_home_dir, *(owner.home_dir for owner in owners[6:15]),
                      *(owner.home_dir for owner in owners[:4])]
     assert len(calls) == len(set(calls))
     assert len(controller._priority) == 64
     assert [key[2] for key in controller._priority] == [
-        *(f'owner-{index:03d}' for index in range(16, 70)),
-        *(f'owner-{index:03d}' for index in range(6, 16)),
+        *(f'owner-{index:03d}' for index in range(15, 70)),
+        *(f'owner-{index:03d}' for index in range(6, 15)),
     ]
     assert controller._cursor is not None
 
@@ -304,3 +325,240 @@ def test_controller_internal_typeerror_runs_once_and_preserves_isolation(tmp_pat
             controller.tick(now=200_000)
         assert raised.value is error and not calls
     assert seen.count(target) == 1
+
+
+def test_full_continuously_due_fifo_cannot_swallow_discovery_debt(tmp_path, monkeypatch, maintenance_clock):
+    partial = {f'owner-{i:03d}' for i in range(64)}
+    controller, home, owners, calls = _controller(tmp_path, monkeypatch, maintenance_clock, 64, partial=partial)
+    controller.tick(now=200_000)
+    assert len(controller._priority) == 64
+    newcomers = [ensure_owner_home(home.root, OwnerIdentity.provider_user('feishu', f'z-new-{i}')) for i in range(3)]
+    original = gateway_loops.run_owner_retention_if_due
+    starts = []
+
+    def overrun(scoped, *, now):
+        starts.append((scoped.owner_home_dir, maintenance_clock.now))
+        result = original(scoped, now=now)
+        if scoped.owner_home_dir != home.owner_home_dir:
+            maintenance_clock.now += 25
+        return result
+
+    monkeypatch.setattr(gateway_loops, 'run_owner_retention_if_due', overrun)
+    calls.clear()
+    # 64旧owner/每页4项，最迟第17拍发现新页；后继新/旧债交替，三项最迟第22拍兑现。
+    for tick in range(22):
+        began = maintenance_clock.now
+        starts.clear()
+        controller.tick(now=200_001 + tick)
+        assert len(controller._priority) <= 64
+        assert all(start - began < 20 for _, start in starts)
+    assert all(calls.count(owner.home_dir) == 1 for owner in newcomers)
+    assert all(key[2] in partial for key in controller._priority)
+
+
+def test_due_hints_do_not_expand_a_full_priority_fifo(tmp_path, monkeypatch, maintenance_clock):
+    import threading
+
+    partial = {f'owner-{i:03d}' for i in range(64)}
+    controller, home, owners, calls = _controller(tmp_path, monkeypatch, maintenance_clock, 64, partial=partial)
+    controller.tick(now=200_000)
+    expected = list(controller._priority)
+    assert len(expected) == 64
+    keys = [('feishu', 'user', f'z-hint-{i:03d}') for i in range(64)]
+    hints = SimpleNamespace(
+        _closed_event=threading.Event(), _scheduler_changes=0, _hint_failures=0, backstop=60,
+        index=SimpleNamespace(priority_owners=lambda **kwargs: keys,
+                              row=lambda key: {'next_maintenance_at': 0}),
+        note_maintenance=lambda *args, **kwargs: None,
+    )
+    controller._wake_hints = hints
+    controller._wake_event = threading.Event()
+    controller._hint_kind = 'maintenance'
+
+    def inspect():
+        assert list(controller._priority) == expected
+        return {}
+
+    monkeypatch.setattr(controller, 'tick', inspect)
+    monkeypatch.setattr(gateway_loops, '_run_loop_with_backoff', lambda stop, tick, site: tick())
+    gateway_loops._run_hinted_controller(controller, threading.Event(),
+        gateway_loops._LoopSite('owner-maintenance', 'test', 'test', 60))
+
+
+def test_discovery_debt_recovery_deduplicates_priority_overlap(tmp_path, monkeypatch, maintenance_clock):
+    import threading
+
+    partial = {f'owner-{i:03d}' for i in range(64)}
+    controller, home, owners, calls = _controller(tmp_path, monkeypatch, maintenance_clock, 64, partial=partial)
+    controller.tick(now=200_000)
+    newcomer = ensure_owner_home(home.root, OwnerIdentity.provider_user('feishu', 'owner-000a'))
+    controller._cursor = ('feishu', 'user', 'owner-000')
+    recovered = threading.Event()
+    original = gateway_loops.run_owner_retention_if_due
+
+    def transition(scoped, *, now):
+        result = original(scoped, now=now)
+        if scoped.owner_home_dir == owners[0].home_dir and not recovered.is_set():
+            maintenance_clock.now += 25
+        return result
+
+    monkeypatch.setattr(gateway_loops, 'run_owner_retention_if_due', transition)
+    controller.tick(now=200_001)
+    assert controller._discovery_debt and controller._cursor == ('feishu', 'user', 'owner-000')
+    recovered.set()
+    partial.remove('owner-001')  # 同一恢复拍既有完成者，也有仍due者。
+    calls.clear()
+    controller.tick(now=200_002)
+    assert Counter(calls) == Counter([home.owner_home_dir, newcomer.home_dir, *(owner.home_dir for owner in owners)])
+    assert len(calls) == len(set(calls)) and len(controller._priority) == 63
+    assert ('feishu', 'user', 'owner-001') not in controller._priority
+    assert ('feishu', 'user', 'owner-002') in controller._priority
+
+
+def test_continuous_discovery_overruns_also_serve_old_fifo(tmp_path, monkeypatch, maintenance_clock):
+    partial = {f'owner-{i:03d}' for i in range(64)}
+    controller, home, owners, calls = _controller(tmp_path, monkeypatch, maintenance_clock, 64, partial=partial)
+    controller.tick(now=200_000)
+    newcomers = [ensure_owner_home(home.root, OwnerIdentity.provider_user('feishu', f'z-new-{i:03d}')) for i in range(16)]
+    controller._cursor = ('feishu', 'user', 'owner-063')
+    original = gateway_loops.run_owner_retention_if_due
+
+    def overrun(scoped, *, now):
+        result = original(scoped, now=now)
+        if scoped.owner_home_dir != home.owner_home_dir:
+            maintenance_clock.now += 25
+        return result
+
+    monkeypatch.setattr(gateway_loops, 'run_owner_retention_if_due', overrun)
+    controller.tick(now=200_001)
+    assert controller._discovery_debt
+    services = []
+    for tick in range(12):
+        calls.clear()
+        controller.tick(now=200_002 + tick)
+        scoped = [path for path in calls if path != home.owner_home_dir]
+        assert len(scoped) == 1 and len(controller._priority) == 64
+        services.append(scoped[0] in {owner.home_dir for owner in newcomers})
+    # 新集合尚未扫完时，任意相邻两拍两类债务各服务一次，不等“新流耗尽”才救旧队列。
+    assert services == [True, False] * 6
+    assert controller._discovery_debt
+
+
+@pytest.mark.parametrize('slow_stage', ['retention', 'idle_compact', 'both'])
+def test_base_overrun_cannot_permanently_exclude_scoped_owners(tmp_path, monkeypatch, maintenance_clock, slow_stage):
+    partial = {f'owner-{i:03d}' for i in range(3)}
+    controller, home, owners, calls = _controller(tmp_path, monkeypatch, maintenance_clock, 3, partial=partial)
+    controller.tick(now=200_000)
+    original = gateway_loops.run_owner_retention_if_due
+    starts, idle_starts, cleanup_calls = [], [], []
+    from agent_py_agent.agent.gateway_parts import compact_operations
+    original_cleanup = gateway_loops._cleanup_loaded_runtime_safety
+
+    def cleanup(agent):
+        cleanup_calls.append(agent)
+        return original_cleanup(agent)
+
+    def idle(*args, **kwargs):
+        starts.append(maintenance_clock.now)
+        idle_starts.append(maintenance_clock.now)
+        if slow_stage in {'idle_compact', 'both'}:
+            maintenance_clock.now += 25
+
+    def always_overrun(scoped, *, now):
+        starts.append(maintenance_clock.now)
+        result = original(scoped, now=now)
+        if scoped.owner_home_dir != home.owner_home_dir or slow_stage in {'retention', 'both'}:
+            maintenance_clock.now += 25
+        return result
+
+    monkeypatch.setattr(gateway_loops, '_cleanup_loaded_runtime_safety', cleanup)
+    monkeypatch.setattr(compact_operations, 'idle_compact_maintenance_tick', idle)
+    monkeypatch.setattr(gateway_loops, 'run_owner_retention_if_due', always_overrun)
+    calls.clear()
+    ticks = 8 if slow_stage == 'both' else 6
+    for tick in range(ticks):
+        began = maintenance_clock.now
+        starts.clear()
+        controller.tick(now=200_001 + tick)
+        assert all(start - began < 20 for start in starts)
+    assert calls.count(home.owner_home_dir) == (2 if slow_stage == 'both' else 3)
+    if slow_stage == 'both':
+        assert sum(calls.count(owner.home_dir) for owner in owners) == 4
+        assert all(owner.home_dir in calls for owner in owners)
+    else:
+        assert all(calls.count(owner.home_dir) == 1 for owner in owners)
+    assert len(controller._priority) == 3
+    assert len(cleanup_calls) == ticks
+    assert len(idle_starts) == (3 if slow_stage == 'idle_compact' else 2)
+
+
+def test_failed_base_overrun_preserves_exception_and_next_scoped_opportunity(tmp_path, monkeypatch, maintenance_clock):
+    partial = {'owner-000', 'owner-001'}
+    controller, home, owners, calls = _controller(tmp_path, monkeypatch, maintenance_clock, 2, partial=partial)
+    controller.tick(now=200_000)
+    original = gateway_loops.run_owner_retention_if_due
+    error = OSError('synthetic base overrun failure')
+
+    def overrun(scoped, *, now):
+        maintenance_clock.now += 25
+        if scoped.owner_home_dir == home.owner_home_dir:
+            raise error
+        return original(scoped, now=now)
+
+    monkeypatch.setattr(gateway_loops, 'run_owner_retention_if_due', overrun)
+    calls.clear()
+    for tick in range(4):
+        if tick % 2 == 0:
+            with pytest.raises(OSError) as raised:
+                controller.tick(now=200_001 + tick)
+            assert raised.value is error and controller._base_yield
+        else:
+            result = controller.tick(now=200_001 + tick)
+            assert result['ran'] == 1  # 只报告真实scoped服务，不给失败/未执行base造结果。
+    assert calls == [owner.home_dir for owner in owners]
+
+
+def test_failed_base_overrun_still_discovers_previously_unknown_owners(tmp_path, monkeypatch, maintenance_clock):
+    partial = {'owner-000', 'owner-001'}
+    controller, home, owners, calls = _controller(tmp_path, monkeypatch, maintenance_clock, 0, partial=partial)
+    controller.tick(now=200_000)
+    newcomers = [ensure_owner_home(home.root, OwnerIdentity.provider_user('feishu', name)) for name in sorted(partial)]
+    original = gateway_loops.run_owner_retention_if_due
+    error = OSError('synthetic base fails before discovery')
+
+    def overrun(scoped, *, now):
+        maintenance_clock.now += 25
+        if scoped.owner_home_dir == home.owner_home_dir:
+            raise error
+        return original(scoped, now=now)
+
+    monkeypatch.setattr(gateway_loops, 'run_owner_retention_if_due', overrun)
+    calls.clear()
+    for tick in range(8):
+        if tick % 2 == 0:
+            with pytest.raises(OSError) as raised:
+                controller.tick(now=200_001 + tick)
+            assert raised.value is error
+        else:
+            controller.tick(now=200_001 + tick)
+        assert len(controller._priority) <= 64
+    assert all(owner.home_dir in calls for owner in newcomers)
+
+
+def test_base_cleanup_clock_failure_does_not_replace_source_exception(tmp_path, monkeypatch, maintenance_clock):
+    controller, home, owners, calls = _controller(tmp_path, monkeypatch, maintenance_clock, 1)
+    source_error = OSError('synthetic original maintenance failure')
+    timing_error = RuntimeError('synthetic cleanup clock unavailable')
+
+    def clock_unavailable():
+        raise timing_error
+
+    def broken(scoped, *, now):
+        monkeypatch.setattr(gateway_loops.time, 'monotonic', clock_unavailable)
+        raise source_error
+
+    monkeypatch.setattr(gateway_loops, 'run_owner_retention_if_due', broken)
+    with pytest.raises(OSError) as raised:
+        controller.tick(now=200_000)
+    assert raised.value is source_error
+    assert controller._base_yield and controller._discovery_debt

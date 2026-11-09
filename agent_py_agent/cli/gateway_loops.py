@@ -914,7 +914,9 @@ def _run_hinted_controller(controller, stop_event, site):
                                                       limit=_OWNER_MAINTENANCE_PRIORITY_OWNERS_COUNT):
                     row = hints.index.row(key)
                     if (key != ("local", "main", "main") and row is not None
-                            and row["next_maintenance_at"] is not None and row["next_maintenance_at"] <= now):
+                            and row["next_maintenance_at"] is not None and row["next_maintenance_at"] <= now
+                            and (key in controller._priority
+                                 or len(controller._priority) < _OWNER_MAINTENANCE_PRIORITY_OWNERS_COUNT)):
                         controller._priority[key] = OwnerIdentity(*key)
             except Exception:
                 hints._hint_failures += 1
@@ -2386,6 +2388,10 @@ class _GatewayOwnerMaintenanceController:
         self._base_home = getattr(self._base_agent, "home_paths", None)
         self._cursor: OwnerWakeCursor | None = None
         self._priority: OrderedDict[tuple, object] = OrderedDict()
+        self._discovery_debt = False
+        self._discovery_turn = True
+        self._base_yield = False
+        self._base_idle_first = False
         self._idle_compact_cursor: dict = {}
         self.interval = max(
             0.0,
@@ -2411,7 +2417,7 @@ class _GatewayOwnerMaintenanceController:
                 for scan in idle_cursor.pop("directories", {}).values():
                     scan.close()
 
-    # LLM: 每拍先跑基础 owner 与原闲置压缩；优先续作限半拍，发现至少一页，同拍去重、不构造 owner agent。
+    # LLM: 正常先base及闲置压缩，优先项限半拍；base耗尽后让出下拍，发现债与旧FIFO轮转、同拍去重。
     #   摘要由 _maintenance_summary 汇总（failed 只算整次被拒与执行期动作失败，另有 refused / isolated），只打印、不落盘；容量兜底取AgentConfig。
     # 函数用途: 保护期后有界追赶 owner 维护，保留原摘要与安全清理。
     def tick(self, *, now: float | None = None) -> dict[str, int]:
@@ -2428,16 +2434,11 @@ class _GatewayOwnerMaintenanceController:
         self._fts_hint_not_before = None
         with fts_upgrade_tick_scope(deadline=deadline) as fts_budget:
             try:
-                from ..agent.user_space.owner_maintenance import invoke_owner_maintenance
-
-                reports = [invoke_owner_maintenance(run_owner_retention_if_due, self._base_home,
-                    now=current, config=getattr(self._base_agent, "config", None))]
-                from ..agent.gateway_parts.compact_operations import idle_compact_maintenance_tick
-
-                idle_cursor = getattr(self, "_idle_compact_cursor", None)
-                if not isinstance(idle_cursor, dict):
-                    idle_cursor = self._idle_compact_cursor = {}
-                idle_compact_maintenance_tick(self._base_agent, cursor=idle_cursor, now=current)
+                reports = []
+                yield_base = self._base_yield and bool(self._priority or self._discovery_debt)
+                self._base_yield = False
+                if not yield_base and time.monotonic() < deadline:
+                    self._maintain_base_owner(current, reports, deadline)
                 limit = _positive_int_config(
                     self._base_agent,
                     "owner_agent_pool_max_agents",
@@ -2445,37 +2446,24 @@ class _GatewayOwnerMaintenanceController:
                 )
                 priority_deadline = started + _OWNER_MAINTENANCE_TICK_BUDGET_SECONDS / 2
                 visited, scanned = set(), 0
+                discovery_first = self._discovery_debt and self._discovery_turn
+                # 无预算的base拍不能消耗非base轮次；有机会时新/旧债交替，双方不互相饿死。
+                if time.monotonic() < deadline:
+                    self._discovery_turn = not discovery_first
+                if discovery_first:
+                    scanned = self._discover_maintenance_owners(current, reports, visited, deadline, limit)
                 for key, identity in list(self._priority.items()):
+                    if key in visited:
+                        continue
                     if time.monotonic() >= priority_deadline:
                         break
                     self._priority.pop(key, None)
                     visited.add(key)
                     self._run_scoped_owner(identity, current, reports)
-                pages = 0
-                # 单个优先 owner 可能超时；即便整拍额度耗尽，也推进一页发现，避免新 owner 永久饥饿。
-                while pages < _OWNER_MAINTENANCE_MAX_PAGES_COUNT and (pages == 0 or time.monotonic() < deadline):
-                    page = discover_owner_home_page(
-                        self._base_home.owners_dir,
-                        limit=min(limit, _OWNER_MAINTENANCE_PAGE_OWNERS_COUNT),
-                        after_cursor=self._cursor,
-                    )
-                    pages += 1
-                    scanned += page.scanned
-                    self._cursor = page.next_cursor
-                    for offset, target in enumerate(page.targets):
-                        if time.monotonic() >= deadline:
-                            # 本页已经发现但未服务的owner保留到原有界FIFO，不因游标前移而漏过。
-                            for waiting in page.targets[offset:]:
-                                key = (waiting.identity.provider, waiting.identity.owner_kind, waiting.identity.owner_id)
-                                if key not in visited and len(self._priority) < _OWNER_MAINTENANCE_PRIORITY_OWNERS_COUNT:
-                                    self._priority[key] = waiting.identity
-                            break
-                        key = (target.identity.provider, target.identity.owner_kind, target.identity.owner_id)
-                        if key not in visited:
-                            visited.add(key)
-                            self._run_scoped_owner(target.identity, current, reports)
-                    if page.next_cursor is None:
-                        break
+                if not discovery_first:
+                    scanned = self._discover_maintenance_owners(current, reports, visited, deadline, limit)
+                if yield_base and time.monotonic() < deadline:
+                    self._maintain_base_owner(current, reports, deadline)
                 summary = _maintenance_summary(reports, scanned)
                 if summary["ran"] or summary["failed"]:
                     print(
@@ -2492,6 +2480,70 @@ class _GatewayOwnerMaintenanceController:
                     exhausted = True
                 if exhausted:
                     self._fts_hint_not_before = current + max(self.interval, FTS_UPGRADE_INTERVAL_SECONDS)
+
+    def _maintain_base_owner(self, current, reports, deadline):
+        """原base入口共享一次机会，retention与idle两阶段轮转，均不在期限后新开。"""
+        stages = ('idle', 'retention') if self._base_idle_first else ('retention', 'idle')
+        try:
+            for offset, stage in enumerate(stages):
+                if offset and time.monotonic() >= deadline:
+                    break
+                # 只轮转下次机会，不宣称本阶段完成；失败的canonical due责任仍保留。
+                self._base_idle_first = stage == 'retention'
+                if stage == 'retention':
+                    from ..agent.user_space.owner_maintenance import invoke_owner_maintenance
+
+                    reports.append(invoke_owner_maintenance(run_owner_retention_if_due, self._base_home,
+                        now=current, config=getattr(self._base_agent, "config", None)))
+                else:
+                    from ..agent.gateway_parts.compact_operations import (
+                        idle_compact_maintenance_tick,
+                    )
+
+                    idle_cursor = getattr(self, "_idle_compact_cursor", None)
+                    if not isinstance(idle_cursor, dict):
+                        idle_cursor = self._idle_compact_cursor = {}
+                    idle_compact_maintenance_tick(self._base_agent, cursor=idle_cursor, now=current)
+        finally:
+            try:
+                exhausted = time.monotonic() >= deadline
+            except Exception:
+                # 额外观察失败不能覆盖业务首因；无法确认剩余额度时保守留债。
+                exhausted = True
+            self._base_yield = exhausted
+            if exhausted:
+                self._discovery_debt = True
+
+    def _discover_maintenance_owners(self, current, reports, visited, deadline, limit):
+        """发现不因超时停摆；无法服务或入FIFO的首项钉住原身份游标，下拍先偿还。"""
+        scanned, pages = 0, 0
+        while pages < _OWNER_MAINTENANCE_MAX_PAGES_COUNT and (pages == 0 or time.monotonic() < deadline):
+            page = discover_owner_home_page(self._base_home.owners_dir,
+                limit=min(limit, _OWNER_MAINTENANCE_PAGE_OWNERS_COUNT), after_cursor=self._cursor)
+            pages += 1
+            scanned += page.scanned
+            accounted_cursor = self._cursor
+            for target in page.targets:
+                key = (target.identity.provider, target.identity.owner_kind, target.identity.owner_id)
+                if key not in visited:
+                    if time.monotonic() >= deadline:
+                        if key not in self._priority:
+                            if len(self._priority) >= _OWNER_MAINTENANCE_PRIORITY_OWNERS_COUNT:
+                                # 不另留owner列表，也不让发现游标跨过未入债的owner。
+                                self._cursor = accounted_cursor
+                                self._discovery_debt = True
+                                return scanned
+                            self._priority[key] = target.identity
+                    else:
+                        visited.add(key)
+                        self._priority.pop(key, None)
+                        self._run_scoped_owner(target.identity, current, reports)
+                accounted_cursor = key
+            self._cursor = page.next_cursor
+            self._discovery_debt = False
+            if page.next_cursor is None:
+                break
+        return scanned
 
     # LLM: 仅解析该 owner 的目录并调用原维护入口；单 owner 异常隔离，成功后只将仍到期者放入有界 FIFO。
     # 函数用途: 维护一个 scoped owner 并登记下拍需要优先续作的对象。
