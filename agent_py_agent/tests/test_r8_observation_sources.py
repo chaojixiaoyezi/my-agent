@@ -453,6 +453,8 @@ def test_usage_factory_close_failure_keeps_primary_and_unclosed_proof(tmp_path, 
 
 
 def test_usage_projection_rebuild_proof_requires_existing_canonical_directory(tmp_path):
+    import os
+
     from agent_py_agent.agent.conversation.usage_sources import UsageSourceIndex
     directory = tmp_path / 'model_usage'
     index = UsageSourceIndex(directory)
@@ -461,7 +463,30 @@ def test_usage_projection_rebuild_proof_requires_existing_canonical_directory(tm
     before = index._projection_rebuild_proof()
     assert before['directory'] and before['archive'] is None
     (directory / 'canonical.jsonl').write_text('record')
+    # 同一 Linux 文件系统时间刻度内 mkdir/write 可能保留相同目录时间；
+    # 此证明只准许从现存 canonical 重建空投影，随后仍须 prepare；
+    # 它不保证辨认每次叶内容更新。这里显式推进测试中的结构化来源快照。
+    os.utime(directory, ns=(directory.stat().st_atime_ns, before['directory'][2] + 2_000_000_000))
     assert index._projection_rebuild_proof() != before
+
+
+def test_usage_projection_rebuild_proof_rejects_replaced_directory_with_same_mtime(tmp_path):
+    import os
+
+    from agent_py_agent.agent.conversation.usage_sources import UsageSourceIndex
+    directory = tmp_path / 'model_usage'
+    directory.mkdir()
+    index = UsageSourceIndex(directory)
+    before = index._projection_rebuild_proof()
+    # 保留旧目录的 inode，排除文件系统立即复用 inode 对本断言的干扰。
+    directory.rename(tmp_path / 'removed_model_usage')
+    assert index._projection_rebuild_proof() is None
+    directory.mkdir()
+    os.utime(directory, ns=(directory.stat().st_atime_ns, before['directory'][2]))
+    after = index._projection_rebuild_proof()
+    assert after['directory'][2] == before['directory'][2]
+    assert after['directory'][:2] != before['directory'][:2]
+    assert after != before
 
 
 def test_usage_rebuild_proof_retains_cold_manifest_when_active_leaf_is_deleted(tmp_path):
