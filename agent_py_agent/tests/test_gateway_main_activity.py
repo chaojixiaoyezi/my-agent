@@ -251,3 +251,33 @@ def test_foreground_retry_final_event_shows_registered_status_text() -> None:
     row = background_main_activity(agent, "thread-a", {"task-a"})
     assert row["phase"] == "retrying"
     assert row["activity"] == PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED_STATUS_TEXT
+
+
+@pytest.mark.parametrize('level', ['on', 'stream', 'full'])
+def test_feishu_progress_keeps_safe_command_summary_through_the_card_projection(tmp_path, level):
+    import json
+
+    from agent_py_agent.agent.delivery.execution_view import project_execution_view
+
+    writer = BufferedChunkStreamWriter(tmp_path / 'chunks.jsonl', delivery_channel='feishu')
+    writer.set_verbose_level(level)
+    writer.write_progress({'tool': 'run_command', 'phase': 'started', 'call_id': 'call-demo',
+        'input': {'command': 'demo-cli inspect --token=OWNED_SECRET_SENTINEL'}}, '执行命令')
+    events = [json.loads(line) for line in writer.chunk_path.read_text().splitlines()]
+    steps = project_execution_view(events, request_id='request-demo')['steps']
+    assert len(steps) == 1 and 'demo-cli inspect' in steps[0]['label']
+    assert 'OWNED_SECRET_SENTINEL' not in steps[0]['label']
+    if level != 'full':
+        assert all('input' not in event.get('progress', {}) for event in events)
+
+
+@pytest.mark.parametrize('channel,level', [('feishu', 'off'), ('local', 'stream')])
+def test_command_summary_remains_scoped_to_enabled_feishu_progress(tmp_path, channel, level):
+    import json
+
+    writer = BufferedChunkStreamWriter(tmp_path / 'chunks.jsonl', delivery_channel=channel)
+    writer.set_verbose_level(level)
+    writer.write_progress({'tool': 'run_command', 'phase': 'started', 'call_id': 'call-demo',
+        'input': {'command': 'demo-cli inspect'}}, '执行命令')
+    events = [json.loads(line) for line in writer.chunk_path.read_text().splitlines()]
+    assert all('label' not in event.get('progress', {}) for event in events)

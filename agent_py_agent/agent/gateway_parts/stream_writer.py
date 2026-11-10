@@ -366,6 +366,16 @@ class BufferedChunkStreamWriter(StreamLiveness):
             self._reset_tool_input_progress()
             self.reset_model_text("tool_call")
         progress = dict(event)
+        if self.delivery_channel == "feishu" and self._verbose_level != "off":
+            from ..delivery.execution_view import step_display_text
+
+            inputs = progress.get("input")
+            if isinstance(inputs, dict):
+                # 公开卡片只接收既有输入投影的有界摘要，原参数及结果正文仍按档位隔离。
+                summary = next((inputs[key] for key in ("command", "path", "url", "query")
+                                if isinstance(inputs.get(key), str) and inputs[key].strip()), "")
+                if summary:
+                    progress["label"] = step_display_text(summary, max_chars=240)
         if self._verbose_level != "full":
             progress.pop("input", None)
             progress.pop("input_truncated", None)
