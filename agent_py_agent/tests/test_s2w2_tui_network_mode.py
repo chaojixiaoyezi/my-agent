@@ -589,6 +589,9 @@ def test_real_network_tui_stream_steer_approval_stop_new_next_turn(startup_gatew
     note.write_text("本轮只读样本", encoding="utf-8")
     ready, streaming, resume, approved, waiting_stop = (threading.Event() for _ in range(5))
     release, stopped, gateway_stop = (threading.Event() for _ in range(3))
+    next_streaming, next_finish = threading.Event(), threading.Event()
+    silent_streaming, silent_finish = threading.Event(), threading.Event()
+    synthetic_secret = "sk-" + "SyntheticCredential" * 40
     workers, writers, controls, failures, results = [], [], [], [], []
     permission_posts = []
     received_events = []
@@ -611,9 +614,10 @@ def test_real_network_tui_stream_steer_approval_stop_new_next_turn(startup_gatew
                 active[0] += 1
                 active[1] = max(active)
             try:
-                assert on_chunk is not None
+                if index < 4:
+                    assert on_chunk is not None
                 if index == 0:
-                    on_chunk("首轮正在生成。" * 100)
+                    on_chunk("首轮正在生成。" * 100 + " " + synthetic_secret + "\n")
                     streaming.set()
                     assert resume.wait(15), "插话未到达"
                     return ModelResponse(text="首阶段完成", backend=self.name)
@@ -640,8 +644,17 @@ def test_real_network_tui_stream_steer_approval_stop_new_next_turn(startup_gatew
                         assert is_interrupted(), "测试清理不能代替业务停止"
                         stopped.set()
                         raise InterruptedError("首轮已停止")
-                on_chunk("下一轮完整完成。" * 20)
-                return ModelResponse(text="下一轮完整完成。", backend=self.name)
+                if index == 3:
+                    # 超过原256字符安全holdback，才能验证终稿前候选而非等完成时补发。
+                    on_chunk("下一轮完整完成。" * 100)
+                    next_streaming.set()
+                    assert next_finish.wait(15), "默认流式下一轮未释放"
+                    return ModelResponse(text="下一轮完整完成。", backend=self.name)
+                if on_chunk is not None:
+                    on_chunk("静默模式候选不应可见。" * 100)
+                silent_streaming.set()
+                assert silent_finish.wait(15), "静默模式下一轮未释放"
+                return ModelResponse(text="关闭流式后完整完成。", backend=self.name)
             finally:
                 with lock:
                     active[0] -= 1
@@ -705,9 +718,7 @@ def test_real_network_tui_stream_steer_approval_stop_new_next_turn(startup_gatew
                 assert len(workers) == 1
                 cfg = workers[0]
                 runtime = cfg.tui_runtime
-                pipe.send_text("/verbose stream\r")
-                _wait_until(lambda: any(body.get("kind") == "verbose" and body.get("ok")
-                    for _payload, (_status, body) in controls))
+                assert not controls  # 全新TUI首轮没有显式切换verbose。
                 pipe.send_text("开始首轮\r")
                 assert streaming.wait(15), repr(failures)
                 _wait_until(lambda: bool(cfg.running_request_id_ref[0]))
@@ -715,7 +726,8 @@ def test_real_network_tui_stream_steer_approval_stop_new_next_turn(startup_gatew
                 terminal_ids.append(first_id)
                 _wait_until(lambda: any(event.get("kind") == "assistant_text_delta"
                     and "首轮正在生成" in str(event.get("text", "")) for event in received_events))
-                # 显式stream的宿主安全候选可见，但仍未冻结为已采纳正文。
+                # 默认流式仍只能显示宿主已净化候选，不能提前冻结为已采纳正文。
+                assert "SyntheticCredential" not in json.dumps(received_events, ensure_ascii=False)
                 assert any("首轮正在生成" in block.text
                     for block in runtime.store.snapshot().active_blocks)
                 assert not any("首轮正在生成" in block.text
@@ -735,6 +747,10 @@ def test_real_network_tui_stream_steer_approval_stop_new_next_turn(startup_gatew
                 # 真正从审批快捷键批准；不能直接调adapter绕过原UI焦点归还步骤。
                 pipe.send_text("y")
                 assert approved.wait(10) and waiting_stop.wait(10), repr(failures)
+                _wait_until(lambda: any(event.get("kind") == "assistant_text_reset"
+                    and event.get("reason") == "superseded" for event in received_events))
+                assert not any("首轮正在生成" in block.text
+                    for block in runtime.store.snapshot().active_blocks)
                 assert "保留这条补充" in generated[1]
                 # 原首答因插话被superseded；只有工具轮实际提交的commentary可以成为公开正文。
                 _wait_until(lambda: any("读取样本后继续" in block.text
@@ -761,11 +777,41 @@ def test_real_network_tui_stream_steer_approval_stop_new_next_turn(startup_gatew
                     for _payload, (_status, body) in controls))
                 _wait_until(lambda: runtime.conversation_reset_generation == 1)
                 pipe.send_text("下一轮消息\r")
+                assert next_streaming.wait(15), repr(failures)
+                _wait_until(lambda: bool(cfg.running_request_id_ref[0]))
+                _wait_until(lambda: any("下一轮完整完成" in block.text
+                    for block in runtime.store.snapshot().active_blocks))
+                next_finish.set()
                 _wait_until(lambda: any(block.text == "下一轮完整完成。"
                     for block in runtime.store.snapshot().stable_blocks), timeout=15)
                 _wait_until(lambda: not cfg.is_running_ref[0] and not runtime.store.snapshot().has_active_work)
+                assert sum(block.text == "下一轮完整完成。"
+                    for block in runtime.store.snapshot().stable_blocks) == 1
+                assert sum("下一轮完整完成" in block.text
+                    for block in runtime.store.snapshot().stable_blocks) == 1
+                pipe.send_text("/verbose off\r")
+                _wait_until(lambda: any(body.get("kind") == "verbose" and body.get("ok")
+                    for _payload, (_status, body) in controls))
+                pipe.send_text("关闭流式后的消息\r")
+                assert silent_streaming.wait(15), repr(failures)
+                _wait_until(lambda: bool(cfg.running_request_id_ref[0]))
+                assert not any("静默模式候选不应可见" in block.text
+                    for block in runtime.store.snapshot().active_blocks)
+                silent_finish.set()
+                _wait_until(lambda: any(block.text == "关闭流式后完整完成。"
+                    for block in runtime.store.snapshot().stable_blocks), timeout=15)
+                _wait_until(lambda: not cfg.is_running_ref[0] and not runtime.store.snapshot().has_active_work)
                 snapshot = runtime.store.snapshot()
+                assert sum(block.text == "关闭流式后完整完成。" for block in snapshot.stable_blocks) == 1
                 assert snapshot.permission is None and not snapshot.pending_steers and not snapshot.queued_inputs
+                assert sum(block.text == "下一轮完整完成。" for block in snapshot.stable_blocks) == 1
+                assert sum("下一轮完整完成" in block.text for block in snapshot.stable_blocks) == 1
+                assert not any("静默模式候选不应可见" in block.text
+                    or "SyntheticCredential" in block.text
+                    for block in (*snapshot.active_blocks, *snapshot.stable_blocks))
+                assert not any("静默模式候选不应可见" in str(event.get("text", ""))
+                    for event in received_events)
+                assert "SyntheticCredential" not in json.dumps(received_events, ensure_ascii=False)
                 assert not cfg.pending_jobs_ref[0] and cfg.running_request_id_ref == [""]
                 _wait_until(lambda: not runtime.notice(), timeout=5)
                 pipe.send_text("/exit\r")
@@ -775,6 +821,8 @@ def test_real_network_tui_stream_steer_approval_stop_new_next_turn(startup_gatew
         finally:
             resume.set()
             release.set()
+            next_finish.set()
+            silent_finish.set()
             gateway_stop.set()
             if workers:
                 cfg = workers[0]
@@ -789,16 +837,17 @@ def test_real_network_tui_stream_steer_approval_stop_new_next_turn(startup_gatew
             assert not ui_thread.is_alive() and not gateway_thread.is_alive()
     assert not failures, repr(failures)
     assert results == [0] and active == [0, 1]
-    assert [body["kind"] for _payload, (_status, body) in controls] == ["verbose", "steer", "stop", "new"]
+    assert [body["kind"] for _payload, (_status, body) in controls] == ["steer", "stop", "new", "verbose"]
     terminals = list(state.paths.terminal.glob("*.json"))
-    assert len(terminals) == 2
+    assert len(terminals) == 3
     first = state.paths.terminal / f"{terminal_ids[0]}.json"
     retained = terminal_snapshots[first.stem]
     terminal = read_gateway_terminal_response_file(first, request_id=first.stem)
     assert terminal["status"] == "interrupted" and terminal["error_code"] == "INTERRUPTED"
-    other, = (path for path in terminals if path != first)
-    result = read_gateway_terminal_response_file(other, request_id=other.stem)
-    assert result["ok"] and result["response"] == "下一轮完整完成。"
+    completed = [read_gateway_terminal_response_file(path, request_id=path.stem)
+        for path in terminals if path != first]
+    assert len(completed) == 2 and all(result["ok"] for result in completed)
+    assert {result["response"] for result in completed} == {"下一轮完整完成。", "关闭流式后完整完成。"}
     assert first.read_bytes() == retained
     for thread in set(threading.enumerate()) - before_threads:
         if thread.name.startswith(("my-agent-tui", "Thread-")) and thread.daemon:
