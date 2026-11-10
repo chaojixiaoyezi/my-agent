@@ -117,6 +117,10 @@ class BufferedChunkStreamWriter(StreamLiveness):
     _last_flush_at: float = field(default_factory=time.monotonic)
     _verbose_level: str = "off"
     _final_only: bool = field(default=False, init=False)
+    # LLM: 非rich设置行延到本writer首个实际发布事件之前补写（MSG-023 B）：纯final-only短受理轮/零事件writer不落chunk；
+    #   首发之后的档位变化仍即时写出。两标志只在_commit_lock内与补写配对，不建立第二条发送路径。
+    _settings_pending: bool = field(default=False, init=False, repr=False)
+    _published_any: bool = field(default=False, init=False, repr=False)
     _im_preview_max_chars: int = 100
     _display_timezone: str = ""
     im_approval_agent: object | None = field(default=None, repr=False)
@@ -240,6 +244,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
         _commit_model_response(self, payload)
 
     # LLM: 详细级别及字符上限消费本请求有效配置，只投影展示，不裁剪内部候选、工具正文或最终结果。
+    #   首发前的设置只登记待补写，由首个实际发布事件之前按当时档位写一行；首发之后的变化即时写出。
     # 函数用途: 固定本请求的过程档位、短窗口上限和用户时区，随事件传给 IM 投递端。
     def set_verbose_level(self, level: str, *, preview_max_chars: int = 100, timezone: str = "") -> None:
         normalized = str(level or "off").strip().lower()
@@ -249,7 +254,11 @@ class BufferedChunkStreamWriter(StreamLiveness):
         self._im_preview_max_chars = max(1, min(8000, int(preview_max_chars)))
         self._display_timezone = timezone
         if not self.rich_transcript:
-            self._write_event({'kind': 'process_settings', 'verbose_level': self._verbose_level})
+            with self._commit_lock:
+                deferred = not self._published_any
+                self._settings_pending = self._settings_pending or deferred
+            if not deferred:
+                self._write_event({'kind': 'process_settings', 'verbose_level': self._verbose_level})
 
     # LLM: 只由原宿主派工确认后设置；仅普通IM候选/进度静默，不改变rich记录、模型或最终response事实。
     # 函数用途: 让短受理轮只由原最终回复watcher外送一次。
@@ -671,6 +680,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
 
 
 # LLM: 短接单轮仍不向普通IM发过程；正文已由原commit门提交，退休raw kind无producer，其余事件净化落原chunk/sink并逐出口核still_current。
+#   待补写的设置行在锁内先于首个实际发布事件落盘，发布完成才清标志，并发首发者等锁后按序写在其后。
 # 函数用途: 发布 writer 的安全事件与展示时刻，sink 故障不改变任务结果，不创建第二发送路径。
 def _publish_writer_event(writer: BufferedChunkStreamWriter, event: dict[str, object], *, still_current: Callable[[], bool] | None = None) -> None:
     from ..common.log_redaction import redact_sensitive_value
@@ -681,6 +691,12 @@ def _publish_writer_event(writer: BufferedChunkStreamWriter, event: dict[str, ob
         "runtime_progress", "tool_progress", "assistant_commentary", "model_liveness", "tool_liveness",
     }:
         return
+    if writer._settings_pending and event.get("kind") != "process_settings":
+        with writer._commit_lock:
+            if writer._settings_pending:
+                _publish_writer_event(writer, {"kind": "process_settings", "verbose_level": writer._verbose_level})
+                writer._settings_pending = False
+    writer._published_any = True
     event = redact_sensitive_value(event)
     if writer._verbose_level == "stream" and not writer.rich_transcript:
         event = {**event, "preview_max_chars": writer._im_preview_max_chars}
