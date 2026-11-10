@@ -734,9 +734,15 @@ def _task_host_state_path_strings(boundary: dict[str, object]) -> list[str]:
 # 跑、写根也不含本任务时照样只读；ae 块 4 发现，2026-10-02）。
 # 函数用途: 给已授权工具补充模型不可见的写根、读根、临时根顺序和其它运行边界参数。
 def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -> dict[str, Any]:
-    if not isinstance(request.write_boundary, dict):
-        return request.tool_params
     params = dict(request.tool_params)
+    if request.tool_name == "send_message":
+        # 登记根只能来自宿主当前任务，模型同名隐藏参数不能决定查找范围。
+        params.pop("__artifact_registry_root", None)
+    if not isinstance(request.write_boundary, dict):
+        return params if request.tool_name == "send_message" else request.tool_params
+    if request.tool_name == "send_message":
+        _copy_boundary_path(BoundaryPathCopyRequest(params=params, boundary=request.write_boundary,
+            target_key="__artifact_registry_root", source_key="task_root"))
     if request.tool_name in _SANDBOX_WRITE_BOUNDARY_TOOL_NAMES:
         shell_mode = str(request.write_boundary.get("shell_access_mode") or "").strip()
         if shell_mode and request.tool_name in {"run_command", "terminal_session"}:

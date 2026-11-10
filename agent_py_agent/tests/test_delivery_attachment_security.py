@@ -271,7 +271,7 @@ def test_missing_original_registry_hash_is_not_resigned_from_current_file(tmp_pa
     item = _attachment(owner)
     register_artifact(ArtifactRegistration(workspace_root=owner, path=Path(item.path), artifact_id='synthetic', status='ready', source='test'))
     record = channel_message_tool._resolve_registered_artifact(owner, 'synthetic')
-    monkeypatch.setattr(channel_message_tool, '_resolve_registered_artifact', lambda *_: replace(record, sha256=''))
+    monkeypatch.setattr(channel_message_tool, '_resolve_registered_artifact', lambda *_, **__: replace(record, sha256=''))
     tool, adapter = _tool(owner)
     result = tool.execute({'message': '合成说明', 'attachments': ['synthetic']})
     assert not result.ok and result.error_code == 'ARTIFACT_VALIDATION_FAILED'

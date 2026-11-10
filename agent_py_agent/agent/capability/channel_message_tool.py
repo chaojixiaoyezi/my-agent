@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..artifacts.registry import ArtifactRegistryRecord, resolve_artifact_record_report
+from ..artifacts.registry import ArtifactRegistryRecord
 from ..conversation.channels import (
     project_message_paths_for_channel,
     project_user_reply,
@@ -115,7 +115,7 @@ class SendMessageTool(BaseTool):
                 static_scopes=("current_owner_channel",),
             ),
             input_policy=ToolInputPolicy(
-                internal_parameters=("__run_scope", "__tool_call_id"),
+                internal_parameters=("__run_scope", "__tool_call_id", "__artifact_registry_root"),
                 trusted_parameter_bindings=((
                     "evidence_refs",
                     TrustedParameterBinding(
@@ -261,7 +261,7 @@ class SendMessageTool(BaseTool):
         capabilities = self._delivery.registry.capabilities_for(provider)
         if not capabilities.proactive or not target or owner_root is None:
             return _error("当前 owner 没有可用的外部消息通道", "CHANNEL_ADAPTER_UNAVAILABLE")
-        attachments = _resolve_attachments(owner_root, attachment_refs)
+        attachments = _resolve_attachments(owner_root, attachment_refs, task_root=params.get("__artifact_registry_root"))
         if isinstance(attachments, ToolHandlerOutcome):
             return attachments
         envelope = ReplyEnvelope(
@@ -647,10 +647,11 @@ def _owner_delivery_identity(agent: object, channel: str = "") -> tuple[str, str
 def _resolve_attachments(
     owner_root: Path,
     refs: list[str],
+    *, task_root: object = None,
 ) -> tuple[ChannelAttachment, ...] | ToolHandlerOutcome:
     attachments: list[ChannelAttachment] = []
     for ref in refs:
-        record = _resolve_registered_artifact(owner_root, ref)
+        record = _resolve_registered_artifact(owner_root, ref, task_root=task_root)
         if isinstance(record, ToolHandlerOutcome):
             return record
         if record is None:
@@ -686,37 +687,63 @@ def _resolve_attachments(
 def _resolve_registered_artifact(
     owner_root: Path,
     ref: str,
+    *, task_root: object = None,
 ) -> ArtifactRegistryRecord | ToolHandlerOutcome | None:
-    roots = _artifact_registry_roots(owner_root, ref)
+    from ..artifacts.registry import latest_artifact_records_report
+    from ..artifacts.registry_reader import lookup_record_with_errors
+
+    task = None
+    if task_root:
+        try:
+            task = Path(str(task_root)).expanduser().resolve(strict=True)
+            task.relative_to(owner_root)
+        except (OSError, ValueError):
+            return _error("当前任务产物范围不可核验", "PATH_OUTSIDE_WORKSPACE")
+    roots = _artifact_registry_roots(owner_root, ref, task_root=task)
+    matches = {}
+    basename_matches = {}
     for root in roots:
-        report = resolve_artifact_record_report(root, ref, path=ref)
-        if report.errors:
+        raw = Path(ref).expanduser()
+        listing = latest_artifact_records_report(root)
+        if listing.errors:
             return _error("产物登记表不可可靠读取，为避免错发已安全停止", "ARTIFACT_VALIDATION_FAILED")
-        if report.record is not None:
-            return report.record
-    return None
+        paths = [raw] if raw.is_absolute() else [root / raw, owner_root / raw]
+        for path in dict.fromkeys(paths):
+            record, errors = lookup_record_with_errors(listing.records, listing.errors, ref, path=path)
+            if errors:
+                return _error("产物登记表不可可靠读取，为避免错发已安全停止", "ARTIFACT_VALIDATION_FAILED")
+            if record is not None:
+                matches[(record.artifact_id, record.path, record.sha256, record.size_bytes, record.status)] = record
+        if root == task and len(raw.parts) == 1:
+            # 只在正式当前任务的登记表里匹配文件名，不枚举文件或其它任务。
+            for record in listing.records.values():
+                if Path(record.path).name == ref:
+                    basename_matches[(record.artifact_id, record.path, record.sha256, record.size_bytes, record.status)] = record
+    found = matches or basename_matches
+    if len(found) > 1:
+        return _error("产物引用存在歧义，请使用完整已登记路径", "ARTIFACT_VALIDATION_FAILED")
+    return next(iter(found.values()), None)
 
 
-# LLM: 只有 ref 的真实绝对路径才可派生任务根；路径逃出 owner 时仅返回 owner 根并由后续边界校验拒绝。
-# 函数用途: 枚举 owner 根与文件祖先中的少量候选 registry 根。
-def _artifact_registry_roots(owner_root: Path, ref: str) -> tuple[Path, ...]:
-    roots = [owner_root]
+def _artifact_registry_roots(owner_root: Path, ref: str, *, task_root: Path | None = None) -> tuple[Path, ...]:
+    """仅精确路径祖先和宿主当前任务；不扫描其它任务目录。"""
+    roots = [task_root, owner_root] if task_root is not None else [owner_root]
     raw = Path(ref).expanduser()
-    if not raw.is_absolute():
-        return tuple(roots)
-    try:
-        path = raw.resolve(strict=False)
-        path.relative_to(owner_root)
-    except (OSError, ValueError):
-        return tuple(roots)
-    current = path.parent
-    while current != owner_root:
-        if (current / "data" / "artifacts" / "registry.jsonl").is_file():
-            roots.insert(0, current)
-        parent = current.parent
-        if parent == current:
-            break
-        current = parent
+    candidates = [raw] if raw.is_absolute() else [owner_root / raw, *([task_root / raw] if task_root is not None else [])]
+    for candidate in candidates:
+        try:
+            path = candidate.resolve(strict=False)
+            path.relative_to(owner_root)
+        except (OSError, ValueError):
+            continue
+        current = path.parent
+        while current != owner_root:
+            if (current / "data" / "artifacts" / "registry.jsonl").is_file():
+                roots.append(current)
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
     return tuple(dict.fromkeys(roots))
 
 
