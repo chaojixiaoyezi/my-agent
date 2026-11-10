@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import time
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from .feishu_message_history import (
     ChannelMessageHistoryError,
@@ -80,10 +80,45 @@ def list_user_messages(agent, chat_id, **query):
         raise ChannelMessageHistoryError('TOOL_INVALID_ARGUMENTS')
     start, end, senders, cursor, limit = validate_history_query(**query)
     identity = UserHistoryIdentity(agent)
-    authority = identity.check()
+    deadline = time.monotonic() + HistoryLimits.BUDGET_SECONDS
+    mode = None
+
+    def check():
+        nonlocal mode
+        from .feishu_provider_facts import FeishuProviderFactError, _provider, _read
+
+        authority = identity.check()
+        def remaining():
+            amount = deadline - time.monotonic()
+            if amount <= 0:
+                raise ChannelMessageHistoryError('FEISHU_PROVIDER_UNAVAILABLE')
+            return amount
+        path = '/im/v1/chats/' + quote(chat_id, safe='')
+        chat = identity.read(path + '?user_id_type=open_id', remaining())
+        current_mode = chat.get('chat_mode')
+        if current_mode not in {'p2p', 'group', 'topic'} or mode is not None and mode != current_mode:
+            raise ChannelMessageHistoryError('FEISHU_PROVIDER_RESPONSE_INVALID')
+        mode = current_mode
+        if mode != 'p2p':
+            own = identity.read(path + '/members/is_in_chat', remaining())
+            if own.get('is_in_chat') is not True:
+                raise ChannelMessageHistoryError('FEISHU_USER_AUTH_REQUIRED')
+            try:
+                adapter, token = _provider(agent)
+                if adapter.app_id != identity.identity.app_id:
+                    raise ChannelMessageHistoryError('FEISHU_PROVIDER_AUTH_UNAVAILABLE')
+                bot = _read(token, path + '/members/is_in_chat', timeout=min(5.0, remaining()), stage='bot_membership')
+            except FeishuProviderFactError as error:
+                raise ChannelMessageHistoryError(error.reason_code) from None
+            if bot.get('is_in_chat') is not True:
+                raise ChannelMessageHistoryError('FEISHU_BOT_GROUP_MEMBERSHIP_REQUIRED')
+        if identity.check() != authority:
+            raise ChannelMessageHistoryError('FEISHU_USER_AUTH_REQUIRED')
+        return (*authority, mode)
+
+    authority = check()
     return _list_chat_messages(chat_id, start=start, end=end, senders=senders, cursor=cursor, limit=limit,
-        authority=authority, check_authority=identity.check, read_page=identity.read,
-        deadline=time.monotonic() + HistoryLimits.BUDGET_SECONDS)
+        authority=authority, check_authority=check, read_page=identity.read, deadline=deadline)
 
 
 def validate_user_chat_query(*, cursor='', limit=50, chat_types=('p2p', 'group')):

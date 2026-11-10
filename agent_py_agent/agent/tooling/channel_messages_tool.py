@@ -91,7 +91,7 @@ def _query(params):
 def _permission_facts(agent, selector, action):
     from ..user_space.feishu_authorization import permission_requirements
     scopes = ('im:chat:read',) if action == 'list_chats' else (
-        'im:message:readonly', 'im:message.p2p_msg:get_as_user', 'im:message.group_msg:get_as_user')
+        'im:chat:readonly', 'im:message:readonly', 'im:message.p2p_msg:get_as_user', 'im:message.group_msg:get_as_user')
     if selector != 'user':
         scopes = ('im:message:readonly', 'im:message.group_msg')
     return permission_requirements(agent, required_scopes=scopes, identity='user' if selector == 'user' else 'bot',

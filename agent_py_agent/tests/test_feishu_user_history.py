@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -35,11 +37,18 @@ def authorized(ctx, monkeypatch, tmp_path):
     calls, replies = [], []
     ctx.history_hook = None
     ctx.history_provider_code = 0
+    ctx.chat_mode = 'p2p'
+    ctx.user_in_chat = ctx.bot_in_chat = True
+    ctx.authority_calls = []
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             parsed = urlsplit(self.path)
             if parsed.path == '/authen/v1/user_info':
                 data = {'open_id': 'ou_synthetic'}
+            elif parsed.path.startswith('/im/v1/chats/'):
+                bearer = self.headers.get('Authorization')
+                ctx.authority_calls.append((parsed.path, bearer))
+                data = {'is_in_chat': ctx.bot_in_chat if bearer == 'Bearer Synthetic-Bot-Token' else ctx.user_in_chat} if parsed.path.endswith('/members/is_in_chat') else {'chat_mode': ctx.chat_mode}
             else:
                 calls.append((parsed.path, parse_qs(parsed.query), self.headers.get('Authorization')))
                 data = replies.pop(0) if replies else {'items': [], 'has_more': False, 'page_token': ''}
@@ -55,6 +64,15 @@ def authorized(ctx, monkeypatch, tmp_path):
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
+    from agent_py_agent.agent.adapter import feishu, feishu_provider_facts
+    monkeypatch.setattr(feishu_provider_facts, '_provider', lambda agent: (
+        SimpleNamespace(app_id='synthetic-app'), 'Synthetic-Bot-Token'))
+    def provider_api(method, path, body, token, *, timeout):
+        request = urllib.request.Request(f'http://127.0.0.1:{server.server_port}' + path,
+            headers={'Authorization': 'Bearer ' + token}, method=method)
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.load(response)
+    monkeypatch.setattr(feishu, '_feishu_msg_api', provider_api)
     binary = tmp_path / 'private-cli.py'
     binary.write_text('''import json,sys,urllib.request
 p=json.load(sys.stdin)
@@ -264,3 +282,57 @@ def test_remaining_history_budget_reaches_process_timeout_and_cleanup(authorized
     assert cleanup[-1] == ('wait', 2) and process.returncode == 0
     assert len(cleanup) == 2 and not ctx.history_calls
     assert 'Synthetic-Access-Token' not in result.output
+
+
+@pytest.mark.parametrize('mode,user_member,bot_member,allowed', [
+    ('group', True, True, True), ('topic', True, True, True),
+    ('group', False, True, False), ('group', True, False, False),
+    ('p2p', False, False, True),
+])
+def test_user_history_requires_both_group_members_but_not_p2p(authorized, mode, user_member, bot_member, allowed):
+    ctx = authorized
+    ctx.chat_mode, ctx.user_in_chat, ctx.bot_in_chat = mode, user_member, bot_member
+    ctx.history_replies.append({'items': [message(chat='oc_ab')], 'has_more': False, 'page_token': ''})
+    result = ChannelMessagesTool(ctx.agent).execute({'action': 'list', 'selector': 'user', 'chat_id': 'oc_ab',
+        'start_time': 100, 'end_time': 200})
+    assert result.ok is allowed, result.output
+    if allowed:
+        assert len(ctx.history_calls) == 1 and ctx.history_calls[0][2] == 'Bearer Synthetic-Access-Token'
+        assert json.loads(result.output)['items'][0]['message_id'] == 'om_1'
+    else:
+        assert not ctx.history_calls and 'om_1' not in result.output
+    membership = [row for row in ctx.authority_calls if row[0].endswith('/members/is_in_chat')]
+    if mode == 'p2p':
+        assert not membership
+    elif allowed:
+        assert [row[1] for row in membership] == ['Bearer Synthetic-Access-Token', 'Bearer Synthetic-Bot-Token'] * 2
+
+
+@pytest.mark.parametrize('member', ['user', 'bot'])
+def test_group_member_leaving_between_pages_discards_buffer(authorized, member):
+    ctx = authorized
+    ctx.chat_mode = 'group'
+    ctx.history_replies.append({'items': [message(chat='oc_ab')], 'has_more': True, 'page_token': 'later'})
+    def leave():
+        setattr(ctx, member + '_in_chat', False)
+    ctx.history_hook = leave
+    result = ChannelMessagesTool(ctx.agent).execute({'action': 'list', 'selector': 'user', 'chat_id': 'oc_ab',
+        'start_time': 100, 'end_time': 200})
+    assert not result.ok and len(ctx.history_calls) == 1
+    assert 'om_1' not in result.output and 'channel_messages' not in (result.result_envelope or {})
+
+
+def test_unknown_chat_mode_and_wrong_bot_application_never_read_history(authorized, monkeypatch):
+    from agent_py_agent.agent.adapter import feishu_provider_facts
+    ctx = authorized
+    tool = ChannelMessagesTool(ctx.agent)
+    query = {'action': 'list', 'selector': 'user', 'chat_id': 'oc_ab', 'start_time': 100, 'end_time': 200}
+    ctx.chat_mode = 'unverified'
+    assert not tool.execute(query).ok and not ctx.history_calls
+    ctx.chat_mode = 'group'
+    monkeypatch.setattr(feishu_provider_facts, '_provider', lambda agent: (
+        SimpleNamespace(app_id='other-synthetic-app'), 'Synthetic-Bot-Token'))
+    result = tool.execute(query)
+    assert not result.ok and result.error_code == 'FEISHU_PROVIDER_AUTH_UNAVAILABLE'
+    assert not ctx.history_calls
+    assert all(token != 'Bearer Synthetic-Bot-Token' for _, token in ctx.authority_calls)

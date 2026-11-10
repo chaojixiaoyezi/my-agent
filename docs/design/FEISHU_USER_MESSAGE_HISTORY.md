@@ -5,7 +5,7 @@
 - 默认 `selector=current_group` 保持当前群规范归属、机器人/成员/租户证明和租户身份；模型不能在此模式指定别的群。
 - `selector=user` 仅私人 owner，沿既有 `feishu_oauth.user_access_token` 的 owner/actor、宿主 run scope、密文记录、刷新与撤销 CAS。群 owner 不能借私人用户授权读取私聊。受控 CLI 在每次业务请求前验证 token 对应用户。
 - `action=list_chats` 对官方 `/im/v1/chats` 显式发送 `types=p2p,group`；会话来自该用户、该应用实际可见范围，不从应用权限推导全量私人会话。`action=list` 使用准确 chat_id 及原七天时间窗。
-- 用户身份需要 `im:chat:read`（会话列表），消息读取需要 `im:message:readonly`、`im:message.p2p_msg:get_as_user`、`im:message.group_msg:get_as_user`。应用可用范围、群内机器人及飞书外部群等限制仍由官方 API 执行；OAuth 不能替代管理员申请、审核和发布应用权限。
+- 用户身份需要 `im:chat:read`（会话列表），消息读取及会话类型/成员核验需要 `im:chat:readonly`、`im:message:readonly`、`im:message.p2p_msg:get_as_user`、`im:message.group_msg:get_as_user`。群聊读取前、每页和返回前通过本人UAT读取chat_mode；group/topic分别以UAT与宿主同应用TAT核本人和机器人is_in_chat均为true，不要求群主/admin、不枚举全员。私聊不加机器人成员门。应用可用范围及飞书外部群等限制仍由官方 API 执行；OAuth 不能替代管理员申请、审核和发布应用权限。
 - `action=status` 不联网、不读取 token，返回结构化 required_scopes、permission_settings_url、official_api_docs 和原 `feishu_auth authorize` 入口。permission_status=not_verified 不声称权限已获批。用户读失败同样携带上述事实，绝不要求向模型粘贴 token。
 - 默认开放历史能力入口，仍可显式关闭；启用入口不会自动调用网络或创建新授权。用户 CLI 后端未配置、授权缺失/撤销或 owner/actor 不符均明确拒绝，不降级为机器人身份。
 
