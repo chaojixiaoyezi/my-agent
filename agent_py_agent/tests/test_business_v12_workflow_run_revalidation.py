@@ -2,11 +2,21 @@
 #   与副作用前被拒且运行记录不变；范围恢复后同一运行可再续跑；撤销后取消仍可收口；运行中途撤销使后续步骤在副作用前被拒、
 #   脚本不执行。R2：原生服务缓存按工作流端口稳定来源失效（登记回退→显式覆盖、缺一显式、再回退）。只用 tmp 隔离 home；
 #   空间归档的阻塞端口原生未接线（G4），测试只供空阻塞列表让真实归档转换运行。
+#   R3（MSG-027）：非allow策略（skip_if_running/queue）的续跑在撤销后于真实dispatcher首次claim绑定/排队写入前被拒，
+#   运行账本与claim/队列字节不变且无瞬时写；有效对照经同一真实dispatcher建claim或排队后真实执行，排队/跳过准入
+#   回执如实投影为202 accepted / 未开始拒绝 / blocked（原把准入字典当运行记录读而断连）。
 from __future__ import annotations
 
+import threading
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from agent_py_agent.agent.workflows import concurrency_policy
 from agent_py_agent.agent.workflows import engine as workflow_engine
+from agent_py_agent.agent.workflows import run_store as workflow_run_store
 from agent_py_agent.agent.workflows.business_scope import WorkflowRunContextFactory
 from agent_py_agent.agent.workflows.engine import WorkflowEngine
 from agent_py_agent.agent.workflows.run_store import WorkflowRunStore
@@ -162,3 +172,165 @@ def test_native_services_follow_the_workflow_port_source(native, tmp_path):  # n
               )['state'] == 'completed'
     assert len(built) == 1
     assert next(iter(server._business_services.values())).workflow_port_source[0] == 'registry'
+
+
+def _policy_ports(agent, policy):  # noqa: F811
+    """显式宿主端口：引擎工厂只设默认并发策略，使原生运行与续跑经真实dispatcher；上下文仍由宿主工厂解析。"""
+    def factory(owner_home, **options):
+        engine = WorkflowEngine(owner_home, **options)
+        engine.default_concurrency_policy = policy
+        return engine
+
+    agent.workflow_engine_factory, agent.business_context_provider = factory, WorkflowRunContextFactory()
+
+
+def _evidence(agent, *run_ids):  # noqa: F811
+    """原运行目录与本Owner并发claim/队列目录的全部文件字节（含新增文件）。"""
+    store = WorkflowRunStore(agent.home_paths.owner_home_dir)
+    roots = [store.run_dir(run_id) for run_id in run_ids]
+    roots.append(Path(agent.home_paths.owner_home_dir) / 'data' / 'workflow_concurrency')
+    return {(str(root), str(path.relative_to(root))): path.read_bytes()
+            for root in roots if root.exists() for path in sorted(root.rglob('*')) if path.is_file()}
+
+
+def _resume_recording_writes(native, run_id, key, revision):  # noqa: F811
+    """只记录并原样调用真实运行账本写口与claim/排队写口（不替换dispatcher），证明拒绝前连瞬时写也没有。"""
+    writes = []
+    with pytest.MonkeyPatch.context() as patch:
+        for module, name in ((workflow_run_store, '_write_json'), (concurrency_policy, '_create_claim'),
+                             (concurrency_policy, '_write_queue'), (concurrency_policy, '_unlink_same')):
+            real = getattr(module, name)
+
+            def spy(*args, _real=real, _name=name, **kwargs):
+                writes.append(_name)
+                return _real(*args, **kwargs)
+            patch.setattr(module, name, spy)
+        status, payload = call(native, 'workflow_runs.resume', {'workflow_run_id': run_id}, idempotency_key=key,
+                               expected_revision=revision)
+    return status, payload, writes
+
+
+@pytest.mark.parametrize('policy', ['skip_if_running', 'queue'])
+def test_policy_resume_refuses_revoked_run_before_claim_rebinding(native, monkeypatch, policy):  # noqa: F811
+    server, agent = native
+    agent.business_active_references = lambda space_id, actor: []
+    _script(agent)
+    _policy_ports(agent, policy)
+    tag = policy.replace('_', '-')
+    space, other = _spaces(native, 'r3-' + tag)
+    ok(native, 'workflows.create', _flow('r1-flow', scope={'scope_mode': 'spaces', 'space_ids': [space]}),
+       idempotency_key='r3-flow-create-' + tag)
+    run_id = _paused(native, agent, monkeypatch, space, 'r3-paused-run-' + tag)
+    store = WorkflowRunStore(agent.home_paths.owner_home_dir)
+    # 原运行确经真实dispatcher取得claim；暂停时无未结副作用，claim已释放。续跑按原策略须新建claim并绑定run.json。
+    claim = store._read(run_id, 'run.json')['concurrency_claim']
+    assert (claim['record']['policy'], claim['phase']) == (policy, 'released')
+
+    def refuse(key, code, status):
+        before = _evidence(agent, run_id)
+        got, payload, writes = _resume_recording_writes(native, run_id, key, store.load_run(run_id).revision)
+        assert (got, payload['error']['code'], payload['effect_outcome']) == (status, code, 'not_started'), payload
+        assert writes == [] and _evidence(agent, run_id) == before
+
+    _set_scope(native, 'r1-flow', {'scope_mode': 'spaces', 'space_ids': [other]}, 'r3-scope-other-' + tag)
+    refuse('r3-resume-moved-' + tag, 'WORKFLOW_SPACE_MISMATCH', 409)
+    _set_scope(native, 'r1-flow', {'scope_mode': 'spaces', 'space_ids': [space]}, 'r3-scope-back-' + tag)
+    revision = ok(native, 'spaces.get', {'space_id': space})['space']['revision']
+    ok(native, 'spaces.archive', {'space_id': space}, idempotency_key='r3-space-archive-' + tag,
+       expected_revision=revision)
+    refuse('r3-resume-archived-' + tag, 'SPACE_ARCHIVED', 503)
+    # 正对照：空间恢复后同一运行经真实dispatcher重绑原claim、执行脚本并释放。
+    revision = ok(native, 'spaces.get', {'space_id': space})['space']['revision']
+    ok(native, 'spaces.restore', {'space_id': space}, idempotency_key='r3-space-restore-' + tag,
+       expected_revision=revision)
+    done = ok(native, 'workflow_runs.resume', {'workflow_run_id': run_id}, idempotency_key='r3-resume-valid-' + tag,
+              expected_revision=store.load_run(run_id).revision)
+    finished = store.load_run(run_id)
+    assert done['state'] == 'completed' and finished.status == 'succeeded'
+    assert finished.steps[0].output_snapshot == {'total': 3}
+    assert store._read(run_id, 'run.json')['concurrency_claim']['phase'] == 'released'
+
+
+def _paused_after_first_step(native, agent, space, key):  # noqa: F811
+    """首步已提交并发表后、次步副作用前注入一次停止：暂停运行带已提交副作用，claim按原规则保留（retained）。"""
+    real_save, real_stop, armed = WorkflowRunStore.save_step_result, workflow_engine._check_stop, []
+
+    def save_then_arm(self, workflow_run_id, step_record):
+        saved = real_save(self, workflow_run_id, step_record)
+        if step_record.step_id == 'calc' and step_record.status == 'succeeded':
+            armed.append(True)
+        return saved
+
+    def stop_when_armed():
+        if armed:
+            armed.clear()
+            raise InterruptedError('simulated stop between committed steps')
+        return real_stop()
+
+    before = {row.workflow_run_id for row in _runs(agent)}
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(WorkflowRunStore, 'save_step_result', save_then_arm)
+        patch.setattr(workflow_engine, '_check_stop', stop_when_armed)
+        call(native, 'workflows.run', {'workflow_ref': 'r1-flow', 'space_id': space}, idempotency_key=key)
+    [paused] = [row for row in _runs(agent) if row.workflow_run_id not in before]
+    return paused
+
+
+@pytest.mark.parametrize('policy', ['skip_if_running', 'queue'])
+def test_policy_resume_behind_a_claim_holder_refuses_revoked_run_without_any_write(native, monkeypatch, policy):  # noqa: F811
+    server, agent = native
+    _script(agent)
+    tag = policy.replace('_', '-')
+    space, other = _spaces(native, 'r3h-' + tag)
+    flow = _flow('r1-flow', scope={'scope_mode': 'spaces', 'space_ids': [space]})
+    flow['definition']['steps'].append({'step_id': 'calc2', 'name': 'calc2', 'mode': 'deterministic_script',
+                                        'script_id': 'calc'})
+    ok(native, 'workflows.create', flow, idempotency_key='r3h-flow-create-' + tag)
+    waiting = _paused(native, agent, monkeypatch, space, 'r3h-paused-run-' + tag)  # 登记回退端口：allow，无claim。
+    store = WorkflowRunStore(agent.home_paths.owner_home_dir)
+    _policy_ports(agent, policy)
+    holder = _paused_after_first_step(native, agent, space, 'r3h-holder-run-' + tag).workflow_run_id
+    # 持有者：同策略原生运行首步已提交、次步前暂停，带未对账副作用（unknown）而保留claim；等待者只能排队或被跳过。
+    assert (store.load_run(holder).status, store.load_run(holder).effect_outcome) == ('paused_for_resume', 'unknown')
+    assert 'concurrency_claim' not in store._read(waiting, 'run.json')
+    assert store._read(holder, 'run.json')['concurrency_claim']['phase'] == 'retained'
+    workers = {thread.ident for thread in threading.enumerate() if thread.name.startswith('workflow-queue-')}
+    _set_scope(native, 'r1-flow', {'scope_mode': 'spaces', 'space_ids': [other]}, 'r3h-scope-other-' + tag)
+    before = _evidence(agent, waiting, holder)
+    status, payload, writes = _resume_recording_writes(native, waiting, 'r3h-resume-revoked-' + tag,
+                                                       store.load_run(waiting).revision)
+    assert (status, payload['error']['code'], payload['effect_outcome']) == (
+        409, 'WORKFLOW_SPACE_MISMATCH', 'not_started'), payload
+    assert writes == [] and _evidence(agent, waiting, holder) == before
+    assert {thread.ident for thread in threading.enumerate() if thread.name.startswith('workflow-queue-')} <= workers
+    # 正对照（范围恢复）：同一续跑与一条新运行经真实dispatcher遇到持有者——queue写排队票据并如实给202 accepted；
+    #   skip_if_running续跑未开始（not_started）、新运行落skipped（blocked）。持有者经原生取消结清释放claim后真实执行。
+    _set_scope(native, 'r1-flow', {'scope_mode': 'spaces', 'space_ids': [space]}, 'r3h-scope-restore-' + tag)
+    status, payload = call(native, 'workflow_runs.resume', {'workflow_run_id': waiting},
+                           idempotency_key='r3h-resume-valid-' + tag, expected_revision=store.load_run(waiting).revision)
+    fresh_status, fresh = call(native, 'workflows.run', {'workflow_ref': 'r1-flow', 'space_id': space},
+                               idempotency_key='r3h-fresh-run-' + tag)
+    if policy == 'queue':
+        assert (status, payload['data']) == (202, {'operation_id': waiting, 'state': 'accepted'}), payload
+        assert (fresh_status, fresh['data']['state']) == (202, 'accepted'), fresh
+    else:
+        assert (status, payload['error']['code'], payload['effect_outcome']) == (
+            503, 'WORKFLOW_RUN_SKIPPED_ALREADY_RUNNING', 'not_started'), payload
+        assert store.load_run(waiting).status == 'paused_for_resume'
+        assert (fresh_status, fresh['data']['state']) == (200, 'blocked'), fresh
+        assert store.load_run(fresh['data']['workflow_run_id']).status == 'skipped'
+    cancelled = ok(native, 'workflow_runs.cancel', {'workflow_run_id': holder}, idempotency_key='r3h-cancel-holder-' + tag,
+                   expected_revision=store.load_run(holder).revision)
+    assert cancelled['outstanding_refs'] == [] and store._read(holder, 'run.json')['concurrency_claim']['phase'] == 'released'
+    if policy == 'skip_if_running':
+        ok(native, 'workflow_runs.resume', {'workflow_run_id': waiting}, idempotency_key='r3h-resume-after-' + tag,
+           expected_revision=store.load_run(waiting).revision)
+    expected = [waiting] + ([fresh['data']['workflow_run_id']] if policy == 'queue' else [])
+    deadline = time.monotonic() + 20
+    while (any(store._read(run_id, 'run.json')['status'] != 'succeeded' for run_id in expected)
+           and time.monotonic() < deadline):
+        time.sleep(0.05)
+    for run_id in expected:
+        finished = store.load_run(run_id)
+        assert finished.status == 'succeeded', (run_id, finished.status)
+        assert [step.output_snapshot for step in finished.steps] == [{'total': 3}, {'total': 3}]

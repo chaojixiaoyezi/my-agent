@@ -310,6 +310,10 @@ class _WorkflowRunLifecycle:
         frozen = self.store._read(workflow_run_id, 'run.json')
         if options['expected_revision'] is None:
             options['expected_revision'] = frozen.get('revision', 0)
+        # G5a-R3：非allow策略的dispatch会先绑定claim改写run.json或写排队票据；先对同一快照做只读当前业务预检
+        #   （与回调内preflight同门，不论有无operation_key），拒绝时原运行与claim/队列证据不变；回调内与每次副作用前仍复核。
+        from .run_store import _decode_run
+        self._authorize_run(_decode_run(frozen), 'preflight')
         result = dispatch(self.owner_home, 'workflow', frozen['workflow_id'], workflow_run_id,
                           concurrency_policy, callback, queue_limit=queue_limit, _lifecycle=self.store)
         if isinstance(result, dict):

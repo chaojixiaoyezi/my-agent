@@ -491,6 +491,13 @@ class WorkflowScopeService:
         record = engine.run_workflow(definition.to_dict(), request.get('inputs', {}), owner_id=self.owner_id,
             business_context=context, scope_snapshot=state['scope'], workflow_run_id=identity, operation_intent=intent,
             **({'business_context_origin': origin} if origin else {}))
+        if isinstance(record, dict):
+            # 非allow策略的准入回执不是运行记录（原生引擎不挂准入观察者）：排队=已耐久受理，给async accepted回执；
+            #   跳过时引擎已把原运行落为skipped，按该记录回执。不把回执当记录读。
+            if record.get('status') == 'queued':
+                from ..plugin_host.contracts import DomainResult
+                return DomainResult(202, {'workflow_run_id': identity, 'operation_id': identity, 'state': 'accepted'})
+            record = engine.store.load_run(identity)
         return {'workflow_run_id': identity, 'operation_id': identity, 'state': self._receipt_state(record)}
 
     @staticmethod
@@ -542,6 +549,13 @@ class WorkflowScopeService:
         if action == 'workflow_runs.resume':
             result = engine.resume_workflow_run(record.workflow_run_id, expected_revision=expected_revision,
                                                  operation_key=idempotency_key, control_intent=request)
+            if isinstance(result, dict):
+                # 同上：排队=已耐久受理（等待线程按原回调与原门执行），给accepted回执；跳过/不支持=续跑未开始、
+                #   原运行未改，如实拒绝（not_started）。
+                if result.get('status') == 'queued':
+                    from ..plugin_host.contracts import DomainResult
+                    return DomainResult(202, {'operation_id': record.workflow_run_id, 'state': 'accepted'})
+                raise WorkflowPolicyRefusal(result.get('error_code') or 'WORKFLOW_RUN_SKIPPED_ALREADY_RUNNING')
             return {'run': self._run_view(result), 'operation_id': record.workflow_run_id,
                     'state': self._receipt_state(result)}
         if action == 'workflow_runs.cancel':
