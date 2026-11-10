@@ -352,9 +352,7 @@ def _surface(agent) -> dict[str, bool]:
     }
 
 
-# LLM: PRO-MSG-021：真实保存“关之前”的运行时快照和调用，之后才关开关，再拿旧快照走 registry.execute_tool；
-#   这才是过期快照证明（harness 每次新建快照，不能当这个证明）。
-# 函数用途: 在开关开着时保存快照与规范调用。
+# 开关开着时保存真实快照与规范调用；之后关开关再拿旧快照走 registry.execute_tool，才是过期快照证明（PRO-MSG-021）。
 def _saved_call(case):
     from agent_py_agent.tests._tool_runtime_harness import canonical_test_call
 
@@ -378,6 +376,8 @@ def test_b1_switch_toggles_live_on_the_same_agent_both_directions(case):
     _as_parent(case)
     on = _surface(case.agent)
     saved_snapshot, saved_call = _saved_call(case)
+    # 正向对照：同一旧快照与调用在开着时真的执行并读到申请（PRO-MSG-030）。
+    positive = case.agent.tools.execute_tool(saved_call, write_boundary=None, runtime_snapshot=saved_snapshot).result
     _write_switch(case.agent, "false")
     off = _surface(case.agent)
     facts_before = _child_facts(case)
@@ -393,7 +393,10 @@ def test_b1_switch_toggles_live_on_the_same_agent_both_directions(case):
     assert off == {"snapshot": False, "specs": False, "catalog": False, "search": False}
     assert direct.ok is False and direct.effect_outcome == "not_started"
     assert direct_payload["error"]["reason"] == "PENDING_INBOX_DISABLED" and "items" not in direct_payload
+    assert positive.ok is True and "req-1" in positive.output
     assert stale.ok is False and stale.effect_outcome == "not_started" and "req-1" not in stale.output
+    assert stale.error_code == "TOOL_PERMISSION_DENIED"
+    assert json.loads(stale.output)["error"]["reason"] == "PENDING_INBOX_DISABLED"
     assert facts_after == facts_before
     assert again == on and result.ok is True and [item["request_id"] for item in payload["items"]] == ["req-1"]
 
@@ -418,8 +421,7 @@ def test_b1_switch_is_isolated_per_owner(case, tmp_path):
     assert _surface(other)["specs"] is True
 
 
-# LLM: “读不出”用真正读不了的路径（同名目录）构造；共享解析器对无法识别的行按缺省处理，那不算读不出，记在 HANDOFF。
-# 函数用途: 非布尔值与配置读不出都按关闭处理，模型看不到、直接调用也不执行。
+# 非布尔值与真正读不了的路径（同名目录）都按关闭处理；坏行另由 B1-R1 用例覆盖。
 @pytest.mark.parametrize("broken", ["non_boolean", "unreadable"])
 def test_b1_unreadable_or_non_boolean_config_fails_closed(case, broken):
     path = Path(case.agent.capability_config_path)
@@ -638,3 +640,37 @@ def test_cursor_whose_request_vanished_restarts_the_child_and_reports_partial(ca
     assert [item["request_id"] for item in second["items"]] == ["req-0", "req-1", "req-2"]
     assert second["coverage"]["cursor_request_missing"] == [case.child_id]
     assert second["coverage"]["state"] == "partial"
+
+
+# B1-R3（PRO-MSG-030）：显式白名单点名收件箱时，目录 catalog 的 allowed_tools（完整输出与 live 投影）也不能带出关闭的
+#   收件箱；tool_search 本身仍在列表里，其它不可用工具（send_message）照常列出并保留不可用诊断。开着时同一入口能看到它。
+def test_b1_r3_explicit_allowlist_catalog_hides_only_the_disabled_inbox(case):
+    from agent_py_agent.agent.tooling.models import ToolInvocationContext
+
+    _as_parent(case)
+    search = case.agent.tools.tools["tool_search"]
+    allowlist = ["tool_search", "list_pending_requests", "send_message"]
+
+    def catalog():
+        snapshot = case.agent.tools.runtime_snapshot(allowed_tools=allowlist)
+        result = search.execute_scoped({"action": "catalog"}, ToolInvocationContext(snapshot))
+        assert result.ok, result.output
+        raw = result.result_envelope["tool_output_policy"]["live_prompt_output"]
+        return snapshot, json.loads(result.output), raw
+
+    _write_switch(case.agent, "true")
+    on_snapshot, on, on_raw = catalog()
+    _write_switch(case.agent, "false")
+    off_snapshot, off, off_raw = catalog()
+
+    assert "list_pending_requests" in on["allowed_tools"] and "list_pending_requests" in on_raw
+    assert "list_pending_requests" not in off["allowed_tools"] and "list_pending_requests" not in off_raw
+    assert "list_pending_requests" not in json.dumps(off, ensure_ascii=False)
+    # 执行授权仍以快照为准：快照白名单不改，只是模型可见列表不列它，且它不在可用集合里。
+    assert "list_pending_requests" in off_snapshot.allowed_tools
+    assert "list_pending_requests" not in off_snapshot.available_tool_names
+    assert "list_pending_requests" in on_snapshot.available_tool_names
+    for payload, raw in ((on, on_raw), (off, off_raw)):
+        assert "tool_search" in payload["allowed_tools"] and json.loads(raw)
+        assert "send_message" in payload["allowed_tools"]
+        assert "send_message" in {item["name"] for item in payload["unavailable_tools"]}

@@ -265,7 +265,13 @@ def tool_catalog_result(registry, snapshot, context=None) -> ToolHandlerOutcome:
         self_context.update(provider(snapshot, context))
     payload = tool_manifest_payload(snapshot)
     if isinstance(payload.get("allowed_tools"), list):
-        payload["allowed_tools"] = [name for name in payload["allowed_tools"] if name != CATALOG_ONLY_TOOL_GRANT]
+        # B1-R3（PRO-MSG-030）：显式白名单原样进快照（执行授权仍以快照为准，不改）；只在模型可见的目录列表里去掉
+        # 声明 hidden_when_unavailable 且本快照不可用的工具名。其它不可用工具照常列出并保留诊断。
+        hidden = {name for name, tool in registry.tools.items()
+                  if getattr(type(tool), "hidden_when_unavailable", False) is True
+                  and name not in snapshot.available_tool_names}
+        payload["allowed_tools"] = [name for name in payload["allowed_tools"]
+                                    if name != CATALOG_ONLY_TOOL_GRANT and name not in hidden]
     payload["self_context"] = self_context
     payload["permission_mode"] = self_context["permissions"]["mode"]
     payload["tool_failure_taxonomy"] = payload["failure_taxonomy"]
