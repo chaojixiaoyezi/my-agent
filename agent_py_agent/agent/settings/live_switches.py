@@ -46,7 +46,7 @@ LIVE_SWITCH_KEYS = frozenset({
     "memory_compact_remote_enabled", "memory_compact_semantic_summary_enabled", "memory_curator_enabled",
     "memory_hook_enabled", "memory_rule_notices_enabled", "memory_semantic_recall",
     "model_truncation_thinking_downgrade", "notify_delivery_enabled", "openai_compat_gateway_enabled",
-    "ops_remote_update_enabled", "orchestration_pending_inbox_enabled", "plugin_events_enabled", "plugin_legacy_sandbox_default",
+    "ops_remote_update_enabled", "orchestration_git_progress_enabled", "orchestration_pending_inbox_enabled", "plugin_events_enabled", "plugin_legacy_sandbox_default",
     "plugin_self_install_enabled", "prompt_runtime_snapshots_enabled", "public_capability_packages_enabled",
     "query_zero_result_review_enabled", "reasoning_control_auto_probe", "run_task_workspace_enabled",
     "self_learning_include_background", "session_messaging_admin_enabled", "session_messaging_user_enabled",

@@ -66,6 +66,9 @@ def observe_registered(agent: Any, repo: str, *, baseline: str = "") -> dict[str
     from ...capability import runtime_config_reload
 
     config = runtime_config_reload.capability_config_for_agent(agent)
+    # ORCH03-R3：总开关必须严格为 True；关着时即使登记了仓库也不校验、不启动 git。
+    if getattr(config, "orchestration_git_progress_enabled", None) is not True:
+        return _error("GIT_ADAPTER_DISABLED")
     registered = getattr(config, "orchestration_git_progress_repos", None) if config is not None else None
     if not isinstance(registered, list) or not registered:
         return _error("GIT_ADAPTER_DISABLED")
@@ -76,6 +79,43 @@ def observe_registered(agent: Any, repo: str, *, baseline: str = "") -> dict[str
     if isinstance(checked, str):
         return _error(checked)
     return observe(checked, baseline=baseline)
+
+
+# LLM: ORCH03-R2：关联只来自子代理任务记录里的 allowed_write_roots（权威写入范围），不看 workspace_refs 投影或模型
+#   输入。每个写入根取包含它的最深已校验仓库（嵌套时取更具体的）；不在任何已登记仓库内的写入根（例如宿主分给每个
+#   子代理的私有工作目录）与仓库信号无关，不参与关联。规则：落到恰好一个仓库 → exact；落到多个不同仓库 → ambiguous；
+#   一个都没有 → none；同一仓库 exact 关联到多个子代理 → shared（谁的改动说不清，一律不提升）。
+#   返回 run_id -> {"association": exact|shared|ambiguous|none, "repo": 路径或 ""}。
+# 函数用途: 把已校验仓库关联到子代理。
+def associate_repos(write_roots_by_run: dict[str, list[str]], repos: list[Path]) -> dict[str, dict[str, str]]:
+    ordered = sorted(repos, key=lambda item: len(item.parts), reverse=True)
+    result: dict[str, dict[str, str]] = {}
+    for run_id, roots in write_roots_by_run.items():
+        owners = set()
+        for raw in roots:
+            if not isinstance(raw, str) or not os.path.isabs(raw):
+                continue
+            try:
+                real = Path(os.path.realpath(raw))
+            except OSError:
+                continue
+            match = next((repo for repo in ordered if real == repo or repo in real.parents), None)
+            if match is not None:
+                owners.add(match)
+        if not owners:
+            result[run_id] = {"association": "none", "repo": ""}
+        elif len(owners) > 1:
+            result[run_id] = {"association": "ambiguous", "repo": ""}
+        else:
+            result[run_id] = {"association": "exact", "repo": str(next(iter(owners)))}
+    counts: dict[str, int] = {}
+    for item in result.values():
+        if item["association"] == "exact":
+            counts[item["repo"]] = counts.get(item["repo"], 0) + 1
+    for item in result.values():
+        if item["association"] == "exact" and counts[item["repo"]] > 1:
+            item["association"] = "shared"
+    return result
 
 
 # LLM: 路径必须是绝对路径且与其 realpath 完全相同（没有任何符号链接分量），归当前用户，位于某个允许根之内；
@@ -113,13 +153,15 @@ def validate_repo(repo: Path, allowed_roots: list[Path]) -> Path | str:
 
 # LLM: 已校验路径上的只读观察；baseline 只接受十六进制提交号，不接受分支名或任何选项样式输入。
 # 函数用途: 读取 HEAD、相对基线的提交数与改动文件数。
-def observe(repo: Path, *, baseline: str = "") -> dict[str, object]:
+def observe(repo: Path, *, baseline: str = "", deadline: float | None = None) -> dict[str, object]:
     if baseline and not _BASELINE.fullmatch(baseline):
         return _error("BASELINE_INVALID")
     if not _PLATFORM_SUPPORTED:
         # 没有经过验证的进程树清理合同，不启动任何 git 进程，也不编造清理确认。
         return _error("GIT_PLATFORM_UNSUPPORTED")
-    deadline = time.monotonic() + GIT_OBSERVATION_BUDGET_SECONDS
+    # 调用方（list_agents）可给整次调用共用的绝对截止；本次观察取两者中更早的那个。
+    own = time.monotonic() + GIT_OBSERVATION_BUDGET_SECONDS
+    deadline = own if deadline is None else min(own, deadline)
     config = _git(repo, ["config", "--null", "--list", "--show-origin", "--no-includes"], deadline)
     if config["error_code"]:
         return _error(str(config["error_code"]))
@@ -390,4 +432,4 @@ def _error(code: str) -> dict[str, object]:
             "observed_at": round(time.time(), 3), "error_code": code}
 
 
-__all__ = ["GIT_CLEANUP_RESERVE_SECONDS", "GIT_COMMAND_TIMEOUT_SECONDS", "MAX_GIT_OUTPUT_BYTES", "observe", "observe_registered", "validate_repo"]
+__all__ = ["GIT_CLEANUP_RESERVE_SECONDS", "associate_repos", "GIT_COMMAND_TIMEOUT_SECONDS", "MAX_GIT_OUTPUT_BYTES", "observe", "observe_registered", "validate_repo"]

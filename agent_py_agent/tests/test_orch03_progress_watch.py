@@ -18,8 +18,8 @@ from agent_py_agent.agent.agent_core.agent_tree.model_view import agent_tree_pro
 from agent_py_agent.agent.agent_core.agent_tree.status import agent_tree_status_payload
 from agent_py_agent.agent.agent_core.orchestration import git_progress_adapter as git
 from agent_py_agent.agent.agent_core.orchestration.progress_watch import (
+    DEFAULT_PROGRESS_CHECK_CHILD_LIMIT_COUNT,
     HEARTBEAT_STALE_AFTER_SECONDS,
-    MAX_PROGRESS_CLASSIFIED_NODES_COUNT,
     PROGRESS_STALE_AFTER_SECONDS,
     classify_node_progress,
     classify_nodes,
@@ -56,8 +56,12 @@ def _node(**overrides) -> dict:
     (_node(status="BLOCKED"), "waiting_dependency", "BLOCKED"),
     (_node(blockers="x"), "unknown", "BLOCKER_FACTS_UNREADABLE"),
     (_node(status="PLANNING"), "unknown", "NOT_STARTED"),
-    (_node(recent_tool_failure={"consecutive_failures": 3}), "retrying", "REPEATED_TOOL_FAILURE"),
-    (_node(recent_tool_failure={"consecutive_failures": 1}), "working", "RECENT_PROGRESS_EVENT"),
+    # ORCH03-R1：只有仍在进行（ongoing 严格为 True）的同码连续失败才是重试；已结束的失败段只是历史。
+    (_node(recent_tool_failure={"consecutive_failures": 3, "ongoing": True}), "retrying", "REPEATED_TOOL_FAILURE"),
+    (_node(recent_tool_failure={"consecutive_failures": 3, "ongoing": False}), "working", "RECENT_PROGRESS_EVENT"),
+    (_node(recent_tool_failure={"consecutive_failures": 3}), "working", "RECENT_PROGRESS_EVENT"),
+    (_node(recent_tool_failure={"consecutive_failures": 3, "ongoing": "true"}), "working", "RECENT_PROGRESS_EVENT"),
+    (_node(recent_tool_failure={"consecutive_failures": 1, "ongoing": True}), "working", "RECENT_PROGRESS_EVENT"),
     (_node(last_progress_at=NOW - PROGRESS_STALE_AFTER_SECONDS - 1), "no_progress", "PROGRESS_EVENTS_STALE"),
     # 进程/心跳在不等于在干活：活着但从没有进展事件 → unknown，不是 working，也不是 no_progress。
     (_node(last_progress_at=0), "unknown", "NO_PROGRESS_EVENT_YET"),
@@ -85,10 +89,10 @@ def test_sources_keep_time_provenance_and_unknown_never_reads_as_healthy():
 
 
 def test_classification_is_bounded_per_snapshot():
-    results = classify_nodes([_node() for _ in range(MAX_PROGRESS_CLASSIFIED_NODES_COUNT + 6)], now=NOW)
+    results = classify_nodes([_node() for _ in range(DEFAULT_PROGRESS_CHECK_CHILD_LIMIT_COUNT + 6)], now=NOW)
 
     assert [item["reason"] for item in results[-6:]] == ["NOT_CLASSIFIED_LIMIT"] * 6
-    assert {item["state"] for item in results[:MAX_PROGRESS_CLASSIFIED_NODES_COUNT]} == {"working"}
+    assert {item["state"] for item in results[:DEFAULT_PROGRESS_CHECK_CHILD_LIMIT_COUNT]} == {"working"}
 
 
 def test_git_observation_only_upgrades_with_a_verified_change():
@@ -198,11 +202,13 @@ def repo(agent_and_child):
     return path
 
 
-def _register(monkeypatch, repos: list[str]) -> None:
+def _register(monkeypatch, repos: list[str], *, enabled: bool = True, limit: int = 0) -> None:
     from agent_py_agent.agent.capability import runtime_config_reload
 
-    monkeypatch.setattr(runtime_config_reload, "capability_config_for_agent",
-                        lambda _agent: CapabilityConfig(orchestration_git_progress_repos=repos))
+    config = CapabilityConfig(orchestration_git_progress_enabled=enabled, orchestration_git_progress_repos=repos,
+                              orchestration_progress_check_child_limit=limit)
+    monkeypatch.setattr(runtime_config_reload, "capability_config_for_agent", lambda _agent: config)
+    monkeypatch.setattr(runtime_config_reload, "capability_config_with_trusted_source", lambda _agent: (config, ""))
 
 
 def test_git_adapter_is_off_by_default_and_observes_only_registered_repos(agent_and_child, repo, monkeypatch):
@@ -595,7 +601,7 @@ def test_flooding_status_reports_an_honest_lower_bound_with_a_valid_head(agent_a
     _node(status="PAUSED"), _node(status="PLANNING"), _node(status="SOMETHING_NEW"), _node(status=...),
     _node(heartbeat_at=...), _node(heartbeat_at=NOW - HEARTBEAT_STALE_AFTER_SECONDS - 1),
     _node(last_progress_at=0), _node(tool_contract=...), _node(status="FAILED"), _node(status="DONE"),
-    _node(blockers=["等上游"]), _node(recent_tool_failure={"consecutive_failures": 5}),
+    _node(blockers=["等上游"]), _node(recent_tool_failure={"consecutive_failures": 5, "ongoing": True}),
 ])
 def test_git_change_never_overrides_lifecycle_or_unproven_liveness(node):
     """PRO-MSG-017：仓库有变化证明不了暂停/未开始/状态不明/心跳缺失的子代理在干活，也不改等待、重试和终态。"""
@@ -605,3 +611,315 @@ def test_git_change_never_overrides_lifecycle_or_unproven_liveness(node):
 
     assert (merged["state"], merged["reason"]) == (base["state"], base["reason"])
     assert merged["sources"]["git"]["head"] == "b" * 40
+
+
+# ---------- ORCH03-R1/R2/R3（PRO-MSG-024）：真实 list_agents 的冻结上下文 ----------
+
+
+def _child_node(agent, run_id) -> dict:
+    payload = _list(agent, run_id)
+    return next(row for row in payload["nodes"] if row["run_id"] == run_id)
+
+
+def _extra_children(agent, child_id, count) -> list[str]:
+    root = agent.subagents.load(child_id).root_id
+    return [agent.subagents.create_run(goal=f"子任务{index}", thought="", plan=["做"], parent_id=root, root_id=root,
+                                       depth=1).id for index in range(count)]
+
+
+def _write_capability(agent, text: str, bump: float = 2.0) -> None:
+    path = Path(agent.capability_config_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    stamp = time.time() + bump
+    os.utime(path, (stamp, stamp))
+
+
+def test_real_list_agents_reads_every_required_source_and_reports_full_coverage(agent_and_child):
+    agent, child_id, _ = agent_and_child
+    node = _child_node(agent, child_id)
+    required = node["progress"]["sources"]["required"]
+
+    assert set(required) == {"runtime_read", "attempt", "tool_failures", "tool_approvals", "task_progress"}
+    assert all(item["state"] in {"read", "not_applicable"} for item in required.values()), required
+    # 真实子代理登记在 owner 运行库里：attempt 与失败账确实读到了，不是“不适用”。
+    assert required["attempt"] == {"state": "read", "status": "pending"}
+    assert required["tool_failures"] == {"state": "read"} and required["tool_approvals"] == {"state": "read", "pending": 0}
+    assert node["progress"]["coverage"] == "full"
+
+
+def test_task_record_running_but_authoritative_attempt_pending_is_unknown(agent_and_child):
+    agent, child_id, _ = agent_and_child
+    task = agent.subagents.load(child_id)
+    task.status = "RUNNING"
+    task.heartbeat_at = time.time()
+    task.last_progress_at = time.time()
+    agent.subagents.save(task)
+
+    progress = _child_node(agent, child_id)["progress"]
+
+    assert (progress["state"], progress["reason"]) == ("unknown", "ATTEMPT_NOT_RUNNING")
+    assert progress["sources"]["attempt_status"] == "pending"
+
+
+def test_unreadable_todo_is_a_required_source_error_and_unassigned_items_are_counted(agent_and_child):
+    from agent_py_agent.agent.agent_core.agent_tree.node_rendering import _progress_root
+    from agent_py_agent.agent.task_progress import progress_path, write_task_progress
+
+    agent, child_id, _ = agent_and_child
+    root = _progress_root(agent)
+    write_task_progress(root, child_id, {"items": [
+        {"id": "a", "title": "有人认领", "status": "in_progress", "owner": "worker-1"},
+        {"id": "b", "title": "没人认领", "status": "pending"},
+        {"id": "c", "title": "已完成也没 owner", "status": "done"},
+    ]})
+    readable = _child_node(agent, child_id)["progress"]
+    progress_path(root, child_id).write_text("{broken", encoding="utf-8")
+    broken = _child_node(agent, child_id)["progress"]
+
+    assert readable["sources"]["required"]["task_progress"] == {"state": "read", "open": 2, "unassigned_open": 1}
+    assert readable["coverage"] == "full"
+    assert broken["sources"]["required"]["task_progress"] == {"state": "unreadable"}
+    assert (broken["state"], broken["reason"], broken["coverage"]) == ("unknown", "REQUIRED_SOURCE_UNREADABLE",
+                                                                      "partial")
+
+
+def test_pending_tool_approval_is_waiting_permission_and_an_unreadable_ledger_is_not_zero(tmp_path):
+    from agent_py_agent.agent.conversation import agent_tool_approval as approvals
+    from agent_py_agent.tests.test_gateway_agent_control_service import (
+        _bound_agent_tree,
+        _child_approval_request,
+    )
+
+    agent, _, child = _bound_agent_tree(tmp_path)
+    control = _child_node(agent, child.id)["progress"]
+    handle = approvals.publish_agent_tool_approval(agent, run_id=child.id, thread_id=child.agent_thread_id,
+                                                   request_value=_child_approval_request(child.id))
+    pending = _child_node(agent, child.id)["progress"]
+    handle.path.write_text("{broken", encoding="utf-8")
+    broken = _child_node(agent, child.id)["progress"]
+
+    assert control["sources"]["required"]["tool_approvals"] == {"state": "read", "pending": 0}
+    assert control["reason"] != "PENDING_TOOL_APPROVAL"
+    assert (pending["state"], pending["reason"]) == ("waiting_permission", "PENDING_TOOL_APPROVAL")
+    assert pending["sources"]["pending_tool_approvals"] == 1
+    # 审批账读不出时不能当作“没有审批”。
+    assert broken["sources"]["required"]["tool_approvals"] == {"state": "unreadable"}
+    handle.path.unlink()
+    # 发现器正忙（另一线程持有发现锁）时报告不完整：同样是读不出，不是零。
+    import threading
+
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with approvals._pending_discovery_lock:
+            held.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    try:
+        assert held.wait(5)
+        busy = _child_node(agent, child.id)["progress"]
+    finally:
+        release.set()
+        holder.join(10)
+    assert busy["sources"]["required"]["tool_approvals"] == {"state": "unreadable"}
+    assert (busy["state"], busy["reason"]) == ("unknown", "REQUIRED_SOURCE_UNREADABLE")
+    assert (broken["state"], broken["reason"]) == ("unknown", "REQUIRED_SOURCE_UNREADABLE")
+
+
+def test_current_tool_failure_streak_reaches_the_node_with_its_ongoing_fact(agent_and_child):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.tool_runtime_ledger import persist_tool_runtime_ledger
+
+    agent, child_id, _ = agent_and_child
+
+    def call(index, ok):
+        persist_tool_runtime_ledger(SimpleNamespace(subagents=agent.subagents, local_store=None), {
+            "run_id": child_id, "task_id": "task-T", "attempt_id": "attempt-1", "operation_id": f"op-{index}",
+            "handler_executed": ok, "idempotency_key": f"key-{index}", "tool": "read_file", "ok": ok,
+            "error_code": "" if ok else "TOOL_PERMISSION_DENIED", "failure_stage": "" if ok else "authorization"})
+
+    call(1, False)
+    call(2, False)
+    ongoing = _child_node(agent, child_id)["recent_tool_failure"]
+    call(3, True)
+    settled = _child_node(agent, child_id)["recent_tool_failure"]
+
+    assert ongoing["consecutive_failures"] == 2 and ongoing["ongoing"] is True
+    assert settled["consecutive_failures"] == 2 and settled["ongoing"] is False
+    # 分类规则对这两个真实形状的裁决：只有 ongoing=True 的才可能是 retrying。
+    live = _node(recent_tool_failure=ongoing)
+    assert classify_node_progress(live, now=NOW)["state"] == "retrying"
+    assert classify_node_progress(_node(recent_tool_failure=settled), now=NOW)["state"] == "working"
+
+
+def test_child_limit_zero_uses_the_default_explicit_limit_bounds_reads_and_invalid_classifies_nothing(
+        agent_and_child, monkeypatch):
+    from agent_py_agent.agent.agent_core.agent_tree import node_rendering
+
+    agent, child_id, _ = agent_and_child
+    children = [child_id, *_extra_children(agent, child_id, 2)]
+    reads = []
+    original = node_rendering.progress_source_facts
+    monkeypatch.setattr(node_rendering, "progress_source_facts",
+                        lambda a, run_id: reads.append(run_id) or original(a, run_id))
+
+    def states():
+        payload = _list(agent, agent.subagents.load(child_id).root_id)
+        return {row["run_id"]: row["progress"]["reason"] for row in payload["nodes"] if row["run_id"] in children}
+
+    _register(monkeypatch, [], limit=0)
+    default = states()
+    default_reads = list(reads)
+    _register(monkeypatch, [], limit=2)
+    reads.clear()
+    bounded = states()
+    bounded_reads = list(reads)
+    _register(monkeypatch, [], limit=-1)
+    reads.clear()
+    invalid = states()
+
+    assert DEFAULT_PROGRESS_CHECK_CHILD_LIMIT_COUNT == 20
+    assert "NOT_CLASSIFIED_LIMIT" not in default.values() and set(children) <= set(default_reads)
+    assert list(bounded.values()).count("NOT_CLASSIFIED_LIMIT") == 1 and len(bounded_reads) == 2
+    assert set(invalid.values()) == {"PROGRESS_CHILD_LIMIT_INVALID"} and reads == []
+
+
+def test_negative_child_limit_in_the_file_is_refused_at_load(tmp_path):
+    path = tmp_path / "capability_config.yaml"
+    path.write_text("orchestration_progress_check_child_limit: -1\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_capability_config(path)
+    path.write_text("orchestration_progress_check_child_limit: 3\n", encoding="utf-8")
+    assert load_capability_config(path).orchestration_progress_check_child_limit == 3
+    assert load_capability_config("agent_py_agent/config/capability_config.yaml").orchestration_progress_check_child_limit == 0
+
+
+def test_malformed_selected_config_classifies_nothing_instead_of_using_defaults(agent_and_child):
+    agent, child_id, _ = agent_and_child
+    _write_capability(agent, "orchestration_progress_check_child_limit: 5\n这不是合法的 yaml 行\n")
+    broken = _child_node(agent, child_id)["progress"]
+    _write_capability(agent, "orchestration_progress_check_child_limit: 5\n", bump=4.0)
+    fixed = _child_node(agent, child_id)["progress"]
+
+    assert (broken["state"], broken["reason"]) == ("unknown", "PROGRESS_CONFIG_PARSE_ERROR")
+    assert "required" not in broken["sources"]
+    assert fixed["reason"] == "NOT_STARTED" and fixed["coverage"] == "full"
+
+
+def test_associate_repos_needs_one_unshared_repo_for_every_write_root(tmp_path):
+    outer = Path(os.path.realpath(tmp_path)) / "outer"
+    inner = outer / "inner"
+    other = Path(os.path.realpath(tmp_path)) / "other"
+    for item in (inner, other):
+        item.mkdir(parents=True)
+    result = git.associate_repos({
+        "nested": [str(inner / "src")],
+        "outer": [str(outer / "docs")],
+        "split": [str(outer / "docs"), str(other)],
+        "half": [str(other), str(tmp_path / "elsewhere")],
+        "unrelated": [str(tmp_path / "elsewhere")],
+        "empty": [],
+        "relative": ["inner/src"],
+        "shared-a": [str(other / "a")],
+        "shared-b": [str(other / "b")],
+    }, [outer, inner, other])
+
+    assert result["nested"] == {"association": "exact", "repo": str(inner)}
+    assert result["outer"] == {"association": "exact", "repo": str(outer)}
+    assert result["split"]["association"] == "ambiguous"
+    # 仓库外的写入根（例如宿主分配的私有工作目录）不制造歧义，也不把别的仓库算到它头上。
+    assert result["half"] == {"association": "shared", "repo": str(other)}
+    assert {result[key]["association"] for key in ("unrelated", "empty", "relative")} == {"none"}
+    assert result["shared-a"] == result["shared-b"] == {"association": "shared", "repo": str(other)}
+    assert all(item["repo"] == "" for key, item in result.items() if item["association"] in {"none", "ambiguous"})
+
+
+def test_disabled_git_with_registered_repos_starts_no_git_and_attaches_nothing(agent_and_child, repo, monkeypatch):
+    agent, child_id, _ = agent_and_child
+    task = agent.subagents.load(child_id)
+    task.allowed_write_roots = [str(repo)]
+    agent.subagents.save(task)
+    spawned = []
+    monkeypatch.setattr(git.subprocess, "Popen", lambda *a, **k: spawned.append(a) or pytest.fail("git 被启动"))
+    _register(monkeypatch, [str(repo)], enabled=False)
+
+    progress = _child_node(agent, child_id)["progress"]
+
+    assert "git" not in progress["sources"] and "git_association" not in progress["sources"]
+    assert git.observe_registered(agent, str(repo))["error_code"] == "GIT_ADAPTER_DISABLED"
+    assert spawned == []
+
+
+def test_git_observation_attaches_only_to_exact_children_and_previous_resets_after_disable(
+        agent_and_child, repo, monkeypatch):
+    from agent_py_agent.agent.agent_core.orchestration.tools.list_agents import (
+        progress_read_context,
+    )
+
+    agent, child_id, _ = agent_and_child
+    unrelated, sharer_a, sharer_b = _extra_children(agent, child_id, 3)
+    sibling = repo.parent / "sibling"
+    sibling.mkdir()
+    _git(sibling, "init", "-q")
+    for run_id, roots in ((child_id, [str(repo / "src")]), (unrelated, [str(repo.parent / "not-a-repo")]),
+                          (sharer_a, [str(sibling)]), (sharer_b, [str(sibling / "x")])):
+        task = agent.subagents.load(run_id)
+        task.allowed_write_roots = roots
+        agent.subagents.save(task)
+    monkeypatch.setattr(agent, "workspace_roots", [repo.parent], raising=False)
+    _register(monkeypatch, [str(repo), str(sibling)])
+
+    def context():
+        snapshot = agent_tree_status_payload(agent, {"run_id": "task-T", "scope": "own_subtree"})
+        return progress_read_context(agent, snapshot)
+
+    first = context()
+    (repo / "a.txt").write_text("changed")
+    second = context()
+    _register(monkeypatch, [str(repo), str(sibling)], enabled=False)
+    off = context()
+    _register(monkeypatch, [str(repo), str(sibling)])
+    reopened = context()
+    node = _child_node(agent, child_id)["progress"]["sources"]
+
+    assert first.git[child_id]["association"] == "exact" and first.git[child_id]["previous"] is None
+    assert first.git[child_id]["observation"]["error_code"] == ""
+    assert second.git[child_id]["previous"] == first.git[child_id]["observation"]
+    assert second.git[child_id]["observation"]["dirty_paths_count"] == 1
+    assert first.git[unrelated]["association"] == "none" and "observation" not in first.git[unrelated]
+    assert {first.git[run]["association"] for run in (sharer_a, sharer_b)} == {"shared"}
+    assert "observation" not in first.git[sharer_a]
+    assert off.git == {}
+    # 关掉再打开：上一次样本作废，不能拿关之前的旧样本当比较对象。
+    assert reopened.git[child_id]["previous"] is None
+    assert node["git_association"] == {"association": "exact", "repo": str(repo)} and node["git"]["head"]
+    with pytest.raises(TypeError):
+        first.git[child_id]["association"] = "none"
+
+
+@pytest.mark.parametrize("association", ["shared", "ambiguous", "none"])
+def test_only_an_exact_association_can_upgrade_a_stalled_child(association):
+    from agent_py_agent.agent.agent_core.orchestration.progress_watch import ProgressReadContext
+
+    stalled = {**_node(last_progress_at=NOW - PROGRESS_STALE_AFTER_SECONDS - 1), "run_id": "r"}
+    previous = {"head": "a" * 40, "dirty_paths_count": 0, "error_code": ""}
+    entry = {"association": association, "repo": "/repo", "previous": previous,
+             "observation": {**previous, "head": "b" * 40}}
+    sources = {name: {"state": "read"} for name in ("runtime_read", "attempt", "tool_failures", "task_progress")}
+    sources["attempt"] = {"state": "read", "status": "running"}
+    sources["tool_approvals"] = {"state": "read", "pending": 0}
+
+    def classify(kind):
+        context = ProgressReadContext(now=NOW, child_limit=5, sources={"r": sources},
+                                      git={"r": {**entry, "association": kind}})
+        return classify_nodes([stalled], now=NOW, context=context)[0]
+
+    assert (classify("exact")["state"], classify("exact")["reason"]) == ("working", "GIT_CHANGED_SINCE_PREVIOUS")
+    other = classify(association)
+    # 共享/歧义/无关仓库的变化不能算到这个子代理头上。
+    assert (other["state"], other["reason"]) == ("no_progress", "PROGRESS_EVENTS_STALE")
+    assert "git" not in other["sources"] and other["sources"]["git_association"]["association"] == association

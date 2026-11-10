@@ -92,6 +92,10 @@ class CapabilityConfig:
     orchestration_pending_inbox_page_limit: int = 50
     # 进展观察可选读取的 git 仓库（绝对路径、须在工作区根内、无符号链接、归本用户）；空列表=不观察 git。
     orchestration_git_progress_repos: list[str] = field(default_factory=list)
+    # 子代理进展 git 观察总开关，默认关；关着时即使登记了仓库也不启动任何 git 进程。只接受 true/false，下一轮现读生效。
+    orchestration_git_progress_enabled: bool = False
+    # list_agents 一次最多给多少个子代理做进展分类；0 表示用默认 20，负数或非整数按配置错误处理（不会变成不限）。
+    orchestration_progress_check_child_limit: int = 0
     # 后台过程等待默认30秒交回控制；0不加工作片限制，仍受工具协议600秒与取消边界约束。
     process_session_wait_slice_seconds: int = 30
     # 整机跨owner安全阀，仅宿主注入或main配置可覆盖；普通owner私有同名键不影响整机；0不限，可设32或64。
@@ -201,6 +205,10 @@ def _coerce_capability_value(field_name: str, value: object) -> object:
         if not isinstance(value, str) or value not in {"ask", "auto"}:
             raise ValueError("owner_default_permission_mode 必须为 ask 或 auto。")
         return value
+    if field_name == "orchestration_progress_check_child_limit":
+        if type(value) is not int or value < 0:
+            raise ValueError("orchestration_progress_check_child_limit 必须为非负整数；0 表示默认 20。")
+        return value
     if field_name == "process_session_wait_slice_seconds":
         if type(value) is not int or not 0 <= value <= 600:
             raise ValueError("process_session_wait_slice_seconds 必须为0到600的整数。")
@@ -217,7 +225,7 @@ def _coerce_capability_value(field_name: str, value: object) -> object:
                       "background_user_action_notice_enabled", "im_group_shared_credentials_enabled",
                       "im_group_authorization_required", "feishu_bot_subscriptions_enabled",
                       "feishu_user_subscriptions_enabled", "feishu_chat_history_enabled",
-                      "orchestration_pending_inbox_enabled"}:
+                      "orchestration_pending_inbox_enabled", "orchestration_git_progress_enabled"}:
         if not isinstance(value, bool):
             raise ValueError(f"{field_name} 必须为布尔值，不能以未知配置打开能力。")
         return value
