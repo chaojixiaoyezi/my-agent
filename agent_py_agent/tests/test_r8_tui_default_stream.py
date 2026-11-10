@@ -97,3 +97,29 @@ def test_control_before_first_ask_query_new_and_explicit_off(tmp_path):
     command('/verbose off')
     assert '关闭' in command('/verbose').message
     assert '关闭' in command('/verbose', replace(scope, metadata={})).message
+
+
+def test_tui_model_bootstrap_initializes_default_before_first_ask(tmp_path):
+    from agent_py_agent.agent.gateway_parts.model_profile_service import _scoped_model_host
+    from agent_py_agent.cli.chat_parts.tui_model_menu import _request_data_sync
+
+    received = []
+    def request_models(**kwargs):
+        received.append(kwargs)
+        return {'ok': True}
+
+    client = SimpleNamespace(gateway_client_only=True, request_models=request_models)
+    assert _request_data_sync(client, 'boot', 'list', {})['ok']
+    capabilities = received[0]['payload']['metadata']
+    assert capabilities == {'client_capabilities': {'tui_streaming': True}}
+    agent = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path / 'home'),
+        prompt_files=[], gateway_per_user_owner_scoping=False), tmp_path)
+    scope = control_service.GatewayControlScope('local-agent', 'chat', 'boot', metadata=capabilities)
+    _host, thread = _scoped_model_host(agent, scope)
+    assert effective_verbose_level(thread, TUI) == 'stream'
+    assert effective_verbose_level(thread, {}) == 'off'
+    _host, old = _scoped_model_host(agent, replace(scope, metadata={}))
+    assert old.thread_id == thread.thread_id and effective_verbose_level(old, {}) == 'off'
+    agent.conversation_store.threads.update_verbose_level(thread.thread_id, 'off')
+    _host, selected = _scoped_model_host(agent, scope)
+    assert selected.thread_id == thread.thread_id and effective_verbose_level(selected, TUI) == 'off'

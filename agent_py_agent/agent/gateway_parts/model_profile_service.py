@@ -15,6 +15,7 @@ from ..common.request_execution_ports import (
 )
 from ..common.tool_write_context import ToolWriteContextUnavailable
 from ..conversation.control_commands import ConversationControlCommand, ConversationControlResult
+from ..conversation.verbose import initial_verbose_settings
 from ..retrieval.embedding_usage import EMBEDDING_USAGE
 from ..settings.embedding_selection import (
     EMBEDDING_OPERATIONS,
@@ -114,6 +115,7 @@ def _scoped_model_host(base_agent, scope, *, metadata_source=None) -> tuple[Simp
     store = owner_conversation_store(base_agent, scoped_home)
     config_host.conversation_store = store
     thread = store.threads.get_or_create({
+        **initial_verbose_settings(base_agent.config, scope.metadata),
         "canonical_user_id": scope.user_id, "owner_id": scoped_home.owner_id,
         "owner_home": str(scoped_home.owner_home_dir), "channel": scope.channel,
         "channel_conversation_id": scope.conversation_id, "channel_user_id": scope.user_id,

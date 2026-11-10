@@ -107,7 +107,9 @@ def _request_data_sync(agent, session_id: str, operation: str, payload: dict) ->
 
     try:
         if getattr(agent, "gateway_client_only", False) is True:
-            return agent.request_models(session_id=session_id, operation=operation, payload=payload)
+            return agent.request_models(session_id=session_id, operation=operation, payload={
+                **payload, "metadata": {**(payload.get("metadata") or {}),
+                    "client_capabilities": {"tui_streaming": True}}})
         from ...agent.settings.thread_model_selection import execute_local_model_operation
 
         return execute_local_model_operation(agent, session_id, operation, payload)
