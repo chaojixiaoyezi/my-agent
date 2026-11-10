@@ -104,6 +104,37 @@ def _view(kind, row):
     return redact_sensitive_value({key: _copy(row[key]) for key in business_defs()[kind]['properties'] if key in row})
 
 
+# LLM: 公开引用只给交付项自带的 owner 内产物登记 ID（来自终态冻结的 metadata），绝不回退为绝对路径、截断或补造 ID；
+#   未解析的引用如实计数：旧任务无交付身份记 legacy_unresolved，元数据损坏记 unreadable，部分缺失记 partial。
+# 函数用途: 把任务内部结果路径投影成公开 result_refs 与覆盖说明；无结果时覆盖说明为 None。
+def public_result_refs(task):
+    from .session_tasks import SESSION_TASK_RESULT_ARTIFACTS_KEY
+
+    paths = [str(item) for item in task.result_refs]
+    if not paths:
+        return [], None
+    raw = (task.metadata or {}).get(SESSION_TASK_RESULT_ARTIFACTS_KEY)
+    if raw is None:
+        return [], {'state': 'legacy_unresolved', 'unresolved_count': len(paths)}
+    if not isinstance(raw, list):
+        return [], {'state': 'unreadable', 'unresolved_count': len(paths)}
+    known = {}
+    for item in raw:
+        artifact = item.get('artifact_id') if isinstance(item, dict) else None
+        if (isinstance(item, dict) and isinstance(item.get('path'), str) and isinstance(artifact, str)
+                and 0 < len(artifact) <= 128 and len(artifact.encode('utf-8')) <= 128
+                and '/' not in artifact and '\\' not in artifact):
+            known.setdefault(item['path'], artifact)
+    refs, unresolved = [], 0
+    for path in paths:
+        artifact = known.get(path)
+        if artifact is None:
+            unresolved += 1
+        elif artifact not in refs:
+            refs.append(artifact)
+    return refs, {'state': 'partial' if unresolved else 'complete', 'unresolved_count': unresolved}
+
+
 def _coverage(values):
     if 'expired' in values:
         return 'expired'
@@ -373,11 +404,14 @@ class BusinessObservationService:
             raise BusinessError('OBSERVATION_NOT_FOUND')
         workflow = task.metadata.get('workflow_ref')
         # 普通规范任务没有Workflow关联；保留null，不捏造引用或修改任务元数据。
+        refs, ref_coverage = public_result_refs(task)
         detail = {'task': _view('TaskView', rows[0].value), 'assignments': [{
             'assignment_ref': task.task_id, 'task_id': task.task_id, 'sender_thread_id': task.sender_thread_id,
-            'target_thread_id': task.target_thread_id, 'status': task.status, 'result_refs': list(task.result_refs)}],
-            'workflow_ref': workflow, 'result_refs': list(task.result_refs), 'allowed_actions': [],
+            'target_thread_id': task.target_thread_id, 'status': task.status, 'result_refs': list(refs)}],
+            'workflow_ref': workflow, 'result_refs': list(refs), 'allowed_actions': [],
             'scheduling': task_scheduling_view(self.store, task)}
+        if ref_coverage is not None:
+            detail['result_ref_coverage'] = ref_coverage
         result = task_result_view(self.store, task)
         if result is not None:
             detail['result'] = result
@@ -497,10 +531,13 @@ class BusinessObservationService:
             if context and (context.owner_id != self.owner_id or context.task_id != task.task_id):
                 errors.append({'code': 'CONTEXT_MISMATCH'})
                 continue
+            refs, ref_coverage = public_result_refs(task)
             value = {'task_id': task.task_id, 'thread_id': task.target_thread_id,
                 'space_id': context.space_id if context else None, 'project_ref': context.project_ref if context else None,
-                'status': task.status, 'current_run_id': None, 'result_refs': list(task.result_refs),
+                'status': task.status, 'current_run_id': None, 'result_refs': refs,
                 'revision': int(task.updated_at * 1000000)}
+            if ref_coverage is not None:
+                value['result_ref_coverage'] = ref_coverage
             rows.append(ObservationRecord(value, self.owner_id, value['space_id'], value['project_ref'], task.task_id, task.target_thread_id))
         return ObservationPage(tuple(rows), 'partial' if errors else 'complete')
 

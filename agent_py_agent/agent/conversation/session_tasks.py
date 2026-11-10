@@ -473,6 +473,26 @@ class SessionTaskUpdate:
     conversation_request_id: str = ""
     task_run_id: str = ""
     failure_code: str = ""
+    # 结果交付项的稳定身份（path/artifact_id/sha256/size_bytes），只来自本回合已持久的交付项；
+    #   仅在推进到终态时随同一原子更新写入 metadata，内部 result_refs 路径保持不变。
+    result_artifacts: tuple[dict[str, Any], ...] = ()
+
+
+# 交付项身份在 SessionTask.metadata 中的键；公开投影据此把内部路径换成产物登记 ID。
+SESSION_TASK_RESULT_ARTIFACTS_KEY = "result_artifacts"
+
+
+# LLM: 只保留四个稳定字段；路径或 ID 不是非空字符串的项丢弃（投影再计为未解析），不截断、不补造 ID。
+# 函数用途: 规范化一条交付项身份，供终态推进写入。
+def _result_artifact_item(item: object) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    path, artifact_id = item.get("path"), item.get("artifact_id")
+    if not isinstance(path, str) or not path or not isinstance(artifact_id, str) or not artifact_id:
+        return None
+    size = item.get("size_bytes")
+    return {"path": path, "artifact_id": artifact_id, "sha256": str(item.get("sha256") or ""),
+            "size_bytes": size if type(size) is int and size >= 0 else None}
 
 
 # LLM: 幂等判定只比结构化身份字段（发送方/目标/正文），不比对时间戳等派生值。
@@ -1116,11 +1136,16 @@ class SessionTaskStore:
                 raise ValueError(
                     f"illegal session task transition: {latest.status} -> {target_status}"
                 )
+            metadata = latest.metadata
+            artifacts = [item for item in map(_result_artifact_item, update.result_artifacts) if item is not None]
+            if artifacts and target_status in SESSION_TASK_TERMINAL_STATUSES:
+                metadata = {**latest.metadata, SESSION_TASK_RESULT_ARTIFACTS_KEY: artifacts}
             updated = replace(
                 latest,
                 status=target_status,
                 summary=str(update.summary or latest.summary) if update.summary else latest.summary,
                 result_refs=tuple(update.result_refs) if update.result_refs else latest.result_refs,
+                metadata=metadata,
                 conversation_request_id=update.conversation_request_id or latest.conversation_request_id,
                 task_run_id=update.task_run_id or latest.task_run_id,
                 failure_code=update.failure_code or latest.failure_code,

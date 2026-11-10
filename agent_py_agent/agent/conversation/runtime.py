@@ -1421,6 +1421,7 @@ def _close_out_session_task_turn(
                 summary=str(getattr(execution, "response", "") or "").strip(),
                 result_refs=tuple(str(item['path']) for item in getattr(execution, 'delivery_artifacts', ())
                                   if isinstance(item.get('path'), str)),
+                result_artifacts=delivery_result_artifacts(execution),
             ),
         )
         identity = execution.execution_identity or {}
@@ -6172,3 +6173,13 @@ def resume_prompt_for(*, continuation_reason: str, continuation_seq: int, user_t
         f"【系统续跑 #{continuation_seq}】上一轮因 {continuation_reason} 收口，"
         f"任务尚未完成。请基于已有进度继续推进原任务：{user_task}"
     )
+
+
+# LLM: 只取本回合原交付项（_delivery_artifact_from_registry_ref 已核 ready 与根目录）里自带的登记 ID；
+#   没有登记 ID 的交付项不补造，由公开投影计为未解析。不查最新版本、不扫描文件系统。
+# 函数用途: 从执行结果的交付项提取随任务终态冻结的产物身份。
+def delivery_result_artifacts(execution: object) -> tuple[dict, ...]:
+    return tuple({"path": str(item["path"]), "artifact_id": str(item.get("artifact_id") or ""),
+                  "sha256": str(item.get("sha256") or ""), "size_bytes": item.get("size_bytes")}
+                 for item in getattr(execution, "delivery_artifacts", ()) or ()
+                 if isinstance(item, dict) and isinstance(item.get("path"), str) and item.get("artifact_id"))

@@ -127,6 +127,18 @@ def test_frozen_full_catalog_and_schema_bundle_hashes():
         assert result["properties"].pop("result") == {"$ref": "#/$defs/TaskResultView"}
     for definitions in (normalized_api["$defs"], normalized_schemas["$defs"], normalized_defs):
         assert definitions.pop("TaskResultView") == task_result_schema
+    # G7 只可选追加结果引用覆盖说明：锁住新定义与 TaskView/tasks.get 的可选引用；result_refs 形状不变。
+    coverage_schema = {"type": "object", "properties": {
+        "state": {"type": "string", "enum": ["complete", "partial", "legacy_unresolved", "unreadable"]},
+        "unresolved_count": {"type": "integer", "minimum": 0, "maximum": 100}},
+        "required": ["state", "unresolved_count"], "additionalProperties": False}
+    for definitions in (normalized_api["$defs"], normalized_schemas["$defs"], normalized_defs):
+        assert "result_ref_coverage" not in definitions["TaskView"]["required"]
+        assert definitions["TaskView"]["properties"].pop("result_ref_coverage") == {"$ref": "#/$defs/ResultRefCoverage"}
+        assert definitions.pop("ResultRefCoverage") == coverage_schema
+    for result in task_results:
+        assert "result_ref_coverage" not in result["required"]
+        assert result["properties"].pop("result_ref_coverage") == {"$ref": "#/$defs/ResultRefCoverage"}
     # V07-03 只可选追加对象详情：锁住两个新定义与 workflows.get 的可选引用。
     step_summary_schema = {"type": "object", "properties": {
         "step_id": {"$ref": "#/$defs/Id"}, "name": {"type": "string", "minLength": 0, "maxLength": 256},

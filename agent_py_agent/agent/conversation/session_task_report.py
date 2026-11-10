@@ -76,6 +76,8 @@ class TaskTurnOutcome:
     ok: bool
     summary: str = ""
     result_refs: tuple[str, ...] = ()
+    # 与 result_refs 同一批交付项的稳定身份（path/artifact_id/sha256/size_bytes）；公开投影用它，不用路径。
+    result_artifacts: tuple[dict, ...] = ()
 
 
 # LLM: 只在任务已经绑到某个回合时才推进；status 只允许 done/failed（状态机保证 accepted → 二者之一）。
@@ -98,6 +100,7 @@ def finish_task_for_turn(
                 status=target_status,
                 summary=str(outcome.summary or ""),
                 result_refs=tuple(outcome.result_refs or ()),
+                result_artifacts=tuple(outcome.result_artifacts or ()),
             ),
         )
     except (OSError, ValueError, TypeError):
