@@ -213,7 +213,8 @@ class GatewayBoundedHTTPServer(BoundAddressMixin, HTTPServer):
         client_address: tuple[str, int],
         accepted_at: float,
     ) -> None:
-        if time.monotonic() - accepted_at > self.request_queue_timeout:
+        # 与明文selector使用同一绝对截止，后备worker也不能放行恰到期的连接。
+        if time.monotonic() >= accepted_at + self.request_queue_timeout:
             self._reject_overloaded_request(request)
             return
         try:

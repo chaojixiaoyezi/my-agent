@@ -1,14 +1,17 @@
 """真实回环连接验证就绪分类、独立容量、排队过期及票据交错。"""
 from __future__ import annotations
 
+import math
 import socket
 import threading
 import time
 from collections import Counter
 from http.server import BaseHTTPRequestHandler
+from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.gateway_parts import bounded_http_server, http_lanes
 from agent_py_agent.agent.gateway_parts.bounded_http_server import GatewayBoundedHTTPServer
 from agent_py_agent.agent.gateway_parts.http_lanes import (
     HTTP_CONTROL_PEEK_BYTES,
@@ -299,12 +302,20 @@ def test_repeated_expiry_removes_cancelled_executor_work_items(server):
             client.close()
 
 
-def test_worker_checks_expiry_when_selector_has_not_swept(server, monkeypatch):
+@pytest.mark.parametrize('boundary', ['before', 'at', 'after'])
+def test_worker_checks_expiry_when_selector_has_not_swept(server, monkeypatch, boundary):
+    # 接受、worker和selector共享同一单调时钟；不能用sleep推断Windows粗时钟已经越过截止。
+    clock = [1000.0]
+    timer = SimpleNamespace(monotonic=lambda: clock[0])
+    monkeypatch.setattr(http_lanes, 'time', timer)
+    monkeypatch.setattr(bounded_http_server, 'time', timer)
+    tickets = []
     worker_entered, selector_paused = threading.Event(), threading.Event()
     worker_go, selector_go = threading.Event(), threading.Event()
     run, sweep = server._lanes._run_ticket, server._lanes._sweep
 
     def delay_worker(ticket):
+        tickets.append(ticket)
         worker_entered.set()
         assert worker_go.wait(2)
         run(ticket)
@@ -321,14 +332,38 @@ def test_worker_checks_expiry_when_selector_has_not_swept(server, monkeypatch):
         with request(server, 'GET', '/ordinary') as client:
             assert worker_entered.wait(1)
             assert selector_paused.wait(1)
-            time.sleep(server.request_queue_timeout + 0.01)
+            assert len(tickets) == 1
+            deadline = tickets[0].accepted_at + server._lanes.queue_timeout_seconds
+            clock[0] = (math.nextafter(deadline, -math.inf) if boundary == 'before' else
+                        math.nextafter(deadline, math.inf) if boundary == 'after' else deadline)
             worker_go.set()
-            assert b'GATEWAY_HTTP_BUSY' in response(client)
-            assert not server.handled.is_set()
+            payload = response(client)
+            assert (b'GATEWAY_HTTP_BUSY' in payload) is (boundary != 'before')
+            assert (b'200 OK' in payload) is (boundary == 'before')
+            assert server.handled.is_set() is (boundary == 'before')
+            assert not selector_go.is_set(), '响应必须由worker裁决，selector仍未获准sweep'
     finally:
         worker_go.set()
         selector_go.set()
     eventually(lambda: server._request_slots._value == server.max_outstanding_requests)
+
+
+@pytest.mark.parametrize('boundary', ['before', 'at', 'after'])
+def test_fallback_worker_uses_the_same_absolute_deadline(server, monkeypatch, boundary):
+    accepted_at = 1000.0
+    deadline = accepted_at + server.request_queue_timeout
+    now = (math.nextafter(deadline, -math.inf) if boundary == 'before' else
+           math.nextafter(deadline, math.inf) if boundary == 'after' else deadline)
+    monkeypatch.setattr(bounded_http_server, 'time', SimpleNamespace(monotonic=lambda: now))
+    client, accepted = socket.socketpair()
+    with client, accepted:
+        client.settimeout(1)
+        client.sendall(b'GET /ordinary HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n')
+        server._process_request_worker(accepted, ('127.0.0.1', 1), accepted_at)
+        payload = response(client)
+    assert (b'GATEWAY_HTTP_BUSY' in payload) is (boundary != 'before')
+    assert (b'200 OK' in payload) is (boundary == 'before')
+    assert server.handled.is_set() is (boundary == 'before')
 
 
 def test_dead_selector_closes_admission_even_if_failure_observer_raises(server, monkeypatch):

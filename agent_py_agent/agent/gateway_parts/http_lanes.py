@@ -473,8 +473,8 @@ class HTTPLaneRouter:
     # 函数用途: 执行一次已分类的普通请求或控制请求。
     def _run_ticket(self, ticket) -> None:
         ticket._ready.wait()
-        # worker取到任务时再核期限，不能依赖选择器恰好先执行sweep。
-        if time.monotonic() - ticket.accepted_at >= self.queue_timeout_seconds:
+        # 与selector共用绝对截止；浮点相减可能把恰到截止误作未过期，不依赖sweep先执行。
+        if time.monotonic() >= ticket.accepted_at + self.queue_timeout_seconds:
             if ticket.claim_expired():
                 ticket.reject_once(self.server)
                 ticket.mark_done()
