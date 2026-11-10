@@ -262,27 +262,211 @@ def test_repo_local_fsmonitor_hook_never_runs(agent_and_child, repo, monkeypatch
     assert result["error_code"] == "" and not marker.exists()
 
 
-@pytest.mark.skipif(os.name != "posix", reason="替身 git 脚本只在 POSIX 上可执行")
-@pytest.mark.parametrize("behaviour", ["hang", "flood"])
-def test_hanging_or_flooding_git_is_bounded(agent_and_child, repo, monkeypatch, tmp_path, behaviour):
+# ---------- ORCH03-R5：有效 git-dir/工作树钉死，本地配置不能把读取引出仓库 ----------
+
+
+def test_local_core_worktree_cannot_redirect_status_outside_the_repo(agent_and_child, repo, monkeypatch, tmp_path):
     agent, _child, _ = agent_and_child
+    outside = Path(os.path.realpath(tmp_path)) / "outside-tree"
+    outside.mkdir()
+    for index in range(3):
+        (outside / f"secret-{index}.txt").write_text("x")
+    _register(monkeypatch, [str(repo)])
+    clean = git.observe_registered(agent, str(repo))
+    _git(repo, "config", "core.worktree", str(outside))
+    redirected = git.observe_registered(agent, str(repo))
+
+    # 未钉死时 git 会拿 outside 当工作树：a.txt 记成删除、secret-* 记成未跟踪，改动数变成 4。
+    assert clean["error_code"] == "" and clean["dirty_paths_count"] == 0
+    assert redirected["error_code"] == "" and redirected["dirty_paths_count"] == 0
+
+
+def test_outside_excludes_file_from_local_config_is_not_read(agent_and_child, repo, monkeypatch, tmp_path):
+    agent, _child, _ = agent_and_child
+    excludes = Path(os.path.realpath(tmp_path)) / "outside-excludes"
+    excludes.write_text("*.log\n")
+    _git(repo, "config", "core.excludesFile", str(excludes))
+    (repo / "x.log").write_text("l")
+    _register(monkeypatch, [str(repo)])
+
+    # 读了外部排除文件会把 x.log 藏起来（改动数 0）；被改成空设备后它照常算一处改动。
+    assert git.observe_registered(agent, str(repo))["dirty_paths_count"] == 1
+
+
+@pytest.mark.parametrize("redirect", ["include", "includeif", "commondir", "alternates", "config_symlink"])
+def test_git_dir_and_config_redirects_are_refused_before_any_status(agent_and_child, repo, monkeypatch, tmp_path,
+                                                                    redirect):
+    agent, _child, _ = agent_and_child
+    outside = Path(os.path.realpath(tmp_path)) / "outside-config"
+    outside.write_text("[core]\n\tworktree = /\n")
+    git_dir = repo / ".git"
+    _register(monkeypatch, [str(repo)])
+    assert git.observe_registered(agent, str(repo))["error_code"] == ""
+    if redirect == "include":
+        _git(repo, "config", "include.path", str(outside))
+    elif redirect == "includeif":
+        _git(repo, "config", f"includeIf.gitdir:{git_dir}/.path", str(outside))
+    elif redirect == "commondir":
+        (git_dir / "commondir").write_text(str(outside.parent) + "\n")
+    elif redirect == "alternates":
+        (git_dir / "objects" / "info").mkdir(parents=True, exist_ok=True)
+        (git_dir / "objects" / "info" / "alternates").write_text(str(outside.parent) + "\n")
+    else:
+        moved = Path(os.path.realpath(tmp_path)) / "moved-config"
+        (git_dir / "config").rename(moved)
+        (git_dir / "config").symlink_to(moved)
+    result = git.observe_registered(agent, str(repo))
+
+    expected = "REPO_CONFIG_REDIRECT" if redirect.startswith("include") else "REPO_GIT_DIR_REDIRECT"
+    assert result["error_code"] == expected and result["head"] == "" and result["dirty_paths_count"] is None
+
+
+# ---------- ORCH03-R6：子进程树清理、预算与 HEAD 校验（替身 git 只替换指定子命令，其余转真实 git） ----------
+
+
+def _fake_git(monkeypatch, tmp_path, subcommand: str, body: str) -> Path:
+    import shutil
+
+    real = shutil.which("git")
     fake_dir = tmp_path / "fakebin"
-    fake_dir.mkdir()
-    body = "sleep 30" if behaviour == "hang" else "head -c 200000 /dev/zero | tr '\\0' 'a'"
-    (fake_dir / "git").write_text(f"#!/bin/sh\n{body}\n")
-    (fake_dir / "git").chmod(0o755)
+    fake_dir.mkdir(exist_ok=True)
+    script = fake_dir / "git"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'for arg in "$@"; do if [ "$arg" = "{subcommand}" ]; then\n{body}\nexit 0\nfi; done\n'
+        f'exec "{real}" "$@"\n')
+    script.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    return fake_dir
+
+
+def _gone(pid: int, within: float = 3.0) -> bool:
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _python_writer(payload: str) -> str:
+    import shlex
+    import sys
+
+    return f"exec {shlex.quote(sys.executable)} -c {shlex.quote(payload)}"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="替身 git 脚本只在 POSIX 上可执行")
+@pytest.mark.parametrize("behaviour", ["hang", "orphan_holds_stdout"])
+def test_hanging_git_and_stdout_holding_descendants_are_killed_and_reaped(
+        agent_and_child, repo, monkeypatch, tmp_path, behaviour):
+    import threading
+
+    agent, _child, _ = agent_and_child
+    pid_file = tmp_path / "descendant.pid"
+    head = _git(repo, "rev-parse", "HEAD")
+    body = (f"sleep 30 &\necho $! > {pid_file}\nwait" if behaviour == "hang"
+            else f"sleep 30 &\necho $! > {pid_file}\necho {head}")
+    _fake_git(monkeypatch, tmp_path, "rev-parse", body)
     monkeypatch.setattr(git, "GIT_COMMAND_TIMEOUT_SECONDS", 1)
     _register(monkeypatch, [str(repo)])
+    threads_before = threading.active_count()
     started = time.monotonic()
     result = git.observe_registered(agent, str(repo))
     elapsed = time.monotonic() - started
 
-    if behaviour == "hang":
-        assert result["error_code"] == "GIT_TIMEOUT" and elapsed < 5
-    else:
-        # rev-parse 输出被截断后仍是一串 a；status 同样读到上限即停，改动数只算下限。
-        assert result["error_code"] == "" and result["dirty_count_is_lower_bound"] is True
+    assert result["error_code"] == "GIT_TIMEOUT" and result["head"] == ""
+    assert elapsed < git.GIT_OBSERVATION_BUDGET_SECONDS
+    # 后代 sleep 继承了 stdout：只杀直接子进程会留下它；这里要求整棵树被清掉、且没有遗留读线程。
+    assert _gone(int(pid_file.read_text().strip()))
+    assert threading.active_count() == threads_before
+
+
+# LLM: 两次 fork + setsid 的后代既不在父链上也不在进程组里，共享清树找不到它（已知限制，HANDOFF 记录）；
+#   这里只验证它一直占着 stdout 时调用方仍按超时返回、不留下卡住的读线程。测试自己清理该进程。
+# 函数用途: 逃逸的后代占住管道也不会让观察卡住或泄漏线程。
+@pytest.mark.skipif(os.name != "posix", reason="替身 git 脚本只在 POSIX 上可执行")
+def test_escaped_descendant_holding_stdout_does_not_leave_a_reader_thread(agent_and_child, repo, monkeypatch, tmp_path):
+    import shlex
+    import signal
+    import sys
+    import threading
+
+    agent, _child, _ = agent_and_child
+    pid_file = tmp_path / "escaped.pid"
+    escaper = (f"import os, time; os.setsid(); open({str(pid_file)!r}, 'w').write(str(os.getpid())); "
+               "time.sleep(30)")
+    _fake_git(monkeypatch, tmp_path, "rev-parse",
+              f"( {shlex.quote(sys.executable)} -c {shlex.quote(escaper)} & )\nsleep 0.3")
+    monkeypatch.setattr(git, "GIT_COMMAND_TIMEOUT_SECONDS", 1)
+    _register(monkeypatch, [str(repo)])
+    threads_before = threading.active_count()
+    started = time.monotonic()
+    try:
+        result = git.observe_registered(agent, str(repo))
+        elapsed = time.monotonic() - started
+        threads_after = threading.active_count()
+    finally:
+        if pid_file.exists() and pid_file.read_text().strip():
+            try:
+                os.kill(int(pid_file.read_text().strip()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    # 后台读线程方案在关管道时会一直等到逃逸进程自己退出（实测约 30 秒）。
+    assert result["error_code"] == "GIT_TIMEOUT" and threads_after == threads_before
+    assert elapsed < git.GIT_OBSERVATION_BUDGET_SECONDS
+
+
+# LLM: 用共享清理入口的替身制造“未确认”回执，只验证适配器把它映射成失败、不交出输出；不代表真实清理行为。
+# 函数用途: 清理回执未确认时观察整体失败。
+def test_unconfirmed_tree_cleanup_is_not_a_successful_observation(agent_and_child, repo, monkeypatch):
+    from agent_py_agent.agent.tooling import process_registry
+
+    agent, _child, _ = agent_and_child
+    real_finish = process_registry.finish_foreground_process
+
+    def unconfirmed(process, *, expected_birth_token):
+        code, receipt = real_finish(process, expected_birth_token=expected_birth_token)
+        if receipt is None:
+            return code, receipt
+        return code, process_registry.ProcessTerminationReceipt("fake", False, code, 1, (process.pid,))
+
+    monkeypatch.setattr(process_registry, "finish_foreground_process", unconfirmed)
+    _register(monkeypatch, [str(repo)])
+    result = git.observe_registered(agent, str(repo))
+
+    assert result["error_code"] == "GIT_CLEANUP_UNCONFIRMED" and result["head"] == ""
+
+
+@pytest.mark.skipif(os.name != "posix", reason="替身 git 脚本只在 POSIX 上可执行")
+@pytest.mark.parametrize(("label", "payload"), [
+    ("flood", "import sys; sys.stdout.write('a' * 200000)"),
+    ("short", "print('abc1234')"),
+    ("garbage", "print('z' * 40)"),
+    ("two_lines", "print('a' * 40); print('b' * 40)"),
+])
+def test_truncated_or_malformed_head_is_refused(agent_and_child, repo, monkeypatch, tmp_path, label, payload):
+    agent, _child, _ = agent_and_child
+    _fake_git(monkeypatch, tmp_path, "rev-parse", _python_writer(payload))
+    _register(monkeypatch, [str(repo)])
+    result = git.observe_registered(agent, str(repo))
+
+    assert result["error_code"] == "GIT_HEAD_INVALID" and result["head"] == "" and result["dirty_paths_count"] is None
+
+
+@pytest.mark.skipif(os.name != "posix", reason="替身 git 脚本只在 POSIX 上可执行")
+def test_flooding_status_reports_an_honest_lower_bound_with_a_valid_head(agent_and_child, repo, monkeypatch, tmp_path):
+    agent, _child, _ = agent_and_child
+    head = _git(repo, "rev-parse", "HEAD")
+    _fake_git(monkeypatch, tmp_path, "status", _python_writer("import sys; sys.stdout.write('?? f\\0' * 100000)"))
+    _register(monkeypatch, [str(repo)])
+    result = git.observe_registered(agent, str(repo))
+
+    assert result["error_code"] == "" and result["head"] == head
+    assert result["dirty_count_is_lower_bound"] is True and result["dirty_paths_count"] >= 1
 
 
 @pytest.mark.parametrize("node", [
