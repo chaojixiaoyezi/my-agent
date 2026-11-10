@@ -30,6 +30,7 @@ from agent_py_agent.tests.test_issues_w14_lane_wiring_e2e import (
     _assert_live,
     _assert_retired,
     _fd_count,
+    _lane_service_clock,
     _observe_state,
     _settled_fd_delta,
 )
@@ -300,14 +301,15 @@ def test_transition_wires_all_lanes_and_fences_real_mutations(lane_world, monkey
     transition = _RecordingTransition(world.home)
     before = owner_logical_usage_bytes(world.home.owner_home_dir, exact=True)
     seen, revisited = set(), set()
-    repeated_all = False
+    first_round_complete = repeated_all = False
+    wall_clock = _lane_service_clock(monkeypatch)
     gc.collect()
     before_fds = _fd_count(root=world.home.root)
     with monkeypatch.context() as patch:
         unfenced, lane_writes = _watch_mutations(patch, transition)
         state_writes = _watch_state_commits(patch, world.home)
         now = world.now
-        deadline = time.monotonic() + 20.0
+        deadline = wall_clock() + 20.0
         for tick in range(128):
             result = run_with_transition(world.home, now, transition,
                 quota_max_entries=quota_entries, quota_max_ms=owner_maintenance._QUOTA_STEADY_MAX_MS)
@@ -315,15 +317,19 @@ def test_transition_wires_all_lanes_and_fences_real_mutations(lane_world, monkey
             marker, kinds = _observe_state(world.home, coordinator=True)
             # 协调模式的配额回执独立于各车道 cursor，由原扫描器实际完成后发布。
             quota_complete = marker['storage_maintenance']['quota_reconciliation']['complete'] is True
-            if seen == set(LANE_BINDINGS):
+            if first_round_complete:
                 revisited.update(kinds)
-                repeated_all |= kinds == set(LANE_BINDINGS)
             seen.update(kinds)
             if tick == 0:
                 assert world.orphan.exists(), '七天宽限期前不能清扫旧索引节点'
+            if not marker['maintenance_partial'] and quota_complete:
+                if first_round_complete:
+                    repeated_all = revisited == set(LANE_BINDINGS)
+                elif seen == set(LANE_BINDINGS):
+                    first_round_complete = True
             if not marker['maintenance_partial'] and quota_complete and not world.orphan.exists() and repeated_all:
                 break
-            assert time.monotonic() < deadline, f'协调维护排空超时：{marker["storage_maintenance"]}'
+            assert wall_clock() < deadline, f'协调维护排空超时：{marker["storage_maintenance"]}'
             # 沿原维护入口续扫，不直接关闭/清掉生产扫描器，也不跳到新日周期重开一轮配额扫描。
             now += 7 * 86400 if tick == 0 else (1 if marker['maintenance_partial'] or not quota_complete else
                 MemoryRetentionPolicy().maintenance_interval_seconds)

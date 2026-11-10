@@ -48,6 +48,7 @@ from agent_py_agent.agent.tooling.process_session_store import (
     ProcessSessionStore,
     process_session_store_root,
 )
+from agent_py_agent.agent.user_space import storage_lanes
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 from agent_py_agent.agent.user_space.owner_quota import owner_logical_usage_bytes
 from agent_py_agent.agent.user_space.owner_resolver import (
@@ -508,12 +509,36 @@ def test_settled_fd_delta_detects_persistent_growth(tmp_path):
     assert _settled_fd_delta(before_fds, root=tmp_path) <= 0
 
 
+def _lane_service_clock(monkeypatch):
+    """真实车道执行后计入40ms原子I/O；所有生产预算共用单调时钟，测试墙钟限额不变。"""
+    wall_clock, spent = time.monotonic, [0.0]
+    original = storage_lanes.resolve_storage_lane
+
+    def resolve(kind):
+        lane = original(kind)
+        if lane is None:
+            return None
+
+        def execute(request):
+            try:
+                return lane(request)
+            finally:
+                # 不替换车道结果、计数或写门，只让一轮确定性分片，不能依赖机器恰好够快。
+                spent[0] += 0.040
+        return execute
+
+    monkeypatch.setattr(time, 'monotonic', lambda: wall_clock() + spent[0])
+    monkeypatch.setattr(storage_lanes, 'resolve_storage_lane', resolve)
+    return wall_clock
+
+
 def test_controller_wires_all_lanes_and_preserves_second_owner(lane_world, monkeypatch):
     world = lane_world
     controller = _controller(world.home, monkeypatch)
     before = owner_logical_usage_bytes(world.home.owner_home_dir, exact=True)
     seen, revisited = set(), set()
-    repeated_all = False
+    first_round_complete = repeated_all = False
+    _lane_service_clock(monkeypatch)
     gc.collect()
     before_fds = _fd_count(root=world.home.root)
     # R2 的 complete 表示扫描一轮完成，不表示 pending 宽限证明已消费；继续驱动后续周期。
@@ -522,12 +547,16 @@ def test_controller_wires_all_lanes_and_preserves_second_owner(lane_world, monke
         summary = controller.tick(now=now)
         assert summary['failed'] == summary['refused'] == summary['isolated'] == 0
         marker, kinds = _observe_state(world.home, coordinator=False)
-        if seen == set(LANE_BINDINGS):
+        if first_round_complete:
             revisited.update(kinds)
-            repeated_all |= kinds == set(LANE_BINDINGS)
         seen.update(kinds)
         if tick == 0:
             assert world.orphan.exists(), '七天宽限期前不能清扫旧索引节点'
+        if not marker['maintenance_partial']:
+            if first_round_complete:
+                repeated_all = revisited == set(LANE_BINDINGS)
+            elif seen == set(LANE_BINDINGS):
+                first_round_complete = True
         if not marker['maintenance_partial'] and not world.orphan.exists() and repeated_all:
             break
         # 完整一轮后遵守原一天维护间隔；未完成片只推进一秒，不缩短七天宽限期。
@@ -537,6 +566,6 @@ def test_controller_wires_all_lanes_and_preserves_second_owner(lane_world, monke
         pytest.fail('真实控制器未在有界拍数内消费宽限证明并重新走完全部登记车道')
     assert _settled_fd_delta(before_fds, root=world.home.root) <= 0
     assert seen == revisited == set(LANE_BINDINGS)
-    assert repeated_all, '完成首轮覆盖后，必须有后续一拍再次报告全部登记车道'
+    assert repeated_all, '首轮真正完成后，必须再逐片走完全部车道并完成第二轮'
     _assert_retired(world)
     assert owner_logical_usage_bytes(world.home.owner_home_dir, exact=True) < before
