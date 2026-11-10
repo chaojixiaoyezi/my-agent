@@ -30,8 +30,10 @@ def test_step_detail_result_excerpt_and_batch_survive_projection():
     card = render_progress_card(view)
     panel = next(el for el in card['body']['elements'] if el['tag'] == 'collapsible_panel')
     assert len(panel['elements']) == 1
-    text = panel['elements'][0]['text']['content']
-    assert all(value in text for value in ['scripts', '已完成', '42ms', '/health', 'Batch 2/8', row['result_excerpt']])
+    step = panel['elements'][0]
+    assert step['tag'] == 'collapsible_panel' and step['expanded'] is False
+    text = step['header']['title']['content'] + step['elements'][0]['text']['content']
+    assert all(value in text for value in ['执行脚本', '已完成', '42ms', '/health', '批次：2/8', row['result_excerpt']])
     assert 'raw-body-not-for-display' not in json.dumps(card)
     assert 'not-for-display' not in json.dumps(card)
 

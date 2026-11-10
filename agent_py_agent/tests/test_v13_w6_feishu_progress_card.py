@@ -64,8 +64,8 @@ def test_byte_budget_discards_oldest_not_latest():
 
 def test_legacy_truncated_flag_is_visible_without_inventing_total():
     card = render_progress_card({'steps': _steps(1), 'truncated': True})
-    assert '"events_truncated": true' in _text(card).replace('\\"', '"')
-    assert '总数未知' in _text(card)
+    assert '部分过程记录不完整' in _text(card)
+    assert '共 ' not in _text(card) and '已观察 1 步' in _text(card)
 
 
 class Adapter:
@@ -140,7 +140,7 @@ def test_first_post_one_id_throttle_then_patch_same_card(tmp_path, monkeypatch):
     assert '10 条更早' in _text(adapter.edits[-1][2]['card'])
 
 
-def test_final_collapses_same_message_and_keeps_full_reply(tmp_path, monkeypatch):
+def test_final_keeps_foldable_process_and_full_reply(tmp_path, monkeypatch):
     adapter, store, worker, _, _, final, normal = _fixture(tmp_path, monkeypatch)
     worker.run_once()
     final[0] = 'SYNTHETIC_ONLY完整结论' * 100
@@ -149,7 +149,7 @@ def test_final_collapses_same_message_and_keeps_full_reply(tmp_path, monkeypatch
     message_id, text, options = adapter.edits[-1]
     assert message_id == 'om_SYNTHETIC_ONLY_CARD' and text == final[0]
     card = options['card']
-    assert _panel(card)['expanded'] is False
+    assert _panel(card)['expanded'] is True
     assert final[0] in [row.get('text', {}).get('content') for row in card['body']['elements']]
     assert '已完成' in _text(card)
 
@@ -176,3 +176,54 @@ def test_call_id_identity_and_legacy_fallback_unchanged():
     rows = project_execution_steps([{'tool': 'read_file', 'phase': 'started', 'call_id': 'SYNTHETIC_ONLY_C',
         'round': 2, 'call_index': 3}, {'tool': 'read_file', 'phase': 'started', 'round': 2, 'call_index': 4}], request_id='SYNTHETIC_ONLY_R')
     assert [row['step_id'] for row in rows] == ['SYNTHETIC_ONLY_C', 'SYNTHETIC_ONLY_R:2:4']
+
+
+def test_tool_steps_are_readable_individually_foldable_and_keep_execution_uncertainty():
+    snapshot = {'steps': [
+        {'step_id': 'call-safe', 'tool_name': 'run_command', 'phase': 'finished', 'ok': True,
+         'handler_executed': True, 'duration_ms': 42, 'label': 'python3 check.py --password=synthetic-secret',
+         'result_excerpt': '已完成检查'},
+        {'step_id': 'call-denied', 'tool_name': 'write_file', 'phase': 'failed', 'ok': False,
+         'handler_executed': False, 'duration_ms': 0},
+        {'step_id': 'call-unknown', 'tool_name': 'future_tool', 'phase': 'unknown', 'ok': None,
+         'handler_executed': None, 'duration_ms': None},
+    ]}
+    card = render_progress_card(snapshot)
+    outer = _panel(card)
+    assert outer['expanded'] is True
+    steps = outer['elements']
+    assert all(step['tag'] == 'collapsible_panel' and step['expanded'] is False for step in steps)
+    assert '运行命令' in steps[0]['header']['title']['content']
+    assert '已完成' in steps[0]['header']['title']['content']
+    assert '42ms' in steps[0]['header']['title']['content']
+    assert 'python3 check.py' in steps[0]['header']['title']['content']
+    text = _text(card)
+    assert 'python3 check.py' in text and 'synthetic-secret' not in text
+    assert '失败' in _text(steps[1]) and '未执行' in _text(steps[1])
+    assert '结果未确认' in _text(steps[2]) and '执行情况未确认' in _text(steps[2])
+    assert 'future_tool' in _text(steps[2])
+    assert not any(field in text for field in ('step=', 'ok=', 'handler_executed=', 'detail_ref=', 'truncation:'))
+
+
+def test_card_does_not_read_raw_tool_arguments_or_output():
+    class NoRawReads(dict):
+        def get(self, key, *args):
+            assert key not in {'arguments', 'output', 'parameters', 'model_parameters'}
+            return super().get(key, *args)
+
+    step = NoRawReads(step_id='call', tool_name='read_file', phase='finished', ok=True,
+                      handler_executed=True, label='检查文件', result_excerpt='已检查',
+                      arguments={'secret': 'do-not-read'}, output='do-not-read')
+    card = render_progress_card({'steps': [step], 'truncated': True})
+    assert 'do-not-read' not in _text(card)
+    assert '部分过程记录不完整' in _text(card)
+
+
+def test_first_screen_has_no_debug_identity_or_phantom_truncation():
+    card = render_progress_card({'request_id': 'internal-request-id', 'steps': _steps(1)})
+    assert not any(element.get('element_id') == 'truncation' for element in card['body']['elements'])
+    assert 'internal-request-id' not in _text(card)
+    assert '总数未知' not in _text(card)
+    panel = _panel(card)
+    assert panel['expanded'] is True
+    assert 'SYNTHETIC_ONLY_CALL' not in panel['elements'][0]['header']['title']['content']

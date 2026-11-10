@@ -47,7 +47,7 @@ def test_five_real_tool_calls_and_results_project_to_five_ordered_steps():
     card = render_progress_card(view)
     assert card["schema"] == "2.0"
     panel = next(element for element in card["body"]["elements"] if element["tag"] == "collapsible_panel")
-    assert panel["expanded"] is False and len(panel["elements"]) == 5
+    assert panel["expanded"] is True and len(panel["elements"]) == 5
     assert "private-input" not in _card_text(card)
 
 
@@ -112,12 +112,12 @@ def test_view_bounds_steps_and_label_and_keeps_unknown_total_unknown():
     assert view["total_steps"] is None
     assert all(len(step["label"].encode("utf-8")) <= 240 for step in view["steps"])
     text = _card_text(render_progress_card(view))
-    assert "truncation" in text and "总数未知" in text and "%" not in text
+    assert "truncation" in text and "共 " not in text and "%" not in text
     assert "不应展示的工具正文" not in text
 
 
 @pytest.mark.parametrize("text", ["中文🙂" * 12000, '\\"\n\t' * 12000, "组合é\u0301和汉字" * 12000])
-def test_long_multibyte_card_is_valid_collapsed_and_strictly_byte_bounded(text):
+def test_long_multibyte_card_is_valid_foldable_and_strictly_byte_bounded(text):
     snapshot = {"request_id": text, "source_revision": 20, "total_steps": None, "steps": [
         {"step_id": f"call-{index}", "tool_name": text, "phase": "updated", "ok": None,
          "handler_executed": None, "duration_ms": None, "label": text, "detail_ref": text}
@@ -130,8 +130,8 @@ def test_long_multibyte_card_is_valid_collapsed_and_strictly_byte_bounded(text):
     assert len(json.dumps(card).encode("utf-8")) < 30_000
     assert json.loads(encoded)["schema"] == "2.0"
     panel = next(element for element in card["body"]["elements"] if element["tag"] == "collapsible_panel")
-    assert panel["expanded"] is False and 0 < len(panel["elements"]) < 200
-    assert "truncation" in _card_text(card) and "总数未知" in _card_text(card)
+    assert panel["expanded"] is True and 0 < len(panel["elements"]) < 200
+    assert "truncation" in _card_text(card) and "共 " not in _card_text(card)
     assert snapshot == before
 
 
