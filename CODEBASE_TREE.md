@@ -1,3 +1,15 @@
+## 2026-11-09 附件登记来源与资产描述符
+
+```text
+agent_py_agent/
+|-- agent/artifacts/registry_provenance.py        # 依据同线程的宿主请求回执定位原登记表
+`-- tests/
+    |-- test_channel_message_task_refs.py          # 验证本轮及跨轮附件的授权、歧义与投递
+    |-- test_r9_write_artifact_registry_provenance.py  # 验证写入登记与共享网关的来源证明
+    `-- test_r9_asset_clean_json.py                # 验证资产字段净化和并发路径的标量处理
+docs/design/R9_ARTIFACT_REGISTRY_PROVENANCE.md     # 旧产物查找的范围、边界与验收
+```
+
 ## 2026-11-06 Stage 2 配置接线与已合入模块
 
 ```text
