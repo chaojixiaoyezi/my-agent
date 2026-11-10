@@ -101,7 +101,9 @@ def classify_nodes(nodes: list[dict[str, Any]], *, now: float) -> list[dict[str,
     return results
 
 
-# LLM: git 观察只能把“说不清/停滞”提升为有据的 working（HEAD 或改动文件数相对上次观察变化），
+# LLM: git 观察只能把已证实“活着却停滞”的 no_progress（RUNNING、心跳新鲜、没有未决申请/阻塞、进展事件过时）
+#   提升为有据的 working，而且必须是 HEAD 或改动文件数相对上次成功观察真的变了。unknown（暂停、未开始、状态不明、
+#   心跳缺失/过时、来源读不出）、等待、重试、终态一律原样保留：仓库有改动证明不了这个子代理还活着或在干活。
 #   观察失败或未启用只记录在 sources.git 里，绝不把不可用当作有进展或没进展。
 # 函数用途: 把一次可选 git 观察合并进节点分类结果。
 def merge_git_observation(result: dict[str, object], observation: dict[str, object] | None,
@@ -109,12 +111,11 @@ def merge_git_observation(result: dict[str, object], observation: dict[str, obje
     if not observation:
         return result
     merged = {**result, "sources": {**dict(result.get("sources") or {}), "git": dict(observation)}}
-    if observation.get("error_code") or not previous or previous.get("error_code"):
+    if result.get("state") != "no_progress" or observation.get("error_code") or not previous or previous.get("error_code"):
         return merged
     changed = (observation.get("head") != previous.get("head")
                or observation.get("dirty_paths_count") != previous.get("dirty_paths_count"))
-    if changed and result.get("state") in {"unknown", "no_progress"} and result.get("reason") not in {
-            "STATUS_UNREADABLE", "NOT_CLASSIFIED_LIMIT"}:
+    if changed:
         merged.update(state="working", reason="GIT_CHANGED_SINCE_PREVIOUS")
     return merged
 

@@ -283,3 +283,19 @@ def test_hanging_or_flooding_git_is_bounded(agent_and_child, repo, monkeypatch, 
     else:
         # rev-parse 输出被截断后仍是一串 a；status 同样读到上限即停，改动数只算下限。
         assert result["error_code"] == "" and result["dirty_count_is_lower_bound"] is True
+
+
+@pytest.mark.parametrize("node", [
+    _node(status="PAUSED"), _node(status="PLANNING"), _node(status="SOMETHING_NEW"), _node(status=...),
+    _node(heartbeat_at=...), _node(heartbeat_at=NOW - HEARTBEAT_STALE_AFTER_SECONDS - 1),
+    _node(last_progress_at=0), _node(tool_contract=...), _node(status="FAILED"), _node(status="DONE"),
+    _node(blockers=["等上游"]), _node(recent_tool_failure={"consecutive_failures": 5}),
+])
+def test_git_change_never_overrides_lifecycle_or_unproven_liveness(node):
+    """PRO-MSG-017：仓库有变化证明不了暂停/未开始/状态不明/心跳缺失的子代理在干活，也不改等待、重试和终态。"""
+    base = classify_node_progress(node, now=NOW)
+    previous = {"head": "a" * 40, "dirty_paths_count": 0, "error_code": ""}
+    merged = merge_git_observation(base, {**previous, "head": "b" * 40}, previous)
+
+    assert (merged["state"], merged["reason"]) == (base["state"], base["reason"])
+    assert merged["sources"]["git"]["head"] == "b" * 40
