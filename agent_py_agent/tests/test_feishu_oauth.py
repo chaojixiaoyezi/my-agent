@@ -395,6 +395,17 @@ def test_permission_help_reports_owner_override_without_claiming_enabled(ctx, mo
     assert authorization_guidance(ctx.agent)['feature_switches']['owner']['feishu_chat_history_enabled'] is None
 
 
+def test_permission_links_reach_model_output_through_real_tool_executor(ctx):
+    result = execute_registry_test_call(ctx.agent.tools, 'feishu_auth', {'action': 'permissions'},
+        allowed_tools=['feishu_auth'], run_id=ctx.task_id, register_with=ctx.agent)
+    assert result.ok, (result.error_code, result.output)
+    facts = json.loads(result.output)
+    assert facts['permission_settings_url'].startswith('https://open.feishu.cn/app/synthetic-app/auth?')
+    assert 'im:message.p2p_msg:get_as_user' in facts['required_scopes']
+    assert facts['capabilities']['receive_other_bot_messages']['identity'] == 'bot'
+    assert ctx.agent.config.feishu_app_secret not in result.output
+
+
 def test_permission_help_does_not_claim_partial_oauth_grants_are_ready(ctx, monkeypatch):
     _dependency, state, payload = _authorize(ctx)
     _api(ctx, monkeypatch)
