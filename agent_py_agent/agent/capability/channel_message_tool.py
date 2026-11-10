@@ -55,7 +55,7 @@ def build_send_message_model_spec() -> ToolModelSpec:
             "把文字或已经生成的文件原生发送到当前用户连接的聊天通道。"
             "本机管理员可用 notify_channel 发送到自己已绑定的 IM 身份，不需通过另一个会话转述。"
             "用户说‘发我/传给我/作为附件发送’时，在文件生成后调用；不需要用户提供飞书 ID。"
-            "attachments 每项使用 Recent Artifact Refs 里的完整 path 原值。"
+            "attachments 优先使用 Recent Artifact Refs 里的完整 path 或 artifact_id；不要猜测文件位置。"
         ),
         input_schema={
             "type": "object",
@@ -66,7 +66,7 @@ def build_send_message_model_spec() -> ToolModelSpec:
                     "type": "array",
                     "items": {"type": "string"},
                     "maxItems": _MAX_ATTACHMENT_COUNT,
-                    "description": "Recent Artifact Refs 中 path 组成的数组。",
+                    "description": "已登记产物的完整 path 或 artifact_id；已核当前任务内唯一文件名也可，歧义时须用完整路径。",
                 },
                 "evidence_refs": {
                     "type": "array",
@@ -115,7 +115,7 @@ class SendMessageTool(BaseTool):
                 static_scopes=("current_owner_channel",),
             ),
             input_policy=ToolInputPolicy(
-                internal_parameters=("__run_scope", "__tool_call_id", "__artifact_registry_root"),
+                internal_parameters=("__run_scope", "__tool_call_id", "__artifact_registry_root", "__artifact_task_root", "__artifact_gateway_root"),
                 trusted_parameter_bindings=((
                     "evidence_refs",
                     TrustedParameterBinding(
@@ -261,7 +261,35 @@ class SendMessageTool(BaseTool):
         capabilities = self._delivery.registry.capabilities_for(provider)
         if not capabilities.proactive or not target or owner_root is None:
             return _error("当前 owner 没有可用的外部消息通道", "CHANNEL_ADAPTER_UNAVAILABLE")
-        attachments = _resolve_attachments(owner_root, attachment_refs, task_root=params.get("__artifact_registry_root"))
+        task_root = params.get("__artifact_task_root") or params.get("__artifact_registry_root")
+        registry_root = params.get("__artifact_registry_root")
+        current_roots = (Path(str(registry_root)),) if registry_root else ()
+        registry_reports = {}
+        attachments = _resolve_attachments(owner_root, attachment_refs, task_root=task_root,
+            verified_host_roots=current_roots, registry_reports=registry_reports)
+        if isinstance(attachments, ToolHandlerOutcome) and attachments.error_code == "ARTIFACT_NOT_REGISTERED":
+            from ..artifacts.registry_provenance import verified_recent_registry_roots
+
+            qualified = any(Path(ref).is_absolute() or len(Path(ref).parts) > 1 for ref in attachment_refs)
+            roots, errors = verified_recent_registry_roots(self.agent, scope, gateway_root=params.get("__artifact_gateway_root")) if qualified else ((), ())
+            fatal = [error for error in errors if not (isinstance(error, dict)
+                and error.get("reason") == "history_window_partial" and error.get("partial") is True)]
+            if fatal:
+                return _error("历史产物来源尚不可可靠核验，消息未发送", "ARTIFACT_VALIDATION_FAILED")
+            if roots:
+                attachments = _resolve_attachments(owner_root, attachment_refs,
+                    task_root=task_root, verified_host_roots=current_roots, historical_roots=roots,
+                    registry_reports=registry_reports)
+            if isinstance(attachments, ToolHandlerOutcome) and attachments.error_code == "ARTIFACT_NOT_REGISTERED":
+                source_errors = [item for error in errors for item in error.get("source_errors", ())
+                    if isinstance(item, dict)]
+                if source_errors:
+                    return _error("历史产物的部分原始回执不可核验，消息未发送", "ARTIFACT_VALIDATION_FAILED",
+                        coverage={"scope": "current_and_recent_verified", "complete": False,
+                            "reason": "source_unconfirmed", "source_errors": source_errors})
+                return _error("当前及近期可信登记未能定位该产物；请使用原登记完整路径或已绑定的产物引用",
+                    "ARTIFACT_NOT_REGISTERED", coverage={"scope": "current_and_recent_verified", "complete": False,
+                    "reason": "recent_registry_unresolved" if qualified else "structured_ref_required"})
         if isinstance(attachments, ToolHandlerOutcome):
             return attachments
         envelope = ReplyEnvelope(
@@ -647,11 +675,16 @@ def _owner_delivery_identity(agent: object, channel: str = "") -> tuple[str, str
 def _resolve_attachments(
     owner_root: Path,
     refs: list[str],
-    *, task_root: object = None,
+    *, task_root: object = None, verified_host_roots: tuple[Path, ...] = (),
+    historical_roots: tuple[Path, ...] = (), registry_reports: dict | None = None,
 ) -> tuple[ChannelAttachment, ...] | ToolHandlerOutcome:
     attachments: list[ChannelAttachment] = []
+    registry_reports = {} if registry_reports is None else registry_reports
     for ref in refs:
-        record = _resolve_registered_artifact(owner_root, ref, task_root=task_root)
+        qualified = Path(ref).is_absolute() or len(Path(ref).parts) > 1
+        record = _resolve_registered_artifact(owner_root, ref, task_root=task_root,
+            verified_host_roots=verified_host_roots, historical_roots=historical_roots if qualified else (),
+            registry_reports=registry_reports)
         if isinstance(record, ToolHandlerOutcome):
             return record
         if record is None:
@@ -682,57 +715,118 @@ def _resolve_attachments(
     return tuple(attachments)
 
 
-# LLM: artifact registry 跟随任务根保存，不固定在 owner 根；绝对 path 允许沿其祖先查找，但绝不全盘扫描。
-# 函数用途: 在 owner 边界内定位登记该产物的最近任务 registry，并返回它的当前记录。
+# LLM: 登记根只来自当前宿主或同线程规范回执证明；路径只查精确祖先，匹配歧义不得自行挑选。
+# 函数用途: 在已核owner来源中读取原登记，不通过文件名全盘扫描或补签当前文件。
 def _resolve_registered_artifact(
     owner_root: Path,
     ref: str,
-    *, task_root: object = None,
+    *, task_root: object = None, verified_host_roots: tuple[Path, ...] = (),
+    historical_roots: tuple[Path, ...] = (), registry_reports: dict | None = None,
 ) -> ArtifactRegistryRecord | ToolHandlerOutcome | None:
-    from ..artifacts.registry import latest_artifact_records_report
-    from ..artifacts.registry_reader import lookup_record_with_errors
-
     task = None
     if task_root:
         try:
-            task = Path(str(task_root)).expanduser().resolve(strict=True)
+            task = Path(str(task_root)).expanduser().absolute()
+            if task.resolve(strict=True) != task:
+                raise ValueError("task registry root was redirected")
             task.relative_to(owner_root)
         except (OSError, ValueError):
             return _error("当前任务产物范围不可核验", "PATH_OUTSIDE_WORKSPACE")
-    roots = _artifact_registry_roots(owner_root, ref, task_root=task)
+    verified, path_only = [], set()
+    for value in (*verified_host_roots, *historical_roots):
+        try:
+            root = Path(value).expanduser().absolute()
+            if root.resolve(strict=True) != root:
+                raise ValueError("verified registry root was redirected")
+            root.relative_to(owner_root)
+        except (OSError, ValueError):
+            return _error("历史产物来源不可核验", "PATH_OUTSIDE_WORKSPACE")
+        verified.append(root)
+        if value in historical_roots and value not in verified_host_roots and root != task:
+            path_only.add(root)
+    roots = _artifact_registry_roots(owner_root, ref, task_root=task, verified_host_roots=tuple(verified))
+    registry_reports = {} if registry_reports is None else registry_reports
     matches = {}
     basename_matches = {}
     for root in roots:
         raw = Path(ref).expanduser()
-        listing = latest_artifact_records_report(root)
+        if root not in registry_reports:
+            registry_reports[root] = {"report": _read_registry_report_beneath(owner_root, root)}
+        cached = registry_reports[root]
+        listing = cached["report"]
         if listing.errors:
             return _error("产物登记表不可可靠读取，为避免错发已安全停止", "ARTIFACT_VALIDATION_FAILED")
-        paths = [raw] if raw.is_absolute() else [root / raw, owner_root / raw]
-        for path in dict.fromkeys(paths):
-            record, errors = lookup_record_with_errors(listing.records, listing.errors, ref, path=path)
-            if errors:
-                return _error("产物登记表不可可靠读取，为避免错发已安全停止", "ARTIFACT_VALIDATION_FAILED")
-            if record is not None:
-                matches[(record.artifact_id, record.path, record.sha256, record.size_bytes, record.status)] = record
-        if root == task and len(raw.parts) == 1:
-            # 只在正式当前任务的登记表里匹配文件名，不枚举文件或其它任务。
-            for record in listing.records.values():
-                if Path(record.path).name == ref:
-                    basename_matches[(record.artifact_id, record.path, record.sha256, record.size_bytes, record.status)] = record
-    found = matches or basename_matches
+        qualified = raw.is_absolute() or len(raw.parts) > 1
+        if not qualified and root not in path_only and ref in listing.records:
+            record = listing.records[ref]
+            matches[(record.artifact_id, record.path, record.sha256, record.size_bytes, record.status)] = record
+        else:
+            # 每个已核根在本次发送内只解析一次路径索引，多个附件不重复全表解析/路径I/O。
+            if "paths" not in cached:
+                paths_index = {}
+                try:
+                    for record in listing.records.values():
+                        resolved = Path(record.path).expanduser().resolve(strict=False)
+                        paths_index.setdefault(resolved, []).append(record)
+                except (OSError, ValueError, RuntimeError):
+                    return _error("产物登记路径不可可靠解析", "ARTIFACT_VALIDATION_FAILED")
+                cached["paths"] = paths_index
+            paths = [raw] if raw.is_absolute() else [root / raw, owner_root / raw, *([task / raw] if task is not None else [])]
+            try:
+                for path in {path.resolve(strict=False) for path in paths}:
+                    for record in cached["paths"].get(path, ()):
+                        matches[(record.artifact_id, record.path, record.sha256, record.size_bytes, record.status)] = record
+            except (OSError, ValueError, RuntimeError):
+                return _error("产物引用路径不可可靠解析", "ARTIFACT_VALIDATION_FAILED")
+        if root in (task, *verified) and not qualified:
+            # 只在已核宿主根的原登记表里匹配唯一文件名，不枚举文件或其它任务。
+            if "names" not in cached:
+                names = {}
+                for record in listing.records.values():
+                    names.setdefault(Path(record.path).name, []).append(record)
+                cached["names"] = names
+            for record in cached["names"].get(ref, ()):
+                basename_matches[(record.artifact_id, record.path, record.sha256, record.size_bytes, record.status)] = record
+    found = {**matches, **basename_matches}
     if len(found) > 1:
         return _error("产物引用存在歧义，请使用完整已登记路径", "ARTIFACT_VALIDATION_FAILED")
     return next(iter(found.values()), None)
 
 
-def _artifact_registry_roots(owner_root: Path, ref: str, *, task_root: Path | None = None) -> tuple[Path, ...]:
-    """仅精确路径祖先和宿主当前任务；不扫描其它任务目录。"""
-    roots = [task_root, owner_root] if task_root is not None else [owner_root]
+def _read_registry_report_beneath(owner_root: Path, root: Path):
+    """从原owner FD门读取精确组件，不让包装器重新resolve后跟随兄弟run链接。"""
+    from ..artifacts.registry import (
+        REGISTRY_RELATIVE_PATH,
+        ArtifactRegistryReadReport,
+        _projection_report,
+    )
+    from ..artifacts.registry_projection_cache import registry_projection, trusted_root_identity
+    from ..common.nofollow_fs import NoFollowPathError, read_text_beneath
+
+    relative = root.relative_to(owner_root)
+    path = root / REGISTRY_RELATIVE_PATH
+    try:
+        text = read_text_beneath(owner_root, (*relative.parts, *REGISTRY_RELATIVE_PATH.parts))
+        if text is None:
+            return ArtifactRegistryReadReport()
+        identity = (*trusted_root_identity(owner_root), "delivery_registry", *relative.parts)
+        return _projection_report(path, registry_projection(identity, text))
+    except (NoFollowPathError, OSError, UnicodeError) as error:
+        return ArtifactRegistryReadReport(errors=[{"context": "artifact_registry.read",
+            "error_type": type(error).__name__}])
+
+
+def _artifact_registry_roots(owner_root: Path, ref: str, *, task_root: Path | None = None,
+                             verified_host_roots: tuple[Path, ...] = ()) -> tuple[Path, ...]:
+    """仅精确路径祖先和已核宿主根；不扫描其它任务目录。"""
+    roots = [*([task_root] if task_root is not None else []), *verified_host_roots, owner_root]
     raw = Path(ref).expanduser()
     candidates = [raw] if raw.is_absolute() else [owner_root / raw, *([task_root / raw] if task_root is not None else [])]
     for candidate in candidates:
         try:
-            path = candidate.resolve(strict=False)
+            path = candidate.absolute()
+            if candidate.resolve(strict=False) != path:
+                continue
             path.relative_to(owner_root)
         except (OSError, ValueError):
             continue
@@ -857,11 +951,12 @@ def _error(
     *,
     effect_outcome: str = "not_started",
     effect_source_ref: str = "send_message_preflight",
+    coverage: dict[str, object] | None = None,
 ) -> ToolHandlerOutcome:
     return ToolHandlerOutcome(
         "send_message",
         False,
-        json.dumps({"ok": False, "error": message}, ensure_ascii=False),
+        json.dumps({"ok": False, "error": message, **({"coverage": coverage} if coverage is not None else {})}, ensure_ascii=False),
         error_code=code,
         effect_outcome=effect_outcome,
         effect_source_ref=effect_source_ref,
