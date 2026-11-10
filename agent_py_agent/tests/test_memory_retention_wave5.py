@@ -436,30 +436,34 @@ def test_apply_revalidation_does_not_reread_settled_thread_bodies(tmp_path, monk
         return original_read(fd, size)
 
     monkeypatch.setattr(os, "read", read)
-    original_source, opened, actual_bytes = scan._fingerprint_source, [], []
+    original_source, opened, actual_bytes = scan._fingerprint_source, {}, []
 
     class CountedSource:
-        def __init__(self, raw):
+        def __init__(self, raw, intervals):
             self.raw = raw
+            self.intervals = intervals
 
         def __getattr__(self, name):
             return getattr(self.raw, name)
 
         def read1(self, size):
+            offset = self.raw.tell()
             raw = self.raw.read1(size)
             actual_bytes.append(len(raw))
+            self.intervals.append((offset, len(raw)))
             return raw
 
     def source(path):
         raw = original_source(path)
         if path in source_paths:
-            opened.append(path)
-            return CountedSource(raw)
+            intervals = []
+            opened.setdefault(path, []).append((pass_number, intervals))
+            return CountedSource(raw, intervals)
         return raw
 
     monkeypatch.setattr(scan, "_fingerprint_source", source)
     actions = []
-    for _ in range(64):
+    for pass_number in range(64):
         report = service.apply(now=NOW)
         assert report.ok
         actions.extend(report.actions)
@@ -470,7 +474,24 @@ def test_apply_revalidation_does_not_reread_settled_thread_bodies(tmp_path, monk
     assert len(list(home.owner_memory_daily_dir.glob("old-*.jsonl"))) == 20
     assert len([item for item in actions if item.category == "cache" and item.status == "deleted"]) == 20
     assert not reads, "settled thread content must not be rehashed per retention action"
-    assert set(opened) == source_paths and len(opened) == 2 * len(source_paths)
+    # 每个稳定文件只从头读两遍。真实时间片恰好中断文件时，后续片才可在准确偏移重新打开。
+    assert set(opened) == source_paths
+    for path, reads_by_pass in opened.items():
+        length = path.stat().st_size
+        offset = passes = 0
+        previous_pass = None
+        for tick, intervals in reads_by_pass:
+            assert intervals, "must not reopen a settled source merely to check EOF"
+            assert not offset or tick != previous_pass, "same slice reopened a small settled source"
+            previous_pass = tick
+            for start, size in intervals:
+                assert start == offset and size > 0
+                offset += size
+                assert offset <= length
+            if offset == length:
+                passes += 1
+                offset = 0
+        assert (passes, offset) == (2, 0)
     assert sum(actual_bytes) == 2 * sum(path.stat().st_size for path in source_paths)
 
 

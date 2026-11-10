@@ -203,6 +203,54 @@ def test_pin_chunk_pause_releases_source_without_gc(tmp_path, monkeypatch):
         projection.close()
 
 
+def test_pin_window_stops_at_deadline_and_resumes_without_rereading(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store import retention_scan_budget
+
+    projection, _context = _projection(tmp_path)
+    projection.contents.update(pass_token="test", chunk_bytes=4)
+    path = projection.home.owner_home_dir / 'tasks/day/task/work/state.json'
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'abcdefghijkl')
+    clock, handles, reads = [0.0], [], []
+    original = scan._fingerprint_source
+    monkeypatch.setattr(retention_scan_budget, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+
+    class Meter:
+        def __init__(self, raw):
+            self.raw = raw
+
+        def __getattr__(self, name):
+            return getattr(self.raw, name)
+
+        def read1(self, size):
+            reads.append((self.raw.tell(), size))
+            if len(reads) == 1:
+                clock[0] = 2.0
+            return self.raw.read1(size)
+
+    def open_source(target):
+        raw = original(target)
+        handles.append(raw)
+        return Meter(raw)
+
+    monkeypatch.setattr(scan, '_fingerprint_source', open_source)
+    chunks = projection._chunks(path, required=True)
+    try:
+        projection.budget = retention_scan_budget.RetentionScanBudget(8, 32, 1.0)
+        assert next(chunks) == b'abcd'
+        assert projection.budget.exhausted() and all(f.closed for f in handles)
+        projection.budget = retention_scan_budget.RetentionScanBudget(8, 32, 10.0)
+        assert next(chunks) == b'efghijkl'
+        assert all(f.closed for f in handles)
+        with pytest.raises(StopIteration):
+            next(chunks)
+        assert len(handles) == 2
+        assert reads == [(0, 4), (4, 4), (8, 4)]
+    finally:
+        chunks.close()
+        projection.close()
+
+
 @pytest.mark.parametrize('change', ['replace', 'truncate', 'rewrite', 'missing'])
 def test_pin_chunk_resume_rejects_changed_source_and_releases_handles(tmp_path, monkeypatch, change):
     projection, _context = _projection(tmp_path)

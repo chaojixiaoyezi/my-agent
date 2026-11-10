@@ -146,7 +146,7 @@ def test_cold_source_resumes_without_rereading_prefix(tmp_path, monkeypatch, col
     home, candidates, _service = runtime(tmp_path)
     source = old_file(home.owner_memory_curator_runs_dir / "cold.jsonl", "".join(
         json.dumps({"source_refs": [f"evidence/{index}"]}) + "\n" for index in range(count)))
-    opened, sizes = [], []
+    opened, spans = [], []
     original = scan._fingerprint_source
 
     class Meter:
@@ -157,8 +157,9 @@ def test_cold_source_resumes_without_rereading_prefix(tmp_path, monkeypatch, col
             return getattr(self.raw, name)
 
         def read1(self, size):
+            offset = self.raw.tell()
             data = self.raw.read1(size)
-            sizes.append(len(data))
+            spans.append((offset, len(data), size))
             return data
 
     def measured(path):
@@ -174,8 +175,20 @@ def test_cold_source_resumes_without_rereading_prefix(tmp_path, monkeypatch, col
     pins, _context = finish_projection(home, candidates, context.scan_cursor)
     assert pins.protects(home.owner_home_dir / f"evidence/{count - 1}", [])
     assert not pins.protects(home.owner_home_dir / "evidence/missing", [])
-    assert len(opened) == 2 and sum(sizes) == 2 * source.stat().st_size
-    assert max(sizes) <= 4096
+    # 4 KiB 预算走完才可重开；两趟都应顺序读到末尾，不保留跨片 FD，不探读 EOF。
+    length = source.stat().st_size
+    windows = (length + 4095) // 4096
+    assert 2 * windows <= len(opened) <= 2 * windows + 2
+    assert len(opened) == len(spans)
+    offset = passes = 0
+    for start, size, limit in spans:
+        assert start == offset and 0 < size <= limit <= 4096
+        offset += size
+        assert offset <= length
+        if offset == length:
+            offset = 0
+            passes += 1
+    assert (passes, offset) == (2, 0)
 
 
 def test_partial_plan_never_deletes_and_complete_plan_keeps_references(tmp_path, cold_clock):

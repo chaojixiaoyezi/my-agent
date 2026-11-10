@@ -383,15 +383,24 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
         digest = hashlib.sha256()
         scope = None
         offset = 0
+        checked = False
         while True:
-            # 跨预算片只保留位置和摘要；不能让全局续办投影占住用户文件FD。
             current_scope = "settled" if reference_pins._is_settled(stamp) else self.contents["pass_token"]
             if verifying and scope is not None and scope != current_scope:
                 offset = 0
                 digest = hashlib.sha256()
+                checked = False
             scope = current_scope
-            count = min(self.contents["chunk_bytes"], self.budget.max_bytes - self.budget.size)
-            if count <= 0 and offset != stamp[3]:
+            if checked and offset == stamp[3]:
+                # 最后一个原句柄已证明完整字节；暂停后再核路径，不为查询 EOF 重新打开文件。
+                self._check_parents(path)
+                leaf = path.stat(follow_symlinks=False)
+                if leaf.st_nlink != 1 or reference_pins._metadata_stamp(leaf) != stamp:
+                    raise _PinReadChanged(11, "pin source changed before completion", str(path))
+                break
+            window = min(stamp[3] - offset, self.budget.max_bytes - self.budget.size,
+                         reference_pins._MAX_PIN_SOURCE_DIGEST_BYTES)
+            if window <= 0 and offset != stamp[3]:
                 yield b""
                 continue
             self._check_parents(path)
@@ -402,18 +411,32 @@ class _PinProjection(reference_pins.ReferencePinSnapshot):
                 if reference_pins._metadata_stamp(opened) != stamp:
                     raise _PinReadChanged(11, "pin source changed before reading", str(path))
                 source.seek(offset)
-                raw = source.read1(count) if count > 0 else b""
+                # 一次打开读完本片的小窗口；每个底层 read 仍遵守配置，绝不跨暂停持有 FD。
+                parts = []
+                received = 0
+                while received < window:
+                    raw = source.read1(min(window - received, self.contents["chunk_bytes"]))
+                    if not raw:
+                        raise _PinReadChanged(11, "pin source ended before its verified size", str(path))
+                    parts.append(raw)
+                    received += len(raw)
+                    if (received < window and retention_scan_budget.time.monotonic()
+                            >= getattr(self.budget, "deadline", float("inf"))):
+                        break
                 after = os.fstat(source.fileno())
                 if (after.st_nlink != 1 or reference_pins._metadata_stamp(after) != stamp
                         or self._stamp(path) != stamp):
                     raise _PinReadChanged(11, "pin source changed while reading", str(path))
                 self._check_parents(path)
-            self.budget.charge(size=len(raw))
-            if not raw:
+            checked = True
+            self.budget.charge(size=received)
+            if not received:
                 break
-            offset += len(raw)
-            digest.update(raw)
-            yield raw
+            offset += received
+            block = b"".join(parts)
+            del parts
+            digest.update(block)
+            yield block
         self._remember(path, stamp, digest.digest())
         if verifying:
             self.post_scopes[path] = scope
