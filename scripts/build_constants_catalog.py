@@ -72,6 +72,9 @@ _UNIT_SUFFIXES = (
 
 # 跨业务共享合同不能为展示单位改名；只为这些明确量纲的名字补单位，不豁免目录完整性或中文说明。
 _UNIT_OVERRIDES = {
+    "FINISHED_RECHECK_LIMIT": "个后台片",
+    "RECENT_REQUEST_LIMIT": "个请求",
+    "HISTORY_WINDOW_LINES": "行",
     "LLM_RECORDS_AGGREGATE_MAX_MODELS": "个模型",
     "OPENAI_COMPAT_MAX_MESSAGES": "条消息",
     "POLICY_RULES_MAX_PER_OWNER": "条规则",

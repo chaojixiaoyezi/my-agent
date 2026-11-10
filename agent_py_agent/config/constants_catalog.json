@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1436,
+  "count": 1442,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -922,6 +922,46 @@
       "unit": "字节",
       "category": "其它",
       "description": "产物登记表解析投影进程内LRU缓存当前已占用的总字节数"
+    },
+    {
+      "name": "_HISTORY_MAX_BYTES",
+      "file": "agent_py_agent/agent/artifacts/registry_provenance.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "首窗没有完整助手记录时唯一重试的绝对字节上限。"
+    },
+    {
+      "name": "_HISTORY_WINDOW_BYTES",
+      "file": "agent_py_agent/agent/artifacts/registry_provenance.py",
+      "value": 262144,
+      "unit": "字节",
+      "category": "其它",
+      "description": "首拍近期助手记录窗口的物理读取字节上限。"
+    },
+    {
+      "name": "_HISTORY_WINDOW_LINES",
+      "file": "agent_py_agent/agent/artifacts/registry_provenance.py",
+      "value": 80,
+      "unit": "行",
+      "category": "其它",
+      "description": "近期来源窗口最多检查的消息行数；不将窗口之外签为空历史。"
+    },
+    {
+      "name": "_MANIFEST_MAX_BYTES",
+      "file": "agent_py_agent/agent/artifacts/registry_provenance.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "定位原热尾布局时允许读取的manifest字节上限。"
+    },
+    {
+      "name": "_RECENT_REQUEST_LIMIT",
+      "file": "agent_py_agent/agent/artifacts/registry_provenance.py",
+      "value": 8,
+      "unit": "个请求",
+      "category": "上限预算",
+      "description": "同线程历史附件定位最多核验的已完成请求数；不足时明确partial，不扩扫全历史。"
     },
     {
       "name": "MAX_ASSET_BYTES",
@@ -3298,6 +3338,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "停止原已提交后台片的有界等待秒数；超时保留未确认责任，不取消长期任务或宣称排空。"
+    },
+    {
+      "name": "_FINISHED_RECHECK_LIMIT",
+      "file": "agent_py_agent/agent/conversation/background_shutdown.py",
+      "value": 8,
+      "unit": "个后台片",
+      "category": "上限预算",
+      "description": "新提交只公平复核少量旧片；最终 shutdown 仍核全体原责任。"
     },
     {
       "name": "BACKGROUND_TRANSCRIPT_DELTA_FLUSH_CHARS",

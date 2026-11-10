@@ -24,10 +24,15 @@ from ..gateway_parts.request_owner_binding import frozen_request_owner
 from ..gateway_parts.response_renderer import validate_gateway_terminal_envelope_report
 from ..user_space.owner_resolver import resolve_owner_home
 
+# 同线程历史附件定位最多核验的已完成请求数；不足时明确partial，不扩扫全历史。
 _RECENT_REQUEST_LIMIT = 8
+# 首拍近期助手记录窗口的物理读取字节上限。
 _HISTORY_WINDOW_BYTES = 256 * 1024
+# 首窗没有完整助手记录时唯一重试的绝对字节上限。
 _HISTORY_MAX_BYTES = 1_048_576
+# 近期来源窗口最多检查的消息行数；不将窗口之外签为空历史。
 _HISTORY_WINDOW_LINES = 80
+# 定位原热尾布局时允许读取的manifest字节上限。
 _MANIFEST_MAX_BYTES = 65536
 
 
