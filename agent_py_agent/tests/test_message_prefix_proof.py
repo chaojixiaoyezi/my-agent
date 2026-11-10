@@ -1,5 +1,8 @@
 """纯提示的否定证明：碰撞只能丢优化，覆盖、身份和容量不能猜。"""
 import threading
+from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.conversation.message_prefix_proof import HotPrefixCache
 from agent_py_agent.agent.io.cursor_cache import FileStamp, note_seen
@@ -174,7 +177,17 @@ def test_real_100k_source_three_logical_pages_parse_prefix_once(tmp_path, monkey
     assert reader.HOT_PREFIXES.usage() == (1, 256 * 1024)
 
 
-def test_real_duplicate_id_does_not_replace_original_first_position(tmp_path, monkeypatch):
+@pytest.fixture
+def slice_clock(monkeypatch):
+    from agent_py_agent.agent.memory_store import retention_scan_budget
+
+    # 这三项验证源身份和首个位置。只控制扫描时钟，不改变真实文件时间、容量或预算。
+    now = [1000.]
+    monkeypatch.setattr(retention_scan_budget, 'time', SimpleNamespace(monotonic=lambda: now[0]))
+    return now
+
+
+def test_real_duplicate_id_does_not_replace_original_first_position(tmp_path, monkeypatch, slice_clock):
     from agent_py_agent.agent.conversation import message_cursor as cursors
     from agent_py_agent.agent.conversation import message_cursor_slice as reader
     from agent_py_agent.agent.io.cursor_cache import CursorCache
@@ -184,13 +197,17 @@ def test_real_duplicate_id_does_not_replace_original_first_position(tmp_path, mo
     monkeypatch.setattr(cursors, '_MESSAGE_CURSORS', CursorCache(32768))
     path = _stable_jsonl(tmp_path, [{'message_id': key, 'role': 'user', 'content': key}
                                   for key in ('duplicate', 'middle', 'duplicate')])
+    expired = RetentionScanBudget.default()
+    slice_clock[0] = expired.deadline
+    deferred = reader.read_after_slice(path, '', 3, expired)
+    assert deferred.partial and not deferred.rows and deferred.reason == 'slice_budget'
     result = reader.read_after_slice(path, '', 3, RetentionScanBudget.default())
     assert [row['message_id'] for row in result.rows] == ['duplicate', 'middle', 'duplicate']
     following = reader.read_after_slice(path, 'duplicate', 1, RetentionScanBudget.default())
     assert following.rows[0]['message_id'] == 'middle'
 
 
-def test_real_source_rewrite_during_slice_cannot_publish_prefix(tmp_path, monkeypatch):
+def test_real_source_rewrite_during_slice_cannot_publish_prefix(tmp_path, monkeypatch, slice_clock):
     from agent_py_agent.agent.conversation import message_cursor_slice as reader
     from agent_py_agent.agent.memory_store.retention_scan_budget import RetentionScanBudget
 
@@ -213,9 +230,7 @@ def test_real_source_rewrite_during_slice_cannot_publish_prefix(tmp_path, monkey
     assert cache.usage() == (1, 0)
 
 
-def test_real_blank_prefix_never_creates_a_later_first_id_hint(tmp_path, monkeypatch):
-    import pytest
-
+def test_real_blank_prefix_never_creates_a_later_first_id_hint(tmp_path, monkeypatch, slice_clock):
     from agent_py_agent.agent.conversation import message_cursor as cursors
     from agent_py_agent.agent.conversation import message_cursor_slice as reader
     from agent_py_agent.agent.io.cursor_cache import CursorCache, cursor_key

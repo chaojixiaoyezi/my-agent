@@ -71,6 +71,7 @@ jobs:
           agent_py_agent/tests/test_r8_bounded_process_log.py
           agent_py_agent/tests/test_r8_candidate_cleanup_missing.py
           agent_py_agent/tests/test_r8_claim_projection_eviction.py
+          agent_py_agent/tests/test_r8_claim_projection_lifecycle.py
           agent_py_agent/tests/test_r8_ledger_gc_pages.py
           agent_py_agent/tests/test_r8_pending_current_discovery.py
           agent_py_agent/tests/test_r8_compact_history_store.py::test_projection_header_without_o_nofollow_still_checks_real_identity

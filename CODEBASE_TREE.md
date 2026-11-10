@@ -1108,6 +1108,7 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_r8_bounded_process_log.py # 真实子进程日志限额、输出继承、元数据频率及描述符回收
 |-- agent_py_agent/tests/test_r8_candidate_cleanup_missing.py # 缺失中间节点不签发空写，真实清理保留原协调末门与恢复证明
 |-- agent_py_agent/tests/test_r8_claim_projection_eviction.py # 多store续点、可丢弃缓存和fork交错回归
+|-- agent_py_agent/tests/test_r8_claim_projection_lifecycle.py # SQLite 连接与临时目录按序释放、退出与 fork 隔离回归
 |-- agent_py_agent/tests/test_r8_compact_history_store.py # R8：持久历史根、分叉、崩溃搬迁与冷启动定位的运行时回归。
 |-- agent_py_agent/tests/test_r8_compact_progress_pulse.py # 摘要等待可观察、覆盖数不虚增，退出后不再发表旧进度。
 |-- agent_py_agent/tests/test_r8_current_obligations.py # 当前义务查询复杂度与精确attempt收口回归
