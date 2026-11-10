@@ -199,10 +199,14 @@ def _asset_recommendations(request: ToolSectionsRequest) -> str:
     if str(request.context_scope or "").strip().lower() in {"task_local", "isolated", "control_plane"} or current_subagent_run_id(request.agent):
         return ""
     rows, monitors, home = inventory_for_agent(request.agent, runtime_snapshot=request.runtime_snapshot,
-                                              allowed_tools=request.allowed_tools)
+                                              allowed_tools=request.allowed_tools, preserve_descriptors=True)
     if request.selected_skill_ids is not None:
         selected = set(request.selected_skill_ids)
-        rows = [row for row in rows if row.get("kind") != "skill" or row.get("metadata", {}).get("stable_id") in selected]
+        from ...assets.descriptor import AssetDescriptor
+        rows = [row for row in rows if (
+            (row.kind != "skill" or row.metadata.get("stable_id") in selected)
+            if isinstance(row, AssetDescriptor) else
+            (row.get("kind") != "skill" or row.get("metadata", {}).get("stable_id") in selected))]
     return render_turn_recommendations(request.user_prompt, rows, owner_home=home, monitors=monitors,
         in_use_method_ids=request.in_use_method_ids or prompt_method_ids(request.agent),
         attachments=request.attachments, ocr_texts=request.ocr_texts)

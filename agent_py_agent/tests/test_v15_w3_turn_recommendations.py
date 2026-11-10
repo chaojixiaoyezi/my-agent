@@ -187,3 +187,48 @@ def test_real_run_passes_image_metadata_into_fixed_method_matcher(tmp_path, monk
     assert agent.run('处理这张图', params=params).response == '完成'
     wire = json.dumps(probe.calls[0]['body']['input'], ensure_ascii=False)
     assert '## 本轮推荐的固定方法' in wire and 'inspect-image' in wire
+
+
+def test_typed_inventory_reuses_validation_but_rechecks_mutable_secret_fields(monkeypatch):
+    descriptor = AssetDescriptor('typed', 'script', 'typed', metadata={
+        'trigger_matchers': {'intent_keywords': ['排查']}})
+    expected = module.render_turn_recommendations('排查', [descriptor.to_dict()])
+    # frozen 描述符仍含可变容器；不能以类型或缓存替代每次安全投影。
+    descriptor.metadata['api_key'] = 'private-fixture-only'
+    descriptor.metadata['trigger_matchers']['intent_keywords'].append('Bearer private-fixture-only')
+    expected_changed = module.render_turn_recommendations('排查', [descriptor.to_dict()])
+    def unexpected(*args, **kwargs):
+        pytest.fail('typed descriptor was serialized and reconstructed')
+    monkeypatch.setattr(AssetDescriptor, 'from_dict', unexpected)
+    actual = module.render_turn_recommendations('排查', [descriptor])
+    assert actual == expected_changed == expected
+    assert 'private-fixture-only' not in actual
+
+
+def test_inventory_preserves_same_call_skill_values_only_when_requested(tmp_path, monkeypatch):
+    from agent_py_agent.agent.assets import monitor_adapter, workspace_assets
+    monkeypatch.setattr(workspace_assets.WorkspaceAssetOverlay, 'list_assets', lambda *args: [asset('script', 'entry')])
+    monkeypatch.setattr(monitor_adapter, 'list_monitor_descriptors', lambda *args: [])
+    entry = SimpleNamespace(stable_id='owner:skill:test', name='测试技能', description='公开名卡', source='owner')
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=tmp_path), tools=SimpleNamespace(workspace_root=None),
+                            current_skill_snapshot=lambda: SimpleNamespace(enabled_entries=lambda: [entry]))
+    runtime = SimpleNamespace(availability=SimpleNamespace(available=True), exposure=SimpleNamespace(model_visible=True))
+    snapshot = SimpleNamespace(runtime=lambda name: runtime)
+    ordinary, monitors, _ = module.inventory_for_agent(agent, runtime_snapshot=snapshot)
+    typed, typed_monitors, _ = module.inventory_for_agent(agent, runtime_snapshot=snapshot, preserve_descriptors=True)
+    assert all(isinstance(row, dict) for row in ordinary)
+    assert isinstance(typed[-1], AssetDescriptor)
+    assert [row.to_dict() if isinstance(row, AssetDescriptor) else row for row in typed] == ordinary
+    assert module.render_turn_recommendations('entry', ordinary, monitors=monitors) == module.render_turn_recommendations('entry', typed, monitors=typed_monitors)
+
+
+def test_descriptor_subclass_projection_keeps_original_validation_and_whitelist():
+    class ExternalDescriptor(AssetDescriptor):
+        def to_dict(self):
+            return {**super().to_dict(), 'id': '../invalid', 'external_extra': 'ignored'}
+    assert module._inventory_rows([ExternalDescriptor('safe', 'script', 'safe')]) == []
+    class ExtraDescriptor(AssetDescriptor):
+        def to_dict(self):
+            return {**super().to_dict(), 'external_extra': 'ignored'}
+    expected = module._inventory_rows([AssetDescriptor('safe', 'script', 'safe').to_dict()])
+    assert module._inventory_rows([ExtraDescriptor('safe', 'script', 'safe')]) == expected

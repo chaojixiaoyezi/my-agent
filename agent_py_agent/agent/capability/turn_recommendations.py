@@ -42,10 +42,14 @@ def _inventory_rows(values):
     result = []
     for value in values if isinstance(values, (list, tuple)) else ():
         try:
-            raw = value.to_dict() if isinstance(value, AssetDescriptor) else value
-            if not isinstance(raw, dict):
-                continue
-            row = AssetDescriptor.from_dict({key: item for key, item in raw.items() if key in allowed}).to_dict()
+            # 同次已验证值不重新构造；to_dict仍逐次净化可变嵌套字段，外部JSON仍完整校验。
+            if type(value) is AssetDescriptor:
+                row = value.to_dict()
+            else:
+                raw = value.to_dict() if isinstance(value, AssetDescriptor) else value
+                if not isinstance(raw, dict):
+                    continue
+                row = AssetDescriptor.from_dict({key: item for key, item in raw.items() if key in allowed}).to_dict()
         except (TypeError, ValueError):
             continue
         if row['enabled'] is not True:
@@ -347,7 +351,7 @@ def authorized_asset_tools(snapshot, allowed_tools=None):
 
 # LLM: 根只来自宿主home_paths，目录仅读描述符；Skill只消费当前快照名卡，不预读正文或补扫其他Owner。
 # 函数用途: 为推荐及首轮挂载共用一份现有资产元数据发现入口。
-def inventory_for_agent(agent, *, runtime_snapshot, allowed_tools=None):
+def inventory_for_agent(agent, *, runtime_snapshot, allowed_tools=None, preserve_descriptors=False):
     from ..assets.monitor_adapter import list_monitor_descriptors
     from ..assets.workspace_assets import WorkspaceAssetOverlay
 
@@ -370,8 +374,9 @@ def inventory_for_agent(agent, *, runtime_snapshot, allowed_tools=None):
     if callable(snapshot_factory) and (allowed_tools is None or 'skill_search' in allowed_tools):
         snapshot = snapshot_factory()
         for entry in snapshot.enabled_entries():
-            rows.append(AssetDescriptor(entry.stable_id.rsplit(':', 1)[-1] if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', entry.stable_id.rsplit(':', 1)[-1]) else
+            descriptor = AssetDescriptor(entry.stable_id.rsplit(':', 1)[-1] if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', entry.stable_id.rsplit(':', 1)[-1]) else
                 'skill-' + hashlib.sha256(entry.stable_id.encode()).hexdigest()[:24], 'skill', entry.name,
                 summary=entry.description, metadata={'stable_id': entry.stable_id},
-                source_scope='owner' if entry.source in {'owner', 'learned'} else 'builtin' if entry.source == 'builtin' else 'workspace' if entry.source == 'workspace' else 'global').to_dict())
+                source_scope='owner' if entry.source in {'owner', 'learned'} else 'builtin' if entry.source == 'builtin' else 'workspace' if entry.source == 'workspace' else 'global')
+            rows.append(descriptor if preserve_descriptors else descriptor.to_dict())
     return rows, monitors, home
