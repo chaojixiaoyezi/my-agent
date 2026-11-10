@@ -853,3 +853,43 @@ def test_real_network_tui_stream_steer_approval_stop_new_next_turn(startup_gatew
         if thread.name.startswith(("my-agent-tui", "Thread-")) and thread.daemon:
             thread.join(6)
     _assert_fd_restored(before_fd)
+
+
+def test_pending_sse_polls_only_for_terminal_result(live_gateway, monkeypatch):
+    """同一请求的普通 HTTP 返回等待详情，SSE 心跳不重复读取/构造丢弃的详情。"""
+    from urllib.request import Request
+
+    from agent_py_agent.agent.common.authenticated_http import open_authenticated_request
+    from agent_py_agent.agent.gateway_parts import control_plane
+
+    paths = live_gateway["paths"]
+    record = paths.processing / "r.json"
+    record.write_text(json.dumps({"id": "r", "user_id": "alice", "channel": "chat",
+                                  "execution_attempt_id": "attempt-a"}))
+    live_gateway["start"]()
+    base = f"http://127.0.0.1:{live_gateway['port']}"
+    projections = []
+    original = control_plane.server_wait_projection
+
+    def track(server, payload):
+        projections.append(payload["id"])
+        return original(server, payload)
+
+    monkeypatch.setattr(control_plane, "server_wait_projection", track)
+    with open_authenticated_request(Request(base + "/result/r"), timeout=3) as pending:
+        assert pending.status == 202 and json.load(pending)["status"] == "processing"
+    assert projections == ["r"]
+    with open_authenticated_request(Request(base + "/client/requests/r/events"), timeout=3) as stream:
+        beats = 0
+        while beats < 2:
+            line = stream.readline()
+            assert line
+            if line.strip() == b"event: heartbeat":
+                beats += 1
+        assert projections == ["r"]
+        archive = archive_request(paths, record, paths.done, "r",
+                                  terminal_response={"ok": True, "response": "finished", "id": "r",
+                                                     "request_id": "r", "user_id": "alice", "channel": "chat"})
+        assert archive.disposition.value == "committed"
+        data = stream.read(1 << 16)
+        assert b"event: terminal" in data and b'"response": "finished"' in data

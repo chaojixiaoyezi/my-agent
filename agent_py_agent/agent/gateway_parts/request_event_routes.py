@@ -217,7 +217,7 @@ def request_event_frames(handler, server, request_id, *, cursor="", include=froz
             if more:
                 continue
             view = _ResultView(handler, request_id)
-            handle_result(view, server)
+            handle_result(view, server, terminal_only=True)
             if view.result is not None:
                 # 终态可能在本页读取之后提交：最后再读一遍尾部，不能先发终态而漏掉最后一批。
                 tail, more_tail = reader.read_page()

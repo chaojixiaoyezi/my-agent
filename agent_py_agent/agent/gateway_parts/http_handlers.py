@@ -318,7 +318,7 @@ def _state_load_error(state_path, exc: BaseException) -> dict[str, Any]:
 
 # LLM: 原canonical终态优先及原owner ACL保持；pending等待只沿同次server传入，不往原权限DTO塞新身份或修队列。
 # 函数用途: 返回当前用户可见的原请求结果，仍在队列时附只读C隔离等待。
-def handle_result(handler, server) -> None:
+def handle_result(handler, server, *, terminal_only: bool = False) -> None:
     request_id = handler.path[len("/result/"):]
     if server is None:
         handler._send_json(500, {"error": "server not initialized"})
@@ -326,6 +326,14 @@ def handle_result(handler, server) -> None:
     if not request_id or request_id != request_id.replace("/", "").replace("\\", ""):
         handler._send_json(400, {"error": "invalid request id"})
         return
+    if terminal_only:
+        # SSE 本拍未发现终态且仍有活动记录时，仅继续等待。实际交付依然经过下方原归属门。
+        basename = f"{request_id}.json"
+        paths = server.paths
+        if not (paths.terminal / basename).exists() and (
+            (paths.processing / basename).exists() or (paths.inbox / basename).exists()
+        ):
+            return
     user_id, permission = _request_identity(handler)
     access = _ResultAccessContext(request_id, user_id, permission)
     if _send_archived_terminal_result(
