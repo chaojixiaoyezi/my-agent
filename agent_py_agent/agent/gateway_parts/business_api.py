@@ -505,14 +505,9 @@ class BusinessServices:
             from .business_api_v13 import v13_ready
             return v13_ready(action, self)
         if implementer == 'W1':
-            if action.startswith('policies.') or action == 'approvals.decide':
-                return (callable(self.approvals) and self._observation_ready('approvals.get')
-                        if action == 'approvals.decide' else self.spaces.governance is not None)
-            if action == 'spaces.archive':
-                return callable(self.spaces.active_references)
-            if action.startswith(('interfaces.', 'assets.')) or action == 'spaces.packages.mount':
-                return callable(self.spaces.reference_resolver)
-            return bool(self.spaces.enabled)
+            if action == 'approvals.decide':
+                return callable(self.approvals) and self._observation_ready('approvals.get')
+            return self.spaces.action_ready(action)
         if implementer == 'W3':
             if spec.metadata['effect'] == 'execute':
                 return callable(self.workflows.context_provider) and callable(self.workflows.engine_factory)

@@ -336,6 +336,17 @@ class BusinessSpaceService:
             'mounts': self.space_view(row, actor=actor)['mounts'], 'interface_refs': refs,
             'policy_refs': [], 'allowed_actions': self.allowed_actions(actor, space_id=space_id)})
 
+    # LLM: W1动作是否已接上原端口的唯一判据；能力发现(system.capabilities)与对象allowed_actions共用，避免公布不可调用的动作。
+    # 函数用途: 判断一个空间域动作当前能否真正执行（端口已注入且功能开启）。
+    def action_ready(self, action):
+        if action.startswith('policies.'):
+            return self.governance is not None
+        if action == 'spaces.archive':
+            return callable(self.active_references)
+        if action.startswith(('interfaces.', 'assets.')) or action == 'spaces.packages.mount':
+            return callable(self.reference_resolver)
+        return bool(self.enabled)
+
     def allowed_actions(self, actor, **scope):
         from ..plugin_host.business_action_specs import business_action_specs
         allowed = []
@@ -343,6 +354,9 @@ class BusinessSpaceService:
             if spec.metadata.get('implementer') != 'W1':
                 continue
             if spec.action.startswith(('policies.', 'approvals.')) and self.governance is None:
+                continue
+            # BIZ-004：未接端口的动作不在对象详情里公布；调用仍走原授权与就绪检查。
+            if not spec.action.startswith('approvals.') and not self.action_ready(spec.action):
                 continue
             try:
                 require_access(actor, spec.action, service=self, **scope)
