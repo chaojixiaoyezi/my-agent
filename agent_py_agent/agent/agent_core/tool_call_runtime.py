@@ -177,7 +177,8 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         runtime_request.call,
         write_boundary=write_boundary_with_runtime_ledger(
             runtime_request.agent, runtime_request.request.params,
-            for_attachment_lookup=runtime_request.call.tool_name in {"send_message", "tool_program"},
+            for_attachment_lookup=(runtime_request.call.tool_name == "send_message"
+                                   and bool(runtime_request.call.arguments.get("attachments"))),
         ),
         runtime_snapshot=runtime_request.request.params.tool_runtime_snapshot,
         trusted_run_context={

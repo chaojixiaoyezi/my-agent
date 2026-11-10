@@ -449,7 +449,8 @@ def test_attachment_boundary_points_to_the_registry_that_received_the_write(tmp_
         _empty_tool_loop_params(),
         task_attributes={"run_workspace": {"task_root": str(task)}},
         delivery_contract={"task_workspace": {"task_root": str(run)}},
-        write_boundary={"artifact_registry_root": str(tmp_path / "外来输入")},
+        write_boundary={"artifact_registry_root": str(tmp_path / "外来输入"),
+                        "artifact_gateway_root": str(tmp_path / "外来网关")},
     )
     name = "巡检流程图与实现说明.md"
     outcome = WriteFileTool(task).execute({"path": name, "content": "# 巡检\n"})
@@ -461,6 +462,8 @@ def test_attachment_boundary_points_to_the_registry_that_received_the_write(tmp_
     boundary = write_boundary_with_runtime_ledger(agent, params, for_attachment_lookup=True)
     assert boundary["task_root"] == str(task)
     assert boundary["artifact_registry_root"] == str(run)
-    assert "artifact_registry_root" not in write_boundary_with_runtime_ledger(agent, params)
+    assert "artifact_gateway_root" not in boundary
+    ordinary_boundary = write_boundary_with_runtime_ledger(agent, params)
+    assert "artifact_registry_root" not in ordinary_boundary and "artifact_gateway_root" not in ordinary_boundary
     records = list(latest_artifact_records(boundary["artifact_registry_root"]).values())
     assert len(records) == 1 and records[0].path == str(task / name) and records[0].status == "ready"

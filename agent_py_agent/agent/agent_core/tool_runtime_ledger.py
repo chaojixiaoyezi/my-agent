@@ -166,8 +166,14 @@ def write_boundary_with_runtime_ledger(agent: object, params: object, *, for_att
     _attach_canonical_owner_home_root(merged, agent)
     # 登记根只由宿主产生；普通工具不为附件多做路径解析。
     merged.pop("artifact_registry_root", None)
+    merged.pop("artifact_gateway_root", None)
     if for_attachment_lookup and (merged.get("canonical_owner_home_root") or _text(getattr(agent, "root", ""))):
+        from ..artifacts.registry_provenance import gateway_root_from_host_params
+
         merged["artifact_registry_root"] = str(current_run_artifact_registry_root(agent, params))
+        gateway_root = gateway_root_from_host_params(agent, params)
+        if gateway_root is not None:
+            merged["artifact_gateway_root"] = str(gateway_root)
     _attach_effective_owner_scope(merged, agent, params)
     _attach_owner_network_scope(merged, agent)
     _attach_runtime_approved_actions(merged, params)
