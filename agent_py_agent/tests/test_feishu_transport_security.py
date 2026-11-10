@@ -251,3 +251,59 @@ def test_other_host_credential_routes_refuse_redirect(monkeypatch, tmp_path, rou
             with pytest.raises(feishu_app_registration.FeishuRegistrationError, match='拒绝 HTTP 跳转'):
                 feishu_app_registration._post_registration('feishu', {'client_secret': 'OWNED_APP_SECRET'})
         assert not received
+
+
+def test_registered_task_file_reaches_feishu_multipart_and_message_http(tmp_path, monkeypatch):
+    """走正式写入、产物登记和适配器，在本机核对文件字节及最终消息引用。"""
+    import json
+    from email import policy
+    from email.parser import BytesParser
+
+    from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
+    from agent_py_agent.tests.test_channel_message_task_refs import prepared
+    from agent_py_agent.tests.test_channel_message_tool import _message_registry
+
+    owner, task, path, record, _, _, store = prepared(tmp_path)
+    tool, _ = _tool(owner)
+    adapter = FeishuAdapter({'feishu_session_lock_enabled': False})
+    monkeypatch.setattr(adapter, '_get_tenant_access_token', lambda: 'synthetic-test-token')
+    tool._delivery.registry.register_adapter('feishu', adapter, capabilities=ChannelCapabilities(
+        text=True, reply=True, proactive=True, files=True, frozen_attachment_content=True))
+    registry = _message_registry(owner, store, tool)
+    requests = []
+
+    class LocalFeishu(BaseHTTPRequestHandler):
+        def do_POST(self):
+            content = self.rfile.read(int(self.headers['Content-Length']))
+            requests.append((self.path, self.headers['Content-Type'], content))
+            data = {'file_key': 'file_from_upload'} if self.path == '/im/v1/files' else {'message_id': 'om_test'}
+            body = json.dumps({'code': 0, 'data': data}).encode()
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_):
+            pass
+
+    with ThreadingHTTPServer(('127.0.0.1', 0), LocalFeishu) as server:
+        monkeypatch.setattr(feishu, '_FEIHSU_API_BASE', f'http://127.0.0.1:{server.server_port}')
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            result = execute_registry_test_call(registry, 'send_message', {'attachments': [path.name]},
+                write_boundary={'task_root': str(task), 'artifact_registry_root': str(task)})
+        finally:
+            server.shutdown()
+            worker.join()
+    assert result.ok, (result.error_code, result.output)
+    assert json.loads(result.output)['attachments'][0]['artifact_id'] == record.artifact_id
+    assert [item[0] for item in requests] == ['/im/v1/files', '/im/v1/messages?receive_id_type=open_id']
+    _, content_type, multipart = requests[0]
+    mime = BytesParser(policy=policy.default).parsebytes(
+        b'Content-Type: ' + content_type.encode() + b'\r\n\r\n' + multipart)
+    part = next(p for p in mime.iter_parts() if p.get_param('name', header='content-disposition') == 'file')
+    assert part.get_filename() == path.name and part.get_payload(decode=True) == path.read_bytes()
+    message = json.loads(requests[1][2])
+    assert message['msg_type'] == 'file' and message['receive_id'] == 'ou_current_user'
+    assert json.loads(message['content']) == {'file_key': 'file_from_upload'}
