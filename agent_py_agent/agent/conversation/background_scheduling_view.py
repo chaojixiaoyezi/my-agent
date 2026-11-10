@@ -127,8 +127,31 @@ def task_scheduling_view(store: object, task: object) -> dict:
 _MAX_RESULT_SUMMARY_CHARS = 4000
 
 
-# LLM: 只读原 SessionTask 的耐久摘要与结果回报的准确发布回执；不读队列、不改任务，读失败记 unknown。
-# 函数用途: 区分“任务已结束”与“结果回报已发布 / 已被来源会话处理”，未结束的任务不给结果视图。
+# 结果回报的 guidance 回执状态按账本原名投影；reserved/submitted/consumed 是来源会话回合的认领、提交与消费。
+_GUIDANCE_REPORT_STATES = frozenset({"pending", "reserved", "submitted", "consumed", "rejected"})
+
+
+# LLM: 纯读结果回报的准确幂等回执（含归档回执），不取回执转换锁、不迁移旧版、不修投影；坏账或旧版回执记 unknown。
+# 函数用途: 返回结果回报这条 next_turn 消息在来源会话里的发布/消费事实，缺失与读不出分开。
+def _guidance_report_state(store: object, key: str) -> str:
+    from ..gateway_parts.io import read_json_file_report
+
+    path = store.guidance.storage.guidance_dedupe_path(key)
+    report = read_json_file_report(path, context="business.task_result.guidance")
+    if report.load_error is not None or report.lock_busy:
+        return "unknown"
+    payload = report.payload
+    if not payload:
+        return "unknown" if path.exists() else "absent"
+    if payload.get("schema_version") != "conversation_guidance_once.v4" or payload.get("dedupe_key") != key:
+        return "unknown"
+    status = str(payload.get("status") or "")
+    return status if status in _GUIDANCE_REPORT_STATES else "unknown"
+
+
+# LLM: 只读原 SessionTask 的耐久摘要和结果回报的两条独立事实：guidance 是回报消息本身（普通发送会话只收这条），
+#   wake 是主动唤醒（只有绑定/控制/后台身份发送方才有）；两者都不表示对外渠道已送达。不读队列、不改任务，读失败记 unknown。
+# 函数用途: 区分“任务已结束”“回报已发布/已被来源会话消费”和“唤醒已发布/已处理”，未结束的任务不给结果视图。
 def task_result_view(store: object, task: object) -> dict | None:
     if task.status not in SESSION_TASK_TERMINAL_STATUSES:
         return None
@@ -136,13 +159,18 @@ def task_result_view(store: object, task: object) -> dict | None:
     from .session_task_report import result_report_key
 
     summary = str(redact_sensitive_value(str(getattr(task, "summary", "") or "")))
-    report = "not_applicable"
+    report = {"guidance": "not_applicable", "wake": "not_applicable"}
     if str(getattr(task, "sender_thread_id", "") or "").strip():
+        key = result_report_key(task)
         try:
-            receipt = store.wakes.delivery_receipt(task.sender_thread_id, result_report_key(task))
+            report["guidance"] = _guidance_report_state(store, key)
+        except (OSError, ValueError, RuntimeError, AttributeError):
+            report["guidance"] = "unknown"
+        try:
+            receipt = store.wakes.delivery_receipt(task.sender_thread_id, key)
         except (OSError, ValueError, RuntimeError, sqlite3.Error):
             receipt = None
-        report = {"pending": "pending", "handled": "handled", "": "not_published"}.get(receipt, "unknown")
+        report["wake"] = {"pending": "pending", "handled": "handled", "": "absent"}.get(receipt, "unknown")
     return {"summary": summary[:_MAX_RESULT_SUMMARY_CHARS],
             "summary_truncated": len(summary) > _MAX_RESULT_SUMMARY_CHARS, "report": report}
 

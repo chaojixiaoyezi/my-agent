@@ -148,10 +148,11 @@ def test_configured_model_executes_and_projection_moves_from_queued_to_terminal(
     # 纯文本结果经原任务耐久摘要可见；结果回报的发布状态按准确回执投影，与“已结束”分开。
     stored = host.conversation_store.session_tasks.require(task_id)
     assert stored.summary and stored.sender_thread_id and stored.result_refs == ()
-    assert detail['result'] == {'summary': stored.summary, 'summary_truncated': False, 'report': 'pending'}
+    assert detail['result'] == {'summary': stored.summary, 'summary_truncated': False,
+                                'report': {'guidance': 'pending', 'wake': 'pending'}}
 
 
-def test_task_result_view_redacts_bounds_and_reports_unreadable_receipts():
+def test_task_result_view_redacts_bounds_and_reports_unreadable_receipts(tmp_path):
     from types import SimpleNamespace
 
     from agent_py_agent.agent.conversation.background_scheduling_view import task_result_view
@@ -159,23 +160,74 @@ def test_task_result_view_redacts_bounds_and_reports_unreadable_receipts():
     def unreadable(thread_id, key):
         raise OSError('wake ledger locked')
 
-    store = SimpleNamespace(wakes=SimpleNamespace(delivery_receipt=unreadable))
+    def broken_path(key):
+        raise OSError('guidance ledger unavailable')
+
+    guidance = SimpleNamespace(storage=SimpleNamespace(guidance_dedupe_path=broken_path))
+    store = SimpleNamespace(wakes=SimpleNamespace(delivery_receipt=unreadable), guidance=guidance)
     secret = 'sk-' + 'a' * 40
     done = SimpleNamespace(task_id='stask-r1', status='done', summary=f'key {secret} ' + 'x' * 5000,
                            sender_thread_id='thread-origin')
     view = task_result_view(store, done)
     assert secret not in view['summary'] and len(view['summary']) == 4000
-    assert view['summary_truncated'] is True and view['report'] == 'unknown'
-    receipts = SimpleNamespace(wakes=SimpleNamespace(delivery_receipt=lambda thread_id, key: {
-        'session_task_result:stask-r2:failed': 'handled'}.get(key, '')))
+    assert view['summary_truncated'] is True and view['report'] == {'guidance': 'unknown', 'wake': 'unknown'}
+    paths = {'session_task_result:stask-r3:done': tmp_path / 'corrupt.json'}
+    paths['session_task_result:stask-r3:done'].write_text('{bad', encoding='utf-8')
+    receipts = SimpleNamespace(
+        wakes=SimpleNamespace(delivery_receipt=lambda thread_id, key: {
+            'session_task_result:stask-r2:failed': 'handled'}.get(key, '')),
+        guidance=SimpleNamespace(storage=SimpleNamespace(
+            guidance_dedupe_path=lambda key: paths.get(key, tmp_path / 'absent.json'))))
     failed = SimpleNamespace(task_id='stask-r2', status='failed', summary='', sender_thread_id='thread-origin')
-    assert task_result_view(receipts, failed) == {'summary': '', 'summary_truncated': False, 'report': 'handled'}
-    unpublished = SimpleNamespace(task_id='stask-r3', status='done', summary='ok', sender_thread_id='thread-origin')
-    assert task_result_view(receipts, unpublished)['report'] == 'not_published'
+    assert task_result_view(receipts, failed) == {'summary': '', 'summary_truncated': False,
+                                                  'report': {'guidance': 'absent', 'wake': 'handled'}}
+    corrupt = SimpleNamespace(task_id='stask-r3', status='done', summary='ok', sender_thread_id='thread-origin')
+    assert task_result_view(receipts, corrupt)['report'] == {'guidance': 'unknown', 'wake': 'absent'}
     orphan = SimpleNamespace(task_id='stask-r4', status='done', summary='ok', sender_thread_id='')
-    assert task_result_view(receipts, orphan)['report'] == 'not_applicable'
+    assert task_result_view(receipts, orphan)['report'] == {'guidance': 'not_applicable', 'wake': 'not_applicable'}
     assert task_result_view(receipts, SimpleNamespace(task_id='stask-r5', status='pending', summary='',
                                                       sender_thread_id='thread-origin')) is None
+
+
+# S9-R1：普通发送会话只收 next_turn 回报、没有主动唤醒；回报已发布不能被投影成“未发布”。
+#   用真实临时 ConversationStore、真实结果回报 producer 与真实认领/提交/消费接口；重放不产生第二条回报。
+@pytest.mark.parametrize(('sender_kind', 'wake'), [('ordinary', 'absent'), ('controller', 'pending')])
+def test_result_view_keeps_guidance_and_wake_facts_separate(tmp_path, sender_kind, wake):
+    from agent_py_agent.agent.conversation.background_scheduling_view import task_result_view
+    from agent_py_agent.agent.conversation.session_task_report import (
+        report_task_result,
+        result_report_key,
+    )
+    from agent_py_agent.tests.test_bg_w3_session_wake_and_task_tools import _report_case
+
+    agent, sender, task = _report_case(tmp_path, sender_kind=sender_kind, status='done', business=True)
+    store = agent.conversation_store
+
+    def view():
+        return task_result_view(store, store.session_tasks.require(task.task_id))['report']
+
+    def reports():
+        rows, errors = store.guidance.pending_report('thread', sender.thread_id, limit=0)
+        assert not errors
+        return rows
+
+    assert view() == {'guidance': 'absent', 'wake': 'absent'}
+    assert report_task_result(agent, task) and report_task_result(agent, task)
+    assert view() == {'guidance': 'pending', 'wake': wake}
+    [entry] = reports()
+    assert entry.metadata['session_task_id'] == task.task_id
+    assert len(store.wakes.pending(limit=0)) == (wake == 'pending')
+    assert store.guidance.claim_for_turn(entry, expected_turn_id='sender-turn', attempt_id='sender-attempt')
+    assert view() == {'guidance': 'reserved', 'wake': wake}
+    store.guidance.submissions.mark_submitted('sender-turn', [entry], attempt_id='sender-attempt',
+                                              provider_call_id='sender-call')
+    assert view() == {'guidance': 'submitted', 'wake': wake}
+    store.guidance.acknowledgements.consume_submitted('sender-turn', [entry], provider_call_id='sender-call')
+    assert view() == {'guidance': 'consumed', 'wake': wake}
+    assert report_task_result(agent, task)
+    assert view() == {'guidance': 'consumed', 'wake': wake} and reports() == []
+    assert store.guidance.receipt(result_report_key(task)).status == 'consumed'
+    assert len(store.wakes.pending(limit=0)) == (wake == 'pending')
 
 
 def test_deleted_profile_counts_failures_until_quarantine_with_terminal_reason(native):

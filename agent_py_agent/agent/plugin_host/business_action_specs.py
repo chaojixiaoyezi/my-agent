@@ -356,7 +356,10 @@ def _frozen_data() -> Mapping:
             'TaskResultView': {'type': 'object', 'properties': {
                 'summary': {'type': 'string', 'minLength': 0, 'maxLength': 4000},
                 'summary_truncated': {'type': 'boolean'},
-                'report': {'type': 'string', 'enum': ['not_applicable', 'not_published', 'pending', 'handled', 'unknown']}},
+                'report': {'type': 'object', 'properties': {
+                    'guidance': {'type': 'string', 'enum': ['not_applicable', 'absent', 'pending', 'reserved', 'submitted', 'consumed', 'rejected', 'unknown']},
+                    'wake': {'type': 'string', 'enum': ['not_applicable', 'absent', 'pending', 'handled', 'unknown']}},
+                    'required': ['guidance', 'wake'], 'additionalProperties': False}},
                 'required': ['summary', 'summary_truncated', 'report'], 'additionalProperties': False},
             'Result_background_agents_list': {'type': 'object', 'properties': {'items': {'type': 'array', 'items': {'$ref': '#/$defs/AgentView'}, 'maxItems': 100}, 'next_cursor': {'anyOf': [{'$ref': '#/$defs/Cursor'}, {'type': 'null'}]}, 'coverage': {'$ref': '#/$defs/Coverage'}, 'quota': {'$ref': '#/$defs/BackgroundAgentQuotaView'}}, 'required': ['items', 'next_cursor', 'coverage'], 'additionalProperties': False, 'description': 'completed时data的正式投影；async的accepted回执使用accepted_result_schema，只返回已耐久受理的ID，不伪造尚未完成的字段。错误响应data为空对象并带error。'},
             'Result_background_agents_get': {'type': 'object', 'properties': {'agent': {'$ref': '#/$defs/AgentView'}, 'current_execution': {'anyOf': [{'$ref': '#/$defs/ExecutionView'}, {'type': 'null'}]}, 'pending_tasks': {'type': 'array', 'items': {'$ref': '#/$defs/TaskView'}, 'maxItems': 100}, 'allowed_actions': {'type': 'array', 'items': {'type': 'string', 'minLength': 1, 'maxLength': 128}, 'maxItems': 200}, 'scheduling': {'$ref': '#/$defs/BackgroundSchedulingView'}}, 'required': ['agent', 'current_execution', 'pending_tasks', 'allowed_actions'], 'additionalProperties': False, 'description': 'completed时data的正式投影；async的accepted回执使用accepted_result_schema，只返回已耐久受理的ID，不伪造尚未完成的字段。错误响应data为空对象并带error。'},

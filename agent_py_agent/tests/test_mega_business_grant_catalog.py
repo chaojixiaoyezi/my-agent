@@ -112,7 +112,11 @@ def test_frozen_full_catalog_and_schema_bundle_hashes():
     task_result_schema = {"type": "object", "properties": {
         "summary": {"type": "string", "minLength": 0, "maxLength": 4000},
         "summary_truncated": {"type": "boolean"},
-        "report": {"type": "string", "enum": ["not_applicable", "not_published", "pending", "handled", "unknown"]}},
+        "report": {"type": "object", "properties": {
+            "guidance": {"type": "string", "enum": [
+                "not_applicable", "absent", "pending", "reserved", "submitted", "consumed", "rejected", "unknown"]},
+            "wake": {"type": "string", "enum": ["not_applicable", "absent", "pending", "handled", "unknown"]}},
+            "required": ["guidance", "wake"], "additionalProperties": False}},
         "required": ["summary", "summary_truncated", "report"], "additionalProperties": False}
     task_results = [definitions["Result_tasks_get"] for definitions in (
         normalized_api["$defs"], normalized_schemas["$defs"], normalized_defs)]
