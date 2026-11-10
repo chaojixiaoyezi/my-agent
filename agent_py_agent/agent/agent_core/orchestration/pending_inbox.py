@@ -25,6 +25,10 @@ CURSOR_VERSION = 1
 # LLM: 单页硬上限，配置值和模型参数都不能越过它；每页加载的子代理记录数同样受这一页大小约束。
 # 常量用途: 限制一次收件箱读取的条目数和子代理记录读取数。
 MAX_PAGE_ITEMS_COUNT = 200
+# LLM: ORCH02-R2：每页最多检查这么多条申请状态（含被过滤掉的已处理申请），读满就把最后检查过的位置交给游标，
+#   长串已处理前缀也能逐页前进，不会因为只列一条而把几百条状态都读一遍。
+# 常量用途: 限制一次收件箱读取检查的申请条数。
+MAX_EXAMINED_REQUESTS_COUNT = 200
 RESOLVER_TOOL = "resolve_capability_requests"
 EXCLUDED_ITEM_KINDS = ("tool_approval",)
 _DENY_DECISION = "deny"
@@ -48,9 +52,10 @@ def pending_inbox_page(agent: Any, *, cursor: str = "", limit: int = 0, include_
     principals = tuple(sorted(principals, key=lambda item: item.run_id))
     page_limit = _page_limit(agent, limit)
     scope = _scope_digests(agent, principals)
-    position = _decode_cursor(cursor, scope)
-    coverage: dict[str, Any] = {"children_scanned": 0, "child_load_errors": [], "index_errors": [],
-                                "runtime_reads_failed": 0, "truncated": False}
+    position = _decode_cursor(cursor, scope, {item.run_id for item in principals})
+    coverage: dict[str, Any] = {"children_scanned": 0, "requests_examined": 0, "child_load_errors": [],
+                                "index_errors": [], "runtime_reads_failed": 0, "cursor_request_missing": [],
+                                "truncated": False}
     items: list[dict[str, object]] = []
     last: list[str] | None = None
     for principal in principals:
@@ -61,7 +66,8 @@ def pending_inbox_page(agent: Any, *, cursor: str = "", limit: int = 0, include_
         if stop is not None:
             last = stop
             break
-    complete = not (coverage["child_load_errors"] or coverage["index_errors"] or coverage["runtime_reads_failed"])
+    complete = not (coverage["child_load_errors"] or coverage["index_errors"] or coverage["runtime_reads_failed"]
+                    or coverage["cursor_request_missing"])
     return {
         "schema_version": SCHEMA_VERSION,
         "effect": "read_only",
@@ -79,8 +85,8 @@ def pending_inbox_page(agent: Any, *, cursor: str = "", limit: int = 0, include_
     }
 
 
-# LLM: 子代理按 run_id 键集分页、申请按 id 排序；读满一页就把最后位置交给游标，后面的子代理不会被前面的
-#   同一批记录永久挡住。每页加载的子代理数与条目数共用 page_limit 上界。
+# LLM: 子代理按 run_id 键集分页、申请按规范记录里的原顺序；读满一页（条目、子代理或申请检查数任一到上限）
+#   就把最后位置交给游标，后面的子代理不会被前面的同一批记录永久挡住。
 # 函数用途: 扫描一个管理身份的直属下级，追加条目；读满时返回续读位置。
 def _scan_principal(agent: Any, principal: ManagementPrincipal, resume: list[str] | None, page_limit: int,
                     include_resolved: bool, items: list[dict[str, object]], coverage: dict[str, Any]) -> list[str] | None:
@@ -99,9 +105,9 @@ def _scan_principal(agent: Any, principal: ManagementPrincipal, resume: list[str
             return None
         children = _load_children(agent, child_ids, coverage)
         for child_id in child_ids:
-            if len(items) >= page_limit:
+            if len(items) >= page_limit or coverage["requests_examined"] >= MAX_EXAMINED_REQUESTS_COUNT:
                 coverage["truncated"] = True
-                return [principal.run_id, after_child, ""]
+                return [principal.run_id, after_child, after_request]
             coverage["children_scanned"] += 1
             child = children.get(child_id)
             if child is None or str(getattr(child, "parent_id", "") or "") != principal.run_id:
@@ -117,25 +123,32 @@ def _scan_principal(agent: Any, principal: ManagementPrincipal, resume: list[str
             return None
 
 
-# LLM: 断点之后的申请按 id 排序依次追加；一页满时返回本子代理最后列出的 id，下页从同一子代理的下一条继续。
-#   调用前已保证页未满，所以本子代理至少列出一条后才可能在这里停下。
+# LLM: ORCH02-R2：申请按规范记录里的原顺序检查，不每页重排；断点按 id 在原列表里线性定位一次。每检查一条
+#   （无论是否列出）都计入 requests_examined，一页满或检查数到上限时返回本子代理最后检查过的 id。断点 id 已不在
+#   列表里时从头检查并记 cursor_request_missing（覆盖标为 partial，可能重复列出，但不漏掉后面的申请）。
+#   调用前已保证页未满且检查数未到上限，所以本子代理至少检查一条后才可能在这里停下。
 # 函数用途: 把一个直属下级的申请转成收件箱条目。
 def _append_child_items(agent: Any, principal: ManagementPrincipal, child: Any, skip_through: str, page_limit: int,
                         include_resolved: bool, items: list[dict[str, object]], coverage: dict[str, Any]) -> str | None:
-    requests = sorted(getattr(child, "capability_requests", None) or [], key=lambda item: str(getattr(item, "id", "")))
+    requests = list(getattr(child, "capability_requests", None) or [])
+    start = 0
+    if skip_through:
+        ids = [str(getattr(item, "id", "") or "") for item in requests]
+        if skip_through in ids:
+            start = ids.index(skip_through) + 1
+        else:
+            coverage["cursor_request_missing"].append(str(getattr(child, "id", "") or ""))
     runtime_cache: dict[str, Any] = {}
-    emitted = ""
-    for request in requests:
-        request_id = str(getattr(request, "id", "") or "")
-        if skip_through and request_id <= skip_through:
-            continue
+    examined = ""
+    for request in requests[start:]:
+        if len(items) >= page_limit or coverage["requests_examined"] >= MAX_EXAMINED_REQUESTS_COUNT:
+            return examined or skip_through
+        coverage["requests_examined"] += 1
+        examined = str(getattr(request, "id", "") or "")
         state = _request_state(getattr(request, "status", ""))
         if not include_resolved and state not in {CAPABILITY_REQUEST_OPEN_STATUS, "INVALID"}:
             continue
-        if len(items) >= page_limit:
-            return emitted or skip_through
         items.append(_item(agent, principal, child, request, state, runtime_cache, coverage))
-        emitted = request_id
     return None
 
 
@@ -320,23 +333,29 @@ def _encode_cursor(scope: dict[str, str], position: list[str]) -> str:
     return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
 
 
-# LLM: 格式坏返回参数错误；范围摘要不符返回 CURSOR_SCOPE_MISMATCH 且不给任何数据。
+# LLM: ORCH02-R3：at 必须正好是 3 个字符串 [管理身份, 子代理, 最后检查过的申请]，不做类型转换；
+#   管理身份非空且属于当前身份集合，申请非空时子代理也必须非空。格式坏返回参数错误；
+#   范围摘要不符返回 CURSOR_SCOPE_MISMATCH 且不给任何数据。
 # 函数用途: 解码并校验续读游标。
-def _decode_cursor(cursor: object, scope: dict[str, str]) -> list[str] | None:
+def _decode_cursor(cursor: object, scope: dict[str, str], principal_ids: set[str]) -> list[str] | None:
     if not cursor:
         return None
     try:
         text = str(cursor)
         data = json.loads(base64.urlsafe_b64decode(text + "=" * (-len(text) % 4)))
-        position = [str(item) for item in data["at"]]
-        valid = data.get("v") == CURSOR_VERSION and len(position) == 3 and position[0]
+        position = data["at"]
+        valid = (isinstance(data, dict) and data.get("v") == CURSOR_VERSION and isinstance(position, list)
+                 and len(position) == 3 and all(type(item) is str for item in position)
+                 and bool(position[0]) and (bool(position[1]) or not position[2]))
     except (binascii.Error, ValueError, KeyError, TypeError):
         valid = False
     if not valid:
         raise PendingInboxError("TOOL_INVALID_ARGUMENTS", "cursor 格式无效，请从第一页重新读取。")
     if data.get("o") != scope["o"] or data.get("p") != scope["p"]:
         raise PendingInboxError("CURSOR_SCOPE_MISMATCH", "cursor 不属于当前管理身份，请从第一页重新读取。")
-    return position
+    if position[0] not in principal_ids:
+        raise PendingInboxError("TOOL_INVALID_ARGUMENTS", "cursor 位置不属于当前管理身份，请从第一页重新读取。")
+    return list(position)
 
 
 # LLM: 只复制结构化字段的普通值，避免把对象引用交给序列化层。
@@ -349,4 +368,5 @@ def _plain(value: object) -> object:
     return value if isinstance(value, (str, int, float, bool)) or value is None else str(value)
 
 
-__all__ = ["MAX_PAGE_ITEMS_COUNT", "PendingInboxError", "SCHEMA_VERSION", "pending_inbox_page"]
+__all__ = ["MAX_EXAMINED_REQUESTS_COUNT", "MAX_PAGE_ITEMS_COUNT", "PendingInboxError", "SCHEMA_VERSION",
+           "pending_inbox_page"]

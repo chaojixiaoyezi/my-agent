@@ -1,6 +1,6 @@
 """直属下级未决能力申请的只读模型工具。"""
 
-# LLM: 这是 pending_inbox 的唯一模型入口：不写任何状态，开关每轮按能力配置实时复核，关闭时工具不可用。
+# LLM: 这是 pending_inbox 的唯一模型入口：不写任何状态；是否注册由 core 在构造时按能力开关决定（改开关需重启 Gateway）。
 # 模块用途: 把只读收件箱页交给协调代理，裁决仍由 resolve_capability_requests 完成。
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from ....tooling.models import (
     ConcurrencyPolicy,
     EffectResolverPolicy,
     ResourceScopePolicy,
-    ToolAvailability,
     ToolHandlerOutcome,
     ToolRuntimePolicy,
 )
@@ -23,7 +22,9 @@ from ..tool_specs import build_list_pending_requests_model_spec
 if TYPE_CHECKING:
     from ....core import SimpleAgent
 
-# LLM: 游标越权在错误码登记表里没有专门的码，沿用已登记的权限拒绝码，具体原因放在结构化 details 里。
+# LLM: 游标越权在错误码登记表里没有专门的码，沿用已登记的权限拒绝码。机器层只消费顶层 error_code
+#   （TOOL_PERMISSION_DENIED / TOOL_INVALID_ARGUMENTS，effect_outcome=not_started）；details.error.reason
+#   只用于诊断和展示，不参与任何控制判断。
 # 常量用途: 把收件箱内部原因映射到已登记的工具错误码。
 _ERROR_CODES = {"TOOL_INVALID_ARGUMENTS": "TOOL_INVALID_ARGUMENTS", "CURSOR_SCOPE_MISMATCH": "TOOL_PERMISSION_DENIED"}
 
@@ -44,16 +45,6 @@ class ListPendingRequestsTool(BaseTool):
     # 函数用途: 保存当前代理引用。
     def __init__(self, agent: SimpleAgent) -> None:
         self.agent = agent
-
-    # LLM: 开关读失败或关闭都视为不可用，不回落开启。
-    # 函数用途: 按能力配置实时判断收件箱是否开放。
-    def availability(self) -> ToolAvailability:
-        from ....capability.runtime_config_reload import capability_config_for_agent
-
-        config = capability_config_for_agent(self.agent)
-        if config is None or not getattr(config, "orchestration_pending_inbox_enabled", False):
-            return ToolAvailability.unavailable("未决申请收件箱开关未启用")
-        return ToolAvailability.ready()
 
     # LLM: 参数类型错误与游标越权都在读取任何申请前返回 not_started，失败结果不含申请数据。
     # 函数用途: 读取一页收件箱并按 JSON 返回。

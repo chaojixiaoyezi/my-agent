@@ -1405,11 +1405,22 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(CancelSubagentsTool(agent), live_gate="enable_subagents")
     agent.tools.register(SendGuidanceTool(agent), live_gate="enable_subagents")
     agent.tools.register(ResolveCapabilityRequestsTool(agent), live_gate="enable_subagents")
-    # 未决申请收件箱:只读,另由能力配置 orchestration_pending_inbox_enabled 每轮实时复核可用性。
-    agent.tools.register(ListPendingRequestsTool(agent), live_gate="enable_subagents")
+    # 未决申请收件箱:只读;是否注册在构造时按能力配置 orchestration_pending_inbox_enabled 决定,改开关需重启 Gateway。
+    if _pending_inbox_enabled_at_startup(agent):
+        agent.tools.register(ListPendingRequestsTool(agent), live_gate="enable_subagents")
     # 子代理可复用经验账(record_lesson):只写当前 child run 的 lessons.jsonl,结果收口合并成经验候选;
     # 注册表默认隐藏,只随子代理 allowed_tools 显式下发,主线程没有 child run 不提供。
     agent.tools.register(RecordLessonTool(agent), live_gate="enable_subagents")
+
+
+# LLM: ORCH02-R1/R6：收件箱开关只在构造代理时读一次（与参数登记的“重启 Gateway 生效”一致），关闭则根本不注册；
+#   配置读不出时按关闭处理，不借默认值打开能力。
+# 函数用途: 判断构造时是否注册未决申请收件箱工具。
+def _pending_inbox_enabled_at_startup(agent: SimpleAgent) -> bool:
+    from .capability import runtime_config_reload
+
+    capability = runtime_config_reload.capability_config_for_agent(agent)
+    return bool(capability and capability.orchestration_pending_inbox_enabled)
 
 
 # LLM: 工具执行复用能力读口，读取失败时关闭；注册时只绑定回调，不冻结策略。

@@ -318,7 +318,7 @@ def build_cancel_subagents_model_spec() -> ToolModelSpec:
     )
 
 
-# LLM: 收件箱只读、默认收起；它只帮父级看清谁在等什么，裁决仍走 resolve_capability_requests，
+# LLM: 收件箱只读；递归代理控制属于主链默认直出（与 list_agents 等一致，不默认收起）。它只帮父级看清谁在等什么，裁决仍走 resolve_capability_requests，
 #   查看不会唤醒、续跑或自动授权。工具审批不在这里，仍走原审批卡片。
 # 函数用途: 构造只读列出直属下级未决能力申请的模型合同。
 def build_list_pending_requests_model_spec() -> ToolModelSpec:
@@ -350,11 +350,7 @@ def build_list_pending_requests_model_spec() -> ToolModelSpec:
             "它不批准、不拒绝、不唤醒任何代理。"
         ),
         input_schema=_input_schema(parameters, shapes),
-        hints=ToolModelHints(
-            category=hints.category, use_cases=hints.use_cases, avoid_when=hints.avoid_when,
-            keywords=hints.keywords, examples=hints.examples, default_deferred=True,
-            deferred_summary="只读查看直属子代理的未决能力申请、处理父级和决定记录。",
-        ),
+        hints=hints,
     )
 
 

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import threading
 import time
@@ -13,6 +14,7 @@ import time
 import pytest
 
 from agent_py_agent.agent.agent_core.orchestration.pending_inbox import (
+    MAX_EXAMINED_REQUESTS_COUNT,
     MAX_PAGE_ITEMS_COUNT,
     pending_inbox_page,
 )
@@ -92,6 +94,7 @@ def _walk(agent, limit: int, **params) -> tuple[list[str], int]:
         result, payload = _list(agent, limit=limit, cursor=cursor, **params)
         assert result.ok, result.output
         assert len(payload["items"]) <= limit and payload["coverage"]["children_scanned"] <= limit
+        assert payload["coverage"]["requests_examined"] <= MAX_EXAMINED_REQUESTS_COUNT
         seen.extend(item["item_id"] for item in payload["items"])
         pages += 1
         # 页数有界：游标不前进时这里直接失败，而不是无限翻页。
@@ -302,6 +305,8 @@ def test_cursor_is_bound_to_owner_and_principals_and_bad_arguments_fail_closed(c
     assert mismatch_payload == {"error": {"reason": "CURSOR_SCOPE_MISMATCH",
                                           "message": mismatch_payload["error"]["message"]}}
     assert mismatch.effect_outcome == "not_started"
+    # 机器层只读顶层 error_code；reason 只在结构化 details 里给诊断展示。
+    assert mismatch.result_envelope["details"]["error"]["reason"] == "CURSOR_SCOPE_MISMATCH"
     for result in (malformed, too_big, wrong_type):
         assert result.ok is False and result.error_code == "TOOL_INVALID_ARGUMENTS"
 
@@ -319,14 +324,14 @@ def test_page_limit_defaults_follow_config_and_zero_means_hard_ceiling(case, mon
     assert len(unlimited["items"]) == 3 and unlimited["coverage"]["page_limit"] == MAX_PAGE_ITEMS_COUNT
 
 
-def test_switch_controls_availability_and_leaf_roles_never_get_the_tool(case, monkeypatch):
-    tool = case.agent.tools.tools["list_pending_requests"]
-    assert tool.availability().available is True
+def test_switch_off_at_startup_never_registers_and_leaf_roles_never_get_the_tool(case, monkeypatch):
+    assert "list_pending_requests" in case.agent.tools.tools
     _config(monkeypatch, orchestration_pending_inbox_enabled=False)
-    disabled = tool.availability()
-    visible = {spec.name for spec in case.agent.tools.model_visible_specs(loaded_tool_names={"list_pending_requests"})}
+    disabled = _agent(case.config, case.workspace)
+    visible = {spec.name for spec in disabled.tools.model_visible_specs()}
 
-    assert disabled.available is False and "list_pending_requests" not in visible
+    # ORCH02-R1：开关关着时构造出的新代理里根本没有这个工具，不只是“不可用”。
+    assert "list_pending_requests" not in disabled.tools.tools and "list_pending_requests" not in visible
     assert "list_pending_requests" in DIRECT_CHILD_CONTROL_TOOLS
     assert "list_pending_requests" not in _leaf_write_tools(
         ["read_file", "list_pending_requests"], parent_tools=["read_file", "list_pending_requests"])
@@ -362,3 +367,65 @@ def test_zero_limit_argument_uses_configured_default(case, limit):
     result, payload = _list(case.agent, limit=limit)
 
     assert result.ok and payload["coverage"]["page_limit"] == 50 and len(payload["items"]) == 1
+
+
+def _recode(cursor: str, at: object) -> str:
+    data = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+    data["at"] = at
+    return base64.urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip("=")
+
+
+def test_typed_cursor_positions_are_rejected_without_coercion(case):
+    for index in range(3):
+        _add_requests(case.agent, case.child_id, [f"req-{index}"])
+    _as_parent(case)
+    _, first = _list(case.agent, limit=1)
+    cursor = first["next_cursor"]
+    original_at = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))["at"]
+    bad_positions = ["abc", {"a": 1, "b": 2, "c": 3}, [1, 2, 3], ["task-other", case.child_id, "req-0"],
+                     [case.parent_task_id, "", "req-0"], [case.parent_task_id, case.child_id], ["", "", ""],
+                     [case.parent_task_id, case.child_id, 123], [case.parent_task_id, 7, ""]]
+    for at in bad_positions:
+        result, payload = _list(case.agent, cursor=_recode(cursor, at))
+        assert result.ok is False and result.error_code == "TOOL_INVALID_ARGUMENTS", (at, payload)
+        assert result.effect_outcome == "not_started"
+    ok, _ = _list(case.agent, cursor=_recode(cursor, original_at))
+    assert ok.ok is True
+
+
+def test_long_resolved_prefix_is_charged_to_a_finite_request_budget(case):
+    _add_requests(case.agent, case.child_id, [f"req-closed-{n:03d}" for n in range(400)], status="CLOSED")
+    _add_requests(case.agent, case.child_id, ["req-open"])
+    _as_parent(case)
+    pages, found, examined = 0, [], []
+    cursor = ""
+    while True:
+        result, payload = _list(case.agent, limit=1, cursor=cursor)
+        assert result.ok, result.output
+        pages += 1
+        examined.append(payload["coverage"]["requests_examined"])
+        found.extend(item["request_id"] for item in payload["items"])
+        cursor = payload["next_cursor"]
+        if not cursor:
+            break
+        assert pages <= 10, "cursor did not advance"
+
+    # 每页检查数有界、游标按“最后检查过”的申请前进，401 条状态各检查一次就找到唯一的待处理申请。
+    assert found == ["req-open"]
+    assert max(examined) <= MAX_EXAMINED_REQUESTS_COUNT and sum(examined) == 401
+    # 第 4 页为空：子代理读取预算用完时无法确定后面还有没有孩子，只能交回游标再读一次。
+    assert pages <= 4
+
+
+def test_cursor_whose_request_vanished_restarts_the_child_and_reports_partial(case):
+    for index in range(3):
+        _add_requests(case.agent, case.child_id, [f"req-{index}"])
+    _as_parent(case)
+    _, first = _list(case.agent, limit=1)
+    # 规范保存不会删掉已有申请，这里用指向不存在申请的游标模拟断点已消失。
+    vanished = _recode(first["next_cursor"], [case.parent_task_id, case.child_id, "req-gone"])
+    _, second = _list(case.agent, limit=5, cursor=vanished)
+
+    assert [item["request_id"] for item in second["items"]] == ["req-0", "req-1", "req-2"]
+    assert second["coverage"]["cursor_request_missing"] == [case.child_id]
+    assert second["coverage"]["state"] == "partial"

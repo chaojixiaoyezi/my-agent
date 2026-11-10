@@ -83,7 +83,7 @@ class CapabilityConfig:
     skill_transfers_enabled: bool = True
     # 有限只读工具计划，内部调用继续原权限/审计/取消，默认按需加载；关闭不影响普通工具批次。
     tool_program_enabled: bool = True
-    # 协调代理的只读未决申请收件箱；关闭后工具不可用，不影响 resolve_capability_requests 裁决。
+    # 协调代理的只读未决申请收件箱；关闭后启动时不注册该工具（改动需重启 Gateway），不影响 resolve_capability_requests 裁决。
     orchestration_pending_inbox_enabled: bool = True
     # 收件箱每页默认条数；0 表示不另设限制，仍受单页硬上限 200 约束。
     orchestration_pending_inbox_page_limit: int = 50
