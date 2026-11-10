@@ -161,7 +161,12 @@ class WorkflowScopeService:
         if action.startswith('workflow_runs.'):
             return self._run_action(action, request, actor=actor, expected_revision=expected_revision,
                                     idempotency_key=idempotency_key)
-        definition = self._get(ref)
+        try:
+            definition = self._get(ref)
+        except KeyError:
+            # 未知引用在任何副作用之前确定：给出结构化 404/not_started，而不是让运输层断开连接。
+            from ..conversation.business_access import BusinessError
+            raise BusinessError('RESOURCE_NOT_FOUND') from None
         state = workflow_state(definition)
         if action == 'workflows.scope.get':
             return {'scope': scope_view(state['scope']), 'scope_revision': state['scope']['scope_revision'],

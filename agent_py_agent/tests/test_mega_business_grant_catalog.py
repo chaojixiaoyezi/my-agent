@@ -108,6 +108,20 @@ def test_frozen_full_catalog_and_schema_bundle_hashes():
         assert result["properties"].pop("scheduling") == {"$ref": "#/$defs/BackgroundSchedulingView"}
     for definitions in (normalized_api["$defs"], normalized_schemas["$defs"], normalized_defs):
         assert definitions.pop("BackgroundSchedulingView") == scheduling_schema
+    # WF-07 只可选公开已有 foreach 配置：锁住准确 schema，再规范化比较原冻结目录。
+    foreach_schema = {"type": "object", "properties": {
+        "from": {"type": "string", "minLength": 3, "maxLength": 512},
+        "batch_size": {"type": "integer", "minimum": 1, "maximum": 500},
+        "max_parallel": {"type": "integer", "minimum": 1, "maximum": 8},
+        "as": {"type": "string", "minLength": 1, "maxLength": 64},
+        "max_batch_tokens": {"type": ["integer", "null"], "minimum": 1},
+        "on_batch_error": {"type": "string", "enum": ["fail_fast", "continue"]},
+        "mode": {"type": "string", "enum": ["map", "aggregate"]}},
+        "required": ["from"], "additionalProperties": False}
+    for definitions in (normalized_api["$defs"], normalized_schemas["$defs"], normalized_defs):
+        step = definitions["WorkflowStepDefinition"]
+        assert "foreach" not in step["required"]
+        assert step["properties"].pop("foreach") == foreach_schema
     # #49-1仅可选追加画布拓扑字段；先证明不进入required，再规范化比较原冻结目录。
     canvas = {"WorkflowDefinition": ("datasource_ids", "edges", "schedule_ids"),
               "WorkflowStepDefinition": ("description", "next_step_ids", "ui_position")}
