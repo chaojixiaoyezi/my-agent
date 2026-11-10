@@ -524,3 +524,28 @@ def test_message_count_budget_includes_actual_marker_reads(shared_case, monkeypa
     reads.clear()
     assert sessions._message_count(path, case.threads["main"].thread_id, [0], 2) == 24
     assert reads == []
+
+
+
+def test_count_path_exposes_canonical_identity_without_bypassing_read_budget(shared_case, monkeypatch):
+    from agent_py_agent.agent.conversation import store_messages
+    from agent_py_agent.agent.gateway_parts import client_session_list as sessions
+
+    case = shared_case
+    thread = case.threads["main"]
+    path = case.stores["main"].storage.message_path(thread.thread_id)
+    remaining = [8_388_608]
+    bounded = sessions._CountPath(path, remaining)
+    assert os.fspath(bounded) == os.fspath(path) and Path(bounded) == path
+    observations = []
+    original = store_messages.file_identity_snapshot
+    def observe_identity(source):
+        observations.append(source)
+        return original(source)
+    monkeypatch.setattr(store_messages, "file_identity_snapshot", observe_identity)
+    reads = observe_hot_bytes(monkeypatch)
+    marker = sessions.canonical_message_tail_marker(bounded, thread.thread_id)
+    assert marker["message_count"] == 24
+    assert observations == [bounded]
+    assert sum(reads) > 0 and remaining[0] == 8_388_608 - sum(reads)
+    assert bounded.readers and all(reader.handle.closed for reader in bounded.readers)

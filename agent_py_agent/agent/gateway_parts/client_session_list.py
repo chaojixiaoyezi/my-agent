@@ -223,6 +223,10 @@ class _CountPath:
     def __getattr__(self, name):
         return getattr(self.path, name)
 
+    # 路径元数据核验可取原规范名字，但正文打开仍必须留在本包装器的共享预算内。
+    def __fspath__(self):
+        return os.fspath(self.path)
+
     # LLM: marker只需要rb；复用no-follow普通文件opener，拒绝竞态链接或FIFO。
     # 函数用途: 返回受当前页字节预算保护的热文件句柄。
     def open(self, mode):
