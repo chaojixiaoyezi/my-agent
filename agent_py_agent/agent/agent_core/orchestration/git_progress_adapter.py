@@ -6,16 +6,20 @@
 #   加 --no-optional-locks 不写索引锁；每条命令有超时，输出读到上限即停。任何不满足都返回 error_code，fail closed。
 #   ORCH03-R5：git-dir 与工作树用命令行钉死在已校验路径上（压过本地 core.worktree），commondir/alternates 这类
 #   仓库结构重定向和本地配置 include 一律拒绝，读外部文件的路径型配置用 -c 改成空设备。
-#   ORCH03-R6：子进程独立进程组/会话启动，结束时经共享 terminate_process_tree 清整棵树并核对回执，清理没确认
-#   就不算成功；POSIX 在主线程用非阻塞读取，不留后台读线程；HEAD 必须是完整提交号，截断或乱码一律拒绝。
+#   ORCH03-R6（PRO-MSG-022/023 修正）：只支持 POSIX，其它平台在启动任何进程前拒绝。git 以新会话启动，进程组号
+#   等于根 pid；清理只针对这个自己创建的组：超时/读满时趁根进程还没被回收（pid 被占着、不可能被复用）对组发
+#   SIGKILL，正常结束则先回收根进程拿真实退出码；之后用 killpg(组, 0) 探测，直到 ESRCH 证明组里一个成员都不剩，
+#   截止前证明不了就是 GIT_CLEANUP_UNCONFIRMED。不依赖 ps 采集启动身份。识别、读取、清理、确认共用同一个绝对
+#   截止时间。主线程非阻塞读取，不起读线程；HEAD 必须是完整提交号，截断或乱码一律拒绝。
+#   已知限制：自己另开会话/进程组逃出去的后代不在组里，看不到也杀不到（不会卡住观察）。
 # 模块用途: 给进展分类提供一份可核验的 HEAD/改动数观察，不代表进展本身。
 
 from __future__ import annotations
 
 import os
 import re
+import signal
 import subprocess
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -29,16 +33,20 @@ GIT_OBSERVATION_BUDGET_SECONDS = 10
 # LLM: 每条命令最多读取这么多输出字节，超出即停止进程，改动数标成下限。
 # 常量用途: 限制一次 git 命令读取的输出量。
 MAX_GIT_OUTPUT_BYTES = 64 * 1024
-# LLM: 从总预算里给最后一条命令的进程树清理留出的时间，保证读取加清理不超过总预算。
-# 常量用途: 为 git 子进程树清理预留的时长。
-GIT_CLEANUP_RESERVE_SECONDS = 3
+# LLM: 读取最晚在总截止前这么多秒结束，留给最后一条命令的组清理与确认；清理本身也受同一绝对截止约束。
+# 常量用途: 为 git 进程组清理与确认预留的时长。
+GIT_CLEANUP_RESERVE_SECONDS = 2
 _BASELINE = re.compile(r"[0-9a-f]{7,64}")
 # SHA-1 / SHA-256 仓库的完整提交号；截断或带其它字符的 HEAD 都不是有效观察。
 _FULL_OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 # git-dir 里能把读取引到别处的结构文件；存在即拒绝，不尝试判断指向哪里。
 _GIT_DIR_REDIRECTS = ("commondir", "objects/info/alternates")
 # git-dir 里必须是真实文件/目录（不是符号链接）的入口。
-_GIT_DIR_NO_SYMLINK = ("config", "HEAD", "objects", "refs")
+_GIT_DIR_NO_SYMLINK = ("config", "config.worktree", "HEAD", "objects", "refs")
+# 只有 POSIX 有经过验证的会话组清理合同；其它平台在启动任何进程前拒绝。
+_PLATFORM_SUPPORTED = os.name == "posix"
+# 组清理确认的探测间隔。
+_GROUP_PROBE_INTERVAL_SECONDS = 0.02
 
 
 # LLM: 只认配置里的登记列表；登记项本身也要满足同样的路径校验，不能借登记绕过允许根。
@@ -97,7 +105,10 @@ def validate_repo(repo: Path, allowed_roots: list[Path]) -> Path | str:
 def observe(repo: Path, *, baseline: str = "") -> dict[str, object]:
     if baseline and not _BASELINE.fullmatch(baseline):
         return _error("BASELINE_INVALID")
-    deadline = time.monotonic() + GIT_OBSERVATION_BUDGET_SECONDS - GIT_CLEANUP_RESERVE_SECONDS
+    if not _PLATFORM_SUPPORTED:
+        # 没有经过验证的进程树清理合同，不启动任何 git 进程，也不编造清理确认。
+        return _error("GIT_PLATFORM_UNSUPPORTED")
+    deadline = time.monotonic() + GIT_OBSERVATION_BUDGET_SECONDS
     config = _git(repo, ["config", "--null", "--list", "--show-origin", "--no-includes"], deadline)
     if config["error_code"]:
         return _error(str(config["error_code"]))
@@ -134,54 +145,29 @@ def observe(repo: Path, *, baseline: str = "") -> dict[str, object]:
     return result
 
 
-# LLM: 固定参数列表 + 清洁环境 + 超时 + 输出上限；git-dir/工作树钉在已校验路径，路径型配置改成空设备。
-#   子进程独立进程组启动。POSIX：读到 EOF 后按 shell 前台同一路径用 finish_foreground_process 等根进程退出并
-#   清掉残留后代；超时或读满则直接 terminate_process_tree。共享清理入口只能在根进程还没被回收时调用一次，所以
-#   读取阶段不 wait。回执没确认就返回 GIT_CLEANUP_UNCONFIRMED，不把这次输出当观察。Windows 根进程正常退出后
-#   无法再核对后代，只在超时/读满时用 taskkill /T 清树（已知限制，记在 HANDOFF）。
+# LLM: 固定参数列表 + 清洁环境 + 输出上限；git-dir/工作树钉在已校验路径，路径型配置改成空设备。读取最晚在
+#   deadline − GIT_CLEANUP_RESERVE_SECONDS 结束，组清理与确认最晚到 deadline；清理没确认就不交出输出。
 # 函数用途: 运行一条只读 git 命令并返回有界输出。
 def _git(repo: Path, args: list[str], deadline: float) -> dict[str, object]:
-    from ...tooling.process_registry import (
-        capture_process_birth_token,
-        finish_foreground_process,
-        terminate_process_tree,
-    )
-
-    remaining = min(GIT_COMMAND_TIMEOUT_SECONDS, deadline - time.monotonic())
-    if remaining <= 0:
+    read_until = min(time.monotonic() + GIT_COMMAND_TIMEOUT_SECONDS, deadline - GIT_CLEANUP_RESERVE_SECONDS)
+    if read_until <= time.monotonic():
         return {"error_code": "GIT_TIMEOUT", "stdout": b"", "truncated": False}
     command = ["git", "--no-optional-locks", f"--git-dir={repo / '.git'}", f"--work-tree={repo}",
                "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
                "-c", f"core.excludesFile={os.devnull}", "-c", f"core.attributesFile={os.devnull}",
                "-c", f"core.hooksPath={os.devnull}", "-C", str(repo), *args]
-    posix = os.name == "posix"
     try:
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.DEVNULL, env=_clean_env(), close_fds=True,
-                                   **({"start_new_session": True} if posix else
-                                      {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}))
+                                   start_new_session=True)
     except OSError:
         return {"error_code": "GIT_UNAVAILABLE", "stdout": b"", "truncated": False}
-    birth = capture_process_birth_token(process.pid) if posix else None
-    started = time.monotonic()
-    output, truncated, timed_out, confirmed = b"", False, True, False
+    group = process.pid
+    output, truncated, timed_out = b"", False, True
     try:
-        output, truncated, timed_out = (_read_bounded_posix if posix else _read_bounded_thread)(process, remaining)
-        if not timed_out and not truncated:
-            # 根进程按原退出码收尾；超过剩余时间仍不退出就当超时，转去强制清树。
-            while True:
-                code, receipt = finish_foreground_process(process, expected_birth_token=birth)
-                if code is not None:
-                    confirmed = receipt.confirmed if receipt is not None else True
-                    break
-                if time.monotonic() - started >= remaining:
-                    timed_out = True
-                    break
-                time.sleep(0.02)
+        output, truncated, timed_out = _read_bounded(process, read_until)
     finally:
-        if process.returncode is None:
-            confirmed = terminate_process_tree(process.pid, process, grace_seconds=0,
-                                               expected_birth_token=birth).confirmed
+        confirmed = _settle_group(process, group, deadline, kill=timed_out or truncated)
         if process.stdout is not None:
             process.stdout.close()
     if not confirmed:
@@ -193,21 +179,20 @@ def _git(repo: Path, args: list[str], deadline: float) -> dict[str, object]:
     return {"error_code": "", "stdout": output, "truncated": truncated}
 
 
-# LLM: POSIX 管道可 select：主线程非阻塞读，读到 EOF、上限或超时即返回，不起后台线程、不回收根进程；继承了
-#   stdout 的后代一直不关管道也只会等到超时，随后由调用方清整棵树。
-# 函数用途: 在时长和字节上限内读取子进程输出（POSIX）。
-def _read_bounded_posix(process: subprocess.Popen, timeout: float) -> tuple[bytes, bool, bool]:
+# LLM: 主线程非阻塞读，读到 EOF、上限或截止即返回，不起后台线程、不回收根进程；继承了 stdout 的后代一直不关
+#   管道也只会等到截止，随后由调用方清组。
+# 函数用途: 在截止时间和字节上限内读取子进程输出。
+def _read_bounded(process: subprocess.Popen, until: float) -> tuple[bytes, bool, bool]:
     import selectors
 
     assert process.stdout is not None
     fd = process.stdout.fileno()
     os.set_blocking(fd, False)
     buffer = bytearray()
-    deadline = time.monotonic() + timeout
     with selectors.DefaultSelector() as selector:
         selector.register(fd, selectors.EVENT_READ)
         while len(buffer) < MAX_GIT_OUTPUT_BYTES:
-            left = deadline - time.monotonic()
+            left = until - time.monotonic()
             if left <= 0:
                 return b"", False, True
             if not selector.select(min(left, 0.2)):
@@ -222,28 +207,46 @@ def _read_bounded_posix(process: subprocess.Popen, timeout: float) -> tuple[byte
     return bytes(buffer[:MAX_GIT_OUTPUT_BYTES]), len(buffer) >= MAX_GIT_OUTPUT_BYTES, False
 
 
-# LLM: Windows 管道不能 select，只能放到守护线程里按超时等待；调用方随后用 taskkill /T 清整棵树，管道关闭后
-#   读线程随之结束。
-# 函数用途: 在时长和字节上限内读取子进程输出（Windows）。
-def _read_bounded_thread(process: subprocess.Popen, timeout: float) -> tuple[bytes, bool, bool]:
-    assert process.stdout is not None
-    buffer = bytearray()
+# LLM: 只对自己创建的会话组发信号。kill=True 时趁根进程未回收先对组发 SIGKILL（组号就是被占着的根 pid）；
+#   否则先等根进程自己退出拿真实退出码，到截止仍不退出就转为强杀。回收根进程后用 killpg(组, 0) 探测：ESRCH
+#   证明组里不剩任何成员；还有成员（含僵尸，macOS 对纯僵尸组回 EPERM）就再发一次 SIGKILL 并继续等，截止前没
+#   等到 ESRCH 就返回 False。组里还有成员时组号不会被分配给新进程，所以补发的信号不会落到无关进程上。
+# 函数用途: 清掉 git 进程组并证明组已为空。
+def _settle_group(process: subprocess.Popen, group: int, deadline: float, *, kill: bool) -> bool:
+    if not kill:
+        try:
+            process.wait(timeout=max(0.0, deadline - GIT_CLEANUP_RESERVE_SECONDS - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            kill = True
+    if kill and process.returncode is None:
+        _signal_group(group, signal.SIGKILL)
+        try:
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            return False
+    resent = False
+    while True:
+        try:
+            os.killpg(group, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass
+        if not resent:
+            _signal_group(group, signal.SIGKILL)
+            resent = True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_GROUP_PROBE_INTERVAL_SECONDS)
 
-    # LLM: 只往本地缓冲追加，读到上限或管道关闭即退出。
-    # 函数用途: 在后台线程里有界读取输出。
-    def reader() -> None:
-        while len(buffer) < MAX_GIT_OUTPUT_BYTES:
-            chunk = process.stdout.read1(8192)
-            if not chunk:
-                return
-            buffer.extend(chunk)
 
-    thread = threading.Thread(target=reader, daemon=True)
-    thread.start()
-    thread.join(timeout)
-    if thread.is_alive():
-        return b"", False, True
-    return bytes(buffer[:MAX_GIT_OUTPUT_BYTES]), len(buffer) >= MAX_GIT_OUTPUT_BYTES, False
+# LLM: 组已经没了（ESRCH）或只剩僵尸（macOS EPERM）都不是错误，确认交给 killpg(组, 0) 探测。
+# 函数用途: 向 git 进程组发一个信号。
+def _signal_group(group: int, sig: int) -> None:
+    try:
+        os.killpg(group, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 # LLM: 只看 git-dir 里的结构事实（lstat），不读文件内容判断指向；存在重定向文件或入口是符号链接都拒绝。
@@ -272,7 +275,8 @@ def _config_is_local_only(raw: bytes, repo: Path) -> bool:
         fields.pop()
     if len(fields) % 2:
         return False
-    allowed = {os.path.realpath(repo / ".git" / "config"), os.path.realpath(repo / ".git" / "config.worktree")}
+    # 不用 realpath：符号链接已在启动前拒绝，这里只认字面上就在本仓库 .git 下的两个文件，不把外部目标算成本地。
+    allowed = {os.path.normpath(repo / ".git" / "config"), os.path.normpath(repo / ".git" / "config.worktree")}
     for origin_raw, entry_raw in zip(fields[::2], fields[1::2]):
         origin = origin_raw.decode("utf-8", "replace")
         key = entry_raw.split(b"\n", 1)[0].decode("utf-8", "replace").lower()
@@ -283,7 +287,7 @@ def _config_is_local_only(raw: bytes, repo: Path) -> bool:
         if not origin.startswith("file:"):
             return False
         path = origin[len("file:"):]
-        if os.path.realpath(path if os.path.isabs(path) else repo / path) not in allowed:
+        if os.path.normpath(path if os.path.isabs(path) else repo / path) not in allowed:
             return False
     return True
 

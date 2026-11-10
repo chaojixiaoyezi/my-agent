@@ -293,7 +293,8 @@ def test_outside_excludes_file_from_local_config_is_not_read(agent_and_child, re
     assert git.observe_registered(agent, str(repo))["dirty_paths_count"] == 1
 
 
-@pytest.mark.parametrize("redirect", ["include", "includeif", "commondir", "alternates", "config_symlink"])
+@pytest.mark.parametrize("redirect", ["include", "includeif", "commondir", "alternates", "config_symlink",
+                                      "config_worktree_symlink"])
 def test_git_dir_and_config_redirects_are_refused_before_any_status(agent_and_child, repo, monkeypatch, tmp_path,
                                                                     redirect):
     agent, _child, _ = agent_and_child
@@ -311,14 +312,23 @@ def test_git_dir_and_config_redirects_are_refused_before_any_status(agent_and_ch
     elif redirect == "alternates":
         (git_dir / "objects" / "info").mkdir(parents=True, exist_ok=True)
         (git_dir / "objects" / "info" / "alternates").write_text(str(outside.parent) + "\n")
+    elif redirect == "config_worktree_symlink":
+        # extensions.worktreeConfig 打开后 git 会读 config.worktree；它指向允许根外时不能被当成本地配置。
+        _git(repo, "config", "extensions.worktreeConfig", "true")
+        (git_dir / "config.worktree").symlink_to(outside)
     else:
         moved = Path(os.path.realpath(tmp_path)) / "moved-config"
         (git_dir / "config").rename(moved)
         (git_dir / "config").symlink_to(moved)
+    marker = tmp_path / "git-ran"
+    real_popen = git.subprocess.Popen
+    monkeypatch.setattr(git.subprocess, "Popen", lambda *a, **k: (marker.write_text("x"), real_popen(*a, **k))[1])
     result = git.observe_registered(agent, str(repo))
 
     expected = "REPO_CONFIG_REDIRECT" if redirect.startswith("include") else "REPO_GIT_DIR_REDIRECT"
     assert result["error_code"] == expected and result["head"] == "" and result["dirty_paths_count"] is None
+    # 结构重定向（含 config.worktree 符号链接）在启动任何 git 之前就拒绝；include 只能由 git 自己的解析结果发现。
+    assert marker.exists() is redirect.startswith("include")
 
 
 # ---------- ORCH03-R6：子进程树清理、预算与 HEAD 校验（替身 git 只替换指定子命令，其余转真实 git） ----------
@@ -420,25 +430,69 @@ def test_escaped_descendant_holding_stdout_does_not_leave_a_reader_thread(agent_
     assert elapsed < git.GIT_OBSERVATION_BUDGET_SECONDS
 
 
-# LLM: 用共享清理入口的替身制造“未确认”回执，只验证适配器把它映射成失败、不交出输出；不代表真实清理行为。
-# 函数用途: 清理回执未确认时观察整体失败。
-def test_unconfirmed_tree_cleanup_is_not_a_successful_observation(agent_and_child, repo, monkeypatch):
+# LLM: 让 killpg(组, 0) 一直报“组还在”来模拟证明不了组已空；SIGKILL 仍真实下发。只验证证明不了时观察整体失败、
+#   不交出输出，并且在总预算内返回。
+# 函数用途: 组清理确认不了时观察失败且不超预算。
+def test_unprovable_group_cleanup_fails_the_observation_within_budget(agent_and_child, repo, monkeypatch):
+    agent, _child, _ = agent_and_child
+    real_killpg = os.killpg
+
+    def group_never_empty(group, sig):
+        if sig == 0:
+            return None
+        return real_killpg(group, sig)
+
+    monkeypatch.setattr(git.os, "killpg", group_never_empty)
+    monkeypatch.setattr(git, "GIT_OBSERVATION_BUDGET_SECONDS", 3)
+    _register(monkeypatch, [str(repo)])
+    started = time.monotonic()
+    result = git.observe_registered(agent, str(repo))
+    elapsed = time.monotonic() - started
+
+    assert result["error_code"] == "GIT_CLEANUP_UNCONFIRMED" and result["head"] == ""
+    assert elapsed < 3 + 0.5
+
+
+# LLM: PRO-MSG-022/023：协调者环境里 ps 被拒、共享启动身份恒为空。观察不再依赖这条路径：把它换成一调用就失败的
+#   替身，干净仓库的正向对照仍成功。
+# 函数用途: git 观察不依赖 ps 启动身份采集。
+def test_observation_does_not_depend_on_ps_birth_identity(agent_and_child, repo, monkeypatch):
     from agent_py_agent.agent.tooling import process_registry
 
     agent, _child, _ = agent_and_child
-    real_finish = process_registry.finish_foreground_process
 
-    def unconfirmed(process, *, expected_birth_token):
-        code, receipt = real_finish(process, expected_birth_token=expected_birth_token)
-        if receipt is None:
-            return code, receipt
-        return code, process_registry.ProcessTerminationReceipt("fake", False, code, 1, (process.pid,))
+    def denied(*_a, **_k):
+        raise AssertionError("adapter must not need ps birth identity")
 
-    monkeypatch.setattr(process_registry, "finish_foreground_process", unconfirmed)
+    monkeypatch.setattr(process_registry, "capture_process_birth_token", denied)
+    monkeypatch.setattr(process_registry, "terminate_process_tree", denied)
+    monkeypatch.setattr(process_registry, "finish_foreground_process", denied)
     _register(monkeypatch, [str(repo)])
     result = git.observe_registered(agent, str(repo))
 
-    assert result["error_code"] == "GIT_CLEANUP_UNCONFIRMED" and result["head"] == ""
+    assert result["error_code"] == "" and result["dirty_paths_count"] == 0 and len(result["head"]) in (40, 64)
+
+
+def test_unsupported_platform_refuses_before_spawning_git(agent_and_child, repo, monkeypatch):
+    agent, _child, _ = agent_and_child
+    monkeypatch.setattr(git, "_PLATFORM_SUPPORTED", False)
+    monkeypatch.setattr(git.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("spawned")))
+    _register(monkeypatch, [str(repo)])
+
+    assert git.observe_registered(agent, str(repo))["error_code"] == "GIT_PLATFORM_UNSUPPORTED"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="替身 git 脚本只在 POSIX 上可执行")
+def test_hanging_git_total_time_is_capped_by_one_absolute_deadline(agent_and_child, repo, monkeypatch, tmp_path):
+    agent, _child, _ = agent_and_child
+    _fake_git(monkeypatch, tmp_path, "rev-parse", "sleep 30")
+    monkeypatch.setattr(git, "GIT_OBSERVATION_BUDGET_SECONDS", 3)
+    _register(monkeypatch, [str(repo)])
+    started = time.monotonic()
+    result = git.observe_registered(agent, str(repo))
+    elapsed = time.monotonic() - started
+
+    assert result["error_code"] == "GIT_TIMEOUT" and elapsed < 3 + 0.5
 
 
 @pytest.mark.skipif(os.name != "posix", reason="替身 git 脚本只在 POSIX 上可执行")
