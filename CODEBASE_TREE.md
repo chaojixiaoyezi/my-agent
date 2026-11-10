@@ -1053,6 +1053,7 @@ agent_py_agent/
 |-- agent_py_agent/agent/user_space/task_credential_schema.py # 私人密文字段及有效期合同
 |-- agent_py_agent/agent/user_space/task_credential_http.py # 原宿主HTTP的引用登录、会话与签名
 |-- agent_py_agent/agent/user_space/feishu_oauth.py # 当前本人授权、密文token和刷新
+|-- agent_py_agent/agent/user_space/feishu_authorization.py # 飞书功能权限、应用后台链接与本人授权配置事实
 |-- agent_py_agent/agent/tooling/feishu_auth_tool.py # 渐进发现的本人授权交互
 |-- agent_py_agent/agent/gateway_parts/feishu_oauth_service.py # 原Gateway的验签OAuth回调
 |-- agent_py_agent/agent/adapter/feishu_cli.py # 固定随包程序、私有stdin和单次官方运输

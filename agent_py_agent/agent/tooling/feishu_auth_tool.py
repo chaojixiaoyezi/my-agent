@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from ..user_space.feishu_authorization import authorization_guidance
 from ..user_space.feishu_oauth import (
     _application_credentials,
     _assert_network,
@@ -31,15 +32,17 @@ from .models import (
 # 类用途: 为本人飞书资源建立独立授权。
 class FeishuAuthTool(BaseTool):
     model_spec = ToolModelSpec(name="feishu_auth", description=(
-        "查询、发起或撤销当前用户的本人飞书OAuth授权。status查询，authorize向原发起人私聊发送登录授权卡，"
+        "查询当前飞书应用所需权限和直达开发者后台的申请链接，或发起/撤销本人OAuth。"
+        "permissions查询私聊、群历史等能力的权限清单、后台链接和配置阻塞；status同时报告本人授权状态。"
+        "用户问如何开权限时先调用本工具，不猜应用ID或声称已经授权。authorize向原发起人私聊发送登录授权卡，"
         "revoke撤销宿主保存的本人授权。无需用户发送应用密钥或token；群共享资源用feishu_cloud应用身份。"
         "authorize会将任务保存为待输入并释放执行资源，填写后恢复原任务。"),
-        input_schema={"type": "object", "properties": {"action": {"type": "string", "enum": ["status", "authorize", "revoke"]}},
+        input_schema={"type": "object", "properties": {"action": {"type": "string", "enum": ["permissions", "status", "authorize", "revoke"]}},
                       "required": ["action"], "additionalProperties": False},
         hints=ToolModelHints(category="network", keywords=("飞书", "本人", "登录", "授权", "OAuth"),
-                             default_deferred=True, deferred_summary="查询或建立本人飞书授权，登录卡私发，宿主保存凭据"))
+                             default_deferred=True, deferred_summary="飞书权限清单及应用后台申请链接；本人授权状态/私发登录卡"))
     runtime_policy = ToolRuntimePolicy(effect_resolver=EffectResolverPolicy("mutating",
-        by_parameter=(("action", (("status", "read_only"),)),)), idempotency_policy=IdempotencyPolicy("operation"),
+        by_parameter=(("action", (("status", "read_only"), ("permissions", "read_only"))),)), idempotency_policy=IdempotencyPolicy("operation"),
         promotes_task_when=(ToolParameterCondition('action', 'equals', 'authorize'),),
         input_policy=ToolInputPolicy(internal_parameters=("__network_access_mode",), trusted_parameter_bindings=(
             ("__network_access_mode", TrustedParameterBinding(source_refs=("write_boundary.network_access_mode",), authority="host_authoritative")),)))
@@ -52,6 +55,10 @@ class FeishuAuthTool(BaseTool):
     # LLM: 功能与部署状态如实反映；群不拥有共享个人OAuth身份。
     # 函数用途: 未配置回调或群身份时给明确不可用原因。
     def availability(self):
+        # 授权未配好也必须让模型发现只读帮助；实际登录和撤销继续过原配置门。
+        return ToolAvailability.ready()
+
+    def _oauth_availability(self):
         try:
             if owner_identity_from_config(self.agent.config).owner_kind == "group":
                 return ToolAvailability.unavailable("群资源使用应用身份；本人授权在私人助手会话进行。")
@@ -64,10 +71,16 @@ class FeishuAuthTool(BaseTool):
     # LLM: 返回仅有状态/引用，无state链接或密码；等待依赖让原模型循环在完整归档后结束。
     # 函数用途: 查询或执行一次本人授权操作。
     def execute(self, params):
-        if params.get("action") not in {"status", "authorize", "revoke"} or set(params) - {"action", "__network_access_mode"}:
+        if params.get("action") not in {"permissions", "status", "authorize", "revoke"} or set(params) - {"action", "__network_access_mode"}:
             return ToolHandlerOutcome("feishu_auth", False, "本人授权动作无效。", error_code="TOOL_INVALID_ARGUMENTS")
-        if not self.availability().available:
-            return ToolHandlerOutcome("feishu_auth", False, self.availability().reason, error_code="TOOL_UNAVAILABLE")
+        if params['action'] in {'permissions', 'status'}:
+            guidance = authorization_guidance(self.agent)
+            return ToolHandlerOutcome('feishu_auth', True, json.dumps(guidance, ensure_ascii=False),
+                                      result_envelope={'authorization': guidance})
+        readiness = self._oauth_availability()
+        if not readiness.available:
+            return ToolHandlerOutcome("feishu_auth", False, readiness.reason, error_code="TOOL_UNAVAILABLE",
+                result_envelope={'authorization': authorization_guidance(self.agent)})
         try:
             if params["action"] == "authorize":
                 try:

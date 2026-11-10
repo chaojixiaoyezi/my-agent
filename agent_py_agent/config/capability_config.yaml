@@ -17,8 +17,9 @@ feishu_cli_backend_enabled: true
 feishu_user_oauth_enabled: true
 # 部署者在飞书应用登记的准确回调 URI（HTTPS，路径 /feishu/oauth/callback）；空值表示本人授权尚未配置。
 feishu_oauth_redirect_uri: ""
-# 应用实际已开放的用户 scopes；offline_access允许宿主刷新，模型不能自选扩权。
-feishu_oauth_scopes: ["offline_access"]
+# 本人授权申请的用户 scopes；默认含本人会话发现、单聊/群历史与自动刷新。
+# 仍须应用后台申请发布且本人点击OAuth；定制列表是宿主上界，模型不能自选扩权。
+feishu_oauth_scopes: ["offline_access", "im:chat:read", "im:message:readonly", "im:message.p2p_msg:get_as_user", "im:message.group_msg:get_as_user"]
 # 后台主/子代理的具体工具审批通过原发起人的私人 IM 卡片收取；不让父代理代替用户批准。
 # 仍核对原调用、主 claim/子 attempt、接收者和实际卡片身份；关闭后沿原 TUI/Web 审批方式。
 im_tool_approvals_enabled: true

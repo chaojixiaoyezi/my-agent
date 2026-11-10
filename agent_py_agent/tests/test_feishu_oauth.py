@@ -304,14 +304,78 @@ def test_exchange_does_not_hold_record_lock_and_revoke_is_not_overwritten(ctx, m
     assert _row(ctx)['status'] == 'revoked'
 
 
-def test_missing_app_and_bad_deployment_are_not_claimed_ready(ctx):
+def test_missing_app_and_bad_deployment_keep_help_visible_without_authorizing(ctx):
     tool = ctx.agent.tools.tools['feishu_auth']
     assert tool.availability().available
     ctx.agent.config.feishu_app_secret = ''
-    assert not tool.availability().available
+    assert tool.availability().available
+    assert not tool.execute({'action': 'authorize'}).ok
+    assert json.loads(tool.execute({'action': 'status'}).output)['configuration_status'] == 'not_configured'
     ctx.agent.config.feishu_app_secret = 'Synthetic-App-Secret'
     ctx.oauth_config.feishu_oauth_redirect_uri = ''
-    assert not tool.availability().available
+    assert tool.availability().available
+    assert not tool.execute({'action': 'authorize'}).ok
+
+
+def test_permission_help_uses_current_app_without_secret_network_or_token(ctx, monkeypatch):
+    from agent_py_agent.agent.user_space.feishu_authorization import permission_requirements
+
+    monkeypatch.setattr(oauth, 'user_access_token', lambda *a, **k: pytest.fail('只读帮助不能取令牌'))
+    monkeypatch.setattr(oauth, '_oauth_api', lambda *a, **k: pytest.fail('只读帮助不能联网'))
+    result = permission_requirements(ctx.agent,
+        required_scopes=['im:message:readonly', 'im:message:readonly'],
+        required_events=['im.message.receive_v1'])
+    url = urlsplit(result['permission_settings_url'])
+    assert url.hostname == 'open.feishu.cn' and url.path == '/app/synthetic-app/auth'
+    assert parse_qs(url.query)['q'] == ['im:message:readonly']
+    assert result['required_scopes'] == ['im:message:readonly']
+    assert result['permission_status'] == 'not_verified'
+    assert result['oauth_action'] == {'tool': 'feishu_auth', 'arguments': {'action': 'authorize'}}
+    assert ctx.agent.config.feishu_app_secret not in json.dumps(result)
+
+
+def test_permission_help_remains_discoverable_without_oauth_configuration(ctx):
+    before_cards = len(ctx.cards)
+    ctx.oauth_config.feishu_oauth_redirect_uri = ''
+    tool = ctx.agent.tools.tools['feishu_auth']
+    assert tool.availability().available
+    result = tool.execute({'action': 'permissions'})
+    assert result.ok
+    details = result.result_envelope['authorization']
+    assert details['required_action'] == 'configure_application_oauth'
+    assert details['permission_settings_url'].startswith('https://open.feishu.cn/app/synthetic-app/auth?')
+    assert details['oauth_status'] == 'not_configured'
+    assert len(ctx.cards) == before_cards
+
+
+def test_permission_help_does_not_accept_app_id_as_url_or_user_supplied_scope(ctx):
+    from agent_py_agent.agent.user_space.feishu_authorization import permission_requirements
+
+    ctx.agent.config.feishu_app_id = 'bad/app?token=secret'
+    assert permission_requirements(ctx.agent)['permission_settings_url'] == ''
+    tool = ctx.agent.tools.tools['feishu_auth']
+    assert not tool.execute({'action': 'permissions', 'scopes': ['invented:scope']}).ok
+    assert not tool.execute({'action': 'permissions', 'app_id': 'other-app'}).ok
+
+
+def test_permission_help_reports_deployment_scope_upper_bound(ctx):
+    ctx.oauth_config.feishu_oauth_scopes = ['offline_access']
+    result = ctx.agent.tools.tools['feishu_auth'].execute({'action': 'permissions'})
+    details = result.result_envelope['authorization']
+    assert details['configuration_status'] == 'configured'
+    assert details['required_action'] == 'configure_requested_scopes'
+    assert 'im:message.p2p_msg:get_as_user' in details['missing_requested_scopes']
+    assert ctx.oauth_config.feishu_oauth_scopes == ['offline_access']
+
+
+def test_permission_help_does_not_claim_partial_oauth_grants_are_ready(ctx, monkeypatch):
+    _dependency, state, payload = _authorize(ctx)
+    _api(ctx, monkeypatch)
+    oauth.complete_oauth(ctx.agent, payload, state, 'Synthetic-Code')
+    details = ctx.agent.tools.tools['feishu_auth'].execute({'action': 'status'}).result_envelope['authorization']
+    assert details['oauth_status'] == 'ready'
+    assert details['required_action'] == 'reauthorize_current_user'
+    assert details['permission_status'] == 'not_verified'
 
 
 def test_original_owner_provider_is_authority_not_visible_role(ctx):
@@ -325,7 +389,8 @@ def test_original_owner_provider_is_authority_not_visible_role(ctx):
         agent.config.feishu_app_id = 'synthetic-app'
         agent.config.feishu_app_secret = 'Synthetic-App-Secret'
         if kind == 'group':
-            assert not FeishuAuthTool(agent).availability().available
+            assert FeishuAuthTool(agent).availability().available
+            assert not FeishuAuthTool(agent).execute({'action': 'authorize'}).ok
             with pytest.raises(ValueError):
                 oauth.oauth_actor(agent)
         else:

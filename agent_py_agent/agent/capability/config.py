@@ -21,6 +21,11 @@ _CAPABILITY_CONFIG_CACHE: OrderedDict[tuple[str, int, int, int, int, int], Capab
 # 能力路由配置进程内缓存的最大条目数。
 _CAPABILITY_CONFIG_CACHE_MAX_SIZE = 64
 
+DEFAULT_FEISHU_OAUTH_SCOPES = (
+    'offline_access', 'im:chat:read', 'im:message:readonly',
+    'im:message.p2p_msg:get_as_user', 'im:message.group_msg:get_as_user',
+)
+
 # LLM: 包准备默认关闭，方法沿用默认开；凭据期限不改变owner/任务授权；默认与YAML须保持同源。
 # 类用途: 定义子代理能力和包上下文设置；推荐只展示摘要，选包会消耗模型用量并记录原任务，数值配额为零仍受模型窗口限制。
 @dataclass
@@ -53,7 +58,7 @@ class CapabilityConfig:
     # 本人 OAuth 只使用此部署回调及 scopes；空回调明确未配置，不借管理员登录。
     feishu_user_oauth_enabled: bool = True
     feishu_oauth_redirect_uri: str = ""
-    feishu_oauth_scopes: list[str] = field(default_factory=lambda: ["offline_access"])
+    feishu_oauth_scopes: list[str] = field(default_factory=lambda: list(DEFAULT_FEISHU_OAUTH_SCOPES))
     # 无 TUI 的主子代理工具审批发到原发起人的私人卡片；具体批准仍回原请求/claim/attempt。
     im_tool_approvals_enabled: bool = True
     # 原群/本人私聊任务凭据卡及宿主 HTTP 引用注入；可先收集后配置认证，不把密码交给模型或 shell。
