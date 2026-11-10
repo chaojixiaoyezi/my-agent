@@ -25,6 +25,7 @@ from ..conversation.control_commands import (
     parse_conversation_control,
     persisted_control_command_text,
 )
+from ..conversation.verbose import tui_streaming_client
 from ..runtime_errors import DataCorruptionError, runtime_error_report
 from ..user_space.owner_resolver import OwnerIdentity
 from .control_service import (
@@ -132,6 +133,7 @@ class GatewayControlOperationReceipt:
     private_approval: object = None
     model_payload: object = None
     secret_command_sha256: str = ""
+    client_tui_streaming: bool = False
 
     # LLM: 只持久化脱敏正文及可选原命令哈希，绝不保存密码明文；旧无密码回执字节不变。
     # 函数用途: 保存规范控制回执及可选私卡action/分派事实，不序列化AGENTS、Memory封印、RunParams或writer。
@@ -160,6 +162,8 @@ class GatewayControlOperationReceipt:
             "input_digest_version": self.input_digest_version,
             "updated_at": self.updated_at,
         }
+        if self.client_tui_streaming:
+            payload["client_tui_streaming"] = True
         if self.result:
             payload["result"] = dict(self.result)
         if self.error:
@@ -193,6 +197,8 @@ class GatewayControlOperationReceipt:
             raise DataCorruptionError("gateway control operation result is invalid")
         if "error" in data and not isinstance(data.get("error"), dict):
             raise DataCorruptionError("gateway control operation error is invalid")
+        if type(data.get("client_tui_streaming", False)) is not bool:
+            raise DataCorruptionError("gateway control client display capability is invalid")
         raw_digest_version = data.get("input_digest_version")
         if raw_digest_version is None:
             digest_version = 0
@@ -236,6 +242,7 @@ class GatewayControlOperationReceipt:
             private_approval=data.get("private_approval"),
             model_payload=data.get("model_payload"),
             secret_command_sha256=data.get("secret_command_sha256", ""),
+            client_tui_streaming=data.get("client_tui_streaming", False),
         )
         matched_digest_version = _validate_control_operation_receipt(receipt)
         return (
@@ -338,7 +345,7 @@ def execute_gateway_control_operation(
             )
         observed = read_gateway_control_operation(paths, operation_id)
         if observed is not None:
-            if observed.input_digest != input_digest:
+            if not control_input_matches_receipt(observed, scope, digest_text, input_digest):
                 raise GatewayControlOperationConflict(
                     "gateway control message id was reused with different input"
                 )
@@ -724,6 +731,22 @@ def _reconcile_control_operation_locked(
     return updated
 
 
+def control_input_matches_receipt(receipt, scope, command_text, input_digest):
+    """旧回执缺展示位时仅允许同输入重放；不升级旧语义，不丢目标/目录/授权事实。"""
+    if receipt.input_digest == input_digest:
+        return True
+    if receipt.client_tui_streaming or not tui_streaming_client(scope.metadata):
+        return False
+    metadata = {**scope.metadata}
+    capabilities = dict(metadata["client_capabilities"])
+    capabilities.pop("tui_streaming")
+    metadata["client_capabilities"] = capabilities
+    legacy_scope = replace(scope, metadata=metadata)
+    # 使用当前请求原版本选择规则；不能降级版本来忽略新目标或其它条件。
+    _, legacy_digest = gateway_control_operation_identity(legacy_scope, command_text)
+    return receipt.input_digest == legacy_digest
+
+
 # LLM: 原op锁内验证同id完整输入，原factory保存可重算的密码哈希而非明文，目标/准备/来源生命周期不变。
 # 函数用途: 原子准备唯一规范控制回执，原消息重试只读同输入，不新增来源或业务重投。
 def _load_or_prepare_control_operation_locked(
@@ -738,7 +761,9 @@ def _load_or_prepare_control_operation_locked(
 ) -> GatewayControlOperationReceipt:
     existing = read_gateway_control_operation(paths, operation_id)
     if existing is not None:
-        if existing.input_digest != operation_input.input_digest:
+        if not control_input_matches_receipt(existing, scope,
+                _secret_bound_digest_text(operation_input.command_text, operation_input.secret_command_sha256),
+                operation_input.input_digest):
             raise GatewayControlOperationConflict(
                 "gateway control message id was reused with different input"
             )
@@ -796,6 +821,7 @@ def _new_control_operation_receipt(scope, command_kind, command_text, operation_
         input_digest_version=5 if private_approval is not None else _control_input_version(scope),
         private_approval=private_approval,
         secret_command_sha256=secret_command_sha256,
+        client_tui_streaming=tui_streaming_client(scope.metadata),
         state="prepared",
         updated_at=time.time(),
     )
@@ -837,7 +863,7 @@ def _coordinator_control_receipt(source, raw):
     receipt = GatewayControlOperationReceipt.from_dict(payload)
     if receipt.operation_id != source.operation_id:
         raise DataCorruptionError('gateway control operation id does not match its path')
-    if receipt.input_digest != source.input_digest:
+    if not control_input_matches_receipt(receipt, source.scope, source.command_text, source.input_digest):
         raise GatewayControlOperationConflict('gateway control message id was reused with different input')
     return receipt
 
@@ -856,6 +882,7 @@ def _receipt_scope(
         channel=receipt.channel,
         conversation_id=receipt.conversation_id,
         metadata={
+            **({"client_capabilities": {"tui_streaming": True}} if receipt.client_tui_streaming else {}),
             "message_id": receipt.client_message_id,
             "expected_turn_id": receipt.expected_turn_id,
             "target_control_message_id": receipt.target_control_message_id,
@@ -1043,6 +1070,9 @@ def _control_operation_input_digest(
         operation_input['private_approval'] = private_approval
     if "model_payload" in scope.metadata:
         operation_input["model_payload"] = scope.metadata["model_payload"]
+    # 仅显式TUI展示事实进入新摘要；旧缺省false保持原摘要字节，不授予owner/执行权限。
+    if tui_streaming_client(scope.metadata):
+        operation_input["client_tui_streaming"] = True
     return hashlib.sha256(_canonical_json(operation_input).encode("utf-8")).hexdigest()
 
 

@@ -353,7 +353,7 @@ class _LocalControlWriteSource(_ClientMemorySourceMode):
         with ops.try_gateway_control_operation_transition(server.paths, operation_id) as acquired:
             existing = ops.read_gateway_control_operation(server.paths, operation_id, read_only=True)
             if existing is not None:
-                if existing.input_digest != digest:
+                if not ops.control_input_matches_receipt(existing, scope, text, digest):
                     raise ops.GatewayControlOperationConflict('gateway control message id was reused with different input')
                 yield None, existing
                 return
@@ -717,7 +717,7 @@ def _require_receipt_origin(source, receipt):
     command = ops.parse_conversation_control(text, reject_unknown_slash=True)
     if (command is None or receipt.command_kind != command.kind or receipt.command_kind not in {'model', 'effort'}
             or command.kind == 'effort' and command.operation != 'set'
-            or receipt.operation_id != operation or receipt.input_digest != digest
+            or receipt.operation_id != operation or not ops.control_input_matches_receipt(receipt, scope, text, digest)
             or receipt.command_text != text.strip()
             or (receipt.owner_provider, receipt.owner_kind, receipt.owner_id) !=
                (source.owner.provider, source.owner.owner_kind, source.owner.owner_id)
