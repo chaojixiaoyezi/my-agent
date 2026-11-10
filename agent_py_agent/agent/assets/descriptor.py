@@ -79,7 +79,10 @@ class _Record:
     # LLM: dataclass生成构造器调用本钩子；冻结实例只在初始化时归一字段。
     # 函数用途: 校验并复制类型，拒绝负计数、空标识符和未知种类/评估决定。
     def __post_init__(self):
-        hints = get_type_hints(type(self))
+        record_type = type(self)
+        hints = _BUILTIN_FIELD_TYPES.get(record_type)
+        if hints is None:
+            hints = get_type_hints(record_type)
         for item in fields(self):
             value = _convert(getattr(self, item.name), hints[item.name])
             if item.name in {"id", "source_id", "target_id", "candidate_id", "step_id"}:
@@ -348,3 +351,9 @@ def asset_descriptor_from_definition(data, asset_id, kind) -> AssetDescriptor:
     if any(not isinstance(data[key], list) for key in ('access_targets', 'data_sources', 'credential_refs')):
         raise ValueError('目标、数据源和凭据引用必须为列表')
     return AssetDescriptor.from_dict(data)
+
+
+# 内置记录的字段合同由模块定义。每个类型只解析一次注解，插件子类仍按自身定义校验。
+_BUILTIN_FIELD_TYPES = {
+    cls: get_type_hints(cls) for cls in _Record.__subclasses__() if cls.__module__ == __name__
+}

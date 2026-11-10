@@ -1042,3 +1042,16 @@ def test_global_lock_change_is_checked_when_read_raises(api, tmp_path, monkeypat
     with pytest.raises(expected, match='全局.*(?:锁|事务)'):
         getattr(user, f'get_{kind}')('shared')
     assert journal.read_text() == 'pending'
+
+def test_extended_descriptor_validates_its_own_fields():
+    from dataclasses import dataclass
+
+    from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+
+    @dataclass(frozen=True)
+    class Extended(AssetDescriptor):
+        attempts: int = 0
+
+    assert Extended("entry", "skill", "test", attempts=3).attempts == 3
+    with pytest.raises(ValueError):
+        Extended("entry", "skill", "test", attempts=True)
