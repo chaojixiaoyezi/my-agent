@@ -88,3 +88,90 @@ def test_unreadable_metadata_and_runtime_extraction_are_explicit():
     assert delivery_result_artifacts(execution) == (
         {'path': '/srv/a/one.md', 'artifact_id': ART_A, 'sha256': 'c' * 64, 'size_bytes': 12},)
     assert delivery_result_artifacts(SimpleNamespace()) == ()
+
+
+@pytest.mark.parametrize('order', ['a_first', 'b_first'])
+def test_conflicting_ids_for_one_path_stay_unresolved_in_either_order(order):
+    # G7-R1：同一路径两个不同登记ID不按元数据顺序挑选；完全相同的重复项仍去重。
+    one, two, art_c = '/srv/a/one.md', '/srv/a/two.md', 'art_' + 'c' * 20
+    conflict = [_item(one, ART_A), _item(one, ART_B)]
+    items = (conflict if order == 'a_first' else conflict[::-1]) + [_item(two, art_c), _item(two, art_c)]
+    task = SimpleNamespace(result_refs=(one, two), metadata={'result_artifacts': items})
+    assert public_result_refs(task) == ([art_c], {'state': 'partial', 'unresolved_count': 1})
+    only = SimpleNamespace(result_refs=(one,), metadata={'result_artifacts': items})
+    assert public_result_refs(only) == ([], {'state': 'partial', 'unresolved_count': 1})
+
+
+def test_terminal_result_identity_is_write_once_and_report_stays_consistent(native):  # noqa: F811
+    # G7-R2：新的非终态→终态写定映射与结果路径；同状态重放换成另一映射/路径被忽略（不报错），相同映射幂等，
+    #   已发布的结果回报与公开ID保持一致。
+    from agent_py_agent.agent.conversation.session_tasks import SessionTaskUpdate
+
+    _, host = native
+    first_path, other_path = PATHS['short'], '/srv/b/other.md'
+    task_id = _finish(native, 'g7-write-once', [first_path], [_item(first_path)])
+    store = host.conversation_store.session_tasks
+    replay = store.advance(task_id, SessionTaskUpdate(status='done', result_refs=(other_path,),
+                                                      result_artifacts=(_item(other_path, ART_B),)))
+    stored = store.require(task_id)
+    assert replay.metadata['result_artifacts'] == stored.metadata['result_artifacts'] == [_item(first_path)]
+    assert replay.result_refs == stored.result_refs == (first_path,)
+    same = store.advance(task_id, SessionTaskUpdate(status='done', result_refs=(first_path,),
+                                                    result_artifacts=(_item(first_path),)))
+    assert same.metadata['result_artifacts'] == [_item(first_path)] and same.result_refs == (first_path,)
+    assert ok(native, 'tasks.get', {'task_id': task_id})['result_refs'] == [ART_A]
+    reports = [entry for entry in host.conversation_store.guidance.pending('thread', stored.sender_thread_id, limit=0)
+               if entry.metadata.get('session_task_id') == task_id]
+    assert len(reports) == 1 and first_path in reports[0].message and other_path not in reports[0].message
+
+
+def test_legacy_terminal_record_accepts_exactly_one_mapping_backfill(native):  # noqa: F811
+    from agent_py_agent.agent.conversation.session_tasks import SessionTaskUpdate
+
+    _, host = native
+    path = PATHS['short']
+    legacy = _finish(native, 'g7-legacy-backfill', [path])
+    store = host.conversation_store.session_tasks
+    assert 'result_artifacts' not in store.require(legacy).metadata
+    filled = store.advance(legacy, SessionTaskUpdate(status='done', result_artifacts=(_item(path),)))
+    assert filled.metadata['result_artifacts'] == [_item(path)]
+    store.advance(legacy, SessionTaskUpdate(status='done', result_artifacts=(_item(path, ART_B),)))
+    assert store.require(legacy).metadata['result_artifacts'] == [_item(path)]
+    assert ok(native, 'tasks.get', {'task_id': legacy})['result_refs'] == [ART_A]
+
+
+def test_real_registry_id_round_trips_to_public_ref_and_ids_are_not_version_pins(native, tmp_path):  # noqa: F811
+    # MSG-024 证据：真实本地登记簿→原交付投影→运行时提取→终态→公开ID→按ID回读；登记ID按(run,task,agent,path)稳定，
+    #   同路径重登记不换ID但sha256变，故公开ID不是版本钉；冻结的交付sha256留在内部元数据可核漂移。
+    from agent_py_agent.agent.agent_core._finalization_service import (
+        _delivery_artifact_from_registry_ref,
+    )
+    from agent_py_agent.agent.artifacts.registry import (
+        ArtifactRegistration,
+        register_artifact,
+        resolve_artifact_record,
+    )
+
+    _, host = native
+    workspace = tmp_path / 'delivery-ws'
+    target = workspace / 'out' / '季度报告.md'
+    target.parent.mkdir(parents=True)
+    target.write_text('v1', encoding='utf-8')
+    registration = ArtifactRegistration(workspace_root=workspace, path=target, run_id='run-g7', task_id='g7-real',
+                                         agent_id='worker')
+    record = register_artifact(registration)
+    item = _delivery_artifact_from_registry_ref(record.to_dict(), (workspace.resolve(),), frozenset())
+    artifacts = delivery_result_artifacts(SimpleNamespace(delivery_artifacts=[item]))
+    task_id = _finish(native, 'g7-real-registry', [item['path']], artifacts)
+    detail = ok(native, 'tasks.get', {'task_id': task_id})
+    assert detail['result_refs'] == [record.artifact_id] and record.artifact_id.startswith('art_')
+    readback = resolve_artifact_record(workspace, record.artifact_id)
+    persisted = host.conversation_store.session_tasks.require(task_id).metadata['result_artifacts']
+    assert (readback.path, readback.sha256) == (item['path'], item['sha256']) == (persisted[0]['path'],
+                                                                                 persisted[0]['sha256'])
+    target.write_text('v2 changed', encoding='utf-8')
+    second = register_artifact(registration)
+    assert second.artifact_id == record.artifact_id and second.sha256 != record.sha256
+    assert resolve_artifact_record(workspace, record.artifact_id).sha256 == second.sha256
+    assert ok(native, 'tasks.get', {'task_id': task_id})['result_refs'] == [record.artifact_id]
+    assert host.conversation_store.session_tasks.require(task_id).metadata['result_artifacts'][0]['sha256'] == record.sha256

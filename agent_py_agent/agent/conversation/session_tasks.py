@@ -1137,14 +1137,20 @@ class SessionTaskStore:
                     f"illegal session task transition: {latest.status} -> {target_status}"
                 )
             metadata = latest.metadata
+            result_refs = tuple(update.result_refs) if update.result_refs else latest.result_refs
+            if latest.status in SESSION_TASK_TERMINAL_STATUSES and latest.result_refs:
+                # G7-R2：终态结果路径一次写定；同状态重放不得替换已据以发布结果回报的路径。
+                result_refs = latest.result_refs
             artifacts = [item for item in map(_result_artifact_item, update.result_artifacts) if item is not None]
-            if artifacts and target_status in SESSION_TASK_TERMINAL_STATUSES:
+            if (artifacts and target_status in SESSION_TASK_TERMINAL_STATUSES
+                    and SESSION_TASK_RESULT_ARTIFACTS_KEY not in latest.metadata):
+                # 映射一次写定：新终态迁移写入；旧终态缺键只接受一次回填；已有映射后相同或不同重放都保留原值。
                 metadata = {**latest.metadata, SESSION_TASK_RESULT_ARTIFACTS_KEY: artifacts}
             updated = replace(
                 latest,
                 status=target_status,
                 summary=str(update.summary or latest.summary) if update.summary else latest.summary,
-                result_refs=tuple(update.result_refs) if update.result_refs else latest.result_refs,
+                result_refs=result_refs,
                 metadata=metadata,
                 conversation_request_id=update.conversation_request_id or latest.conversation_request_id,
                 task_run_id=update.task_run_id or latest.task_run_id,

@@ -105,7 +105,7 @@ def _view(kind, row):
 
 
 # LLM: 公开引用只给交付项自带的 owner 内产物登记 ID（来自终态冻结的 metadata），绝不回退为绝对路径、截断或补造 ID；
-#   未解析的引用如实计数：旧任务无交付身份记 legacy_unresolved，元数据损坏记 unreadable，部分缺失记 partial。
+#   未解析的引用如实计数：旧任务无交付身份记 legacy_unresolved，元数据损坏记 unreadable，部分缺失或同一路径多个不同ID记 partial。
 # 函数用途: 把任务内部结果路径投影成公开 result_refs 与覆盖说明；无结果时覆盖说明为 None。
 def public_result_refs(task):
     from .session_tasks import SESSION_TASK_RESULT_ARTIFACTS_KEY
@@ -124,13 +124,16 @@ def public_result_refs(task):
         if (isinstance(item, dict) and isinstance(item.get('path'), str) and isinstance(artifact, str)
                 and 0 < len(artifact) <= 128 and len(artifact.encode('utf-8')) <= 128
                 and '/' not in artifact and '\\' not in artifact):
-            known.setdefault(item['path'], artifact)
+            known.setdefault(item['path'], set()).add(artifact)
     refs, unresolved = [], 0
     for path in paths:
-        artifact = known.get(path)
-        if artifact is None:
+        # 同一路径对应多个不同登记ID即身份不明：如实记未解析，不按元数据顺序挑选（G7-R1）；完全相同的重复项已由集合去重。
+        ids = known.get(path, set())
+        if len(ids) != 1:
             unresolved += 1
-        elif artifact not in refs:
+            continue
+        artifact = next(iter(ids))
+        if artifact not in refs:
             refs.append(artifact)
     return refs, {'state': 'partial' if unresolved else 'complete', 'unresolved_count': unresolved}
 
