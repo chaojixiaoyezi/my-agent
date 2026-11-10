@@ -478,12 +478,28 @@ def migrate_feishu_oauth_defaults(prefix: Path, release: Path, package: Path) ->
         old = parsed.get('feishu_oauth_scopes') if isinstance(parsed, dict) else None
         if old != ['offline_access']:
             return original, old, old
-        # 只替换一个顶层字段，不重写其它配置/注释；重复键拒绝而非猜测。
-        matches = list(re.finditer(r'^feishu_oauth_scopes[ \t]*:[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*', original, re.M))
+        # YAML允许无缩进序列；使用解析节点位置，不靠行缩进猜字段边界。
+        document = yaml.compose(original)
+        if not isinstance(document, yaml.MappingNode):
+            raise ValueError('飞书授权scope配置不是映射')
+        matches = [(key, value) for key, value in document.value if key.value == 'feishu_oauth_scopes']
         if len(matches) != 1:
             raise ValueError('飞书授权scope配置重复或不可确认')
-        match = matches[0]
-        updated = original[:match.start()] + 'feishu_oauth_scopes: ' + json.dumps(defaults, ensure_ascii=False) + original[match.end():]
+        key, node = matches[0]
+        if (not isinstance(node, yaml.SequenceNode) or len(node.value) != 1
+                or node.start_mark.index <= key.end_mark.index):
+            # alias可能指向其它字段原节点，不能为了本字段迁移改写共享源。
+            raise ValueError('飞书授权scope源节点不能独立迁移')
+        start = node.start_mark.index
+        end = node.end_mark.index if node.flow_style else node.value[-1].end_mark.index
+        # 无缩进block序列改为flow后必须缩进，否则会成为第二个根节点。
+        prefix = '  ' if not node.flow_style and node.start_mark.column == 0 else ''
+        updated = original[:start] + prefix + json.dumps(defaults, ensure_ascii=False) + original[end:]
+        validated = yaml.safe_load(updated)
+        if (not isinstance(validated, dict) or validated.get('feishu_oauth_scopes') != defaults
+                or {key: value for key, value in validated.items() if key != 'feishu_oauth_scopes'}
+                != {key: value for key, value in parsed.items() if key != 'feishu_oauth_scopes'}):
+            raise ValueError('飞书授权scope迁移改变了其它配置，未写入')
         return updated, old, defaults
 
     _migrate_config_once(prefix, release, config, 'feishu-oauth-default-scopes-v1', transform)

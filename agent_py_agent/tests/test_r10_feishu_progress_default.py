@@ -146,3 +146,63 @@ def test_off_batch_never_creates_tool_card_and_persists_gate(tmp_path, monkeypat
     assert not any('card' in options for _, _, options in adapter.created)
     draft = store.pending()[0].progress_draft
     assert draft.get('verbose_level') == 'off' and draft.get('render_kind') == 'text', store.pending()[0]
+
+
+@pytest.mark.parametrize('field', [
+    'feishu_oauth_scopes:\n- offline_access # scope item\n',
+    'feishu_oauth_scopes: # scope heading\n  - offline_access # scope item\n',
+    'feishu_oauth_scopes: [offline_access] # scope item\n',
+])
+def test_oauth_scope_node_preserves_neighbor_history_and_comments(tmp_path, field):
+    import yaml
+    prefix, _ = _installation(tmp_path)
+    config = prefix / 'data/config/capability_config.yaml'
+    original = 'before: {keep: [1, true]}\n' + field + '# neighbor comment\nfeishu_chat_history_enabled: false # history\nafter: keep\n'
+    config.write_text(original)
+    package = tmp_path / 'package'
+    (package / 'config').mkdir(parents=True)
+    defaults = ['offline_access', 'im:chat:read']
+    (package / 'config/capability_config.yaml').write_text('feishu_chat_history_enabled: true\nfeishu_oauth_scopes: ' + json.dumps(defaults) + '\n')
+    installer.migrate_feishu_oauth_defaults(prefix, tmp_path / 'v1', package)
+    migrated = config.read_text()
+    assert yaml.safe_load(migrated) == {**yaml.safe_load(original), 'feishu_oauth_scopes': defaults}
+    assert '# scope item' in migrated and '# neighbor comment' in migrated and '# history' in migrated
+    if '# scope heading' in original:
+        assert '# scope heading' in migrated
+    installer.migrate_feishu_history_default(prefix, tmp_path / 'v1', package)
+    assert yaml.safe_load(config.read_text()) == {**yaml.safe_load(original), 'feishu_oauth_scopes': defaults, 'feishu_chat_history_enabled': True}
+    facts = json.loads((prefix / installer.MARKER).read_text())['config_migrations']
+    assert facts['feishu-oauth-default-scopes-v1']['phase'] == facts['feishu-chat-history-default-v1']['phase'] == 'completed'
+
+
+@pytest.mark.parametrize('failure_stage', ['config', 'completed'])
+def test_oauth_scope_prepared_retry_keeps_other_migrations(tmp_path, monkeypatch, failure_stage):
+    import yaml
+    prefix, _ = _installation(tmp_path)
+    marker = prefix / installer.MARKER
+    original_record = json.loads(marker.read_text())
+    preserved = {'phase': 'completed', 'evidence': 'earlier-migration'}
+    marker.write_text(json.dumps({**original_record, 'config_migrations': {'earlier': preserved}}))
+    config = prefix / 'data/config/capability_config.yaml'
+    original = 'feishu_oauth_scopes:\n- offline_access\nfeishu_chat_history_enabled: false\n'
+    config.write_text(original)
+    package = tmp_path / 'package'
+    (package / 'config').mkdir(parents=True)
+    (package / 'config/capability_config.yaml').write_text('feishu_oauth_scopes: [offline_access, "im:chat:read"]\n')
+    native = installer._atomic_write_config
+    def interrupted(path, content):
+        if ((failure_stage == 'config' and path == config)
+                or (failure_stage == 'completed' and path == marker and '"completed_at"' in content)):
+            raise OSError('injected interruption')
+        native(path, content)
+    monkeypatch.setattr(installer, '_atomic_write_config', interrupted)
+    with pytest.raises(OSError):
+        installer.migrate_feishu_oauth_defaults(prefix, tmp_path / 'v1', package)
+    facts = json.loads(marker.read_text())['config_migrations']
+    assert facts['earlier'] == preserved and facts['feishu-oauth-default-scopes-v1']['phase'] == 'prepared'
+    assert yaml.safe_load(config.read_text())['feishu_chat_history_enabled'] is False
+    monkeypatch.setattr(installer, '_atomic_write_config', native)
+    installer.migrate_feishu_oauth_defaults(prefix, tmp_path / 'v1', package)
+    assert yaml.safe_load(config.read_text()) == {'feishu_oauth_scopes': ['offline_access', 'im:chat:read'], 'feishu_chat_history_enabled': False}
+    facts = json.loads(marker.read_text())['config_migrations']
+    assert facts['earlier'] == preserved and facts['feishu-oauth-default-scopes-v1']['phase'] == 'completed'
