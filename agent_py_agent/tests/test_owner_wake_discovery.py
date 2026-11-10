@@ -585,6 +585,7 @@ def _write_curator_state(
     last_failure_code: str = "",
     last_daily_finalize_date: str = "",
     raw: str | None = None,
+    candidate_scan_cursor: dict | None = None,
 ) -> None:
     state_path = owner_home / "memory" / "curator" / "state.json"
     state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -610,6 +611,7 @@ def _write_curator_state(
                 "pending_reasons": pending_reasons or [],
                 "pending_requested_at": "",
                 "last_daily_finalize_date": last_daily_finalize_date,
+                "candidate_scan_cursor": candidate_scan_cursor or {},
             }
         ),
         encoding="utf-8",
@@ -680,7 +682,9 @@ def test_curator_pending_review_candidate_discovered(monkeypatch, tmp_path) -> N
     _freeze_curator_utc(monkeypatch, owner_wake_discovery, "2026-08-08T14:00:00+00:00")
     owners = tmp_path / "owners"
     home = owners / "providers" / "feishu" / "users" / "u-cand"
-    _write_curator_state(home, last_success_at=datetime.now(timezone.utc).isoformat())
+    # 已完成R9首次积压扫描；仅候选保留不应再次触发提取或无限重排。
+    _write_curator_state(home, last_success_at=datetime.now(timezone.utc).isoformat(),
+        candidate_scan_cursor={'active': False, 'pending': [], 'scan': {}})
     (home / "memory" / "candidates.jsonl").write_text(
         json.dumps(
             {"candidate_id": "c-1", "status": "pending_review", "origin": "user_explicit"}
@@ -704,7 +708,9 @@ def test_candidate_review_status_ignored(monkeypatch, tmp_path) -> None:
     _freeze_curator_utc(monkeypatch, owner_wake_discovery, "2026-08-08T14:00:00+00:00")
     owners = tmp_path / "owners"
     home = owners / "providers" / "feishu" / "users" / "u-cand-skip"
-    _write_curator_state(home, last_success_at=datetime.now(timezone.utc).isoformat())
+    # 已完成R9首次积压扫描；仅候选保留不应再次触发提取或无限重排。
+    _write_curator_state(home, last_success_at=datetime.now(timezone.utc).isoformat(),
+        candidate_scan_cursor={'active': False, 'pending': [], 'scan': {}})
     (home / "memory" / "candidates.jsonl").write_text(
         json.dumps({"candidate_id": "c-1", "status": "user_rejected", "origin": "user_explicit"})
         + "\n"

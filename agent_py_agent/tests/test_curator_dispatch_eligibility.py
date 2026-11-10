@@ -54,9 +54,10 @@ def _pending_candidate(service, status):
 
 # LLM: 仅调用原只读来源枚举叶；实际owner配置沿原dataclass解析，timezone与本测试consumer同为UTC，不构造controller/Root或enqueue。
 # 函数用途: 查看实际owner是否提供新的策展运输候选，不执行或补造任何队列请求。
-def _curator_sources(root, owner, home):
+def _curator_sources(root, owner, home, *, policy="conservative_v1"):
     discovery = SimpleNamespace(control=SimpleNamespace(home_root=root, config=AgentConfig(
-        owner_maintenance_scan_interval_seconds=0, memory_curator_enabled=True, enable_self_learning=False, timezone='UTC')))
+        owner_maintenance_scan_interval_seconds=0, memory_curator_enabled=True, enable_self_learning=False, timezone='UTC',
+        memory_curator_auto_promotion_policy=policy)))
     discovery._managed_canonical_root = MethodType(CoordinatorBackgroundRequests._managed_canonical_root, discovery)
     return [ref for ref in CoordinatorBackgroundRequests._owner_sources(
         discovery, SimpleNamespace(identity=owner, home_dir=home)) if ref['kind'] == 'curator']
@@ -71,8 +72,10 @@ def test_candidate_only_does_not_publish_new_curator_source(tmp_path, status, po
         service.config = replace(service.config, auto_promotion_policy=policy)
         service.promotion_callback = lambda _candidate_id: pytest.fail('candidate-only must not attempt promotion')
     before = service.state_store.path.read_bytes(), service.candidate_service.path.read_bytes(), curator_input_revision(home)
-    assert _has_pending_memory_curator_work(home,timezone_name='UTC') is False
-    assert _curator_sources(root, owner, home) == []
+    # R9冷积压先给一次纯晋升维护提示；发现层不推断执行宿主有没有callback。
+    automatic = policy != 'manual_only'
+    assert _has_pending_memory_curator_work(home, curator_config=service.config, timezone_name='UTC') is automatic
+    assert len(_curator_sources(root, owner, home, policy=service.config.auto_promotion_policy)) == int(automatic)
     assert (service.state_store.path.read_bytes(), service.candidate_service.path.read_bytes(), curator_input_revision(home)) == before
     assert backend.calls == 0
 
@@ -82,14 +85,32 @@ def test_candidate_only_does_not_publish_new_curator_source(tmp_path, status, po
 def test_candidate_only_is_not_due_and_preserves_complete_state(tmp_path, status, policy):
     _root, _owner, home, service, backend = _quiet_case(tmp_path)
     candidate = _pending_candidate(service, status)
+    reviewed = []
     if policy != 'no_callback':
         service.config = replace(service.config, auto_promotion_policy=policy)
-        service.promotion_callback = lambda _candidate_id: pytest.fail('candidate-only must not attempt promotion')
-    before = service.state_store.path.read_bytes(), service.candidate_service.path.read_bytes(), curator_input_revision(home)
-    for _ in range(2):
-        result = service.run_if_due()
-        assert result.status == 'not_due' and result.run_id == ''
-    assert (service.state_store.path.read_bytes(), service.candidate_service.path.read_bytes(), curator_input_revision(home)) == before
+        service.promotion_callback = lambda identifier: reviewed.append(identifier)
+    before_state = service.state_store.load().to_dict()
+    before = service.candidate_service.path.read_bytes(), curator_input_revision(home)
+    first = service.run_if_due()
+    if policy == 'conservative_v1':
+        # 新合同只续晋升；回调不宣布成功，候选安全状态和模型输入消费均保持。
+        assert first.status == 'succeeded' and first.run_id
+        after = service.state_store.load().to_dict()
+        assert after.pop('candidate_scan_cursor')['active'] is False
+        before_state.pop('candidate_scan_cursor')
+        assert after.pop('last_run_at') >= before_state.pop('last_run_at')
+        assert after == before_state
+        assert reviewed == []  # 单次lesson尚未达到重复门槛，维护不能越过正式晋升资格。
+    else:
+        assert first.status == 'not_due' and first.run_id == '' and not reviewed
+        assert service.state_store.load().to_dict() == before_state
+    revision_after_scan = curator_input_revision(home)
+    second = service.run_if_due()
+    assert second.status == 'not_due' and second.run_id == ''
+    assert service.candidate_service.path.read_bytes() == before[0]
+    assert curator_input_revision(home) == revision_after_scan
+    if policy != 'conservative_v1':
+        assert revision_after_scan == before[1]
     assert service.candidate_service.get(candidate.candidate_id).promotion_mode == 'auto_eligible'
     assert backend.calls == 0
 

@@ -54,7 +54,7 @@ def _ref(call: ToolCall) -> dict[str, str]:
 def chain(tmp_path, monkeypatch):
     root = tmp_path / "task"
     monkeypatch.setattr(archive_module, "_tool_output_archive_root", lambda *_: root)
-    monkeypatch.setattr(archive_module, "_artifact_registry_root", lambda *_: root)
+    monkeypatch.setattr(archive_module, "current_run_artifact_registry_root", lambda *_: root)
     monkeypatch.setattr(archive_module, "runtime_run_scope", lambda *_: SimpleNamespace(to_dict=lambda: {"run_id": _RUN}))
     agent = SimpleNamespace(config=SimpleNamespace(
         tool_output_externalize_min_chars=_MIN_CHARS, tool_output_preview_chars=120,

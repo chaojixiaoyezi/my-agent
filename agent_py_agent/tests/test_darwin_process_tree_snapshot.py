@@ -262,11 +262,26 @@ def test_exact_zombie_probe_preserves_original_date_token_and_never_enumerates_h
 
 
 def test_cached_zombie_identity_uses_fresh_kernel_birth_without_ps(monkeypatch):
+    # 此处模拟Darwin LP64字节，而不是Windows LLP64的long；产品sizeof硬门保持。
+    import builtins
     import ctypes
+    from pathlib import Path
 
     from agent_py_agent.agent.common import heartbeat
-    from agent_py_agent.agent.gateway_parts.multiprocess_takeover_darwin_types import KinfoProc
+    from agent_py_agent.agent.gateway_parts import (
+        multiprocess_takeover_darwin_types as darwin_types,
+    )
 
+    real_import = builtins.__import__
+    darwin_ctypes = SimpleNamespace(**{key: getattr(ctypes, key) for key in dir(ctypes) if not key.startswith('__')})
+    darwin_ctypes.c_long = ctypes.c_int64
+    def import_darwin(name, *args, **kwargs):
+        return darwin_ctypes if name == 'ctypes' else real_import(name, *args, **kwargs)
+    namespace = {'__builtins__': {**vars(builtins), '__import__': import_darwin}}
+    exec(compile(Path(darwin_types.__file__).read_text(encoding='utf-8'), darwin_types.__file__, 'exec'), namespace)
+    KinfoProc = namespace['KinfoProc']
+    assert ctypes.sizeof(KinfoProc) == 648
+    monkeypatch.setattr(darwin_types, 'KinfoProc', KinfoProc)
     value = KinfoProc()
     value.kp_proc.p_pid = ROOT
     value.kp_proc.p_stat = b'\x05'
