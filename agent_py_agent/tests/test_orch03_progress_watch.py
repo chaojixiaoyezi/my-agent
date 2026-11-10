@@ -473,6 +473,74 @@ def test_observation_does_not_depend_on_ps_birth_identity(agent_and_child, repo,
     assert result["error_code"] == "" and result["dirty_paths_count"] == 0 and len(result["head"]) in (40, 64)
 
 
+# LLM: ORCH03-R6（PRO-MSG-027）确定性时序回归：记录每次 killpg 时根进程是否仍未回收。任何破坏性信号（sig != 0）
+#   都必须发生在根进程还被占着的时候；回收之后只允许 killpg(组, 0) 探测。覆盖正常结束、正常 EOF 但留下后代、
+#   占着 stdout 的后代、挂住和灌输出五种路径。
+# 函数用途: 根进程回收后绝不再发破坏性组信号。
+@pytest.mark.skipif(os.name != "posix", reason="替身 git 脚本只在 POSIX 上可执行")
+@pytest.mark.parametrize("scenario", ["clean", "detached_descendant", "stdout_descendant", "hang", "status_flood"])
+def test_no_destructive_group_signal_after_the_root_is_reaped(agent_and_child, repo, monkeypatch, tmp_path, scenario):
+    import shlex
+    import sys
+
+    agent, _child, _ = agent_and_child
+    head = _git(repo, "rev-parse", "HEAD")
+    pid_file = tmp_path / "descendant.pid"
+    if scenario == "detached_descendant":
+        _fake_git(monkeypatch, tmp_path, "rev-parse",
+                  f"sleep 30 >/dev/null 2>&1 </dev/null &\necho $! > {pid_file}\necho {head}")
+    elif scenario == "stdout_descendant":
+        _fake_git(monkeypatch, tmp_path, "rev-parse", f"sleep 30 &\necho $! > {pid_file}\necho {head}")
+    elif scenario == "hang":
+        _fake_git(monkeypatch, tmp_path, "rev-parse", "sleep 30")
+    elif scenario == "status_flood":
+        payload = "import sys; sys.stdout.write('?? f\\0' * 100000)"
+        _fake_git(monkeypatch, tmp_path, "status", f"exec {shlex.quote(sys.executable)} -c {shlex.quote(payload)}")
+    monkeypatch.setattr(git, "GIT_COMMAND_TIMEOUT_SECONDS", 1)
+    spawned = []
+    real_popen, real_killpg = git.subprocess.Popen, os.killpg
+
+    def popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        spawned.append(process)
+        return process
+
+    signals = []
+
+    def killpg(group, sig):
+        owner = next((item for item in spawned if item.pid == group), None)
+        signals.append((int(sig), owner is not None and owner.returncode is None))
+        return real_killpg(group, sig)
+
+    monkeypatch.setattr(git.subprocess, "Popen", popen)
+    monkeypatch.setattr(git.os, "killpg", killpg)
+    _register(monkeypatch, [str(repo)])
+    result = git.observe_registered(agent, str(repo))
+
+    expected = {"clean": "", "detached_descendant": "GIT_DESCENDANTS_LEFT", "stdout_descendant": "GIT_TIMEOUT",
+                "hang": "GIT_TIMEOUT", "status_flood": ""}[scenario]
+    assert result["error_code"] == expected
+    assert [sig for sig, pinned in signals if sig != 0 and not pinned] == []
+    if scenario in {"detached_descendant", "stdout_descendant"}:
+        assert _gone(int(pid_file.read_text().strip()))
+
+
+# LLM: git 先关掉 stdout、过一会儿才退出：EOF 之后必须不回收地等它真正退出，拿到它自己的退出码；不能把仍在运行的
+#   根进程当成“留下的后代”，也不能提前强杀改写退出码。
+# 函数用途: EOF 早于根进程退出时保留真实退出码。
+@pytest.mark.skipif(os.name != "posix", reason="替身 git 脚本只在 POSIX 上可执行")
+@pytest.mark.parametrize(("code", "expected"), [(0, ""), (3, "GIT_FAILED")])
+def test_root_exiting_after_eof_keeps_its_real_exit_code(agent_and_child, repo, monkeypatch, tmp_path, code, expected):
+    agent, _child, _ = agent_and_child
+    head = _git(repo, "rev-parse", "HEAD")
+    _fake_git(monkeypatch, tmp_path, "rev-parse", f"echo {head}\nexec 1>&-\nsleep 0.4\nexit {code}")
+    _register(monkeypatch, [str(repo)])
+    result = git.observe_registered(agent, str(repo))
+
+    assert result["error_code"] == expected
+    assert (result["head"] == head) is (code == 0)
+
+
 def test_unsupported_platform_refuses_before_spawning_git(agent_and_child, repo, monkeypatch):
     agent, _child, _ = agent_and_child
     monkeypatch.setattr(git, "_PLATFORM_SUPPORTED", False)

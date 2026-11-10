@@ -6,20 +6,23 @@
 #   加 --no-optional-locks 不写索引锁；每条命令有超时，输出读到上限即停。任何不满足都返回 error_code，fail closed。
 #   ORCH03-R5：git-dir 与工作树用命令行钉死在已校验路径上（压过本地 core.worktree），commondir/alternates 这类
 #   仓库结构重定向和本地配置 include 一律拒绝，读外部文件的路径型配置用 -c 改成空设备。
-#   ORCH03-R6（PRO-MSG-022/023 修正）：只支持 POSIX，其它平台在启动任何进程前拒绝。git 以新会话启动，进程组号
-#   等于根 pid；清理只针对这个自己创建的组：超时/读满时趁根进程还没被回收（pid 被占着、不可能被复用）对组发
-#   SIGKILL，正常结束则先回收根进程拿真实退出码；之后用 killpg(组, 0) 探测，直到 ESRCH 证明组里一个成员都不剩，
-#   截止前证明不了就是 GIT_CLEANUP_UNCONFIRMED。不依赖 ps 采集启动身份。识别、读取、清理、确认共用同一个绝对
-#   截止时间。主线程非阻塞读取，不起读线程；HEAD 必须是完整提交号，截断或乱码一律拒绝。
-#   已知限制：自己另开会话/进程组逃出去的后代不在组里，看不到也杀不到（不会卡住观察）。
+#   ORCH03-R6（PRO-MSG-022/023/027 修正）：git 以新会话启动，进程组号等于根 pid。任何破坏性信号都只在根进程
+#   还没被回收（pid/组号被它占着、不可能被复用）时发：先用不回收的方式等根进程退出（Linux waitid WNOWAIT，
+#   macOS kqueue NOTE_EXIT），趁它还是僵尸时查组里是否还有活成员，有就当场对组发 SIGKILL 并把这次观察判为不健康；
+#   之后才回收根进程拿真实退出码，回收后只做 killpg(组, 0) 这种无破坏探测，直到 ESRCH，绝不再发信号。截止前证明
+#   不了就是 GIT_CLEANUP_UNCONFIRMED。不依赖 ps。识别、读取、清理、确认共用同一个绝对截止时间。主线程非阻塞读取，
+#   不起读线程；HEAD 必须是完整提交号。没有这些原语的平台在启动任何进程前拒绝。
+#   已知限制：组为空只证明“本组”没有成员；自己另开会话/进程组逃出去的后代不在组里，看不到也杀不到。
 # 模块用途: 给进展分类提供一份可核验的 HEAD/改动数观察，不代表进展本身。
 
 from __future__ import annotations
 
 import os
 import re
+import select
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -43,8 +46,16 @@ _FULL_OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _GIT_DIR_REDIRECTS = ("commondir", "objects/info/alternates")
 # git-dir 里必须是真实文件/目录（不是符号链接）的入口。
 _GIT_DIR_NO_SYMLINK = ("config", "config.worktree", "HEAD", "objects", "refs")
-# 只有 POSIX 有经过验证的会话组清理合同；其它平台在启动任何进程前拒绝。
-_PLATFORM_SUPPORTED = os.name == "posix"
+# 需要两样原语：不回收地等根进程退出（waitid WNOWAIT 或 kqueue NOTE_EXIT），以及在根进程未回收时查组里的活成员
+# （Linux /proc 或 macOS 纯僵尸组的 EPERM 语义）。缺一样就在启动任何进程前拒绝。
+_IS_DARWIN = sys.platform == "darwin"
+_HAS_PROC = Path("/proc/self/stat").exists()
+_PLATFORM_SUPPORTED = os.name == "posix" and (
+    (hasattr(os, "waitid") and hasattr(os, "WNOWAIT") and _HAS_PROC)
+    or (_IS_DARWIN and hasattr(select, "kqueue"))
+)
+# Linux 上查组成员时最多扫这么多个 /proc 条目，超出就算“不知道”，观察判为清理未确认。
+_MAX_PROC_SCAN_ENTRIES = 65536
 # 组清理确认的探测间隔。
 _GROUP_PROBE_INTERVAL_SECONDS = 0.02
 
@@ -167,13 +178,16 @@ def _git(repo: Path, args: list[str], deadline: float) -> dict[str, object]:
     try:
         output, truncated, timed_out = _read_bounded(process, read_until)
     finally:
-        confirmed = _settle_group(process, group, deadline, kill=timed_out or truncated)
+        settled = _settle_group(process, group, deadline, kill=timed_out or truncated)
         if process.stdout is not None:
             process.stdout.close()
-    if not confirmed:
+    if settled == "unconfirmed":
         return {"error_code": "GIT_CLEANUP_UNCONFIRMED", "stdout": b"", "truncated": False}
     if timed_out:
         return {"error_code": "GIT_TIMEOUT", "stdout": b"", "truncated": False}
+    if settled == "descendants":
+        # 正常 EOF 但 git 留下了还活着的后代：已在根进程被占着时清掉，这次输出不当作健康观察。
+        return {"error_code": "GIT_DESCENDANTS_LEFT", "stdout": b"", "truncated": False}
     if process.returncode != 0 and not truncated:
         return {"error_code": "GIT_FAILED", "stdout": b"", "truncated": False}
     return {"error_code": "", "stdout": output, "truncated": truncated}
@@ -207,40 +221,108 @@ def _read_bounded(process: subprocess.Popen, until: float) -> tuple[bytes, bool,
     return bytes(buffer[:MAX_GIT_OUTPUT_BYTES]), len(buffer) >= MAX_GIT_OUTPUT_BYTES, False
 
 
-# LLM: 只对自己创建的会话组发信号。kill=True 时趁根进程未回收先对组发 SIGKILL（组号就是被占着的根 pid）；
-#   否则先等根进程自己退出拿真实退出码，到截止仍不退出就转为强杀。回收根进程后用 killpg(组, 0) 探测：ESRCH
-#   证明组里不剩任何成员；还有成员（含僵尸，macOS 对纯僵尸组回 EPERM）就再发一次 SIGKILL 并继续等，截止前没
-#   等到 ESRCH 就返回 False。组里还有成员时组号不会被分配给新进程，所以补发的信号不会落到无关进程上。
-# 函数用途: 清掉 git 进程组并证明组已为空。
-def _settle_group(process: subprocess.Popen, group: int, deadline: float, *, kill: bool) -> bool:
-    if not kill:
-        try:
-            process.wait(timeout=max(0.0, deadline - GIT_CLEANUP_RESERVE_SECONDS - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            kill = True
-    if kill and process.returncode is None:
+# LLM: 两阶段，破坏性信号只出现在第一阶段（根进程未回收、组号被占着）：kill=True 直接对组发 SIGKILL；否则先不回收
+#   地等根进程退出（到读截止仍不退出就转强杀），根进程成了僵尸后查组里有没有别的活成员，有（或查不清）就对组发
+#   SIGKILL 并记下“有后代”。第二阶段回收根进程拿真实退出码，之后只用 killpg(组, 0) 探测到 ESRCH，不再发任何信号。
+# 函数用途: 清掉 git 进程组并返回 clean / descendants / unconfirmed。
+def _settle_group(process: subprocess.Popen, group: int, deadline: float, *, kill: bool) -> str:
+    descendants = False
+    if not kill and not _wait_root_exit_unreaped(process.pid, deadline - GIT_CLEANUP_RESERVE_SECONDS):
+        kill = True
+    if kill:
         _signal_group(group, signal.SIGKILL)
-        try:
-            process.wait(timeout=max(0.0, deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            return False
-    resent = False
+    else:
+        live = _group_has_live_members(group, process.pid)
+        if live is not False:
+            descendants = True
+            _signal_group(group, signal.SIGKILL)
+            if live is None:
+                # 查不清组成员：已经强杀，但不能说成干净。
+                _reap(process, deadline)
+                return "unconfirmed"
+    if not _reap(process, deadline):
+        return "unconfirmed"
     while True:
         try:
             os.killpg(group, 0)
         except ProcessLookupError:
-            return True
+            return "descendants" if descendants else "clean"
         except PermissionError:
             pass
-        if not resent:
-            _signal_group(group, signal.SIGKILL)
-            resent = True
         if time.monotonic() >= deadline:
-            return False
+            return "unconfirmed"
         time.sleep(_GROUP_PROBE_INTERVAL_SECONDS)
 
 
-# LLM: 组已经没了（ESRCH）或只剩僵尸（macOS EPERM）都不是错误，确认交给 killpg(组, 0) 探测。
+# LLM: 第二阶段入口；回收之后组号不再被根进程占着，调用方不得再发破坏性信号。
+# 函数用途: 在截止前回收根进程。
+def _reap(process: subprocess.Popen, deadline: float) -> bool:
+    try:
+        process.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        return False
+    return True
+
+
+# LLM: 不回收根进程（它保持僵尸、pid 继续被占着）地等它退出：有 waitid 用 WEXITED|WNOWAIT|WNOHANG 轮询，
+#   macOS 用 kqueue NOTE_EXIT（对已是僵尸的进程会立即触发）。到 until 还没退出返回 False。
+# 函数用途: 等根进程退出但不回收它。
+def _wait_root_exit_unreaped(pid: int, until: float) -> bool:
+    if hasattr(os, "waitid") and hasattr(os, "WNOWAIT"):
+        while True:
+            try:
+                if os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is not None:
+                    return True
+            except ChildProcessError:
+                return False
+            if time.monotonic() >= until:
+                return False
+            time.sleep(_GROUP_PROBE_INTERVAL_SECONDS)
+    queue = select.kqueue()
+    try:
+        event = select.kevent(pid, filter=select.KQ_FILTER_PROC, flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                              fflags=select.KQ_NOTE_EXIT)
+        try:
+            return bool(queue.control([event], 1, max(0.0, until - time.monotonic())))
+        except ProcessLookupError:
+            return False
+    finally:
+        queue.close()
+
+
+# LLM: 只在根进程还是僵尸（未回收）时调用。Linux 扫 /proc 找同组且不是僵尸的其它进程（有扫描上限，超出返回 None）；
+#   macOS 对只剩僵尸的组 killpg(组, 0) 回 EPERM，有活成员则成功。返回 True / False / None（查不清）。
+# 函数用途: 判断 git 进程组里除根进程外是否还有活着的成员。
+def _group_has_live_members(group: int, root_pid: int) -> bool | None:
+    if _HAS_PROC:
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return None
+        if len(entries) > _MAX_PROC_SCAN_ENTRIES:
+            return None
+        for name in entries:
+            if not name.isdigit() or int(name) == root_pid:
+                continue
+            try:
+                fields = Path(f"/proc/{name}/stat").read_text(encoding="ascii", errors="replace").rsplit(")", 1)[1].split()
+            except (OSError, IndexError):
+                continue
+            if len(fields) > 2 and fields[2] == str(group) and fields[0] != "Z":
+                return True
+        return False
+    if _IS_DARWIN:
+        try:
+            os.killpg(group, 0)
+        except PermissionError:
+            return False
+        except ProcessLookupError:
+            return False
+        return True
+    return None
+
+
+# LLM: 只在根进程未回收时调用；组已经没了（ESRCH）或只剩僵尸（macOS EPERM）都不是错误。
 # 函数用途: 向 git 进程组发一个信号。
 def _signal_group(group: int, sig: int) -> None:
     try:
