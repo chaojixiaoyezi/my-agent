@@ -350,8 +350,21 @@ def user_access_token(agent):
     scope = tool_approval_scope(agent, str(current.run_id or current.task_id))
     if not scope.active or not tool_approval_scope_is_current(agent, scope):
         raise ValueError("当前本人操作没有有效执行权。")
-    _assert_network(agent, scope)
     actor = oauth_actor(agent, scope)
+
+    def revalidate():
+        _assert_network(agent, scope)
+        if not tool_approval_scope_is_current(agent, scope):
+            raise ValueError("原本人执行已失效。")
+
+    return _user_access_token_with_authority(agent, actor, revalidate=revalidate)
+
+
+def _user_access_token_with_authority(agent, actor, *, revalidate):
+    """宿主执行或原持久规则复用同一刷新 CAS；调用者须反复核验其规范授权。"""
+    revalidate()
+    _assert_network(agent)
+    _assert_actor(agent, actor)
     path = oauth_path(agent, actor)
     row = read_json_object_report(path, context="oauth.token").payload
     if not row or row.get("status") != "ready" or row.get("actor_id") != actor:
@@ -365,15 +378,19 @@ def user_access_token(agent):
             "refresh_token": value["refresh_token"], "client_id": row["app_id"], "client_secret": agent.config.feishu_app_secret})
         ready = _ready_row(agent, row, result)
         _assert_configuration(agent, row)
-        _assert_network(agent, scope)
-        if not tool_approval_scope_is_current(agent, scope):
-            raise ValueError("刷新期间原执行已失效。")
+        revalidate()
+        _assert_network(agent)
+        _assert_actor(agent, actor)
         with _credential_mutation(agent, path) as admission:
             latest = read_json_object_report(path, context="oauth.refresh_commit").payload
             if not latest or latest.get("status") != "ready" or latest.get("ciphertext") != row["ciphertext"]:
                 raise ValueError("刷新期间原授权已变化。")
             _save_credential_row(admission, path, ready)
         value = _decrypt_oauth(agent, ready["ciphertext"])
+    revalidate()
+    _assert_network(agent)
+    _assert_actor(agent, actor)
+    _assert_configuration(agent, row)
     return value["access_token"]
 
 

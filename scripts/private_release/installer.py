@@ -489,6 +489,37 @@ def migrate_feishu_oauth_defaults(prefix: Path, release: Path, package: Path) ->
     _migrate_config_once(prefix, release, config, 'feishu-oauth-default-scopes-v1', transform)
 
 
+def migrate_feishu_history_default(prefix: Path, release: Path, package: Path) -> None:
+    """旧模板的历史查询开关一次采用本次用户要求的新默认，后续显式关闭保持。"""
+    config = prefix / 'data/config/capability_config.yaml'
+    template = package / 'config/capability_config.yaml'
+    if not config.exists() or not template.exists():
+        return
+    if not re.search(r'^feishu_chat_history_enabled:\s*true\s*(?:#.*)?$', template.read_text(encoding='utf-8'), re.M):
+        return
+
+    def transform(original):
+        pattern = re.compile(r'^(?P<prefix>feishu_chat_history_enabled[ \t]*:[ \t]*)(?P<value>[^#\r\n]*)(?P<tail>[^\r\n]*)$', re.M)
+        matches = list(pattern.finditer(original))
+        if len(matches) > 1:
+            raise ValueError('飞书历史查询开关重复，未迁移')
+        old = matches[0].group('value').strip().strip('"\'').lower() if matches else None
+        if old not in (None, 'false', 'true'):
+            raise ValueError('飞书历史查询开关不是布尔值，未迁移')
+        if old == 'false':
+            match = matches[0]
+            value = match.group('value')
+            updated = (original[:match.start()] + match.group('prefix') + 'true'
+                       + value[len(value.rstrip()):] + match.group('tail') + original[match.end():])
+        elif old is None:
+            updated = original.rstrip('\n') + '\n\n# 更新后默认提供飞书历史查询；实际读取仍核验本人/群权限。\nfeishu_chat_history_enabled: true\n'
+        else:
+            updated = original
+        return updated, old, True
+
+    _migrate_config_once(prefix, release, config, 'feishu-chat-history-default-v1', transform)
+
+
 # LLM: 首装保留原owner目录权威；模板优先随包3.14/3.14t并兼容旧目录，更新不覆盖用户模型、凭据或路径。
 # 函数用途: 初始化空白数据，已有配置通过受限的升级迁移入口更新。
 def initialize_data(prefix: Path, release: Path) -> None:
@@ -505,6 +536,7 @@ def initialize_data(prefix: Path, release: Path) -> None:
     package = candidates[0] if candidates else lib / "python3.11/site-packages/agent_py_agent"
     content = (package / "config" / "agent_config.yaml").read_text(encoding="utf-8")
     migrate_feishu_oauth_defaults(prefix, release, package)
+    migrate_feishu_history_default(prefix, release, package)
     if config.exists():
         upgrade_existing_config_defaults(config, content)
         migrate_feishu_progress_default(prefix, release, config, content)

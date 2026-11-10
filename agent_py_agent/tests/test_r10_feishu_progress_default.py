@@ -94,6 +94,23 @@ def test_oauth_only_exact_old_default_once(tmp_path, value, changed):
     assert config.read_text() == original
 
 
+@pytest.mark.parametrize('line', ['feishu_chat_history_enabled: false # 历史模板\n', 'other: keep\n'])
+def test_history_default_adopts_once_and_keeps_later_off(tmp_path, line):
+    prefix, _ = _installation(tmp_path)
+    config = prefix / 'data/config/capability_config.yaml'
+    config.write_text(line)
+    package = tmp_path / 'package'
+    (package / 'config').mkdir(parents=True)
+    (package / 'config/capability_config.yaml').write_text('feishu_chat_history_enabled: true\n')
+    installer.migrate_feishu_history_default(prefix, tmp_path / 'v1', package)
+    assert 'feishu_chat_history_enabled: true' in config.read_text()
+    if '# 历史模板' in line:
+        assert '# 历史模板' in config.read_text()
+    config.write_text('feishu_chat_history_enabled: false\n')
+    installer.migrate_feishu_history_default(prefix, tmp_path / 'v2', package)
+    assert config.read_text() == 'feishu_chat_history_enabled: false\n'
+
+
 from agent_py_agent.tests import test_s2w2_tui_network_mode as network_tests  # noqa: E402
 
 startup_gateway = network_tests.startup_gateway

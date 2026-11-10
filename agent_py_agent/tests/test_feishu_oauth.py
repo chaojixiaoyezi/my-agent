@@ -378,6 +378,42 @@ def test_permission_help_does_not_claim_partial_oauth_grants_are_ready(ctx, monk
     assert details['permission_status'] == 'not_verified'
 
 
+def test_host_authority_uses_original_refresh_without_forging_run_context(ctx, monkeypatch):
+    _dependency, state, payload = _authorize(ctx)
+    _api(ctx, monkeypatch)
+    oauth.complete_oauth(ctx.agent, payload, state, 'Synthetic-Code')
+    row = _row(ctx)
+    with oauth._credential_mutation(ctx.agent, oauth.oauth_path(ctx.agent, 'ou_synthetic')) as admission:
+        oauth._save_credential_row(admission, oauth.oauth_path(ctx.agent, 'ou_synthetic'),
+                                   {**row, 'ready_expires_at': time.time() - 1})
+    ctx.agent._current_run_params = None
+    checks = []
+    token = oauth._user_access_token_with_authority(ctx.agent, 'ou_synthetic',
+                                                    revalidate=lambda: checks.append(True))
+    assert token == 'Synthetic-Access-Token' and len(checks) == 3
+    assert ctx.agent._current_run_params is None
+    assert ctx.api_calls.count(('POST', '/authen/v2/oauth/token')) == 2
+    assert _row(ctx)['ready_expires_at'] > time.time()
+
+
+def test_retired_host_authority_cannot_commit_refreshed_oauth(ctx, monkeypatch):
+    _dependency, state, payload = _authorize(ctx)
+    _api(ctx, monkeypatch)
+    oauth.complete_oauth(ctx.agent, payload, state, 'Synthetic-Code')
+    path = oauth.oauth_path(ctx.agent, 'ou_synthetic')
+    with oauth._credential_mutation(ctx.agent, path) as admission:
+        oauth._save_credential_row(admission, path, {**_row(ctx), 'ready_expires_at': time.time() - 1})
+    before = path.read_bytes()
+    checks = []
+    def revalidate():
+        checks.append(True)
+        if len(checks) > 1:
+            raise ValueError('原规则已停用')
+    with pytest.raises(ValueError, match='原规则已停用'):
+        oauth._user_access_token_with_authority(ctx.agent, 'ou_synthetic', revalidate=revalidate)
+    assert path.read_bytes() == before
+
+
 def test_original_owner_provider_is_authority_not_visible_role(ctx):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
