@@ -1,4 +1,4 @@
-# LLM: 只在原 durable prepare 内读取当前群明确 parent_id；准确消息、群和话题证明先于资源下载。
+# LLM: 只在原 durable prepare 内读取当前聊天明确 parent_id；准确消息、群和话题证明先于资源下载。
 #   父发送者不进入当前身份；文字只作有界外部资料，无缓存、递归引用、最近消息查询或第二入站状态。
 # 模块用途: 核验被引用消息的文字和附件来源，沿原入站入口提交资料或不可读取事实。
 from __future__ import annotations
@@ -58,13 +58,13 @@ class ValidatedQuotedMedia:
     text_omitted: bool = False
 
 
-# LLM: 核心控制命令先走原分流；这里只沿原开关和已受理群事件读取明确 parent，私聊及无引用不发请求。
-# 函数用途: 按文字/附件开关判断是否单次读取明确的群引用，不新造提及证明或权限来源。
+# LLM: 核心控制命令先走原分流；这里只沿原开关和已受理群事件读取明确 parent，无引用不发请求。
+# 函数用途: 按文字/附件开关判断是否单次读取明确的聊天引用，不新造提及证明或权限来源。
 def quoted_media_requested(adapter: object, msg: IncomingMessage) -> bool:
     metadata = msg.metadata or {}
     enabled = getattr(adapter, 'quoted_media_enabled', False) or getattr(adapter, 'quoted_text_enabled', False)
     return bool(msg.channel == 'feishu' and enabled
-        and metadata.get('feishu_chat_type') == 'group' and metadata.get('feishu_chat_id')
+        and metadata.get('feishu_chat_type') in {'group', 'p2p'} and metadata.get('feishu_chat_id')
         and metadata.get('feishu_parent_id') and not system_slash_command_name(msg.content))
 
 
@@ -141,7 +141,7 @@ def _project_members(adapter: object, msg: IncomingMessage, members: object) -> 
 
 
 # LLM: ID/chat/deleted/topic 全部通过后才按开关解析文字/资源；转发仅读同次已证 upper 闭包，不追加查询或改 owner。
-# 函数用途: 核验同群父消息并准备有界资料与准确资源来源，记录覆盖缺口，不猜更早引用或陌生响应项。
+# 函数用途: 核验同聊天父消息并准备有界资料与准确资源来源，记录覆盖缺口，不猜更早引用或陌生响应项。
 def read_quoted_media(adapter: object, msg: IncomingMessage) -> ValidatedQuotedMedia:
     from .feishu_quoted_members import validated_quote_members
 
@@ -169,11 +169,11 @@ def read_quoted_media(adapter: object, msg: IncomingMessage) -> ValidatedQuotedM
     return _project_members(adapter, msg, validated_quote_members(response, parent))
 
 
-# LLM: 同一 prepare 的来源证明必须仍对应当前消息和群；source ID 只能是准确根或本次 GET 已证转发成员。
+# LLM: 同一 prepare 的来源证明必须仍对应当前消息和聊天；source ID 只能是准确根或本次 GET 已证转发成员。
 # 函数用途: 为原下载器核验被引用附件的逐资源来源，不改变资源或身份字段。
 def quoted_media_references(msg: IncomingMessage, quoted: ValidatedQuotedMedia) -> dict[str, object]:
     if (quoted.current_message_id != msg.message_id or quoted.parent_message_id != msg.metadata.get('feishu_parent_id')
-        or quoted.chat_id != msg.metadata.get('feishu_chat_id') or msg.metadata.get('feishu_chat_type') != 'group'
+        or quoted.chat_id != msg.metadata.get('feishu_chat_id') or msg.metadata.get('feishu_chat_type') not in {'group', 'p2p'}
         or any(item.get('source_message_id') not in (quoted.source_message_ids or (quoted.parent_message_id,))
                for item in quoted.items)):
         raise FeishuQuotedMediaError('FEISHU_QUOTED_MEDIA_INVALID')

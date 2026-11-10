@@ -1104,7 +1104,7 @@ def _gateway_message_references(request, conversation):
     quoted = metadata.get('quoted_message_references')
     if quoted is None:
         return ()
-    if (scope is None or scope.channel != 'feishu' or metadata.get('channel_chat_type') != 'group'
+    if (scope is None or scope.channel != 'feishu' or metadata.get('channel_chat_type') not in {'group', 'p2p'}
             or not isinstance(quoted, dict) or set(quoted) != {'schema', 'channel', 'chat_id', 'current_message_id', 'references'}
             or quoted.get('schema') != 'quoted_message_references.v1' or quoted.get('channel') != scope.channel
             or quoted.get('chat_id') != metadata.get('channel_chat_id')

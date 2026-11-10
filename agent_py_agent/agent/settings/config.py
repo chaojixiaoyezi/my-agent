@@ -631,9 +631,9 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     feishu_group_require_bot_mention: bool = True
     # 下载并核验的当前/引用图片作为真实附件交给当前模型；关闭仅保留原附件路径行为，不自动换模型。
     feishu_image_input_enabled: bool = True
-    # 群里引用文件并触发机器人时，按准确父消息读取同群附件；需要飞书消息和资源读取权限。
+    # 在私聊或群里引用文件并触发机器人时，按准确父消息读取同聊天附件；需要飞书消息和资源读取权限。
     feishu_quoted_media_enabled: bool = True
-    # 明确引用同群文字并触发机器人时，只把正文作为外部资料；当前引用者仍决定身份和权限。
+    # 明确引用同聊天文字并触发机器人时，只把正文作为外部资料；当前引用者仍决定身份和权限。
     feishu_quoted_text_enabled: bool = True
     # /verbose stream 整条过程正文的字符上限；只影响展示，不裁剪最终回复。
     im_stream_preview_max_chars: int = 100

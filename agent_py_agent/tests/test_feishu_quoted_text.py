@@ -222,9 +222,35 @@ def test_unaddressed_bot_quote_does_not_query_or_create_ingress(tmp_path, monkey
     assert not gets and not resources and not manager._delivery_worker.store.pending()
 
 
-def test_private_text_quote_does_not_query_parent(tmp_path, monkeypatch):
-    manager, _, _, gets, _ = _manager(tmp_path, monkeypatch, text_enabled=True)
+@pytest.mark.parametrize('chat_type', ['p2p', 'group'])
+def test_bot_alert_quote_reaches_current_prompt_without_old_image_context(tmp_path, monkeypatch, chat_type):
+    manager, _, _, gets, resources = _manager(tmp_path, monkeypatch,
+        {'code': 0, 'data': {'items': [_text_parent('公开合成告警：任务出现异常。')]}},
+        enabled=False, text_enabled=True)
+    event = _event(content='这个告警是什么意思')
+    event['event']['message']['chat_type'] = chat_type
+    payload = _prepare(manager, event)
+    facts = _quote_facts(payload)
+    assert facts['content'] == '公开合成告警：任务出现异常。'
+    assert facts['untrusted'] is True and payload['metadata']['user_id'] == 'ou_user'
+    assert len(gets) == 1 and not resources
+    from agent_py_agent.agent.gateway_parts.request_execution import _gateway_message_references
+    refs = _gateway_message_references(payload, SimpleNamespace(scope=SimpleNamespace(channel='feishu')))
+    assert len(refs) == 1 and refs[0][1] == 'om_file'
+
+
+@pytest.mark.parametrize('fault,code', [('foreign_chat', 'FEISHU_QUOTED_MEDIA_CHAT_MISMATCH'),
+    ('deleted', 'FEISHU_QUOTED_MEDIA_DELETED'), ('permission', 'FEISHU_QUOTED_MEDIA_PERMISSION_REQUIRED')])
+def test_private_alert_quote_keeps_original_source_checks(tmp_path, monkeypatch, fault, code):
+    parent = _text_parent()
+    if fault == 'foreign_chat':
+        parent['chat_id'] = 'oc_foreign'
+    if fault == 'deleted':
+        parent['deleted'] = True
+    response = {'code': 230027} if fault == 'permission' else {'code': 0, 'data': {'items': [parent]}}
+    manager, _, _, gets, resources = _manager(tmp_path, monkeypatch, response, enabled=False, text_enabled=True)
     event = _event()
     event['event']['message']['chat_type'] = 'p2p'
-    _prepare(manager, event)
-    assert not gets
+    payload = _prepare(manager, event)
+    assert code in payload['prompt'] and '[引用消息资料]' not in payload['prompt']
+    assert len(gets) == 1 and not resources

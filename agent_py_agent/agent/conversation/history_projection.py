@@ -71,10 +71,15 @@ def history_row_selected(row: object, *, current_request_id: str, work_scope: di
     role = str(getattr(row, "role", "") or "").strip().lower()
     metadata = getattr(row, "metadata", None)
     metadata = metadata if isinstance(metadata, dict) else {}
+    # 用户已收到的通知是对话历史；仅内部审计转录继续由后台范围读取。
+    channel_message_id = getattr(row, "channel_message_id", "")
+    sent_ids = metadata.get("channel_message_ids")
+    delivered = (isinstance(channel_message_id, str) and bool(channel_message_id.strip())
+                 and isinstance(sent_ids, list) and channel_message_id in sent_ids)
     return not (
         role not in {"user", "assistant"}
         or metadata.get("gateway_request_id") == current_request_id
-        or is_audit_background_transcript_entry(row)
+        or (is_audit_background_transcript_entry(row) and not delivered)
         or not _history_row_visible_in_work_scope(metadata, work_scope)
     )
 

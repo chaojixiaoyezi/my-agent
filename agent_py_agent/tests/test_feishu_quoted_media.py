@@ -146,7 +146,7 @@ def test_controls_and_disabled_feature_make_no_parent_request(tmp_path, monkeypa
     assert payload['prompt'] == body and not gets and not resources
 
 
-def test_config_off_and_private_quote_make_no_parent_request(tmp_path, monkeypatch):
+def test_config_off_and_private_quote_use_explicit_switch_and_same_chat_source(tmp_path, monkeypatch):
     manager, _, _, gets, resources = _manager(tmp_path, monkeypatch, enabled=False)
     _prepare(manager, _event())
     assert not gets and not resources
@@ -154,7 +154,7 @@ def test_config_off_and_private_quote_make_no_parent_request(tmp_path, monkeypat
     event = _event()
     event['event']['message']['chat_type'] = 'p2p'
     _prepare(manager, event)
-    assert not gets and not resources
+    assert len(gets) == 1 and resources == [('om_file', 'file_synthetic', 'file')]
 
 
 @pytest.mark.parametrize('mention', ['all', 'ou_other'])

@@ -316,3 +316,30 @@ def test_rows_native_drops_but_text_keeps_do_not_change_native_output(tmp_path, 
     text = seed_text_messages(seed)
     assert (text == (("user", ""), ("assistant", ""))) if case == "background_empty_rows" else (text == ())
     assert _native(seed) == _legacy_fallback(seed) == [], "跳过旧文本回退前后，原生边界输出一致"
+
+
+@pytest.mark.parametrize('reason', ['audit_finding', 'audit_capacity_alert'])
+def test_delivered_alert_is_readable_in_next_turn_but_unsent_background_stays_excluded(tmp_path, reason):
+    from agent_py_agent.agent.conversation.store import ConversationStore
+
+    store = ConversationStore(tmp_path / 'conversations')
+    thread = store.threads.create(title='公开告警验收')
+    metadata = {'task_id': 'synthetic-task', 'reason': reason,
+                'background_delivery_reason': 'scheduled'}
+    internal = store.messages.append({'thread_id': thread.thread_id, 'role': 'assistant',
+        'channel': 'feishu', 'content': '内部未投递材料', 'metadata': metadata})
+    delivered = store.messages.append({'thread_id': thread.thread_id, 'role': 'assistant',
+        'channel': 'feishu', 'channel_message_id': 'om_sent_alert', 'content': '公开合成告警：异常已发生',
+        'metadata': {**metadata, 'channel_message_ids': ['om_sent_alert']}})
+    user = store.messages.append({'thread_id': thread.thread_id, 'role': 'user',
+        'channel': 'feishu', 'content': '刚才这条告警是什么'})
+    agent = SimpleNamespace(conversation_store=store, config=SimpleNamespace())
+    errors = []
+    rows = conversation_history_rows(agent, thread.thread_id, 'next-request', errors)
+    assert not errors
+    assert delivered.message_id in {r.message_id for r in rows}
+    assert user.message_id in {r.message_id for r in rows}
+    assert internal.message_id not in {r.message_id for r in rows}
+    provider = provider_history_messages_from_rows(rows)
+    assert '公开合成告警：异常已发生' in str(provider)
+    assert '内部未投递材料' not in str(provider)

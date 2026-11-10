@@ -339,7 +339,7 @@ def _gateway_ask_payload(msg: IncomingMessage, *, input_media: tuple[dict, ...] 
             metadata[target] = incoming_metadata[source]
     quoted = incoming_metadata.get('quoted_message_references')
     if (isinstance(quoted, dict) and quoted.get('schema') == 'quoted_message_references.v1'
-            and quoted.get('channel') == msg.channel == 'feishu' and chat_type == 'group'
+            and quoted.get('channel') == msg.channel == 'feishu' and chat_type in {'group', 'p2p'}
             and quoted.get('chat_id') == chat_id and quoted.get('current_message_id') == msg.message_id):
         metadata['quoted_message_references'] = dict(quoted)
     payload: dict[str, object] = {
