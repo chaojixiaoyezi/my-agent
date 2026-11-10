@@ -135,6 +135,8 @@ def test_configured_model_executes_and_projection_moves_from_queued_to_terminal(
     queued = ok(native, 'background_agents.get', {'agent_id': agent['agent_id']})
     assert queued['scheduling']['state'] == 'queued' and queued['scheduling']['model_ready'] is True
     assert queued['scheduling']['wake_signal_ids'] and queued['pending_tasks'][0]['current_run_id'] is None
+    # G1/ROUTE-05：未结束的任务没有结果视图；受理不等于已结束。
+    assert 'result' not in ok(native, 'tasks.get', {'task_id': task_id})
     reports = tick(scheduler_for(host), agent['agent_id'], time.time())
     assert isinstance(reports, list) and reports and reports[0].runtime_status == 'ok'
     assert host.conversation_store.session_tasks.require(task_id).status == 'done'
@@ -143,6 +145,37 @@ def test_configured_model_executes_and_projection_moves_from_queued_to_terminal(
     detail = ok(native, 'tasks.get', {'task_id': task_id})
     assert detail['task']['status'] == 'done'
     assert detail['scheduling']['state'] == 'terminal' and detail['scheduling']['reason_code'] == ''
+    # 纯文本结果经原任务耐久摘要可见；结果回报的发布状态按准确回执投影，与“已结束”分开。
+    stored = host.conversation_store.session_tasks.require(task_id)
+    assert stored.summary and stored.sender_thread_id and stored.result_refs == ()
+    assert detail['result'] == {'summary': stored.summary, 'summary_truncated': False, 'report': 'pending'}
+
+
+def test_task_result_view_redacts_bounds_and_reports_unreadable_receipts():
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.background_scheduling_view import task_result_view
+
+    def unreadable(thread_id, key):
+        raise OSError('wake ledger locked')
+
+    store = SimpleNamespace(wakes=SimpleNamespace(delivery_receipt=unreadable))
+    secret = 'sk-' + 'a' * 40
+    done = SimpleNamespace(task_id='stask-r1', status='done', summary=f'key {secret} ' + 'x' * 5000,
+                           sender_thread_id='thread-origin')
+    view = task_result_view(store, done)
+    assert secret not in view['summary'] and len(view['summary']) == 4000
+    assert view['summary_truncated'] is True and view['report'] == 'unknown'
+    receipts = SimpleNamespace(wakes=SimpleNamespace(delivery_receipt=lambda thread_id, key: {
+        'session_task_result:stask-r2:failed': 'handled'}.get(key, '')))
+    failed = SimpleNamespace(task_id='stask-r2', status='failed', summary='', sender_thread_id='thread-origin')
+    assert task_result_view(receipts, failed) == {'summary': '', 'summary_truncated': False, 'report': 'handled'}
+    unpublished = SimpleNamespace(task_id='stask-r3', status='done', summary='ok', sender_thread_id='thread-origin')
+    assert task_result_view(receipts, unpublished)['report'] == 'not_published'
+    orphan = SimpleNamespace(task_id='stask-r4', status='done', summary='ok', sender_thread_id='')
+    assert task_result_view(receipts, orphan)['report'] == 'not_applicable'
+    assert task_result_view(receipts, SimpleNamespace(task_id='stask-r5', status='pending', summary='',
+                                                      sender_thread_id='thread-origin')) is None
 
 
 def test_deleted_profile_counts_failures_until_quarantine_with_terminal_reason(native):

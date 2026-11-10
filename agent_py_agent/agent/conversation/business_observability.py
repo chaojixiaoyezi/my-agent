@@ -22,7 +22,7 @@ from ..common.log_redaction import redact_sensitive_value
 from ..plugin_host.business_action_specs import business_defs
 from ..runtime_db.recovery_guard import RuntimeDatabaseDeferred
 from ..runtime_db.repository import AGENT_RUN_TERMINAL_STATUSES, RuntimeRepository
-from .background_scheduling_view import task_scheduling_view
+from .background_scheduling_view import task_result_view, task_scheduling_view
 from .background_team_lifecycle import background_identity
 from .business_access import (
     BusinessError,
@@ -373,11 +373,15 @@ class BusinessObservationService:
             raise BusinessError('OBSERVATION_NOT_FOUND')
         workflow = task.metadata.get('workflow_ref')
         # 普通规范任务没有Workflow关联；保留null，不捏造引用或修改任务元数据。
-        return {'task': _view('TaskView', rows[0].value), 'assignments': [{
+        detail = {'task': _view('TaskView', rows[0].value), 'assignments': [{
             'assignment_ref': task.task_id, 'task_id': task.task_id, 'sender_thread_id': task.sender_thread_id,
             'target_thread_id': task.target_thread_id, 'status': task.status, 'result_refs': list(task.result_refs)}],
             'workflow_ref': workflow, 'result_refs': list(task.result_refs), 'allowed_actions': [],
             'scheduling': task_scheduling_view(self.store, task)}
+        result = task_result_view(self.store, task)
+        if result is not None:
+            detail['result'] = result
+        return detail
 
     # LLM: 同一线程/任务在本页只读一次，消息行仍逐条活授权且沿原归档边界。
     # 函数用途: 返回有界规范消息页及真实历史边界。

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1443,
+  "count": 1444,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -3330,6 +3330,14 @@
       "unit": "秒",
       "category": "上限预算",
       "description": "后台进度失败退避封顶 3600 秒（1 小时）：防止等待无限拉长。"
+    },
+    {
+      "name": "_MAX_RESULT_SUMMARY_CHARS",
+      "file": "agent_py_agent/agent/conversation/background_scheduling_view.py",
+      "value": 4000,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "已结束任务摘要在业务投影里的最大字符数（与 TaskResultView.summary 的 maxLength 一致）。"
     },
     {
       "name": "SHUTDOWN_WAIT_SECONDS",

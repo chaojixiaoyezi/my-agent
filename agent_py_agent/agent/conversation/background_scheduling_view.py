@@ -123,4 +123,28 @@ def task_scheduling_view(store: object, task: object) -> dict:
     return scheduling_view(store, thread_id=task.target_thread_id, tasks=[task])
 
 
-__all__ = ["model_readiness", "scheduling_view", "task_scheduling_view"]
+# 已结束任务摘要在业务投影里的最大字符数（与 TaskResultView.summary 的 maxLength 一致）。
+_MAX_RESULT_SUMMARY_CHARS = 4000
+
+
+# LLM: 只读原 SessionTask 的耐久摘要与结果回报的准确发布回执；不读队列、不改任务，读失败记 unknown。
+# 函数用途: 区分“任务已结束”与“结果回报已发布 / 已被来源会话处理”，未结束的任务不给结果视图。
+def task_result_view(store: object, task: object) -> dict | None:
+    if task.status not in SESSION_TASK_TERMINAL_STATUSES:
+        return None
+    from ..common.log_redaction import redact_sensitive_value
+    from .session_task_report import result_report_key
+
+    summary = str(redact_sensitive_value(str(getattr(task, "summary", "") or "")))
+    report = "not_applicable"
+    if str(getattr(task, "sender_thread_id", "") or "").strip():
+        try:
+            receipt = store.wakes.delivery_receipt(task.sender_thread_id, result_report_key(task))
+        except (OSError, ValueError, RuntimeError, sqlite3.Error):
+            receipt = None
+        report = {"pending": "pending", "handled": "handled", "": "not_published"}.get(receipt, "unknown")
+    return {"summary": summary[:_MAX_RESULT_SUMMARY_CHARS],
+            "summary_truncated": len(summary) > _MAX_RESULT_SUMMARY_CHARS, "report": report}
+
+
+__all__ = ["model_readiness", "scheduling_view", "task_result_view", "task_scheduling_view"]

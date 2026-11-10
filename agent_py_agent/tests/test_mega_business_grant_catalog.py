@@ -108,6 +108,21 @@ def test_frozen_full_catalog_and_schema_bundle_hashes():
         assert result["properties"].pop("scheduling") == {"$ref": "#/$defs/BackgroundSchedulingView"}
     for definitions in (normalized_api["$defs"], normalized_schemas["$defs"], normalized_defs):
         assert definitions.pop("BackgroundSchedulingView") == scheduling_schema
+    # ROUTE-05/G1 只可选追加已结束任务的结果视图：锁住新定义与 tasks.get 的可选引用。
+    task_result_schema = {"type": "object", "properties": {
+        "summary": {"type": "string", "minLength": 0, "maxLength": 4000},
+        "summary_truncated": {"type": "boolean"},
+        "report": {"type": "string", "enum": ["not_applicable", "not_published", "pending", "handled", "unknown"]}},
+        "required": ["summary", "summary_truncated", "report"], "additionalProperties": False}
+    task_results = [definitions["Result_tasks_get"] for definitions in (
+        normalized_api["$defs"], normalized_schemas["$defs"], normalized_defs)]
+    task_results += [row["result_schema"] for row in normalized_api["actions"] if row["action"] == "tasks.get"]
+    assert len(task_results) == 4
+    for result in task_results:
+        assert "result" not in result["required"]
+        assert result["properties"].pop("result") == {"$ref": "#/$defs/TaskResultView"}
+    for definitions in (normalized_api["$defs"], normalized_schemas["$defs"], normalized_defs):
+        assert definitions.pop("TaskResultView") == task_result_schema
     # WF-07 只可选公开已有 foreach 配置：锁住准确 schema，再规范化比较原冻结目录。
     foreach_schema = {"type": "object", "properties": {
         "from": {"type": "string", "minLength": 3, "maxLength": 512},
