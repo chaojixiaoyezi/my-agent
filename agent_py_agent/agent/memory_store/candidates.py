@@ -407,6 +407,37 @@ class CandidateService:
             return read_candidate_window(self.path, read_manifest(self.path), cursor,
                 references=references, max_records=max_records)
 
+    def anchor_rows(self, scopes):
+        """精确前十二锚点；旧投影分批发表，片间释放原锁且只在完整后交付。"""
+        from .candidate_anchor_index import read_anchors, ready
+        while True:
+            with self._locked_candidates():
+                header = read_manifest(self.path)
+                if header is not None:
+                    rows = CandidateRows(self.path, header)
+                    if ready(rows):
+                        return read_anchors(rows, scopes)
+                    if not rows:
+                        return ()
+            with _quota_admission(self.quota_enforcer) as admission, self._locked_candidates():
+                rows = self._load_unlocked()
+                if not isinstance(rows, CandidateRows):
+                    if not rows:
+                        return ()
+                    # 原JSONL迁移沿唯一写口，失败不发表新头；不另建权威或截断旧数据。
+                    _write_candidates_unlocked(self.path, rows, admission=admission, coordinator_io=self.coordinator_io)
+                    rows = self._load_unlocked()
+                if ready(rows):
+                    return read_anchors(rows, scopes)
+                start = rows.index.get(rows.root, 'anchor/progress') or 0
+                if type(start) is not int or not 0 <= start <= len(rows):
+                    raise CandidateStoreCorruptError('candidate anchor progress is invalid')
+                rows.anchor_build_end = min(len(rows), start + 128)
+                rows.anchor_build_positions = range(start, rows.anchor_build_end)
+                for position in rows.anchor_build_positions:
+                    rows[position]
+                _write_candidates_unlocked(self.path, rows, admission=admission, coordinator_io=self.coordinator_io)
+
     def filter_observation_conflicts(self, observations, *, rejected_bindings=()):
         """在原候选锁内按索引预演观察，不复制全部历史或提前写入。"""
         from .curator_rejected_bindings import retain_rejected_target_bindings
@@ -2007,7 +2038,7 @@ def _candidate_node_family(index, root):
             pending.extend(node['children'].values())
         else:
             for key, value in node['entries'].items():
-                if key.startswith('statusroot/') and value is not None:
+                if key.startswith(('statusroot/', 'anchorroot/')) and value is not None:
                     pending.append(value)
                 if key.startswith('row/') and value:
                     yield value['record']['ref']
@@ -2094,7 +2125,7 @@ def _write_incremental_candidates(path, candidates, *, admission, coordinator_io
         'reviewer': 'memory-hard-delete', 'now': utc_now_iso()}
     archives = dict(cold_changes or {})
     archives.update(_cold_redaction_plan(path, options, archives))
-    if isinstance(candidates, CandidateRows) and not rows.changed() and not archives:
+    if isinstance(candidates, CandidateRows) and not rows.changed() and not archives and not hasattr(rows, "anchor_build_end"):
         return
     root, writes, cleanup = rows.plan()
     if not isinstance(candidates, CandidateRows) and previous is not None:

@@ -289,7 +289,7 @@ def attach_candidate_anchors(batch, candidates):
         if event.task_id:
             _add_anchor_scope(scopes, "project", event.task_id)
     anchors, counts = [], {}
-    rows = candidates.readonly_rows(statuses={"pending_review", "approved", "observed", "blocked_missing_evidence"})
+    rows = candidates.anchor_rows(scopes)
     for row in sorted(rows, key=lambda item: (item.last_observed_at, item.candidate_id), reverse=True):
         scope = (row.scope["scope_type"], row.scope["scope_key"])
         key = (*scope, row.candidate_type)

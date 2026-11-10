@@ -102,6 +102,14 @@ class PlannedIndex(ImmutableJsonIndex):
         self.loaded = set()
         self.obsolete = set()
 
+    @staticmethod
+    def _maximum(values):
+        values = list(values)
+        anchors = [value for value in values if isinstance(value, dict) and 'anchor_rank' in value]
+        if anchors:
+            return max(anchors, key=lambda value: value['anchor_rank'])
+        return ImmutableJsonIndex._maximum(values)
+
     def _save(self, node):
         raw = (json.dumps(node, ensure_ascii=False, sort_keys=True, separators=(',', ':')) + '\n').encode()
         if len(raw) > 1024 * 1024:
@@ -174,7 +182,7 @@ class PlannedIndex(ImmutableJsonIndex):
                 pending.extend(node['children'].values())
             else:
                 for key, value in node['entries'].items():
-                    if key.startswith('statusroot/') and value is not None:
+                    if key.startswith(('statusroot/', 'anchorroot/')) and value is not None:
                         pending.append(value)
                     if key.startswith('row/') and value:
                         blob = value['record']['ref']
@@ -318,6 +326,11 @@ class CandidateRows(MutableSequence):
             root = self.index.put(root, 'obs/' + key, sorted(values))
         for key, values in bindings.items():
             root = self.index.put(root, 'binding/' + key, sorted(values, key=lambda value: -1 if value is None else value))
+        from .candidate_anchor_index import plan_anchors
+        anchor_changes = {position: (position, row, old) for position, row, old in changes}
+        for position in getattr(self, 'anchor_build_positions', ()):
+            anchor_changes.setdefault(position, (position, self[position], None))
+        root = plan_anchors(self, root, anchor_changes.values())
         writes, cleanup = self.index.finish(root)
         return root, writes, cleanup
 
