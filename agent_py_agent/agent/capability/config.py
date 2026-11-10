@@ -22,7 +22,7 @@ _CAPABILITY_CONFIG_CACHE: OrderedDict[tuple[str, int, int, int, int, int], Capab
 _CAPABILITY_CONFIG_CACHE_MAX_SIZE = 64
 
 DEFAULT_FEISHU_OAUTH_SCOPES = (
-    'offline_access', 'im:chat:read', 'im:message:readonly',
+    'offline_access', 'im:chat:read', 'im:chat:readonly', 'im:message:readonly',
     'im:message.p2p_msg:get_as_user', 'im:message.group_msg:get_as_user',
 )
 

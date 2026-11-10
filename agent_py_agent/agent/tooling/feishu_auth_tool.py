@@ -39,7 +39,7 @@ class FeishuAuthTool(BaseTool):
         "authorize会将任务保存为待输入并释放执行资源，填写后恢复原任务。"),
         input_schema={"type": "object", "properties": {"action": {"type": "string", "enum": ["permissions", "status", "authorize", "revoke"]}},
                       "required": ["action"], "additionalProperties": False},
-        hints=ToolModelHints(category="network", keywords=("飞书", "本人", "登录", "授权", "OAuth"),
+        hints=ToolModelHints(category="network", keywords=("飞书", "本人", "登录", "授权", "权限", "开发者后台", "OAuth"),
                              default_deferred=True, deferred_summary="飞书权限清单及应用后台申请链接；本人授权状态/私发登录卡"))
     runtime_policy = ToolRuntimePolicy(effect_resolver=EffectResolverPolicy("mutating",
         by_parameter=(("action", (("status", "read_only"), ("permissions", "read_only"))),)), idempotency_policy=IdempotencyPolicy("operation"),

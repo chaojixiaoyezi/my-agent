@@ -1054,6 +1054,7 @@ agent_py_agent/
 |-- agent_py_agent/agent/user_space/task_credential_http.py # 原宿主HTTP的引用登录、会话与签名
 |-- agent_py_agent/agent/user_space/feishu_oauth.py # 当前本人授权、密文token和刷新
 |-- agent_py_agent/agent/user_space/feishu_authorization.py # 飞书功能权限、应用后台链接与本人授权配置事实
+|-- agent_py_agent/agent/adapter/feishu_user_history.py # 本人OAuth可见私聊/群会话发现与有界历史读取
 |-- agent_py_agent/agent/tooling/feishu_auth_tool.py # 渐进发现的本人授权交互
 |-- agent_py_agent/agent/gateway_parts/feishu_oauth_service.py # 原Gateway的验签OAuth回调
 |-- agent_py_agent/agent/adapter/feishu_cli.py # 固定随包程序、私有stdin和单次官方运输
@@ -1070,6 +1071,11 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_task_credential_http.py # 引用登录、CSRF、签名和同源边界
 |-- agent_py_agent/tests/test_feishu_cli_backend.py # 私有运输、停止与未知写入
 |-- agent_py_agent/tests/test_feishu_oauth.py # 本人授权回调、撤销与身份负例
+|-- agent_py_agent/tests/test_feishu_user_history.py # 本人历史真实HTTP往返、分页绑定和撤权负例
+|-- agent_py_agent/tests/test_r10_feishu_progress_default.py # 默认过程卡、显式关闭和安装迁移
+|-- agent_py_agent/tests/test_r9_feishu_user_event_sources.py # 指定群成员订阅、入站预筛和宿主租约
+|-- agent_py_agent/tests/test_r10_feishu_sheet_structure.py # 建子表/重命名的编辑权限与未知写入不重放
+|-- docs/design/FEISHU_USER_MESSAGE_HISTORY.md # 本人可见会话、授权范围和部分覆盖说明
 `-- docs/design/IM_UNATTENDED_IMPLEMENTATION.md # 本期实施合同、部署和验收边界
 ```
 

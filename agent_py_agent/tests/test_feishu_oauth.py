@@ -368,6 +368,18 @@ def test_permission_help_reports_deployment_scope_upper_bound(ctx):
     assert ctx.oauth_config.feishu_oauth_scopes == ['offline_access']
 
 
+def test_group_permission_help_distinguishes_chat_get_and_user_vs_bot_events(ctx):
+    from agent_py_agent.agent.user_space.feishu_authorization import authorization_guidance
+    capabilities = authorization_guidance(ctx.agent)['capabilities']
+    assert capabilities['list_own_chats']['required_scopes'] == ['im:chat:read']
+    assert capabilities['verify_own_group_membership']['required_scopes'] == ['im:chat:readonly']
+    assert capabilities['receive_group_messages']['identity'] == 'bot'
+    assert 'im:message.group_msg' in capabilities['receive_group_messages']['required_scopes']
+    bot_scopes = capabilities['receive_other_bot_messages']['required_scopes']
+    assert 'im:message.group_msg.include_bot:read' in bot_scopes
+    assert 'im:chat:readonly' in bot_scopes and 'im:chat:read' not in bot_scopes
+
+
 def test_permission_help_does_not_claim_partial_oauth_grants_are_ready(ctx, monkeypatch):
     _dependency, state, payload = _authorize(ctx)
     _api(ctx, monkeypatch)
