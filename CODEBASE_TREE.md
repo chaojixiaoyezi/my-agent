@@ -1079,6 +1079,8 @@ agent_py_agent/
 |-- docs/design/R8_QUOTA_ROOT_MEMBERSHIP.md # 有限配额根目录成员核验、分片与超上限行为。
 |-- docs/design/R8_HOST_WAIT_OWNERSHIP.md # 自有子进程的等待归属与退出证明边界。
 |-- docs/design/R9_CANDIDATE_PROMOTION_WINDOWS.md # 候选晋升的读取上限与恢复语义。
+|-- docs/design/R9_CANDIDATE_ANCHOR_INDEX.md # 正式候选索引内的经验锚点投影与分片构建
+|-- agent_py_agent/agent/memory_store/candidate_anchor_index.py # 按范围和类型维护最新锚点
 |-- docs/design/R8_HTTP_BODY_READINESS.md # 慢正文准入、正常请求保留容量与套接字回放。
 |-- agent_py_agent/agent/gateway_parts/http_body_readiness.py # 有界 HTTP 前缀分类及原生 socket 的读取顺序。
 |-- agent_py_agent/tests/test_dispatch_host_wait_ownership.py # 只读判活、直接子进程的真实退出码及等待异常。
@@ -3680,6 +3682,9 @@ agent_py_agent/
 |   |-- test_r9_candidate_promotion_windows.py  # 候选晋升分页、重启续读和调度收尾
 |   |-- test_r9_model_result_consumer_lifetime.py  # 模型结果迟到时的引用释放与正常错误交付
 |   |-- test_r9_tui_stream_bootstrap_wire.py  # 真实客户端首次控制、流式显示及跨版本重试
+|   |-- test_r9_background_observation_bounds.py  # 后台未决责任的轮转检查和退出引用释放
+|   |-- test_r9_candidate_anchor_index.py  # 有序候选锚点、旧库续建和配额
+|   |-- test_r9_restart_drain_lifecycle.py  # 可逆排空与失败收尾的同代证明
 |   |-- test_curator_dispatch_eligibility.py # 待确认候选不单独运输/策展，保pending、旧lease、新输入与日终
 |   |-- test_curator_recovery_race.py  # Curator 双进程发现/清理交错与唯一恢复执行
 |   |-- test_curator_recovery_critical_section.py # Curator manifest重验、清理审计领取持锁与异常释放
