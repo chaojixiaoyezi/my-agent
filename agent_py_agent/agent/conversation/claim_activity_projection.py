@@ -1,6 +1,7 @@
 """临时磁盘投影保留分片续点；只有稳定且完整的 canonical 核对才能证明空闲。"""
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import os
@@ -17,6 +18,7 @@ from .store_claims import _read_claim_report
 
 _LOCK = threading.RLock()
 _CACHE = None
+_EXITING_PID = None
 _PORTABLE = {}
 _NATIVE = os.name != "nt"
 
@@ -65,6 +67,52 @@ def _small_proof(directory, deadline):
             os.close(descriptor)
 
 
+def close_claim_activity_projection():
+    """同一模块锁内先归还流和连接，再删本进程目录；可重复关闭并重建下一代。"""
+    global _CACHE
+    with _LOCK:
+        error = None
+        for key, (stream, _accessed) in list(_PORTABLE.items()):
+            try:
+                stream.close()
+            except BaseException as exc:
+                if error is None:
+                    error = exc
+            else:
+                _PORTABLE.pop(key, None)
+        cached = _CACHE
+        if cached is not None:
+            pid, directory, conn = cached[:3]
+            # 关闭失败不得让下次读者借到半初始化或已关闭的连接。
+            _CACHE = pid, directory, conn, False
+            if pid != os.getpid():
+                directory._finalizer.detach()
+            try:
+                if conn is not None:
+                    conn.close()
+                _CACHE = pid, directory, None, False
+                if pid == os.getpid():
+                    directory.cleanup()
+                _CACHE = None
+            except BaseException as exc:
+                if error is None:
+                    error = exc
+        if error is not None:
+            raise error
+
+
+def _close_at_exit():
+    global _EXITING_PID
+    with _LOCK:
+        # 更早注册的退出回调还可能查询；只能返回unknown，不能在已清理后重建目录。
+        _EXITING_PID = os.getpid()
+        close_claim_activity_projection()
+
+
+# 不逐代捕获连接；TD自动finalizer由本模块接管，退出必须按同一关闭顺序。
+atexit.register(_close_at_exit)
+
+
 def _before_fork():
     # 动态读取当前锁：child 重置后再次 fork 也必须守住自己的 SQL/目录流边界。
     _LOCK.acquire()
@@ -75,16 +123,10 @@ def _after_fork_parent():
 
 
 def _after_fork():
-    global _LOCK, _CACHE
+    global _LOCK
     _LOCK = threading.RLock()
-    if _CACHE is not None:
-        # child 不拥有父进程临时目录：先解绑继承的 finalizer，再丢弃连接副本。
-        _CACHE[1]._finalizer.detach()
-        _CACHE[2].close()
-        _CACHE = None
-    for stream, _ in _PORTABLE.values():
-        stream.close()
-    _PORTABLE.clear()
+    # 继承的PID不匹配：只关本子进程副本，绝不cleanup父进程目录。
+    close_claim_activity_projection()
 
 
 if hasattr(os, 'register_at_fork'):
@@ -94,25 +136,43 @@ if hasattr(os, 'register_at_fork'):
 
 def _connection():
     global _CACHE
-    if _CACHE is None or _CACHE[0] != os.getpid():
-        # 一个进程只持有一个缓存连接，不随 owner 数量保留目录 FD 或 Python 活跃集。
+    if os.getpid() == _EXITING_PID:
+        raise sqlite3.OperationalError('claim projection process exit in progress')
+    if (_CACHE is not None and (_CACHE[0] != os.getpid() or not _CACHE[3])) or (_CACHE is None and _PORTABLE):
+        close_claim_activity_projection()
+    if _CACHE is None:
+        # 一个进程只持有一个缓存连接；未ready资源也登记，异常不能交给GC碰运气。
         directory = tempfile.TemporaryDirectory(prefix='my-agent-claim-view-')
-        conn = sqlite3.connect(os.path.join(directory.name, 'projection.sqlite3'),
-                               check_same_thread=False, timeout=0)
-        conn.execute('PRAGMA journal_mode=MEMORY')
-        conn.execute('PRAGMA synchronous=OFF')
-        conn.execute('PRAGMA cache_size=-256')
-        conn.execute('PRAGMA mmap_size=0')
-        conn.executescript('''
-            CREATE TABLE scans (store TEXT PRIMARY KEY, signature TEXT, generation INTEGER,
-                cursor TEXT, complete INTEGER, unknown INTEGER, checked REAL, last_access REAL);
-            CREATE INDEX scan_access ON scans(last_access);
-            CREATE INDEX scan_waiting ON scans(complete,generation);
-            CREATE TABLE busy (store TEXT, generation INTEGER, thread TEXT,
-                PRIMARY KEY(store,generation,thread));
-            CREATE TABLE retired (store TEXT, generation INTEGER, PRIMARY KEY(store,generation));
-        ''')
-        _CACHE = os.getpid(), directory, conn
+        _CACHE = os.getpid(), directory, None, False
+        conn = None
+        try:
+            # weakref退出清理不能早于仍由_CACHE持有的SQLite句柄。
+            directory._finalizer.detach()
+            conn = sqlite3.connect(os.path.join(directory.name, 'projection.sqlite3'),
+                                   check_same_thread=False, timeout=0)
+            _CACHE = os.getpid(), directory, conn, False
+            conn.execute('PRAGMA journal_mode=MEMORY')
+            conn.execute('PRAGMA synchronous=OFF')
+            conn.execute('PRAGMA cache_size=-256')
+            conn.execute('PRAGMA mmap_size=0')
+            conn.executescript('''
+                CREATE TABLE scans (store TEXT PRIMARY KEY, signature TEXT, generation INTEGER,
+                    cursor TEXT, complete INTEGER, unknown INTEGER, checked REAL, last_access REAL);
+                CREATE INDEX scan_access ON scans(last_access);
+                CREATE INDEX scan_waiting ON scans(complete,generation);
+                CREATE TABLE busy (store TEXT, generation INTEGER, thread TEXT,
+                    PRIMARY KEY(store,generation,thread));
+                CREATE TABLE retired (store TEXT, generation INTEGER, PRIMARY KEY(store,generation));
+            ''')
+            _CACHE = os.getpid(), directory, conn, True
+        except BaseException as primary:
+            if conn is not None:
+                _CACHE = os.getpid(), directory, conn, False
+            try:
+                close_claim_activity_projection()
+            except BaseException as cleanup_error:
+                primary.add_note('claim projection cleanup failed: ' + type(cleanup_error).__name__)
+            raise
     return _CACHE[2]
 
 
