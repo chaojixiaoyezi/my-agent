@@ -305,3 +305,19 @@ def test_repeated_rollback_rebuild_keeps_one_reachable_group_catalog(tmp_path, m
         assert not any(key.startswith('anchorroot/') for key in keys)
         catalog = rows.index.get(rows.root, 'anchor/groups')
         assert len(list(rows.index.items(catalog))) == 4
+
+
+def test_seal_remains_stable_when_its_key_splits_a_full_hamt_leaf(tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.memory_store.candidate_anchor_index import seal_root, source_valid
+    index = candidate_ledger.PlannedIndex(tmp_path / 'candidates.jsonl')
+    root = None
+    for position in range(8):
+        root = index.put(root, f'ordinary/{position}', position)
+    assert len(index._load(root)['entries']) == 8
+    sealed = seal_root(index, root)
+    assert 'children' in index._load(sealed)
+    assert source_valid(SimpleNamespace(index=index, root=sealed))
+    changed = index.put(sealed, 'ordinary/0', 999)
+    assert not source_valid(SimpleNamespace(index=index, root=changed))

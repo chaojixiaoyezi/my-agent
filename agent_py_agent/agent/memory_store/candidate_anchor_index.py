@@ -59,19 +59,24 @@ def plan_anchors(rows, root, changes):
         root = index.put(root, 'anchor/version', 1)
     if end is not None:
         root = index.put(root, 'anchor/progress', end)
-    unsigned = index.remove(root, 'anchor/seal')
+    return seal_root(index, root)
+
+
+def seal_root(index, root):
+    # 保留seal键，只中和其值；插入/删除第九键会改变HAMT拓扑，remove并非put的逆。
+    unsigned = index.put(root, 'anchor/seal', None)
     return index.put(unsigned, 'anchor/seal', unsigned['ref']['sha256'])
 
 
 def source_valid(rows):
-    """去seal后的规范根摘要是写者覆盖证明；旧写者改任意其它键都会自然撤销。"""
+    """seal值固定为空后的规范根摘要是写者覆盖证明；旧写者改任意其它键都会自然撤销。"""
     if rows.root is None:
         return True
     cached = getattr(rows, '_anchor_source_valid', None)
     if cached is not None:
         return cached
     seal = rows.index.get(rows.root, 'anchor/seal')
-    unsigned = rows.index.remove(rows.root, 'anchor/seal')
+    unsigned = rows.index.put(rows.root, 'anchor/seal', None)
     valid = isinstance(seal, str) and unsigned is not None and seal == unsigned['ref']['sha256']
     rows._anchor_source_valid = valid
     return valid
