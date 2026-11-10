@@ -656,7 +656,9 @@ def _error_code(error):
     code = getattr(error, 'error_code', None) or getattr(error, 'code', None)
     if not isinstance(code, str) or not re.fullmatch(r'[A-Z][A-Z0-9_]{0,127}', code):
         code = 'HOST_NOT_READY'
-    status = (409 if code in {'REVISION_CONFLICT', 'IDEMPOTENCY_CONFLICT', 'BACKGROUND_AGENT_LIMIT_REACHED'} else
+    status = (409 if code in {'REVISION_CONFLICT', 'IDEMPOTENCY_CONFLICT', 'BACKGROUND_AGENT_LIMIT_REACHED',
+                              'SPACE_MISMATCH', 'AGENT_NOT_AVAILABLE', 'IDENTITY_TRANSITION_CONFLICT',
+                              'MODEL_PROFILE_UNAVAILABLE'} else
               404 if code.endswith('_NOT_FOUND') or code == 'SPACE_SCOPE_MISMATCH' else
               403 if code in {'ACTOR_REQUIRED', 'BUSINESS_ACCESS_DENIED', 'HUMAN_RESPONSE_REQUIRED'} else
               400 if code == 'INVALID_SCHEMA' else 503)

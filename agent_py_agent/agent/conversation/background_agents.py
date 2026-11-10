@@ -25,6 +25,7 @@ from .background_team_lifecycle import (
     identity_outstanding,
     reconcile_background_identity,
 )
+from .business_access import BusinessError
 from .business_contracts import (
     BackgroundAgentIdentity,
     BusinessContextIntent,
@@ -117,12 +118,18 @@ class BackgroundAgentService:
 
     def _profile(self, requested=None):
         from ..settings.model_profiles import selected_model_config
+        from ..settings.model_provider_schema import ModelProfileError
         from ..settings.thread_model_selection import default_model_profile_id
 
         profile = requested or default_model_profile_id(self.host)
         if not profile:
-            raise ValueError("MODEL_PROFILE_REQUIRED")
-        selected_model_config(self.host, profile_id=profile)
+            raise BusinessError("MODEL_PROFILE_REQUIRED")
+        try:
+            selected_model_config(self.host, profile_id=profile)
+        except ModelProfileError as exc:
+            # BIZ-006：写入前的确定性拒绝必须是结构化 not_started，不能被运输层归成 OUTCOME_UNKNOWN。
+            code = "MODEL_PROFILE_NOT_FOUND" if getattr(exc, "reason", "") == "profile_not_found" else "MODEL_PROFILE_UNAVAILABLE"
+            raise BusinessError(code) from exc
         return profile
 
     # LLM: 只在创建锁内已确认不存在的新行上调用；适配器可附加原安装出处，不授权修改既有线程。
@@ -147,7 +154,7 @@ class BackgroundAgentService:
             if existing is not None:
                 creation = existing.metadata.get("background_creation")
                 if existing.owner_id != actor.owner_id or creation != {"key": key, "fingerprint": fingerprint}:
-                    raise ValueError("IDEMPOTENCY_CONFLICT")
+                    raise BusinessError("IDEMPOTENCY_CONFLICT")
                 self._thread(identifier, actor)
                 quota.track(identifier)
                 return {"agent": self._agent_view(existing), "revision": background_identity(existing).identity_revision}
@@ -381,11 +388,11 @@ class BackgroundAgentService:
             receipts = dict(latest.metadata.get("background_receipts") or {})
             if key in receipts:
                 if receipts[key] != fingerprint:
-                    raise ValueError("IDEMPOTENCY_CONFLICT")
+                    raise BusinessError("IDEMPOTENCY_CONFLICT")
                 return latest
             revision = latest.model_selection_revision if model else identity.identity_revision
             if type(expected_revision) is not int or expected_revision != revision:
-                raise ValueError("REVISION_CONFLICT")
+                raise BusinessError("REVISION_CONFLICT")
             if model:
                 revision += 1
                 updated = replace(latest, model_profile_id=changes["model_profile_id"],
@@ -395,16 +402,16 @@ class BackgroundAgentService:
                 state = identity.identity_state
                 if action in {"resume", "restore"}:
                     if (action == "resume" and state != "suspended") or (action == "restore" and state != "retired"):
-                        raise ValueError("IDENTITY_TRANSITION_CONFLICT")
+                        raise BusinessError("IDENTITY_TRANSITION_CONFLICT")
                     state = "available"
                 elif action == "suspend":
                     if state not in {"available", "suspended"}:
-                        raise ValueError("IDENTITY_TRANSITION_CONFLICT")
+                        raise BusinessError("IDENTITY_TRANSITION_CONFLICT")
                     state = "suspended"
                 elif action == "retire":
                     state = "retiring" if state != "retired" else state
                 elif state in {"retired", "retiring"}:
-                    raise ValueError("AGENT_NOT_AVAILABLE")
+                    raise BusinessError("AGENT_NOT_AVAILABLE")
                 if action == "restore":
                     BackgroundAgentQuota(self).reserve(agent_id)
                 identity = replace(identity, identity_state=state, after_task=changes.get("after_task", identity.after_task),
@@ -443,7 +450,7 @@ class BackgroundAgentService:
                 changes["handoff_agent_id"] = handoff_agent_id
                 source, target = self._thread(agent_id, actor), self._thread(handoff_agent_id, actor)
                 if background_identity(source).space_id != background_identity(target).space_id or agent_id == handoff_agent_id:
-                    raise ValueError("SPACE_MISMATCH")
+                    raise BusinessError("SPACE_MISMATCH")
                 # 不改写在途任务的冻结归属。交接是可观察的待处理义务，不复制任务到新空间。
         _params("background_agents." + action, changes)
         quota = BackgroundAgentQuota(self)
@@ -629,9 +636,9 @@ class BackgroundAgentService:
         from .session_task_dispatch import _task_dedupe_key
         previous = self.store.session_tasks.find_by_dedupe_key(_task_dedupe_key(plan))
         if previous is None and not background_identity_allows_work(target):
-            raise ValueError("AGENT_NOT_AVAILABLE")
+            raise BusinessError("AGENT_NOT_AVAILABLE")
         if previous is None and (failure := session_task_pair_limit_error(self.host, plan.sender_thread_id, plan.target_thread_id, config)):
-            raise ValueError(failure.error_code)
+            raise BusinessError(failure.error_code)
         intent = BusinessContextIntent(actor.owner_id, request["space_id"], request.get("project_ref"), None)
 
         # LLM: 仅由dispatch_session_task首次建canonical任务时传入准确task_id；只解析并校验上下文，None显式走无归属，重放不重算默认选择。
@@ -653,9 +660,9 @@ class BackgroundAgentService:
         target = self._thread(request["agent_id"], actor)
         identity = background_identity(target)
         if identity.space_id != request["space_id"] or identity.project_ref != request.get("project_ref"):
-            raise ValueError("SPACE_MISMATCH")
+            raise BusinessError("SPACE_MISMATCH")
         if not background_identity_allows_work(target):
-            raise ValueError("AGENT_NOT_AVAILABLE")
+            raise BusinessError("AGENT_NOT_AVAILABLE")
         if request.get("origin_task_id"):
             self._owned_task(request["origin_task_id"], actor)
         result = self._dispatch(request, target, actor=actor, idempotency_key=idempotency_key,
@@ -667,7 +674,7 @@ class BackgroundAgentService:
         self._actor(actor)
         # 资产并非权限。明确声明却尚无资产接入端口时拒绝，不静默丢弃用户的选择。
         if request.get("asset_refs"):
-            raise ValueError("ASSET_BINDING_UNAVAILABLE")
+            raise BusinessError("ASSET_BINDING_UNAVAILABLE")
         identifier = self.ensure_controller(actor=actor)["thread_id"]
         if request.get("controller_agent_id", identifier) != identifier:
             raise PermissionError("CONTROLLER_IDENTITY_CONFLICT")

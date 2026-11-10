@@ -187,3 +187,40 @@ def test_suspended_identity_reports_paused_and_lost_wake_reports_stalled(native)
     stalled = ok(native, 'background_agents.get', {'agent_id': other['agent_id']})['scheduling']
     assert stalled['state'] == 'stalled' and stalled['reason_code'] == 'NO_PENDING_WAKE'
     assert host.conversation_store.session_tasks.require(other_task).status == 'queued'
+
+
+def test_deterministic_rejections_are_not_started_and_write_uncertainty_stays_unknown(native, monkeypatch):
+    # BIZ-006：写入前的确定性拒绝报准确码与 not_started，且不改原状态；真正进入写入后的未知仍是 OUTCOME_UNKNOWN。
+    _, host = native
+    add_echo_profile(host)
+    space = ok(native, 'spaces.create', {'name': 'p6'}, idempotency_key='sched-p6-space-00001')
+    other = ok(native, 'spaces.create', {'name': 'p6b'}, idempotency_key='sched-p6-space-00002')
+    agent = ok(native, 'background_agents.create', {'space_id': space['space_id'], 'name': 'w'},
+               idempotency_key='sched-p6-agent-00001')['agent']
+    model = ok(native, 'background_agents.model.get', {'agent_id': agent['agent_id']})
+    cases = [
+        ('background_agents.model.set', {'agent_id': agent['agent_id'], 'model_profile_id': str(uuid.uuid4())},
+         {'expected_revision': model['selection_revision'], 'idempotency_key': 'sched-p6-model-missing'},
+         404, 'MODEL_PROFILE_NOT_FOUND'),
+        ('tasks.assign', {'agent_id': agent['agent_id'], 'space_id': other['space_id'], 'instruction': 'x'},
+         {'idempotency_key': 'sched-p6-assign-mismatch'}, 409, 'SPACE_MISMATCH'),
+        ('background_agents.model.set', {'agent_id': agent['agent_id'], 'model_profile_id': model['model_profile_id']},
+         {'expected_revision': model['selection_revision'] + 7, 'idempotency_key': 'sched-p6-model-stale-1'},
+         409, 'REVISION_CONFLICT'),
+    ]
+    for action, params, extra, status, code in cases:
+        observed, payload = call(native, action, params, **extra)
+        assert (observed, payload['error']['code'], payload['effect_outcome']) == (status, code, 'not_started')
+        assert payload['error']['retryable'] is False
+    assert ok(native, 'background_agents.model.get', {'agent_id': agent['agent_id']}) == model
+    assert host.conversation_store.session_tasks.list_report(limit=0)[0] == []
+    from agent_py_agent.agent.conversation import store_threads
+
+    def broken_write(*_args, **_kwargs):
+        raise OSError('disk went away mid-write')
+
+    monkeypatch.setattr(store_threads.ThreadStore, 'update_atomic', broken_write)
+    observed, payload = call(native, 'background_agents.model.set',
+                             {'agent_id': agent['agent_id'], 'model_profile_id': model['model_profile_id']},
+                             expected_revision=model['selection_revision'], idempotency_key='sched-p6-model-uncertain')
+    assert (observed, payload['error']['code'], payload['effect_outcome']) == (503, 'OUTCOME_UNKNOWN', 'unknown')
