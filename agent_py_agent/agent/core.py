@@ -38,6 +38,7 @@ from .agent_core.orchestration_tools import (
     CancelSubagentsTool,
     CreateSubagentsTool,
     ListAgentsTool,
+    ListPendingRequestsTool,
     ResolveCapabilityRequestsTool,
 )
 from .agent_core.parameters import (
@@ -1404,6 +1405,8 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(CancelSubagentsTool(agent), live_gate="enable_subagents")
     agent.tools.register(SendGuidanceTool(agent), live_gate="enable_subagents")
     agent.tools.register(ResolveCapabilityRequestsTool(agent), live_gate="enable_subagents")
+    # 未决申请收件箱:只读,另由能力配置 orchestration_pending_inbox_enabled 每轮实时复核可用性。
+    agent.tools.register(ListPendingRequestsTool(agent), live_gate="enable_subagents")
     # 子代理可复用经验账(record_lesson):只写当前 child run 的 lessons.jsonl,结果收口合并成经验候选;
     # 注册表默认隐藏,只随子代理 allowed_tools 显式下发,主线程没有 child run 不提供。
     agent.tools.register(RecordLessonTool(agent), live_gate="enable_subagents")

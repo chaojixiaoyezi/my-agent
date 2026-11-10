@@ -34,6 +34,7 @@ _BACKGROUND_WORK_TOOLS = (
     "watch_stream",
     "task_progress",
     "resolve_capability_requests",
+    "list_pending_requests",
     "cancel_subagents",
     # learnpack（用户 2026-10-06 定方案 A）：学外部 agent 时她常把写包文件派给子代理，子代理写完后的续跑要能打包、按开关安装或
     #   开待确认安装单。两个工具只注册给本机管理员；这里保留授权闭包，初次展示另按结构化唤醒选择，不强制前台直出。
@@ -125,6 +126,7 @@ CONTROL_ACTION_DESCRIPTIONS = {
     "watch_stream": "读取有持久游标和覆盖账的数据源；Audit 模式按完整记录和 ack/source_ref 对账。",
     "task_progress": "更新任务清单进展。",
     "resolve_capability_requests": "批准或拒绝子代理的能力申请,让它能继续干。",
+    "list_pending_requests": "只读查看直属子代理还有哪些能力申请在等父级处理。",
     "cancel_subagents": "打断并结束一个不应继续运行的直属子代理；它不负责轮询、推动或验收。",
     "package_build": "把（子代理）写好的能力包或插件目录打成包，不安装；回执写现在装着的版本和提醒。",
     "package_install": "按自动装开关安装她打的包；开关关着只开待确认安装单，把回执里的确认行原样交给用户。",

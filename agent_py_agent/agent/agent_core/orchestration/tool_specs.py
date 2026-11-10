@@ -318,6 +318,46 @@ def build_cancel_subagents_model_spec() -> ToolModelSpec:
     )
 
 
+# LLM: 收件箱只读、默认收起；它只帮父级看清谁在等什么，裁决仍走 resolve_capability_requests，
+#   查看不会唤醒、续跑或自动授权。工具审批不在这里，仍走原审批卡片。
+# 函数用途: 构造只读列出直属下级未决能力申请的模型合同。
+def build_list_pending_requests_model_spec() -> ToolModelSpec:
+    parameters = {
+        "cursor": "可选。上一页返回的 next_cursor，原样传回继续读；换了身份的游标会被拒绝。",
+        "limit": "可选。本页最多条数，1 到 200；省略时用配置默认值。",
+        "include_resolved": "可选。true 时连同已授权/已关闭/GAP 的申请一起列出，默认只列仍待父级处理的申请。",
+    }
+    shapes = {
+        "cursor": {"type": "string"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+        "include_resolved": {"type": "boolean"},
+    }
+    hints = _hints(
+        use_cases=(
+            "想一次看清直属子代理有哪些能力申请还在等父级处理",
+            "定时续查时核对原父任务的子代理是否还有未决申请",
+        ),
+        avoid_when=("要批准或拒绝时直接用 resolve_capability_requests", "不要循环轮询；宿主会在申请出现时唤醒父级"),
+        keywords=("待处理", "未决申请", "capability", "inbox", "pending", "授权申请"),
+        examples=('{"tool":"list_pending_requests"}', '{"tool":"list_pending_requests","include_resolved":true,"limit":20}'),
+    )
+    return ToolModelSpec(
+        name="list_pending_requests",
+        description=(
+            "只读列出当前代理直属下级的能力申请：谁申请、要什么范围、等了多久、该由哪个父级用 "
+            "resolve_capability_requests 处理，以及已有的授权/拒绝记录和续跑排队情况。"
+            "没有记录的决定或执行显示为未记录/unknown，不代表已处理；coverage 为 partial 时说明有记录没读到。"
+            "它不批准、不拒绝、不唤醒任何代理。"
+        ),
+        input_schema=_input_schema(parameters, shapes),
+        hints=ToolModelHints(
+            category=hints.category, use_cases=hints.use_cases, avoid_when=hints.avoid_when,
+            keywords=hints.keywords, examples=hints.examples, default_deferred=True,
+            deferred_summary="只读查看直属子代理的未决能力申请、处理父级和决定记录。",
+        ),
+    )
+
+
 # LLM: capability 裁决是直接父子之间的结构化授权控制，不承担推进、轮询或
 # 质量验收；run_id 在 handler 还要经过直接下级授权门。
 # 函数用途: 构造批准或拒绝直属子代理权限申请的模型合同。

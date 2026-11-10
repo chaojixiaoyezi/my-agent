@@ -115,6 +115,9 @@ from .orchestration.tools.capability import (
     ResolveCapabilityRequestsTool as ResolveCapabilityRequestsTool,
 )
 from .orchestration.tools.list_agents import ListAgentsTool as ListAgentsTool
+from .orchestration.tools.pending_requests import (
+    ListPendingRequestsTool as ListPendingRequestsTool,
+)
 from .orchestration.write_guard import (
     ExternalWriteTargetRequest,
     external_write_target_error,

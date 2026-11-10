@@ -83,6 +83,10 @@ class CapabilityConfig:
     skill_transfers_enabled: bool = True
     # 有限只读工具计划，内部调用继续原权限/审计/取消，默认按需加载；关闭不影响普通工具批次。
     tool_program_enabled: bool = True
+    # 协调代理的只读未决申请收件箱；关闭后工具不可用，不影响 resolve_capability_requests 裁决。
+    orchestration_pending_inbox_enabled: bool = True
+    # 收件箱每页默认条数；0 表示不另设限制，仍受单页硬上限 200 约束。
+    orchestration_pending_inbox_page_limit: int = 50
     # 后台过程等待默认30秒交回控制；0不加工作片限制，仍受工具协议600秒与取消边界约束。
     process_session_wait_slice_seconds: int = 30
     # 整机跨owner安全阀，仅宿主注入或main配置可覆盖；普通owner私有同名键不影响整机；0不限，可设32或64。
