@@ -12,23 +12,50 @@ import time
 
 import pytest
 
-from agent_py_agent.agent.agent_core.orchestration.pending_inbox import MAX_PAGE_ITEMS_COUNT, pending_inbox_page
+from agent_py_agent.agent.agent_core.orchestration.pending_inbox import (
+    MAX_PAGE_ITEMS_COUNT,
+    pending_inbox_page,
+)
 from agent_py_agent.agent.agent_core.orchestration.tools.cancel import CancelSubagentsTool
-from agent_py_agent.agent.agent_core.orchestration.tools.capability import ResolveCapabilityRequestsTool
-from agent_py_agent.agent.agent_core.orchestration.tools.pending_requests import ListPendingRequestsTool
+from agent_py_agent.agent.agent_core.orchestration.tools.capability import (
+    ResolveCapabilityRequestsTool,
+)
+from agent_py_agent.agent.agent_core.orchestration.tools.pending_requests import (
+    ListPendingRequestsTool,
+)
 from agent_py_agent.agent.capability.config import CapabilityConfig
 from agent_py_agent.agent.subagents.model_capabilities import CapabilityRequest
 from agent_py_agent.agent.subagents.role_templates import DIRECT_CHILD_CONTROL_TOOLS
 from agent_py_agent.agent.subagents.services.hierarchy.tool_policy import _leaf_write_tools
-from agent_py_agent.tests.test_orch01_management_continuity import (  # noqa: F401 - case 是共用夹具
+from agent_py_agent.tests import test_orch01_management_continuity as orch01
+from agent_py_agent.tests.test_orch01_management_continuity import (
     _agent,
     _bound,
     _foreground,
     _open_request,
     _start_scheduled_run,
     _thread,
-    case,
 )
+
+
+# 与 ORCH-01 同一真实夹具：线程 long-work、父任务 task-T、直属子代理和指向 T 的定时作业。
+@pytest.fixture
+def case(tmp_path) -> orch01.Case:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    config = orch01.AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), enable_subagents=True)
+    agent = _agent(config, workspace)
+    thread = _thread(agent, "long-work")
+    parent = agent.conversation_store.tasks.bind(
+        {"thread_id": thread.thread_id, "task_id": "task-T", "goal": "长期工作", "status": "active"}
+    ).task_id
+    child = agent.subagents.create_run(goal="子任务", thought="", plan=["做"], parent_id=parent, root_id=parent, depth=1)
+    job = agent.scheduler_repository.create_job(orch01.SchedulerJobCreateRequest(
+        name="定时检查", prompt="检查直属下级进展", thread_id=thread.thread_id, source_task_id=parent,
+        schedule={"kind": "every", "every_seconds": 600, "timezone": "UTC", "anchor_at": 1000},
+        creator={"local": True}, now=1000,
+    ))[0]
+    return orch01.Case(agent, config, workspace, thread, parent, child.id, job)
 
 
 def _as_parent(case) -> None:
@@ -225,7 +252,9 @@ def test_unreadable_runtime_and_child_records_make_coverage_partial(case, monkey
 def test_unreadable_run_index_is_partial_not_empty(case, monkeypatch):
     _open_request(case, "req-1")
     _as_parent(case)
-    from agent_py_agent.agent.subagents.services.persistence.run_index import SubagentRunIndexUnavailable
+    from agent_py_agent.agent.subagents.services.persistence.run_index import (
+        SubagentRunIndexUnavailable,
+    )
 
     def incomplete(_db):
         raise SubagentRunIndexUnavailable("subagent run index coverage is partial")
