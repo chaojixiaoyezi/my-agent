@@ -22,10 +22,6 @@ from typing import TYPE_CHECKING, Any
 
 from ....capability.pack_tool_grant import pack_linked_tool_names
 from ....runtime_errors import runtime_error_report
-from ....subagents.authorization_gate import (
-    OperationRequest,
-    authorize_direct_child_operation,
-)
 from ....subagents.capability_scope import (
     direct_parent_tool_authority,
     partition_capability_paths_by_owner,
@@ -50,7 +46,11 @@ from ....tooling.models import (
     ToolRuntimePolicy,
 )
 from ....tooling.write_boundary import WRITE_TOOL_ORDER
-from ..create_policy import current_orchestration_requester_run_id
+from ..management_continuity import (
+    ManagedChildDenied,
+    authorize_managed_child,
+    management_principals,
+)
 from ..tool_specs import build_resolve_capability_requests_model_spec
 
 if TYPE_CHECKING:
@@ -124,20 +124,19 @@ class ResolveCapabilityRequestsTool(BaseTool):
         if invalid is not None:
             return invalid
         try:
-            # 3.txt B.4：resolve capability 走统一授权查询门（owner + 子树）。
-            task = authorize_direct_child_operation(
-                self.agent.subagents,
-                OperationRequest(
-                    operation="resolve_capability",
-                    run_id=run_id,
-                    requester_owner=str(
-                        getattr(getattr(self.agent, "home_paths", None), "owner_id", "") or ""
-                    ),
-                    requester_run_id=_model_requester_run_id(self.agent),
-                ),
-            )
+            # 3.txt B.4：resolve capability 走统一授权查询门（owner + 子树）；管理身份可以是被证明的
+            # 定时延续原父任务。授权/拒绝是控制动作，无权时只如实拒绝，不转交、不改任何申请。
+            task = authorize_managed_child(
+                self.agent, operation="resolve_capability", run_id=run_id,
+            ).task
         except FileNotFoundError:
             return _error_result(f"run_id 不存在：{run_id}。{_known_children_hint(self.agent)}")
+        except ManagedChildDenied as exc:
+            parent = exc.authorized_parent_run_id
+            return _error_result(
+                f"无权操作 {run_id}：{exc}"
+                + (f"；有权裁决的直接父级是 {parent}，本次没有转交或改动任何申请" if parent else "")
+            )
         except PermissionError as exc:
             return _error_result(f"无权操作 {run_id}：{exc}")
         request_id = str(params.get("request_id") or "").strip()
@@ -406,21 +405,26 @@ def _no_pending_result(task: Any, run_id: str, decision: str) -> ToolHandlerOutc
     )
 
 
-# LLM: 名册只展示当前请求方的直接下级，不能因报错把兄弟树或孙代理 ID 泄露给模型。
+# LLM: 名册只展示当前管理身份的直接下级，不能因报错把兄弟树或孙代理 ID 泄露给模型。
+#   每个管理身份各读一次有界名册（最多 12 条），不做 owner 全量扫描。
 # 函数用途: run_id 打错时给出真实直属子代理名册，供模型自纠。
 def _known_children_hint(agent: Any) -> str:
     from ..dispatch.params import DispatchParams
     from ..dispatch.refs import dispatch_scope_tasks
 
-    requester_run_id = _model_requester_run_id(agent)
-    try:
-        tasks = dispatch_scope_tasks(agent, DispatchParams(parent_run_id=requester_run_id), limit=12)
-    except Exception:
-        return ""
+    principals, _warnings = management_principals(agent)
+    tasks: list[Any] = []
+    for principal in principals:
+        try:
+            scoped = dispatch_scope_tasks(agent, DispatchParams(parent_run_id=principal.run_id), limit=12)
+        except Exception:
+            return ""
+        tasks.extend(
+            task for task in scoped
+            if not principal.run_id or str(getattr(task, "parent_id", "") or "") == principal.run_id
+        )
     rows: list[tuple[int, int, str, str]] = []
     for task in tasks:
-        if requester_run_id and str(getattr(task, "parent_id", "") or "") != requester_run_id:
-            continue
         open_requests = sum(
             1
             for request in (getattr(task, "capability_requests", None) or [])
@@ -436,13 +440,6 @@ def _known_children_hint(agent: Any) -> str:
         if run_id
     )
     return f"当前子代理: {listing}。用列表里的真实 run_id 重试。" if listing else ""
-
-
-# LLM: 子代理 runner 身份是递归父子关系的权威值；外层 gateway request 只在
-# 根主代理没有 runner 身份时兜底，不能让子代理借根请求越级裁决孙代理。
-# 函数用途: 返回当前模型可代表的代理 run id。
-def _model_requester_run_id(agent: Any) -> str:
-    return current_orchestration_requester_run_id(agent)
 
 
 # LLM: 授权后排队在原创建锁内复读任务；未决请求已闭合且无活 runner 才排队，旧裁决快照不得跨过新控制终态。

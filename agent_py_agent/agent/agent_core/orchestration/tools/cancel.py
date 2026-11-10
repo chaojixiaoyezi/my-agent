@@ -10,11 +10,6 @@ from typing import TYPE_CHECKING
 
 from ....common.audit_activation import structured_audit_source_worker_attributes
 from ....runtime_errors import runtime_error_report
-from ....subagents.authorization_gate import (
-    OperationRequest,
-    authorize_direct_child_operation,
-    authorize_operation,
-)
 from ....subagents.cancellation import (
     CancelSubagentTaskRequest,
     cancel_subagent_task,
@@ -35,7 +30,11 @@ from ....tooling.models import (
     ToolRuntimePolicy,
 )
 from ...orchestration.scope_resolution import UNMATCHED_RUN_SCOPE_CODE
-from ..create_policy import current_orchestration_requester_run_id
+from ..management_continuity import (
+    ManagedChildDenied,
+    authorize_managed_child,
+    authorize_with_principals,
+)
 from ..tool_specs import build_cancel_subagents_model_spec
 
 if TYPE_CHECKING:
@@ -111,7 +110,8 @@ class CancelSubagentsTool(BaseTool):
         self.agent = agent
 
     # LLM: 拒绝宿主私有的扫描/进程参数，并在执行任何取消副作用前一次性
-    # 校验全部显式目标都是当前请求方的直接下级。
+    # 校验全部显式目标都是当前管理身份（原请求方或被证明的定时延续原父任务）的直接下级。
+    # 停止是控制动作，无权时只如实拒绝并披露同 owner 的原父级，不转交、不写任何东西。
     # 函数用途: 校验模型点名的直接子代理，再调用统一取消实现落状态和审计。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         private_parameters = [
@@ -127,17 +127,11 @@ class CancelSubagentsTool(BaseTool):
             )
         for run_id in _explicit_run_ids(params):
             try:
-                authorize_direct_child_operation(
-                    self.agent.subagents,
-                    OperationRequest(
-                        operation="cancel",
-                        run_id=run_id,
-                        requester_owner=_requester_owner(self.agent),
-                        requester_run_id=_model_requester_run_id(self.agent),
-                    ),
-                )
+                authorize_managed_child(self.agent, operation="cancel", run_id=run_id)
             except FileNotFoundError:
                 continue
+            except ManagedChildDenied as exc:
+                return _cancel_failure(_denied_text(exc), "TOOL_PERMISSION_DENIED")
             except PermissionError as exc:
                 return _cancel_failure(str(exc), "TOOL_PERMISSION_DENIED")
         return execute_cancel_subagents(self.agent, params)
@@ -491,35 +485,26 @@ def _filter_existing_targets(agent: SimpleAgent, run_ids: list[str], status_filt
     return targets
 
 
+# LLM: 3.txt B.4：cancel 走统一授权查询门（owner 一致性 + 子树可见性）。取消工具在 execute() 入口已按
+#   稳定父级做过直接下级校验；实际落状态时复用同一组管理身份（原请求方优先，其次被证明的定时延续原父任务）。
+# 函数用途: 以当前管理身份加载并授权一个取消目标，失败时返回结构化错误。
 def _load_cancel_target(agent: SimpleAgent, run_id: str) -> dict[str, object]:
     try:
-        # 3.txt B.4：cancel 走统一授权查询门（owner 一致性 + 子树可见性）。
-        task = authorize_operation(
-            agent.subagents,
-            OperationRequest(
-                operation="cancel",
-                run_id=run_id,
-                requester_owner=_requester_owner(agent),
-                # 取消工具在 execute() 入口已按稳定父级做过直接下级校验；实际
-                # 落状态时必须复用同一身份。普通主代理后续消息会换 gwreq，
-                # 但它仍是创建这些 child 的同一个 conversation task。
-                requester_run_id=_model_requester_run_id(agent),
-            ),
-        )
+        task, _principal = authorize_with_principals(agent, operation="cancel", run_id=run_id)
         return {"run_id": run_id, "task": task}
     except Exception as exc:
         return {"run_id": run_id, "task": None, "error": runtime_error_report(exc, context="cancel_subagents.load")}
 
 
-def _requester_owner(agent: SimpleAgent) -> str:
-    return str(getattr(getattr(agent, "home_paths", None), "owner_id", "") or "")
-
-
-# LLM: 子代理线程身份优先于外层 gateway request；主代理没有 runner 身份时才
-# 使用当前请求 run/task/request id，避免孙代理把自己误认成根主控。
-# 函数用途: 返回模型侧递归控制动作的当前代理身份。
-def _model_requester_run_id(agent: SimpleAgent) -> str:
-    return current_orchestration_requester_run_id(agent)
+# LLM: 只披露结构化的原父级编号与告警码，供模型改用正确的管理者；拒绝本身不产生副作用。
+# 函数用途: 生成管理身份不足时的取消拒绝说明。
+def _denied_text(denied: ManagedChildDenied) -> str:
+    text = str(denied)
+    if denied.authorized_parent_run_id:
+        text += f"；有权停止它的直接父级是 {denied.authorized_parent_run_id}，本次没有转交或停止任何代理"
+    if denied.warnings:
+        text += f"；scope_warnings={','.join(denied.warnings)}"
+    return text
 
 
 # LLM: A model-facing generic cancellation tool cannot terminate the

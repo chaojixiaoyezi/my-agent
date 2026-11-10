@@ -10,10 +10,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ...runtime_errors import runtime_error_report
-from ...subagents.authorization_gate import (
-    OperationRequest,
-    authorize_direct_child_operation,
-)
 from ...subagents.models import TaskStatus, task_status_in
 from ...tooling.models import (
     BaseTool,
@@ -26,7 +22,12 @@ from ...tooling.models import (
     ToolModelSpec,
     ToolRuntimePolicy,
 )
-from ..orchestration.create_policy import current_orchestration_requester_run_id
+from ..orchestration.management_continuity import (
+    ManagedChildAuthorization,
+    ManagedChildDenied,
+    authorize_managed_child,
+    route_to_authorized_parent,
+)
 
 if TYPE_CHECKING:
     from ...core import SimpleAgent
@@ -56,7 +57,8 @@ class SendGuidanceTool(BaseTool):
             parameter_kinds={"target": "logical"},
             resource_domains={"target": "agent_run"},
         ),
-        input_policy=ToolInputPolicy(internal_parameters=("sender", "metadata")),
+        # __operation_id 由执行器按调用注入，只用于无权转交的幂等键；模型看不到也不能伪造。
+        input_policy=ToolInputPolicy(internal_parameters=("sender", "metadata", "__operation_id")),
     )
 
     # LLM: model_spec 是实例属性，便于现有工具注册器保持统一装配方式。
@@ -68,26 +70,23 @@ class SendGuidanceTool(BaseTool):
     # LLM: 投递前必须过共享授权门并读取目标的权威 TaskStatus；只有仍可能进入执行轮的
     # 下级才可入队，终态/暂停/失败目标必须同步拒绝，不能制造永远无法消费的假 pending。
     # 成功只确认 queue append，不能声称 provider 已确认或目标模型已执行。
+    # 授权身份来自 management_continuity：原请求方，或被宿主事实证明的定时检查所延续的原父任务。
+    # 同 owner 现存孩子被拒时只把内容作为“请求”转交其直接父级，回执如实写 routed，不写目标已收到。
     # 函数用途: 校验目标、消息和子代理状态，确认它仍可工作后再把补充要求耐久排队。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         parsed = _guidance_input(params)
         if isinstance(parsed, ToolHandlerOutcome):
             return parsed
-        requester_run_id = current_orchestration_requester_run_id(self.agent)
-        authorized = _authorized_guidance_target(
-            self.agent,
-            parsed.target,
-            requester_run_id,
-        )
+        authorized = _authorized_guidance_target(self.agent, parsed, params)
         if isinstance(authorized, ToolHandlerOutcome):
             return authorized
-        if status_error := _guidance_status_error(authorized, parsed.target):
+        if status_error := _guidance_status_error(authorized.task, parsed.target):
             return status_error
         return _queue_guidance(
             self.agent,
             params,
             parsed,
-            requester_run_id=requester_run_id,
+            authorization=authorized,
         )
 
 
@@ -116,31 +115,24 @@ def _guidance_input(
 
 # LLM: Direct-child authorization is the sole relationship gate. Storage and
 # permission errors remain distinguishable structured failures and never fall
-# back to an owner-wide scan.
-# 函数用途: 核对目标确实是当前代理直属下级，并把异常转换成稳定错误码。
+# back to an owner-wide scan. 管理身份可以是被证明的定时延续，但仍逐个走原直属下级门。
+# 函数用途: 核对目标确实是当前管理身份的直属下级，并把异常转换成稳定错误码或转交回执。
 def _authorized_guidance_target(
     agent: object,
-    target: str,
-    requester_run_id: str,
-) -> object | ToolHandlerOutcome:
+    guidance: _GuidanceInput,
+    params: dict[str, object],
+) -> ManagedChildAuthorization | ToolHandlerOutcome:
+    target = guidance.target
     try:
-        return authorize_direct_child_operation(
-            agent.subagents,
-            OperationRequest(
-                operation="send_guidance",
-                run_id=target,
-                requester_owner=str(
-                    getattr(getattr(agent, "home_paths", None), "owner_id", "") or ""
-                ),
-                requester_run_id=requester_run_id,
-            ),
-        )
+        return authorize_managed_child(agent, operation="send_guidance", run_id=target)
     except FileNotFoundError:
         return _guidance_error(
             f"目标子代理不存在：{target}。请使用 create_subagents 回执或生命周期事件里的真实 run_id。",
             error_code="TOOL_INVALID_ARGUMENTS",
             effect_outcome="not_started",
         )
+    except ManagedChildDenied as exc:
+        return _denied_or_routed(agent, exc, guidance, params)
     except PermissionError as exc:
         return _guidance_error(
             f"无权给目标子代理发送消息：{exc}",
@@ -154,6 +146,62 @@ def _authorized_guidance_target(
             details=runtime_error_report(exc, context="send_guidance.target"),
             effect_outcome="not_started",
         )
+
+
+# LLM: 跨 owner、不存在或无宿主 operation_id 时保持原 TOOL_PERMISSION_DENIED 且不写任何东西；同 owner 现存孩子
+#   才转交给其直接父级。转交成功是 ok=True + delivery=routed_to_authorized_parent，明确孩子没有收到；
+#   转交写入异常结果未知，返回 effect_outcome=unknown，不能谎称没有副作用。
+# 函数用途: 把直属下级门拒绝转换成诚实的拒绝或转交回执。
+def _denied_or_routed(
+    agent: object,
+    denied: ManagedChildDenied,
+    guidance: _GuidanceInput,
+    params: dict[str, object],
+) -> ToolHandlerOutcome:
+    details: dict[str, object] = {}
+    if denied.authorized_parent_run_id:
+        details["authorized_parent_run_id"] = denied.authorized_parent_run_id
+    if denied.warnings:
+        details["scope_warnings"] = list(denied.warnings)
+    try:
+        route = route_to_authorized_parent(
+            agent,
+            denied,
+            child_run_id=guidance.target,
+            message=guidance.message,
+            operation_key=str(params.get("__operation_id") or ""),
+        )
+    except Exception as exc:  # noqa: BLE001 - 转交写入结果未知必须如实上报
+        return _guidance_error(
+            "无权直接给目标子代理发送消息；转交给有权父级时写入失败，结果未知。",
+            error_code="TOOL_EXECUTION_FAILED",
+            details={**details, **runtime_error_report(exc, context="send_guidance.route")},
+            effect_outcome="unknown",
+        )
+    if not route or route.get("routed") is not True:
+        if route:
+            details["route"] = route
+        return _guidance_error(
+            f"无权给目标子代理发送消息：{denied}",
+            error_code="TOOL_PERMISSION_DENIED",
+            details=details or None,
+            effect_outcome="not_started",
+        )
+    payload = {
+        "ok": True,
+        "target": guidance.target,
+        "delivery": "routed_to_authorized_parent",
+        "delivered_to_target": False,
+        "provider_acknowledged": False,
+        "consumed": False,
+        "route": route,
+        **details,
+        "message": (
+            "你不是该子代理的直接父级，消息没有发给它；已作为转交请求耐久交给它的直接父级，"
+            "由父级决定是否转发。route.receipt_status 是父级邮箱的真实回执状态。"
+        ),
+    }
+    return ToolHandlerOutcome(_TOOL_NAME, True, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 # LLM: Eligibility is an exact TaskStatus decision. Terminal and temporarily
@@ -214,10 +262,15 @@ def _queue_guidance(
     params: dict[str, object],
     guidance: _GuidanceInput,
     *,
-    requester_run_id: str,
+    authorization: ManagedChildAuthorization,
 ) -> ToolHandlerOutcome:
-    sender = str(params.get("sender") or requester_run_id or "main_agent").strip()
-    metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
+    principal = authorization.principal
+    sender = str(params.get("sender") or principal.run_id or "main_agent").strip()
+    metadata = dict(params.get("metadata")) if isinstance(params.get("metadata"), dict) else {}
+    resolution = authorization.scope_resolution()
+    if resolution.get("authority") != "self":
+        # 代表原父任务发出时保留真实执行者（定时 run）身份，消息来源仍可追溯。
+        metadata["management_authority"] = resolution
     try:
         entry = agent.conversation_store.guidance.append(
             {
@@ -246,6 +299,7 @@ def _queue_guidance(
         "provider_acknowledged": False,
         "consumed": False,
         "delivery_timing": "current_tool_boundary_or_next_turn",
+        "scope_resolution": resolution,
         "message": (
             "消息已耐久排队；这不代表目标模型已经接收或执行。目标会在当前工具边界"
             "或下一轮安全点读取，后续以结构化消息状态和目标输出为准。"
