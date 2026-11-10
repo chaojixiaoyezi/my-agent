@@ -1262,6 +1262,7 @@ agent_py_agent/
 |       |-- analysis_gate.py # 消费结构化查询健康事实阻断分析，不检查模型正文或另建状态
 |       |-- analysis_isolation.py # 选择单步研判隔离模式，本模块不建立会话、回忆记忆或挂载工具
 |       |-- batching.py # 确定性 foreach 切批、有界调度和聚合，账本仅由协调线程写入
+|       |-- conditions.py # 步骤条件唯一求值/校验：旧 equals 形状原样兼容，类型化 op 表达式与有界正则安全子集
 |       |-- pinned_definitions.py # 从发布历史恢复工作流定义与冻结脚本引用，不回退当前可编辑资产
 |       `-- query_health.py # 源报告归一、查询健康回执与安全重试判断，无 I/O 或权限副作用
 `-- skills/
@@ -3021,6 +3022,7 @@ agent_py_agent/
 |   |   |-- background_shutdown.py      # 原后台片的准确claim中断与物理退出/只读收口观察
 |   |   |-- background_claim.py         # 后台执行领取、最终准入、共享心跳与精确 claim 结算
 |   |   |-- background_recovery.py      # 按次查询权威恢复阻断，只去重日志、不缓存执行资格
+|   |   |-- background_scheduling_view.py # 后台等待/阻塞的只读调度投影（原因码、唤醒引用、尝试计数、模型就绪），不领取不推进
 |   |   |-- background_tool_policy.py   # 无副作用的后台工具目录、owner/task 收紧及展示投影
 |   |   |-- background_context.py       # 后台一次性事实准备与纯渲染，保留任务范围和原预算
 |   |   |-- background_history_seed.py  # 后台范围与应用视图冻结、精确消息覆盖、种子及压缩来源
