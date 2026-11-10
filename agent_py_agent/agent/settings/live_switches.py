@@ -17,7 +17,7 @@ DEPLOY_LIVE_SWITCH_KEYS = frozenset({
     "admin_channel_identity_enabled", "audit_enabled", "auth_enabled",
     "daemon_mutate_state", "daemon_start_runners", "enable_gateway_memory_diagnostics",
     "feishu_bot_subscriptions_enabled", "feishu_cli_backend_enabled",
-    "feishu_cloud_verify_sheet_writes_enabled", "feishu_user_oauth_enabled",
+    "feishu_user_subscriptions_enabled", "feishu_cloud_verify_sheet_writes_enabled", "feishu_user_oauth_enabled",
     "gateway_per_user_owner_scoping", "gateway_restart_force_on_drain_timeout",
     "hard_failure_halt_enabled", "im_group_authorization_required", "im_model_cards_enabled",
     "plugin_process_sandbox", "protect_running_runtime", "terminal_block_enabled",

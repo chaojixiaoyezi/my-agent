@@ -39,6 +39,14 @@ def route_channel_observation(manager, event):
     anchor = [event[key] for key in ('channel', 'app_id', 'tenant_key', 'chat_id', 'sender_id_type', 'sender_id', 'message_id')]
     ingress_id = hashlib.sha256(json.dumps(anchor, ensure_ascii=False).encode()).hexdigest()
     frozen = {**event, 'ingress_id': ingress_id}
+    if event['sender_type'] == 'user':
+        # 先问原活动规则；未订阅正文不进入持久入站，未知保留供应商重投。
+        try:
+            interest = submit_channel_observation(manager, {**frozen, 'content': ''}, probe_only=True)
+        except (OSError, ValueError, RuntimeError):
+            return False
+        if interest['status'] == 'ignored':
+            return interest
     record = GatewayIngressRecord(ingress_id=ingress_id, kind='observation', channel=event['channel'],
         user_id='', conversation_id=event['chat_id'], provider_message_id=event['message_id'],
         canonical_payload_digest=canonical_payload_digest(frozen), content='',
@@ -54,12 +62,12 @@ def route_channel_observation(manager, event):
 
 # LLM: 只使用原宿主 credential headers，来源 bot 不能成为 X-User-Id；503 保持原 worker 重试和相同正文。
 # 函数用途: 提交已冻结观察，只有明确 accepted/ignored 才推进原入站到终态。
-def submit_channel_observation(manager, payload):
+def submit_channel_observation(manager, payload, *, probe_only=False):
     credentials = manager._reply_poll_client.credentials
     headers = {'Content-Type': 'application/json', 'X-Channel': str(payload['channel'])}
     headers.update(credentials.headers())
     request = Request(f'http://127.0.0.1:{manager.gateway_port}/channel-observations',
-        data=json.dumps(payload, ensure_ascii=False).encode(), headers=headers)
+        data=json.dumps({**payload, **({'probe_only': True} if probe_only else {})}, ensure_ascii=False).encode(), headers=headers)
     with open_authenticated_request(request, timeout=30) as response:
         result = json.loads(response.read().decode())
     if not isinstance(result, dict) or result.get('status') not in {'accepted', 'ignored'}:

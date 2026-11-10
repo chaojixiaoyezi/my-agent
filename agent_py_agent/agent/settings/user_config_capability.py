@@ -235,6 +235,7 @@ BOUNDARY_KEYS: dict[str, str] = {
     "force_compact_trigger_percent": "管理员压缩强制策略；模型不能自助解除或伪造管理员锁，须走宿主管理入口",
     "im_group_authorization_required": "群能力显式授权的部署安全边界；模型不能关闭或绕过",
     "feishu_bot_subscriptions_enabled": "群机器人消息订阅的部署安全边界；模型不能自行扩大接收范围",
+    "feishu_user_subscriptions_enabled": "群成员消息订阅的部署安全边界；模型不能自行扩大接收范围",
     "owner_default_permission_mode": "部署默认确认策略；仅部署者修改，模型不能扩大自身执行策略",
     "tool_approval_timeout_seconds": "工具确认绝对截止；模型不能延长或关闭保护",
     "feishu_cli_backend_enabled": "决定宿主飞书请求后端；模型不能自行切换执行后端",

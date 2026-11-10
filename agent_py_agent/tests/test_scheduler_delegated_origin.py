@@ -49,8 +49,8 @@ def delegated_plan(tmp_path, monkeypatch, *, owner_kind='group', depth=1, mode='
 
         monkeypatch.setattr(sources, 'group_authority_snapshot', lambda *_: {'provider': 'feishu', 'chat_id': 'oc_a',
             'app_id': 'cli_receiver', 'tenant_key': 'tenant', 'bot_is_member': True, 'members_complete': True})
-        monkeypatch.setattr(sources, 'resolve_bot_source', lambda _agent, chat, message: {'app_id': 'cli_receiver',
-            'chat_id': chat, 'source_message_id': message, 'sender_id': 'cli_other_bot', 'sender_id_type': 'app_id'})
+        monkeypatch.setattr(sources, 'resolve_group_message_source', lambda _agent, chat, message, *, snapshot: {'app_id': 'cli_receiver',
+            'chat_id': chat, 'source_message_id': message, 'sender_id': 'cli_other_bot', 'sender_type': 'bot', 'sender_id_type': 'app_id'})
         args.pop('every_seconds')
         args.update(schedule_kind='event_source', event_source={'source_message_refs': [refs[0][0]]})
     result = ScheduleTool(agent).execute(args)

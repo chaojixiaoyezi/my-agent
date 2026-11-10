@@ -75,6 +75,8 @@ class CapabilityConfig:
     im_group_authorization_required: bool = True
     # 仅订阅准确机器人身份的群消息，沿原调度账本运行；没有订阅时不增加模型调用或轮询。
     feishu_bot_subscriptions_enabled: bool = True
+    # 指定群成员订阅仍须原群授权和官方消息/成员核验。
+    feishu_user_subscriptions_enabled: bool = True
     # 当前群只读历史需要部署者显式开启，和事件订阅开关相互独立。
     feishu_chat_history_enabled: bool = False
     # 跨owner投递/一次复刻仍需双端真人确认精确清单，不能复制权限或秘密。
@@ -204,7 +206,8 @@ def _coerce_capability_value(field_name: str, value: object) -> object:
         return int(value)
     if field_name in {"feishu_cli_backend_enabled", "feishu_user_oauth_enabled", "tool_program_enabled",
                       "background_user_action_notice_enabled", "im_group_shared_credentials_enabled",
-                      "im_group_authorization_required", "feishu_bot_subscriptions_enabled", "feishu_chat_history_enabled"}:
+                      "im_group_authorization_required", "feishu_bot_subscriptions_enabled",
+                      "feishu_user_subscriptions_enabled", "feishu_chat_history_enabled"}:
         if not isinstance(value, bool):
             raise ValueError(f"{field_name} 必须为布尔值，不能以未知配置打开能力。")
         return value

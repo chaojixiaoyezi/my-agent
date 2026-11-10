@@ -62,11 +62,11 @@ def _event_case(tmp_path, monkeypatch):
         'bot_is_member': True, 'members_complete': True}
     seen = []
     monkeypatch.setattr(sources, 'group_authority_snapshot', lambda *_args: dict(scope))
-    def resolve(_agent, chat, message):
+    def resolve(_agent, chat, message, *, snapshot):
         seen.append((chat, message))
         return {'app_id': 'cli_receiver', 'chat_id': chat, 'source_message_id': message,
-            'sender_id': 'cli_other_bot', 'sender_id_type': 'app_id'}
-    monkeypatch.setattr(sources, 'resolve_bot_source', resolve)
+            'sender_id': 'cli_other_bot', 'sender_type': 'bot', 'sender_id_type': 'app_id'}
+    monkeypatch.setattr(sources, 'resolve_group_message_source', resolve)
     return agent, scope, seen
 
 
@@ -113,14 +113,14 @@ def test_source_network_preflight_does_not_hold_policy_lock_and_revoke_wins_fina
         conversation_id='oc_source:thread:om_topic' if topic else 'oc_source')
     saved = _allow(agent, raw, actor, subject=actor.actor_id)
     monkeypatch.setattr(sources, 'group_authority_snapshot', lambda *_args: dict(raw))
-    def resolve(_agent, chat, message):
+    def resolve(_agent, chat, message, *, snapshot):
         with locked_json_path(agent.home_paths.owner_tool_policy_json, blocking=False):
             pass
         change_group_authorization(agent.home_paths, _snapshot(raw), actor,
             GroupAuthorizationChange('revoke', saved['revision'], grant_id=saved['grants'][0]['grant_id']))
         return {'app_id': raw['app_id'], 'chat_id': chat, 'source_message_id': message,
-            'sender_id': 'other-bot', 'sender_id_type': 'app_id'}
-    monkeypatch.setattr(sources, 'resolve_bot_source', resolve)
+            'sender_id': 'other-bot', 'sender_type': 'bot', 'sender_id_type': 'app_id'}
+    monkeypatch.setattr(sources, 'resolve_group_message_source', resolve)
     before = [row.thread_id for row in agent.conversation_store.threads.list()]
     result = ScheduleTool(agent).execute({'action': 'create', 'name': 'synthetic subscription', 'prompt': '合成判断',
         'schedule_kind': 'event_source', 'event_source': {'source_message_ids': ['om_source']}})
@@ -195,12 +195,12 @@ def test_topic_subscription_proof_background_route_and_provider_use_exact_base_g
 
     # LLM: 仅替代原官方Get传输，记录精确basechat+消息；原schema/授权/规则与持久化均为真实入口。
     # 函数用途: 为合成来源证明返回同应用同群的其他机器人身份。
-    def get_source(_agent, chat, message):
+    def get_source(_agent, chat, message, *, snapshot):
         seen.append((chat, message))
         return {'app_id': raw['app_id'], 'chat_id': chat, 'source_message_id': message,
-            'sender_id': 'cli_other_bot', 'sender_id_type': 'app_id'}
+            'sender_id': 'cli_other_bot', 'sender_type': 'bot', 'sender_id_type': 'app_id'}
 
-    monkeypatch.setattr(sources, 'resolve_bot_source', get_source)
+    monkeypatch.setattr(sources, 'resolve_group_message_source', get_source)
     result = ScheduleTool(agent).execute({'action': 'create', 'name': '合成订阅', 'prompt': '合成一行',
         'schedule_kind': 'event_source', 'event_source': {'source_message_refs': [reference]}, 'delivery': {'mode': 'origin'}})
     assert result.ok, result.output
@@ -314,11 +314,11 @@ def test_fake_model_tool_calls_replay_quoted_refs_into_original_scheduler(tmp_pa
     reference = agent._current_run_params.host_message_references[0][0]
     seen = []
     monkeypatch.setattr(sources, 'group_authority_snapshot', lambda *_args: dict(scope))
-    def resolve(_agent, chat, message):
+    def resolve(_agent, chat, message, *, snapshot):
         seen.append(message)
         return {'app_id': scope['app_id'], 'chat_id': chat, 'source_message_id': message,
-            'sender_id': 'other-bot', 'sender_id_type': 'app_id'}
-    monkeypatch.setattr(sources, 'resolve_bot_source', resolve)
+            'sender_id': 'other-bot', 'sender_type': 'bot', 'sender_id_type': 'app_id'}
+    monkeypatch.setattr(sources, 'resolve_group_message_source', resolve)
     model_call = {'action': 'create', 'name': '合成消息研判', 'delivery': {'mode': 'origin'},
         'rules': [{'id': f'rule_{i}', 'name': f'规则{i}', 'use_llm': True, 'prompt': '依原需求分析外部资料',
             'schedule': {'kind': 'event_source', 'source_message_refs': [reference], 'min_interval_seconds': 60}}
@@ -405,10 +405,10 @@ def test_resolved_reference_still_requires_exact_current_provider_proof(tmp_path
     agent, _scope, _seen = _event_case(tmp_path, monkeypatch)
     reference = provider_message_reference('om_one')
     agent._current_run_params.host_message_references = ((reference, 'om_one'),)
-    def forged(*_args):
+    def forged(*_args, **_kwargs):
         return {'app_id': 'cli_receiver', 'chat_id': 'oc_source', 'sender_id': 'cli_other_bot',
-            'sender_id_type': 'app_id', 'source_message_id': 'om_one', field: value}
-    monkeypatch.setattr(sources, 'resolve_bot_source', forged)
+            'sender_type': 'bot', 'sender_id_type': 'app_id', 'source_message_id': 'om_one', field: value}
+    monkeypatch.setattr(sources, 'resolve_group_message_source', forged)
     with pytest.raises(ValueError):
         sources.schedule_from_event_input(agent, {'source_message_refs': [reference]})
     assert agent.scheduler_repository.list_jobs()[0] == []

@@ -148,12 +148,12 @@ def test_delegated_child_creates_nested_subscription_via_original_proof_path(tmp
 
     # LLM: 精确Get替身只记录真实om_编号；完整工具链仍执行原授权、归一化及持久化。
     # 函数用途: 验证公开引用不会作为供应商ID发出，并返回合成同群app证明。
-    def get_source(_agent, chat, message):
+    def get_source(_agent, chat, message, *, snapshot):
         seen.append((chat, message))
         return {'app_id': 'cli_receiver', 'chat_id': chat, 'source_message_id': message,
-            'sender_id': 'cli_other_bot', 'sender_id_type': 'app_id'}
+            'sender_id': 'cli_other_bot', 'sender_type': 'bot', 'sender_id_type': 'app_id'}
 
-    monkeypatch.setattr(sources, 'resolve_bot_source', get_source)
+    monkeypatch.setattr(sources, 'resolve_group_message_source', get_source)
     result = ScheduleTool(agent).execute({'action': 'create', 'name': '合成订阅', 'rules': [{
         'id': 'one', 'name': '合成规则', 'use_llm': True, 'prompt': '合成一行',
         'schedule': {'kind': 'event_source', 'source_message_refs': [refs[0][0]], 'min_interval_seconds': 60}}]})

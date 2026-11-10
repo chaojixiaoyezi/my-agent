@@ -108,7 +108,7 @@ def test_bot_without_mention_never_reaches_human_commands_or_actor(kind):
     human.assert_not_called()
 
 
-@pytest.mark.parametrize('kind', ['', 'unknown', 'anonymous', 'user'])
+@pytest.mark.parametrize('kind', ['', 'unknown', 'anonymous'])
 def test_unknown_or_unmentioned_human_is_not_bot_subscription_input(kind):
     current = adapter()
     observed = Mock()

@@ -1,5 +1,5 @@
 # LLM: 单计划和规则只接收公开引用，当前请求专有映射后沿原 REST 核验；模型不能传应用/租户/proofs，最终仍守原 actor/CAS。
-# 模块用途: 将公开机器人引用转换为原监控 canonical 计划，来源证明不另存账本或继承到新请求。
+# 模块用途: 将公开群消息引用转换为原监控 canonical 计划，来源证明不另存账本或继承到新请求。
 from __future__ import annotations
 
 from copy import deepcopy
@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from ..adapter.feishu_provider_facts import (
     FeishuProviderFactError,
     group_authority_snapshot,
-    resolve_bot_source,
+    resolve_group_message_source,
 )
 from ..capability.runtime_config_reload import deployment_capability_config
 from ..conversation.host_actor import resolve_host_actor
@@ -76,10 +76,8 @@ class EventSourceInputError(ValueError):
 def _source_scope(agent):
     home = getattr(agent, 'home_paths', None)
     if getattr(home, 'owner_kind', '') != 'group':
-        raise EventSourceInputError('EVENT_SOURCE_GROUP_REQUIRED', '机器人消息订阅只能在原群创建。')
+        raise EventSourceInputError('EVENT_SOURCE_GROUP_REQUIRED', '群消息订阅只能在原群创建；个人跨群订阅尚未接入。')
     try:
-        if deployment_capability_config(home).feishu_bot_subscriptions_enabled is not True:
-            raise EventSourceInputError('EVENT_SOURCE_DISABLED', '部署者已关闭机器人消息订阅。')
         chat_id = group_chat_id(home)
         snapshot = group_authority_snapshot(agent, chat_id)
         if (snapshot.get('chat_id') != chat_id or snapshot.get('members_complete') is not True
@@ -104,13 +102,17 @@ def _source_proofs(agent, scope, message_ids):
     proofs = {}
     for message_id in message_ids:
         try:
-            fact = resolve_bot_source(agent, scope['chat_id'], message_id)
+            fact = resolve_group_message_source(agent, scope['chat_id'], message_id, snapshot=scope)
         except FeishuProviderFactError as exc:
-            raise EventSourceInputError(exc.reason_code, '无法核验所引用的其他机器人消息，未创建订阅。') from exc
+            raise EventSourceInputError(exc.reason_code, '无法核验所引用的群消息，未创建订阅。') from exc
         if (fact.get('app_id') != scope['app_id'] or fact.get('chat_id') != scope['chat_id']
-                or fact.get('sender_id_type') != 'app_id' or fact.get('source_message_id') != message_id):
-            raise EventSourceInputError('EVENT_SOURCE_SCOPE_UNVERIFIED', '机器人来源与当前群不一致，未创建订阅。')
-        proofs.setdefault(fact['sender_id'], {'sender_id': fact['sender_id'], 'source_message_id': message_id})
+                or (fact.get('sender_type'), fact.get('sender_id_type')) not in {('bot', 'app_id'), ('user', 'open_id')}
+                or fact.get('source_message_id') != message_id):
+            raise EventSourceInputError('EVENT_SOURCE_SCOPE_UNVERIFIED', '消息来源与当前群不一致，未创建订阅。')
+        if proofs and next(iter(proofs.values()))['sender_type'] != fact['sender_type']:
+            raise ScheduleValidationError('不同身份类型的来源请分别创建规则。')
+        proofs.setdefault(fact['sender_id'], {'sender_id': fact['sender_id'], 'source_message_id': message_id,
+            'sender_type': fact['sender_type'], 'sender_id_type': fact['sender_id_type']})
     return list(proofs.values())
 
 
@@ -153,8 +155,13 @@ def schedule_from_event_input(agent, raw):
     identifiers = _message_ids(agent, raw)
     scope = _source_scope(agent)
     proofs = _source_proofs(agent, scope, identifiers)
+    kind, id_type = proofs[0]['sender_type'], proofs[0]['sender_id_type']
+    config = deployment_capability_config(agent.home_paths)
+    if getattr(config, 'feishu_user_subscriptions_enabled' if kind == 'user' else 'feishu_bot_subscriptions_enabled', True) is not True:
+        raise EventSourceInputError('EVENT_SOURCE_DISABLED', '部署者已关闭群成员消息订阅。')
+    canonical_proofs = [{key: row[key] for key in ('sender_id', 'source_message_id')} for row in proofs]
     return normalize_event_schedule({'kind': 'event_source',
         'source': {'channel': 'feishu', 'event_type': 'message', 'app_id': scope['app_id'],
-            'tenant_key': scope['tenant_key'], 'chat_id': scope['chat_id'], 'sender_type': 'bot',
-            'sender_id_type': 'app_id', 'sender_ids': [row['sender_id'] for row in proofs], 'proofs': proofs},
+            'tenant_key': scope['tenant_key'], 'chat_id': scope['chat_id'], 'sender_type': kind,
+            'sender_id_type': id_type, 'sender_ids': [row['sender_id'] for row in proofs], 'proofs': canonical_proofs},
         **{key: raw[key] for key in ('min_interval_seconds', 'max_batch_events') if key in raw}})

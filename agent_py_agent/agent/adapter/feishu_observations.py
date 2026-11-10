@@ -28,14 +28,14 @@ class FeishuObservationMixin:
 
 # LLM: app_id 来自已认证接收实例并与官方 header 对照；保留 raw bot/open_id，后续只经同消息 Get 得 canonical app_id。
 # 函数用途: 将群机器人事件转换成明确类型的观察；私聊机器人、自机器人和缺身份来源拒绝。
-def admit_bot_observation(adapter, payload, bot_open_id):
+def _admit_observation(adapter, payload, bot_open_id, *, user=False):
     header, event = payload.get('header') or {}, payload.get('event') or {}
     message, sender = event.get('message') or {}, event.get('sender') or {}
     sender_id = sender.get('sender_id') or {}
     app_id = header.get('app_id')
     tenant_key = header.get('tenant_key')
     source = sender_id.get('open_id')
-    if (message.get('chat_type') != 'group' or sender.get('sender_type') not in {'bot', 'app'}
+    if (message.get('chat_type') != 'group' or sender.get('sender_type') not in ({'user'} if user else {'bot', 'app'})
             or app_id != adapter.app_id or not all(isinstance(value, str) and value for value in
                 (tenant_key, source, message.get('message_id'), message.get('chat_id')))):
         return FeishuEventDisposition('ignored', 'FEISHU_OBSERVATION_INVALID')
@@ -51,6 +51,17 @@ def admit_bot_observation(adapter, payload, bot_open_id):
         'content': raw if isinstance(raw, str) else '{}', 'message_type': str(message.get('message_type') or message.get('msg_type') or ''),
         'parent_id': str(message.get('parent_id') or ''), 'root_id': str(message.get('root_id') or ''),
         'thread_id': str(message.get('thread_id') or '')}
-    if callback(observation) is False:
+    result = callback(observation)
+    if isinstance(result, dict) and result.get('status') == 'ignored':
+        return FeishuEventDisposition('ignored', 'FEISHU_OBSERVATION_NOT_SUBSCRIBED')
+    if result is False or (user and result is not True):
         return FeishuEventDisposition('retryable', 'FEISHU_OBSERVATION_UNAVAILABLE')
     return FeishuEventDisposition('accepted')
+
+
+def admit_bot_observation(adapter, payload, bot_open_id):
+    return _admit_observation(adapter, payload, bot_open_id)
+
+
+def admit_user_observation(adapter, payload, bot_open_id):
+    return _admit_observation(adapter, payload, bot_open_id, user=True)

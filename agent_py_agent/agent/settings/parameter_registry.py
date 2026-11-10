@@ -87,6 +87,7 @@ DEPLOYMENT_ONLY_KEYS = _HOST_CAPACITY_KEYS | frozenset({
     "tool_shell_demote_after_seconds", "tool_shell_demoted_nice",
     "tool_approval_timeout_seconds", "feishu_cli_backend_enabled", "feishu_user_oauth_enabled", "feishu_oauth_redirect_uri",
     "feishu_oauth_scopes", "im_model_cards_enabled", "im_group_authorization_required", "feishu_bot_subscriptions_enabled",
+    "feishu_user_subscriptions_enabled",
     "process_session_wait_slice_seconds", "max_parallel_tool_calls_global", "feishu_cloud_verify_sheet_writes_enabled",
     "decision_agent_timeout_min_seconds", "decision_agent_timeout_max_seconds", "session_pair_hourly_limit",
 })

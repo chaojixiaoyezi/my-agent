@@ -102,6 +102,41 @@ def resolve_bot_source(agent, chat_id, source_message_id):
         'sender_tenant_key': str(sender.get('tenant_key') or ''), 'chat_id': chat_id, 'app_id': adapter.app_id}
 
 
+# 精确消息决定来源类型；用户必须仍在当前完整成员快照内，显示名不参与身份。
+def resolve_group_message_source(agent, chat_id, source_message_id, *, snapshot):
+    adapter, token = _provider(agent)
+    row = _message(token, chat_id, source_message_id)
+    sender = row.get('sender') or {}
+    kind, id_type, identifier = sender.get('sender_type'), sender.get('id_type'), sender.get('id')
+    if kind == 'app' and id_type == 'app_id' and isinstance(identifier, str) and identifier:
+        if identifier == adapter.app_id:
+            raise FeishuProviderFactError('FEISHU_BOT_LOOP_SUPPRESSED')
+        canonical_kind = 'bot'
+    elif kind == 'user' and id_type == 'open_id' and isinstance(identifier, str) and identifier:
+        if (snapshot.get('chat_id') != chat_id or snapshot.get('app_id') != adapter.app_id
+                or snapshot.get('members_complete') is not True or identifier not in snapshot.get('member_ids', ())):
+            raise FeishuProviderFactError('FEISHU_OBSERVATION_SCOPE_MISMATCH')
+        canonical_kind = 'user'
+    else:
+        raise FeishuProviderFactError('FEISHU_SOURCE_MESSAGE_UNVERIFIED')
+    return {'sender_id': identifier, 'sender_type': canonical_kind, 'sender_id_type': id_type,
+        'source_message_id': source_message_id, 'chat_id': chat_id, 'app_id': adapter.app_id,
+        'sender_tenant_key': str(sender.get('tenant_key') or '')}
+
+
+# 人类观察不是会话输入；同一准确消息、群租户和实时成员事实才可登记订阅。
+def canonical_user_observation(agent, event):
+    snapshot = group_authority_snapshot(agent, event['chat_id'])
+    if (event.get('sender_type') != 'user' or event.get('sender_id_type') != 'open_id'
+            or event.get('app_id') != snapshot.get('app_id') or snapshot.get('bot_is_member') is not True):
+        raise FeishuProviderFactError('FEISHU_OBSERVATION_SCOPE_MISMATCH')
+    source = resolve_group_message_source(agent, event['chat_id'], event['message_id'], snapshot=snapshot)
+    if source['sender_type'] != 'user' or source['sender_id'] != event['sender_id']:
+        raise FeishuProviderFactError('FEISHU_OBSERVATION_SCOPE_MISMATCH')
+    return {**event, 'provider_tenant_key': event['tenant_key'], 'tenant_key': snapshot['tenant_key'],
+        'sender_tenant_key': source['sender_tenant_key']}
+
+
 # LLM: token 是 tenant token，is_in_chat 只证明本机器人；当前人类成员必须完整分页，群主/管理员只读显式角色字段。
 # 函数用途: 取得实时群授权快照，不缓存或保存成员权限，部分分页或身份类型不明时拒绝。
 def group_authority_snapshot(agent, chat_id):
