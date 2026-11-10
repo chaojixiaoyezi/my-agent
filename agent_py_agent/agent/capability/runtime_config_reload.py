@@ -10,7 +10,12 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 
-from .config import CapabilityConfig, _config_stat_key, load_capability_config
+from .config import (
+    CapabilityConfig,
+    _config_stat_key,
+    load_capability_config,
+    load_capability_config_report,
+)
 from .runtime_config_models import CapabilityConfigReloadResult, CapabilityConfigSnapshot
 
 _BUNDLED_CAPABILITY_CONFIG_PATH = (Path(__file__).resolve().parents[2] / 'config' / 'capability_config.yaml').resolve()
@@ -130,6 +135,31 @@ def capability_config_for_agent(agent: object):
     return loaded
 
 
+# LLM: B1-R1/R2（PRO-MSG-020/021）：只给收件箱这类“读不准就关”的安全开关用，其它能力原有回落不变。先走原
+#   capability_config_for_agent（同一路径优先级、快照与 stat 复核），再核来源：选中的用户文件必须同一次解析零诊断；
+#   没选中用户文件时，随包模板必须真的读成功且零诊断；两者都没读成功时原入口回的默认对象不算来源。宿主显式内存
+#   注入的 CapabilityConfig 原样认可。返回 (配置或 None, 拒绝码)。
+# 函数用途: 返回有可靠来源的能力配置，来源坏了或读不到就给出拒绝码。
+def capability_config_with_trusted_source(agent: object) -> tuple[CapabilityConfig | None, str]:
+    config = capability_config_for_agent(agent)
+    if not isinstance(config, CapabilityConfig):
+        return None, "CONFIG_UNREADABLE"
+    snapshot = getattr(agent, "_capability_config_runtime_snapshot", None)
+    if isinstance(snapshot, CapabilityConfigSnapshot) and snapshot.config is config:
+        if getattr(snapshot, "_parse_diagnostic_count", None) != 0:
+            return None, "CONFIG_PARSE_ERROR"
+        return config, ""
+    if snapshot is not None and getattr(snapshot, "config", None) is config:
+        return config, ""
+    try:
+        bundled, diagnostics = load_capability_config_report(bundled_capability_config_path())
+    except (OSError, TypeError, ValueError):
+        return None, "CONFIG_SOURCE_UNAVAILABLE"
+    if diagnostics:
+        return None, "CONFIG_PARSE_ERROR"
+    return bundled, ""
+
+
 # LLM: 只接受可信宿主显式提供的原构造 root/准确覆盖路径；这不是授权，也不能默认换成 owner home。缺文件沿原随包默认，不创建锁或缓存。
 # 函数用途: 无 Agent 地按原路径优先级读取能力开关；坏配置返回 None，由调用方关闭可选能力。
 def capability_config_for_paths(*, root: str | Path, user_path: str | Path | None = None) -> CapabilityConfig | None:
@@ -217,7 +247,10 @@ def _snapshot_stat_key(path: Path) -> tuple:
 def load_capability_config_snapshot(config_path: str | Path) -> CapabilityConfigSnapshot:
     path = Path(config_path)
     stat = path.stat()
+    # 配置仍经原 load_capability_config 入口取得（保留既有替换/观测接缝）；诊断随后从同一 stat 代次的缓存取，
+    # 不重新解析。两者若不属于同一文件代次，下面的 stat 复核会拒绝发布。
     parsed = load_capability_config(path)
+    diagnostics = load_capability_config_report(path)[1]
     version = capability_config_version(path)
     stat_key = (str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
     if _snapshot_stat_key(path) != stat_key:
@@ -231,6 +264,8 @@ def load_capability_config_snapshot(config_path: str | Path) -> CapabilityConfig
         size=stat.st_size,
     )
     object.__setattr__(snapshot, "_runtime_stat_key", stat_key)
+    # B1-R1：与配置同一次解析的诊断数，只供安全开关判断选中文件是否有坏行；不改其它能力的回落行为。
+    object.__setattr__(snapshot, "_parse_diagnostic_count", len(diagnostics))
     return snapshot
 
 

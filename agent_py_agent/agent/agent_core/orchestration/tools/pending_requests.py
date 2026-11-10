@@ -36,6 +36,8 @@ _ERROR_CODES = {"TOOL_INVALID_ARGUMENTS": "TOOL_INVALID_ARGUMENTS", "CURSOR_SCOP
 # 类用途: 只读列出当前代理（含已证明的定时续查父任务）直属下级的能力申请。
 class ListPendingRequestsTool(BaseTool):
     model_spec = build_list_pending_requests_model_spec()
+    # B1-R3：开关关着时连名字/类别/原因都不进模型可见的发现面（注册表按这个结构属性过滤）。
+    hidden_when_unavailable = True
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("read_only"),
         concurrency_policy=ConcurrencyPolicy("parallel_safe"),
@@ -84,14 +86,15 @@ class ListPendingRequestsTool(BaseTool):
         return ToolHandlerOutcome(name, True, json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
 
-# LLM: 唯一的开关读口；只有读到真正的 CapabilityConfig 且值严格为 True 才开放。
+# LLM: 唯一的开关读口；B1-R1/R2：只认有可靠来源的配置（选中的用户文件零解析诊断，或随包模板真读成功），坏行、
+#   读不到来源时的默认对象都按关闭；值还必须严格为 True。
 # 函数用途: 现读当前 owner 的收件箱开关。
 def _inbox_enabled(agent: object) -> bool:
     from ....capability import runtime_config_reload
     from ....capability.config import CapabilityConfig
 
     try:
-        config = runtime_config_reload.capability_config_for_agent(agent)
+        config, _refusal = runtime_config_reload.capability_config_with_trusted_source(agent)
     except Exception:  # noqa: BLE001 - 配置读失败按关闭处理
         return False
     return isinstance(config, CapabilityConfig) and config.orchestration_pending_inbox_enabled is True

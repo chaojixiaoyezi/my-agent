@@ -15,9 +15,12 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from ..settings.config import load_simple_yaml
+from ..settings.config_diagnostics import ConfigParseDiagnostic
 
 _CAPABILITY_CONFIG_CACHE_LOCK = threading.RLock()
-_CAPABILITY_CONFIG_CACHE: OrderedDict[tuple[str, int, int, int, int, int], CapabilityConfig] = OrderedDict()
+_CAPABILITY_CONFIG_CACHE: OrderedDict[
+    tuple[str, int, int, int, int, int], tuple[CapabilityConfig, tuple[ConfigParseDiagnostic, ...]]
+] = OrderedDict()
 # 能力路由配置进程内缓存的最大条目数。
 _CAPABILITY_CONFIG_CACHE_MAX_SIZE = 64
 
@@ -229,6 +232,15 @@ def _coerce_capability_value(field_name: str, value: object) -> object:
 # LLM: 只缓存成功解析的准确stat，RLock覆盖冷装载、容量64；交回可变字段副本，显式缺失仍抛错，不借默认开启能力。
 # 函数用途: 复用未变化的能力配置；省略路径才由原解析器选择默认，磁盘改变立即重新加载。
 def load_capability_config(config_path: str | Path | None = None) -> CapabilityConfig:
+    return load_capability_config_report(config_path)[0]
+
+
+# LLM: B1-R1：同一次解析同时交回结构化解析诊断（行号/码，不含原文），与配置同一 stat 代次缓存；原有调用方只取配置，
+#   行为不变。安全开关据此区分“合法的部分配置用默认值”和“选中的文件有坏行”。
+# 函数用途: 加载能力配置并返回该文件的解析诊断。
+def load_capability_config_report(
+    config_path: str | Path | None = None,
+) -> tuple[CapabilityConfig, tuple[ConfigParseDiagnostic, ...]]:
     from .runtime_config_reload import resolve_capability_config_path
 
     path = Path(config_path) if config_path is not None else resolve_capability_config_path()
@@ -236,13 +248,14 @@ def load_capability_config(config_path: str | Path | None = None) -> CapabilityC
     with _CAPABILITY_CONFIG_CACHE_LOCK:
         if stat_key in _CAPABILITY_CONFIG_CACHE:
             _CAPABILITY_CONFIG_CACHE.move_to_end(stat_key)
-            return _copy_capability_config(_CAPABILITY_CONFIG_CACHE[stat_key])
-        result = _load_capability_config(path)
+            cached, diagnostics = _CAPABILITY_CONFIG_CACHE[stat_key]
+            return _copy_capability_config(cached), diagnostics
+        result, diagnostics = _load_capability_config(path)
         if stat_key[1] != -1:
-            _CAPABILITY_CONFIG_CACHE[stat_key] = _copy_capability_config(result)
+            _CAPABILITY_CONFIG_CACHE[stat_key] = (_copy_capability_config(result), diagnostics)
             if len(_CAPABILITY_CONFIG_CACHE) > _CAPABILITY_CONFIG_CACHE_MAX_SIZE:
                 _CAPABILITY_CONFIG_CACHE.popitem(last=False)
-        return result
+        return result, diagnostics
 
 
 # LLM: 签名含dev/inode/size/mtime/ctime；缺失或失败返回哨兵且不复用旧成功配置，供缓存与旧位置诊断共用。
@@ -267,13 +280,14 @@ def _copy_capability_config(config: CapabilityConfig) -> CapabilityConfig:
 
 # LLM: 原标准库 YAML 与安全开关校验保持；失败不缓存，决策迁移只由显式离线流程执行。
 # 函数用途: 加载正式能力配置，已删/未知字段记告警，不把旧决策变成运行默认。
-def _load_capability_config(config_path: str | Path) -> CapabilityConfig:
+def _load_capability_config(config_path: str | Path) -> tuple[CapabilityConfig, tuple[ConfigParseDiagnostic, ...]]:
     """加载能力路由配置；未知字段只记告警并忽略（与主配置一致），非法值仍报错。"""
 
     path = Path(config_path)
     if not path.exists():
         raise FileNotFoundError(f"能力路由配置文件不存在: {path}")
-    raw = load_simple_yaml(path)
+    diagnostics: list[ConfigParseDiagnostic] = []
+    raw = load_simple_yaml(path, diagnostics=diagnostics)
     allowed = set(CapabilityConfig.__dataclass_fields__.keys())
     # 参数减量的约定：已删的键只告警、不迁移，也不能拦住加载；用户配置里残留旧键是常态。
     config_warnings = [
@@ -282,4 +296,4 @@ def _load_capability_config(config_path: str | Path) -> CapabilityConfig:
     clean = {key: _coerce_capability_value(key, value) for key, value in raw.items() if key in allowed}
     config = CapabilityConfig(**clean)
     config.config_warnings = config_warnings
-    return config
+    return config, tuple(diagnostics)

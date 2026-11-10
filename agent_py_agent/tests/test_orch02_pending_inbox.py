@@ -352,25 +352,38 @@ def _surface(agent) -> dict[str, bool]:
     }
 
 
-def _registry_call(case, params: dict):
-    from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
+# LLM: PRO-MSG-021：真实保存“关之前”的运行时快照和调用，之后才关开关，再拿旧快照走 registry.execute_tool；
+#   这才是过期快照证明（harness 每次新建快照，不能当这个证明）。
+# 函数用途: 在开关开着时保存快照与规范调用。
+def _saved_call(case):
+    from agent_py_agent.tests._tool_runtime_harness import canonical_test_call
 
     run_id = f"gwreq-inbox-{time.time_ns()}"
     attempt = case.agent.subagents.runtime_db.record_run_creation(
         owner_id=case.agent.home_paths.owner_id, goal="inbox", conversation_task_id=case.parent_task_id,
         thread_id=case.thread.thread_id, run_id=run_id, role="assistant")["attempt_id"]
-    return execute_registry_test_call(case.agent.tools, "list_pending_requests", params,
-                                      run_id=run_id, attempt_id=attempt)
+    snapshot = case.agent.tools.runtime_snapshot(run_id=run_id)
+    assert "list_pending_requests" in snapshot.available_tool_names
+    return snapshot, canonical_test_call(snapshot, "list_pending_requests", {}, attempt_id=attempt)
+
+
+def _child_facts(case) -> tuple:
+    task = case.agent.subagents.load(case.child_id)
+    wakes = case.agent.conversation_store.wakes.pending(limit=1000)
+    return task.status, [(r.id, r.status) for r in task.capability_requests], len(wakes)
 
 
 def test_b1_switch_toggles_live_on_the_same_agent_both_directions(case):
     _open_request(case, "req-1")
     _as_parent(case)
     on = _surface(case.agent)
+    saved_snapshot, saved_call = _saved_call(case)
     _write_switch(case.agent, "false")
     off = _surface(case.agent)
+    facts_before = _child_facts(case)
     direct, direct_payload = _list(case.agent)
-    stale = _registry_call(case, {})
+    stale = case.agent.tools.execute_tool(saved_call, write_boundary=None, runtime_snapshot=saved_snapshot).result
+    facts_after = _child_facts(case)
     _write_switch(case.agent, "true")
     again = _surface(case.agent)
     result, payload = _list(case.agent)
@@ -380,7 +393,8 @@ def test_b1_switch_toggles_live_on_the_same_agent_both_directions(case):
     assert off == {"snapshot": False, "specs": False, "catalog": False, "search": False}
     assert direct.ok is False and direct.effect_outcome == "not_started"
     assert direct_payload["error"]["reason"] == "PENDING_INBOX_DISABLED" and "items" not in direct_payload
-    assert stale.ok is False and "req-1" not in stale.output
+    assert stale.ok is False and stale.effect_outcome == "not_started" and "req-1" not in stale.output
+    assert facts_after == facts_before
     assert again == on and result.ok is True and [item["request_id"] for item in payload["items"]] == ["req-1"]
 
 
@@ -436,6 +450,94 @@ def test_b1_injected_non_boolean_value_is_not_treated_as_enabled(case):
     result, _ = _list(case.agent)
 
     assert _surface(case.agent)["specs"] is False and result.ok is False
+
+
+def _write_raw(agent, text: str, bump: float) -> None:
+    path = Path(agent.capability_config_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    stamp = time.time() + bump
+    os.utime(path, (stamp, stamp))
+
+
+# LLM: B1-R1（PRO-MSG-020/021）：选中的用户文件里有坏行（整份乱码、合法行夹坏行、引号不闭合）时，解析器跳过坏行
+#   并给出结构诊断；收件箱必须按关闭处理，修好文件后同一实例恢复。
+# 函数用途: 坏掉的选中配置不能把收件箱开成默认开启。
+@pytest.mark.parametrize("text", [
+    "{{{ not yaml\n",
+    "orchestration_pending_inbox_enabled: true\n{{{ junk\n",
+    'orchestration_pending_inbox_enabled: "true\n',
+])
+def test_b1_r1_malformed_selected_config_fails_closed_and_recovers(case, text):
+    _open_request(case, "req-1")
+    _as_parent(case)
+    _write_switch(case.agent, "true")
+    assert _surface(case.agent)["specs"] is True
+    _write_raw(case.agent, text, 3)
+    broken_surface = _surface(case.agent)
+    broken, _ = _list(case.agent)
+    _write_raw(case.agent, "orchestration_pending_inbox_enabled: true\n", 5)
+    repaired, payload = _list(case.agent)
+
+    assert broken_surface == {"snapshot": False, "specs": False, "catalog": False, "search": False}
+    assert broken.ok is False and broken.effect_outcome == "not_started"
+    assert repaired.ok is True and [item["request_id"] for item in payload["items"]] == ["req-1"]
+
+
+# LLM: 合法的空文件、只有注释、只写别的键都是合法的部分配置，沿随包默认开启（PRO-MSG-020 的合法默认规则）。
+# 函数用途: 合法部分配置保留随包默认。
+@pytest.mark.parametrize("text", ["", "# 只有注释\n", "session_pair_hourly_limit: 7\n"])
+def test_b1_valid_partial_config_keeps_the_shipped_default(case, text):
+    _as_parent(case)
+    _write_raw(case.agent, text, 3)
+
+    assert _surface(case.agent)["specs"] is True and _list(case.agent)[0].ok is True
+
+
+# LLM: B1-R2：没有用户文件、随包模板也读不到时，原入口会回一个默认对象；它不算来源，收件箱关闭。随包模板真读到时
+#   缺用户文件是正常情况（正向对照）。只重定向随包路径，解析器、加载器和开关读口都是真实实现。
+# 函数用途: 没有任何成功读取的来源时收件箱关闭。
+def test_b1_r2_no_successfully_read_source_fails_closed(case, monkeypatch, tmp_path):
+    from agent_py_agent.agent.capability import runtime_config_reload
+
+    Path(case.agent.capability_config_path).unlink(missing_ok=True)
+    fresh = _agent(case.config, case.workspace)
+    assert not Path(fresh.capability_config_path).exists()
+    with_template = _surface(fresh)["specs"]
+    monkeypatch.setattr(runtime_config_reload, "bundled_capability_config_path", lambda: tmp_path / "missing.yaml")
+    without_any_source = _surface(fresh)
+    direct, _ = _list(fresh)
+
+    assert with_template is True
+    assert without_any_source == {"snapshot": False, "specs": False, "catalog": False, "search": False}
+    assert direct.ok is False and direct.effect_outcome == "not_started"
+
+
+# LLM: B1-R3：关着时真实 tool_search 的 query/names/catalog 三种入口（完整输出与 live_prompt_output）都不能再带出
+#   它的名字、类别或原因；只排除对入参的原样回显（query/names/not_found）。开着时 names 能查到（正向对照），
+#   其它工具的不可用诊断不受影响由原有 registry 测试守住。
+# 函数用途: 关闭的收件箱不出现在模型可见的发现元数据里。
+def test_b1_r3_disabled_inbox_leaves_no_discovery_metadata(case):
+    _as_parent(case)
+    search = case.agent.tools.tools["tool_search"]
+    echo = {"query", "names", "not_found"}
+
+    def leaked(params) -> bool:
+        result = search.execute(params)
+        payload = json.loads(result.output)
+        live = (result.result_envelope or {}).get("tool_output_policy", {}).get("live_prompt_output")
+        live = json.loads(live) if isinstance(live, str) else (live or {})
+        rest = [{k: v for k, v in part.items() if k not in echo} for part in (payload, live) if isinstance(part, dict)]
+        return "list_pending_requests" in json.dumps(rest, ensure_ascii=False)
+
+    _write_switch(case.agent, "true")
+    enabled = {"names": leaked({"names": ["list_pending_requests"]}), "catalog": leaked({"action": "catalog"})}
+    _write_switch(case.agent, "false")
+    disabled = {"query": leaked({"query": "list_pending_requests"}), "names": leaked({"names": ["list_pending_requests"]}),
+                "catalog": leaked({"action": "catalog"})}
+
+    assert enabled == {"names": True, "catalog": True}
+    assert disabled == {"query": False, "names": False, "catalog": False}
 
 
 def test_leaf_roles_never_get_the_tool():

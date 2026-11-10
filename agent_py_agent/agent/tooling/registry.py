@@ -1223,13 +1223,19 @@ def _registry_runtime_snapshot(registry, allowed_tools, run_id, owner_scope_root
             continue
         spec = getattr(tool, "model_spec", None)
         exposure = getattr(tool, "exposure", None)
+        # B1-R3：工具类显式声明 hidden_when_unavailable=True 时（结构属性，不看名字或原因文案），不可用就整体不进
+        # 本次快照：目录、不可用列表、self_context 与 tool_search 都看不到它的名字/类别/原因；其它工具的不可用诊断不变。
+        hidden_when_unavailable = getattr(type(tool), "hidden_when_unavailable", False) is True
+        availability = _safe_tool_availability(tool, registry=registry) if hidden_when_unavailable else None
+        if availability is not None and not availability.available:
+            continue
         if catalog_only and name == "tool_search":
             spec = _catalog_only_model_spec(spec)
         if isinstance(spec, ToolModelSpec) and (exposure is None or bool(getattr(exposure, "model_visible", True))):
             catalog_specs.append(spec)
         if name in registry.disabled_tool_names or (catalog_only and name == "tool_search" and "list_tools" in registry.disabled_tool_names):
             continue
-        availability = _safe_tool_availability(tool, registry=registry)
+        availability = availability or _safe_tool_availability(tool, registry=registry)
         if not availability.available:
             unavailable.append((name, availability.error_code or "TOOL_UNAVAILABLE", availability.reason))
             continue
