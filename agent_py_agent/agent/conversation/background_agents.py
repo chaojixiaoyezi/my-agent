@@ -275,16 +275,32 @@ class BackgroundAgentService:
     # LLM: 业务详情入口先核目标Owner与空间，再读有界待办页和准确执行关联；执行观察异常仅降级为None，不创建任务或改写身份。
     # 函数用途: 查询一个后台助手的身份、待办及可核实的当前执行。
     def get(self, agent_id, *, actor):
+        from .background_scheduling_view import model_readiness, scheduling_view
+
         thread = self._thread(agent_id, actor)
         page = self.store.session_tasks.list_page(target_thread_id=agent_id, limit=100)
-        pending = [self._task_view(task) for task in page["items"] if task.status not in SESSION_TASK_TERMINAL_STATUSES]
+        open_tasks = [task for task in page["items"] if task.status not in SESSION_TASK_TERMINAL_STATUSES]
         try:
             execution = self._execution_view(thread)
         except (OSError, ValueError, TypeError, KeyError, RuntimeError, sqlite3.Error):
             execution = None
-        return {"agent": self._agent_view(thread), "current_execution": execution, "pending_tasks": pending,
+        pending_inputs = None
+        if not open_tasks and not page["load_errors"]:
+            try:
+                inputs, errors = self.store.guidance.pending_report("thread", thread.thread_id, limit=100)
+                pending_inputs = None if errors else bool(inputs)
+            except (OSError, ValueError, TypeError, KeyError, sqlite3.Error):
+                pending_inputs = None
+        ready, reason = model_readiness(self.host, thread)
+        complete = not page["load_errors"] and page["coverage"] == "complete" and page["next_cursor"] is None
+        scheduling = scheduling_view(self.store, thread_id=thread.thread_id, tasks=open_tasks,
+            identity_state=background_identity(thread).identity_state, running=execution is not None,
+            model_ready=ready, model_reason=reason, pending_inputs=pending_inputs, tasks_complete=complete)
+        return {"agent": self._agent_view(thread), "current_execution": execution,
+                "pending_tasks": [self._task_view(task, execution) for task in open_tasks],
                 "allowed_actions": ["background_agents.get", "background_agents.messages.send", "background_agents.suspend",
-                                    "background_agents.resume", "background_agents.retire", "background_agents.model.set"]}
+                                    "background_agents.resume", "background_agents.retire", "background_agents.model.set"],
+                "scheduling": scheduling}
 
     # LLM: 供详情和工作态投影只读使用；running须同时通过有效claim、同Owner运行库和canonical任务绑定复核，缺证抛错，不用身份可用态推断执行。
     # 函数用途: 将真正仍在运行的精确run与attempt整理为执行详情；非运行claim返回None。
@@ -339,12 +355,15 @@ class BackgroundAgentService:
                 or task.metadata.get("business_context") != context.to_dict()):
             raise ValueError("EXECUTION_AUTHORITY_UNAVAILABLE")
 
-    def _task_view(self, task):
+    # LLM: current_run_id 只取调用方已按 claim/运行库/canonical 任务复核过的准确执行，且其冻结 task_id 等于本任务；其它一律 None。
+    # 函数用途: 把 canonical 任务整理成冻结 TaskView，正在执行的任务关联到它的准确 run。
+    def _task_view(self, task, execution=None):
         raw = task.metadata.get("business_context")
         context = BusinessExecutionContext.from_dict(raw) if raw else None
+        run_id = execution.get("run_id") if isinstance(execution, dict) and execution.get("task_id") == task.task_id else None
         return {"task_id": task.task_id, "thread_id": task.target_thread_id, "space_id": context.space_id if context else None,
                 "project_ref": context.project_ref if context else None, "status": task.status,
-                "current_run_id": None, "result_refs": list(task.result_refs), "revision": int(task.updated_at * 1000000)}
+                "current_run_id": run_id, "result_refs": list(task.result_refs), "revision": int(task.updated_at * 1000000)}
 
     # LLM: 更新、模型选择和生命周期共用此写入口；核目标范围后在身份锁及线程原子更新内处理CAS与幂等回执并发布索引，restore还须预留配额。
     # 函数用途: 按修订号安全修改后台身份或模型选择，同键重放不重复变更。

@@ -84,6 +84,30 @@ def test_frozen_full_catalog_and_schema_bundle_hashes():
         assert result["properties"]["workflow_ref"] == {
             "anyOf": [{"$ref": "#/$defs/Id"}, {"type": "null"}]}
         result["properties"]["workflow_ref"] = {"$ref": "#/$defs/Id"}
+    # ROUTE-02 只可选追加后台调度投影：锁住新定义与两处可选引用，再规范化比较原冻结目录。
+    scheduling_schema = {"type": "object", "properties": {
+        "state": {"type": "string", "enum": ["no_work", "queued", "running", "paused", "retiring", "retired",
+                                             "model_unavailable", "wake_backoff", "stalled", "terminal", "unknown"]},
+        "reason_code": {"type": "string", "minLength": 0, "maxLength": 128},
+        "pending_task_count": {"type": ["integer", "null"], "minimum": 0},
+        "wake_signal_ids": {"type": "array", "items": {"$ref": "#/$defs/Id"}, "maxItems": 20},
+        "failure_count": {"type": "integer", "minimum": 0}, "uncounted_count": {"type": "integer", "minimum": 0},
+        "last_failure_at": {"$ref": "#/$defs/Timestamp"}, "next_attempt_at": {"$ref": "#/$defs/Timestamp"},
+        "model_ready": {"type": ["boolean", "null"]}, "coverage": {"$ref": "#/$defs/Coverage"}},
+        "required": ["state", "reason_code", "pending_task_count", "wake_signal_ids", "failure_count",
+                     "uncounted_count", "last_failure_at", "next_attempt_at", "model_ready", "coverage"],
+        "additionalProperties": False}
+    scheduling_results = [definitions[name] for definitions in (normalized_api["$defs"], normalized_schemas["$defs"],
+                                                                normalized_defs)
+                          for name in ("Result_background_agents_get", "Result_tasks_get")]
+    scheduling_results += [row["result_schema"] for row in normalized_api["actions"]
+                           if row["action"] in {"background_agents.get", "tasks.get"}]
+    assert len(scheduling_results) == 8
+    for result in scheduling_results:
+        assert "scheduling" not in result["required"]
+        assert result["properties"].pop("scheduling") == {"$ref": "#/$defs/BackgroundSchedulingView"}
+    for definitions in (normalized_api["$defs"], normalized_schemas["$defs"], normalized_defs):
+        assert definitions.pop("BackgroundSchedulingView") == scheduling_schema
     # #49-1仅可选追加画布拓扑字段；先证明不进入required，再规范化比较原冻结目录。
     canvas = {"WorkflowDefinition": ("datasource_ids", "edges", "schedule_ids"),
               "WorkflowStepDefinition": ("description", "next_step_ids", "ui_position")}
