@@ -1,6 +1,8 @@
 """直属下级未决能力申请的只读模型工具。"""
 
-# LLM: 这是 pending_inbox 的唯一模型入口：不写任何状态；是否注册由 core 在构造时按能力开关决定（改开关需重启 Gateway）。
+# LLM: 这是 pending_inbox 的唯一模型入口：不写任何状态。B1 生命周期：工具常驻注册，availability 每次快照现读
+#   当前 owner 的能力开关，关着（或配置读不出/非布尔）就不进快照、模型看不到也调不了；execute 自己再查一次，
+#   过期的直接调用同样拒绝。
 # 模块用途: 把只读收件箱页交给协调代理，裁决仍由 resolve_capability_requests 完成。
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from ....tooling.models import (
     ConcurrencyPolicy,
     EffectResolverPolicy,
     ResourceScopePolicy,
+    ToolAvailability,
     ToolHandlerOutcome,
     ToolRuntimePolicy,
 )
@@ -46,10 +49,23 @@ class ListPendingRequestsTool(BaseTool):
     def __init__(self, agent: SimpleAgent) -> None:
         self.agent = agent
 
-    # LLM: 参数类型错误与游标越权都在读取任何申请前返回 not_started，失败结果不含申请数据。
+    # LLM: 每次快照现读当前 owner 的能力配置；读不出（None/异常）或值不是 True 都按关闭，不回落默认开启。
+    # 函数用途: 告诉注册表收件箱此刻是否开放。
+    def availability(self) -> ToolAvailability:
+        if _inbox_enabled(self.agent):
+            return ToolAvailability.ready()
+        return ToolAvailability.unavailable("未决申请收件箱开关未启用")
+
+    # LLM: 参数类型错误与游标越权都在读取任何申请前返回 not_started，失败结果不含申请数据；开关关着时直接或过期的调用
+    #   同样在读取前拒绝。
     # 函数用途: 读取一页收件箱并按 JSON 返回。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         name = self.model_spec.name
+        if not _inbox_enabled(self.agent):
+            details = {"error": {"reason": "PENDING_INBOX_DISABLED", "message": "未决申请收件箱开关未启用。"}}
+            return ToolHandlerOutcome(name, False, json.dumps(details, ensure_ascii=False),
+                                      result_envelope={"details": details}, error_code="TOOL_PERMISSION_DENIED",
+                                      effect_outcome="not_started")
         try:
             include_resolved = params.get("include_resolved", False)
             if not isinstance(include_resolved, bool):
@@ -66,6 +82,19 @@ class ListPendingRequestsTool(BaseTool):
                                       error_code=_ERROR_CODES.get(error.code, "TOOL_INVALID_ARGUMENTS"),
                                       effect_outcome="not_started")
         return ToolHandlerOutcome(name, True, json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+
+
+# LLM: 唯一的开关读口；只有读到真正的 CapabilityConfig 且值严格为 True 才开放。
+# 函数用途: 现读当前 owner 的收件箱开关。
+def _inbox_enabled(agent: object) -> bool:
+    from ....capability import runtime_config_reload
+    from ....capability.config import CapabilityConfig
+
+    try:
+        config = runtime_config_reload.capability_config_for_agent(agent)
+    except Exception:  # noqa: BLE001 - 配置读失败按关闭处理
+        return False
+    return isinstance(config, CapabilityConfig) and config.orchestration_pending_inbox_enabled is True
 
 
 __all__ = ["ListPendingRequestsTool"]

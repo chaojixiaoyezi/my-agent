@@ -83,7 +83,7 @@ class CapabilityConfig:
     skill_transfers_enabled: bool = True
     # 有限只读工具计划，内部调用继续原权限/审计/取消，默认按需加载；关闭不影响普通工具批次。
     tool_program_enabled: bool = True
-    # 协调代理的只读未决申请收件箱；关闭后启动时不注册该工具（改动需重启 Gateway），不影响 resolve_capability_requests 裁决。
+    # 协调代理的只读未决申请收件箱；关闭后下一轮起模型看不到也调不了（同一进程内现读生效），不影响 resolve_capability_requests 裁决。
     orchestration_pending_inbox_enabled: bool = True
     # 收件箱每页默认条数；0 表示不另设限制，仍受单页硬上限 200 约束。
     orchestration_pending_inbox_page_limit: int = 50
@@ -213,7 +213,8 @@ def _coerce_capability_value(field_name: str, value: object) -> object:
     if field_name in {"feishu_cli_backend_enabled", "feishu_user_oauth_enabled", "tool_program_enabled",
                       "background_user_action_notice_enabled", "im_group_shared_credentials_enabled",
                       "im_group_authorization_required", "feishu_bot_subscriptions_enabled",
-                      "feishu_user_subscriptions_enabled", "feishu_chat_history_enabled"}:
+                      "feishu_user_subscriptions_enabled", "feishu_chat_history_enabled",
+                      "orchestration_pending_inbox_enabled"}:
         if not isinstance(value, bool):
             raise ValueError(f"{field_name} 必须为布尔值，不能以未知配置打开能力。")
         return value

@@ -23,6 +23,8 @@ SELF_INSTALL_SWITCH_KEYS = frozenset({PACK_SELF_INSTALL_KEY, PLUGIN_SELF_INSTALL
 # 用到时现读文件的能力配置键唯一名单；参数中心和前端目录按这份事实报"马上生效"。
 CAPABILITY_FRESH_SWITCH_KEYS = SELF_INSTALL_SWITCH_KEYS | frozenset({
     "enable_capability_package_selection", "conversation_method_carry_enabled", "skill_transfers_enabled",
+    # 未决申请收件箱的可用性每次快照经 capability_config_for_agent 现读，改动下一轮即生效。
+    "orchestration_pending_inbox_enabled",
 })
 # 配置文件读不到或解析失败时的版本标记：开关按关处理，回执如实带上这个标记。
 UNREADABLE_CONFIG_VERSION = "unreadable"

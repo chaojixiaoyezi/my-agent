@@ -51,7 +51,7 @@ feishu_chat_history_enabled: true
 skill_transfers_enabled: true
 # 有限只读批量计划：按需加载；最多16步/32调用，不执行代码、不允许写动作，内部仍逐工具授权和取消。
 tool_program_enabled: true
-# 协调代理的只读未决申请收件箱（list_pending_requests）：列出直属子代理待处理的能力申请；关闭后启动时不注册该工具，改动需重启 Gateway，裁决入口不受影响。
+# 协调代理的只读未决申请收件箱（list_pending_requests）：列出直属子代理待处理的能力申请；改动下一轮现读生效，关闭后模型看不到也调不了；只接受 true/false，裁决入口不受影响。
 orchestration_pending_inbox_enabled: true
 # 收件箱每页默认条数；0 表示不另设限制，仍受单页硬上限 200 约束。
 orchestration_pending_inbox_page_limit: 50

@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -324,14 +326,119 @@ def test_page_limit_defaults_follow_config_and_zero_means_hard_ceiling(case, mon
     assert len(unlimited["items"]) == 3 and unlimited["coverage"]["page_limit"] == MAX_PAGE_ITEMS_COUNT
 
 
-def test_switch_off_at_startup_never_registers_and_leaf_roles_never_get_the_tool(case, monkeypatch):
-    assert "list_pending_requests" in case.agent.tools.tools
-    _config(monkeypatch, orchestration_pending_inbox_enabled=False)
-    disabled = _agent(case.config, case.workspace)
-    visible = {spec.name for spec in disabled.tools.model_visible_specs()}
+# ---------- B1 开关生命周期（PRO-MSG-016）：取代 4bd54f9cf 的“启动时不注册”观察，原候选与探针留作历史 ----------
+# 工具常驻注册是实现细节；公开合同是：关着时不出现在任何模型可见面（快照、规格、目录、搜索），任何调用都不执行，
+# 同一个 agent 上 true→false / false→true 下一轮就生效，按 owner 隔离，配置读不出或非布尔按关闭。
 
-    # ORCH02-R1：开关关着时构造出的新代理里根本没有这个工具，不只是“不可用”。
-    assert "list_pending_requests" not in disabled.tools.tools and "list_pending_requests" not in visible
+
+def _write_switch(agent, value: str) -> None:
+    path = Path(agent.capability_config_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"orchestration_pending_inbox_enabled: {value}\n", encoding="utf-8")
+    # 同一秒内重写时也要换掉 stat 身份，确保读口看到的是新文件。
+    stamp = time.time() + (0.0 if value == "true" else 1.0)
+    os.utime(path, (stamp, stamp))
+
+
+def _surface(agent) -> dict[str, bool]:
+    name = "list_pending_requests"
+    snapshot = agent.tools.runtime_snapshot()
+    searched = agent.tools.search_deferred_specs(name, runtime_snapshot=snapshot)
+    return {
+        "snapshot": name in set(snapshot.available_tool_names),
+        "specs": name in {spec.name for spec in agent.tools.model_visible_specs()},
+        "catalog": name in agent.tools.render_catalog_section(),
+        "search": name in {spec.name for spec in searched},
+    }
+
+
+def _registry_call(case, params: dict):
+    from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
+
+    run_id = f"gwreq-inbox-{time.time_ns()}"
+    attempt = case.agent.subagents.runtime_db.record_run_creation(
+        owner_id=case.agent.home_paths.owner_id, goal="inbox", conversation_task_id=case.parent_task_id,
+        thread_id=case.thread.thread_id, run_id=run_id, role="assistant")["attempt_id"]
+    return execute_registry_test_call(case.agent.tools, "list_pending_requests", params,
+                                      run_id=run_id, attempt_id=attempt)
+
+
+def test_b1_switch_toggles_live_on_the_same_agent_both_directions(case):
+    _open_request(case, "req-1")
+    _as_parent(case)
+    on = _surface(case.agent)
+    _write_switch(case.agent, "false")
+    off = _surface(case.agent)
+    direct, direct_payload = _list(case.agent)
+    stale = _registry_call(case, {})
+    _write_switch(case.agent, "true")
+    again = _surface(case.agent)
+    result, payload = _list(case.agent)
+
+    # 工具不延迟（默认延迟合同），目录与延迟搜索本就只列延迟工具，开着时只核快照与规格。
+    assert on["snapshot"] is True and on["specs"] is True
+    assert off == {"snapshot": False, "specs": False, "catalog": False, "search": False}
+    assert direct.ok is False and direct.effect_outcome == "not_started"
+    assert direct_payload["error"]["reason"] == "PENDING_INBOX_DISABLED" and "items" not in direct_payload
+    assert stale.ok is False and "req-1" not in stale.output
+    assert again == on and result.ok is True and [item["request_id"] for item in payload["items"]] == ["req-1"]
+
+
+def test_b1_disabled_before_construction_is_absent_from_every_model_surface(case):
+    _write_switch(case.agent, "false")
+    fresh = _agent(case.config, case.workspace)
+
+    assert _surface(fresh) == {"snapshot": False, "specs": False, "catalog": False, "search": False}
+    _write_switch(fresh, "true")
+    assert _surface(fresh)["specs"] is True
+
+
+def test_b1_switch_is_isolated_per_owner(case, tmp_path):
+    other_workspace = tmp_path / "other-ws"
+    other_workspace.mkdir()
+    other = _agent(type(case.config)(model_backend="echo", my_agent_home=str(tmp_path / "other-home"),
+                                     enable_subagents=True), other_workspace)
+    _write_switch(case.agent, "false")
+
+    assert _surface(case.agent)["specs"] is False
+    assert _surface(other)["specs"] is True
+
+
+# LLM: “读不出”用真正读不了的路径（同名目录）构造；共享解析器对无法识别的行按缺省处理，那不算读不出，记在 HANDOFF。
+# 函数用途: 非布尔值与配置读不出都按关闭处理，模型看不到、直接调用也不执行。
+@pytest.mark.parametrize("broken", ["non_boolean", "unreadable"])
+def test_b1_unreadable_or_non_boolean_config_fails_closed(case, broken):
+    path = Path(case.agent.capability_config_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _surface(case.agent)
+    if broken == "non_boolean":
+        path.write_text("orchestration_pending_inbox_enabled: maybe\n", encoding="utf-8")
+        stamp = time.time() + 2
+        os.utime(path, (stamp, stamp))
+    else:
+        path.unlink(missing_ok=True)
+        path.mkdir()
+    result, _ = _list(case.agent)
+
+    assert _surface(case.agent)["specs"] is False and result.ok is False
+    assert result.effect_outcome == "not_started"
+
+
+# LLM: 宿主显式内存注入的 CapabilityConfig 不经过文件严格解析；字符串 "false" 是真值，读口必须严格认 True。
+# 函数用途: 内存注入的非布尔开关值也按关闭处理。
+def test_b1_injected_non_boolean_value_is_not_treated_as_enabled(case):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.capability.config import CapabilityConfig
+
+    case.agent._capability_config_runtime_snapshot = SimpleNamespace(
+        config=CapabilityConfig(orchestration_pending_inbox_enabled="false"))
+    result, _ = _list(case.agent)
+
+    assert _surface(case.agent)["specs"] is False and result.ok is False
+
+
+def test_leaf_roles_never_get_the_tool():
     assert "list_pending_requests" in DIRECT_CHILD_CONTROL_TOOLS
     assert "list_pending_requests" not in _leaf_write_tools(
         ["read_file", "list_pending_requests"], parent_tools=["read_file", "list_pending_requests"])
