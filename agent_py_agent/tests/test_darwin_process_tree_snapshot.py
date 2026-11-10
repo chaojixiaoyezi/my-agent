@@ -259,3 +259,93 @@ def test_exact_zombie_probe_preserves_original_date_token_and_never_enumerates_h
     monkeypatch.setattr(registry.subprocess, 'run', run)
     assert registry._darwin_zombie_root_info(ROOT) == (ROOT, 'host:Mon Nov  9 11:00:00 2026')
     assert calls == [['ps', '-p', str(ROOT), '-o', 'pid=,pgid=,stat=,lstart=']]
+
+
+def test_cached_zombie_identity_uses_fresh_kernel_birth_without_ps(monkeypatch):
+    import ctypes
+
+    from agent_py_agent.agent.common import heartbeat
+    from agent_py_agent.agent.gateway_parts.multiprocess_takeover_darwin_types import KinfoProc
+
+    value = KinfoProc()
+    value.kp_proc.p_pid = ROOT
+    value.kp_proc.p_stat = b'\x05'
+    value.kp_proc.p_un.p_starttime.tv_sec = 1794249600
+    value.kp_proc.p_un.p_starttime.tv_usec = 123
+    value.kp_eproc.e_pgid = ROOT
+    queries, ps = [], []
+    def query(mib, count, output, size, *_unused):
+        assert count == 4 and tuple(mib) == (1, 14, 1, ROOT)
+        queries.append(ROOT)
+        ctypes.memmove(output, ctypes.byref(value), ctypes.sizeof(value))
+        ctypes.cast(size, ctypes.POINTER(ctypes.c_size_t))[0] = ctypes.sizeof(value)
+        return 0
+    monkeypatch.setattr(heartbeat, '_darwin_sysctl', lambda: query)
+    monkeypatch.setattr(registry, 'sys', SimpleNamespace(platform='darwin'))
+    monkeypatch.setattr(native, 'sys', SimpleNamespace(platform='darwin'))
+    monkeypatch.setattr(native, '_darwin_info', lambda pid: (None, errno.ESRCH))
+    monkeypatch.setattr(registry, '_native_posix_probe_enabled', lambda: True)
+    monkeypatch.setattr(native, 'process_birth', lambda pid: None)
+    monkeypatch.setattr(registry, '_PID_BIRTH_TOKEN_CACHE', {
+        (ROOT, '1794249600:000123'): 'host:original#kb=1794249600:000123'})
+    def empty_ps(*args, **kwargs):
+        ps.append(args)
+        return SimpleNamespace(returncode=1, stdout='')
+    monkeypatch.setattr(registry.subprocess, 'run', empty_ps)
+    assert registry._darwin_zombie_root_info(ROOT) == (ROOT, 'host:original#kb=1794249600:000123')
+    assert registry.capture_process_birth_token(ROOT) == 'host:original#kb=1794249600:000123'
+    assert registry._native_kernel_terminated(ROOT) is True
+    assert len(queries) >= 3 and ps == []
+
+
+@pytest.mark.parametrize('failure', ['size', 'pid', 'live', 'group', 'seconds', 'micros', 'errno', 'abi'])
+def test_zombie_kernel_unknown_never_borrows_cached_identity(monkeypatch, failure):
+    import ctypes
+
+    from agent_py_agent.agent.common import heartbeat
+    from agent_py_agent.agent.gateway_parts import multiprocess_takeover_darwin_types as types
+
+    value = types.KinfoProc()
+    value.kp_proc.p_pid = ROOT + (failure == 'pid')
+    value.kp_proc.p_stat = b'\x02' if failure == 'live' else b'\x05'
+    value.kp_proc.p_un.p_starttime.tv_sec = 0 if failure == 'seconds' else 1794249600
+    value.kp_proc.p_un.p_starttime.tv_usec = 1000000 if failure == 'micros' else 123
+    value.kp_eproc.e_pgid = 0 if failure == 'group' else ROOT
+    def query(mib, count, output, size, *_unused):
+        ctypes.memmove(output, ctypes.byref(value), ctypes.sizeof(value))
+        ctypes.cast(size, ctypes.POINTER(ctypes.c_size_t))[0] = ctypes.sizeof(value) - (failure == 'size')
+        return -1 if failure == 'errno' else 0
+    monkeypatch.setattr(heartbeat, '_darwin_sysctl', lambda: query)
+    monkeypatch.setattr(registry, 'sys', SimpleNamespace(platform='darwin'))
+    monkeypatch.setattr(registry, '_native_posix_probe_enabled', lambda: True)
+    monkeypatch.setattr(registry, '_PID_BIRTH_TOKEN_CACHE', {
+        (ROOT, '1794249600:000123'): 'host:original#kb=1794249600:000123'})
+    if failure == 'abi':
+        monkeypatch.setattr(types, 'KinfoProc', ctypes.c_int)
+    calls = []
+    def empty_ps(*args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout='')
+    monkeypatch.setattr(registry.subprocess, 'run', empty_ps)
+    assert registry._darwin_zombie_kernel_identity(ROOT) is None
+    assert registry._darwin_zombie_root_info(ROOT) is None
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('platform', ['linux', 'freebsd', 'win32'])
+def test_non_darwin_never_queries_darwin_zombie_abi(monkeypatch, platform):
+    from agent_py_agent.agent.common import heartbeat
+
+    monkeypatch.setattr(registry, 'sys', SimpleNamespace(platform=platform))
+    def forbidden():
+        raise AssertionError('wrong-platform sysctl')
+    monkeypatch.setattr(heartbeat, '_darwin_sysctl', forbidden)
+    monkeypatch.setattr(registry, '_native_posix_probe_enabled', lambda: True)
+    calls = []
+    def old_probe(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout='41001 41001 Z Mon Nov  9 11:00:00 2026')
+    monkeypatch.setattr(registry.subprocess, 'run', old_probe)
+    assert registry._darwin_zombie_kernel_identity(ROOT) is None
+    assert registry._darwin_zombie_root_info(ROOT) == (ROOT, 'host:Mon Nov  9 11:00:00 2026')
+    assert len(calls) == 1

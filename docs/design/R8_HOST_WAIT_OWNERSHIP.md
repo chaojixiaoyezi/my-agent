@@ -47,3 +47,11 @@ reaper先等原setup-finally门，保留marker→原Popen.poll→registry的原�
 现有`TOOL_OPERATION_IN_FLIGHT`仅表达等待原操作，普通handler返回仍立即结算；没有等待依赖→有界维护→精确原活跃父轮唤醒的完整消费者。`runner_session.cancelled/ended_at`、旧stop diagnostic、日志`.exit.json`及PID消失均不补这个缺口。
 
 建议下一步：先独立评审副作用前不可变绑定、proof-only CAS、持久保留及unknown回收责任，再一次接通确认阶段和活跃父等待。可以并行只读核宿主/PTY证明源，不能把本片算作旧c9自愈闭环。
+
+## Darwin 前台自然退出的点查开销（本地候选）
+
+真实忙时栈落在前台工具退出后的 `_darwin_zombie_root_info`：libproc 不返回僵尸 BSD 身份，同次树快照反复启动精确 PID 的 `ps`。这里不是全机扫描；不得借优化缓存存活或省略末次身份/组复核。
+
+该入口仅在真实 `sys.platform == darwin` 时复用已有 `KinfoProc` 类型及 heartbeat 的已绑定 sysctl，完整核对 LP64/648 字节、准确 PID、SZOMB、有效秒/微秒与正进程组。每次重新点查内核；只有完整出生一致才复用原有 `(pid, birth)` 的 host token 投影。ABI、权限、短读、缺失及非法记录继续原精确 ps 路径；空 ps 输出仍无身份资格。其它平台不调用 Darwin ABI，保留原生命周期。前台的后代集合、组长末次复核、信号资格及退出码不变，不提前 reap，不改旧 UNKNOWN。
+
+同一宿主的隔离自有子进程保留为 zombie 后，旧/新身份与组一致，实际退出码 7 保留。30 次点查中位：标准 3.12 旧 ps 3.680ms、新内核 0.0198ms；默认 free-threaded 3.14.3t 旧 5.4225ms、新 0.0255ms；新点查及整次单节点树快照均零子进程。仅说明此段 fork/等待开销减少，不作为整个忙时 CPU 峰或多用户容量的归因。

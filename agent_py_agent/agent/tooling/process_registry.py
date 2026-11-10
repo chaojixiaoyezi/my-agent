@@ -13,6 +13,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -952,8 +953,45 @@ def _process_tree_snapshot(root_pid: int) -> tuple[dict[int, str], bool]:
     return snapshot, complete
 
 
+def _darwin_zombie_kernel_identity(pid: int) -> tuple[int, str] | None:
+    """点查同一僵尸的完整出生与组；复用原KinfoProc ABI，不缓存存活或关系。"""
+    if sys.platform != "darwin":
+        return None
+    import ctypes
+
+    from ..common.heartbeat import _darwin_sysctl
+    from ..gateway_parts.multiprocess_takeover_darwin_types import KinfoProc
+
+    try:
+        if type(pid) is not int or pid <= 0 or ctypes.c_int(pid).value != pid:
+            return None
+        if ctypes.sizeof(ctypes.c_void_p) != 8 or ctypes.sizeof(KinfoProc) != 648:
+            return None
+        query = _darwin_sysctl()
+        if query is None:
+            return None
+        mib, value = (ctypes.c_int * 4)(1, 14, 1, pid), KinfoProc()
+        size = ctypes.c_size_t(ctypes.sizeof(value))
+        if query(mib, 4, ctypes.byref(value), ctypes.byref(size), None, 0) != 0:
+            return None
+        stamp = value.kp_proc.p_un.p_starttime
+        if (size.value != ctypes.sizeof(value) or value.kp_proc.p_pid != pid
+                or value.kp_proc.p_stat != b'\x05' or value.kp_eproc.e_pgid <= 0
+                or stamp.tv_sec <= 0 or not 0 <= stamp.tv_usec < 1000000):
+            return None
+        return value.kp_eproc.e_pgid, f"{stamp.tv_sec}:{stamp.tv_usec:06d}"
+    except (ImportError, OSError, TypeError, ValueError, AttributeError):
+        return None
+
+
 def _darwin_zombie_root_info(pid: int) -> tuple[int, str] | None:
-    """libproc不返回zombie的BSD身份；仅按原PID读取同一C日期/状态/组，不枚举主机。"""
+    """先核同一原生僵尸出生/组；未知仍点查原ps，不枚举主机或复用存活缓存。"""
+    if _native_posix_probe_enabled():
+        identity = _darwin_zombie_kernel_identity(pid)
+        if identity is not None:
+            group, birth = identity
+            token = _cached_host_birth_token(pid, birth)
+            return (group, token) if token else None
     try:
         result = subprocess.run(
             ["ps", "-p", str(pid), "-o", "pid=,pgid=,stat=,lstart="],
@@ -1362,7 +1400,7 @@ def _native_kernel_terminated(pid: int) -> bool | None:
     ):
         info, error = native._darwin_info(pid)
         if info is None or error:
-            return None
+            return True if _darwin_zombie_kernel_identity(pid) is not None else None
         return info.prefix[1] == 5
     return terminated if isinstance(terminated, bool) else None
 
@@ -1385,6 +1423,11 @@ def capture_process_birth_token(pid: int) -> str:
             kernel_birth = None
         if kernel_birth is not None and str(kernel_birth):
             return _cached_host_birth_token(pid, str(kernel_birth))
+        # libproc拒读zombie；同一KERN_PROC_PID完整身份可继续命中原host-token投影，
+        # 每次仍实际查内核，不能把旧缓存当作该PID仍存在或仍为同一实例。
+        identity = _darwin_zombie_kernel_identity(pid)
+        if identity is not None:
+            return _cached_host_birth_token(pid, identity[1])
     return _read_host_birth_token(pid)
 
 
