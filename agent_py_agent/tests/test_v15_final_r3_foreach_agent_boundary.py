@@ -159,12 +159,14 @@ def test_scope_create_rejects_async_foreach_before_any_commit(business, policy, 
 
 
 def test_wire_create_keeps_frozen_schema_refusal(business):
-    # 冻结的W3 wire schema原本不接foreach；不改协议来代替领域准入修复。
+    # 冻结的W3 wire schema原本不接foreach；WF-07（d2d710c62）按任务要求把既有foreach作为可选字段公开后，
+    # agent_task+foreach 仍由原领域准入在写入前拒绝：不改协议来代替领域准入修复，拒绝/未开始/无任务/无定义不变。
     receipt = business.client.send(PreparedBusinessCall(json.dumps({'action': 'workflows.create',
         'params': {'definition': definition()}, 'request_id': 'boundary-wire-schema',
         'idempotency_key': 'boundary-wire-schema-create'})))
-    assert receipt['ok'] is False and receipt['error']['code'] == 'INVALID_SCHEMA'
+    assert receipt['ok'] is False and receipt['error']['code'] == 'WORKFLOW_FOREACH_AGENT_TASK_UNSUPPORTED'
     assert receipt['effect_outcome'] == 'not_started' and tasks(business) == []
+    assert WorkflowStore(business.home).get_workflow('boundary-flow') is None
 
 
 @pytest.mark.parametrize('policy,parallel', CONFIGURATIONS)

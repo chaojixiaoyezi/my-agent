@@ -13,7 +13,13 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from ..assets.descriptor import asset_descriptor_from_definition
-from ..assets.workflow_store import BUSINESS_WORKFLOW_METADATA, WorkflowDefinition, WorkflowStore
+from ..assets.workflow_store import (
+    BUSINESS_WORKFLOW_METADATA,
+    WorkflowDefinition,
+    WorkflowOperationConflict,
+    WorkflowStore,
+)
+from ..conversation.business_access import BusinessError
 from ..conversation.business_contracts import BusinessExecutionContext, WorkflowScope
 
 # 原领域入口的参数边界；原生工具只适配此入口，W13 目录仍负责完整公开 schema。
@@ -99,6 +105,15 @@ def workflow_view(definition, state=None):
         'protected': state['protected'], 'definition_ref': definition.descriptor.id}
 
 
+# LLM: 只在任何副作用之前抛出；保留 PermissionError 类型（原调用方与测试不变），业务边界据机器码给出 not_started。
+# 类用途: W3 范围/生命周期策略拒绝。
+class WorkflowPolicyRefusal(PermissionError):
+    def __init__(self, code, *, details=None):
+        super().__init__(code)
+        self.error_code = self.code = code
+        self.details = details or {}
+
+
 class WorkflowScopeService:
     """原动作目录与 UI/plugin 共用的 Owner 领域入口；不从请求猜当前业务身份。"""
 
@@ -165,7 +180,6 @@ class WorkflowScopeService:
             definition = self._get(ref)
         except KeyError:
             # 未知引用在任何副作用之前确定：给出结构化 404/not_started，而不是让运输层断开连接。
-            from ..conversation.business_access import BusinessError
             raise BusinessError('RESOURCE_NOT_FOUND') from None
         state = workflow_state(definition)
         if action == 'workflows.scope.get':
@@ -200,7 +214,7 @@ class WorkflowScopeService:
         def transform(previous):
             self._authorize(actor, 'workflows.create', definition.descriptor.id)
             if previous is not None:
-                raise ValueError('WORKFLOW_ALREADY_EXISTS')
+                raise BusinessError('WORKFLOW_ALREADY_EXISTS')
             now = self.clock()
             state = {'scope': scope.to_dict(), 'lifecycle': 'active', 'protected': False,
                 'orphan_since': now if scope.scope_mode == 'unassigned' else None,
@@ -208,14 +222,18 @@ class WorkflowScopeService:
             return with_state(definition, state), {'workflow_ref': definition.descriptor.id,
                 'definition_revision': 1, 'scope_revision': 1, 'scope': scope_view(scope.to_dict())}
 
-        return self.store.apply_business_operation(definition.descriptor.id, action='workflows.create',
-            intent=request, idempotency_key=key, expected_revision=None, revision_target=None, transform=transform)
+        try:
+            return self.store.apply_business_operation(definition.descriptor.id, action='workflows.create',
+                intent=request, idempotency_key=key, expected_revision=None, revision_target=None, transform=transform)
+        except WorkflowOperationConflict as error:
+            raise BusinessError(error.error_code) from None
 
     def _check_scope(self, scope, space_id, *, preview=False):
+        # 范围策略在任何副作用前裁决：结构化拒绝（not_started），不是结果未知。
         if scope['scope_mode'] == 'unassigned' and not preview:
-            raise PermissionError('WORKFLOW_UNASSIGNED')
+            raise WorkflowPolicyRefusal('WORKFLOW_UNASSIGNED')
         if scope['scope_mode'] == 'spaces' and space_id not in scope['space_ids']:
-            raise PermissionError('WORKFLOW_SPACE_MISMATCH')
+            raise WorkflowPolicyRefusal('WORKFLOW_SPACE_MISMATCH')
 
     def _list(self, request, actor):
         rows = []
@@ -262,10 +280,10 @@ class WorkflowScopeService:
             raise ValueError('UNKNOWN_WORKFLOW_ACTION')
         definition = self._get(ref)
         if definition.descriptor.source_scope != 'owner' or definition.descriptor.scope_layer != 'owner':
-            raise PermissionError('WORKFLOW_READ_ONLY')
+            raise WorkflowPolicyRefusal('WORKFLOW_READ_ONLY')
         replacement = self._definition(request['definition']) if action == 'workflows.update' else None
         if replacement is not None and replacement.descriptor.id != ref:
-            raise ValueError('WORKFLOW_REFERENCE_MISMATCH')
+            raise BusinessError('WORKFLOW_REFERENCE_MISMATCH')
 
         def transform(previous):
             self._authorize(actor, action, ref)
@@ -298,7 +316,7 @@ class WorkflowScopeService:
             elif action in ('workflows.enable', 'workflows.disable'):
                 enabled = action == 'workflows.enable'
                 if enabled and state['lifecycle'] != 'active':
-                    raise PermissionError('WORKFLOW_RECYCLED')
+                    raise WorkflowPolicyRefusal('WORKFLOW_RECYCLED')
                 current = replace(previous, enabled=enabled, descriptor=replace(previous.descriptor, enabled=enabled))
             elif action == 'workflows.protection.set':
                 if type(request['protected']) is not bool:
@@ -308,7 +326,10 @@ class WorkflowScopeService:
                 from .orphan_maintenance import cleanup_status
                 status = cleanup_status(self, previous)
                 if status['blockers']:
-                    raise PermissionError('WORKFLOW_REFERENCED_OR_COVERAGE_UNKNOWN')
+                    # 引用存在或覆盖未知都在写入前拒绝；首个阻断原因让客户端区分“被引用”与“覆盖未知”。
+                    raise WorkflowPolicyRefusal('WORKFLOW_REFERENCED_OR_COVERAGE_UNKNOWN', details={
+                        'blocker_reason_code': status['blockers'][0]['reason_code'],
+                        'blocker_count': len(status['blockers'])})
                 state['lifecycle'] = 'recycled'
             current = with_state(current, state)
             current = replace(current, descriptor=replace(current.descriptor, revision=previous.descriptor.revision + 1))
@@ -328,9 +349,12 @@ class WorkflowScopeService:
                           'cleanup_status': cleanup_status(self, current)}
             return current, result
 
-        return self.store.apply_business_operation(ref, action=action, intent=request, idempotency_key=key,
-            expected_revision=revision, revision_target='scope' if action == 'workflows.scope.set' else 'definition',
-            transform=transform)
+        try:
+            return self.store.apply_business_operation(ref, action=action, intent=request, idempotency_key=key,
+                expected_revision=revision, revision_target='scope' if action == 'workflows.scope.set' else 'definition',
+                transform=transform)
+        except WorkflowOperationConflict as error:
+            raise BusinessError(error.error_code) from None
 
     def _run_store(self):
         from .run_store import WorkflowRunStore
@@ -372,7 +396,7 @@ class WorkflowScopeService:
         definition = self._get(request['workflow_ref'])
         state = workflow_state(definition)
         if state['lifecycle'] != 'active' or not definition.enabled:
-            raise PermissionError('WORKFLOW_NOT_ACTIVE')
+            raise WorkflowPolicyRefusal('WORKFLOW_NOT_ACTIVE')
         identity = hashlib.sha256((self.owner_id + '\0workflows.run\0' + key).encode()).hexdigest()
         intent = hashlib.sha256(json.dumps(request, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()).hexdigest()
         engine = self._engine(actor)
@@ -382,7 +406,7 @@ class WorkflowScopeService:
             saved = None
         if saved is not None:
             if engine.store.load_workflow_snapshot(identity).get('_operation_intent') != intent:
-                raise ValueError('IDEMPOTENCY_CONFLICT')
+                raise BusinessError('IDEMPOTENCY_CONFLICT')
             return {'workflow_run_id': identity, 'operation_id': identity, 'state': self._receipt_state(saved)}
         context = None
         if self.context_provider is not None:

@@ -42,6 +42,14 @@ class WorkflowForeachAgentTaskUnsupported(HostAPIError):
         self.details = {'step_id': step_id, 'mode': 'agent_task'}
 
 
+# LLM: 锁内、写入前确定的冲突；保留原 ValueError 类型与文案，只另带机器码供业务边界给出 not_started。
+# 类用途: 业务操作的幂等/版本冲突。
+class WorkflowOperationConflict(ValueError):
+    def __init__(self, code, message=None):
+        super().__init__(message or code)
+        self.error_code = self.code = code
+
+
 # LLM: 只检查当前步骤的模式组合，不改变共享codec，历史定义及取消/对账身份仍可解码。
 # 函数用途: 在写入或执行前拒绝尚无异步完成语义的批节点。
 def validate_step_eligibility(step):
@@ -339,7 +347,7 @@ class WorkflowStore(_AssetStore):
             operations = dict(state.get('operations', {}))
             if receipt := operations.get(identity):
                 if receipt['fingerprint'] != fingerprint:
-                    raise ValueError('IDEMPOTENCY_CONFLICT')
+                    raise WorkflowOperationConflict('IDEMPOTENCY_CONFLICT')
                 return json.loads(json.dumps(receipt['result']))
             if revision_target is not None:
                 if previous is None:
@@ -347,7 +355,8 @@ class WorkflowStore(_AssetStore):
                 actual = (state.get('scope', {}).get('scope_revision', 0) if revision_target == 'scope'
                           else previous.descriptor.revision)
                 if type(expected_revision) is not int or expected_revision != actual:
-                    raise ValueError(f'REVISION_CONFLICT: expected={expected_revision}, actual={actual}')
+                    raise WorkflowOperationConflict(
+                        'REVISION_CONFLICT', f'REVISION_CONFLICT: expected={expected_revision}, actual={actual}')
             updated, result = transform(previous)
             if action in ('workflows.create', 'workflows.update'):
                 validate_definition_eligibility(updated)

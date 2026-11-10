@@ -615,10 +615,15 @@ class BusinessServices:
             return self.spaces.call(action, params, actor=actor, **kwargs)
         if implementer == 'W3':
             from ..plugin_host.contracts import AuthorizedCall
+            from ..workflows.business_scope import WorkflowPolicyRefusal
 
             service = (self._workflow_cancel_service(context)
                 if action == 'workflow_runs.cancel' and isinstance(context.actor, AuthorizedCall) else self.workflows)
-            return service.execute(action, params, actor=actor, **kwargs)
+            try:
+                return service.execute(action, params, actor=actor, **kwargs)
+            except WorkflowPolicyRefusal as error:
+                # 领域在副作用前作出的策略拒绝：结构化 not_started，而不是 OUTCOME_UNKNOWN。
+                raise BusinessError(error.error_code, details=error.details) from None
         if implementer == 'W2':
             background_context = context if isinstance(self.background, _BackgroundPort) else context.business_context
             return self.background.execute(action, params, actor=context.actor, context=background_context, **kwargs)
@@ -653,7 +658,10 @@ def _error_code(error):
         code = 'HOST_NOT_READY'
     status = (409 if code in {'REVISION_CONFLICT', 'IDEMPOTENCY_CONFLICT', 'BACKGROUND_AGENT_LIMIT_REACHED',
                               'SPACE_MISMATCH', 'AGENT_NOT_AVAILABLE', 'IDENTITY_TRANSITION_CONFLICT',
-                              'MODEL_PROFILE_UNAVAILABLE'} else
+                              'MODEL_PROFILE_UNAVAILABLE', 'WORKFLOW_ALREADY_EXISTS', 'WORKFLOW_READ_ONLY',
+                              'WORKFLOW_REFERENCE_MISMATCH', 'WORKFLOW_RECYCLED', 'WORKFLOW_NOT_ACTIVE',
+                              'WORKFLOW_REFERENCED_OR_COVERAGE_UNKNOWN', 'WORKFLOW_UNASSIGNED',
+                              'WORKFLOW_SPACE_MISMATCH'} else
               404 if code.endswith('_NOT_FOUND') or code == 'SPACE_SCOPE_MISMATCH' else
               403 if code in {'ACTOR_REQUIRED', 'BUSINESS_ACCESS_DENIED', 'HUMAN_RESPONSE_REQUIRED'} else
               400 if code == 'INVALID_SCHEMA' else 503)
