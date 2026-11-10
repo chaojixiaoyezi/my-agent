@@ -923,8 +923,10 @@ def _has_pending_memory_curator_work(
             return False
         state = _curator_models.MemoryCuratorState.from_dict(payload)
     except FileNotFoundError:
-        # 从未初始化:有新输入就该初始化(一次性低频,不构成占位源)
-        return _curator_input_newer_than(owner_home, 0.0)
+        from .memory_store.curator_due import candidate_source_present
+        automatic = curator_config is None or curator_config.auto_promotion_policy != "manual_only"
+        return (automatic and candidate_source_present(owner_home / "memory" / "candidates.jsonl")
+                or _curator_input_newer_than(owner_home, 0.0))
     except (OSError, UnicodeError, ValueError, TypeError):
         # 坏 state 不能证明有活;CuratorService 运行时会以结构化错误暴露,发现层不据此占工位
         return False
@@ -956,6 +958,14 @@ def curator_work_is_due(owner_home, state, *, curator_config=None, timezone_name
         return False
     if state.pending_reasons or state.active_lease:
         return True
+    from .memory_store.curator_due import candidate_scan_deadline, candidate_source_present
+    scan_deadline = candidate_scan_deadline(state, config.interval_seconds,
+        source_present=not state.candidate_scan_cursor and candidate_source_present(owner_home / "memory" / "candidates.jsonl")
+    ) if config.auto_promotion_policy != "manual_only" else None
+    if scan_deadline is not None:
+        if now >= scan_deadline:
+            return True
+        _add_deadline(deadline_out, scan_deadline)
     if daily_finalize_due(state,current,config.daily_finalize_hour):
         _add_deadline(deadline_out,next_local_boundary(current,timezone_name,0,next_day=True))
         return True

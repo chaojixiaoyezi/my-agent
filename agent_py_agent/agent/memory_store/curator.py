@@ -277,6 +277,12 @@ class _CuratorLifecycleMixin:
             return self._run_pending_when_due(state, pending, current)
         if _daily_finalize_due(state, current, self.config.daily_finalize_hour):
             return self.run(reason="daily_finalize", now=current)
+        from .curator_due import candidate_scan_deadline, candidate_source_present
+        scan_deadline = candidate_scan_deadline(state, self.config.interval_seconds,
+            source_present=not state.candidate_scan_cursor and candidate_source_present(self.candidate_service.path)
+        ) if self._promotion_backlog_enabled() else None
+        if scan_deadline is not None and current.timestamp() >= scan_deadline:
+            return self._resume_candidate_promotions(current)
         # due 判定也遵守学习排除名单：名单不可读时按 fail-closed 不收集任何消息（不会因名单
         # 会话的旧消息误触发一次运行）；快照进入 _execute 后复核再复用。不可读的诊断要随
         # not_due 一起返回，不能显示成没有原因的普通 not_due（mc4-3106）。
@@ -299,6 +305,34 @@ class _CuratorLifecycleMixin:
             return self.run(reason="interval", now=current, precollected_batch=precollected)
         return self._result(status="busy" if batch.message_scan_partial else "not_due", reason="interval",
                             warnings=_message_scan_warnings(batch) if batch.message_scan_partial else ())
+
+    def _resume_candidate_promotions(self, current):
+        """原维护节拍的纯晋升续办：不收集输入、不调用提取模型、不推进日报或消息游标。"""
+        from .curator_lease import (
+            curator_lease_heartbeat,
+            curator_lease_interruption_guard,
+            release_curator_lease,
+        )
+        acquired = self.committer.recover_and_acquire(CuratorLeaseRequest(
+            "interval", self.config.revision(), _lease_seconds(self.config), current, purpose="candidate_scan"))
+        if acquired is None:
+            return self._result(status="busy", reason="interval")
+        context = _run_context("interval", *acquired)
+        with curator_lease_interruption_guard(self.state_store, context.lease_id):
+            try:
+                with curator_lease_heartbeat(self.state_store, context.lease_id, _lease_seconds(self.config)):
+                    next_cursor = {}
+                    identifiers = self._pending_promotable_candidate_ids(limit=32, lease_id=context.lease_id, scanned_at=context.started_at, cursor_out=next_cursor)
+                    promoted, warnings, receipts = self._promote_eligible(identifiers)
+                    self.state_store.advance_candidate_scan(context.lease_id, next_cursor)
+                release_curator_lease(self.state_store, context.lease_id)
+                from .curator_promotion_receipts import promotion_counts
+                return CuratorRunResult(run_id=context.run_id, status="succeeded", reason="interval",
+                    provider="", model="", warnings=warnings, promotion_results=receipts, **promotion_counts(receipts))
+            except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+                raise
+            except Exception as exc:
+                return self._commit_failure(context, exc)
 
     # LLM: 冷却只约束已持久化的失败待办请求；限制供应商重试但不删触发原因、不跳过输入。退避时长与 owner_wake_discovery 共用
     # curator_failure_retry_seconds：普通失败沿维护周期（30–300 秒），CURATOR_MODEL_NOT_CONFIGURED 等一小时，
@@ -759,10 +793,14 @@ class _CuratorExecutionMixin:
             and str(getattr(item, "promotion_target", "") or "").strip().lower()
             != "agents"
         ]
-        promotable = list(dict.fromkeys((*promotable, *self._pending_promotable_candidate_ids(limit=32))))
+        next_cursor = {}
+        backlog = self._pending_promotable_candidate_ids(limit=32, lease_id=context.lease_id, scanned_at=context.started_at, cursor_out=next_cursor) if self._promotion_backlog_enabled() else ()
+        promotable = list(dict.fromkeys((*promotable, *backlog)))
         from .curator_promotion_receipts import promotion_counts
 
         promoted, promotion_warnings, receipts = self._promote_eligible(promotable)
+        if next_cursor:
+            self.state_store.advance_candidate_scan(context.lease_id, next_cursor)
         warnings = (
             *prepared.warnings,
             *extra_warnings,
@@ -924,30 +962,33 @@ class _CuratorPromotionMixin:
 
     # LLM: 读取失败必须以稳定诊断阻止成功收尾，未结执行原样透传；筛选与正式写入的权限边界保持不变。
     # 函数用途: 为积压晋升排序，不把候选账本损坏伪装成没有待办。
-    def _pending_promotable_candidate_ids(self, *, limit: int = 32) -> list[str]:
+    def _pending_promotable_candidate_ids(self, *, limit: int = 32, lease_id: str = "", scanned_at: str = "", cursor_out: dict | None = None) -> list[str]:
         """已落库、待自主晋升或待门槛重试的候选 ID；读取失败显式报错。
 
         这里只筛结构与排队次序；真实来源、证据、目标版本和最终提交仍由PromotionService复核。
         """
         try:
-            rows = self.candidate_service.readonly_rows(
-                statuses={"pending_review", "approved"},
-                limit=0,
-            )
+            scan = self.state_store.load().candidate_scan_cursor if lease_id else getattr(self, "_candidate_scan_cursor", {})
+            pending = scan.get("pending", [])
+            if limit > 0:
+                rows, refs, next_scan, wrapped = self.candidate_service.readonly_window(
+                    scan.get("scan"), references=pending[:128])
+                references = {row.candidate_id: ref for row, ref in zip(rows, refs)}
+            else:
+                rows = self.candidate_service.readonly_rows(statuses={"pending_review", "approved"}, limit=0)
+                references, next_scan, wrapped = {}, {}, True
             promo = getattr(self, "promotion_service", None) or getattr(self.promotion_callback, "__self__", None)
             lesson_min = int(getattr(promo, "lesson_min_occurrences", getattr(self.config, "lesson_min_occurrences", 2)) or 2)
             hot_min = int(getattr(promo, "hot_min_occurrences", getattr(self.config, "hot_min_occurrences", 3)) or 3)
             eligible = [
                 row
                 for row in rows
-                if _candidate_structurally_promotable(row)
+                if row.status in {"pending_review", "approved"} and _candidate_structurally_promotable(row)
                 and (getattr(row, "status", "") != "approved" or _candidate_repetition_ready(
                     row, lesson_min_occurrences=lesson_min, hot_min_occurrences=hot_min))
                 and (projection_is_learnable(row.learning_source) if getattr(row, "learning_source", None)
                      else self._can_backfill_empty_source(row))
             ]
-            if not eligible:
-                return []
             eligible = self._drop_excluded_promotable(eligible)
 
             # LLM: 使用同一次实际门槛与宿主来源；sort稳定保各档内原顺序，不把计数就绪当正式授权。
@@ -958,14 +999,28 @@ class _CuratorPromotionMixin:
                 return 0 if _candidate_repetition_ready(
                     row, lesson_min_occurrences=lesson_min, hot_min_occurrences=hot_min) else 1
 
-            eligible.sort(key=_queue_priority_tier)
+            eligible.sort(key=lambda row: (_queue_priority_tier(row), row.created_at, row.candidate_id))
             if limit > 0:
+                remaining = [references[row.candidate_id] for row in eligible[limit:]]
+                cursor = {"scan": next_scan, "pending": remaining, "active": self._promotion_backlog_enabled() and (bool(remaining) or not wrapped),
+                          "last_at": scanned_at or utc_now_iso()}
+                # 生产调用先尝试原晋升再发布；异常/退出时保留旧页，正式 CAS 负责幂等重验。
+                if cursor_out is not None:
+                    cursor_out.update(cursor)
+                elif lease_id:
+                    self.state_store.advance_candidate_scan(lease_id, cursor)
+                else:
+                    self._candidate_scan_cursor = cursor
                 eligible = eligible[:limit]
             return [str(getattr(row, "candidate_id", "") or "") for row in eligible]
-        except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+        except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError, CuratorLeaseLostError):
             raise
         except Exception as exc:
             raise CuratorInputError("CURATOR_CANDIDATE_READ_FAILED") from exc
+
+    def _promotion_backlog_enabled(self):
+        return self.config.auto_promotion_policy != "manual_only" and (
+            self.promotion_callback is not None or self._promotion_batch_callback is not None)
 
     # LLM: 晋升在同一租约内逐条重查排除；注入批量回调时按原序去重、以完整快照至多32条一批提交，绝不回退逐条执行；
     #   原短提交门的typed未知必须透传保欠账，不能变普通晋升警告。

@@ -54,3 +54,28 @@ def next_local_boundary(current: datetime, timezone_name: str, hour: int, *, nex
     if target.timestamp() <= current.timestamp():
         target += timedelta(days=1)
     return target.timestamp()
+
+
+def candidate_scan_deadline(state, interval_seconds, *, source_present=False):
+    """晋升续页复用原维护30–300秒冷却，不借提取pending触发模型或重做日报。"""
+    cursor = getattr(state, "candidate_scan_cursor", {})
+    if not cursor.get("active") and not (not cursor and source_present):
+        return None
+    last = parse_time(cursor.get("last_at", ""))
+    cadence = max(30, min(300, interval_seconds))
+    deadline = 0.0 if last is None else last.timestamp() + cadence
+    failure = parse_time(state.last_failure_at)
+    if state.last_failure_code and failure is not None:
+        from .curator_models import curator_failure_retry_seconds
+        deadline = max(deadline, failure.timestamp() + curator_failure_retry_seconds(state.last_failure_code, cadence))
+    return deadline
+
+
+def candidate_source_present(path):
+    """只读规范候选叶的存在/大小提示；读错只触发原服务核验，不把未知当空。"""
+    try:
+        return path.stat(follow_symlinks=False).st_size > 0
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True

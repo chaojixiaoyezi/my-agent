@@ -234,6 +234,7 @@ class MemoryCuratorState:
     pending_requested_at: str = ""
     last_daily_finalize_date: str = ""
     last_committed_run_id: str = ""
+    candidate_scan_cursor: dict = field(default_factory=dict)
 
     # LLM: 空对象=首次初始化(允许); 非空但无任何已知字段=纯未知字段
     # fail-closed(seq1625 P0 遗留: {"not":"a state"} 不得静默复用默认 state);
@@ -361,6 +362,11 @@ def validate_curator_state(state: MemoryCuratorState) -> None:
         for key, value in state.per_thread_cursors.items()
     ):
         raise ValueError("memory curator per_thread_cursors must be string map")
+    if (not isinstance(state.candidate_scan_cursor, dict)
+            or len(json.dumps(state.candidate_scan_cursor)) > 32768
+            or not isinstance(state.candidate_scan_cursor.get("pending", []), list)
+            or len(state.candidate_scan_cursor.get("pending", [])) > 128):
+        raise ValueError("memory curator candidate scan cursor is invalid")
     if not isinstance(state.active_lease, dict):
         raise ValueError("memory curator active_lease must be an object")
     if any(

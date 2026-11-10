@@ -392,6 +392,21 @@ class CandidateService:
     # LLM: candidate_id 是唯一定位键；禁止按正文或 subject 模糊选中审核目标。
     #   默认走锁内单条定位，命中缓存时只深拷贝目标候选而不再深拷贝和排序全表；若 list 被外部替身替换则保留原遍历。
     # 函数用途: 读取一个候选，不存在时抛出精确 KeyError。
+    def readonly_window(self, cursor=None, *, references=(), max_records=128):
+        """后台公平选源窗口；不全读状态组、不迁移或改写候选，旧JSONL用受核字节续点。"""
+        from .candidate_ledger import read_candidate_window
+        if ("list" in self.__dict__ or getattr(self.list, "__func__", None) is not CandidateService.list
+                or "_load_unlocked" in self.__dict__
+                or getattr(self._load_unlocked, "__func__", None) is not CandidateService._load_unlocked):
+            rows = self.readonly_rows()
+            if references:
+                wanted = {ref['candidate_id'] for ref in references}
+                rows = tuple(row for row in rows if row.candidate_id in wanted)
+            return rows[:max_records], tuple({'candidate_id': row.candidate_id} for row in rows[:max_records]), {}, True
+        with self._locked_candidates():
+            return read_candidate_window(self.path, read_manifest(self.path), cursor,
+                references=references, max_records=max_records)
+
     def filter_observation_conflicts(self, observations, *, rejected_bindings=()):
         """在原候选锁内按索引预演观察，不复制全部历史或提前写入。"""
         from .curator_rejected_bindings import retain_rejected_target_bindings

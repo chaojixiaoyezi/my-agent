@@ -85,6 +85,7 @@ class CuratorLeaseRequest:
     config_revision: str
     lease_seconds: int
     now: datetime | None = None
+    purpose: str = "extract"
 
 
 # LLM: StateStore 只管理机器状态，不读取对话、不调用模型、不写候选或 daily。
@@ -161,6 +162,15 @@ class MemoryCuratorStateStore:
         if str(state.active_lease.get("lease_id") or "") != str(lease_id or ""):
             raise CuratorLeaseLostError("memory curator lease is no longer owned by this run")
         return state
+
+    def advance_candidate_scan(self, lease_id, cursor):
+        """原租约下只更新可重建选源续点，不推进消息消费或授权晋升。"""
+        with gateway_short_transaction("candidate_scan"):
+            with locked_json_path(self.path):
+                state = self._load_unlocked()
+                _require_lease(state, lease_id)
+                if state.candidate_scan_cursor != cursor:
+                    self._write_unlocked(replace(state, candidate_scan_cursor=cursor))
 
     # LLM: 只有 daily/candidate/run audit 全部成功后调用；这里是 cursor 唯一推进点。
     # 函数用途: 原子提交成功游标、累计计数并释放 lease。
@@ -431,9 +441,13 @@ def _leased_state(state: MemoryCuratorState, request: CuratorLeaseRequest):
     current = (request.now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     if _lease_live(state.active_lease, now=current) and not stale_lease_reclaimable(state.active_lease):
         return None
-    pending, generations = _bump_pending_reason(state, request.reason)
+    if request.purpose not in {"extract", "candidate_scan"}:
+        raise ValueError("invalid curator lease purpose")
+    pending, generations = (list(state.pending_reasons), dict(state.pending_reason_generations)) if request.purpose == "candidate_scan" else _bump_pending_reason(state, request.reason)
     lease = _new_lease(request, state.active_lease, current)
-    lease["reason_generation"] = generations[request.reason]
+    lease["reason_generation"] = generations.get(request.reason, 0)
+    if request.purpose == "candidate_scan":
+        lease["purpose"] = request.purpose
     return replace(
         state,
         last_run_at=current.isoformat(),
@@ -441,7 +455,7 @@ def _leased_state(state: MemoryCuratorState, request: CuratorLeaseRequest):
         config_revision=str(request.config_revision or "").strip(),
         pending_reasons=pending,
         pending_reason_generations=generations,
-        pending_requested_at=state.pending_requested_at or current.isoformat(),
+        pending_requested_at=(state.pending_requested_at if request.purpose == "candidate_scan" else state.pending_requested_at or current.isoformat()),
     )
 
 

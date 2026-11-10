@@ -89,7 +89,8 @@ def test_m2_pending_candidate_corruption_is_diagnostic_not_empty(tmp_path, monke
 def test_m2_pending_scan_borrows_readonly_candidates(tmp_path, monkeypatch):
     service, _thread, _message = _m2_service(tmp_path)
     calls = []
-    monkeypatch.setattr(service.candidate_service, "readonly_rows", lambda **_kwargs: calls.append("readonly") or ())
+    monkeypatch.setattr(service.candidate_service, "readonly_window",
+        lambda *_args, **_kwargs: calls.append("readonly") or ((), (), {}, True))
     assert service._pending_promotable_candidate_ids() == []
     assert calls == ["readonly"]
 
@@ -328,6 +329,7 @@ def test_r2_post_commit_report_failure_keeps_committed_cursor_chain(tmp_path, mo
     def fail_report(**_kwargs):
         raise CuratorInputError("CURATOR_CANDIDATE_READ_FAILED")
 
+    service.promotion_callback = lambda _candidate_id: None
     monkeypatch.setattr(service, "_pending_promotable_candidate_ids", fail_report)
     assert service.run(reason="admin").status == "failed"
     committed = service.state_store.load().per_thread_cursors

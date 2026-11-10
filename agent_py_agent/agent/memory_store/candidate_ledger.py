@@ -377,3 +377,92 @@ def seal_cleanup(writes, cleanup):
     name = digest + '.cleanup'
     writes[name] = raw
     return {'ref': name, 'sha256': digest, 'byte_length': len(raw)}
+
+
+def read_candidate_window(path, manifest, cursor=None, *, references=(), max_records=128):
+    """规范位置/字节续点只作公平调度；每片正文有界，返回记录仍须原审核与CAS。"""
+    import os
+
+    from ..common.nofollow_fs import (
+        file_descriptor_change_ns,
+        file_identity_snapshot,
+        open_readonly_file_beneath,
+    )
+    from .candidates import _parse_candidate_line
+
+    if type(max_records) is not int or not 1 <= max_records <= 128:
+        raise ValueError('candidate window limit is invalid')
+    cursor = cursor or {}
+    rows, refs = [], []
+    if manifest is not None:
+        source = CandidateRows(path, _validate_manifest(manifest))
+        if references:
+            positions = [(source.index_for(ref['candidate_id'], None), ref['candidate_id']) for ref in references]
+            next_cursor, wrapped = cursor, cursor.get("wrapped", False)
+        else:
+            start = cursor.get('position', 0) if cursor.get('kind') == 'indexed' else 0
+            start = start if type(start) is int and 0 <= start < len(source) else 0
+            end = min(len(source), start + max_records)
+            positions = [(position, None) for position in range(start, end)]
+            wrapped = end == len(source)
+            next_cursor = {'kind': 'indexed', 'position': 0 if wrapped else end, 'wrapped': wrapped}
+        for position, identifier in positions[:max_records]:
+            if position is None:
+                continue
+            row = source[position]
+            if identifier is not None and identifier != row.candidate_id:
+                raise ValueError('candidate scheduling identity changed')
+            rows.append(row)
+            refs.append({'candidate_id': row.candidate_id})
+        return tuple(rows), tuple(refs), next_cursor, wrapped
+    try:
+        fd = open_readonly_file_beneath(path.parent, (path.name,))
+    except FileNotFoundError:
+        return (), (), {}, True
+    with os.fdopen(fd, 'rb') as stream:
+        before = os.fstat(fd)
+        stamp = [before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+                 before.st_ctime_ns, file_descriptor_change_ns(fd, before)]
+        if stamp[-1] is None:
+            raise ValueError('candidate source generation unavailable')
+        from ..common.cache_freshness import cache_entry_trustworthy
+        trusted = all(cache_entry_trustworthy(value) for value in stamp[3:])
+        valid_refs = references and trusted and all(ref.get('source') == stamp for ref in references)
+        offsets = [ref['offset'] for ref in references] if valid_refs else None
+        offset = cursor.get('offset', 0) if cursor.get('kind') == 'legacy' and trusted and cursor.get('source') == stamp else 0
+        stream.seek(offset if offsets is None else 0)
+        spent = 0
+        for index in range(max_records):
+            if offsets is not None:
+                if index >= len(offsets):
+                    break
+                stream.seek(offsets[index])
+            start = stream.tell()
+            raw = stream.readline(8 * 1024 * 1024 - spent + 1)
+            spent += len(raw)
+            if spent > 8 * 1024 * 1024:
+                if start > (offset if offsets is None else offsets[0]):
+                    stream.seek(start)
+                    break
+                raise ValueError('candidate source row exceeds bounded read window')
+            if not raw:
+                break
+            if not raw.strip():
+                continue
+            if not raw.endswith(b'\n') and stream.tell() != before.st_size:
+                raise ValueError('candidate source row is incomplete')
+            row = _parse_candidate_line(raw.decode('utf-8'))
+            if offsets is not None and row.candidate_id != references[index]['candidate_id']:
+                raise ValueError('candidate scheduling identity changed')
+            rows.append(row)
+            refs.append({'candidate_id': row.candidate_id, 'offset': start, 'source': stamp})
+        end = stream.tell()
+        current, changed = file_identity_snapshot(path)
+        after = os.fstat(fd)
+        fields = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+        if (any(getattr(before, key) != getattr(after, key) or getattr(current, key) != getattr(after, key) for key in fields)
+                or changed != stamp[-1] or file_descriptor_change_ns(fd, after) != changed):
+            raise ValueError('candidate source changed during window')
+        wrapped = cursor.get('wrapped', False) if offsets is not None else end == before.st_size
+        next_cursor = cursor if offsets is not None else {'kind': 'legacy', 'offset': 0 if wrapped else end, 'source': stamp, 'wrapped': wrapped}
+        return tuple(rows), tuple(refs), next_cursor, wrapped
