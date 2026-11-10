@@ -479,9 +479,15 @@ def conversation_agent_activity(
     agent: object,
     store: object,
     thread_id: str,
+    *,
+    display_thread: object | None = None,
 ) -> ConversationAgentActivity:
-    # 只在本次展示调用内复用同一canonical线程；任务/claim/progress授权仍走原独立读口。
-    thread_snapshot = _conversation_display_thread(store, thread_id)
+    # 只复用调用方本拍已核的展示记录；任务/claim/progress授权仍走原独立读口。
+    thread_snapshot = (
+        (display_thread, [])
+        if display_thread is not None and getattr(display_thread, "thread_id", None) == thread_id
+        else _conversation_display_thread(store, thread_id)
+    )
     thread, _thread_warnings = thread_snapshot
     display, compact_warnings, goal_warnings = _conversation_display_state(store, thread_id, thread_snapshot)
     active_links, link_warnings = _active_task_links(store, thread_id)

@@ -2048,7 +2048,7 @@ def read_gateway_client_notices(
         after=event_after,
         stream_id=event_stream_id,
     )
-    activity = conversation_agent_activity(owner_agent, store, thread_id)
+    activity = conversation_agent_activity(owner_agent, store, thread_id, display_thread=thread)
     activity_payload = activity.to_dict()
     from .idle_notice_page import read_idle_message_page
 

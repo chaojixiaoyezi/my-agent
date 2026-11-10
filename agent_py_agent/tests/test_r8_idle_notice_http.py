@@ -140,14 +140,14 @@ def test_default_http_activity_uses_one_display_thread_generation(tmp_path, monk
             observations[-1]['all'] += 1
             if inspect.currentframe().f_back.f_code.co_name in display_callers:
                 observations[-1]['display'] += 1
-                if not changed:
-                    changed.append(True)
-                    store.threads.write(version(2))
         return result
 
     def activity(*args, **kwargs):
         observations.append({'all': 0, 'display': 0})
         projection.active = True
+        if not changed:
+            changed.append(True)
+            store.threads.write(version(2))
         try:
             return original_activity(*args, **kwargs)
         finally:
@@ -172,7 +172,7 @@ def test_default_http_activity_uses_one_display_thread_generation(tmp_path, monk
             assert shown['context_usage']['current_tokens'] == 42_100 + generation
             assert shown['model_metrics']['model_rounds'] == generation
             assert shown['task_progress_generation_id'] == f'turn-{generation}'
-            assert observations[-1]['display'] == 1
+            assert observations[-1]['display'] == 0  # 复用本拍绑定已核线程，不再重读展示正文。
             assert observations[-1]['all'] > 1  # 原任务/claim授权仍独立读取，不借展示快照授权。
         store.storage.thread_path(thread.thread_id).write_bytes(b'{broken')
         status, payload = client.request_json('POST', '/client/notices', body)
@@ -181,3 +181,38 @@ def test_default_http_activity_uses_one_display_thread_generation(tmp_path, monk
     finally:
         request.node.user_properties.append(('activity_thread_load_counts', json.dumps(observations)))
         server.stop()
+
+
+def test_activity_reuses_only_same_thread_display_record(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.conversation.agent_activity import conversation_agent_activity
+    from agent_py_agent.agent.conversation.store import ConversationStore
+
+    store = ConversationStore(tmp_path / 'conversations')
+    thread = store.threads.get_or_create({'canonical_user_id': 'alice'})
+    current = replace(thread, compact_generation=3)
+    store.threads.write(current)
+    reads = []
+    original = store.threads.load_report
+
+    def load(thread_id):
+        reads.append(thread_id)
+        return original(thread_id)
+
+    monkeypatch.setattr(store.threads, 'load_report', load)
+    agent = SimpleNamespace()
+    snapshot = replace(current, compact_generation=2)
+    # 本拍展示可取已核快照；任务活动仍读取当前规范账，下一拍不复用旧值。
+    shown = conversation_agent_activity(agent, store, thread.thread_id, display_thread=snapshot)
+    snapshot_reads = len(reads)
+    assert shown.compact_count == 2
+    reads.clear()
+    shown = conversation_agent_activity(agent, store, thread.thread_id)
+    assert shown.compact_count == 3
+    assert len(reads) == snapshot_reads + 1
+    reads.clear()
+    foreign = replace(snapshot, thread_id='thread-foreign')
+    shown = conversation_agent_activity(agent, store, thread.thread_id, display_thread=foreign)
+    assert shown.compact_count == 3
+    assert len(reads) == snapshot_reads + 1
