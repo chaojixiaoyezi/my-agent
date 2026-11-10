@@ -19,6 +19,7 @@ from .models import ConversationThread, MessageLogEntry, new_id
 from .store_io import now
 from .store_messages import fork_message_prefix
 from .store_threads import create_thread_atomic
+from .verbose import inherited_verbose_metadata
 from .workspace_context import validate_workspace_directory
 
 if TYPE_CHECKING:
@@ -145,7 +146,7 @@ def _new_thread(source: ConversationThread, rows: list[MessageLogEntry], title: 
         title=title if title is not None else source.title, cwd=cwd, workspace_root=root, runtime_workspace_roots=roots,
         forked_from_thread_id=source.thread_id, forked_from_message_id=rows[-1].message_id if rows else "",
         fork_lineage_depth=source.fork_lineage_depth + 1, model_profile_id=source.model_profile_id,
-        metadata={'fork_publication_id': new_id('fork-publish')},
+        metadata={**inherited_verbose_metadata(source), 'fork_publication_id': new_id('fork-publish')},
         model_selection_revision=source.model_selection_revision, model_selection_source=source.model_selection_source,
         model_selection_last_explicit_revision=source.model_selection_last_explicit_revision,
         model_selection_selected_at=source.model_selection_selected_at, reasoning_effort=source.reasoning_effort,

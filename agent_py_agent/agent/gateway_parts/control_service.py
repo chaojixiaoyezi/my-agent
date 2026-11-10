@@ -6,6 +6,8 @@
 # 模块用途: 按认证身份分派会话、目录、分叉、用户管理及资产投递控制，保持任务、历史、权限和中断边界。
 from __future__ import annotations
 
+from ..conversation.verbose import effective_verbose_level, initial_verbose_settings
+
 """Conversation task controls backed by request and durable task ledgers.
 
 给人看的解释：
@@ -733,7 +735,7 @@ def _execute_gateway_new_session(base_agent, paths, command, scope):
     if error:
         return ConversationControlResult("new", False, "会话绑定不可读，未切换。", error_code="THREAD_BINDING_UNAVAILABLE")
     if current is None:
-        current = store.threads.get_or_create({"canonical_user_id": scope.user_id, "channel": scope.channel,
+        current = store.threads.get_or_create({**initial_verbose_settings(agent.config, scope.metadata), "canonical_user_id": scope.user_id, "channel": scope.channel,
             "channel_user_id": scope.user_id, "channel_conversation_id": scope.conversation_id,
             "owner_id": getattr(home, "owner_id", ""), "owner_home": str(getattr(home, "owner_home_dir", "")),
             "cwd": str(getattr(agent, "effective_workspace_root", "") or getattr(home, "owner_home_dir", ""))})
@@ -758,7 +760,7 @@ def _execute_gateway_workspace_control(base_agent, command, scope, *, is_admin: 
     if thread is None:
         if command.kind == "fork":
             return ConversationControlResult("fork", False, "当前还没有可分叉的会话。", error_code="WORKSPACE_CONTROL_INVALID")
-        thread = store.threads.get_or_create({"canonical_user_id": scope.user_id, "channel": scope.channel,
+        thread = store.threads.get_or_create({**initial_verbose_settings(owner_agent.config, scope.metadata), "canonical_user_id": scope.user_id, "channel": scope.channel,
             "channel_conversation_id": scope.conversation_id, "channel_user_id": scope.user_id,
             "owner_id": getattr(home, "owner_id", ""), "owner_home": str(owner_home)})
     return execute_workspace_control(store, command, thread_id=thread.thread_id, owner_home=owner_home, is_admin=is_admin)
@@ -818,6 +820,7 @@ def _execute_audit_control(
                 "channel": scope.channel,
                 "channel_conversation_id": scope.conversation_id,
                 "channel_user_id": scope.user_id,
+                **initial_verbose_settings(owner_agent.config, scope.metadata),
                 "title": "Audit",
             }
         )
@@ -1096,6 +1099,7 @@ def _execute_goal_control(
             cwd, roots = gateway_request_workspace_scope(owner_agent, {"workspace": scope.workspace})
         thread = store.threads.get_or_create(
             {
+                **initial_verbose_settings(owner_agent.config, scope.metadata),
                 "canonical_user_id": scope.user_id,
                 "owner_id": str(getattr(getattr(owner_agent, "home_paths", None), "owner_id", "") or ""),
                 "owner_home": str(
@@ -1140,6 +1144,7 @@ def _settings_thread(owner_agent: object, scope: GatewayControlScope) -> object:
             "channel": scope.channel,
             "channel_conversation_id": scope.conversation_id,
             "channel_user_id": scope.user_id,
+            **initial_verbose_settings(owner_agent.config, scope.metadata),
             "title": "会话设置",
         }
     )
@@ -1158,7 +1163,7 @@ def _execute_verbose_control(
         thread = _settings_thread(owner_agent, scope)
         if command.value:
             thread = store.threads.update_verbose_level(thread.thread_id, command.value)
-        level = str(getattr(thread, "verbose_level", "off") or "off")
+        level = effective_verbose_level(thread, scope.metadata)
         return ConversationControlResult(
             "verbose",
             True,
@@ -3024,7 +3029,7 @@ def _gateway_task_status(
             owner_agent = base_agent
     else:
         owner_agent = _request_agent_or_base(base_agent, payload)
-    compact_generation, verbose_level = _conversation_profile(owner_agent, payload)
+    compact_generation, verbose_level = _conversation_profile(owner_agent, payload, client=scope.metadata)
     from .status_projection import status_display_facts
 
     facts = status_display_facts(owner_agent, scope=scope)
@@ -3323,7 +3328,7 @@ def _request_agent_or_base(base_agent: object, payload: dict[str, object]):
 
 # LLM: 线程模型档案与普通会话历史必须沿同一结构化通道绑定解析。
 # 函数用途:读取当前会话已压缩次数和过程显示档位；未知时明确省略。
-def _conversation_profile(agent: object, payload: dict[str, object]) -> tuple[int | None, str]:
+def _conversation_profile(agent: object, payload: dict[str, object], *, client=None) -> tuple[int | None, str]:
     conversation = payload.get("conversation")
     if not isinstance(conversation, dict):
         return None, ""
@@ -3340,9 +3345,7 @@ def _conversation_profile(agent: object, payload: dict[str, object]) -> tuple[in
         return None, ""
     if thread is None:
         return 0, "off"
-    return int(getattr(thread, "compact_generation", 0) or 0), str(
-        getattr(thread, "verbose_level", "off") or "off"
-    )
+    return int(getattr(thread, "compact_generation", 0) or 0), effective_verbose_level(thread, payload if client is None else client)
 
 
 # LLM: 子代理数量只从持久父级及根身份统计，不从流式对话正文推断。

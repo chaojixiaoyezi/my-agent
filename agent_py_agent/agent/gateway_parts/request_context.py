@@ -34,6 +34,7 @@ from ..conversation.learning_source import (
     unknown_projection,
     user_dialogue_projection,
 )
+from ..conversation.verbose import effective_verbose_level, initial_verbose_settings
 from ..memory_store.learning_exclusions import (
     curator_learning_exclusions,
     thread_is_excluded,
@@ -327,7 +328,7 @@ def gateway_conversation_context(
         ),
         recent_operation_evidence=recent_operation_evidence,
         compact_generation=thread.compact_generation,
-        verbose_level=thread.verbose_level,
+        verbose_level=effective_verbose_level(thread, inputs.request),
         scope=scope,
         history_source=history_source,
         recent_artifacts=recent_artifacts,
@@ -402,6 +403,7 @@ def _load_gateway_thread(
     try:
         thread = store.threads.get_or_create(
             {
+                **initial_verbose_settings(inputs.agent.config, inputs.request),
                 "canonical_user_id": str(spec.get("canonical_user_id") or "local-agent"),
                 "owner_id": str(
                     getattr(getattr(inputs.agent, "home_paths", None), "owner_id", "") or ""

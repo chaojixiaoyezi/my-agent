@@ -921,6 +921,7 @@ class ThreadStore:
             lambda latest: replace(
                 latest,
                 verbose_level=normalized,
+                metadata={key: value for key, value in latest.metadata.items() if key != "verbose_level_source"},
                 updated_at=max(latest.updated_at, current),
             ),
         )
@@ -1020,6 +1021,8 @@ class ThreadStore:
             owner_id=str(kwargs.get("owner_id") or ""),
             owner_home=str(kwargs.get("owner_home") or ""),
             learning_source=_thread_learning_source(kwargs.get("learning_source")),
+            verbose_level=kwargs.get("verbose_level", "off"),
+            metadata=({"verbose_level_source": "tui_default"} if kwargs.get("verbose_level_source") == "tui_default" else {}),
             model_profile_id=initial_model,
             model_selection_revision=1 if initial_model else 0,
             model_selection_source="default" if initial_model else "unknown",
@@ -1169,7 +1172,7 @@ def _succeed_thread(threads, thread_id, *, title, binding, validate=None):
                 raise ValueError("NEW_SESSION_BUSY")
             stamp = now(None)
             metadata = {key: copy.deepcopy(value) for key, value in latest.metadata.items()
-                        if key in {"provider", "model", "permission_mode", "packs"}}
+                        if key in {"provider", "model", "permission_mode", "packs", "verbose_level_source"}}
             portal = latest.metadata.get("plugin_host_v2", {})
             if isinstance(portal, dict) and portal:
                 metadata["plugin_host_v2"] = {key: copy.deepcopy(value) for key, value in portal.items()

@@ -114,6 +114,7 @@ def _submit_new_gateway_job(cfg: Any, job: Any, turn_inject: list[str]):
             client_message_id=str(getattr(job, "client_message_id", "") or getattr(job, "request_id", "")),
             interactive_approvals=job.tool_approval,
             rich_transcript=job.rich_transcript,
+            tui_streaming=job.tui_streaming,
         ),
         agent=cfg.agent,
         workspace_root=getattr(cfg.agent, "root", ""),

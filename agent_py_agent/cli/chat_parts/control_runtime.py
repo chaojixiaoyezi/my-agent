@@ -62,6 +62,7 @@ class ChatControlExecution:
     agent: object
     use_gateway: bool
     state: ChatControlState
+    tui_streaming: bool = False
 
 
 # /status 里“异常”子代理标签细分最多收几条（Gateway 端按计数排好序）。
@@ -163,6 +164,7 @@ def _execute_gateway_control(
         "channel": "chat",
         "conversation_id": execution.state.session_id or "default",
         "metadata": {
+            **({"client_capabilities": {"tui_streaming": True}} if execution.tui_streaming else {}),
             "message_id": client_message_id,
             "expected_turn_id": expected_turn_id,
         },
@@ -692,6 +694,9 @@ def _execute_local_verbose(
     command: ConversationControlCommand,
 ) -> ConversationControlResult:
     try:
+        from ...agent.conversation.verbose import effective_verbose_level, initial_verbose_settings
+
+        client = {"client_capabilities": {"tui_streaming": execution.tui_streaming}}
         store = execution.agent.conversation_store
         thread = store.threads.get_or_create(
             {
@@ -699,6 +704,7 @@ def _execute_local_verbose(
                 "channel": "chat",
                 "channel_conversation_id": execution.state.session_id or "default",
                 "channel_user_id": "local-agent",
+                **initial_verbose_settings(execution.agent.config, client),
                 "title": "会话设置",
             }
         )
@@ -708,7 +714,7 @@ def _execute_local_verbose(
             "verbose",
             True,
             render_verbose_control(
-                str(getattr(thread, "verbose_level", "off") or "off"),
+                effective_verbose_level(thread, client),
                 command,
             ),
         )

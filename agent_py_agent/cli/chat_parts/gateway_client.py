@@ -43,6 +43,7 @@ class ChatRequestContent:
     input_media: tuple[dict, ...] = ()
     original_prompt: str | None = None
     client_message_id: str = ""
+    tui_streaming: bool = False
 
 
 # LLM: GatewayChunkPollRequest carries the canonical terminal path as the only completion fact;
@@ -134,6 +135,7 @@ def submit_chat_request(
             system_task=content.system_task,
             interactive_approvals=content.interactive_approvals,
             rich_transcript=content.rich_transcript,
+            tui_streaming=content.tui_streaming,
             workspace_root=str(workspace.get("cwd") or ""),
             workspace_roots=[str(item) for item in workspace.get("roots", [])],
         ),

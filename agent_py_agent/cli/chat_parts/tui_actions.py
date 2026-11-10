@@ -127,6 +127,7 @@ def _tui_execution_options(
         ),
         tool_approval=True,
         rich_transcript=True,
+        tui_streaming=True,
     )
 
 
@@ -165,6 +166,7 @@ def _tui_enqueue_job(
         resume_context=options.resume_context,
         tool_approval=options.tool_approval,
         rich_transcript=options.rich_transcript,
+        tui_streaming=options.tui_streaming,
         inject_complete=inject_complete,
         input_media=options.input_media,
     )
@@ -205,6 +207,7 @@ def _tui_attach_gateway_job(
         resume_context=options.resume_context,
         tool_approval=options.tool_approval,
         rich_transcript=options.rich_transcript,
+        tui_streaming=options.tui_streaming,
         inject_complete=True,
     )
     if not runtime.claim_gateway_job_attachment(request_id):
@@ -419,6 +422,7 @@ def _ensure_control_operation_reconciler(
         execution = ChatControlExecution(
             agent=params.agent,
             use_gateway=True,
+            tui_streaming=True,
             state=ChatControlState(
                 running=bool(entry.expected_turn_id),
                 queued_count=0,
@@ -444,6 +448,7 @@ def _ensure_control_operation_reconciler(
             ChatControlExecution(
                 agent=params.agent,
                 use_gateway=True,
+                tui_streaming=True,
                 state=ChatControlState(
                     running=False,
                     queued_count=0,

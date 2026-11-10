@@ -173,6 +173,7 @@ class ChatJob:
         "resume_context",
         "tool_approval",
         "rich_transcript",
+        "tui_streaming",
         "inject_complete",
         "input_media",
         "completion_clock",
@@ -198,6 +199,7 @@ class ChatJob:
         resume_context: bool | None = None,
         tool_approval: bool = False,
         rich_transcript: bool = False,
+        tui_streaming: bool = False,
         inject_complete: bool = False,
         input_media: tuple[dict, ...] = (),
     ) -> None:
@@ -215,6 +217,7 @@ class ChatJob:
         self.resume_context = resume_context if isinstance(resume_context, bool) else None
         self.tool_approval = bool(tool_approval)
         self.rich_transcript = bool(rich_transcript)
+        self.tui_streaming = bool(tui_streaming)
         self.inject_complete = bool(inject_complete)
         self.input_media = tuple(input_media)
         from ..turn_completion import TurnClock

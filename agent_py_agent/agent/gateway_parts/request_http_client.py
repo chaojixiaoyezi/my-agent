@@ -77,6 +77,7 @@ def submit_authenticated_ask(paths, params, submit_request, on_request_allocated
         resume_context=params.resume_context,
         tool_approval=params.interactive_approvals,
         rich_transcript=params.rich_transcript,
+        tui_streaming=params.tui_streaming,
         input_media=params.input_media,
     )
     body = {

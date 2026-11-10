@@ -733,6 +733,9 @@ feishu_quoted_media_enabled: true
 feishu_quoted_text_enabled: true
 # /verbose stream 同一条过程消息每次最多展示多少字符，默认 100；有效范围 1～8000，最终答复不受影响。
 im_stream_preview_max_chars: 100
+# 明确TUI客户端新线程的过程显示默认档位：off/on/full/stream；已有线程及手动/verbose优先。
+# stream沿原净化、可撤回的正文候选轨道逐段显示；不改变模型调用或普通CLI/IM/插件。
+tui_default_verbose_level: stream
 # IM 无可见输出的长工具和模型请求等待刷新间隔，单位秒，默认 120；verbose off 仅显示极简状态与时间。
 # 模型心跳只表示同一已发出请求尚未返回及已等待时长，不表示完成了业务进展；停止/超时后不继续刷新。
 # 0 关闭心跳，有效刷新间隔 1～120 秒；stream 有新正文时仍沿原节流更新，不额外调用 LLM。

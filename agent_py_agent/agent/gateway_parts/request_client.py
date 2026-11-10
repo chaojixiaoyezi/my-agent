@@ -64,6 +64,7 @@ class GatewayAskExecutionOptions:
     tool_approval: bool = False
     rich_transcript: bool = False
     input_media: tuple[dict, ...] = ()
+    tui_streaming: bool = False
 
     # LLM: Serialization emits explicit defaults so idempotency digests cover behavior rather than
     # whichever client happened to omit a false/default field.
@@ -78,6 +79,7 @@ class GatewayAskExecutionOptions:
             "client_capabilities": {
                 "tool_approval": self.tool_approval,
                 "rich_transcript": self.rich_transcript,
+                **({"tui_streaming": True} if self.tui_streaming else {}),
             },
         }
         if self.resume_context is not None:
@@ -107,6 +109,7 @@ class GatewayAskExecutionOptions:
             resume_context=resume_context,
             tool_approval=capabilities.get("tool_approval") is True,
             rich_transcript=capabilities.get("rich_transcript") is True,
+            tui_streaming=capabilities.get("tui_streaming") is True,
         )
 
 
@@ -156,6 +159,7 @@ class GatewayAskParams:
     workspace_roots: list[str] | None = None
     original_prompt: str | None = None
     client_message_id: str = ""
+    tui_streaming: bool = False
 
 
 _DEFAULT_GATEWAY_CLI_SESSION_ID = "default"
@@ -194,6 +198,7 @@ def submit_gateway_ask(
         "client_capabilities": {
             "tool_approval": bool(params.interactive_approvals),
             "rich_transcript": bool(params.rich_transcript),
+            **({"tui_streaming": True} if params.tui_streaming else {}),
         },
     }
     if params.resume_context is not None:

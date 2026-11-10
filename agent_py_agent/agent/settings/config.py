@@ -352,6 +352,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
         from .services._normalize import validate_central_parameters
 
         validate_central_parameters(self)
+        if self.tui_default_verbose_level not in {"off", "on", "full", "stream"}:
+            raise ValueError("tui_default_verbose_level 必须是 off/on/full/stream")
         validate_gateway_worker_process_count(self.gateway_worker_process_count)
         if type(self.max_background_agents) is not int or self.max_background_agents < 0:
             raise ValueError("max_background_agents 必须是非负整数（0 表示不限制）")
@@ -635,6 +637,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     feishu_quoted_text_enabled: bool = True
     # /verbose stream 整条过程正文的字符上限；只影响展示，不裁剪最终回复。
     im_stream_preview_max_chars: int = 100
+    # 只初始化明确TUI客户端的新线程；已有线程和手动/verbose选择优先，不改变CLI/IM/插件。
+    tui_default_verbose_level: str = "stream"
     # IM 长工具/模型请求等待刷新间隔（秒）；0 关闭，默认 120，不调用额外 LLM，不表示业务进展。
     im_stream_heartbeat_seconds: float = 120.0
     # 可选话题聚合；默认关闭，沿原引用回复，不把 provider topic 当作应用内部 thread_id。

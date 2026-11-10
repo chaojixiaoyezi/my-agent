@@ -10,6 +10,7 @@ from ..gateway_parts.io import locked_file_transition
 from ..runtime_errors import DataCorruptionError
 from .models import ConversationThread
 from .store_io import now
+from .verbose import inherited_verbose_metadata
 
 EXECUTION_ORIGIN_KEY = "host_execution_origin.v1"
 IM_TASK_EXECUTION_KEY = "host_im_task_execution.v1"
@@ -100,7 +101,7 @@ def ensure_execution_thread(agent: object, source_thread_id: str, operation_key:
             reasoning_effort=source.reasoning_effort, verbose_level=source.verbose_level,
             title=source.title, created_at=current, updated_at=current,
             cwd=owner_home, runtime_workspace_roots=(owner_home,),
-            metadata={"thread_kind": "background", EXECUTION_ORIGIN_KEY: identity},
+            metadata={**inherited_verbose_metadata(source), "thread_kind": "background", EXECUTION_ORIGIN_KEY: identity},
         )
         store.write(thread)
         return thread
