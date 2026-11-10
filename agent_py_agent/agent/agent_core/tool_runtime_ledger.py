@@ -23,7 +23,10 @@ from ..plugin_observation import (
 )
 from ..tooling.runtime_contracts import tool_arguments_hash
 from ..user_space.owner_policy import resolve_effective_owner_policy
-from .run_task_workspace_writer import current_run_tool_output_archive_root
+from .run_task_workspace_writer import (
+    current_run_artifact_registry_root,
+    current_run_tool_output_archive_root,
+)
 from .runtime_write_guards import attach_running_install_guard
 from .tool_guard.call_guardrail import tool_guardrail_policy, tool_guardrail_records
 
@@ -157,10 +160,14 @@ def _nonnegative_int(value: object) -> int:
 # LLM: 合并顺序必须保留调用方已有 boundary，再追加宿主账本和当前 run 的精确审批；任何临时批准都不能覆盖原安全范围。
 #   正在运行的安装目录保护最后写入独立键 runtime_install_roots（见 runtime_write_guards），不改原有写入范围。
 # 函数用途: 生成一次工具执行使用的完整结构化边界。
-def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[str, object] | None:
+def write_boundary_with_runtime_ledger(agent: object, params: object, *, for_attachment_lookup: bool = False) -> dict[str, object] | None:
     boundary = getattr(params, "write_boundary", None)
     merged = dict(boundary) if isinstance(boundary, dict) else {}
     _attach_canonical_owner_home_root(merged, agent)
+    # 登记根只由宿主产生；普通工具不为附件多做路径解析。
+    merged.pop("artifact_registry_root", None)
+    if for_attachment_lookup and (merged.get("canonical_owner_home_root") or _text(getattr(agent, "root", ""))):
+        merged["artifact_registry_root"] = str(current_run_artifact_registry_root(agent, params))
     _attach_effective_owner_scope(merged, agent, params)
     _attach_owner_network_scope(merged, agent)
     _attach_runtime_approved_actions(merged, params)
@@ -189,13 +196,13 @@ def write_boundary_with_runtime_ledger(agent: object, params: object) -> dict[st
     store = getattr(agent, "local_store", None)
     run_id = _text(getattr(params, "run_id", ""))
     if not run_id:
-        return merged or boundary
+        return merged if merged or isinstance(boundary, dict) else boundary
     rate_rows = _runtime_tool_rate_limit_rows(store, run_id)
     if rate_rows:
         merged["tool_rate_limit_records"] = _merged_rate_limit_rows(
             merged.get("tool_rate_limit_records"), rate_rows
         )
-    return merged or boundary
+    return merged if merged or isinstance(boundary, dict) else boundary
 
 
 # LLM: 每次读取原 owner 策略并与创建期/child 上界取交集；坏权限或真实 owner 缺 home 关闭，独立库无 owner 不新增授权。

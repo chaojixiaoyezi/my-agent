@@ -36,10 +36,9 @@ from ..tooling.output_projection import project_tool_output_body
 from ..tooling.runtime_contracts import ToolCall, ToolContentBlock, ToolResultRef
 from ..tooling.runtime_facts import project_host_shutdown_facts, project_process_runtime_facts
 from .run_task_workspace_writer import (
-    current_run_task_workspace_root,
+    current_run_artifact_registry_root,
     current_run_tool_output_archive_root,
 )
-from .runtime.owner_roots import runtime_owner_root
 from .tool_loop.recovery import runtime_run_scope
 from .tool_loop.round_execution import ToolCallRecordParams
 from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
@@ -547,7 +546,7 @@ def _register_tool_result_artifacts(
         return
     scope = output_record.get("run_scope")
     scope = scope if isinstance(scope, dict) else {}
-    workspace_root = _artifact_registry_root(agent, record.params)
+    workspace_root = current_run_artifact_registry_root(agent, record.params)
     seen: set[tuple[str, str]] = set()
     for ref in refs:
         if not isinstance(ref, dict):
@@ -588,13 +587,6 @@ def _register_tool_result_artifacts(
         output_record.setdefault("artifact_registry_refs", [])
         if isinstance(output_record["artifact_registry_refs"], list):
             output_record["artifact_registry_refs"].append(registered.to_dict())
-
-
-def _artifact_registry_root(agent: object, params: object) -> Path:
-    task_root = current_run_task_workspace_root(agent, params)
-    if task_root is not None:
-        return task_root
-    return runtime_owner_root(agent)
 
 
 # LLM: 删除记录只接受绝对路径且当前确实缺失；普通引用继续要求实际文件，不把失败正文当文件。

@@ -175,7 +175,10 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
     run_scope = runtime_run_scope(runtime_request.agent, runtime_request.request.params)
     execution = runtime_request.agent.tools.execute_tool(
         runtime_request.call,
-        write_boundary=write_boundary_with_runtime_ledger(runtime_request.agent, runtime_request.request.params),
+        write_boundary=write_boundary_with_runtime_ledger(
+            runtime_request.agent, runtime_request.request.params,
+            for_attachment_lookup=runtime_request.call.tool_name in {"send_message", "tool_program"},
+        ),
         runtime_snapshot=runtime_request.request.params.tool_runtime_snapshot,
         trusted_run_context={
             "interactive": _interactive_approvals(runtime_request),

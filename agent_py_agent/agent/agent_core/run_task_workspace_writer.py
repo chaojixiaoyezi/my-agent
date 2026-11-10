@@ -55,6 +55,12 @@ def current_run_task_workspace_root(agent, params: object | None = None) -> Path
     return None
 
 
+def current_run_artifact_registry_root(agent: object, params: object) -> Path:
+    """交付物登记与读取共用同一执行工作区；没有运行工作区时使用规范 owner 根。"""
+    task_root = current_run_task_workspace_root(agent, params)
+    return task_root if task_root is not None else runtime_owner_root(agent)
+
+
 def current_run_task_work_dir(agent, params: object | None = None) -> Path | None:
     for text in _task_workspace_work_dir_candidates(agent, params):
         if not text:

@@ -423,3 +423,44 @@ def test_partial_patch_registers_committed_file_not_failed_target(tmp_path, monk
     assert outcome.result_envelope['partial_commit']
     _archive_patch_outcome(tmp_path, outcome)
     assert {row.path for row in latest_artifact_records(tmp_path).values()} == {str(tmp_path / 'a')}
+
+def test_attachment_boundary_points_to_the_registry_that_received_the_write(tmp_path):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.tool_call_archive_record import archive_tool_call_record
+    from agent_py_agent.agent.agent_core.tool_loop.round_execution import ToolCallRecordParams
+    from agent_py_agent.agent.agent_core.tool_runtime_ledger import (
+        write_boundary_with_runtime_ledger,
+    )
+    from agent_py_agent.agent.artifacts.registry import latest_artifact_records
+    from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool
+    from agent_py_agent.tests._tool_runtime_harness import (
+        canonical_history_call,
+        canonical_history_result,
+    )
+
+    task = tmp_path / "tasks" / "原任务"
+    task.mkdir(parents=True)
+    run = tmp_path / "runs" / "生成文档的运行"
+    run.mkdir(parents=True)
+    agent = SimpleNamespace(root=tmp_path, config=SimpleNamespace())
+    params = replace(
+        _empty_tool_loop_params(),
+        task_attributes={"run_workspace": {"task_root": str(task)}},
+        delivery_contract={"task_workspace": {"task_root": str(run)}},
+        write_boundary={"artifact_registry_root": str(tmp_path / "外来输入")},
+    )
+    name = "巡检流程图与实现说明.md"
+    outcome = WriteFileTool(task).execute({"path": name, "content": "# 巡检\n"})
+    assert outcome.ok
+    call = canonical_history_call("write_file", {"path": name}, call_id="write-doc", run_id=params.run_id)
+    result = canonical_history_result(call, outcome.output, handler_details=outcome.result_envelope)
+    archive_tool_call_record(agent, ToolCallRecordParams(params=params, tool_rounds=1, idx=1, call=call, result=result))
+
+    boundary = write_boundary_with_runtime_ledger(agent, params, for_attachment_lookup=True)
+    assert boundary["task_root"] == str(task)
+    assert boundary["artifact_registry_root"] == str(run)
+    assert "artifact_registry_root" not in write_boundary_with_runtime_ledger(agent, params)
+    records = list(latest_artifact_records(boundary["artifact_registry_root"]).values())
+    assert len(records) == 1 and records[0].path == str(task / name) and records[0].status == "ready"
