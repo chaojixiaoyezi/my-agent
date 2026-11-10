@@ -201,3 +201,66 @@ def test_platform_scope_rejection_is_not_an_empty_success(authorized):
     assert not result.ok and result.error_code == 'FEISHU_PROVIDER_SCOPE_REQUIRED'
     assert result.result_envelope['authorization']['required_scopes'] == ['im:chat:read']
     assert len(ctx.history_calls) == 1
+
+
+@pytest.mark.parametrize('change', ['application', 'scopes'])
+def test_configuration_change_after_page_discards_buffer_without_second_request(authorized, change):
+    ctx = authorized
+    ctx.history_replies.append({'items': [message(chat='oc_ab')], 'has_more': True, 'page_token': 'later'})
+    def change_configuration():
+        if change == 'application':
+            ctx.agent.config.feishu_app_id = 'different-synthetic-application'
+        else:
+            ctx.oauth_config.feishu_oauth_scopes = ['offline_access']
+    ctx.history_hook = change_configuration
+    result = ChannelMessagesTool(ctx.agent).execute({'action': 'list', 'selector': 'user', 'chat_id': 'oc_ab',
+        'start_time': 100, 'end_time': 200})
+    assert not result.ok and result.error_code == 'FEISHU_USER_AUTH_REQUIRED'
+    assert len(ctx.history_calls) == 1
+    assert 'om_1' not in result.output and 'Synthetic-Access-Token' not in result.output
+    assert 'channel_messages' not in (result.result_envelope or {})
+
+
+def test_remaining_history_budget_reaches_process_timeout_and_cleanup(authorized, monkeypatch):
+    from types import SimpleNamespace
+    ctx = authorized
+    clock = [0.0]
+    times, payloads, cleanup = [], [], []
+    original_check = feishu_user_history.UserHistoryIdentity.check
+    checks = [0]
+    def check(identity):
+        result = original_check(identity)
+        checks[0] += 1
+        if checks[0] == 2:
+            clock[0] = 7.95  # 授权复核用去本次8秒业务预算的大部分。
+        return result
+    monkeypatch.setattr(feishu_user_history.UserHistoryIdentity, 'check', check)
+    fake_clock = SimpleNamespace(monotonic=lambda: clock[0])
+    monkeypatch.setattr(feishu_user_history, 'time', fake_clock)
+    monkeypatch.setattr(feishu_cli, 'time', fake_clock)
+    class Process:
+        pid = 23456789
+        returncode = None
+        def communicate(self, *, input, timeout):
+            times.append(timeout)
+            payloads.append(json.loads(input))
+            clock[0] = 8.01
+            raise feishu_cli.subprocess.TimeoutExpired('synthetic-cli', timeout)
+        def poll(self):
+            return self.returncode
+        def terminate(self):
+            cleanup.append('terminate')
+        def wait(self, *, timeout):
+            cleanup.append(('wait', timeout))
+            self.returncode = 0
+            return 0
+    process = Process()
+    monkeypatch.setattr(feishu_cli.subprocess, 'Popen', lambda *args, **kwargs: process)
+    monkeypatch.setattr(feishu_cli.os, 'killpg', lambda pid, sig: cleanup.append(('signal', pid)), raising=False)
+    result = ChannelMessagesTool(ctx.agent).execute({'action': 'list_chats', 'selector': 'user'})
+    assert times == [pytest.approx(0.05)]  # 不重新获得25秒，也不多发一次业务请求。
+    assert payloads[0]['identity'] == 'user' and payloads[0]['token'] == 'Synthetic-Access-Token'
+    assert not result.ok and result.error_code == 'FEISHU_PROVIDER_UNAVAILABLE'
+    assert cleanup[-1] == ('wait', 2) and process.returncode == 0
+    assert len(cleanup) == 2 and not ctx.history_calls
+    assert 'Synthetic-Access-Token' not in result.output
