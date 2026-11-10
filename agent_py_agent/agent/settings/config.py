@@ -643,8 +643,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     im_stream_heartbeat_seconds: float = 120.0
     # 可选话题聚合；默认关闭，沿原引用回复，不把 provider topic 当作应用内部 thread_id。
     im_topic_aggregation_enabled: bool = field(default=False, kw_only=True)
-    # 可选执行事件进度卡片；默认关闭，保持原文本首发与展示类型，不改变任务终态。
-    im_progress_cards_enabled: bool = field(default=False, kw_only=True)
+    # 飞书默认显示真实执行过程卡；显式关闭配置仍沿文本投递，/verbose off关闭会话过程卡，不改变任务终态。
+    im_progress_cards_enabled: bool = field(default=True, kw_only=True)
     # 空查询复核只增加共享模型提示，基线由模型在原权限/预算内执行，不启动自动查询或告警。
     query_zero_result_review_enabled: bool = True
     # 仅显式选择 delivery.reply_policy=explicit 的后台任务使用结构化公开回执；旧 always 策略不变。

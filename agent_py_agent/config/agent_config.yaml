@@ -742,8 +742,9 @@ tui_default_verbose_level: stream
 im_stream_heartbeat_seconds: 120.0
 # 可选话题聚合；默认关闭，保持原引用回复。话题标识仅用于提供方路由，不替代内部会话身份。
 im_topic_aggregation_enabled: false
-# 可选真实执行事件进度卡片；默认关闭，保持文本行为。首发类型冻结，卡片失败不改变任务终态。
-im_progress_cards_enabled: false
+# 飞书默认显示真实执行过程卡；/verbose off关闭当前会话过程卡。显式false仍使用文本投递。
+# 首发类型冻结，卡片失败不改变任务终态；不增加模型调用。
+im_progress_cards_enabled: true
 # 带条件查询零命中时，提醒模型做一次有界同范围对照，再下否定结论；不会自动联网或发送零条告警。
 query_zero_result_review_enabled: true
 # 是否允许后台任务显式选择 delivery.reply_policy=explicit，将内部结果与公开通知分开。

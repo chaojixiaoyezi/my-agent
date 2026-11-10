@@ -100,7 +100,7 @@ def test_verbose_command_is_persisted_per_conversation_without_calling_model(tmp
     assert "工具步骤摘要" in first.message
     assert current.verbose_level == "on"
     assert context_history(current) == ()
-    assert other.verbose_level == "off"
+    assert other.verbose_level == "stream"
     status = _run_command(agent, "/v", _conversation())
     assert status.message == "当前详细过程模式：开启。"
 
@@ -125,7 +125,7 @@ def test_verbose_invalid_level_does_not_change_thread_state(tmp_path) -> None:
         )
     )
     assert result.message.startswith("用法：")
-    assert current.verbose_level == "off"
+    assert current.verbose_level == "stream"
 
 
 def test_progress_chunk_respects_on_and_full_levels(tmp_path) -> None:
@@ -139,10 +139,13 @@ def test_progress_chunk_respects_on_and_full_levels(tmp_path) -> None:
     writer.close()
 
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert [row["verbose_level"] for row in rows if row.get("kind") == "process_settings"] == ["on", "full"]
+    rows = [row for row in rows if "progress" in row]
     assert "output" not in rows[0]["progress"]
     assert rows[1]["progress"]["output"] == "secret result"
     events, cursor = _read_public_progress_events(path, 0)
-    assert cursor == 2
+    assert cursor == 4
+    events = [item for item in events if item.get("kind") != "process_settings"]
     assert [item["level"] for item in events] == ["on", "full"]
     assert "结果" not in _render_gateway_progress(events[0])
     assert "secret result" in _render_gateway_progress(events[1])
@@ -159,7 +162,8 @@ def test_public_progress_skips_turn_resumed_boundary_and_advances_cursor(tmp_pat
 
     events, cursor = _read_public_progress_events(path, 0)
 
-    assert cursor == 3
+    assert cursor == 4
+    assert events.pop(0) == {"kind": "process_settings", "verbose_level": "on"}
     assert [item["tool"] for item in events] == ["read_file", "run_command"]
     assert all("cause" not in item and item.get("kind") != "turn_resumed" for item in events)
 

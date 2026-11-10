@@ -1589,7 +1589,7 @@ class GatewayReplyDeliveryWorker(
             batch = self._poll_progress(record)
             from .progress_draft import GatewayProgressBatch, deliver_stream_progress
 
-            if (isinstance(batch, GatewayProgressBatch) and (batch.mode == "stream" or batch.render_kind == 'card')) or record.progress_draft.get("mode") == "stream":
+            if (isinstance(batch, GatewayProgressBatch) and (batch.mode == "stream" or batch.render_kind == 'card' or batch.verbose_level in {"off", "on", "full", "stream"})) or record.progress_draft.get("mode") == "stream":
                 if not isinstance(batch, GatewayProgressBatch):
                     batch = GatewayProgressBatch(tuple(batch[0]), batch[1], "stream")
                 return deliver_stream_progress(self, record, batch, force=final_update)

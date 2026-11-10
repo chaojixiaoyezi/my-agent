@@ -397,13 +397,15 @@ def _load_gateway_thread(
         thread, error = store.threads.load_report(explicit_tid)
         if error is not None or thread is None:
             return None, error or {"error_code": "thread_unavailable"}
+        thread = store.threads.adopt_verbose_default(thread, initial_verbose_settings(
+            getattr(inputs.agent, "config", None), inputs.request, channel=str(spec.get("channel") or "")))
         if inputs.request_id:
             thread = store.threads.record_user_activity(thread.thread_id, request_id=inputs.request_id)
         return thread, None
     try:
         thread = store.threads.get_or_create(
             {
-                **initial_verbose_settings(getattr(inputs.agent, "config", None), inputs.request),
+                **initial_verbose_settings(getattr(inputs.agent, "config", None), inputs.request, channel=str(spec.get("channel") or "")),
                 "canonical_user_id": str(spec.get("canonical_user_id") or "local-agent"),
                 "owner_id": str(
                     getattr(getattr(inputs.agent, "home_paths", None), "owner_id", "") or ""

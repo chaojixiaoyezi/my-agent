@@ -103,7 +103,7 @@ def scoped_model_host(source, scope):
     # 函数用途: 在本次原C短门内取得唯一模型设置线程。
     def prepare():
         thread = host.conversation_store.threads.get_or_create({
-            **initial_verbose_settings(getattr(host, "config", None), scope.metadata),
+            **initial_verbose_settings(getattr(host, "config", None), scope.metadata, channel=scope.channel),
             'canonical_user_id': scope.user_id, 'owner_id': host.home_paths.owner_id,
             'owner_home': str(host.home_paths.owner_home_dir), 'channel': scope.channel,
             'channel_conversation_id': scope.conversation_id, 'channel_user_id': scope.user_id,

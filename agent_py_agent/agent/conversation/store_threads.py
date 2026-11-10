@@ -37,6 +37,7 @@ from .store_io import (
     read_json_object_report,
 )
 from .store_layout import ConversationStorage
+from .verbose import VERBOSE_LEVEL_SOURCES
 
 logger = logging.getLogger(__name__)
 
@@ -453,7 +454,8 @@ class ThreadStore:
         )
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         with locked_file_transition(self.storage.threads_dir / f".channel-{digest}", **({} if blocking else {"blocking": False})):
-            return _get_or_create_bound_thread(self, request, **({} if blocking else {"blocking": False}))
+            thread = _get_or_create_bound_thread(self, request, **({} if blocking else {"blocking": False}))
+            return self.adopt_verbose_default(thread, request, blocking=blocking)
 
     # LLM: 此适配器保持精简；准确身份的创建及冲突检查属于 agent_thread_store，通道绑定存储不得吸收代理运行时策略。
     # 函数用途: 为一个确定的子代理运行创建或校验独立会话线程，不把它绑定成用户聊天会话。
@@ -905,6 +907,18 @@ class ThreadStore:
 
     # LLM: 详细输出级别是线程本地控制字段，必须只原子更新它本身，不覆盖其它线程状态。
     # 函数用途: 修改当前会话的详细输出级别，不让旧会话快照覆盖其他状态。
+    def adopt_verbose_default(self, thread, settings, *, blocking=True):
+        """仅按显式飞书默认迁移无来源旧off；锁内最新手动选择永远优先。"""
+        if (settings.get('verbose_level_source') != 'feishu_default' or thread.verbose_level != 'off'
+                or thread.metadata.get('verbose_level_source')):
+            return thread
+        def adopt(latest):
+            if latest.verbose_level != 'off' or latest.metadata.get('verbose_level_source'):
+                return latest
+            return replace(latest, verbose_level='stream',
+                           metadata={**latest.metadata, 'verbose_level_source': 'feishu_default'})
+        return self.update_atomic(thread.thread_id, adopt, **({} if blocking else {'blocking': False}))
+
     def update_verbose_level(
         self,
         thread_id: str,
@@ -921,7 +935,7 @@ class ThreadStore:
             lambda latest: replace(
                 latest,
                 verbose_level=normalized,
-                metadata={key: value for key, value in latest.metadata.items() if key != "verbose_level_source"},
+                metadata={**latest.metadata, "verbose_level_source": "user"},
                 updated_at=max(latest.updated_at, current),
             ),
         )
@@ -1022,7 +1036,8 @@ class ThreadStore:
             owner_home=str(kwargs.get("owner_home") or ""),
             learning_source=_thread_learning_source(kwargs.get("learning_source")),
             verbose_level=kwargs.get("verbose_level", "off"),
-            metadata=({"verbose_level_source": "tui_default"} if kwargs.get("verbose_level_source") == "tui_default" else {}),
+            metadata=({"verbose_level_source": kwargs["verbose_level_source"]}
+                      if kwargs.get("verbose_level_source") in VERBOSE_LEVEL_SOURCES else {}),
             model_profile_id=initial_model,
             model_selection_revision=1 if initial_model else 0,
             model_selection_source="default" if initial_model else "unknown",

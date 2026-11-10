@@ -248,6 +248,8 @@ class BufferedChunkStreamWriter(StreamLiveness):
         self._verbose_level = normalized if normalized in {"off", "on", "full", "stream"} else "off"
         self._im_preview_max_chars = max(1, min(8000, int(preview_max_chars)))
         self._display_timezone = timezone
+        if not self.rich_transcript:
+            self._write_event({'kind': 'process_settings', 'verbose_level': self._verbose_level})
 
     # LLM: 只由原宿主派工确认后设置；仅普通IM候选/进度静默，不改变rich记录、模型或最终response事实。
     # 函数用途: 让短受理轮只由原最终回复watcher外送一次。

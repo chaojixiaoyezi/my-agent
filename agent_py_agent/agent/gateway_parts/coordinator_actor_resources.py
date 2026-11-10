@@ -66,7 +66,7 @@ def _prepare_actor_control_thread(source):
             _initialize_missing_owner(home)
             storage.ensure_dirs()
             scope = source.http_origin[5]
-            thread = threads.get_or_create({**initial_verbose_settings(_config, scope.metadata), 'canonical_user_id': scope.user_id, 'owner_id': home.owner_id,
+            thread = threads.get_or_create({**initial_verbose_settings(_config, scope.metadata, channel=scope.channel), 'canonical_user_id': scope.user_id, 'owner_id': home.owner_id,
                 'owner_home': str(home.owner_home_dir), 'channel': scope.channel,
                 'channel_conversation_id': scope.conversation_id, 'channel_user_id': scope.user_id,
                 'title': '会话设置'}, blocking=False)

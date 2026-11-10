@@ -559,6 +559,10 @@ def _project_public_progress_rows(lines, *, channel="", include=frozenset(), pre
             continue
         if not isinstance(row.get("kind"), str):
             continue
+        if row.get("kind") == "process_settings":
+            if row.get("verbose_level") in {"off", "on", "full", "stream"}:
+                events.append({"kind": "process_settings", "verbose_level": row["verbose_level"]})
+            continue
         if row.get("kind") in {"assistant_text_delta", "assistant_text_reset", "assistant_text_done", "workflow_step_progress"}:
             extension = _public_progress_extension(row, include=include, channel=channel, preserve_host_paths=preserve_host_paths)
             if extension is not None:

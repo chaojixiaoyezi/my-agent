@@ -395,6 +395,100 @@ def upgrade_existing_config_defaults(config_path: Path, template_content: str) -
         _atomic_write_config(config_path, text)
 
 
+_FEISHU_PROGRESS_MIGRATION = 'feishu-progress-default-v1'
+
+
+def _migrate_config_once(prefix: Path, release: Path, config: Path, migration: str, transform) -> None:
+    """在原安装锁内一次采用明确的新默认；意图/完成均记原安装metadata，重试不重开用户false。"""
+    marker = prefix / MARKER
+    if not marker.exists():
+        return
+    record = json.loads(marker.read_text(encoding='utf-8'))
+    migrations = record.get('config_migrations', {})
+    if not isinstance(migrations, dict):
+        raise ValueError('安装配置迁移记录损坏')
+    previous = migrations.get(migration)
+    if isinstance(previous, dict) and previous.get('phase') == 'completed':
+        return
+    original = config.read_text(encoding='utf-8')
+    before_hash = hashlib.sha256(original.encode('utf-8')).hexdigest()
+    if previous is not None:
+        if not isinstance(previous, dict) or previous.get('phase') != 'prepared':
+            raise ValueError('飞书过程卡迁移状态不可确认')
+        if before_hash == previous.get('after_sha256'):
+            completed = {**previous, 'phase': 'completed', 'completed_at': time.time()}
+            _atomic_write_config(marker, json.dumps({**record, 'config_migrations': {**migrations,
+                migration: completed}}, ensure_ascii=False, indent=2) + '\n')
+            return
+        if before_hash != previous.get('before_sha256'):
+            raise ValueError('飞书过程卡迁移期间配置已改变，保留原配置')
+    updated, old, new = transform(original)
+    prepared = {'phase': 'prepared', 'release': release.name, 'old_value': old,
+        'new_value': new, 'before_sha256': before_hash,
+        'after_sha256': hashlib.sha256(updated.encode('utf-8')).hexdigest(), 'prepared_at': time.time()}
+    _atomic_write_config(marker, json.dumps({**record, 'config_migrations': {**migrations,
+        migration: prepared}}, ensure_ascii=False, indent=2) + '\n')
+    if updated != original:
+        _atomic_write_config(config, updated)
+    completed = {**prepared, 'phase': 'completed', 'completed_at': time.time()}
+    _atomic_write_config(marker, json.dumps({**record, 'config_migrations': {**migrations,
+        migration: completed}}, ensure_ascii=False, indent=2) + '\n')
+
+
+def migrate_feishu_progress_default(prefix: Path, release: Path, config: Path, template: str) -> None:
+    if not re.search(r'^im_progress_cards_enabled:\s*true\s*(?:#.*)?$', template, re.M):
+        return
+    _migrate_config_once(prefix, release, config, _FEISHU_PROGRESS_MIGRATION, _progress_default_text)
+
+
+def _progress_default_text(original: str):
+    pattern = re.compile(r'^(?P<prefix>im_progress_cards_enabled[ \t]*:[ \t]*)(?P<value>[^#\r\n]*)(?P<tail>[^\r\n]*)$', re.M)
+    matches = list(pattern.finditer(original))
+    if len(matches) > 1:
+        raise ValueError('飞书过程卡配置重复，未迁移')
+    old = matches[0].group('value').strip().strip('"\'').lower() if matches else None
+    if old not in (None, 'false', 'true'):
+        raise ValueError('飞书过程卡配置不是布尔值，未迁移')
+    if old == 'false':
+        match = matches[0]
+        value = match.group('value')
+        replacement = match.group('prefix') + 'true' + value[len(value.rstrip()):] + match.group('tail')
+        updated = original[:match.start()] + replacement + original[match.end():]
+    elif old is None:
+        updated = original.rstrip('\n') + '\n\n# 本次更新采用飞书过程卡默认；/verbose off可关闭当前会话。\nim_progress_cards_enabled: true\n'
+    else:
+        updated = original
+    return updated, None if old is None else old == 'true', True
+
+
+def migrate_feishu_oauth_defaults(prefix: Path, release: Path, package: Path) -> None:
+    """仅替换旧模板的准确scope列表；不改授权/token，定制列表与空列表原样保留。"""
+    import yaml
+
+    config = prefix / 'data/config/capability_config.yaml'
+    template = package / 'config/capability_config.yaml'
+    if not config.exists() or not template.exists():
+        return
+    defaults = yaml.safe_load(template.read_text(encoding='utf-8')).get('feishu_oauth_scopes')
+    if not isinstance(defaults, list) or defaults == ['offline_access']:
+        return
+
+    def transform(original):
+        parsed = yaml.safe_load(original)
+        old = parsed.get('feishu_oauth_scopes') if isinstance(parsed, dict) else None
+        if old != ['offline_access']:
+            return original, old, old
+        # 只替换一个顶层字段，不重写其它配置/注释；重复键拒绝而非猜测。
+        matches = list(re.finditer(r'^feishu_oauth_scopes[ \t]*:[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*', original, re.M))
+        if len(matches) != 1:
+            raise ValueError('飞书授权scope配置重复或不可确认')
+        match = matches[0]
+        updated = original[:match.start()] + 'feishu_oauth_scopes: ' + json.dumps(defaults, ensure_ascii=False) + original[match.end():]
+        return updated, old, defaults
+
+    _migrate_config_once(prefix, release, config, 'feishu-oauth-default-scopes-v1', transform)
+
+
 # LLM: 首装保留原owner目录权威；模板优先随包3.14/3.14t并兼容旧目录，更新不覆盖用户模型、凭据或路径。
 # 函数用途: 初始化空白数据，已有配置通过受限的升级迁移入口更新。
 def initialize_data(prefix: Path, release: Path) -> None:
@@ -410,14 +504,17 @@ def initialize_data(prefix: Path, release: Path) -> None:
         candidates = sorted((path for path in lib.glob("python3.*/site-packages/agent_py_agent") if path.is_dir()), reverse=True)
     package = candidates[0] if candidates else lib / "python3.11/site-packages/agent_py_agent"
     content = (package / "config" / "agent_config.yaml").read_text(encoding="utf-8")
+    migrate_feishu_oauth_defaults(prefix, release, package)
     if config.exists():
         upgrade_existing_config_defaults(config, content)
+        migrate_feishu_progress_default(prefix, release, config, content)
         return
     # 空工作区配置保留原 owner-home 权威；环境绑定 data 后无需另建外部目录或放宽权限。
     content = re.sub(r'^gateway_port:.*$', 'gateway_port: 18420', content, flags=re.M)
     with config.open("x", encoding="utf-8") as stream:
         stream.write(content)
     config.chmod(0o600)
+    migrate_feishu_progress_default(prefix, release, config, content)
 
 
 # LLM: 修改范围限于标记安装目录；校验、版本冲突及活动PID均在切换前拒绝，新增详情不改变旧错误前缀。
@@ -440,9 +537,13 @@ def install(bundle: Path, prefix: Path) -> dict:
                 for row in inspect_active_processes(prefix))
             raise ValueError(f"请先退出本安装的 TUI 并停止 Gateway 后重试；活动 PID: {pids}；详情: {details}")
         record = {"schema": SCHEMA, "prefix": str(prefix), "data": str(prefix / "data"), "workspace": str(workspace_path(prefix)), "owner_uid": os.getuid()}
-        if marker.exists() and json.loads(marker.read_text(encoding="utf-8")) != record:
-            raise ValueError("安装记录与目标路径不一致，请不要直接搬移运行中的安装目录")
-        marker.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        if marker.exists():
+            existing = json.loads(marker.read_text(encoding="utf-8"))
+            if ({key: value for key, value in existing.items() if key != 'config_migrations'} != record
+                    or not isinstance(existing.get('config_migrations', {}), dict)):
+                raise ValueError("安装记录与目标路径不一致，请不要直接搬移运行中的安装目录")
+            record = existing
+        _atomic_write_config(marker, json.dumps(record, ensure_ascii=False, indent=2) + "\n")
         releases = prefix / "releases"
         releases.mkdir(exist_ok=True)
         target = releases / manifest["version"]
@@ -460,6 +561,7 @@ def install(bundle: Path, prefix: Path) -> dict:
                 if staging.exists():
                     shutil.rmtree(staging)
         initialize_data(prefix, target)
+        record = json.loads(marker.read_text(encoding="utf-8"))
         (prefix / "bin").mkdir(exist_ok=True)
         launcher = prefix / "bin" / "my-agent-preview"
         temporary = launcher.with_name(f".launcher-{os.getpid()}")

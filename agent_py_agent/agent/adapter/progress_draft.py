@@ -21,6 +21,7 @@ class GatewayProgressBatch:
     steps: tuple[dict, ...] = field(default=(), kw_only=True)
     render_kind: str = field(default='text', kw_only=True)
     source_revision: int = field(default=0, kw_only=True)
+    verbose_level: str = field(default='', kw_only=True)
 
     # LLM: 旧 tuple 解包只投影消息和游标；新的 stream mode 由 worker 显式读取。
     # 函数用途: 保持原 poll_progress 调用方可以解包批次。
@@ -34,8 +35,15 @@ class GatewayProgressBatch:
 def deliver_stream_progress(worker: object, record: object, batch: GatewayProgressBatch, *, force: bool = False,
                             max_step_identities: int = 4096):
     draft = dict(record.progress_draft)
+    if batch.verbose_level in {'off', 'on', 'full', 'stream'} and draft.get('verbose_level') != batch.verbose_level:
+        draft['verbose_level'] = batch.verbose_level
+        record = worker.store.commit_claim(record, replace(record, progress_draft=draft),
+            owner=worker._claim_owner, epoch=record.claim_epoch, release=False)
+        if record is None:
+            return None
+        draft = dict(record.progress_draft)
     # 首发类型先冻结到原 pending；旧 message_id 没有类型字段时只能继续 text。
-    render_kind = str(draft.get('render_kind') or ('text' if draft.get('message_id') else batch.render_kind))
+    render_kind = str(draft.get('render_kind') or ('text' if draft.get('message_id') or draft.get('verbose_level') == 'off' else batch.render_kind))
     if draft.get("disabled"):
         return worker._commit_progress(record, batch.next_cursor)
     if not record.dispatch and not draft.get('reconcile_pending') and render_kind == 'card' and batch.next_cursor <= record.progress_cursor and (

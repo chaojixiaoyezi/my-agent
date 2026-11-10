@@ -128,7 +128,7 @@ def _utc_now_iso() -> str:
 # 函数用途: 渲染 IM 过程和模型请求等待时长，不宣称业务进展；工具待确认时提示控制命令。
 def _render_gateway_progress(event: dict[str, object]) -> str:
     kind = str(event.get("kind") or "")
-    if kind in {"model_draft", "model_delta"}:
+    if kind in {"model_draft", "model_delta", "process_settings"}:
         return ""
     if kind == "assistant_commentary":
         return str(event.get("text") or "").strip()
@@ -936,6 +936,9 @@ class _GatewayReplyPollClient:
             ) from exc
         events = body.get("events") if isinstance(body, dict) else []
         source_events = events if isinstance(events, list) else []
+        levels = [event.get('verbose_level') for event in source_events if isinstance(event, dict)
+                  and event.get('kind') == 'process_settings' and event.get('verbose_level') in {'off', 'on', 'full', 'stream'}]
+        verbose_level = levels[-1] if levels else str(pending.progress_draft.get('verbose_level') or '')
         messages = [
             rendered
             for event in source_events
@@ -952,7 +955,8 @@ class _GatewayReplyPollClient:
                                     any(isinstance(e, dict) and e.get("kind") in {"tool_liveness", "model_liveness"} for e in source_events),
                                     limits[-1] if limits else None, updates[-1] if updates else "",
                                     steps=tuple(project_execution_view(source_events, request_id=pending.request_id)['steps']),
-                                    render_kind=getattr(self, 'progress_render_kind', 'text'),
+                                    render_kind=('text' if verbose_level == 'off' else getattr(self, 'progress_render_kind', 'text')),
+                                    verbose_level=verbose_level,
                                     source_revision=max(pending.progress_cursor, int(body.get('next') or 0)))
 
     # LLM: 稳定输入编号仍只读对账；原身份头加凭据。开关开时读取失败在请求前抛 G1 原因码，

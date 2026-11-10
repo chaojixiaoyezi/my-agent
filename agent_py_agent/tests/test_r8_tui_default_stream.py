@@ -66,7 +66,7 @@ def test_new_default_legacy_and_manual_choices_survive_restart(tmp_path, monkeyp
     assert effective_verbose_level(bound, {}) == 'off'
     for level in ['off', 'on', 'full', 'stream']:
         selected = store.threads.update_verbose_level(thread.thread_id, level)
-        assert 'verbose_level_source' not in selected.metadata
+        assert selected.metadata['verbose_level_source'] == 'user'
         cold = ConversationStore(store.storage.root).threads.require(thread.thread_id)
         assert effective_verbose_level(cold, TUI) == effective_verbose_level(cold, {}) == level
         assert store.threads.get_or_create({**spec, **initial_verbose_settings(AgentConfig(), TUI)}).verbose_level == level

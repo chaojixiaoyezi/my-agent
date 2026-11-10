@@ -312,6 +312,9 @@ def test_long_model_draft_keeps_latest_window_after_complete_redaction(tmp_path,
     events = [json.loads(line) for line in writer.chunk_path.read_text().splitlines()]
     assert observed == [(len(content), 0), (len(content), 0)]
     # 原raw草稿8K裁剪退休；已确认全文完整留在原chunk，展示上限仍由原投递配置消费。
+    settings = events.pop(0)
+    assert settings['kind'] == 'process_settings' and settings['verbose_level'] == 'stream'
+    assert settings['preview_max_chars'] == 8000
     assert events[0]['text'] == content.replace('旧内容', '已脱敏')
     assert events[0]['preview_max_chars'] == 8000
     assert events[0]['text'].endswith('最新结果')
