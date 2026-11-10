@@ -25,6 +25,25 @@ def resolve_business_context(*, actor: object, task_id: str, requested_space_id:
         return _unassigned_context(actor=actor, task_id=task_id, project_ref=project_ref,
             requested_method_refs=requested_method_refs, requested_asset_version_refs=requested_asset_version_refs,
             host=host)
+    return _resolve_selection(actor=actor, task_id=task_id, requested_space_id=requested_space_id,
+        project_ref=project_ref, binding_id=binding_id, requested_method_refs=requested_method_refs,
+        requested_asset_version_refs=requested_asset_version_refs)
+
+
+# LLM: 仅供工作流宿主工厂在原 WorkflowRunStore 创建运行前调用：准确 workflow_run_id 作逻辑 task_id（不是 SessionTask，
+#   也不是编排父任务），来源由调用方与运行快照同次冻结；空间/项目/资产选择与访问、修订检查与 SessionTask 入口同一实现。
+# 函数用途: 把一次原生工作流运行的业务意图解析成随运行记录冻结的上下文，不建任务或调用模型。
+def resolve_workflow_run_context(*, actor: object, workflow_run_id: str, requested_space_id: str | None,
+        project_ref: str | None) -> BusinessExecutionContext:
+    """重放与恢复使用运行快照里的原上下文，不再调用本函数重新选默认空间。"""
+    return _resolve_selection(actor=actor, task_id=workflow_run_id, requested_space_id=requested_space_id,
+        project_ref=project_ref, binding_id=None, requested_method_refs=(), requested_asset_version_refs=())
+
+
+# LLM: 只读核Actor、空间、绑定和引用并冻结选择；两类调用方各自声明task_id的来源，这里不分配ID也不取latest。
+# 函数用途: 由准确逻辑任务ID与已认证Actor解析空间、项目、方法与资产版本选择。
+def _resolve_selection(*, actor, task_id, requested_space_id, project_ref, binding_id, requested_method_refs,
+        requested_asset_version_refs):
     actor = require_actor(actor)
     service = actor.service
     _identifier(task_id)

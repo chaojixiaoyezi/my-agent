@@ -370,6 +370,24 @@ class _BackgroundPort:
         raise HostAPIError('UNSUPPORTED_ACTION')
 
 
+# LLM: 显式宿主端口优先；否则只复用同一Owner已登记WorkflowsTool的owner绑定引擎，并配显式签名的运行上下文工厂。
+#   找不到同Owner引擎时两者都缺，workflows.run如实HOST_NOT_READY；不造无状态引擎，也不把主Owner引擎借给别的Owner。
+# 函数用途: 为原生/插件/工具业务组合取得工作流运行端口。
+def workflow_run_ports(host):
+    engine_factory = getattr(host, 'workflow_engine_factory', None)
+    context_provider = getattr(host, 'business_context_provider', None)
+    if engine_factory is not None or context_provider is not None:
+        return engine_factory, context_provider
+    from ..tooling.workflows_tool import WorkflowsTool
+    from ..workflows.business_scope import WorkflowRunContextFactory
+    registry = getattr(getattr(host, 'tools', None), 'tools', None)
+    tool = registry.get('workflows') if isinstance(registry, dict) else None
+    home = getattr(host, 'home_paths', None)
+    if not isinstance(tool, WorkflowsTool) or home is None or tool.owner_home != Path(home.owner_home_dir).absolute():
+        return None, None
+    return tool._business_engine, WorkflowRunContextFactory()
+
+
 class BusinessServices:
     """静态选择原服务。可选端口由组合根注入，绝不从payload或任意函数名加载。"""
     # LLM: 只绑定当前owner原Store与规范只读库；功能关闭不探测观察来源，显式端口不替换，不缓存actor。
@@ -382,13 +400,14 @@ class BusinessServices:
         self._default_spaces = spaces is None
         if workflows is None:
             from ..workflows.business_scope import WorkflowScopeService
+            engine_factory, context_provider = workflow_run_ports(host)
             workflows = WorkflowScopeService(self.owner_home, owner_id=self.owner_id,
                 authorize=lambda actor, action, ref: actor.authorize(action, {'workflow_ref': ref}),
                 reference_reader=getattr(host, 'business_reference_reader', None),
-                context_provider=getattr(host, 'business_context_provider', None),
+                context_provider=context_provider,
                 agent_steps=getattr(host, 'workflow_agent_steps', None),
                 governance=getattr(host, 'business_governance', None),
-                engine_factory=getattr(host, 'workflow_engine_factory', None))
+                engine_factory=engine_factory)
         self.workflows = workflows
         self.background = background if background is not None else getattr(host, 'business_background', None)
         self.capabilities = capabilities if capabilities is not None else getattr(host, 'business_capabilities', None)
@@ -812,6 +831,9 @@ def native_business_context(handler, server):
                     'business_v13_providers', 'business_v13_clock'):
             if hasattr(base, key):
                 setattr(host, key, getattr(base, key))
+        # 同一Owner才复用基座已登记的owner绑定工作流引擎；其它Owner缺端口时如实未就绪。
+        engine_factory, context_provider = workflow_run_ports(base)
+        host.workflow_engine_factory, host.business_context_provider = engine_factory, context_provider
 
     def check(action, facts):
         middleware = getattr(handler, '_auth_middleware', None)

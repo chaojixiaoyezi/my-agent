@@ -150,6 +150,18 @@ class WorkflowPolicyRefusal(PermissionError):
         self.details = details or {}
 
 
+# LLM: 宿主工作流上下文工厂的显式签名合同（actor, request, workflow_run_id, scope）；旧二参提供者按原调用，
+#   不靠捕获任意TypeError猜签名。逻辑task_id只用准确运行ID，空间/项目解析复用原只读选择与访问、修订检查。
+# 类用途: 为一次原生工作流运行解析冻结上下文；Owner级范围且未请求空间或项目时返回None，不冻结空间。
+class WorkflowRunContextFactory:
+    def __call__(self, actor, request, *, workflow_run_id, scope):
+        if scope.get('scope_mode') != 'spaces' and not request.get('space_id') and not request.get('project_ref'):
+            return None
+        from ..conversation.business_context import resolve_workflow_run_context
+        return resolve_workflow_run_context(actor=actor, workflow_run_id=workflow_run_id,
+            requested_space_id=request.get('space_id'), project_ref=request.get('project_ref'))
+
+
 class WorkflowScopeService:
     """原动作目录与 UI/plugin 共用的 Owner 领域入口；不从请求猜当前业务身份。"""
 
@@ -444,18 +456,27 @@ class WorkflowScopeService:
             if engine.store.load_workflow_snapshot(identity).get('_operation_intent') != intent:
                 raise BusinessError('IDEMPOTENCY_CONFLICT')
             return {'workflow_run_id': identity, 'operation_id': identity, 'state': self._receipt_state(saved)}
-        context = None
-        if self.context_provider is not None:
+        context, origin = None, None
+        if isinstance(self.context_provider, WorkflowRunContextFactory):
+            # 显式签名：工厂拿准确运行身份与冻结范围；Owner级运行未请求空间/项目时不冻结业务上下文。
+            context = self.context_provider(actor, request, workflow_run_id=identity, scope=state['scope'])
+            if context is not None:
+                origin = 'workflow_run'
+                if not isinstance(context, BusinessExecutionContext) or context.task_id != identity:
+                    raise PermissionError('WORKFLOW_CONTEXT_MISMATCH')
+        elif self.context_provider is not None:
             context = self.context_provider(actor, request)
-            if not isinstance(context, BusinessExecutionContext) or context.owner_id != self.owner_id:
+            if not isinstance(context, BusinessExecutionContext):
                 raise PermissionError('WORKFLOW_CONTEXT_MISMATCH')
-            if request.get('space_id') and context.space_id != request['space_id']:
-                raise PermissionError('WORKFLOW_CONTEXT_MISMATCH')
+        if context is not None and (context.owner_id != self.owner_id
+                                    or request.get('space_id') and context.space_id != request['space_id']):
+            raise PermissionError('WORKFLOW_CONTEXT_MISMATCH')
         if state['scope']['scope_mode'] == 'spaces' and context is None:
             raise PermissionError('BUSINESS_CONTEXT_UNAVAILABLE')
         self._check_scope(state['scope'], context.space_id if context else request.get('space_id'))
         record = engine.run_workflow(definition.to_dict(), request.get('inputs', {}), owner_id=self.owner_id,
-            business_context=context, scope_snapshot=state['scope'], workflow_run_id=identity, operation_intent=intent)
+            business_context=context, scope_snapshot=state['scope'], workflow_run_id=identity, operation_intent=intent,
+            **({'business_context_origin': origin} if origin else {}))
         return {'workflow_run_id': identity, 'operation_id': identity, 'state': self._receipt_state(record)}
 
     @staticmethod
@@ -467,7 +488,10 @@ class WorkflowScopeService:
     @staticmethod
     def _run_view(record):
         return {'workflow_run_id': record.workflow_run_id, 'workflow_ref': record.workflow_id,
-            'task_id': record.business_context.get('task_id'), 'space_id': record.business_context.get('space_id'),
+            # 运行级上下文的逻辑task_id就是本运行ID，不是SessionTask，公开视图不把它当任务引用。
+            'task_id': (None if record.business_context.get('task_id') == record.workflow_run_id
+                        else record.business_context.get('task_id')),
+            'space_id': record.business_context.get('space_id'),
             'status': record.status, 'execution_definition_ref': record.execution_definition_ref,
             'scope_revision': record.scope_revision, 'phase': record.phase,
             'effect_outcome': {'confirmed': 'committed', 'failed': 'unknown'}.get(record.effect_outcome, record.effect_outcome),

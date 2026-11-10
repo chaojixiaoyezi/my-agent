@@ -182,7 +182,8 @@ class _WorkflowRunLifecycle:
     # 函数用途: 新建运行账本并顺序执行步骤。
     def run_workflow(self, workflow, inputs=None, trigger_kind='manual', owner_id='', *,
                      business_context=None, scope_snapshot=None, workflow_run_id=None, operation_intent=None,
-                     concurrency_policy='allow', queue_limit=8, definition_version: int | None = None):
+                     concurrency_policy='allow', queue_limit=8, definition_version: int | None = None,
+                     business_context_origin=None):
         if concurrency_policy == 'allow':
             concurrency_policy = getattr(self, 'default_concurrency_policy', 'allow')
         if concurrency_policy not in ('allow', 'skip_if_running', 'queue'):
@@ -217,6 +218,12 @@ class _WorkflowRunLifecycle:
                                    scope_snapshot=payload(frozen_scope), scope_revision=frozen_scope.get('scope_revision', 0))
         if operation_intent is not None:
             definition['_operation_intent'] = operation_intent
+        if business_context_origin is not None:
+            # 来源与上下文同次冻结进运行快照：运行级上下文的逻辑task_id就是本运行ID，不是SessionTask。
+            if (business_context_origin != 'workflow_run'
+                    or record.business_context.get('task_id') != record.workflow_run_id):
+                raise ValueError('WORKFLOW_CONTEXT_ORIGIN_INVALID')
+            definition['_business_context_origin'] = business_context_origin
         record.definition_version = definition_version
         definition['_frozen_scripts'] = self._script_pins(definition['steps']) if version_pins is None else version_pins
         record = replace_run_record(record, dict(workflow_name=descriptor['name'], total_steps=len(definition['steps'])))
