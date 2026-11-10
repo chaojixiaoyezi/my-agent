@@ -430,6 +430,31 @@ def _authorize_cancellation_task(task, authorize_task):
 
 # LLM: 先耐久取消，再核原回合/独立执行退出；后代只更新自身责任，不覆盖原根scope。正文只收同一任务的准确回执。
 # 函数用途: 执行单条规范任务的取消及正文收尾，返回仍未确认的原引用。
+# LLM: BIZ-008/009：先前尝试已失败结束（如缺模型）的任务，没有绑定回合却留着 task_run；只有原运行库证明该 task_run 及其全部
+#   AgentRun 已终态关闭、且目标线程此刻没有 running claim 时，才算"不在执行"。调用前任务已推进为终态，之后的领取会按终态退役，
+#   不会再启动；读不出任何一项都保守返回 False（保留未确认责任）。只读。
+# 函数用途: 判断一个未绑定回合的会话任务的唯一执行记录是否已被原运行库确认结束。
+def _unbound_task_run_proven_closed(host, task) -> bool:
+    import sqlite3
+
+    from ..runtime_db.operations import AGENT_RUN_TERMINAL_STATUSES
+
+    repo = getattr(getattr(host, "subagents", None), "runtime_db", None)
+    if repo is None or not task.task_run_id:
+        return False
+    try:
+        task_run = repo.get_task_run(task.task_run_id)
+        if (task_run is None or task_run["task_id"] != task.task_id or not task_run["closed_at"]
+                or task_run["status"] not in AGENT_RUN_TERMINAL_STATUSES):
+            return False
+        if any(run["status"] not in AGENT_RUN_TERMINAL_STATUSES for run in repo.agent_runs_for_task_run(task.task_run_id)):
+            return False
+        claim, error = host.conversation_store.claims.load_report(task.target_thread_id)
+    except (OSError, ValueError, TypeError, KeyError, IndexError, sqlite3.Error):
+        return False
+    return error is None and (not claim or claim.get("status") != "running")
+
+
 def _cancel_selected_session_task(host, binding, root_context, *, root=False, authorize_task=None):
     from ..gateway_parts.session_task_stop import stop_session_task_turn
     from .session_tasks import SESSION_TASK_TERMINAL_STATUSES, SessionTaskUpdate
@@ -470,7 +495,8 @@ def _cancel_selected_session_task(host, binding, root_context, *, root=False, au
     execution_refs = (latest.get("execution_outstanding_refs", latest.get("outstanding_refs", []))
                       if latest.get("execution_ref") else [])
     if (not current.conversation_request_id and not execution_refs
-            and (current.task_run_id or current.status not in {"queued", "cancelled", *SESSION_TASK_TERMINAL_STATUSES})):
+            and (current.task_run_id or current.status not in {"queued", "cancelled", *SESSION_TASK_TERMINAL_STATUSES})
+            and not _unbound_task_run_proven_closed(host, current)):
         refs.append(current.task_id)
     # 原执行引用已经承担未明责任，不能再造一份task引用，也不能在该执行未结时拒绝正文。
     refs.extend(execution_refs)

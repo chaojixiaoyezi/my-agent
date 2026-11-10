@@ -224,3 +224,55 @@ def test_deterministic_rejections_are_not_started_and_write_uncertainty_stays_un
                              {'agent_id': agent['agent_id'], 'model_profile_id': model['model_profile_id']},
                              expected_revision=model['selection_revision'], idempotency_key='sched-p6-model-uncertain')
     assert (observed, payload['error']['code'], payload['effect_outcome']) == (503, 'OUTCOME_UNKNOWN', 'unknown')
+
+
+def _cancel(native, task_id, key):
+    revision = ok(native, 'tasks.get', {'task_id': task_id})['task']['revision']
+    return ok(native, 'tasks.cancel', {'task_id': task_id, 'include_descendants': True},
+              idempotency_key=key, expected_revision=revision)
+
+
+def test_cancel_after_failed_attempt_settles_body_and_agent_is_idle_not_failed(native):
+    # BIZ-008/009：一次已失败结束的尝试只留下已关闭 task_run；取消必须收口正文，身份不能永远 waiting 或显示 failed。
+    _, host = native
+    agent, task_id = assigned_task(native)
+    assert type(tick(scheduler_for(host), agent['agent_id'], time.time())).__name__ == 'ModelNotConfiguredError'
+    receipt = _cancel(native, task_id, 'sched-cancel-failed-try-1')
+    assert receipt['state'] == 'completed' and receipt['outstanding_refs'] == []
+    assert host.conversation_store.guidance.pending_report('thread', agent['agent_id'], limit=20) == ([], [])
+    view = ok(native, 'background_agents.get', {'agent_id': agent['agent_id']})
+    assert view['agent']['work_state'] == 'idle' and view['scheduling']['state'] == 'no_work'
+    assert host.conversation_store.session_tasks.require(task_id).status == 'cancelled'
+
+
+def test_cancel_keeps_responsibility_while_target_claim_is_running(native, monkeypatch):
+    _, host = native
+    agent, task_id = assigned_task(native)
+    tick(scheduler_for(host), agent['agent_id'], time.time())
+    claims = host.conversation_store.claims
+    original = claims.load_report
+
+    def running(thread_id):
+        claim, error = original(thread_id)
+        if thread_id == agent['agent_id']:
+            return {**(claim or {}), 'thread_id': thread_id, 'status': 'running'}, None
+        return claim, error
+
+    monkeypatch.setattr(claims, 'load_report', running)
+    receipt = _cancel(native, task_id, 'sched-cancel-while-running')
+    assert receipt['state'] == 'pending' and receipt['outstanding_refs'] == [task_id]
+
+
+def test_retire_with_cancel_after_failed_attempt_reaches_retired_and_releases_quota(native):
+    _, host = native
+    agent, task_id = assigned_task(native)
+    scheduler = scheduler_for(host)
+    tick(scheduler, agent['agent_id'], time.time())
+    current = ok(native, 'background_agents.get', {'agent_id': agent['agent_id']})['agent']
+    ok(native, 'background_agents.retire', {'agent_id': agent['agent_id'], 'disposition': 'cancel_tasks'},
+       expected_revision=current['revision'], idempotency_key='sched-retire-cancel-0001')
+    tick(scheduler, agent['agent_id'], time.time() + 400)
+    view = ok(native, 'background_agents.get', {'agent_id': agent['agent_id']})
+    assert view['agent']['identity_state'] == 'retired' and view['scheduling']['state'] == 'retired'
+    assert host.conversation_store.session_tasks.require(task_id).status == 'cancelled'
+    assert ok(native, 'background_agents.list', {})['quota']['used'] == 0

@@ -222,6 +222,10 @@ class BackgroundAgentService:
                     return view
                 if inputs:
                     view["work_state"] = "waiting"
+                elif page["items"]:
+                    # BIZ-008：工作态按最近一条终态任务的事实聚合；被取消/已完成的任务不因更早一次失败尝试的claim显示为failed。
+                    latest = max(page["items"], key=lambda task: task.updated_at)
+                    view["work_state"] = "failed" if latest.status == "failed" else "idle"
                 else:
                     view["work_state"] = "failed" if claim.get("status") == "failed" else "idle"
         except (OSError, ValueError, TypeError, KeyError, RuntimeError, sqlite3.Error):
