@@ -31,7 +31,10 @@ def test_restart_parks_original_background_claim_before_irreversible_cleanup(tmp
         current = ctx.store.claims.load(ctx.thread.thread_id)
         assert current['claim_id'] == original['claim_id'] and current['status'] == 'cancelled'
         assert ctx.store.tasks.link_report(ctx.thread.thread_id, 'original-work')[0].status == 'active'
-        assert ctx.store.wakes.pending()
+        signals = ctx.store.wakes.pending()
+        assert signals
+        state, error = ctx.store.wakes.attempts.state_report(signals[0].wake_signal_id)
+        assert not error and state.uncounted_count == 0 and state.neutral_count in (None, 0)
         assert not ctx.context.background_shutdown.stopping
         assert ctx.context.background_shutdown.blockers() == []
     finally:
@@ -110,3 +113,35 @@ def test_finished_unknown_refuses_park_without_interrupting_other_original_work(
     assert control.pause_for_restart() == [unknown]
     assert not control.restart_paused and not control.stopping
     assert item in control.slices
+
+
+def test_only_host_park_cannot_push_neutral_boundary_into_quarantine():
+    from agent_py_agent.agent.conversation import wake_poison as poison
+    state = poison.WakePoisonState(uncounted_count=4, uncounted_since=1., neutral_count=4, neutral_since=1.)
+    now = 100_000.
+    ordinary = poison.next_poison_state(state,
+        poison.WakeAttemptVerdict(poison.WAKE_VERDICT_NEUTRAL, poison.WAKE_REASON_RUN_CANCELLED), now=now)
+    assert poison.quarantine_decision(ordinary) is not None
+    parked = poison.next_poison_state(state,
+        poison.WakeAttemptVerdict(poison.WAKE_VERDICT_NEUTRAL, poison.WAKE_REASON_HOST_RESTART_PARK), now=now)
+    assert parked is state and poison.quarantine_decision(parked) is None
+
+
+def test_host_park_store_preserves_old_neutral_window_without_stall_or_quarantine(tmp_path):
+    from agent_py_agent.agent.conversation import wake_poison as poison
+    from agent_py_agent.tests.test_wake_attempt_store import _raise, _store
+    store = _store(tmp_path)
+    signal = _raise(store)
+    attempts = store.wakes.attempts
+    ordinary = poison.WakeAttemptVerdict(poison.WAKE_VERDICT_NEUTRAL, poison.WAKE_REASON_RUN_CANCELLED)
+    for n in range(5):
+        attempts.record(signal, ordinary, now=float(n + 1))
+    before, error = attempts.state_report(signal.wake_signal_id)
+    assert not error and before.neutral_count == 5
+    parked = attempts.record(signal,
+        poison.WakeAttemptVerdict(poison.WAKE_VERDICT_NEUTRAL, poison.WAKE_REASON_HOST_RESTART_PARK), now=100_000.)
+    assert parked.state == before and parked.decision is None and parked.stall_alert is None
+    assert store.wakes.pending_one(signal.wake_signal_id) is not None
+    # 原业务取消仍执行原neutral结案合同，宿主park不洗掉旧积累。
+    next_ordinary = attempts.record(signal, ordinary, now=100_001.)
+    assert next_ordinary.decision is not None

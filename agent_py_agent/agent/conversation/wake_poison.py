@@ -64,6 +64,8 @@ WAKE_ATTEMPT_PATHS = frozenset({WAKE_ATTEMPT_PATH_CLAIMED, WAKE_ATTEMPT_PATH_RED
 WAKE_CLAIM_NOT_EXECUTED = "not_executed"
 WAKE_CLAIM_FINISHED = "finished"
 WAKE_CLAIM_CANCELLED = "cancelled"
+WAKE_ADMISSION_HOST_RESTART_PARK = "gateway_restart_park"
+WAKE_REASON_HOST_RESTART_PARK = "host:restart_park"
 WAKE_CLAIM_YIELDED = "yielded"
 WAKE_CLAIM_STATUSES = frozenset({WAKE_CLAIM_NOT_EXECUTED, WAKE_CLAIM_FINISHED, WAKE_CLAIM_CANCELLED, WAKE_CLAIM_YIELDED})
 
@@ -256,7 +258,9 @@ def _verdict_for_claimed_attempt(facts: WakeAttemptFacts) -> WakeAttemptVerdict:
     if facts.claim_status == WAKE_CLAIM_NOT_EXECUTED:
         return verdict_for_admission(facts.admission)
     if facts.claim_status == WAKE_CLAIM_CANCELLED:
-        return WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, WAKE_REASON_RUN_CANCELLED)
+        reason = (WAKE_REASON_HOST_RESTART_PARK if facts.admission == WAKE_ADMISSION_HOST_RESTART_PARK
+                  else WAKE_REASON_RUN_CANCELLED)
+        return WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, reason)
     if facts.claim_status == WAKE_CLAIM_YIELDED:
         return WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, WAKE_REASON_COMPACT_YIELD)
     if facts.report is None:
@@ -295,6 +299,9 @@ def next_poison_state(state: WakePoisonState, verdict: WakeAttemptVerdict, *, no
     if verdict.kind == WAKE_VERDICT_FAILURE:
         return _after_failure(state, verdict.reason_code, now)
     if verdict.kind == WAKE_VERDICT_NEUTRAL:
+        if verdict.reason_code == WAKE_REASON_HOST_RESTART_PARK:
+            # 宿主维护让出没有新增业务尝试，不能推进neutral结案窗或重置旧失败事实。
+            return state
         return _after_uncounted(state, verdict.reason_code, now)
     if verdict.kind == WAKE_VERDICT_BATCH_FAILURE:
         return replace(_after_uncounted(state, verdict.reason_code, now, is_batch=True), batch_failures=state.batch_failures + 1,

@@ -33,6 +33,7 @@ from .models import BackgroundMainAgentReport
 from .run_claim import ConversationRunClaimHeartbeat, conversation_claim_interrupt_name
 from .store_io import now
 from .wake_poison import (
+    WAKE_ADMISSION_HOST_RESTART_PARK,
     WAKE_CLAIM_CANCELLED,
     WAKE_CLAIM_FINISHED,
     WAKE_CLAIM_NOT_EXECUTED,
@@ -265,6 +266,10 @@ def run_with_heartbeat(
         except InterruptedError:
             # 回合中断只关闭本次执行权；目标续跑和任务资源停止分别由原控制入口负责。
             status, attempt_status = "cancelled", WAKE_CLAIM_CANCELLED
+            from .background_shutdown import current_slice_restart_parked
+
+            if current_slice_restart_parked():
+                admission = WAKE_ADMISSION_HOST_RESTART_PARK
             return None
         except BackgroundCompactSliceYield:
             # 本片让出不消费原 wake/observation/policy，下片沿 canonical checkpoint 继续。

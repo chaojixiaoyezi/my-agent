@@ -270,3 +270,8 @@
 工具排空之后、关闭HTTP/服务循环之前，后台控制先核已finished片的原责任；UNKNOWN及不可核收来源仍拒绝。对仍running的片，仅关闭本次后台准入，沿原准确claim中断名请求本片结束，复用原两秒等待预算核future/claim/attempt/worker。成功才保住该准入门进入原cleanup；超时/异常则恢复新片准入，HTTP与原服务循环未停止。已请求旧片退出的事实不撤销，晚到claim/后继领取仍在原片内消费早停，避免取消升级后旧片继续领新工作。不会取消或暂停持久TaskLink、删除wake或清UNKNOWN。
 
 此阶段复用原InterruptedError→claim cancelled协议；原wake在TaskLink仍active时保pending，原neutral/毒丸结案策略未在本片改变，不把“本次不计失败”夸大为永远不触独立24小时neutral结案策略。不可抢占、不合作provider仍可令本次升级取消，不能以park意图签已退出。
+
+
+### 宿主 park 不推进业务毒丸窗口
+
+仅由原 BackgroundSlice 的宿主 restart_parked 事实标识本次 InterruptedError；原 claim cancelled 回执附结构化 gateway_restart_park admission，仍不伪造成功或撤销取消。wake verdict 使用唯一 host:restart_park neutral 理由，保留原全部失败/neutral状态，只在原attempt账清 in_flight；不推进退避、stall alert或新quarantine裁决，避免升级维护恰好成为24小时neutral窗口的第五次业务尝试。普通用户取消、其它neutral、真实失败与原结案规则保持。

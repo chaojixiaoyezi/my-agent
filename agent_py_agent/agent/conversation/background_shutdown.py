@@ -38,6 +38,7 @@ class BackgroundSlice:
         self.exited_worker_count = 0
         self.finished = False
         self.draining = False
+        self.restart_parked = False
 
     # LLM: 调用点必须已登记同claim的interruptible；关闭门后即时中断并拒新片，不触碰后继claim。
     # 函数用途: 保存原领取句柄，让宿主停止只命中这一片。
@@ -188,6 +189,8 @@ class BackgroundShutdown:
         try:
             deadline = time.monotonic() + SHUTDOWN_WAIT_SECONDS
             for item in active:
+                with self.lock:
+                    item.restart_parked = True
                 item.interrupt()
             while True:
                 blockers = self.blockers()
@@ -329,3 +332,9 @@ def check_background_admission():
     item = _CURRENT.get()
     if item is not None and (item.owner.stopping or item.owner.restart_paused or item.draining):
         raise InterruptedError('Gateway已停止接纳新的后台claim')
+
+
+def current_slice_restart_parked() -> bool:
+    """只读取原宿主片的park事实，不解析模型回执或中断文案。"""
+    item = _CURRENT.get()
+    return item is not None and item.restart_parked

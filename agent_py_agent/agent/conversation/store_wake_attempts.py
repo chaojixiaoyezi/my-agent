@@ -32,8 +32,10 @@ from .store_wake_publication import (
 from .wake_poison import (
     WAKE_ATTEMPT_ABANDONED,
     WAKE_ATTEMPT_GATEWAY_STOPPED,
+    WAKE_REASON_HOST_RESTART_PARK,
     WAKE_STATUS_FAILED_PERMANENTLY,
     WAKE_VERDICT_FAILURE,
+    WAKE_VERDICT_NEUTRAL,
     QuarantineDecision,
     WakeAttemptVerdict,
     WakePoisonState,
@@ -227,14 +229,15 @@ class WakeAttemptStore:
             if state == WakePoisonState():
                 unlink_quietly(path)
                 return WakeAttemptOutcome(state, None)
-            alert = stall_alert(state, now=now)
+            host_park = verdict.kind == WAKE_VERDICT_NEUTRAL and verdict.reason_code == WAKE_REASON_HOST_RESTART_PARK
+            alert = None if host_park else stall_alert(state, now=now)
             if alert is not None:
                 state = mark_stall_alerted(state, now=now)
             ledger.update(state=ensure_writable_state(state).to_dict(), in_flight=None)
             if verdict.kind == WAKE_VERDICT_FAILURE and error is not None:
                 ledger["last_error"] = _error_facts(error)
             write_json_file_atomic_unlocked(path, ledger)
-        return WakeAttemptOutcome(state, quarantine_decision(state), stall_alert=alert)
+        return WakeAttemptOutcome(state, None if host_park else quarantine_decision(state), stall_alert=alert)
 
     # LLM: 只结案仍在 pending 的唤醒（找不到返回空结果）；原信封字段原样保留，只改 status/handled_at 并附顶层
     #   quarantine 键。顺序固定：写结案记录（坏账时已带预先算出的 ledger_preserved_at）→ 删 pending → 移坏账 → 删尝试账 →
