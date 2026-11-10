@@ -18,6 +18,9 @@ from agent_py_agent.agent.artifacts.registry import (
 from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool
 from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
 from agent_py_agent.tests.test_artifact_registry import _empty_tool_loop_params
+from agent_py_agent.tests.test_compact_scoped_checkpoint import compact_case as _compact_case
+
+compact_case = _compact_case
 
 
 @pytest.mark.parametrize('external', [False, True])
@@ -80,7 +83,7 @@ def history_fixture(tmp_path, *, with_refs=True):
     root = owner.home_dir / 'runs' / '2026-11-09' / 'previous'
     root.mkdir(parents=True)
     agent = SimpleNamespace(root=owner.home_dir, home_paths=home, conversation_store=store,
-                            config=SimpleNamespace(gateway_workspace='gateway'))
+                            config=SimpleNamespace(gateway_workspace=str(owner.home_dir / 'gateway')))
     payload = {'schema_version': 'gateway_terminal_request.v1', 'id': 'previous-request',
         'host_request_owner.v1': {'provider': 'local', 'owner_kind': 'main', 'owner_id': 'main'},
         'conversation_runtime': {'request_id': 'previous-request', 'thread_id': thread.thread_id,
@@ -181,32 +184,33 @@ def test_historical_request_lookup_never_exceeds_eight_receipts(monkeypatch, tmp
 
 
 @pytest.mark.parametrize('shape', ['display', 'huge', 'blank', 'cold'])
-def test_history_lookup_has_one_fixed_physical_tail_budget(monkeypatch, tmp_path, shape):
+def test_history_lookup_has_two_fixed_physical_tail_budgets(monkeypatch, tmp_path, shape):
     from agent_py_agent.agent.artifacts import registry_provenance as provenance
     fixture = history_fixture(tmp_path)
     storage = fixture.agent.conversation_store.storage
     path = storage.message_path(fixture.thread.thread_id)
     if shape == 'cold':
-        path.with_suffix('.manifest.json').write_bytes(b'not opened or parsed')
+        path.with_suffix('.manifest.json').write_bytes(b'{"phase":"prepared"}')
     elif shape == 'display':
         for _ in range(90):
             fixture.agent.conversation_store.messages.append({'thread_id': fixture.thread.thread_id,
                 'role': 'display', 'content': 'synthetic display'})
     else:
         with path.open('ab') as stream:
-            stream.write(b' ' * (2 * provenance._HISTORY_WINDOW_BYTES) if shape == 'blank'
-                         else b'{"oversized":"' + b'x' * (2 * provenance._HISTORY_WINDOW_BYTES))
+            stream.write(b' ' * (2 * provenance._HISTORY_MAX_BYTES) if shape == 'blank'
+                         else b'{"oversized":"' + b'x' * (2 * provenance._HISTORY_MAX_BYTES))
     calls = []
     original = provenance.read_tail_snapshot_beneath
     def bounded(*args, **kwargs):
         calls.append(kwargs['max_bytes'])
         value = original(*args, **kwargs)
-        assert value is None or len(value.content) <= provenance._HISTORY_WINDOW_BYTES
+        assert value is None or len(value.content) <= kwargs['max_bytes']
         return value
     monkeypatch.setattr(provenance, 'read_tail_snapshot_beneath', bounded)
     roots, errors = provenance.verified_recent_registry_roots(fixture.agent, fixture.scope)
     assert roots == () and errors[0]['partial'] is True
-    assert calls == ([] if shape == 'cold' else [provenance._HISTORY_WINDOW_BYTES])
+    assert calls == ([] if shape == 'cold' else [provenance._HISTORY_WINDOW_BYTES] if shape == 'display'
+                     else [provenance._HISTORY_WINDOW_BYTES, provenance._HISTORY_MAX_BYTES])
 
 
 def test_oversized_or_linked_terminal_cannot_authorize_historical_registry(tmp_path):
@@ -214,13 +218,13 @@ def test_oversized_or_linked_terminal_cannot_authorize_historical_registry(tmp_p
     fixture = history_fixture(tmp_path)
     fixture.path.write_bytes(b' ' * 1_048_577)
     roots, errors = verified_recent_registry_roots(fixture.agent, fixture.scope)
-    assert not roots and errors and not errors[0].get('partial')
+    assert not roots and errors[0].get('source_errors')
     fixture.path.unlink()
     unrelated = tmp_path / 'outside.json'
     unrelated.write_text('{}')
     fixture.path.symlink_to(unrelated)
     roots, errors = verified_recent_registry_roots(fixture.agent, fixture.scope)
-    assert not roots and errors and not errors[0].get('partial')
+    assert not roots and errors[0].get('source_errors')
 
 
 def test_rotation_published_during_tail_read_does_not_authorize_hot_only_source(monkeypatch, tmp_path):
@@ -236,3 +240,124 @@ def test_rotation_published_during_tail_read_does_not_authorize_hot_only_source(
     roots, errors = provenance.verified_recent_registry_roots(fixture.agent, fixture.scope)
     assert not roots and errors[0]['partial'] is True
     assert errors[0]['window_reason'] == 'cold_transcript'
+
+
+@pytest.mark.parametrize('body_bytes', [540_000, 600_000])
+def test_large_complete_previous_assistant_uses_one_bounded_second_window(monkeypatch, tmp_path, body_bytes):
+    from agent_py_agent.agent.artifacts import registry_provenance as provenance
+    fixture = history_fixture(tmp_path)
+    fixture.agent.conversation_store.messages.append({'thread_id': fixture.thread.thread_id, 'role': 'assistant',
+        'content': 'x' * body_bytes, 'metadata': {'gateway_request_id': 'previous-request'}})
+    calls = []
+    original = provenance.read_tail_snapshot_beneath
+    def read(*args, **kwargs):
+        calls.append(kwargs['max_bytes'])
+        return original(*args, **kwargs)
+    monkeypatch.setattr(provenance, 'read_tail_snapshot_beneath', read)
+    roots, errors = provenance.verified_recent_registry_roots(fixture.agent, fixture.scope)
+    assert roots == (fixture.root,) and errors[0]['partial'] is True
+    assert calls == [provenance._HISTORY_WINDOW_BYTES, provenance._HISTORY_MAX_BYTES]
+
+
+def test_bad_unrelated_old_receipt_does_not_discard_verified_precise_root(tmp_path):
+    from agent_py_agent.agent.artifacts.registry_provenance import verified_recent_registry_roots
+    fixture = history_fixture(tmp_path)
+    fixture.agent.conversation_store.messages.append({'thread_id': fixture.thread.thread_id, 'role': 'assistant',
+        'content': '', 'metadata': {'gateway_request_id': 'unavailable-older-request'}})
+    roots, errors = verified_recent_registry_roots(fixture.agent, fixture.scope)
+    assert roots == (fixture.root,)
+    assert errors[0]['source_errors'][0]['reason'] == 'receipt_unavailable'
+
+
+def test_host_claimed_path_locates_shared_gateway_for_distinct_feishu_owner(tmp_path):
+    import json
+
+    from agent_py_agent.agent.artifacts.registry_provenance import (
+        gateway_root_from_host_params,
+        verified_recent_registry_roots,
+    )
+    from agent_py_agent.agent.gateway_parts.io import write_json_file_atomic
+    from agent_py_agent.agent.user_space.owner_resolver import (
+        OwnerIdentity,
+        home_paths_with_owner,
+        resolve_owner_home,
+    )
+    fixture = history_fixture(tmp_path)
+    home = fixture.agent.home_paths
+    owner = resolve_owner_home(home.root, OwnerIdentity.provider_user('feishu', 'isolated-user'))
+    owner.home_dir.mkdir(parents=True)
+    fixture.agent.home_paths = home_paths_with_owner(home, owner)
+    from agent_py_agent.agent.conversation import ConversationStore
+    fixture.agent.conversation_store = ConversationStore(owner.home_dir / 'conversations')
+    fixture.thread = fixture.agent.conversation_store.threads.create(title='isolated feishu thread')
+    fixture.agent.conversation_store.messages.append({'thread_id': fixture.thread.thread_id, 'role': 'assistant',
+        'content': '', 'metadata': {'gateway_request_id': 'previous-request'}})
+    fixture.payload['conversation_runtime']['thread_id'] = fixture.thread.thread_id
+    fixture.scope['session_id'] = fixture.thread.thread_id
+    fixture.root = owner.home_dir / 'runs' / 'old-run'
+    fixture.root.mkdir(parents=True)
+    fixture.agent.root = owner.home_dir / 'different-execution-workspace'
+    fixture.agent.config.gateway_workspace = 'wrong-relative-workspace'
+    frozen = {'provider': 'feishu', 'owner_kind': 'user', 'owner_id': 'isolated-user'}
+    fixture.payload['host_request_owner.v1'] = frozen
+    fixture.payload['conversation_runtime']['task_path'] = str(fixture.root)
+    write_json_file_atomic(fixture.path, fixture.payload)
+    shared = fixture.path.parents[2]
+    current = json.loads(json.dumps(fixture.payload))
+    current['id'] = 'current-request'
+    current['conversation_runtime']['request_id'] = 'current-request'
+    claimed = shared / 'requests' / 'processing' / 'current-request.json'
+    write_json_file_atomic(claimed, current)
+    params = SimpleNamespace(source='gateway', request_id='current-request',
+        task_attributes={'conversation_thread_id': fixture.thread.thread_id},
+        recovery_content_paths=[str(claimed), str(shared / 'responses' / claimed.name)])
+    actual = gateway_root_from_host_params(fixture.agent, params)
+    assert actual == shared
+    scope = {**fixture.scope, 'owner_id': fixture.agent.home_paths.owner_id}
+    roots, errors = verified_recent_registry_roots(fixture.agent, scope, gateway_root=actual)
+    assert roots == (fixture.root,) and errors[0]['partial'] is True
+    assert verified_recent_registry_roots(fixture.agent, scope)[1][0]['reason'] == 'gateway_root_unconfirmed'
+    current['host_request_owner.v1'] = {'provider': 'local', 'owner_kind': 'main', 'owner_id': 'main'}
+    write_json_file_atomic(claimed, current)
+    assert gateway_root_from_host_params(fixture.agent, params) is None
+
+
+def test_real_committed_compact_layout_authenticates_recent_hot_assistant(compact_case, monkeypatch, tmp_path):
+    from agent_py_agent.agent.artifacts.registry_provenance import verified_recent_registry_roots
+    from agent_py_agent.agent.gateway_parts.io import write_json_file_atomic
+    from agent_py_agent.tests.test_transcript_cold_rotation import _commit_rotation
+    case = compact_case
+    _, _, _, path = _commit_rotation(case, monkeypatch)
+    assert path.with_suffix('.manifest.json').exists()
+    fixture = history_fixture(tmp_path / 'history-owner')
+    fixture.agent.conversation_store = case.store
+    case.store.messages.append({'thread_id': case.thread_id, 'role': 'assistant', 'content': 'new complete response',
+        'metadata': {'gateway_request_id': 'previous-request'}})
+    fixture.payload['conversation_runtime']['thread_id'] = case.thread_id
+    write_json_file_atomic(fixture.path, fixture.payload)
+    scope = {**fixture.scope, 'session_id': case.thread_id}
+    roots, errors = verified_recent_registry_roots(fixture.agent, scope)
+    assert roots == (fixture.root,) and errors[0]['partial'] is True
+    # 损坏原前缀不能靠尾部同名 assistant 通过；不重签内容或读取冷段。
+    raw = path.read_bytes()
+    path.write_bytes(b'X' + raw[1:])
+    roots, errors = verified_recent_registry_roots(fixture.agent, scope)
+    assert not roots and errors[0]['reason'] == 'source_unavailable'
+
+
+def test_portable_directory_candidate_is_verified_without_opening_directory_fd(monkeypatch, tmp_path):
+    from agent_py_agent.agent.artifacts import registry_provenance as provenance
+    fixture = history_fixture(tmp_path)
+    monkeypatch.setattr(provenance.managed_fs, '_supports_dir_fd', lambda: False)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('portable path must not open directory FD')
+    monkeypatch.setattr(provenance, 'open_directory_beneath', forbidden)
+    roots, errors = provenance.verified_recent_registry_roots(fixture.agent, fixture.scope)
+    assert roots == (fixture.root,) and errors[0]['partial'] is True
+    from agent_py_agent.agent.gateway_parts.io import write_json_file_atomic
+    link = fixture.root.parent / 'link'
+    link.symlink_to(fixture.root, target_is_directory=True)
+    fixture.payload['conversation_runtime']['task_path'] = str(link)
+    write_json_file_atomic(fixture.path, fixture.payload)
+    roots, errors = provenance.verified_recent_registry_roots(fixture.agent, fixture.scope)
+    assert not roots and errors[0]['source_errors']
