@@ -107,7 +107,7 @@ def execute_cli_request(payload: dict, *, cancellation_token=None, timeout: floa
 
 # LLM: token只由宿主读取；先通过owner/群/资源门，HTTP/API状态和明确拒绝交原共享分类器，未知写入仍不重放。
 # 函数用途: 通过官方CLI后端执行固定云请求，保持未知写入不能重放。
-def request_cli_cloud_api(adapter, method: str, path: str, body=None, *, read_only=False, cancellation_token=None, user_token=""):
+def request_cli_cloud_api(adapter, method: str, path: str, body=None, *, read_only=False, cancellation_token=None, user_token="", timeout=None):
     from ..common.log_redaction import redact_sensitive_value
     from .feishu_cloud import (
         FeishuCloudError,
@@ -128,7 +128,8 @@ def request_cli_cloud_api(adapter, method: str, path: str, body=None, *, read_on
                "app_id": str(getattr(adapter, "app_id", "") or ""), "token": token,
                "identity": "user" if user_token else "bot", "actor_id": actor_id}
     try:
-        result = execute_cli_request(payload, cancellation_token=cancellation_token)
+        result = execute_cli_request(payload, cancellation_token=cancellation_token,
+            **({"timeout": timeout} if timeout is not None else {}))
     except InterruptedError:
         raise
     except FileNotFoundError:

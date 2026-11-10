@@ -77,8 +77,8 @@ class CapabilityConfig:
     feishu_bot_subscriptions_enabled: bool = True
     # 指定群成员订阅仍须原群授权和官方消息/成员核验。
     feishu_user_subscriptions_enabled: bool = True
-    # 当前群只读历史需要部署者显式开启，和事件订阅开关相互独立。
-    feishu_chat_history_enabled: bool = False
+    # 默认开放只读历史入口；用户身份仍须本人OAuth和平台权限，和事件订阅相互独立。
+    feishu_chat_history_enabled: bool = True
     # 跨owner投递/一次复刻仍需双端真人确认精确清单，不能复制权限或秘密。
     skill_transfers_enabled: bool = True
     # 有限只读工具计划，内部调用继续原权限/审计/取消，默认按需加载；关闭不影响普通工具批次。

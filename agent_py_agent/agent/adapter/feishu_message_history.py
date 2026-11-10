@@ -40,7 +40,7 @@ class HistoryLimits:
 # LLM: 只接受固定机器码；异常链不投影平台正文、URL、身份或秘密。
 # 类用途: 向工具边界报告参数、开关、网络或授权失败，失败不返回已读取的群消息。
 class ChannelMessageHistoryError(ValueError):
-    CODES = frozenset({"TOOL_INVALID_ARGUMENTS", "CHANNEL_MESSAGES_DISABLED", "CHANNEL_MESSAGES_GROUP_REQUIRED",
+    CODES = frozenset({"FEISHU_USER_AUTH_REQUIRED", "TOOL_INVALID_ARGUMENTS", "CHANNEL_MESSAGES_DISABLED", "CHANNEL_MESSAGES_GROUP_REQUIRED",
         "CHANNEL_MESSAGES_SCOPE_UNVERIFIED", "NETWORK_DISABLED", "CHANNEL_MESSAGES_UNAVAILABLE",
         "FEISHU_PROVIDER_AUTH_UNAVAILABLE", "FEISHU_PROVIDER_UNAVAILABLE", "FEISHU_PROVIDER_RESPONSE_INVALID",
         "FEISHU_PROVIDER_SCOPE_REQUIRED", "FEISHU_PROVIDER_HTTP_REJECTED", "FEISHU_PROVIDER_READ_REJECTED",
@@ -215,22 +215,28 @@ def list_group_messages(agent: object, chat_id: str, *, start_time: int, end_tim
         start_time=start_time, end_time=end_time, sender_ids=sender_ids, cursor=cursor, limit=limit)
     deadline = time.monotonic() + HistoryLimits.BUDGET_SECONDS
     authority = _authority(agent, chat_id)
-    binding = {"chat_id": chat_id, "start_time": start, "end_time": end, "sender_ids": list(senders),
-               "authority": list(authority)}
-    token = _decode_cursor(cursor, binding)
     try:
         adapter, credential = _provider(agent)
         if adapter.app_id != authority[0]:
             raise ChannelMessageHistoryError("CHANNEL_MESSAGES_SCOPE_UNVERIFIED")
     except FeishuProviderFactError as exc:
         raise ChannelMessageHistoryError(exc.reason_code) from exc
+    return _list_chat_messages(chat_id, start=start, end=end, senders=senders, cursor=cursor, limit=limit,
+        authority=authority, check_authority=lambda: _authority(agent, chat_id),
+        read_page=lambda path, remaining: _read(credential, path, timeout=min(5.0, remaining), stage="message"), deadline=deadline)
+
+
+def _list_chat_messages(chat_id, *, start, end, senders, cursor, limit, authority, check_authority, read_page, deadline):
+    binding = {"chat_id": chat_id, "start_time": start, "end_time": end, "sender_ids": list(senders),
+               "authority": list(authority)}
+    token = _decode_cursor(cursor, binding)
     items, reasons, seen_ids, seen_tokens = [], [], set(), {token}
     fetched, pages, has_more, text_truncated, provider_error = 0, 0, True, False, None
     for page_number in range(HistoryLimits.MAX_PAGES):
         if time.monotonic() >= deadline:
             reasons.append("time_budget")
             break
-        if page_number and _authority(agent, chat_id) != authority:
+        if page_number and check_authority() != authority:
             raise ChannelMessageHistoryError("CHANNEL_MESSAGES_SCOPE_UNVERIFIED")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -245,7 +251,7 @@ def list_group_messages(agent: object, chat_id: str, *, start_time: int, end_tim
         if token:
             query["page_token"] = token
         try:
-            data = _read(credential, "/im/v1/messages?" + urlencode(query), timeout=min(5.0, remaining), stage="message")
+            data = read_page("/im/v1/messages?" + urlencode(query), remaining)
         except FeishuProviderFactError as exc:
             # 平台文档码230027是读取消息的明确权限拒绝，与缺scope、HTTP 401/403同属授权失败：整体失败，不发布已缓冲页。
             if (exc.reason_code == "FEISHU_PROVIDER_SCOPE_REQUIRED" or exc.provider_code in {401, 403}
@@ -288,7 +294,7 @@ def list_group_messages(agent: object, chat_id: str, *, start_time: int, end_tim
             break
     else:
         reasons.append("page_budget")
-    if _authority(agent, chat_id) != authority:
+    if check_authority() != authority:
         raise ChannelMessageHistoryError("CHANNEL_MESSAGES_SCOPE_UNVERIFIED")
     if text_truncated:
         reasons.append("text_truncated")

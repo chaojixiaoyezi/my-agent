@@ -45,8 +45,8 @@ im_group_authorization_required: true
 feishu_bot_subscriptions_enabled: true
 # 允许已授权群按准确 open_id 订阅指定成员消息；未订阅消息不进入普通对话。
 feishu_user_subscriptions_enabled: true
-# 当前群只读历史，默认关闭；不启用人类事件订阅或历史回灌。
-feishu_chat_history_enabled: false
+# 默认开放当前群/本人OAuth历史入口；仍需平台权限和本人授权，不订阅人类事件或回灌历史。
+feishu_chat_history_enabled: true
 # 开启Skill投递/一次复刻入口；双端真人确认后才复制，失败不计成功，不复制权限和秘密。
 skill_transfers_enabled: true
 # 有限只读批量计划：按需加载；最多16步/32调用，不执行代码、不允许写动作，内部仍逐工具授权和取消。

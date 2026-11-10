@@ -27,14 +27,14 @@ def params(**overrides):
 
 # LLM: pytest 默认能力回归；使用真实配置与工具注册，所有状态限于临时 HOME。
 # 函数用途: 检查代码、YAML 和运行快照都默认不开放群历史。
-def test_defaults_off_in_dataclass_yaml_and_real_registry(tmp_path):
-    assert CapabilityConfig().feishu_chat_history_enabled is False
+def test_defaults_on_in_dataclass_yaml_and_real_registry(tmp_path):
+    assert CapabilityConfig().feishu_chat_history_enabled is True
     config = load_simple_yaml(Path(__file__).parents[1] / "config" / "capability_config.yaml")
-    assert config["feishu_chat_history_enabled"] is False
+    assert config["feishu_chat_history_enabled"] is True
     agent = core.SimpleAgent(AgentConfig(enable_tools=True, memory_path=str(tmp_path / "memory.jsonl")), str(tmp_path))
     snapshot = agent.tools.runtime_snapshot()
-    assert "channel_messages" not in snapshot.available_tool_names
-    assert ("channel_messages", "TOOL_UNAVAILABLE", "disabled by feishu_chat_history_enabled") in snapshot.unavailable_tools
+    assert "channel_messages" in snapshot.available_tool_names
+    assert not any(name == "channel_messages" and reason == "disabled by feishu_chat_history_enabled" for name, _code, reason in snapshot.unavailable_tools)
 
 
 # LLM: pytest 严格 bool 回归；通过真实配置加载拒绝字符串、整数和空值，不能静默放行。
@@ -69,8 +69,8 @@ def test_enabled_real_registry_deferred_spec_and_handler_fake_http(tmp_path, mon
     assert tool.availability().available
     hints = tool.model_spec.hints
     assert hints.category == "capability" and hints.default_deferred
-    assert hints.deferred_summary == "读取当前飞书群的有界历史消息" and len(hints.deferred_summary) <= 60
-    assert "chat_id" not in tool.model_spec.input_schema["properties"]
+    assert hints.deferred_summary == "读取当前群或本人OAuth可见的私聊/群历史，列会话和查询授权要求" and len(hints.deferred_summary) <= 60
+    assert tool.model_spec.input_schema["properties"]["selector"]["enum"] == ["current_group", "user"]
     assert tool.model_spec.input_schema["additionalProperties"] is False
     assert tool.runtime_policy.effect_resolver == EffectResolverPolicy("read_only")
     env.replies.append(page([message()]))
