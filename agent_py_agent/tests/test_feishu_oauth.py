@@ -380,6 +380,21 @@ def test_group_permission_help_distinguishes_chat_get_and_user_vs_bot_events(ctx
     assert 'im:chat:readonly' in bot_scopes and 'im:chat:read' not in bot_scopes
 
 
+def test_permission_help_reports_owner_override_without_claiming_enabled(ctx, monkeypatch):
+    from agent_py_agent.agent.capability import runtime_config_reload
+    from agent_py_agent.agent.user_space.feishu_authorization import authorization_guidance
+
+    monkeypatch.setattr(runtime_config_reload, 'deployment_capability_config',
+                        lambda home: replace(ctx.oauth_config, feishu_chat_history_enabled=True))
+    monkeypatch.setattr(runtime_config_reload, 'capability_config_for_agent',
+                        lambda agent: replace(ctx.oauth_config, feishu_chat_history_enabled=False))
+    facts = authorization_guidance(ctx.agent)['feature_switches']
+    assert facts['deployment']['feishu_chat_history_enabled'] is True
+    assert facts['owner']['feishu_chat_history_enabled'] is False
+    monkeypatch.setattr(runtime_config_reload, 'capability_config_for_agent', lambda agent: None)
+    assert authorization_guidance(ctx.agent)['feature_switches']['owner']['feishu_chat_history_enabled'] is None
+
+
 def test_permission_help_does_not_claim_partial_oauth_grants_are_ready(ctx, monkeypatch):
     _dependency, state, payload = _authorize(ctx)
     _api(ctx, monkeypatch)

@@ -37,6 +37,10 @@ def permission_requirements(agent, *, required_scopes=(), identity='user',
 
 def authorization_guidance(agent):
     """让 Agent 在尚未配置 OAuth 时仍能说明申请路径和准确阻塞项。"""
+    from ..capability.runtime_config_reload import (
+        capability_config_for_agent,
+        deployment_capability_config,
+    )
     from . import feishu_oauth
 
     features = {
@@ -71,6 +75,17 @@ def authorization_guidance(agent):
     result['oauth_status'] = 'not_configured'
     result['configuration_status'] = 'not_configured'
     result['missing_requested_scopes'] = []
+    # 帮助不能把“提供了接口”说成开关已开启；保留用户覆盖与配置损坏的未知状态。
+    switches = ('feishu_chat_history_enabled', 'feishu_user_subscriptions_enabled',
+                'feishu_bot_subscriptions_enabled', 'feishu_cloud_tools_enabled')
+    result['feature_switches'] = {}
+    for label, read in (('deployment', deployment_capability_config), ('owner', capability_config_for_agent)):
+        try:
+            config = read(agent.home_paths if label == 'deployment' else agent)
+        except (OSError, ValueError, TypeError, AttributeError):
+            config = None
+        result['feature_switches'][label] = {key: value if type(value := getattr(config, key, None)) is bool else None
+                                           for key in switches}
     result['notes'] = [
         '后台权限审核发布与用户本人 OAuth 是两步，申请链接不代表已经开通。',
         '只能读取当前已授权本人可见的数据；群历史仍受飞书机器人在群和历史可见性限制。',
