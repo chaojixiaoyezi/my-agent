@@ -38,7 +38,7 @@ def goal_binding(agent: object, params: object | None = None) -> tuple[str, str,
 #   版本，拒绝时原样抛出第一道门的 PermissionError。
 # 函数用途: 给父代理修改直属下级目标解析精确身份；目标名字、普通正文和用户显示名不能授权。
 def goal_tool_target(agent: object, target_run_id: str = "") -> tuple[str, str, str, dict | None]:
-    binding = _proven_goal_binding(agent)
+    binding = proven_goal_binding(agent)
     target = str(target_run_id or "").strip()
     if not target or target == binding[1]:
         return binding
@@ -68,8 +68,9 @@ def goal_tool_target(agent: object, target_run_id: str = "") -> tuple[str, str, 
 
 # LLM: 子代理和独立命令的身份来自 runner/命令本身，原样返回；会话回合的任务编号只是提名，必须等于
 #   authoritative_self_principal 的结果（执行事实无冲突、TaskLink 同线程、读取无错误），否则抛 PermissionError。
+#   get/update 经 goal_tool_target、create_goal 直接调用它；其它原始 goal_binding 消费者（记账、提示、self_map）未改。
 # 函数用途: 返回已核验自身身份的目标归属。
-def _proven_goal_binding(agent: object) -> tuple[str, str, str, dict | None]:
+def proven_goal_binding(agent: object) -> tuple[str, str, str, dict | None]:
     binding = goal_binding(agent)
     attrs = binding[3] if isinstance(binding[3], dict) else {}
     nominated = str(attrs.get("conversation_task_id") or "").strip()

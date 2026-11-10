@@ -820,6 +820,68 @@ def test_r5_real_foreground_parent_still_reads_its_own_goal(case):
     assert read.ok is True and "父目标" in read.output
 
 
+# ---------- PRO-MSG-016：create_goal 先证明自身身份，再写目标/任务登记/attrs ----------
+
+
+def _create_goal_writes(case: Case) -> dict[str, object]:
+    params = case.agent._current_run_params
+    return {
+        "goals": [(g.task_id, g.objective) for g in case.agent.conversation_store.goals.list(case.thread.thread_id)],
+        "registered": case.agent.local_store.task_registry.lookup_task(case.parent_task_id),
+        "attr_goal": dict(getattr(params, "task_attributes", None) or {}).get("thread_goal_id"),
+    }
+
+
+@pytest.mark.parametrize("error_source", ["none", "claim", "task_link", "both"])
+def test_create_goal_with_forged_parent_nomination_writes_nothing(case, monkeypatch, error_source):
+    if error_source == "both":
+        # 提名改成 T、去掉调度属性，且租约与 S 的 TaskLink 读口都返回错误。
+        _forge_parent_on_scheduled_run(case, monkeypatch)
+    else:
+        _start_scheduled_run(case)
+    params = case.agent._current_run_params
+    params.task_attributes = {k: v for k, v in {**params.task_attributes, "conversation_task_id": case.parent_task_id}.items()
+                              if not k.startswith("scheduler_")}
+    store = case.agent.conversation_store
+    scope = _bound(case)
+    if error_source == "claim":
+        params.task_id = params.run_id = "gwreq-forged"
+        monkeypatch.setattr(store.claims, "load_report", lambda *_a, **_k: ({}, {"error_type": "DataCorruptionError"}))
+    elif error_source == "task_link":
+        original = store.tasks.load_report
+        monkeypatch.setattr(store.tasks, "load_report", lambda task_id: (None, {"error_type": "DataCorruptionError"})
+                            if task_id == case.run_id else original(task_id))
+        scope = contextlib.nullcontext()
+    before = _create_goal_writes(case)
+    with scope:
+        result = case.agent.tools.tools["create_goal"].execute({"objective": "冒充给父任务建目标"})
+
+    assert result.ok is False and result.error_code == "GOAL_STATE_CONFLICT"
+    assert result.effect_outcome == "not_started"
+    assert _create_goal_writes(case) == before and before["goals"] == []
+
+
+def test_create_goal_positive_control_scheduled_run_creates_its_own_goal(case):
+    _start_scheduled_run(case)
+    with _bound(case):
+        result = case.agent.tools.tools["create_goal"].execute({"objective": "定时自身目标"})
+
+    assert result.ok is True, result.output
+    assert [(g.task_id, g.objective) for g in case.agent.conversation_store.goals.list(case.thread.thread_id)] == [
+        (case.run_id, "定时自身目标")]
+
+
+def test_create_goal_positive_control_real_foreground_parent(case):
+    _foreground(case.agent, case.thread, case.parent_task_id)
+    result = case.agent.tools.tools["create_goal"].execute({"objective": "父任务自己的目标"})
+
+    assert result.ok is True, result.output
+    assert [(g.task_id, g.objective) for g in case.agent.conversation_store.goals.list(case.thread.thread_id)] == [
+        (case.parent_task_id, "父任务自己的目标")]
+    assert case.agent._current_run_params.task_attributes.get("thread_goal_id")
+    assert case.agent.local_store.task_registry.lookup_task(case.parent_task_id) is not None
+
+
 def test_r6_wake_failure_after_append_is_repaired_once_by_replay(case, monkeypatch):
     _limit_pairs(monkeypatch, 1)
     _foreground(case.agent, _thread(case.agent, "unrelated"), "task-U")
