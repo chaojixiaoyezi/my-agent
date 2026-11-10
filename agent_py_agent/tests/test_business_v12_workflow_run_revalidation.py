@@ -19,19 +19,19 @@ from agent_py_agent.tests.test_business_v12_workflow_native_run import _flow, _r
 from agent_py_agent.tests.test_business_v12_workflow_receipts import refused
 
 
-def _spaces(native, prefix):
+def _spaces(native, prefix):  # noqa: F811
     space = ok(native, 'spaces.create', {'name': prefix + '-a'}, idempotency_key=prefix + '-space-create-a')['space_id']
     other = ok(native, 'spaces.create', {'name': prefix + '-b'}, idempotency_key=prefix + '-space-create-b')['space_id']
     return space, other
 
 
-def _set_scope(native, name, scope, key):
+def _set_scope(native, name, scope, key):  # noqa: F811
     revision = ok(native, 'workflows.get', {'workflow_ref': name})['workflow']['scope_revision']
     ok(native, 'workflows.scope.set', {'workflow_ref': name, 'scope': scope}, idempotency_key=key,
        expected_revision=revision)
 
 
-def _paused(native, agent, monkeypatch, space, key):
+def _paused(native, agent, monkeypatch, space, key):  # noqa: F811
     """在首个副作用之前注入一次停止：运行落为可续跑暂停，副作用未开始（原生无需对账）。"""
     real, armed = workflow_engine._check_stop, [True]
 
