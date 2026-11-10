@@ -10,7 +10,11 @@ from dataclasses import asdict, dataclass, field, fields
 from types import UnionType
 from typing import get_args, get_origin, get_type_hints
 
-from ..common.log_redaction import redact_sensitive_value
+from ..common.log_redaction import (
+    _field_is_sensitive,
+    redact_sensitive_text,
+    redact_sensitive_value,
+)
 from . import safe_asset_id
 
 ASSET_KINDS = ("monitor", "workflow", "script", "skill")
@@ -30,7 +34,7 @@ def _keep_field(key, value):
     normalized = re.sub(r'(?<=[a-z0-9])(?=[A-Z])', '_', key).strip().lower().replace('-', '_')
     if normalized in _TOKEN_METRICS and type(value) in (int, float):
         return True
-    return normalized != 'bearer' and redact_sensitive_value(None, field_name=normalized) is None
+    return normalized != 'bearer' and not _field_is_sensitive(normalized)
 
 
 # LLM: 字符串先走统一脱敏口，再补独立Bearer值遮蔽；JSON类型/有限数仍严格，返回独立容器且不执行正文。
@@ -43,9 +47,10 @@ def clean_json(value):
     if isinstance(value, (list, tuple)):
         return [clean_json(item) for item in value]
     if type(value) is str:
-        return _BEARER_VALUE.sub(r'\1<redacted>', redact_sensitive_value(value))
+        return _BEARER_VALUE.sub(r'\1<redacted>', redact_sensitive_text(value))
     if value is None or type(value) in (int, bool):
-        return redact_sensitive_value(value)
+        # 字段敏感性已在字典分支裁决；这些精确JSON标量没有文本，不再遍历通用容器净化口。
+        return value
     if type(value) is float and math.isfinite(value):
         return value
     raise ValueError("资产字段必须是有限JSON值")
