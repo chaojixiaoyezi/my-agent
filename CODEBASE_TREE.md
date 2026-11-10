@@ -4,6 +4,7 @@
 agent_py_agent/
 |-- agent/artifacts/registry_provenance.py        # 依据同线程的宿主请求回执定位原登记表
 `-- tests/
+    |-- test_r9_background_restart_park.py       # 验证交接时当前后台片的中断、恢复及持续任务保留
     |-- test_channel_message_task_refs.py          # 验证本轮及跨轮附件的授权、歧义与投递
     |-- test_r9_write_artifact_registry_provenance.py  # 验证写入登记与共享网关的来源证明
     `-- test_r9_asset_clean_json.py                # 验证资产字段净化和并发路径的标量处理
