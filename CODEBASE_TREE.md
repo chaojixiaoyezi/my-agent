@@ -1055,6 +1055,9 @@ agent_py_agent/
 |-- agent_py_agent/agent/user_space/feishu_oauth.py # 当前本人授权、密文token和刷新
 |-- agent_py_agent/agent/user_space/feishu_authorization.py # 飞书功能权限、应用后台链接与本人授权配置事实
 |-- agent_py_agent/agent/adapter/feishu_user_history.py # 本人OAuth可见私聊/群会话发现与有界历史读取
+|-- agent_py_agent/agent/scheduler/source_authorization.py # 持久本人规则的来源授权与原OAuth续权复核
+|-- agent_py_agent/agent/scheduler/source_owner_index.py # 原调度SQLite内的活动来源到owner投影
+|-- agent_py_agent/agent/scheduler/source_owner_recovery.py # 原分页发现内的来源索引恢复，不创建Agent
 |-- agent_py_agent/agent/tooling/feishu_auth_tool.py # 渐进发现的本人授权交互
 |-- agent_py_agent/agent/gateway_parts/feishu_oauth_service.py # 原Gateway的验签OAuth回调
 |-- agent_py_agent/agent/adapter/feishu_cli.py # 固定随包程序、私有stdin和单次官方运输
@@ -1074,8 +1077,11 @@ agent_py_agent/
 |-- agent_py_agent/tests/test_feishu_user_history.py # 本人历史真实HTTP往返、分页绑定和撤权负例
 |-- agent_py_agent/tests/test_r10_feishu_progress_default.py # 默认过程卡、显式关闭和安装迁移
 |-- agent_py_agent/tests/test_r9_feishu_user_event_sources.py # 指定群成员订阅、入站预筛和宿主租约
+|-- agent_py_agent/tests/test_r10_feishu_personal_event_sources.py # 本人跨群订阅、隔离与持久分页续办
+|-- agent_py_agent/tests/test_r10_feishu_source_projection_recovery.py # 两种运行模式丢索引及epoch交错恢复
 |-- agent_py_agent/tests/test_r10_feishu_sheet_structure.py # 建子表/重命名的编辑权限与未知写入不重放
 |-- docs/design/FEISHU_USER_MESSAGE_HISTORY.md # 本人可见会话、授权范围和部分覆盖说明
+|-- docs/design/FEISHU_GROUP_EVENT_SUBSCRIPTIONS.md # 本人与机器人共同所在群的消息订阅合同
 `-- docs/design/IM_UNATTENDED_IMPLEMENTATION.md # 本期实施合同、部署和验收边界
 ```
 
