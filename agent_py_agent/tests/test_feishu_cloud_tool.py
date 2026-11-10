@@ -48,7 +48,14 @@ class _CloudHandler(BaseHTTPRequestHandler):
                 self.server.rows.extend(body['valueRange']['values'])
             elif self.command == 'PUT':
                 self.server.rows[:] = body['valueRange']['values']
-            if '/wiki/' in self.path:
+            if self.path.endswith('/sheets_batch_update'):
+                request = body['requests'][0]
+                action = next(iter(request))
+                properties = dict(request[action]['properties'])
+                properties.setdefault('sheetId', 'new_sheet_id')
+                properties.setdefault('index', 0)
+                result = {'code': 0, 'data': {'replies': [{action: {'properties': properties}}], 'echo': TOKEN + SECRET}}
+            elif '/wiki/' in self.path:
                 result = {'code': 0, 'data': {'node': {'obj_token': 'other_sheet', 'obj_type': 'sheet'}}}
             elif '/docx/' in self.path:
                 result = {'code': 0, 'data': {'items': body.get('children', []), 'has_more': False}}

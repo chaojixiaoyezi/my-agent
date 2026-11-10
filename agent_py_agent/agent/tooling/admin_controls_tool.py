@@ -82,7 +82,7 @@ class AdminControlsTool(BaseTool):
             "只管理已登记的普通本地用户，支持人格锁、记忆审核、资产配发、任务派单和带CAS批复。"
             "user_id 是准确用户名，owner_id 支持 local/alice、local/users/alice 或 alice；输出不含密码或散列。"
             "resources 查看指定 owner 的云资源许可；resource_grant/resource_revoke 按 resource 精确登记/撤销。"
-            "resource 含 provider、resource_type、resource_token、operations；飞书 sheet 操作为 sheet_read/sheet_append/sheet_update，"
+            "resource 含 provider、resource_type、resource_token、operations；飞书 sheet 操作为 sheet_meta/sheet_read/sheet_append/sheet_update/sheet_add/sheet_rename，"
             "docx 操作为 document_read/document_append，wiki 定位为 wiki_resolve；不填写密钥。"
             "list/resources 只读查询；set/resource_grant/resource_revoke 执行管理员已要求的修改，不要自行开启跨用户审计。"
         ),

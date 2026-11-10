@@ -50,6 +50,8 @@ def _model_spec() -> ToolModelSpec:
         '使用宿主凭据读写本人或当前群已共享的飞书云资源，或管理员准确授权的资源。'
         'sheet_meta 查询电子表格的所有工作表标签页（返回 sheet_id、title、行列数，未知 sheet_id 时先调此动作，勿盲猜 Sheet1）；'
         'sheet_read 读范围，sheet_append 追加行，sheet_update 更新范围（多行数据请合并为一次二维 values 批量写入，勿逐行调工具）；'
+        'sheet_add 新增子表（title必填，index可选，省略按飞书默认插入第0位），sheet_rename 按准确sheet_id重命名子表；'
+        '创建和重命名由宿主直接调用，无需脚本或app_secret。未知写入不能直接重复新建。'
         'document_read 分页读文档块，document_append 写入文档块；wiki_resolve 返回对象 resource_id/resource_type。'
         '分页结果 next_cursor 对应下一次 page_token。'
         '用 resource_token 传准确编号；知识库链接的节点编号可设 resource_type=wiki，由宿主定位并核验实际对象权限，无需重复人工授权。'
@@ -61,6 +63,9 @@ def _model_spec() -> ToolModelSpec:
             'action': {'type': 'string', 'enum': list(_TYPES)}, 'resource_token': {'type': 'string'},
             'identity': {'type': 'string', 'enum': ['bot', 'user'], 'description': '默认bot使用应用身份；user须当前私人用户已通过feishu_auth本人授权。群资源使用bot。'},
             'resource_type': {'type': 'string', 'description': '可选：wiki 表示传入知识库节点编号；否则与动作对应的 sheet/docx 一致。'},
+            'title': {'type': 'string', 'minLength': 1, 'maxLength': 100, 'description': 'sheet_add/sheet_rename必填，子表标题，最长100字符，不含 / \\ ? * [ ] :。'},
+            'sheet_id': {'type': 'string', 'minLength': 1, 'maxLength': 256, 'description': 'sheet_rename必填的准确子表编号；未知时先sheet_meta，不使用子表名称冒充编号。'},
+            'index': {'type': 'integer', 'minimum': 0, 'description': 'sheet_add可选，从0开始的插入位置；省略按飞书默认第0位。'},
             'range': {'type': 'string', 'description': 'sheet_read/sheet_append/sheet_update 必填，格式为 sheet_id!A1:C10（未知 sheet_id 时先调 sheet_meta）。'},
             'values': {'type': 'array', 'items': {'type': 'array', 'items': {}}, 'description': '追加或更新的二维单元格数据（支持多行一次性批量提交）。'},
             'block_id': {'type': 'string', 'description': '文档块父编号，缺省为文档根。'},
@@ -87,7 +92,16 @@ def _validate_params(params: dict) -> None:
     if action in {'sheet_read', 'sheet_append', 'sheet_update'} and (
             not isinstance(params.get('range'), str) or not params['range'].strip() or len(params['range']) > 512):
         raise ValueError('表格读写动作需要准确 range（若未知 sheet_id 请先调用 action="sheet_meta"）。')
-    if action in WRITE_ACTIONS and _TYPES[action] == 'sheet':
+    if action in {'sheet_add', 'sheet_rename'}:
+        title = params.get('title')
+        if not isinstance(title, str) or not title.strip() or len(title) > 100 or any(c in title for c in '/\\?*[]:'):
+            raise ValueError('子表标题需为1至100字符且不含飞书禁止字符。')
+        if action == 'sheet_add' and 'index' in params and (type(params['index']) is not int or params['index'] < 0):
+            raise ValueError('子表index需为非负整数。')
+        if action == 'sheet_rename':
+            normalized_resource_grant({'provider': 'feishu', 'resource_type': 'sheet',
+                'resource_token': params.get('sheet_id'), 'operations': [action]})
+    if action in {'sheet_append', 'sheet_update'}:
         rows = params.get('values')
         if not isinstance(rows, list) or not rows or len(rows) > 5000 or any(not isinstance(row, list) or not row or len(row) > 100 for row in rows):
             raise ValueError('values 需为非空二维数组，单次最多 5000 行、100 列。')
@@ -104,6 +118,15 @@ def _request_plan(params: dict) -> tuple[str, str, dict | None]:
     action, token = params['action'], quote(params['resource_token'], safe='')
     if action == 'sheet_meta':
         return 'GET', '/sheets/v2/spreadsheets/' + token + '/metainfo', None
+    if action in {'sheet_add', 'sheet_rename'}:
+        properties = {'title': params['title']}
+        if action == 'sheet_add' and 'index' in params:
+            properties['index'] = params['index']
+        if action == 'sheet_rename':
+            properties['sheetId'] = params['sheet_id']
+        operation = 'addSheet' if action == 'sheet_add' else 'updateSheet'
+        return 'POST', '/sheets/v2/spreadsheets/' + token + '/sheets_batch_update', {
+            'requests': [{operation: {'properties': properties}}]}
     if action.startswith('sheet_'):
         path = '/sheets/v2/spreadsheets/' + token + '/values'
         if action == 'sheet_read':
@@ -115,6 +138,27 @@ def _request_plan(params: dict) -> tuple[str, str, dict | None]:
     if action == 'document_append':
         return 'POST', path, {'children': params['children'], 'index': -1}
     return 'GET', path + '?' + urlencode({'page_size': 50, 'page_token': params.get('page_token', '')}), None
+
+
+def _sheet_structure_receipt(params: dict, result: dict) -> dict:
+    """只投影本次唯一官方回执；缺失/冲突不能伪造sheet_id或允许重做写入。"""
+    operation = 'addSheet' if params['action'] == 'sheet_add' else 'updateSheet'
+    replies = result.get('replies') if isinstance(result, dict) else None
+    row = replies[0].get(operation) if isinstance(replies, list) and len(replies) == 1 and isinstance(replies[0], dict) else None
+    properties = row.get('properties') if isinstance(row, dict) else None
+    if isinstance(properties, dict):
+        sheet_id = properties.get('sheetId')
+        try:
+            normalized_resource_grant({'provider': 'feishu', 'resource_type': 'sheet',
+                'resource_token': sheet_id, 'operations': [params['action']]})
+            if properties.get('title') != params['title'] or (params['action'] == 'sheet_rename' and sheet_id != params['sheet_id']):
+                raise ValueError('本次子表回执不一致')
+            return {'sheet_id': sheet_id, 'title': properties['title'],
+                    **({'index': properties['index']} if type(properties.get('index')) is int and properties['index'] >= 0 else {})}
+        except (TypeError, ValueError):
+            pass
+    raise FeishuCloudError('FEISHU_CLOUD_RESPONSE_INVALID', '飞书已接受请求但未返回可核验的唯一子表回执；请先核对原操作，不要重复新建。',
+        unknown=True, reason='sheet_structure_receipt_unverifiable', request_stage='response')
 
 
 # LLM: 工具实例固定 owner，子代理继承原工具与网络上界；CLI/HTTP后端均在同一资源权限门之后。
@@ -226,6 +270,8 @@ class FeishuCloudTool(BaseTool):
                 ]}
             public_authorization = {key: value for key, value in authorization.items() if key != 'principal_id'}
             payload = {'action': params['action'], 'data': result, 'resource_authorization': public_authorization}
+            if params['action'] in {'sheet_add', 'sheet_rename'}:
+                payload['sheet'] = _sheet_structure_receipt(params, result)
             if params['action'] in {'sheet_append', 'sheet_update'}:
                 payload['write_verification'] = verify_sheet_write(adapter, cloud_request,
                     {**params, 'resource_token': resource.resource_token}, result,

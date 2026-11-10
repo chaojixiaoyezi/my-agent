@@ -24,6 +24,8 @@ CLOUD_OPERATIONS = {op.action: op for op in (
     CloudOperation('sheet_read', 'sheet', False),
     CloudOperation('sheet_append', 'sheet', True),
     CloudOperation('sheet_update', 'sheet', True),
+    CloudOperation('sheet_add', 'sheet', True),
+    CloudOperation('sheet_rename', 'sheet', True),
     CloudOperation('document_read', 'docx', False),
     CloudOperation('document_append', 'docx', True),
     CloudOperation('wiki_resolve', 'wiki', False),

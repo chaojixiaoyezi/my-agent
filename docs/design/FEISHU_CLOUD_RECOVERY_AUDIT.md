@@ -47,3 +47,11 @@ HTTP 与受控 CLI 共用 `adapter/feishu_cloud.py` 的分类器。保留实际 
 - 原定时 waiting/failure policy 回归继续覆盖未来周期；显式配置 `failure_pause_after/backoff` 仍遵守用户策略，默认不会因单轮 UNKNOWN 永久停 job。
 
 未向真实飞书发送请求；官方 API 原子拒绝语义和回包形状仍须真实租户按授权验收，不能把合成供应商当作现场已恢复。
+
+## 子表新增和重命名（2026-11-09）
+
+`feishu_cloud` 的统一 `CloudOperation` 表新增 `sheet_add(title,index?)` 与 `sheet_rename(sheet_id,title)`，均为写操作。前者省略 index 时按官方默认插入第 0 位；不额外读取或猜测末尾位置。两者共用原本人/群实时 edit/full_access 或准确管理员许可、宿主凭据、固定 API 计划与原 operation 账。重命名仅发送 sheetId/title，不发送单元格、保护设置或任意属性。
+
+官方文档 metadata 返回的正式路径：[操作工作表](https://open.feishu.cn/document/ukTMukTMukTM/uYTMzUjL2EzM14iNxMTN)（document id `6907569745299439618`）及[更新工作表属性](https://open.feishu.cn/document/ukTMukTMukTM/ugjMzUjL4IzM14COyMTN)。正文可从官方页面自身使用的 `/api/tools/document/detail?fullPath=...` 读口取得。二者均 `POST /open-apis/sheets/v2/spreadsheets/:spreadsheet_token/sheets_batch_update`，本工具一次仅提交一个 `requests` 元素：`addSheet.properties={title,index?}` 或 `updateSheet.properties={sheetId,title}`。这不是 Google Sheets 协议，也不采用 CLI 的 MCP `modify_workbook_structure` 参数。
+
+成功只消费当前唯一 `replies[].addSheet/updateSheet.properties`，校验准确返回 sheetId/title，并公开 `sheet.sheet_id`。缺失、冲突、5xx 或回包未知保持 UNKNOWN；不靠同名扫描推断创建成功，也不重复创建/重命名、改旧 UNKNOWN 或另签操作编号。新增或重命名不改任何单元格；原单元格写入保护核验保持。暂不增加复制、删除子表、通用批量属性或任意 HTTP 能力。
