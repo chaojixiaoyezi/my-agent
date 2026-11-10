@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ...subagents.authorization_gate import (
@@ -78,16 +79,50 @@ class ManagedChildDenied(AuthorizationError):
         return str(getattr(self.same_owner_task, "parent_id", "") or "").strip()
 
 
-# LLM: 第一项永远是原 current_orchestration_requester_run_id；第二项只在定时片被完整证明时出现，并且不缓存，
-#   每次调用重读，任何撤销在下一次调用即生效。
+# LLM: 第一项是经执行事实核验的自身身份（authoritative_self_principal）；第二项只在定时片被完整证明时出现，
+#   并且不缓存，每次调用重读，任何撤销在下一次调用即生效。
 # 函数用途: 返回当前代理可代表的管理身份列表及裁决告警。
 def management_principals(agent: object) -> tuple[tuple[ManagementPrincipal, ...], tuple[str, ...]]:
-    current = ManagementPrincipal(run_id=current_orchestration_requester_run_id(agent))
+    current, self_warning = authoritative_self_principal(agent)
     continuation, warning = scheduled_continuation_principal(agent)
-    warnings = (warning,) if warning else ()
+    warnings = tuple(item for item in (self_warning, warning) if item)
     if continuation is None or continuation.run_id == current.run_id:
         return (current,), warnings
     return (current, continuation), warnings
+
+
+# LLM: ORCH01-R1：task_attributes.conversation_task_id 只是提名。子代理 runner 用自身 run；否则只要当前执行事实
+#   （scheduler_run_id 属性、ContextVar 后台租约的持久 task_id、RunParams.task_id/run_id 指向的现存 TaskLink）
+#   与提名不一致，自身身份就退回那个执行事实，提名的父任务只能经 scheduled_continuation_principal 完整证明获得。
+#   带线程的回合还要求提名任务的 TaskLink 存在且属于同一线程；证明不了时用当前执行编号（不可能是任何孩子的父级）。
+#   绝不返回空身份，空 requester 在授权门里等于系统身份。
+# 函数用途: 返回不会被冲突属性冒充的当前管理自身身份及告警码。
+def authoritative_self_principal(agent: object) -> tuple[ManagementPrincipal, str]:
+    from ...runtime_context import current_subagent_run_id
+
+    requested = current_orchestration_requester_run_id(agent)
+    if current_subagent_run_id(agent):
+        return ManagementPrincipal(run_id=requested), ""
+    params = getattr(agent, "_current_run_params", None)
+    attrs = getattr(params, "task_attributes", None) if params is not None else None
+    attrs = attrs if isinstance(attrs, dict) else {}
+    nominated = _text(attrs.get("conversation_task_id"))
+    if not nominated or nominated != requested:
+        return ManagementPrincipal(run_id=requested), ""
+    fallback = _execution_fallback_id(params, nominated)
+    try:
+        for executing in _execution_task_ids(agent, params, attrs):
+            if executing != nominated:
+                return ManagementPrincipal(run_id=executing), "SELF_TASK_IDENTITY_CONFLICT"
+        thread_id = _text(attrs.get("conversation_thread_id"))
+        store = getattr(agent, "conversation_store", None)
+        if thread_id and store is not None:
+            link, error = store.tasks.load_report(nominated)
+            if error is not None or link is None or _text(getattr(link, "thread_id", "")) != thread_id:
+                return ManagementPrincipal(run_id=fallback), "SELF_TASK_UNPROVEN"
+    except Exception:  # noqa: BLE001 - 读不出执行事实时不能信任提名
+        return ManagementPrincipal(run_id=fallback), "SELF_TASK_UNPROVEN"
+    return ManagementPrincipal(run_id=nominated), ""
 
 
 # LLM: 只有自身不是子代理 runner、当前 RunParams 就是这次 scheduler run、后台领取租约仍在跑这次 run、
@@ -197,7 +232,9 @@ def authorize_with_principals(
 
 # LLM: 只在同 owner 的现存孩子被拒绝时调用；目标父级是孩子的 parent_id：子代理父级写 agent_run 邮箱，
 #   根会话任务父级写 task 邮箱并在其线程发一次 root_task_id=父任务 的唤醒，使父任务以自己的身份消费。
-#   幂等键由(原请求方, 孩子, 宿主 operation_id)决定，同一次调用重试返回同一条转交和当前回执状态。
+#   幂等键由(原请求方, 孩子, 宿主 operation_id)决定。ORCH01-R2/R3/R4：发送方与目标线程都必须可证明（否则拒绝，
+#   不跳过配额）；只接受此刻能消费的父级（会话任务 active、子代理处于可接收消息的状态）；在同一对线程的跨进程锁内
+#   先查原回执——已有转交直接返回原 route 与实时回执、不再占配额——只有新转交才检查并计入原会话对配额。
 #   原请求方身份只写结构化 metadata，正文是“请求”，不会被执行，也不把父级权限转给请求方。
 # 函数用途: 把无权方的补充要求耐久、有界、可追踪地转交给有权的直接父级。
 def route_to_authorized_parent(
@@ -208,63 +245,98 @@ def route_to_authorized_parent(
     message: str,
     operation_key: str,
 ) -> dict[str, object] | None:
+    from ...gateway_parts.io import locked_file_transition
+
     parent_id = denied.authorized_parent_run_id
     key_part = _text(operation_key)
     if not parent_id or not key_part:
         return None
     if len(message) > MAX_ROUTED_MESSAGE_CHARS:
         return {"routed": False, "reason": "ROUTE_MESSAGE_TOO_LARGE", "max_chars": MAX_ROUTED_MESSAGE_CHARS}
-    principals, _warnings = management_principals(agent)
-    requester = principals[0]
-    sender_thread = _current_thread_id(agent)
-    target = _route_target(agent, parent_id)
-    if target is None:
-        return {"routed": False, "reason": "AUTHORIZED_PARENT_UNAVAILABLE", "parent_run_id": parent_id}
-    target_type, target_thread = target
+    requester = management_principals(agent)[0][0]
     store = agent.conversation_store
-    if target_thread and sender_thread and _pair_limit_reached(agent, sender_thread, target_thread):
-        return {"routed": False, "reason": "SESSION_TASK_RATE_LIMIT", "parent_run_id": parent_id}
     dedupe_key = _route_dedupe_key(requester.run_id, child_run_id, key_part)
-    previous = store.guidance.receipt(dedupe_key)
-    entry = store.guidance.append_once(
-        {
-            "target_type": target_type,
-            "target_id": parent_id,
-            "message": _route_message(requester, sender_thread, child_run_id, message),
-            "sender": requester.run_id or "unknown",
-            "priority": "normal",
-            "delivery": "next_turn",
-            "metadata": {
-                "origin_kind": ROUTE_ORIGIN_KIND,
-                "input_kind": ROUTE_INPUT_KIND,
-                "origin_thread_id": sender_thread,
-                "requester_run_id": requester.run_id,
-                "requester_kind": requester.kind,
-                "requester_thread_id": sender_thread,
-                "child_run_id": child_run_id,
-                "route_operation": "send_guidance",
-            },
-        },
-        dedupe_key=dedupe_key,
-    )
-    wake_id = ""
-    if target_type == "task" and target_thread:
-        wake_id = _raise_route_wake(store, target_thread, parent_id, dedupe_key, requester.run_id)
-    if previous is None and target_thread and sender_thread:
-        _record_pair(store, sender_thread, target_thread)
-    receipt = store.guidance.receipt(dedupe_key)
+    existing = store.guidance.receipt(dedupe_key)
+    if existing is not None:
+        # 已受理的转交只读回原记录与实时回执，不再做准入、不占配额；父级此后结束时如实标出不可消费。
+        return _route_payload(agent, existing.entry, dedupe_key, parent_id, replayed=True)
+    sender_thread = _current_thread_id(agent)
+    if not sender_thread:
+        return {"routed": False, "reason": "ROUTE_SENDER_THREAD_UNPROVABLE", "parent_run_id": parent_id}
+    target = _route_target(agent, parent_id)
+    if isinstance(target, str):
+        return {"routed": False, "reason": target, "parent_run_id": parent_id}
+    target_type, target_thread = target
+    with locked_file_transition(_pair_lock_path(store, sender_thread, target_thread)):
+        previous = store.guidance.receipt(dedupe_key)
+        if previous is None and _pair_limit_reached(agent, sender_thread, target_thread):
+            return {"routed": False, "reason": "SESSION_TASK_RATE_LIMIT", "parent_run_id": parent_id}
+        # 并发重放落到这里也只返回原记录：append_once 同键同输入不新增条目，只有首次写入计入配额。
+        entry = store.guidance.append_once(
+            _route_request(requester, sender_thread, target_type, parent_id, child_run_id, message),
+            dedupe_key=dedupe_key,
+        )
+        if previous is None:
+            _record_pair(store, sender_thread, target_thread)
+    if target_type == "task":
+        _raise_route_wake(store, target_thread, parent_id, dedupe_key, requester.run_id)
+    return _route_payload(agent, entry, dedupe_key, parent_id, replayed=previous is not None)
+
+
+# LLM: 回执状态每次现读；parent_receiving 只表示此刻父级是否仍可消费，不改变已受理事实，也不复活父级。
+# 函数用途: 生成转交回执，区分已受理、父级是否已消费与是否仍可消费。
+def _route_payload(agent: object, entry: object, dedupe_key: str, parent_id: str, *, replayed: bool) -> dict[str, object]:
+    receipt = agent.conversation_store.guidance.receipt(dedupe_key)
     status = _text(getattr(receipt, "status", "")) or "unknown"
+    target = _route_target(agent, parent_id)
     return {
         "routed": True,
-        "route_id": entry.guidance_id,
+        "replayed": replayed,
+        "route_id": _text(getattr(entry, "guidance_id", "")),
         "dedupe_key": dedupe_key,
         "parent_run_id": parent_id,
-        "target_type": target_type,
-        "target_thread_id": target_thread,
+        "target_type": _text(getattr(entry, "target_type", "")),
         "receipt_status": status,
         "parent_consumed": status == "consumed",
-        "wake_signal_id": wake_id,
+        "parent_receiving": not isinstance(target, str),
     }
+
+
+# LLM: 转交请求的全部字段只来自结构化身份；正文包装只给父级模型阅读。
+# 函数用途: 组装写入父级邮箱的转交请求记录。
+def _route_request(
+    requester: ManagementPrincipal,
+    sender_thread: str,
+    target_type: str,
+    parent_id: str,
+    child_run_id: str,
+    message: str,
+) -> dict[str, object]:
+    return {
+        "target_type": target_type,
+        "target_id": parent_id,
+        "message": _route_message(requester, sender_thread, child_run_id, message),
+        "sender": requester.run_id or "unknown",
+        "priority": "normal",
+        "delivery": "next_turn",
+        "metadata": {
+            "origin_kind": ROUTE_ORIGIN_KIND,
+            "input_kind": ROUTE_INPUT_KIND,
+            "origin_thread_id": sender_thread,
+            "requester_run_id": requester.run_id,
+            "requester_kind": requester.kind,
+            "requester_thread_id": sender_thread,
+            "child_run_id": child_run_id,
+            "route_operation": "send_guidance",
+        },
+    }
+
+
+# LLM: 锁文件与 guidance 回执同目录、按线程对的摘要命名，数量随线程对有界；只序列化转交准入，不保存业务事实。
+# 函数用途: 返回同一对线程转交准入共用的跨进程锁路径。
+def _pair_lock_path(store: object, sender_thread: str, target_thread: str) -> Path:
+    receipt_path = store.storage.guidance_dedupe_path(f"orchestration-route-pair:{sender_thread}|{target_thread}")
+    return receipt_path.with_name(f".{receipt_path.stem}.route-pair.lock")
 
 
 # LLM: 原后台片在领取租约后用 bind_claim_execution 设置 ContextVar；客户端 metadata 无法伪造它。持久 claim 必须仍是
@@ -329,6 +401,46 @@ def _proven_source_task(agent: object, *, job_id: str, run_id: str, thread_id: s
     return source_task_id
 
 
+# LLM: 执行事实只来自宿主：scheduler 属性、ContextVar 租约对应的持久 claim.task_id、以及 RunParams 自身
+#   task_id/run_id 中已登记为 TaskLink 的编号（前台请求编号不是 TaskLink，不会出现在这里）。
+# 函数用途: 列出当前回合真实在执行的任务编号，用来识别与提名冲突的自身身份。
+def _execution_task_ids(agent: object, params: object, attrs: dict) -> list[str]:
+    from ...conversation.claim_execution_binding import current_claim_execution
+
+    found: list[str] = []
+    scheduler_run = _text(attrs.get("scheduler_run_id"))
+    if scheduler_run:
+        found.append(scheduler_run)
+    store = getattr(agent, "conversation_store", None)
+    binding = current_claim_execution()
+    claims = getattr(store, "claims", None) if store is not None else None
+    if binding is not None and claims is not None:
+        claim, error = claims.load_report(
+            _text(getattr(binding, "thread_id", "")),
+            claim_scope_id=_text(getattr(binding, "claim_scope_id", "")),
+        )
+        if error is None and isinstance(claim, dict) and _text(claim.get("claim_id")) == _text(binding.claim_id):
+            if _text(claim.get("task_id")):
+                found.append(_text(claim.get("task_id")))
+    if store is not None:
+        for candidate in dict.fromkeys((_text(getattr(params, "task_id", "")), _text(getattr(params, "run_id", "")))):
+            if candidate:
+                link, error = store.tasks.load_report(candidate)
+                if error is None and link is not None:
+                    found.append(candidate)
+    return list(dict.fromkeys(found))
+
+
+# LLM: 退回值必须非空且不能是提名的父任务；RunParams 的执行编号最多只能代表它自己。
+# 函数用途: 给证明失败的自身身份选择一个无法冒充父级的执行编号。
+def _execution_fallback_id(params: object, nominated: str) -> str:
+    for value in (getattr(params, "run_id", ""), getattr(params, "task_id", ""), getattr(params, "request_id", "")):
+        text = _text(value)
+        if text and text != nominated:
+            return text
+    return f"unproven-self:{nominated}"
+
+
 # LLM: requester 为空的 view 门只核 owner 与运行库记录；跨 owner、不存在或任何读错误都返回 None。
 # 函数用途: 判断被拒绝的目标是否是当前 owner 的现存孩子。
 def _same_owner_task(manager: object, run_id: str, owner: str) -> Any:
@@ -341,27 +453,32 @@ def _same_owner_task(manager: object, run_id: str, owner: str) -> Any:
         return None
 
 
-# LLM: 父级是登记过的子代理就写它自己的 agent_run 邮箱（结束态不转交）；否则必须是未撤销的会话任务。
-# 函数用途: 解析转交目标邮箱类型与目标线程。
-def _route_target(agent: object, parent_id: str) -> tuple[str, str] | None:
-    from ...subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
+# LLM: ORCH01-R2/R3：父级是子代理时必须处于 send_guidance 可接收状态并有自己的 agent_thread（配额按该线程计）；
+#   父级是会话任务时 TaskLink 必须 active——后台准入会拒绝已结束的父任务，不能把请求排进不会被消费的邮箱，
+#   也不为转交复活已结束的工作。返回 (邮箱类型, 目标线程) 或拒绝原因码。
+# 函数用途: 解析转交目标邮箱类型与可证明的目标线程。
+def _route_target(agent: object, parent_id: str) -> tuple[str, str] | str:
+    from ...subagents.models import TaskStatus, task_status_in
 
     try:
         parent = agent.subagents.load(parent_id)
     except FileNotFoundError:
         parent = None
     except (OSError, ValueError):
-        return None
+        return "AUTHORIZED_PARENT_UNAVAILABLE"
     if parent is not None:
-        if task_status_in(_text(getattr(parent, "status", "")), SUBAGENT_ENDED_STATUSES):
-            return None
-        return "agent_run", ""
+        receivable = {TaskStatus.PLANNING.value, TaskStatus.PENDING.value, TaskStatus.RUNNING.value, TaskStatus.BLOCKED.value}
+        thread_id = _text(getattr(parent, "agent_thread_id", ""))
+        if not task_status_in(_text(getattr(parent, "status", "")), receivable):
+            return "AUTHORIZED_PARENT_NOT_RECEIVING"
+        return ("agent_run", thread_id) if thread_id else "ROUTE_TARGET_THREAD_UNPROVABLE"
     link, error = agent.conversation_store.tasks.load_report(parent_id)
     if error is not None or link is None:
-        return None
-    if _text(getattr(link, "status", "")).lower() in _REVOKING_TASK_LINK_STATUSES:
-        return None
-    return "task", _text(getattr(link, "thread_id", ""))
+        return "AUTHORIZED_PARENT_UNAVAILABLE"
+    if _text(getattr(link, "status", "")).lower() != "active":
+        return "AUTHORIZED_PARENT_NOT_RECEIVING"
+    thread_id = _text(getattr(link, "thread_id", ""))
+    return ("task", thread_id) if thread_id else "ROUTE_TARGET_THREAD_UNPROVABLE"
 
 
 # LLM: 唤醒复用同一幂等键；root_task_id 是原父任务，使消费回合以父任务自己的身份读取 task 邮箱。
@@ -447,12 +564,18 @@ def _principal_resolution(principal: ManagementPrincipal, warnings: tuple[str, .
     return resolution
 
 
-# LLM: 线程编号只读宿主构造的 task_attributes，不读模型参数。
-# 函数用途: 取得当前回合所在会话线程编号。
+# LLM: 线程编号只读宿主构造的 task_attributes，不读模型参数；取不到返回空串，调用方必须拒绝转交。
+# 函数用途: 取得当前回合（主代理会话或子代理 agent_thread）所在线程编号。
 def _current_thread_id(agent: object) -> str:
+    from ...runtime_context import current_subagent_run_id
+
     params = getattr(agent, "_current_run_params", None)
     attrs = getattr(params, "task_attributes", None) if params is not None else None
-    return _text(attrs.get("conversation_thread_id")) if isinstance(attrs, dict) else ""
+    if not isinstance(attrs, dict):
+        return ""
+    # 子代理 runner 的会话身份是自己的 agent_thread；主代理用会话线程。
+    key = "agent_thread_id" if current_subagent_run_id(agent) else "conversation_thread_id"
+    return _text(attrs.get(key))
 
 
 # LLM: scheduler 账本的 owner 是结构化字典，只取规范 id。

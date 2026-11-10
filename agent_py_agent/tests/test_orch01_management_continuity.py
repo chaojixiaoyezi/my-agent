@@ -187,7 +187,9 @@ def test_forged_scheduler_attributes_on_another_turn_grant_nothing(case):
         result, payload = _guide(case.agent, case.child_id, "冒充定时片")
 
     assert result.ok is False
-    assert payload["details"]["scope_warnings"] == ["SCHEDULED_CONTINUATION_RUN_MISMATCH"]
+    assert payload["details"]["scope_warnings"] == [
+        "SELF_TASK_IDENTITY_CONFLICT", "SCHEDULED_CONTINUATION_RUN_MISMATCH",
+    ]
     assert _child_messages(case) == []
 
 
@@ -238,7 +240,7 @@ def test_cancelled_parent_task_revokes_scheduled_management(case):
     assert result.ok is False and result.error_code == "TOOL_PERMISSION_DENIED"
     assert payload["details"]["scope_warnings"] == ["SCHEDULED_CONTINUATION_REVOKED"]
     # 原父任务已撤销：既不能代管，也没有可转交的父级邮箱。
-    assert payload["details"]["route"]["reason"] == "AUTHORIZED_PARENT_UNAVAILABLE"
+    assert payload["details"]["route"]["reason"] == "AUTHORIZED_PARENT_NOT_RECEIVING"
     assert _child_messages(case) == []
     assert case.agent.conversation_store.guidance.pending("task", case.parent_task_id) == []
 
@@ -488,3 +490,255 @@ def test_unrelated_thread_cannot_edit_child_goal_and_nothing_is_routed(case):
     assert _goal_objective(case, goal) == "原子目标"
     assert case.agent.conversation_store.guidance.pending("task", case.parent_task_id) == []
     assert _child_messages(case) == []
+
+
+# ---------- PRO-MSG-005 复核：ORCH01-R1..R4 与证据缺口 ----------
+
+
+def _open_request(case: Case, request_id: str = "req-1", *, directory_only: bool = False) -> None:
+    from agent_py_agent.agent.subagents.model_capabilities import CapabilityRequest
+
+    task = case.agent.subagents.load(case.child_id)
+    # 目录-only 申请只要求孩子自己任务区内的写目录，不增加工具，留在父级既有上界内。
+    scope = {"path_scope": [str(Path(task.task_workspace_dir) / "out")]} if directory_only else {
+        "requested_tools": ["run_command"]}
+    task.capability_requests = [*task.capability_requests, CapabilityRequest(
+        id=request_id, from_run_id=case.child_id, problem="需要写输出", needed_capability="write_output",
+        status="OPEN", created_at=time.time(), **scope,
+    )]
+    case.agent.subagents.save(task)
+
+
+def _request_status(case: Case, request_id: str = "req-1") -> str:
+    task = case.agent.subagents.load(case.child_id)
+    return next(item.status for item in task.capability_requests if item.id == request_id)
+
+
+def _limit_pairs(monkeypatch, limit: int) -> None:
+    from agent_py_agent.agent.capability import runtime_config_reload
+    from agent_py_agent.agent.capability.config import CapabilityConfig
+
+    monkeypatch.setattr(runtime_config_reload, "capability_config_for_agent",
+                        lambda _agent: CapabilityConfig(session_pair_hourly_limit=limit))
+
+
+@pytest.mark.parametrize("drop_scheduler_attrs", [False, True])
+def test_r1_forged_parent_identity_in_scheduled_run_mutates_nothing(case, drop_scheduler_attrs):
+    goal = _child_goal(case)
+    _open_request(case)
+    _start_scheduled_run(case)
+    params = case.agent._current_run_params
+    attrs = {**params.task_attributes, "conversation_task_id": case.parent_task_id}
+    if drop_scheduler_attrs:
+        attrs = {k: v for k, v in attrs.items() if not k.startswith("scheduler_")}
+    params.task_attributes = attrs
+    with _bound(case):
+        principals, warnings = management_principals(case.agent)
+        guide, _ = _guide(case.agent, case.child_id, "冒充父任务")
+        grant = ResolveCapabilityRequestsTool(case.agent).execute(
+            {"run_id": case.child_id, "decision": "grant", "reason": "冒充批准"})
+        deny = ResolveCapabilityRequestsTool(case.agent).execute(
+            {"run_id": case.child_id, "decision": "deny", "reason": "冒充拒绝"})
+        cancel = CancelSubagentsTool(case.agent).execute({"run_id": case.child_id})
+        read = case.agent.tools.tools["get_goal"].execute({"target_run_id": case.child_id})
+        edit = _update_child_goal(case, goal, "冒充改目标")
+
+    assert [p.run_id for p in principals] == [case.run_id]
+    assert "SELF_TASK_IDENTITY_CONFLICT" in warnings
+    assert not any(item.ok for item in (guide, grant, deny, cancel, read, edit))
+    assert _child_messages(case) == []
+    assert _request_status(case) == "OPEN"
+    assert case.agent.subagents.load(case.child_id).status != TaskStatus.CANCELLED.value
+    assert _goal_objective(case, goal) == "原子目标"
+
+
+def test_r1_foreground_task_on_another_thread_is_not_trusted(case):
+    other_thread = _thread(case.agent, "unrelated")
+    _foreground(case.agent, other_thread, case.parent_task_id)
+    principals, warnings = management_principals(case.agent)
+    result, _ = _guide(case.agent, case.child_id, "别的线程冒充")
+
+    assert principals[0].run_id != case.parent_task_id and warnings == ("SELF_TASK_UNPROVEN",)
+    assert result.ok is False and _child_messages(case) == []
+
+
+def test_scheduled_continuation_grants_and_denies_a_real_open_request(case):
+    _open_request(case, "req-grant", directory_only=True)
+    _open_request(case, "req-deny")
+    _start_scheduled_run(case)
+    with _bound(case):
+        grant = ResolveCapabilityRequestsTool(case.agent).execute(
+            {"run_id": case.child_id, "request_id": "req-grant", "decision": "grant", "reason": "允许跑测试"})
+        deny = ResolveCapabilityRequestsTool(case.agent).execute(
+            {"run_id": case.child_id, "request_id": "req-deny", "decision": "deny", "reason": "按现有权限继续"})
+
+    assert grant.ok is True, grant.output
+    assert deny.ok is True, deny.output
+    task = case.agent.subagents.load(case.child_id)
+    assert _request_status(case, "req-grant") == "GRANTED"
+    assert _request_status(case, "req-deny") == "CLOSED"
+    assert [g.request_id for g in task.capability_grants] == ["req-grant"]
+    continuation = json.loads(deny.output)["continuation"]
+    assert continuation["status"] in {"queued", "not_queued", "already_running"}
+    assert task.attributes["capability_resolution_wake"]["decision"] == "deny"
+
+
+def _coordinator_child(case: Case) -> tuple[object, object]:
+    coordinator = case.agent.subagents.create_run(
+        goal="协调者", thought="", plan=["派"], parent_id=case.parent_task_id, root_id=case.parent_task_id, depth=1)
+    grandchild = case.agent.subagents.create_run(
+        goal="孙任务", thought="", plan=["做"], parent_id=coordinator.id, root_id=case.parent_task_id, depth=2)
+    return coordinator, grandchild
+
+
+def test_r2_r4_subagent_parent_route_uses_bounded_pairs_and_replays_first(case, monkeypatch):
+    _limit_pairs(monkeypatch, 1)
+    coordinator, grandchild = _coordinator_child(case)
+    _foreground(case.agent, _thread(case.agent, "unrelated"), "task-U")
+    first, payload = _guide(case.agent, grandchild.id, "第一条", operation="op-a")
+    second, second_payload = _guide(case.agent, grandchild.id, "第二条", operation="op-b")
+    replay, replay_payload = _guide(case.agent, grandchild.id, "第一条", operation="op-a")
+
+    assert first.ok is True and payload["route"]["target_type"] == "agent_run"
+    assert payload["route"]["parent_run_id"] == coordinator.id
+    assert second.ok is False and second_payload["details"]["route"]["reason"] == "SESSION_TASK_RATE_LIMIT"
+    assert replay.ok is True and replay_payload["route"]["route_id"] == payload["route"]["route_id"]
+    assert replay_payload["route"]["replayed"] is True
+    pending = case.agent.conversation_store.guidance.pending("agent_run", coordinator.id)
+    assert [entry.guidance_id for entry in pending] == [payload["route"]["route_id"]]
+
+
+def test_r2_concurrent_distinct_routes_respect_the_pair_limit(case, monkeypatch):
+    _limit_pairs(monkeypatch, 1)
+    other_thread = _thread(case.agent, "unrelated")
+    outcomes: list[bool] = []
+
+    def router(index: int) -> None:
+        _foreground(case.agent, other_thread, "task-U")
+        outcomes.append(_guide(case.agent, case.child_id, f"并发-{index}", operation=f"op-{index}")[0].ok)
+
+    workers = [threading.Thread(target=router, args=(index,)) for index in range(5)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(30)
+    assert sorted(outcomes) == [False, False, False, False, True]
+    assert len(case.agent.conversation_store.guidance.pending("task", case.parent_task_id)) == 1
+
+
+def test_r2_route_without_provable_sender_thread_is_refused(case):
+    from types import SimpleNamespace
+
+    case.agent._current_run_params = SimpleNamespace(
+        run_id="gwreq-x", task_id="gwreq-x", request_id="gwreq-x", task_attributes={"conversation_task_id": "task-U"})
+    result, payload = _guide(case.agent, case.child_id, "没有线程", operation="op-x")
+
+    assert result.ok is False and payload["details"]["route"]["reason"] == "ROUTE_SENDER_THREAD_UNPROVABLE"
+    assert case.agent.conversation_store.guidance.pending("task", case.parent_task_id) == []
+
+
+def _end_parent(case: Case, status: str = "done") -> None:
+    case.agent.conversation_store.tasks.update_status(
+        {"task_id": case.parent_task_id, "status": status, "expected_status": "active", "now": time.time()})
+
+
+def test_r3_ended_parent_is_not_routed_and_accepted_route_reports_honestly(case):
+    other_thread = _thread(case.agent, "unrelated")
+    _foreground(case.agent, other_thread, "task-U")
+    accepted, payload = _guide(case.agent, case.child_id, "父级结束前", operation="op-before")
+    _end_parent(case)
+    refused, refused_payload = _guide(case.agent, case.child_id, "父级结束后", operation="op-after")
+    replay, replay_payload = _guide(case.agent, case.child_id, "父级结束前", operation="op-before")
+
+    assert accepted.ok is True and payload["route"]["parent_receiving"] is True
+    assert refused.ok is False
+    assert refused_payload["details"]["route"]["reason"] == "AUTHORIZED_PARENT_NOT_RECEIVING"
+    assert replay.ok is True and replay_payload["route"]["receipt_status"] == "pending"
+    assert replay_payload["route"]["parent_receiving"] is False and replay_payload["route"]["parent_consumed"] is False
+    assert len(case.agent.conversation_store.guidance.pending("task", case.parent_task_id)) == 1
+
+
+def _background_scheduler(agent: SimpleAgent, run_once):
+    from agent_py_agent.agent.conversation import runtime as runtime_module
+
+    runtime = runtime_module.BackgroundMainAgentRuntime(agent=agent, store=agent.conversation_store)
+    runtime.run_once = run_once
+    scheduler = runtime_module.BackgroundMainAgentScheduler({"runtime": runtime, "store": agent.conversation_store})
+    return runtime_module._background_claim_dependencies(scheduler)
+
+
+def test_r3_real_claim_path_does_not_run_an_ended_parent_for_its_route(case):
+    from agent_py_agent.agent.conversation import background_claim as claim_module
+
+    other_thread = _thread(case.agent, "unrelated")
+    _foreground(case.agent, other_thread, "task-U")
+    _ok, payload = _guide(case.agent, case.child_id, "等父级处理", operation="op-claim")
+    _end_parent(case)
+    wake = next(w for w in _thread_wakes(case) if (w.metadata or {}).get("route_dedupe_key") == payload["route"]["dedupe_key"])
+    ran: list[object] = []
+    report = claim_module.run_claimed(_background_scheduler(case.agent, ran.append), {
+        "thread_id": wake.thread_id, "task_id": wake.root_task_id, "reason": wake.reason,
+        "wake_signal": wake.to_dict(), "now": time.time(),
+    })
+
+    assert ran == [] and report is None or getattr(report, "status", "") != "finished"
+    receipt = case.agent.conversation_store.guidance.receipt(payload["route"]["dedupe_key"])
+    assert receipt.status == "pending"
+
+
+def test_scheduled_guidance_through_the_real_claim_runner(case):
+    from agent_py_agent.agent.conversation import background_claim as claim_module
+
+    _start_scheduled_run(case)
+    case.agent.conversation_store.claims.finish(
+        {"thread_id": case.thread.thread_id, "claim_id": case.claim["claim_id"], "status": "finished"})
+    results: list[object] = []
+
+    def run_once(request):
+        case.agent._current_run_params = _scheduled_params(case, case.agent)
+        results.append(_guide(case.agent, case.child_id, "真实租约循环里的补充")[0])
+
+    claim_module.run_claimed(_background_scheduler(case.agent, run_once), {
+        "thread_id": case.thread.thread_id, "task_id": case.run_id, "reason": _SCHEDULER_WAKE_REASON,
+        "now": time.time(),
+    })
+
+    assert len(results) == 1 and results[0].ok is True, results
+    assert _child_messages(case) == ["真实租约循环里的补充"]
+
+
+def test_route_through_the_real_tool_executor_injects_and_protects_operation_id(case):
+    from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
+
+    other_thread = _thread(case.agent, "unrelated")
+    _foreground(case.agent, other_thread, "task-U")
+    attempt = case.agent.subagents.runtime_db.record_run_creation(
+        owner_id=case.agent.home_paths.owner_id, goal="unrelated main turn", conversation_task_id="task-U",
+        thread_id=other_thread.thread_id, run_id="gwreq-task-U", role="assistant",
+    )["attempt_id"]
+    call = {"run_id": "gwreq-task-U", "attempt_id": attempt}
+    first = execute_registry_test_call(case.agent.tools, "send_guidance",
+                                       {"target": case.child_id, "message": "经执行器"}, operation_id="op-exec", **call)
+    again = execute_registry_test_call(case.agent.tools, "send_guidance", {"target": case.child_id, "message": "经执行器"},
+                                       operation_id="op-exec", call_id="test-call-2", **call)
+    forged = execute_registry_test_call(case.agent.tools, "send_guidance",
+                                        {"target": case.child_id, "message": "x", "__operation_id": "forged"}, **call)
+
+    assert first.ok is True, first.output
+    assert json.loads(first.output)["route"]["route_id"] == json.loads(again.output)["route"]["route_id"]
+    assert forged.ok is False and forged.error_code == "TOOL_INTERNAL_PARAMETER_FORBIDDEN"
+    assert len(case.agent.conversation_store.guidance.pending("task", case.parent_task_id)) == 1
+
+
+def test_route_receipt_and_wake_survive_restart(case):
+    _foreground(case.agent, _thread(case.agent, "unrelated"), "task-U")
+    _ok, payload = _guide(case.agent, case.child_id, "重启前", operation="op-restart")
+    restarted = _agent(case.config, case.workspace)
+    _foreground(restarted, _thread(restarted, "unrelated"), "task-U")
+    replay, replay_payload = _guide(restarted, case.child_id, "重启前", operation="op-restart")
+
+    assert replay.ok is True and replay_payload["route"]["route_id"] == payload["route"]["route_id"]
+    wakes = [w for w in restarted.conversation_store.wakes.pending(limit=1000)
+             if (w.metadata or {}).get("route_dedupe_key") == payload["route"]["dedupe_key"]]
+    assert len(wakes) == 1
+    assert len(restarted.conversation_store.guidance.pending("task", case.parent_task_id)) == 1

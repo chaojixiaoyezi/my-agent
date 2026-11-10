@@ -32,7 +32,7 @@ def goal_binding(agent: object, params: object | None = None) -> tuple[str, str,
 
 
 # LLM: Models may revise only a direct child through existing owner/runtime authorization, not sibling/ancestor targets.
-#   原门（requester=当前目标归属任务）先判；仅当它拒绝时，才用 management_continuity 证明过的定时延续原父任务
+#   原门（requester=当前目标归属任务，会话任务提名先经 authoritative_self_principal 核验）先判；仅当它拒绝时，才用 management_continuity 证明过的定时延续原父任务
 #   再走同一个直属下级门。目标修改不转交、不改目标生命周期或版本，拒绝时原样抛出第一道门的 PermissionError。
 # 函数用途: 给父代理修改直属下级目标解析精确身份；目标名字、普通正文和用户显示名不能授权。
 def goal_tool_target(agent: object, target_run_id: str = "") -> tuple[str, str, str, dict | None]:
@@ -42,17 +42,25 @@ def goal_tool_target(agent: object, target_run_id: str = "") -> tuple[str, str, 
         return binding
     if not binding[1]:
         raise PermissionError("当前代理身份不完整，不能修改下级目标。")
-    from ..agent_core.orchestration.management_continuity import scheduled_continuation_principal
+    from ..agent_core.orchestration.management_continuity import (
+        authoritative_self_principal,
+        scheduled_continuation_principal,
+    )
     from ..subagents.authorization_gate import OperationRequest, authorize_direct_child_operation
 
     owner = str(getattr(getattr(agent, "home_paths", None), "owner_id", "") or "")
+    requester = binding[1]
+    attrs = binding[3] if isinstance(binding[3], dict) else {}
+    if not current_subagent_run_id(agent) and requester == str(attrs.get("conversation_task_id") or "").strip():
+        # ORCH01-R1：会话任务编号只是提名，与执行事实冲突时以执行事实为准，不能借它冒充原父任务。
+        requester = authoritative_self_principal(agent)[0].run_id
     try:
         task = authorize_direct_child_operation(agent.subagents, OperationRequest(
-            operation="send_guidance", run_id=target, requester_run_id=binding[1], requester_owner=owner,
+            operation="send_guidance", run_id=target, requester_run_id=requester, requester_owner=owner,
         ))
     except PermissionError as denied:
         continuation, _warning = scheduled_continuation_principal(agent)
-        if continuation is None or continuation.run_id == binding[1]:
+        if continuation is None or continuation.run_id == requester:
             raise
         try:
             task = authorize_direct_child_operation(agent.subagents, OperationRequest(
