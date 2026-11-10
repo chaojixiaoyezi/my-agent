@@ -806,3 +806,50 @@ def test_failed_guard_refresh_does_not_retain_old_file_config_generation(tmp_pat
     monkeypatch.setattr(live, "_refresh_guard", original)
     live.refresh_live_switches(config)
     assert all(candidate.enable_tools is False for candidate in copies)
+
+
+def test_guard_cache_retires_unbound_paths_only_after_complete_refresh(tmp_path, monkeypatch):
+    path, base = _config(tmp_path)
+    live.register_live_config(base)
+    source = base._live_switch_binding.source
+    for index in range(12):
+        home = tmp_path / f'guard-{index}'
+        _write(home / 'config' / 'deployment_policy.json', json.dumps({
+            'schema_version': 'deployment-policy.v1', 'revision': 1,
+            'runtime_guards': {'terminal_block_enabled': False},
+        }))
+        child = replace(base, runtime_guard_policy=runtime_guard_policy(home_root=home))
+        live.register_live_config(child)
+        live.refresh_live_switches(base)
+        ref = weakref.ref(child)
+        del child
+        assert ref() is None
+    live.refresh_live_switches(base)
+    assert len(source.policies) == 0
+
+    home = tmp_path / 'active-guard'
+    policy_path = home / 'config' / 'deployment_policy.json'
+    _write(policy_path, json.dumps({'schema_version': 'deployment-policy.v1', 'revision': 1,
+                                  'runtime_guards': {'terminal_block_enabled': False}}))
+    active = replace(base, runtime_guard_policy=runtime_guard_policy(home_root=home))
+    live.register_live_config(active)
+    live.refresh_live_switches(base)
+    assert len(source.policies) == 1
+    _write(policy_path, json.dumps({'schema_version': 'deployment-policy.v1', 'revision': 2,
+                                  'runtime_guards': {'terminal_block_enabled': True}}))
+    assert 'terminal_block_enabled' in live.refresh_live_switches(base)
+    assert active.runtime_guard_policy.terminal_block_enabled is True
+
+    # 异常不能把未访问的活路径或旧诊断状态当作已完整核验后删除。
+    stale = tmp_path / 'unvisited.json'
+    source.policies[stale] = ('evidence', object())
+    original = live._refresh_guard
+    def fail(*args, **kwargs):
+        raise PermissionError('unreadable guard')
+    monkeypatch.setattr(live, '_refresh_guard', fail)
+    with pytest.raises(PermissionError):
+        live.refresh_live_switches(base)
+    assert stale in source.policies and policy_path in source.policies
+    monkeypatch.setattr(live, '_refresh_guard', original)
+    live.refresh_live_switches(base)
+    assert set(source.policies) == {policy_path}

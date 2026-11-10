@@ -204,6 +204,10 @@ def refresh_live_switches(config=None, *, path=None, force=False) -> frozenset[s
                 if (apply_switches or guard_before != registered.guard_applied
                         or candidate.config_sources is not registered.published_provenance):
                     _publish_provenance(candidate, registered)
+        # 完整成功扫描才退役已无活绑定使用的守卫快照；常态只比较大小，不遍历缓存。
+        if len(source.policies) > len(checked_policies):
+            for stale_path in source.policies.keys() - checked_policies.keys():
+                del source.policies[stale_path]
         return frozenset(changed)
 
 
