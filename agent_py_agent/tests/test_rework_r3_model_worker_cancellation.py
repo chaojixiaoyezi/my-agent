@@ -182,7 +182,7 @@ def test_missing_or_failed_exact_retention_prevents_backend_start(monkeypatch, m
     assert calls == []
 
 
-@pytest.mark.parametrize("factory", ["Queue", "copy_context", "Thread"])
+@pytest.mark.parametrize("factory", ["_GenerationResultQueue", "copy_context", "Thread"])
 def test_failure_before_worker_construction_leaves_no_retention(monkeypatch, factory):
     ledger = ModelCallLedger()
     _started_call(ledger, "guard-call")

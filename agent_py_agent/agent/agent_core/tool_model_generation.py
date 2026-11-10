@@ -1304,6 +1304,33 @@ def _restore_failed_call_turn_input(state: _ModelGenerationState) -> None:
         return
 
 
+class _GenerationResultQueue(Queue):
+    """只属于一次guard；consumer退出后不再保留无人接收的结果或异常栈。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._consumer_lock = Lock()
+        self._consumer_exited = False
+
+    def put(self, item, block=True, timeout=None) -> None:
+        # 原队列无容量等待；此锁只线性化发表与consumer退出，不跨模型/连接关闭。
+        with self._consumer_lock:
+            if not self._consumer_exited:
+                super().put(item, block=block, timeout=timeout)
+
+    def close_consumer(self) -> None:
+        discarded = []
+        with self._consumer_lock:
+            self._consumer_exited = True
+            while True:
+                try:
+                    discarded.append(self.get_nowait())
+                except Empty:
+                    break
+        # 释放时不持队列/consumer锁，不修改可能由provider其它持有者引用的异常。
+        discarded.clear()
+
+
 # LLM: Event在原中断锁下先set，向无界结果队列只放一次哨兵；不做socket清理，不反向获取中断锁。
 # 类用途: 把原即时中断唤醒连接到正在阻塞的模型结果队列。
 class _GenerationInterruptWake(Event):
@@ -1341,7 +1368,7 @@ def _generate_through_wall_guard(
 
     from ..conversation.background_shutdown import start_background_model_worker
 
-    results: Queue[_BackendGenerateResult | object] = Queue()
+    results: _GenerationResultQueue = _GenerationResultQueue()
     # 出生前取得准确调用的保留权；缺账、缺 call 或保留失败必须阻止真正发出模型请求。
     worker_retention = state.ledger.retain_call(state.call_id)
 
@@ -1369,9 +1396,12 @@ def _generate_through_wall_guard(
         # 尚未调用原启动入口，确定没有 worker；启动尝试后的异常则不能这样释放。
         worker_retention.release()
         raise
-    start_background_model_worker(worker, on_proven_not_started=worker_retention.release)
-    with register_interrupt_wakeup(_GenerationInterruptWake(results)), register_interrupt_callback(lambda: _interrupt_generation_worker(worker)):
-        return _wait_for_generation_result(request, state, results, worker, timeout, interrupt_registered=True)
+    try:
+        start_background_model_worker(worker, on_proven_not_started=worker_retention.release)
+        with register_interrupt_wakeup(_GenerationInterruptWake(results)), register_interrupt_callback(lambda: _interrupt_generation_worker(worker)):
+            return _wait_for_generation_result(request, state, results, worker, timeout, interrupt_registered=True)
+    finally:
+        results.close_consumer()
 
 
 # LLM: 采纳前复核中断；显式注册的取消由外层异步转交，直接等待入口自行转交，不能在等待线程重复慢close。
