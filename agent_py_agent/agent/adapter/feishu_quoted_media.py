@@ -17,10 +17,10 @@ MAX_QUOTED_TEXT_CHARS = 16000
 _REASONS = {
     'FEISHU_QUOTED_MEDIA_AUTH_UNAVAILABLE': '宿主飞书应用认证暂不可用，未读取引用资料。',
     'FEISHU_QUOTED_MEDIA_READ_UNAVAILABLE': '引用消息不可读取，请检查机器人入群、群消息读取权限和消息可见范围。',
-    'FEISHU_QUOTED_MEDIA_PERMISSION_REQUIRED': '应用缺少读取此群消息的权限；接收群内提及权限不等于读取原文件消息权限。',
+    'FEISHU_QUOTED_MEDIA_PERMISSION_REQUIRED': '应用缺少读取被引用消息的权限；接收消息的权限不等于读取原文件消息权限。',
     'FEISHU_QUOTED_MEDIA_DELETED': '引用消息已撤回，未读取引用资料。',
     'FEISHU_QUOTED_MEDIA_ID_MISMATCH': '返回内容没有唯一匹配被引用的消息，未读取引用资料。',
-    'FEISHU_QUOTED_MEDIA_CHAT_MISMATCH': '被引用消息不属于当前群，禁止读取引用资料。',
+    'FEISHU_QUOTED_MEDIA_CHAT_MISMATCH': '被引用消息不属于当前聊天，禁止读取引用资料。',
     'FEISHU_QUOTED_MEDIA_TOPIC_MISMATCH': '无法证明引用消息属于当前话题，禁止读取引用资料。',
     'FEISHU_QUOTED_MEDIA_INVALID': '引用消息结构不完整，无法核验引用来源。',
     'FEISHU_QUOTED_MEDIA_NO_RESOURCE': '当前引用开关下没有可读取的文字或附件；未沿更早引用查找内容。',
