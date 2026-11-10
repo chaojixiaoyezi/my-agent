@@ -81,6 +81,9 @@ def verified_recent_registry_roots(agent: object, trusted_scope: Mapping, *, gat
             if not configured.is_absolute():
                 return (), (_error('gateway_root_unconfirmed'),)
             gateway_root = configured
+        gateway_root = Path(gateway_root)
+        if not gateway_root.is_absolute() or '..' in gateway_root.parts:
+            return (), (_error('gateway_root_unconfirmed'),)
         paths = gateway_paths_from_root(gateway_root)
         owner_root = Path(owner_root).absolute()
         selected = _bounded_previous_ids(agent.conversation_store.storage, thread_id, request_id)

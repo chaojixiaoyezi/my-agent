@@ -361,3 +361,11 @@ def test_portable_directory_candidate_is_verified_without_opening_directory_fd(m
     write_json_file_atomic(fixture.path, fixture.payload)
     roots, errors = provenance.verified_recent_registry_roots(fixture.agent, fixture.scope)
     assert not roots and errors[0]['source_errors']
+
+
+@pytest.mark.parametrize('root', ['', 'relative/gateway'])
+def test_empty_or_relative_host_gateway_root_never_falls_back_to_cwd(tmp_path, root):
+    from agent_py_agent.agent.artifacts.registry_provenance import verified_recent_registry_roots
+    fixture = history_fixture(tmp_path)
+    roots, errors = verified_recent_registry_roots(fixture.agent, fixture.scope, gateway_root=root)
+    assert not roots and errors[0]['reason'] == 'gateway_root_unconfirmed'
