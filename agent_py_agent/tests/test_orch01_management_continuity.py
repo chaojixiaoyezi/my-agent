@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import json
 import threading
@@ -681,7 +682,9 @@ def test_r3_real_claim_path_does_not_run_an_ended_parent_for_its_route(case):
         "wake_signal": wake.to_dict(), "now": time.time(),
     })
 
-    assert ran == [] and report is None or getattr(report, "status", "") != "finished"
+    # ORCH01-R7：先单独断言从未执行，再断言租约报告状态，避免运算符优先级让非空 ran 也能通过。
+    assert ran == []
+    assert report is None or getattr(report, "status", "") != "finished"
     receipt = case.agent.conversation_store.guidance.receipt(payload["route"]["dedupe_key"])
     assert receipt.status == "pending"
 
@@ -742,3 +745,159 @@ def test_route_receipt_and_wake_survive_restart(case):
              if (w.metadata or {}).get("route_dedupe_key") == payload["route"]["dedupe_key"]]
     assert len(wakes) == 1
     assert len(restarted.conversation_store.guidance.pending("task", case.parent_task_id)) == 1
+
+
+# ---------- PRO-MSG-008：ORCH01-R1 返回型读错误、R5 目标提前返回、R6 唤醒补发 ----------
+
+
+def _forge_parent_on_scheduled_run(case: Case, monkeypatch) -> None:
+    """定时 run S 把提名改成真实父任务 T、去掉调度属性，并让 claim 与 S 的 TaskLink 读口返回错误（不抛异常）。"""
+    _start_scheduled_run(case)
+    params = case.agent._current_run_params
+    params.task_attributes = {k: v for k, v in {**params.task_attributes, "conversation_task_id": case.parent_task_id}.items()
+                              if not k.startswith("scheduler_")}
+    store = case.agent.conversation_store
+    monkeypatch.setattr(store.claims, "load_report", lambda *_a, **_k: ({}, {"error_type": "DataCorruptionError"}))
+    original = store.tasks.load_report
+
+    def task_report(task_id):
+        if task_id == case.run_id:
+            return None, {"error_type": "DataCorruptionError"}
+        return original(task_id)
+
+    monkeypatch.setattr(store.tasks, "load_report", task_report)
+
+
+def test_r1_returned_read_errors_fail_closed_for_every_control(case, monkeypatch):
+    goal = _child_goal(case)
+    _open_request(case)
+    _forge_parent_on_scheduled_run(case, monkeypatch)
+    with _bound(case):
+        principals, warnings = management_principals(case.agent)
+        guide, _ = _guide(case.agent, case.child_id, "读错误冒充")
+        grant = ResolveCapabilityRequestsTool(case.agent).execute(
+            {"run_id": case.child_id, "decision": "grant", "reason": "冒充批准"})
+        deny = ResolveCapabilityRequestsTool(case.agent).execute(
+            {"run_id": case.child_id, "decision": "deny", "reason": "冒充拒绝"})
+        cancel = CancelSubagentsTool(case.agent).execute({"run_id": case.child_id})
+        read = case.agent.tools.tools["get_goal"].execute({"target_run_id": case.child_id})
+        edit = _update_child_goal(case, goal, "冒充改目标")
+
+    assert case.parent_task_id not in [p.run_id for p in principals] and "SELF_TASK_UNPROVEN" in warnings
+    assert not any(item.ok for item in (guide, grant, deny, cancel, read, edit))
+    assert _child_messages(case) == [] and _request_status(case) == "OPEN"
+    assert case.agent.subagents.load(case.child_id).status != TaskStatus.CANCELLED.value
+    assert _goal_objective(case, goal) == "原子目标"
+
+
+@pytest.mark.parametrize("read_errors", [False, True])
+def test_r5_forged_parent_cannot_read_or_edit_the_parents_own_goal(case, monkeypatch, read_errors):
+    parent_goal = case.agent.conversation_store.goals.create(
+        {"thread_id": case.thread.thread_id, "task_id": case.parent_task_id, "objective": "父目标"})
+    if read_errors:
+        _forge_parent_on_scheduled_run(case, monkeypatch)
+    else:
+        _start_scheduled_run(case)
+        params = case.agent._current_run_params
+        params.task_attributes = {**params.task_attributes, "conversation_task_id": case.parent_task_id}
+    with _bound(case):
+        read = case.agent.tools.tools["get_goal"].execute({})
+        edit = case.agent.tools.tools["update_goal"].execute(
+            {"objective": "冒充改父目标", "expected_revision": parent_goal.revision})
+        self_target = case.agent.tools.tools["get_goal"].execute({"target_run_id": case.parent_task_id})
+
+    assert read.ok is False and edit.ok is False and self_target.ok is False
+    assert read.error_code == edit.error_code == "GOAL_STATE_CONFLICT"
+    assert case.agent.conversation_store.goals.load(case.thread.thread_id).objective == "父目标"
+
+
+def test_r5_real_foreground_parent_still_reads_its_own_goal(case):
+    case.agent.conversation_store.goals.create(
+        {"thread_id": case.thread.thread_id, "task_id": case.parent_task_id, "objective": "父目标"})
+    _foreground(case.agent, case.thread, case.parent_task_id)
+    read = case.agent.tools.tools["get_goal"].execute({})
+
+    assert read.ok is True and "父目标" in read.output
+
+
+def test_r6_wake_failure_after_append_is_repaired_once_by_replay(case, monkeypatch):
+    _limit_pairs(monkeypatch, 1)
+    _foreground(case.agent, _thread(case.agent, "unrelated"), "task-U")
+    wakes = case.agent.conversation_store.wakes
+    original = wakes.raise_signal
+    calls = {"n": 0}
+
+    def failing_once(request, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("wake store unavailable")
+        return original(request, **kwargs)
+
+    monkeypatch.setattr(wakes, "raise_signal", failing_once)
+    first, first_payload = _guide(case.agent, case.child_id, "要父级处理", operation="op-wake")
+    key = "orchestration-route:"
+    pending_before = [w for w in _thread_wakes(case) if (w.metadata or {}).get("origin_kind") == ROUTE_ORIGIN_KIND]
+    results: list[tuple[object, dict]] = []
+    barrier = threading.Barrier(2)
+
+    unrelated = _thread(case.agent, "unrelated")
+
+    def replay() -> None:
+        # 运行参数按线程隔离：每个工作线程都要带上同一个无关线程身份，否则就成了宿主系统身份。
+        _foreground(case.agent, unrelated, "task-U")
+        barrier.wait()
+        results.append(_guide(case.agent, case.child_id, "要父级处理", operation="op-wake"))
+
+    threads = [threading.Thread(target=replay) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    route_wakes = [w for w in _thread_wakes(case) if (w.metadata or {}).get("origin_kind") == ROUTE_ORIGIN_KIND]
+    other_op, other_payload = _guide(case.agent, case.child_id, "另一条", operation="op-other")
+
+    assert first.ok is False and first.error_code == "TOOL_EXECUTION_FAILED" and first.effect_outcome == "unknown"
+    assert pending_before == []
+    assert len(results) == 2
+    for result, payload in results:
+        assert result.ok is True and payload.get("route", {}).get("replayed") is True, payload
+    assert len(route_wakes) == 1 and route_wakes[0].metadata["route_dedupe_key"].startswith(key)
+    assert len(case.agent.conversation_store.guidance.pending("task", case.parent_task_id)) == 1
+    # 补发不计配额：上限 1 已被首次写入占用，新操作被限流，重放没有被限流。
+    assert other_op.ok is False and other_payload["details"]["route"]["reason"] == "SESSION_TASK_RATE_LIMIT"
+
+    wakes.mark_handled(route_wakes[0].wake_signal_id)
+    again, _ = _guide(case.agent, case.child_id, "要父级处理", operation="op-wake")
+    assert again.ok is True
+    assert [w for w in _thread_wakes(case) if (w.metadata or {}).get("origin_kind") == ROUTE_ORIGIN_KIND] == []
+
+
+@pytest.mark.parametrize("error_source", ["claim", "task_link"])
+def test_r1_each_unreadable_execution_fact_alone_fails_closed(case, monkeypatch, error_source):
+    """只有一个执行事实能揭示真实执行 S，且它返回读错误时，自身身份也不能回落成提名的父任务 T。"""
+    _open_request(case)
+    _start_scheduled_run(case)
+    params = case.agent._current_run_params
+    params.task_attributes = {k: v for k, v in {**params.task_attributes, "conversation_task_id": case.parent_task_id}.items()
+                              if not k.startswith("scheduler_")}
+    store = case.agent.conversation_store
+    if error_source == "claim":
+        # RunParams 不再指向任何 TaskLink，只剩租约能证明 S；租约读口返回错误。
+        params.task_id = params.run_id = "gwreq-forged"
+        monkeypatch.setattr(store.claims, "load_report", lambda *_a, **_k: ({}, {"error_type": "DataCorruptionError"}))
+        scope = _bound(case)
+    else:
+        # 不绑定租约，只剩 RunParams 指向的 S TaskLink；它的读口返回错误。
+        original = store.tasks.load_report
+        monkeypatch.setattr(store.tasks, "load_report", lambda task_id: (None, {"error_type": "DataCorruptionError"})
+                            if task_id == case.run_id else original(task_id))
+        scope = contextlib.nullcontext()
+    with scope:
+        principals, warnings = management_principals(case.agent)
+        guide, _ = _guide(case.agent, case.child_id, "单一读错误冒充")
+        deny = ResolveCapabilityRequestsTool(case.agent).execute(
+            {"run_id": case.child_id, "decision": "deny", "reason": "冒充拒绝"})
+
+    assert case.parent_task_id not in [p.run_id for p in principals] and "SELF_TASK_UNPROVEN" in warnings
+    assert guide.ok is False and deny.ok is False
+    assert _child_messages(case) == [] and _request_status(case) == "OPEN"

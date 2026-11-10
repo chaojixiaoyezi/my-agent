@@ -259,6 +259,8 @@ def route_to_authorized_parent(
     existing = store.guidance.receipt(dedupe_key)
     if existing is not None:
         # 已受理的转交只读回原记录与实时回执，不再做准入、不占配额；父级此后结束时如实标出不可消费。
+        # ORCH01-R6：首次写入后唤醒发布失败时，重放沿同一键补发一次，不新增请求也不计配额。
+        _reconcile_route_wake(store, existing.entry, dedupe_key, parent_id, requester.run_id)
         return _route_payload(agent, existing.entry, dedupe_key, parent_id, replayed=True)
     sender_thread = _current_thread_id(agent)
     if not sender_thread:
@@ -273,13 +275,12 @@ def route_to_authorized_parent(
             return {"routed": False, "reason": "SESSION_TASK_RATE_LIMIT", "parent_run_id": parent_id}
         # 并发重放落到这里也只返回原记录：append_once 同键同输入不新增条目，只有首次写入计入配额。
         entry = store.guidance.append_once(
-            _route_request(requester, sender_thread, target_type, parent_id, child_run_id, message),
+            _route_request(requester, sender_thread, target, parent_id, child_run_id, message),
             dedupe_key=dedupe_key,
         )
         if previous is None:
             _record_pair(store, sender_thread, target_thread)
-    if target_type == "task":
-        _raise_route_wake(store, target_thread, parent_id, dedupe_key, requester.run_id)
+    _reconcile_route_wake(store, entry, dedupe_key, parent_id, requester.run_id)
     return _route_payload(agent, entry, dedupe_key, parent_id, replayed=previous is not None)
 
 
@@ -307,11 +308,12 @@ def _route_payload(agent: object, entry: object, dedupe_key: str, parent_id: str
 def _route_request(
     requester: ManagementPrincipal,
     sender_thread: str,
-    target_type: str,
+    target: tuple[str, str],
     parent_id: str,
     child_run_id: str,
     message: str,
 ) -> dict[str, object]:
+    target_type, target_thread = target
     return {
         "target_type": target_type,
         "target_id": parent_id,
@@ -328,6 +330,7 @@ def _route_request(
             "requester_thread_id": sender_thread,
             "child_run_id": child_run_id,
             "route_operation": "send_guidance",
+            "target_thread_id": target_thread,
         },
     }
 
@@ -403,6 +406,8 @@ def _proven_source_task(agent: object, *, job_id: str, run_id: str, thread_id: s
 
 # LLM: 执行事实只来自宿主：scheduler 属性、ContextVar 租约对应的持久 claim.task_id、以及 RunParams 自身
 #   task_id/run_id 中已登记为 TaskLink 的编号（前台请求编号不是 TaskLink，不会出现在这里）。
+#   ORCH01-R1：“不存在”与“读失败”分开——load_report 返回的错误、绑定了租约却读不到同一 claim，都抛出
+#   _ExecutionFactUnreadable，由调用方 fail closed；只有确实不存在（无绑定、无 TaskLink 文件）才算不适用。
 # 函数用途: 列出当前回合真实在执行的任务编号，用来识别与提名冲突的自身身份。
 def _execution_task_ids(agent: object, params: object, attrs: dict) -> list[str]:
     from ...conversation.claim_execution_binding import current_claim_execution
@@ -419,16 +424,25 @@ def _execution_task_ids(agent: object, params: object, attrs: dict) -> list[str]
             _text(getattr(binding, "thread_id", "")),
             claim_scope_id=_text(getattr(binding, "claim_scope_id", "")),
         )
-        if error is None and isinstance(claim, dict) and _text(claim.get("claim_id")) == _text(binding.claim_id):
-            if _text(claim.get("task_id")):
-                found.append(_text(claim.get("task_id")))
+        if error is not None or not isinstance(claim, dict) or _text(claim.get("claim_id")) != _text(binding.claim_id):
+            raise _ExecutionFactUnreadable("bound claim unreadable or replaced")
+        if _text(claim.get("task_id")):
+            found.append(_text(claim.get("task_id")))
     if store is not None:
         for candidate in dict.fromkeys((_text(getattr(params, "task_id", "")), _text(getattr(params, "run_id", "")))):
             if candidate:
                 link, error = store.tasks.load_report(candidate)
-                if error is None and link is not None:
+                if error is not None:
+                    raise _ExecutionFactUnreadable("execution TaskLink unreadable")
+                if link is not None:
                     found.append(candidate)
     return list(dict.fromkeys(found))
+
+
+# LLM: 只在 _execution_task_ids 内抛出，调用方统一转成 SELF_TASK_UNPROVEN，不向外泄漏存储细节。
+# 类用途: 标记执行事实是读失败而不是不存在。
+class _ExecutionFactUnreadable(RuntimeError):
+    pass
 
 
 # LLM: 退回值必须非空且不能是提名的父任务；RunParams 的执行编号最多只能代表它自己。
@@ -503,6 +517,26 @@ def _raise_route_wake(store: object, thread_id: str, parent_id: str, dedupe_key:
         }
     )
     return _text(getattr(signal, "wake_signal_id", ""))
+
+
+# LLM: ORCH01-R6：只有任务邮箱需要唤醒；请求仍是 pending 且同键唤醒从未完整发布（回执为空）才发布，
+#   已 pending/handled 的唤醒不重发（发布层对已结案事件会重新入队，所以必须先读回执），已被消费/拒绝的请求也不补。
+#   并发重放由发布锁内去重收敛为一个信号。目标线程取请求自带的结构化 target_thread_id，旧记录退回父任务 TaskLink。
+# 函数用途: 让一次转交请求最终恰好有一个对应唤醒。
+def _reconcile_route_wake(store: object, entry: object, dedupe_key: str, parent_id: str, requester_run_id: str) -> None:
+    if _text(getattr(entry, "target_type", "")) != "task":
+        return
+    receipt = store.guidance.receipt(dedupe_key)
+    if _text(getattr(receipt, "status", "")) != "pending":
+        return
+    metadata = getattr(entry, "metadata", None) or {}
+    thread_id = _text(metadata.get("target_thread_id")) if isinstance(metadata, dict) else ""
+    if not thread_id:
+        link, error = store.tasks.load_report(parent_id)
+        thread_id = _text(getattr(link, "thread_id", "")) if error is None and link is not None else ""
+    if not thread_id or store.wakes.delivery_receipt(thread_id, dedupe_key):
+        return
+    _raise_route_wake(store, thread_id, parent_id, dedupe_key, requester_run_id)
 
 
 # LLM: 正文只给父级模型看；结构化身份另存 metadata，机器判断不读这段文字。

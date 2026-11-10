@@ -32,28 +32,23 @@ def goal_binding(agent: object, params: object | None = None) -> tuple[str, str,
 
 
 # LLM: Models may revise only a direct child through existing owner/runtime authorization, not sibling/ancestor targets.
-#   原门（requester=当前目标归属任务，会话任务提名先经 authoritative_self_principal 核验）先判；仅当它拒绝时，才用 management_continuity 证明过的定时延续原父任务
-#   再走同一个直属下级门。目标修改不转交、不改目标生命周期或版本，拒绝时原样抛出第一道门的 PermissionError。
+#   ORCH01-R5：任何返回之前（含省略 target 或 target 等于自身的提前返回）都先核验会话任务提名；与执行事实冲突或
+#   证明不了时直接拒绝，不能借提名读写原父任务自己的目标。原门（requester=已核验的自身）先判；仅当它拒绝时，
+#   才用 management_continuity 证明过的定时延续原父任务再走同一个直属下级门。目标修改不转交、不改目标生命周期或
+#   版本，拒绝时原样抛出第一道门的 PermissionError。
 # 函数用途: 给父代理修改直属下级目标解析精确身份；目标名字、普通正文和用户显示名不能授权。
 def goal_tool_target(agent: object, target_run_id: str = "") -> tuple[str, str, str, dict | None]:
-    binding = goal_binding(agent)
+    binding = _proven_goal_binding(agent)
     target = str(target_run_id or "").strip()
     if not target or target == binding[1]:
         return binding
     if not binding[1]:
         raise PermissionError("当前代理身份不完整，不能修改下级目标。")
-    from ..agent_core.orchestration.management_continuity import (
-        authoritative_self_principal,
-        scheduled_continuation_principal,
-    )
+    from ..agent_core.orchestration.management_continuity import scheduled_continuation_principal
     from ..subagents.authorization_gate import OperationRequest, authorize_direct_child_operation
 
     owner = str(getattr(getattr(agent, "home_paths", None), "owner_id", "") or "")
     requester = binding[1]
-    attrs = binding[3] if isinstance(binding[3], dict) else {}
-    if not current_subagent_run_id(agent) and requester == str(attrs.get("conversation_task_id") or "").strip():
-        # ORCH01-R1：会话任务编号只是提名，与执行事实冲突时以执行事实为准，不能借它冒充原父任务。
-        requester = authoritative_self_principal(agent)[0].run_id
     try:
         task = authorize_direct_child_operation(agent.subagents, OperationRequest(
             operation="send_guidance", run_id=target, requester_run_id=requester, requester_owner=owner,
@@ -69,3 +64,20 @@ def goal_tool_target(agent: object, target_run_id: str = "") -> tuple[str, str, 
         except PermissionError:
             raise denied from None
     return str(task.agent_thread_id), str(task.id), "", None
+
+
+# LLM: 子代理和独立命令的身份来自 runner/命令本身，原样返回；会话回合的任务编号只是提名，必须等于
+#   authoritative_self_principal 的结果（执行事实无冲突、TaskLink 同线程、读取无错误），否则抛 PermissionError。
+# 函数用途: 返回已核验自身身份的目标归属。
+def _proven_goal_binding(agent: object) -> tuple[str, str, str, dict | None]:
+    binding = goal_binding(agent)
+    attrs = binding[3] if isinstance(binding[3], dict) else {}
+    nominated = str(attrs.get("conversation_task_id") or "").strip()
+    if current_subagent_run_id(agent) or not binding[1] or binding[1] != nominated:
+        return binding
+    from ..agent_core.orchestration.management_continuity import authoritative_self_principal
+
+    principal, warning = authoritative_self_principal(agent)
+    if warning or principal.run_id != binding[1]:
+        raise PermissionError("当前会话任务身份与执行事实不一致，不能读写该目标。")
+    return binding
