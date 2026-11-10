@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -77,9 +78,13 @@ class ListAgentsTool(BaseTool):
         )
 
 
-# LLM: 进展观察缓存上限（条）；键含 owner+run+仓库+配置代次，只作比较样本，不是生命周期或授权事实。
+# LLM: 进展观察缓存上限（条）；只保存上一次调用里仍是 exact 的 (run, 仓库) 样本，配置代次一变整表作废；只作比较
+#   样本，不是生命周期或授权事实。
 # 常量用途: 限制挂在 agent 上的上一次 git 观察缓存条数。
 _MAX_GIT_PREVIOUS_ENTRIES_COUNT = 128
+# LLM: 仓库独占证明要看完整个已授权视图的写入范围；视图里节点超过它就不再逐个读任务记录，所有关联记为 unproven。
+# 常量用途: 一次 list_agents 为证明仓库独占最多读取的子代理任务记录数。
+_MAX_ASSOCIATION_NODES_COUNT = 256
 # 常量用途: 一次 list_agents 读工具审批账的总时长（所有根共用一个截止）。
 _APPROVAL_READ_BUDGET_SECONDS = 1.0
 # 常量用途: 每个根一次审批目录扫描最多看的条目数；没扫完就记为读不出，不当作没有审批。
@@ -100,25 +105,31 @@ def progress_read_context(agent: object, snapshot: dict[str, object]) -> Progres
     except Exception:  # noqa: BLE001 - 配置读不出按整次不分类处理
         config, refusal = None, "CONFIG_UNREADABLE"
     if not isinstance(config, CapabilityConfig):
-        # 坏行、读不到来源都和读不出一样：整次不分类，不拿默认值冒充用户配置。
+        # 坏行、读不到来源都和读不出一样：整次不分类，不拿默认值冒充用户配置；上一次样本同时作废。
+        _reset_previous(agent)
         return ProgressReadContext(now=now, child_limit=0, config_error=f"PROGRESS_{refusal or 'CONFIG_UNREADABLE'}")
     limit = config.orchestration_progress_check_child_limit
     if type(limit) is not int or limit < 0:
+        _reset_previous(agent)
         return ProgressReadContext(now=now, child_limit=0, config_error="PROGRESS_CHILD_LIMIT_INVALID")
     limit = limit or DEFAULT_PROGRESS_CHECK_CHILD_LIMIT_COUNT
-    nodes = [node for node in snapshot.get("nodes") or [] if isinstance(node, dict)][:limit]
-    sources = _node_sources(agent, nodes)
+    visible = [node for node in snapshot.get("nodes") or [] if isinstance(node, dict)]
+    sources = _node_sources(agent, visible[:limit])
     if config.orchestration_git_progress_enabled is True:
-        git = _git_facts(agent, config, nodes)
+        # ORCH03-R2-a：独占关联看整个已授权视图，不受分类上限截断。
+        git = _git_facts(agent, config, snapshot, visible)
     else:
         # 关掉即作废上一次样本：重新打开后第一次观察没有比较对象，不会拿关之前的旧样本说“有变化”。
         git = {}
-        _previous_cache(agent).clear()
+        _reset_previous(agent)
     return ProgressReadContext(now=now, child_limit=limit,
                                sources=MappingProxyType({key: MappingProxyType(value) for key, value in sources.items()}),
                                git=MappingProxyType(git))
 
 
+# LLM: 只给前 child_limit 个节点读必需来源；审批账每个根一次、共用一个截止。runtime_read 取“节点已在授权快照里”
+#   这一事实，其它记录的加载错误仍在快照 warnings 里。不写任何状态。
+# 函数用途: 汇总受限节点集合的必需来源事实。
 def _node_sources(agent: object, nodes: list[dict[str, object]]) -> dict[str, dict[str, dict[str, object]]]:
     from ...agent_tree.node_rendering import progress_source_facts
 
@@ -166,56 +177,102 @@ def _approval_counts(agent: object, roots: set[str]) -> dict[str, dict[str, int]
     return counts
 
 
-# LLM: 只在开关为 True 时调用。仓库先过 validate_repo；关联只用子代理任务记录的 allowed_write_roots；同一仓库一次调用
-#   只观察一次，整次调用共用一个绝对截止。上一次样本按 owner+run+仓库+配置代次取自 agent 上的有界缓存，没有就不比较。
+# LLM: 只在开关为 True 时调用。仓库先过 validate_repo；关联只用子代理任务记录的 allowed_write_roots。ORCH03-R2-a：
+#   独占要在“整个已授权视图都看全”时才证明得了——视图必须是整棵根树（own_subtree 且 run_id 就是根）或当前会话线程
+#   视图、快照没有任何警告、节点数不超上限且每条任务记录都读到；否则所有关联降为 unproven，不观察、不提升。不扩大
+#   读取范围去补证明。已知边界：视图之外（别的会话/线程）的写者看不到，exact 只表示“本授权视图内唯一写者”。
+#   ORCH03-R3-a：上一次样本按配置代次（owner + 登记列表 + 每个仓库的设备/inode）保存，代次一变整表作废；只保留本次
+#   仍是 exact 且观察成功的 (run, 仓库)，共享/歧义/失败的间隔不留可提升的基线。同一仓库一次调用只观察一次，共用一个截止。
 # 函数用途: 读取本次 list_agents 的 git 关联与观察。
-def _git_facts(agent: object, config: object, nodes: list[dict[str, object]]) -> dict[str, dict[str, object]]:
+def _git_facts(agent: object, config: object, snapshot: dict[str, object],
+               nodes: list[dict[str, object]]) -> dict[str, dict[str, object]]:
     from .. import git_progress_adapter as git
 
     registered = tuple(item for item in config.orchestration_git_progress_repos or [] if isinstance(item, str))
     allowed_roots = [Path(item) for item in getattr(agent, "workspace_roots", None) or []]
     repos = [checked for checked in (git.validate_repo(Path(item), allowed_roots) for item in registered)
              if isinstance(checked, Path)]
-    write_roots: dict[str, list[str]] = {}
-    for node in nodes:
-        run_id = str(node.get("run_id") or "")
-        if not run_id:
-            continue
-        try:
-            task = agent.subagents.load(run_id)
-            write_roots[run_id] = [item for item in getattr(task, "allowed_write_roots", None) or [] if isinstance(item, str)]
-        except Exception:  # noqa: BLE001 - 读不到任务记录就没有权威关联
-            write_roots[run_id] = []
-    associations = git.associate_repos(write_roots, repos)
+    identities = tuple(_repo_identity(repo) for repo in repos)
     owner = str(getattr(getattr(agent, "home_paths", None), "owner_id", "") or "")
-    cache = _previous_cache(agent)
+    previous = _previous_cache(agent, (owner, registered, identities))
+    write_roots, complete = _view_write_roots(agent, snapshot, nodes)
+    associations = git.associate_repos(write_roots, repos)
+    if not complete or None in identities:
+        associations = {run_id: {"association": "unproven", "repo": ""} for run_id in associations}
     deadline = time.monotonic() + git.GIT_OBSERVATION_BUDGET_SECONDS
     observed: dict[str, dict[str, object]] = {}
+    kept: dict[tuple[str, str], dict[str, object]] = {}
     facts: dict[str, dict[str, object]] = {}
     for run_id, association in associations.items():
-        entry: dict[str, object] = dict(association)
+        # 每个条目都带 previous；非 exact 永远是 None（没有可比较的基线）。
+        entry: dict[str, object] = {**association, "previous": None}
         if association["association"] == "exact":
             repo = association["repo"]
             if repo not in observed:
                 observed[repo] = git.observe(Path(repo), deadline=deadline)
-            key = (owner, run_id, repo, registered)
-            entry["previous"] = cache.get(key)
+            entry["previous"] = previous.get((run_id, repo))
             entry["observation"] = observed[repo]
             if not observed[repo].get("error_code"):
-                cache[key] = observed[repo]
-                cache.move_to_end(key)
-                while len(cache) > _MAX_GIT_PREVIOUS_ENTRIES_COUNT:
-                    cache.popitem(last=False)
+                kept[(run_id, repo)] = observed[repo]
         facts[run_id] = MappingProxyType(entry)
+    previous.clear()
+    for key, value in list(kept.items())[-_MAX_GIT_PREVIOUS_ENTRIES_COUNT:]:
+        previous[key] = value
     return facts
 
 
-def _previous_cache(agent: object) -> OrderedDict:
+# LLM: 返回 (run_id -> 写入根列表, 视图是否完整)。完整需要：快照范围是整棵根树或会话线程视图、没有 warnings /
+#   scope_warnings、节点数不超上限、每条任务记录都读到。任何一条不满足都只能说“证明不了独占”。
+# 函数用途: 读取整个已授权视图的权威写入范围。
+def _view_write_roots(agent: object, snapshot: dict[str, object],
+                      nodes: list[dict[str, object]]) -> tuple[dict[str, list[str]], bool]:
+    effective = dict((snapshot.get("scope_resolution") or {}).get("effective") or {})
+    whole_tree = (effective.get("scope") == "own_subtree" and bool(effective.get("root_id"))
+                  and effective.get("run_id") == effective.get("root_id"))
+    complete = ((whole_tree or effective.get("scope") == "conversation_thread")
+                and not snapshot.get("warnings") and not snapshot.get("scope_warnings")
+                and len(nodes) <= _MAX_ASSOCIATION_NODES_COUNT)
+    write_roots: dict[str, list[str]] = {}
+    for node in nodes[:_MAX_ASSOCIATION_NODES_COUNT]:
+        run_id = str(node.get("run_id") or "")
+        if not run_id:
+            complete = False
+            continue
+        try:
+            task = agent.subagents.load(run_id)
+            write_roots[run_id] = [item for item in getattr(task, "allowed_write_roots", None) or [] if isinstance(item, str)]
+        except Exception:  # noqa: BLE001 - 读不到任务记录：它可能写任何仓库，整个视图证明不了独占
+            write_roots[run_id] = []
+            complete = False
+    return write_roots, complete
+
+
+# LLM: 仓库实例身份取 .git 目录的 (设备, inode)；同一路径被换成另一个仓库时代次随之改变。读不到返回 None（不确定）。
+# 函数用途: 读取已校验仓库的实例身份。
+def _repo_identity(repo: Path) -> tuple[str, int, int] | None:
+    try:
+        info = os.stat(repo / ".git", follow_symlinks=False)
+    except OSError:
+        return None
+    return str(repo), info.st_dev, info.st_ino
+
+
+# LLM: 样本挂在 agent 上，只是观察缓存，不是权威或持久存储；代次与上次不同就整表作废后换成新代次。
+# 函数用途: 取当前配置代次下的上一次 git 样本表。
+def _previous_cache(agent: object, generation: tuple) -> OrderedDict:
     cache = getattr(agent, "_progress_git_previous", None)
-    if not isinstance(cache, OrderedDict):
+    if not isinstance(cache, OrderedDict) or getattr(agent, "_progress_git_generation", None) != generation:
         cache = OrderedDict()
         agent._progress_git_previous = cache
+        agent._progress_git_generation = generation
     return cache
+
+
+# LLM: 配置读不出、上限非法、开关关闭都走这里；之后第一次观察没有比较对象。
+# 函数用途: 作废上一次 git 样本。
+def _reset_previous(agent: object) -> None:
+    agent._progress_git_previous = OrderedDict()
+    agent._progress_git_generation = None
 
 
 __all__ = ["ListAgentsTool", "progress_read_context"]

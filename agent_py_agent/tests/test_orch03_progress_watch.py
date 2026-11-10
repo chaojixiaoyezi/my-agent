@@ -651,7 +651,10 @@ def test_real_list_agents_reads_every_required_source_and_reports_full_coverage(
     assert all(item["state"] in {"read", "not_applicable"} for item in required.values()), required
     # 真实子代理登记在 owner 运行库里：attempt 与失败账确实读到了，不是“不适用”。
     assert required["attempt"] == {"state": "read", "status": "pending"}
-    assert required["tool_failures"] == {"state": "read"} and required["tool_approvals"] == {"state": "read", "pending": 0}
+    current = agent.subagents.runtime_db.agent_run_for_run_id(child_id)["current_attempt_id"]
+    # 失败事实与可读性来自同一次读取，且绑定当前权威 attempt（PRO-MSG-034 R1-a/R1-b）。
+    assert required["tool_failures"] == {"state": "read", "attempt_id": current, "current_attempt_streak": {}}
+    assert required["tool_approvals"] == {"state": "read", "pending": 0}
     assert node["progress"]["coverage"] == "full"
 
 
@@ -836,7 +839,10 @@ def test_associate_repos_needs_one_unshared_repo_for_every_write_root(tmp_path):
     }, [outer, inner, other])
 
     assert result["nested"] == {"association": "exact", "repo": str(inner)}
-    assert result["outer"] == {"association": "exact", "repo": str(outer)}
+    # split 也写 outer（同时还写 other，所以它自己是 ambiguous）：歧义写者同样让 outer 的单仓写者失去独占（R2-b）。
+    assert result["outer"] == {"association": "shared", "repo": str(outer)}
+    assert git.associate_repos({"outer": [str(outer / "docs")]}, [outer, inner, other])["outer"] == {
+        "association": "exact", "repo": str(outer)}
     assert result["split"]["association"] == "ambiguous"
     # 仓库外的写入根（例如宿主分配的私有工作目录）不制造歧义，也不把别的仓库算到它头上。
     assert result["half"] == {"association": "shared", "repo": str(other)}
@@ -891,7 +897,8 @@ def test_git_observation_attaches_only_to_exact_children_and_previous_resets_aft
     off = context()
     _register(monkeypatch, [str(repo), str(sibling)])
     reopened = context()
-    node = _child_node(agent, child_id)["progress"]["sources"]
+    node = next(row for row in _list(agent, "task-T")["nodes"] if row["run_id"] == child_id)["progress"]["sources"]
+    subtree = _child_node(agent, child_id)["progress"]["sources"]
 
     assert first.git[child_id]["association"] == "exact" and first.git[child_id]["previous"] is None
     assert first.git[child_id]["observation"]["error_code"] == ""
@@ -904,6 +911,8 @@ def test_git_observation_attaches_only_to_exact_children_and_previous_resets_aft
     # 关掉再打开：上一次样本作废，不能拿关之前的旧样本当比较对象。
     assert reopened.git[child_id]["previous"] is None
     assert node["git_association"] == {"association": "exact", "repo": str(repo)} and node["git"]["head"]
+    # 子树视图看不到兄弟写者，证明不了独占：unproven，不观察。
+    assert subtree["git_association"] == {"association": "unproven", "repo": ""} and "git" not in subtree
     with pytest.raises(TypeError):
         first.git[child_id]["association"] = "none"
 
@@ -1174,3 +1183,151 @@ def test_probe_errors_after_reap_settle_as_unconfirmed(agent_and_child, repo, mo
 
     assert result["error_code"] == "GIT_CLEANUP_UNCONFIRMED" and destructive == []
     assert len(spawned) == 1 and spawned[0].stdout.closed and spawned[0].returncode is not None
+
+
+# ---------- ORCH03 S3 复核反例（PRO-MSG-034）：R1-a / R1-b / R2-a / R2-b / R3-a ----------
+
+
+def _tool_call(agent, child_id, index, ok, attempt_id):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.tool_runtime_ledger import persist_tool_runtime_ledger
+
+    persist_tool_runtime_ledger(SimpleNamespace(subagents=agent.subagents, local_store=None), {
+        "run_id": child_id, "task_id": "task-T", "attempt_id": attempt_id, "operation_id": f"op-{attempt_id}-{index}",
+        "handler_executed": ok, "idempotency_key": f"key-{attempt_id}-{index}", "tool": "read_file", "ok": ok,
+        "error_code": "" if ok else "TOOL_PERMISSION_DENIED", "failure_stage": "" if ok else "authorization"})
+
+
+# R1-a：失败事实那一次读取失败，就只能是 unreadable，不能由后面别的读取替它作证。一次性故障直接打在来源读取上；
+#   持续故障则走真实 list_agents（展示读取吞掉错误，来源读取如实报 unreadable）。
+def test_r1a_failed_failure_read_is_unreadable_and_never_certified_by_another_read(agent_and_child, monkeypatch):
+    import sqlite3
+
+    from agent_py_agent.agent.agent_core.agent_tree.node_rendering import progress_source_facts
+
+    agent, child_id, _ = agent_and_child
+    db = agent.subagents.runtime_db
+    original = db.events_for_agent_run
+    fired = []
+
+    def once(agent_run_id, **kwargs):
+        if not fired:
+            fired.append(kwargs.get("limit"))
+            raise sqlite3.OperationalError("one-shot failure")
+        return original(agent_run_id, **kwargs)
+
+    monkeypatch.setattr(db, "events_for_agent_run", once)
+    one_shot = progress_source_facts(agent, child_id)
+    assert fired == [200] and one_shot["tool_failures"] == {"state": "unreadable"}
+
+    def always(agent_run_id, **kwargs):
+        raise sqlite3.OperationalError("persistent failure")
+
+    monkeypatch.setattr(db, "events_for_agent_run", always)
+    progress = _child_node(agent, child_id)["progress"]
+    assert progress["sources"]["required"]["tool_failures"] == {"state": "unreadable"}
+    assert progress["coverage"] == "partial" and progress["reason"] == "REQUIRED_SOURCE_UNREADABLE"
+
+
+# R1-b：旧 attempt 的连续失败只留在展示用的历史段里，不进当前 attempt 的失败段；当前 attempt 自己的连续失败才算。
+def test_r1b_failures_of_an_older_attempt_are_not_a_current_retry(agent_and_child):
+    agent, child_id, _ = agent_and_child
+    current = agent.subagents.runtime_db.agent_run_for_run_id(child_id)["current_attempt_id"]
+    _tool_call(agent, child_id, 1, False, "attempt-old")
+    _tool_call(agent, child_id, 2, False, "attempt-old")
+    node = _child_node(agent, child_id)
+    old_only = node["progress"]["sources"]["required"]["tool_failures"]
+    _tool_call(agent, child_id, 3, False, current)
+    _tool_call(agent, child_id, 4, False, current)
+    now_failing = _child_node(agent, child_id)["progress"]["sources"]["required"]["tool_failures"]
+
+    assert node["recent_tool_failure"]["consecutive_failures"] == 2 and node["recent_tool_failure"]["ongoing"] is True
+    assert old_only == {"state": "read", "attempt_id": current, "current_attempt_streak": {}}
+    assert now_failing["current_attempt_streak"]["consecutive_failures"] == 2
+    assert now_failing["current_attempt_streak"]["ongoing"] is True
+    live = {**_node(), "run_id": "r"}
+    sources = {"runtime_read": {"state": "read"}, "attempt": {"state": "read", "status": "running"},
+               "tool_approvals": {"state": "read", "pending": 0}, "task_progress": {"state": "not_applicable"}}
+    assert classify_node_progress(live, now=NOW, sources={**sources, "tool_failures": old_only})["state"] == "working"
+    assert classify_node_progress(live, now=NOW, sources={**sources, "tool_failures": now_failing})["state"] == "retrying"
+
+
+def _write_repo(agent, run_ids, roots):
+    for run_id in run_ids:
+        task = agent.subagents.load(run_id)
+        task.allowed_write_roots = list(roots)
+        agent.subagents.save(task)
+
+
+# R2-a：分类上限只决定给谁分类，不是独占证明；两个子代理都写同一仓库，上限 1 时被选中的那个仍是 shared。
+#   视图里有任务记录读不到时，整个视图证明不了独占（unproven）。
+def test_r2a_child_limit_and_unreadable_records_never_make_a_shared_repo_exact(agent_and_child, repo, monkeypatch):
+    agent, child_id, _ = agent_and_child
+    sibling = _extra_children(agent, child_id, 1)[0]
+    _write_repo(agent, [child_id, sibling], [str(repo)])
+    monkeypatch.setattr(agent, "workspace_roots", [repo.parent], raising=False)
+    _register(monkeypatch, [str(repo)], limit=1)
+    limited = _list(agent, "task-T")["nodes"]
+    classified = [row for row in limited if row["progress"]["reason"] != "NOT_CLASSIFIED_LIMIT"]
+    _register(monkeypatch, [str(repo)])
+    _write_repo(agent, [sibling], [])
+    alone = {row["run_id"]: row["progress"]["sources"]["git_association"] for row in _list(agent, "task-T")["nodes"]}
+    real_load = agent.subagents.load
+    monkeypatch.setattr(agent.subagents, "load",
+                        lambda run_id: (_ for _ in ()).throw(OSError("unreadable")) if run_id == sibling
+                        else real_load(run_id))
+    broken = {row["run_id"]: row["progress"]["sources"]["git_association"] for row in _list(agent, "task-T")["nodes"]}
+
+    assert len(classified) == 1 and classified[0]["progress"]["sources"]["git_association"]["association"] == "shared"
+    assert alone[child_id] == {"association": "exact", "repo": str(repo)}
+    assert broken[child_id] == {"association": "unproven", "repo": ""}
+
+
+# R3-a：上一次样本按配置代次作废——登记 X→[]→X 往返、上限非法、仓库实例被换、中间出现共享写者，都不能复活旧样本；
+#   同一代次连续两次 exact 才有比较对象（正向对照）。
+def test_r3a_previous_sample_never_survives_a_generation_change(agent_and_child, repo, monkeypatch):
+    import shutil
+
+    from agent_py_agent.agent.agent_core.orchestration.tools.list_agents import (
+        progress_read_context,
+    )
+
+    agent, child_id, _ = agent_and_child
+    sibling = _extra_children(agent, child_id, 1)[0]
+    _write_repo(agent, [child_id], [str(repo)])
+    _write_repo(agent, [sibling], [])
+    monkeypatch.setattr(agent, "workspace_roots", [repo.parent], raising=False)
+
+    def previous():
+        context = progress_read_context(agent, agent_tree_status_payload(agent, {"run_id": "task-T",
+                                                                                "scope": "own_subtree"}))
+        return dict(context.git.get(child_id) or {}).get("previous")
+
+    _register(monkeypatch, [str(repo)])
+    assert previous() is None
+    assert previous() is not None
+    _register(monkeypatch, [])
+    previous()
+    _register(monkeypatch, [str(repo)])
+    roundtrip = previous()
+    previous()
+    _register(monkeypatch, [str(repo)], limit=-1)
+    previous()
+    _register(monkeypatch, [str(repo)])
+    after_refusal = previous()
+    previous()
+    # 只改登记列表（多一个通不过校验的条目），校验后的仓库集合不变：配置代次照样变，旧样本作废。
+    _register(monkeypatch, [str(repo), "relative/not-a-repo"])
+    after_registration_edit = previous()
+    previous()
+    _write_repo(agent, [sibling], [str(repo)])
+    previous()
+    _write_repo(agent, [sibling], [])
+    after_shared = previous()
+    previous()
+    shutil.move(str(repo / ".git"), str(repo / "old-git"))
+    shutil.copytree(str(repo / "old-git"), str(repo / ".git"), symlinks=True)
+    after_replaced = previous()
+
+    assert (roundtrip, after_refusal, after_registration_edit, after_shared, after_replaced) == (None,) * 5

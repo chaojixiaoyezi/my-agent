@@ -7,6 +7,9 @@
 #   子代理的必需来源及可读性、可选 git 关联观察）。必需来源（运行读取、当前 attempt、工具失败账、工具审批、Todo）
 #   任何一项读不出就只能是 unknown，覆盖标 partial；不适用（例如本地未托管运行）与读失败分开记。没有上下文的旧调用
 #   仍做纯投影，但覆盖固定标 partial，不冒充完整。
+#   例外（有意保留）：完成/终态/暂停/未决能力申请/工具审批等待/阻塞这些由独立结构事实证明的结论排在可读性门之前，
+#   所以可能出现 completed 或 waiting_* 同时 coverage=partial；覆盖字段始终如实，读不全时绝不标 full。重试只认来源里
+#   当前 attempt 的失败段（与可读性同一次读取），不看跨 attempt 的展示字段。
 # 模块用途: 给 list_agents 的每个节点附上 progress 分类及其来源和时间。
 
 from __future__ import annotations
@@ -123,10 +126,13 @@ def _classify(node: dict[str, Any], *, now: float,
     alive = facts["heartbeat_age_seconds"] is not None and facts["heartbeat_age_seconds"] <= HEARTBEAT_STALE_AFTER_SECONDS
     if not alive:
         return _result("unknown", "HEARTBEAT_STALE_OR_MISSING", now, facts)
-    failures = _failure_count(node.get("recent_tool_failure"))
+    # 有上下文时只认当前 attempt 的失败段（与可读性同一次读取）；旧纯投影沿用节点展示字段。
+    streak = (dict((sources or {}).get("tool_failures") or {}).get("current_attempt_streak")
+              if sources is not None else node.get("recent_tool_failure"))
+    failures = _failure_count(streak)
     facts["consecutive_tool_failures"] = failures
     # 只有仍在进行的同码连续失败才算重试；历史上的连续失败次数证明不了现在还在重试。
-    if failures >= RETRYING_MIN_FAILURES_COUNT and _failure_ongoing(node.get("recent_tool_failure")):
+    if failures >= RETRYING_MIN_FAILURES_COUNT and _failure_ongoing(streak):
         return _result("retrying", "REPEATED_TOOL_FAILURE", now, facts)
     age = facts["progress_age_seconds"]
     if age is None:

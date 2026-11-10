@@ -103,15 +103,17 @@ def observe_registered(agent: Any, repo: str, *, baseline: str = "") -> dict[str
 
 # LLM: ORCH03-R2：关联只来自子代理任务记录里的 allowed_write_roots（权威写入范围），不看 workspace_refs 投影或模型
 #   输入。每个写入根取包含它的最深已校验仓库（嵌套时取更具体的）；不在任何已登记仓库内的写入根（例如宿主分给每个
-#   子代理的私有工作目录）与仓库信号无关，不参与关联。规则：落到恰好一个仓库 → exact；落到多个不同仓库 → ambiguous；
-#   一个都没有 → none；同一仓库 exact 关联到多个子代理 → shared（谁的改动说不清，一律不提升）。
+#   子代理的私有工作目录）与仓库信号无关，不参与关联。规则：落到恰好一个仓库且该仓库没有别的可能写者 → exact；落到
+#   多个不同仓库 → ambiguous；一个都没有 → none；ORCH03-R2-b：仓库的写者把 ambiguous 的子代理也算上，任何别的写者
+#   都让单仓写者降为 shared（谁的改动说不清，一律不提升）。调用方负责证明传入的是完整视图。
 #   返回 run_id -> {"association": exact|shared|ambiguous|none, "repo": 路径或 ""}。
 # 函数用途: 把已校验仓库关联到子代理。
 def associate_repos(write_roots_by_run: dict[str, list[str]], repos: list[Path]) -> dict[str, dict[str, str]]:
     ordered = sorted(repos, key=lambda item: len(item.parts), reverse=True)
-    result: dict[str, dict[str, str]] = {}
+    owners_by_run: dict[str, set[Path]] = {}
+    writers: dict[Path, set[str]] = {}
     for run_id, roots in write_roots_by_run.items():
-        owners = set()
+        owners: set[Path] = set()
         for raw in roots:
             if not isinstance(raw, str) or not os.path.isabs(raw):
                 continue
@@ -122,19 +124,18 @@ def associate_repos(write_roots_by_run: dict[str, list[str]], repos: list[Path])
             match = next((repo for repo in ordered if real == repo or repo in real.parents), None)
             if match is not None:
                 owners.add(match)
+        owners_by_run[run_id] = owners
+        for repo in owners:
+            writers.setdefault(repo, set()).add(run_id)
+    result: dict[str, dict[str, str]] = {}
+    for run_id, owners in owners_by_run.items():
         if not owners:
             result[run_id] = {"association": "none", "repo": ""}
         elif len(owners) > 1:
             result[run_id] = {"association": "ambiguous", "repo": ""}
         else:
-            result[run_id] = {"association": "exact", "repo": str(next(iter(owners)))}
-    counts: dict[str, int] = {}
-    for item in result.values():
-        if item["association"] == "exact":
-            counts[item["repo"]] = counts.get(item["repo"], 0) + 1
-    for item in result.values():
-        if item["association"] == "exact" and counts[item["repo"]] > 1:
-            item["association"] = "shared"
+            repo = next(iter(owners))
+            result[run_id] = {"association": "exact" if writers[repo] == {run_id} else "shared", "repo": str(repo)}
     return result
 
 
