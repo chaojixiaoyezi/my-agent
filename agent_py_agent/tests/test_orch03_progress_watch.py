@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -515,7 +517,9 @@ def test_no_destructive_group_signal_after_the_root_is_reaped(agent_and_child, r
 
     def killpg(group, sig):
         owner = next((item for item in spawned if item.pid == group), None)
-        signals.append((int(sig), owner is not None and owner.returncode is None))
+        # PRO-MSG-032：钉住按内核事实（waitid WNOWAIT / libproc 父子关系）判，不只看缓存的 returncode。
+        pinned = owner is not None and owner.returncode is None and git._root_state(owner) != git._IDENTITY_LOST
+        signals.append((int(sig), pinned))
         return real_killpg(group, sig)
 
     monkeypatch.setattr(git.subprocess, "Popen", popen)
@@ -527,6 +531,9 @@ def test_no_destructive_group_signal_after_the_root_is_reaped(agent_and_child, r
                 "hang": "GIT_TIMEOUT", "status_flood": ""}[scenario]
     assert result["error_code"] == expected
     assert [sig for sig, pinned in signals if sig != 0 and not pinned] == []
+    if scenario in {"hang", "stdout_descendant", "detached_descendant"}:
+        # 正向对照：需要清理的路径确实在钉住时发过 SIGKILL。
+        assert (int(signal.SIGKILL), True) in signals
     if scenario in {"detached_descendant", "stdout_descendant"}:
         assert _gone(int(pid_file.read_text().strip()))
 
@@ -923,3 +930,247 @@ def test_only_an_exact_association_can_upgrade_a_stalled_child(association):
     # 共享/歧义/无关仓库的变化不能算到这个子代理头上。
     assert (other["state"], other["reason"]) == ("no_progress", "PROGRESS_EVENTS_STALE")
     assert "git" not in other["sources"] and other["sources"]["git_association"]["association"] == association
+
+
+# ---------- ORCH03-R6 第三版（PRO-MSG-032）：钉住三态、受截止约束的组扫描、诚实收尾 ----------
+
+
+def _spawn_recorder(monkeypatch):
+    spawned, destructive = [], []
+    real_popen, real_killpg = git.subprocess.Popen, os.killpg
+
+    def popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        spawned.append(process)
+        return process
+
+    def killpg(group, sig):
+        if sig != 0:
+            destructive.append((group, int(sig)))
+        return real_killpg(group, sig)
+
+    monkeypatch.setattr(git.subprocess, "Popen", popen)
+    monkeypatch.setattr(git.os, "killpg", killpg)
+    return spawned, destructive
+
+
+# 确定性的“钉住丢失”：读完之后由测试在 Popen 背后用 waitpid 抢先回收根进程（模拟同进程里别的回收者），内核里已经
+#   没有这个子进程，而 Popen.returncode 仍是 None。之后任何破坏性组信号都不允许，观察判清理未确认。超时路径同理：
+#   先单独杀掉并抢先回收根进程，再交回“读超时”。不触发真实 pid 复用，也不给未知进程发信号。
+@pytest.mark.skipif(os.name != "posix", reason="替身 git 脚本只在 POSIX 上可执行")
+@pytest.mark.parametrize("path", ["normal_eof", "timed_out"])
+def test_lost_pin_after_a_foreign_reap_sends_no_destructive_signal(agent_and_child, repo, monkeypatch, tmp_path, path):
+    agent, _child, _ = agent_and_child
+    head = _git(repo, "rev-parse", "HEAD")
+    body = f"echo {head}" if path == "normal_eof" else "sleep 30"
+    _fake_git(monkeypatch, tmp_path, "rev-parse", body)
+    spawned, destructive = _spawn_recorder(monkeypatch)
+    real_read = git._read_bounded
+    stolen = []
+
+    def read_then_foreign_reap(process, until):
+        if not any(arg == "rev-parse" for arg in process.args):
+            return real_read(process, until)
+        if path == "normal_eof":
+            result = real_read(process, until)
+        else:
+            os.kill(process.pid, signal.SIGKILL)
+            result = (b"", False, True)
+        stolen.append(os.waitpid(process.pid, 0)[0])
+        assert process.returncode is None
+        return result
+
+    monkeypatch.setattr(git, "_read_bounded", read_then_foreign_reap)
+    _register(monkeypatch, [str(repo)])
+    result = git.observe_registered(agent, str(repo))
+    [root] = [item for item in spawned if "rev-parse" in item.args]
+
+    assert stolen == [root.pid]
+    assert result["error_code"] == "GIT_CLEANUP_UNCONFIRMED" and result["head"] == ""
+    assert [group for group, _sig in destructive if group == root.pid] == []
+    assert root.stdout.closed
+
+
+# 正向对照：根进程还在本进程名下（运行中或僵尸）时，内核事实给出钉住；回收之后同一个 Popen 判身份丢失。
+@pytest.mark.skipif(os.name != "posix", reason="需要 POSIX 子进程")
+def test_root_state_follows_kernel_facts_not_the_cached_returncode():
+    import sys
+
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.4)"], start_new_session=True)
+    try:
+        running = git._root_state(process)
+        deadline = time.monotonic() + 5
+        while git._root_state(process) == git._RUNNING_PINNED and time.monotonic() < deadline:
+            time.sleep(0.02)
+        exited = git._root_state(process)
+        os.waitpid(process.pid, 0)
+        lost = git._root_state(process)
+    finally:
+        process.wait(timeout=5)
+
+    assert (running, exited, lost) == (git._RUNNING_PINNED, git._EXITED_UNREAPED, git._IDENTITY_LOST)
+    assert git._root_state(process) == git._IDENTITY_LOST
+
+
+# SIGCHLD 被设成忽略时内核自动回收子进程，钉不住：在启动任何 git 前拒绝。
+@pytest.mark.skipif(os.name != "posix", reason="需要 SIGCHLD")
+def test_ignored_sigchld_refuses_before_spawning_git(agent_and_child, repo, monkeypatch):
+    agent, _child, _ = agent_and_child
+    spawned, _destructive = _spawn_recorder(monkeypatch)
+    _register(monkeypatch, [str(repo)])
+    previous = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    try:
+        refused = git.observe_registered(agent, str(repo))
+        spawned_while_ignored = len(spawned)
+    finally:
+        signal.signal(signal.SIGCHLD, previous)
+    allowed = git.observe_registered(agent, str(repo))
+
+    assert refused["error_code"] == "GIT_REAPER_UNAVAILABLE" and spawned_while_ignored == 0
+    assert allowed["error_code"] == "" and len(spawned) == 3
+
+
+def _fake_proc(tmp_path, rows: dict[str, object]) -> str:
+    root = tmp_path / "proc"
+    root.mkdir()
+    for name, content in rows.items():
+        entry = root / name
+        entry.mkdir()
+        if content is None:
+            continue
+        if content == "DIR":
+            (entry / "stat").mkdir()
+        else:
+            (entry / "stat").write_bytes(content if isinstance(content, bytes) else str(content).encode())
+    return str(root)
+
+
+def _stat(pid: int, state: str, group: int) -> str:
+    return f"{pid} (g (it)) {state} 1 {group} {group} 0 -1 0"
+
+
+# Linux 组扫描：在 macOS 上也能跑的纯逻辑——给一个假的 /proc 根。活成员 True；只有僵尸、别组成员、扫描中消失
+#   的进程 False；stat 读不出、解析不了、读满上限、超出条目数、截止已到都是 None（查不清），不能当作没有。
+@pytest.mark.parametrize(("rows", "expected"), [
+    ({"100": _stat(100, "Z", 100), "101": _stat(101, "S", 100)}, True),
+    ({"100": _stat(100, "S", 100), "101": _stat(101, "Z", 100), "102": _stat(102, "R", 7)}, False),
+    ({"101": None, "self": _stat(1, "S", 100)}, False),
+    ({"101": "DIR"}, None),
+    ({"101": "garbage without paren"}, None),
+    ({"101": "101 (x) S 1 notanumber"}, None),
+    ({"101": b"101 (" + b"x" * 5000 + b") S 1 100"}, None),
+    # 读满上限：截断后的前缀本身能解析（别的组），但没读完就不能当作“不是本组成员”。
+    ({"101": (_stat(101, "S", 7) + " 0" * 3000).encode()}, None),
+])
+def test_linux_group_scan_separates_absent_from_unknown(tmp_path, rows, expected):
+    root = _fake_proc(tmp_path, rows)
+    assert git._linux_group_has_live_members(100, 100, time.monotonic() + 5, root) is expected
+
+
+def test_linux_group_scan_honors_the_deadline_and_the_entry_cap(tmp_path, monkeypatch):
+    root = _fake_proc(tmp_path, {str(pid): _stat(pid, "S", 7) for pid in range(200, 205)})
+
+    assert git._linux_group_has_live_members(100, 100, time.monotonic() + 5, root) is False
+    assert git._linux_group_has_live_members(100, 100, time.monotonic() - 1, root) is None
+    monkeypatch.setattr(git, "_MAX_PROC_SCAN_ENTRIES", 3)
+    assert git._linux_group_has_live_members(100, 100, time.monotonic() + 5, root) is None
+
+
+# macOS：组成员列不出（libproc 查询失败）时，killpg 的 EPERM 不能被当成“只剩僵尸”的证明，正常结束也判未确认；
+#   成员读状态遇到 ESRCH 以外的错误同样查不清。
+@pytest.mark.skipif(sys.platform != "darwin", reason="只验证 macOS 的成员证明路径")
+@pytest.mark.parametrize("failure", ["list", "member_info"])
+def test_darwin_eperm_alone_is_not_proof_of_an_empty_group(agent_and_child, repo, monkeypatch, tmp_path, failure):
+    import errno
+    import shutil
+
+    agent, _child, _ = agent_and_child
+    pid_file = tmp_path / "member.pid"
+    real_git = shutil.which("git")
+    # 第一条命令（config）留下一个同组、脱离 stdout 的活成员，然后换成真实 git 正常输出、正常退出。
+    _fake_git(monkeypatch, tmp_path, "--list",
+              f'sleep 30 >/dev/null 2>&1 </dev/null &\necho $! > {pid_file}\nexec "{real_git}" "$@"')
+    spawned, _destructive = _spawn_recorder(monkeypatch)
+    real_list, real_info = git._darwin_list, git._darwin_info
+    if failure == "list":
+        monkeypatch.setattr(git, "_darwin_list",
+                            lambda kind, ident: None if kind == git._LIBPROC_PROTOCOL_PGRP_ONLY else real_list(kind, ident))
+    else:
+        monkeypatch.setattr(git, "_darwin_info", lambda pid: real_info(pid) if any(
+            item.pid == pid for item in spawned) else (None, errno.EPERM))
+    _register(monkeypatch, [str(repo)])
+    result = git.observe_registered(agent, str(repo))
+
+    assert result["error_code"] == "GIT_CLEANUP_UNCONFIRMED"
+    assert _gone(int(pid_file.read_text().strip()))
+
+
+# 等待原语本身报错（Linux waitid / macOS kqueue 的非 ESRCH 错误）：诚实收尾为未确认，不发破坏性信号，根进程仍被
+#   回收、stdout 已关。清理过程抛出其它异常时，stdout 也已在清理前单独关闭。
+@pytest.mark.skipif(os.name != "posix", reason="需要 POSIX 子进程")
+def test_wait_primitive_errors_settle_honestly_and_stdout_is_closed_independently(agent_and_child, repo, monkeypatch):
+    agent, _child, _ = agent_and_child
+    spawned, destructive = _spawn_recorder(monkeypatch)
+    import errno
+
+    if git._HAS_WAITID:
+        real_waitid = os.waitid
+
+        def broken_waitid(*args):
+            if any(item.returncode is None and item.pid == args[1] for item in spawned):
+                raise OSError(errno.EIO, "injected EIO")
+            return real_waitid(*args)
+
+        monkeypatch.setattr(git.os, "waitid", broken_waitid)
+    else:
+        # macOS 的读取本身也用 kqueue，不能整体替换；在根进程的内核状态读口（libproc）注入非 ESRCH 错误。
+        real_info = git._darwin_info
+        monkeypatch.setattr(git, "_darwin_info", lambda pid: (None, errno.EIO) if any(
+            item.pid == pid for item in spawned) else real_info(pid))
+    _register(monkeypatch, [str(repo)])
+    result = git.observe_registered(agent, str(repo))
+
+    assert result["error_code"] == "GIT_CLEANUP_UNCONFIRMED"
+    assert [group for group, _sig in destructive if any(group == item.pid for item in spawned)] == []
+    assert spawned and all(item.stdout.closed and item.returncode is not None for item in spawned)
+
+
+def test_stdout_is_closed_even_when_cleanup_raises(agent_and_child, repo, monkeypatch):
+    agent, _child, _ = agent_and_child
+    spawned, _destructive = _spawn_recorder(monkeypatch)
+    real_settle = git._settle_group
+    seen = []
+
+    def settle_raises(process, group, deadline, *, kill):
+        seen.append(process.stdout.closed)
+        real_settle(process, group, deadline, kill=kill)
+        raise RuntimeError("cleanup bug")
+
+    monkeypatch.setattr(git, "_settle_group", settle_raises)
+    _register(monkeypatch, [str(repo)])
+    with pytest.raises(RuntimeError):
+        git.observe_registered(agent, str(repo))
+
+    assert seen == [True] and spawned[0].stdout.closed and spawned[0].returncode is not None
+
+
+# 回收后的无破坏探测本身报 ESRCH/EPERM 以外的错误：清理不向上抛，判未确认，根进程已回收、stdout 已关。
+@pytest.mark.skipif(os.name != "posix", reason="需要 POSIX 子进程")
+def test_probe_errors_after_reap_settle_as_unconfirmed(agent_and_child, repo, monkeypatch):
+    import errno
+
+    agent, _child, _ = agent_and_child
+    spawned, destructive = _spawn_recorder(monkeypatch)
+    recorder = git.os.killpg
+
+    def probe_fails(group, sig):
+        if sig == 0:
+            raise OSError(errno.EIO, "injected EIO")
+        return recorder(group, sig)
+
+    monkeypatch.setattr(git.os, "killpg", probe_fails)
+    _register(monkeypatch, [str(repo)])
+    result = git.observe_registered(agent, str(repo))
+
+    assert result["error_code"] == "GIT_CLEANUP_UNCONFIRMED" and destructive == []
+    assert len(spawned) == 1 and spawned[0].stdout.closed and spawned[0].returncode is not None
