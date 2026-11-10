@@ -95,9 +95,22 @@ def drain_for_requested_restart(context: GatewayRunContext, process_identity: di
     if result.get("ok") and stop_requested():
         reset_restart_drain_state()
         result = {"ok": False, "reason": "stop_requested", "request_id": request_id}
+    # 仍在可逆阶段核原 future/claim/attempt；finished 不等于副作用已经结清。
+    # 调度器排空期间不再提交新工作；已越过其检查的迟到提交仍由最终 cleanup 拒绝交接。
+    if result.get("ok") and not result.get("forced_after_drain_timeout") and background_shutdown is not None:
+        try:
+            blockers = background_shutdown.blockers()
+        except Exception as exc:
+            blockers = [{"reason": "background_drain_unreadable", "error_type": type(exc).__name__}]
+        if blockers:
+            reset_restart_drain_state()
+            result = {"ok": False, "reason": "background_unsettled", "request_id": request_id,
+                      "unresolved_operation_refs": blockers}
     if not result.get("ok"):
         cancel_restart_request(paths, request, result)
-        _publish_drain_state(paths, {"phase": "cancelled", "reason": result.get("reason"), "request_id": request_id})
+        _publish_drain_state(paths, {"phase": "cancelled", "reason": result.get("reason"), "request_id": request_id,
+                                     "service_cleanup_started": False,
+                                     "unresolved_operation_refs": result.get("unresolved_operation_refs", [])})
         home_root = getattr(getattr(agent, "home_paths", None), "root", None)
         notified = append_restart_cancellation(request, result, home_root=home_root)
         log_gateway_event(agent, "gateway_restart_cancelled", {**result,
@@ -173,7 +186,8 @@ def finalize_restart_cleanup(context, marker: dict, cleanup: dict) -> dict:
         fields = {"restart_request_id": marker.get("request_id"), "cleanup_result": result,
                   "forced_after_drain_timeout": forced, "unresolved_operation_refs": refs}
         if not result["handover_allowed"]:
-            fields["restart_drain"] = {"phase": "cancelled", "reason": "drain_incomplete",
+            fields["restart_drain"] = {"phase": "cleanup_failed", "reason": "drain_incomplete",
+                                       "service_cleanup_started": True,
                                        "request_id": marker.get("request_id")}
         return {**state, **fields}
 
@@ -205,7 +219,7 @@ def finalize_restart_cleanup(context, marker: dict, cleanup: dict) -> dict:
         update_json_file_atomic(marker_path, lambda current: {
             **current, "cleanup_result": result, "unresolved_operation_refs": refs} if same_marker(current) else current)
         # marker换代也必须保留旧请求的原审计事件，不覆盖新代文件来补旧回执。
-        log_gateway_event(context.agent, "gateway_restart_cancelled", {
+        log_gateway_event(context.agent, "gateway_restart_cleanup_failed", {
             "request_id": marker.get("request_id"), "old_process_identity": identity,
             "cleanup_result": result, "notification_results": notifications["notification_results"]})
     return result
@@ -367,8 +381,8 @@ def _wait_for_cli_restart(paths, old_pid: int, request_id: str, budget: float) -
     while time.monotonic() < deadline:
         state = read_json_file(paths.state)
         drain = state.get("restart_drain") if isinstance(state.get("restart_drain"), dict) else {}
-        if drain.get("request_id") == request_id and drain.get("phase") == "cancelled":
-            print(f"安全重启已取消（{drain.get('reason')}），Gateway 照常运行；确需立即重启可加 --force。", file=sys.stderr)
+        if drain.get("request_id") == request_id and drain.get("phase") in {"cancelled", "cleanup_failed"}:
+            _report_unsuccessful_drain(drain, old_pid)
             return 2
         new_pid = get_running_pid(paths.pid)
         if new_pid and new_pid != old_pid:
@@ -409,8 +423,9 @@ __all__ = [
 
 
 # LLM: 停止使用原 restart 请求、两段排空和完成标记，仅终态 operation 区分不拉起旧版本；晚到旧请求不能换目标进程。
-# 函数用途: 为离线更新排空并停止准确 Gateway，超时保留原服务、不强杀工具；新包成功后原入口恢复。
+# 函数用途: 为离线更新排空并停止准确 Gateway；可逆取消保原服务，收尾后失败明确要求核验恢复，不强杀工具。
 def safe_stop_for_update(agent,paths,pid):
+    original_identity = build_process_identity(pid)
     result=submit_restart_request(paths,target_pid=pid,requester={'kind':'cli'},reason='离线更新排空',
         cooldown_seconds=0,operation='stop_for_update')
     if result.get('status') not in {'scheduled','coalesced'}:
@@ -421,13 +436,34 @@ def safe_stop_for_update(agent,paths,pid):
     deadline=time.monotonic()+budget
     print('更新正在等待原回合和工具排空，不会强杀执行中的工具。',flush=True)
     while time.monotonic()<deadline:
-        if not is_pid_alive(pid):
-            return 0
         state=read_json_file(paths.state)
         phase=state.get('restart_drain') or {}
-        if phase.get('request_id')==request_id and phase.get('phase')=='cancelled':
-            print('排空取消，原实例保持运行，未更新。',file=sys.stderr)
+        if phase.get('request_id')==request_id and phase.get('phase') in {'cancelled', 'cleanup_failed'}:
+            _report_unsuccessful_drain(phase, pid)
+            return 2
+        if not is_pid_alive(pid):
+            # 退出事实不等于排空证明；只接受原请求/原 PID 的最终持久交接结果。
+            marker = read_json_file(restart_completed_path(paths))
+            cleanup = marker.get('cleanup_result') or {}
+            if (marker.get('request_id') == request_id and marker.get('old_pid') == pid
+                    and marker.get('operation') == 'stop_for_update'
+                    and original_identity.get('start_time') is not None
+                    and marker.get('old_process_identity') == original_identity
+                    and cleanup.get('status') == 'clean_drain' and cleanup.get('handover_allowed') is True):
+                return 0
+            print('原进程已退出，但未取得本次完整排空证明，未更新。请用 my-agent gateway status 核验，'
+                  '确认原进程退出后用 my-agent gateway start 恢复原版本；未知操作仍须沿原恢复流程处理。', file=sys.stderr)
             return 2
         time.sleep(.25)
-    print('等待排空超时，未切换版本。',file=sys.stderr)
+    print('等待排空超时，未切换版本。请用 my-agent gateway status 核验当前实例。',file=sys.stderr)
     return 2
+
+
+def _report_unsuccessful_drain(drain: dict, pid: int) -> None:
+    """只报告已发表的生命周期阶段，不把取消意图或 PID 存活当作服务就绪。"""
+    if drain.get('phase') == 'cancelled' and drain.get('service_cleanup_started') is False and is_pid_alive(pid):
+        print('排空已取消，尚未开始服务收尾；原进程仍存活，未更新。请用 my-agent gateway status 核验服务就绪。',
+              file=sys.stderr)
+    else:
+        print('排空未完整确认，未更新；原实例可能已进入不可逆收尾或退出。请用 my-agent gateway status 核验，'
+              '确认原进程退出后用 my-agent gateway start 恢复原版本；未知操作仍须沿原恢复流程处理。', file=sys.stderr)

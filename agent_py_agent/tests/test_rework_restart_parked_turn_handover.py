@@ -165,7 +165,8 @@ def test_tool_still_executing_at_cleanup_blocks_unforced_handover(tmp_path, monk
         assert spawned == []
         state = read_json_file(context.paths.state)
         assert state["status"] == "failed"
-        assert state["restart_drain"]["phase"] == "cancelled"
+        assert state["restart_drain"]["phase"] == "cleanup_failed"
+        assert state["restart_drain"]["service_cleanup_started"] is True
         cleanup_result = state["cleanup_result"]
         assert cleanup_result["status"] == "incomplete" and cleanup_result["handover_allowed"] is False
         assert [row.get("operation_id") for row in cleanup_result["unresolved_operation_refs"]] == ["next-tool"]

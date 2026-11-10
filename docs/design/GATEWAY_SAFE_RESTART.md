@@ -247,3 +247,12 @@
 - 插话（step17h）：收口时每条插话都有终态和提示。没被取走的、以及送进被杀调用又没写进历史的，拒收后作为备用下一轮马上跑
   （计数从 0），提示说“你补充的话会作为新的一轮马上处理”；已写进历史的记成已消费、不再单独跑，提示说“发‘继续’会一起处理”。
   见 DESIGN_LEDGER 同名节“插话怎么办”。
+
+
+## 2026-11-09 排空取消与不可逆收尾的边界
+
+原 Count0 排空在工具归零后、发表 drained 标记前，核同一 `BackgroundShutdown` 的原 future、执行片及准确 claim/attempt 操作责任。执行片 finished 不代表 operation 已结；UNKNOWN、未返回 future 或来源读取失败均撤销本次请求并重开原工具门，此时尚未调用后台 stop、关闭 HTTP 或停止服务循环。后续只能在原工作确实收尾后重新请求，不清账、不重放副作用。
+
+调度循环在排空期间不再发起新工作，但已越过检查的提交或其它收尾错误仍可能在最后核收出现。因此前置核收不是最终 clean 证明，最终 cleanup 的原硬门保持。进入 cleanup 后无法承诺恢复旧服务；失败发表 `cleanup_failed` / `service_cleanup_started=true`，禁止接班。CLI 不再将其称为“原实例保持运行”，原 PID 消失也不单独授权离线更新：必须取得本次请求、原出生身份和 `stop_for_update` 的 clean_drain/handover_allowed 标记。
+
+正式恢复路径是先用 `my-agent gateway status` 核验，确认原进程退出后通过 `my-agent gateway start` 恢复原版本。恢复服务不等于旧 UNKNOWN 操作已结清，操作仍沿原恢复与证据合同处理。该检查不强杀、不改变显式强制 restart 的原语义。
