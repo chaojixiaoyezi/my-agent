@@ -47,6 +47,7 @@ jobs:
           agent_py_agent/tests/test_r8_windows_hot_slice.py
           agent_py_agent/tests/test_r8_windows_tail_clocks.py
           agent_py_agent/tests/test_r8_observation_portable_tail.py
+          agent_py_agent/tests/test_r8_tui_default_stream.py
           agent_py_agent/tests/test_v15_rework_r3_delivery_recovery.py::test_portable_source_uses_fd_clock_and_binary_bytes
           agent_py_agent/tests/test_v15_rework_r3_delivery_recovery.py::test_old_five_field_checkpoint_resumes_byte_exact_portable_source
           agent_py_agent/tests/test_v15_rework_r3_delivery_recovery.py::test_native_generation_unknown_or_changed_never_advances_checkpoint

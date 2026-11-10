@@ -254,7 +254,7 @@ COMMAND_CATALOG = (
         "verbose",
         "/verbose [off|on|full|stream]",
         "查看或切换详细过程显示",
-        help_variants=(("/verbose stream", "TUI逐步显示可撤回正文；IM短预览默认最多100字符，最终结果完整保留"),
+        help_variants=(("/verbose stream", "逐段显示可撤回的正文；新 TUI 会话默认开启，IM 短预览默认最多100字符"),
                        ("/verbose on", "逐步展示工具进展"), ("/verbose off", "关闭详细过程，长工具仍给极简状态与更新时间")),
         submit_on_enter=True,
         conversation_suffix=r"(?:\s+(\S+))?\s*$",
