@@ -635,6 +635,7 @@ agent_py_agent/
 - `R8_OPERATION_CONFIRMATION_DRAFT.md` 记录未知副作用继续硬停与可证明未来收口的边界；未实现自动确认。
 - `R8_QUOTA_ROOT_MEMBERSHIP.md` 说明有限配额的根成员证明、检查范围和大目录成本。
 - `R8_HOST_WAIT_OWNERSHIP.md` 区分宿主实际等待、只读判活和持久控制效果的证明。
+- `R9_CANDIDATE_PROMOTION_WINDOWS.md` 说明候选窗口、同一租约续读以及旧积压的次序。
 - `gateway_parts/http_body_readiness.py` 只预读有界传输前缀，保留原套接字与 HTTP 处理器；详见 `R8_HTTP_BODY_READINESS.md`。
 
 - `docs/tasks/R8_AUDIT_FOLLOWUPS.md`：14项功能、历史失败、最终验收与交付的统一状态入口。
@@ -1077,6 +1078,7 @@ agent_py_agent/
 |-- docs/design/R8_OPERATION_CONFIRMATION_DRAFT.md # 等待确证退出的操作合同草案；旧未知不能补签。
 |-- docs/design/R8_QUOTA_ROOT_MEMBERSHIP.md # 有限配额根目录成员核验、分片与超上限行为。
 |-- docs/design/R8_HOST_WAIT_OWNERSHIP.md # 自有子进程的等待归属与退出证明边界。
+|-- docs/design/R9_CANDIDATE_PROMOTION_WINDOWS.md # 候选晋升的读取上限与恢复语义。
 |-- docs/design/R8_HTTP_BODY_READINESS.md # 慢正文准入、正常请求保留容量与套接字回放。
 |-- agent_py_agent/agent/gateway_parts/http_body_readiness.py # 有界 HTTP 前缀分类及原生 socket 的读取顺序。
 |-- agent_py_agent/tests/test_dispatch_host_wait_ownership.py # 只读判活、直接子进程的真实退出码及等待异常。
@@ -3675,6 +3677,8 @@ agent_py_agent/
 |   |-- test_memory_hardening.py       # 来源证据、候选、并发去重、hard delete 与信封安全回归
 |   |-- test_memory_candidate_daily_v2.py # Candidate/Daily v2 身份、状态、顺序、并发与大输出边界
 |   |-- test_memory_curator_v2.py      # Curator 触发、模型配置、权限、失败恢复与整批提交
+|   |-- test_r9_candidate_promotion_windows.py  # 候选晋升分页、重启续读和调度收尾
+|   |-- test_r9_model_result_consumer_lifetime.py  # 模型结果迟到时的引用释放与正常错误交付
 |   |-- test_curator_dispatch_eligibility.py # 待确认候选不单独运输/策展，保pending、旧lease、新输入与日终
 |   |-- test_curator_recovery_race.py  # Curator 双进程发现/清理交错与唯一恢复执行
 |   |-- test_curator_recovery_critical_section.py # Curator manifest重验、清理审计领取持锁与异常释放
