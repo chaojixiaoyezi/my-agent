@@ -123,6 +123,31 @@ def test_frozen_full_catalog_and_schema_bundle_hashes():
         assert result["properties"].pop("result") == {"$ref": "#/$defs/TaskResultView"}
     for definitions in (normalized_api["$defs"], normalized_schemas["$defs"], normalized_defs):
         assert definitions.pop("TaskResultView") == task_result_schema
+    # V07-03 只可选追加对象详情：锁住两个新定义与 workflows.get 的可选引用。
+    step_summary_schema = {"type": "object", "properties": {
+        "step_id": {"$ref": "#/$defs/Id"}, "name": {"type": "string", "minLength": 0, "maxLength": 256},
+        "mode": {"type": "string", "minLength": 1, "maxLength": 64},
+        "depends_on": {"type": "array", "items": {"$ref": "#/$defs/Id"}, "maxItems": 100},
+        "conditional": {"type": "boolean"}, "foreach": {"type": "boolean"},
+        "on_error": {"type": "string", "minLength": 0, "maxLength": 64}},
+        "required": ["step_id", "name", "mode", "depends_on", "conditional", "foreach", "on_error"],
+        "additionalProperties": False}
+    detail_schema = {"type": "object", "properties": {
+        "summary": {"type": "string", "minLength": 0, "maxLength": 4096},
+        "io_contract": {"anyOf": [{"$ref": "#/$defs/IOContract"}, {"type": "null"}]},
+        "steps": {"type": "array", "items": {"$ref": "#/$defs/WorkflowStepSummaryView"}, "maxItems": 100},
+        "step_count": {"type": "integer", "minimum": 0}, "coverage": {"$ref": "#/$defs/Coverage"}},
+        "required": ["summary", "io_contract", "steps", "step_count", "coverage"], "additionalProperties": False}
+    detail_results = [definitions["Result_workflows_get"] for definitions in (
+        normalized_api["$defs"], normalized_schemas["$defs"], normalized_defs)]
+    detail_results += [row["result_schema"] for row in normalized_api["actions"] if row["action"] == "workflows.get"]
+    assert len(detail_results) == 4
+    for result in detail_results:
+        assert "detail" not in result["required"]
+        assert result["properties"].pop("detail") == {"$ref": "#/$defs/WorkflowDetailView"}
+    for definitions in (normalized_api["$defs"], normalized_schemas["$defs"], normalized_defs):
+        assert definitions.pop("WorkflowStepSummaryView") == step_summary_schema
+        assert definitions.pop("WorkflowDetailView") == detail_schema
     # WF-07 只可选公开已有 foreach 配置：锁住准确 schema，再规范化比较原冻结目录。
     foreach_schema = {"type": "object", "properties": {
         "from": {"type": "string", "minLength": 3, "maxLength": 512},

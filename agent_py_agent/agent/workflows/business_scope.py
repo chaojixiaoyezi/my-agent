@@ -105,6 +105,42 @@ def workflow_view(definition, state=None):
         'protected': state['protected'], 'definition_ref': definition.descriptor.id}
 
 
+# LLM: 只投影用途、IO 合同与步骤摘要；字段逐项有界，超出上限或无法校验的部分标 coverage=partial 而不是让详情整体失败。
+# 函数用途: 生成 workflows.get 的对象详情（V07-03）。
+def workflow_detail_view(definition):
+    partial = len(definition.steps) > 100
+    summary = str(definition.descriptor.summary or '')
+    partial = partial or len(summary) > 4096
+    io_contract = _io_contract_view(definition.descriptor.io_contract.to_dict())
+    partial = partial or io_contract is None
+    steps = []
+    for step in definition.steps[:100]:
+        depends = list(dict.fromkeys(value['step_id'] for value in step.inputs_map.values()
+            if isinstance(value, dict) and isinstance(value.get('step_id'), str) and value['step_id'] != '$inputs'))
+        partial = partial or len(depends) > 100 or len(step.name) > 256
+        steps.append({'step_id': step.step_id, 'name': step.name[:256], 'mode': step.mode,
+            'depends_on': depends[:100], 'conditional': bool(step.condition), 'foreach': step.foreach is not None,
+            'on_error': step.on_error})
+    return {'summary': summary[:4096], 'io_contract': io_contract, 'steps': steps,
+            'step_count': len(definition.steps), 'coverage': 'partial' if partial else 'complete'}
+
+
+def _io_contract_view(contract):
+    # 只接受与公开 IOContract 一致的有界形状；旧记录不合规时返回 None（详情标 partial）。
+    try:
+        value = json.loads(json.dumps(contract, allow_nan=False))
+    except (TypeError, ValueError):
+        return None
+    if (not isinstance(value, dict) or not set(value) <= {'inputs', 'outputs', 'nullable_outputs', 'output_types'}
+            or any(not isinstance(value.get(key, []), list) or len(value.get(key, [])) > 1000
+                   for key in ('inputs', 'outputs', 'nullable_outputs'))
+            or any(not isinstance(item, str) or len(item) > 4096 for item in value.get('nullable_outputs', []))
+            or not isinstance(value.get('output_types', {}), dict)
+            or any(not isinstance(item, str) or len(item) > 4096 for item in value.get('output_types', {}).values())):
+        return None
+    return value
+
+
 # LLM: 只在任何副作用之前抛出；保留 PermissionError 类型（原调用方与测试不变），业务边界据机器码给出 not_started。
 # 类用途: W3 范围/生命周期策略拒绝。
 class WorkflowPolicyRefusal(PermissionError):
@@ -190,7 +226,7 @@ class WorkflowScopeService:
             from .orphan_maintenance import cleanup_status
             return {'workflow': workflow_view(definition), 'scope': scope_view(state['scope']),
                 'run_refs': [row.workflow_run_id for row in self._run_store().list_runs(workflow_id=ref, limit=100)],
-                'cleanup_status': cleanup_status(self, definition),
+                'cleanup_status': cleanup_status(self, definition), 'detail': workflow_detail_view(definition),
                 'allowed_actions': [name for name in ('workflows.update', 'workflows.scope.set', 'workflows.run',
                     'workflows.recycle', 'workflows.restore') if self.authorize(actor, name, ref) is True]}
         if action == 'workflows.preview':
