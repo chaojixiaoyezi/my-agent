@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
+import sqlite3
 import stat
 import time
 from copy import deepcopy
@@ -775,8 +777,19 @@ def apply_scheduler_batch(root, jobs, runs, *, previous=False, admission=None, h
         history_size = len(''.join(json.dumps(row, ensure_ascii=False, sort_keys=True) + '\n' for row in pending).encode())
         admission.check([OwnerQuotaChange(repo.store_path, len(raw)),
             *([OwnerQuotaChange(repo.history_path, history_size, append=True)] if pending else [])])
+    source_jobs = [store['jobs'].get(identifier) for identifier in jobs]
+    changed_sources = repo.due_index is not None and any(
+        (change.get('before') or {}).get('event_source_state') or (change.get('after') or {}).get('event_source_state')
+        for change in jobs.values())
+    if changed_sources:
+        changed_sources = repo.due_index.prepare_source_jobs(repo.due_owner, source_jobs, job_ids=tuple(jobs))
     write_bytes_atomic_beneath(root, ('data', 'scheduler', 'store.json'), raw)
     repo._sync_due_index_unlocked(store)
+    if changed_sources:
+        try:
+            repo.due_index.settle_source_jobs(repo.due_owner, tuple(jobs), source_jobs)
+        except (OSError, sqlite3.Error):
+            logging.getLogger(__name__).warning('SCHEDULER_SOURCE_PROJECTION_RETIRE_DEFERRED')
 
 
 # LLM: 沿job→rules递归剔除运行投影；工具参数/metadata等静态子树逐字保留，不能按同名键删除用户输入。

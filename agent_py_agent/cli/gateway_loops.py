@@ -743,13 +743,15 @@ class _OwnerWakeHints:
         self._closed_event = threading.Event()
         self._hint_failures = 0
         self._scheduler_changes = 0
+        self._source_repair_failed = False
+        self._source_repair_epoch = self.due_index.source_projection_epoch()
         self._armed = {}
         self._removers = []
         try:
             self._removers.append(self.due_index.add_due_listener(self._due_changed))
             self._removers.append(add_wake_listener(self._runtime_changed))
             self.discovery = bind_owner_activity_index(self.home.owners_dir, self.index,
-                sweep_seconds=self.rescan, freshness_seconds=self.backstop, note_owner=self.note_owner, forget_owner=self.forget_owner)
+                sweep_seconds=self.rescan, freshness_seconds=self.backstop, note_owner=self.note_owner, forget_owner=self.forget_owner, on_sweep_complete=self._source_sweep_complete)
             self.base._owner_wake_hints = self
         except Exception:
             for remove in self._removers:
@@ -844,12 +846,49 @@ class _OwnerWakeHints:
     def note_owner(self, owner, home):
         from ..agent.runtime_db.schema import runtime_db_path
 
+        # 新恢复I/O不持提示堆锁；纯投影不构造业务Agent。
+        from ..agent.scheduler.source_owner_index import SourceOwnerIndexError
+        from ..agent.scheduler.source_owner_recovery import repair_source_owner
+
+        with self._notice_lock:
+            if self._closed:
+                return
+        try:
+            try:
+                epoch = self.due_index.source_projection_epoch()
+                if epoch != self._source_repair_epoch:
+                    self._source_repair_epoch = epoch
+                    self._source_repair_failed = True
+                recovering = not self.due_index.source_discovery_ready()
+            except SourceOwnerIndexError:
+                self._source_repair_failed = True  # 当前页可能不是全轮起点，先拒绝签完成。
+                recovering = True
+            if recovering:
+                repair_source_owner(self.due_index, self.home.root, owner, home)
+        except Exception:
+            self._source_repair_failed = True
+            raise
         with self._notice_lock:
             if self._closed:
                 return
             self._refresh_runtime(owner, runtime_db_path(home))
             self._publish(owner, "scheduler_due", self.due_index.next_due_at(owner))
             self.note_maintenance(owner, home)
+
+    def _source_sweep_complete(self, successful):
+        from ..agent.scheduler.source_owner_recovery import repair_source_owner
+        from ..agent.user_space.owner_resolver import owner_identity_from_config
+
+        epoch = self.due_index.source_projection_epoch()
+        if epoch != self._source_repair_epoch:
+            self._source_repair_epoch = epoch
+            self._source_repair_failed = True
+        if successful and not self._source_repair_failed:
+            owner = owner_identity_from_config(self.base.config)
+            repair_source_owner(self.due_index, self.home.root,
+                (owner.provider, owner.owner_kind, owner.owner_id), self.home.owner_home_dir)
+            self.due_index.mark_source_discovery_complete(expected_epoch=self._source_repair_epoch)
+        self._source_repair_failed = False
 
     def note_maintenance(self, owner, home, *, not_before=None):
         from ..agent.user_space.owner_maintenance import _maintenance_state_path, _positive_interval

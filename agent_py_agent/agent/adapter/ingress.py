@@ -147,12 +147,15 @@ class GatewayIngressRecord:
 class GatewayIngressAdvance:
     state: str
     progress_handle: str = ""
+    gateway_payload: dict[str, object] | None = None
 
     # LLM: Only worker-recognized post-submission transitions are accepted.
     # 函数用途: 防止回调跳过 watcher 移交或写入未知状态。
     def __post_init__(self) -> None:
-        if self.state not in {"placeholder_ready", "completed"}:
+        if self.state not in {"placeholder_ready", "completed", "payload_ready"}:
             raise ValueError(f"invalid gateway ingress advance state: {self.state}")
+        if (self.state == "payload_ready") != (isinstance(self.gateway_payload, dict)):
+            raise ValueError("invalid gateway ingress continuation")
 
 
 # LLM: Canonicalization is a strict JSON round trip so digest equality means byte-equivalent
@@ -925,9 +928,12 @@ class GatewayAdapterDeliveryWorker:
             )
         if record.state == "submitted":
             advance = self._advance_submission(record)
+            if advance.gateway_payload is not None and record.kind != "observation":
+                raise ValueError("message cannot use observation continuation")
             return replace(
                 record,
                 state=advance.state,
+                gateway_payload=advance.gateway_payload if advance.gateway_payload is not None else record.gateway_payload,
                 progress_handle=advance.progress_handle,
                 **common,
             )

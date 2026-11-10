@@ -29,11 +29,17 @@ def validate_event_job(job):
     owner, creator = job.get('owner') or {}, job.get('creator') or {}
     for view in views:
         source = view['schedule']['source']
-        if (owner.get('kind') != 'group' or owner.get('provider') != source['channel']
-                or str(owner.get('id') or '').split('/')[-1] != source['chat_id']
-                or creator.get('channel') != source['channel'] or not creator.get('actor_id')
+        group = (owner.get('kind') == 'group' and owner.get('provider') == source['channel']
+            and str(owner.get('id') or '').split('/')[-1] == source['chat_id'] and 'subscriber_actor_id' not in source)
+        personal_owner = ((owner.get('kind') == 'user' and owner.get('provider') == 'feishu'
+            and str(owner.get('id') or '').split('/')[-1] == source.get('subscriber_actor_id'))
+            or (owner.get('kind') == 'main' and owner.get('provider') == 'local'
+                and str(owner.get('id') or '').split('/')[-1] == 'main'))
+        personal = (personal_owner and source.get('authorization_source') == 'personal_rule_oauth'
+            and source.get('subscriber_actor_id') == creator.get('actor_id'))
+        if (not (group or personal) or creator.get('channel') != source['channel'] or not creator.get('actor_id')
                 or view.get('use_llm', True) is not True):
-            raise ScheduleValidationError('事件订阅必须由准确当前群人类创建者登记并交 LLM 研判')
+            raise ScheduleValidationError('事件订阅必须绑定原群或本人 owner 的准确创建者并交 LLM 研判')
         state = (job.get('event_source_state') or {}).get(str(view.get('rule_id') or ''))
         if (not isinstance(state, dict) or type(state.get('generation')) is not int or state['generation'] < 1
                 or type(state.get('active')) is not bool or not isinstance(state.get('pending'), list)

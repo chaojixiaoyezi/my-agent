@@ -583,6 +583,15 @@ class _ChannelIngressCoordinator:
         record: GatewayIngressRecord,
     ) -> GatewayIngressAdvance:
         if record.kind == 'observation':
+            if isinstance(record.submission, dict) and record.submission.get('status') == 'partial':
+                cursor = record.submission.get('source_owner_cursor')
+                if (not isinstance(cursor, list) or len(cursor) != 3
+                        or any(not isinstance(value, str) or len(value) > 256 for value in cursor)
+                        or not isinstance(record.gateway_payload, dict)):
+                    raise ValueError('observation continuation is invalid')
+                if cursor == record.gateway_payload.get('source_owner_cursor'):
+                    raise ValueError('observation continuation did not advance')
+                return GatewayIngressAdvance('payload_ready', gateway_payload={**record.gateway_payload, 'source_owner_cursor': cursor})
             if not isinstance(record.submission, dict) or record.submission.get('status') not in {'accepted', 'ignored'}:
                 raise ValueError('observation receipt is invalid')
             return GatewayIngressAdvance('completed')

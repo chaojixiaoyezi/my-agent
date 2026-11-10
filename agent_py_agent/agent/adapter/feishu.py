@@ -623,7 +623,7 @@ def _admit_feishu_event(adapter: Any, payload: dict[str, Any], facts: dict[str, 
         facts.update(mention_gate='matched' if decision.allowed else 'unmatched' if decision.verified else 'unverified',
                      mentions_count=decision.mentions_count, post_at_count=decision.post_at_count)
         if not decision.allowed:
-            if not bot:
+            if not decision.verified:
                 return FeishuEventDisposition('retryable', decision.reason_code)
             from .feishu_observations import admit_user_observation
             return admit_user_observation(adapter, payload, bot)

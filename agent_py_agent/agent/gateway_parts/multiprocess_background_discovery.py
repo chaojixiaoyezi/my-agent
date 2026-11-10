@@ -112,6 +112,10 @@ class CoordinatorBackgroundRequests:
         self._source_cursors = {}
         self._next_poll_at = 0.0
         self._next_compact_at = 0.0
+        self._source_repair_failed = False
+        self._source_index = None
+        self._source_recovering = False
+        self._source_repair_epoch = None
         self.require_original()
 
     # LLM: 元数据查询不授执行权；源对象/原Root/control/当前lease与PID皆准确核，关闭或替换不能借新C恢复原producer。
@@ -169,6 +173,27 @@ class CoordinatorBackgroundRequests:
         if now < self._next_poll_at:
             return 0
         self._next_poll_at = now + 1.0
+        from ..scheduler.due_index import SchedulerDueIndex
+        from ..scheduler.source_owner_index import SourceOwnerIndexError
+        from ..user_space import home_paths
+
+        if self._source_index is None:
+            self._source_index = self._commit_main(lambda: SchedulerDueIndex(
+                home_paths(self.control.home_root).global_index_dir / 'scheduler_due.sqlite3'))
+        try:
+            recovering_sources = not self._source_index.source_discovery_ready()
+        except SourceOwnerIndexError:
+            self._commit_main(self._source_index._ensure_schema)
+            self._source_recovering = False
+            recovering_sources = True
+        epoch = self._source_index.source_projection_epoch()
+        if epoch != self._source_repair_epoch:
+            self._source_repair_epoch = epoch
+            self._source_recovering = False
+        if recovering_sources and not self._source_recovering:
+            self._cursor = None
+            self._source_repair_failed = False
+        self._source_recovering = recovering_sources
         page = discover_owner_home_page(self.control.home_root / "owners", limit=64, after_cursor=self._cursor)
         self._cursor = page.next_cursor
         from .multiprocess_curator_accounting import reconcile_quota
@@ -182,9 +207,23 @@ class CoordinatorBackgroundRequests:
         count = 0
         local = OwnerIdentity.local_main()
         targets = (SimpleNamespace(identity=local, home_dir=_owner_home_dir(self.control.home_root, local)), *page.targets)
+        from ..scheduler.source_owner_recovery import repair_source_owner
+
         for target in targets:
+            if recovering_sources:
+                try:
+                    owner = target.identity
+                    self._commit_main(lambda target=target, owner=owner: repair_source_owner(
+                        self._source_index, self.control.home_root,
+                        (owner.provider, owner.owner_kind, owner.owner_id), target.home_dir))
+                except Exception:
+                    self._source_repair_failed = True
             for ref in self._owner_sources(target):
                 count += int(self._submit(ref))
+        if recovering_sources and page.next_cursor is None:
+            if not self._source_repair_failed:
+                self._commit_main(lambda: self._source_index.mark_source_discovery_complete(expected_epoch=self._source_repair_epoch))
+            self._source_repair_failed = False
         return count
 
     # LLM: 只读原owner来源；learning沿FIFO/registry，冷维护按同代正文last_maintenance_at，mtime仅CAS不作维护时钟。

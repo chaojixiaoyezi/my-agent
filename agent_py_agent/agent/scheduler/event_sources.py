@@ -31,12 +31,15 @@ def normalize_event_schedule(raw):
         raise ScheduleValidationError('事件计划字段无效')
     source = raw.get('source')
     fields = {'channel', 'event_type', 'app_id', 'tenant_key', 'chat_id', 'sender_type', 'sender_id_type', 'sender_ids', 'proofs'}
-    if not isinstance(source, dict) or set(source) != fields:
+    optional = {'subscriber_actor_id', 'authorization_source'}
+    if not isinstance(source, dict) or not fields <= set(source) or set(source) - fields not in (set(), optional):
         raise ScheduleValidationError('事件来源需要准确应用、租户、群和来源身份')
     if (source['channel'], source['event_type'], source['sender_type'], source['sender_id_type']) not in {
             ('feishu', 'message', 'bot', 'app_id'), ('feishu', 'message', 'user', 'open_id')}:
         raise ScheduleValidationError('当前事件订阅仅支持已核验的飞书群成员或机器人')
-    for key in fields - {'sender_ids', 'proofs'}:
+    if 'subscriber_actor_id' in source and source.get('authorization_source') != 'personal_rule_oauth':
+        raise ScheduleValidationError('本人订阅授权来源无效')
+    for key in set(source) - {'sender_ids', 'proofs'}:
         if not isinstance(source[key], str) or not source[key].strip() or len(source[key]) > 256:
             raise ScheduleValidationError('事件来源身份无效')
     senders = source['sender_ids']

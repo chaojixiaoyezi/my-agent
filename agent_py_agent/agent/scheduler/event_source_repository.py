@@ -25,7 +25,7 @@ EVENT_FUTURE_TOLERANCE_SECONDS = 300
 class SchedulerEventSourceOperations:
     # LLM: 先复核所有命中规则容量再同事务写入；重复重投不占容量，冲突及背压不得返回 accepted。
     # 函数用途: 持久登记同群已核验事件，保存原 Ingress refs；无订阅时只返回 ignored。
-    def accept_source_event(self, event, *, now=None):
+    def accept_source_event(self, event, *, now=None, authorized_sources=None, revalidate=None):
         current = time.time() if now is None else float(now)
         stamp = event.get('created_at')
         if type(stamp) not in {int, float} or not math.isfinite(stamp) or stamp < 0 or stamp > current + EVENT_FUTURE_TOLERANCE_SECONDS:
@@ -33,13 +33,25 @@ class SchedulerEventSourceOperations:
         identity, digest = event_identity(event)
         matches, duplicates, stale, updates = [], 0, 0, {}
         with self._mutation_scope() as (store, admission):
-            jobs, errors = self._valid_jobs(store)
+            if revalidate is not None:
+                revalidate()
+            if authorized_sources is None:
+                jobs, errors = self._valid_jobs(store)
+            else:
+                parsed = [self._parse_job(store['jobs'].get(job_id))
+                    for job_id in sorted({row[0] for row in authorized_sources})]
+                jobs = [job for job, _error in parsed if job is not None]
+                errors = [error for job, error in parsed if job is None]
             if errors:
                 return {'status': 'retryable', 'reason_code': 'EVENT_SOURCE_STATE_INVALID'}
             for job in jobs:
                 if job['status'] != 'active':
                     continue
                 for view in event_rule_views(job):
+                    key = str(view.get('rule_id') or '')
+                    state = (job.get('event_source_state') or {}).get(key) or {}
+                    if authorized_sources is not None and (job['job_id'], key, state.get('generation')) not in authorized_sources:
+                        continue
                     outcome, key, state = _event_candidate(job, view, event, identity, digest, current)
                     if state is not None:
                         updates[(job['job_id'], key)] = state

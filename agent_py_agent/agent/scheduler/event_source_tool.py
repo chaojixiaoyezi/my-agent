@@ -73,10 +73,10 @@ class EventSourceInputError(ValueError):
 
 # LLM: 开关只读共享部署配置，群 ID 只读原 owner；普通个人、其它群或模型局部设置均不形成来源权威。
 # 函数用途: 检查事件订阅入口，并从实时官方事实获得当前接收应用和群租户。
-def _source_scope(agent):
+def _source_scope(agent, message_ids):
     home = getattr(agent, 'home_paths', None)
     if getattr(home, 'owner_kind', '') != 'group':
-        raise EventSourceInputError('EVENT_SOURCE_GROUP_REQUIRED', '群消息订阅只能在原群创建；个人跨群订阅尚未接入。')
+        return _personal_source_scope(agent, message_ids[0])
     try:
         chat_id = group_chat_id(home)
         snapshot = group_authority_snapshot(agent, chat_id)
@@ -153,7 +153,7 @@ def schedule_from_event_input(agent, raw):
     if not isinstance(raw, dict) or set(raw) - {'source_message_refs', 'source_message_ids', 'min_interval_seconds', 'max_batch_events'}:
         raise ScheduleValidationError('event_source 参数无效。')
     identifiers = _message_ids(agent, raw)
-    scope = _source_scope(agent)
+    scope = _source_scope(agent, identifiers)
     proofs = _source_proofs(agent, scope, identifiers)
     kind, id_type = proofs[0]['sender_type'], proofs[0]['sender_id_type']
     config = deployment_capability_config(agent.home_paths)
@@ -163,5 +163,45 @@ def schedule_from_event_input(agent, raw):
     return normalize_event_schedule({'kind': 'event_source',
         'source': {'channel': 'feishu', 'event_type': 'message', 'app_id': scope['app_id'],
             'tenant_key': scope['tenant_key'], 'chat_id': scope['chat_id'], 'sender_type': kind,
-            'sender_id_type': id_type, 'sender_ids': [row['sender_id'] for row in proofs], 'proofs': canonical_proofs},
+            'sender_id_type': id_type, 'sender_ids': [row['sender_id'] for row in proofs], 'proofs': canonical_proofs,
+            **({key: scope[key] for key in ('subscriber_actor_id', 'authorization_source')}
+               if 'subscriber_actor_id' in scope else {})},
         **{key: raw[key] for key in ('min_interval_seconds', 'max_batch_events') if key in raw}})
+
+
+def _personal_source_scope(agent, message_id):
+    from urllib.parse import quote
+
+    from ..adapter.feishu_provider_facts import _provider, _read
+    from ..conversation.tool_approval_scope import tool_approval_scope
+    from ..user_space.feishu_oauth import oauth_actor, user_access_token
+
+    try:
+        current = getattr(agent, '_current_run_params', None)
+        scope = tool_approval_scope(agent, str(getattr(current, 'run_id', '') or getattr(current, 'task_id', '')))
+        actor = oauth_actor(agent, scope)
+        user_token = user_access_token(agent)
+        _adapter, bot_token = _provider(agent)
+        data = _read(bot_token, '/im/v1/messages/' + quote(message_id, safe=''), stage='message')
+        rows = data.get('items')
+        if (not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict)
+                or rows[0].get('message_id') != message_id or rows[0].get('deleted') is True
+                or not isinstance(rows[0].get('chat_id'), str) or not rows[0]['chat_id']):
+            raise EventSourceInputError('EVENT_SOURCE_SCOPE_UNVERIFIED', '准确群消息来源不可核验。')
+        chat_id = rows[0]['chat_id']
+        try:
+            chat = _read(user_token, '/im/v1/chats/' + quote(chat_id, safe='') + '?user_id_type=open_id', stage='chat_info')
+        except FeishuProviderFactError as exc:
+            raise EventSourceInputError('FEISHU_USER_AUTH_REQUIRED', '本人无法读取所引用的原群，请申请 im:chat:readonly 并完成本人授权。') from exc
+        snapshot = group_authority_snapshot(agent, chat_id)
+        if (chat.get('chat_mode') not in {'group', 'topic'} or chat.get('tenant_key') != snapshot.get('tenant_key')
+                or snapshot.get('members_complete') is not True or snapshot.get('bot_is_member') is not True
+                or actor not in snapshot.get('member_ids', ())):
+            raise EventSourceInputError('EVENT_SOURCE_SCOPE_UNVERIFIED', '本人或机器人不在原群，未创建订阅。')
+        return {**snapshot, 'subscriber_actor_id': actor, 'authorization_source': 'personal_rule_oauth'}
+    except FeishuProviderFactError as exc:
+        raise EventSourceInputError(exc.reason_code, '无法核验本人所在群，请检查应用权限和本人授权。') from exc
+    except (OSError, RuntimeError, ValueError, TypeError, AttributeError) as exc:
+        if isinstance(exc, EventSourceInputError):
+            raise
+        raise EventSourceInputError('FEISHU_USER_AUTH_REQUIRED', '本人授权或原群来源不可用；未创建订阅。') from exc

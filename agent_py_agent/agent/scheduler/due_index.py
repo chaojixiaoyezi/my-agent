@@ -24,8 +24,12 @@ from typing import Any
 
 from ..owner_activity_index import next_hint_revision
 from ..storage_backend import ensure_sqlite_wal
+from .source_owner_index import (
+    SchedulerSourceOwnerIndex,
+    create_source_owner_schema,
+)
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _SCHEMA_INIT_LOCK = threading.Lock()
 _SCHEMA_INITIALIZED_DBS: OrderedDict[str, tuple[int, int, int]] = OrderedDict()
 _SCHEMA_INITIALIZED_MAX = 256
@@ -58,7 +62,7 @@ class _LegacyOwnerLedger:
 
 # LLM: 到期唤醒全局 SQLite 索引投影，权威 job 状态仍在 owner 账本；按物理文件指纹缓存 schema 初始化，改动须同步 test_scheduler_due_index.py。
 # 类用途: 维护跨 owner 的最近到期时刻索引与监控短编号分配，供网关后台按时唤醒目标 owner。
-class SchedulerDueIndex:
+class SchedulerDueIndex(SchedulerSourceOwnerIndex):
     """SQLite projection used only to wake the correct owner at the right time."""
 
     def __init__(self, path: str | Path) -> None:
@@ -353,7 +357,7 @@ class SchedulerDueIndex:
                 return None
             initialized = (conn.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
                            and conn.execute("SELECT count(*) FROM sqlite_master WHERE type='table' "
-                                            "AND name IN ('scheduler_due_owners', 'scheduler_due_meta')").fetchone()[0] == 2)
+                                            "AND name IN ('scheduler_due_owners', 'scheduler_due_meta', 'scheduler_source_owners')").fetchone()[0] == 3)
             ensure_sqlite_wal(conn)
             if not initialized:
                 _create_due_schema(conn)
@@ -399,6 +403,7 @@ def _create_due_schema(conn: sqlite3.Connection) -> None:
     # 最早可领取时间还受租约约束，表达式索引让 MIN(MAX(...)) 直接定位索引端点。
     conn.execute("""CREATE INDEX IF NOT EXISTS scheduler_due_owner_wake_idx
         ON scheduler_due_owners (MAX(next_due_at, lease_until))""")
+    create_source_owner_schema(conn)
     conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
 
 

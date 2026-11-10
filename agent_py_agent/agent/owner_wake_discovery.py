@@ -137,16 +137,16 @@ _ACTIVITY_BINDINGS = {}
 _ACTIVITY_BINDING_LOCK = threading.Lock()
 
 
-def bind_owner_activity_index(owners_dir, index, *, sweep_seconds, freshness_seconds, note_owner=None, forget_owner=None):
+def bind_owner_activity_index(owners_dir, index, *, sweep_seconds, freshness_seconds, note_owner=None, forget_owner=None, on_sweep_complete=None):
     """只在组合根登记投影，不改变原发现器的调用签名或owner权限。"""
-    binding = _ActivityDiscovery(owners_dir, index, sweep_seconds, freshness_seconds, note_owner, forget_owner)
+    binding = _ActivityDiscovery(owners_dir, index, sweep_seconds, freshness_seconds, note_owner, forget_owner, on_sweep_complete)
     with _ACTIVITY_BINDING_LOCK:
         _ACTIVITY_BINDINGS[binding.key] = binding
     return binding
 
 
 class _ActivityDiscovery:
-    def __init__(self, owners_dir, index, sweep_seconds, freshness_seconds, note_owner, forget_owner):
+    def __init__(self, owners_dir, index, sweep_seconds, freshness_seconds, note_owner, forget_owner, on_sweep_complete=None):
         self.key = str(Path(owners_dir).resolve())
         self.index = index
         self.sweep_seconds = sweep_seconds
@@ -154,6 +154,8 @@ class _ActivityDiscovery:
         self.note_owner = note_owner
         self.forget_owner = forget_owner
         self.next_sweep_at = 0.0
+        self.on_sweep_complete = on_sweep_complete
+        self._sweep_failed = False
 
     def close(self):
         with _ACTIVITY_BINDING_LOCK:
@@ -177,7 +179,10 @@ class _ActivityDiscovery:
                 if self.forget_owner is not None:
                     self.forget_owner(key)
         cursor, scanned = None, len(targets)
+        completed_sweep = False
         if after_cursor is not None or time.monotonic() >= self.next_sweep_at:
+            if after_cursor is None:
+                self._sweep_failed = False
             page = discover_owner_home_page(owners_dir, limit=limit, after_cursor=after_cursor)
             self.index.rebuild(owner_key(target.identity) for target in page.targets)
             for target in page.targets:
@@ -185,6 +190,7 @@ class _ActivityDiscovery:
             scanned += page.scanned
             cursor = page.next_cursor
             if cursor is None:
+                completed_sweep = True
                 self.next_sweep_at = time.monotonic() + self.sweep_seconds
         hard, soft = [], []
         for key, target in targets.items():
@@ -205,6 +211,7 @@ class _ActivityDiscovery:
                     self.note_owner(key, target.home_dir)
                 self.index.note_facts(key, kind == "hard", kind == "soft", revision=revision)
             except Exception:
+                self._sweep_failed = True
                 try:
                     self.index.note_facts(key, None, None, revision=revision)
                 except Exception:
@@ -213,6 +220,11 @@ class _ActivityDiscovery:
                 hard.append(target.identity)
             elif kind == "soft":
                 soft.append(target.identity)
+        if completed_sweep and self.on_sweep_complete is not None:
+            try:
+                self.on_sweep_complete(not self._sweep_failed)
+            except Exception:
+                pass  # 辅助恢复失败不能抹掉本页已证明的原hard/soft事实。
         return OwnerWakeDiscoveryPage((*hard, *soft), cursor, scanned, tuple(hard), tuple(soft))
 
 

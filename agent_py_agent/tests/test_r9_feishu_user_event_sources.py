@@ -118,6 +118,7 @@ def test_real_observation_http_probe_register_replay_and_lease_release(tmp_path,
 
     base = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path / 'home')), tmp_path)
     paths = gateway_paths(base)
+    base.scheduler_repository.due_index.mark_source_discovery_complete()
     owner = resolve_owner_home(base.home_paths.root, OwnerIdentity.provider_group('feishu', 'group'))
     repo, job = repo_with_job(tmp_path)
     owner.scheduler_dir.mkdir(parents=True, exist_ok=True)

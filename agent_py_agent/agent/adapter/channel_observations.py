@@ -70,6 +70,6 @@ def submit_channel_observation(manager, payload, *, probe_only=False):
         data=json.dumps({**payload, **({'probe_only': True} if probe_only else {})}, ensure_ascii=False).encode(), headers=headers)
     with open_authenticated_request(request, timeout=30) as response:
         result = json.loads(response.read().decode())
-    if not isinstance(result, dict) or result.get('status') not in {'accepted', 'ignored'}:
+    if not isinstance(result, dict) or result.get('status') not in ({'accepted', 'ignored'} if probe_only else {'accepted', 'ignored', 'partial'}):
         raise RuntimeError('CHANNEL_OBSERVATION_NOT_ACCEPTED')
     return result

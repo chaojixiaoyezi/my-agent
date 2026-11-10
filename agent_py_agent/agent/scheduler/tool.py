@@ -232,10 +232,16 @@ class ScheduleTool(BaseTool):
             if exc.error_code.startswith('FEISHU_'):
                 from ..user_space.feishu_authorization import permission_requirements
 
-                outcome.result_envelope['permission_requirements'] = permission_requirements(self.agent,
-                    identity='bot', required_scopes=('im:message:readonly', 'im:message.group_msg',
-                        'im:chat:read', 'im:chat.members:read'), required_events=('im.message.receive_v1',),
+                personal = exc.error_code == 'FEISHU_USER_AUTH_REQUIRED'
+                requirements = permission_requirements(self.agent,
+                    identity='user' if personal else 'bot',
+                    required_scopes=('im:chat:readonly',) if personal else ('im:message:readonly', 'im:chat:readonly'),
+                    required_events=() if personal else ('im.message.receive_v1',),
                     official_api_docs=('https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/events/receive',))
+                if not personal:
+                    requirements['required_scopes_by_sender_type'] = {
+                        'user': ['im:message.group_msg'], 'bot': ['im:message.group_msg.include_bot:read']}
+                outcome.result_envelope['permission_requirements'] = requirements
             return outcome
         except GroupAuthorizationError as exc:
             return _error(str(exc), exc.error_code, metadata_only=metadata_only)
