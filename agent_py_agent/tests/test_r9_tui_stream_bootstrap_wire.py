@@ -129,4 +129,3 @@ def test_control_receipt_freezes_display_capability_and_preserves_legacy_replay(
     changed_scope = replace(retry_scope, workspace={'cwd': '/different/workspace', 'roots': []})
     _, changed_digest = gateway_control_operation_identity(changed_scope, '/status')
     assert not control_input_matches_receipt(old_receipt, changed_scope, '/status', changed_digest)
-

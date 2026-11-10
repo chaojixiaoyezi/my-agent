@@ -3679,6 +3679,7 @@ agent_py_agent/
 |   |-- test_memory_curator_v2.py      # Curator 触发、模型配置、权限、失败恢复与整批提交
 |   |-- test_r9_candidate_promotion_windows.py  # 候选晋升分页、重启续读和调度收尾
 |   |-- test_r9_model_result_consumer_lifetime.py  # 模型结果迟到时的引用释放与正常错误交付
+|   |-- test_r9_tui_stream_bootstrap_wire.py  # 真实客户端首次控制、流式显示及跨版本重试
 |   |-- test_curator_dispatch_eligibility.py # 待确认候选不单独运输/策展，保pending、旧lease、新输入与日终
 |   |-- test_curator_recovery_race.py  # Curator 双进程发现/清理交错与唯一恢复执行
 |   |-- test_curator_recovery_critical_section.py # Curator manifest重验、清理审计领取持锁与异常释放
