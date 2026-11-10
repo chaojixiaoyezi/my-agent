@@ -401,3 +401,90 @@ def test_unrelated_thread_resolve_denial_names_parent_and_changes_nothing(case):
     assert result.ok is False
     assert case.parent_task_id in result.output and "没有转交" in result.output
     assert case.agent.conversation_store.guidance.pending("task", case.parent_task_id) == []
+
+
+# ---------- PRO-MSG-004 扩展：定时延续修改直属下级目标（goal_binding.goal_tool_target） ----------
+
+
+def _child_goal(case: Case) -> object:
+    child = case.agent.subagents.load(case.child_id)
+    return case.agent.conversation_store.goals.create(
+        {"thread_id": child.agent_thread_id, "task_id": child.id, "objective": "原子目标"}
+    )
+
+
+def _update_child_goal(case: Case, goal: object, objective: str) -> object:
+    return case.agent.tools.tools["update_goal"].execute(
+        {"target_run_id": case.child_id, "objective": objective, "expected_revision": goal.revision}
+    )
+
+
+def _goal_objective(case: Case, goal: object) -> str:
+    return case.agent.conversation_store.goals.load(goal.thread_id).objective
+
+
+def test_scheduled_followup_reads_and_revises_the_parents_child_goal(case):
+    goal = _child_goal(case)
+    _start_scheduled_run(case)
+    with _bound(case):
+        read = case.agent.tools.tools["get_goal"].execute({"target_run_id": case.child_id})
+        updated = _update_child_goal(case, goal, "定时检查调整后的子目标")
+
+    assert read.ok is True, read.output
+    assert updated.ok is True, updated.output
+    current = case.agent.conversation_store.goals.load(goal.thread_id)
+    assert current.objective == "定时检查调整后的子目标"
+    assert current.goal_id == goal.goal_id and current.revision > goal.revision
+
+
+def test_goal_edit_without_claim_binding_or_with_forged_attributes_is_denied(case):
+    goal = _child_goal(case)
+    _start_scheduled_run(case)
+    unbound = _update_child_goal(case, goal, "未绑定租约")
+    params = case.agent._current_run_params
+    params.task_attributes = {**params.task_attributes, "conversation_task_id": "gwreq-other"}
+    with _bound(case):
+        forged = _update_child_goal(case, goal, "伪造属性")
+
+    for result in (unbound, forged):
+        assert result.ok is False and result.error_code == "GOAL_STATE_CONFLICT"
+        assert result.effect_outcome == "not_started"
+    assert _goal_objective(case, goal) == "原子目标"
+    assert _child_messages(case) == []
+
+
+def test_goal_edit_from_stale_finished_run_is_denied(case):
+    goal = _child_goal(case)
+    _start_scheduled_run(case)
+    claim = case.agent.scheduler_repository.get_active_run(case.run_id)
+    case.agent.scheduler_repository.finish_run(case.run_id, claim["claim_id"], _done_finish())
+    with _bound(case):
+        stale = _update_child_goal(case, goal, "旧定时片")
+
+    assert stale.ok is False and stale.error_code == "GOAL_STATE_CONFLICT"
+    assert _goal_objective(case, goal) == "原子目标"
+
+
+def test_goal_edit_after_parent_cancelled_is_denied(case):
+    goal = _child_goal(case)
+    _start_scheduled_run(case)
+    case.agent.conversation_store.tasks.update_status(
+        {"task_id": case.parent_task_id, "status": "cancelled", "expected_status": "active", "now": time.time()}
+    )
+    with _bound(case):
+        revoked = _update_child_goal(case, goal, "父任务已取消")
+
+    assert revoked.ok is False and revoked.error_code == "GOAL_STATE_CONFLICT"
+    assert _goal_objective(case, goal) == "原子目标"
+
+
+def test_unrelated_thread_cannot_edit_child_goal_and_nothing_is_routed(case):
+    goal = _child_goal(case)
+    other_thread = _thread(case.agent, "unrelated")
+    _foreground(case.agent, other_thread, "task-U")
+    result = _update_child_goal(case, goal, "越权改目标")
+
+    assert result.ok is False and result.error_code == "GOAL_STATE_CONFLICT"
+    assert _goal_objective(case, goal) == "原子目标"
+    assert case.agent.conversation_store.guidance.pending("task", case.parent_task_id) == []
+    assert _child_messages(case) == []
