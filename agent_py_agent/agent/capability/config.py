@@ -87,6 +87,8 @@ class CapabilityConfig:
     orchestration_pending_inbox_enabled: bool = True
     # 收件箱每页默认条数；0 表示不另设限制，仍受单页硬上限 200 约束。
     orchestration_pending_inbox_page_limit: int = 50
+    # 进展观察可选读取的 git 仓库（绝对路径、须在工作区根内、无符号链接、归本用户）；空列表=不观察 git。
+    orchestration_git_progress_repos: list[str] = field(default_factory=list)
     # 后台过程等待默认30秒交回控制；0不加工作片限制，仍受工具协议600秒与取消边界约束。
     process_session_wait_slice_seconds: int = 30
     # 整机跨owner安全阀，仅宿主注入或main配置可覆盖；普通owner私有同名键不影响整机；0不限，可设32或64。

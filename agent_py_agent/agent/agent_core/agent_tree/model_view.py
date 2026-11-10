@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 
 from ...subagents.models import TaskStatus
+from ..orchestration.progress_watch import classify_nodes
 
 # recent_tool_failure 是节点投影时从权威事件流现算的最近工具失败段，让父级分清"被拦下"与"在思考"。
 # replaced_by 是已被接替的结构化关系（接替者与 superseded/taken_over），让父级不再使用被取代的旧结果。
@@ -62,7 +64,7 @@ def agent_tree_model_payload(snapshot: dict[str, object]) -> dict[str, object]:
         "scope": snapshot.get("scope"),
         "root_id": snapshot.get("root_id"),
         "main": _pick(main, ("run_id", "status", "current_tool")),
-        "nodes": [_model_node(node, results.get(node.get("run_id"), {})) for node in _rows(snapshot.get("nodes"))],
+        "nodes": _model_nodes(_rows(snapshot.get("nodes")), results),
         "scope_resolution": snapshot.get("scope_resolution", {}),
         "scope_warnings": snapshot.get("scope_warnings", []),
         "warnings": snapshot.get("warnings", []),
@@ -86,6 +88,8 @@ def agent_tree_model_preview(payload: dict[str, object]) -> str:
         row = _pick(node, ("run_id", "parent_run_id", "role", "status", "replaced_by", "failure_type", "current_tool",
                            "readiness", "recent_tool_failure", "model", "reasoning_effort"))
         row["last_progress_summary"] = str(node.get("last_progress_summary") or "")[:160]
+        # 预览只留进展分类的状态与原因码，完整来源仍在本次工具的完整结果里。
+        row["progress"] = _pick(node.get("progress"), ("state", "reason"))
         refs = node.get("read_order")
         refs = [item for item in refs if isinstance(item, str) and item] if isinstance(refs, list) else []
         kept_refs = refs[:1]
@@ -98,6 +102,19 @@ def agent_tree_model_preview(payload: dict[str, object]) -> str:
     preview["nodes"] = selected
     preview["omitted_nodes"] = len(nodes) - len(selected)
     return _json(preview)
+
+
+# LLM: ORCH-03：每个节点在原白名单字段之外附上只读 progress 分类（progress_watch.v1），同一次快照共用一个观察时间；
+#   分类不进 agent_tree_progress_observation 的稳定指纹，单纯时间流逝不会重置重复提醒。
+# 函数用途: 生成模型节点列表并附上进展分类。
+def _model_nodes(nodes: list[dict[str, object]], results: dict[object, dict[str, object]]) -> list[dict[str, object]]:
+    progress = classify_nodes(nodes, now=time.time())
+    rows = []
+    for node, classified in zip(nodes, progress, strict=True):
+        row = _model_node(node, results.get(node.get("run_id"), {}))
+        row["progress"] = classified
+        rows.append(row)
+    return rows
 
 
 # LLM: 只读取白名单状态字段及规范 result index，不把 recovery summary/checkpoint 当成交付结果。

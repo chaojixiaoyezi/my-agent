@@ -55,6 +55,8 @@ tool_program_enabled: true
 orchestration_pending_inbox_enabled: true
 # 收件箱每页默认条数；0 表示不另设限制，仍受单页硬上限 200 约束。
 orchestration_pending_inbox_page_limit: 50
+# 子代理进展观察可选读取的 git 仓库列表（绝对路径、须在工作区根内、无符号链接、归本用户）；默认空=不观察 git。只读，每条命令有超时和输出上限。
+orchestration_git_progress_repos: []
 # 后台进程wait每片最多等待30秒，保留原句柄/完成事件/停止；0不加片限制，协议仍最多600秒。
 process_session_wait_slice_seconds: 30
 # 整机跨 owner 共享的并行工具调用安全阀；0 表示不限制（默认），生产环境可按机器规格设为 32 或 64。
