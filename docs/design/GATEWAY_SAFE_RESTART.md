@@ -263,3 +263,10 @@
 `BackgroundShutdown.slices` 继续保存原全部未结责任，UNKNOWN 不因年龄、容量或调度预算删除。新后台片出生只从同拥有者的待复核顺序中预约最多 8 个已结束片，锁外核原 claim/attempt/operation 后把仍未决片放回队尾；读取异常也保留本批尚未核验项，后继新提交公平继续。此顺序只安排复核，不授执行或完成权；显式 `blockers`、排空预检和最终 shutdown 仍覆盖全体原片。单片内部的原 claim 核验保持，不把 8 片称为固定 SQL/耗时上限。
 
 原 worker 观察只有通过原 `exited()` 的准确身份及物理退出/未启动证明后才释放 Thread 引用，并保留单调退出计数；出生或身份未知继续保留。释放已退 worker 不会删除 UNKNOWN claim。257 个各含一个未决 claim 的计数回放中，每个新提交从 257 次降到 8 次，33 次新提交覆盖全部旧片；最终核收仍读取并拒绝全部 257 个 UNKNOWN。该结果说明重复核收的 CPU/I/O 放大，不能据此断言真实进程物理内存均由这些 Thread 引用造成。
+
+
+## 2026-11-09 运行中后台片的可逆 park
+
+工具排空之后、关闭HTTP/服务循环之前，后台控制先核已finished片的原责任；UNKNOWN及不可核收来源仍拒绝。对仍running的片，仅关闭本次后台准入，沿原准确claim中断名请求本片结束，复用原两秒等待预算核future/claim/attempt/worker。成功才保住该准入门进入原cleanup；超时/异常则恢复新片准入，HTTP与原服务循环未停止。已请求旧片退出的事实不撤销，晚到claim/后继领取仍在原片内消费早停，避免取消升级后旧片继续领新工作。不会取消或暂停持久TaskLink、删除wake或清UNKNOWN。
+
+此阶段复用原InterruptedError→claim cancelled协议；原wake在TaskLink仍active时保pending，原neutral/毒丸结案策略未在本片改变，不把“本次不计失败”夸大为永远不触独立24小时neutral结案策略。不可抢占、不合作provider仍可令本次升级取消，不能以park意图签已退出。

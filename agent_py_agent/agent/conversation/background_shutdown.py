@@ -37,13 +37,14 @@ class BackgroundSlice:
         self.workers = []
         self.exited_worker_count = 0
         self.finished = False
+        self.draining = False
 
     # LLM: 调用点必须已登记同claim的interruptible；关闭门后即时中断并拒新片，不触碰后继claim。
     # 函数用途: 保存原领取句柄，让宿主停止只命中这一片。
     def bind_claim(self, claim):
         with self.owner.lock:
             self.claims.append(claim)
-            stopping = self.owner.stopping
+            stopping = self.owner.stopping or self.owner.restart_paused or self.draining
         if stopping:
             interrupt_by_name(conversation_claim_interrupt_name(claim.claim_id))
             raise InterruptedError('Gateway正在停止本次后台执行片')
@@ -63,6 +64,7 @@ class BackgroundSlice:
     # 函数用途: 中断本片已经登记的准确claim，不发任务级取消。
     def interrupt(self):
         with self.owner.lock:
+            self.draining = True
             claims = tuple(self.claims)
         for claim in claims:
             interrupt_by_name(conversation_claim_interrupt_name(claim.claim_id))
@@ -139,6 +141,7 @@ class BackgroundShutdown:
     def __init__(self):
         self.lock = threading.RLock()
         self.stopping = False
+        self.restart_paused = False
         self.deadline = 0.0
         self.supervisor = None
         self.slices = set()
@@ -169,6 +172,41 @@ class BackgroundShutdown:
         for item in slices:
             item.interrupt()
 
+    def pause_for_restart(self):
+        """原片有界park而不关闭服务；未结终态先拒绝，不用中断洗掉UNKNOWN。"""
+        with self.lock:
+            finished = tuple(item for item in self.slices if item.finished)
+        blockers = [row for item in finished for row in item.blockers()]
+        if blockers:
+            return blockers
+        with self.lock:
+            if self.stopping:
+                return [{'reason': 'background_shutdown_started', 'ref': 'original_owner'}]
+            self.restart_paused = True
+            active = tuple(item for item in self.slices if not item.finished)
+        settled = False
+        try:
+            deadline = time.monotonic() + SHUTDOWN_WAIT_SECONDS
+            for item in active:
+                item.interrupt()
+            while True:
+                blockers = self.blockers()
+                if not blockers:
+                    settled = True
+                    return []
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return blockers
+                time.sleep(min(.01, remaining))
+        finally:
+            if not settled:
+                self.resume_after_restart_cancel()
+
+    def resume_after_restart_cancel(self):
+        """只复原未来片准入；已经请求原片退出的事实不撤销，不改持久任务。"""
+        with self.lock:
+            self.restart_paused = False
+
     # LLM: ContextVar只跟随原job与其copy_context；finally不改执行账，只移除已核清观察，未知继续保留。
     # 函数用途: 在原后台工作函数外包住本片控制，阻止停止后的新claim开始。
     @contextmanager
@@ -187,7 +225,7 @@ class BackgroundShutdown:
                         self._finished_rechecks[prior] = None
         item = BackgroundSlice(self, repo)
         with self.lock:
-            if self.stopping:
+            if self.stopping or self.restart_paused:
                 raise InterruptedError('Gateway已停止接纳后台执行片')
             self.slices.add(item)
         token = _CURRENT.set(item)
@@ -289,5 +327,5 @@ def model_shutdown_blockers():
 # 函数用途: 在停止后阻止同tick继续领取后继业务片，未观察调用保持原行为。
 def check_background_admission():
     item = _CURRENT.get()
-    if item is not None and item.owner.stopping:
+    if item is not None and (item.owner.stopping or item.owner.restart_paused or item.draining):
         raise InterruptedError('Gateway已停止接纳新的后台claim')

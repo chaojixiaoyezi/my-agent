@@ -99,14 +99,19 @@ def drain_for_requested_restart(context: GatewayRunContext, process_identity: di
     # 调度器排空期间不再提交新工作；已越过其检查的迟到提交仍由最终 cleanup 拒绝交接。
     if result.get("ok") and not result.get("forced_after_drain_timeout") and background_shutdown is not None:
         try:
-            blockers = background_shutdown.blockers()
+            blockers = background_shutdown.pause_for_restart()
         except Exception as exc:
             blockers = [{"reason": "background_drain_unreadable", "error_type": type(exc).__name__}]
         if blockers:
             reset_restart_drain_state()
             result = {"ok": False, "reason": "background_unsettled", "request_id": request_id,
                       "unresolved_operation_refs": blockers}
+    if result.get("ok") and stop_requested():
+        reset_restart_drain_state()
+        result = {"ok": False, "reason": "stop_requested", "request_id": request_id}
     if not result.get("ok"):
+        if background_shutdown is not None:
+            background_shutdown.resume_after_restart_cancel()
         cancel_restart_request(paths, request, result)
         _publish_drain_state(paths, {"phase": "cancelled", "reason": result.get("reason"), "request_id": request_id,
                                      "service_cleanup_started": False,
