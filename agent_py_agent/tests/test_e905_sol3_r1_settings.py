@@ -159,11 +159,13 @@ def test_http_timeout_and_externalization_have_the_correct_tiers():
 def test_listed_parameter_classification_has_exact_counts():
     registry = listed_parameters()
     # 摘要进度心跳归高级，后台日志容量归部署；计数覆盖全部正式目录项。
-    assert Counter(spec.tier for spec in registry.values()) == {"common": 14, "advanced": 214, "deployment": 147}
+    assert Counter(spec.tier for spec in registry.values()) == {"common": 14, "advanced": 215, "deployment": 147}
     assert sum(spec.source == "runtime_guard" for spec in registry.values()) == 23
     assert len(DEPLOYMENT_ONLY_KEYS) == 124
     assert registry.keys() >= DEPLOYMENT_ONLY_KEYS
-    assert len(registry) == 375
+    assert len(registry) == 376
+    streaming = registry["tui_default_verbose_level"]
+    assert streaming.tier == "advanced" and streaming.writable and streaming.user_editable
     pulse = registry["memory_compact_progress_heartbeat_seconds"]
     assert pulse.tier == "advanced" and pulse.writable and pulse.user_editable
     assert pulse.default == AgentConfig().memory_compact_progress_heartbeat_seconds == 5.0

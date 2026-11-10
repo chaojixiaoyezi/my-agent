@@ -115,7 +115,7 @@ def _scoped_model_host(base_agent, scope, *, metadata_source=None) -> tuple[Simp
     store = owner_conversation_store(base_agent, scoped_home)
     config_host.conversation_store = store
     thread = store.threads.get_or_create({
-        **initial_verbose_settings(base_agent.config, scope.metadata),
+        **initial_verbose_settings(getattr(base_agent, "config", None), scope.metadata),
         "canonical_user_id": scope.user_id, "owner_id": scoped_home.owner_id,
         "owner_home": str(scoped_home.owner_home_dir), "channel": scope.channel,
         "channel_conversation_id": scope.conversation_id, "channel_user_id": scope.user_id,

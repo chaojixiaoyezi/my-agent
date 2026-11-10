@@ -403,7 +403,7 @@ def _load_gateway_thread(
     try:
         thread = store.threads.get_or_create(
             {
-                **initial_verbose_settings(inputs.agent.config, inputs.request),
+                **initial_verbose_settings(getattr(inputs.agent, "config", None), inputs.request),
                 "canonical_user_id": str(spec.get("canonical_user_id") or "local-agent"),
                 "owner_id": str(
                     getattr(getattr(inputs.agent, "home_paths", None), "owner_id", "") or ""

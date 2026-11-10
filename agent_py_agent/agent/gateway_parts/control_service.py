@@ -735,7 +735,7 @@ def _execute_gateway_new_session(base_agent, paths, command, scope):
     if error:
         return ConversationControlResult("new", False, "会话绑定不可读，未切换。", error_code="THREAD_BINDING_UNAVAILABLE")
     if current is None:
-        current = store.threads.get_or_create({**initial_verbose_settings(agent.config, scope.metadata), "canonical_user_id": scope.user_id, "channel": scope.channel,
+        current = store.threads.get_or_create({**initial_verbose_settings(getattr(agent, "config", None), scope.metadata), "canonical_user_id": scope.user_id, "channel": scope.channel,
             "channel_user_id": scope.user_id, "channel_conversation_id": scope.conversation_id,
             "owner_id": getattr(home, "owner_id", ""), "owner_home": str(getattr(home, "owner_home_dir", "")),
             "cwd": str(getattr(agent, "effective_workspace_root", "") or getattr(home, "owner_home_dir", ""))})
@@ -760,7 +760,7 @@ def _execute_gateway_workspace_control(base_agent, command, scope, *, is_admin: 
     if thread is None:
         if command.kind == "fork":
             return ConversationControlResult("fork", False, "当前还没有可分叉的会话。", error_code="WORKSPACE_CONTROL_INVALID")
-        thread = store.threads.get_or_create({**initial_verbose_settings(owner_agent.config, scope.metadata), "canonical_user_id": scope.user_id, "channel": scope.channel,
+        thread = store.threads.get_or_create({**initial_verbose_settings(getattr(owner_agent, "config", None), scope.metadata), "canonical_user_id": scope.user_id, "channel": scope.channel,
             "channel_conversation_id": scope.conversation_id, "channel_user_id": scope.user_id,
             "owner_id": getattr(home, "owner_id", ""), "owner_home": str(owner_home)})
     return execute_workspace_control(store, command, thread_id=thread.thread_id, owner_home=owner_home, is_admin=is_admin)
@@ -820,7 +820,7 @@ def _execute_audit_control(
                 "channel": scope.channel,
                 "channel_conversation_id": scope.conversation_id,
                 "channel_user_id": scope.user_id,
-                **initial_verbose_settings(owner_agent.config, scope.metadata),
+                **initial_verbose_settings(getattr(owner_agent, "config", None), scope.metadata),
                 "title": "Audit",
             }
         )
@@ -1099,7 +1099,7 @@ def _execute_goal_control(
             cwd, roots = gateway_request_workspace_scope(owner_agent, {"workspace": scope.workspace})
         thread = store.threads.get_or_create(
             {
-                **initial_verbose_settings(owner_agent.config, scope.metadata),
+                **initial_verbose_settings(getattr(owner_agent, "config", None), scope.metadata),
                 "canonical_user_id": scope.user_id,
                 "owner_id": str(getattr(getattr(owner_agent, "home_paths", None), "owner_id", "") or ""),
                 "owner_home": str(
@@ -1144,7 +1144,7 @@ def _settings_thread(owner_agent: object, scope: GatewayControlScope) -> object:
             "channel": scope.channel,
             "channel_conversation_id": scope.conversation_id,
             "channel_user_id": scope.user_id,
-            **initial_verbose_settings(owner_agent.config, scope.metadata),
+            **initial_verbose_settings(getattr(owner_agent, "config", None), scope.metadata),
             "title": "会话设置",
         }
     )
