@@ -95,6 +95,10 @@ _CREDENTIAL_KEY_NAMES = (
 # 两份词表各管一处、不共用：common/ 不能反向依赖 settings/（import boundaries 会拦）。
 # 常量用途: 凭据词集合，供 _is_credential_key_name 做等于/后缀判定。
 _CREDENTIAL_KEY_NAME_SET = frozenset(_CREDENTIAL_KEY_NAMES.split("|"))
+# 预建固定词表的完整分隔后缀，避免每检查一个普通字段就重建三十余个元组。
+_CREDENTIAL_KEY_SUFFIXES = tuple(
+    separator + word for word in _CREDENTIAL_KEY_NAME_SET for separator in ("_", "-", ".")
+)
 # LLM: 词表不含正则元字符的自检——它同时被正则拼装和集合判定使用，混进 `?` 这类符号会让集合判定
 #   静默失效（api_?key 与 api_key 不相等），是"功能悄悄变松"而不是报错。这行在 import 时拦住。
 assert not any(character in name for name in _CREDENTIAL_KEY_NAME_SET for character in "?*+[](){}|\\"), (
@@ -105,8 +109,7 @@ assert not any(character in name for name in _CREDENTIAL_KEY_NAME_SET for charac
 # 函数用途: 判断一个键名是不是凭据键——等于凭据词，或以 _ / - / 点连接后以凭据词结尾。
 def _is_credential_key_name(name: str) -> bool:
     lowered = name.lower()
-    return any(lowered == word or lowered.endswith(("_" + word, "-" + word, "." + word))
-               for word in _CREDENTIAL_KEY_NAME_SET)
+    return lowered in _CREDENTIAL_KEY_NAME_SET or lowered.endswith(_CREDENTIAL_KEY_SUFFIXES)
 
 
 # LLM: 只用一个不嵌套的字符类整段取出键名，再在回调里判定——键名前缀原来是 (?:[A-Za-z0-9_.]*[_-])*，

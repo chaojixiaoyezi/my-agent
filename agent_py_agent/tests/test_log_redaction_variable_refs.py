@@ -383,7 +383,8 @@ def test_credential_word_list_is_literal_and_matchable() -> None:
     for word in words:
         assert not any(character in word for character in "?*+[](){}|\\"), f"词表混进正则元字符: {word}"
         assert redaction._is_credential_key_name(word)
-        assert redaction._is_credential_key_name("DB_" + word.upper())
+        for separator in ("_", "-", "."):
+            assert redaction._is_credential_key_name("DB" + separator + word.upper())
     # 全小写归一：settings 那份按原样比，这里必须大小写都认。
     for name in ("api_key", "API_KEY", "Api_Key", "x-api-key"):
         assert redaction._is_credential_key_name(name), name
