@@ -510,8 +510,9 @@ def test_settled_fd_delta_detects_persistent_growth(tmp_path):
 
 
 def _lane_service_clock(monkeypatch):
-    """真实车道执行后计入40ms原子I/O；所有生产预算共用单调时钟，测试墙钟限额不变。"""
-    wall_clock, spent = time.monotonic, [0.0]
+    """预算钟只按真实车道推进，避免宿主磁盘抖动改变完整轮次；墙钟限额另计。"""
+    wall_clock = time.monotonic
+    spent = [wall_clock()]
     original = storage_lanes.resolve_storage_lane
 
     def resolve(kind):
@@ -527,7 +528,7 @@ def _lane_service_clock(monkeypatch):
                 spent[0] += 0.040
         return execute
 
-    monkeypatch.setattr(time, 'monotonic', lambda: wall_clock() + spent[0])
+    monkeypatch.setattr(time, 'monotonic', lambda: spent[0])
     monkeypatch.setattr(storage_lanes, 'resolve_storage_lane', resolve)
     return wall_clock
 

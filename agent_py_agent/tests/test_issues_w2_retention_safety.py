@@ -152,15 +152,51 @@ def test_legacy_memory_trash_is_kept_while_cache_trash_is_planned(tmp_path):
 # LLM: Each binding index independently preserves an old thread; an unbound old thread remains reclaimable.
 # 函数用途: 验证绑定豁免不关闭正常会话回收。
 @pytest.mark.parametrize('index_name', ['channel_bindings.json', 'user_latest_threads.json'])
-def test_bound_old_thread_is_kept_and_unbound_control_is_trashed(tmp_path, index_name):
+@pytest.mark.parametrize('expired_first_slice', [False, True])
+def test_bound_old_thread_is_kept_and_unbound_control_is_trashed(tmp_path, monkeypatch, index_name, expired_first_slice):
+    from agent_py_agent.agent.memory_store.retention_scan_budget import RetentionScanBudget
+
     home, service = _runtime(tmp_path)
     store, bound = _thread(home, 'bound')
     _store, unbound = _thread(home, 'unbound')
-    write_private_json_file_atomic(store.storage.root / index_name, {'binding': bound.thread_id})
-    report = service.apply(now=NOW)
+    binding_path = store.storage.root / index_name
+    write_private_json_file_atomic(binding_path, {'binding': bound.thread_id})
+    bound_path = store.storage.thread_path(bound.thread_id)
+    original_thread, original_binding = bound_path.read_bytes(), json.loads(binding_path.read_bytes())
+    original_budget, budgets = RetentionScanBudget.default, []
+
+    def scan_budget(cls, config=None):
+        budget = original_budget(config=config)
+        if expired_first_slice and not budgets:
+            # 只模拟首片已经耗尽，不扩大原25ms或条目/字节额度。
+            budget.deadline = time.monotonic()
+        budgets.append(budget)
+        return budget
+
+    monkeypatch.setattr(RetentionScanBudget, 'default', classmethod(scan_budget))
+    actions = {}
+    for attempt in range(32):
+        report = service.apply(now=NOW)
+        assert report.ok and not report.legal_hold, report
+        budget = budgets[-1]
+        assert budget.entries <= budget.max_entries and budget.size <= budget.max_bytes
+        assert bound_path.read_bytes() == original_thread
+        assert json.loads(binding_path.read_bytes()) == original_binding
+        for action in report.actions:
+            assert action.action_id not in actions, '续片不得重复执行已提交动作'
+            assert action.status not in {'failed', 'busy', 'state_changed'}, action
+            actions[action.action_id] = action
+        if expired_first_slice and attempt == 0:
+            assert report.scan_partial and not report.actions and store.threads.load(unbound.thread_id) is not None
+        if not report.scan_partial:
+            break
+    else:
+        pytest.fail('32个原预算片内未完成绑定保护和未绑定线程退休')
+    assert not expired_first_slice or len(budgets) > 1
     assert store.threads.load(bound.thread_id) is not None
     assert store.threads.load(unbound.thread_id) is None
-    assert any(action.record_id == unbound.thread_id and action.status == 'trashed' for action in report.actions)
+    retired = [action for action in actions.values() if action.record_id == unbound.thread_id]
+    assert len(retired) == 1 and retired[0].status == 'trashed'
 
 
 # LLM: A binding published after planning must survive the apply-time check without index removal or file movement.
