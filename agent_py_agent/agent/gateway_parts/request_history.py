@@ -524,7 +524,12 @@ def _conversation_row_artifacts(row: object, current_request_id: str) -> list[di
     metadata = metadata if isinstance(metadata, dict) else {}
     if metadata.get("gateway_request_id") == current_request_id:
         return []
-    return _metadata_artifact_refs(metadata.get("delivery_artifacts"))
+    refs = _metadata_artifact_refs(metadata.get("delivery_artifacts"))
+    previous_request_id = metadata.get("gateway_request_id")
+    if isinstance(previous_request_id, str) and previous_request_id:
+        for ref in refs:
+            ref["gateway_request_id"] = previous_request_id
+    return refs
 
 
 # LLM: delivery_artifacts 写入会话 metadata 前只保留最小稳定字段；不得复制验收协议或任意嵌套对象。

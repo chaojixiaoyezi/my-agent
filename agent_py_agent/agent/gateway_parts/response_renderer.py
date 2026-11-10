@@ -224,7 +224,14 @@ def read_gateway_terminal_envelope_report(
     expected_id = str(request_id or path.stem).strip()
     if report.load_error is not None:
         return report
-    payload = report.payload
+    return validate_gateway_terminal_envelope_report(report.payload, request_id=expected_id, context=context)
+
+
+def validate_gateway_terminal_envelope_report(
+    payload: dict, *, request_id: str, context: str = "gateway.terminal.read",
+) -> GatewayJsonReadReport:
+    """复用同一终态纯校验，允许已锚定、有界读取的原字节进入正式读口。"""
+    expected_id = request_id
     terminal_response = payload.get("terminal_response") if isinstance(payload, dict) else None
     actual_id = str(payload.get("id") or "").strip() if isinstance(payload, dict) else ""
     response_id = (
