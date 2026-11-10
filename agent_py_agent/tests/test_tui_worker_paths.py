@@ -112,6 +112,7 @@ def test_thin_tui_initial_gateway_job_carries_client_workspace(tmp_path, monkeyp
     )
     from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
     from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.cli.chat_parts.plain_state import ChatJob
     from agent_py_agent.cli.chat_parts.tui_worker_paths import _submit_new_gateway_job
 
     project = tmp_path / "project"
@@ -142,8 +143,10 @@ def test_thin_tui_initial_gateway_job_carries_client_workspace(tmp_path, monkeyp
         return prepare_request(target, scope, payload)
 
     monkeypatch.setattr(http_handlers, "_prepare_http_gateway_input", inspect_before_admission)
-    job = SimpleNamespace(input_media=(),
+    job = ChatJob(input_media=(),
         user="创建项目",
+        request_id="chat-workspace",
+        inject=[],
         prompt_files=[],
         save=True,
         show_prompt=False,
@@ -151,6 +154,7 @@ def test_thin_tui_initial_gateway_job_carries_client_workspace(tmp_path, monkeyp
         system_task=None,
         tool_approval=True,
         rich_transcript=True,
+        tui_streaming=True,
         gateway_request_id="",
     )
 
@@ -165,6 +169,9 @@ def test_thin_tui_initial_gateway_job_carries_client_workspace(tmp_path, monkeyp
         "roots": [str(project.resolve())],
     }
     assert job.gateway_request_id == request_id
+    assert payload["client_capabilities"] == {
+        "tool_approval": True, "rich_transcript": True, "tui_streaming": True,
+    }
 
 
 def test_display_registration_failure_does_not_submit_a_request(tmp_path):

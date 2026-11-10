@@ -81,7 +81,8 @@ def test_model_menu_request_keeps_gateway_and_local_error_semantics(monkeypatch)
             return {"ok": True, "session_id": session_id, "operation": operation, "payload": payload}
 
     assert tui_model_menu._request_data_sync(_GatewayClient(), "s1", "list", {"a": 1}) == {
-        "ok": True, "session_id": "s1", "operation": "list", "payload": {"a": 1}}
+        "ok": True, "session_id": "s1", "operation": "list",
+        "payload": {"a": 1, "metadata": {"client_capabilities": {"tui_streaming": True}}}}
 
     def _raise(*_args, **_kwargs):
         raise ModelProfileError("模型配置结构无效。")

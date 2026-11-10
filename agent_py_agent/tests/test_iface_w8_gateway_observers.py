@@ -111,6 +111,8 @@ class TurnAdapter:
 
 
 def _tui_context(paths, *, attached=True, agent=None):
+    from agent_py_agent.cli.chat_parts.plain_state import ChatJob
+
     notices, clears = [], []
     runtime = SimpleNamespace(
         set_notice=lambda text, **kw: notices.append((text, kw)),
@@ -122,10 +124,11 @@ def _tui_context(paths, *, attached=True, agent=None):
         last_token_estimate_ref=[0], stop_event=threading.Event(), tui_runtime=runtime,
         current_session_id="iface-w8",
     )
-    job = SimpleNamespace(
+    job = ChatJob(
+        request_id="iface-w8-client", inject=[],
         gateway_request_id="req" if attached else "", user="观察原请求", input_media=(),
         prompt_files=[], save=False, show_prompt=False, resume_context=None, system_task=None,
-        tool_approval=True, rich_transcript=True,
+        tool_approval=True, rich_transcript=True, tui_streaming=True,
     )
     return SimpleNamespace(cfg=cfg, job=job, turn_inject=[], turn_adapter=TurnAdapter()), notices, clears
 

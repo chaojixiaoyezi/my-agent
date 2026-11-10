@@ -380,7 +380,8 @@ def test_pipe_probe_requires_explicit_start_and_hides_price_output_and_secret(tm
             await press(ui, b"\x01\x0b")
             await press(ui, "3.25\t\r")
             calls = [payload for operation, payload in gateway.calls if operation == "decision_probe"]
-            assert calls == [{"profile_id": gateway.key, "timeout_seconds": 3.25}]
+            assert calls == [{"profile_id": gateway.key, "timeout_seconds": 3.25,
+                              "metadata": {"client_capabilities": {"tui_streaming": True}}}]
             shown = visible(ui.app)
             assert "测试额度不足" in shown and "决策输入：未知" in shown and "决策输出：\n" in shown
             assert all(secret not in shown for secret in ("999", "888", "private-secret"))
