@@ -196,7 +196,7 @@ class BackgroundAgentService:
 
     # LLM: 工作态核对同thread的claim、canonical任务和有界guidance报告；坏账或覆盖不足不假称idle。
     # 函数用途: 给身份DTO添加独立当前工作观察，available从不等价于running。
-    def _agent_view(self, thread):
+    def _agent_view(self, thread, *, guidance=None):
         view = _agent_view(thread)
         view["work_state"] = "unknown"
         try:
@@ -217,7 +217,9 @@ class BackgroundAgentService:
             if pending:
                 view["work_state"] = "waiting"
             elif page["coverage"] == "complete" and page["next_cursor"] is None:
-                inputs, errors = self.store.guidance.pending_report("thread", thread.thread_id, limit=100)
+                # get() 已读过同一有界报告时复用它：一次调用只读一次原消息队列，两个投影看到同一事实。
+                inputs, errors = (guidance if guidance is not None
+                                  else self.store.guidance.pending_report("thread", thread.thread_id, limit=100))
                 if errors:
                     return view
                 if inputs:
@@ -295,19 +297,19 @@ class BackgroundAgentService:
             execution = self._execution_view(thread)
         except (OSError, ValueError, TypeError, KeyError, RuntimeError, sqlite3.Error):
             execution = None
-        pending_inputs = None
+        guidance, pending_inputs = None, None
         if not open_tasks and not page["load_errors"]:
             try:
-                inputs, errors = self.store.guidance.pending_report("thread", thread.thread_id, limit=100)
-                pending_inputs = None if errors else bool(inputs)
+                guidance = self.store.guidance.pending_report("thread", thread.thread_id, limit=100)
             except (OSError, ValueError, TypeError, KeyError, sqlite3.Error):
-                pending_inputs = None
+                guidance = ([], [{"code": "GUIDANCE_READ_FAILED"}])
+            pending_inputs = None if guidance[1] else bool(guidance[0])
         ready, reason = model_readiness(self.host, thread)
         complete = not page["load_errors"] and page["coverage"] == "complete" and page["next_cursor"] is None
         scheduling = scheduling_view(self.store, thread_id=thread.thread_id, tasks=open_tasks,
             identity_state=background_identity(thread).identity_state, running=execution is not None,
             model_ready=ready, model_reason=reason, pending_inputs=pending_inputs, tasks_complete=complete)
-        return {"agent": self._agent_view(thread), "current_execution": execution,
+        return {"agent": self._agent_view(thread, guidance=guidance), "current_execution": execution,
                 "pending_tasks": [self._task_view(task, execution) for task in open_tasks],
                 "allowed_actions": ["background_agents.get", "background_agents.messages.send", "background_agents.suspend",
                                     "background_agents.resume", "background_agents.retire", "background_agents.model.set"],

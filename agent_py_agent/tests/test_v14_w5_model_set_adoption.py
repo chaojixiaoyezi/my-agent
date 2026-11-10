@@ -112,9 +112,10 @@ def test_stale_model_revision_keeps_original_selection(model_case):
     before = host.conversation_store.threads.require(agent_id)
     result = client.send(client.prepare("background_agents.model.set", {"agent_id": agent_id, "model_profile_id": second},
         expected_revision=before.model_selection_revision + 10))
-    # 原运输层将领域 ValueError 包成 OUTCOME_UNKNOWN；本片不改变既有错误映射。
-    assert result["ok"] is False and result["http_status"] == 503, result
-    assert result["error"]["code"] == "OUTCOME_UNKNOWN", result
+    # 原运输层曾将领域 ValueError 包成 OUTCOME_UNKNOWN；BIZ-006（6b2159e05）后写入前确定的版本冲突是结构化拒绝：
+    # 409 REVISION_CONFLICT / not_started，且选择、版本与元数据都不变（下列断言保留）。
+    assert result["ok"] is False and result["http_status"] == 409, result
+    assert result["error"]["code"] == "REVISION_CONFLICT" and result["effect_outcome"] == "not_started", result
     after = host.conversation_store.threads.require(agent_id)
     assert after.model_profile_id == first
     assert after.model_selection_revision == before.model_selection_revision
