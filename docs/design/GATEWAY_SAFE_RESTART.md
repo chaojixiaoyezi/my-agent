@@ -256,3 +256,10 @@
 调度循环在排空期间不再发起新工作，但已越过检查的提交或其它收尾错误仍可能在最后核收出现。因此前置核收不是最终 clean 证明，最终 cleanup 的原硬门保持。进入 cleanup 后无法承诺恢复旧服务；失败发表 `cleanup_failed` / `service_cleanup_started=true`，禁止接班。CLI 不再将其称为“原实例保持运行”，原 PID 消失也不单独授权离线更新：必须取得本次请求、原出生身份和 `stop_for_update` 的 clean_drain/handover_allowed 标记。
 
 正式恢复路径是先用 `my-agent gateway status` 核验，确认原进程退出后通过 `my-agent gateway start` 恢复原版本。恢复服务不等于旧 UNKNOWN 操作已结清，操作仍沿原恢复与证据合同处理。该检查不强杀、不改变显式强制 restart 的原语义。
+
+
+### 已结束但未决执行片的日常复核
+
+`BackgroundShutdown.slices` 继续保存原全部未结责任，UNKNOWN 不因年龄、容量或调度预算删除。新后台片出生只从同拥有者的待复核顺序中预约最多 8 个已结束片，锁外核原 claim/attempt/operation 后把仍未决片放回队尾；读取异常也保留本批尚未核验项，后继新提交公平继续。此顺序只安排复核，不授执行或完成权；显式 `blockers`、排空预检和最终 shutdown 仍覆盖全体原片。单片内部的原 claim 核验保持，不把 8 片称为固定 SQL/耗时上限。
+
+原 worker 观察只有通过原 `exited()` 的准确身份及物理退出/未启动证明后才释放 Thread 引用，并保留单调退出计数；出生或身份未知继续保留。释放已退 worker 不会删除 UNKNOWN claim。257 个各含一个未决 claim 的计数回放中，每个新提交从 257 次降到 8 次，33 次新提交覆盖全部旧片；最终核收仍读取并拒绝全部 257 个 UNKNOWN。该结果说明重复核收的 CPU/I/O 放大，不能据此断言真实进程物理内存均由这些 Thread 引用造成。

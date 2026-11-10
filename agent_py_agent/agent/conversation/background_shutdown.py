@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -20,6 +21,8 @@ from .run_claim import conversation_claim_interrupt_name
 _CURRENT: ContextVar[BackgroundSlice | None] = ContextVar('background_shutdown_slice', default=None)
 # 停止原已提交后台片的有界等待秒数；超时保留未确认责任，不取消长期任务或宣称排空。
 SHUTDOWN_WAIT_SECONDS = 2.0
+# 新提交只公平复核少量旧片；最终 shutdown 仍核全体原责任。
+_FINISHED_RECHECK_LIMIT = 8
 
 
 # LLM: 只保原宿主已提交job中的确切claim和出生前worker观察，不能从task/latest投影生成中断对象。
@@ -32,6 +35,7 @@ class BackgroundSlice:
         self.repo = repo
         self.claims = []
         self.workers = []
+        self.exited_worker_count = 0
         self.finished = False
 
     # LLM: 调用点必须已登记同claim的interruptible；关闭门后即时中断并拒新片，不触碰后继claim。
@@ -70,8 +74,15 @@ class BackgroundSlice:
             return [{'reason':'background_slice_running', 'ref':'submitted_slice'}]
         with self.owner.lock:
             claims, workers = tuple(self.claims), tuple(self.workers)
+        exited = {worker for worker in workers if worker.exited()}
+        if exited:
+            # 只在准确原生退出/未启动证明后释放 Thread 引用；UNKNOWN claim 留在原片。
+            with self.owner.lock:
+                retained = [worker for worker in self.workers if worker not in exited]
+                self.exited_worker_count += len(self.workers) - len(retained)
+                self.workers = retained
         out = [{'reason':'background_model_worker_unsettled', 'ref':'original_worker'}
-               for worker in workers if not worker.exited()]
+               for worker in workers if worker not in exited]
         for claim in claims:
             try:
                 reason = self._claim_blocker(claim)
@@ -131,6 +142,7 @@ class BackgroundShutdown:
         self.deadline = 0.0
         self.supervisor = None
         self.slices = set()
+        self._finished_rechecks = OrderedDict()
 
     # LLM: 只读进程内活跃后台执行片计数；不访问数据库或磁盘，供安全重启turn_wait统计在途后台回合。
     # 函数用途: 返回当前正在执行、尚未结束的后台会话/定时任务执行片数量。
@@ -162,11 +174,17 @@ class BackgroundShutdown:
     @contextmanager
     def observe(self, repo):
         with self.lock:
-            previous = tuple(self.slices)
-        for prior in previous:
-            if prior.finished and not prior.blockers():
-                with self.lock:
-                    self.slices.discard(prior)
+            previous = [self._finished_rechecks.popitem(last=False)[0]
+                        for _ in range(min(_FINISHED_RECHECK_LIMIT, len(self._finished_rechecks)))]
+        try:
+            for prior in previous:
+                self._recheck_finished(prior)
+        finally:
+            # 某片读取抛错也不能让本批尚未核验的责任脱离后继公平复核。
+            with self.lock:
+                for prior in previous:
+                    if prior in self.slices and prior not in self._finished_rechecks:
+                        self._finished_rechecks[prior] = None
         item = BackgroundSlice(self, repo)
         with self.lock:
             if self.stopping:
@@ -177,10 +195,22 @@ class BackgroundShutdown:
             yield
         finally:
             _CURRENT.reset(token)
-            item.finished = True
-            if not item.blockers():
-                with self.lock:
+            with self.lock:
+                item.finished = True
+            self._recheck_finished(item)
+
+    def _recheck_finished(self, item):
+        """锁外核原证据；失败/UNKNOWN 放回队尾，不建立第二份执行权威。"""
+        settled = False
+        try:
+            settled = not item.blockers()
+        finally:
+            with self.lock:
+                if settled:
                     self.slices.discard(item)
+                    self._finished_rechecks.pop(item, None)
+                elif item in self.slices:
+                    self._finished_rechecks[item] = None
 
     # LLM: future只是原提交责任之一；原claim/attempt和模型worker也必须核收。轮询不启动新执行或重试业务。
     # 函数用途: 在第一次停止的绝对期限内等待原工作返回，超时保留准确阻塞。
