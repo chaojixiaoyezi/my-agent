@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1442,
+  "count": 1443,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -10506,6 +10506,14 @@
       "unit": "秒",
       "category": "超时",
       "description": "准入 slot 等待超时秒数；超时按拒绝处理，避免请求无限排队。"
+    },
+    {
+      "name": "_MAX_INT_DIGIT_COUNT",
+      "file": "agent_py_agent/agent/workflows/conditions.py",
+      "value": 1000,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "类型化整数的支持范围：绝对值 < 10**1000。超出者在保存时拒绝；运行时读到的超范围整数按类型不符处理。"
     },
     {
       "name": "BUSINESS_MAINTENANCE_MAX_ROWS",
