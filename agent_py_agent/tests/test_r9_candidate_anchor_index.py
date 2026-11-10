@@ -105,7 +105,7 @@ def test_old_head_build_is_chunked_resumable_and_concurrent_mutation_is_seen(tmp
     header = candidate_ledger.read_manifest(service.path)
     rows = candidate_ledger.CandidateRows(service.path, header)
     assert rows.index.get(rows.root, 'anchor/progress') == 128
-    assert rows.index.get(rows.root, 'anchor/version') is None
+    assert rows.index.get(rows.root, 'anchor/version') == 0
     monkeypatch.setattr(module, '_write_candidates_unlocked', original)
     mutate(service, lambda rows: rows.__setitem__(0, replace(rows[0], last_observed_at='9999-01-01T00:00:00+00:00')))
     restarted = CandidateService(service.path)
@@ -117,7 +117,7 @@ def test_bad_anchor_node_is_not_empty_result(tmp_path):
     service = seed(tmp_path, 20)
     header = candidate_ledger.read_manifest(service.path)
     rows = candidate_ledger.CandidateRows(service.path, header)
-    reference = rows.index.get(rows.root, group_key({'scope_type': 'personal', 'scope_key': 'personal'}, 'lesson'))
+    reference = rows.index.get(rows.index.get(rows.root, 'anchor/groups'), group_key({'scope_type': 'personal', 'scope_key': 'personal'}, 'lesson'))
     (service.path.parent / (service.path.name + '.records') / reference['ref']['ref']).write_bytes(b'broken')
     with pytest.raises((ValueError, OSError)):
         service.anchor_rows({('personal', 'personal')})
@@ -207,3 +207,101 @@ def test_existing_row_forged_as_another_group_maximum_is_rejected(tmp_path, monk
     monkeypatch.setattr(candidate_ledger.PlannedIndex, 'get', forged)
     with pytest.raises(ValueError):
         service.anchor_rows({('personal', 'personal')})
+
+
+def test_old_writer_invalidates_seal_and_restart_uses_new_group_generation(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store import candidate_anchor_index
+    service = seed(tmp_path, 270)
+    scopes = {('personal', 'personal'), ('global', 'global')}
+    before = service.anchor_rows(scopes)[0]
+    # 旧协议写者仍正常更新规范行/状态索引，但不理解anchor维护或seal。
+    with monkeypatch.context() as legacy:
+        legacy.setattr(candidate_anchor_index, 'plan_anchors', lambda rows, root, changes: root)
+        mutate(service, lambda rows: rows.__setitem__(rows.index_for(before.candidate_id), replace(before,
+            status='rejected', status_history=[*before.status_history,
+                module._status_event('rejected', actor='test', note='', at=before.updated_at)])))
+    rows = service._load_unlocked()
+    assert not candidate_anchor_index.source_valid(rows)
+    original = module._write_candidates_unlocked
+    steps = []
+    def interrupted(path, rows, **kwargs):
+        if hasattr(rows, 'anchor_build_end'):
+            steps.append(rows.anchor_build_end)
+            if len(steps) == 2:
+                raise RuntimeError('cold restart after first rebuilt chunk')
+        return original(path, rows, **kwargs)
+    monkeypatch.setattr(module, '_write_candidates_unlocked', interrupted)
+    with pytest.raises(RuntimeError):
+        service.anchor_rows(scopes)
+    rows = service._load_unlocked()
+    generation = rows.index.get(rows.root, 'anchor/generation')
+    assert generation != 'initial' and rows.index.get(rows.root, 'anchor/progress') == 128
+    assert candidate_anchor_index.source_valid(rows) and not candidate_anchor_index.ready(rows)
+    monkeypatch.setattr(module, '_write_candidates_unlocked', original)
+    restarted = CandidateService(service.path)
+    assert [row.candidate_id for row in restarted.anchor_rows(scopes)] == expected(service, scopes)
+    assert before.candidate_id not in [row.candidate_id for row in restarted.anchor_rows(scopes)]
+    assert restarted._load_unlocked().index.get(restarted._load_unlocked().root, 'anchor/generation') == generation
+
+
+def test_new_mutation_cannot_reseal_stale_old_writer_projection_as_complete(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store import candidate_anchor_index
+    service = seed(tmp_path, 160)
+    scopes = {('personal', 'personal'), ('global', 'global')}
+    seen = {row.candidate_id for row in service.anchor_rows(scopes)}
+    target = next(row for row in service.readonly_rows() if row.candidate_id not in seen)
+    with monkeypatch.context() as legacy:
+        legacy.setattr(candidate_anchor_index, 'plan_anchors', lambda rows, root, changes: root)
+        mutate(service, lambda rows: rows.__setitem__(rows.index_for(target.candidate_id),
+            replace(target, last_observed_at='2099-01-01T00:00:00+00:00')))
+    mutate(service, lambda rows: rows.__setitem__(0, replace(rows[0], review_note='new writer mutation')))
+    rows = service._load_unlocked()
+    assert candidate_anchor_index.source_valid(rows) and not candidate_anchor_index.ready(rows)
+    assert [row.candidate_id for row in service.anchor_rows(scopes)] == expected(service, scopes)
+    assert service.anchor_rows(scopes)[0].candidate_id == target.candidate_id
+
+
+def test_repeated_legacy_writer_changes_yield_and_later_recover(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    from agent_py_agent.agent.memory_store import candidate_anchor_index
+    service = seed(tmp_path, 270)
+    old_header(service)
+    original = module._quota_admission
+    interrupted = []
+    @contextmanager
+    def admission(*args):
+        with original(*args) as value:
+            yield value
+        if not interrupted:
+            interrupted.append(True)
+            # 片锁已释放，旧写者仍可提交；不能因此在同一调用里无限重启全史。
+            with monkeypatch.context() as legacy:
+                legacy.setattr(candidate_anchor_index, 'plan_anchors', lambda rows, root, changes: root)
+                mutate(service, lambda rows: rows.__setitem__(0,
+                    replace(rows[0], last_observed_at='2099-01-01T00:00:00+00:00')))
+    monkeypatch.setattr(module, '_quota_admission', admission)
+    with pytest.raises(RuntimeError, match='source changed again'):
+        service.anchor_rows({('personal', 'personal'), ('global', 'global')})
+    assert interrupted
+    monkeypatch.setattr(module, '_quota_admission', original)
+    scopes = {('personal', 'personal'), ('global', 'global')}
+    assert [row.candidate_id for row in service.anchor_rows(scopes)] == expected(service, scopes)
+
+
+def test_repeated_rollback_rebuild_keeps_one_reachable_group_catalog(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store import candidate_anchor_index
+    service = seed(tmp_path, 80)
+    scopes = {('personal', 'personal'), ('global', 'global')}
+    for year in (2091, 2092, 2093):
+        with monkeypatch.context() as legacy:
+            legacy.setattr(candidate_anchor_index, 'plan_anchors', lambda rows, root, changes: root)
+            mutate(service, lambda rows: rows.__setitem__(0,
+                replace(rows[0], last_observed_at=f'{year}-01-01T00:00:00+00:00')))
+        assert [row.candidate_id for row in service.anchor_rows(scopes)] == expected(service, scopes)
+        rows = service._load_unlocked()
+        keys = [key for key, _ in rows.index.items(rows.root)]
+        assert keys.count('anchor/groups') == 1
+        assert not any(key.startswith('anchorroot/') for key in keys)
+        catalog = rows.index.get(rows.root, 'anchor/groups')
+        assert len(list(rows.index.items(catalog))) == 4

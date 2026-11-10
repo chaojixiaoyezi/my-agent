@@ -23,32 +23,65 @@ def rank(row):
 def plan_anchors(rows, root, changes):
     groups = {}
     index = rows.index
+    valid = source_valid(rows)
+    generation = (index.get(rows.root, 'anchor/generation') or 'initial') if valid else rows.root['ref']['sha256']
+    catalog = index.get(rows.root, 'anchor/groups') if valid else None
+    if not valid:
+        previous = index.get(rows.root, 'anchor/groups')
+        if previous is not None:
+            index.obsolete.add(previous['ref']['ref'])
+        # 仅已发布v1原型的首次转换需要枚举元数据键；不读正文，之后换代只解绑单个目录引用。
+        if index.get(rows.root, 'anchor/version') == 1 and index.get(rows.root, 'anchor/generation') is None:
+            for key, _ in index.items(rows.root):
+                if key.startswith('anchorroot/'):
+                    root = index.remove(root, key)
+        root = index.put(root, 'anchor/version', 0)
+        root = index.put(root, 'anchor/progress', 0)
+    root = index.put(root, 'anchor/generation', generation)
     for _, row, old in changes:
         if old is not None and eligible(old):
             key = group_key(old.scope, old.candidate_type)
             if key not in groups:
-                groups[key] = index.get(rows.root, key)
+                groups[key] = index.get(catalog, key)
             previous = groups[key]
             groups[key] = index.remove(previous, old.candidate_id)
         if eligible(row):
             key = group_key(row.scope, row.candidate_type)
             if key not in groups:
-                groups[key] = index.get(rows.root, key)
+                groups[key] = index.get(catalog, key)
             previous = groups[key]
             groups[key] = index.put(previous, row.candidate_id, {'anchor_rank': rank(row), 'candidate_id': row.candidate_id})
     for key, reference in groups.items():
-        root = index.put(root, key, reference)
+        catalog = index.put(catalog, key, reference) if reference is not None else index.remove(catalog, key)
+    root = index.put(root, 'anchor/groups', catalog)
     end = getattr(rows, 'anchor_build_end', None)
     if rows.root is None or end is not None and end == len(rows):
         root = index.put(root, 'anchor/version', 1)
     if end is not None:
         root = index.put(root, 'anchor/progress', end)
-    return root
+    unsigned = index.remove(root, 'anchor/seal')
+    return index.put(unsigned, 'anchor/seal', unsigned['ref']['sha256'])
+
+
+def source_valid(rows):
+    """去seal后的规范根摘要是写者覆盖证明；旧写者改任意其它键都会自然撤销。"""
+    if rows.root is None:
+        return True
+    cached = getattr(rows, '_anchor_source_valid', None)
+    if cached is not None:
+        return cached
+    seal = rows.index.get(rows.root, 'anchor/seal')
+    unsigned = rows.index.remove(rows.root, 'anchor/seal')
+    valid = isinstance(seal, str) and unsigned is not None and seal == unsigned['ref']['sha256']
+    rows._anchor_source_valid = valid
+    return valid
 
 
 def ready(rows):
+    if not source_valid(rows):
+        return False
     version = rows.index.get(rows.root, 'anchor/version')
-    if version is None:
+    if version is None or type(version) is int and version == 0:
         return False
     if type(version) is not int or version != 1:
         raise ValueError('candidate anchor index version is invalid')
@@ -60,10 +93,11 @@ def read_anchors(rows, scopes):
     if not ready(rows):
         raise ValueError('candidate anchor index is incomplete')
     groups = {}
+    catalog = index.get(rows.root, 'anchor/groups')
     for scope_type, scope_key in scopes:
         for candidate_type in ('lesson', 'hot_rule'):
             key = group_key({'scope_type': scope_type, 'scope_key': scope_key}, candidate_type)
-            reference = index.get(rows.root, key)
+            reference = index.get(catalog, key)
             if reference is not None:
                 groups[key] = reference
     result, counts = [], {}

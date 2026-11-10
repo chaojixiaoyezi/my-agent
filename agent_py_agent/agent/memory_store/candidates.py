@@ -409,7 +409,8 @@ class CandidateService:
 
     def anchor_rows(self, scopes):
         """精确前十二锚点；旧投影分批发表，片间释放原锁且只在完整后交付。"""
-        from .candidate_anchor_index import read_anchors, ready
+        from .candidate_anchor_index import read_anchors, ready, source_valid
+        reset = False
         while True:
             with self._locked_candidates():
                 header = read_manifest(self.path)
@@ -429,7 +430,12 @@ class CandidateService:
                     rows = self._load_unlocked()
                 if ready(rows):
                     return read_anchors(rows, scopes)
-                start = rows.index.get(rows.root, 'anchor/progress') or 0
+                valid = source_valid(rows)
+                if not valid:
+                    if reset:
+                        raise RuntimeError('candidate anchor source changed again during rebuild')
+                    reset = True
+                start = (rows.index.get(rows.root, 'anchor/progress') or 0) if valid else 0
                 if type(start) is not int or not 0 <= start <= len(rows):
                     raise CandidateStoreCorruptError('candidate anchor progress is invalid')
                 rows.anchor_build_end = min(len(rows), start + 128)
@@ -2038,7 +2044,7 @@ def _candidate_node_family(index, root):
             pending.extend(node['children'].values())
         else:
             for key, value in node['entries'].items():
-                if key.startswith(('statusroot/', 'anchorroot/')) and value is not None:
+                if (key.startswith(('statusroot/', 'anchorroot/')) or key == 'anchor/groups') and value is not None:
                     pending.append(value)
                 if key.startswith('row/') and value:
                     yield value['record']['ref']

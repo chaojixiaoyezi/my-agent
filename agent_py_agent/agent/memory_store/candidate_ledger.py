@@ -182,7 +182,7 @@ class PlannedIndex(ImmutableJsonIndex):
                 pending.extend(node['children'].values())
             else:
                 for key, value in node['entries'].items():
-                    if key.startswith(('statusroot/', 'anchorroot/')) and value is not None:
+                    if (key.startswith(('statusroot/', 'anchorroot/')) or key == 'anchor/groups') and value is not None:
                         pending.append(value)
                     if key.startswith('row/') and value:
                         blob = value['record']['ref']
