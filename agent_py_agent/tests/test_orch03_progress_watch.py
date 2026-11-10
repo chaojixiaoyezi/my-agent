@@ -1331,3 +1331,140 @@ def test_r3a_previous_sample_never_survives_a_generation_change(agent_and_child,
     after_replaced = previous()
 
     assert (roundtrip, after_refusal, after_registration_edit, after_shared, after_replaced) == (None,) * 5
+
+
+# ---------- ORCH03-R6-deadline / R6-kqueue-error（PRO-MSG-037） ----------
+
+
+# Linux 组扫描：结论（活成员或没有成员）落定时已过截止，一律只能说查不清。
+#   正向对照：截止充裕时同一样本照常给出 True / False。
+def test_linux_scan_rechecks_the_deadline_before_any_conclusion(tmp_path, monkeypatch):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    live = _fake_proc(tmp_path / "a", {"101": _stat(101, "S", 100)})
+    other = _fake_proc(tmp_path / "b", {"102": _stat(102, "S", 7)})
+    assert git._linux_group_has_live_members(100, 1, time.monotonic() + 5, live) is True
+    assert git._linux_group_has_live_members(100, 1, time.monotonic() + 5, other) is False
+    real_read = os.read
+
+    def slow_read(fd, count):
+        data = real_read(fd, count)
+        time.sleep(0.05)
+        return data
+
+    monkeypatch.setattr(git.os, "read", slow_read)
+    assert git._linux_group_has_live_members(100, 1, time.monotonic() + 0.01, live) is None
+    assert git._linux_group_has_live_members(100, 1, time.monotonic() + 0.01, other) is None
+
+
+# macOS 组成员查询：列表或单个状态查询跨过截止都只能说查不清（受控的 libproc 替身，只验证截止逻辑，不是真实计时）。
+@pytest.mark.parametrize("slow", ["list", "info"])
+def test_darwin_member_queries_recheck_the_deadline(monkeypatch, slow):
+    from types import SimpleNamespace
+
+    def listing(*_args):
+        if slow == "list":
+            time.sleep(0.05)
+        return frozenset({987654})
+
+    def info(_pid):
+        if slow == "info":
+            time.sleep(0.05)
+        return SimpleNamespace(scope=[0, 43210]), 0
+
+    monkeypatch.setattr(git, "_HAS_PROC", False)
+    monkeypatch.setattr(git, "_IS_DARWIN", True)
+    monkeypatch.setattr(git, "_darwin_list", listing)
+    monkeypatch.setattr(git, "_darwin_info", info)
+
+    assert git._group_has_live_members(43210, 123, time.monotonic() + 5) is True
+    assert git._group_has_live_members(43210, 123, time.monotonic() + 0.01) is None
+
+
+# 回收与 ESRCH 探测本身成功，但落定时已过截止：不能报 clean。正向对照：截止充裕时同一进程报 clean。
+@pytest.mark.skipif(os.name != "posix", reason="需要 POSIX 子进程")
+@pytest.mark.parametrize("late", [False, True])
+def test_a_clean_result_must_land_before_the_deadline(monkeypatch, late):
+    process = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True, stdout=subprocess.DEVNULL)
+    deadline = time.monotonic() + 3
+    real_killpg = os.killpg
+
+    def probe(group, sig):
+        if sig == 0 and late:
+            time.sleep(max(0.0, deadline - time.monotonic()) + 0.05)
+        return real_killpg(group, sig)
+
+    monkeypatch.setattr(git.os, "killpg", probe)
+    result = git._settle_group(process, process.pid, deadline, kill=False)
+
+    assert process.returncode is not None
+    assert result == ("unconfirmed" if late else "clean")
+
+
+# kqueue 等待本身报错（EIO）：不重试、不被之后的“已退出”状态抹掉，判身份不明且队列已关闭。正向对照：真实 kqueue
+#   等到同一类真实子进程退出，得到 EXITED_UNREAPED。只在 macOS（无 waitid 时走 kqueue）上验证。
+@pytest.mark.skipif(sys.platform != "darwin", reason="kqueue 等待路径只在 macOS 上使用")
+def test_kqueue_wait_errors_are_honest_identity_loss(monkeypatch):
+    import errno
+
+    monkeypatch.setattr(git, "_HAS_WAITID", False)
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.3)"], start_new_session=True)
+    try:
+        exited = git._wait_root_exit_unreaped(process, time.monotonic() + 5)
+    finally:
+        process.wait(timeout=5)
+    calls = []
+
+    class BrokenQueue:
+        def control(self, *_args):
+            calls.append("control")
+            raise OSError(errno.EIO, "injected kqueue failure")
+
+        def close(self):
+            calls.append("closed")
+
+    second = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.3)"], start_new_session=True)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(git.select, "kqueue", BrokenQueue)
+            broken = git._wait_root_exit_unreaped(second, time.monotonic() + 5)
+    finally:
+        second.wait(timeout=5)
+
+    assert exited == git._EXITED_UNREAPED
+    assert broken == git._IDENTITY_LOST and calls == ["control", "closed"]
+
+
+
+# 截止的“限制工作量”检查：第一次读取就跨过截止时，后面的条目不再读取（Linux 读 stat / macOS 查成员状态），
+#   截止一开始就已过时连成员列表都不查。
+def test_member_scans_stop_reading_once_the_deadline_has_passed(tmp_path, monkeypatch):
+    root = _fake_proc(tmp_path, {"101": _stat(101, "S", 7), "102": _stat(102, "S", 7), "103": _stat(103, "S", 7)})
+    reads = []
+    real_read = os.read
+
+    def slow_read(fd, count):
+        reads.append(fd)
+        time.sleep(0.05)
+        return real_read(fd, count)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(git.os, "read", slow_read)
+        assert git._linux_group_has_live_members(100, 1, time.monotonic() + 0.01, root) is None
+    assert len(reads) == 1
+
+    queried, listed = [], []
+
+    def info(pid):
+        queried.append(pid)
+        time.sleep(0.05)
+        return None, 3
+
+    monkeypatch.setattr(git, "_HAS_PROC", False)
+    monkeypatch.setattr(git, "_IS_DARWIN", True)
+    monkeypatch.setattr(git, "_darwin_list", lambda *_a: listed.append(1) or frozenset({11, 12, 13}))
+    monkeypatch.setattr(git, "_darwin_info", info)
+    assert git._group_has_live_members(43210, 1, time.monotonic() + 0.01) is None
+    assert len(queried) == 1
+    assert git._group_has_live_members(43210, 1, time.monotonic() - 1) is None
+    assert len(listed) == 1 and len(queried) == 1

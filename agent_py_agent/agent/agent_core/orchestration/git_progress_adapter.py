@@ -15,7 +15,11 @@
 #   未确认。之后才回收根进程拿真实退出码，回收后只做 killpg(组, 0) 探测直到 ESRCH，绝不再发信号。不依赖 ps。识别、
 #   读取、清理、确认共用同一个绝对截止时间，等待都按剩余时间截断。stdout 在清理前单独关闭，清理异常也不漏关。
 #   主线程非阻塞读取，不起读线程；HEAD 必须是完整提交号。没有这些原语的平台在启动任何进程前拒绝。
-#   残余前提：同一进程里若有别的代码用 waitpid(-1)/os.wait() 抢先回收，只能在下一次钉住检查时发现（身份丢失）。
+#   残余前提：同一进程里若有别的代码用 waitpid(-1)/os.wait() 抢先回收，只能在下一次钉住检查时发现（身份丢失）；
+#   SIGCHLD 未被忽略只是必要条件，证明不了没有外部等待者抢在“最后一次钉住检查→发信号”之间。
+#   ORCH03-R6-deadline：成员枚举、每次状态读取和每个成功结论都在调用前后对同一绝对截止复核，过了截止一律“查不清/
+#   未确认”；但单个同步系统调用（读 /proc、libproc 查询、waitpid）本身不可打断，所以这是“超时后不给出结论”的保证，
+#   不是硬性的墙钟上限。
 #   已知限制：组为空只证明“本组”没有成员；自己另开会话/进程组逃出去的后代不在组里，看不到也杀不到。
 # 模块用途: 给进展分类提供一份可核验的 HEAD/改动数观察，不代表进展本身。
 
@@ -329,6 +333,9 @@ def _settle(process: subprocess.Popen, group: int, deadline: float, kill: bool) 
         try:
             os.killpg(group, 0)
         except ProcessLookupError:
+            # ORCH03-R6-deadline：成功也要在同一截止之内落定，过了截止只能说没确认。
+            if time.monotonic() >= deadline:
+                return "unconfirmed"
             return "descendants" if descendants else "clean"
         except PermissionError:
             pass
@@ -398,14 +405,18 @@ def _wait_root_exit_unreaped(process: subprocess.Popen, until: float) -> str:
         if _HAS_WAITID:
             time.sleep(min(_GROUP_PROBE_INTERVAL_SECONDS, left))
             continue
-        queue = select.kqueue()
+        try:
+            queue = select.kqueue()
+        except OSError:
+            return _IDENTITY_LOST
         try:
             event = select.kevent(process.pid, filter=select.KQ_FILTER_PROC,
                                   flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT, fflags=select.KQ_NOTE_EXIT)
             queue.control([event], 1, left)
         except OSError:
-            # 注册失败（进程已不在等）交给下一轮 _root_state 判定，不在这里猜。
-            time.sleep(min(_GROUP_PROBE_INTERVAL_SECONDS, max(0.0, until - time.monotonic())))
+            # ORCH03-R6-kqueue-error：等待原语本身出错（EIO/EPERM/ESRCH 等）不重试、不让之后的状态把它抹掉，
+            #   直接判身份不明，由调用方做无破坏收尾并报未确认。
+            return _IDENTITY_LOST
         finally:
             queue.close()
 
@@ -419,18 +430,25 @@ def _group_has_live_members(group: int, root_pid: int, deadline: float, proc_roo
     if _HAS_PROC:
         return _linux_group_has_live_members(group, root_pid, deadline, proc_root)
     if _IS_DARWIN:
+        # 两类截止检查：每次查询前（限制工作量）与给出结论时（结论必须在截止内落定）。
+        if time.monotonic() >= deadline:
+            return None
         members = _darwin_list(_LIBPROC_PROTOCOL_PGRP_ONLY, group)
         if members is None:
             return None
+        live = False
         for pid in members:
             if pid == root_pid:
                 continue
+            if time.monotonic() >= deadline:
+                return None
             info, error = _darwin_info(pid)
             if info is not None and info.scope[1] == group:
-                return True
+                live = True
+                break
             if info is None and error != errno.ESRCH:
                 return None
-        return False
+        return None if time.monotonic() >= deadline else live
     return None
 
 
@@ -459,10 +477,10 @@ def _linux_group_has_live_members(group: int, root_pid: int, deadline: float, pr
                 if len(parts) < 3 or not parts[2].lstrip("-").isdigit():
                     return None
                 if int(parts[2]) == group and parts[0] != "Z":
-                    return True
+                    return None if time.monotonic() >= deadline else True
     except OSError:
         return None
-    return False
+    return None if time.monotonic() >= deadline else False
 
 
 # LLM: SIGCHLD 被设成忽略时内核自动回收子进程，pid 钉不住；此外不能证明别处没有抢先回收的代码（见模块说明）。
