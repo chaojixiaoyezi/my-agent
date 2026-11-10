@@ -94,6 +94,10 @@ class WorkflowStepSpec(_Record):
         if self.foreach is not None:
             from ..workflows.batching import validate_foreach
             validate_foreach(self.foreach)
+        if isinstance(self.condition, dict) and 'op' in self.condition:
+            # WF-04：类型化条件在保存/恢复时严格校验（含正则安全子集）；旧 equals 形状保持原行为。
+            from ..workflows.conditions import validate_condition
+            validate_condition(self.condition)
         if (not isinstance(self.ui_position, dict) or set(self.ui_position) - {'x', 'y'}
                 or any(type(number) not in (int, float) or not math.isfinite(number)
                        for number in self.ui_position.values())):

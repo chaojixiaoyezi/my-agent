@@ -44,6 +44,7 @@ from .batching import (
     validate_foreach,
 )
 from .concurrency_policy import _reconcile_workflow_claim, dispatch
+from .conditions import evaluate_condition
 from .datasource_runtime import (
     _preflight_failure,
     bind_script_execution_record,
@@ -843,7 +844,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             try:
                 _check_stop()
                 condition = spec.get('condition')
-                if condition and output_value(condition, outputs, record.inputs) != condition['equals']:
+                if condition and not evaluate_condition(condition, outputs, record.inputs):
                     step.status = 'skipped'
                 else:
                     state.update(record=record, phase='started', started=True)
@@ -935,9 +936,9 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             record.input_snapshot[key] = output_value(reference, outputs, run.inputs) if isinstance(reference, dict) and 'step_id' in reference else payload(reference)
         if run.ephemeral_debug and spec.get('condition'):
             condition = spec['condition']
-            if not isinstance(condition, dict) or 'equals' not in condition:
+            if not isinstance(condition, dict) or ('equals' not in condition and 'op' not in condition):
                 raise ValueError('条件必须是结构化比较')
-            matched = output_value(condition, outputs, run.inputs) == condition['equals']
+            matched = evaluate_condition(condition, outputs, run.inputs)
             record.escalation_result['condition_branch'] = matched
             if not matched:
                 record.status = 'skipped'
