@@ -157,52 +157,74 @@ def report_task_result(agent: object, task: object) -> bool:
         lines.append("产物：" + "、".join(refs))
     lines.append("这条消息由宿主自动发出，是结构化结果，不是目标会话的原话。")
     dedupe_key = result_report_key(task)
+    target_thread_id = str(getattr(task, "target_thread_id", "") or "")
     try:
-        previous = guidance.receipt(dedupe_key) if delegated else None
-        guidance.append_once(
-            {
-                "target_type": "thread",
-                "target_id": sender,
-                "message": "\n".join(lines),
-                "sender": str(getattr(task, "target_thread_id", "") or ""),
-                "priority": "normal",
-                "delivery": "next_turn",
-                "metadata": {
-                    "origin_kind": _RESULT_ORIGIN_KIND,
-                    "origin_thread_id": str(getattr(task, "target_thread_id", "") or ""),
-                    "session_task_id": task_id,
-                    SESSION_TASK_STATUS_FIELD: status,
-                    **({"session_task_failure_code": failure_code} if failure_code else {}),
-                },
-            },
-            dedupe_key=dedupe_key,
-            **({"blocking": False} if delegated else {}),
-        )
-        if delegated and previous is None:
-            _record_pair(store, task.target_thread_id, sender)
-        if delegated or business:
-            from .session_messaging import SESSION_MESSAGE_KEY_FIELD
-
-            source = threads.require(sender)
-            if delegated and source.status != "active":
-                return False
-        if (delegated or business) and source.status == "active" and (
-            delegated or _business_sender_receives_wakes(source)
-        ):
-            store.wakes.raise_signal({
-                "thread_id": sender, "urgency": "normal", "reason": "session_message",
-                "summary": "收到原委派任务的终态结果", "dedupe_key": dedupe_key, "retain_handled": True,
-                "metadata": {"origin_kind": "session_message", "origin_thread_id": task.target_thread_id,
-                             SESSION_MESSAGE_KEY_FIELD: dedupe_key},
-            }, blocking=False)
+        # 同一任务的检查、发布与计数沿原task责任门串行；只有本次新建了回报回执才计一次会话对额度，
+        #   重放、并发重入与部分提交后的补账都不再计（回执是唯一权威，计数写失败只影响节流精度）。
+        with _report_guard(store, target_thread_id, task_id, blocking=not delegated):
+            return _publish_report(store, guidance, threads, task, sender, lines, dedupe_key,
+                                   delegated=delegated, business=business, failure_code=failure_code)
     except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError,
             BoundedCallExitUnconfirmedError, ToolWriteContextUnavailable):
         raise
     except Exception:  # noqa: BLE001 - 普通失败由委派caller保原wake重试，非委派仍为附加报告。
         return False
-    if not delegated:
-        _record_pair(store, str(getattr(task, "target_thread_id", "") or ""), sender)
+
+
+# LLM: 原发布正文：guidance 幂等入队，按原规则补 wake；只在本次新建回执时计会话对额度。调用方已持准确 task 责任门。
+# 函数用途: 发布一条终态结果回报并只为新发布计数，返回是否已发布或已在账。
+def _publish_report(store, guidance, threads, task, sender, lines, dedupe_key, *, delegated, business, failure_code):
+    task_id = str(getattr(task, "task_id", "") or "")
+    status = str(getattr(task, "status", "") or "")
+    previous = guidance.receipt(dedupe_key)
+    guidance.append_once(
+        {
+            "target_type": "thread",
+            "target_id": sender,
+            "message": "\n".join(lines),
+            "sender": str(getattr(task, "target_thread_id", "") or ""),
+            "priority": "normal",
+            "delivery": "next_turn",
+            "metadata": {
+                "origin_kind": _RESULT_ORIGIN_KIND,
+                "origin_thread_id": str(getattr(task, "target_thread_id", "") or ""),
+                "session_task_id": task_id,
+                SESSION_TASK_STATUS_FIELD: status,
+                **({"session_task_failure_code": failure_code} if failure_code else {}),
+            },
+        },
+        dedupe_key=dedupe_key,
+        **({"blocking": False} if delegated else {}),
+    )
+    if previous is None:
+        _record_pair(store, task.target_thread_id, sender)
+    if delegated or business:
+        from .session_messaging import SESSION_MESSAGE_KEY_FIELD
+
+        source = threads.require(sender)
+        if delegated and source.status != "active":
+            return False
+    if (delegated or business) and source.status == "active" and (
+        delegated or _business_sender_receives_wakes(source)
+    ):
+        store.wakes.raise_signal({
+            "thread_id": sender, "urgency": "normal", "reason": "session_message",
+            "summary": "收到原委派任务的终态结果", "dedupe_key": dedupe_key, "retain_handled": True,
+            "metadata": {"origin_kind": "session_message", "origin_thread_id": task.target_thread_id,
+                         SESSION_MESSAGE_KEY_FIELD: dedupe_key},
+        }, blocking=False)
     return True
+
+
+# LLM: 复用原 wake 账本的准确 task 责任门（同线程同身份可重入）；没有 wake 账本的旧/测试 Store 不加锁，仍走原幂等键。
+# 函数用途: 串行化同一任务的回报检查、发布与计数。
+def _report_guard(store, target_thread_id, task_id, *, blocking):
+    from contextlib import nullcontext
+
+    guard = getattr(getattr(store, "wakes", None), "task_responsibility_guard", None)
+    if not callable(guard) or not target_thread_id or not task_id:
+        return nullcontext()
+    return guard(target_thread_id, task_id, blocking=blocking)
 
 
 # LLM: 回报是宿主自动发出、不会被拒的消息，但必须占用每对会话配额，否则回报可以绕过限额。

@@ -361,3 +361,34 @@ def test_retire_with_cancel_after_failed_attempt_reaches_retired_and_releases_qu
     assert view['agent']['identity_state'] == 'retired' and view['scheduling']['state'] == 'retired'
     assert host.conversation_store.session_tasks.require(task_id).status == 'cancelled'
     assert ok(native, 'background_agents.list', {})['quota']['used'] == 0
+
+
+# S9-R3：同一终态回报的重放与并发只在新发布时计一次会话对额度；真实临时 Store、真实限流器与真实 producer。
+@pytest.mark.parametrize('sender_kind', ['ordinary', 'controller'])
+def test_result_report_charges_the_pair_once_across_replay_and_concurrency(tmp_path, sender_kind):
+    import threading
+
+    from agent_py_agent.agent.conversation.session_task_report import report_task_result
+    from agent_py_agent.tests.test_bg_w3_session_wake_and_task_tools import _report_case
+
+    for index in range(6):
+        agent, sender, task = _report_case(tmp_path / f'case-{index}', sender_kind=sender_kind, status='done',
+                                           business=True)
+        store = agent.conversation_store
+        start, results = threading.Barrier(4), []
+
+        def publish():
+            start.wait()
+            results.append(report_task_result(agent, task))
+
+        workers = [threading.Thread(target=publish) for _ in range(4)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=60)
+        assert results == [True] * 4
+        assert report_task_result(agent, task)
+        rows, errors = store.guidance.pending_report('thread', sender.thread_id, limit=0)
+        assert not errors and len(rows) == 1
+        assert store.session_pair_rate.count(task.target_thread_id, sender.thread_id) == 1
+        assert len(store.wakes.pending(limit=0)) == (sender_kind == 'controller')
