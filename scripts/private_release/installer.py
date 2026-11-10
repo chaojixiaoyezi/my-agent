@@ -463,40 +463,68 @@ def _progress_default_text(original: str):
 
 def migrate_feishu_oauth_defaults(prefix: Path, release: Path, package: Path) -> None:
     """仅替换旧模板的准确scope列表；不改授权/token，定制列表与空列表原样保留。"""
-    import yaml
+    from agent_py_agent.agent.settings.config_io import _strip_yaml_comment, parse_simple_yaml_text
+
+    def parse_config(text):
+        result = parse_simple_yaml_text(text)
+        value = result.get('feishu_oauth_scopes')
+        # 正式简化loader仅认Python式引号列表；旧YAML裸scope只在本次迁移
+        # 按OAuth标识符的无转义语法核验，绝不将其它配置或复杂YAML重新解释。
+        if isinstance(value, str) and value.startswith('[') and value.endswith(']'):
+            items = value[1:-1].split(',')
+            scopes = []
+            for item in items:
+                item = item.strip()
+                if len(item) >= 2 and item[0] == item[-1] and item[0] in '\"\'':
+                    item = item[1:-1]
+                if not re.fullmatch(r'[A-Za-z0-9_:./-]+', item):
+                    return result
+                scopes.append(item)
+            result['feishu_oauth_scopes'] = scopes
+        return result
 
     config = prefix / 'data/config/capability_config.yaml'
     template = package / 'config/capability_config.yaml'
     if not config.exists() or not template.exists():
         return
-    defaults = yaml.safe_load(template.read_text(encoding='utf-8')).get('feishu_oauth_scopes')
+    defaults = parse_config(template.read_text(encoding='utf-8')).get('feishu_oauth_scopes')
     if not isinstance(defaults, list) or defaults == ['offline_access']:
         return
 
     def transform(original):
-        parsed = yaml.safe_load(original)
-        old = parsed.get('feishu_oauth_scopes') if isinstance(parsed, dict) else None
+        parsed = parse_config(original)
+        old = parsed.get('feishu_oauth_scopes')
         if old != ['offline_access']:
             return original, old, old
-        # YAML允许无缩进序列；使用解析节点位置，不靠行缩进猜字段边界。
-        document = yaml.compose(original)
-        if not isinstance(document, yaml.MappingNode):
-            raise ValueError('飞书授权scope配置不是映射')
-        matches = [(key, value) for key, value in document.value if key.value == 'feishu_oauth_scopes']
+        # 与正式配置读取共用标准库语法；只改准确旧默认，保持其它行逐字不动。
+        lines = original.splitlines(keepends=True)
+        matches = [index for index, line in enumerate(lines)
+                   if re.match(r'^feishu_oauth_scopes[ \t]*:', line)]
         if len(matches) != 1:
             raise ValueError('飞书授权scope配置重复或不可确认')
-        key, node = matches[0]
-        if (not isinstance(node, yaml.SequenceNode) or len(node.value) != 1
-                or node.start_mark.index <= key.end_mark.index):
-            # alias可能指向其它字段原节点，不能为了本字段迁移改写共享源。
-            raise ValueError('飞书授权scope源节点不能独立迁移')
-        start = node.start_mark.index
-        end = node.end_mark.index if node.flow_style else node.value[-1].end_mark.index
-        # 无缩进block序列改为flow后必须缩进，否则会成为第二个根节点。
-        prefix = '  ' if not node.flow_style and node.start_mark.column == 0 else ''
-        updated = original[:start] + prefix + json.dumps(defaults, ensure_ascii=False) + original[end:]
-        validated = yaml.safe_load(updated)
-        if (not isinstance(validated, dict) or validated.get('feishu_oauth_scopes') != defaults
+        index = matches[0]
+        raw = lines[index]
+        code = _strip_yaml_comment(raw).rstrip()
+        colon = code.index(':') + 1
+        if not code[colon:].strip():
+            items = []
+            for cursor in range(index + 1, len(lines)):
+                item_code = _strip_yaml_comment(lines[cursor]).rstrip()
+                if not item_code.strip():
+                    continue
+                if not item_code.lstrip().startswith('- '):
+                    break
+                items.append((cursor, item_code))
+            if len(items) != 1:
+                raise ValueError('飞书授权scope列表不能独立迁移')
+            cursor, item_code = items[0]
+            # 原列表项退为注释/空行；保留其行尾注释和相邻字段注释。
+            suffix = lines[cursor][len(item_code):]
+            lines[cursor] = suffix.lstrip(' \t')
+        lines[index] = raw[:colon] + ' ' + json.dumps(defaults, ensure_ascii=False) + raw[len(code):]
+        updated = ''.join(lines)
+        validated = parse_config(updated)
+        if (validated.get('feishu_oauth_scopes') != defaults
                 or {key: value for key, value in validated.items() if key != 'feishu_oauth_scopes'}
                 != {key: value for key, value in parsed.items() if key != 'feishu_oauth_scopes'}):
             raise ValueError('飞书授权scope迁移改变了其它配置，未写入')

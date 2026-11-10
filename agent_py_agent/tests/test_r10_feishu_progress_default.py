@@ -206,3 +206,40 @@ def test_oauth_scope_prepared_retry_keeps_other_migrations(tmp_path, monkeypatch
     assert yaml.safe_load(config.read_text()) == {'feishu_oauth_scopes': ['offline_access', 'im:chat:read'], 'feishu_chat_history_enabled': False}
     facts = json.loads(marker.read_text())['config_migrations']
     assert facts['earlier'] == preserved and facts['feishu-oauth-default-scopes-v1']['phase'] == 'completed'
+
+
+def test_installer_scope_migration_subprocess_without_pyyaml(tmp_path):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    prefix, _ = _installation(tmp_path)
+    config = prefix / 'data/config/capability_config.yaml'
+    config.write_text('feishu_oauth_scopes:\n- offline_access # preserve\nfeishu_chat_history_enabled: false\n')
+    package = tmp_path / 'package'
+    (package / 'config').mkdir(parents=True)
+    (package / 'config/capability_config.yaml').write_text('feishu_oauth_scopes: ["offline_access", "im:chat:read"]\nfeishu_chat_history_enabled: true\n')
+    script = '''
+import builtins, sys
+native = builtins.__import__
+def guarded(name, *args, **kwargs):
+    if name == 'yaml' or name.startswith('yaml.'):
+        raise ModuleNotFoundError('PyYAML intentionally unavailable')
+    return native(name, *args, **kwargs)
+builtins.__import__ = guarded
+from pathlib import Path
+from scripts.private_release import installer
+prefix, package = map(Path, sys.argv[1:])
+installer.migrate_feishu_oauth_defaults(prefix, Path('candidate'), package)
+installer.migrate_feishu_history_default(prefix, Path('candidate'), package)
+from agent_py_agent.agent.settings.config_io import parse_simple_yaml_text
+value = parse_simple_yaml_text((prefix / 'data/config/capability_config.yaml').read_text())
+assert value == {'feishu_oauth_scopes': ['offline_access', 'im:chat:read'], 'feishu_chat_history_enabled': True}
+assert 'yaml' not in sys.modules
+'''
+    result = subprocess.run([sys.executable, '-c', script, str(prefix), str(package)],
+        cwd=Path(__file__).resolve().parents[2], env={**os.environ, 'PYTHONPATH': str(Path(__file__).resolve().parents[2])},
+        capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    assert '# preserve' in config.read_text()
