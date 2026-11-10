@@ -161,6 +161,14 @@ class WorkflowRunContextFactory:
         return resolve_workflow_run_context(actor=actor, workflow_run_id=workflow_run_id,
             requested_space_id=request.get('space_id'), project_ref=request.get('project_ref'))
 
+    # LLM: 同一宿主端口复核它冻结过的上下文：只读核当前空间活跃、Actor访问及绑定/项目可用，不重选默认空间，
+    #   也不授予工具权限（G5a-R1）；失败抛原业务错误码，运行记录不变。
+    # 函数用途: 在恢复控制写入及每次后续副作用之前确认冻结业务上下文仍被当前授权允许。
+    def revalidate(self, actor, context):
+        from ..conversation.business_context import revalidate_business_context
+        from ..conversation.business_contracts import BusinessExecutionContext
+        revalidate_business_context(actor=actor, context=BusinessExecutionContext.from_dict(context))
+
 
 class WorkflowScopeService:
     """原动作目录与 UI/plugin 共用的 Owner 领域入口；不从请求猜当前业务身份。"""
@@ -421,6 +429,12 @@ class WorkflowScopeService:
                 raise PermissionError('WORKFLOW_RECYCLED')
             if record.business_context and record.business_context.get('owner_id') != self.owner_id:
                 raise PermissionError('WORKFLOW_OWNER_MISMATCH')
+            if phase != 'cancel' and (record.scope_snapshot or record.business_context):
+                # G5a-R1：恢复控制写入前与每次后续副作用前，按当前范围核冻结空间并复核冻结上下文的当前业务准入；
+                #   只核不重选默认，取消不经此门以保收回能力。
+                self._check_scope(workflow_state(current)['scope'], record.business_context.get('space_id'))
+                if record.business_context and isinstance(self.context_provider, WorkflowRunContextFactory):
+                    self.context_provider.revalidate(actor, record.business_context)
             if self.governance is not None:
                 if phase == 'resume' and resolution_ref is not None:
                     return self.governance.require_resolution(record, resolution_ref)

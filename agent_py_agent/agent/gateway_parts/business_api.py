@@ -373,19 +373,37 @@ class _BackgroundPort:
 # LLM: 显式宿主端口优先；否则只复用同一Owner已登记WorkflowsTool的owner绑定引擎，并配显式签名的运行上下文工厂。
 #   找不到同Owner引擎时两者都缺，workflows.run如实HOST_NOT_READY；不造无状态引擎，也不把主Owner引擎借给别的Owner。
 # 函数用途: 为原生/插件/工具业务组合取得工作流运行端口。
-def workflow_run_ports(host):
+def workflow_run_ports(host, source=None):
+    source = workflow_port_source(host) if source is None else source
+    if source[0] == 'explicit':
+        return source[1], source[2]
+    if source[0] == 'registry':
+        from ..workflows.business_scope import WorkflowRunContextFactory
+        return source[1]._business_engine, WorkflowRunContextFactory()
+    return None, None
+
+
+# LLM: 端口来源以稳定对象身份表示：显式端口取宿主属性对象本身（缺一仍按显式且如实未就绪），登记回退取同owner的
+#   WorkflowsTool实例；不以每次取属性新建的绑定方法作身份（G5a-R2）。只读，不创建引擎。
+# 函数用途: 给原生业务服务缓存判定工作流运行端口来源是否变化。
+def workflow_port_source(host):
     engine_factory = getattr(host, 'workflow_engine_factory', None)
     context_provider = getattr(host, 'business_context_provider', None)
     if engine_factory is not None or context_provider is not None:
-        return engine_factory, context_provider
+        return ('explicit', engine_factory, context_provider)
     from ..tooling.workflows_tool import WorkflowsTool
-    from ..workflows.business_scope import WorkflowRunContextFactory
     registry = getattr(getattr(host, 'tools', None), 'tools', None)
     tool = registry.get('workflows') if isinstance(registry, dict) else None
     home = getattr(host, 'home_paths', None)
     if not isinstance(tool, WorkflowsTool) or home is None or tool.owner_home != Path(home.owner_home_dir).absolute():
-        return None, None
-    return tool._business_engine, WorkflowRunContextFactory()
+        return ('none',)
+    return ('registry', tool)
+
+
+# 函数用途: 按标签相等与端口对象同一判定两次来源是否相同。
+def _same_port_source(previous, current):
+    return (isinstance(previous, tuple) and len(previous) == len(current) and previous[0] == current[0]
+            and all(old is new for old, new in zip(previous[1:], current[1:])))
 
 
 class BusinessServices:
@@ -824,6 +842,7 @@ def native_business_context(handler, server):
     if getattr(base, 'conversation_store', None) is not None:
         from .owner_conversation_store import owner_conversation_store
         host.conversation_store = owner_conversation_store(base, home, initialize=False)
+    port_source = ('none',)
     if base.home_paths.owner_id == home.owner_id:
         for key in ('business_projection', 'business_reference_reader', 'business_active_references',
                     'business_governance', 'business_background', 'business_capabilities',
@@ -832,7 +851,8 @@ def native_business_context(handler, server):
             if hasattr(base, key):
                 setattr(host, key, getattr(base, key))
         # 同一Owner才复用基座已登记的owner绑定工作流引擎；其它Owner缺端口时如实未就绪。
-        engine_factory, context_provider = workflow_run_ports(base)
+        port_source = workflow_port_source(base)
+        engine_factory, context_provider = workflow_run_ports(base, port_source)
         host.workflow_engine_factory, host.business_context_provider = engine_factory, context_provider
 
     def check(action, facts):
@@ -895,10 +915,13 @@ def native_business_context(handler, server):
             or cache[key].complete_host_wired != wired
             or cache[key].spaces.enabled != bool(getattr(base.config, 'business_spaces_enabled', False))
             or getattr(getattr(getattr(cache[key].host, 'conversation_store', None), 'storage', None), 'root', None)
-            != getattr(getattr(getattr(host, 'conversation_store', None), 'storage', None), 'root', None)):
+            != getattr(getattr(getattr(host, 'conversation_store', None), 'storage', None), 'root', None)
+            # G5a-R2：工作流运行端口来源（显式/登记回退/缺失）变化时重建，不沿用旧引擎工厂与上下文端口。
+            or not _same_port_source(getattr(cache[key], 'workflow_port_source', None), port_source)):
         if len(cache) >= 64:
             cache.pop(next(iter(cache)))
         cache[key] = BusinessServices(host)
+        cache[key].workflow_port_source = port_source
     else:
         cache[key].host = host
         # 默认投影保持原对象和签名密钥，但所有读口须绑定本次可信宿主的同一会话库。

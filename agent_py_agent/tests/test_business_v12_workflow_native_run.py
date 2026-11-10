@@ -46,7 +46,7 @@ def test_owner_level_run_executes_natively_without_freezing_a_space(native):  # 
     run = ok(native, 'workflow_runs.get', {'workflow_run_id': receipt['workflow_run_id']})
     assert (run['run']['status'], run['run']['task_id'], run['run']['space_id']) == ('succeeded', None, None)
     [record] = _runs(agent)
-    assert record.business_context == {}
+    assert record.business_context == {} and record.steps[0].output_snapshot == {'total': 3}
     snapshot = WorkflowRunStore(agent.home_paths.owner_home_dir).load_workflow_snapshot(record.workflow_run_id)
     assert '_business_context_origin' not in snapshot
 
@@ -65,6 +65,7 @@ def test_space_run_freezes_run_scoped_context_and_survives_restart_duplicate_and
     [record] = _runs(agent)
     store = WorkflowRunStore(agent.home_paths.owner_home_dir)
     assert record.workflow_run_id == run_id and record.status == 'succeeded'
+    assert record.steps[0].output_snapshot == {'total': 3}
     assert (record.business_context['task_id'], record.business_context['space_id']) == (run_id, space)
     assert record.business_context['owner_id'] == agent.home_paths.owner_id
     assert store.load_workflow_snapshot(run_id)['_business_context_origin'] == 'workflow_run'
