@@ -104,9 +104,60 @@ def _view(kind, row):
     return redact_sensitive_value({key: _copy(row[key]) for key in business_defs()[kind]['properties'] if key in row})
 
 
-# LLM: 公开引用只给交付项自带的 owner 内产物登记 ID（来自终态冻结的 metadata），绝不回退为绝对路径、截断或补造 ID；
-#   未解析的引用如实计数：旧任务无交付身份记 legacy_unresolved，元数据损坏记 unreadable，部分缺失或同一路径多个不同ID记 partial。
-# 函数用途: 把任务内部结果路径投影成公开 result_refs 与覆盖说明；无结果时覆盖说明为 None。
+# LLM: 仅当交付元数据携带合法64位十六进制sha256摘要时返回小写规范值；缺失或格式异常返回None，不伪造版本摘要。
+# 函数用途: 校验并规范化交付项记录的版本摘要钉（sha256）。
+def _valid_sha256_pin(value: object) -> str | None:
+    if isinstance(value, str) and len(value) == 64:
+        lowered = value.lower()
+        if all(ch in '0123456789abcdef' for ch in lowered):
+            return lowered
+    return None
+
+
+# LLM: 按父目录有界回溯最近的工作区产物登记簿，复用请求级只读缓存避免重复IO；无登记簿时不报错，有可读登记簿且当前记录缺失、损坏或sha256已变时如实报告漂移。
+# 函数用途: 检测可读本地产物登记簿上当前记录是否已偏离任务终态冻结的sha256版本摘要。
+def _registry_pin_drifted(path: str, artifact_id: str, pinned_sha: str, dir_cache: dict[str, Path | None]) -> bool:
+    from ..artifacts.registry import REGISTRY_RELATIVE_PATH, latest_artifact_records_report
+
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        return False
+    parent = str(candidate.parent)
+    if parent in dir_cache:
+        workspace = dir_cache[parent]
+    else:
+        workspace = None
+        visited: list[str] = []
+        for anc in list(candidate.parents)[:24]:
+            anc_str = str(anc)
+            if anc_str in dir_cache:
+                workspace = dir_cache[anc_str]
+                break
+            visited.append(anc_str)
+            if anc.parent == anc:
+                break
+            try:
+                has_registry = os.path.lexists(anc / REGISTRY_RELATIVE_PATH)
+            except OSError:
+                has_registry = False
+            if has_registry:
+                workspace = anc
+                break
+        for anc_str in visited:
+            dir_cache[anc_str] = workspace
+    if workspace is None:
+        return False
+    report = _observation_cached(('artifact_registry', str(workspace)),
+                                 lambda: latest_artifact_records_report(workspace))
+    if report.errors:
+        return True
+    record = report.records.get(artifact_id)
+    return record is None or str(record.sha256 or '').lower() != pinned_sha
+
+
+# LLM: 公开引用只给交付项自带的 owner 内产物登记 ID（最多前100个唯一ID，保持交付路径顺序），绝不回退为绝对路径、截断内部账本或补造 ID；
+#   unresolved_count与omitted_count均不设人为上限100，任一为正、版本摘要未知或可读登记簿已发生sha256漂移均记 partial，绝不把漂移/未知冒充 complete。
+# 函数用途: 把任务内部结果路径有界投影成公开 result_refs（<=100）与诚实覆盖说明；无结果时覆盖说明为 None。
 def public_result_refs(task):
     from .session_tasks import SESSION_TASK_RESULT_ARTIFACTS_KEY
 
@@ -115,17 +166,20 @@ def public_result_refs(task):
         return [], None
     raw = (task.metadata or {}).get(SESSION_TASK_RESULT_ARTIFACTS_KEY)
     if raw is None:
-        return [], {'state': 'legacy_unresolved', 'unresolved_count': len(paths)}
+        return [], {'state': 'legacy_unresolved', 'unresolved_count': len(paths), 'omitted_count': 0}
     if not isinstance(raw, list):
-        return [], {'state': 'unreadable', 'unresolved_count': len(paths)}
-    known = {}
+        return [], {'state': 'unreadable', 'unresolved_count': len(paths), 'omitted_count': 0}
+    known: dict[str, set[str]] = {}
+    pins: dict[tuple[str, str], set[str | None]] = {}
     for item in raw:
         artifact = item.get('artifact_id') if isinstance(item, dict) else None
         if (isinstance(item, dict) and isinstance(item.get('path'), str) and isinstance(artifact, str)
                 and 0 < len(artifact) <= 128 and len(artifact.encode('utf-8')) <= 128
                 and '/' not in artifact and '\\' not in artifact):
             known.setdefault(item['path'], set()).add(artifact)
-    refs, unresolved = [], 0
+            pins.setdefault((item['path'], artifact), set()).add(_valid_sha256_pin(item.get('sha256')))
+    refs, unresolved, pin_incomplete = [], 0, False
+    dir_cache: dict[str, Path | None] = {}
     for path in paths:
         # 同一路径对应多个不同登记ID即身份不明：如实记未解析，不按元数据顺序挑选（G7-R1）；完全相同的重复项已由集合去重。
         ids = known.get(path, set())
@@ -133,9 +187,20 @@ def public_result_refs(task):
             unresolved += 1
             continue
         artifact = next(iter(ids))
+        pin_set = pins.get((path, artifact), set())
+        if len(pin_set) != 1 or None in pin_set:
+            pin_incomplete = True
+        else:
+            pinned_sha = next(iter(pin_set))
+            if pinned_sha is None or _registry_pin_drifted(path, artifact, pinned_sha, dir_cache):
+                pin_incomplete = True
         if artifact not in refs:
             refs.append(artifact)
-    return refs, {'state': 'partial' if unresolved else 'complete', 'unresolved_count': unresolved}
+    # FLAG-7 B（MSG-029）：公开投影最多给前100个唯一ID（按交付路径稳定顺序），其余已解析ID计omitted_count；
+    #   内部路径与映射完整保留；任一计数为正或版本摘要未知/漂移即记partial，不将未知或漂移混同为完整无遗漏。
+    omitted = max(0, len(refs) - 100)
+    state = 'partial' if (unresolved or omitted or pin_incomplete) else 'complete'
+    return refs[:100], {'state': state, 'unresolved_count': unresolved, 'omitted_count': omitted}
 
 
 def _coverage(values):

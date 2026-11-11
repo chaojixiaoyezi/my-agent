@@ -37,6 +37,8 @@ def _finish(native, name, refs, artifacts=()):  # noqa: F811
     return task_id
 
 
+# LLM: 验证短路径、超长ASCII与多字节UTF-8路径均只投影为稳定登记ID并含omitted_count=0，不泄露宿主绝对路径。
+# 函数用途: 校验公开tasks.get/tasks.list的结果引用投影与内部路径保留合同。
 @pytest.mark.parametrize('kind', list(PATHS))
 def test_public_result_refs_are_registry_ids_and_internal_paths_stay(native, kind):  # noqa: F811
     _, host = native
@@ -49,7 +51,7 @@ def test_public_result_refs_are_registry_ids_and_internal_paths_stay(native, kin
     detail = ok(native, 'tasks.get', {'task_id': task_id})
     assert detail['result_refs'] == detail['task']['result_refs'] == detail['assignments'][0]['result_refs'] == [ART_A]
     assert detail['result_ref_coverage'] == detail['task']['result_ref_coverage'] == {
-        'state': 'complete', 'unresolved_count': 0}
+        'state': 'complete', 'unresolved_count': 0, 'omitted_count': 0}
     assert path not in json.dumps(detail, ensure_ascii=False)
     listed = [row for row in ok(native, 'tasks.list', {})['items'] if row['task_id'] == task_id]
     assert [row['result_refs'] for row in listed] == [[ART_A]]
@@ -60,17 +62,19 @@ def test_public_result_refs_are_registry_ids_and_internal_paths_stay(native, kin
     assert len(reports) == 1 and path in reports[0].message
 
 
+# LLM: 验证旧任务无映射、重复与非法ID均如实统计unresolved_count与omitted_count，绝不回退暴露绝对路径。
+# 函数用途: 校验遗留未映射、重复项去重、非法ID过滤及空结果的覆盖状态。
 def test_legacy_duplicate_and_invalid_results_are_counted_never_exposed_as_paths(native):  # noqa: F811
     one, two, three = '/srv/a/one.md', '/srv/a/two.md', '/srv/a/three.md'
     legacy = _finish(native, 'g7-legacy', [one, two])
     detail = ok(native, 'tasks.get', {'task_id': legacy})
     assert detail['result_refs'] == [] and detail['task']['result_refs'] == []
-    assert detail['result_ref_coverage'] == {'state': 'legacy_unresolved', 'unresolved_count': 2}
+    assert detail['result_ref_coverage'] == {'state': 'legacy_unresolved', 'unresolved_count': 2, 'omitted_count': 0}
     mixed = _finish(native, 'g7-mixed', [one, two, one, three],
                     [_item(one), _item(two), _item(three, 'x' * 129), 'garbage', {'path': 5, 'artifact_id': ART_B}])
     detail = ok(native, 'tasks.get', {'task_id': mixed})
     assert detail['result_refs'] == [ART_A]
-    assert detail['result_ref_coverage'] == {'state': 'partial', 'unresolved_count': 1}
+    assert detail['result_ref_coverage'] == {'state': 'partial', 'unresolved_count': 1, 'omitted_count': 0}
     text = json.dumps(detail, ensure_ascii=False)
     assert all(path not in text for path in (one, two, three))
     empty = _finish(native, 'g7-empty', [])
@@ -78,9 +82,11 @@ def test_legacy_duplicate_and_invalid_results_are_counted_never_exposed_as_paths
     assert detail['result_refs'] == [] and 'result_ref_coverage' not in detail
 
 
+# LLM: 验证损坏的result_artifacts结构显式标记unreadable，且运行时提取仅保留合法登记项。
+# 函数用途: 校验损坏元数据覆盖投影与delivery_result_artifacts提取过滤。
 def test_unreadable_metadata_and_runtime_extraction_are_explicit():
     task = SimpleNamespace(result_refs=('/srv/a/one.md',), metadata={'result_artifacts': 'corrupt'})
-    assert public_result_refs(task) == ([], {'state': 'unreadable', 'unresolved_count': 1})
+    assert public_result_refs(task) == ([], {'state': 'unreadable', 'unresolved_count': 1, 'omitted_count': 0})
     assert public_result_refs(SimpleNamespace(result_refs=(), metadata={})) == ([], None)
     execution = SimpleNamespace(delivery_artifacts=[
         {'path': '/srv/a/one.md', 'artifact_id': ART_A, 'sha256': 'c' * 64, 'size_bytes': 12, 'ok': True},
@@ -90,6 +96,8 @@ def test_unreadable_metadata_and_runtime_extraction_are_explicit():
     assert delivery_result_artifacts(SimpleNamespace()) == ()
 
 
+# LLM: 验证同一路径存在多个不同登记ID时与元数据顺序无关，一律计入unresolved_count并标记partial。
+# 函数用途: 校验冲突登记ID在任意顺序下都不会被挑选冒充complete。
 @pytest.mark.parametrize('order', ['a_first', 'b_first'])
 def test_conflicting_ids_for_one_path_stay_unresolved_in_either_order(order):
     # G7-R1：同一路径两个不同登记ID不按元数据顺序挑选；完全相同的重复项仍去重。
@@ -97,9 +105,9 @@ def test_conflicting_ids_for_one_path_stay_unresolved_in_either_order(order):
     conflict = [_item(one, ART_A), _item(one, ART_B)]
     items = (conflict if order == 'a_first' else conflict[::-1]) + [_item(two, art_c), _item(two, art_c)]
     task = SimpleNamespace(result_refs=(one, two), metadata={'result_artifacts': items})
-    assert public_result_refs(task) == ([art_c], {'state': 'partial', 'unresolved_count': 1})
+    assert public_result_refs(task) == ([art_c], {'state': 'partial', 'unresolved_count': 1, 'omitted_count': 0})
     only = SimpleNamespace(result_refs=(one,), metadata={'result_artifacts': items})
-    assert public_result_refs(only) == ([], {'state': 'partial', 'unresolved_count': 1})
+    assert public_result_refs(only) == ([], {'state': 'partial', 'unresolved_count': 1, 'omitted_count': 0})
 
 
 def test_terminal_result_identity_is_write_once_and_report_stays_consistent(native):  # noqa: F811
@@ -140,9 +148,111 @@ def test_legacy_terminal_record_accepts_exactly_one_mapping_backfill(native):  #
     assert ok(native, 'tasks.get', {'task_id': legacy})['result_refs'] == [ART_A]
 
 
+
+# LLM: 验证空结果终态（result_refs == ()）在同状态迟到重放时严格冻结为空，公开tasks.get/list与原结果回报保持一致。
+# 函数用途: 校验G7-R2无交付终态任务拒绝迟到结果路径追加。
+def test_empty_terminal_result_refs_stay_empty_on_replay_and_projection_matches_report(native):  # noqa: F811
+    # G7-R2（MSG-031）：合法的无交付终态（result_refs为空元组）同样一次写定；同状态重放带来的迟到路径/映射不得改变
+    #   内部路径、tasks.get/tasks.list公开ID与覆盖，也不得与已发布的那条无产物结果回报不一致。
+    from agent_py_agent.agent.conversation.session_tasks import SessionTaskUpdate
+
+    _, host = native
+    task_id = _finish(native, 'g7-empty-terminal', [])
+    store = host.conversation_store.session_tasks
+    before = store.require(task_id)
+
+    # LLM: 读取来源会话待处理结果回报正文列表。
+    # 函数用途: 获取当前任务已发布的guidance结果回报消息。
+    def reports():
+        return [entry.message for entry in host.conversation_store.guidance.pending(
+            'thread', before.sender_thread_id, limit=0) if entry.metadata.get('session_task_id') == task_id]
+
+    # LLM: 查询tasks.get与tasks.list中的公开result_refs及result_ref_coverage。
+    # 函数用途: 提取当前任务在公开详情与列表接口上的结果引用投影。
+    def public():
+        detail = ok(native, 'tasks.get', {'task_id': task_id})
+        listed = [row['result_refs'] for row in ok(native, 'tasks.list', {})['items'] if row['task_id'] == task_id]
+        return detail['result_refs'], detail.get('result_ref_coverage'), listed
+
+    published, projected = reports(), public()
+    assert before.status == 'done' and before.result_refs == () and len(published) == 1
+    assert projected[0] == [] and projected[2] == [[]]
+    late = '/srv/g7/late-result.md'
+    replay = store.advance(task_id, SessionTaskUpdate(status='done', result_refs=(late,),
+                                                      result_artifacts=(_item(late),)))
+    assert replay.result_refs == store.require(task_id).result_refs == ()
+    assert public() == projected and reports() == published
+
+
+# LLM: 按确定性前缀批量生成合成交付路径与对应稳定产物登记ID。
+# 函数用途: 构造超过100条的批量交付路径与登记ID测试样本。
+def _many(prefix, count):
+    return [f'/srv/{prefix}/r{index:03d}.md' for index in range(count)], [f'art_{prefix}{index:016d}' for index in range(count)]
+
+
+# LLM: 验证超过100个已解析交付项时公开投影有界返回前100个唯一ID、omitted_count如实记录剩余数量且state为partial，内部账本不截断。
+# 函数用途: 校验FLAG-7 B对100+已解析产物的有界投影与完整内部证据保留。
+def test_more_than_one_hundred_resolved_ids_are_bounded_with_explicit_omitted_count(native):  # noqa: F811
+    # FLAG-7 B（MSG-029）：105个已解析交付项——公开最多100个唯一ID（交付路径顺序，重复读取同序），omitted_count=5，
+    #   partial；内部路径与映射完整保留、不截断。修复前公开数组超schema上限（maxItems 100）→ 503 DOMAIN_RESULT_INVALID。
+    _, host = native
+    paths, ids = _many('okay', 105)
+    task_id = _finish(native, 'g7-many-resolved', paths, [_item(path, art) for path, art in zip(paths, ids)])
+    coverage = {'state': 'partial', 'unresolved_count': 0, 'omitted_count': 5}
+    for _ in range(2):
+        detail = ok(native, 'tasks.get', {'task_id': task_id})
+        assert detail['result_refs'] == detail['task']['result_refs'] == detail['assignments'][0]['result_refs'] == ids[:100]
+        assert detail['result_ref_coverage'] == detail['task']['result_ref_coverage'] == coverage
+        listed = [row for row in ok(native, 'tasks.list', {})['items'] if row['task_id'] == task_id]
+        assert [(row['result_refs'], row['result_ref_coverage']) for row in listed] == [(ids[:100], coverage)]
+    assert all(path not in json.dumps(detail, ensure_ascii=False) for path in paths)
+    stored = host.conversation_store.session_tasks.require(task_id)
+    assert stored.result_refs == tuple(paths)
+    assert stored.metadata['result_artifacts'] == [_item(path, art) for path, art in zip(paths, ids)]
+
+
+# LLM: 验证超过100个未解析路径及混合>100场景下unresolved_count与omitted_count均无人为100上限且公开schema校验通过。
+# 函数用途: 校验FLAG-7 B对超过100条未解析路径与混合场景的诚实计数。
+def test_more_than_one_hundred_unresolved_paths_keep_schema_valid_honest_counts(native):  # noqa: F811
+    # FLAG-7 B：>100个无法解析的交付路径（旧记录无映射；或与>100个已解析混合）——计数无人为上限、公开响应合法；
+    #   修复前 unresolved_count>100 超schema上限 → 503 DOMAIN_RESULT_INVALID。
+    _, host = native
+    legacy_paths, _ = _many('lgcy', 105)
+    legacy = _finish(native, 'g7-many-legacy', legacy_paths)
+    detail = ok(native, 'tasks.get', {'task_id': legacy})
+    expected = {'state': 'legacy_unresolved', 'unresolved_count': 105, 'omitted_count': 0}
+    assert detail['result_refs'] == [] and detail['result_ref_coverage'] == expected
+    listed = [row for row in ok(native, 'tasks.list', {})['items'] if row['task_id'] == legacy]
+    assert [(row['result_refs'], row['result_ref_coverage']) for row in listed] == [([], expected)]
+    resolved, ids = _many('mixd', 103)
+    unknown, _ = _many('none', 102)
+    mixed = _finish(native, 'g7-many-mixed', resolved + unknown, [_item(path, art) for path, art in zip(resolved, ids)])
+    detail = ok(native, 'tasks.get', {'task_id': mixed})
+    assert detail['result_refs'] == ids[:100]
+    assert detail['result_ref_coverage'] == {'state': 'partial', 'unresolved_count': 102, 'omitted_count': 3}
+    stored = host.conversation_store.session_tasks.require(mixed)
+    assert stored.result_refs == tuple(resolved + unknown) and len(stored.metadata['result_artifacts']) == 103
+    assert host.conversation_store.session_tasks.require(legacy).result_refs == tuple(legacy_paths)
+
+
+# LLM: 验证缺少sha256版本摘要或同一(path, artifact_id)存在不一致sha256时覆盖状态降为partial，绝不冒充complete。
+# 函数用途: 校验未知或冲突版本摘要钉时public_result_refs不会声称complete。
+def test_unknown_or_conflicting_pin_marks_coverage_partial():
+    path = '/srv/a/unknown-pin.md'
+    missing_pin = SimpleNamespace(result_refs=(path,), metadata={'result_artifacts': [
+        {'path': path, 'artifact_id': ART_A, 'sha256': '', 'size_bytes': 12}]})
+    assert public_result_refs(missing_pin) == ([ART_A], {'state': 'partial', 'unresolved_count': 0, 'omitted_count': 0})
+    conflicting_pin = SimpleNamespace(result_refs=(path,), metadata={'result_artifacts': [
+        {'path': path, 'artifact_id': ART_A, 'sha256': 'a' * 64, 'size_bytes': 12},
+        {'path': path, 'artifact_id': ART_A, 'sha256': 'b' * 64, 'size_bytes': 12}]})
+    assert public_result_refs(conflicting_pin) == ([ART_A], {'state': 'partial', 'unresolved_count': 0, 'omitted_count': 0})
+
+
+# LLM: 验证真实本地产物登记簿往返投影稳定ID，且同路径重登记导致sha256漂移后覆盖状态如实变为partial而不声称complete。
+# 函数用途: 校验真实登记簿往返、稳定ID投影及sha256版本漂移后的partial覆盖检测。
 def test_real_registry_id_round_trips_to_public_ref_and_ids_are_not_version_pins(native, tmp_path):  # noqa: F811
-    # MSG-024 证据：真实本地登记簿→原交付投影→运行时提取→终态→公开ID→按ID回读；登记ID按(run,task,agent,path)稳定，
-    #   同路径重登记不换ID但sha256变，故公开ID不是版本钉；冻结的交付sha256留在内部元数据可核漂移。
+    # MSG-024 / MSG-029 证据：真实本地登记簿→原交付投影→运行时提取→终态→公开ID→按ID回读；登记ID按(run,task,agent,path)稳定，
+    #   同路径重登记不换ID但sha256变，故公开ID不是版本钉；可读登记簿发生sha256漂移后coverage降为partial，不冒充complete。
     from agent_py_agent.agent.agent_core._finalization_service import (
         _delivery_artifact_from_registry_ref,
     )
@@ -165,6 +275,7 @@ def test_real_registry_id_round_trips_to_public_ref_and_ids_are_not_version_pins
     task_id = _finish(native, 'g7-real-registry', [item['path']], artifacts)
     detail = ok(native, 'tasks.get', {'task_id': task_id})
     assert detail['result_refs'] == [record.artifact_id] and record.artifact_id.startswith('art_')
+    assert detail['result_ref_coverage'] == {'state': 'complete', 'unresolved_count': 0, 'omitted_count': 0}
     readback = resolve_artifact_record(workspace, record.artifact_id)
     persisted = host.conversation_store.session_tasks.require(task_id).metadata['result_artifacts']
     assert (readback.path, readback.sha256) == (item['path'], item['sha256']) == (persisted[0]['path'],
@@ -173,5 +284,7 @@ def test_real_registry_id_round_trips_to_public_ref_and_ids_are_not_version_pins
     second = register_artifact(registration)
     assert second.artifact_id == record.artifact_id and second.sha256 != record.sha256
     assert resolve_artifact_record(workspace, record.artifact_id).sha256 == second.sha256
-    assert ok(native, 'tasks.get', {'task_id': task_id})['result_refs'] == [record.artifact_id]
+    drifted = ok(native, 'tasks.get', {'task_id': task_id})
+    assert drifted['result_refs'] == [record.artifact_id]
+    assert drifted['result_ref_coverage'] == {'state': 'partial', 'unresolved_count': 0, 'omitted_count': 0}
     assert host.conversation_store.session_tasks.require(task_id).metadata['result_artifacts'][0]['sha256'] == record.sha256

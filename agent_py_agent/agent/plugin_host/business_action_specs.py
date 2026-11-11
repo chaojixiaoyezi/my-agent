@@ -355,8 +355,9 @@ def _frozen_data() -> Mapping:
             # ROUTE-05/G1：已结束任务的耐久摘要与结果回报发布回执；“已结束”与“回报已发布/已被来源会话处理”是不同事实。
             'ResultRefCoverage': {'type': 'object', 'properties': {
                 'state': {'type': 'string', 'enum': ['complete', 'partial', 'legacy_unresolved', 'unreadable']},
-                'unresolved_count': {'type': 'integer', 'minimum': 0, 'maximum': 100}},
-                'required': ['state', 'unresolved_count'], 'additionalProperties': False},
+                'unresolved_count': {'type': 'integer', 'minimum': 0},
+                'omitted_count': {'type': 'integer', 'minimum': 0}},
+                'required': ['state', 'unresolved_count', 'omitted_count'], 'additionalProperties': False},
             'TaskResultView': {'type': 'object', 'properties': {
                 'summary': {'type': 'string', 'minLength': 0, 'maxLength': 4000},
                 'summary_truncated': {'type': 'boolean'},

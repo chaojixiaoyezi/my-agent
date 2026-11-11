@@ -68,6 +68,8 @@ def test_exact_vocabulary_and_no_grant_upgrade():
             validate_capabilities(bad)
 
 
+# LLM: 锁住业务动作目录与Schema包除显式已批可选投影（含FLAG-7 B无上限unresolved_count/omitted_count）外的完整冻结摘要，禁止未授权schema漂移。
+# 函数用途: 校验冻结的完整业务动作目录与Schema捆绑包摘要一致性。
 def test_frozen_full_catalog_and_schema_bundle_hashes():
     module = catalog()
     api = module.business_api()
@@ -128,10 +130,12 @@ def test_frozen_full_catalog_and_schema_bundle_hashes():
     for definitions in (normalized_api["$defs"], normalized_schemas["$defs"], normalized_defs):
         assert definitions.pop("TaskResultView") == task_result_schema
     # G7 只可选追加结果引用覆盖说明：锁住新定义与 TaskView/tasks.get 的可选引用；result_refs 形状不变。
+    #   FLAG-7 B（MSG-029）：公开ID仍最多100个，另加必填omitted_count；两个计数都不设人为上限100。
     coverage_schema = {"type": "object", "properties": {
         "state": {"type": "string", "enum": ["complete", "partial", "legacy_unresolved", "unreadable"]},
-        "unresolved_count": {"type": "integer", "minimum": 0, "maximum": 100}},
-        "required": ["state", "unresolved_count"], "additionalProperties": False}
+        "unresolved_count": {"type": "integer", "minimum": 0},
+        "omitted_count": {"type": "integer", "minimum": 0}},
+        "required": ["state", "unresolved_count", "omitted_count"], "additionalProperties": False}
     for definitions in (normalized_api["$defs"], normalized_schemas["$defs"], normalized_defs):
         assert "result_ref_coverage" not in definitions["TaskView"]["required"]
         assert definitions["TaskView"]["properties"].pop("result_ref_coverage") == {"$ref": "#/$defs/ResultRefCoverage"}

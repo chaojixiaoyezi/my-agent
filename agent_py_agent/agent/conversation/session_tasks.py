@@ -1126,8 +1126,8 @@ class SessionTaskStore:
             raise ValueError(f"unknown session task status: {target_status}")
         current = now if now is not None else time.time()
 
-        # LLM: 锁内重读最新记录再校验迁移；并发下只有一个写入方成功，避免双账。
-        # 函数用途: 在原子更新内校验并应用状态迁移。
+        # LLM: 锁内重读最新记录再校验迁移；并发下只有一个写入方成功，避免双账；既有终态含空result_refs一律保留原值。
+        # 函数用途: 在原子更新内校验并应用状态迁移与一次写定结果身份。
         def updater(data: dict[str, Any]) -> dict[str, Any]:
             if target_status in SESSION_TASK_TERMINAL_STATUSES:
                 check_store_terminal_epoch(self.storage, expected_owner_epoch)
@@ -1138,8 +1138,8 @@ class SessionTaskStore:
                 )
             metadata = latest.metadata
             result_refs = tuple(update.result_refs) if update.result_refs else latest.result_refs
-            if latest.status in SESSION_TASK_TERMINAL_STATUSES and latest.result_refs:
-                # G7-R2：终态结果路径一次写定；同状态重放不得替换已据以发布结果回报的路径。
+            if latest.status in SESSION_TASK_TERMINAL_STATUSES:
+                # G7-R2（MSG-031）：一切既有终态（含合法无产物的空元组）结果路径一次写定，绝不允许迟到重放追加或替换路径。
                 result_refs = latest.result_refs
             artifacts = [item for item in map(_result_artifact_item, update.result_artifacts) if item is not None]
             if (artifacts and target_status in SESSION_TASK_TERMINAL_STATUSES
