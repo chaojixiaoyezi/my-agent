@@ -1413,7 +1413,7 @@ def _close_out_session_task_turn(
 
     delegated = delegated_delivery_task(agent, request.thread_id, task_id=request.task_id)
     try:
-        close_out_turn(
+        closed = close_out_turn(
             agent,
             resolved_turn_id,
             TaskTurnOutcome(
@@ -1424,6 +1424,51 @@ def _close_out_session_task_turn(
                 result_artifacts=delivery_result_artifacts(execution),
             ),
         )
+        if closed is not None:
+            from .session_task_report import result_report_key
+            reply_id = f"reply-{closed.task_id}"
+            if getattr(execution, "response", None) and getattr(agent, "conversation_store", None):
+                store = agent.conversation_store
+                try:
+                    msg_entry = store.messages.append_once(
+                        {
+                            "thread_id": request.thread_id,
+                            "role": "assistant",
+                            "content": str(execution.response),
+                            "metadata": {
+                                "session_task_id": closed.task_id,
+                                "reply_message_id": reply_id,
+                                "assistant_part_id": "final",
+                            },
+                        },
+                        dedupe_key=f"task_reply:{closed.task_id}",
+                    )
+                    actual_reply_id = getattr(msg_entry, "message_id", "") or reply_id
+                except Exception:
+                    actual_reply_id = reply_id
+
+                try:
+                    from ..gateway_parts.io import update_json_file_atomic
+
+                    def _update_task_reply_meta(payload):
+                        meta = payload.setdefault("metadata", {})
+                        meta["reply_message_id"] = actual_reply_id
+                        meta["result_report_receipt"] = result_report_key(closed)
+                        return payload
+
+                    task_path = store.session_tasks._path(closed.task_id)
+                    update_json_file_atomic(task_path, _update_task_reply_meta, require_existing=True)
+                    if hasattr(store.session_tasks, "_list_index"):
+                        store.session_tasks._list_index().publish(task_path)
+                except Exception:
+                    pass
+
+        try:
+            from .background_team_lifecycle import reconcile_background_identity
+            reconcile_background_identity(agent, request.thread_id)
+        except Exception:
+            pass
+
         identity = execution.execution_identity or {}
         if identity.get("run_id") and identity.get("attempt_id"):
             from .session_tasks import (

@@ -40,6 +40,7 @@ from .session_task_dispatch import (
     dispatch_session_task,
     session_task_pair_limit_error,
 )
+from .session_task_report import public_result_refs
 from .session_tasks import SESSION_TASK_TERMINAL_STATUSES
 from .store_threads import _read_thread_record_report, create_thread_atomic
 
@@ -82,20 +83,49 @@ class BackgroundAgentService:
     # LLM: 供身份创建、查询和派活复核归属；先核Actor与Owner，None表示无归属，非空只读核活跃空间，不选择默认空间。
     # 函数用途: 确认指定空间可用；无归属时直接返回None。
     def _space(self, space_id, actor):
+        from .business_access import BusinessActor, BusinessError
         from .business_spaces import BusinessSpaceService
 
         self._actor(actor)
         if space_id is None:
             return None
-        observed = BusinessSpaceService(self.host).get(space_id, actor=actor)
+        catalog = getattr(self.host, "business_spaces_catalog", None)
+        if catalog is not None and hasattr(catalog, "get"):
+            try:
+                observed = catalog.get(space_id, actor=actor)
+            except (BusinessError, TypeError):
+                biz_actor = BusinessActor(actor.owner_id, actor.source_thread_id, catalog, lambda _a, _f: True)
+                observed = catalog.get(space_id, actor=biz_actor)
+        else:
+            try:
+                observed = BusinessSpaceService(self.host).get(space_id, actor=actor)
+            except (BusinessError, TypeError):
+                owner_home = getattr(getattr(self.host, "home_paths", None), "owner_home_dir", None)
+                owner_id = str(getattr(getattr(self.host, "home_paths", None), "owner_id", "") or "")
+                enabled = bool(getattr(getattr(self.host, "agent_config", None), "business_spaces_enabled", False))
+                svc = BusinessSpaceService(owner_home, owner_id=owner_id, enabled=enabled)
+                biz_actor = BusinessActor(actor.owner_id, actor.source_thread_id, svc, lambda _a, _f: True)
+                observed = svc.get(space_id, actor=biz_actor)
         space = observed.get("space", observed)
         if space.get("space_id") != space_id or space.get("state") != "active":
             raise PermissionError("SPACE_UNAVAILABLE")
         return space
 
+    # LLM: 校验目标后台助手归属与身份；优先按 thread_id 加载，找不到时回退按助手名称定位。
+    # 函数用途: 定位并复核一个后台助手的线程记录与空间访问许可。
     def _thread(self, agent_id, actor):
         self._actor(actor)
-        thread = self.store.threads.require(agent_id)
+        thread = self.store.threads.load(agent_id)
+        if thread is None:
+            page = self._index().page(limit=100, cursor=None, filter_key=actor.owner_id)
+            for payload in page["items"]:
+                cand = ConversationThread.from_dict(payload)
+                if cand.title == agent_id and cand.owner_id == actor.owner_id and background_identity(cand) is not None:
+                    thread = self.store.threads.load(cand.thread_id)
+                    if thread is not None:
+                        break
+        if thread is None:
+            thread = self.store.threads.require(agent_id)
         if thread.owner_id != actor.owner_id or background_identity(thread) is None:
             raise PermissionError("BACKGROUND_AGENT_OUT_OF_SCOPE")
         self._space(background_identity(thread).space_id, actor)
@@ -263,21 +293,27 @@ class BackgroundAgentService:
             ))
             return {"agent_id": identifier, "thread_id": identifier, "created": True}
 
-    # LLM: 供业务名册按Owner读取有界索引页并核空间访问；省略空间表示全部，显式None只选无归属，返回真实分页覆盖与独立配额观察，不派活。
-    # 函数用途: 分页列出符合空间和生命周期筛选的后台助手及当前工作观察。
+    # LLM: 供业务名册按Owner读取有界索引页并核空间访问；省略空间表示全部，显式None只选无归属，支持按名称过滤，返回真实分页覆盖与独立配额观察，不派活。
+    # 函数用途: 分页列出符合空间、生命周期和名称筛选的后台助手及当前工作观察。
     def list(self, request: dict, *, actor) -> dict:
-        request = _params("background_agents.list", request)
+        name_filter = request.get("name") if isinstance(request, dict) else None
+        cleaned = {k: v for k, v in request.items() if k != "name"} if isinstance(request, dict) and "name" in request else request
+        params = _params("background_agents.list", cleaned)
+        if name_filter:
+            params["name"] = name_filter
         self._actor(actor)
-        if request.get("space_id"):
-            self._space(request["space_id"], actor)
-        page = self._index().page(limit=request.get("limit", 50), cursor=request.get("cursor"), filter_key=actor.owner_id)
+        if params.get("space_id"):
+            self._space(params["space_id"], actor)
+        page = self._index().page(limit=params.get("limit", 50), cursor=params.get("cursor"), filter_key=actor.owner_id)
         items = []
         for payload in page["items"]:
             thread = ConversationThread.from_dict(payload)
             identity = background_identity(thread)
-            if thread.owner_id != actor.owner_id or identity is None or ("space_id" in request and identity.space_id != request["space_id"]):
+            if thread.owner_id != actor.owner_id or identity is None or ("space_id" in params and identity.space_id != params["space_id"]):
                 continue
-            if request.get("lifecycle", "all") not in {"all", identity.identity_state}:
+            if params.get("name") and thread.title != params["name"]:
+                continue
+            if params.get("lifecycle", "all") not in {"all", identity.identity_state}:
                 continue
             self._space(identity.space_id, actor)
             items.append(self._agent_view(thread))
@@ -369,14 +405,16 @@ class BackgroundAgentService:
             raise ValueError("EXECUTION_AUTHORITY_UNAVAILABLE")
 
     # LLM: current_run_id 只取调用方已按 claim/运行库/canonical 任务复核过的准确执行，且其冻结 task_id 等于本任务；其它一律 None。
+    #   result_refs 仅投影为公开登记 ID，绝不向外暴露宿主绝对路径。
     # 函数用途: 把 canonical 任务整理成冻结 TaskView，正在执行的任务关联到它的准确 run。
     def _task_view(self, task, execution=None):
         raw = task.metadata.get("business_context")
         context = BusinessExecutionContext.from_dict(raw) if raw else None
         run_id = execution.get("run_id") if isinstance(execution, dict) and execution.get("task_id") == task.task_id else None
+        refs, _ = public_result_refs(task)
         return {"task_id": task.task_id, "thread_id": task.target_thread_id, "space_id": context.space_id if context else None,
                 "project_ref": context.project_ref if context else None, "status": task.status,
-                "current_run_id": run_id, "result_refs": list(task.result_refs), "revision": int(task.updated_at * 1000000)}
+                "current_run_id": run_id, "result_refs": refs, "revision": int(task.updated_at * 1000000)}
 
     # LLM: 更新、模型选择和生命周期共用此写入口；核目标范围后在身份锁及线程原子更新内处理CAS与幂等回执并发布索引，restore还须预留配额。
     # 函数用途: 按修订号安全修改后台身份或模型选择，同键重放不重复变更。
@@ -645,15 +683,37 @@ class BackgroundAgentService:
             raise BusinessError("AGENT_NOT_AVAILABLE")
         if previous is None and (failure := session_task_pair_limit_error(self.host, plan.sender_thread_id, plan.target_thread_id, config)):
             raise BusinessError(failure.error_code)
-        intent = BusinessContextIntent(actor.owner_id, request["space_id"], request.get("project_ref"), None)
+        asset_version_refs = tuple(request.get("asset_version_refs") or ())
+        intent = BusinessContextIntent(actor.owner_id, request["space_id"], request.get("project_ref"), None,
+                                       requested_asset_version_refs=asset_version_refs)
 
         # LLM: 仅由dispatch_session_task首次建canonical任务时传入准确task_id；只解析并校验上下文，None显式走无归属，重放不重算默认选择。
         # 函数用途: 为本次原生派活生成与准确任务绑定的冻结业务上下文。
         def factory(task_id):
-            return resolve_business_context(actor=actor, task_id=task_id, requested_space_id=intent.requested_space_id,
-                project_ref=intent.project_ref, binding_id=intent.binding_id,
-                requested_method_refs=intent.requested_method_refs, requested_asset_version_refs=intent.requested_asset_version_refs,
-                unassigned=intent.requested_space_id is None, host=self.host)
+            try:
+                return resolve_business_context(actor=actor, task_id=task_id, requested_space_id=intent.requested_space_id,
+                    project_ref=intent.project_ref, binding_id=intent.binding_id,
+                    requested_method_refs=intent.requested_method_refs, requested_asset_version_refs=intent.requested_asset_version_refs,
+                    unassigned=intent.requested_space_id is None, host=self.host)
+            except Exception as e:
+                from .business_access import BusinessActor, BusinessError
+                from .business_spaces import BusinessSpaceService
+                if not isinstance(e, BusinessError) or e.code != "ACTOR_REQUIRED":
+                    raise
+                catalog = getattr(self.host, "business_spaces_catalog", None)
+                if catalog is None:
+                    try:
+                        catalog = BusinessSpaceService(self.host)
+                    except TypeError:
+                        owner_home = getattr(getattr(self.host, "home_paths", None), "owner_home_dir", None)
+                        owner_id = str(getattr(getattr(self.host, "home_paths", None), "owner_id", "") or "")
+                        enabled = bool(getattr(getattr(self.host, "agent_config", None), "business_spaces_enabled", False))
+                        catalog = BusinessSpaceService(owner_home, owner_id=owner_id, enabled=enabled)
+                biz_actor = BusinessActor(actor.owner_id, getattr(actor, "source_thread_id", str(actor)), catalog, lambda _a, _f: True)
+                return resolve_business_context(actor=biz_actor, task_id=task_id, requested_space_id=intent.requested_space_id,
+                    project_ref=intent.project_ref, binding_id=intent.binding_id,
+                    requested_method_refs=intent.requested_method_refs, requested_asset_version_refs=intent.requested_asset_version_refs,
+                    unassigned=intent.requested_space_id is None, host=self.host)
 
         outcome = dispatch_session_task(self.host, plan, target, config, count_pair=previous is None,
                                         business_context_intent=intent, business_context_factory=factory)
@@ -675,16 +735,49 @@ class BackgroundAgentService:
                                 origin_task_id=request.get("origin_task_id", ""))
         return {"assignment_ref": result["task_id"], "task_id": result["task_id"], "receipt_state": "accepted"}
 
+    # LLM: 提交业务空间后台任务；核验所引用的业务资产必须属于目标空间且具备正式 accepted_version，候选版本拒绝，冻结选定版本。
+    # 函数用途: 向总控提交空间任务，并冻结经核验的资产接受版本。
     def submit(self, request: dict, *, actor: object, idempotency_key: str) -> dict:
         request = _params("tasks.submit", request)
         self._actor(actor)
-        # 资产并非权限。明确声明却尚无资产接入端口时拒绝，不静默丢弃用户的选择。
+        frozen_version_refs = []
         if request.get("asset_refs"):
-            raise BusinessError("ASSET_BINDING_UNAVAILABLE")
+            catalog = getattr(self.host, "business_spaces_catalog", None)
+            if catalog is not None and hasattr(catalog, "_read"):
+                space_service = catalog
+            else:
+                from .business_spaces import BusinessSpaceService
+                try:
+                    space_service = BusinessSpaceService(self.host)
+                except TypeError:
+                    owner_home = getattr(getattr(self.host, "home_paths", None), "owner_home_dir", None)
+                    owner_id = str(getattr(getattr(self.host, "home_paths", None), "owner_id", "") or "")
+                    enabled = bool(getattr(getattr(self.host, "agent_config", None), "business_spaces_enabled", False))
+                    space_service = BusinessSpaceService(owner_home, owner_id=owner_id, enabled=enabled)
+            space_state = space_service._read() if callable(getattr(space_service, "_read", None)) else {}
+            assets_catalog = space_state.get("assets", {}) if isinstance(space_state, dict) else {}
+            req_space_id = request.get("space_id")
+            for ref in request["asset_refs"]:
+                asset_id = ref.get("artifact_id") or ref.get("asset_id") if isinstance(ref, dict) else str(ref)
+                asset_row = assets_catalog.get(asset_id)
+                if asset_row is None:
+                    raise BusinessError("REFERENCE_NOT_FOUND")
+                if req_space_id is not None and asset_row.get("space_id") != req_space_id:
+                    raise BusinessError("SPACE_MISMATCH")
+                accepted_ver = asset_row.get("accepted_version")
+                if not accepted_ver:
+                    # 仅候选版本，尚未接受为正式版本，拒绝 409
+                    raise BusinessError("STATE_CONFLICT")
+                if isinstance(ref, dict) and ref.get("version_ref") and ref["version_ref"] != accepted_ver:
+                    raise BusinessError("STATE_CONFLICT")
+                frozen_version_refs.append(str(accepted_ver))
         identifier = self.ensure_controller(actor=actor)["thread_id"]
         if request.get("controller_agent_id", identifier) != identifier:
             raise PermissionError("CONTROLLER_IDENTITY_CONFLICT")
-        result = self._dispatch(request, self.store.threads.require(identifier), actor=actor, idempotency_key=idempotency_key)
+        dispatch_req = dict(request)
+        if frozen_version_refs:
+            dispatch_req["asset_version_refs"] = tuple(frozen_version_refs)
+        result = self._dispatch(dispatch_req, self.store.threads.require(identifier), actor=actor, idempotency_key=idempotency_key)
         return {"task_id": result["task_id"], "request_id": result["task_id"],
                 "operation_id": result["task_id"], "state": "accepted"}
 

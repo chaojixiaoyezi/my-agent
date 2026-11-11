@@ -47,11 +47,12 @@ def model_readiness(host: object, thread: object) -> tuple[bool | None, str]:
 
 
 # LLM: tasks 必须是调用方已读出的同线程非终态 canonical 任务（有界页）；只按准确 task 主键读唤醒定位与尝试账，
-#   不 glob 队列或历史。running 只能来自调用方已复核的准确执行，不能由身份 available 推断。
+#   不 glob 队列或历史。running 只能来自调用方已复核的准确执行，不能由身份 available 推断。支持准入饱和阻塞报告。
 # 函数用途: 生成一个后台会话或单个任务的结构化调度视图（状态、原因码、唤醒引用、失败计数、下次重试时间）。
 def scheduling_view(store: object, *, thread_id: str, tasks: list, identity_state: str = "", running: bool = False,
                     model_ready: bool | None = None, model_reason: str = "", pending_inputs: bool | None = None,
-                    tasks_complete: bool = True, probe_limit: int = 20) -> dict:
+                    tasks_complete: bool = True, probe_limit: int = 20,
+                    admission_limit_reached: bool = False) -> dict:
     view = {"state": "unknown", "reason_code": "", "pending_task_count": len(tasks), "wake_signal_ids": [],
             "failure_count": 0, "uncounted_count": 0, "last_failure_at": None, "next_attempt_at": None,
             "model_ready": model_ready, "coverage": "complete" if tasks_complete else "partial"}
@@ -102,6 +103,8 @@ def scheduling_view(store: object, *, thread_id: str, tasks: list, identity_stat
             view["state"], view["reason_code"] = ("queued", "PENDING_INPUT") if pending_inputs else ("no_work", "")
     elif model_ready is False:
         view["state"], view["reason_code"] = "model_unavailable", model_reason
+    elif admission_limit_reached or counted_reason == "ADMISSION_LIMIT_REACHED" or uncounted_reason == "ADMISSION_LIMIT_REACHED":
+        view["state"], view["reason_code"] = "queued", "ADMISSION_LIMIT_REACHED"
     elif view["failure_count"] or view["uncounted_count"]:
         view["state"], view["reason_code"] = "wake_backoff", counted_reason or uncounted_reason
     elif view["wake_signal_ids"]:
@@ -113,14 +116,15 @@ def scheduling_view(store: object, *, thread_id: str, tasks: list, identity_stat
 
 
 # LLM: tasks.get 用：终态任务只报终态与宿主原因码（如 SESSION_TASK_WAKE_QUARANTINED），非终态按同一投影读准确唤醒；
-#   本入口没有宿主模型目录，model_ready 留 None，不猜。
+#   本入口没有宿主模型目录，model_ready 留 None，不猜。支持准入饱和阻塞报告。
 # 函数用途: 为单个 canonical 会话任务生成调度视图。
-def task_scheduling_view(store: object, task: object) -> dict:
+def task_scheduling_view(store: object, task: object, *, admission_limit_reached: bool = False) -> dict:
     if task.status in SESSION_TASK_TERMINAL_STATUSES:
         view = scheduling_view(store, thread_id=task.target_thread_id, tasks=[], pending_inputs=False)
         view.update(state="terminal", reason_code=str(task.failure_code or "")[:128], pending_task_count=0)
         return view
-    return scheduling_view(store, thread_id=task.target_thread_id, tasks=[task])
+    return scheduling_view(store, thread_id=task.target_thread_id, tasks=[task],
+                           admission_limit_reached=admission_limit_reached)
 
 
 # 已结束任务摘要在业务投影里的最大字符数（与 TaskResultView.summary 的 maxLength 一致）。
