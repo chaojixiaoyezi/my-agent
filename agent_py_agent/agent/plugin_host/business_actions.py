@@ -114,8 +114,11 @@ class GatewayBusinessDomain:
                          'task_business_context', '_business_host_ports_wired'):
                 if hasattr(base, name):
                     setattr(host, name, getattr(base, name))
-        if getattr(base, '_business_host_ports_wired', False) or getattr(base, 'business_host_ports_enabled', False):
-            from ..gateway_parts.business_host_ports import wire_business_host_ports
+        from ..gateway_parts.business_host_ports import (
+            is_business_host_ports_enabled,
+            wire_business_host_ports,
+        )
+        if is_business_host_ports_enabled(base):
             wire_business_host_ports(host)
         key = (scoped_home.owner_id, str(scoped_home.owner_home_dir))
         services = self._services.get(key)

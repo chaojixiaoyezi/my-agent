@@ -15,6 +15,7 @@ from agent_py_agent.agent.gateway_parts.business_host_ports import (
     build_default_business_workflow_reference_reader,
     build_default_task_business_context,
     build_default_workflow_agent_steps,
+    is_business_host_ports_enabled,
     wire_business_host_ports,
 )
 from agent_py_agent.tests.test_business_v12_background_scheduling import (  # noqa: F401 - pytest fixture
@@ -251,3 +252,69 @@ def test_biz_012_workflow_reference_reader_and_recycle(native, monkeypatch):  # 
     )
     # 验证 safe_to_delete 门禁正常工作
     assert m_res['executed'] is False and m_res['reason'] == 'retention_not_safe'
+
+
+# LLM: 验证宿主端口装配时序解耦与网关生产默认装配机制。
+# 函数用途: 验证 wire_business_host_ports 在 conversation_store 注入前调用仍可动态绑定任务，
+# 以及网关基于 config.business_host_ports_enabled 自动装配端口且支持 explicit False 覆盖。
+def test_business_host_ports_wiring_order_and_production_default(native, monkeypatch):  # noqa: F811
+    server, agent = native
+
+    # 1. 验证 wire_business_host_ports 在 conversation_store 注入前调用：
+    # 模拟在 conversation_store 挂载前即完成宿主接线
+    unattached_host = SimpleNamespace(
+        home_paths=agent.home_paths,
+        config=agent.config,
+    )
+    wire_business_host_ports(unattached_host)
+    assert unattached_host._business_host_ports_wired is True
+    assert unattached_host.business_workflow_reference_reader is not None
+
+    # 后续挂载 conversation_store 并注入活跃任务
+    flow_id = 'dynamic-wf-' + uuid.uuid4().hex[:8]
+    dyn_stask = SimpleNamespace(
+        task_id='task-delayed-01',
+        status='running',
+        metadata={'workflow_ref': flow_id}
+    )
+    unattached_host.conversation_store = SimpleNamespace(
+        session_tasks=SimpleNamespace(
+            list_page=lambda limit=100: {'items': [dyn_stask], 'next_cursor': None}
+        )
+    )
+
+    # 读者在调用时动态识别后来挂载的 session_tasks，阻断项归一化为 task
+    cov = unattached_host.business_workflow_reference_reader(flow_id)
+    assert cov['coverage'] == 'complete'
+    assert any(b['kind'] == 'task' and b['ref'] == 'task-delayed-01' for b in cov['blockers'])
+
+    # 2. 验证生产网关 business_api / business_actions 默认装配无需手动设置 host.business_host_ports_enabled = True
+    # 宿主本身未显式设置 business_host_ports_enabled (值为 None)
+    prod_host = SimpleNamespace(
+        home_paths=agent.home_paths,
+        config=SimpleNamespace(business_host_ports_enabled=True, business_spaces_enabled=True),
+    )
+    assert getattr(prod_host, 'business_host_ports_enabled', None) is None
+    # 但根据 config.business_host_ports_enabled = True，判定为已启用
+    assert is_business_host_ports_enabled(prod_host) is True
+
+    # 验证显式 override: 当 host.business_host_ports_enabled = False 时，即使 config 为 True 也禁用
+    disabled_host = SimpleNamespace(
+        home_paths=agent.home_paths,
+        config=SimpleNamespace(business_host_ports_enabled=True, business_spaces_enabled=True),
+        business_host_ports_enabled=False,
+    )
+    assert is_business_host_ports_enabled(disabled_host) is False
+
+    # 3. 验证通过网关 API / _local_business_services 真实消费，无需显式在 base 上打开关
+    from agent_py_agent.agent.gateway_parts import business_api as api
+    gateway_host = SimpleNamespace(
+        home_paths=agent.home_paths,
+        config=SimpleNamespace(business_host_ports_enabled=True, business_spaces_enabled=True),
+        conversation_store=agent.conversation_store,
+    )
+    # 模拟 _local_business_services 自动触发 wire_business_host_ports
+    api._local_business_services(gateway_host)
+    assert gateway_host._business_host_ports_wired is True
+    assert gateway_host.business_capabilities is not None
+    assert gateway_host.business_workflow_reference_reader is not None

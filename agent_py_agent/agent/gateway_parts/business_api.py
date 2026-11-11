@@ -441,9 +441,11 @@ class BusinessServices:
         self.background = background if background is not None else getattr(host, 'business_background', None)
         if capabilities is None:
             capabilities = getattr(host, 'business_capabilities', None)
-            if capabilities is None and (getattr(host, '_business_host_ports_wired', False) or getattr(getattr(host, 'config', None), 'business_host_ports_enabled', True)):
-                from ..capability.business_capabilities import BusinessCapabilityService
-                capabilities = BusinessCapabilityService(host)
+            if capabilities is None:
+                from .business_host_ports import is_business_host_ports_enabled
+                if is_business_host_ports_enabled(host):
+                    from ..capability.business_capabilities import BusinessCapabilityService
+                    capabilities = BusinessCapabilityService(host)
         self.capabilities = capabilities
         self.projection = projection if projection is not None else getattr(host, 'business_projection', None)
         self._default_projection = self.projection is None
@@ -912,8 +914,8 @@ def native_business_context(handler, server):
         engine_factory, context_provider = workflow_run_ports(base, port_source)
         host.workflow_engine_factory, host.business_context_provider = engine_factory, context_provider
 
-    if getattr(base, '_business_host_ports_wired', False) or getattr(base, 'business_host_ports_enabled', False):
-        from .business_host_ports import wire_business_host_ports
+    from .business_host_ports import is_business_host_ports_enabled, wire_business_host_ports
+    if is_business_host_ports_enabled(base):
         wire_business_host_ports(host)
 
     def check(action, facts):
@@ -1189,8 +1191,8 @@ def handle_client_business_stream(handler, server):
 def _local_business_services(host):
     lock = vars(host).setdefault('_local_business_services_lock', RLock())
     with lock:
-        if getattr(host, '_business_host_ports_wired', False) or getattr(host, 'business_host_ports_enabled', False):
-            from .business_host_ports import wire_business_host_ports
+        from .business_host_ports import is_business_host_ports_enabled, wire_business_host_ports
+        if is_business_host_ports_enabled(host):
             wire_business_host_ports(host)
         store = getattr(host, 'conversation_store', None)
         storage = getattr(store, 'storage', None)
