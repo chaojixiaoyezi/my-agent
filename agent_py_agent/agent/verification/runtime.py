@@ -317,6 +317,15 @@ def verification_task_metadata(agent: object, *, thread_id: str, task_id: str) -
     return VerificationEvidenceRepository(runtime_owner_root(agent)).task_metadata(context)
 
 
+# LLM: 纯投影当前 owner 验证库中记录的指定需求溯源状态，排除命令与私有内容。
+# 函数用途: 为协调层或汇报入口提供单条需求的结构化溯源信息。
+def requirement_provenance_metadata(agent: object, *, requirement_id: str) -> dict[str, Any] | None:
+    context = _verification_context(agent)
+    repo = VerificationEvidenceRepository(runtime_owner_root(agent))
+    rec = repo.get_requirement(context.owner_ref, requirement_id)
+    return rec.to_dict() if rec is not None else None
+
+
 # LLM: 显式工作目录优先，其次任务工作区和 agent 根；不写文件。
 # 函数用途: 确定命令的实际工程目录。
 def _command_cwd(agent: object, payload: dict[str, object]) -> Path:
@@ -381,4 +390,8 @@ def _public_evidence(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-__all__ = ["record_tool_verification"]
+__all__ = [
+    "record_tool_verification",
+    "requirement_provenance_metadata",
+    "verification_task_metadata",
+]
