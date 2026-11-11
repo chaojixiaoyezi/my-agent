@@ -198,7 +198,13 @@ def _card_action_key(norm: dict) -> str:
     if value.get("session_lock_action") in {"pwd_set", "pwd_unlock", "pwd_change"}:
         return ""
     kind = value.get("kind")
-    if kind in {"my_agent_tool_approval", "my_agent_task_credential"}:
+    if kind == "my_agent_panel_action":
+        event_id = str(norm.get("event_id") or "").strip()
+        if not event_id:
+            return ""
+        identity = ["my_agent_panel_action", event_id, norm.get("operator_open_id"),
+                    norm.get("message_id"), norm.get("chat_id")]
+    elif kind in {"my_agent_tool_approval", "my_agent_task_credential"}:
         identity = [kind, value.get("reference"), value.get("decision"), norm.get("operator_open_id"),
                     norm.get("message_id"), norm.get("chat_id")]
         if not identity[1] or not all(identity[3:]):

@@ -13,7 +13,7 @@ import time
 import urllib.error
 import urllib.request
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
@@ -435,6 +435,13 @@ def _reply_after_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, An
     password_matched, password_result = _password_card_action(adapter, norm, value)
     if password_matched:
         return password_result
+
+    from .feishu_agent_panel import handle_panel_card_action
+
+    panel_result = handle_panel_card_action(adapter, norm)
+    if panel_result is not None:
+        return panel_result
+
     from .private_controls import tool_approval_card_action
 
     approval_result = tool_approval_card_action(adapter, norm)
@@ -635,6 +642,11 @@ def _admit_feishu_event(adapter: Any, payload: dict[str, Any], facts: dict[str, 
     lock_result = _session_message_lock_disposition(adapter, msg)
     if lock_result is not None:
         return lock_result
+    if adapter.my_agent_home:
+        from .feishu_agent_panel import handle_panel_command_event, is_panel_command
+
+        if is_panel_command(msg.content):
+            return handle_panel_command_event(adapter, msg)
     if adapter._dispatch(msg) is False:
         return FeishuEventDisposition('retryable', 'FEISHU_INGRESS_UNAVAILABLE')
     return FeishuEventDisposition('accepted')
@@ -1203,6 +1215,32 @@ class FeishuAdapter(FeishuObservationMixin, FeishuUnlockResumeMixin, FeishuTypin
     # 函数用途: 发送原生控制卡，返回消息/聊天 ID 或明确拒绝诊断，不返回供应商正文。
     def send_control_card(self, user_id: str, card: dict, *, idempotency_key: str) -> dict[str, Any]:
         return _send_feishu_control_card(self, user_id, card, idempotency_key=idempotency_key)
+
+    def send_agent_panel_card(
+        self,
+        target: str,
+        *,
+        actor_open_id: str = "",
+        origin_conversation_id: str = "",
+        chat_type: str = "p2p",
+        session_task_id: str = "",
+        bound_root_id: str = "",
+        steps: Sequence[Mapping[str, Any]] = (),
+        idempotency_key: str = "",
+    ) -> dict[str, Any]:
+        from .feishu_agent_panel import send_agent_panel_card
+
+        return send_agent_panel_card(
+            self,
+            target,
+            actor_open_id=actor_open_id,
+            origin_conversation_id=origin_conversation_id,
+            chat_type=chat_type,
+            session_task_id=session_task_id,
+            bound_root_id=bound_root_id,
+            steps=steps,
+            idempotency_key=idempotency_key,
+        )
 
     # LLM: 进度始终使用首次创建的 text 类型，不能根据候选出现 Markdown/表格而改变消息类型；只编辑原 ID。
     # 函数用途: 更新原文本进度窗口，普通富文本订正仍由 edit_message 保持已有语义。
