@@ -180,6 +180,8 @@ def _execute_target_tool(agent, params, target, *, monitor_id=''):
 def _bind_pinned_tool(handler, target, definition):
     from types import SimpleNamespace
     tool = copy(handler)
+    scope = 'workflows:scheduled_target' if target['kind'] == 'workflow' else 'scripts:scheduled_target'
+    tool.effective_resource_scopes = lambda *_args, **_kwargs: (scope,)
     if target['kind'] == 'workflow':
         tool.store = SimpleNamespace(owner_home=tool.owner_home,
             get_workflow=lambda identifier: deepcopy(definition) if identifier == target['asset_id'] else None)

@@ -613,7 +613,6 @@ def _invoke_with_operation_policy(
             )
         )
         outcome.duration_ms = max(0, _elapsed_ms(started_at))
-        outcome.result_envelope.setdefault("redacted_input", deepcopy(redacted_input))
         if call.input_migration:
             outcome.result_envelope["input_migration"] = dict(call.input_migration)
         return outcome
