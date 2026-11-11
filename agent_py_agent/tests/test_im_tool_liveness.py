@@ -102,12 +102,13 @@ def test_original_gateway_projection_shows_real_elapsed_without_model_or_stdout(
     writer.set_verbose_level("stream", preview_max_chars=100)
     writer.write_tool_liveness(event)
     public, _ = _read_public_progress_events(writer.chunk_path, 0, channel="feishu")
-    assert public[1]["preview_max_chars"] == 100
-    text = _render_gateway_progress(public[1])
+    assert public[1] == {"kind": "process_settings", "verbose_level": "stream"}
+    assert public[2]["preview_max_chars"] == 100
+    text = _render_gateway_progress(public[2])
     assert "61.25" in text and "仍在执行" in text and "等待工具结果" in text
     writer.rich_transcript = True
     writer.write_tool_liveness(event)
-    assert len(_read_public_progress_events(writer.chunk_path, 0)[0]) == 2
+    assert len(_read_public_progress_events(writer.chunk_path, 0)[0]) == 3
 
 
 def test_real_model_tool_seam_passes_liveness_into_registry(gateway, tmp_path):
@@ -136,8 +137,9 @@ def test_real_model_tool_seam_passes_liveness_into_registry(gateway, tmp_path):
     execution = execute_traced_tool_call(ToolCallRuntimeRequest(agent, ToolCallExecuteParams(params, 1, 1, call), call))
     assert execution.result.ok
     public, _ = _read_public_progress_events(writer.chunk_path, 0)
-    assert public[0]["round"] == public[0]["call_index"] == 1
-    assert public[0]["elapsed_seconds"] >= 0.9
+    assert public[0] == {"kind": "process_settings", "verbose_level": "stream"}
+    assert public[1]["round"] == public[1]["call_index"] == 1
+    assert public[1]["elapsed_seconds"] >= 0.9
 
 
 def test_real_silent_shell_updates_window_and_stops_after_final(tmp_path):

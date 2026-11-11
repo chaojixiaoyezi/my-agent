@@ -206,7 +206,8 @@ def test_acceptance_same_call_delta_then_terminal(tmp_path):
     callback(text[:100])
     # 首次发布发生在 commit 之前，不能以终稿人工分字冒充 token 流。
     before = _events(writer)
-    assert before and all(row["kind"] == "assistant_text_delta" for row in before)
+    assert before[0] == {"kind": "process_settings", "verbose_level": "stream"}
+    assert before[1:] and all(row["kind"] == "assistant_text_delta" for row in before[1:])
     callback(text[100:])
     _commit(writer, text)
     rows = _events(writer)
@@ -282,7 +283,7 @@ def test_acceptance_cursor_replay_and_default_invisibility(tmp_path):
     seqs = [row["seq"] for row in first + rest if row["kind"] == "assistant_text_delta"]
     assert len(seqs) == len(set(seqs))
     assert _read_public_progress_events(writer.chunk_path, end, include=frozenset({"assistant_text_delta"})) == ([], end)
-    assert _read_public_progress_events(writer.chunk_path, 0)[0] == []
+    assert _read_public_progress_events(writer.chunk_path, 0)[0] == [{"kind": "process_settings", "verbose_level": "stream"}]
 
 
 def test_acceptance_long_command_input_and_full_output_archive(tmp_path):
@@ -307,7 +308,9 @@ def test_acceptance_long_command_input_and_full_output_archive(tmp_path):
     writer.write_progress(first, "开始")
     writer.write_progress(last, "完成")
     rows = _read_public_progress_events(writer.chunk_path, 0)[0]
-    assert all(row["kind"] == "tool_progress" for row in rows)
+    assert rows[0] == {"kind": "process_settings", "verbose_level": "full"}
+    tool_rows = rows[1:]
+    assert tool_rows and all(row["kind"] == "tool_progress" for row in tool_rows)
     assert stdout not in json.dumps(rows, ensure_ascii=False) and stderr not in json.dumps(rows, ensure_ascii=False)
     reference = rows[-1]["display_archive_ref"]
     restored = []
@@ -365,11 +368,11 @@ def test_workflow_step_is_typed_redacted_monotonic_and_opt_in(tmp_path):
              "private_unknown": "not-public"}
     writer.write_workflow_step_progress(event)
     writer.write_workflow_step_progress(event)
-    assert _read_public_progress_events(writer.chunk_path, 0)[0] == []
+    assert _read_public_progress_events(writer.chunk_path, 0)[0] == [{"kind": "process_settings", "verbose_level": "stream"}]
     rows, cursor = _read_public_progress_events(writer.chunk_path, 0, include=frozenset({"workflow_step_progress"}))
-    assert cursor == 1 and len(rows) == 1 and rows[0]["kind"] == "workflow_step_progress"
-    assert rows[0]["step_id"] == "step" and "workflow_step" not in rows[0]
-    assert "synthetic-private" not in json.dumps(rows) and "private_unknown" not in rows[0]
+    assert cursor == 2 and len(rows) == 2 and rows[0] == {"kind": "process_settings", "verbose_level": "stream"}
+    assert rows[1]["kind"] == "workflow_step_progress" and rows[1]["step_id"] == "step" and "workflow_step" not in rows[1]
+    assert "synthetic-private" not in json.dumps(rows) and "private_unknown" not in rows[1]
     writer.write_workflow_step_progress({**event, "seq": 2, "status": "succeeded"})
     assert _read_public_progress_events(writer.chunk_path, cursor, include=frozenset({"workflow_step_progress"}))[0][0]["seq"] == 2
 
@@ -485,10 +488,11 @@ def test_workflow_writer_to_http_opt_in_roundtrip(tmp_path):
         writer.write_workflow_step_progress(event)
         writer.write_workflow_step_progress(event)
         code, default = _w2_http(server, f"/progress/{request_id}")
-        assert code == 200 and default["events"] == [] and default["next"] == 1
+        assert code == 200 and default["events"] == [{"kind": "process_settings", "verbose_level": "stream"}] and default["next"] == 2
         code, opted = _w2_http(server, f"/progress/{request_id}?include=workflow_step_progress")
         assert code == 200
-        assert opted["events"] == [{**{key: value for key, value in event.items() if key != "private_unknown"},
+        assert opted["events"] == [{"kind": "process_settings", "verbose_level": "stream"},
+                                   {**{key: value for key, value in event.items() if key != "private_unknown"},
                                     "kind": "workflow_step_progress"}]
         code, replay = _w2_http(server, f"/progress/{request_id}?include=workflow_step_progress&since={opted['next']}")
         assert code == 200 and replay["events"] == [] and replay["next"] == opted["next"]
