@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 ObservationScope = Literal["module_only", "focused_integration", "full_candidate", "unverified"]
 ReviewStatus = Literal["missing", "pending", "approved", "changes_requested", "stale"]
-AcceptanceStatus = Literal["unaccepted", "accepted", "invalidated"]
+AcceptanceStatus = Literal["unaccepted", "accepted", "invalidated", "rejected"]
 ReviewVerdict = Literal["pass", "changes_requested"]
 
 
@@ -149,7 +149,7 @@ class AcceptanceRecord:
     requirement_id: str
     accepted_by_principal_id: str
     accepted_input_version: str
-    verdict: Literal["accepted", "invalidated", "rejected"] = "accepted"
+    verdict: Literal["accepted", "invalidated", "rejected", "changes_requested"] = "accepted"
     observation_scope: str = ""
     review_id: str = ""
     evidence_refs: tuple[str, ...] = ()
@@ -264,6 +264,7 @@ def provenance_closeout_summary(records: list[RequirementProvenanceRecord]) -> d
     approved_count = sum(1 for r in records if r.review_status == "approved")
     stale_review_count = sum(1 for r in records if r.review_status == "stale")
     accepted_count = sum(1 for r in records if r.acceptance_status == "accepted")
+    rejected_count = sum(1 for r in records if r.acceptance_status == "rejected")
     invalidated_count = sum(1 for r in records if r.acceptance_status == "invalidated")
 
     advisory_notes: list[str] = []
@@ -277,6 +278,8 @@ def provenance_closeout_summary(records: list[RequirementProvenanceRecord]) -> d
 
         if r.acceptance_status == "invalidated":
             advisory_notes.append(f"需求 {r.requirement_id} 验收已失效（原因：{r.invalidation_reason or '代码修改'}），需重新验收。")
+        elif r.acceptance_status == "rejected":
+            advisory_notes.append(f"需求 {r.requirement_id} 验收被驳回，需修改后重新提请验收。")
         elif r.acceptance_status == "unaccepted":
             advisory_notes.append(f"需求 {r.requirement_id} 尚未完成最终验收。")
 
@@ -292,6 +295,7 @@ def provenance_closeout_summary(records: list[RequirementProvenanceRecord]) -> d
         and accepted_count == total
         and stale_review_count == 0
         and invalidated_count == 0
+        and rejected_count == 0
     )
 
     return {
@@ -301,6 +305,7 @@ def provenance_closeout_summary(records: list[RequirementProvenanceRecord]) -> d
         "approved_count": approved_count,
         "stale_review_count": stale_review_count,
         "accepted_count": accepted_count,
+        "rejected_count": rejected_count,
         "invalidated_count": invalidated_count,
         "is_closeout_ready": all_ready,
         "advisory_notes": advisory_notes,

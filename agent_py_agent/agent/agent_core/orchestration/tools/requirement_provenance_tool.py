@@ -119,6 +119,14 @@ def build_manage_requirement_provenance_model_spec() -> ToolModelSpec:
                     "type": "string",
                     "description": "验收结论（默认 accepted）。",
                 },
+                "verdict": {
+                    "type": "string",
+                    "description": "评审或验收结论（review_verdict 或 acceptance_verdict 的别名）。",
+                },
+                "scope": {
+                    "type": "string",
+                    "description": "评审或观测范围（review_scope 的别名）。",
+                },
                 "evidence_refs": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -209,6 +217,7 @@ def _provenance_failure(
     *,
     error_code: str = "TOOL_INVALID_ARGUMENTS",
     effect_outcome: str = "not_started",
+    scope_warnings: list[str] | tuple[str, ...] | None = None,
 ) -> ToolHandlerOutcome:
     details: dict[str, object] = {
         "reason": reason,
@@ -220,6 +229,9 @@ def _provenance_failure(
         "message": message,
         "details": details,
     }
+    if scope_warnings:
+        details["scope_warnings"] = list(scope_warnings)
+        payload["scope_warnings"] = list(scope_warnings)
     return ToolHandlerOutcome(
         "manage_requirement_provenance",
         False,
@@ -269,18 +281,19 @@ class RequirementProvenanceTool(BaseTool):
         if not action:
             return _provenance_failure("MISSING_ACTION", "必须指定操作动作 action 参数。")
 
+        scope_warnings: list[str] = []
         try:
             repo = VerificationEvidenceRepository(runtime_owner_root(self.agent))
             context = self._resolve_context(params)
 
             if action == "bind_requirement":
-                return self._handle_bind(params, context, repo)
+                return self._handle_bind(params, context, repo, scope_warnings)
             if action == "link_verification":
                 return self._handle_link(params, context, repo)
             if action == "record_independent_review":
-                return self._handle_review(params, context, repo)
+                return self._handle_review(params, context, repo, scope_warnings)
             if action == "record_acceptance":
-                return self._handle_acceptance(params, context, repo)
+                return self._handle_acceptance(params, context, repo, scope_warnings)
             if action == "query_provenance":
                 return self._handle_query(params, context, repo)
 
@@ -291,6 +304,7 @@ class RequirementProvenanceTool(BaseTool):
                 str(exc),
                 error_code="TOOL_PERMISSION_DENIED",
                 effect_outcome="not_started",
+                scope_warnings=scope_warnings,
             )
         except ObservationScopeHonestyError as exc:
             return _provenance_failure(
@@ -298,6 +312,7 @@ class RequirementProvenanceTool(BaseTool):
                 str(exc),
                 error_code="TOOL_INVALID_ARGUMENTS",
                 effect_outcome="not_started",
+                scope_warnings=scope_warnings,
             )
         except StaleInputVersionError as exc:
             return _provenance_failure(
@@ -305,6 +320,7 @@ class RequirementProvenanceTool(BaseTool):
                 str(exc),
                 error_code="TOOL_INVALID_ARGUMENTS",
                 effect_outcome="not_started",
+                scope_warnings=scope_warnings,
             )
         except KeyError as exc:
             return _provenance_failure(
@@ -312,6 +328,7 @@ class RequirementProvenanceTool(BaseTool):
                 str(exc),
                 error_code="TOOL_INVALID_ARGUMENTS",
                 effect_outcome="not_started",
+                scope_warnings=scope_warnings,
             )
         except ValueError as exc:
             return _provenance_failure(
@@ -319,6 +336,7 @@ class RequirementProvenanceTool(BaseTool):
                 str(exc),
                 error_code="TOOL_INVALID_ARGUMENTS",
                 effect_outcome="not_started",
+                scope_warnings=scope_warnings,
             )
         except Exception as exc:  # noqa: BLE001 - 兜底异常处理
             return _provenance_failure(
@@ -326,6 +344,7 @@ class RequirementProvenanceTool(BaseTool):
                 f"需求溯源执行异常: {exc}",
                 error_code="TOOL_RUNTIME_ERROR",
                 effect_outcome="failed",
+                scope_warnings=scope_warnings,
             )
 
     # LLM: 从当前 agent 与参数中解析权威验证上下文。
@@ -348,14 +367,23 @@ class RequirementProvenanceTool(BaseTool):
         params: dict[str, object],
         context: VerificationContext,
         repo: VerificationEvidenceRepository,
+        scope_warnings: list[str],
     ) -> ToolHandlerOutcome:
         req_id = str(params.get("requirement_id") or "").strip()
         if not req_id:
-            return _provenance_failure("MISSING_REQUIREMENT_ID", "bind_requirement 必须指定 requirement_id。")
+            return _provenance_failure(
+                "MISSING_REQUIREMENT_ID",
+                "bind_requirement 必须指定 requirement_id。",
+                scope_warnings=scope_warnings,
+            )
 
         input_ver = str(params.get("input_version") or "").strip()
         if not input_ver:
-            return _provenance_failure("MISSING_INPUT_VERSION", "bind_requirement 必须指定 input_version。")
+            return _provenance_failure(
+                "MISSING_INPUT_VERSION",
+                "bind_requirement 必须指定 input_version。",
+                scope_warnings=scope_warnings,
+            )
 
         watched_raw = params.get("watched_paths", ())
         if isinstance(watched_raw, str):
@@ -368,6 +396,16 @@ class RequirementProvenanceTool(BaseTool):
         root = str(params.get("root") or getattr(self.agent, "root", "") or ".").strip()
         author = str(params.get("author_principal_id") or "").strip()
 
+        sub_id = current_subagent_run_id(self.agent)
+        if sub_id:
+            principal, _ = authoritative_self_principal(self.agent)
+            self_id = str(principal.run_id or "").strip()
+            if not author:
+                author = self_id
+            elif author != self_id:
+                scope_warnings.append(f"author_principal_id overridden by runner identity '{self_id}'")
+                author = self_id
+
         record = RequirementProvenanceRecord(
             requirement_id=req_id,
             owner_ref=context.owner_ref,
@@ -378,11 +416,14 @@ class RequirementProvenanceTool(BaseTool):
             author_principal_id=author,
         )
         updated = repo.bind_requirement(context, record)
-        payload = {"ok": True, "action": "bind_requirement", "requirement": updated.to_dict()}
+        payload: dict[str, Any] = {"ok": True, "action": "bind_requirement", "requirement": updated.to_dict()}
+        if scope_warnings:
+            payload["scope_warnings"] = list(scope_warnings)
         return ToolHandlerOutcome(
             "manage_requirement_provenance",
             True,
             json.dumps(payload, ensure_ascii=False, indent=2),
+            result_envelope={"details": {"scope_warnings": list(scope_warnings)}} if scope_warnings else None,
         )
 
     # LLM: 处理关联测试命令证据动作（link_verification）。
@@ -432,20 +473,45 @@ class RequirementProvenanceTool(BaseTool):
         params: dict[str, object],
         context: VerificationContext,
         repo: VerificationEvidenceRepository,
+        scope_warnings: list[str],
     ) -> ToolHandlerOutcome:
         req_id = str(params.get("requirement_id") or "").strip()
         if not req_id:
-            return _provenance_failure("MISSING_REQUIREMENT_ID", "record_independent_review 必须指定 requirement_id。")
+            return _provenance_failure(
+                "MISSING_REQUIREMENT_ID",
+                "record_independent_review 必须指定 requirement_id。",
+                scope_warnings=scope_warnings,
+            )
 
         reviewer = str(params.get("reviewer_principal_id") or "").strip()
         author = str(params.get("author_principal_id") or "").strip()
+
+        sub_id = current_subagent_run_id(self.agent)
+        if sub_id:
+            principal, _ = authoritative_self_principal(self.agent)
+            self_id = str(principal.run_id or "").strip()
+            if reviewer and reviewer != self_id:
+                scope_warnings.append(f"reviewer_principal_id overridden by runner identity '{self_id}'")
+            reviewer = self_id
+        elif not reviewer:
+            principal, _ = authoritative_self_principal(self.agent)
+            reviewer = str(principal.run_id or "").strip()
+
         reviewed_ver = str(params.get("reviewed_input_version") or "").strip()
         if not reviewed_ver:
-            return _provenance_failure("MISSING_REVIEWED_VERSION", "必须指定 reviewed_input_version。")
+            return _provenance_failure(
+                "MISSING_REVIEWED_VERSION",
+                "必须指定 reviewed_input_version。",
+                scope_warnings=scope_warnings,
+            )
 
         verdict_raw = str(params.get("review_verdict") or params.get("verdict") or "pass").strip()
         if verdict_raw not in ("pass", "changes_requested"):
-            return _provenance_failure("INVALID_VERDICT", f"无效的评审结论: '{verdict_raw}'，必须为 pass 或 changes_requested。")
+            return _provenance_failure(
+                "INVALID_VERDICT",
+                f"无效的评审结论: '{verdict_raw}'，必须为 pass 或 changes_requested。",
+                scope_warnings=scope_warnings,
+            )
 
         scope = str(params.get("review_scope") or params.get("scope") or "independent_review").strip()
         evidence_refs_raw = params.get("evidence_refs", ())
@@ -464,16 +530,19 @@ class RequirementProvenanceTool(BaseTool):
         )
         saved = repo.record_independent_review(context, record)
         req = repo.get_requirement(context.owner_ref, req_id)
-        payload = {
+        payload: dict[str, Any] = {
             "ok": True,
             "action": "record_independent_review",
             "review": saved.to_dict(),
             "requirement": req.to_dict() if req is not None else None,
         }
+        if scope_warnings:
+            payload["scope_warnings"] = list(scope_warnings)
         return ToolHandlerOutcome(
             "manage_requirement_provenance",
             True,
             json.dumps(payload, ensure_ascii=False, indent=2),
+            result_envelope={"details": {"scope_warnings": list(scope_warnings)}} if scope_warnings else None,
         )
 
     # LLM: 处理阶段与最终验收动作（record_acceptance）。
@@ -483,18 +552,42 @@ class RequirementProvenanceTool(BaseTool):
         params: dict[str, object],
         context: VerificationContext,
         repo: VerificationEvidenceRepository,
+        scope_warnings: list[str],
     ) -> ToolHandlerOutcome:
         req_id = str(params.get("requirement_id") or "").strip()
         if not req_id:
-            return _provenance_failure("MISSING_REQUIREMENT_ID", "record_acceptance 必须指定 requirement_id。")
+            return _provenance_failure(
+                "MISSING_REQUIREMENT_ID",
+                "record_acceptance 必须指定 requirement_id。",
+                scope_warnings=scope_warnings,
+            )
 
         accepted_by = str(params.get("accepted_by_principal_id") or "").strip()
+        sub_id = current_subagent_run_id(self.agent)
+        if sub_id:
+            principal, _ = authoritative_self_principal(self.agent)
+            self_id = str(principal.run_id or "").strip()
+            if accepted_by and accepted_by != self_id:
+                scope_warnings.append(f"accepted_by_principal_id overridden by runner identity '{self_id}'")
+            accepted_by = self_id
+        elif not accepted_by:
+            principal, _ = authoritative_self_principal(self.agent)
+            accepted_by = str(principal.run_id or "").strip()
+
         if not accepted_by:
-            return _provenance_failure("MISSING_ACCEPTED_BY", "必须指定 accepted_by_principal_id。")
+            return _provenance_failure(
+                "MISSING_ACCEPTED_BY",
+                "必须指定 accepted_by_principal_id。",
+                scope_warnings=scope_warnings,
+            )
 
         accepted_ver = str(params.get("accepted_input_version") or "").strip()
         if not accepted_ver:
-            return _provenance_failure("MISSING_ACCEPTED_VERSION", "必须指定 accepted_input_version。")
+            return _provenance_failure(
+                "MISSING_ACCEPTED_VERSION",
+                "必须指定 accepted_input_version。",
+                scope_warnings=scope_warnings,
+            )
 
         verdict = str(params.get("acceptance_verdict") or params.get("verdict") or "accepted").strip()
         scope = str(params.get("observation_scope") or "").strip()
@@ -513,16 +606,19 @@ class RequirementProvenanceTool(BaseTool):
         )
         saved = repo.record_acceptance(context, record)
         req = repo.get_requirement(context.owner_ref, req_id)
-        payload = {
+        payload: dict[str, Any] = {
             "ok": True,
             "action": "record_acceptance",
             "acceptance": saved.to_dict(),
             "requirement": req.to_dict() if req is not None else None,
         }
+        if scope_warnings:
+            payload["scope_warnings"] = list(scope_warnings)
         return ToolHandlerOutcome(
             "manage_requirement_provenance",
             True,
             json.dumps(payload, ensure_ascii=False, indent=2),
+            result_envelope={"details": {"scope_warnings": list(scope_warnings)}} if scope_warnings else None,
         )
 
     # LLM: 处理需求溯源查询动作（query_provenance）。
@@ -563,7 +659,10 @@ class RequirementProvenanceTool(BaseTool):
         )
 
 
+build_requirement_provenance_model_spec = build_manage_requirement_provenance_model_spec
+
 __all__ = [
     "RequirementProvenanceTool",
     "build_manage_requirement_provenance_model_spec",
+    "build_requirement_provenance_model_spec",
 ]

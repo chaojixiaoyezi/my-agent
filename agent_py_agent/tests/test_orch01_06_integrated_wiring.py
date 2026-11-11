@@ -36,6 +36,7 @@ from agent_py_agent.agent.agent_core.orchestration_tools import (
     ResolveCapabilityRequestsTool,
 )
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+from agent_py_agent.agent.agent_core.runtime.owner_roots import runtime_owner_root
 from agent_py_agent.agent.collaboration.handoff_board import HandoffBoardService
 from agent_py_agent.agent.collaboration.store import CollaborationStore
 from agent_py_agent.agent.core import SimpleAgent
@@ -46,6 +47,7 @@ from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.tooling.models import ToolInvocationContext
 from agent_py_agent.agent.verification.repository import (
     VerificationContext,
+    VerificationEvidence,
     VerificationEvidenceRepository,
 )
 
@@ -435,10 +437,26 @@ def test_orch01_06_composed_pipeline_smoke(integrated_agent: SimpleAgent, tmp_pa
     assert bind_res.ok is True, bind_res.output
 
     # 5.2 link_verification
+    evidence_repo = VerificationEvidenceRepository(runtime_owner_root(integrated_agent))
+    evidence_ctx = prov_tool._resolve_context({})
+    ev_passed = evidence_repo.record(
+        evidence_ctx,
+        VerificationEvidence(
+            command="pytest module_a",
+            canonical_command="pytest",
+            kind="test",
+            scope="targeted",
+            status="passed",
+            exit_code=0,
+            cwd=str(tmp_path),
+            root=str(tmp_path),
+            output_summary="1 passed",
+        ),
+    )
     link_res = prov_tool.execute_scoped({
         "action": "link_verification",
         "requirement_id": "ORCH-E2E-PIPE",
-        "verification_event_ids": [201],
+        "verification_event_ids": [ev_passed["id"]],
         "observation_scope": "module_only",
     }, proven_ctx)
     assert link_res.ok is True, link_res.output
