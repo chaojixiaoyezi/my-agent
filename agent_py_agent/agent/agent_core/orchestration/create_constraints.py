@@ -63,9 +63,24 @@ def merged_extra_write_roots(params: dict[str, object], goal: str) -> list[str]:
     return roots
 
 
-# LLM: 普通 child 继承宿主文件范围；交付引用不是额外授权，精确 worker 只保留显式授权。
-# 函数用途: 计算子代理写根，不根据 tasks/output 命名、goal、产物或输入文件推导权限。
+# LLM: 普通 child 继承宿主文件范围；交付引用不是额外授权，精确 worker 或指定 exact_write_set 只保留显式授权。
+# 函数用途: 计算子代理写根，当显式指定 exact_write_set 或 allowed_output_dirs 时绝不继承父级宽工作区。
 def resolved_extra_write_roots(agent: object, params: dict[str, object], goal: str) -> list[str]:
+    from .delegation_constraints import extract_delegation_constraints
+
+    constraints = extract_delegation_constraints(params)
+    if constraints is not None and (constraints.exact_write_set or constraints.allowed_output_dirs):
+        roots: list[str] = []
+        for path_str in constraints.exact_write_set:
+            p = str(Path(str(path_str)).expanduser().resolve(strict=False)).rstrip("/")
+            if p and p not in roots:
+                roots.append(p)
+        for dir_str in constraints.allowed_output_dirs:
+            p = str(Path(str(dir_str)).expanduser().resolve(strict=False)).rstrip("/")
+            if p and p not in roots:
+                roots.append(p)
+        return roots
+
     explicit = merged_extra_write_roots(params, goal)
     if params.get("_exact_allowed_tools") is True:
         return explicit
@@ -279,8 +294,39 @@ def _resolve_create_run_unlocked(
         return CreateTaskResolution(task=existing, reused=True)
     if prepared is not None:
         prepared = manager.base_service.refreeze_run(params=params, prepared=prepared)
-        return CreateTaskResolution(task=manager.create_run(params=params, prepared=prepared), reused=False)
-    return CreateTaskResolution(task=manager.create_run(params=params), reused=False)
+        resolution = CreateTaskResolution(task=manager.create_run(params=params, prepared=prepared), reused=False)
+    else:
+        resolution = CreateTaskResolution(task=manager.create_run(params=params), reused=False)
+    _persist_delegation_scope(manager, resolution.task)
+    return resolution
+
+
+# LLM: 将已冻结在 task.attributes['delegation_constraints'] 上的约束同步存入 delegations.granted_scope_json 权威表。
+# 函数用途: 在子代理物化入库后，更新对应委托记录的 granted_scope_json。
+def _persist_delegation_scope(manager: Any, task: Any) -> None:
+    if task is None:
+        return
+    attrs = getattr(task, "attributes", None)
+    if not isinstance(attrs, dict) or "delegation_constraints" not in attrs:
+        return
+    constraints_data = attrs["delegation_constraints"]
+    repo = getattr(manager, "runtime_db", None)
+    if repo is None:
+        return
+    import json
+
+    task_id = str(getattr(task, "id", "") or "").strip()
+    if not task_id:
+        return
+    try:
+        with repo._runtime_connection() as conn:
+            conn.execute(
+                "UPDATE delegations SET granted_scope_json = ? WHERE child_agent_run_id = ?",
+                (json.dumps(constraints_data, ensure_ascii=False), task_id),
+            )
+            conn.commit()
+    except Exception:
+        pass
 
 
 def _has_reusable_create_identity(params: CreateRunParams) -> bool:

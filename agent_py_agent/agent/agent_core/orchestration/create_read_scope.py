@@ -40,7 +40,17 @@ _ISSUE_COUNT = 20
 _SCOPE_UNAVAILABLE_ERRORS = (OSError, ValueError, TypeError, KeyError, AttributeError)
 
 
-# LLM: 冻结的是子代理运行时同源事实：owner 墙根、相对路径起点、墙外已授权根和同一 PathAccessPolicy；不持有可变状态。
+# LLM: 判定 target 是否与 base 相等或为其子路径。
+# 函数用途: 安全判断子路径归属性。
+def _is_subpath(target: Path, base: Path) -> bool:
+    try:
+        target.relative_to(base)
+        return True
+    except ValueError:
+        return False
+
+
+# LLM: 冻结的是子代理运行时同源事实：owner 墙根、相对路径起点、墙外已授权根、约束读输入和同一 PathAccessPolicy。
 # 类用途: 表示一个待创建子代理能读到哪些路径，并对单个输入路径给出结构化裁决。
 @dataclass(frozen=True)
 class ChildReadScope:
@@ -48,9 +58,10 @@ class ChildReadScope:
     cwd: Path
     granted_roots: tuple[Path, ...]
     policy: PathAccessPolicy
+    allowed_read_inputs: tuple[Path, ...] = ()
 
     # LLM: 解析方式与 FileSystemTool.resolve_path 一致（展开 ~、相对路径接 cwd、resolve），
-    #   裁决与 FileSystemTool.check_path_access 一致；不读文件内容、不判断文件是否存在。
+    #   裁决优先受 delegation_constraints.allowed_read_inputs 限制，再与 FileSystemTool.check_path_access 一致。
     # 函数用途: 判断一个输入路径子代理能否读取，返回解析后的路径和结构化裁决。
     def check(self, ref: str) -> tuple[Path, PathAccessDecision]:
         candidate = Path(ref).expanduser()
@@ -60,11 +71,20 @@ class ChildReadScope:
             resolved = candidate.resolve(strict=False)
         except (OSError, RuntimeError):
             return candidate, PathAccessDecision(False, "PATH_RESOLUTION_FAILED", "路径解析失败，请检查路径是否有效。")
+        if self.allowed_read_inputs:
+            if not any(resolved == allowed or _is_subpath(resolved, allowed) for allowed in self.allowed_read_inputs):
+                return resolved, PathAccessDecision(
+                    False,
+                    "PATH_NOT_IN_ALLOWED_READ_INPUTS",
+                    "输入路径不在 allowed_read_inputs 允许的读取范围之内。",
+                )
         return resolved, self.policy.check_with_external_roots(resolved, self.granted_roots)
 
     # LLM: 只列出本 scope 已冻结的根，供回执告诉父代理可以把文件放到哪里；不是新的授权。
     # 函数用途: 返回子代理可访问的根目录列表（自己的工作区、shared 区和已授权的墙外根）。
     def visible_roots(self) -> list[str]:
+        if self.allowed_read_inputs:
+            return list(dict.fromkeys(str(p) for p in self.allowed_read_inputs))
         roots = [str(self.owner_root)]
         home = self.policy.agent_home_root
         if home is not None:
@@ -91,11 +111,22 @@ def child_read_scope(agent: object, run_params: object) -> ChildReadScope | None
         owner_scope_root=scope_root,
     )
     owner_root = Path(scope_root).expanduser().resolve(strict=False)
+
+    attrs = getattr(run_params, "attributes", {}) or {}
+    constraints_dict = attrs.get("delegation_constraints") if isinstance(attrs, dict) else None
+    allowed_inputs_raw: tuple[str, ...] = ()
+    if isinstance(constraints_dict, dict):
+        allowed_inputs_raw = tuple(constraints_dict.get("allowed_read_inputs") or ())
+    resolved_allowed = tuple(
+        Path(p).expanduser().resolve(strict=False) for p in allowed_inputs_raw if str(p).strip()
+    )
+
     return ChildReadScope(
         owner_root=owner_root,
         cwd=effective_registry_cwd(owner_root, boundary),
         granted_roots=granted_external_work_roots(boundary, scope_root),
         policy=policy,
+        allowed_read_inputs=resolved_allowed,
     )
 
 
@@ -109,7 +140,7 @@ def input_read_scope_failure(
     children: list[dict[str, object]] = []
     for index, (params, run_params) in enumerate(zip(items_params, task_params, strict=True)):
         refs = explicit_input_refs(params) if isinstance(params, dict) else []
-        if refs and (child := _invisible_child_inputs(agent, index, refs, run_params)):
+        if child := _invisible_child_inputs(agent, index, refs, run_params):
             children.append(child)
     if not children:
         return None
@@ -130,7 +161,19 @@ def _invisible_child_inputs(
         return {}
     if scope is None:
         return {}
-    invisible = [issue for ref in refs if (issue := _ref_issue(scope, ref))]
+    invisible: list[dict[str, str]] = []
+    if scope.allowed_read_inputs:
+        for allowed_path in scope.allowed_read_inputs:
+            decision = scope.policy.check_with_external_roots(allowed_path, scope.granted_roots)
+            if not decision.allowed:
+                invisible.append({
+                    "ref": str(allowed_path)[:_REF_TEXT_LIMIT_CHARS],
+                    "resolved_path": str(allowed_path)[:_REF_TEXT_LIMIT_CHARS],
+                    "reason_code": "DELEGATION_SCOPE_EXCEEDS_PARENT",
+                })
+    for ref in refs:
+        if issue := _ref_issue(scope, ref):
+            invisible.append(issue)
     if not invisible:
         return {}
     return {
