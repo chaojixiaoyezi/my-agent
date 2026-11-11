@@ -127,6 +127,8 @@ CONTROL_ACTION_DESCRIPTIONS = {
     "task_progress": "更新任务清单进展。",
     "resolve_capability_requests": "批准或拒绝子代理的能力申请,让它能继续干。",
     "list_pending_requests": "只读查看直属子代理还有哪些能力申请在等父级处理。",
+    "manage_handoff_board": "管理跨代理原生交接板（Handoff Board）项目生命周期与外部助手安全邮箱同步。",
+    "manage_requirement_provenance": "管理与查询需求项、输入版本、单测范围、独立评审及最终验收溯源（ORCH-05）。",
     "cancel_subagents": "打断并结束一个不应继续运行的直属子代理；它不负责轮询、推动或验收。",
     "package_build": "把（子代理）写好的能力包或插件目录打成包，不安装；回执写现在装着的版本和提醒。",
     "package_install": "按自动装开关安装她打的包；开关关着只开待确认安装单，把回执里的确认行原样交给用户。",

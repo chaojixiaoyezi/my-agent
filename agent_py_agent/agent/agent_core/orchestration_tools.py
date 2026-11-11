@@ -74,6 +74,10 @@ from .orchestration.decision_subagent import (
     decide_subagent_models,
     prepare_subagent_model_decision,
 )
+from .orchestration.delegation_constraints import (
+    DelegationConstraintError,
+    extract_delegation_constraints,
+)
 from .orchestration.dispatch_progress_seed import (
     DISPATCH_SEED_NOTE,
     dispatch_coverage_binding,
@@ -114,9 +118,15 @@ from .orchestration.tools.cancel import (
 from .orchestration.tools.capability import (
     ResolveCapabilityRequestsTool as ResolveCapabilityRequestsTool,
 )
+from .orchestration.tools.handoff_board_tool import (
+    ManageHandoffBoardTool as ManageHandoffBoardTool,
+)
 from .orchestration.tools.list_agents import ListAgentsTool as ListAgentsTool
 from .orchestration.tools.pending_requests import (
     ListPendingRequestsTool as ListPendingRequestsTool,
+)
+from .orchestration.tools.requirement_provenance_tool import (
+    RequirementProvenanceTool as RequirementProvenanceTool,
 )
 from .orchestration.write_guard import (
     ExternalWriteTargetRequest,
@@ -283,6 +293,8 @@ class CreateSubagentsTool(BaseTool):
                     tool_name="create_subagents",
                 )
             return execute_create_subagents_service(self.agent, params)
+        except DelegationConstraintError as exc:
+            return _not_started_create_result(exc)
         except ToolCancelled as exc:
             return _cancelled_create_subagents_result(exc)
 
@@ -350,9 +362,12 @@ def _nested_create_params(
     allowed_tool_values = [subagent_allowed_tools(item.params) for item in delegated_items]
     if invalid := _planned_delegation_result(agent, delegated_items, allowed_tool_values):
         return invalid
+    top_c = params.get("delegation_constraints")
     children = [dict(item.params) for item in delegated_items]
     for child in children:
         child.pop("items", None)
+        if top_c and "delegation_constraints" not in child:
+            child["delegation_constraints"] = top_c
     return {
         "children": children,
         "dry_run": bool(params.get("dry_run", False)),
@@ -484,6 +499,11 @@ def _prepare_items(
     items: list[CreateSubagentItem],
     request_params: dict[str, object],
 ) -> PreparedSubagentCreation | ToolHandlerOutcome:
+    top_c = request_params.get("delegation_constraints")
+    if top_c:
+        for item in items:
+            if "delegation_constraints" not in item.params:
+                item.params["delegation_constraints"] = top_c
     capacity = _checked_creation_capacity(agent)
     if isinstance(capacity, ToolHandlerOutcome):
         return capacity
@@ -523,7 +543,7 @@ def _prepare_items(
         return ToolHandlerOutcome("create_subagents", False, validation, error_code="TOOL_INVALID_ARGUMENTS")
     try:
         task_params = _indexed_item_run_params(agent, capped)
-    except (ModelProfileError, SubagentInputMediaError) as exc:
+    except (ModelProfileError, SubagentInputMediaError, DelegationConstraintError) as exc:
         return _not_started_create_result(exc)
     if invalid := _replacement_preflight_result(agent, task_params):
         return invalid

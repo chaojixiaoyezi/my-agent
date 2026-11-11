@@ -86,6 +86,8 @@ DIRECT_CHILD_CONTROL_TOOLS = [
     "cancel_subagents",
     "resolve_capability_requests",
     "list_pending_requests",
+    "manage_handoff_board",
+    "manage_requirement_provenance",
 ]
 COORDINATOR_TOOLS = [
     *DIRECT_CHILD_CONTROL_TOOLS,
