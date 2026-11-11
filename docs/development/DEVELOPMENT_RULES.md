@@ -31,8 +31,22 @@ before changing code.
    - 严禁只修被点名的单行代码。修改前必须对照 `/Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/DEFECT_PATTERNS.md` 横扫当前文件及关联模块中所有同类调用点（如锁外读旧快照进锁整条覆盖、归档函数误移活跃 `.lock`、热路径裸拿租约未套 `ExitStack`），并将典型模式沉淀为秒级静态检查规则。
 2. **四大核心状态机并发交错不变量（State-Machine Interleaving Invariants）**：
    - 修改 `SessionTaskStore`、`ClaimStore`、`PtySessionRegistry`、`WorkflowEngine` 时，必须通过 `Event` 控制的确定性交错测试验证三大单调不变量：① **终态不可逆**（`cancelled/done/failed` 绝不被晚到的 `bind_body` 或旧快照覆盖回 `queued/running`）；② **同 Scope 执行体严格互斥**（归档/续租交错下活跃执行体数 `<= 1`）；③ **退出/取消证明单调保留**（持久化证明被确认前，32 条 PTY 历史淘汰等有界内存清理绝不能删掉原退出证明）。
-3. **高频热路径（Hot Path）与宿主租约零泄漏（Hot-Path & Lease Discipline）**：
-   - 在 Gateway 轮询/心跳、TUI 状态栏刷新、消息流读取与被动只读查询（如 `background_agents.get`）中，严禁无界全盘遍历（`rglob`）、严禁在被动只读查询中实例化重型执行 `Agent`；凡控制路径调用 `_resolve_request_agent_for_owner` 获取 `acquire_pinned` 宿主租约，必须包裹在 `ExitStack` / `try..finally` 中确保成功与异常路径 100% 释放（断言 `fd_delta == 0`）。
+3. **高频热路径（Hot Path）、14 条超长稳抗时间衰减硬约束与宿主租约零泄漏（Hot-Path, 14 Long-Horizon Anti-Decay Rules & Lease Discipline）**：
+   - **统一核算基线**：所有代码实现与审查一律按「**5,000 个同时在线用户 × 单用户 20～100 个并发代理（主代理 + 后台代理 + 子代理） × Gateway 连续运行 365 天不重启 × 单会话累计万次工具调用/compact**」核算时间、内存、句柄与磁盘上界，确保运行第 1 天与第 365 天的单步耗时和常驻内存保持同一数量级：
+     1. **严禁高频路径无界 $O(N)$ 扫描与 $O(N^2)$ 嵌套扫描**：在 Gateway 轮询/心跳、TUI 状态栏刷新、消息流读取、权限裁决与被动只读查询（如 `background_agents.get`）中，严禁无界全盘遍历（`rglob` / `os.walk` / 扫全量归档目录），严禁在被动只读查询中实例化重型执行 `Agent`，严禁在循环内重复打开文件/SQLite、重复反序列化或做列表线性查找（单步查找必须预建哈希索引降为 $O(1)$）。
+     2. **严禁单文件无限膨胀与整表重写**：严禁“读全文件/全表 → 改一条 → 整文件重写”的 $O(N^2)$ 写放大；持续追加的日志、事件流、超长消息流必须支持按偏移量/游标（offset/cursor）增量读取或分段轮转（rotation），禁止每次从头反序列化超大单文件。
+     3. **死线程、僵尸 Session、坏数据死循环与幽灵记录自动治理**：运行态租约/session 必须具备 TTL/心跳超时回收机制；后台恢复与维护器遇到损坏行/坏文件必须执行**有界重试 + 隔离跳过（quarantine/skip）**，严禁对同一条坏记录无限重试占满 CPU；清理幽灵配额前必须走**三态核验**（仅在确认目标进程/子任务真已终结时回收，状态不明时标记 `unknown` 留待下轮重验，绝不误杀仍在执行的长耗时任务）。
+     4. **严禁随时间累积的文件增长退化**：任何读取逻辑的耗时只能与“当前活跃集（Active Set）”或“单页 `limit` 大小”成正比，严禁随历史会话数、历史任务数或历史回执文件数的增长而线性变慢。
+     5. **严禁“文件数增长 × 单文件增长 × 轮询频率”乘数叠加劣化**：严禁在高频轮询接口中同时触发跨文件聚合与全文件解析，列表与汇总视图必须走 SQLite 索引分页或增量投影摘要。
+     6. **防文件暴涨耗尽 inode 与可配过期自动清理**：已终态的运行期产物必须支持按**最大保留天数（如默认 `365` 天可选）或最大保留数量可选**的定期清理策略（`0` 表示不自动清理；参数必须接入统一配置表，禁止写死魔法常数）。**安全红线**：自动清理**仅限已终态运行期临时/归档产物**（如终态请求回执、过期快照、孤儿回收站到期项、未晋升陈旧候选），**绝对禁止自动删除用户的正式长期记忆（`memory/`）、`SOUL.md`/`AGENTS.md`、已接受业务资产（`assets`）、正式工作流定义或仍有活跃引用的记录**。
+     7. **严禁不必要的大粒度锁造成跨请求阻塞**：严禁跨网络 I/O、LLM 调用、子进程等待或长耗时工作流执行期持有全局锁或 owner 级大锁；锁只允许保护毫秒级内存/元数据状态切换，长耗时执行必须基于不可变冻结快照 + 单对象细粒度锁或 CAS/幂等键。
+     8. **严禁内存锁字典与缓存只增不删（防几十 GB 内存泄漏）**：严禁对动态增长的 `run_id / task_id / thread_id / session_id / workflow_id` 使用无界 `_LOCKS.setdefault(id, Lock())` 或无上限 `dict` 缓存只增不删；动态细粒度锁与缓存必须使用**引用计数归零自动释放**、**`WeakValueDictionary`（调用栈局部变量持强引用保活 + 互斥小锁内取用）**或**有界 LRU 淘汰**。
+     9. **文件句柄（FD）、SQLite 连接、宿主租约与僵尸子进程零泄漏**：凡打开文件、`os.scandir`、SQLite 连接、HTTP/SSE 流、启动子进程管道或通过 `_resolve_request_agent_for_owner` 获取 `acquire_pinned` 宿主租约，成功与所有异常分支必须 `100%` 经 `with` / `ExitStack` / `try..finally` 关闭释放（断言 `fd_delta == 0`）；子进程退出或超时取消必须按进程组清理并 `wait` 回收，杜绝 `Too many open files` 或僵尸进程堆积。
+     10. **防 SQLite `.wal` 暴涨几十 GB 与删除碎片不回收**：高频读写 SQLite 库统一配置合理的 `journal_size_limit` 与 `PRAGMA auto_vacuum = INCREMENTAL`；由后台低频维护按有界页数执行 `PRAGMA incremental_vacuum(N)` 与非高峰 `wal_checkpoint(RESTART/TRUNCATE)`，**严禁在业务请求路径执行全量 `VACUUM` 锁死整库**。
+     11. **严禁单目录平铺几十万/上百万文件**：所有持续产生的归档、回执、快照、日志目录必须按 **`YYYY-MM-DD/` 日期分桶或哈希前缀两级分桶**（如 `archived/2026-11-10/...`），防止单目录百万级 dentry 导致操作系统底层目录查找退化。
+     12. **防后台清理/定时维护惊群效应（Thundering Herd）**：多用户后台维护、过期清理与对账任务必须带**随机时间抖动（jitter） + 全局并发度上限 + 单轮扫描条数/耗时配额（Budget，未扫完保存游标留到下一轮）**，严禁所有用户在整点同时全速扫盘阻塞前台请求。
+     13. **防 TUI 连续运行一个月越来越卡**：TUI 客户端内存中的渲染消息块、流式增量缓冲、折叠工具日志与状态事件队列必须设**固定滑窗上限（Bounded Ring Window，更早历史落盘按需分页读取）**，状态栏轮询保持 $O(1)$ 增量更新。
+     14. **防运行半年后冷重启恢复雪崩**：Gateway 启动阶段**只允许加载当前活跃未决索引（Active Unsettled Index，常数级或有界页）并立即监听端口提供服务**；历史 owner、归档线程与非紧急对账一律采用**首次访问懒加载（Lazy Load） + 后台限速分批渐进恢复**。
 4. **跨模块与前后端无 Mock 往返契约测试（No-Mock Wire Contract Roundtrip）**：
    - 涉及 Gateway HTTP/WS 路由与 CLI/TUI/Web 客户端交互时，禁止前后端各自手写假字典 Mock 自测；必须通过真实 Client 序列化 $\rightarrow$ Server 路由消费 $\rightarrow$ Client 解析标准 Envelope 的端到端往返测试。
 5. **连续交互序列验证（Headless Bot Multi-Step Sequence）**：
