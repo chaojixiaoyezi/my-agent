@@ -172,21 +172,85 @@
       }
     }
   }
-  const exported = {BusinessClient, BusinessObservation, NDJSONDecoder, BusinessError, displayUnknown};
+
+  function createReferenceSurface(options = {}) {
+    const fetcher = options.fetcher || (typeof globalThis !== 'undefined' && globalThis.fetch ? globalThis.fetch.bind(globalThis) : null);
+    const csrf = options.csrf || (() => (typeof document !== 'undefined' ? (document.querySelector('meta[name="my-agent-csrf"]')?.content || document.querySelector('meta[name="csrf-token"]')?.content || '') : ''));
+    const client = options.client || new BusinessClient(fetcher, csrf);
+    return {
+      client,
+      BusinessClient,
+      BusinessObservation,
+      NDJSONDecoder,
+      BusinessError,
+      displayUnknown,
+      controller: {
+        getController: (params = {}) => client.call('controllers.get', params),
+        submitTask: (spaceId, instruction, extra = {}) => client.call('tasks.submit', {space_id: spaceId, instruction, ...extra}, {mutating: true}),
+        assignTask: (agentId, spaceId, instruction, extra = {}) => client.call('tasks.assign', {agent_id: agentId, space_id: spaceId, instruction, ...extra}, {mutating: true}),
+        resolveInterface: (bindingId, selectedSpaceId) => client.call('interfaces.resolve', {binding_id: bindingId, ...(selectedSpaceId ? {selected_space_id: selectedSpaceId} : {})}),
+      },
+      materials: {
+        listAssets: (spaceId, options = {}) => client.call('assets.list', {space_id: spaceId, ...options}),
+        getAsset: (spaceId, assetId) => client.call('assets.get', {space_id: spaceId, asset_id: assetId}),
+        registerAsset: (spaceId, name, kind, artifactRef, extra = {}) => client.call('assets.register', {space_id: spaceId, name, kind, artifact_ref: artifactRef, ...extra}, {mutating: true}),
+        listVersions: (spaceId, assetId, options = {}) => client.call('assets.versions.list', {space_id: spaceId, asset_id: assetId, ...options}),
+        uploadArtifact: (file, spaceId, key, taskId) => client.uploadArtifact(file, spaceId, key, taskId),
+        readArtifact: (artifactId, versionRef, range) => client.readArtifact(artifactId, versionRef, range),
+      },
+      packages: {
+        catalogPackages: (options = {}) => client.call('spaces.packages.catalog', options),
+        listPackages: (spaceId, options = {}) => client.call('spaces.packages.list', {space_id: spaceId, ...options}),
+        previewPackages: (spaceId, mounts) => client.call('spaces.packages.preview', {space_id: spaceId, mounts}),
+        listWorkflows: (options = {}) => client.call('workflows.list', options),
+        getWorkflow: (workflowRef) => client.call('workflows.get', {workflow_ref: workflowRef}),
+        runWorkflow: (workflowRef, spaceId, inputs = {}) => client.call('workflows.run', {workflow_ref: workflowRef, space_id: spaceId, inputs}, {mutating: true}),
+      },
+      team: {
+        listAgents: (options = {}) => client.call('background_agents.list', options),
+        getAgent: (agentId) => client.call('background_agents.get', {agent_id: agentId}),
+        suspendAgent: (agentId) => client.call('background_agents.suspend', {agent_id: agentId}, {mutating: true}),
+        resumeAgent: (agentId) => client.call('background_agents.resume', {agent_id: agentId}, {mutating: true}),
+        retireAgent: (agentId, disposition = 'drain', handoffAgentId) => client.call('background_agents.retire', {agent_id: agentId, disposition, ...(handoffAgentId ? {handoff_agent_id: handoffAgentId} : {})}, {mutating: true}),
+        sendMessage: (agentId, text, kind = 'message') => client.call('background_agents.messages.send', {agent_id: agentId, text, input_kind: kind}, {mutating: true}),
+        listMessages: (target, options = {}) => client.call('messages.list', {target, ...options}),
+        getAgentTree: (spaceId, rootAgentId) => client.call('agent_tree.get', {space_id: spaceId, root_agent_id: rootAgentId}),
+      },
+      executions: {
+        listExecutions: (filter = {}, options = {}) => client.call('executions.list', {filter, ...options}),
+        listToolCalls: (filter = {}, options = {}) => client.call('tool_calls.list', {filter, ...options}),
+        getToolCall: (operationId) => client.call('tool_calls.get', {operation_id: operationId}),
+        readLogs: (sourceRef, options = {}) => client.call('logs.read', {source_ref: sourceRef, ...options}),
+        listEvents: (filter = {}, options = {}) => client.call('events.list', {filter, ...options}),
+        createObservation: (onUpdate, filter = {}) => new BusinessObservation(client, onUpdate, filter),
+      },
+      delivery: {
+        listArtifacts: (filter = {}, options = {}) => client.call('artifacts.list', {filter, ...options}),
+        getChanges: (taskId, candidateRef) => client.call('changes.get', {task_id: taskId, ...(candidateRef ? {candidate_ref: candidateRef} : {})}),
+        listApprovals: (filter = {}, options = {}) => client.call('approvals.list', {filter, ...options}),
+        decideApproval: (approvalId, decision, responseTicket) => client.call('approvals.decide', {approval_id: approvalId, decision, response_ticket: responseTicket}, {mutating: true}),
+        getPolicies: (spaceId) => client.call('policies.get', {space_id: spaceId}),
+        getPermissions: (target, taskId) => client.call('permissions.get', {target, ...(taskId ? {task_id: taskId} : {})}),
+      },
+    };
+  }
+
+  const exported = {BusinessClient, BusinessObservation, NDJSONDecoder, BusinessError, displayUnknown, createReferenceSurface};
   if (typeof module !== 'undefined' && module.exports) module.exports = exported;
   root.BusinessUI = exported;
+  root.createReferenceSurface = createReferenceSurface;
   if (typeof document === 'undefined') return;
 
   // DOM 内容只走 textContent，不把模型/日志/文件名拼成 HTML 或宿主路径。
   const $ = id => document.getElementById(id);
-  const api = new BusinessClient(globalThis.fetch.bind(globalThis), () => document.querySelector('meta[name="csrf-token"]')?.content || '');
+  const api = new BusinessClient(globalThis.fetch.bind(globalThis), () => document.querySelector('meta[name="my-agent-csrf"]')?.content || document.querySelector('meta[name="csrf-token"]')?.content || '');
   let supported = new Set(), observation = null, streamStop = null;
   let workflowNumbers = new Map(), workflowVisible = new Set();
-  function notice(text) { $('connection').textContent = text; }
-  function show(id, value) { $(id).textContent = JSON.stringify(value, null, 2); }
+  function notice(text) { const el = $('connection'); if (el) el.textContent = text; }
+  function show(id, value) { const el = $(id); if (el) el.textContent = JSON.stringify(value, null, 2); }
   function space() { const value = $('space').value; if (!value) throw new Error('请先选择真实空间'); return value; }
   function renderRows(id, data, keys) {
-    const target = $(id); target.replaceChildren();
+    const target = $(id); if (!target) return; target.replaceChildren();
     const coverage = document.createElement('p'); coverage.className = 'muted';
     coverage.textContent = `覆盖：${data?.coverage || 'unknown'}${data?.next_cursor ? ' · 尚有下一页' : ''}`; target.append(coverage);
     if (!Array.isArray(data?.items)) return;
@@ -197,13 +261,13 @@
     }
   }
   async function call(action, params, options = {}) {
-    if (!supported.has(action)) throw new Error(`接口未接通：${action}`);
+    if (supported.size > 0 && !supported.has(action)) throw new Error(`接口未接通：${action}`);
     return api.call(action, params, options);
   }
   async function perform(fn) {
     try { await fn(); } catch (error) { notice(error.status === 0 ? `结果未知；${error.message}` : `${error.message}（${displayUnknown(error.status)}）`); }
   }
-  function wire(id, fn) { $(id).addEventListener('click', () => perform(fn)); }
+  function wire(id, fn) { const el = $(id); if (el) el.addEventListener('click', () => perform(fn)); }
   async function refresh() {
     const id = space(), filter = {space_id: id};
     const reads = [
@@ -216,15 +280,26 @@
     ];
     await Promise.all(reads.map(async ([action, params, target, keys]) => {
       try { const result = await call(action, params); renderRows(target, result.data, keys); }
-      catch (error) { $(target).textContent = `未知 / 未连接：${error.message}`; }
+      catch (error) { const el = $(target); if (el) el.textContent = `未知 / 未连接：${error.message}`; }
     }));
-    if (supported.has('workflows.list')) {
-      const result = await call('workflows.list', {space_id: id}); renderWorkflows(result.data);
+    if (supported.size === 0 || supported.has('workflows.list')) {
+      try {
+        const result = await call('workflows.list', {space_id: id});
+        renderWorkflows(result.data);
+      } catch (error) {
+        const el = $('workflows-data'); if (el) el.replaceChildren();
+      }
     }
-    if (supported.has('usage.get')) show('usage-data', (await call('usage.get', {filter})).data);
+    if (supported.size === 0 || supported.has('usage.get')) {
+      try {
+        const result = await call('usage.get', {filter});
+        show('usage-data', result.data);
+      } catch {}
+    }
   }
   function renderWorkflows(data) {
-    $('workflows-data').replaceChildren(); workflowVisible = new Set();
+    const target = $('workflows-data'); if (!target) return;
+    target.replaceChildren(); workflowVisible = new Set();
     for (const row of data?.items || []) {
       const ref = row.workflow_ref; workflowVisible.add(ref);
       if (!workflowNumbers.has(ref)) workflowNumbers.set(ref, workflowNumbers.size + 1);
@@ -233,9 +308,10 @@
         const td = document.createElement('td'); td.textContent = text; tr.append(td);
       }
       tr.addEventListener('click', () => perform(async () => show('workflow-detail', (await call('workflows.get', {workflow_ref: ref})).data)));
-      $('workflows-data').append(tr);
+      target.append(tr);
     }
-    $('workflow-coverage').textContent = `覆盖：${data?.coverage || 'unknown'}${data?.next_cursor ? ' · 尚有下一页' : ''}`;
+    const cov = $('workflow-coverage');
+    if (cov) cov.textContent = `覆盖：${data?.coverage || 'unknown'}${data?.next_cursor ? ' · 尚有下一页' : ''}`;
   }
   wire('connect', async () => {
     const result = await api.call('system.capabilities', {});
@@ -249,24 +325,63 @@
     if ($('space').value) await refresh();
   });
   wire('refresh', refresh);
-  $('space').addEventListener('change', () => { streamStop?.abort(); observation = null; perform(refresh); });
+  const spaceSelect = $('space');
+  if (spaceSelect) spaceSelect.addEventListener('change', () => { streamStop?.abort(); observation = null; perform(refresh); });
+
+  // 1. Controller & task input
+  wire('controller-get', async () => show('controller-info', (await call('controllers.get', {})).data));
   wire('submit', async () => {
     const request = api.prepare('tasks.submit', {space_id: space(), instruction: $('instruction').value}, {mutating: true});
-    if (!supported.has('tasks.submit')) throw new Error('任务提交未接通');
+    if (supported.size > 0 && !supported.has('tasks.submit')) throw new Error('任务提交未接通');
     show('controller-result', await api.send(request));
   });
-  wire('team-send', async () => show('team-result', await call('background_agents.messages.send', {
-    agent_id: $('agent-id').value, text: $('team-message').value, input_kind: 'message'}, {mutating: true})));
-  wire('team-tree', async () => show('team-result', (await call('agent_tree.get', {space_id: space(), root_agent_id: $('agent-id').value})).data));
-  wire('read-log', async () => show('execution-detail', (await call('logs.read', {source_ref: $('log-ref').value})).data));
-  wire('workflow-run', async () => {
-    const number = Number($('workflow-number').value);
-    const ref = [...workflowNumbers].find(([ref, n]) => n === number && workflowVisible.has(ref))?.[0];
-    if (!ref) throw new Error('编号已失效，请重新查看流程列表');
-    show('workflow-detail', await call('workflows.run', {workflow_ref: ref, space_id: space(), inputs: JSON.parse($('workflow-inputs').value)}, {mutating: true}));
+  wire('task-assign', async () => {
+    const agentId = $('assign-agent-id').value.trim();
+    const instruction = $('assign-instruction').value;
+    if (!agentId || !instruction) throw new Error('请提供助手引用与指派指令');
+    show('assign-result', await call('tasks.assign', {agent_id: agentId, space_id: space(), instruction}, {mutating: true}));
+  });
+  wire('interface-resolve', async () => {
+    const bindingId = $('interface-binding-id').value.trim();
+    if (!bindingId) throw new Error('请提供绑定引用');
+    show('interface-result', (await call('interfaces.resolve', {binding_id: bindingId, selected_space_id: space()})).data);
+  });
+  wire('observe', async () => {
+    streamStop?.abort(); streamStop = new AbortController();
+    observation ||= new BusinessObservation(api, item => {
+      const list = $('events');
+      if (list) {
+        const line = document.createElement('li'); line.textContent = JSON.stringify(item);
+        list.append(line); while (list.children.length > 100) list.firstChild.remove();
+      }
+      const obsState = $('observation-state');
+      if (obsState) obsState.textContent = `覆盖：${observation.coverage} · 观察不代表执行/发布成功`;
+    }, {space_id: space()});
+    await observation.run(streamStop.signal);
+  });
+  wire('stop-observe', async () => { streamStop?.abort(); const el = $('observation-state'); if (el) el.textContent = '观察已断开；后台工作未取消'; });
+
+  // 2. Business material
+  wire('asset-get', async () => {
+    const assetId = $('asset-id').value.trim();
+    if (!assetId) throw new Error('请提供资料引用 (asset_id)');
+    show('asset-detail', (await call('assets.get', {space_id: space(), asset_id: assetId})).data);
+  });
+  wire('asset-versions', async () => {
+    const assetId = $('asset-id').value.trim();
+    if (!assetId) throw new Error('请提供资料引用 (asset_id)');
+    show('asset-detail', (await call('assets.versions.list', {space_id: space(), asset_id: assetId})).data);
+  });
+  wire('asset-register', async () => {
+    const name = $('asset-reg-name').value.trim();
+    const kind = $('asset-reg-kind').value.trim() || 'document';
+    const artifactRef = $('asset-reg-artifact-ref').value.trim();
+    if (!name || !artifactRef) throw new Error('请提供资料名称与产物引用');
+    show('asset-reg-result', await call('assets.register', {space_id: space(), name, kind, artifact_ref: artifactRef}, {mutating: true}));
   });
   let uploadKey = null;
-  $('media-file').addEventListener('change', () => { uploadKey = null; });
+  const mediaInput = $('media-file');
+  if (mediaInput) mediaInput.addEventListener('change', () => { uploadKey = null; });
   wire('upload', async () => {
     const file = $('media-file').files[0]; if (!file) throw new Error('请选择文件');
     uploadKey ||= identifier(); show('upload-result', await api.uploadArtifact(file, space(), uploadKey));
@@ -278,20 +393,86 @@
     const url = URL.createObjectURL(blob), viewer = document.createElement(blob.type.startsWith('video/') ? 'video' : blob.type.startsWith('audio/') ? 'audio' : blob.type.startsWith('image/') ? 'img' : 'a');
     if (viewer.tagName === 'A') { viewer.href = url; viewer.textContent = '下载当前认证版本'; viewer.download = id; }
     else { viewer.src = blob.type.startsWith('video/') || blob.type.startsWith('audio/') ? api.artifactURL(id, version) : url; viewer.controls = true; viewer.alt = '已认证产物'; }
-    const old = $('media-preview').dataset.objectUrl; if (old) URL.revokeObjectURL(old);
-    $('media-preview').dataset.objectUrl = url; $('media-preview').replaceChildren(viewer);
+    const prev = $('media-preview');
+    if (prev) {
+      const old = prev.dataset.objectUrl; if (old) URL.revokeObjectURL(old);
+      prev.dataset.objectUrl = url; prev.replaceChildren(viewer);
+    }
   });
-  wire('observe', async () => {
-    streamStop?.abort(); streamStop = new AbortController();
-    observation ||= new BusinessObservation(api, item => {
-      const list = $('events'), line = document.createElement('li'); line.textContent = JSON.stringify(item);
-      list.append(line); while (list.children.length > 100) list.firstChild.remove();
-      $('observation-state').textContent = `覆盖：${observation.coverage} · 观察不代表执行/发布成功`;
-    }, {space_id: space()});
-    await observation.run(streamStop.signal);
+
+  // 3. Packages & workflows
+  wire('packages-catalog', async () => show('packages-catalog-result', (await call('spaces.packages.catalog', {})).data));
+  wire('packages-preview', async () => {
+    let mounts = [];
+    try { mounts = JSON.parse($('packages-preview-mounts').value || '[]'); } catch { throw new Error('挂载参数非合法JSON'); }
+    show('packages-preview-result', (await call('spaces.packages.preview', {space_id: space(), mounts})).data);
   });
-  wire('stop-observe', async () => { streamStop?.abort(); $('observation-state').textContent = '观察已断开；后台工作未取消'; });
+  wire('workflow-run', async () => {
+    const number = Number($('workflow-number').value);
+    const ref = [...workflowNumbers].find(([ref, n]) => n === number && workflowVisible.has(ref))?.[0];
+    if (!ref) throw new Error('编号已失效，请重新查看流程列表');
+    show('workflow-detail', await call('workflows.run', {workflow_ref: ref, space_id: space(), inputs: JSON.parse($('workflow-inputs').value)}, {mutating: true}));
+  });
+
+  // 4. Background team
+  wire('team-get', async () => {
+    const agentId = $('agent-id').value.trim();
+    if (!agentId) throw new Error('请提供准确 Agent 引用');
+    const result = await call('background_agents.get', {agent_id: agentId});
+    show('team-result', result.data);
+    if (result.data?.scheduling?.reason_code) {
+      notice(`Agent 调度状态：${result.data.scheduling.reason_code}`);
+    }
+  });
+  wire('team-suspend', async () => {
+    const agentId = $('agent-id').value.trim();
+    if (!agentId) throw new Error('请提供准确 Agent 引用');
+    show('team-result', await call('background_agents.suspend', {agent_id: agentId}, {mutating: true}));
+  });
+  wire('team-resume', async () => {
+    const agentId = $('agent-id').value.trim();
+    if (!agentId) throw new Error('请提供准确 Agent 引用');
+    show('team-result', await call('background_agents.resume', {agent_id: agentId}, {mutating: true}));
+  });
+  wire('team-retire', async () => {
+    const agentId = $('agent-id').value.trim();
+    const disposition = $('retire-disposition').value;
+    if (!agentId) throw new Error('请提供准确 Agent 引用');
+    show('team-result', await call('background_agents.retire', {agent_id: agentId, disposition}, {mutating: true}));
+  });
+  wire('team-send', async () => show('team-result', await call('background_agents.messages.send', {
+    agent_id: $('agent-id').value, text: $('team-message').value, input_kind: 'message'}, {mutating: true})));
+  wire('team-messages', async () => {
+    const agentId = $('agent-id').value.trim();
+    if (!agentId) throw new Error('请提供准确 Agent 引用');
+    show('team-result', (await call('messages.list', {target: {kind: 'agent', id: agentId}})).data);
+  });
+  wire('team-tree', async () => show('team-result', (await call('agent_tree.get', {space_id: space(), root_agent_id: $('agent-id').value})).data));
+
+  // 5. Execution records
+  wire('tool-calls-list', async () => show('execution-detail', (await call('tool_calls.list', {filter: {space_id: space()}})).data));
+  wire('tool-call-get', async () => {
+    const opId = $('operation-id').value.trim();
+    if (!opId) throw new Error('请提供操作ID (operation_id)');
+    show('execution-detail', (await call('tool_calls.get', {operation_id: opId})).data);
+  });
+  wire('events-list', async () => show('execution-detail', (await call('events.list', {filter: {space_id: space()}})).data));
+  wire('read-log', async () => show('execution-detail', (await call('logs.read', {source_ref: $('log-ref').value})).data));
+
+  // 6. Artifacts, review & release outcomes
+  wire('changes-get', async () => {
+    const taskId = $('changes-task-id').value.trim();
+    if (!taskId) throw new Error('请提供任务ID (task_id)');
+    show('changes-result', (await call('changes.get', {task_id: taskId})).data);
+  });
+  wire('policies-get', async () => show('delivery-info', (await call('policies.get', {space_id: space()})).data));
+  wire('permissions-get', async () => {
+    const target = $('permission-target').value.trim();
+    if (!target) throw new Error('请提供权限目标引用');
+    show('delivery-info', (await call('permissions.get', {target: {kind: 'agent', id: target}})).data);
+  });
   wire('approval-decide', async () => show('approval-result', await call('approvals.decide', {
     approval_id: $('approval-id').value, decision: $('decision').value, response_ticket: $('response-ticket').value}, {mutating: true})));
+
   root.addEventListener('pagehide', () => streamStop?.abort());
 })(typeof window === 'undefined' ? globalThis : window);

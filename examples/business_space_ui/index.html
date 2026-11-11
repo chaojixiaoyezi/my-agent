@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <!-- 由认证宿主注入 CSRF；空值不表示通过认证，禁止把密钥固化到页面。 -->
   <meta name="csrf-token" content="">
+  <meta name="my-agent-csrf" content="">
   <meta name="referrer" content="same-origin">
   <title>业务空间 · 工作台</title>
   <style>
@@ -39,21 +40,44 @@
   <section data-panel="controller" aria-labelledby="controller-title">
     <div class="section-head"><span class="number">01</span><h2 id="controller-title">主控输入</h2></div>
     <p class="muted">任务提交到当前空间的主控服务。受理不等于执行完成；重复操作前先核对原回执。</p>
+    <div class="row"><button id="controller-get">读取主控事实</button></div>
+    <pre id="controller-info">尚无主控事实</pre>
     <label for="instruction">这次想完成什么</label><textarea id="instruction" placeholder="描述目标、所用资料和期望交付，不需要指定机器路径。"></textarea>
     <div class="row"><button id="submit" class="primary">提交任务</button><button id="observe">连接只读观察</button><button id="stop-observe">断开观察</button></div>
     <pre id="controller-result" aria-live="polite">尚无任务回执</pre>
+    <h3>指派任务给助手</h3>
+    <label for="assign-agent-id">助手引用 (agent_id)</label><input id="assign-agent-id" autocomplete="off">
+    <label for="assign-instruction">指派指令</label><textarea id="assign-instruction" placeholder="指派给指定助手的指令"></textarea>
+    <button id="task-assign">指派任务</button><pre id="assign-result">尚无指派回执</pre>
+    <h3>解析界面绑定</h3>
+    <label for="interface-binding-id">绑定引用 (binding_id)</label><input id="interface-binding-id" autocomplete="off">
+    <button id="interface-resolve">解析界面</button><pre id="interface-result">尚无界面解析回执</pre>
     <h3>事件与补拉</h3><p id="observation-state" class="muted">覆盖未知 · POST NDJSON；断流从 events.list 补拉</p><ol id="events"></ol>
     <details><summary>原始用量事实（未知不计为零）</summary><pre id="usage-data">未知</pre></details>
   </section>
   <section data-panel="materials" aria-labelledby="materials-title">
     <div class="section-head"><span class="number">02</span><h2 id="materials-title">作品资料</h2></div>
     <div id="materials-data" class="muted">未连接 · 由 assets.list 获取资料</div>
+    <h3>资料详情与版本</h3>
+    <label for="asset-id">资料引用 (asset_id)</label><input id="asset-id" autocomplete="off">
+    <div class="row"><button id="asset-get">读取资料详情</button><button id="asset-versions">查看资料版本</button></div>
+    <pre id="asset-detail">尚未读取资料详情</pre>
+    <h3>登记作品资料</h3>
+    <label for="asset-reg-name">资料名称</label><input id="asset-reg-name">
+    <label for="asset-reg-kind">资料类型 (kind)</label><input id="asset-reg-kind" placeholder="document / image / video">
+    <label for="asset-reg-artifact-ref">产物引用 (artifact_ref)</label><input id="asset-reg-artifact-ref">
+    <button id="asset-register">登记资料</button><pre id="asset-reg-result">尚无登记回执</pre>
     <h3>上传原始媒体</h3><p class="muted">通过认证文件服务上传，只登记产物版本，不自动采纳资料或执行文件。未知结果保留原幂等键。</p>
     <label for="media-file">选择文件</label><input id="media-file" type="file"><button id="upload">上传到当前空间</button><pre id="upload-result">尚无上传回执</pre>
   </section>
   <section data-panel="packages" aria-labelledby="packages-title">
     <div class="section-head"><span class="number">03</span><h2 id="packages-title">能力包 / 流程</h2></div>
     <div id="packages-data" class="muted">未连接 · 当前空间挂载来自 spaces.packages.list</div>
+    <div class="row"><button id="packages-catalog">能力包目录 (catalog)</button></div>
+    <pre id="packages-catalog-result">尚未读取能力包目录</pre>
+    <h3>预览包挂载</h3>
+    <label for="packages-preview-mounts">挂载参数 JSON</label><textarea id="packages-preview-mounts">[]</textarea>
+    <button id="packages-preview">预览挂载效果</button><pre id="packages-preview-result">尚未预览挂载</pre>
     <h3>流程</h3><p id="workflow-coverage" class="muted">覆盖未知 · 点击名称读取准确对象的详情</p>
     <table><thead><tr><th>名称</th><th>关联空间</th></tr></thead><tbody id="workflows-data"></tbody></table>
     <label for="workflow-number">流程编号（绑定对象，不随排序改变）</label><input id="workflow-number" type="number" min="1">
@@ -63,25 +87,42 @@
     <div class="section-head"><span class="number">04</span><h2 id="team-title">后台团队</h2></div>
     <div id="team-data" class="muted">未连接 · 职责 / 模型 / 当前工作 / 阻塞未知</div>
     <label for="agent-id">准确后台 Agent 引用</label><input id="agent-id" autocomplete="off">
+    <div class="row">
+      <button id="team-get">Agent 详情与调度阻断</button>
+      <button id="team-suspend">挂起</button>
+      <button id="team-resume">恢复</button>
+    </div>
+    <div class="row">
+      <label for="retire-disposition">退役处置</label>
+      <select id="retire-disposition"><option value="drain">排空(drain)</option><option value="reassign">重新分配(reassign)</option><option value="cancel">取消(cancel)</option></select>
+      <button id="team-retire">退役</button>
+    </div>
     <label for="team-message">补充消息</label><textarea id="team-message" placeholder="只发往这里明确选择的 Agent"></textarea>
-    <div class="row"><button id="team-send">发送消息</button><button id="team-tree">按需读取子树</button></div><pre id="team-result">尚无团队回执</pre>
+    <div class="row"><button id="team-send">发送消息</button><button id="team-messages">读取消息历史</button><button id="team-tree">按需读取子树</button></div><pre id="team-result">尚无团队回执</pre>
     <p class="muted">组织管理边和运行父子边保持原协议，不把团队人数当作运行中的模型槽。</p>
   </section>
   <section data-panel="executions" aria-labelledby="executions-title">
     <div class="section-head"><span class="number">05</span><h2 id="executions-title">执行记录</h2></div>
     <div id="executions-data" class="muted">未连接 · 由 executions.list 获取记录</div>
-    <label for="log-ref">日志引用（不是文件路径）</label><input id="log-ref" autocomplete="off"><button id="read-log">按需读取日志</button><pre id="execution-detail">没有读取日志正文</pre>
+    <div class="row"><button id="tool-calls-list">工具调用列表</button><button id="events-list">事件列表</button></div>
+    <label for="operation-id">工具操作ID (operation_id)</label><input id="operation-id" autocomplete="off"><button id="tool-call-get">读取工具调用详情</button>
+    <label for="log-ref">日志引用（不是文件路径）</label><input id="log-ref" autocomplete="off"><button id="read-log">按需读取日志</button><pre id="execution-detail">没有读取详情</pre>
   </section>
   <section data-panel="delivery" aria-labelledby="delivery-title">
     <div class="section-head"><span class="number">06</span><h2 id="delivery-title">产物 / 审核 / 发布</h2></div>
     <div id="artifacts-data" class="muted">未连接 · 由 artifacts.list 获取版本</div>
     <label for="artifact-id">产物引用</label><input id="artifact-id"><label for="version-ref">准确版本引用</label><input id="version-ref"><button id="preview-artifact">认证预览 / 下载</button><div id="media-preview"></div>
+    <h3>任务变更候选 (changes.get)</h3>
+    <label for="changes-task-id">任务ID (task_id)</label><input id="changes-task-id" autocomplete="off"><button id="changes-get">读取变更</button><pre id="changes-result">尚未读取变更</pre>
+    <h3>空间策略与权限</h3>
+    <div class="row"><button id="policies-get">读取空间策略</button></div>
+    <label for="permission-target">权限目标引用 (target)</label><input id="permission-target" placeholder="agent_id 或 task_id" autocomplete="off"><button id="permissions-get">读取权限</button><pre id="delivery-info">尚未读取策略或权限</pre>
     <h3>待审核事项</h3><div id="approvals-data" class="muted">未知 · 审批仍须原用户票据与当前权限</div>
     <label for="approval-id">审批引用</label><input id="approval-id"><label for="response-ticket">本次宿主响应票据</label><input id="response-ticket" type="password" autocomplete="off">
     <label for="decision">决定</label><select id="decision"><option value="denied">拒绝</option><option value="approved">批准</option></select><button id="approval-decide">提交明确决定</button><pre id="approval-result">尚无审批回执</pre>
     <p class="muted">发布由已配置且已批准的流程执行；在流程区选定准确对象运行。这里不伪造“已发布”，不另造发布 API。</p>
   </section>
 </main>
-<footer>需要由 W13 认证宿主同源托管并注入 CSRF。静态页面打开不代表领域服务可用；真实领域、媒体权限与最终端到端验收由后续集成完成。</footer>
+<footer>已由 Gateway 认证宿主同源托管并注入 CSRF。所有状态来自真实响应，页面不包含演示记录。</footer>
 </body>
 </html>
