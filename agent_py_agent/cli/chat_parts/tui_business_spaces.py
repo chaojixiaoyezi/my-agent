@@ -1,6 +1,9 @@
 """TUI 的业务命令适配；只消费明确 slash，不读取 Owner 业务文件。"""
 from __future__ import annotations
 
+# LLM: TUI 与聊天共用 BusinessCommandSession，保证同一会话内的工作流编号与空间状态一致；
+# 命令执行过程持有线程锁避免并发渲染交织，不读取底层文件系统（V02-02 / V07-03 / V13-03）。
+# 模块用途: 统一适配 /space、/team 与 /workflow 的终端交互命令。
 import json
 import threading
 from collections.abc import Callable
@@ -12,6 +15,9 @@ from ..space_commands import (
 )
 
 
+# LLM: 拦截并消费以 /space、/team 或 /workflow 开头的显式命令，
+# 按照两列格式展示流程列表，或展示格式化详情及标准 JSON 回执。
+# 函数用途: 处理 TUI 与命令行交互中的业务空间、团队与流程控制命令。
 def handle_tui_business_command(raw: str, *, agent: object, print_line: Callable[[str], None],
                                 session_id: str = '') -> bool:
     if raw.strip().partition(' ')[0] not in {'/space', '/team', '/workflow'}:
@@ -34,6 +40,8 @@ def handle_tui_business_command(raw: str, *, agent: object, print_line: Callable
             for row in result['display_rows']:
                 print_line(' | '.join(row))
             print_line('覆盖：' + str(result.get('data', {}).get('coverage', 'unknown')))
+        elif result and 'rendered' in result and any(raw.strip().startswith(p) for p in ('/workflow show', '/workflow get')):
+            print_line(str(result['rendered']))
         else:
             print_line(json.dumps(result, ensure_ascii=False))
     except (ValueError, TypeError) as exc:

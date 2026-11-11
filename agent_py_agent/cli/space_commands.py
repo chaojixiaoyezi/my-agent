@@ -120,16 +120,53 @@ class BusinessCommandSession:
     workflow_table: object = field(default=None)
 
 
+_VERB_MAP = {
+    '/space': {
+        'list': 'spaces.list',
+        'show': 'spaces.get',
+        'get': 'spaces.get',
+        'use': 'spaces.get',
+        'packages': 'spaces.packages.list',
+        'rename': 'spaces.update',
+        'archive': 'spaces.archive',
+        'restore': 'spaces.restore',
+        'create': 'spaces.create',
+    },
+    '/team': {
+        'list': 'background_agents.list',
+        'show': 'background_agents.get',
+        'get': 'background_agents.get',
+        'create': 'background_agents.create',
+        'pause': 'background_agents.suspend',
+        'suspend': 'background_agents.suspend',
+        'resume': 'background_agents.resume',
+        'retire': 'background_agents.retire',
+        'restore': 'background_agents.restore',
+        'model': 'background_agents.model.set',
+    },
+    '/workflow': {
+        'list': 'workflows.list',
+        'show': 'workflows.get',
+        'get': 'workflows.get',
+    },
+}
+
+
+# LLM: 仅消费显式命令；JSON 与自然入参传业务参数，校验失败不降级为普通正文；
+# 流程列表与详情附加展示列及多行渲染，不改原 DTO 结构。
+# 函数用途: 消费 /space、/team 与 /workflow 斜杠命令并提交统一 BusinessClient。
 def consume_business_command(raw: str, *, session: BusinessCommandSession) -> dict | None:
-    """仅消费显式命令；JSON 传业务参数，/agents 保持原 AGENTS 入口。"""
     head, _, tail = raw.strip().partition(' ')
     prefixes = {'/space': 'spaces', '/team': 'background_agents', '/workflow': 'workflows'}
     if head not in prefixes:
         return None
     verb, _, arguments = tail.strip().partition(' ')
-    action = prefixes[head] + '.' + (verb or 'list')
+    verb_lower = (verb or 'list').lower()
+    action = _VERB_MAP.get(head, {}).get(verb_lower)
+    if action is None:
+        action = prefixes[head] + '.' + verb_lower
     spec = business_action_spec(action)
-    options = {}
+    options: dict[str, object] = {}
     if not arguments:
         params = {}
     elif arguments.lstrip().startswith('{'):
@@ -142,38 +179,106 @@ def consume_business_command(raw: str, *, session: BusinessCommandSession) -> di
         else:
             params = value
     else:
-        keys = spec.params_schema.get('required', [])
-        if len(keys) != 1 or not keys[0].endswith(('_id', '_ref')):
-            raise ValueError('参数请使用 JSON 对象；修改须携带原版本与审批票据')
-        identifier = arguments.strip()
-        if head == '/workflow' and identifier.isdecimal():
-            if session.workflow_table is None:
-                raise ValueError('请先列出流程再使用编号')
-            identifier = session.workflow_table.resolve(identifier)
-        params = {keys[0]: identifier}
+        arg_text = arguments.strip()
+        if action == 'spaces.create':
+            params = {'name': arg_text}
+        elif action == 'spaces.update':
+            parts = arg_text.split(maxsplit=1)
+            params = {'space_id': parts[0], 'name': parts[1] if len(parts) > 1 else parts[0]}
+        elif action in ('spaces.get', 'spaces.archive', 'spaces.restore', 'spaces.packages.list'):
+            params = {'space_id': arg_text}
+        elif action in ('background_agents.get', 'background_agents.suspend', 'background_agents.resume', 'background_agents.restore'):
+            params = {'agent_id': arg_text}
+        elif action == 'background_agents.create':
+            parts = arg_text.split(maxsplit=2)
+            params = {'space_id': parts[0], 'name': parts[1]} if len(parts) >= 2 else {'name': parts[0]}
+        elif action == 'background_agents.retire':
+            parts = arg_text.split()
+            params = {'agent_id': parts[0], 'disposition': parts[1] if len(parts) > 1 else 'idle'}
+        elif action == 'background_agents.model.set':
+            parts = arg_text.split()
+            params = {'agent_id': parts[0], 'model_profile_id': parts[1] if len(parts) > 1 else ''}
+        elif action == 'workflows.get':
+            identifier = arg_text
+            if identifier.isdecimal():
+                if session.workflow_table is None:
+                    raise ValueError('请先列出流程再使用编号')
+                identifier = session.workflow_table.resolve(identifier)
+            params = {'workflow_ref': identifier}
+        else:
+            keys = spec.params_schema.get('required', [])
+            if len(keys) != 1 or not keys[0].endswith(('_id', '_ref')):
+                raise ValueError('参数请使用 JSON 对象；修改须携带原版本与审批票据')
+            identifier = arg_text
+            if head == '/workflow' and identifier.isdecimal():
+                if session.workflow_table is None:
+                    raise ValueError('请先列出流程再使用编号')
+                identifier = session.workflow_table.resolve(identifier)
+            params = {keys[0]: identifier}
+
     result = session.client.send(session.client.prepare(action, params, **options))
     if action == 'workflows.list' and result.get('ok') is True:
         from .workflow_commands import WorkflowTable
 
         session.workflow_table = session.workflow_table or WorkflowTable()
-        result = {**result, 'display_columns': ['名称', '关联空间'],
-                  'display_rows': session.workflow_table.update(result.get('data', {}).get('items', []))}
+        snapshot_id = result.get('data', {}).get('list_snapshot_id')
+        items = result.get('data', {}).get('items', [])
+        rows = session.workflow_table.update(items, list_snapshot_id=snapshot_id)
+        result = {**result, 'display_columns': ['名称', '关联空间'], 'display_rows': rows}
+    elif action == 'workflows.get' and result.get('ok') is True:
+        from .workflow_commands import format_workflow_detail
+
+        data = result.get('data', {})
+        wf = data.get('workflow', {})
+        detail = data.get('detail', {})
+        run_refs = data.get('run_refs', [])
+        draft_status = 'draft' if not wf.get('enabled', True) else wf.get('lifecycle', 'active')
+        result = {
+            **result,
+            'workflow_detail': {
+                'purpose': detail.get('summary', '') or wf.get('name', ''),
+                'io_contract': detail.get('io_contract'),
+                'version': wf.get('definition_revision', 1),
+                'steps': detail.get('steps', []),
+                'run_refs': run_refs,
+                'draft_status': draft_status,
+            },
+            'rendered': format_workflow_detail(data),
+        }
     return result
 
 
+# LLM: 经由统一 BusinessClient 消费 CLI 命令，支持显式传入的 business_client，
+# 或在宿主环境自动装配轻量 Gateway 客户端；支持 business_args 与 action/params 两种调用方式。
+# 函数用途: 执行 CLI 业务命令并输出 JSON 回执。
 def run_business_cli(args, *, command: str) -> int:
-    """W13 parser 注入 business_client；不构造第二个 Agent 或领域仓库。"""
     api = getattr(args, 'business_client', None)
+    if api is None:
+        try:
+            from .chat_client_context import make_gateway_chat_client
+            client = make_gateway_chat_client(args)
+            api = business_client_for_agent(client)
+        except Exception:
+            api = None
     if api is None:
         print('业务入口未连接；需由命令宿主提供已认证 business_client。')
         return 2
-    raw_params = getattr(args, 'params', '{}')
-    params_text = raw_params if isinstance(raw_params, str) else json.dumps(raw_params, ensure_ascii=False)
-    result = consume_business_command(f'/{command} {getattr(args, "action", "list")} {params_text}',
-                                      session=BusinessCommandSession(api))
+
+    session = getattr(args, 'business_session', None) or BusinessCommandSession(api)
+    tokens = getattr(args, 'business_args', None)
+    if tokens:
+        raw_cmd = f'/{command} ' + ' '.join(tokens)
+    else:
+        raw_params = getattr(args, 'params', '{}')
+        params_text = raw_params if isinstance(raw_params, str) else json.dumps(raw_params, ensure_ascii=False)
+        raw_cmd = f'/{command} {getattr(args, "action", "list")} {params_text}'
+
+    result = consume_business_command(raw_cmd, session=session)
     print(json.dumps(result, ensure_ascii=False))
     return 0 if result and result.get('ok') is True else 1
 
 
+# LLM: 执行 space 子命令，将 CLI 参数转送给统一业务客户端。
+# 函数用途: 处理 my-agent space 命令。
 def cmd_space(args) -> int:
     return run_business_cli(args, command='space')
