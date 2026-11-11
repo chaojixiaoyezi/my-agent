@@ -129,14 +129,96 @@ def identity_outstanding(host, thread) -> tuple[list[str], list]:
                 refs.append(task.id)
             pending = [r for r in task.capability_requests if capability_request_requires_parent_resolution(r.status)]
             refs.extend(str(r.id) for r in pending)
+        # runtime_db 活跃子代理执行轮核验（三态核验：未知状态保守阻止退休）
+        repo = getattr(manager, "runtime_db", None)
+        if repo is not None and callable(getattr(repo, "_runtime_connection", None)):
+            try:
+                with repo._runtime_connection() as conn:
+                    rows = conn.execute(
+                        "SELECT ar.agent_run_id, ar.status "
+                        "FROM agent_runs ar "
+                        "JOIN task_runs tr ON tr.task_run_id = ar.task_run_id "
+                        "JOIN tasks t ON t.task_id = tr.task_id "
+                        "WHERE t.thread_id = ? AND tr.closed_at = 0 "
+                        "AND ar.parent_agent_run_id != ''",
+                        (str(thread.thread_id),),
+                    ).fetchall()
+                    for row in rows:
+                        status = str(row["status"] or "").strip().lower()
+                        if status not in {"done", "failed", "cancelled", "stopped"}:
+                            refs.append(f"child_agent_run:{row['agent_run_id']}")
+            except Exception:
+                refs.append("runtime_db:unreadable")
+    # 启用的 ManagedSubscriptionService 订阅核验
+    catalog = getattr(host, "business_spaces_catalog", None)
+    if catalog is None:
+        try:
+            from .business_spaces import BusinessSpaceService
+            owner_home = getattr(getattr(host, "home_paths", None), "owner_home_dir", None)
+            owner_id = str(getattr(getattr(host, "home_paths", None), "owner_id", "") or "")
+            if owner_home and owner_id:
+                catalog = BusinessSpaceService(owner_home, owner_id=owner_id, enabled=True)
+        except Exception:
+            catalog = None
+    if catalog is not None and callable(getattr(catalog, "_read", None)):
+        try:
+            cstate = catalog._read()
+            subs = cstate.get("subscriptions", {}) if isinstance(cstate, dict) else {}
+            for sub_id, sub in subs.items():
+                if isinstance(sub, dict) and sub.get("state") == "active":
+                    target_id = sub.get("agent_id") or sub.get("target_agent_id") or sub.get("thread_id")
+                    if target_id == thread.thread_id:
+                        refs.append(f"subscription:{sub_id}")
+        except Exception:
+            refs.append("subscriptions:unreadable")
+    # 待处理人工审批核验
+    try:
+        from .agent_tool_approval import list_pending_agent_tool_approvals
+        pending_appr = list_pending_agent_tool_approvals(host, thread_id=thread.thread_id, root_task_id=thread.thread_id, deadline=0)
+        for appr in pending_appr:
+            appr_id = getattr(appr, "id", None) or (appr.get("approval_id") if isinstance(appr, dict) else str(appr))
+            refs.append(f"approval:{appr_id}")
+    except Exception:
+        pass
+    # 未投递的 SessionTask 终态结果回报（只对 done/failed，不含 cancelled）
+    from .session_task_report import (
+        SESSION_TASK_DONE,
+        SESSION_TASK_FAILED,
+        delegated_result_report_pending,
+        result_report_key,
+    )
+    try:
+        if delegated_result_report_pending(host, thread.thread_id):
+            refs.append(f"undelivered_report:{thread.thread_id}")
+        for items in session_task_pages(store.session_tasks, target_thread_id=thread.thread_id):
+            for task in items:
+                if task.status in {SESSION_TASK_DONE, SESSION_TASK_FAILED} and str(getattr(task, "sender_thread_id", "") or "").strip():
+                    key = result_report_key(task)
+                    if store.guidance.receipt(key) is None:
+                        refs.append(f"undelivered_report:{task.task_id}")
+                    elif store.wakes.delivery_receipt(task.sender_thread_id, key) == "pending":
+                        refs.append(f"undelivered_wake:{task.task_id}")
+    except Exception:
+        refs.append("session_tasks:coverage_unknown")
     # 附加来源只允许宿主提供读取适配器；返回unknown不能被当作空列表。
     probe = getattr(host, "background_identity_obligations", None)
     if callable(probe):
-        observed = probe(thread.thread_id)
-        if not isinstance(observed, dict) or observed.get("coverage") != "complete":
-            refs.append("host_obligations:unknown")
-        else:
-            refs.extend(str(ref) for ref in observed.get("outstanding_refs", ()))
+        try:
+            try:
+                observed = probe(host, thread.thread_id)
+            except TypeError:
+                observed = probe(thread.thread_id)
+            if isinstance(observed, list):
+                refs.extend(str(ref) for ref in observed)
+            elif isinstance(observed, dict):
+                if observed.get("coverage") != "complete":
+                    refs.append("host_obligations:unknown")
+                else:
+                    refs.extend(str(ref) for ref in observed.get("outstanding_refs", ()))
+            elif observed is not None:
+                refs.append("host_obligations:unknown")
+        except Exception:
+            refs.append("host_obligations:unreadable")
     return list(dict.fromkeys(refs)), tasks
 
 
@@ -168,9 +250,13 @@ def _reconcile_background_identity_locked(host, thread_id):
         return thread
     refs, _ = identity_outstanding(host, thread)
     if refs:
-        return thread
-    target = ("retired" if identity.identity_state == "retiring" or identity.after_task == "retire"
-              else "suspended" if identity.after_task == "suspend" else "available")
+        if identity.identity_state == "available" and identity.after_task == "retire":
+            target = "retiring"
+        else:
+            return thread
+    else:
+        target = ("retired" if identity.identity_state == "retiring" or identity.after_task == "retire"
+                  else "suspended" if identity.after_task == "suspend" else "available")
     if target == identity.identity_state:
         return thread
 
@@ -182,3 +268,16 @@ def _reconcile_background_identity_locked(host, thread_id):
         return replace(latest, metadata={**latest.metadata, BACKGROUND_IDENTITY_KEY: updated.to_dict()}, updated_at=time.time())
 
     return store.threads.update_atomic(thread_id, apply)
+
+
+# LLM: 检查指定线程在后台身份下的全部未结清义务；供宿主或测试直接查验。
+# 函数用途: 返回线程的未结清义务清单，不修改线程状态。
+def background_identity_obligations(host: object, thread_id: str) -> list[str]:
+    store = getattr(host, "conversation_store", None)
+    if store is None:
+        return []
+    thread = store.threads.load(thread_id)
+    if thread is None:
+        return []
+    refs, _ = identity_outstanding(host, thread)
+    return refs

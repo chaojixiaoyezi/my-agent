@@ -16,6 +16,7 @@ from ..common.request_execution_ports import (
     RequestExecutionOutcomeUncertainError,
 )
 from ..common.tool_write_context import ToolWriteContextUnavailable
+from .business_observability import public_result_refs
 from .session_messaging import SESSION_TASK_STATUS_FIELD
 from .session_tasks import (
     SESSION_TASK_DONE,
@@ -293,6 +294,7 @@ __all__ = [
     "close_out_turn",
     "finish_task_for_turn",
     "outcome_from_error",
+    "public_result_refs",
     "report_task_result",
     "task_for_turn",
 ]

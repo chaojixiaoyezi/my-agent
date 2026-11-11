@@ -90,13 +90,20 @@ def _capture_snapshot(home, config, scope, capability, *, live_policy=None, thre
         and preference["enabled"] and scope.metadata.get("route_self_execution") is not True
         and _allows_delegation(policy) and _allows_delegation(live_policy)
     )
-    return {"mode": "delegated" if enabled else "original", "channel": scope.channel,
-            "actor_id": scope.user_id, "conversation_id": scope.conversation_id, "owner_id": str(home.owner_id),
-            "preference_revision": preference["revision"], "expires_at": 0.0,
-            "route_mode_frozen": preference["enabled"],
-            "route_origin": {"channel": scope.channel, "chat_id": scope.conversation_id,
-                             "thread_id": thread.thread_id if thread is not None else "",
-                             "message_id": str(scope.metadata.get("message_id") or ""), "owner_id": str(home.owner_id)}}
+    snapshot = {"mode": "delegated" if enabled else "original", "channel": scope.channel,
+                "actor_id": scope.user_id, "conversation_id": scope.conversation_id, "owner_id": str(home.owner_id),
+                "preference_revision": preference["revision"], "expires_at": 0.0,
+                "route_mode_frozen": preference["enabled"],
+                "route_origin": {"channel": scope.channel, "chat_id": scope.conversation_id,
+                                 "thread_id": thread.thread_id if thread is not None else "",
+                                 "message_id": str(scope.metadata.get("message_id") or ""), "owner_id": str(home.owner_id)}}
+    if getattr(scope, "metadata", None) and isinstance(scope.metadata, dict):
+        if scope.metadata.get("space_id"):
+            snapshot["space_id"] = str(scope.metadata["space_id"])
+        target_agent = scope.metadata.get("target_agent_id") or scope.metadata.get("background_agent_id")
+        if target_agent:
+            snapshot["target_agent_id"] = str(target_agent)
+    return snapshot
 
 
 # LLM: 只消费原策略结构化错误及禁用列表；缺少可选 Agent 上界不等于越过刚读取的 owner policy。

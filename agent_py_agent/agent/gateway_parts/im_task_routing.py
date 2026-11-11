@@ -88,6 +88,10 @@ def prepare_im_task_dispatch(context, conversation, prompt: str):
                                      source_binding={key: snapshot[key] for key in ("channel", "conversation_id", "actor_id")})
     policy = {"mode": "delegated", "preference_revision": snapshot["preference_revision"],
               "package_refs": list(marker["package_refs"])}
+    if snapshot.get("space_id"):
+        policy["space_id"] = str(snapshot["space_id"])
+    if snapshot.get("target_agent_id"):
+        policy["target_agent_id"] = str(snapshot["target_agent_id"])
 
     # LLM: 仅初始化原线程的宿主策略，不改已有工作方式或主子版本；设置后来到期不影响这份准确记录。
     # 函数用途: 保存后台任务的执行方式与所需能力版本。
