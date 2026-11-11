@@ -75,10 +75,25 @@ class UserHistoryIdentity:
         return data
 
 
-def list_user_messages(agent, chat_id, **query):
+def list_user_messages(
+    agent,
+    chat_id,
+    *,
+    start_time=None,
+    end_time=None,
+    sender_ids=(),
+    cursor='',
+    limit=50,
+):
     if not _identifier(chat_id):
         raise ChannelMessageHistoryError('TOOL_INVALID_ARGUMENTS')
-    start, end, senders, cursor, limit = validate_history_query(**query)
+    start, end, senders, cursor, limit = validate_history_query(
+        start_time=start_time,
+        end_time=end_time,
+        sender_ids=sender_ids,
+        cursor=cursor,
+        limit=limit,
+    )
     identity = UserHistoryIdentity(agent)
     deadline = time.monotonic() + HistoryLimits.BUDGET_SECONDS
     mode = None

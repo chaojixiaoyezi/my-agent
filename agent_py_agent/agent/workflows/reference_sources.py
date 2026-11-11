@@ -512,22 +512,38 @@ class WorkflowReferenceReader:
         except Exception:
             return False
 
-    def __call__(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        if not args and not kwargs:
+    def __call__(
+        self,
+        target_or_kind: str | None = None,
+        target_id: str | None = None,
+        *,
+        workflow_id: str | None = None,
+        ref_id: str | None = None,
+        ref: str | None = None,
+    ) -> dict[str, Any]:
+        if (
+            target_or_kind is None
+            and target_id is None
+            and workflow_id is None
+            and ref_id is None
+            and ref is None
+        ):
             return {"coverage": "complete", "blockers": []}
-        if len(args) == 1 and isinstance(args[0], str):
-            workflow_id = args[0]
-        elif len(args) >= 2 and args[0] in ("workflow", "workflows"):
-            workflow_id = args[1]
-        elif "workflow_id" in kwargs:
-            workflow_id = kwargs["workflow_id"]
-        elif "ref_id" in kwargs:
-            workflow_id = kwargs["ref_id"]
-        elif "ref" in kwargs:
-            workflow_id = kwargs["ref"]
+        if target_id is not None and target_or_kind in ("workflow", "workflows"):
+            resolved_id = str(target_id)
+        elif target_or_kind is not None:
+            resolved_id = str(target_or_kind)
+        elif workflow_id is not None:
+            resolved_id = str(workflow_id)
+        elif ref_id is not None:
+            resolved_id = str(ref_id)
+        elif ref is not None:
+            resolved_id = str(ref)
+        elif target_id is not None:
+            resolved_id = str(target_id)
         else:
-            workflow_id = str(args[0])
-        return self.read_references(workflow_id)
+            return {"coverage": "complete", "blockers": []}
+        return self.read_references(resolved_id)
 
 
 def build_workflow_reference_reader(
@@ -564,7 +580,10 @@ class WorkflowManagementService(WorkflowScopeService):
         authorize: Any = None,
         reference_reader: Any = None,
         clock: Any = None,
-        **kwargs: Any,
+        context_provider: Any = None,
+        agent_steps: Any = None,
+        governance: Any = None,
+        engine_factory: Any = None,
     ) -> None:
         if reference_reader is None:
             reference_reader = build_workflow_reference_reader(owner_home)
@@ -579,7 +598,10 @@ class WorkflowManagementService(WorkflowScopeService):
             authorize=authorize,
             reference_reader=reference_reader,
             clock=clock,
-            **kwargs,
+            context_provider=context_provider,
+            agent_steps=agent_steps,
+            governance=governance,
+            engine_factory=engine_factory,
         )
 
     def execute(self, action: str, request: dict, *, actor: Any, expected_revision: int | None = None, idempotency_key: str = "") -> dict:

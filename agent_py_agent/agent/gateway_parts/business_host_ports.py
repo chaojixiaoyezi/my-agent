@@ -685,7 +685,7 @@ def build_default_workflow_agent_steps(host: Any) -> Any | None:
         from ..workflows.agent_steps import WorkflowAgentSteps
         from .business_api import BackgroundAgentService
 
-        owner_id = getattr(getattr(host, 'home_paths', None), 'owner_id', '')
+        default_owner_id = getattr(getattr(host, 'home_paths', None), 'owner_id', '')
         background_service = BackgroundAgentService(host)
 
         # LLM: 构造执行工作流代理步骤所需的调用者身份。
@@ -695,7 +695,15 @@ def build_default_workflow_agent_steps(host: Any) -> Any | None:
 
         # LLM: 读取 SessionTask 执行完成状态和结构化回执。
         # 函数用途: 将底层会话任务终态投影为工作流步骤可识别的执行回执。
-        def completion_reader(task_id: str, **identity: Any) -> dict[str, Any] | None:
+        def completion_reader(
+            task_id: str,
+            *,
+            owner_id: str = '',
+            workflow_run_id: str = '',
+            step_id: str = '',
+            attempt_id: str = '',
+            session_task_dispatch: Any = None,
+        ) -> dict[str, Any] | None:
             try:
                 stask = store.session_tasks.load(str(task_id))
             except (OSError, ValueError, RuntimeError):
@@ -710,13 +718,13 @@ def build_default_workflow_agent_steps(host: Any) -> Any | None:
             output = result if isinstance(result, dict) else {'result': result}
             return {
                 'task_id': str(task_id),
-                'owner_id': identity.get('owner_id', owner_id),
-                'workflow_run_id': identity.get('workflow_run_id', ''),
-                'step_id': identity.get('step_id', ''),
-                'attempt_id': identity.get('attempt_id', ''),
+                'owner_id': owner_id or default_owner_id,
+                'workflow_run_id': workflow_run_id,
+                'step_id': step_id,
+                'attempt_id': attempt_id,
                 'status': outcome,
                 'completion_ref': str(getattr(stask, 'completion_ref', None) or f"task:{task_id}:{status}"),
-                'output': output
+                'output': output,
             }
 
         # LLM: 取消正在运行的会话代理任务并级联子任务。

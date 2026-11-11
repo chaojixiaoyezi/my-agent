@@ -98,7 +98,6 @@ def execute_subworkflow_step(
     spec: dict,
     context: Any = None,
     outputs: dict | None = None,
-    **kwargs,
 ) -> StepExecutionRecord:
     """Execute a formal nested subworkflow step (WF-09)."""
     child_ref = _resolve_target_child_workflow_id(spec)

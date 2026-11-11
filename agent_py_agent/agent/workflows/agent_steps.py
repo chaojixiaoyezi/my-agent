@@ -5,6 +5,8 @@ submit 沿 W2 BackgroundAgentService 的耐久幂等入口；completion_reader �
 """
 from __future__ import annotations
 
+from typing import Any
+
 from ..conversation.session_task_dispatch import (
     SessionTaskDispatchError,
     SessionTaskDispatchPlan,
@@ -182,27 +184,32 @@ class WorkflowAgentSteps:
 
 # LLM: 只读 SessionTask 完成证据读取；验证所有者与派发身份，返回结构化状态与输出 (G5b)。
 # 函数用途: 为 WorkflowAgentSteps 提供安全 SessionTask 状态读取与完成证据验证。
-def read_session_task_completion(conversation_store, run, step=None, **identity_kwargs):
+def read_session_task_completion(
+    conversation_store,
+    run,
+    step=None,
+    *,
+    owner_id: str = "",
+    workflow_run_id: str = "",
+    step_id: str = "",
+    attempt_id: str = "",
+    session_task_dispatch: Any = None,
+):
     if conversation_store is None or not hasattr(conversation_store, "session_tasks"):
         return None
 
     if isinstance(run, str):
         task_id = run
-        owner_id = identity_kwargs.get("owner_id", "")
-        workflow_run_id = identity_kwargs.get("workflow_run_id", "")
-        step_id = identity_kwargs.get("step_id", "")
-        attempt_id = identity_kwargs.get("attempt_id", "")
-        session_task_dispatch = identity_kwargs.get("session_task_dispatch")
     else:
         result = getattr(step, "escalation_result", {}) if step is not None else {}
         task_id = result.get("task_id")
         if not task_id:
             return None
-        owner_id = getattr(run, "owner_id", "")
-        workflow_run_id = getattr(run, "workflow_run_id", "")
-        step_id = getattr(step, "step_id", "")
-        attempt_id = result.get("attempt_id", "")
-        session_task_dispatch = result.get("session_task_dispatch")
+        owner_id = getattr(run, "owner_id", "") or owner_id
+        workflow_run_id = getattr(run, "workflow_run_id", "") or workflow_run_id
+        step_id = getattr(step, "step_id", "") or step_id
+        attempt_id = result.get("attempt_id", "") or attempt_id
+        session_task_dispatch = result.get("session_task_dispatch") or session_task_dispatch
 
     tasks_store = conversation_store.session_tasks
     try:
@@ -361,11 +368,38 @@ def cancel_workflow_session_task(
 
 def make_session_task_completion_reader(conversation_store):
     """构造沿准确 SessionTask->run/attempt 链读取结构化完成证据的 reader。"""
-    def completion_reader(*c_args, **c_kwargs):
-        if len(c_args) == 2 and hasattr(c_args[0], "workflow_run_id"):
-            return read_session_task_completion(conversation_store, c_args[0], c_args[1], **c_kwargs)
-        task_id = c_args[0] if c_args else c_kwargs.pop("task_id", "")
-        return read_session_task_completion(conversation_store, task_id, **c_kwargs)
+    def completion_reader(
+        target: Any = None,
+        step: Any = None,
+        *,
+        task_id: str = "",
+        owner_id: str = "",
+        workflow_run_id: str = "",
+        step_id: str = "",
+        attempt_id: str = "",
+        session_task_dispatch: Any = None,
+    ):
+        if target is not None and hasattr(target, "workflow_run_id") and step is not None:
+            return read_session_task_completion(
+                conversation_store,
+                target,
+                step,
+                owner_id=owner_id,
+                workflow_run_id=workflow_run_id,
+                step_id=step_id,
+                attempt_id=attempt_id,
+                session_task_dispatch=session_task_dispatch,
+            )
+        resolved_task_id = str(target) if target else task_id
+        return read_session_task_completion(
+            conversation_store,
+            resolved_task_id,
+            owner_id=owner_id,
+            workflow_run_id=workflow_run_id,
+            step_id=step_id,
+            attempt_id=attempt_id,
+            session_task_dispatch=session_task_dispatch,
+        )
 
     return completion_reader
 
@@ -411,11 +445,31 @@ def build_default_workflow_agent_steps(host, *, background_service=None):
     completion_reader = make_session_task_completion_reader(conv_store)
 
     # 4. 构造 cancel_handler
-    def cancel_handler(*c_args, **c_kwargs):
-        if len(c_args) == 2 and hasattr(c_args[0], "workflow_run_id"):
-            return cancel_workflow_session_task(background_service, conv_store, c_args[0], c_args[1], **c_kwargs)
-        task_id = c_args[0] if c_args else c_kwargs.pop("task_id", "")
-        return cancel_workflow_session_task(background_service, conv_store, task_id, **c_kwargs)
+    def cancel_handler(
+        target: Any = None,
+        step: Any = None,
+        *,
+        task_id: str = "",
+        actor: Any = None,
+        idempotency_key: str | None = None,
+    ):
+        if target is not None and hasattr(target, "workflow_run_id") and step is not None:
+            return cancel_workflow_session_task(
+                background_service,
+                conv_store,
+                target,
+                step,
+                actor=actor,
+                idempotency_key=idempotency_key,
+            )
+        resolved_task_id = str(target) if target else task_id
+        return cancel_workflow_session_task(
+            background_service,
+            conv_store,
+            resolved_task_id,
+            actor=actor,
+            idempotency_key=idempotency_key,
+        )
 
     return WorkflowAgentSteps(
         background_service,
