@@ -17,6 +17,19 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .requirement_provenance import (
+    AcceptanceRecord,
+    IndependentReviewRecord,
+    ObservationScopeHonestyError,
+    RequirementProvenanceRecord,
+    SelfReviewForbiddenError,
+    StaleInputVersionError,
+    normalize_path,
+    path_intersects,
+    validate_independent_review,
+    validate_scope_upgrade,
+)
+
 _SCHEMA_VERSION = 1
 # 证据文件最多接受的天数；超过视为过期证据，恢复时不再采用。
 _MAX_EVIDENCE_AGE_DAYS = 30
@@ -108,7 +121,8 @@ class VerificationEvidenceRepository:
 
     # LLM: edits retain the prior event pointer and advance last_edit_at; status
     # can therefore say stale instead of silently forgetting what once passed.
-    # 函数用途: 文件成功修改后登记路径，让较早的测试结果立即过期。
+    # 同时定向失效监控这些已修改路径的需求项（ORCH-05）。
+    # 函数用途: 文件成功修改后登记路径，让较早的测试结果立即过期，并精准失效相交需求项。
     def mark_edited(
         self,
         context: VerificationContext,
@@ -147,8 +161,21 @@ class VerificationEvidenceRepository:
                     json.dumps(merged, ensure_ascii=False),
                 ),
             )
+            invalidated = self._invalidate_requirements_on_paths(
+                conn,
+                owner_ref=context.owner_ref,
+                root=root_text,
+                paths=changed,
+                now_text=edited_at,
+            )
             conn.commit()
-        return {**asdict(context), "root": root_text, "last_edit_at": edited_at, "changed_paths": merged}
+        return {
+            **asdict(context),
+            "root": root_text,
+            "last_edit_at": edited_at,
+            "changed_paths": merged,
+            "invalidated_requirements": invalidated,
+        }
 
     # LLM: this projection preserves scope/status verbatim.  Callers must not
     # turn targeted into full or failed/stale into passed.
@@ -201,20 +228,32 @@ class VerificationEvidenceRepository:
                    FROM verification_state s JOIN verification_events e ON e.id = s.last_event_id
                    WHERE s.owner_ref = ? AND s.thread_id = ? AND s.task_id = ?
                      AND e.owner_ref = s.owner_ref AND e.thread_id = s.thread_id AND e.task_id = s.task_id
-                   ORDER BY e.id""", (context.owner_ref, context.thread_id, context.task_id),
+                   ORDER BY e.id""",
+                (context.owner_ref, context.thread_id, context.task_id),
             ).fetchall()
-            return [{"event_id": row["id"], "scope": row["scope"],
-                     "status": "stale" if row["last_edit_at"] and row["last_edit_at"] > row["created_at"] else row["status"]}
-                    for row in rows]
+            return [
+                {
+                    "event_id": row["id"],
+                    "scope": row["scope"],
+                    "status": "stale"
+                    if row["last_edit_at"] and row["last_edit_at"] > row["created_at"]
+                    else row["status"],
+                }
+                for row in rows
+            ]
         finally:
             conn.close()
 
+    # LLM: 连接初始化时配置 WAL 模式、忙等待超时及增量自动清理与日志上限（Rule 10）。
+    # 函数用途: 创建并配置 SQLite 数据库物理连接。
     def _connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path, timeout=5.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA journal_size_limit = 67108864")
+        conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
         self._ensure_schema(conn)
         return conn
 
@@ -230,6 +269,8 @@ class VerificationEvidenceRepository:
         finally:
             conn.close()
 
+    # LLM: 增量建表与索引，保持 verification_events & verification_state 与 ORCH-05 三大新表完全正交。
+    # 函数用途: 确保数据库存在所需全部数据表及性能索引。
     @staticmethod
     def _ensure_schema(conn: sqlite3.Connection) -> None:
         conn.executescript(
@@ -266,6 +307,60 @@ class VerificationEvidenceRepository:
             );
             CREATE INDEX IF NOT EXISTS idx_verification_events_task_root
             ON verification_events(owner_ref, thread_id, task_id, root, id DESC);
+
+            CREATE TABLE IF NOT EXISTS requirement_links (
+                owner_ref TEXT NOT NULL,
+                requirement_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                root TEXT NOT NULL,
+                input_version TEXT NOT NULL,
+                watched_paths_json TEXT NOT NULL DEFAULT '[]',
+                verification_event_ids_json TEXT NOT NULL DEFAULT '[]',
+                observation_scope TEXT NOT NULL DEFAULT 'unverified',
+                review_status TEXT NOT NULL DEFAULT 'missing',
+                acceptance_status TEXT NOT NULL DEFAULT 'unaccepted',
+                invalidation_reason TEXT NOT NULL DEFAULT '',
+                author_principal_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(owner_ref, requirement_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_requirement_links_owner_task
+            ON requirement_links(owner_ref, task_id);
+            CREATE INDEX IF NOT EXISTS idx_requirement_links_owner_root
+            ON requirement_links(owner_ref, root);
+
+            CREATE TABLE IF NOT EXISTS independent_reviews (
+                review_id TEXT NOT NULL,
+                requirement_id TEXT NOT NULL,
+                owner_ref TEXT NOT NULL,
+                reviewer_principal_id TEXT NOT NULL,
+                author_principal_id TEXT NOT NULL,
+                reviewed_input_version TEXT NOT NULL,
+                verdict TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(owner_ref, review_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_independent_reviews_req
+            ON independent_reviews(owner_ref, requirement_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS acceptance_records (
+                acceptance_id TEXT NOT NULL,
+                requirement_id TEXT NOT NULL,
+                owner_ref TEXT NOT NULL,
+                accepted_by_principal_id TEXT NOT NULL,
+                accepted_input_version TEXT NOT NULL,
+                verdict TEXT NOT NULL,
+                observation_scope TEXT NOT NULL,
+                review_id TEXT NOT NULL DEFAULT '',
+                evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(owner_ref, acceptance_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_acceptance_records_req
+            ON acceptance_records(owner_ref, requirement_id, created_at DESC);
             """
         )
         conn.execute(
@@ -273,6 +368,8 @@ class VerificationEvidenceRepository:
             (str(_SCHEMA_VERSION),),
         )
 
+    # LLM: 仅保留各任务最近事件并淘汰超期与孤立记录。
+    # 函数用途: 清理过期和超出数量限制的验证历史事件。
     def _prune(self, conn: sqlite3.Connection, *, context: VerificationContext, root: str) -> None:
         conn.execute(
             """
@@ -315,6 +412,8 @@ class VerificationEvidenceRepository:
             (_MAX_TOTAL_UNREFERENCED_EVENTS,),
         )
 
+    # LLM: 默认空状态投影。
+    # 函数用途: 构造未验证状态的基础字典。
     @staticmethod
     def _empty_status(context: VerificationContext, root: str) -> dict[str, Any]:
         return {
@@ -325,11 +424,571 @@ class VerificationEvidenceRepository:
             "changed_paths": [],
         }
 
+    # LLM: 仅对受影响 paths 与 watched_paths 存在交集的需求将状态置为 stale/invalidated，其余互不干扰。
+    # 函数用途: 在文件被修改后精准失效监控该路径的需求，保留不相关需求的证据与评审。
+    def _invalidate_requirements_on_paths(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        owner_ref: str,
+        root: str,
+        paths: list[str],
+        now_text: str,
+    ) -> list[str]:
+        if not paths:
+            return []
+        norm_edited = {normalize_path(p, root) for p in paths if str(p).strip()}
+        if not norm_edited:
+            return []
 
+        rows = conn.execute(
+            """
+            SELECT requirement_id, root, input_version, watched_paths_json, review_status, acceptance_status
+            FROM requirement_links
+            WHERE owner_ref = ?
+            """,
+            (owner_ref,),
+        ).fetchall()
+
+        invalidated: list[str] = []
+        for row in rows:
+            req_id = row["requirement_id"]
+            req_root = row["root"] or root
+            watched = _json_string_list(row["watched_paths_json"])
+            if not watched:
+                continue
+            norm_watched = [normalize_path(w, req_root) for w in watched]
+            intersects = any(
+                any(path_intersects(nw, ne) for ne in norm_edited)
+                for nw in norm_watched
+            )
+            if intersects:
+                conn.execute(
+                    """
+                    UPDATE requirement_links
+                    SET review_status = 'stale',
+                        acceptance_status = 'invalidated',
+                        invalidation_reason = 'WATCHED_PATH_MODIFIED',
+                        updated_at = ?
+                    WHERE owner_ref = ? AND requirement_id = ?
+                    """,
+                    (now_text, owner_ref, req_id),
+                )
+                invalidated.append(req_id)
+        return invalidated
+
+    # LLM: 外部显式调用路径变更失效入口，支持附加新输入版本校验。
+    # 函数用途: 主动使匹配监控路径或版本变更的需求项失效。
+    def invalidate_edited_paths(
+        self,
+        context: VerificationContext,
+        *,
+        root: str | Path,
+        paths: list[str],
+        new_input_version: str | None = None,
+    ) -> list[str]:
+        root_text = str(Path(root).expanduser().resolve(strict=False))
+        now_text = _utc_now()
+        with _DB_LOCK, self._connection() as conn:
+            invalidated = self._invalidate_requirements_on_paths(
+                conn,
+                owner_ref=context.owner_ref,
+                root=root_text,
+                paths=paths,
+                now_text=now_text,
+            )
+            if new_input_version is not None and new_input_version.strip():
+                rows = conn.execute(
+                    "SELECT requirement_id, input_version FROM requirement_links WHERE owner_ref = ?",
+                    (context.owner_ref,),
+                ).fetchall()
+                for r in rows:
+                    if r["requirement_id"] in invalidated:
+                        continue
+                    if r["input_version"] != new_input_version.strip():
+                        conn.execute(
+                            """
+                            UPDATE requirement_links
+                            SET review_status = 'stale',
+                                acceptance_status = 'invalidated',
+                                invalidation_reason = 'INPUT_VERSION_CHANGED',
+                                updated_at = ?
+                            WHERE owner_ref = ? AND requirement_id = ?
+                            """,
+                            (now_text, context.owner_ref, r["requirement_id"]),
+                        )
+                        invalidated.append(r["requirement_id"])
+            conn.commit()
+            return invalidated
+
+    # LLM: 注册或更新需求项绑定关系，若输入版本发生变更则将既有评审与验收自动标为过期失效。
+    # 函数用途: 登记需求到监控路径与初始输入版本的关联事实。
+    def bind_requirement(
+        self,
+        context: VerificationContext,
+        record: RequirementProvenanceRecord,
+    ) -> RequirementProvenanceRecord:
+        now_text = _utc_now()
+        owner_ref = record.owner_ref or context.owner_ref
+        task_id = record.task_id or context.task_id
+        watched_json = json.dumps(list(record.watched_paths), ensure_ascii=False)
+
+        with _DB_LOCK, self._connection() as conn:
+            existing = conn.execute(
+                "SELECT * FROM requirement_links WHERE owner_ref = ? AND requirement_id = ?",
+                (owner_ref, record.requirement_id),
+            ).fetchone()
+
+            if existing is None:
+                created_at = record.created_at or now_text
+                updated_at = now_text
+                review_status = record.review_status if record.review_status != "missing" else "missing"
+                acceptance_status = record.acceptance_status if record.acceptance_status != "unaccepted" else "unaccepted"
+                observation_scope = record.observation_scope if record.observation_scope != "unverified" else "unverified"
+                invalidation_reason = record.invalidation_reason
+                events_json = json.dumps(list(record.verification_event_ids), ensure_ascii=False)
+                author = record.author_principal_id
+                conn.execute(
+                    """
+                    INSERT INTO requirement_links(
+                        owner_ref, requirement_id, task_id, root, input_version,
+                        watched_paths_json, verification_event_ids_json, observation_scope,
+                        review_status, acceptance_status, invalidation_reason, author_principal_id,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        owner_ref,
+                        record.requirement_id,
+                        task_id,
+                        record.root,
+                        record.input_version,
+                        watched_json,
+                        events_json,
+                        observation_scope,
+                        review_status,
+                        acceptance_status,
+                        invalidation_reason,
+                        author,
+                        created_at,
+                        updated_at,
+                    ),
+                )
+            else:
+                created_at = existing["created_at"]
+                updated_at = now_text
+                author = record.author_principal_id or existing["author_principal_id"]
+                if record.input_version and record.input_version != existing["input_version"]:
+                    review_status = "stale"
+                    acceptance_status = "invalidated"
+                    invalidation_reason = "INPUT_VERSION_CHANGED"
+                    observation_scope = existing["observation_scope"]
+                    events_json = existing["verification_event_ids_json"]
+                else:
+                    review_status = record.review_status if record.review_status != "missing" else existing["review_status"]
+                    acceptance_status = (
+                        record.acceptance_status if record.acceptance_status != "unaccepted" else existing["acceptance_status"]
+                    )
+                    observation_scope = (
+                        record.observation_scope if record.observation_scope != "unverified" else existing["observation_scope"]
+                    )
+                    invalidation_reason = record.invalidation_reason or existing["invalidation_reason"]
+                    events_json = (
+                        json.dumps(list(record.verification_event_ids), ensure_ascii=False)
+                        if record.verification_event_ids
+                        else existing["verification_event_ids_json"]
+                    )
+
+                conn.execute(
+                    """
+                    UPDATE requirement_links
+                    SET task_id = ?,
+                        root = ?,
+                        input_version = ?,
+                        watched_paths_json = ?,
+                        verification_event_ids_json = ?,
+                        observation_scope = ?,
+                        review_status = ?,
+                        acceptance_status = ?,
+                        invalidation_reason = ?,
+                        author_principal_id = ?,
+                        updated_at = ?
+                    WHERE owner_ref = ? AND requirement_id = ?
+                    """,
+                    (
+                        task_id,
+                        record.root or existing["root"],
+                        record.input_version or existing["input_version"],
+                        watched_json,
+                        events_json,
+                        observation_scope,
+                        review_status,
+                        acceptance_status,
+                        invalidation_reason,
+                        author,
+                        updated_at,
+                        owner_ref,
+                        record.requirement_id,
+                    ),
+                )
+            conn.commit()
+            updated_row = conn.execute(
+                "SELECT * FROM requirement_links WHERE owner_ref = ? AND requirement_id = ?",
+                (owner_ref, record.requirement_id),
+            ).fetchone()
+            return _row_to_requirement_record(updated_row)
+
+    # LLM: 绑定测试命令证据，严格执行范围诚实性：只有存在全量集成事实且具备匹配版本的通过评审才允许置为 full_candidate。
+    # 函数用途: 将测试执行结果编号关联至需求项，阻断局部测试虚标全量。
+    def link_verification(
+        self,
+        context: VerificationContext,
+        *,
+        requirement_id: str,
+        event_ids: list[int] | tuple[int, ...],
+        observation_scope: str = "module_only",
+        input_version: str | None = None,
+    ) -> RequirementProvenanceRecord:
+        now_text = _utc_now()
+        with _DB_LOCK, self._connection() as conn:
+            req_row = conn.execute(
+                "SELECT * FROM requirement_links WHERE owner_ref = ? AND requirement_id = ?",
+                (context.owner_ref, requirement_id),
+            ).fetchone()
+            if req_row is None:
+                raise KeyError(f"Requirement '{requirement_id}' not bound for owner '{context.owner_ref}'")
+
+            current_input_version = req_row["input_version"]
+            if input_version is not None and input_version.strip() and input_version.strip() != current_input_version:
+                raise StaleInputVersionError(
+                    f"STALE_INPUT_VERSION: provided input_version '{input_version}' does not match requirement '{current_input_version}'"
+                )
+
+            int_event_ids = [int(eid) for eid in event_ids]
+            has_integrated = False
+            if int_event_ids:
+                placeholders = ",".join("?" for _ in int_event_ids)
+                event_rows = conn.execute(
+                    f"SELECT id, scope, status FROM verification_events WHERE owner_ref = ? AND id IN ({placeholders})",
+                    (context.owner_ref, *int_event_ids),
+                ).fetchall()
+                for er in event_rows:
+                    if er["scope"] == "full" and er["status"] == "passed":
+                        has_integrated = True
+                        break
+
+            review_row = conn.execute(
+                """
+                SELECT review_id, reviewed_input_version, verdict
+                FROM independent_reviews
+                WHERE owner_ref = ? AND requirement_id = ? AND verdict = 'pass'
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (context.owner_ref, requirement_id),
+            ).fetchone()
+            has_matching_approved_review = (
+                review_row is not None
+                and review_row["reviewed_input_version"] == current_input_version
+                and req_row["review_status"] == "approved"
+            )
+
+            validate_scope_upgrade(
+                observation_scope,
+                has_integrated_evidence=has_integrated,
+                has_matching_approved_review=has_matching_approved_review,
+            )
+
+            existing_events = _json_int_list(req_row["verification_event_ids_json"])
+            merged_events = sorted(set(existing_events) | set(int_event_ids))
+
+            conn.execute(
+                """
+                UPDATE requirement_links
+                SET verification_event_ids_json = ?,
+                    observation_scope = ?,
+                    updated_at = ?
+                WHERE owner_ref = ? AND requirement_id = ?
+                """,
+                (
+                    json.dumps(merged_events, ensure_ascii=False),
+                    observation_scope,
+                    now_text,
+                    context.owner_ref,
+                    requirement_id,
+                ),
+            )
+            conn.commit()
+            updated_row = conn.execute(
+                "SELECT * FROM requirement_links WHERE owner_ref = ? AND requirement_id = ?",
+                (context.owner_ref, requirement_id),
+            ).fetchone()
+            return _row_to_requirement_record(updated_row)
+
+    # LLM: 记录独立评审，严格拦截作者自评（SELF_REVIEW_FORBIDDEN），更新评审状态。
+    # 函数用途: 登记代码与架构独立评审结论，校验作者与评审人隔离。
+    def record_independent_review(
+        self,
+        context: VerificationContext,
+        record: IndependentReviewRecord,
+    ) -> IndependentReviewRecord:
+        now_text = _utc_now()
+        created_at = record.created_at or now_text
+        owner_ref = record.owner_ref or context.owner_ref
+
+        with _DB_LOCK, self._connection() as conn:
+            req_row = conn.execute(
+                "SELECT * FROM requirement_links WHERE owner_ref = ? AND requirement_id = ?",
+                (owner_ref, record.requirement_id),
+            ).fetchone()
+
+            author = record.author_principal_id.strip()
+            if not author and req_row is not None:
+                author = str(req_row["author_principal_id"] or "").strip()
+
+            validate_independent_review(record.reviewer_principal_id, author)
+
+            effective_record = IndependentReviewRecord(
+                review_id=record.review_id or f"rev-{now_text}",
+                requirement_id=record.requirement_id,
+                reviewer_principal_id=record.reviewer_principal_id.strip(),
+                author_principal_id=author,
+                reviewed_input_version=record.reviewed_input_version.strip(),
+                verdict=record.verdict,
+                scope=record.scope or "independent_review",
+                evidence_refs=record.evidence_refs,
+                created_at=created_at,
+                owner_ref=owner_ref,
+            )
+
+            conn.execute(
+                """
+                INSERT INTO independent_reviews(
+                    review_id, requirement_id, owner_ref, reviewer_principal_id,
+                    author_principal_id, reviewed_input_version, verdict, scope,
+                    evidence_refs_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(owner_ref, review_id) DO UPDATE SET
+                    verdict = excluded.verdict,
+                    scope = excluded.scope,
+                    evidence_refs_json = excluded.evidence_refs_json,
+                    created_at = excluded.created_at
+                """,
+                (
+                    effective_record.review_id,
+                    effective_record.requirement_id,
+                    effective_record.owner_ref,
+                    effective_record.reviewer_principal_id,
+                    effective_record.author_principal_id,
+                    effective_record.reviewed_input_version,
+                    effective_record.verdict,
+                    effective_record.scope,
+                    json.dumps(list(effective_record.evidence_refs), ensure_ascii=False),
+                    effective_record.created_at,
+                ),
+            )
+
+            if req_row is not None:
+                current_ver = req_row["input_version"]
+                if effective_record.verdict == "pass":
+                    if effective_record.reviewed_input_version == current_ver:
+                        new_review_status = "approved"
+                    else:
+                        new_review_status = "stale"
+                else:
+                    new_review_status = "changes_requested"
+
+                conn.execute(
+                    """
+                    UPDATE requirement_links
+                    SET review_status = ?,
+                        author_principal_id = CASE WHEN author_principal_id != '' THEN author_principal_id ELSE ? END,
+                        updated_at = ?
+                    WHERE owner_ref = ? AND requirement_id = ?
+                    """,
+                    (new_review_status, author, now_text, owner_ref, effective_record.requirement_id),
+                )
+            conn.commit()
+            return effective_record
+
+    # LLM: 记录验收决定，校验输入版本与评审通过状态，防止基于过期或未审核事实验收。
+    # 函数用途: 登记最终或阶段验收事实并切换需求验收状态为 accepted。
+    def record_acceptance(
+        self,
+        context: VerificationContext,
+        record: AcceptanceRecord,
+    ) -> AcceptanceRecord:
+        now_text = _utc_now()
+        created_at = record.created_at or now_text
+        owner_ref = record.owner_ref or context.owner_ref
+
+        with _DB_LOCK, self._connection() as conn:
+            req_row = conn.execute(
+                "SELECT * FROM requirement_links WHERE owner_ref = ? AND requirement_id = ?",
+                (owner_ref, record.requirement_id),
+            ).fetchone()
+            if req_row is None:
+                raise KeyError(f"Requirement '{record.requirement_id}' not bound for owner '{owner_ref}'")
+
+            current_ver = req_row["input_version"]
+            if record.accepted_input_version.strip() != current_ver:
+                raise StaleInputVersionError(
+                    f"STALE_INPUT_VERSION: accepted input version '{record.accepted_input_version}' != requirement version '{current_ver}'"
+                )
+
+            if req_row["review_status"] != "approved":
+                raise ValueError(
+                    f"REQUIREMENT_NOT_APPROVED: cannot record acceptance when review_status is '{req_row['review_status']}'"
+                )
+
+            if req_row["acceptance_status"] == "invalidated" and req_row["invalidation_reason"]:
+                raise ValueError(
+                    f"REQUIREMENT_INVALIDATED: requirement has been invalidated ({req_row['invalidation_reason']})"
+                )
+
+            effective_record = AcceptanceRecord(
+                acceptance_id=record.acceptance_id or f"acc-{now_text}",
+                requirement_id=record.requirement_id,
+                accepted_by_principal_id=record.accepted_by_principal_id.strip(),
+                accepted_input_version=record.accepted_input_version.strip(),
+                verdict=record.verdict or "accepted",
+                observation_scope=record.observation_scope or req_row["observation_scope"],
+                review_id=record.review_id or "",
+                evidence_refs=record.evidence_refs,
+                created_at=created_at,
+                owner_ref=owner_ref,
+            )
+
+            conn.execute(
+                """
+                INSERT INTO acceptance_records(
+                    acceptance_id, requirement_id, owner_ref, accepted_by_principal_id,
+                    accepted_input_version, verdict, observation_scope, review_id,
+                    evidence_refs_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(owner_ref, acceptance_id) DO UPDATE SET
+                    verdict = excluded.verdict,
+                    observation_scope = excluded.observation_scope,
+                    review_id = excluded.review_id,
+                    evidence_refs_json = excluded.evidence_refs_json,
+                    created_at = excluded.created_at
+                """,
+                (
+                    effective_record.acceptance_id,
+                    effective_record.requirement_id,
+                    effective_record.owner_ref,
+                    effective_record.accepted_by_principal_id,
+                    effective_record.accepted_input_version,
+                    effective_record.verdict,
+                    effective_record.observation_scope,
+                    effective_record.review_id,
+                    json.dumps(list(effective_record.evidence_refs), ensure_ascii=False),
+                    effective_record.created_at,
+                ),
+            )
+
+            conn.execute(
+                """
+                UPDATE requirement_links
+                SET acceptance_status = 'accepted',
+                    invalidation_reason = '',
+                    updated_at = ?
+                WHERE owner_ref = ? AND requirement_id = ?
+                """,
+                (now_text, owner_ref, effective_record.requirement_id),
+            )
+            conn.commit()
+            return effective_record
+
+    # LLM: 按 owner 与 requirement_id 读取单条需求溯源快照。
+    # 函数用途: 查询单个需求的详细溯源记录。
+    def get_requirement(self, owner_ref: str, requirement_id: str) -> RequirementProvenanceRecord | None:
+        with _DB_LOCK, self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM requirement_links WHERE owner_ref = ? AND requirement_id = ?",
+                (owner_ref, requirement_id),
+            ).fetchone()
+            return _row_to_requirement_record(row) if row is not None else None
+
+    # LLM: 分页查询某 owner 下需求绑定列表（有界 limit 防深扫）。
+    # 函数用途: 列出匹配任务或目录的所有需求溯源项。
+    def list_requirements(
+        self,
+        owner_ref: str,
+        *,
+        task_id: str | None = None,
+        root: str | None = None,
+        limit: int = 100,
+    ) -> list[RequirementProvenanceRecord]:
+        limit_bounded = min(max(1, int(limit or 100)), 200)
+        query = "SELECT * FROM requirement_links WHERE owner_ref = ?"
+        params: list[Any] = [owner_ref]
+        if task_id:
+            query += " AND task_id = ?"
+            params.append(task_id)
+        if root:
+            norm_root = str(Path(root).expanduser().resolve(strict=False))
+            query += " AND (root = ? OR root = '')"
+            params.append(norm_root)
+        query += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit_bounded)
+
+        with _DB_LOCK, self._connection() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+            return [_row_to_requirement_record(r) for r in rows]
+
+    # LLM: 分页查询某需求或 owner 的独立评审历史记录。
+    # 函数用途: 列出满足条件的独立评审记录列表。
+    def list_independent_reviews(
+        self,
+        owner_ref: str,
+        *,
+        requirement_id: str | None = None,
+        limit: int = 100,
+    ) -> list[IndependentReviewRecord]:
+        limit_bounded = min(max(1, int(limit or 100)), 200)
+        query = "SELECT * FROM independent_reviews WHERE owner_ref = ?"
+        params: list[Any] = [owner_ref]
+        if requirement_id:
+            query += " AND requirement_id = ?"
+            params.append(requirement_id)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit_bounded)
+
+        with _DB_LOCK, self._connection() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+            return [_row_to_review_record(r) for r in rows]
+
+    # LLM: 分页查询某需求或 owner 的验收事实历史。
+    # 函数用途: 列出满足条件的验收事实记录列表。
+    def list_acceptance_records(
+        self,
+        owner_ref: str,
+        *,
+        requirement_id: str | None = None,
+        limit: int = 100,
+    ) -> list[AcceptanceRecord]:
+        limit_bounded = min(max(1, int(limit or 100)), 200)
+        query = "SELECT * FROM acceptance_records WHERE owner_ref = ?"
+        params: list[Any] = [owner_ref]
+        if requirement_id:
+            query += " AND requirement_id = ?"
+            params.append(requirement_id)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit_bounded)
+
+        with _DB_LOCK, self._connection() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+            return [_row_to_acceptance_record(r) for r in rows]
+
+
+# LLM: 生成当前 UTC ISO 时间戳字符串。
+# 函数用途: 获取当前时间。
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# LLM: 安全解析 JSON 字符串数组，返回纯净字符串列表。
+# 函数用途: 反序列化 JSON 文本为字符串列表。
 def _json_string_list(value: object) -> list[str]:
     try:
         payload = json.loads(str(value or "[]"))
@@ -338,6 +997,83 @@ def _json_string_list(value: object) -> list[str]:
     if not isinstance(payload, list):
         return []
     return [str(item) for item in payload if str(item).strip()]
+
+
+# LLM: 安全解析 JSON 整数数组。
+# 函数用途: 反序列化 JSON 文本为整型数字列表。
+def _json_int_list(value: object) -> list[int]:
+    try:
+        payload = json.loads(str(value or "[]"))
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, list):
+        return []
+    result: list[int] = []
+    for item in payload:
+        try:
+            result.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+# LLM: 将数据库 Row 投影为 RequirementProvenanceRecord。
+# 函数用途: 从 SQLite 查询行构建需求记录。
+def _row_to_requirement_record(row: sqlite3.Row) -> RequirementProvenanceRecord:
+    watched = tuple(_json_string_list(row["watched_paths_json"]))
+    event_ids = tuple(_json_int_list(row["verification_event_ids_json"]))
+    return RequirementProvenanceRecord(
+        requirement_id=row["requirement_id"],
+        owner_ref=row["owner_ref"],
+        task_id=row["task_id"],
+        root=row["root"],
+        input_version=row["input_version"],
+        watched_paths=watched,
+        verification_event_ids=event_ids,
+        observation_scope=row["observation_scope"],
+        review_status=row["review_status"],
+        acceptance_status=row["acceptance_status"],
+        invalidation_reason=row["invalidation_reason"],
+        author_principal_id=row["author_principal_id"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+# LLM: 将数据库 Row 投影为 IndependentReviewRecord。
+# 函数用途: 从 SQLite 查询行构建独立评审记录。
+def _row_to_review_record(row: sqlite3.Row) -> IndependentReviewRecord:
+    refs = tuple(_json_string_list(row["evidence_refs_json"]))
+    return IndependentReviewRecord(
+        review_id=row["review_id"],
+        requirement_id=row["requirement_id"],
+        reviewer_principal_id=row["reviewer_principal_id"],
+        author_principal_id=row["author_principal_id"],
+        reviewed_input_version=row["reviewed_input_version"],
+        verdict=row["verdict"],
+        scope=row["scope"],
+        evidence_refs=refs,
+        created_at=row["created_at"],
+        owner_ref=row["owner_ref"],
+    )
+
+
+# LLM: 将数据库 Row 投影为 AcceptanceRecord。
+# 函数用途: 从 SQLite 查询行构建验收事实记录。
+def _row_to_acceptance_record(row: sqlite3.Row) -> AcceptanceRecord:
+    refs = tuple(_json_string_list(row["evidence_refs_json"]))
+    return AcceptanceRecord(
+        acceptance_id=row["acceptance_id"],
+        requirement_id=row["requirement_id"],
+        accepted_by_principal_id=row["accepted_by_principal_id"],
+        accepted_input_version=row["accepted_input_version"],
+        verdict=row["verdict"],
+        observation_scope=row["observation_scope"],
+        review_id=row["review_id"],
+        evidence_refs=refs,
+        created_at=row["created_at"],
+        owner_ref=row["owner_ref"],
+    )
 
 
 __all__ = ["VerificationContext", "VerificationEvidence", "VerificationEvidenceRepository"]
