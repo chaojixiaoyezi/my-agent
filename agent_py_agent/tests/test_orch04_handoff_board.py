@@ -46,6 +46,8 @@ from agent_py_agent.agent.collaboration.models import (
     new_evidence_id,
 )
 from agent_py_agent.agent.collaboration.store import CollaborationStore
+from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling.models import ToolInvocationContext
 
 
@@ -1054,3 +1056,54 @@ def test_scenario_f_archive_closed_items_pruning_and_active_index(
     published_items = collab_store.list_all_handoff_items(state="published", limit=10)
     assert len(published_items) == 1
     assert published_items[0].item_id == "item-a-active"
+
+
+def test_scenario_g_unmocked_simple_agent_workspace_resolution(tmp_path: Path) -> None:
+    """(g) unmocked SimpleAgent.root workspace directory resolved in ManageHandoffBoardTool."""
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    home_dir = tmp_path / "home"
+    outside_dir = tmp_path / "outside_dir"
+
+    config = AgentConfig(
+        model_backend="echo",
+        my_agent_home=str(home_dir),
+        execution_mode="local_unmanaged",
+    )
+    agent = SimpleAgent(config, workspace_dir)
+    agent._current_run_params = SimpleNamespace(
+        run_id="run-real-agent",
+        task_id="task-real-agent",
+        request_id="req-real-agent",
+    )
+
+    tool = ManageHandoffBoardTool(agent=agent)
+    ctx = ToolInvocationContext(runtime_snapshot=MagicMock())
+
+    # 1. sync_external_mailbox succeeds for root_dir under agent workspace
+    mailbox_dir = workspace_dir / "mailboxes"
+    sync_ok = tool.execute_scoped(
+        {
+            "action": "sync_external_mailbox",
+            "root_dir": str(mailbox_dir),
+            "actor_id": "worker-real-1",
+        },
+        ctx,
+    )
+    assert sync_ok.ok is True, sync_ok.output
+    assert (mailbox_dir / "worker-real-1").is_dir()
+
+    # 2. sync_external_mailbox rejects outside_dir fail-closed (PATH_TRAVERSAL_FORBIDDEN, not_started)
+    sync_fail = tool.execute_scoped(
+        {
+            "action": "sync_external_mailbox",
+            "root_dir": str(outside_dir),
+            "actor_id": "worker-real-1",
+        },
+        ctx,
+    )
+    assert sync_fail.ok is False
+    assert sync_fail.reported_error_code == "PATH_TRAVERSAL_FORBIDDEN"
+    assert sync_fail.result_envelope["error_code"] == "PATH_TRAVERSAL_FORBIDDEN"
+    assert sync_fail.effect_outcome == "not_started"
+    assert not outside_dir.exists()

@@ -252,7 +252,11 @@ class ManageHandoffBoardTool(BaseTool):
         if self.agent is not None:
             store = getattr(self.agent, "collaboration_store", None)
             conv_store = getattr(self.agent, "conversation_store", None)
-            ws_root = getattr(self.agent, "workspace_root", None)
+            ws_root = (
+                getattr(self.agent, "workspace_root", None)
+                or getattr(self.agent, "root", None)
+                or getattr(getattr(self.agent, "subagents", None), "workspace_root", None)
+            )
             if store is None and ws_root is not None:
                 store = CollaborationStore(Path(ws_root) / "collaboration")
             if store is not None:
@@ -384,6 +388,18 @@ class ManageHandoffBoardTool(BaseTool):
         if getattr(service, "store", None) and getattr(service.store, "root", None):
             authorized_roots.append(Path(service.store.root).resolve())
         if self.agent is not None:
+            agent_root = getattr(self.agent, "root", None)
+            if agent_root:
+                try:
+                    authorized_roots.append(Path(agent_root).resolve())
+                except Exception:
+                    pass
+            for wr in getattr(getattr(self.agent, "tools", None), "workspace_roots", ()) or ():
+                if wr:
+                    try:
+                        authorized_roots.append(Path(wr).resolve())
+                    except Exception:
+                        pass
             try:
                 owner_root = runtime_owner_root(self.agent)
                 if owner_root:
