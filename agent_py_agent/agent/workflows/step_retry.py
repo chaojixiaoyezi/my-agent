@@ -202,8 +202,13 @@ def run_step_with_retry(
         step.attempt_count = attempt + 1
         step.max_attempts = max_attempts
 
-        # 持久化中间步骤状态
-        if engine is not None and getattr(engine, 'store', None) is not None and run is not None:
+        # 持久化中间步骤状态（并行 batch worker 不写 store，由协调线程集中收口原子写盘）
+        if (
+            engine is not None
+            and getattr(engine, 'store', None) is not None
+            and run is not None
+            and not getattr(run, '_batch_worker', False)
+        ):
             try:
                 engine.store.save_step_result(run.workflow_run_id, step)
             except Exception:

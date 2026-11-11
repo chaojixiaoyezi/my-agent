@@ -21,7 +21,7 @@ from ..common.cancellation import ToolCancelled, raise_if_cancelled
 from ..concurrency.interrupt import is_interrupted
 from .conditions import evaluate_condition
 from .models import StepExecutionRecord, payload
-from .run_store import _HELD_LOCKS, execution_receipt, replace_run_record
+from .run_store import execution_receipt, replace_run_record
 
 _LOG = logging.getLogger(__name__)
 
@@ -193,10 +193,9 @@ def _is_blocked_by_skipped_upstream(
     return False
 
 
-# LLM: 纯计算工作线程函数；不写Store、同步进程锁凭据，避免多线程死锁。
+# LLM: 纯计算工作线程函数；不写Store、不继承协调线程锁凭据，避免跨线程锁状态泄漏与死锁。
 # 函数用途: 在线程池内执行单步实际业务逻辑并返回结果。
-def _run_step_worker(engine, step, spec, local_outputs, definition, local_record, held_paths):
-    _HELD_LOCKS.paths = set(held_paths)
+def _run_step_worker(engine, step, spec, local_outputs, definition, local_record):
     clock = time.monotonic()
     try:
         _check_stop()
@@ -436,7 +435,6 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
                 local_record = replace_run_record(record, {})
                 local_record._batch_worker = True
                 local_outputs = dict(outputs)
-                held_paths = tuple(getattr(_HELD_LOCKS, 'paths', ()))
                 ctx = copy_context()
                 fut = pool.submit(
                     ctx.run,
@@ -447,7 +445,6 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
                     local_outputs,
                     definition,
                     local_record,
-                    held_paths,
                 )
                 active_futures[fut] = (sid, spec)
 

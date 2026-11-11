@@ -30,10 +30,12 @@ from agent_py_agent.agent.conversation.session_tasks import (
     SessionTaskStore,
     SessionTaskUpdate,
 )
+from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.workflows.agent_steps import (
     WorkflowAgentSteps,
     build_default_workflow_agent_steps,
     cancel_workflow_session_task,
+    make_session_task_completion_reader,
     read_session_task_completion,
 )
 from agent_py_agent.agent.workflows.analysis_isolation import (
@@ -779,3 +781,88 @@ def test_workflow_agent_steps_full_integration(tmp_path):
     cancel_success = agents.cancel(run, step)
     assert cancel_success is True
     assert step.escalation_result.get("cancellation_receipt") is not None
+
+
+def test_make_session_task_completion_reader_resolves_owner_from_threads_load(tmp_path):
+    """验证当 SessionTask.metadata 中无 inline owner_id 时，make_session_task_completion_reader
+
+    能通过真实的 ConversationStore / ThreadStore.load(target_thread_id) 准确解析出所属 owner_id，
+    并对合法 owner 放行、对非法 owner 坚决拦截抛出 WORKFLOW_AGENT_OWNER_MISMATCH。
+    """
+    conv_store = ConversationStore(tmp_path / "conv_storage_real")
+
+    # 1. 在真实 ThreadStore 创建目标线程，锁定 owner_id 为 "owner-alice"
+    thread = conv_store.threads.create(owner_id="owner-alice", title="Alice Target Thread")
+    assert hasattr(conv_store.threads, "load")
+
+    # 2. 创建真实 SessionTask，指向 target_thread_id=thread.thread_id
+    # 注意：新创建的 SessionTask 其 metadata 为空，内部无 business_context.owner_id
+    draft = SessionTaskDraft(
+        sender_thread_id="thread-sender",
+        target_thread_id=thread.thread_id,
+        goal="分析任务",
+        dedupe_key="dedupe-real-task-1",
+    )
+    task = conv_store.session_tasks.create(draft)
+    task_id = task.task_id
+
+    # 验证此时 task.metadata 确实无 inline owner_id，task.owner_id 亦为空
+    assert not getattr(task, "owner_id", None)
+    meta = getattr(task, "metadata", {}) or {}
+    assert "owner_id" not in meta.get("business_context", {})
+
+    # 3. 构造 reader
+    reader = make_session_task_completion_reader(conv_store)
+
+    run_alice = SimpleNamespace(owner_id="owner-alice", workflow_run_id="run-1", workflow_id="wf-1")
+    step = SimpleNamespace(step_id="step-ag", escalation_result={"task_id": task_id, "attempt_id": "att-1"})
+
+    # 4. running 状态下通过 reader 读取：应当成功解析 thread.owner_id 并放行
+    res_running = reader(run_alice, step)
+    assert res_running is not None
+    assert res_running["status"] == "running"
+    assert res_running["state"] == "running"
+    assert res_running["owner_id"] == "owner-alice"
+
+    # 5. 支持 reader(task_id, owner_id=...) 单任务参数形式调用
+    res_direct = reader(task_id, owner_id="owner-alice", attempt_id="att-1")
+    assert res_direct is not None
+    assert res_direct["status"] == "running"
+
+    # 6. 非法 owner (intruder) 尝试读取：必须被拦截并抛出 PermissionError("WORKFLOW_AGENT_OWNER_MISMATCH")
+    run_intruder = SimpleNamespace(owner_id="owner-intruder", workflow_run_id="run-1", workflow_id="wf-1")
+    with pytest.raises(PermissionError, match="WORKFLOW_AGENT_OWNER_MISMATCH"):
+        reader(run_intruder, step)
+
+    with pytest.raises(PermissionError, match="WORKFLOW_AGENT_OWNER_MISMATCH"):
+        reader(task_id, owner_id="owner-intruder")
+
+    # 7. 推进任务到 accepted -> done 终态并附带结果，验证 reader 能读出完成证据
+    conv_store.session_tasks.advance(task_id, SessionTaskUpdate(status="accepted"))
+    conv_store.session_tasks.advance(
+        task_id,
+        SessionTaskUpdate(status="done", summary="执行成功", result_refs=("ref_evidence_1",)),
+    )
+    res_done = reader(run_alice, step)
+    assert res_done is not None
+    assert res_done["status"] == "completed"
+    assert res_done["state"] == "succeeded"
+    assert res_done["output"]["summary"] == "执行成功"
+    assert res_done["output"]["result_refs"] == ["ref_evidence_1"]
+
+    # 8. 降级兼容测试：测试桩若无 .load 仅有 .get，仍能平稳回退并正确解析
+    class LegacyThreadStoreDouble:
+        def __init__(self, owner_map):
+            self._map = owner_map
+
+        def get(self, tid):
+            return SimpleNamespace(owner_id=self._map.get(tid))
+
+    conv_store_legacy = SimpleNamespace(
+        session_tasks=conv_store.session_tasks,
+        threads=LegacyThreadStoreDouble({thread.thread_id: "owner-alice"}),
+    )
+    reader_legacy = make_session_task_completion_reader(conv_store_legacy)
+    res_legacy = reader_legacy(run_alice, step)
+    assert res_legacy is not None
+    assert res_legacy["status"] == "completed"

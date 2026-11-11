@@ -173,8 +173,13 @@ def commit_verified_watermark(
 
     wm_payload = dict(candidate)
 
-    # 1. 持久化至当前 Run 记录
-    if engine is not None and getattr(engine, 'store', None) is not None and run is not None:
+    # 1. 持久化至当前 Run 记录（并行 batch worker 在内存记录 watermark，由协调线程原子写盘）
+    if (
+        engine is not None
+        and getattr(engine, 'store', None) is not None
+        and run is not None
+        and not getattr(run, '_batch_worker', False)
+    ):
         try:
             updated = engine.store.save_step_watermark(run.workflow_run_id, step.step_id, wm_payload)
             step.watermark = updated.watermark
