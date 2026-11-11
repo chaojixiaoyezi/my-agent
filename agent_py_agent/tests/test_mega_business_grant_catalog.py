@@ -184,7 +184,8 @@ def test_frozen_full_catalog_and_schema_bundle_hashes():
         assert step["properties"].pop("foreach") == foreach_schema
     # #49-1仅可选追加画布拓扑字段；先证明不进入required，再规范化比较原冻结目录。
     canvas = {"WorkflowDefinition": ("datasource_ids", "edges", "schedule_ids"),
-              "WorkflowStepDefinition": ("description", "next_step_ids", "ui_position")}
+              "WorkflowStepDefinition": ("description", "next_step_ids", "ui_position",
+                                         "retry_policy", "depends_on", "tool_spec", "subworkflow_ref", "notification_spec")}
     for definitions in (normalized_api["$defs"], normalized_schemas["$defs"], normalized_defs):
         for name, added in canvas.items():
             assert set(added) <= set(definitions[name]["properties"])

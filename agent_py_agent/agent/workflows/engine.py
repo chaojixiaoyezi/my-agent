@@ -163,11 +163,19 @@ def _script_pin(script_id, row):
 # LLM: 生命周期持有冻结定义、版本和断点合同，步骤调度由子类_drive提供，不建立另一执行器。
 # 类用途: 管理工作流创建、恢复与运行级合同，供公开引擎复用。
 class _WorkflowRunLifecycle:
-    # LLM: 构造不执行资产；外部debug执行器/分析器只由可信宿主注入，定义JSON不授新权限。
-    # 函数用途: 绑定Owner存储、分析及可选通用外部节点执行端口，默认不具备外部节点执行能力。
+    # LLM: 构造不执行资产；外部debug执行器/分析器及Wave2扩展钩子只由可信宿主注入或模块延迟解析。
+    # 函数用途: 绑定Owner存储、分析及可选通用扩展节点执行端口与生命周期钩子。
     def __init__(self, owner_home, *, escalation_handler=None, analysis_handler=None, skill_resolver=None,
                  skill_details_resolver=None, workspace_root=None, debug_node_handler=None,
-                 agent_steps=None, run_authorizer=None, step_observer: Callable[[dict], None] | None = None):
+                 agent_steps=None, run_authorizer=None, step_observer: Callable[[dict], None] | None = None,
+                 step_executors: dict[str, Callable] | None = None,
+                 tool_step_executor=None,
+                 notification_step_executor=None,
+                 subworkflow_step_executor=None,
+                 step_retry_runner=None,
+                 watermark_committer=None,
+                 dag_scheduler=None,
+                 unattended_failure_notifier=None):
         self.owner_home = Path(owner_home).absolute()
         self.workspace_root = workspace_root
         self.store, self.runner = WorkflowRunStore(owner_home), ScriptRunner(owner_home, workspace_root=workspace_root)
@@ -177,6 +185,14 @@ class _WorkflowRunLifecycle:
         self.debug_node_handler = debug_node_handler
         self.agent_steps, self.run_authorizer = agent_steps, run_authorizer
         self.step_observer = step_observer
+        self.step_executors = dict(step_executors or {})
+        self.tool_step_executor = tool_step_executor
+        self.notification_step_executor = notification_step_executor
+        self.subworkflow_step_executor = subworkflow_step_executor
+        self.step_retry_runner = step_retry_runner
+        self.watermark_committer = watermark_committer
+        self.dag_scheduler = dag_scheduler
+        self.unattended_failure_notifier = unattended_failure_notifier
 
     # LLM: 首次执行冻结定义及依赖；准入前后重读原run，queued只读复核不再争执行权；取消终态不伪报准入，owner_id不授权。
     # 函数用途: 新建运行账本并顺序执行步骤。
@@ -815,12 +831,44 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                 logging.getLogger(__name__).warning('workflow summary write failed error_type=%s error=%s',
                     error_type, error, extra={'error_type': error_type, 'error': error})
 
-    # LLM: 失败保存若确认原run已经终结则返回耐久记录；其它异常和中断保持原回执，附属通知不改运行事实。
+    # LLM: 获取DAG调度器；支持构造注入与外部模块延迟加载 (WF-08)。
+    # 函数用途: 解析可选的 DAG 调度器实例或模块。
+    def _get_dag_scheduler(self):
+        if self.dag_scheduler is not None:
+            return self.dag_scheduler
+        try:
+            from . import dag_scheduler
+            return dag_scheduler
+        except ImportError:
+            return None
+
+    # LLM: 失败保存若确认原run已经终结则返回耐久记录；支持DAG并行波次调度委托与顺序执行回退。
     # 函数用途: 调度后缀步骤，更新当前进度并结算整次运行。
     def _drive(self, record, definition, start):
         # 内部/已排队调用也不得先发表新attempt；资格错误不转换为失败批次或可恢复执行。
         validate_definition_eligibility(definition)
         state = {'record': record, 'phase': 'preflight', 'started': bool(start), 'committed': False}
+        has_depends_on = any(bool(s.get('depends_on')) for s in definition.get('steps', ()))
+        dag_sched = self._get_dag_scheduler()
+        should_dag = has_depends_on or (dag_sched is not None and getattr(dag_sched, 'should_schedule_dag', lambda d: False)(definition))
+        if should_dag and dag_sched is not None and hasattr(dag_sched, 'execute_workflow_dag'):
+            try:
+                return dag_sched.execute_workflow_dag(engine=self, record=record, definition=definition, start=start, execution_state=state)
+            except (KeyboardInterrupt, SystemExit, ToolCancelled, InterruptedError) as exc:
+                current = self._committed_record(state)
+                if current is None:
+                    current = self._pause_failed_run(state, definition, exc, interrupted=True)
+                exc.record = current
+                exc.receipt = WorkflowExecutionError(current, exc).receipt
+                raise
+            except Exception as exc:
+                committed = self._committed_record(state)
+                if committed is not None:
+                    return committed
+                current = self._pause_failed_run(state, definition, exc)
+                if state.get('terminal_record_observed'):
+                    return current
+                raise WorkflowExecutionError(current, exc) from exc
         try:
             return self._drive_steps(record, definition, start, execution_state=state)
         except (KeyboardInterrupt, SystemExit, ToolCancelled, InterruptedError) as exc:
@@ -906,6 +954,10 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             step = replace(template, status='running', started_at=time.time(), input_snapshot=payload(record.inputs),
                            error_code='', error_message='', needs_repair=False)
             # 所有真实步骤先落准确 attempt；审核及异步完成都绑定此身份。
+            if spec.get('retry_policy'):
+                policy = spec['retry_policy']
+                if isinstance(policy, dict):
+                    step.max_attempts = int(policy.get('max_attempts', 1))
             step.escalation_result['attempt_id'] = uuid.uuid4().hex
             state.update(record=record, phase='step_publish')
             record = self.store.save_step_result(record.workflow_run_id, step)
@@ -919,7 +971,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                     step.status = 'skipped'
                 else:
                     state.update(record=record, phase='started', started=True)
-                    self._perform(step, spec, outputs, definition, record)
+                    self._execute_step_with_retry_and_watermarks(step, spec, outputs, definition, record)
                 _check_stop()
             except (KeyboardInterrupt, SystemExit, ToolCancelled, InterruptedError):
                 step.ended_at, step.duration_ms = time.time(), (time.monotonic() - clock) * 1000
@@ -955,6 +1007,8 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                          final_output=next(reversed(outputs.values()), {})))
         state.update(record=record, phase='finalize')
         record = self._finalize_record(record, definition)
+        if record.status == 'failed':
+            self._notify_unattended_run_failure(record)
         _check_stop()
         execution_receipt(record, phase='finalize' if record.breakpoint else 'terminal',
             effect_outcome='confirmed' if record.status == 'succeeded' else 'failed',
@@ -985,6 +1039,116 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             # best-effort: 进度只是展示投影，不覆盖业务执行事实。
             pass
 
+    # LLM: 检查是否具备正式单步执行器；支持构造注入、注册表及外部模块延迟加载。
+    # 函数用途: 判断指定 step mode 是否已由插件化执行器支持，避免 formal 执行被误判为 UNAVAILABLE。
+    def _has_formal_step_executor(self, mode: str) -> bool:
+        if mode in self.step_executors:
+            return True
+        if mode == 'tool_call':
+            if callable(self.tool_step_executor):
+                return True
+            try:
+                from . import tool_steps
+                return hasattr(tool_steps, 'execute_tool_step')
+            except ImportError:
+                return False
+        if mode == 'notification':
+            if callable(self.notification_step_executor):
+                return True
+            try:
+                from . import notification_steps
+                return hasattr(notification_steps, 'execute_notification_step')
+            except ImportError:
+                return False
+        if mode == 'subworkflow':
+            if callable(self.subworkflow_step_executor):
+                return True
+            try:
+                from . import subworkflow_steps
+                return hasattr(subworkflow_steps, 'execute_subworkflow_step')
+            except ImportError:
+                return False
+        return False
+
+    # LLM: 分派正式扩展节点执行；优先使用属性注入与专用模块，不破坏旧单步调试能力。
+    # 函数用途: 执行正式 tool_call, notification, subworkflow 或注册的扩展步骤。
+    def _dispatch_formal_step(self, record, spec, outputs, definition, run, context):
+        mode = record.mode
+        if mode in self.step_executors:
+            executor = self.step_executors[mode]
+            return executor(engine=self, run=run, workflow=definition, step=record, spec=spec, context=context, outputs=outputs)
+        if mode == 'tool_call':
+            executor = self.tool_step_executor
+            if executor is None:
+                from . import tool_steps
+                executor = tool_steps.execute_tool_step
+            return executor(engine=self, run=run, workflow=definition, step=record, spec=spec, context=context, outputs=outputs)
+        if mode == 'notification':
+            executor = self.notification_step_executor
+            if executor is None:
+                from . import notification_steps
+                executor = notification_steps.execute_notification_step
+            return executor(engine=self, run=run, workflow=definition, step=record, spec=spec, context=context, outputs=outputs)
+        if mode == 'subworkflow':
+            executor = self.subworkflow_step_executor
+            if executor is None:
+                from . import subworkflow_steps
+                executor = subworkflow_steps.execute_subworkflow_step
+            return executor(engine=self, run=run, workflow=definition, step=record, spec=spec, context=context, outputs=outputs)
+        raise ValueError(f"No formal executor configured for mode: {mode}")
+
+    # LLM: 包装单步执行；支持 step_retry 重试策略与 step_watermarks 水位持久化 (WF-03 + WF-10)。
+    # 函数用途: 结合重试策略执行单步，并在步骤成功后提交已验证水位。
+    def _execute_step_with_retry_and_watermarks(self, step, spec, outputs, definition, record):
+        retry_runner = self.step_retry_runner
+        if retry_runner is None:
+            try:
+                from . import step_retry
+                retry_runner = getattr(step_retry, 'run_step_with_retry', None)
+            except ImportError:
+                retry_runner = None
+        if callable(retry_runner):
+            retry_runner(engine=self, step=step, spec=spec, outputs=outputs, definition=definition, run=record,
+                         execute_fn=lambda: self._perform(step, spec, outputs, definition, record))
+        else:
+            self._perform(step, spec, outputs, definition, record)
+
+        if step.status in ('succeeded', 'escalated_recovered'):
+            committer = self.watermark_committer
+            if committer is None:
+                try:
+                    from . import step_watermarks
+                    committer = getattr(step_watermarks, 'commit_verified_watermark', None)
+                except ImportError:
+                    committer = None
+            if callable(committer):
+                try:
+                    committer(engine=self, run=record, step=step, spec=spec, outputs=outputs)
+                except Exception:
+                    pass
+
+    # LLM: 正式运行终态失败时触发无人值守通知；记录回执于 run.failure_notification，不掩盖失败事实。
+    # 函数用途: 当正式运行失败时调用通知扩展，防无限递归 (WF-05)。
+    def _notify_unattended_run_failure(self, record):
+        if record.ephemeral_debug or record.status != 'failed':
+            return
+        if getattr(record, 'failure_notification', None) is not None:
+            return
+        notifier = self.unattended_failure_notifier
+        if notifier is None:
+            try:
+                from . import notification_steps
+                notifier = getattr(notification_steps, 'notify_unattended_run_failure', None)
+            except ImportError:
+                notifier = None
+        if callable(notifier):
+            try:
+                result = notifier(engine=self, run=record)
+                if isinstance(result, dict):
+                    record.failure_notification = payload(result)
+            except Exception as exc:
+                record.failure_notification = {'error': str(exc), 'status': 'failed'}
+
     # LLM: 正式链仍只原三模式；条件别名纯求值，脚本别名及审批/通知都先过debug副作用门，内置mock例外不变。
     # 函数用途: 复用旧脚本执行链并安全分派单节点，不能从mode别名/config或分析器属性取得新权限。
     def _perform(self, record, spec, outputs, definition, run, *, record_summary=True, allow_side_effects=True):
@@ -995,10 +1159,11 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             self._foreach_step(record, spec, outputs, definition, run)
             return
         if not run.ephemeral_debug and record.mode not in ('deterministic_script', 'llm_skill_analysis', 'llm_prompt', 'hybrid', 'agent_task'):
-            record.status, record.error_code = 'failed', 'NODE_EXECUTOR_UNAVAILABLE'
-            record.error_message = '通用节点当前仅支持单节点调试，不支持正式DAG执行'
-            record.needs_repair = True
-            return
+            if not self._has_formal_step_executor(record.mode):
+                record.status, record.error_code = 'failed', 'NODE_EXECUTOR_UNAVAILABLE'
+                record.error_message = '通用节点当前仅支持单节点调试，不支持正式DAG执行'
+                record.needs_repair = True
+                return
         for key, reference in spec.get('inputs_map', {}).items():
             if (record.mode in ('llm_skill_analysis', 'llm_prompt', 'hybrid') and isinstance(reference, dict)
                     and reference.get('step_id') == '$inputs' and 'key' in reference
@@ -1032,6 +1197,10 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             return
         if record.mode in ('condition', 'condition_branch', 'script_transform', 'http_request', 'tool_call',
                            'subworkflow', 'approval_wait', 'notification'):
+            if not run.ephemeral_debug and self._has_formal_step_executor(record.mode):
+                context = AnalysisContext(outputs, run.inputs, record.input_snapshot, data_sources=self._sources(definition))
+                self._dispatch_formal_step(record, spec, outputs, definition, run, context)
+                return
             self._generic_debug_step(record, spec, outputs, definition, run)
             return
         if record.mode in ('deterministic_script', 'script', 'hybrid'):

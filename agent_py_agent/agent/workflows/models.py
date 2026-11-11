@@ -200,6 +200,11 @@ class StepExecutionRecord:
     next_step_ids: tuple[str, ...] = field(default=(), kw_only=True)
     output_dir: str = field(default='', kw_only=True)
     output_artifacts: tuple[dict[str, Any], ...] = field(default=(), kw_only=True)
+    attempt_count: int = field(default=1, kw_only=True)
+    max_attempts: int = field(default=1, kw_only=True)
+    subworkflow_run_id: str = field(default='', kw_only=True)
+    watermark: dict[str, Any] | None = field(default=None, kw_only=True)
+    effect_id: str = field(default='', kw_only=True)
 
     # LLM: JSON往返保留修复标记，返回独立快照而不是内部可变字典。
     # 函数用途: 序列化一个步骤的完整运行事实。
@@ -212,9 +217,15 @@ class StepExecutionRecord:
     def from_dict(cls, value):
         if value['status'] not in get_args(StepStatus):
             raise ValueError('未知步骤状态')
-        return cls(**{**payload(value), 'resolved_skill_ids': tuple(value.get('resolved_skill_ids', ())),
+        raw = dict(payload(value))
+        return cls(**{**raw, 'resolved_skill_ids': tuple(value.get('resolved_skill_ids', ())),
                       'next_step_ids': tuple(value.get('next_step_ids', ())),
-                      'output_artifacts': tuple(value.get('output_artifacts', ()))})
+                      'output_artifacts': tuple(value.get('output_artifacts', ())),
+                      'attempt_count': int(raw.get('attempt_count', 1)),
+                      'max_attempts': int(raw.get('max_attempts', 1)),
+                      'subworkflow_run_id': str(raw.get('subworkflow_run_id', '')),
+                      'watermark': raw.get('watermark'),
+                      'effect_id': str(raw.get('effect_id', ''))})
 
 
 # LLM: 身份不由正文推导；debug只由引擎内存创建，禁止调试记录进入正式运行Store。
@@ -254,6 +265,9 @@ class WorkflowRunRecord:
     revision: int = field(default=0, kw_only=True)
     progress_seq: int = field(default=0, kw_only=True)
     definition_version: int | None = field(default=None, kw_only=True)
+    parent_workflow_run_id: str = field(default='', kw_only=True)
+    subworkflow_depth: int = field(default=0, kw_only=True)
+    failure_notification: dict[str, Any] | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         # 这里只定义快照/版本合同；锁内比较与递增由 W3 的原 run_store 实现，不在 DTO 猜 CAS。
@@ -268,6 +282,12 @@ class WorkflowRunRecord:
             if type(value) is not dict:
                 raise TypeError(f'{name} 必须是 JSON 对象')
             setattr(self, name, payload(value))
+        if not isinstance(self.parent_workflow_run_id, str):
+            raise TypeError('parent_workflow_run_id 必须是字符串')
+        if not isinstance(self.subworkflow_depth, int) or self.subworkflow_depth < 0:
+            raise ValueError('subworkflow_depth 必须是非负整数')
+        if self.failure_notification is not None and not isinstance(self.failure_notification, dict):
+            raise TypeError('failure_notification 必须是字典或None')
 
     # LLM: 嵌套步骤、进度和断点一起序列化；旧记录缺字段由默认值兼容，不清除历史失败。
     # 函数用途: 输出完整运行JSON快照。
@@ -278,8 +298,12 @@ class WorkflowRunRecord:
     # 函数用途: 从JSON恢复整个工作流运行记录。
     @classmethod
     def from_dict(cls, value):
-        return cls(**{**payload(value), 'steps': tuple(StepExecutionRecord.from_dict(item) for item in value.get('steps', ())),
-                      'confirmed_step_refs': tuple(value.get('confirmed_step_refs', ()))})
+        raw = dict(payload(value))
+        return cls(**{**raw, 'steps': tuple(StepExecutionRecord.from_dict(item) for item in value.get('steps', ())),
+                      'confirmed_step_refs': tuple(value.get('confirmed_step_refs', ())),
+                      'parent_workflow_run_id': str(raw.get('parent_workflow_run_id', '')),
+                      'subworkflow_depth': int(raw.get('subworkflow_depth', 0)),
+                      'failure_notification': raw.get('failure_notification')})
 
 
 # LLM: 所有JSON边界均复制；仅dataclass归档空字段省略，业务dict的同名键原样保留，嵌套步骤同样兼容。

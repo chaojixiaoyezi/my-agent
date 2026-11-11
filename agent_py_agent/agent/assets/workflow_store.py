@@ -50,11 +50,28 @@ class WorkflowOperationConflict(ValueError):
         self.error_code = self.code = code
 
 
+# LLM: 规范化工作流引用；支持 workflow:<id> 与裸 <id>，确保统一安全寻址 (BIZ-005)。
+# 函数用途: 剥离可选的 workflow: 前缀，返回标准化工作流资产 ID。
+def normalize_workflow_asset_id(ref: str) -> str:
+    if not isinstance(ref, str):
+        return ref
+    ref = ref.strip()
+    if ref.startswith("workflow:"):
+        return ref[len("workflow:"):].strip()
+    return ref
+
+
 # LLM: 只检查当前步骤的模式组合，不改变共享codec，历史定义及取消/对账身份仍可解码。
 # 函数用途: 在写入或执行前拒绝尚无异步完成语义的批节点。
 def validate_step_eligibility(step):
     spec = step.to_dict() if isinstance(step, WorkflowStepSpec) else step
     if spec.get('mode') == 'agent_task' and spec.get('foreach') is not None:
+        try:
+            from ..workflows import batching
+            if getattr(batching, 'SUPPORTS_FOREACH_AGENT_TASK', False):
+                return
+        except ImportError:
+            pass
         raise WorkflowForeachAgentTaskUnsupported(spec['step_id'])
 
 
@@ -95,6 +112,11 @@ class WorkflowStepSpec(_Record):
     next_step_ids: tuple[str, ...] = field(default=(), kw_only=True)
     ui_position: dict[str, float] = field(default_factory=dict, kw_only=True)
     foreach: dict | None = field(default=None, kw_only=True)
+    retry_policy: dict[str, object] | None = field(default=None, kw_only=True)
+    depends_on: tuple[str, ...] = field(default=(), kw_only=True)
+    tool_spec: dict[str, object] | None = field(default=None, kw_only=True)
+    subworkflow_ref: str = field(default="", kw_only=True)
+    notification_spec: dict[str, object] | None = field(default=None, kw_only=True)
 
     # LLM: 资产层唯一校验步骤；Skill引用允许来源前缀，脚本目录ID仍严格，模式/策略/超时不静默修正。
     # 函数用途: 在构造或JSON恢复时拒绝非法工作流步骤。
@@ -110,6 +132,29 @@ class WorkflowStepSpec(_Record):
                 or any(type(number) not in (int, float) or not math.isfinite(number)
                        for number in self.ui_position.values())):
             raise ValueError('画布坐标只接受有限x/y数值')
+        if self.retry_policy is not None:
+            if not isinstance(self.retry_policy, dict):
+                raise ValueError("retry_policy 必须是字典")
+            if 'max_attempts' in self.retry_policy:
+                max_att = self.retry_policy['max_attempts']
+                if not isinstance(max_att, int) or isinstance(max_att, bool) or max_att < 1:
+                    raise ValueError("retry_policy.max_attempts 必须为 >= 1 的整数")
+            if 'delay_seconds' in self.retry_policy:
+                delay = self.retry_policy['delay_seconds']
+                if not isinstance(delay, (int, float)) or isinstance(delay, bool) or delay < 0 or not math.isfinite(delay):
+                    raise ValueError("retry_policy.delay_seconds 必须为 >= 0 的有限数值")
+            if 'backoff_factor' in self.retry_policy:
+                backoff = self.retry_policy['backoff_factor']
+                if not isinstance(backoff, (int, float)) or isinstance(backoff, bool) or backoff < 1.0 or not math.isfinite(backoff):
+                    raise ValueError("retry_policy.backoff_factor 必须为 >= 1.0 的有限数值")
+            if 'retryable_codes' in self.retry_policy:
+                codes = self.retry_policy['retryable_codes']
+                if not isinstance(codes, (list, tuple)) or any(not isinstance(c, str) for c in codes):
+                    raise ValueError("retry_policy.retryable_codes 必须是字符串序列")
+        if self.tool_spec is not None and not isinstance(self.tool_spec, dict):
+            raise ValueError("tool_spec 必须是字典")
+        if self.notification_spec is not None and not isinstance(self.notification_spec, dict):
+            raise ValueError("notification_spec 必须是字典")
         super().__post_init__()
         if self.mode not in WORKFLOW_STEP_MODES:
             raise ValueError("未知工作流步骤mode")
@@ -122,16 +167,27 @@ class WorkflowStepSpec(_Record):
             safe_asset_id(self.script_id)
         for step_id in self.next_step_ids:
             safe_asset_id(step_id)
+        for dep_id in self.depends_on:
+            safe_asset_id(dep_id)
+        if self.step_id in self.depends_on:
+            raise ValueError(f"工作流步骤 {self.step_id} 不能依赖自身")
+        if self.subworkflow_ref:
+            if not isinstance(self.subworkflow_ref, str):
+                raise ValueError("subworkflow_ref 必须是字符串")
+            safe_asset_id(normalize_workflow_asset_id(self.subworkflow_ref))
 
     # LLM: 默认画布字段不进入旧传输字节；非默认字段仍由严格值对象校验并脱敏复制。
     # 函数用途: 在兼容旧记录的同时输出节点说明、坐标和下一跳。
     def to_dict(self):
         value = super().to_dict()
-        for key in ('description', 'next_step_ids', 'ui_position'):
-            if not value[key]:
-                value.pop(key)
-        if value['foreach'] is None:
-            value.pop('foreach')
+        for key in ('description', 'next_step_ids', 'ui_position', 'depends_on'):
+            if not value.get(key):
+                value.pop(key, None)
+        for key in ('foreach', 'retry_policy', 'tool_spec', 'notification_spec'):
+            if value.get(key) is None:
+                value.pop(key, None)
+        if not value.get('subworkflow_ref'):
+            value.pop('subworkflow_ref', None)
         return value
 
 
@@ -160,6 +216,26 @@ class WorkflowDefinition(_Record):
         for step in self.steps:
             if set(step.next_step_ids) - ids:
                 raise ValueError('画布下一跳引用未知步骤')
+            if set(step.depends_on) - ids:
+                raise ValueError(f"工作流步骤 {step.step_id} 依赖未知步骤: {set(step.depends_on) - ids}")
+        graph = {step.step_id: step.depends_on for step in self.steps}
+        visited = {}
+        def _has_cycle(node):
+            state = visited.get(node, 0)
+            if state == 1:
+                return True
+            if state == 2:
+                return False
+            visited[node] = 1
+            for dep in graph.get(node, ()):
+                if _has_cycle(dep):
+                    return True
+            visited[node] = 2
+            return False
+
+        for step in self.steps:
+            if step.step_id not in visited and _has_cycle(step.step_id):
+                raise ValueError(f"工作流步骤依赖存在环路: {step.step_id}")
         for edge in self.edges:
             if (set(edge) - {'from_step_id', 'to_step_id', 'label'}
                     or not {'from_step_id', 'to_step_id'} <= set(edge)
@@ -204,7 +280,9 @@ def with_workflow_step_refs(definition, *, script_datasources: Mapping[str, tupl
                             schedule_ids: tuple[str, ...] | None = None):
     scripts = tuple(dict.fromkeys(step.script_id for step in definition.steps if step.script_id))
     skills = tuple(dict.fromkeys(canonical_skill_name(skill) for step in definition.steps for skill in step.skill_ids))
-    refs = replace(definition.descriptor.refs, scripts=scripts, skills=skills)
+    subworkflows = tuple(dict.fromkeys(normalize_workflow_asset_id(step.subworkflow_ref) for step in definition.steps if step.subworkflow_ref))
+    workflows = tuple(dict.fromkeys((*definition.descriptor.refs.workflows, *subworkflows))) if subworkflows else definition.descriptor.refs.workflows
+    refs = replace(definition.descriptor.refs, scripts=scripts, skills=skills, workflows=workflows)
     additions = {}
     if script_datasources is not None:
         additions['datasource_ids'] = tuple(dict.fromkeys(source for script_id in scripts
@@ -373,7 +451,10 @@ class WorkflowStore(_AssetStore):
 
     # LLM: 项目冷读只用readonly视图，坏记录不回退；返回值不能决定后续更新写根。
     # 函数用途: 依项目、Owner、全局优先级读取工作流定义。
+    # LLM: 规范化ID以支持workflow:前缀寻址；工作区覆盖优先，读回完整定义或全局候选 (BIZ-005)。
+    # 函数用途: 读取指定工作流定义，支持 workflow:<id> 与裸 <id>。
     def get_workflow(self, workflow_id):
+        workflow_id = normalize_workflow_asset_id(workflow_id)
         safe_asset_id(workflow_id)
         if self.workspace_root is not None:
             return self._summary_projection(next(iter(self._overlay_definitions(workflow_id)), None))

@@ -630,3 +630,36 @@ class WorkflowRunStore:
             if (workflow_id is None or record.workflow_id == workflow_id) and (status is None or record.status == status):
                 records.append(record)
         return sorted(records, key=lambda r: (-r.started_at, r.workflow_run_id))[:limit]
+
+    # LLM: 步骤水位以准确原子快照持久化于原运行各步快照；无全表扫描，共用跨平台 run.json 锁。
+    # 函数用途: 保存特定步骤的水位信息 (WF-10)，支持增量读取与断点游标。
+    def save_step_watermark(self, workflow_run_id, step_id, watermark):
+        safe_path(self.root, step_id + '.json')
+        if not isinstance(watermark, dict):
+            raise TypeError('watermark 必须是字典')
+        with self._lock(workflow_run_id):
+            record = self.load_run(workflow_run_id)
+            step = next((s for s in record.steps if s.step_id == step_id), None)
+            if step is None:
+                raise ValueError('运行中不存在该步骤')
+            updated_step = replace(step, watermark=payload(watermark))
+            self._write_step(workflow_run_id, updated_step)
+            record = replace_run_record(record, dict(
+                steps=tuple(updated_step if s.step_id == step_id else s for s in record.steps)))
+            data = self._read(workflow_run_id, 'run.json')
+            data.update(_run_payload(record))
+            data['revision'] = record.revision + 1
+            _write_json(self.owner_home, ('data', 'workflow_runs', workflow_run_id, 'run.json'), data)
+            record.revision = data['revision']
+            return updated_step
+
+    # LLM: 仅通过工作流运行锁快速读取已持久化步骤水位；不进行无界目录扫描，未找到步骤报 ValueError。
+    # 函数用途: 加载步骤持久化水位 (WF-10)，缺失返回 None。
+    def load_step_watermark(self, workflow_run_id, step_id):
+        safe_path(self.root, step_id + '.json')
+        with self._lock(workflow_run_id):
+            record = self.load_run(workflow_run_id)
+            step = next((s for s in record.steps if s.step_id == step_id), None)
+            if step is None:
+                raise ValueError('运行中不存在该步骤')
+            return step.watermark
