@@ -1,0 +1,551 @@
+"""WF-07 Public Foreach & WF-08 Parallel Dependency DAG Scheduler 完整测试套件。
+
+涵盖：
+- WF-07: validate_foreach公有Schema、concurrency别名、item/batch错误策略、item_id_key稳定提取、
+         pack_items稳定身份与preview_foreach_plan纯函数无副作用预览及端到端执行；
+- WF-08: should_schedule_dag判定、显式/隐式(inputs_map/condition)依赖推导、圈检测与未知依赖fail-closed拒绝、
+         菱形DAG并行执行与输入输出传递、4并发扇出扇入时序证明、中途失败时波次排空与同伴回执不丢失、
+         断点续跑成功前缀保留、条件分支跳过与下游级联跳过、准入观察器通知等。
+"""
+
+import time
+from dataclasses import replace
+
+import pytest
+
+from agent_py_agent.agent.assets.workflow_store import WorkflowStepSpec, WorkflowStore
+from agent_py_agent.agent.workflows import batching, dag_scheduler
+from agent_py_agent.agent.workflows.batching import ForeachInvalid
+from agent_py_agent.agent.workflows.engine import WorkflowEngine
+from agent_py_agent.agent.workflows.models import StepExecutionRecord
+
+
+def _flow(steps, **options):
+    metadata = {}
+    if 'execution_mode' in options:
+        metadata['execution_mode'] = options['execution_mode']
+    if 'max_parallel_steps' in options:
+        metadata['max_parallel_steps'] = options['max_parallel_steps']
+
+    desc = {'id': 'dag-flow', 'kind': 'workflow', 'name': 'dag-flow', 'owner_id': 'alice', 'metadata': metadata}
+    desc.update(options.get('descriptor', {}))
+
+    normalized_steps = []
+    for s in steps:
+        s_dict = dict(s)
+        s_dict.setdefault('name', s_dict['step_id'])
+        normalized_steps.append(s_dict)
+
+    return {'descriptor': desc, 'steps': normalized_steps}
+
+
+# ==========================================
+# WF-07: Public Foreach Tests
+# ==========================================
+
+
+def test_foreach_validate_formal_schema():
+    # 1. 正常基础配置
+    cfg = batching.validate_foreach({'from': 'inputs.records'})
+    assert cfg['from'] == 'inputs.records'
+    assert cfg['batch_size'] == 50
+    assert cfg['max_parallel'] == 1
+    assert cfg['concurrency'] == 1
+    assert cfg['on_batch_error'] == 'fail_fast'
+    assert cfg['on_item_error'] == 'fail_fast'
+    assert cfg['mode'] == 'map'
+    assert cfg['item_id_key'] is None
+
+    # 2. 支持上游步骤路径: <step_id>.<path>
+    cfg_step = batching.validate_foreach({'from': 'fetch_data.items.rows'})
+    assert cfg_step['from'] == 'fetch_data.items.rows'
+
+    # 3. concurrency 别名归一化至 max_parallel
+    cfg_conc = batching.validate_foreach({'from': 'inputs.rows', 'concurrency': 4})
+    assert cfg_conc['max_parallel'] == 4
+    assert cfg_conc['concurrency'] == 4
+
+    # 4. max_parallel 与 concurrency 一致时通过
+    cfg_both = batching.validate_foreach({'from': 'inputs.rows', 'max_parallel': 3, 'concurrency': 3})
+    assert cfg_both['max_parallel'] == 3
+
+    # 5. max_parallel 与 concurrency 冲突时拒绝
+    with pytest.raises(ForeachInvalid, match='max_parallel与concurrency冲突'):
+        batching.validate_foreach({'from': 'inputs.rows', 'max_parallel': 2, 'concurrency': 4})
+
+    # 6. item_id_key 字段
+    cfg_id = batching.validate_foreach({'from': 'inputs.rows', 'item_id_key': 'sku_id'})
+    assert cfg_id['item_id_key'] == 'sku_id'
+
+    with pytest.raises(ForeachInvalid, match='item_id_key必须是非空字符串或null'):
+        batching.validate_foreach({'from': 'inputs.rows', 'item_id_key': ''})
+
+    # 7. on_item_error: collect_errors 映射至 continue
+    cfg_err = batching.validate_foreach({'from': 'inputs.rows', 'on_item_error': 'collect_errors'})
+    assert cfg_err['on_batch_error'] == 'continue'
+    assert cfg_err['on_item_error'] == 'collect_errors'
+
+    cfg_err2 = batching.validate_foreach({'from': 'inputs.rows', 'on_item_error': 'continue'})
+    assert cfg_err2['on_batch_error'] == 'continue'
+
+    cfg_err3 = batching.validate_foreach({'from': 'inputs.rows', 'on_batch_error': 'collect_errors'})
+    assert cfg_err3['on_batch_error'] == 'continue'
+    assert cfg_err3['on_item_error'] == 'collect_errors'
+
+    # 8. 非法属性被严格拦截
+    with pytest.raises(ForeachInvalid, match='foreach必须是合法配置对象'):
+        batching.validate_foreach({'from': 'inputs.rows', 'unsupported_key': True})
+
+
+def test_foreach_pack_items_stable_ids():
+    items = [
+        {'id': 'item-alpha', 'val': 10},
+        {'sku_id': 'SKU-999', 'val': 20},
+        {'val': 30},
+        'simple_primitive',
+    ]
+
+    # 带 item_id_key 指定
+    packed = batching.pack_items(items, batch_size=2, item_id_key='sku_id')
+    assert len(packed) == 2
+    # 第一批: item-alpha 没有 sku_id，fallback 至 id -> item-alpha; 第二个有 sku_id -> SKU-999
+    assert packed[0]['item_ids'] == ['item-alpha', 'SKU-999']
+    # 第二批: 第三个无 id 无 sku_id -> item:2; 第四个是字符串 -> item:3
+    assert packed[1]['item_ids'] == ['item:2', 'item:3']
+
+    # 幂等性检验
+    packed_again = batching.pack_items(items, batch_size=2, item_id_key='sku_id')
+    assert packed[0]['item_ids'] == packed_again[0]['item_ids']
+    assert packed[1]['item_ids'] == packed_again[1]['item_ids']
+
+
+def test_preview_foreach_plan_pure_metadata():
+    inputs = {'records': [{'id': f'rec-{i}', 'content': f'text-{i}'} for i in range(15)]}
+    spec = {
+        'from': 'inputs.records',
+        'batch_size': 5,
+        'concurrency': 3,
+        'on_item_error': 'collect_errors',
+        'item_id_key': 'id',
+    }
+
+    preview = batching.preview_foreach_plan(spec, inputs)
+    assert preview['item_count'] == 15
+    assert preview['batch_count'] == 3
+    assert preview['max_parallel'] == 3
+    assert preview['concurrency'] == 3
+    assert preview['on_batch_error'] == 'continue'
+    assert preview['on_item_error'] == 'collect_errors'
+    assert len(preview['batches']) == 3
+    assert preview['batches'][0]['item_ids'] == ['rec-0', 'rec-1', 'rec-2', 'rec-3', 'rec-4']
+    assert preview['batches'][0]['start'] == 0
+    assert preview['batches'][0]['end'] == 5
+
+
+def test_foreach_execution_with_concurrency_alias_and_collect_errors(tmp_path):
+    executed_batches = []
+
+    def analyze(spec, context, skills):
+        rows = context.step_inputs['batch']
+        executed_batches.append(rows)
+        # 故意让第一批中的某批报错
+        if rows[0] == 2:
+            raise ValueError('simulated item failure in batch 2')
+        return {'processed': rows}
+
+    engine = WorkflowEngine(tmp_path, analysis_handler=analyze)
+
+    flow = _flow([
+        {
+            'step_id': 'batch_process',
+            'name': 'batch_process',
+            'mode': 'llm_skill_analysis',
+            'foreach': {
+                'from': 'inputs.items',
+                'batch_size': 2,
+                'concurrency': 2,
+                'on_item_error': 'collect_errors',
+                'mode': 'aggregate',
+                'as': 'batch',
+            },
+        }
+    ])
+
+    run = engine.run_workflow(flow, {'items': [0, 1, 2, 3, 4, 5]})
+    # continue / collect_errors 模式下整步成功，跳过失败批
+    assert run.status == 'succeeded'
+    assert len(executed_batches) == 3
+    assert run.final_output == {'processed': [0, 1, 4, 5]}
+    assert run.steps[0].batches_summary['completed'] == 2
+    assert run.steps[0].batches_summary['failed'] == 1
+
+
+# ==========================================
+# WF-08: Parallel Dependency DAG Scheduler Tests
+# ==========================================
+
+
+def test_dag_should_schedule_dag():
+    # 1. 显式 execution_mode == 'dag'
+    assert dag_scheduler.should_schedule_dag({'execution_mode': 'dag', 'steps': [{'step_id': 's1'}]})
+
+    # 2. 包含 depends_on
+    assert dag_scheduler.should_schedule_dag({'steps': [{'step_id': 's1'}, {'step_id': 's2', 'depends_on': ['s1']}]})
+
+    # 3. 传统顺序流程无 depends_on
+    assert not dag_scheduler.should_schedule_dag({'steps': [{'step_id': 's1'}, {'step_id': 's2'}]})
+    assert not dag_scheduler.should_schedule_dag({})
+
+
+def test_dag_validation_cycles_and_unknown_steps():
+    # 自环检测
+    with pytest.raises(ValueError, match='Self-dependency cycle detected'):
+        dag_scheduler.build_dag([{'step_id': 'a', 'depends_on': ['a']}])
+
+    # 两节点环
+    with pytest.raises(ValueError, match='Cycle detected'):
+        dag_scheduler.build_dag([
+            {'step_id': 'a', 'depends_on': ['b']},
+            {'step_id': 'b', 'depends_on': ['a']},
+        ])
+
+    # 三节点环
+    with pytest.raises(ValueError, match='Cycle detected'):
+        dag_scheduler.build_dag([
+            {'step_id': 'a', 'depends_on': ['c']},
+            {'step_id': 'b', 'depends_on': ['a']},
+            {'step_id': 'c', 'depends_on': ['b']},
+        ])
+
+    # 未知前置依赖
+    with pytest.raises(ValueError, match="Unknown upstream dependency 'nonexistent'"):
+        dag_scheduler.build_dag([
+            {'step_id': 'a', 'depends_on': ['nonexistent']},
+        ])
+
+    # 重复 step_id
+    with pytest.raises(ValueError, match="Duplicate step_id"):
+        dag_scheduler.build_dag([
+            {'step_id': 'a'},
+            {'step_id': 'a'},
+        ])
+
+
+def test_dag_implicit_dependencies_inputs_map_and_conditions():
+    steps = [
+        {'step_id': 'root'},
+        {
+            'step_id': 'child_inputs_map',
+            'inputs_map': {
+                'data': {'step_id': 'root', 'key': 'payload'},
+                'static_input': {'step_id': '$inputs', 'key': 'global_param'},
+            },
+        },
+        {
+            'step_id': 'child_condition',
+            'condition': {'op': 'eq', 'ref': {'step_id': 'child_inputs_map', 'key': 'status'}, 'value': 'ok'},
+        },
+    ]
+
+    deps, reverse_deps, topo_order = dag_scheduler.build_dag(steps)
+    assert deps['root'] == set()
+    assert deps['child_inputs_map'] == {'root'}
+    assert deps['child_condition'] == {'child_inputs_map'}
+    assert topo_order == ['root', 'child_inputs_map', 'child_condition']
+
+
+def test_dag_diamond_execution_order_and_inputs_map(tmp_path):
+    timeline = []
+
+    def analyze(spec, context, skills):
+        sid = spec['step_id']
+        timeline.append(f'start:{sid}')
+        time.sleep(0.05)
+        timeline.append(f'end:{sid}')
+        if sid == 'step_a':
+            return {'alpha': 100}
+        if sid == 'step_b':
+            a_val = context.step_inputs.get('from_a', 0)
+            return {'beta': a_val + 1}
+        if sid == 'step_c':
+            a_val = context.step_inputs.get('from_a', 0)
+            return {'gamma': a_val + 2}
+        if sid == 'step_d':
+            b_val = context.step_inputs.get('from_b', 0)
+            c_val = context.step_inputs.get('from_c', 0)
+            return {'sum': b_val + c_val}
+        return {}
+
+    engine = WorkflowEngine(tmp_path, analysis_handler=analyze)
+
+    flow = _flow(
+        [
+            {'step_id': 'step_a', 'mode': 'llm_skill_analysis'},
+            {
+                'step_id': 'step_b',
+                'mode': 'llm_skill_analysis',
+                'depends_on': ['step_a'],
+                'inputs_map': {'from_a': {'step_id': 'step_a', 'key': 'alpha'}},
+            },
+            {
+                'step_id': 'step_c',
+                'mode': 'llm_skill_analysis',
+                'depends_on': ['step_a'],
+                'inputs_map': {'from_a': {'step_id': 'step_a', 'key': 'alpha'}},
+            },
+            {
+                'step_id': 'step_d',
+                'mode': 'llm_skill_analysis',
+                'depends_on': ['step_b', 'step_c'],
+                'inputs_map': {
+                    'from_b': {'step_id': 'step_b', 'key': 'beta'},
+                    'from_c': {'step_id': 'step_c', 'key': 'gamma'},
+                },
+            },
+        ],
+        max_parallel_steps=2,
+    )
+
+    run = engine.run_workflow(flow)
+    assert run.status == 'succeeded'
+    assert run.final_output == {'sum': 203}
+
+    # 验证执行顺序拓扑约束：
+    # 1. step_a 必须在 step_b 和 step_c 启动前完成
+    idx_end_a = timeline.index('end:step_a')
+    idx_start_b = timeline.index('start:step_b')
+    idx_start_c = timeline.index('start:step_c')
+    assert idx_end_a < idx_start_b
+    assert idx_end_a < idx_start_c
+
+    # 2. step_d 必须在 step_b 和 step_c 都完成后启动
+    idx_end_b = timeline.index('end:step_b')
+    idx_end_c = timeline.index('end:step_c')
+    idx_start_d = timeline.index('start:step_d')
+    assert idx_end_b < idx_start_d
+    assert idx_end_c < idx_start_d
+
+
+def test_dag_parallel_timing_proof(tmp_path):
+    sleep_duration = 0.12
+
+    def analyze(spec, context, skills):
+        time.sleep(sleep_duration)
+        return {'ok': True}
+
+    engine = WorkflowEngine(tmp_path, analysis_handler=analyze)
+
+    # 根节点启动 -> 4个并行检索节点 -> 聚合汇聚节点
+    flow = _flow(
+        [
+            {'step_id': 'root', 'mode': 'llm_skill_analysis'},
+            {'step_id': 'fetch_1', 'mode': 'llm_skill_analysis', 'depends_on': ['root']},
+            {'step_id': 'fetch_2', 'mode': 'llm_skill_analysis', 'depends_on': ['root']},
+            {'step_id': 'fetch_3', 'mode': 'llm_skill_analysis', 'depends_on': ['root']},
+            {'step_id': 'fetch_4', 'mode': 'llm_skill_analysis', 'depends_on': ['root']},
+            {'step_id': 'join', 'mode': 'llm_skill_analysis', 'depends_on': ['fetch_1', 'fetch_2', 'fetch_3', 'fetch_4']},
+        ],
+        max_parallel_steps=4,
+    )
+
+    t0 = time.monotonic()
+    run = engine.run_workflow(flow)
+    elapsed = time.monotonic() - t0
+
+    assert run.status == 'succeeded'
+    # 若顺序执行，6步总耗时 > 6 * 0.12 = 0.72s
+    # 4并发执行下，fetch_1..4耗时重叠，总耗时约为 3 * 0.12 = 0.36s (严控在 0.55s 以内以提供确定性时序证明)
+    assert elapsed < 0.55, f"Parallel timing proof failed: elapsed={elapsed:.3f}s"
+
+
+def test_dag_mid_wave_failure_draining_no_lost_receipts(tmp_path):
+    executed = []
+
+    def analyze(spec, context, skills):
+        sid = spec['step_id']
+        executed.append(sid)
+        if sid == 'failing_node':
+            raise ValueError('simulated node explosion')
+        if sid == 'sibling_node':
+            time.sleep(0.08)
+            return {'sibling': 'done'}
+        return {'root': 'ok'}
+
+    engine = WorkflowEngine(tmp_path, analysis_handler=analyze)
+
+    flow = _flow(
+        [
+            {'step_id': 'root', 'mode': 'llm_skill_analysis'},
+            {'step_id': 'failing_node', 'mode': 'llm_skill_analysis', 'depends_on': ['root']},
+            {'step_id': 'sibling_node', 'mode': 'llm_skill_analysis', 'depends_on': ['root']},
+            {'step_id': 'downstream', 'mode': 'llm_skill_analysis', 'depends_on': ['failing_node', 'sibling_node']},
+        ],
+        max_parallel_steps=2,
+    )
+
+    run = engine.run_workflow(flow)
+    assert run.status == 'failed'
+    assert run.failed_step_id == 'failing_node'
+
+    step_map = {s.step_id: s for s in run.steps}
+    # root 成功
+    assert step_map['root'].status == 'succeeded'
+    # failing_node 失败
+    assert step_map['failing_node'].status == 'failed'
+    # sibling_node 被完整排空执行完毕，未丢失回执且 status == 'succeeded'
+    assert step_map['sibling_node'].status == 'succeeded'
+    assert step_map['sibling_node'].output_snapshot == {'sibling': 'done'}
+    # downstream 未启动
+    assert step_map['downstream'].status == 'pending'
+
+
+def test_dag_resume_preserves_successful_prefix(tmp_path):
+    should_fail = [True]
+    calls = []
+
+    def analyze(spec, context, skills):
+        sid = spec['step_id']
+        calls.append(sid)
+        if sid == 'step_a':
+            return {'data_a': 42}
+        if sid == 'step_b':
+            if should_fail[0]:
+                raise ValueError('temporary failure on B')
+            return {'data_b': 84}
+        if sid == 'step_c':
+            a_val = context.step_inputs.get('a', 0)
+            b_val = context.step_inputs.get('b', 0)
+            return {'result': a_val + b_val}
+        return {}
+
+    engine = WorkflowEngine(tmp_path, analysis_handler=analyze)
+
+    flow = _flow(
+        [
+            {'step_id': 'step_a', 'mode': 'llm_skill_analysis'},
+            {'step_id': 'step_b', 'mode': 'llm_skill_analysis', 'depends_on': ['step_a']},
+            {
+                'step_id': 'step_c',
+                'mode': 'llm_skill_analysis',
+                'depends_on': ['step_a', 'step_b'],
+                'inputs_map': {
+                    'a': {'step_id': 'step_a', 'key': 'data_a'},
+                    'b': {'step_id': 'step_b', 'key': 'data_b'},
+                },
+            },
+        ],
+        max_parallel_steps=2,
+    )
+
+    saved = WorkflowStore(tmp_path).save_workflow(flow)
+    run = engine.run_workflow(saved.descriptor.id)
+    assert run.status == 'failed'
+    assert run.failed_step_id == 'step_b'
+    assert calls == ['step_a', 'step_b']
+
+    # 修复故障并恢复运行
+    should_fail[0] = False
+    resumed = engine.resume_workflow_run(run.workflow_run_id)
+    assert resumed.status == 'succeeded'
+    assert resumed.final_output == {'result': 126}
+    # 验证 step_a 成功前缀被完整保留，续跑时未重新调用 step_a
+    assert calls == ['step_a', 'step_b', 'step_b', 'step_c']
+
+
+def test_dag_conditional_branch_and_cascading_skip(tmp_path):
+    executed = []
+
+    def analyze(spec, context, skills):
+        sid = spec['step_id']
+        executed.append(sid)
+        if sid == 'produce':
+            return {'score': 20}
+        if sid == 'independent':
+            return {'indep': 'ok'}
+        return {'val': 1}
+
+    engine = WorkflowEngine(tmp_path, analysis_handler=analyze)
+
+    flow = _flow([
+        {'step_id': 'produce', 'mode': 'llm_skill_analysis'},
+        {
+            'step_id': 'high_score_only',
+            'mode': 'llm_skill_analysis',
+            'depends_on': ['produce'],
+            'condition': {'op': 'gt', 'ref': {'step_id': 'produce', 'key': 'score'}, 'value': 80},
+        },
+        {
+            'step_id': 'cascaded_dependent',
+            'mode': 'llm_skill_analysis',
+            'depends_on': ['high_score_only'],
+        },
+        {
+            'step_id': 'independent',
+            'mode': 'llm_skill_analysis',
+        },
+    ], max_parallel_steps=2)
+
+    run = engine.run_workflow(flow)
+    assert run.status == 'succeeded'
+
+    step_map = {s.step_id: s for s in run.steps}
+    assert step_map['produce'].status == 'succeeded'
+    assert step_map['independent'].status == 'succeeded'
+    # 条件不满足 -> skipped
+    assert step_map['high_score_only'].status == 'skipped'
+    # 依赖的前置步骤 skipped 且无 fallback -> 级联 skipped
+    assert step_map['cascaded_dependent'].status == 'skipped'
+    assert set(executed) == {'produce', 'independent'}
+
+
+def test_dag_admission_observer_callback(tmp_path):
+    events = []
+
+    def observer(event):
+        events.append(event)
+
+    engine = WorkflowEngine(tmp_path, analysis_handler=lambda s, c, sk: {'ok': True})
+    engine.concurrency_admission_observer = observer
+
+    flow = _flow([
+        {'step_id': 'step_1', 'mode': 'llm_skill_analysis'},
+        {'step_id': 'step_2', 'mode': 'llm_skill_analysis', 'depends_on': ['step_1']},
+    ])
+
+    run = engine.run_workflow(flow)
+    assert run.status == 'succeeded'
+    admitted_steps = [e['step_id'] for e in events if e.get('event') == 'step_admitted']
+    assert 'step_1' in admitted_steps
+    assert 'step_2' in admitted_steps
+
+
+def test_dag_cancellation_mid_wave(tmp_path):
+    from agent_py_agent.agent.common.cancellation import ToolCancelled
+
+    executed = []
+
+    def analyze(spec, context, skills):
+        sid = spec['step_id']
+        executed.append(sid)
+        if sid == 'cancel_node':
+            raise ToolCancelled('simulated user cancel')
+        if sid == 'sibling_node':
+            time.sleep(0.08)
+            return {'sibling': 'ok'}
+        return {'root': 'ok'}
+
+    engine = WorkflowEngine(tmp_path, analysis_handler=analyze)
+
+    flow = _flow(
+        [
+            {'step_id': 'root', 'mode': 'llm_skill_analysis'},
+            {'step_id': 'cancel_node', 'mode': 'llm_skill_analysis', 'depends_on': ['root']},
+            {'step_id': 'sibling_node', 'mode': 'llm_skill_analysis', 'depends_on': ['root']},
+            {'step_id': 'downstream', 'mode': 'llm_skill_analysis', 'depends_on': ['cancel_node', 'sibling_node']},
+        ],
+        max_parallel_steps=2,
+    )
+
+    with pytest.raises(ToolCancelled):
+        engine.run_workflow(flow)
+
