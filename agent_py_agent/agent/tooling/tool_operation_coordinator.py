@@ -545,7 +545,7 @@ def _settle_reconciled_operation(
                 holder_id=claim.record.holder_id,
                 generation=claim.record.generation,
                 status=terminal_status,
-                result=_result_payload(reconciled_result, request.settled_effect_outcome),
+                result=_result_payload(reconciled_result, request.settled_effect_outcome, redacted_input=request.redacted_input),
                 error_code=reconciled_result.error_code,
             )
         )
@@ -687,7 +687,7 @@ def _reopen_unknown_operation(
                 holder=attempt.holder,
                 lease_expires_at=attempt.lease_expires_at,
                 source_ref=source_ref,
-                reconciliation_result=_result_payload(reconciliation_result, request.settled_effect_outcome),
+                reconciliation_result=_result_payload(reconciliation_result, request.settled_effect_outcome, redacted_input=request.redacted_input),
             )
         )
     except Exception as exc:  # noqa: BLE001 - a competing reconciliation must win atomically
@@ -831,8 +831,6 @@ def _execute_claimed_operation(
 ) -> ToolHandlerOutcome:
     with tool_write_claim_scope(request, claim), _operation_dispatch_scope(request, claim) as dispatch:
         result = _invoke_with_lease_renewal(request, claim)
-    if request.redacted_input is not None:
-        result.result_envelope.setdefault("redacted_input", deepcopy(request.redacted_input))
     result.result_envelope.update(first_dispatch_at=dispatch.record.first_dispatch_at,
         component_receipts=deepcopy(dispatch.record.component_receipts))
     operation_status = _operation_status_for_result(result)
@@ -864,7 +862,7 @@ def _execute_claimed_operation(
                 holder_id=claim.record.holder_id,
                 generation=claim.record.generation,
                 status=operation_status,
-                result=_result_payload(result, request.settled_effect_outcome),
+                result=_result_payload(result, request.settled_effect_outcome, redacted_input=request.redacted_input),
                 error_code=result.error_code,
                 unknown_reason=unknown_reason,
             )
@@ -1180,10 +1178,14 @@ def _tool_execution_facts(result: ToolHandlerOutcome) -> dict[str, object]:
 def _result_payload(
     result: ToolHandlerOutcome,
     settled_effect_outcome: str = "",
+    *,
+    redacted_input: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    redacted_input = {}
-    if isinstance(result.result_envelope, dict) and isinstance(result.result_envelope.get("redacted_input"), dict):
-        redacted_input = deepcopy(result.result_envelope["redacted_input"])
+    resolved_redacted = {}
+    if isinstance(redacted_input, dict):
+        resolved_redacted = deepcopy(redacted_input)
+    elif isinstance(result.result_envelope, dict) and isinstance(result.result_envelope.get("redacted_input"), dict):
+        resolved_redacted = deepcopy(result.result_envelope["redacted_input"])
     effect_outcome = (
         settled_effect_outcome
         if (result.ok and not result.effect_outcome)
@@ -1208,7 +1210,7 @@ def _result_payload(
         "handler_executed": result.handler_executed,
         "failure_stage": result.failure_stage,
         "duration_ms": result.duration_ms,
-        "redacted_input": redacted_input,
+        "redacted_input": resolved_redacted,
     }
 
 
@@ -1330,7 +1332,12 @@ def _complete_terminal_result(record: ToolOperationRecord) -> bool:
         return False
     if "duration_ms" in payload and type(payload["duration_ms"]) not in (int, float):
         return False
-    if payload.get("effect_outcome", "") not in {"", "none", "not_started", "committed", "running", "failed", "unknown"}:
+    allowed_effects = (
+        {"", "none", "committed"}
+        if record.status == TOOL_OPERATION_SUCCEEDED
+        else {"", "not_started", "failed"}
+    )
+    if payload.get("effect_outcome", "") not in allowed_effects:
         return False
     if record.status == "cancelled" and (
         payload.get("effect_outcome") != "not_started" or payload["handler_executed"]
