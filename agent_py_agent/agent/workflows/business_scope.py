@@ -450,6 +450,9 @@ class WorkflowScopeService:
             raise PermissionError('WORKFLOW_BUSINESS_ENGINE_UNAVAILABLE')
         return self.engine_factory(self.store.owner_home, run_authorizer=authorize, agent_steps=self.agent_steps)
 
+    # LLM: 运行身份由Owner+幂等键派生，同键重放非阻塞读取原运行快照与持久准入回执，不争抢执行锁或再次准入；
+    #   仍在排队的原运行按admission.json如实返回202 accepted，进入执行或终态后按原运行真实状态返回。
+    # 函数用途: 以冻结上下文和范围启动一次原生工作流运行，或如实回放同键原运行回执。
     def _run(self, request, actor, key):
         if not isinstance(key, str) or not 0 < len(key.encode()) <= 256:
             raise ValueError('IDEMPOTENCY_KEY_REQUIRED')
@@ -461,12 +464,26 @@ class WorkflowScopeService:
         intent = hashlib.sha256(json.dumps(request, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()).hexdigest()
         engine = self._engine(actor)
         try:
-            saved = engine.store.load_run(identity)
+            raw_run = engine.store._read(identity, 'run.json')
         except FileNotFoundError:
-            saved = None
-        if saved is not None:
-            if engine.store.load_workflow_snapshot(identity).get('_operation_intent') != intent:
+            raw_run = None
+        if raw_run is not None:
+            if raw_run.get('workflow_run_id') != identity:
+                raise ValueError('运行身份与目录不匹配')
+            from .run_store import _decode_run
+            saved = _decode_run(raw_run)
+            if saved.owner_id != self.owner_id:
+                raise PermissionError('WORKFLOW_OWNER_MISMATCH')
+            if (raw_run.get('workflow_snapshot') or {}).get('_operation_intent') != intent:
                 raise BusinessError('IDEMPOTENCY_CONFLICT')
+            if saved.status == 'queued' and not callable(getattr(engine, 'concurrency_admission_observer', None)):
+                try:
+                    admission = engine.store._read(identity, 'admission.json')
+                except FileNotFoundError:
+                    admission = None
+                if isinstance(admission, dict) and admission.get('status') == 'queued':
+                    from ..plugin_host.contracts import DomainResult
+                    return DomainResult(202, {'workflow_run_id': identity, 'operation_id': identity, 'state': 'accepted'})
             return {'workflow_run_id': identity, 'operation_id': identity, 'state': self._receipt_state(saved)}
         context, origin = None, None
         if isinstance(self.context_provider, WorkflowRunContextFactory):
@@ -516,6 +533,9 @@ class WorkflowScopeService:
             'effect_outcome': {'confirmed': 'committed', 'failed': 'unknown'}.get(record.effect_outcome, record.effect_outcome),
             'confirmed_step_refs': list(record.confirmed_step_refs), 'revision': record.revision}
 
+    # LLM: 运行读写都先核原Owner与当前授权；续跑/取消前置只读快照不争抢活回调的执行锁，同键不同意图与已取消续跑
+    #   在任何写入前被原账本或活准入拒绝并投影为not_started，并存异键控制返回503 WORKFLOW_RUN_SKIPPED_ALREADY_RUNNING。
+    # 函数用途: 分派workflow_runs.list/get/resume/cancel并投影原生回执。
     def _run_action(self, action, request, *, actor, expected_revision, idempotency_key):
         store = self._run_store()
         if action == 'workflow_runs.list':
@@ -526,7 +546,14 @@ class WorkflowScopeService:
             page = self._page(rows, request)
             page.pop('list_snapshot_id')
             return page
-        record = store.load_run(request['workflow_run_id'])
+        if action in ('workflow_runs.get', 'workflow_runs.cancel'):
+            record = store.load_run(request['workflow_run_id'])
+        else:
+            raw_run = store._read(request['workflow_run_id'], 'run.json')
+            if raw_run.get('workflow_run_id') != request['workflow_run_id']:
+                raise ValueError('运行身份与目录不匹配')
+            from .run_store import _decode_run
+            record = _decode_run(raw_run)
         if record.owner_id != self.owner_id:
             raise PermissionError('WORKFLOW_OWNER_MISMATCH')
         self._authorize(actor, action, record.workflow_id)
@@ -545,20 +572,33 @@ class WorkflowScopeService:
             raise ValueError('IDEMPOTENCY_KEY_REQUIRED')
         engine = self._engine(actor, resolution_ref=request.get('resolution_ref'))
         if action == 'workflow_runs.resume':
-            result = engine.resume_workflow_run(record.workflow_run_id, expected_revision=expected_revision,
-                                                 operation_key=idempotency_key, control_intent=request)
+            try:
+                result = engine.resume_workflow_run(record.workflow_run_id, expected_revision=expected_revision,
+                                                     operation_key=idempotency_key, control_intent=request)
+            except ValueError as error:
+                if type(error) is ValueError and str(error) in ('IDEMPOTENCY_CONFLICT', 'WORKFLOW_CANCELLED'):
+                    raise BusinessError(str(error)) from None
+                raise
             if isinstance(result, dict):
                 # 同上：排队=已耐久受理（等待线程按原回调与原门执行），给accepted回执；跳过/不支持=续跑未开始、
                 #   原运行未改，如实拒绝（not_started）。
                 if result.get('status') == 'queued':
                     from ..plugin_host.contracts import DomainResult
                     return DomainResult(202, {'operation_id': record.workflow_run_id, 'state': 'accepted'})
-                raise WorkflowPolicyRefusal(result.get('error_code') or 'WORKFLOW_RUN_SKIPPED_ALREADY_RUNNING')
+                details = ({'reason_code': result['reason_code']}
+                           if isinstance(result.get('reason_code'), str) and result['reason_code'] else None)
+                raise WorkflowPolicyRefusal(result.get('error_code') or 'WORKFLOW_RUN_SKIPPED_ALREADY_RUNNING',
+                                            details=details)
             return {'run': self._run_view(result), 'operation_id': record.workflow_run_id,
                     'state': self._receipt_state(result)}
         if action == 'workflow_runs.cancel':
-            outstanding = engine.cancel_workflow_run(record.workflow_run_id, expected_revision=expected_revision,
-                                                       operation_key=idempotency_key)
+            try:
+                outstanding = engine.cancel_workflow_run(record.workflow_run_id, expected_revision=expected_revision,
+                                                           operation_key=idempotency_key)
+            except ValueError as error:
+                if type(error) is ValueError and str(error) == 'IDEMPOTENCY_CONFLICT':
+                    raise BusinessError('IDEMPOTENCY_CONFLICT') from None
+                raise
             return {'operation_id': record.workflow_run_id, 'state': 'pending' if outstanding else 'completed',
                     'outstanding_refs': outstanding}
         raise ValueError('UNKNOWN_WORKFLOW_ACTION')

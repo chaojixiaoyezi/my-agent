@@ -283,8 +283,9 @@ class _WorkflowRunLifecycle:
             return record
         return result
 
-    # LLM: 参数/补丁先完成无副作用验证，再核后缀版本；合法修复可重钉当前依赖，确认/漂移断点仍强制版本门。
-    # 函数用途: 在独占锁内校验修复请求、保存批准的快照变更并续跑，保留成功前缀。
+    # LLM: 参数/补丁先完成无副作用验证，非阻塞读取原运行快照校验定义、授权与控制幂等；同键已完成回放走begin_control零写校验，
+    #   在途控制指纹交dispatch复用原准入或拒绝并存异键控制，绝不在进入dispatch前争抢正在执行的运行锁。
+    # 函数用途: 在独占锁或并发策略门内校验修复请求、去重同键控制并续跑工作流，保留成功前缀。
     def resume_workflow_run(self, workflow_run_id, from_step_id=None, *, patched_step_output=None, updated_data_sources=None,
                             resolution_origin: Literal['user', 'agent', 'system'] | None = None, allow_script_drift: bool = False,
                             expected_revision=None, operation_key='', control_intent=None,
@@ -296,30 +297,81 @@ class _WorkflowRunLifecycle:
         options = dict(patched_step_output=payload(patched_step_output), updated_data_sources=payload(updated_data_sources),
                        resolution_origin=resolution_origin, allow_script_drift=allow_script_drift,
                        expected_revision=expected_revision, operation_key=operation_key, control_intent=payload(control_intent))
+        frozen = self.store._read(workflow_run_id, 'run.json')
+        if frozen.get('workflow_run_id') != workflow_run_id:
+            raise ValueError('运行身份与目录不匹配')
+        definition = frozen['workflow_snapshot']
         # 旧冻结定义也必须先拒绝；不能先申请claim或排队，再把异步批次当原生单任务恢复。
-        validate_definition_eligibility(self.store.load_workflow_snapshot(workflow_run_id))
-        # LLM: 参数只捕获本次原运行的显式恢复意图，实际执行仍要经过原CAS和授权门。
+        validate_definition_eligibility(definition)
+        # LLM: 参数只捕获本次原运行的显式恢复意图；已持并发claim的worker避让同门等待者的瞬时探针锁，同线程重入仍立即拒绝。
         # 函数用途: 将冻结的恢复请求交给取得claim的原执行器。
         def callback():
-            return self._resume_workflow_run(workflow_run_id, from_step_id, **options)
-        original_policy = self.store._concurrency_policy(workflow_run_id)
+            from .concurrency_policy import _self_identity
+            from .run_store import _RunBusy
+            for attempt in range(40):
+                try:
+                    return self._resume_workflow_run(workflow_run_id, from_step_id, **options)
+                except _RunBusy as exc:
+                    if concurrency_policy == 'allow' or '不能重复续跑' in str(exc) or attempt == 39:
+                        raise
+                    proof = (self.store._read(workflow_run_id, 'run.json').get('concurrency_claim') or {})
+                    if proof.get('phase') != 'executing' or proof.get('callback_identity') != _self_identity():
+                        raise
+                    time.sleep(0.005)
+        original_policy = ((frozen.get('concurrency_claim') or {}).get('record') or {}).get('policy', 'allow')
         if original_policy != 'allow':
             concurrency_policy = original_policy
         if concurrency_policy == 'allow':
             return callback()
-        frozen = self.store._read(workflow_run_id, 'run.json')
         if options['expected_revision'] is None:
             options['expected_revision'] = frozen.get('revision', 0)
+        self._require_workflow_enabled(definition)
         # G5a-R3：非allow策略的dispatch会先绑定claim改写run.json或写排队票据；先对同一快照做只读当前业务预检
         #   （与回调内preflight同门，不论有无operation_key），拒绝时原运行与claim/队列证据不变；回调内与每次副作用前仍复核。
         from .run_store import _decode_run
-        self._authorize_run(_decode_run(frozen), 'preflight')
+        decoded = _decode_run(frozen)
+        self._authorize_run(decoded, 'preflight')
+        fingerprint = None
+        intent = None
+        if operation_key:
+            intent = self._resume_control_intent(options['control_intent'], from_step_id, options['patched_step_output'],
+                options['updated_data_sources'], resolution_origin, allow_script_drift)
+            intent_digest = hashlib.sha256(json.dumps(intent, sort_keys=True, ensure_ascii=False,
+                                                      allow_nan=False).encode()).hexdigest()
+            previous_op = (frozen.get('control_operations') or {}).get(operation_key)
+            if isinstance(previous_op, dict):
+                if previous_op.get('state') == 'completed':
+                    # FLAG-8：原账本已完成的同键控制在任何claim/排队前经begin_control回放（核动作/修订/意图，零写入），不再入队。
+                    return self.store.begin_control(workflow_run_id, action='resume', operation_key=operation_key,
+                                                    expected_revision=options['expected_revision'], intent=intent)[1]
+                if (previous_op.get('action') != 'resume'
+                        or previous_op.get('expected_revision') != options['expected_revision']
+                        or previous_op.get('intent') != intent_digest):
+                    raise ValueError('IDEMPOTENCY_CONFLICT')
+            fingerprint = hashlib.sha256(json.dumps({'action': 'resume', 'intent': intent_digest,
+                'expected_revision': options['expected_revision']}, sort_keys=True, ensure_ascii=False,
+                allow_nan=False).encode()).hexdigest()
+        if frozen.get('status') in ('cancelled', 'cancelling'):
+            raise ValueError('WORKFLOW_CANCELLED')
         result = dispatch(self.owner_home, 'workflow', frozen['workflow_id'], workflow_run_id,
-                          concurrency_policy, callback, queue_limit=queue_limit, _lifecycle=self.store)
+                          concurrency_policy, callback, queue_limit=queue_limit, _lifecycle=self.store,
+                          operation_key=operation_key or None, operation_fingerprint=fingerprint)
+        if isinstance(result, dict) and result.get('status') == 'completed_replay':
+            return self.store.begin_control(workflow_run_id, action='resume', operation_key=operation_key,
+                                            expected_revision=options['expected_revision'], intent=intent)[1]
         if isinstance(result, dict):
-            from .run_store import _decode_run
-            return self._policy_receipt({**result, 'workflow_run_id': workflow_run_id}, _decode_run(frozen))
+            return self._policy_receipt({**result, 'workflow_run_id': workflow_run_id}, decoded)
         return result
+
+    # LLM: 恢复意图是原控制账指纹的唯一形状；准入前回放、排队票据指纹与原执行器共用，避免两处漂移。
+    # 函数用途: 由显式恢复选项构造begin_control使用的意图。
+    @staticmethod
+    def _resume_control_intent(control_intent, from_step_id, patched_step_output, updated_data_sources,
+                               resolution_origin, allow_script_drift):
+        return control_intent if control_intent is not None else {
+            'from_step_id': from_step_id, 'patched_step_output': patched_step_output,
+            'updated_data_sources': updated_data_sources, 'resolution_origin': resolution_origin,
+            'allow_script_drift': allow_script_drift}
 
     # LLM: 公共准入后只消费原run冻结定义、CAS和控制操作账，不从可编辑资产重建运行。
     # 函数用途: 在原运行排他锁内验证和执行一次显式恢复。
@@ -341,10 +393,8 @@ class _WorkflowRunLifecycle:
             # 必须先于begin_control的耐久写入，以及原生任务恢复/副作用准入；拒绝不改原证据。
             validate_definition_eligibility(definition)
             if operation_key:
-                intent = control_intent if control_intent is not None else {
-                    'from_step_id': from_step_id, 'patched_step_output': patched_step_output,
-                    'updated_data_sources': updated_data_sources, 'resolution_origin': resolution_origin,
-                    'allow_script_drift': allow_script_drift}
+                intent = self._resume_control_intent(control_intent, from_step_id, patched_step_output,
+                                                     updated_data_sources, resolution_origin, allow_script_drift)
                 replay, record = self.store.begin_control(workflow_run_id, action='resume', operation_key=operation_key,
                                                           expected_revision=expected_revision, intent=intent)
                 if replay:

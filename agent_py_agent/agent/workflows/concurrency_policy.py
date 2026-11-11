@@ -586,7 +586,123 @@ def _queue_worker(scope: _Scope, ticket: dict[str, Any], callback: Callable[[], 
         pause.wait(scope.poll_seconds)
 
 
+# LLM: 非阻塞查询原工作流运行占位阶段；仅以原run.json中完整匹配的lifecycle证明与存活身份判定，不争抢运行锁，损坏或失配直接拒绝。
+# 函数用途: 判断当前claim持有者是否处于已验证的真实执行阶段并返回原运行快照，不触碰回调运行锁。
+def _holder_executing_data(holder: _Lease | None, lifecycle) -> tuple[bool, dict[str, Any]]:
+    if holder is None:
+        return False, {}
+    if holder.record.get("schema") != "workflow-concurrency-claim.v1":
+        raise _StateError("并发占位记录损坏")
+    if lifecycle is None:
+        return _identity_live(holder.record.get("identity")) is True, {}
+    data, proof = lifecycle._concurrency_claim(holder)
+    if proof.get("phase") != "executing":
+        return False, {}
+    identity = proof.get("callback_identity", holder.record.get("identity"))
+    if _identity_live(identity) is False:
+        return False, {}
+    return True, data
+
+
+# LLM: 同一原运行控制准入在死票据清理后、任何队列或claim写入前裁决：同键同意图复用活票据或已验证执行中准入，
+#   同键异意图报IDEMPOTENCY_CONFLICT，同运行异键并存控制报WORKFLOW_RUN_SKIPPED_ALREADY_RUNNING（不新开票据或线程）。
+# 函数用途: 裁决带操作身份的控制请求是复用原准入、回放刚完成结果、拒绝并存竞争控制还是继续新准入。
+def _control_admission(
+    entries: list[dict[str, Any]],
+    holder: _Lease | None,
+    run_id: str,
+    operation_key: str,
+    operation_fingerprint: str,
+    lifecycle,
+) -> dict[str, Any] | None:
+    competing_queued = False
+    for position, entry in enumerate(entries, 1):
+        if entry.get("run_id") != run_id:
+            continue
+        if "operation_key" in entry or "operation_fingerprint" in entry:
+            entry_key, entry_fp = entry.get("operation_key"), entry.get("operation_fingerprint")
+            if type(entry_key) is not str or not entry_key or type(entry_fp) is not str or not entry_fp:
+                raise _StateError("并发队列控制身份损坏")
+            if entry_key == operation_key:
+                if entry_fp != operation_fingerprint:
+                    raise ValueError("IDEMPOTENCY_CONFLICT")
+                return {"status": "queued", "queue_position": position, "run_id": run_id}
+        competing_queued = True
+    if competing_queued:
+        return {
+            "status": "skipped",
+            "error_code": "WORKFLOW_RUN_SKIPPED_ALREADY_RUNNING",
+            "running_run_id": run_id,
+            "reason_code": "control_already_pending",
+        }
+    if holder is not None and holder.record.get("run_id") == run_id:
+        if "operation_key" in holder.record or "operation_fingerprint" in holder.record:
+            holder_key = holder.record.get("operation_key")
+            holder_fp = holder.record.get("operation_fingerprint")
+            if type(holder_key) is not str or not holder_key or type(holder_fp) is not str or not holder_fp:
+                raise ValueError("WORKFLOW_CONCURRENCY_CLAIM_MISMATCH")
+        else:
+            holder_key, holder_fp = None, None
+        executing, data = _holder_executing_data(holder, lifecycle)
+        if executing:
+            operations = data.get("control_operations") if isinstance(data, dict) else None
+            if isinstance(operations, dict) and operation_key in operations:
+                op = operations[operation_key]
+                if not isinstance(op, dict):
+                    raise ValueError("WORKFLOW_CONCURRENCY_CLAIM_MISMATCH")
+                op_fp = hashlib.sha256(
+                    json.dumps(
+                        {
+                            "action": op.get("action"),
+                            "intent": op.get("intent"),
+                            "expected_revision": op.get("expected_revision"),
+                        },
+                        sort_keys=True,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    ).encode("utf-8")
+                ).hexdigest()
+                if op_fp != operation_fingerprint:
+                    raise ValueError("IDEMPOTENCY_CONFLICT")
+                if op.get("state") == "completed":
+                    return {"status": "completed_replay", "run_id": run_id}
+            pending_resumes = [
+                k for k, v in (operations or {}).items()
+                if isinstance(v, dict) and v.get("action") == "resume" and v.get("state") == "pending"
+            ]
+            if pending_resumes:
+                if pending_resumes[-1] == operation_key:
+                    return {"status": "queued", "queue_position": 0, "run_id": run_id}
+                return {
+                    "status": "skipped",
+                    "error_code": "WORKFLOW_RUN_SKIPPED_ALREADY_RUNNING",
+                    "running_run_id": run_id,
+                    "reason_code": "control_already_pending",
+                }
+            holder_settled = (
+                holder_key is not None
+                and isinstance(operations, dict)
+                and (operations.get(holder_key) or {}).get("state") == "completed"
+            )
+            if holder_key == operation_key and not holder_settled:
+                if holder_fp != operation_fingerprint:
+                    raise ValueError("IDEMPOTENCY_CONFLICT")
+                return {"status": "queued", "queue_position": 0, "run_id": run_id}
+            return {
+                "status": "skipped",
+                "error_code": "WORKFLOW_RUN_SKIPPED_ALREADY_RUNNING",
+                "running_run_id": run_id,
+                "reason_code": "control_already_pending",
+            }
+    if lifecycle is not None:
+        latest = lifecycle._read(run_id, "run.json")
+        if ((latest.get("control_operations") or {}).get(operation_key) or {}).get("state") == "completed":
+            return {"status": "completed_replay", "run_id": run_id}
+    return None
+
+
 # LLM: allow保持旧调用语义；其它策略只管理执行准入，冻结定义、权限和运行终态仍由原宿主/Engine负责。
+#   operation_key/operation_fingerprint成对随票据与由票据建的claim持久化，只用于同一控制重放沿用原准入及拦截同运行竞争控制，不授予执行权。
 # 函数用途: 执行真实callback，或返回明确的skipped/queued并发策略回执。
 def dispatch(
     owner_home,
@@ -598,6 +714,8 @@ def dispatch(
     *,
     queue_limit=8,
     _lifecycle=None,
+    operation_key=None,
+    operation_fingerprint=None,
 ):
     if type(policy) is not str or policy not in ("allow", "skip_if_running", "queue"):
         return {"status": "skipped", "error_code": "INVALID_CONCURRENCY_POLICY"}
@@ -607,6 +725,13 @@ def dispatch(
         raise TypeError("callback必须可调用")
     if type(queue_limit) is not int or queue_limit < 0:
         raise ValueError("queue_limit必须为非负整数")
+    if (operation_key is None) != (operation_fingerprint is None) or operation_key is not None and (
+        type(operation_key) is not str
+        or not 0 < len(operation_key.encode()) <= 256
+        or type(operation_fingerprint) is not str
+        or not operation_fingerprint
+    ):
+        raise ValueError("operation_key与operation_fingerprint必须成对且为有界非空字符串")
     scope = _scope(owner_home, kind, asset_id, run_id)
     if not _supported():
         return {
@@ -619,20 +744,33 @@ def dispatch(
             "status": "skipped",
             "error_code": "WORKFLOW_CONCURRENCY_IDENTITY_UNAVAILABLE",
         }
-    ticket = {
-        "schema": "workflow-concurrency-ticket.v1",
-        "nonce": uuid.uuid4().hex,
-        "run_id": run_id,
-        "identity": identity,
-    }
-    if _lifecycle is not None:
-        if kind != 'workflow' or Path(_lifecycle.owner_home).absolute() != scope.root:
-            raise ValueError('工作流生命周期作用域不匹配')
-        ticket.update(lifecycle='workflow', asset_id=asset_id, policy=policy)
+    if _lifecycle is not None and (
+        kind != "workflow" or Path(_lifecycle.owner_home).absolute() != scope.root
+    ):
+        raise ValueError("工作流生命周期作用域不匹配")
     context = copy_context()
     with _gate(scope) as parent:
         entries = _prune_queue(scope, parent)
         holder = _holder(scope, parent)
+        if operation_key is not None:
+            original = _control_admission(
+                entries, holder, run_id, operation_key, operation_fingerprint, _lifecycle,
+            )
+            if original is not None:
+                return original
+        ticket = {
+            "schema": "workflow-concurrency-ticket.v1",
+            "nonce": uuid.uuid4().hex,
+            "run_id": run_id,
+            "identity": identity,
+        }
+        if _lifecycle is not None:
+            ticket.update(lifecycle="workflow", asset_id=asset_id, policy=policy)
+        if operation_key is not None:
+            ticket.update(
+                operation_key=operation_key,
+                operation_fingerprint=operation_fingerprint,
+            )
         if (holder is not None and _lifecycle is not None and holder.record.get('run_id') == run_id
                 and holder.record.get('lifecycle') == 'workflow'
                 and _lifecycle._concurrency_claim_phase(holder) == 'retained'):
