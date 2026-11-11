@@ -1,10 +1,13 @@
 """不可信源报告的纯值归一与查询健康回执；无IO或权限副作用。"""
 from __future__ import annotations
 
+import math
 from copy import deepcopy
+from typing import Any
 
 from ..assets import safe_asset_id
 from ..assets.descriptor import access_target_requires_network
+from ..common.log_redaction import redact_sensitive_value
 
 
 # LLM: 来源ID只有结构校验，不解释正文或授予路径权限。
@@ -190,3 +193,248 @@ def transient_failure_code(source_report, error_code=''):
         if row['status'] == 'transient_error':
             return 'transient_error'
     return ''
+
+
+# LLM: 提取单个运行各步骤的健康快照与规范引用；严格脱敏敏感凭据与内部错误。
+# 函数用途: 将 StepExecutionRecord 转换为只读健康统计项。
+def summarize_run_step_health(run, *, redact=True):
+    step_summaries = []
+    for step in getattr(run, 'steps', ()):
+        error_msg = getattr(step, 'error_message', '')
+        if redact and error_msg:
+            error_msg = str(redact_sensitive_value(error_msg))
+        escalation = getattr(step, 'escalation_result', {}) or {}
+        tool_receipt = escalation.get('tool_receipt', {}) or {}
+        agent_task = escalation.get('agent_task', {}) or {}
+        subwf_receipt = escalation.get('subworkflow_receipt', {}) or {}
+
+        operation_id = (
+            tool_receipt.get('operation_id')
+            or escalation.get('operation_id')
+            or getattr(step, 'effect_id', '')
+        )
+        subworkflow_run_id = (
+            getattr(step, 'subworkflow_run_id', '')
+            or subwf_receipt.get('child_run_id', '')
+            or escalation.get('subworkflow_run_id', '')
+        )
+        task_id = (
+            agent_task.get('task_id')
+            or escalation.get('task_id', '')
+        )
+        effect_id = (
+            getattr(step, 'effect_id', '')
+            or subworkflow_run_id
+            or operation_id
+            or escalation.get('effect_id', '')
+        )
+
+        attempts = getattr(step, 'attempt_count', 1)
+        max_attempts = getattr(step, 'max_attempts', 1)
+        step_summaries.append({
+            'step_id': step.step_id,
+            'name': getattr(step, 'name', ''),
+            'mode': getattr(step, 'mode', ''),
+            'status': getattr(step, 'status', ''),
+            'duration_ms': getattr(step, 'duration_ms', 0.0),
+            'attempt_count': attempts,
+            'max_attempts': max_attempts,
+            'retried': attempts > 1,
+            'error_code': getattr(step, 'error_code', ''),
+            'error_message': error_msg,
+            'needs_repair': getattr(step, 'needs_repair', False),
+            'effect_id': effect_id,
+            'operation_id': operation_id,
+            'subworkflow_run_id': subworkflow_run_id,
+            'task_id': task_id,
+        })
+
+    return {
+        'workflow_run_id': getattr(run, 'workflow_run_id', ''),
+        'workflow_id': getattr(run, 'workflow_id', ''),
+        'status': getattr(run, 'status', ''),
+        'duration_ms': getattr(run, 'duration_ms', 0.0),
+        'total_steps': getattr(run, 'total_steps', len(step_summaries)),
+        'completed_steps': getattr(run, 'completed_steps', 0),
+        'steps': step_summaries,
+    }
+
+
+# LLM: 构造有界工作流及各步骤的健康视图，严禁全量扫描历史文件 (WF-11)。
+# 函数用途: 按 bounded_limit 读取有限运行并聚合耗时、故障分类、重试与规范引用。
+def build_workflow_health_view(run_store, *, workflow_id=None, limit=50, redact=True):
+    bounded_limit = max(1, min(100, int(limit))) if isinstance(limit, (int, float)) else 50
+    coverage = 'complete'
+    truncated = False
+    try:
+        runs = run_store.list_runs(workflow_id=workflow_id, limit=bounded_limit)
+        if len(runs) == bounded_limit:
+            coverage = 'partial'
+            truncated = True
+    except Exception:
+        runs = []
+        coverage = 'unknown'
+        truncated = False
+
+    run_counts = {
+        'succeeded': 0,
+        'failed': 0,
+        'running': 0,
+        'paused_for_resume': 0,
+        'waiting_for_agent': 0,
+        'cancelled': 0,
+    }
+    workflow_counts: dict[str, dict[str, int]] = {}
+    step_aggregates: dict[str, dict[str, Any]] = {}
+    overall_reason_classes: dict[str, int] = {}
+    total_attempts_all = 0
+    retried_steps_all = 0
+    all_effect_ids: set[str] = set()
+    all_operation_ids: set[str] = set()
+    all_subworkflow_run_ids: set[str] = set()
+    all_task_ids: set[str] = set()
+
+    for run in runs:
+        st = getattr(run, 'status', 'unknown')
+        if st in run_counts:
+            run_counts[st] += 1
+        else:
+            run_counts[st] = run_counts.get(st, 0) + 1
+
+        wid = getattr(run, 'workflow_id', '') or 'unknown'
+        if wid not in workflow_counts:
+            workflow_counts[wid] = {
+                'succeeded': 0,
+                'failed': 0,
+                'running': 0,
+                'paused_for_resume': 0,
+                'waiting_for_agent': 0,
+                'cancelled': 0,
+                'total': 0,
+            }
+        workflow_counts[wid]['total'] += 1
+        if st in workflow_counts[wid]:
+            workflow_counts[wid][st] += 1
+
+        summary = summarize_run_step_health(run, redact=redact)
+        for s in summary['steps']:
+            sid = s['step_id']
+            if sid not in step_aggregates:
+                step_aggregates[sid] = {
+                    'step_id': sid,
+                    'name': s['name'],
+                    'mode': s['mode'],
+                    'execution_count': 0,
+                    'status_counts': {},
+                    'durations': [],
+                    'failure_count': 0,
+                    'reason_classes': {},
+                    'total_attempts': 0,
+                    'retried_count': 0,
+                    'effect_ids': set(),
+                    'operation_ids': set(),
+                    'subworkflow_run_ids': set(),
+                    'task_ids': set(),
+                }
+            agg = step_aggregates[sid]
+            agg['execution_count'] += 1
+            step_st = s['status']
+            agg['status_counts'][step_st] = agg['status_counts'].get(step_st, 0) + 1
+            if isinstance(s['duration_ms'], (int, float)) and s['duration_ms'] >= 0:
+                agg['durations'].append(float(s['duration_ms']))
+
+            if s['status'] == 'failed' or s['error_code']:
+                agg['failure_count'] += 1
+                err_code = s['error_code'] or 'STEP_FAILED'
+                agg['reason_classes'][err_code] = agg['reason_classes'].get(err_code, 0) + 1
+                overall_reason_classes[err_code] = overall_reason_classes.get(err_code, 0) + 1
+
+            attempts = s['attempt_count']
+            agg['total_attempts'] += attempts
+            total_attempts_all += attempts
+            if s['retried']:
+                agg['retried_count'] += 1
+                retried_steps_all += 1
+
+            if s['effect_id']:
+                agg['effect_ids'].add(s['effect_id'])
+                all_effect_ids.add(s['effect_id'])
+            if s['operation_id']:
+                agg['operation_ids'].add(s['operation_id'])
+                all_operation_ids.add(s['operation_id'])
+            if s['subworkflow_run_id']:
+                agg['subworkflow_run_ids'].add(s['subworkflow_run_id'])
+                all_subworkflow_run_ids.add(s['subworkflow_run_id'])
+            if s['task_id']:
+                agg['task_ids'].add(s['task_id'])
+                all_task_ids.add(s['task_id'])
+
+    step_summaries_compiled = {}
+    for sid, agg in step_aggregates.items():
+        durations = agg['durations']
+        cnt = len(durations)
+        if cnt > 0:
+            sorted_d = sorted(durations)
+            min_ms = round(sorted_d[0], 2)
+            max_ms = round(sorted_d[-1], 2)
+            avg_ms = round(sum(sorted_d) / cnt, 2)
+            p95_idx = max(0, int(math.ceil(0.95 * cnt)) - 1)
+            p95_ms = round(sorted_d[p95_idx], 2)
+        else:
+            min_ms = avg_ms = max_ms = p95_ms = 0.0
+
+        step_summaries_compiled[sid] = {
+            'step_id': sid,
+            'name': agg['name'],
+            'mode': agg['mode'],
+            'execution_count': agg['execution_count'],
+            'status_counts': agg['status_counts'],
+            'duration_ms': {
+                'count': cnt,
+                'min_ms': min_ms,
+                'avg_ms': avg_ms,
+                'max_ms': max_ms,
+                'p95_ms': p95_ms,
+            },
+            'failure_count': agg['failure_count'],
+            'reason_classes': agg['reason_classes'],
+            'retry_stats': {
+                'total_attempts': agg['total_attempts'],
+                'retried_steps': agg['retried_count'],
+            },
+            'canonical_references': {
+                'effect_ids': sorted(agg['effect_ids']),
+                'operation_ids': sorted(agg['operation_ids']),
+                'subworkflow_run_ids': sorted(agg['subworkflow_run_ids']),
+                'task_ids': sorted(agg['task_ids']),
+            },
+        }
+
+    return {
+        'schema_version': 'workflow_health.v1',
+        'workflow_id': workflow_id,
+        'coverage': coverage,
+        'truncated': truncated,
+        'sampled_runs': len(runs),
+        'bounded_limit': bounded_limit,
+        'run_counts': run_counts,
+        'workflow_counts': workflow_counts,
+        'step_health': step_summaries_compiled,
+        'reason_classes': overall_reason_classes,
+        'retry_stats': {
+            'total_attempts': total_attempts_all,
+            'retried_steps': retried_steps_all,
+        },
+        'canonical_references': {
+            'effect_ids': sorted(all_effect_ids),
+            'operation_ids': sorted(all_operation_ids),
+            'subworkflow_run_ids': sorted(all_subworkflow_run_ids),
+            'task_ids': sorted(all_task_ids),
+        },
+    }
+
+
+# LLM: 便捷工作流状态健康报告；复用 build_workflow_health_view 的有界读取。
+# 函数用途: 向外提供与既有契约对齐的健康报告。
+def workflow_state_report(run_store, workflow_id=None, *, limit=50, redact=True):
+    return build_workflow_health_view(run_store, workflow_id=workflow_id, limit=limit, redact=redact)
