@@ -1179,6 +1179,48 @@ class SessionTaskStore:
         payload = update_json_file_atomic(self._path(task_id), bind, require_existing=True)
         return SessionTask.from_dict(payload)
 
+    # LLM: 续跑交付回执与回复编号绑定：锁内核对或合并 non-empty reply_message_id 与 result_report_receipt，
+    #   不回退 task.status，不冲掉并发 metadata 其它键。锁外发布列表索引。
+    # 函数用途: 原子记录回合回复消息 ID 与回报回执，完成交付链路关联。
+    def record_turn_reply_linkage(
+        self,
+        task_id: str,
+        *,
+        reply_message_id: str = "",
+        result_report_receipt: str = "",
+    ) -> SessionTask | None:
+        selected = str(task_id or "").strip()
+        if not selected:
+            return None
+        reply_id = str(reply_message_id or "").strip()
+        report_receipt = str(result_report_receipt or "").strip()
+        if not reply_id and not report_receipt:
+            return self.load(selected)
+
+        changed = False
+
+        def update(payload: dict[str, Any]) -> dict[str, Any]:
+            nonlocal changed
+            task = SessionTask.from_dict(payload)
+            metadata = dict(task.metadata or {})
+            updates: dict[str, Any] = {}
+            if reply_id and metadata.get("reply_message_id") != reply_id:
+                updates["reply_message_id"] = reply_id
+            if report_receipt and metadata.get("result_report_receipt") != report_receipt:
+                updates["result_report_receipt"] = report_receipt
+            if not updates:
+                return payload
+            changed = True
+            return replace(task, metadata={**metadata, **updates}).to_dict()
+
+        try:
+            saved = update_json_file_atomic(self._path(selected), update, require_existing=True)
+        except FileNotFoundError:
+            return None
+        if changed:
+            self._list_index().publish(self._path(selected))
+        return SessionTask.from_dict(saved)
+
     # LLM: 链深按 origin_task_id 结构化遍历，不信任模型传的深度；环或坏链返回一个足够大的值让调用方拒绝。
     # 函数用途: 计算一条任务在派活链上的深度（根为 0）。
     def chain_depth(self, task: SessionTask, *, limit: int = 64) -> int:

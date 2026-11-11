@@ -327,7 +327,8 @@ class BackgroundAgentService:
         from .background_scheduling_view import model_readiness, scheduling_view
 
         thread = self._thread(agent_id, actor)
-        page = self.store.session_tasks.list_page(target_thread_id=agent_id, limit=100)
+        resolved_id = thread.thread_id
+        page = self.store.session_tasks.list_page(target_thread_id=resolved_id, limit=100)
         open_tasks = [task for task in page["items"] if task.status not in SESSION_TASK_TERMINAL_STATUSES]
         try:
             execution = self._execution_view(thread)
@@ -419,7 +420,8 @@ class BackgroundAgentService:
     # LLM: 更新、模型选择和生命周期共用此写入口；核目标范围后在身份锁及线程原子更新内处理CAS与幂等回执并发布索引，restore还须预留配额。
     # 函数用途: 按修订号安全修改后台身份或模型选择，同键重放不重复变更。
     def _mutate(self, agent_id, *, actor, action, changes, expected_revision, idempotency_key, model=False):
-        self._thread(agent_id, actor)
+        thread = self._thread(agent_id, actor)
+        resolved_id = thread.thread_id
         key = self._operation_key(actor, idempotency_key)
         fingerprint = _digest([action, changes, expected_revision])
 
@@ -457,7 +459,7 @@ class BackgroundAgentService:
                 elif state in {"retired", "retiring"}:
                     raise BusinessError("AGENT_NOT_AVAILABLE")
                 if action == "restore":
-                    BackgroundAgentQuota(self).reserve(agent_id)
+                    BackgroundAgentQuota(self).reserve(resolved_id)
                 identity = replace(identity, identity_state=state, after_task=changes.get("after_task", identity.after_task),
                                    identity_revision=identity.identity_revision + 1)
                 metadata = {**latest.metadata, BACKGROUND_IDENTITY_KEY: identity.to_dict()}
@@ -472,14 +474,16 @@ class BackgroundAgentService:
             receipts = dict(list(receipts.items())[-64:])
             return replace(updated, metadata={**updated.metadata, "background_receipts": receipts}, updated_at=time.time())
 
-        with background_identity_transition(self.store, agent_id):
-            return self._publish(self.store.threads.update_atomic(agent_id, apply))
+        with background_identity_transition(self.store, resolved_id):
+            return self._publish(self.store.threads.update_atomic(resolved_id, apply))
 
     # LLM: 业务编辑入口校验update schema后委托_mutate完成范围、CAS和幂等写入；返回含独立工作观察的身份DTO及身份修订，不启动执行。
     # 函数用途: 保存后台助手的名称、用途等允许编辑的身份字段。
     def update(self, agent_id, changes: dict, *, actor, expected_revision, idempotency_key):
-        changes = _params("background_agents.update", {**changes, "agent_id": agent_id})
-        thread = self._mutate(agent_id, actor=actor, action="update", changes=changes,
+        thread = self._thread(agent_id, actor)
+        resolved_id = thread.thread_id
+        changes = _params("background_agents.update", {**changes, "agent_id": resolved_id})
+        thread = self._mutate(resolved_id, actor=actor, action="update", changes=changes,
                               expected_revision=expected_revision, idempotency_key=idempotency_key)
         return {"agent": self._agent_view(thread), "revision": background_identity(thread).identity_revision}
 
@@ -487,19 +491,21 @@ class BackgroundAgentService:
     # 函数用途: 控制身份生命周期，按完整任务责任恢复唤醒或取消，并收口实际可完成的退休。
     def transition(self, agent_id, action, *, actor, expected_revision, idempotency_key,
                    disposition="drain", handoff_agent_id=None):
-        changes = {"agent_id": agent_id}
+        source = self._thread(agent_id, actor)
+        resolved_id = source.thread_id
+        changes = {"agent_id": resolved_id}
         if action == "retire":
             changes["disposition"] = disposition
             if handoff_agent_id is not None:
                 changes["handoff_agent_id"] = handoff_agent_id
-                source, target = self._thread(agent_id, actor), self._thread(handoff_agent_id, actor)
-                if background_identity(source).space_id != background_identity(target).space_id or agent_id == handoff_agent_id:
+                target = self._thread(handoff_agent_id, actor)
+                if background_identity(source).space_id != background_identity(target).space_id or source.thread_id == target.thread_id:
                     raise BusinessError("SPACE_MISMATCH")
                 # 不改写在途任务的冻结归属。交接是可观察的待处理义务，不复制任务到新空间。
         _params("background_agents." + action, changes)
         quota = BackgroundAgentQuota(self)
         with quota.guard() if action == "restore" else nullcontext():
-            thread = self._mutate(agent_id, actor=actor, action=action, changes=changes,
+            thread = self._mutate(resolved_id, actor=actor, action=action, changes=changes,
                                   expected_revision=expected_revision, idempotency_key=idempotency_key)
         refs, tasks = identity_outstanding(self.host, thread)
         if action == "retire":
@@ -508,11 +514,11 @@ class BackgroundAgentService:
                     self.cancel_task(task.task_id, actor=actor, include_descendants=True)
             elif disposition == "drain":
                 self._republish_pending_work(thread, tasks, actor=actor)
-            thread = reconcile_background_identity(self.host, agent_id)
+            thread = reconcile_background_identity(self.host, resolved_id)
             refs, _ = identity_outstanding(self.host, thread)
             if not refs and background_identity(thread).identity_state == "retiring":
                 # 取消后的首个索引回填可能partial；上面的新完整遍历追平后，再走原锁内CAS，不把新空账配给旧身份。
-                thread = reconcile_background_identity(self.host, agent_id)
+                thread = reconcile_background_identity(self.host, resolved_id)
                 if background_identity(thread).identity_state == "retiring":
                     refs, _ = identity_outstanding(self.host, thread)
             return {"agent": self._agent_view(thread), "operation_id": self._operation_key(actor, idempotency_key), "outstanding_refs": refs[:100]}
@@ -634,7 +640,8 @@ class BackgroundAgentService:
     # 函数用途: 查询后台助手的当前模型选择和采纳边界。
     def get_model(self, agent_id, *, actor):
         thread = self._thread(agent_id, actor)
-        effective_at, _adoption_status = self._model_adoption(agent_id)
+        resolved_id = thread.thread_id
+        effective_at, _adoption_status = self._model_adoption(resolved_id)
         return {"model_profile_id": thread.model_profile_id, "selection_revision": thread.model_selection_revision,
                 "source": {"kind": thread.model_selection_source or "default", "source_ref": thread.thread_id,
                            "revision": thread.model_selection_revision},
@@ -645,15 +652,16 @@ class BackgroundAgentService:
     def set_model(self, agent_id, model_profile_id, *, actor, expected_revision, idempotency_key):
         from ..user_space.group_authorization_context import group_capability_guard
 
-        _params("background_agents.model.set", {"agent_id": agent_id, "model_profile_id": model_profile_id})
-        self._thread(agent_id, actor)
+        thread = self._thread(agent_id, actor)
+        resolved_id = thread.thread_id
+        _params("background_agents.model.set", {"agent_id": resolved_id, "model_profile_id": model_profile_id})
         self._profile(model_profile_id)
-        with group_capability_guard(self.host, "assistant.configure", thread_id=agent_id):
-            previous = self._thread(agent_id, actor)
+        with group_capability_guard(self.host, "assistant.configure", thread_id=resolved_id):
+            previous = self._thread(resolved_id, actor)
             unchanged = previous.model_profile_id == model_profile_id
-            thread = self._mutate(agent_id, actor=actor, action="model.set", changes={"model_profile_id": model_profile_id},
+            thread = self._mutate(resolved_id, actor=actor, action="model.set", changes={"model_profile_id": model_profile_id},
                                   expected_revision=expected_revision, idempotency_key=idempotency_key, model=True)
-        _effective_at, adoption_status = self._model_adoption(agent_id)
+        _effective_at, adoption_status = self._model_adoption(resolved_id)
         return {"selection_revision": thread.model_selection_revision,
                 "adoption_status": "unchanged" if unchanged else adoption_status}
 
