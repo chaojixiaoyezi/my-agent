@@ -359,21 +359,9 @@ def run_owner_workflow_maintenance(home, previous, *, now, safe_to_delete, servi
     actor = BusinessActor(home.owner_id, 'owner-maintenance', service or object(),
         lambda action, facts: action in {'workflows.cleanup.run', 'workflows.recycle'})
     tick = now.timestamp() if isinstance(now, datetime) else float(now)
-    reader = getattr(service, 'reference_reader', None)
-    if reader is None:
-        from types import SimpleNamespace
-
-        from ..gateway_parts.business_host_ports import (
-            build_default_business_workflow_reference_reader,
-        )
-        reader = build_default_business_workflow_reference_reader(
-            SimpleNamespace(home_paths=home, owner_home_dir=home.owner_home_dir, owner_id=home.owner_id))
     service = service or WorkflowScopeService(home.owner_home_dir, owner_id=home.owner_id,
         authorize=lambda current, action, ref: current is actor and actor.authorize(action, {'workflow_ref': ref}),
-        reference_reader=reader,
         clock=lambda: tick)
-    if getattr(service, 'reference_reader', None) is None:
-        service.reference_reader = reader
     if service.owner_id != home.owner_id:
         return {'executed': False, 'reason': 'workflow_owner_mismatch'}
     key = 'owner-maintenance-' + hashlib.sha256(json.dumps([home.owner_id,

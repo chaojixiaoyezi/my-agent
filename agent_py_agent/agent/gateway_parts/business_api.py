@@ -590,7 +590,9 @@ class BusinessServices:
         def _actor_authorize(action, facts):
             try:
                 return context.check(action, facts) is True
-            except HostAPIError:
+            except HostAPIError as exc:
+                if exc.code == 'HOST_NOT_READY':
+                    raise
                 return False
 
         return BusinessActor(self.owner_id, context.subject_id, self.spaces,
