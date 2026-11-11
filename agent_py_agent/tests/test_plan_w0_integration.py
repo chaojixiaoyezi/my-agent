@@ -203,14 +203,20 @@ def test_inbound_progress_card_and_final_keep_original_topic(tmp_path, monkeypat
     assert [step["step_id"] for step in durable_steps] == [f"w0-call-{index}" for index in range(5)]
     assert all(step["phase"] == "finished" and step["ok"] is True for step in durable_steps)
     expected_cards.append(render_progress_card({"request_id": request_id, **terminal["progress_draft"]}))
-    # W6 原卡终结合同：步骤结束先刷新，随后把完整结论及请求终态写回同一张卡，不另发文本。
+    # W6 原卡终结合同：步骤结束先刷新，随后把卡片收拢关闭，独立发送最终业务文本。
     expected_cards.append(render_progress_card({"request_id": request_id, **terminal["progress_draft"],
-        "request_phase": "completed", "total_steps": len(durable_steps), "final_text": current.final}))
-    creates = [row for row in calls if row[0] == "POST" and row[2].get("msg_type") == "interactive"]
+        "request_phase": "completed", "total_steps": len(durable_steps)}))
+    creates = [row for row in calls if row[0] == "POST" and json.loads(row[2]["content"]).get("schema") == "2.0"]
     edits = [row for row in calls if row[0] == "PATCH"]
-    finals = [row for row in calls if row[0] == "POST" and row[2].get("msg_type") == "text"]
-    assert len(creates) == 1 and len(edits) == 2 and not finals and not receipts
-    assert calls.index(creates[0]) < calls.index(edits[0]) < calls.index(edits[1])
+    finals = [row for row in calls if row[0] == "POST" and row not in creates]
+    assert len(creates) == 1 and len(edits) == 2 and len(finals) == 1
+    assert calls.index(creates[0]) < calls.index(edits[0]) < calls.index(edits[1]) < calls.index(finals[0])
+    assert creates[0][1] == "/im/v1/messages/om_w0_inbound/reply"
+    assert creates[0][2]["reply_in_thread"] is True
+    assert finals[0][1] == "/im/v1/messages/om_w0_inbound/reply"
+    assert finals[0][2]["reply_in_thread"] is True
+    assert current.final in finals[0][2]["content"]
+    assert len(receipts) == 1 and receipts[0].delivery_status == "sent"
     assert creates[0][1] == "/im/v1/messages/om_w0_inbound/reply"
     assert creates[0][2]["reply_in_thread"] is True
     assert [row[1] for row in edits] == ["/im/v1/messages/om_w0_card"] * 2

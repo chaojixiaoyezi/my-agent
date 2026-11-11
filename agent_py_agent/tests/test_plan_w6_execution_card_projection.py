@@ -47,7 +47,7 @@ def test_five_real_tool_calls_and_results_project_to_five_ordered_steps():
     card = render_progress_card(view)
     assert card["schema"] == "2.0"
     panel = next(element for element in card["body"]["elements"] if element["tag"] == "collapsible_panel")
-    assert panel["expanded"] is True and len(panel["elements"]) == 5
+    assert panel["expanded"] is False and len(panel["elements"]) == 5
     assert "private-input" not in _card_text(card)
 
 
@@ -130,7 +130,7 @@ def test_long_multibyte_card_is_valid_foldable_and_strictly_byte_bounded(text):
     assert len(json.dumps(card).encode("utf-8")) < 30_000
     assert json.loads(encoded)["schema"] == "2.0"
     panel = next(element for element in card["body"]["elements"] if element["tag"] == "collapsible_panel")
-    assert panel["expanded"] is True and 0 < len(panel["elements"]) < 200
+    assert panel["expanded"] is False and 0 < len(panel["elements"]) < 200
     assert "truncation" in _card_text(card) and "共 " not in _card_text(card)
     assert snapshot == before
 
