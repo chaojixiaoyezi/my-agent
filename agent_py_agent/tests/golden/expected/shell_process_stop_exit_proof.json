@@ -177,7 +177,7 @@
     "timestamp": 2,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "7704d98216b62f5a3b652eec098c672882fe1e58628b7142d1d9abaee858ea70",
+    "body_hash": "deb8ab534f6acfd82587ef3ad8791427118e48129e72b21f9f06796e33e8e384",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -1899,6 +1899,64 @@
                         "maxLength": 128,
                         "minLength": 1,
                         "type": "string"
+                      },
+                      "delegation_constraints": {
+                        "additionalProperties": false,
+                        "description": "可选结构化委托约束（累计子代理上限、禁止后代、精确读写集、允许工具、禁用动作），仅单调收窄父级权限",
+                        "properties": {
+                          "schema_version": {
+                            "type": "string"
+                          },
+                          "actor_runtime": {
+                            "enum": [
+                              "native",
+                              "external_instruction_only"
+                            ],
+                            "type": "string"
+                          },
+                          "max_cumulative_children": {
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          "allow_descendants": {
+                            "type": "boolean"
+                          },
+                          "max_descendant_depth": {
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          "exact_write_set": {
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          "allowed_read_inputs": {
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          "allowed_output_dirs": {
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          "permitted_tools": {
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          "prohibited_actions": {
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          }
+                        },
+                        "type": "object"
                       }
                     },
                     "required": [

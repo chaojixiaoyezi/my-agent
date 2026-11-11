@@ -153,8 +153,10 @@ def cumulative_created_child_count(agent: object, parent_run_id: str | None = No
         try:
             with runtime_db._runtime_connection() as conn:
                 row = conn.execute(
-                    "SELECT COUNT(*) FROM delegations WHERE parent_agent_run_id = ?",
-                    (resolved_parent_id,),
+                    """SELECT COUNT(*) FROM delegations d
+                    LEFT JOIN agent_runs p ON p.agent_run_id = d.parent_agent_run_id
+                    WHERE d.parent_agent_run_id = ? OR p.run_id = ?""",
+                    (resolved_parent_id, resolved_parent_id),
                 ).fetchone()
                 if row and row[0] is not None:
                     db_count = int(row[0])

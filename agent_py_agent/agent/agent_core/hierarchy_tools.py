@@ -321,8 +321,10 @@ def _persist_scheduled_delegation_scopes(agent: object, result: HierarchySchedul
                 if constraints_data:
                     with repo._runtime_connection() as conn:
                         conn.execute(
-                            "UPDATE delegations SET granted_scope_json = ? WHERE child_agent_run_id = ?",
-                            (json.dumps(constraints_data, ensure_ascii=False), run_id),
+                            """UPDATE delegations SET granted_scope_json = ?
+                            WHERE child_agent_run_id = ?
+                               OR child_agent_run_id IN (SELECT agent_run_id FROM agent_runs WHERE run_id = ?)""",
+                            (json.dumps(constraints_data, ensure_ascii=False), run_id, run_id),
                         )
                         conn.commit()
         except Exception:

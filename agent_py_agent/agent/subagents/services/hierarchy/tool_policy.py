@@ -97,6 +97,10 @@ def scheduled_child_tools(request: ToolPolicyRequest) -> list[str]:
         candidates = [t for t in candidates if t not in _DIRECT_CHILD_CONTROL_TOOLS and t != "create_subagents"]
     if "network_access" in prohibited_actions:
         candidates = [t for t in candidates if t not in ("web_search", "web_fetch", "network_fetch")]
+    if "network_fetch" in prohibited_actions:
+        candidates = [t for t in candidates if t not in ("web_fetch", "network_fetch")]
+    if "shell_execution" in prohibited_actions:
+        candidates = [t for t in candidates if t not in ("run_command", "process_session", "terminal_session")]
 
     if _can_spawn_children(request.role, request.spec) and "spawn_children" not in prohibited_actions:
         return _coordinator_tools(candidates, parent_tools=parent_tools)

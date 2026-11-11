@@ -42,6 +42,17 @@ class DelegationScopeExceedsParentError(DelegationConstraintError):
         super().__init__(message, error_code="DELEGATION_SCOPE_EXCEEDS_PARENT")
 
 
+def _parse_non_negative_int(val: Any) -> int | None:
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, int):
+        return val if val >= 0 else None
+    if isinstance(val, str) and val.strip().isdigit():
+        parsed = int(val.strip())
+        return parsed if parsed >= 0 else None
+    return None
+
+
 # LLM: 结构化约束对象冻结子代理运行时不可逾越的边界，并作为不可变契约存入 attributes 与 delegations 库。
 # 类用途: 表示子代理派发时的结构化委托约束，包括累计子代理上限、后代派发策略、精确读写域与禁用动作。
 @dataclass(frozen=True)
@@ -83,16 +94,10 @@ class StructuredDelegationConstraints:
         runtime: Literal["native", "external_instruction_only"] = (
             "external_instruction_only" if runtime_raw == "external_instruction_only" else "native"
         )
-        max_cum = data.get("max_cumulative_children")
-        max_cumulative_children = int(max_cum) if max_cum is not None and str(max_cum).isdigit() else (
-            int(max_cum) if isinstance(max_cum, int) else None
-        )
+        max_cumulative_children = _parse_non_negative_int(data.get("max_cumulative_children"))
         allow_desc = data.get("allow_descendants")
         allow_descendants = True if allow_desc is None else bool(allow_desc)
-        depth_raw = data.get("max_descendant_depth")
-        max_descendant_depth = int(depth_raw) if depth_raw is not None and str(depth_raw).isdigit() else (
-            int(depth_raw) if isinstance(depth_raw, int) else None
-        )
+        max_descendant_depth = _parse_non_negative_int(data.get("max_descendant_depth"))
         return cls(
             schema_version=str(data.get("schema_version") or "delegation_constraints.v1"),
             actor_runtime=runtime,
@@ -267,6 +272,54 @@ def validate_delegation_constraints_upper_bound(
                     False,
                     f"DELEGATION_SCOPE_EXCEEDS_PARENT: Child max_descendant_depth ({constraints.max_descendant_depth}) must be strictly less than parent ({parent_constraints.max_descendant_depth}).",
                 )
+        if parent_constraints.allowed_read_inputs:
+            if not constraints.allowed_read_inputs:
+                return (
+                    False,
+                    "DELEGATION_SCOPE_EXCEEDS_PARENT: Parent restricts allowed_read_inputs, child cannot be unlimited.",
+                )
+            parent_read_roots = [
+                Path(r).expanduser().resolve(strict=False)
+                for r in parent_constraints.allowed_read_inputs
+                if str(r).strip()
+            ]
+            for path_str in constraints.allowed_read_inputs:
+                p = Path(path_str).expanduser().resolve(strict=False)
+                if not any(_is_subpath(p, root) for root in parent_read_roots):
+                    return (
+                        False,
+                        f"DELEGATION_SCOPE_EXCEEDS_PARENT: Allowed read input '{path_str}' is outside parent allowed read inputs.",
+                    )
+        if parent_constraints.prohibited_actions:
+            missing_prohibited = set(parent_constraints.prohibited_actions) - set(constraints.prohibited_actions)
+            if missing_prohibited:
+                return (
+                    False,
+                    f"DELEGATION_SCOPE_EXCEEDS_PARENT: Child prohibited_actions must include all parent prohibited actions: missing {sorted(missing_prohibited)}.",
+                )
+
+    if parent_read_scope is not None:
+        exact_roots = getattr(parent_read_scope, "exact_roots", None) or getattr(
+            parent_read_scope, "allowed_read_inputs", None
+        )
+        if exact_roots:
+            if not constraints.allowed_read_inputs:
+                return (
+                    False,
+                    "DELEGATION_SCOPE_EXCEEDS_PARENT: Parent read scope restricts exact roots, child cannot be unlimited.",
+                )
+            resolved_exact = [
+                Path(r).expanduser().resolve(strict=False)
+                for r in exact_roots
+                if str(r).strip()
+            ]
+            for path_str in constraints.allowed_read_inputs:
+                p = Path(path_str).expanduser().resolve(strict=False)
+                if not any(_is_subpath(p, root) for root in resolved_exact):
+                    return (
+                        False,
+                        f"DELEGATION_SCOPE_EXCEEDS_PARENT: Allowed read input '{path_str}' is outside parent read scope exact roots.",
+                    )
 
     return True, ""
 
@@ -350,28 +403,85 @@ def extract_delegation_constraints(
 def is_action_prohibited(
     action: str,
     constraints: StructuredDelegationConstraints | None,
+    *,
+    tool_name: str = "",
 ) -> tuple[bool, str]:
     if constraints is None or not constraints.prohibited_actions:
         return False, ""
     normalized_action = str(action or "").strip().lower()
+    normalized_tool = str(tool_name or "").strip().lower()
     prohibited = set(constraints.prohibited_actions)
 
-    if normalized_action in prohibited:
-        return True, f"Action '{normalized_action}' is prohibited by delegation constraints."
+    if normalized_action in prohibited or normalized_tool in prohibited:
+        matched = normalized_action if normalized_action in prohibited else normalized_tool
+        return True, f"Action '{matched}' is prohibited by delegation constraints."
 
-    if "git_push" in prohibited and "git push" in normalized_action:
+    if "git_push" in prohibited and (
+        normalized_action == "git_push"
+        or "git push" in normalized_action
+        or normalized_tool == "git_push"
+    ):
         return True, "Action 'git_push' is prohibited by delegation constraints."
+
     if "git_reset_hard" in prohibited and (
-        "git reset --hard" in normalized_action or "git reset -hard" in normalized_action
+        normalized_action == "git_reset_hard"
+        or "git reset --hard" in normalized_action
+        or "git reset -hard" in normalized_action
+        or normalized_tool == "git_reset_hard"
     ):
         return True, "Action 'git_reset_hard' is prohibited by delegation constraints."
-    if "spawn_children" in prohibited and normalized_action in {"create_subagents", "spawn_children"}:
+
+    if "spawn_children" in prohibited and (
+        normalized_action in {"create_subagents", "spawn_children"}
+        or normalized_tool in {"create_subagents", "spawn_children"}
+    ):
         return True, "Action 'spawn_children' is prohibited by delegation constraints."
+
     if "network_access" in prohibited and (
         normalized_action in {"web_search", "web_fetch", "network_access", "network_fetch"}
+        or normalized_tool in {"web_search", "web_fetch", "network_access", "network_fetch"}
         or "curl " in normalized_action
+        or normalized_action.startswith("curl")
         or "wget " in normalized_action
+        or normalized_action.startswith("wget")
+        or "http://" in normalized_action
+        or "https://" in normalized_action
     ):
         return True, "Action 'network_access' is prohibited by delegation constraints."
+
+    if "network_fetch" in prohibited and (
+        normalized_action in {"web_fetch", "network_fetch"}
+        or normalized_tool in {"web_fetch", "network_fetch"}
+        or "curl " in normalized_action
+        or normalized_action.startswith("curl")
+        or "wget " in normalized_action
+        or normalized_action.startswith("wget")
+        or "http://" in normalized_action
+        or "https://" in normalized_action
+    ):
+        return True, "Action 'network_fetch' is prohibited by delegation constraints."
+
+    if "shell_execution" in prohibited and (
+        normalized_tool in {"run_command", "process_session", "terminal_session"}
+        or normalized_action in {"run_command", "process_session", "terminal_session", "shell_execution"}
+    ):
+        return True, "Action 'shell_execution' is prohibited by delegation constraints."
+
+    if "file_delete" in prohibited:
+        if normalized_action == "file_delete" or normalized_tool == "file_delete":
+            return True, "Action 'file_delete' is prohibited by delegation constraints."
+        import re
+
+        has_rm = bool(re.search(r"(?:^|[;&|\s])rm(?:\s|$)", normalized_action))
+        has_unlink = bool(re.search(r"(?:^|[;&|\s])unlink(?:\s|$)", normalized_action))
+        if (
+            has_rm
+            or has_unlink
+            or "shutil.rmtree" in normalized_action
+            or "os.remove" in normalized_action
+            or "os.unlink" in normalized_action
+            or "*** delete file:" in normalized_action
+        ):
+            return True, "Action 'file_delete' is prohibited by delegation constraints."
 
     return False, ""

@@ -323,6 +323,8 @@ def _role_policy(
     )
 
     constraints = extract_delegation_constraints(raw_params)
+    if constraints is None and agent is not None:
+        constraints = extract_delegation_constraints(None, agent=agent)
     if constraints is not None:
         if constraints.permitted_tools:
             parent_scope = _parent_tool_authority_names(agent)
@@ -336,7 +338,11 @@ def _role_policy(
         if "spawn_children" in constraints.prohibited_actions:
             allowed_tools = [t for t in allowed_tools if t not in ("create_subagents", "spawn_children")]
         if "network_access" in constraints.prohibited_actions:
-            allowed_tools = [t for t in allowed_tools if t not in ("web_search", "web_fetch")]
+            allowed_tools = [t for t in allowed_tools if t not in ("web_search", "web_fetch", "network_fetch")]
+        if "network_fetch" in constraints.prohibited_actions:
+            allowed_tools = [t for t in allowed_tools if t not in ("web_fetch", "network_fetch")]
+        if "shell_execution" in constraints.prohibited_actions:
+            allowed_tools = [t for t in allowed_tools if t not in ("run_command", "process_session", "terminal_session")]
     from ...conversation.im_delegation_delivery import current_delegated_delivery_task
 
     if current_delegated_delivery_task(agent) is not None:
@@ -651,6 +657,7 @@ def _bind_delegation_constraints(attrs: dict[str, object], raw_params: dict[str,
     from .delegation_constraints import (
         DelegationConstraintError,
         DelegationScopeExceedsParentError,
+        StructuredDelegationConstraints,
         ToolPermissionDeniedError,
         evaluate_delegation_enforcement,
         extract_delegation_constraints,
@@ -658,6 +665,43 @@ def _bind_delegation_constraints(attrs: dict[str, object], raw_params: dict[str,
     )
 
     constraints = extract_delegation_constraints(raw_params)
+    parent_constraints = extract_delegation_constraints(None, agent=agent) if agent else None
+
+    if constraints is None and parent_constraints is not None:
+        new_depth = (
+            max(0, parent_constraints.max_descendant_depth - 1)
+            if parent_constraints.max_descendant_depth is not None
+            else None
+        )
+        constraints = StructuredDelegationConstraints(
+            schema_version=parent_constraints.schema_version,
+            actor_runtime=parent_constraints.actor_runtime,
+            max_cumulative_children=parent_constraints.max_cumulative_children,
+            allow_descendants=parent_constraints.allow_descendants,
+            max_descendant_depth=new_depth,
+            exact_write_set=parent_constraints.exact_write_set,
+            allowed_read_inputs=parent_constraints.allowed_read_inputs,
+            allowed_output_dirs=parent_constraints.allowed_output_dirs,
+            permitted_tools=parent_constraints.permitted_tools,
+            prohibited_actions=parent_constraints.prohibited_actions,
+        )
+    elif constraints is not None and parent_constraints is not None:
+        combined_prohibited = tuple(
+            dict.fromkeys((*constraints.prohibited_actions, *parent_constraints.prohibited_actions))
+        )
+        constraints = StructuredDelegationConstraints(
+            schema_version=constraints.schema_version,
+            actor_runtime=constraints.actor_runtime,
+            max_cumulative_children=constraints.max_cumulative_children,
+            allow_descendants=constraints.allow_descendants,
+            max_descendant_depth=constraints.max_descendant_depth,
+            exact_write_set=constraints.exact_write_set,
+            allowed_read_inputs=constraints.allowed_read_inputs,
+            allowed_output_dirs=constraints.allowed_output_dirs,
+            permitted_tools=constraints.permitted_tools,
+            prohibited_actions=combined_prohibited,
+        )
+
     if constraints is None:
         return
 
@@ -673,7 +717,6 @@ def _bind_delegation_constraints(attrs: dict[str, object], raw_params: dict[str,
     # 2. 单调上界校验：不能超出父级已授权工具、写根、后代派发权限
     parent_tools = _parent_tool_authority_names(agent)
     parent_write_roots = list(delegated_product_write_roots(agent)) if agent else None
-    parent_constraints = extract_delegation_constraints(None, agent=agent) if agent else None
     valid, err_msg = validate_delegation_constraints_upper_bound(
         constraints,
         parent_tools=parent_tools,
