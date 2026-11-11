@@ -794,6 +794,39 @@ def _complete_background_slice(
     from .continuation_refs import ContinuationDelivery, record_continuation_ref
 
     record_continuation_ref(runtime, ContinuationDelivery.from_turn(request, plan, commit))
+    if (
+        getattr(commit, "message_id", "")
+        and runtime.store is not None
+        and hasattr(runtime.store, "session_tasks")
+        and hasattr(runtime.store.session_tasks, "record_turn_reply_linkage")
+    ):
+        try:
+            task = None
+            if getattr(request, "task_id", ""):
+                task = runtime.store.session_tasks.load(request.task_id)
+            if task is None:
+                from .session_task_report import task_for_turn
+
+                candidate_turns = (
+                    _session_task_run_id(request),
+                    _scheduler_run_id(request),
+                    _session_message_run_id(request),
+                    getattr(request, "conversation_turn_id", ""),
+                )
+                for candidate_turn in candidate_turns:
+                    if candidate_turn:
+                        task = task_for_turn(runtime.agent, candidate_turn, include_terminal=True)
+                        if task is not None:
+                            break
+            if task is not None and (
+                getattr(task, "target_thread_id", "") == request.thread_id
+                or getattr(task, "sender_thread_id", "") == request.thread_id
+            ):
+                runtime.store.session_tasks.record_turn_reply_linkage(
+                    task.task_id, reply_message_id=commit.message_id
+                )
+        except Exception:
+            pass
     return BackgroundMainAgentReport(
         thread_id=request.thread_id,
         task_id=request.task_id,
@@ -1426,40 +1459,15 @@ def _close_out_session_task_turn(
         )
         if closed is not None:
             from .session_task_report import result_report_key
-            reply_id = f"reply-{closed.task_id}"
-            if getattr(execution, "response", None) and getattr(agent, "conversation_store", None):
-                store = agent.conversation_store
+
+            store = getattr(agent, "conversation_store", None)
+            if store is not None and hasattr(store, "session_tasks") and hasattr(store.session_tasks, "record_turn_reply_linkage"):
                 try:
-                    msg_entry = store.messages.append_once(
-                        {
-                            "thread_id": request.thread_id,
-                            "role": "assistant",
-                            "content": str(execution.response),
-                            "metadata": {
-                                "session_task_id": closed.task_id,
-                                "reply_message_id": reply_id,
-                                "assistant_part_id": "final",
-                            },
-                        },
-                        dedupe_key=f"task_reply:{closed.task_id}",
+                    store.session_tasks.record_turn_reply_linkage(
+                        closed.task_id,
+                        reply_message_id=f"reply-{closed.task_id}" if getattr(execution, "response", None) else "",
+                        result_report_receipt=result_report_key(closed),
                     )
-                    actual_reply_id = getattr(msg_entry, "message_id", "") or reply_id
-                except Exception:
-                    actual_reply_id = reply_id
-
-                try:
-                    from ..gateway_parts.io import update_json_file_atomic
-
-                    def _update_task_reply_meta(payload):
-                        meta = payload.setdefault("metadata", {})
-                        meta["reply_message_id"] = actual_reply_id
-                        meta["result_report_receipt"] = result_report_key(closed)
-                        return payload
-
-                    task_path = store.session_tasks._path(closed.task_id)
-                    update_json_file_atomic(task_path, _update_task_reply_meta, require_existing=True)
-                    if hasattr(store.session_tasks, "_list_index"):
-                        store.session_tasks._list_index().publish(task_path)
                 except Exception:
                     pass
 

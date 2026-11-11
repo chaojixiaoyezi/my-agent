@@ -142,17 +142,51 @@ def test_g1_text_only_closeout_and_reply_linkage(native):  # noqa: F811
     # 执行收口
     _close_out_session_task_turn(host, req, exec_result, turn_id=turn_id)
 
-    # 验证 messages 中存在对应 assistant 消息
+    # 驱动真实后台交付收口（唯一的 canonical assistant 消息提交通道）
+    runtime = BackgroundMainAgentRuntime(agent=host, store=host.conversation_store)
+    from agent_py_agent.agent.conversation.channels import DeliveryContext
+    from agent_py_agent.agent.conversation.runtime import (
+        _BackgroundSlicePlan,
+        _complete_background_slice,
+    )
+
+    plan = _BackgroundSlicePlan(
+        request=req,
+        delivery_context=DeliveryContext(
+            channel="local", target=agent["agent_id"], thread_id=agent["agent_id"]
+        ),
+        channel="local",
+        target=agent["agent_id"],
+        response=exec_result.response,
+        deliver=True,
+        delivery_reason="session_task",
+        route_supports_transcript=True,
+        counters=(
+            exec_result.tool_call_count,
+            exec_result.tool_success_count,
+            exec_result.material_progress_count,
+        ),
+        runtime_status="ok",
+    )
+    report = _complete_background_slice(runtime, plan)
+
+    # 验证 messages 中仅存在 1 条对应 assistant 消息（无重复 final 消息）
     page = host.conversation_store.messages.history_page_report(agent["agent_id"], limit=10)
-    replies = [m for m in page.rows if m.metadata.get("session_task_id") == task_id]
+    replies = [
+        m
+        for m in page.rows
+        if m.role == "assistant"
+        and m.content == "Calculated final total: 4200 units"
+    ]
     assert len(replies) == 1
-    assert replies[0].content == "Calculated final total: 4200 units"
+    assert replies[0].metadata.get("assistant_part_id") == "final"
 
     # 验证任务终态与元数据中持久化的 reply_message_id
     stored = host.conversation_store.session_tasks.require(task_id)
     assert stored.status == SESSION_TASK_DONE
     assert stored.summary == "Calculated final total: 4200 units"
     assert stored.result_refs == ()
+    assert stored.metadata.get("reply_message_id") == report.message_id
     assert stored.metadata.get("reply_message_id") == replies[0].message_id
     assert stored.metadata.get("result_report_receipt")
 
@@ -647,3 +681,87 @@ def test_route_01_through_06_lifecycle_and_entrypoints(tmp_path):
     res_get = route_setting(agent, source_thread, actor_id="user-001")
     assert res_get["enabled"] is True
     assert res_get["source"] == "thread"
+
+
+# LLM: 验证命名后台代理通过唯一名称寻址执行全部生命周期操作（get / update / suspend / resume / model.get / model.set / retire）。
+# 函数用途: 验证按名称寻址时内部正确解析为实际 thread_id，不因使用 name 导致状态机、配额或模型选择错位。
+def test_named_background_agent_lifecycle_operations(tmp_path):
+    agent, actor = _make_agent_and_actor(tmp_path)
+    add_echo_profile(agent)
+    service = BackgroundAgentService(agent)
+
+    worker_name = "named-operator-x"
+    created = service.create(
+        {"space_id": None, "name": worker_name, "purpose": "Original Purpose"},
+        actor=actor,
+        idempotency_key="create-named-op",
+    )["agent"]
+    thread_id = created["agent_id"]
+    rev = created["revision"]
+
+    # 1. get by unique name
+    got = service.get(worker_name, actor=actor)
+    assert got["agent"]["thread_id"] == thread_id
+    assert got["agent"]["name"] == worker_name
+
+    # 2. update by unique name
+    updated = service.update(
+        worker_name,
+        {"name": worker_name, "purpose": "Updated Purpose"},
+        actor=actor,
+        expected_revision=rev,
+        idempotency_key="update-named-op",
+    )
+    assert updated["agent"]["purpose"] == "Updated Purpose"
+    rev = updated["agent"]["revision"]
+
+    # 3. suspend by unique name
+    suspended = service.transition(
+        worker_name,
+        "suspend",
+        actor=actor,
+        expected_revision=rev,
+        idempotency_key="suspend-named-op",
+    )
+    assert suspended["agent"]["identity_state"] == "suspended"
+    rev = suspended["agent"]["revision"]
+
+    # 4. resume by unique name
+    resumed = service.transition(
+        worker_name,
+        "resume",
+        actor=actor,
+        expected_revision=rev,
+        idempotency_key="resume-named-op",
+    )
+    assert resumed["agent"]["identity_state"] == "available"
+    rev = resumed["agent"]["revision"]
+
+    # 5. get_model by unique name
+    model_view = service.get_model(worker_name, actor=actor)
+    assert "model_profile_id" in model_view
+    assert model_view["effective_at"] in {"current", "next_safe_turn"}
+
+    # 6. set_model by unique name
+    new_profile_id = add_echo_profile(agent, default=False)
+    set_model_res = service.set_model(
+        worker_name,
+        new_profile_id,
+        actor=actor,
+        expected_revision=model_view["selection_revision"],
+        idempotency_key="set-model-named-op",
+    )
+    assert set_model_res["adoption_status"] in {"applied", "unchanged"}
+    after_model = service.get_model(worker_name, actor=actor)
+    assert after_model["model_profile_id"] == new_profile_id
+
+    # 7. retire by unique name
+    retired = service.transition(
+        worker_name,
+        "retire",
+        actor=actor,
+        expected_revision=rev,
+        idempotency_key="retire-named-op",
+        disposition="drain",
+    )
+    assert retired["agent"]["identity_state"] in {"retiring", "retired"}
