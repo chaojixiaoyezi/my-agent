@@ -1041,7 +1041,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
 
     # LLM: 检查是否具备正式单步执行器；支持构造注入、注册表及外部模块延迟加载。
     # 函数用途: 判断指定 step mode 是否已由插件化执行器支持，避免 formal 执行被误判为 UNAVAILABLE。
-    def _has_formal_step_executor(self, mode: str) -> bool:
+    def _has_formal_step_executor(self, mode: str, spec: dict | None = None) -> bool:
         if mode in self.step_executors:
             return True
         if mode == 'tool_call':
@@ -1049,17 +1049,37 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                 return True
             try:
                 from . import tool_steps
-                return hasattr(tool_steps, 'execute_tool_step')
+                if not hasattr(tool_steps, 'execute_tool_step'):
+                    return False
             except ImportError:
                 return False
+            if spec is not None:
+                has_spec = 'tool_spec' in spec or (
+                    isinstance(spec.get('config'), dict) and any(
+                        k in spec['config'] for k in ('tool_name', 'arguments', 'arguments_map')
+                    )
+                )
+                if not has_spec:
+                    return False
+            return True
         if mode == 'notification':
             if callable(self.notification_step_executor):
                 return True
             try:
                 from . import notification_steps
-                return hasattr(notification_steps, 'execute_notification_step')
+                if not hasattr(notification_steps, 'execute_notification_step'):
+                    return False
             except ImportError:
                 return False
+            if spec is not None:
+                has_spec = 'notification_spec' in spec or (
+                    isinstance(spec.get('config'), dict) and any(
+                        k in spec['config'] for k in ('channel', 'template', 'message')
+                    )
+                )
+                if not has_spec:
+                    return False
+            return True
         if mode == 'subworkflow':
             if callable(self.subworkflow_step_executor):
                 return True
@@ -1159,7 +1179,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             self._foreach_step(record, spec, outputs, definition, run)
             return
         if not run.ephemeral_debug and record.mode not in ('deterministic_script', 'llm_skill_analysis', 'llm_prompt', 'hybrid', 'agent_task'):
-            if not self._has_formal_step_executor(record.mode):
+            if not self._has_formal_step_executor(record.mode, spec):
                 record.status, record.error_code = 'failed', 'NODE_EXECUTOR_UNAVAILABLE'
                 record.error_message = '通用节点当前仅支持单节点调试，不支持正式DAG执行'
                 record.needs_repair = True
@@ -1197,7 +1217,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             return
         if record.mode in ('condition', 'condition_branch', 'script_transform', 'http_request', 'tool_call',
                            'subworkflow', 'approval_wait', 'notification'):
-            if not run.ephemeral_debug and self._has_formal_step_executor(record.mode):
+            if not run.ephemeral_debug and self._has_formal_step_executor(record.mode, spec):
                 context = AnalysisContext(outputs, run.inputs, record.input_snapshot, data_sources=self._sources(definition))
                 self._dispatch_formal_step(record, spec, outputs, definition, run, context)
                 return
