@@ -203,6 +203,14 @@ def _prepare_child_creation(agent: object, params: dict, *, tool_name: str) -> H
         return _schedule_request(ScheduleRequestBuildParams(agent, parent_run_id, child_specs, params))
     except (IndexError, TypeError, ValueError) as exc:
         return _schedule_error(_schedule_validation_error_message(exc), tool_name=tool_name)
+    except PermissionError as exc:
+        return ToolHandlerOutcome(
+            tool_name,
+            False,
+            str(exc),
+            error_code="TOOL_PERMISSION_DENIED",
+            effect_outcome="not_started",
+        )
 
 
 # LLM: 与根创建同一预检；孙代理规范参数沿 _child_create_params 构造（与 _decision_children 同一算法），
@@ -221,7 +229,7 @@ def _child_input_read_scope_error(
             _child_create_params(parent, spec, sibling_index=len(parent.child_ids) + 1 + index)
             for index, spec in enumerate(child_specs)
         ]
-    except (FileNotFoundError, IndexError, TypeError, ValueError):
+    except (FileNotFoundError, IndexError, TypeError, ValueError, PermissionError):
         return None
     if len(raw) != len(task_params):
         return None
@@ -266,16 +274,24 @@ def _materialize_child_creation(agent: object, params: dict, prepared: Hierarchy
         subagent_entries_enabled,
     )
 
-    if subagent_entries_enabled(agent):
-        _decision_children(agent, params, prepared)
-        prepared.prepared_runs[:] = [prepare_subagent_entry_initialization(agent, run) if run else None
-                                     for run in prepared.prepared_runs]
     try:
+        if subagent_entries_enabled(agent):
+            _decision_children(agent, params, prepared)
+            prepared.prepared_runs[:] = [prepare_subagent_entry_initialization(agent, run) if run else None
+                                         for run in prepared.prepared_runs]
         result = agent.subagents.hierarchy.schedule_child_runs(params=prepared)
     except (IndexError, TypeError, ValueError) as exc:
         return _schedule_error(
             _schedule_validation_error_message(exc),
             tool_name=tool_name,
+        )
+    except PermissionError as exc:
+        return ToolHandlerOutcome(
+            tool_name,
+            False,
+            str(exc),
+            error_code="TOOL_PERMISSION_DENIED",
+            effect_outcome="not_started",
         )
     _persist_scheduled_delegation_scopes(agent, result)
     lifecycle = _schedule_lifecycle(agent, result, params)

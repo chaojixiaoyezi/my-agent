@@ -63,13 +63,33 @@ def merged_extra_write_roots(params: dict[str, object], goal: str) -> list[str]:
     return roots
 
 
+def _has_native_write_constraints(attrs: object) -> bool:
+    if hasattr(attrs, "attributes"):
+        attrs = getattr(attrs, "attributes", None)
+    if isinstance(attrs, dict):
+        raw = attrs.get("delegation_constraints")
+        if hasattr(raw, "actor_runtime"):
+            return getattr(raw, "actor_runtime", "") == "native" and bool(
+                getattr(raw, "exact_write_set", None) or getattr(raw, "allowed_output_dirs", None)
+            )
+        if isinstance(raw, dict):
+            return str(raw.get("actor_runtime") or "native") == "native" and bool(
+                raw.get("exact_write_set") or raw.get("allowed_output_dirs")
+            )
+    return False
+
+
 # LLM: 普通 child 继承宿主文件范围；交付引用不是额外授权，精确 worker 或指定 exact_write_set 只保留显式授权。
 # 函数用途: 计算子代理写根，当显式指定 exact_write_set 或 allowed_output_dirs 时绝不继承父级宽工作区。
 def resolved_extra_write_roots(agent: object, params: dict[str, object], goal: str) -> list[str]:
     from .delegation_constraints import extract_delegation_constraints
 
-    constraints = extract_delegation_constraints(params)
-    if constraints is not None and (constraints.exact_write_set or constraints.allowed_output_dirs):
+    constraints = extract_delegation_constraints(params, agent=agent)
+    if (
+        constraints is not None
+        and constraints.actor_runtime == "native"
+        and (constraints.exact_write_set or constraints.allowed_output_dirs)
+    ):
         roots: list[str] = []
         for path_str in constraints.exact_write_set:
             p = str(Path(str(path_str)).expanduser().resolve(strict=False)).rstrip("/")
@@ -90,6 +110,15 @@ def resolved_extra_write_roots(agent: object, params: dict[str, object], goal: s
 # LLM: 普通后代同享 canonical owner home；精确 Audit 父级保持原授权，不受旧 task 窄目录影响。
 # 函数用途: 从真实父级身份与 owner 读取文件上界；缺 owner 的独立运行环境仍按宿主既有写根。
 def _direct_parent_product_write_roots(agent: object) -> list[str]:
+    manager = getattr(agent, "subagents", None)
+    delegated_run_id = current_subagent_run_id(agent)
+    if manager is not None and delegated_run_id:
+        try:
+            parent = manager.load(delegated_run_id)
+            if parent is not None and _has_native_write_constraints(getattr(parent, "attributes", None)):
+                return _task_product_write_roots(parent)
+        except (FileNotFoundError, OSError, ValueError):
+            pass
     return _unique_roots([*_direct_parent_declared_write_roots(agent), *_second_layer_work_roots(agent)])
 
 
@@ -108,6 +137,8 @@ def _direct_parent_declared_write_roots(agent: object) -> list[str]:
         except (FileNotFoundError, OSError, ValueError):
             parent = None
         if parent is not None and str(getattr(parent, "id", "") or "").strip() == run_id:
+            if _has_native_write_constraints(getattr(parent, "attributes", None)):
+                return _task_product_write_roots(parent)
             from ...common.audit_activation import structured_audit_supervised_worker_attributes
 
             if not structured_audit_supervised_worker_attributes(getattr(parent, "attributes", None)):
