@@ -99,7 +99,7 @@ class ToolOperationExecutionRequest:
     attempt_id: str = ""
     operation_attempt_id: str = ""
     redacted_input: dict[str, Any] | None = None
-    settled_effect_outcome: str = "committed"
+    settled_effect_outcome: str = ""
 
 
 @dataclass(frozen=True)
@@ -1179,7 +1179,7 @@ def _tool_execution_facts(result: ToolHandlerOutcome) -> dict[str, object]:
 
 def _result_payload(
     result: ToolHandlerOutcome,
-    settled_effect_outcome: str = "committed",
+    settled_effect_outcome: str = "",
 ) -> dict[str, Any]:
     redacted_input = {}
     if isinstance(result.result_envelope, dict) and isinstance(result.result_envelope.get("redacted_input"), dict):

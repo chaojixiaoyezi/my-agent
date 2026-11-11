@@ -38,6 +38,7 @@ from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 from agent_py_agent.agent.tooling.business_spaces_tool import BusinessSpacesTool
 from agent_py_agent.agent.tooling.executor import _bound_redacted_input
 from agent_py_agent.agent.tooling.models import BaseTool, ToolHandlerOutcome
+from agent_py_agent.agent.tooling.tool_operation_coordinator import _result_payload
 from agent_py_agent.tests._tool_runtime_harness import (
     execute_canonical_test_call,
     make_test_model_spec,
@@ -734,3 +735,5 @@ def test_biz013_executor_managed_operation_persists_committed_and_replays_cleanl
     assert replay.result.effect_outcome == "confirmed"
     assert replay.result.error_code != "TOOL_OPERATION_OUTCOME_UNKNOWN"
     assert tool.calls == 1
+    assert _result_payload(ToolHandlerOutcome("biz_mutate", True, "{}"))["effect_outcome"] == ""
+    assert _result_payload(ToolHandlerOutcome("biz_mutate", True, "{}"), "committed")["effect_outcome"] == "committed"
