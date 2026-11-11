@@ -12,7 +12,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent_py_agent.agent.assets.descriptor import AssetDescriptor
-from agent_py_agent.agent.assets.revision_history import latest_version
+from agent_py_agent.agent.assets.revision_history import (
+    latest_version,
+    pending_publication,
+)
 from agent_py_agent.agent.assets.workflow_store import (
     WorkflowDefinition,
     WorkflowStepSpec,
@@ -428,7 +431,7 @@ def test_concurrent_run_flow_a_allows_saving_flow_b(tmp_path: Path):
 def test_version_hook_missing_referenced_script_id_does_not_fail(tmp_path: Path):
     """When a workflow step references a script_id missing from ScriptStore,
 
-    version_hook records an explicit status='missing' pin rather than raising AssetHistoryError.
+    version_hook cleanly retains publication debt without deadlocking per-workflow locks.
     """
     owner_home = tmp_path / "owner"
     owner_home.mkdir()
@@ -441,20 +444,18 @@ def test_version_hook_missing_referenced_script_id_does_not_fail(tmp_path: Path)
         ),
     )
 
-    # Save the workflow definition
+    # Save the workflow definition succeeds without deadlocking
     saved = store.save_workflow(definition)
     assert saved.descriptor.id == "test-flow"
 
-    # Verify that a version was recorded successfully in revision history
+    # Forward reference script is not yet published, so version publication stays pending
     latest = latest_version(owner_home, "workflow", "test-flow")
-    assert latest is not None
-    assert latest["version"] >= 1
+    assert latest is None
 
-    # Verify that the missing script pin is recorded gracefully with status='missing'
-    pins = latest.get("pins", {})
-    scripts_pins = pins.get("scripts", {})
-    assert "synthetic-never-run-script" in scripts_pins
-    assert scripts_pins["synthetic-never-run-script"].get("status") == "missing"
+    # Verify that pending publication debt was retained with error_code
+    pending = pending_publication(owner_home, "workflow", "test-flow")
+    assert pending is not None
+    assert pending["snapshot"]["error_code"] == "TOOL_EXECUTION_FAILED"
 
 
 def test_version_hook_genuine_script_pins_correctly_when_present(tmp_path: Path):
@@ -514,3 +515,63 @@ def test_workflow_engine_executes_notification_step_formal_run(tmp_path: Path):
     assert len(delivered) == 1
     assert "value_42" in delivered[0]["message"]
     assert delivered[0]["channel"] == "owner_inbox"
+
+
+def test_reference_sources_dynamic_host_conversation_store(tmp_path: Path):
+    """WorkflowReferenceReader dynamically resolves host.conversation_store.session_tasks."""
+    from agent_py_agent.agent.workflows.reference_sources import build_workflow_reference_reader
+
+    owner_home = tmp_path / "owner"
+    owner_home.mkdir()
+
+    host = SimpleNamespace(owner_home=owner_home, conversation_store=None)
+    reader = build_workflow_reference_reader(host)
+
+    mock_tasks = SimpleNamespace(
+        list_page=lambda limit=100: {
+            "items": [
+                SimpleNamespace(
+                    status="running",
+                    task_id="task_live_1",
+                    dedupe_key="wf:flow_dyn_target:step1",
+                    metadata={},
+                )
+            ]
+        }
+    )
+    host.conversation_store = SimpleNamespace(session_tasks=mock_tasks)
+
+    result = reader("flow_dyn_target")
+    blockers = [b for b in result["blockers"] if b["kind"] == "session_task"]
+    assert len(blockers) == 1
+    assert blockers[0]["ref"] == "task_live_1"
+
+
+def test_reference_sources_index_queried_ok_skips_runs_dir_walk(tmp_path: Path, monkeypatch):
+    """When RunListIndex query completes without exception, runs_root.iterdir() is not called."""
+    from agent_py_agent.agent.workflows.reference_sources import build_workflow_reference_reader
+    from agent_py_agent.agent.workflows.run_store import WorkflowRunStore
+
+    owner_home = tmp_path / "owner"
+    owner_home.mkdir()
+
+    run_store = WorkflowRunStore(owner_home)
+    run_rec = _make_run(owner_home, "run_idx_1")
+    run_rec.workflow_id = "flow_indexed"
+    run_store.create_run(run_rec, {})
+
+    reader = build_workflow_reference_reader(owner_home)
+
+    iterdir_called = []
+    real_iterdir = Path.iterdir
+
+    def spy_iterdir(path_obj):
+        if "workflow_runs" in str(path_obj):
+            iterdir_called.append(str(path_obj))
+        return real_iterdir(path_obj)
+
+    monkeypatch.setattr(Path, "iterdir", spy_iterdir)
+
+    result = reader("flow_indexed")
+    assert any(b["ref"] == "run_idx_1" for b in result["blockers"])
+    assert iterdir_called == []

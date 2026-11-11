@@ -127,8 +127,6 @@ def _base_pins(store, payload):
             raise ValueError('invalid published pins')
         pins[kind] = deepcopy(values)
     for script_id, pin in pins['scripts'].items():
-        if pin.get('status') == 'missing':
-            continue
         script = history.get_version(store.owner_home, 'script', script_id, pin.get('version'))
         _version_payload(store.owner_home, script)
         if (script['code_sha256'] != pin.get('code_sha256') or pin.get('execution_definition_ref')
@@ -185,17 +183,11 @@ def _pins(store, payload, *, use_restoration=True):
                 raise history.AssetHistoryError('ASSET_VERSION_NOT_FOUND')
             continue
         if script_id not in current:
-            try:
-                current[script_id] = _current_script_pin(store, scripts, script_id)
-            except FileNotFoundError:
-                current[script_id] = {'kind': 'script', 'id': script_id, 'status': 'missing'}
+            current[script_id] = _current_script_pin(store, scripts, script_id)
         pin = current[script_id]
         previous = pins['scripts'].get(script_id)
-        if previous is not None:
-            if previous.get('status') == 'missing' and pin.get('status') == 'missing':
-                pass
-            elif any(previous.get(key) != pin.get(key) for key in ('version', 'code_sha256', 'status')):
-                raise history.AssetHistoryError('ASSET_VERSION_CONFLICT')
+        if previous is not None and any(previous.get(key) != pin[key] for key in ('version', 'code_sha256')):
+            raise history.AssetHistoryError('ASSET_VERSION_CONFLICT')
         pins['scripts'].setdefault(script_id, pin)
     return pins
 

@@ -396,6 +396,7 @@ class WorkflowReferenceReader:
                 runs_root = self.owner_home / "data" / "workflow_runs"
                 index_path = self.owner_home / "data" / "workflow_run_index.sqlite3"
                 found_run_ids = set()
+                index_queried_ok = False
                 if index_path.exists():
                     try:
                         from .run_list_index import RunListIndex
@@ -405,12 +406,18 @@ class WorkflowReferenceReader:
                             for q_id in (target_id, f"workflow:{target_id}"):
                                 for r_id, _ in idx.page(q_id, st, limit=10):
                                     found_run_ids.add(str(r_id))
+                        index_queried_ok = True
                     except Exception:
-                        pass
-                if runs_root.exists() and runs_root.is_dir():
+                        index_queried_ok = False
+                if not index_queried_ok and runs_root.exists() and runs_root.is_dir():
+                    scanned = 0
+                    max_scan = 100
                     for entry in runs_root.iterdir():
+                        if scanned >= max_scan:
+                            break
                         if not entry.is_dir() or entry.name.startswith("."):
                             continue
+                        scanned += 1
                         if entry.name in found_run_ids:
                             continue
                         raw = read_text_beneath(self.owner_home, ("data", "workflow_runs", entry.name, "run.json"))
@@ -441,7 +448,7 @@ class WorkflowReferenceReader:
             return False
 
     def _check_session_tasks(self, target_id: str, blockers: list[dict[str, str]]) -> bool:
-        task_store = self.session_task_store
+        task_store = self.session_task_store or getattr(getattr(self.host, "conversation_store", None), "session_tasks", None)
         if task_store is None and self.owner_home is not None:
             conv_dir = self.owner_home / "conversation"
             if conv_dir.exists() and (conv_dir / "session_tasks").exists():
