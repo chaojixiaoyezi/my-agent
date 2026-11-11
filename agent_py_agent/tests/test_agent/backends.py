@@ -275,6 +275,7 @@ class BoundaryWriteSubagentBackend(_TestNativeBackend):
             "PATH_DANGEROUS_ROOT_BLOCKED" in native_messages
             or "PATH_OWNER_SCOPE_BLOCKED" in native_messages
             or "runtime gate denied" in native_messages
+            or "WRITE_FORBIDDEN" in native_messages
         )
         return ModelResponse(
             text=(

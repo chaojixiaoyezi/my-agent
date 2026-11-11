@@ -4869,3 +4869,132 @@ ERROR_CONTRACTS.update({
         recovery_hint="目标资源当前状态与请求操作冲突；先读取最新权威状态核对生命周期，再决定后续操作。",
     ),
 })
+
+# 注册编排、工作流与子代理边界合同错误码；统一恢复建议，不回退至 UNKNOWN_ERROR。
+ERROR_CONTRACTS.update({
+    "DELEGATION_SCOPE_EXCEEDS_PARENT": ErrorContract(
+        code="DELEGATION_SCOPE_EXCEEDS_PARENT", category="permission", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="子代理的读写路径、允许工具或累计后代约束超出父代理授权上界；请收敛 delegation_constraints 至父代理允许子集后再派发。",
+    ),
+    "FROZEN_INPUT_VERSION_MISMATCH": ErrorContract(
+        code="FROZEN_INPUT_VERSION_MISMATCH", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="交接项冻结输入版本与当前权威记录不一致；请先读取最新交接项状态与版本号后再提交。",
+    ),
+    "HANDOFF_WRITESET_OVERLAP": ErrorContract(
+        code="HANDOFF_WRITESET_OVERLAP", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="同一协作 case 下活跃交接项的独占写入集合存在重叠；请拆分互不重叠的文件集合或等待前序交接项收口。",
+    ),
+    "INVALID_STATE_TRANSITION": ErrorContract(
+        code="INVALID_STATE_TRANSITION", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="请求的状态流转不符合当前实体生命周期约束；请先查询最新状态后执行合法动作。",
+    ),
+    "PATH_TRAVERSAL_FORBIDDEN": ErrorContract(
+        code="PATH_TRAVERSAL_FORBIDDEN", category="path", retryable=False,
+        recommended_action=RecoveryAction.FIX_PATH_WITHIN_ALLOWED_ROOTS.value,
+        recovery_hint="目标路径包含越界相对段或超出受管根目录；请改用受管工作区内的规范相对路径。",
+    ),
+    "SELF_REVIEW_FORBIDDEN": ErrorContract(
+        code="SELF_REVIEW_FORBIDDEN", category="permission", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="独立验收与交接核验要求评审主体与作者主体分离；请交由独立的验证代理或协调者执行验收。",
+    ),
+    "SUBAGENT_CUMULATIVE_LIMIT_EXCEEDED": ErrorContract(
+        code="SUBAGENT_CUMULATIVE_LIMIT_EXCEEDED", category="resource", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="当前父节点累计创建的子代理总数已达上限；请在当前代理内直接完成剩余工作或向父级汇报结果。",
+    ),
+    "SUBAGENT_DESCENDANTS_FORBIDDEN": ErrorContract(
+        code="SUBAGENT_DESCENDANTS_FORBIDDEN", category="permission", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="当前代理的派发约束禁止继续创建后代子代理；请自行完成本轮任务并直接返回结构化结果。",
+    ),
+    "SUBWORKFLOW_CYCLE_DETECTED": ErrorContract(
+        code="SUBWORKFLOW_CYCLE_DETECTED", category="contract", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="检测到嵌套子工作流调用环路；请检查调用链并移除循环引用后再执行。",
+    ),
+    "SUBWORKFLOW_DISABLED": ErrorContract(
+        code="SUBWORKFLOW_DISABLED", category="configuration", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前运行配置未启用嵌套子工作流能力；请如实报告配置状态，不要重复重试。",
+    ),
+    "SUBWORKFLOW_MAX_DEPTH_EXCEEDED": ErrorContract(
+        code="SUBWORKFLOW_MAX_DEPTH_EXCEEDED", category="resource", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="嵌套子工作流调用深度超过允许上限；请收敛工作流层级或改为平面步骤编排。",
+    ),
+    "SUBWORKFLOW_PIN_MISMATCH": ErrorContract(
+        code="SUBWORKFLOW_PIN_MISMATCH", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="子工作流固定版本摘要与当前定义不一致；请先核对目标工作流最新修订后再重新绑定。",
+    ),
+    "SUBWORKFLOW_REF_INVALID": ErrorContract(
+        code="SUBWORKFLOW_REF_INVALID", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="子工作流引用标识缺失、格式不合法或目标不存在；请先列出可用工作流核对准确标识。",
+    ),
+    "SUBWORKFLOW_SCOPE_DENIED": ErrorContract(
+        code="SUBWORKFLOW_SCOPE_DENIED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
+        recovery_hint="子工作流目标超出当前工作区或所有者授权范围；请使用本作用域内已授权的工作流定义。",
+    ),
+    "SYMLINK_FORBIDDEN": ErrorContract(
+        code="SYMLINK_FORBIDDEN", category="path", retryable=False,
+        recommended_action=RecoveryAction.FIX_PATH_WITHIN_ALLOWED_ROOTS.value,
+        recovery_hint="受管目录与外部信箱适配路径禁止包含符号链接组件；请改用受管根目录内的真实普通文件路径。",
+    ),
+    "TOOL_RUNTIME_ERROR": ErrorContract(
+        code="TOOL_RUNTIME_ERROR", category="tool", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="工具运行时发生未预期错误；请先核对输入参数与目标资源状态，不要盲目原样重复调用。",
+    ),
+    "WORKFLOW_CONDITION_INVALID": ErrorContract(
+        code="WORKFLOW_CONDITION_INVALID", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="工作流步骤分支条件表达式结构不合法；请按受支持的结构化条件语法修正定义后再保存或预览。",
+    ),
+    "WORKFLOW_ISOLATION_TOOL_FORBIDDEN": ErrorContract(
+        code="WORKFLOW_ISOLATION_TOOL_FORBIDDEN", category="permission", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="只读分析隔离步骤禁止调用具有变更副作用的工具；请改用只读查询工具或移至受控执行步骤。",
+    ),
+    "WORKFLOW_NOTIFICATION_DELIVERY_FAILED": ErrorContract(
+        code="WORKFLOW_NOTIFICATION_DELIVERY_FAILED", category="network", retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint="工作流通知投递未成功；请先核对通道适配器回执与目标会话状态，避免重复发送通知。",
+    ),
+    "WORKFLOW_NOTIFICATION_SPEC_INVALID": ErrorContract(
+        code="WORKFLOW_NOTIFICATION_SPEC_INVALID", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="工作流通知步骤定义缺少必填字段或参数格式无效；请修正通知步骤规格后再执行。",
+    ),
+    "WORKFLOW_NOTIFICATION_TARGET_FORBIDDEN": ErrorContract(
+        code="WORKFLOW_NOTIFICATION_TARGET_FORBIDDEN", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
+        recovery_hint="工作流通知目标不在当前所有者或已绑定通道允许范围内；请核对受管投递目标配置。",
+    ),
+    "WORKFLOW_TOOL_EXECUTOR_UNAVAILABLE": ErrorContract(
+        code="WORKFLOW_TOOL_EXECUTOR_UNAVAILABLE", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前工作流运行上下文未挂载受控工具执行器；请通过正式宿主工作流运行入口执行。",
+    ),
+    "WORKFLOW_TOOL_PERMISSION_DENIED": ErrorContract(
+        code="WORKFLOW_TOOL_PERMISSION_DENIED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
+        recovery_hint="工作流工具步骤请求的工具或范围未被当前运行策略允许；请收敛步骤工具白名单或由有权用户授权。",
+    ),
+    "WORKFLOW_TOOL_SCHEMA_INVALID": ErrorContract(
+        code="WORKFLOW_TOOL_SCHEMA_INVALID", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="工作流工具步骤传入的参数不符合目标工具的输入 Schema；请核对工具参数定义后修正。",
+    ),
+    "WORKFLOW_TOOL_SPEC_INVALID": ErrorContract(
+        code="WORKFLOW_TOOL_SPEC_INVALID", category="contract", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="工作流工具步骤定义不合法或引用了未知工具名；请核对步骤规格与可用工具目录。",
+    ),
+})

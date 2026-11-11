@@ -35,6 +35,7 @@ DECLARED = {
     "scripts", "send_message", "send_session_message", "skill_summarize", "stop_named_work", "update_persona",
     "create_session_task", "get_session_task", "list_owner_sessions",
     "user_config", "watch_stream", "workflows", "feishu_cloud", "feishu_auth", "channel_messages", "skill_transfer", "tool_program",
+    "manage_handoff_board", "manage_requirement_provenance",
 }
 
 # 后台闭包不再替前台豁免工具声明，实际声明收起集合与原授权闭包相互独立。

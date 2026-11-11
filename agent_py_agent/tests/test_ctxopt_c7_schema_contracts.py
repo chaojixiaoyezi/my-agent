@@ -33,8 +33,8 @@ from agent_py_agent.tests.ctxopt_c7_contract_snapshot import (
 # “一项或多项统一用items”；task_progress 的 action 枚举去掉 create。以下四项按该提交后的当前生产 spec 重算，其余沿用冻结快照。
 _SCHEMA_HASHES = {
     **_SCHEMA_HASHES,
-    'create_subagents': '77f0c0e63db4ad09fbbb6546fe1149f33fae53e5fbed29af226d68f3901a9d96',
-    'create_subagents_media': '2e9b70ae7d3a484471e3b9aafcfb3468e8a97990c8e126c7b86b715c778cf309',
+    'create_subagents': 'b46bdf6b78891e0cfc04917a0bb9b4f56404ce1096a3ebbe44a63acdcb912ffa',
+    'create_subagents_media': 'e9e6d79ac58295060893e28372d8de6af9f304f873ec5d6fac4c28395519ed20',
     'task_progress': '28d00d48e4519db2f9fe8a0275104ce7062ebf84cce7af8145ea3fd921adb050',
 }
 _DESCRIPTION_HASHES = {
