@@ -126,8 +126,17 @@ def extract_card_action(data: Any) -> dict[str, Any] | None:
         context = getattr(event, "context", None)
         identity = {"message_id": str(getattr(context, "open_message_id", "") or ""),
                     "chat_id": str(getattr(context, "open_chat_id", "") or "")}
-        return {"value": value, "operator_open_id": operator_open_id, "form_value": form_value,
-                **(identity if any(identity.values()) else {})}
+        option_str = str(getattr(action, "option", "") or "") if action is not None else ""
+        header = getattr(data, "header", None)
+        event_id = str(getattr(header, "event_id", "") or "") if header is not None else ""
+        return {
+            "value": value,
+            "operator_open_id": operator_open_id,
+            "form_value": form_value,
+            **(identity if any(identity.values()) else {}),
+            **({"option": option_str} if option_str else {}),
+            **({"event_id": event_id} if event_id and value.get("kind") == "my_agent_panel_action" else {}),
+        }
     except Exception:
         return None
 
@@ -155,11 +164,16 @@ def extract_webhook_card_action(payload: object) -> dict[str, Any] | None:
     form_value = action.get("form_value") if isinstance(action.get("form_value"), dict) else {}
     context = event.get("context") if isinstance(event.get("context"), dict) else {}
     identity = {"message_id": str(context.get("open_message_id") or ""), "chat_id": str(context.get("open_chat_id") or "")}
+    option_str = str(action.get("option") or "")
+    header = payload.get("header") if isinstance(payload.get("header"), dict) else {}
+    event_id = str(header.get("event_id") or "")
     return {
         "value": value,
         "operator_open_id": operator_open_id,
         "form_value": form_value,
         **(identity if any(identity.values()) else {}),
+        **({"option": option_str} if option_str else {}),
+        **({"event_id": event_id} if event_id and value.get("kind") == "my_agent_panel_action" else {}),
     }
 
 

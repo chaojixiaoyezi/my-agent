@@ -3101,6 +3101,7 @@ agent_py_agent/
 |   |   |-- control_cards.py           # 原生私人控制卡的真实 message/chat 身份；不授予权限
 |   |   `-- service.py                 # 普通回复、主动消息、可编辑进度及附件的统一发送出口
 |   |-- adapter/
+|   |   |-- feishu_agent_panel.py        # 飞书交互式任务与子代理控制面板：HMAC 绑定、分桶状态、私聊/群聊分流与 14 天换卡
 |   |   |-- private_controls.py        # 已验证 SDK actor/卡片身份到原 Gateway 的私人决定运输
 |   |   |-- feishu_ws_observation.py   # SDK帧头及连接摘要、固定卡片阶段；不读取payload或改变ACK
 |   |   |-- feishu_mentions.py         # WS/webhook 共用直接 @机器人判据，不按名称或正文猜
@@ -5036,3 +5037,16 @@ agent_py_agent/
 ```
 
 关键文件说明：`task_rounds.py` 将任务模型回合遥测从整份 JSON 重写改为增量追加源并维护固定摘要水位；`recovery_guard.py` 在物理 SQLite 连接完整生命周期内持有代际锁，配合 `salvage.py` 实现 `runtime.db` 启动期与在线损坏验证抢救。
+
+## 2026-11-11 飞书进度卡片渲染、凭据保险库 v2 与交互式控制面板增量 (WS-F1..WS-F5)
+
+```text
+|-- agent_py_agent/agent/adapter/feishu_agent_panel.py        # 飞书交互式任务与子代理控制面板：HMAC 绑定、分桶状态、私聊/群聊分流与 14 天换卡
+|-- agent_py_agent/tests/test_feishu_cred_v2_core.py          # 凭据保险库 v2 核心逻辑与表单细粒度诊断测试
+|-- agent_py_agent/tests/test_feishu_cred_v2_wire.py          # 凭据保险库 v2 跨端往返与端到端提交流程测试
+|-- agent_py_agent/tests/test_feishu_progress_and_panel_card.py # 飞书进度卡片 JSON 2.0 纯渲染与 28KB 预算淘汰测试
+|-- agent_py_agent/tests/test_feishu_panel_auth_control.py    # 飞书交互式控制面板鉴权、委托任务投影与网关 API 测试
+`-- agent_py_agent/tests/test_feishu_agent_panel_callbacks.py # 飞书控制面板长连与 Webhook 回调、受众分流与换卡端到端测试
+```
+
+关键文件说明：`feishu_agent_panel.py` 为飞书平台提供任务总览与子代理层级控制卡片，支持个人私聊、群聊公开摘要及群任务私聊详情三种受众模式，集成 14 天自动换卡机制与双重会话锁保护。
