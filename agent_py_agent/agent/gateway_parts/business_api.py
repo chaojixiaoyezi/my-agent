@@ -1057,6 +1057,8 @@ def handle_client_business(handler, server):
         if not _native_source(handler):
             return
         context, services = native_business_context(handler, server)
+        from .business_ui_http import enforce_browser_request_token
+        enforce_browser_request_token(handler, server, context, services)
         status, response = execute_business(_native_json(handler), context, services)
     except (HostAPIError, BusinessError) as error:
         code, status, effect = _error_code(error)
@@ -1084,6 +1086,8 @@ def handle_client_business_stream(handler, server):
         if not _native_source(handler):
             return
         context, services = native_business_context(handler, server)
+        from .business_ui_http import enforce_browser_request_token
+        enforce_browser_request_token(handler, server, context, services)
         request = validate_object(_native_json(handler), standalone_schema(business_schema_bundle()['stream_request_schema']))
         context.check('events.list', request)
         if not business_stream_available():

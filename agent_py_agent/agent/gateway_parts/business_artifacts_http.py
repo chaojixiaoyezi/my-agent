@@ -253,6 +253,8 @@ def handle_business_artifact_upload(handler, server):
         if not _native_source(handler):
             return
         context, services = native_business_context(handler, server)
+        from .business_ui_http import enforce_browser_request_token
+        enforce_browser_request_token(handler, server, context, services)
         source, fields, filename = _multipart(handler)
         entered = True
         result = upload_artifact(source, fields, filename, context, services)
