@@ -9,8 +9,8 @@ import json
 import re
 import sqlite3
 import sys
+import threading
 from contextlib import contextmanager
-from contextvars import ContextVar
 from pathlib import Path
 
 from ..conversation.im_tool_approval import resolve_im_tool_approval
@@ -22,24 +22,25 @@ from ..user_space.task_credential_forms import CredentialFormValidationError
 from .multiprocess_global_write import GlobalWriteError
 from .request_worker import _resolve_request_agent_for_owner, admin_channel_identity_for_request
 
-_PLUGIN_INPUT_RECORD_GUARD = ContextVar("plugin_input_record_guard", default=None)
+_PLUGIN_INPUT_RECORD_GUARD = threading.local()
 
 
-# LLM: 只在同步原提交期间设置，ContextVar隔离并发调用；finally恢复，不改变原服务公开参数合同。
+# LLM: 只在同步原提交期间设置，thread-local隔离并发调用；finally恢复，不改变原服务公开参数合同。
 # 函数用途: 给三类原卡锁内提交临时绑定同一次插件票据末核。
 @contextmanager
 def plugin_input_record_check(guard):
-    token = _PLUGIN_INPUT_RECORD_GUARD.set(guard)
+    previous = getattr(_PLUGIN_INPUT_RECORD_GUARD, "guard", None)
+    _PLUGIN_INPUT_RECORD_GUARD.guard = guard
     try:
         yield
     finally:
-        _PLUGIN_INPUT_RECORD_GUARD.reset(token)
+        _PLUGIN_INPUT_RECORD_GUARD.guard = previous
 
 
 # LLM: 仅原卡持锁叶子调用；普通IM路径没有绑定时完全无动作，不创建记录或签权。
 # 函数用途: 在原卡身份核验后执行可选插件CAS末核。
 def check_plugin_input_record(row):
-    guard = _PLUGIN_INPUT_RECORD_GUARD.get()
+    guard = getattr(_PLUGIN_INPUT_RECORD_GUARD, "guard", None)
     if guard is not None:
         guard(row)
 
@@ -122,8 +123,17 @@ def handle_private_interaction(handler, server) -> None:
                 raise ValueError("服务不可用")
             result = resolve_private_interaction(server.agent,body,channel=channel,actor_id=actor_id,approval_paths=server.paths)
     except CredentialFormValidationError as error:
-        handler._send_json(400, {'ok':False, 'error_code':error.code, 'error_stage':error.stage,
-                                 'error_field':error.field, 'message':error.message})
+        reason = getattr(error, "reason", "")
+        response = {
+            "ok": False,
+            "error_code": error.code,
+            "error_stage": error.stage,
+            "error_field": error.field,
+            "message": error.message,
+        }
+        if isinstance(reason, str) and reason:
+            response["error_reason"] = reason
+        handler._send_json(400, response)
         return
     except (OSError, RuntimeError, sqlite3.Error, GlobalWriteError) as error:
         _report_private_interaction_failure(error)
@@ -295,8 +305,12 @@ def _plugin_input_binding(inputs, row):
     reference = row["credential_ref"] if credential else row["input_id"]
     if dependency["provider"] != provider or dependency["reference"] != reference:
         raise HostAPIError("INTERACTION_CONFLICT", 409)
-    if dependency["status"] != "pending" or not inputs.current(dependency):
-        return None
+    if credential and row.get("access_scope") == "owner":
+        if row.get("status") != "pending" or dependency["status"] not in {"pending", "cancelled"}:
+            return None
+    else:
+        if dependency["status"] != "pending" or not inputs.current(dependency):
+            return None
     scope = dependency["scope"]
     if credential and any(scope.get(key) != value for key, value in row["scope"].items()):
         raise HostAPIError("INTERACTION_CONFLICT", 409)

@@ -1547,7 +1547,9 @@ class GatewayReplyDeliveryWorker(
         if quarantined:
             return None
         if response is not None and not claimed.dispatch:
-            if claimed.progress_draft.get('render_kind') == 'card' and claimed.progress_draft.get('message_id'):
+            if claimed.progress_draft.get('render_kind') == 'card' and (
+                claimed.progress_draft.get('display_message_id') or claimed.progress_draft.get('message_id')
+            ):
                 try:
                     progressed = self._deliver_available_progress(claimed, final_update=True)
                 except GatewayReplyQuarantineError as exc:

@@ -156,11 +156,9 @@ class DeliveryService:
         policy = reply_policy if reply_policy is not None else getattr(context, 'reply_policy', '')
         if policy not in {'', 'reference', 'thread'}:
             return ProgressDeliveryReceipt(False, message_id, 'CHANNEL_DELIVERY_MODE_INVALID', 'permanent')
-        # 结论只能来自统一净化后的正文，不接受snapshot中另塞的原始final_text。
+        # 结论不塞入进度卡片，保持卡片轻量收拢并由独立最终消息投递。
         card_snapshot = dict(snapshot or {})
         card_snapshot.pop('final_text', None)
-        if final:
-            card_snapshot['final_text'] = attempt.content
         try:
             options = {'render_kind': 'card', 'card': render_progress_card(card_snapshot)} if render_kind == 'card' else {}
         except ProgressCardOverflow:

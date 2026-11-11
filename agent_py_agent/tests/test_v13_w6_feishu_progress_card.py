@@ -140,36 +140,36 @@ def test_first_post_one_id_throttle_then_patch_same_card(tmp_path, monkeypatch):
     assert '10 条更早' in _text(adapter.edits[-1][2]['card'])
 
 
-def test_final_keeps_foldable_process_and_full_reply(tmp_path, monkeypatch):
+def test_final_closes_card_collapsed_and_sends_standalone_reply(tmp_path, monkeypatch):
     adapter, store, worker, _, _, final, normal = _fixture(tmp_path, monkeypatch)
     worker.run_once()
     final[0] = 'SYNTHETIC_ONLY完整结论' * 100
     worker.run_once()
-    assert len(adapter.created) == 1 and not normal and not store.pending()
+    assert len(adapter.created) == 1 and len(normal) == 1 and normal[0][2] == final[0] and not store.pending()
     message_id, text, options = adapter.edits[-1]
-    assert message_id == 'om_SYNTHETIC_ONLY_CARD' and text == final[0]
+    assert message_id == 'om_SYNTHETIC_ONLY_CARD'
     card = options['card']
-    assert _panel(card)['expanded'] is True
-    assert final[0] in [row.get('text', {}).get('content') for row in card['body']['elements']]
+    assert _panel(card)['expanded'] is False
+    assert final[0] not in [row.get('text', {}).get('content') for row in card['body']['elements']]
     assert '已完成' in _text(card)
 
 
-def test_oversized_final_uses_normal_path_without_partial_patch(tmp_path, monkeypatch):
+def test_oversized_final_closes_card_without_overflow_and_sends_normal_reply(tmp_path, monkeypatch):
     adapter, _, worker, _, _, final, normal = _fixture(tmp_path, monkeypatch)
     worker.run_once()
     final[0] = 'SYNTHETIC_ONLY中文结论🙂' * 5000
     worker.run_once()
     assert len(normal) == 1 and normal[0][2] == final[0]
-    assert not adapter.edits
+    assert len(adapter.edits) == 1
 
 
-def test_final_edit_failure_does_not_send_duplicate_normal_reply(tmp_path, monkeypatch):
+def test_final_card_edit_failure_is_fail_open_and_still_delivers_standalone_reply(tmp_path, monkeypatch):
     adapter, store, worker, _, _, final, normal = _fixture(tmp_path, monkeypatch)
     worker.run_once()
     adapter.edit_ok = False
     final[0] = 'SYNTHETIC_ONLY结论'
     worker.run_once()
-    assert not normal and store.pending()
+    assert len(normal) == 1 and normal[0][2] == final[0] and not store.pending()
 
 
 def test_call_id_identity_and_legacy_fallback_unchanged():
@@ -190,7 +190,7 @@ def test_tool_steps_are_readable_individually_foldable_and_keep_execution_uncert
     ]}
     card = render_progress_card(snapshot)
     outer = _panel(card)
-    assert outer['expanded'] is True
+    assert outer['expanded'] is False
     steps = outer['elements']
     assert all(step['tag'] == 'collapsible_panel' and step['expanded'] is False for step in steps)
     assert '运行命令' in steps[0]['header']['title']['content']
@@ -225,5 +225,5 @@ def test_first_screen_has_no_debug_identity_or_phantom_truncation():
     assert 'internal-request-id' not in _text(card)
     assert '总数未知' not in _text(card)
     panel = _panel(card)
-    assert panel['expanded'] is True
+    assert panel['expanded'] is False
     assert 'SYNTHETIC_ONLY_CALL' not in panel['elements'][0]['header']['title']['content']

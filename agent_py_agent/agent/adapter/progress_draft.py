@@ -135,12 +135,19 @@ def send_gateway_draft(service: object, pending: object, text: str, *, final: bo
     options = {}
     draft = pending.progress_draft
     if draft.get('render_kind') == 'card':
-        options = {'render_kind': 'card', 'snapshot': {'request_id': pending.request_id,
+        snapshot = {
+            'request_id': pending.request_id,
             'source_revision': draft.get('source_revision', pending.progress_cursor),
-            'steps': draft.get('steps', ()), 'truncated': draft.get('truncated', False),
-            'truncation': draft.get('truncation', {}), 'final': final,
+            'steps': draft.get('steps', ()),
+            'truncated': draft.get('truncated', False),
+            'truncation': draft.get('truncation', {}),
+            'final': final,
             'request_phase': 'completed' if final else draft.get('request_phase', 'updated'),
-            'total_steps': (draft.get('truncation', {}).get('observed_steps') if final and draft.get('step_count_complete') else draft.get('total_steps'))}}
+            'total_steps': (draft.get('truncation', {}).get('observed_steps') if final and draft.get('step_count_complete') else draft.get('total_steps')),
+        }
+        if draft.get('panel_view') is not None:
+            snapshot['panel_view'] = draft['panel_view']
+        options = {'render_kind': 'card', 'snapshot': snapshot}
     if pending.reply_policy:
         options['reply_policy'] = pending.reply_policy
     return service.deliver_progress(context, ReplyEnvelope(content=text),

@@ -39,9 +39,9 @@ class RequestCredentialsTool(BaseTool):
             '用真实安全卡收集秘密，禁止要求在普通聊天填写；发卡不访问目标。request常规账号密码用collection_mode=username_password；'
             'authentication=collected时url可由用户在卡片填。只有request_delivery.status=confirmed可称已发卡，waiting_input不等于已填或已保存。'
             '已有credential_ref用status查安全状态；find只接受真实同origin URL，空匹配不证明旧引用未填写。'
-            '群站点先find准确URL或list已授权凭据；selected_credential_ref由宿主按本人优先选择，可直接交web_fetch。'
+            '群聊与个人私聊在访问需认证站点前，都必须先用operation=find加目标URL查当前已授权凭据；selected_credential_ref非空时直接复用交web_fetch，避免发卡打扰用户。'
             '本人的401/403或失败不得静默换他人账号；仅用户撤销自己的引用后可重find。旧task群卡仅在用户明确要求时share本人可分享引用。'
-            '仅缺失或用户明确新增/换账号才request；群新卡默认群共享、个人来源仅本人，可显式access_scope=task。'
+            '仅当find为空或遇到明确HTTP 401（verification_status=rejected）时才request；个人来源绑定URL时默认owner跨任务同站点复用，无URL为task，群新卡默认group本群共享。'
             'request已指定basic/bearer等方案时保存后即可用；collected仅保存，使用前configure原引用与准确方案，由宿主注入秘密。job_id仅绑定已有本人监控。'),
             input_schema={'type':'object','properties':{'url':{'type':'string','description':'find须提供真实目标URL，按同origin发现；不得编造占位URL代查已有引用，已有ref用status。'}, 'authentication':{'type':'string','enum':['collected','basic','bearer','header','login','signature']},
             'collection_mode':{'type':'string','enum':['username_password','password'], 'description':'常规账号密码或仅密码使用本项；宿主自动生成相应秘密字段，以及缺失的目标链接、可选名称和备注。'},'header_name':{'type':'string'},'job_id':{'type':'string'},
@@ -49,7 +49,7 @@ class RequestCredentialsTool(BaseTool):
             'auth_config':{'type':'object'},'ttl_seconds':{'type':'integer','anyOf':[{'const':0},{'minimum':60,'maximum':31536000}], 'description':'保存后有效秒数；0持续复用直到认证拒绝或撤销，缺省使用能力配置（默认0）。不改变卡片填写期限。'},
             'operation':{'type':'string','enum':['request','status','update','configure','revoke','list','find','share']},'credential_ref':{'type':'string','description':'宿主返回的不透明引用，不是账号、密码或其它内容；查询原卡保存状态用status。find不能携带本字段。'},
             'credential_name':{'type':'string','description':'find可选名称筛选；名称只是查找元数据，不能扩大权限或绕过本人账号优先。'},
-            'access_scope':{'type':'string','enum':['group','task'],'description':'新卡使用范围；省略由原宿主决定：群新卡默认group本群共享，个人仅task。个人来源不能选group。'}},
+            'access_scope':{'type':'string','enum':['owner','group','task'],'description':'新卡使用范围；省略由原宿主决定：个人来源绑定URL时默认owner（本人跨任务同站点复用，无URL时为task），群新卡默认group本群共享。个人来源不能选group。'}},
             'anyOf':[
                 {'properties':{'operation':{'enum':['list']}},'required':['operation']},
                 {'properties':{'operation':{'enum':['find']},'url':{'minLength':1},'credential_ref':{'type':'string'}},'required':['operation','url'],EXCLUSIVE_ARGUMENT_GROUPS_KEY:[['url','credential_ref']]},
@@ -61,7 +61,7 @@ class RequestCredentialsTool(BaseTool):
             hints=ToolModelHints(category='orchestration',
                 use_cases=('明确要新的账号密码、输入卡或安全表单时，用request申请宿主安全输入卡；默认仅收集可不传URL，发卡不访问网站，无须先找模板或历史。',
                     '已有引用查保存状态用status；find仅用于真实URL同origin发现，空匹配不能推断原引用未填写。',
-                    '群内需认证站点先用find查当前授权引用，有可用引用直接复用；list查看本群已保存候选。',
+                    '群聊与个人私聊在访问需认证站点前，必须先调用operation=find与目标URL查已授权凭据；selected_credential_ref非空直接复用在web_fetch中，无需发新卡；仅find为空或明确HTTP 401（verification_status=rejected）才request。',
                     '旧task群卡不会自动共享；用户明确要求共享本人旧群卡时才share，再find，无须重新填写；新增或换账号仍明确request。',
                     '本人认证失败由用户决定，不静默换他人账号；明确撤销本人引用后再find本群其它账号。'),
                 keywords=('凭据', '已保存账号', '群共享', '认证', 'credential', '复用账号', '账号密码', '输入卡', '安全表单', '凭据卡'),
@@ -154,11 +154,34 @@ def _invalid_operation_arguments(operation, params):
 def _dispatch_existing_credential_operation(agent, operation, params):
     from ..user_space.task_credentials import manage_credential
     if operation in {'list', 'find'}:
+        try:
+            from ..user_space.task_credential_groups import discover_owner_credentials
+        except ImportError:
+            discover_owner_credentials = None
         from ..user_space.task_credential_groups import discover_group_credentials
-        result = discover_group_credentials(agent, url=params.get('url', ''),
-            name=params.get('credential_name', ''), operation=operation)
-        return ToolHandlerOutcome('request_credentials', True, json.dumps(result, ensure_ascii=False),
-            result_envelope={'credential_discovery': result})
+
+        home_paths = getattr(agent, "home_paths", None)
+        owner_kind = getattr(home_paths, "owner_kind", "group")
+        if owner_kind != "group" and discover_owner_credentials is not None:
+            result = discover_owner_credentials(
+                agent,
+                url=params.get("url", ""),
+                name=params.get("credential_name", ""),
+                operation=operation,
+            )
+        else:
+            result = discover_group_credentials(
+                agent,
+                url=params.get("url", ""),
+                name=params.get("credential_name", ""),
+                operation=operation,
+            )
+        return ToolHandlerOutcome(
+            "request_credentials",
+            True,
+            json.dumps(result, ensure_ascii=False),
+            result_envelope={"credential_discovery": result},
+        )
     if operation == 'share':
         from ..user_space.task_credential_forms import share_credential
         result = share_credential(agent, params['credential_ref'])

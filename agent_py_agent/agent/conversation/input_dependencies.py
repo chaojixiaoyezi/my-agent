@@ -334,8 +334,13 @@ class InputDependencyAccess:
     # 函数用途: 在原门内维护同一任务的输入查找引用。
     def update_refs(self, task_id, input_id, *, remove=False):
         from .input_dependency_index import update_task_input_refs_from_store
-        return self.perform(lambda: update_task_input_refs_from_store(self.store, task_id, input_id,
-            remove=remove, blocking=self.blocking))
+        try:
+            return self.perform(lambda: update_task_input_refs_from_store(self.store, task_id, input_id,
+                remove=remove, blocking=self.blocking))
+        except FileNotFoundError:
+            if remove:
+                return None
+            raise
 
     # LLM: 只读准确task refs，Count0/W共用；到期只resolve原输入，无新线程或范围，整拍最后重排deadline。
     # 函数用途: 对账一项任务已登记的必要输入，并补原恢复投影。
@@ -403,8 +408,13 @@ class InputDependencyAccess:
     def schedule(self, task_id):
         snapshots = self.runtime_db.input_deadline_wakes(task_id) if self.runtime_db is not None else []
         link, error = self.store.tasks.load_report(task_id)
-        if error or link is None:
+        if error:
             raise ValueError('输入任务记录不可读')
+        if link is None:
+            if snapshots and self.runtime_db is not None:
+                for snapshot in snapshots:
+                    self.perform(lambda snapshot=snapshot: self.runtime_db.retire_input_deadline(snapshot))
+            return
         pending = []
         for input_id in getattr(link,'input_dependency_refs',()):
             row = self.read(input_id,task_id=task_id)

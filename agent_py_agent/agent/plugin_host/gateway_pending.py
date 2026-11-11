@@ -315,9 +315,13 @@ def respond_interaction(services, authorized, ticket):
         if approval_revision(row) != ticket.revision:
             raise HostAPIError("REVISION_CONFLICT", 409)
 
+    from ..user_space.task_credential_forms import CredentialFormValidationError
     try:
-        execute_plugin_input(native, thaw(ticket.interaction["payload"]), thaw(ticket.decision_payload),
-                             thaw(ticket.human_identity), guard)
-        return "cancelled" if ticket.decision_payload.get("decision") == "cancel" else "submitted"
+        try:
+            execute_plugin_input(native, thaw(ticket.interaction["payload"]), thaw(ticket.decision_payload),
+                                 thaw(ticket.human_identity), guard)
+            return "cancelled" if ticket.decision_payload.get("decision") == "cancel" else "submitted"
+        except CredentialFormValidationError:
+            raise HostAPIError("INVALID_ARGUMENT", 400) from None
     finally:
         repo.close()
