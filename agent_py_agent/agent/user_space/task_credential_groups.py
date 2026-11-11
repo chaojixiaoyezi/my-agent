@@ -26,20 +26,23 @@ _MANAGEMENT = {'configure', 'update', 'revoke', 'share'}
 
 # LLM: 默认选择只在部署能力明确开启的群生效；私聊/旧task不升级，启用群缺实时身份则失败而非降级发卡。
 # 函数用途: 在原申请入口决定新凭据采用群共享还是原任务作用域，不写记录或发送卡片。
-def new_credential_access_scope(agent, scope) -> str:
-    if getattr(agent.home_paths, 'owner_kind', '') != 'group':
-        return 'task'
-    capability = capability_config_for_agent(agent)
-    if getattr(capability, 'im_group_shared_credentials_enabled', False) is not True:
-        return 'task'
-    _context(agent, scope)
-    return 'group'
+def new_credential_access_scope(agent, scope, *, url: str = "") -> str:
+    owner_kind = getattr(agent.home_paths, 'owner_kind', '')
+    if owner_kind == 'group':
+        capability = capability_config_for_agent(agent)
+        if getattr(capability, 'im_group_shared_credentials_enabled', False) is not True:
+            return 'task'
+        _context(agent, scope)
+        return 'group'
+    if owner_kind == 'user':
+        return 'owner' if isinstance(url, str) and bool(url.strip()) else 'task'
+    return 'task'
 
 
 # LLM: group失败直接抛错；use核own优先，管理限原请求人/填写人，notification必须仍是未被替换的精确旧row而非resolver新ref。
 # 函数用途: 给原使用和管理入口复用群授权；返回False只表示旧task记录仍须走原门。
 def group_credential_access(agent, row, scope, operation='use') -> bool:
-    if _access_scope(row) == 'task':
+    if _access_scope(row) != 'group':
         return False
     actor, owner, chat = _context(agent, scope, require_enabled=operation not in {'status', 'revoke'})
     _validate_group_row(row, owner, chat)
@@ -117,6 +120,111 @@ def discover_group_credentials(agent, *, url='', name='', operation='list') -> d
         'group_sharing_enabled': enabled}
 
 
+# LLM: 个人站点凭据按owner/actor/origin发现，不跨人/跨群，支持list和find操作，不返回密码或密文。
+# 函数用途: 列出或查找本人在当前站点已就绪的个人凭据，供跨任务自动复用。
+def discover_owner_credentials(agent, *, url: str = '', name: str = '', operation: str = 'list') -> dict:
+    if operation not in {'list', 'find'} or not isinstance(name, str) or len(name) > 128:
+        _denied('个人凭据发现参数无效。')
+    home = agent.home_paths
+    if getattr(home, 'owner_kind', '') == 'group':
+        _denied('当前来源不支持个人凭据查询。')
+    current = getattr(agent, '_current_run_params', None)
+    if current is None:
+        _denied('当前凭据调用已失效。')
+    scope = tool_approval_scope(agent, str(current.run_id or current.task_id))
+    if not _scope_is_current(agent, scope):
+        _denied('当前凭据调用已失效。')
+    channel, actor_id = approval_recipient(agent, scope)
+    owner = asdict(owner_identity_from_config(agent.config))
+    origin = _origin(url) if url else ''
+    if operation == 'find' and not origin:
+        _denied('查找凭据需要准确的接口地址。')
+    owner_home = home.owner_home_dir
+    with credential_stage('owner_discovery'):
+        try:
+            descriptor = open_directory_beneath(owner_home, PRIVATE_INTERACTIONS_OWNER_PARTS)
+        except FileNotFoundError:
+            descriptor = None
+        if descriptor is not None:
+            try:
+                names = sorted(os.listdir(descriptor))
+            finally:
+                os.close(descriptor)
+        else:
+            names = []
+        owner_rows = []
+        for file_name in names:
+            if re.fullmatch(r'cred_[0-9a-f]{32}\.json', file_name) is None:
+                continue
+            try:
+                text = read_text_beneath(owner_home, (*PRIVATE_INTERACTIONS_OWNER_PARTS, file_name))
+            except (OSError, UnicodeError):
+                continue
+            if not text:
+                continue
+            try:
+                row = json.loads(text)
+            except (ValueError, UnicodeError):
+                continue
+            if not isinstance(row, dict):
+                continue
+            if _access_scope(row) != 'owner':
+                continue
+            if row.get('schema_version') not in {'task_credential.v1', 'task_credential.v2'}:
+                continue
+            if row.get('owner') != owner or row.get('channel') != channel or row.get('actor_id') != actor_id:
+                continue
+            if row.get('credential_ref') + '.json' != file_name:
+                continue
+            owner_rows.append(row)
+    active = _current_rows(owner_rows)
+    own = _own_rows(active, actor_id, origin or None)
+    usable_candidates = [
+        r for r in active
+        if (not origin or r.get('origin') == origin)
+        and (not name or r.get('credential_name') == name)
+        and _usable(r)
+    ]
+    visible = [
+        r for r in owner_rows
+        if (not origin or r.get('origin') == origin)
+        and (not name or r.get('credential_name') == name)
+    ]
+    selected = _stable(usable_candidates)[0]['credential_ref'] if (operation == 'find' and usable_candidates) else ''
+    own_present = bool(own)
+    reason = (
+        'own_selected'
+        if selected
+        else (
+            'list_only'
+            if operation == 'list' or not origin
+            else ('own_unavailable' if own_present else 'none')
+        )
+    )
+    active_refs = {r['credential_ref'] for r in active}
+    return {
+        'status': 'ok',
+        'operation': operation,
+        'access_scope': 'owner',
+        'origin': origin,
+        'query_name': name,
+        'total_count': len(visible),
+        'usable_count': len(usable_candidates),
+        'own_credential_present': own_present,
+        'selected_credential_ref': selected,
+        'selection_reason': reason,
+        'credentials': [
+            {
+                **_summary(r, actor_id, superseded=r['credential_ref'] not in active_refs),
+                'usable': r['credential_ref'] in active_refs and _usable(r),
+                'submitted_at': r.get('submitted_at'),
+                'expires_at': r.get('ready_expires_at', r.get('expires_at')),
+            }
+            for r in _stable(visible)
+        ],
+    }
+
+
 # LLM: 调用方须在凭据写锁外执行；不缓存成员，只核当前原claim/child attempt及原HostActor，status/revoke可不要求开关。
 # 函数用途: 为一次发现/使用/管理读取准确群身份；未知、退群或分页不完整直接安全拒绝，不挂起等待。
 def _context(agent, scope=None, *, require_enabled=True):
@@ -170,7 +278,7 @@ def _access_scope(row):
     if not isinstance(row, dict):
         _denied('凭据记录格式无效。')
     value = row.get('access_scope', 'task')
-    if value not in ('task', 'group'):
+    if value not in ('task', 'group', 'owner'):
         _denied('凭据共享范围无法识别。')
     return value
 
@@ -219,6 +327,8 @@ def _rows(agent, owner, chat, *, include_task=False):
                 row = json.loads(text)
             except (UnicodeError, ValueError):
                 _denied('凭据记录损坏，未自动改用其它人的凭据。')
+            if _access_scope(row) == 'owner':
+                continue
             if _access_scope(row) == 'task' and (not include_task or not isinstance(row.get('presentation'), dict)
                     or row['presentation'].get('kind') != 'group'):
                 continue

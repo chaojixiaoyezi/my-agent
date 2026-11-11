@@ -27,6 +27,11 @@ from ..path_access_policy import PRIVATE_INTERACTIONS_OWNER_PARTS
 from .interaction_refs import interaction_key, sign_interaction_reference
 from .owner_quota import OwnerQuotaChange
 from .owner_resolver import owner_identity_from_config
+from .task_credential_groups import (
+    discover_group_credentials,
+    discover_owner_credentials,
+    new_credential_access_scope,
+)
 from .task_credential_schema import (
     collection_fields,
     credential_auth_config,
@@ -98,13 +103,25 @@ def request_credential_card(agent, *, url='', authentication='collected', header
     capability = capability_config_for_agent(agent)
     if capability is None:
         raise CredentialInputError('TOOL_UNAVAILABLE', '凭据有效期配置不可用，未发送卡片。', stage='configuration', effect_outcome='not_started')
-    ttl_seconds = credential_seconds(ttl_seconds, default=capability.im_task_credentials_ttl_seconds, allow_unlimited=True)
-    if options.access_scope not in {'', 'task', 'group'}:
+    if options.access_scope not in {'', 'owner', 'task', 'group'}:
         raise ValueError('凭据使用范围无效')
-    from .task_credential_groups import new_credential_access_scope
-    access_scope = 'task' if options.access_scope == 'task' else new_credential_access_scope(agent, scope)
-    if options.access_scope == 'group' and access_scope != 'group':
-        raise ValueError('当前来源不能登记群共享凭据')
+    origin = credential_origin(url) if url else ''
+    if options.access_scope == 'owner':
+        if owner_identity_from_config(agent.config).owner_kind == 'group':
+            raise ValueError('群来源不能登记个人站点凭据')
+        if not origin:
+            raise CredentialInputError('CREDENTIAL_BINDING_INVALID', '个人站点凭据必须绑定目标 URL。')
+        access_scope = 'owner'
+    elif options.access_scope == 'task':
+        access_scope = 'task'
+    else:
+        access_scope = new_credential_access_scope(agent, scope, url=url)
+        if options.access_scope == 'group' and access_scope != 'group':
+            raise ValueError('当前来源不能登记群共享凭据')
+    if access_scope == 'owner':
+        ttl_seconds = credential_seconds(options.ttl_seconds, default=0, allow_unlimited=True)
+    else:
+        ttl_seconds = credential_seconds(options.ttl_seconds, default=capability.im_task_credentials_ttl_seconds, allow_unlimited=True)
     if job_id:
         job = agent.scheduler_repository.get_job(job_id)
         creator = job.get('creator') or {}
@@ -114,7 +131,6 @@ def request_credential_card(agent, *, url='', authentication='collected', header
     with credential_stage("key_initialization", key_validation=True):
         _cipher(home)
     from ..conversation.im_tool_approval import _scope_identity
-    origin = credential_origin(url) if url else ''
     if authentication == 'login' and origin and credential_origin(auth_config['url']) != origin:
         raise ValueError('登录地址必须属于同一接口 origin')
     with credential_stage("key_reference", key_validation=True):
@@ -127,7 +143,7 @@ def request_credential_card(agent, *, url='', authentication='collected', header
         if owner.owner_kind == 'group':
             payload.update(presentation={'kind':'group','chat_id':owner.owner_id}, submitter_policy='current_group_member')
         signed = sign_interaction_reference(home,payload)
-    row = {**payload,'schema_version':'task_credential.v1','reference':signed,'status':'pending',
+    row = {**payload,'schema_version':'task_credential.v2' if access_scope == 'owner' else 'task_credential.v1','reference':signed,'status':'pending',
            'origin':origin,'target_url':url,'collection_mode':options.collection_mode,'authentication':authentication,
            'header_name':header_name,'job_id':job_id,'fields':fields,'auth_config':auth_config,
            'ttl_seconds':ttl_seconds,'generation':1,'delivery_state':'not_started'}
@@ -329,23 +345,78 @@ def _save_credential_row(admission,path,row):
 # LLM: 展示只读原access_scope和结构字段；username为text，其它凭据password且无default，show_icon不控制明文眼睛；提交仍经原MAC/成员门。
 # 函数用途: 在原表单说明使用范围；账号为普通文本、其它凭据遮蔽且从不预填，内部控件名不与业务字段冲突。
 def credential_card(row):
-    inputs = [{'tag':'input','name':field['name'],
-        **({'input_type':'text'} if field['name']=='username' else {'input_type':'password','show_icon':True}),
-        'label':{'tag':'plain_text','content':field['label']}} for field in row.get('fields', credential_fields(row['authentication']))]
+    is_owner = row.get('access_scope') == 'owner'
+    if is_owner:
+        inputs = [{
+            'tag': 'input',
+            'name': field['name'],
+            'required': True,
+            **({'input_type': 'text'} if field['name'] == 'username' else {'input_type': 'password', 'show_icon': True}),
+            'label': {'tag': 'plain_text', 'content': field['label']},
+        } for field in row.get('fields', credential_fields(row['authentication']))]
+        submit_text = '更新并保存凭据' if row.get('replaces_ref') else '保存凭据'
+        submit = {
+            'tag': 'button',
+            'name': '_credential_submit',
+            'action_type': 'form_submit',
+            'type': 'primary',
+            'text': {'tag': 'plain_text', 'content': submit_text},
+            'value': {'kind': 'my_agent_task_credential', 'reference': row['reference'], 'decision': 'submit'},
+        }
+        cancel = {
+            'tag': 'button',
+            'text': {'tag': 'plain_text', 'content': '取消'},
+            'value': {'kind': 'my_agent_task_credential', 'reference': row['reference'], 'decision': 'cancel'},
+        }
+        site_target = row.get('origin') or row.get('target_url') or ''
+        div_text = f"站点凭据安全填写：{site_target}\n保存后仅绑定到你的个人账号与该站点，跨任务可自动复用；输入不会进入聊天、模型或记忆。"
+        return {
+            'config': {'wide_screen_mode': True, 'update_multi': True},
+            'elements': [
+                {'tag': 'div', 'text': {'tag': 'plain_text', 'content': div_text}},
+                {'tag': 'form', 'name': '_credential_form', 'elements': [*inputs, submit]},
+                {'tag': 'action', 'actions': [cancel]},
+            ],
+        }
+    inputs = [{
+        'tag': 'input',
+        'name': field['name'],
+        'required': True,
+        **({'input_type': 'text'} if field['name'] == 'username' else {'input_type': 'password', 'show_icon': True}),
+        'label': {'tag': 'plain_text', 'content': field['label']},
+    } for field in row.get('fields', credential_fields(row['authentication']))]
     if not row.get('target_url', row.get('origin')):
-        inputs.insert(0, {'tag':'input','name':'target_url','label':{'tag':'plain_text','content':'目标链接'}})
-    inputs.extend({'tag':'input','name':name,'required':False,'label':{'tag':'plain_text','content':label}}
-                  for name,label in [('credential_name','名称（可选）'),('credential_note','备注（可选）')])
-    submit = {'tag':'button','name':'_credential_submit','action_type':'form_submit','type':'primary',
-        'text':{'tag':'plain_text','content':'保存并供本群助手使用' if row.get('access_scope') == 'group' else '仅供此任务使用'}, 'value':{'kind':'my_agent_task_credential','reference':row['reference'],'decision':'submit'}}
-    cancel = {'tag':'button','text':{'tag':'plain_text','content':'取消'},
-        'value':{'kind':'my_agent_task_credential','reference':row['reference'],'decision':'cancel'}}
-    target = '监控 '+row['job_id'] if row['job_id'] else '当前任务'
+        inputs.insert(0, {'tag': 'input', 'name': 'target_url', 'required': True, 'label': {'tag': 'plain_text', 'content': '目标链接'}})
+    inputs.extend({
+        'tag': 'input',
+        'name': name,
+        'required': False,
+        'label': {'tag': 'plain_text', 'content': label},
+    } for name, label in [('credential_name', '名称（可选）'), ('credential_note', '备注（可选）')])
+    submit = {
+        'tag': 'button',
+        'name': '_credential_submit',
+        'action_type': 'form_submit',
+        'type': 'primary',
+        'text': {'tag': 'plain_text', 'content': '保存并供本群助手使用' if row.get('access_scope') == 'group' else '仅供此任务使用'},
+        'value': {'kind': 'my_agent_task_credential', 'reference': row['reference'], 'decision': 'submit'},
+    }
+    cancel = {
+        'tag': 'button',
+        'text': {'tag': 'plain_text', 'content': '取消'},
+        'value': {'kind': 'my_agent_task_credential', 'reference': row['reference'], 'decision': 'cancel'},
+    }
+    target = '监控 ' + row['job_id'] if row['job_id'] else '当前任务'
     usage = ('本群成员可让助手复用；优先使用自己填写的账号，主动取消后可使用本群其它账号。'
              if row.get('access_scope') == 'group' else '仅限原发起人的当前任务或已绑定监控。')
-    return {'config':{'wide_screen_mode':True,'update_multi':True},'elements':[
-        {'tag':'div','text':{'tag':'plain_text','content':f"{target}需要接口凭据：{row.get('target_url') or row['origin'] or '请填写目标链接'}\n{usage}\n输入不进入聊天、模型或记忆。"}},
-        {'tag':'form','name':'_credential_form','elements':[*inputs,submit]}, {'tag':'action','actions':[cancel]}]}
+    return {
+        'config': {'wide_screen_mode': True, 'update_multi': True},
+        'elements': [
+            {'tag': 'div', 'text': {'tag': 'plain_text', 'content': f"{target}需要接口凭据：{row.get('target_url') or row['origin'] or '请填写目标链接'}\n{usage}\n输入不进入聊天、模型或记忆。"}},
+            {'tag': 'form', 'name': '_credential_form', 'elements': [*inputs, submit]},
+            {'tag': 'action', 'actions': [cancel]},
+        ],
+    }
 
 
 # LLM: 上游已MAC/actor/解锁；群共享关闭时不收旧group卡新值但允许取消；同卡同代终态和原期限不变。
@@ -427,6 +498,14 @@ def _assert_credential_scope(agent, row, scope, url, *, require_ready=True, oper
         raise ValueError('凭据未就绪、已过期或已撤销，请重新申请私人输入')
     from .task_credential_groups import group_credential_access
     if group_credential_access(agent, row, scope, operation=operation):
+        return
+    if row.get('access_scope') == 'owner':
+        if (
+            owner_identity_from_config(agent.config).owner_kind == 'group'
+            or row.get('actor_id') != actor
+            or (row.get('submitter_actor_id') and row.get('submitter_actor_id') != actor)
+        ):
+            raise ValueError('凭据不属于此调用或接口')
         return
     if row.get('access_scope', 'task') != 'task' or row['actor_id'] != actor:
         raise ValueError('凭据不属于此调用或接口')
@@ -527,8 +606,13 @@ def submit_credential_card_for_owner(home, capability, inputs, payload, body, *,
             if row['status'] != 'pending':
                 should_publish = False if row['status']=='cancelled' and body['decision']=='cancel' else credential_callback_replay_for_input(inputs,row,body,actor)
             else:
-                if body['decision'] != 'cancel' and (time.time() >= row['expires_at'] or not credential_submission_current_from_access(inputs,row)):
-                    raise ValueError('原任务或卡片已失效')
+                expired = time.time() >= row['expires_at']
+                task_current = credential_submission_current_from_access(inputs, row)
+                if body['decision'] != 'cancel':
+                    if expired:
+                        raise ValueError('原任务或卡片已失效')
+                    if not task_current and row.get('access_scope', 'task') != 'owner':
+                        raise ValueError('原任务或卡片已失效')
                 row['submitter_actor_id'] = actor
                 if body['decision'] == 'cancel':
                     row.update(status='cancelled',cancelled_by=audit(actor))
@@ -544,9 +628,11 @@ def submit_credential_card_for_owner(home, capability, inputs, payload, body, *,
                 else:
                     raise ValueError('提交动作无效')
                 _save_credential_row(admission,path,row)
+                if body['decision'] == 'submit' and row.get('access_scope') == 'owner' and not task_current:
+                    return row, 'retire_inactive', None
                 should_publish = True
         return row, should_publish, None
-    row, should_publish, done = inputs.perform(transition)
+    row, action, done = inputs.perform(transition)
     if done is not None:
         return done
     if row['status'] == 'cancelled':
@@ -555,7 +641,20 @@ def submit_credential_card_for_owner(home, capability, inputs, payload, body, *,
             retire_credential_input_from_access(inputs,row)
         else:
             retire(row)
-    elif should_publish:
+    elif action == 'retire_inactive':
+        if retire is None:
+            from .task_credential_forms import retire_credential_input_from_access
+            retire_credential_input_from_access(inputs, row)
+        else:
+            retire(row)
+        return {
+            'ok': True,
+            'decision': row['status'],
+            'saved': True,
+            'resume_status': 'task_inactive',
+            'message': '凭据已安全保存（原任务已结束，后续访问该站点可直接复用）。',
+        }
+    elif action is True or (isinstance(action, bool) and action):
         if publish is None:
             inputs.resolve(row.get('input_id',row['credential_ref']),status=row['status'],result_refs=[row['credential_ref']])
         else:

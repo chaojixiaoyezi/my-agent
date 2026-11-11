@@ -42,7 +42,11 @@ def credential_callback_replay_for_input(inputs, row, body, actor):
     same_scope = all(dependency.get('scope', {}).get(key) == value for key, value in row.get('scope', {}).items())
     if (not dependency or dependency.get('owner') != row.get('owner') or not same_scope
             or dependency.get('reference') != row['credential_ref'] or dependency.get('provider') != 'credential'
-            or dependency.get('input_id') != row.get('input_id',row['credential_ref']) or not inputs.current(dependency)):
+            or dependency.get('input_id') != row.get('input_id',row['credential_ref'])):
+        raise ValueError('原任务或输入绑定已失效')
+    if not inputs.current(dependency):
+        if row.get('access_scope') == 'owner' and row.get('status') == 'ready' and body.get('decision') == 'submit':
+            return False
         raise ValueError('原任务或输入绑定已失效')
     status = dependency.get('status')
     if status not in {'pending', row['status']}:

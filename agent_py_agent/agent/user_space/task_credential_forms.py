@@ -4,48 +4,106 @@
 # 模块用途: 校验原凭据卡与认证配置，群共享使用和管理保持分权，秘密只在原加密链保存。
 from __future__ import annotations
 
-
 # LLM: 仅原卡授权后的parser可抛此类型；字段和文案来自固定枚举，不保存表单、URL或底层异常，HTTP与适配器须同步保留安全分类。
 # 类用途: 把可改正的表单错误与身份、期限或任务失效分开，不读取或写入任何存储。
+CREDENTIAL_FORM_ERROR_FIELDS: tuple[str, ...] = ("fields", "username", "secret", "target_url")
+CREDENTIAL_FORM_ERROR_REASONS: tuple[str, ...] = (
+    "missing", "empty", "type", "too_long", "newline", "unexpected", "invalid_url"
+)
+
+_DEFAULT_REASON = object()
+
+
 class CredentialFormValidationError(ValueError):
     code = 'CREDENTIAL_FORM_INVALID'
     stage = 'form'
 
-    # LLM: 调用方只传fields/target_url固定枚举；未知值用固定错误拒绝，不复制参数到异常。
-    # 函数用途: 保存安全字段和对应提示，供HTTP返回可重试原卡的事实。
-    def __init__(self, field):
-        messages = {'fields':'表单内容无效，请检查必填项和字段格式后重新提交原卡。',
-                    'target_url':'目标链接无效，请填写完整的 HTTP 或 HTTPS 链接后重新提交原卡。'}
-        if not isinstance(field, str) or field not in messages:
+    # LLM: 调用方只传fields/username/secret/target_url固定枚举；未知值用固定错误拒绝，不复制参数到异常。
+    # 函数用途: 保存安全字段、原因和对应提示，供HTTP返回可重试原卡的事实。
+    def __init__(self, field: str, reason: str = _DEFAULT_REASON) -> None:
+        if not isinstance(field, str) or field not in CREDENTIAL_FORM_ERROR_FIELDS:
+            raise ValueError('表单错误字段无效')
+        if reason is _DEFAULT_REASON:
+            reason = 'invalid_url' if field == 'target_url' else 'empty'
+        if not isinstance(reason, str) or reason not in CREDENTIAL_FORM_ERROR_REASONS:
             raise ValueError('表单错误字段无效')
         self.field = field
-        self.message = messages[field]
+        self.reason = reason
+        if field == 'username' and reason in {'missing', 'empty'}:
+            msg = '请填写账号后重新提交原卡，请勿在聊天中发送密码。'
+        elif field == 'secret' and reason in {'missing', 'empty'}:
+            msg = '请填写密码或密钥后重新提交原卡，请勿在聊天中发送密码。'
+        elif field == 'target_url' and reason in {'missing', 'empty'}:
+            msg = '请填写目标链接后重新提交原卡，请勿在聊天中发送密码。'
+        elif field == 'target_url' and reason == 'invalid_url':
+            msg = '目标链接无效，请填写完整的 HTTP 或 HTTPS 链接后重新提交原卡，请勿在聊天中发送密码。'
+        elif reason == 'newline':
+            msg = '凭据字段不能包含换行符，请修改后重新提交原卡，请勿在聊天中发送密码。'
+        elif reason == 'too_long':
+            msg = '凭据字段超出长度上限，请修改后重新提交原卡，请勿在聊天中发送密码。'
+        else:
+            msg = '表单内容无效，请检查必填项和字段格式后重新提交原卡，请勿在聊天中发送密码。'
+        self.message = msg
         super().__init__(self.message)
 
 
 # LLM: 只接收原卡明确字段且必须由调用方先验授权；typed错误仅覆盖本次fields及新目标，既有目标错误不转表单错误，不泄露输入。
 # 函数用途: 将提交拆成待加密秘密和可保存元数据；可改正的字段或新链接错误保留原待填卡。
 def credential_submission_values(row, fields, origin_for):
-    names = {field['name'] for field in row['fields']}
+    if not isinstance(fields, dict):
+        raise CredentialFormValidationError('fields', 'type')
     optional = {'credential_name', 'credential_note'}
+    cleaned = {
+        k: v for k, v in fields.items()
+        if k != '_credential_submit' and not (k in optional and v is None)
+    }
+    names = [field['name'] for field in row['fields']]
+    name_set = set(names)
     needs_url = not row.get('target_url', row.get('origin'))
-    required = names | ({'target_url'} if needs_url else set())
-    if not isinstance(fields, dict) or not required <= set(fields) or set(fields) - required - optional:
-        raise CredentialFormValidationError('fields')
-    if any(not isinstance(value, str) or len(value) > (8192 if name in names else 2048)
-           or '\r' in value or '\n' in value or (name in required and not value)
-           for name, value in fields.items()):
-        raise CredentialFormValidationError('fields')
-    target = fields['target_url'] if needs_url else row.get('target_url', row['origin'])
-    try:
+    allowed_keys = name_set | optional | {'target_url'}
+    if set(cleaned) - allowed_keys:
+        raise CredentialFormValidationError('fields', 'unexpected')
+    required_keys = (['target_url'] if needs_url else []) + names
+    for key in required_keys:
+        err_field = key if key in CREDENTIAL_FORM_ERROR_FIELDS else 'fields'
+        if key not in cleaned or cleaned[key] is None:
+            raise CredentialFormValidationError(err_field, 'missing')
+        if not isinstance(cleaned[key], str):
+            raise CredentialFormValidationError(err_field, 'type')
+        if key in {'username', 'target_url'}:
+            if not cleaned[key].strip():
+                raise CredentialFormValidationError(err_field, 'empty')
+        else:
+            if not cleaned[key]:
+                raise CredentialFormValidationError(err_field, 'empty')
+    for k, v in cleaned.items():
+        err_field = k if k in CREDENTIAL_FORM_ERROR_FIELDS else 'fields'
+        if not isinstance(v, str):
+            raise CredentialFormValidationError(err_field, 'type')
+        limit = 8192 if k in name_set else 2048
+        if len(v) > limit:
+            raise CredentialFormValidationError(err_field, 'too_long')
+        if '\r' in v or '\n' in v:
+            raise CredentialFormValidationError(err_field, 'newline')
+    if needs_url:
+        target = cleaned['target_url'].strip()
+        try:
+            origin = origin_for(target)
+        except ValueError:
+            raise CredentialFormValidationError('target_url', 'invalid_url') from None
+    else:
+        target = row.get('target_url', row['origin'])
         origin = origin_for(target)
-    except ValueError:
-        if not needs_url:
-            raise
-        raise CredentialFormValidationError('target_url') from None
+        if 'target_url' in cleaned:
+            try:
+                cleaned_origin = origin_for(cleaned['target_url'].strip())
+                if cleaned_origin != origin:
+                    raise CredentialFormValidationError('target_url', 'invalid_url')
+            except ValueError:
+                raise CredentialFormValidationError('target_url', 'invalid_url') from None
     metadata = {'target_url': target, 'origin': origin}
-    metadata.update({name: fields[name] for name in optional if name in fields})
-    return {name: fields[name] for name in names}, metadata
+    metadata.update({name: cleaned[name] for name in optional if name in cleaned})
+    return {name: cleaned[name] for name in names}, metadata
 
 
 # LLM: 群成员提供权限来自可信运输事实，取消只终止本卡允许当前成员，覆盖仍限原请求人或既有提供者；不认表单姓名。
@@ -179,6 +237,7 @@ def assert_credential_reissue_scope(agent, row, scope):
     channel, actor = approval_recipient(agent, scope)
     original_scope = row.get('scope', {})
     shared = row.get('access_scope') == 'group'
+    cross_thread_allowed = row.get('access_scope') in {'group', 'owner'}
     if shared:
         from .task_credential_groups import group_credential_access
         group_credential_access(agent, row, scope, operation='update')
@@ -189,8 +248,12 @@ def assert_credential_reissue_scope(agent, row, scope):
     # 子代理scope.thread_id是child线程，比较原任务的canonical来源线程，而非展示线程。
     original, error = agent.conversation_store.tasks.load_report(original_scope.get('root_task_id', ''))
     current, current_error = agent.conversation_store.tasks.load_report(scope.root_task_id)
-    if error or current_error or original is None or current is None or (not shared and original.thread_id != current.thread_id):
-        raise ValueError('凭据重发不属于原会话')
+    if not cross_thread_allowed:
+        if error or current_error or original is None or current is None or original.thread_id != current.thread_id:
+            raise ValueError('凭据重发不属于原会话')
+    else:
+        if current_error or current is None:
+            raise ValueError('凭据重发不属于原会话')
     assert_credential_record_signature(agent, row)
 
 
