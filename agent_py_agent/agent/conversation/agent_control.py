@@ -145,6 +145,154 @@ def read_agent_view(
     )
 
 
+def _resolve_authorized_sender_threads(
+    agent: object,
+    store: ConversationStore,
+    scope: object,
+) -> tuple[object, set[str], list[object]]:
+    conversation_id = str(getattr(scope, "conversation_id", "") or "").strip()
+    user_id = str(getattr(scope, "user_id", "") or "").strip()
+    channel = str(getattr(scope, "channel", "") or "").strip()
+    if not conversation_id or not user_id or not channel:
+        raise AgentControlError(400, "AGENT_SCOPE_INVALID", "当前会话身份不完整。")
+
+    owner_kind = str(getattr(getattr(agent, "home_paths", None), "owner_kind", "") or "").strip()
+    owner_id = str(getattr(getattr(agent, "home_paths", None), "owner_id", "") or "").strip()
+
+    if owner_kind != "group":
+        try:
+            sender_thread, load_error = store.threads.resolve_report(
+                channel=channel,
+                channel_conversation_id=conversation_id,
+                channel_user_id=user_id,
+            )
+        except Exception as exc:
+            raise AgentControlError(503, "AGENT_THREAD_UNAVAILABLE", "当前会话暂时不可读取。") from exc
+        if sender_thread is None or load_error is not None:
+            raise AgentControlError(404, "AGENT_THREAD_NOT_FOUND", "当前会话还没有可查看的代理任务。")
+        st_id = str(getattr(sender_thread, "thread_id", "") or "").strip()
+        return sender_thread, {st_id}, [sender_thread]
+
+    exact_thread = None
+    try:
+        sender_thread, load_error = store.threads.resolve_report(
+            channel=channel,
+            channel_conversation_id=conversation_id,
+            channel_user_id=user_id,
+        )
+        if sender_thread is not None and load_error is None:
+            exact_thread = sender_thread
+    except Exception:
+        exact_thread = None
+
+    candidate_ids: list[str] = []
+    seen_ids: set[str] = set()
+    if exact_thread is not None:
+        tid = str(getattr(exact_thread, "thread_id", "") or "").strip()
+        if tid:
+            seen_ids.add(tid)
+            candidate_ids.append(tid)
+
+    bindings: dict[str, str] = {}
+    read_bindings_fn = getattr(store.threads, "_read_bindings_report", None)
+    if callable(read_bindings_fn):
+        try:
+            raw_bindings, bind_err = read_bindings_fn()
+            if isinstance(raw_bindings, dict) and bind_err is None:
+                bindings = raw_bindings
+        except Exception:
+            bindings = {}
+
+    prefix = f"{channel}\x1f{conversation_id}\x1f"
+    for k, v in bindings.items():
+        if str(k).startswith(prefix):
+            tid = str(v or "").strip()
+            if tid and tid not in seen_ids:
+                seen_ids.add(tid)
+                candidate_ids.append(tid)
+                if len(candidate_ids) >= 32:
+                    break
+
+    candidates: list[object] = []
+    if exact_thread is not None:
+        if not owner_id or not getattr(exact_thread, "owner_id", "") or str(exact_thread.owner_id).strip() == owner_id:
+            candidates.append(exact_thread)
+
+    for tid in candidate_ids:
+        if exact_thread is not None and tid == str(getattr(exact_thread, "thread_id", "") or "").strip():
+            continue
+        try:
+            th, err = store.threads.load_report(tid)
+            if th is not None and err is None:
+                if not owner_id or not getattr(th, "owner_id", "") or str(th.owner_id).strip() == owner_id:
+                    candidates.append(th)
+        except Exception:
+            continue
+
+    if not candidates:
+        raise AgentControlError(404, "AGENT_THREAD_NOT_FOUND", "当前会话还没有可查看的代理任务。")
+
+    authorized_sender_ids = {
+        str(getattr(t, "thread_id", "") or "").strip()
+        for t in candidates
+        if str(getattr(t, "thread_id", "") or "").strip()
+    }
+
+    if (
+        exact_thread is not None
+        and exact_thread in candidates
+        and str(getattr(exact_thread, "workspace_task_id", "") or "").strip()
+    ):
+        primary_thread = exact_thread
+    else:
+        primary_thread = max(candidates, key=lambda t: float(getattr(t, "updated_at", 0.0) or 0.0))
+
+    return primary_thread, authorized_sender_ids, candidates
+
+
+def _verify_delegated_session_task(
+    store: ConversationStore,
+    st: object,
+    *,
+    owner_id: str,
+    authorized_sender_ids: set[str],
+    clean_root_id: str = "",
+) -> tuple[object, str]:
+    if str(getattr(st, "sender_thread_id", "") or "").strip() not in authorized_sender_ids:
+        raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "目标后台任务不属于当前会话。")
+
+    target_thread_id = str(getattr(st, "target_thread_id", "") or "").strip()
+    try:
+        target_thread, target_err = store.threads.load_report(target_thread_id)
+    except Exception as exc:
+        raise AgentControlError(503, "AGENT_THREAD_UNAVAILABLE", "目标后台执行会话暂时不可读取。") from exc
+    if target_thread is None or target_err is not None:
+        raise AgentControlError(404, "AGENT_THREAD_NOT_FOUND", "目标后台执行会话不可读取。")
+
+    if owner_id and getattr(target_thread, "owner_id", "") and str(target_thread.owner_id).strip() != owner_id:
+        raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "目标后台任务超出当前用户。")
+
+    from .execution_threads import IM_TASK_EXECUTION_KEY, execution_origin_thread
+    policy = (getattr(target_thread, "metadata", None) or {}).get(IM_TASK_EXECUTION_KEY)
+    if isinstance(policy, dict):
+        try:
+            origin_thread = execution_origin_thread(store.threads.require, target_thread)
+        except (DataCorruptionError, KeyError, FileNotFoundError) as exc:
+            raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "后台执行来源会话无效。") from exc
+        if str(getattr(origin_thread, "thread_id", "") or "").strip() not in authorized_sender_ids:
+            raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "后台执行来源会话与当前会话不匹配。")
+        if str(policy.get("session_task_id") or "") not in {"", st.task_id}:
+            raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "后台执行策略中的任务引用不匹配。")
+        verified_root_id = str(policy.get("root_task_id") or getattr(target_thread, "workspace_task_id", "") or "").strip()
+    else:
+        verified_root_id = clean_root_id or str(getattr(target_thread, "workspace_task_id", "") or "").strip()
+
+    if clean_root_id and verified_root_id and clean_root_id != verified_root_id:
+        raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "卡片绑定的根任务与后台任务不一致。")
+
+    return target_thread, verified_root_id
+
+
 # LLM: Bounded panel read gathers authorized foreground/delegated tasks and subagent nodes for Feishu cards within 1s.
 # 函数用途: 投影会话当前授权的任务花名册与选中子代理视图，不执行全量目录或全历史扫描。
 def list_authorized_task_panel(
@@ -161,21 +309,8 @@ def list_authorized_task_panel(
     store = getattr(agent, "conversation_store", None)
     if not isinstance(store, ConversationStore):
         raise AgentControlError(503, "AGENT_STORE_UNAVAILABLE", "代理状态存储不可用。")
-    conversation_id = str(getattr(scope, "conversation_id", "") or "").strip()
-    user_id = str(getattr(scope, "user_id", "") or "").strip()
-    channel = str(getattr(scope, "channel", "") or "").strip()
-    if not conversation_id or not user_id or not channel:
-        raise AgentControlError(400, "AGENT_SCOPE_INVALID", "当前会话身份不完整。")
-    try:
-        sender_thread, load_error = store.threads.resolve_report(
-            channel=channel,
-            channel_conversation_id=conversation_id,
-            channel_user_id=user_id,
-        )
-    except Exception as exc:
-        raise AgentControlError(503, "AGENT_THREAD_UNAVAILABLE", "当前会话暂时不可读取。") from exc
-    if sender_thread is None or load_error is not None:
-        raise AgentControlError(404, "AGENT_THREAD_NOT_FOUND", "当前会话还没有可查看的代理任务。")
+
+    sender_thread, authorized_sender_ids, candidate_threads = _resolve_authorized_sender_threads(agent, store, scope)
 
     owner_id = str(
         getattr(getattr(agent, "home_paths", None), "owner_id", "") or ""
@@ -199,37 +334,13 @@ def list_authorized_task_panel(
             raise AgentControlError(404, "AGENT_TASK_NOT_FOUND", "目标后台任务不存在或不可读。") from exc
         if st is None:
             raise AgentControlError(404, "AGENT_TASK_NOT_FOUND", "目标后台任务不存在。")
-        if str(getattr(st, "sender_thread_id", "") or "").strip() != str(getattr(sender_thread, "thread_id", "") or "").strip():
-            raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "目标后台任务不属于当前会话。")
-
-        target_thread_id = str(getattr(st, "target_thread_id", "") or "").strip()
-        try:
-            target_thread, target_err = store.threads.load_report(target_thread_id)
-        except Exception as exc:
-            raise AgentControlError(503, "AGENT_THREAD_UNAVAILABLE", "目标后台执行会话暂时不可读取。") from exc
-        if target_thread is None or target_err is not None:
-            raise AgentControlError(404, "AGENT_THREAD_NOT_FOUND", "目标后台执行会话不可读取。")
-
-        if owner_id and getattr(target_thread, "owner_id", "") and str(target_thread.owner_id).strip() != owner_id:
-            raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "目标后台任务超出当前用户。")
-
-        from .execution_threads import IM_TASK_EXECUTION_KEY, execution_origin_thread
-        policy = (getattr(target_thread, "metadata", None) or {}).get(IM_TASK_EXECUTION_KEY)
-        if isinstance(policy, dict):
-            try:
-                origin_thread = execution_origin_thread(store.threads.require, target_thread)
-            except (DataCorruptionError, KeyError, FileNotFoundError) as exc:
-                raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "后台执行来源会话无效。") from exc
-            if str(getattr(origin_thread, "thread_id", "") or "").strip() != str(getattr(sender_thread, "thread_id", "") or "").strip():
-                raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "后台执行来源会话与当前会话不匹配。")
-            if str(policy.get("session_task_id") or "") not in {"", st.task_id}:
-                raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "后台执行策略中的任务引用不匹配。")
-            verified_root_id = str(policy.get("root_task_id") or getattr(target_thread, "workspace_task_id", "") or "").strip()
-        else:
-            verified_root_id = clean_root_id or str(getattr(target_thread, "workspace_task_id", "") or "").strip()
-
-        if clean_root_id and verified_root_id and clean_root_id != verified_root_id:
-            raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "卡片绑定的根任务与后台任务不一致。")
+        target_thread, verified_root_id = _verify_delegated_session_task(
+            store,
+            st,
+            owner_id=owner_id,
+            authorized_sender_ids=authorized_sender_ids,
+            clean_root_id=clean_root_id,
+        )
 
         st_title = str(getattr(st, "goal", "") or getattr(st, "title", "") or "后台协调任务").strip()[:160]
         st_status = str(getattr(st, "status", "") or "queued").strip().lower()
@@ -239,7 +350,7 @@ def list_authorized_task_panel(
             "task_kind": "delegated_session_task",
             "session_task_id": st.task_id,
             "bound_root_id": verified_root_id or clean_root_id,
-            "target_thread_id": target_thread_id,
+            "target_thread_id": str(getattr(target_thread, "thread_id", "") or "").strip(),
             "title": st_title,
             "status": st_status,
             "updated_at": st_updated_at,
@@ -252,47 +363,58 @@ def list_authorized_task_panel(
             raise AgentControlError(503, "AGENT_ROOT_UNAVAILABLE", "当前主任务状态暂时不可读取。") from exc
         if link is None or link_err is not None:
             raise AgentControlError(404, "AGENT_ROOT_NOT_FOUND", "当前卡片绑定的主任务不存在。")
-        if str(getattr(link, "thread_id", "") or "").strip() != str(getattr(sender_thread, "thread_id", "") or "").strip():
+        if str(getattr(link, "thread_id", "") or "").strip() not in authorized_sender_ids:
             raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "目标主任务不属于当前会话。")
         verified_root_id = clean_root_id
-        target_thread = sender_thread
-        fg_title = str(getattr(link, "title", "") or getattr(link, "goal", "") or getattr(sender_thread, "title", "") or "当前会话主任务").strip()[:160]
+        target_thread = next(
+            (t for t in candidate_threads if str(getattr(t, "thread_id", "") or "").strip() == str(getattr(link, "thread_id", "") or "").strip()),
+            sender_thread,
+        )
+        fg_title = str(getattr(link, "title", "") or getattr(link, "goal", "") or getattr(target_thread, "title", "") or "当前会话主任务").strip()[:160]
         fg_status = str(getattr(link, "status", "") or "running").strip().lower()
-        fg_updated_at = float(getattr(link, "updated_at", getattr(sender_thread, "updated_at", 0.0)) or 0.0)
+        fg_updated_at = float(getattr(link, "updated_at", getattr(target_thread, "updated_at", 0.0)) or 0.0)
         selected_task_dict = {
             "task_ref": f"root:{clean_root_id}",
             "task_kind": "foreground_root",
             "session_task_id": "",
             "bound_root_id": clean_root_id,
-            "target_thread_id": str(getattr(sender_thread, "thread_id", "") or "").strip(),
+            "target_thread_id": str(getattr(target_thread, "thread_id", "") or "").strip(),
             "title": fg_title,
             "status": fg_status,
             "updated_at": fg_updated_at,
         }
 
     else:
-        fg_root_id = str(getattr(sender_thread, "workspace_task_id", "") or "").strip()
-        if fg_root_id:
+        ordered_candidates = [sender_thread] + [t for t in candidate_threads if t is not sender_thread]
+        for cand_thread in ordered_candidates:
+            cand_root_id = str(getattr(cand_thread, "workspace_task_id", "") or "").strip()
+            if not cand_root_id:
+                continue
             try:
-                link, link_err = store.tasks.load_report(fg_root_id)
+                link, link_err = store.tasks.load_report(cand_root_id)
             except Exception:
                 link, link_err = None, "read_error"
-            if link is not None and link_err is None and str(getattr(link, "thread_id", "") or "").strip() == str(getattr(sender_thread, "thread_id", "") or "").strip():
-                verified_root_id = fg_root_id
-                target_thread = sender_thread
-                fg_title = str(getattr(link, "title", "") or getattr(link, "goal", "") or getattr(sender_thread, "title", "") or "当前会话主任务").strip()[:160]
+            if (
+                link is not None
+                and link_err is None
+                and str(getattr(link, "thread_id", "") or "").strip() in authorized_sender_ids
+            ):
+                verified_root_id = cand_root_id
+                target_thread = cand_thread
+                fg_title = str(getattr(link, "title", "") or getattr(link, "goal", "") or getattr(cand_thread, "title", "") or "当前会话主任务").strip()[:160]
                 fg_status = str(getattr(link, "status", "") or "running").strip().lower()
-                fg_updated_at = float(getattr(link, "updated_at", getattr(sender_thread, "updated_at", 0.0)) or 0.0)
+                fg_updated_at = float(getattr(link, "updated_at", getattr(cand_thread, "updated_at", 0.0)) or 0.0)
                 selected_task_dict = {
-                    "task_ref": f"root:{fg_root_id}",
+                    "task_ref": f"root:{cand_root_id}",
                     "task_kind": "foreground_root",
                     "session_task_id": "",
-                    "bound_root_id": fg_root_id,
-                    "target_thread_id": str(getattr(sender_thread, "thread_id", "") or "").strip(),
+                    "bound_root_id": cand_root_id,
+                    "target_thread_id": str(getattr(cand_thread, "thread_id", "") or "").strip(),
                     "title": fg_title,
                     "status": fg_status,
                     "updated_at": fg_updated_at,
                 }
+                break
 
     task_map: dict[str, dict[str, object]] = {}
     if selected_task_dict is not None:
@@ -303,9 +425,8 @@ def list_authorized_task_panel(
         try:
             page = session_tasks.list_page(limit=32, cursor=None)
             items = page.get("items") or []
-            sender_id = str(getattr(sender_thread, "thread_id", "") or "").strip()
             for item in items:
-                if str(getattr(item, "sender_thread_id", "") or "").strip() == sender_id:
+                if str(getattr(item, "sender_thread_id", "") or "").strip() in authorized_sender_ids:
                     st_id = str(getattr(item, "task_id", "") or "").strip()
                     if not st_id:
                         continue
@@ -331,23 +452,31 @@ def list_authorized_task_panel(
     )[:clamped_task_limit]
 
     if selected_task_dict is None and all_tasks:
-        selected_task_dict = all_tasks[0]
-        if selected_task_dict.get("task_kind") == "delegated_session_task" and session_tasks is not None:
-            clean_st_id = str(selected_task_dict.get("session_task_id") or "")
-            try:
-                st = session_tasks.load(clean_st_id)
-                if st is not None:
-                    target_thread, _ = store.threads.load_report(str(st.target_thread_id or "").strip())
-                    if target_thread is not None:
-                        from .execution_threads import IM_TASK_EXECUTION_KEY
-                        policy = (getattr(target_thread, "metadata", None) or {}).get(IM_TASK_EXECUTION_KEY)
-                        if isinstance(policy, dict):
-                            verified_root_id = str(policy.get("root_task_id") or getattr(target_thread, "workspace_task_id", "") or "").strip()
-                        else:
-                            verified_root_id = str(getattr(target_thread, "workspace_task_id", "") or "").strip()
-                        selected_task_dict["bound_root_id"] = verified_root_id
-            except Exception:
-                pass
+        for candidate_task in all_tasks:
+            cand_kind = candidate_task.get("task_kind")
+            if cand_kind == "delegated_session_task" and session_tasks is not None:
+                clean_st = str(candidate_task.get("session_task_id") or "").strip()
+                try:
+                    st = session_tasks.load(clean_st)
+                    if st is None:
+                        continue
+                    cand_target_thread, cand_verified_root = _verify_delegated_session_task(
+                        store,
+                        st,
+                        owner_id=owner_id,
+                        authorized_sender_ids=authorized_sender_ids,
+                    )
+                except Exception:
+                    continue
+                target_thread = cand_target_thread
+                verified_root_id = cand_verified_root
+                candidate_task["bound_root_id"] = verified_root_id
+                selected_task_dict = candidate_task
+                break
+            elif cand_kind == "foreground_root":
+                selected_task_dict = candidate_task
+                verified_root_id = str(candidate_task.get("bound_root_id") or "")
+                break
 
     nodes: list[dict[str, object]] = []
     if selected_task_dict is not None:
@@ -441,11 +570,22 @@ def list_authorized_task_panel(
                     sub_parent = str(getattr(stask, "parent_id", "") or "").strip()
                     sub_lifecycle = str(getattr(stask, "lifecycle_phase", "") or sub_status).strip().lower()
                     sub_activity = str(
-                        getattr(stask, "activity", "")
+                        getattr(stask, "current_step", "")
+                        or getattr(stask, "last_progress_summary", "")
+                        or getattr(stask, "latest_summary", "")
                         or getattr(stask, "goal", "")
                         or getattr(stask, "description", "")
                         or ""
                     ).strip()[:160]
+                    sub_latest_progress = str(
+                        getattr(stask, "last_progress_summary", "")
+                        or getattr(stask, "latest_summary", "")
+                        or ""
+                    ).strip()[:240]
+                    sub_result_summary = str(getattr(stask, "result", "") or "").strip()[:4000] if sub_term else ""
+                    sub_artifact_refs = [
+                        str(p) for p in (getattr(stask, "artifact_refs", ()) or ()) if str(p).strip()
+                    ][:20]
 
                     nodes.append({
                         "node_id": f"run:{sub_id}",
@@ -458,10 +598,13 @@ def list_authorized_task_panel(
                         "status": sub_status,
                         "lifecycle_phase": sub_lifecycle,
                         "activity": sub_activity,
+                        "latest_progress": sub_latest_progress,
+                        "result_summary": sub_result_summary,
+                        "artifact_refs": sub_artifact_refs,
                         "terminal": sub_term,
                         "can_view": True,
-                        "can_guide": True,
-                        "can_stop_branch": True,
+                        "can_guide": not sub_term,
+                        "can_stop_branch": not sub_term,
                     })
 
     clean_sel_id = str(selected_run_id or "").strip()
@@ -481,8 +624,8 @@ def list_authorized_task_panel(
                 scope=scope,
                 run_id=raw_run_id,
                 after=max(0, int(event_after or 0)),
-                session_task_id=session_task_id,
-                bound_root_id=bound_root_id,
+                session_task_id=str((selected_task_dict or {}).get("session_task_id") or session_task_id or ""),
+                bound_root_id=str(verified_root_id or bound_root_id or ""),
             )
 
     return {
@@ -1316,16 +1459,7 @@ def _authorized_agent_target(
     channel = str(getattr(scope, "channel", "") or "").strip()
     if not conversation_id or not user_id or not channel:
         raise AgentControlError(400, "AGENT_SCOPE_INVALID", "当前会话身份不完整。")
-    try:
-        sender_thread, load_error = store.threads.resolve_report(
-            channel=channel,
-            channel_conversation_id=conversation_id,
-            channel_user_id=user_id,
-        )
-    except Exception as exc:
-        raise AgentControlError(503, "AGENT_THREAD_UNAVAILABLE", "当前会话暂时不可读取。") from exc
-    if sender_thread is None or load_error is not None:
-        raise AgentControlError(404, "AGENT_THREAD_NOT_FOUND", "当前会话还没有可查看的代理任务。")
+    sender_thread, authorized_sender_ids, candidate_threads = _resolve_authorized_sender_threads(agent, store, scope)
 
     owner_id = str(
         getattr(getattr(agent, "home_paths", None), "owner_id", "") or ""
@@ -1334,21 +1468,30 @@ def _authorized_agent_target(
     clean_root_id = str(bound_root_id or "").strip()
 
     if not clean_st_id and not clean_root_id:
-        root_id = str(getattr(sender_thread, "workspace_task_id", "") or "").strip()
-        try:
-            link, link_error = store.tasks.load_report(root_id)
-        except Exception as exc:
-            raise AgentControlError(503, "AGENT_ROOT_UNAVAILABLE", "当前主任务状态暂时不可读取。") from exc
-        if (
-            not root_id
-            or link is None
-            or link_error is not None
-            or str(getattr(link, "thread_id", "") or "").strip()
-            != str(getattr(sender_thread, "thread_id", "") or "").strip()
-        ):
+        ordered_candidates = [sender_thread] + [t for t in candidate_threads if t is not sender_thread]
+        root_id = ""
+        link = None
+        owning_thread = None
+        for cand_thread in ordered_candidates:
+            cand_root_id = str(getattr(cand_thread, "workspace_task_id", "") or "").strip()
+            if not cand_root_id:
+                continue
+            try:
+                cand_link, cand_err = store.tasks.load_report(cand_root_id)
+            except Exception:
+                continue
+            if (
+                cand_link is not None
+                and cand_err is None
+                and str(getattr(cand_link, "thread_id", "") or "").strip() in authorized_sender_ids
+            ):
+                root_id = cand_root_id
+                link = cand_link
+                owning_thread = cand_thread
+                break
+        if not root_id or link is None or owning_thread is None:
             raise AgentControlError(404, "AGENT_ROOT_NOT_FOUND", "当前会话没有可操作的主任务树。")
         verified_root_id = root_id
-        owning_thread = sender_thread
 
     elif clean_st_id:
         session_tasks = getattr(store, "session_tasks", None)
@@ -1360,37 +1503,13 @@ def _authorized_agent_target(
             raise AgentControlError(404, "AGENT_TASK_NOT_FOUND", "目标后台任务不存在或不可读。") from exc
         if st is None:
             raise AgentControlError(404, "AGENT_TASK_NOT_FOUND", "目标后台任务不存在。")
-        if str(getattr(st, "sender_thread_id", "") or "").strip() != str(getattr(sender_thread, "thread_id", "") or "").strip():
-            raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "目标后台任务不属于当前会话。")
-
-        target_thread_id = str(getattr(st, "target_thread_id", "") or "").strip()
-        try:
-            target_thread, target_err = store.threads.load_report(target_thread_id)
-        except Exception as exc:
-            raise AgentControlError(503, "AGENT_THREAD_UNAVAILABLE", "目标后台执行会话暂时不可读取。") from exc
-        if target_thread is None or target_err is not None:
-            raise AgentControlError(404, "AGENT_THREAD_NOT_FOUND", "目标后台执行会话不可读取。")
-
-        if owner_id and getattr(target_thread, "owner_id", "") and str(target_thread.owner_id).strip() != owner_id:
-            raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "目标后台任务超出当前用户。")
-
-        from .execution_threads import IM_TASK_EXECUTION_KEY, execution_origin_thread
-        policy = (getattr(target_thread, "metadata", None) or {}).get(IM_TASK_EXECUTION_KEY)
-        if isinstance(policy, dict):
-            try:
-                origin_thread = execution_origin_thread(store.threads.require, target_thread)
-            except (DataCorruptionError, KeyError, FileNotFoundError) as exc:
-                raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "后台执行来源会话无效。") from exc
-            if str(getattr(origin_thread, "thread_id", "") or "").strip() != str(getattr(sender_thread, "thread_id", "") or "").strip():
-                raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "后台执行来源会话与当前会话不匹配。")
-            if str(policy.get("session_task_id") or "") not in {"", st.task_id}:
-                raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "后台执行策略中的任务引用不匹配。")
-            verified_root_id = str(policy.get("root_task_id") or getattr(target_thread, "workspace_task_id", "") or "").strip()
-        else:
-            verified_root_id = clean_root_id or str(getattr(target_thread, "workspace_task_id", "") or "").strip()
-
-        if clean_root_id and verified_root_id and clean_root_id != verified_root_id:
-            raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "卡片绑定的根任务与后台任务不一致。")
+        target_thread, verified_root_id = _verify_delegated_session_task(
+            store,
+            st,
+            owner_id=owner_id,
+            authorized_sender_ids=authorized_sender_ids,
+            clean_root_id=clean_root_id,
+        )
 
         if not verified_root_id:
             raise AgentControlError(404, "AGENT_ROOT_NOT_FOUND", "目标后台任务尚未建立子代理主任务树。")
@@ -1414,10 +1533,13 @@ def _authorized_agent_target(
             raise AgentControlError(503, "AGENT_ROOT_UNAVAILABLE", "当前主任务状态暂时不可读取。") from exc
         if link is None or link_err is not None:
             raise AgentControlError(404, "AGENT_ROOT_NOT_FOUND", "当前卡片绑定的主任务不存在。")
-        if str(getattr(link, "thread_id", "") or "").strip() != str(getattr(sender_thread, "thread_id", "") or "").strip():
+        if str(getattr(link, "thread_id", "") or "").strip() not in authorized_sender_ids:
             raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "目标主任务不属于当前会话。")
         verified_root_id = clean_root_id
-        owning_thread = sender_thread
+        owning_thread = next(
+            (t for t in candidate_threads if str(getattr(t, "thread_id", "") or "").strip() == str(getattr(link, "thread_id", "") or "").strip()),
+            sender_thread,
+        )
 
     if operation == "resolve_tool_approval" and str(run_id or "").strip() == verified_root_id:
         return store, owning_thread, link

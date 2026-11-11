@@ -1746,7 +1746,7 @@ def handle_client_agent_view(handler, server) -> None:
                 scope=scope,
                 session_task_id=session_task_id,
                 bound_root_id=bound_root_id,
-                selected_run_id=str(body.get("run_id") or ""),
+                selected_run_id=str(body.get("selected_run_id") or body.get("run_id") or ""),
                 event_after=max(0, _safe_request_int(body.get("event_after"))),
                 task_limit=_safe_request_int(body.get("task_limit")) or 8,
                 node_limit=_safe_request_int(body.get("node_limit")) or 32,

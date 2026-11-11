@@ -160,8 +160,29 @@ def _dispatch_existing_credential_operation(agent, operation, params):
             discover_owner_credentials = None
         from ..user_space.task_credential_groups import discover_group_credentials
 
+        requested_scope = params.get("access_scope", "")
+        if requested_scope is None:
+            requested_scope = ""
+        if requested_scope not in {"", "owner", "group"}:
+            raise ValueError("凭据发现使用范围无效")
+
         home_paths = getattr(agent, "home_paths", None)
         owner_kind = getattr(home_paths, "owner_kind", "group")
+        if requested_scope == "group" and owner_kind != "group":
+            raise CredentialInputError(
+                "CREDENTIAL_NOT_AUTHORIZED",
+                "当前来源不能发现群共享凭据。",
+                stage="group_authorization",
+                effect_outcome="not_started",
+            )
+        if requested_scope == "owner" and owner_kind == "group":
+            raise CredentialInputError(
+                "CREDENTIAL_NOT_AUTHORIZED",
+                "群来源不能发现个人站点凭据。",
+                stage="group_authorization",
+                effect_outcome="not_started",
+            )
+
         if owner_kind != "group" and discover_owner_credentials is not None:
             result = discover_owner_credentials(
                 agent,

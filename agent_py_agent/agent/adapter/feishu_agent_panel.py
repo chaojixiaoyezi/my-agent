@@ -99,6 +99,24 @@ def _write_panel_state(state_path: Path, payload: dict[str, Any]) -> None:
     write_private_json_file_atomic_unlocked(state_path, payload)
 
 
+def _gateway_channel_metadata(base_chat_id: str, chat_type: str) -> dict[str, str]:
+    return {
+        "channel_chat_type": chat_type,
+        "channel_chat_id": base_chat_id,
+        "feishu_chat_type": chat_type,
+        "feishu_chat_id": base_chat_id,
+    }
+
+
+def _valid_card_receipt(receipt: object) -> bool:
+    """核验证书回执是否有效（包含非空 message_id 与 chat_id）。"""
+    return (
+        isinstance(receipt, dict)
+        and bool(str(receipt.get("message_id") or "").strip())
+        and bool(str(receipt.get("chat_id") or "").strip())
+    )
+
+
 def _call_gateway_api(
     adapter: Any,
     path: str,
@@ -106,6 +124,7 @@ def _call_gateway_api(
     actor: str,
     origin_chat_type: str,
     *,
+    base_chat_id: str = "",
     timeout: float = 0.85,
 ) -> tuple[int, dict[str, Any] | None]:
     port = getattr(adapter, "_gateway_port", 0)
@@ -117,6 +136,9 @@ def _call_gateway_api(
             Path(home_dir),
             getattr(adapter, "_gateway_auth_token", ""),
         )
+        effective_base_chat_id = base_chat_id or str(
+            ((body.get("metadata") or {}) if isinstance(body, dict) else {}).get("channel_chat_id") or ""
+        )
         headers = {
             "Content-Type": "application/json",
             "X-Channel": "feishu",
@@ -124,6 +146,8 @@ def _call_gateway_api(
             "X-Channel-Chat-Type": origin_chat_type,
             **credentials.headers(),
         }
+        if effective_base_chat_id:
+            headers["X-Channel-Chat-Id"] = effective_base_chat_id
     except Exception:
         return 401, None
 
@@ -217,7 +241,8 @@ def build_panel_view(
                 t_ref = str(t.get("task_ref") or "")
                 t_tit = str(t.get("title") or t_ref)[:24]
                 t_st = str(t.get("status") or "")
-                t_options.append({"text": f"{t_tit} ({t_st})", "value": t_ref})
+                opt_text = f"{t_tit} ({t_st})"
+                t_options.append({"text": opt_text, "label": opt_text, "value": t_ref})
         if t_options:
             sel_t_ref = str(selected_task.get("task_ref") or "") if isinstance(selected_task, dict) else ""
             task_selector = {
@@ -235,13 +260,14 @@ def build_panel_view(
     agent_selector = None
     selected_target_ref = str(record.get("selected_target_ref") or "all_summary")
     if not expired and audience != "group_public":
-        a_options = [{"text": "任务全部汇总", "value": "all_summary"}]
+        a_options = [{"text": "任务全部汇总", "label": "任务全部汇总", "value": "all_summary"}]
         for n in nodes:
             if isinstance(n, dict):
                 nid = str(n.get("node_id") or "")
                 ntit = str(n.get("title") or nid)[:20]
                 nst = str(n.get("status") or "")
-                a_options.append({"text": f"{ntit} ({nst})", "value": nid})
+                opt_text = f"{ntit} ({nst})"
+                a_options.append({"text": opt_text, "label": opt_text, "value": nid})
         agent_selector = {
             "placeholder": "选择代理分支",
             "options": a_options[:20],
@@ -266,13 +292,33 @@ def build_panel_view(
         agent_obj = (selected_agent_view or {}).get("agent") if isinstance(selected_agent_view, dict) else {}
         if not isinstance(agent_obj, dict):
             agent_obj = {}
-        res_summary = str(agent_obj.get("result_summary") or "").strip()
-        artifacts = agent_obj.get("artifacts") or ()
-        art_lines = [f"- {a.get('path')}" for a in artifacts if isinstance(a, dict) and a.get("path")]
+        res_summary = str(
+            (selected_agent_view or {}).get("final_response")
+            or agent_obj.get("result_summary")
+            or target_node.get("result_summary")
+            or ""
+        ).strip()
+        target_artifacts = target_node.get("artifact_refs") or agent_obj.get("artifacts") or ()
+        art_lines = []
+        for a in target_artifacts:
+            if isinstance(a, str) and a.strip():
+                art_lines.append(f"- {a.strip()}")
+            elif isinstance(a, dict) and a.get("path"):
+                art_lines.append(f"- {str(a['path']).strip()}")
         art_summary = "\n".join(art_lines)
 
-        current_action = str(agent_obj.get("current_action") or target_node.get("activity") or "").strip()
-        latest_progress = str(agent_obj.get("latest_progress") or "").strip()
+        current_action = str(
+            agent_obj.get("activity")
+            or agent_obj.get("current_action")
+            or target_node.get("activity")
+            or ""
+        ).strip()
+        latest_progress = str(
+            target_node.get("latest_progress")
+            or agent_obj.get("latest_progress")
+            or agent_obj.get("description")
+            or ""
+        ).strip()
         sub_status = str(target_node.get("status") or "")
 
         selected_target = {
@@ -448,10 +494,14 @@ def send_agent_panel_card(
     is_group = (chat_type == "group")
     audience = "group_public" if is_group else "dm"
     clean_actor = "" if is_group else (actor_open_id or target)
+    origin_conv = origin_conversation_id or target
+    base_chat_id = origin_conv.split(":")[0]
+    send_target = target.split(":")[0] if is_group else target
+
     owner = {
         "provider": "feishu",
         "owner_kind": "group" if is_group else "user",
-        "owner_id": target,
+        "owner_id": send_target,
     }
     identity = OwnerIdentity(**owner)
     resolved = resolve_owner_home(Path(adapter.my_agent_home), identity)
@@ -465,7 +515,7 @@ def send_agent_panel_card(
         "owner": owner,
         "audience": audience,
         "actor_id": clean_actor,
-        "origin_conversation_id": origin_conversation_id or target,
+        "origin_conversation_id": origin_conv,
         "origin_chat_type": chat_type,
         "session_task_id": session_task_id,
         "bound_root_id": bound_root_id,
@@ -493,24 +543,22 @@ def send_agent_panel_card(
     }
 
     # Query gateway panel data
-    base_chat_id = (origin_conversation_id or target).split(":")[0]
+    query_actor = (actor_open_id or "").strip() or clean_actor or f"group_panel:{send_target}"
     gw_status, panel_data = _call_gateway_api(
         adapter,
         "/client/agent-view",
         {
-            "conversation_id": origin_conversation_id or target,
-            "user_id": clean_actor or "feishu_user",
+            "conversation_id": origin_conv,
+            "user_id": query_actor,
             "channel": "feishu",
             "mode": "panel",
             "session_task_id": session_task_id,
             "bound_root_id": bound_root_id,
-            "metadata": {
-                "feishu_chat_id": base_chat_id,
-                "feishu_chat_type": chat_type,
-            },
+            "metadata": _gateway_channel_metadata(base_chat_id, chat_type),
         },
-        clean_actor or "feishu_user",
+        query_actor,
         chat_type,
+        base_chat_id=base_chat_id,
     )
     if isinstance(panel_data, dict) and panel_data.get("selected_task"):
         st = panel_data["selected_task"]
@@ -519,11 +567,19 @@ def send_agent_panel_card(
         if not bound_root_id and st.get("bound_root_id"):
             record["selected_bound_root_id"] = str(st["bound_root_id"])
 
-    panel_view = build_panel_view(panel_data, binding_ref, record, next_revision=2)
+    panel_view = build_panel_view(panel_data, binding_ref, record, next_revision=1)
     card = render_progress_card({"steps": list(steps), "panel_view": panel_view})
 
     key = idempotency_key or f"panel:{binding_id}"
-    receipt = adapter.send_control_card(target, card, idempotency_key=key)
+    receipt = adapter.send_control_card(send_target, card, idempotency_key=key)
+
+    if not _valid_card_receipt(receipt):
+        err = (
+            str(receipt.get("error_code") or "CHANNEL_CONTROL_RECEIPT_MISSING")
+            if isinstance(receipt, dict)
+            else "CHANNEL_CONTROL_RECEIPT_MISSING"
+        )
+        raise RuntimeError(err)
 
     record["message_id"] = str(receipt.get("message_id") or "")
     record["chat_id"] = str(receipt.get("chat_id") or "")
@@ -606,10 +662,10 @@ def handle_panel_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, An
         if not isinstance(record, dict) or record.get("schema_version") != _PANEL_STATE_SCHEMA:
             return {"toast": {"type": "error", "content": "面板状态不存在或已过期。"}}
 
-        # 防转发检查：卡片 message_id 和 chat_id 必须匹配绑定的原始记录
-        rec_msg = str(record.get("message_id") or "")
-        rec_chat = str(record.get("chat_id") or "")
-        if (rec_msg and rec_msg != message_id) or (rec_chat and rec_chat != chat_id):
+        # 防转发检查：卡片 message_id 和 chat_id 必须匹配绑定的原始记录（fail-closed）
+        rec_msg = str(record.get("message_id") or "").strip()
+        rec_chat = str(record.get("chat_id") or "").strip()
+        if not rec_msg or rec_msg != message_id or not rec_chat or rec_chat != chat_id:
             return {"toast": {"type": "error", "content": "该卡片不支持转发后操作，请在原始会话中操作。"}}
 
         audience = str(claims.get("audience") or "dm")
@@ -657,7 +713,12 @@ def handle_panel_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, An
         is_expired = record.get("expired") is True or (now - created_at >= FEISHU_CARD_MAX_AGE_SECONDS)
 
         if record.get("expired") is True:
-            expired_pv = build_panel_view(None, binding_ref, record, next_revision=record.get("display_revision", 1) + 1)
+            expired_pv = build_panel_view(
+                None,
+                binding_ref,
+                record,
+                next_revision=int(record.get("display_revision") or 1),
+            )
             expired_card = render_progress_card({"steps": (), "panel_view": expired_pv})
             return {
                 "toast": {"type": "warning", "content": "该旧面板已停用，请使用最新面板卡片操作。"},
@@ -665,14 +726,6 @@ def handle_panel_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, An
             }
 
         if now - created_at >= FEISHU_CARD_MAX_AGE_SECONDS:
-            # 标记旧卡过期并重新发卡
-            record["expired"] = True
-            record["expired_notice"] = "该旧面板已停用，请使用最新面板卡片操作。"
-            _write_panel_state(state_path, record)
-
-            expired_pv = build_panel_view(None, binding_ref, record, next_revision=record.get("display_revision", 1) + 1)
-            expired_card = render_progress_card({"steps": (), "panel_view": expired_pv})
-
             succ_binding_id = secrets.token_hex(16)
             succ_claims = {
                 **claims,
@@ -700,11 +753,14 @@ def handle_panel_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, An
             }
 
             gw_code, panel_data = _fetch_panel_data(adapter, claims, succ_record, actor)
-            succ_pv = build_panel_view(panel_data, succ_binding_ref, succ_record, next_revision=2)
+            succ_pv = build_panel_view(panel_data, succ_binding_ref, succ_record, next_revision=1)
             succ_card = render_progress_card({"steps": (), "panel_view": succ_pv})
 
             reissue_target = actor if audience != "group_public" else base_group_chat_id
             receipt = adapter.send_control_card(reissue_target, succ_card, idempotency_key=f"reissue:{succ_binding_id}")
+            if not _valid_card_receipt(receipt):
+                return {"toast": {"type": "error", "content": "新面板卡片发送未成功，请稍后重试原卡片。"}}
+
             succ_record["message_id"] = str(receipt.get("message_id") or "")
             succ_record["chat_id"] = str(receipt.get("chat_id") or "")
 
@@ -712,6 +768,18 @@ def handle_panel_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, An
             ensure_private_dir(succ_path.parent)
             with locked_json_path(succ_path):
                 _write_panel_state(succ_path, succ_record)
+
+            record["expired"] = True
+            record["expired_notice"] = "该旧面板已停用，请使用最新面板卡片操作。"
+            _write_panel_state(state_path, record)
+
+            expired_pv = build_panel_view(
+                None,
+                binding_ref,
+                record,
+                next_revision=int(record.get("display_revision") or 1),
+            )
+            expired_card = render_progress_card({"steps": (), "panel_view": expired_pv})
 
             return {
                 "toast": {"type": "info", "content": "原卡片已达飞书 14 天更新上限，已为您发送新面板卡片。"},
@@ -728,7 +796,12 @@ def handle_panel_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, An
                 record["display_revision"] = int(record.get("display_revision") or 1) + 1
                 _write_panel_state(state_path, record)
                 gw_code, panel_data = _fetch_panel_data(adapter, claims, record, actor)
-                refreshed_pv = build_panel_view(panel_data, binding_ref, record, next_revision=record["display_revision"] + 1)
+                refreshed_pv = build_panel_view(
+                    panel_data,
+                    binding_ref,
+                    record,
+                    next_revision=int(record.get("display_revision") or 1),
+                )
                 refreshed_card = render_progress_card({"steps": (), "panel_view": refreshed_pv})
                 return {
                     "toast": {"type": "warning", "content": "面板目标已变更，已刷新最新状态，请确认后重试。"},
@@ -782,7 +855,12 @@ def handle_panel_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, An
                     dm_rec["selected_bound_root_id"] = record.get("selected_bound_root_id", "")
                     dm_rec["display_revision"] = int(dm_rec.get("display_revision") or 1) + 1
                     _write_panel_state(dm_state_path, dm_rec)
-                dm_pv = build_panel_view(panel_data, dm_binding_ref, dm_rec, next_revision=dm_rec["display_revision"] + 1)
+                dm_pv = build_panel_view(
+                    panel_data,
+                    dm_binding_ref,
+                    dm_rec,
+                    next_revision=int(dm_rec.get("display_revision") or 1),
+                )
                 dm_card = render_progress_card({"steps": (), "panel_view": dm_pv})
                 patched = adapter.edit_progress_message(dm_info["message_id"], "", render_kind="card", card=dm_card)
                 if not patched:
@@ -822,9 +900,12 @@ def handle_panel_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, An
                     "expired": False,
                     "dm_detail_cards": {},
                 }
-                new_dm_pv = build_panel_view(panel_data, new_dm_ref, new_dm_rec, next_revision=2)
+                new_dm_pv = build_panel_view(panel_data, new_dm_ref, new_dm_rec, next_revision=1)
                 new_dm_card = render_progress_card({"steps": (), "panel_view": new_dm_pv})
                 receipt = adapter.send_control_card(actor, new_dm_card, idempotency_key=f"dm_detail:{new_dm_id}")
+                if not _valid_card_receipt(receipt):
+                    return {"toast": {"type": "error", "content": "私聊详情卡发送未成功，请稍后重试。"}}
+
                 new_dm_rec["message_id"] = str(receipt.get("message_id") or "")
                 new_dm_rec["chat_id"] = str(receipt.get("chat_id") or "")
 
@@ -881,13 +962,14 @@ def handle_panel_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, An
                     "message_id": guide_msg_id,
                     "session_task_id": str(record.get("selected_session_task_id") or ""),
                     "bound_root_id": str(record.get("selected_bound_root_id") or ""),
-                    "metadata": {
-                        "feishu_chat_id": base_group_chat_id,
-                        "feishu_chat_type": str(claims.get("origin_chat_type") or "p2p"),
-                    },
+                    "metadata": _gateway_channel_metadata(
+                        base_group_chat_id,
+                        str(claims.get("origin_chat_type") or "p2p"),
+                    ),
                 },
                 actor,
                 str(claims.get("origin_chat_type") or "p2p"),
+                base_chat_id=base_group_chat_id,
             )
             if code not in {200, 202}:
                 err_msg = (resp or {}).get("message") or "发送补充指令未成功，请稍后重试。"
@@ -925,13 +1007,14 @@ def handle_panel_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, An
                     "operation_id": op_id,
                     "session_task_id": str(record.get("selected_session_task_id") or ""),
                     "bound_root_id": str(record.get("selected_bound_root_id") or ""),
-                    "metadata": {
-                        "feishu_chat_id": base_group_chat_id,
-                        "feishu_chat_type": str(claims.get("origin_chat_type") or "p2p"),
-                    },
+                    "metadata": _gateway_channel_metadata(
+                        base_group_chat_id,
+                        str(claims.get("origin_chat_type") or "p2p"),
+                    ),
                 },
                 actor,
                 str(claims.get("origin_chat_type") or "p2p"),
+                base_chat_id=base_group_chat_id,
             )
             record["confirm_stop_run_id"] = ""
             if code not in {200, 202}:
@@ -954,7 +1037,12 @@ def handle_panel_card_action(adapter: Any, norm: dict[str, Any]) -> dict[str, An
         _write_panel_state(state_path, record)
 
         gw_code, panel_data = _fetch_panel_data(adapter, claims, record, actor)
-        updated_pv = build_panel_view(panel_data, binding_ref, record, next_revision=record["display_revision"] + 1)
+        updated_pv = build_panel_view(
+            panel_data,
+            binding_ref,
+            record,
+            next_revision=int(record.get("display_revision") or 1),
+        )
         updated_card = render_progress_card({"steps": (), "panel_view": updated_pv})
 
         res: dict[str, Any] = {"card": {"type": "raw", "data": updated_card}}
@@ -972,26 +1060,31 @@ def _fetch_panel_data(
     """查询 Gateway 任务投影数据。"""
     origin_conv_id = str(claims.get("origin_conversation_id") or "")
     base_chat_id = origin_conv_id.split(":")[0]
+    origin_chat_type = str(claims.get("origin_chat_type") or "p2p")
     selected_target = str(record.get("selected_target_ref") or "all_summary")
     selected_run_id = selected_target[4:] if selected_target.startswith("run:") else ""
+    query_actor = (
+        (actor or "").strip()
+        or str(claims.get("actor_id") or "").strip()
+        or (f"group_panel:{base_chat_id}" if origin_chat_type == "group" else "feishu_user")
+    )
     return _call_gateway_api(
         adapter,
         "/client/agent-view",
         {
             "conversation_id": origin_conv_id,
-            "user_id": actor or str(claims.get("actor_id") or "feishu_user"),
+            "user_id": query_actor,
             "channel": "feishu",
             "mode": "panel",
             "session_task_id": str(record.get("selected_session_task_id") or ""),
             "bound_root_id": str(record.get("selected_bound_root_id") or ""),
+            "run_id": selected_run_id,
             "selected_run_id": selected_run_id,
-            "metadata": {
-                "feishu_chat_id": base_chat_id,
-                "feishu_chat_type": str(claims.get("origin_chat_type") or "p2p"),
-            },
+            "metadata": _gateway_channel_metadata(base_chat_id, origin_chat_type),
         },
-        actor or str(claims.get("actor_id") or "feishu_user"),
-        str(claims.get("origin_chat_type") or "p2p"),
+        query_actor,
+        origin_chat_type,
+        base_chat_id=base_chat_id,
     )
 
 

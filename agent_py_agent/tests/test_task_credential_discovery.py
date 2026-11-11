@@ -283,9 +283,7 @@ def test_personal_source_cannot_select_or_discover_group_scope(tmp_path, operati
     from agent_py_agent.tests.test_ingestion_task_credential_scope import _active, _agent
     agent = _agent(tmp_path, 'user')
     _active(agent)
-    params = {'operation': operation, 'url': 'https://example.com/api'}
-    if operation == 'request':
-        params['access_scope'] = 'group'
+    params = {'operation': operation, 'url': 'https://example.com/api', 'access_scope': 'group'}
     result, _ = _credential_operation(agent, params)
     assert not result.ok
     assert not agent.conversation_store.tasks.load(agent._current_run_params.task_id).input_dependency_refs

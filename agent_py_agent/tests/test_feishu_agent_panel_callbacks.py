@@ -15,10 +15,13 @@ from agent_py_agent.agent.adapter.feishu_agent_panel import (
     FEISHU_CARD_MAX_AGE_SECONDS,
     _panel_state_path,
     _read_panel_state,
+    _valid_card_receipt,
+    build_panel_view,
     handle_panel_card_action,
     handle_panel_command_event,
     is_panel_command,
     parse_panel_command_arg,
+    send_agent_panel_card,
     sign_panel_binding,
     verify_panel_binding,
 )
@@ -26,6 +29,7 @@ from agent_py_agent.agent.adapter.feishu_card import (
     extract_card_action,
     extract_webhook_card_action,
 )
+from agent_py_agent.agent.adapter.feishu_progress_card import render_progress_card
 from agent_py_agent.agent.adapter.feishu_ws import _card_action_key
 from agent_py_agent.agent.conversation.execution_threads import (
     EXECUTION_ORIGIN_KEY,
@@ -42,6 +46,7 @@ from agent_py_agent.agent.gateway_parts.http_service import (
     GatewayHTTPServerParams,
 )
 from agent_py_agent.agent.gateway_parts.paths import GatewayPaths
+from agent_py_agent.agent.gateway_parts.request_worker import _resolve_request_agent_for_owner
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, resolve_owner_home
 
@@ -684,5 +689,337 @@ def test_agents_command_nonblocking_in_dm_and_group(tmp_path) -> None:
         disp_group = handle_panel_command_event(adapter, group_msg)
         assert disp_group.status == "accepted"
         assert len(sent_cards) == 2
+    finally:
+        server.stop()
+
+
+def test_group_owner_scoping_topic_task_and_no_feishu_user(tmp_path) -> None:
+    """验证 gateway_per_user_owner_scoping=True 下：
+    1. 群聊 /agents 在话题 oc_group_1:thread:om_topic_1 中准确定位群任务 'Group Q4 Report Analysis'。
+    2. 绝不在 owners/providers/feishu/users/feishu_user 下创建任何目录或数据库。
+    """
+    home_dir = tmp_path / "home"
+    base_agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(home_dir),
+            gateway_per_user_owner_scoping=True,
+        ),
+        tmp_path / "workspace",
+    )
+    group_owner = OwnerIdentity.provider_group("feishu", "oc_group_1")
+    group_agent = _resolve_request_agent_for_owner(base_agent, group_owner)
+
+    group_store = group_agent.conversation_store
+    topic_conv_id = "oc_group_1:thread:om_topic_1"
+    group_thread = group_store.threads.get_or_create(
+        {
+            "canonical_user_id": "ou_member_1",
+            "channel": "feishu",
+            "channel_conversation_id": topic_conv_id,
+            "channel_user_id": "ou_member_1",
+        }
+    )
+    root_id = "task-root-group-q4"
+    group_store.tasks.bind(
+        {
+            "thread_id": group_thread.thread_id,
+            "task_id": root_id,
+            "goal": "Group Q4 Report Analysis",
+            "status": "active",
+            "now": time.time(),
+        }
+    )
+    group_store.tasks.select_workspace_task(
+        {
+            "thread_id": group_thread.thread_id,
+            "task_id": root_id,
+            "now": time.time(),
+        }
+    )
+
+    port = _free_port()
+    gateway_paths = GatewayPaths(
+        root=tmp_path / "gw",
+        pid=tmp_path / "gw" / "gateway.pid",
+        adapter_pid=tmp_path / "gw" / "adapter.pid",
+        state=tmp_path / "gw" / "state.json",
+        heartbeat=tmp_path / "gw" / "heartbeat.json",
+        stop_request=tmp_path / "gw" / "stop.request",
+        log=tmp_path / "gw" / "gateway.log",
+        inbox=tmp_path / "gw" / "pending",
+        processing=tmp_path / "gw" / "processing",
+        done=tmp_path / "gw" / "done",
+        failed=tmp_path / "gw" / "failed",
+        responses=tmp_path / "gw" / "responses",
+        history=tmp_path / "gw" / "history.jsonl",
+    )
+    server = GatewayHTTPServer(
+        port,
+        gateway_paths,
+        params=GatewayHTTPServerParams(agent=base_agent),
+    )
+    server.start()
+
+    adapter = FeishuAdapter(
+        config={
+            "feishu_app_id": "app_test",
+            "feishu_app_secret": "sec_test",
+            "feishu_verification_token": "tok_test",
+            "my_agent_home": str(home_dir),
+            "feishu_session_lock_enabled": False,
+        },
+        callback_port=8421,
+    )
+    adapter.my_agent_home = str(home_dir)
+    adapter._gateway_port = port
+    adapter._gateway_auth_token = ""
+
+    sent_cards: list[tuple[str, dict[str, Any]]] = []
+
+    def _mock_send(target, card, *, idempotency_key):
+        receipt = {
+            "message_id": f"om_group_{len(sent_cards) + 1}",
+            "chat_id": target,
+            "card": card,
+            "idempotency_key": idempotency_key,
+        }
+        sent_cards.append((target, receipt))
+        return receipt
+
+    adapter.send_control_card = _mock_send
+
+    try:
+        msg = SimpleNamespace(
+            content="/agents",
+            user_id="ou_member_1",
+            conversation_id=topic_conv_id,
+            metadata={"feishu_chat_type": "group", "feishu_chat_id": "oc_group_1"},
+        )
+        disp = handle_panel_command_event(adapter, msg)
+        assert disp.status == "accepted"
+        assert len(sent_cards) == 1
+        target_sent, receipt = sent_cards[0]
+        # 发送目标被正规化为群 ID 而非带有 thread 的复合目标
+        assert target_sent == "oc_group_1"
+
+        card = receipt["card"]
+        header_title = card["header"]["title"]["content"]
+        assert "Group Q4 Report Analysis" in header_title
+
+        # 验证零 feishu_user 目录创建
+        feishu_user_dir = home_dir / "owners" / "providers" / "feishu" / "users" / "feishu_user"
+        assert not feishu_user_dir.exists()
+
+        # 验证真实群目录创建并存放状态
+        group_dir = home_dir / "owners" / "providers" / "feishu" / "groups" / "oc_group_1"
+        assert group_dir.exists()
+    finally:
+        server.stop()
+
+
+def test_completed_subagent_res_panel_dm_and_group_public() -> None:
+    """验证已完成子代理在 DM 中渲染 res_panel（结果与产物），在 group_public 中严格隐藏。"""
+    binding_ref = "fp1.dummy.0000000000000000000000000000000000000000000000000000000000000000"
+    target_node = {
+        "node_kind": "subagent",
+        "node_id": "run:sub_done_01",
+        "run_id": "sub_done_01",
+        "title": "Data Analyzer Worker",
+        "status": "done",
+        "terminal": True,
+        "result_summary": "Q4 analysis report generated with 99.8% precision.",
+        "artifact_refs": ["/tmp/q4_report.csv", "/tmp/chart.png"],
+        "activity": "finished analysis",
+        "latest_progress": "100% complete",
+    }
+    panel_data = {
+        "selected_task": {"title": "Annual Summary", "status": "running"},
+        "tasks": [{"task_ref": "task-1", "title": "Annual Summary", "status": "running"}],
+        "nodes": [target_node],
+        "selected_agent_view": {
+            "final_response": "Q4 analysis report generated with 99.8% precision.",
+            "agent": {
+                "activity": "finished analysis",
+                "result_summary": "Q4 analysis report generated with 99.8% precision.",
+                "artifacts": [{"path": "/tmp/q4_report.csv"}, {"path": "/tmp/chart.png"}],
+            },
+        },
+    }
+
+    # 1. DM 模式：必须完整投影 result_summary 与 artifacts_summary 并渲染 res_panel
+    record_dm = {
+        "audience": "dm",
+        "selected_target_ref": "run:sub_done_01",
+        "display_revision": 1,
+    }
+    pv_dm = build_panel_view(panel_data, binding_ref, record_dm, next_revision=1)
+    assert pv_dm["selected_target"]["result_summary"] == "Q4 analysis report generated with 99.8% precision."
+    assert "/tmp/q4_report.csv" in pv_dm["selected_target"]["artifacts_summary"]
+    card_dm = render_progress_card({"steps": (), "panel_view": pv_dm})
+    eids_dm = [e.get("element_id") for e in card_dm["body"]["elements"]]
+    assert "res_panel" in eids_dm
+    res_elem = next(e for e in card_dm["body"]["elements"] if e.get("element_id") == "res_panel")
+    assert res_elem["header"]["title"]["content"] == "结果与产物"
+    content_text = res_elem["elements"][0]["text"]["content"]
+    assert "99.8% precision" in content_text
+    assert "/tmp/q4_report.csv" in content_text
+
+    # 2. group_public 模式：必须剥离 result_summary 与 artifacts_summary，绝不渲染 res_panel
+    record_group = {
+        "audience": "group_public",
+        "selected_target_ref": "run:sub_done_01",
+        "display_revision": 1,
+    }
+    pv_group = build_panel_view(panel_data, binding_ref, record_group, next_revision=1)
+    assert "result_summary" not in pv_group["selected_target"]
+    assert "artifacts_summary" not in pv_group["selected_target"]
+    card_group = render_progress_card({"steps": (), "panel_view": pv_group})
+    eids_group = [e.get("element_id") for e in card_group["body"]["elements"]]
+    assert "res_panel" not in eids_group
+
+
+def test_14_day_reissue_send_failure_preserves_expired_false(tmp_path) -> None:
+    """验证 14 天换卡时若 send_control_card 瞬时失败，旧卡绝不提前标记为 expired=True，重试能成功恢复。"""
+    agent, store, sender_thread, child, server, adapter, sent_cards = _setup_test_agent_and_server(tmp_path)
+    try:
+        receipt = adapter.send_agent_panel_card(
+            "ou_user_1",
+            actor_open_id="ou_user_1",
+            origin_conversation_id="conv-sender-1",
+            chat_type="p2p",
+        )
+        binding_ref = receipt["binding_ref"]
+        binding_id = receipt["binding_id"]
+
+        # 将存储中的 created_at 修改为 15 天前
+        owner = resolve_owner_home(Path(adapter.my_agent_home), OwnerIdentity.provider_user("feishu", "ou_user_1"))
+        state_path = _panel_state_path(owner.home_dir, binding_id)
+        from agent_py_agent.agent.common.json_io import (
+            locked_json_path,
+            write_private_json_file_atomic_unlocked,
+        )
+        with locked_json_path(state_path):
+            st = _read_panel_state(state_path)
+            assert st is not None
+            st["created_at"] = time.time() - (FEISHU_CARD_MAX_AGE_SECONDS + 1000)
+            write_private_json_file_atomic_unlocked(state_path, st)
+
+        # 模拟发卡网络瞬态异常（返回无效/缺失 message_id 的回执）
+        adapter.send_control_card = lambda *args, **kw: {"error_code": "FEISHU_NETWORK_TIMEOUT"}
+
+        res_fail = adapter._handle_card_action({
+            "value": {"kind": "my_agent_panel_action", "action": "panel.refresh", "binding_ref": binding_ref, "display_revision": 1},
+            "operator_open_id": "ou_user_1",
+            "message_id": receipt["message_id"],
+            "chat_id": "oc_p2p",
+        })
+        assert res_fail is not None
+        assert res_fail["toast"]["type"] == "error"
+        assert "新面板卡片发送未成功" in res_fail["toast"]["content"]
+
+        # 验证原卡状态依然保持 expired is False，绝不致残卡片
+        st_after_fail = _read_panel_state(state_path)
+        assert st_after_fail is not None
+        assert st_after_fail["expired"] is False
+
+        # 恢复正常的 send_control_card
+        def _mock_send_ok(user_id, card, *, idempotency_key):
+            rec = {
+                "message_id": f"om_reissued_{len(sent_cards) + 1}",
+                "chat_id": "oc_p2p",
+                "card": card,
+                "idempotency_key": idempotency_key,
+            }
+            sent_cards.append((user_id, rec))
+            return rec
+
+        adapter.send_control_card = _mock_send_ok
+
+        # 用户再次点击原卡片，触发成功换卡
+        res_ok = adapter._handle_card_action({
+            "value": {"kind": "my_agent_panel_action", "action": "panel.refresh", "binding_ref": binding_ref, "display_revision": 1},
+            "operator_open_id": "ou_user_1",
+            "message_id": receipt["message_id"],
+            "chat_id": "oc_p2p",
+        })
+        assert res_ok is not None
+        assert res_ok["toast"]["type"] == "info"
+        assert "14 天更新上限" in res_ok["toast"]["content"]
+
+        # 换卡成功后原卡标记为 expired=True
+        st_final = _read_panel_state(state_path)
+        assert st_final is not None
+        assert st_final["expired"] is True
+    finally:
+        server.stop()
+
+
+def test_anti_forwarding_empty_message_or_chat_id_fails_closed(tmp_path) -> None:
+    """验证 anti-forwarding 在 record 状态中 message_id 或 chat_id 为空时严格 fail-closed。"""
+    agent, store, sender_thread, child, server, adapter, sent_cards = _setup_test_agent_and_server(tmp_path)
+    try:
+        receipt = adapter.send_agent_panel_card(
+            "ou_user_1",
+            actor_open_id="ou_user_1",
+            origin_conversation_id="conv-sender-1",
+            chat_type="p2p",
+        )
+        binding_ref = receipt["binding_ref"]
+        binding_id = receipt["binding_id"]
+
+        owner = resolve_owner_home(Path(adapter.my_agent_home), OwnerIdentity.provider_user("feishu", "ou_user_1"))
+        state_path = _panel_state_path(owner.home_dir, binding_id)
+        from agent_py_agent.agent.common.json_io import (
+            locked_json_path,
+            write_private_json_file_atomic_unlocked,
+        )
+
+        # 1. 模拟异常破坏导致 message_id 为空
+        with locked_json_path(state_path):
+            st = _read_panel_state(state_path)
+            assert st is not None
+            st["message_id"] = ""
+            write_private_json_file_atomic_unlocked(state_path, st)
+
+        res_empty_msg = adapter._handle_card_action({
+            "value": {"kind": "my_agent_panel_action", "action": "panel.refresh", "binding_ref": binding_ref, "display_revision": 1},
+            "operator_open_id": "ou_user_1",
+            "message_id": "om_1",
+            "chat_id": "oc_p2p",
+        })
+        assert res_empty_msg is not None
+        assert res_empty_msg["toast"]["type"] == "error"
+        assert "不支持转发" in res_empty_msg["toast"]["content"]
+
+        # 2. 模拟异常破坏导致 chat_id 为空
+        with locked_json_path(state_path):
+            st = _read_panel_state(state_path)
+            assert st is not None
+            st["message_id"] = "om_1"
+            st["chat_id"] = ""
+            write_private_json_file_atomic_unlocked(state_path, st)
+
+        res_empty_chat = adapter._handle_card_action({
+            "value": {"kind": "my_agent_panel_action", "action": "panel.refresh", "binding_ref": binding_ref, "display_revision": 1},
+            "operator_open_id": "ou_user_1",
+            "message_id": "om_1",
+            "chat_id": "oc_p2p",
+        })
+        assert res_empty_chat is not None
+        assert res_empty_chat["toast"]["type"] == "error"
+        assert "不支持转发" in res_empty_chat["toast"]["content"]
+
+        # 3. 验证 send_agent_panel_card 在 receipt 无效时抛出 RuntimeError 且不写盘
+        adapter.send_control_card = lambda *args, **kw: {"error_code": "FEISHU_AUTH_FAILED"}
+        with pytest.raises(RuntimeError) as exc_info:
+            send_agent_panel_card(
+                adapter,
+                "ou_user_fail",
+                actor_open_id="ou_user_fail",
+                origin_conversation_id="conv-sender-fail",
+                chat_type="p2p",
+            )
+        assert "FEISHU_AUTH_FAILED" in str(exc_info.value)
     finally:
         server.stop()

@@ -266,12 +266,46 @@ def test_personal_agent_dispatches_discovery_to_owner_credentials(monkeypatch):
     envelope = outcome.result_envelope["credential_discovery"]
     assert envelope["selected_credential_ref"] == "cred_personal_1"
 
+    # Personal agent find with explicit access_scope="owner" succeeds
+    outcome_owner = tool_user.execute(
+        {"operation": "find", "url": "https://example.com/login", "access_scope": "owner"}
+    )
+    assert outcome_owner.ok
+    assert len(owner_calls) == 2
+
+    # Personal agent find with access_scope="group" is rejected
+    outcome_user_group = tool_user.execute(
+        {"operation": "find", "url": "https://example.com/login", "access_scope": "group"}
+    )
+    assert not outcome_user_group.ok
+    assert outcome_user_group.error_code == "CREDENTIAL_NOT_AUTHORIZED"
+
     group_agent = SimpleNamespace(home_paths=SimpleNamespace(owner_kind="group"))
     tool_group = RequestCredentialsTool(group_agent)
     outcome_grp = tool_group.execute({"operation": "find", "url": "https://example.com/login"})
     assert outcome_grp.ok
     assert len(group_calls) == 1
     assert group_calls[0][1] == "https://example.com/login"
+
+    # Group agent find with access_scope="owner" is rejected
+    outcome_grp_owner = tool_group.execute(
+        {"operation": "find", "url": "https://example.com/login", "access_scope": "owner"}
+    )
+    assert not outcome_grp_owner.ok
+    assert outcome_grp_owner.error_code == "CREDENTIAL_NOT_AUTHORIZED"
+
+    # find or list with access_scope="task" is rejected as invalid scope
+    outcome_task_find = tool_user.execute(
+        {"operation": "find", "url": "https://example.com/login", "access_scope": "task"}
+    )
+    assert not outcome_task_find.ok
+    assert outcome_task_find.error_code == "CREDENTIAL_BINDING_INVALID"
+
+    outcome_task_list = tool_group.execute(
+        {"operation": "list", "access_scope": "task"}
+    )
+    assert not outcome_task_list.ok
+    assert outcome_task_list.error_code == "CREDENTIAL_BINDING_INVALID"
 
 
 def test_plugin_input_binding_allows_owner_credential_card_on_cancelled_task():
