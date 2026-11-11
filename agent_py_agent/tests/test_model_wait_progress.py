@@ -66,11 +66,13 @@ def test_actual_model_generation_thinking_without_visible_output_refreshes_and_s
     else:
         assert _do_backend_generate(Backend(), 'synthetic prompt', state).text == 'final'
     public, _ = _read_public_progress_events(writer.chunk_path, 0, channel='feishu')
-    assert len(public) == 1 and public[0]['kind'] == 'model_liveness'
-    assert public[0]['wait_state'] == 'model_response'
-    assert public[0]['model_call_id'] == state.call_id
-    assert public[0]['elapsed_seconds'] >= .9
-    assert public[0]['updated_at'] and public[0]['preview_max_chars'] == 100
+    assert len(public) == 2 and public[0] == {'kind': 'process_settings', 'verbose_level': 'stream'}
+    liveness = public[1]
+    assert liveness['kind'] == 'model_liveness'
+    assert liveness['wait_state'] == 'model_response'
+    assert liveness['model_call_id'] == state.call_id
+    assert liveness['elapsed_seconds'] >= .9
+    assert liveness['updated_at'] and liveness['preview_max_chars'] == 100
     assert 'sensitive-thinking-not-public' not in writer.chunk_path.read_text()
     before = writer.chunk_path.read_text()
     time.sleep(.08)
