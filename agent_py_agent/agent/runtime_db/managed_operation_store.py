@@ -1710,10 +1710,15 @@ def _completion_payload(repo: Any, request: ToolOperationCompletionRequest) -> d
             (request.operation_id,),
         ).fetchone()
     payload = _json_loads(row["outcome_json"]) if row is not None else {}
+    result_data = _json_payload(request.result)
+    if isinstance(result_data, dict) and "redacted_input" not in result_data:
+        env = result_data.get("result_envelope")
+        if isinstance(env, dict) and isinstance(env.get("redacted_input"), dict):
+            result_data["redacted_input"] = env["redacted_input"]
     payload.update(
         {
             "schema": _OUTCOME_SCHEMA,
-            "result": _json_payload(request.result),
+            "result": result_data,
             "error_code": str(request.error_code or ""),
             "unknown_reason": (
                 str(request.unknown_reason or "")

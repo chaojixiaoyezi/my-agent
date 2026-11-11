@@ -98,6 +98,7 @@ class ToolOperationExecutionRequest:
     # seq 245 P2：调用者 attempt 身份透传（来源 = ToolCall.attempt_id）。
     attempt_id: str = ""
     operation_attempt_id: str = ""
+    redacted_input: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -829,6 +830,8 @@ def _execute_claimed_operation(
 ) -> ToolHandlerOutcome:
     with tool_write_claim_scope(request, claim), _operation_dispatch_scope(request, claim) as dispatch:
         result = _invoke_with_lease_renewal(request, claim)
+    if request.redacted_input is not None:
+        result.result_envelope.setdefault("redacted_input", deepcopy(request.redacted_input))
     result.result_envelope.update(first_dispatch_at=dispatch.record.first_dispatch_at,
         component_receipts=deepcopy(dispatch.record.component_receipts))
     operation_status = _operation_status_for_result(result)
@@ -1174,6 +1177,9 @@ def _tool_execution_facts(result: ToolHandlerOutcome) -> dict[str, object]:
 
 
 def _result_payload(result: ToolHandlerOutcome) -> dict[str, Any]:
+    redacted_input = {}
+    if isinstance(result.result_envelope, dict) and isinstance(result.result_envelope.get("redacted_input"), dict):
+        redacted_input = deepcopy(result.result_envelope["redacted_input"])
     return {
         "schema_version": _RESULT_SCHEMA,
         "result_ref": _operation_result_ref(result),
@@ -1193,6 +1199,7 @@ def _result_payload(result: ToolHandlerOutcome) -> dict[str, Any]:
         "handler_executed": result.handler_executed,
         "failure_stage": result.failure_stage,
         "duration_ms": result.duration_ms,
+        "redacted_input": redacted_input,
     }
 
 
@@ -1308,7 +1315,7 @@ def _complete_terminal_result(record: ToolOperationRecord) -> bool:
         return False
     if "duration_ms" in payload and type(payload["duration_ms"]) not in (int, float):
         return False
-    if payload.get("effect_outcome", "") not in {"", "not_started", "failed"}:
+    if payload.get("effect_outcome", "") not in {"", "none", "not_started", "committed", "running", "failed", "unknown"}:
         return False
     if record.status == "cancelled" and (
         payload.get("effect_outcome") != "not_started" or payload["handler_executed"]

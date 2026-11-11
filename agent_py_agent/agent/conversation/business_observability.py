@@ -37,7 +37,7 @@ OBSERVATION_ACTIONS = frozenset({
     'tasks.list', 'tasks.get', 'agent_tree.get', 'subagents.list', 'subagents.get', 'messages.list',
     'executions.list', 'executions.get', 'tool_calls.list', 'tool_calls.get', 'logs.read',
     'artifacts.list', 'artifacts.get', 'changes.get', 'approvals.list', 'approvals.get',
-    'permissions.get', 'usage.get', 'events.list',
+    'permissions.get', 'usage.get', 'events.list', 'operations.get',
 })
 
 _observation_request_data = ContextVar('business_observation_request_data', default=None)
@@ -101,7 +101,15 @@ def _timestamp(value):
 
 
 def _view(kind, row):
-    return redact_sensitive_value({key: _copy(row[key]) for key in business_defs()[kind]['properties'] if key in row})
+    props = business_defs()[kind]['properties']
+    result = {}
+    for key, spec in props.items():
+        if key in row:
+            val = row[key]
+            if val == '' and spec.get('$ref') == '#/$defs/NullableId':
+                val = None
+            result[key] = _copy(val)
+    return redact_sensitive_value(result)
 
 
 # LLM: 仅当交付元数据携带合法64位十六进制sha256摘要时返回小写规范值；缺失或格式异常返回None，不伪造版本摘要。
@@ -609,6 +617,8 @@ class BusinessObservationService:
             rows.append(ObservationRecord(value, self.owner_id, value['space_id'], value['project_ref'], task.task_id, task.target_thread_id))
         return ObservationPage(tuple(rows), 'partial' if errors else 'complete')
 
+    # LLM: 列表分页按规范rowid有界批次扫描，过滤空间时跨批推进避免假空页；超出扫描预算如实保留partial。
+    # 函数用途: 返回已授权规范执行页，支持空间过滤游标扫描。
     def _executions(self, params=None, *, source_page=None):
         if self.runtime is None:
             return ObservationPage(coverage='unknown')
@@ -619,7 +629,15 @@ class BusinessObservationService:
         limit = min(100, request.limit)
         selected_run = params.get('run_id')
         selected_attempt = params.get('attempt_id')
-        more, next_position = False, None
+        filter_space = (params.get('filter') or {}).get('space_id') or params.get('space_id')
+        collected_records = []
+        max_scan = 1000
+        total_scanned = 0
+        hit_cap = False
+        batch_size = max(50, limit)
+        current_after = after
+        has_more = False
+        next_pos = None
         with self.runtime._runtime_connection() as conn:
             if selected_run is not None:
                 where = 'ar.run_id=? AND t.owner_id=?'
@@ -629,29 +647,55 @@ class BusinessObservationService:
                     values.append(selected_attempt)
                 else:
                     where += ' AND aa.attempt_id=ar.current_attempt_id'
-                source = 'agent_attempts aa'
-            else:
-                # 先按canonical rowid固定窗口，再join/owner过滤；稀疏权限不能驱动SQL扫描全部历史。
+                raw = conn.execute('SELECT ar.run_id,ar.current_attempt_id,ar.parent_agent_run_id,pa.run_id AS parent_run_id,'
+                    't.thread_id,tr.metadata_json,aa.attempt_id,aa.status,aa.started_at,aa.ended_at,aa.metadata_json AS attempt_metadata '
+                    'FROM agent_attempts aa JOIN agent_runs ar ON ar.agent_run_id=aa.agent_run_id '
+                    'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id '
+                    'LEFT JOIN agent_runs pa ON pa.agent_run_id=ar.parent_agent_run_id WHERE ' + where +
+                    ' ORDER BY aa.rowid LIMIT 2', values).fetchall()
+                if runtime_source_revision(self.runtime.db_path) != revision:
+                    raise BusinessError('CURSOR_EXPIRED')
+                return self._execution_page(raw, more=False, revision=revision, source_paged=True)
+            while len(collected_records) < limit and total_scanned < max_scan:
                 positions = conn.execute('SELECT rowid FROM agent_attempts WHERE rowid>? ORDER BY rowid LIMIT ?',
-                                         (after, limit + 1)).fetchall()
-                more = len(positions) > limit
-                positions = positions[:limit]
-                if more:
-                    next_position = {'revision': revision, 'after': positions[-1][0]}
+                                         (current_after, batch_size + 1)).fetchall()
                 if not positions:
-                    return ObservationPage(revision=revision, source_paged=True)
+                    has_more = False
+                    break
+                more_in_batch = len(positions) > batch_size
+                positions = positions[:batch_size]
+                total_scanned += len(positions)
+                current_after = positions[-1][0]
                 where = 'aa.rowid IN (' + ','.join('?' for _ in positions) + ') AND t.owner_id=?'
                 values = [row[0] for row in positions] + [self.owner_id]
-                source = 'agent_attempts aa'
-            raw = conn.execute('SELECT ar.run_id,ar.current_attempt_id,ar.parent_agent_run_id,pa.run_id AS parent_run_id,'
-                't.thread_id,tr.metadata_json,aa.attempt_id,aa.status,aa.started_at,aa.ended_at,aa.metadata_json AS attempt_metadata '
-                'FROM ' + source + ' JOIN agent_runs ar ON ar.agent_run_id=aa.agent_run_id '
-                'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id '
-                'LEFT JOIN agent_runs pa ON pa.agent_run_id=ar.parent_agent_run_id WHERE ' + where +
-                ' ORDER BY aa.rowid LIMIT ?', [*values, 2 if selected_run is not None else limit]).fetchall()
+                raw = conn.execute('SELECT ar.run_id,ar.current_attempt_id,ar.parent_agent_run_id,pa.run_id AS parent_run_id,'
+                    't.thread_id,tr.metadata_json,aa.attempt_id,aa.status,aa.started_at,aa.ended_at,aa.metadata_json AS attempt_metadata '
+                    'FROM agent_attempts aa JOIN agent_runs ar ON ar.agent_run_id=aa.agent_run_id '
+                    'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id '
+                    'LEFT JOIN agent_runs pa ON pa.agent_run_id=ar.parent_agent_run_id WHERE ' + where +
+                    ' ORDER BY aa.rowid LIMIT ?', [*values, batch_size]).fetchall()
+                batch_page = self._execution_page(raw)
+                for rec in batch_page.records:
+                    if filter_space is not None and rec.space_id != filter_space:
+                        continue
+                    collected_records.append(rec)
+                    if len(collected_records) >= limit:
+                        break
+                next_pos = {'revision': revision, 'after': current_after}
+                if len(collected_records) >= limit:
+                    has_more = more_in_batch or True
+                    break
+                if not more_in_batch:
+                    has_more = False
+                    break
+            if total_scanned >= max_scan and len(collected_records) < limit:
+                hit_cap = True
+                has_more = True
         if runtime_source_revision(self.runtime.db_path) != revision:
             raise BusinessError('CURSOR_EXPIRED')
-        return self._execution_page(raw, more=more, revision=revision, source_paged=True, next_position=next_position)
+        cov = 'partial' if hit_cap or (has_more and not collected_records) else 'complete'
+        return ObservationPage(tuple(collected_records[:limit]), coverage=cov,
+                               revision=revision, source_paged=True, next_position=next_pos if has_more else None)
 
     def _event_execution_page(self, conn, events):
         """事件只查本页显式attempt；与事件行共用读事务，不借历史页版本拒绝无关append。"""
@@ -670,6 +714,8 @@ class BusinessObservationService:
             [*identifiers, self.owner_id]).fetchall()
         return self._execution_page(raw)
 
+    # LLM: 列表分页及事件点查共用原字段/owner/context校验，来源选择不改变公开执行投影。
+    # 函数用途: 投影规范执行页，未绑定线程的内部记录如实忽略或解析并保持partial标记。
     def _execution_page(self, raw, *, more=False, revision='', source_paged=False, next_position=None):
         """列表分页及事件点查共用原字段/owner/context校验，来源选择不改变公开执行投影。"""
         rows, incomplete = [], False
@@ -683,8 +729,21 @@ class BusinessObservationService:
             outcome = facts.get('effect_outcome', 'running' if row['status'] == 'running' else 'unknown')
             if outcome not in {'none', 'not_started', 'committed', 'running', 'unknown'}:
                 outcome = 'unknown'
+            thread_id = row['thread_id']
+            if not thread_id:
+                if context and context.task_id and self.store is not None:
+                    session_task = _observation_task(self.store, context.task_id)
+                    if session_task and session_task.target_thread_id:
+                        thread_id = session_task.target_thread_id
+                if not thread_id and metadata.get('session_task_ref') and self.store is not None:
+                    session_task = _observation_task(self.store, metadata['session_task_ref'])
+                    if session_task and session_task.target_thread_id:
+                        thread_id = session_task.target_thread_id
+                if not thread_id:
+                    incomplete = True
+                    continue
             value = {'run_id': row['run_id'], 'attempt_id': row['attempt_id'], 'task_id': context.task_id if context else None,
-                'thread_id': row['thread_id'], 'space_id': context.space_id if context else None, 'status': row['status'],
+                'thread_id': thread_id, 'space_id': context.space_id if context else None, 'status': row['status'],
                 'effect_outcome': outcome, 'started_at': _timestamp(row['started_at']), 'ended_at': _timestamp(row['ended_at']),
                 'error': None, 'retry_refs': [], '_is_current': row['current_attempt_id'] == row['attempt_id'],
                 '_parent_run_id': row['parent_run_id'] or None}
@@ -876,10 +935,16 @@ class BusinessObservationService:
             if context and (context.owner_id != source['owner_id'] or metadata.get('session_task_ref') != context.task_id):
                 return None
             task_id = context.task_id if context else source['canonical_task_id']
-            if context and self.store is not None:
+            thread_id = source['thread_id'] or None
+            task = None
+            if self.store is not None and task_id:
                 task = _observation_task(self.store, task_id)
-                if (task is None or task.target_thread_id != source['thread_id']
-                        or task.task_run_id and task.task_run_id != source['canonical_task_run_id']
+                if not thread_id and task and task.target_thread_id:
+                    thread_id = task.target_thread_id
+            if context and self.store is not None:
+                if (task is None
+                        or (source['thread_id'] and task.target_thread_id != source['thread_id'])
+                        or (task.task_run_id and task.task_run_id != source['canonical_task_run_id'])
                         or task.metadata.get('business_context') != metadata['business_context']
                         or any(_observation_thread(self.store, tid).owner_id != self.owner_id
                             for tid in (task.sender_thread_id, task.target_thread_id))):
@@ -887,7 +952,7 @@ class BusinessObservationService:
             space_id, project_ref = (context.space_id, context.project_ref) if context else (None, None)
             if source['run_id'] is not None:
                 value = {'kind': 'subagent' if source['parent_run_id'] else 'background_main',
-                    'id': source['run_id'], 'thread_id': source['thread_id'],
+                    'id': source['run_id'], 'thread_id': thread_id or None,
                     'parent_run_id': source['parent_run_id'], 'managed_by_thread_id': None,
                     'space_id': space_id, 'task_id': task_id, 'run_id': source['run_id'],
                     'model_profile_id': None, 'status': source['agent_status'],
@@ -900,14 +965,18 @@ class BusinessObservationService:
                     if not isinstance(closed, dict) or closed.get('status') not in AGENT_RUN_TERMINAL_STATUSES:
                         return None
                     status, updated_at = closed['status'], source['created_at']
-                value = {'task_id': task_id, 'thread_id': source['thread_id'], 'space_id': space_id,
+                if not thread_id:
+                    return None
+                value = {'task_id': task_id, 'thread_id': thread_id, 'space_id': space_id,
                     'project_ref': project_ref, 'status': status, 'current_run_id': None,
                     'result_refs': [], 'revision': int(updated_at * 1000000)}
             return ObservationRecord(value, source['owner_id'], space_id, project_ref, task_id,
-                source['thread_id'], source['run_id'], None)
+                thread_id, source['run_id'], None)
         except (OSError, ValueError, TypeError, KeyError):
             return None
 
+    # LLM: 列表分页按自增seq游标扫描，非匹配空间行批次推进避免假空页；超上限如实保留partial。
+    # 函数用途: 返回已授权的流式事件页并支持空间过滤分页。
     def _events(self, params, actor):
         scope = self.scope_digest('events.list', params, actor)
         generation = self._event_generation()
@@ -920,6 +989,14 @@ class BusinessObservationService:
         events, coverage = [], 'unknown'
         native_execution = 'executions' not in self.readers
         if self.runtime is not None and generation != 'unavailable':
+            coverage = 'complete'
+        limit = params.get('limit', 50)
+        batch_size = max(50, limit)
+        max_scan = 1000
+        total_scanned = 0
+        hit_cap = False
+        has_more_rows = False
+        if self.runtime is not None and generation != 'unavailable':
             with self.runtime._runtime_connection() as conn:
                 if native_execution:
                     conn.execute('BEGIN')
@@ -929,69 +1006,87 @@ class BusinessObservationService:
                     raise BusinessError('CURSOR_EXPIRED')
                 if position is None:
                     after = retained_after
-                raw = conn.execute('SELECT e.*,ar.run_id,ar.agent_run_id AS canonical_agent_run_id,'
-                    'aa.agent_run_id AS attempt_agent_run_id,ar.task_run_id AS agent_task_run_id,ar.status AS agent_status,'
-                    'pa.run_id AS parent_run_id,tr.task_run_id AS canonical_task_run_id,tr.task_id AS canonical_task_id,'
-                    'tr.metadata_json,tr.status AS task_run_status,tr.updated_at AS task_run_updated_at,t.owner_id,t.thread_id,'
-                    'agent_task.owner_id AS agent_owner_id,attempt_task.owner_id AS attempt_owner_id,'
-                    'EXISTS(SELECT 1 FROM agent_runs child WHERE child.parent_agent_run_id=ar.agent_run_id '
-                    'AND child.task_run_id=tr.task_run_id) AS has_children '
-                    'FROM runtime_events e LEFT JOIN agent_attempts aa ON aa.attempt_id=e.attempt_id '
-                    'LEFT JOIN agent_runs ar ON ar.agent_run_id=COALESCE(NULLIF(e.agent_run_id,\'\'),aa.agent_run_id) '
-                    'LEFT JOIN task_runs agent_tr ON agent_tr.task_run_id=ar.task_run_id '
-                    'LEFT JOIN tasks agent_task ON agent_task.task_id=agent_tr.task_id '
-                    'LEFT JOIN agent_runs attempt_ar ON attempt_ar.agent_run_id=aa.agent_run_id '
-                    'LEFT JOIN task_runs attempt_tr ON attempt_tr.task_run_id=attempt_ar.task_run_id '
-                    'LEFT JOIN tasks attempt_task ON attempt_task.task_id=attempt_tr.task_id '
-                    'LEFT JOIN agent_runs pa ON pa.agent_run_id=ar.parent_agent_run_id AND pa.task_run_id=ar.task_run_id '
-                    'LEFT JOIN task_runs tr ON tr.task_run_id=COALESCE(NULLIF(e.task_run_id,\'\'),ar.task_run_id) '
-                    'LEFT JOIN tasks t ON t.task_id=tr.task_id WHERE e.seq>? ORDER BY e.seq LIMIT ?',
-                    (after, params.get('limit', 50))).fetchall()
-                if native_execution:
-                    execution_page = self._event_execution_page(conn, raw)
+                while len(events) < limit and total_scanned < max_scan:
+                    raw = conn.execute('SELECT e.*,ar.run_id,ar.agent_run_id AS canonical_agent_run_id,'
+                        'aa.agent_run_id AS attempt_agent_run_id,ar.task_run_id AS agent_task_run_id,ar.status AS agent_status,'
+                        'pa.run_id AS parent_run_id,tr.task_run_id AS canonical_task_run_id,tr.task_id AS canonical_task_id,'
+                        'tr.metadata_json,tr.status AS task_run_status,tr.updated_at AS task_run_updated_at,t.owner_id,t.thread_id,'
+                        'agent_task.owner_id AS agent_owner_id,attempt_task.owner_id AS attempt_owner_id,'
+                        'EXISTS(SELECT 1 FROM agent_runs child WHERE child.parent_agent_run_id=ar.agent_run_id '
+                        'AND child.task_run_id=tr.task_run_id) AS has_children '
+                        'FROM runtime_events e LEFT JOIN agent_attempts aa ON aa.attempt_id=e.attempt_id '
+                        'LEFT JOIN agent_runs ar ON ar.agent_run_id=COALESCE(NULLIF(e.agent_run_id,\'\'),aa.agent_run_id) '
+                        'LEFT JOIN task_runs agent_tr ON agent_tr.task_run_id=ar.task_run_id '
+                        'LEFT JOIN tasks agent_task ON agent_task.task_id=agent_tr.task_id '
+                        'LEFT JOIN agent_runs attempt_ar ON attempt_ar.agent_run_id=aa.agent_run_id '
+                        'LEFT JOIN task_runs attempt_tr ON attempt_tr.task_run_id=attempt_ar.task_run_id '
+                        'LEFT JOIN tasks attempt_task ON attempt_task.task_id=attempt_tr.task_id '
+                        'LEFT JOIN agent_runs pa ON pa.agent_run_id=ar.parent_agent_run_id AND pa.task_run_id=ar.task_run_id '
+                        'LEFT JOIN task_runs tr ON tr.task_run_id=COALESCE(NULLIF(e.task_run_id,\'\'),ar.task_run_id) '
+                        'LEFT JOIN tasks t ON t.task_id=tr.task_id WHERE e.seq>? ORDER BY e.seq LIMIT ?',
+                        (after, batch_size)).fetchall()
+                    if not raw:
+                        has_more_rows = False
+                        break
+                    total_scanned += len(raw)
+                    if native_execution:
+                        execution_page = self._event_execution_page(conn, raw)
+                    else:
+                        execution_page = self._source('executions', params)
+                    execution = {(row.run_id, row.attempt_id): row for row in execution_page.records}
+                    coverage = execution_page.coverage
+                    for source in raw:
+                        # 明确属于其它owner的行不披露，也不能用其坏引用阻塞本owner；跨owner矛盾仍保留为缺口。
+                        # 非空引用必须已解析才能证明外部归属，缺省的optional引用则不等待后继记录。
+                        if (source['owner_id'] not in (None, self.owner_id)
+                                and (not source['agent_run_id'] or source['agent_owner_id'] not in (None, self.owner_id))
+                                and (not source['attempt_id'] or source['attempt_owner_id'] not in (None, self.owner_id))):
+                            after = source['seq']
+                            continue
+                        if (source['canonical_task_run_id'] is None or source['owner_id'] is None
+                                or source['attempt_id'] and source['attempt_agent_run_id'] != source['canonical_agent_run_id']
+                                or (source['agent_run_id'] or source['attempt_id'])
+                                and source['agent_task_run_id'] != source['canonical_task_run_id']):
+                            coverage = 'partial'
+                            break
+                        if source['owner_id'] != self.owner_id:
+                            after = source['seq']
+                            continue
+                        row = (execution.get((source['run_id'], source['attempt_id'])) if source['attempt_id']
+                            else self._event_without_attempt(source))
+                        if row is None:
+                            # 真正缺失的非空引用保留重连机会；空attempt不会等待并不存在的后继attempt。
+                            coverage = 'partial'
+                            break
+                        after = source['seq']
+                        event_facts = ObservationRecord({**row.value, 'occurred_at': _timestamp(source['created_at'])},
+                            row.owner_id, row.space_id, row.project_ref, row.task_id, row.thread_id, row.run_id, row.attempt_id)
+                        if not self._visible(event_facts, 'events.list', params, actor):
+                            continue
+                        cursor = self.cursor(scope, {'generation': generation, 'after': after})
+                        node = ({'kind': 'subagent' if row.value.get('_parent_run_id') else 'background_main', 'id': row.run_id}
+                            if row.run_id is not None else None)
+                        kind = 'ExecutionView' if row.attempt_id is not None else 'NodeView' if node else 'TaskView'
+                        events.append({'stream_item': 'event', 'event_id': source['event_id'], 'cursor': cursor,
+                            'event_type': source['event_type'], 'occurred_at': _timestamp(source['created_at']) or '', 'node': node,
+                            'space_id': row.space_id, 'project_ref': row.project_ref, 'task_id': row.task_id,
+                            'run_id': row.run_id, 'attempt_id': row.attempt_id, 'operation_id': None,
+                            'payload': _view(kind, row.value), 'coverage': execution_page.coverage})
+                        if len(events) >= limit:
+                            break
+                    if len(events) >= limit:
+                        has_more_rows = len(raw) == batch_size or after < last
+                        break
+                    if len(raw) < batch_size:
+                        has_more_rows = False
+                        break
+                if total_scanned >= max_scan and len(events) < limit:
+                    hit_cap = True
+                    has_more_rows = after < last
             if self._event_generation() != generation:
                 raise BusinessError('CURSOR_EXPIRED')
-            if not native_execution:
-                execution_page = self._source('executions', params)
-            execution = {(row.run_id, row.attempt_id): row for row in execution_page.records}
-            coverage = execution_page.coverage
-            for source in raw:
-                # 明确属于其它owner的行不披露，也不能用其坏引用阻塞本owner；跨owner矛盾仍保留为缺口。
-                # 非空引用必须已解析才能证明外部归属，缺省的optional引用则不等待后继记录。
-                if (source['owner_id'] not in (None, self.owner_id)
-                        and (not source['agent_run_id'] or source['agent_owner_id'] not in (None, self.owner_id))
-                        and (not source['attempt_id'] or source['attempt_owner_id'] not in (None, self.owner_id))):
-                    after = source['seq']
-                    continue
-                if (source['canonical_task_run_id'] is None or source['owner_id'] is None
-                        or source['attempt_id'] and source['attempt_agent_run_id'] != source['canonical_agent_run_id']
-                        or (source['agent_run_id'] or source['attempt_id'])
-                        and source['agent_task_run_id'] != source['canonical_task_run_id']):
-                    coverage = 'partial'
-                    break
-                if source['owner_id'] != self.owner_id:
-                    after = source['seq']
-                    continue
-                row = (execution.get((source['run_id'], source['attempt_id'])) if source['attempt_id']
-                    else self._event_without_attempt(source))
-                if row is None:
-                    # 真正缺失的非空引用保留重连机会；空attempt不会等待并不存在的后继attempt。
-                    coverage = 'partial'
-                    break
-                after = source['seq']
-                event_facts = ObservationRecord({**row.value, 'occurred_at': _timestamp(source['created_at'])},
-                    row.owner_id, row.space_id, row.project_ref, row.task_id, row.thread_id, row.run_id, row.attempt_id)
-                if not self._visible(event_facts, 'events.list', params, actor):
-                    continue
-                cursor = self.cursor(scope, {'generation': generation, 'after': after})
-                node = ({'kind': 'subagent' if row.value.get('_parent_run_id') else 'background_main', 'id': row.run_id}
-                    if row.run_id is not None else None)
-                kind = 'ExecutionView' if row.attempt_id is not None else 'NodeView' if node else 'TaskView'
-                events.append({'stream_item': 'event', 'event_id': source['event_id'], 'cursor': cursor,
-                    'event_type': source['event_type'], 'occurred_at': _timestamp(source['created_at']) or '', 'node': node,
-                    'space_id': row.space_id, 'project_ref': row.project_ref, 'task_id': row.task_id,
-                    'run_id': row.run_id, 'attempt_id': row.attempt_id, 'operation_id': None,
-                    'payload': _view(kind, row.value), 'coverage': execution_page.coverage})
+            if hit_cap:
+                coverage = 'partial'
         return {'events': events, 'next_cursor': self.cursor(scope, {'generation': generation, 'after': after}),
             'coverage': coverage, 'reset_required': False}
 

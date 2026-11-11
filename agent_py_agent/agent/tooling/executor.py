@@ -19,6 +19,7 @@ from typing import Any
 _LOGGER = logging.getLogger(__name__)
 
 from ..common.cancellation import CancellationToken
+from ..common.log_redaction import redact_sensitive_value
 from ..contracts.diagnostics import DiagnosticEnvelope
 from ..contracts.error_taxonomy import error_contract
 from ..io.sqlite_connection import sqlite_error_details
@@ -330,7 +331,7 @@ def _execute_authorized(
                 pass
     observed_request = replace(request, on_handler_started=handler_started)
     try:
-        outcome = _invoke_with_operation_policy(observed_request, call, runtime, decision)
+        outcome = _invoke_with_operation_policy(observed_request, call, runtime, decision, started_at)
     finally:
         liveness.close()
     states.append("succeeded" if outcome.ok else _outcome_state(outcome))
@@ -552,6 +553,31 @@ def _precheck_before_approval(runtime: ToolRuntime, decision: ActionDecision) ->
     return decision if availability is None else _precheck_denial(decision, availability, "pre_approval")
 
 
+# LLM: 敏感输入脱敏后有界截断（<= 16KiB），防超大输入撑爆操作记录；不修改原调用参数。
+# 函数用途: 生成用于持久化操作回执的有界脱敏参数字典。
+def _bound_redacted_input(arguments: dict[str, Any], max_bytes: int = 16384) -> dict[str, Any]:
+    redacted = redact_sensitive_value(arguments) if isinstance(arguments, dict) else {}
+    if not isinstance(redacted, dict):
+        return {}
+    try:
+        encoded = json.dumps(redacted, ensure_ascii=False).encode('utf-8')
+        if len(encoded) <= max_bytes:
+            return redacted
+        bounded: dict[str, Any] = {}
+        for k, v in redacted.items():
+            val_bytes = json.dumps(v, ensure_ascii=False).encode('utf-8')
+            if len(val_bytes) > 2048:
+                bounded[k] = f"<truncated:{len(val_bytes)} bytes>"
+            else:
+                bounded[k] = v
+            if len(json.dumps(bounded, ensure_ascii=False).encode('utf-8')) > max_bytes - 128:
+                bounded[k] = "<truncated>"
+                break
+        return bounded
+    except Exception:
+        return {}
+
+
 # LLM: 执行仍沿原操作协调器写账；迁移来源须在handler结果持久化前附入信封，不能事后装饰审计。
 # 函数用途: 按原读写及幂等策略执行一次已授权工具并保留可信迁移事实。
 def _invoke_with_operation_policy(
@@ -559,7 +585,10 @@ def _invoke_with_operation_policy(
     call: ToolCall,
     runtime: ToolRuntime,
     decision: ActionDecision,
+    started_at: float,
 ) -> ToolHandlerOutcome:
+    redacted_input = _bound_redacted_input(call.arguments)
+
     # LLM: 只调用本次冻结的原handler；停止先拒绝，可信迁移信息不进入模型参数。
     # 函数用途: 执行或拒绝当前调用，在原操作账写结果前附上迁移来源。
     def invoke() -> ToolHandlerOutcome:
@@ -571,6 +600,8 @@ def _invoke_with_operation_policy(
                 error_code="CANCELLED",
                 failure_stage=ToolFailureStage.RUNTIME_GATE.value,
                 handler_executed=False,
+                duration_ms=max(0, _elapsed_ms(started_at)),
+                effect_outcome="not_started",
             )
         outcome = invoke_registry_tool(
             _invoke_request(
@@ -579,7 +610,13 @@ def _invoke_with_operation_policy(
                 operation_managed=decision.resolved_effect != "read_only",
             )
         )
-
+        outcome.duration_ms = max(0, _elapsed_ms(started_at))
+        if not outcome.effect_outcome:
+            if decision.resolved_effect == "read_only":
+                outcome.effect_outcome = "none" if outcome.ok else ("not_started" if not outcome.handler_executed else "failed")
+            else:
+                outcome.effect_outcome = "committed" if outcome.ok else ("not_started" if not outcome.handler_executed else "failed")
+        outcome.result_envelope.setdefault("redacted_input", deepcopy(redacted_input))
         if call.input_migration:
             outcome.result_envelope["input_migration"] = dict(call.input_migration)
         return outcome
@@ -637,6 +674,7 @@ def _invoke_with_operation_policy(
             on_settled=_operation_settlement_notifier(runtime, call),
             resource_scopes=resource_scopes,
             attempt_id=call.attempt_id,
+            redacted_input=redacted_input,
         )
     )
 
