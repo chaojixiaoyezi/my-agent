@@ -281,9 +281,10 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
     def _handle_client_notices(self) -> None:
         handle_client_notices(self, _server_instance)
 
-    # LLM: HTTP routing delegates exact descendant reads to the shared owner-scoped
-    # service; the handler never loads a task file directly.
-    # 函数用途: 处理 TUI/Web 查看一个子代理详情的请求。
+    # LLM: HTTP routing delegates exact descendant reads or authorized task-panel
+    # roster projections (mode='panel') to the shared owner-scoped control service
+    # without adding a new route.
+    # 函数用途: 处理 TUI/Web/卡片查看单个子代理详情或任务面板花名册的请求。
     def _handle_client_agent_view(self) -> None:
         handle_client_agent_view(self, _server_instance)
 

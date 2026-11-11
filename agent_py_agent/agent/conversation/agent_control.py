@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -125,12 +126,16 @@ def read_agent_view(
     scope: object,
     run_id: str,
     after: int = 0,
+    session_task_id: str = "",
+    bound_root_id: str = "",
 ) -> dict[str, object]:
     store, _thread, task = _authorized_agent_target(
         agent,
         scope=scope,
         run_id=run_id,
         operation="view",
+        session_task_id=session_task_id,
+        bound_root_id=bound_root_id,
     )
     return conversation_agent_view(
         agent,
@@ -138,6 +143,360 @@ def read_agent_view(
         str(getattr(task, "id", "") or ""),
         after=max(0, int(after or 0)),
     )
+
+
+# LLM: Bounded panel read gathers authorized foreground/delegated tasks and subagent nodes for Feishu cards within 1s.
+# 函数用途: 投影会话当前授权的任务花名册与选中子代理视图，不执行全量目录或全历史扫描。
+def list_authorized_task_panel(
+    agent: object,
+    *,
+    scope: object,
+    session_task_id: str = "",
+    bound_root_id: str = "",
+    selected_run_id: str = "",
+    event_after: int = 0,
+    task_limit: int = 8,
+    node_limit: int = 32,
+) -> dict[str, object]:
+    store = getattr(agent, "conversation_store", None)
+    if not isinstance(store, ConversationStore):
+        raise AgentControlError(503, "AGENT_STORE_UNAVAILABLE", "代理状态存储不可用。")
+    conversation_id = str(getattr(scope, "conversation_id", "") or "").strip()
+    user_id = str(getattr(scope, "user_id", "") or "").strip()
+    channel = str(getattr(scope, "channel", "") or "").strip()
+    if not conversation_id or not user_id or not channel:
+        raise AgentControlError(400, "AGENT_SCOPE_INVALID", "当前会话身份不完整。")
+    try:
+        sender_thread, load_error = store.threads.resolve_report(
+            channel=channel,
+            channel_conversation_id=conversation_id,
+            channel_user_id=user_id,
+        )
+    except Exception as exc:
+        raise AgentControlError(503, "AGENT_THREAD_UNAVAILABLE", "当前会话暂时不可读取。") from exc
+    if sender_thread is None or load_error is not None:
+        raise AgentControlError(404, "AGENT_THREAD_NOT_FOUND", "当前会话还没有可查看的代理任务。")
+
+    owner_id = str(
+        getattr(getattr(agent, "home_paths", None), "owner_id", "") or ""
+    ).strip()
+    clean_st_id = str(session_task_id or "").strip()
+    clean_root_id = str(bound_root_id or "").strip()
+    clamped_task_limit = max(1, min(20, int(task_limit or 8)))
+    clamped_node_limit = max(1, min(64, int(node_limit or 32)))
+
+    selected_task_dict: dict[str, object] | None = None
+    target_thread: object | None = None
+    verified_root_id = ""
+
+    if clean_st_id:
+        session_tasks = getattr(store, "session_tasks", None)
+        if session_tasks is None or not hasattr(session_tasks, "load"):
+            raise AgentControlError(503, "AGENT_TASK_UNAVAILABLE", "会话任务存储不可用。")
+        try:
+            st = session_tasks.load(clean_st_id)
+        except (OSError, ValueError) as exc:
+            raise AgentControlError(404, "AGENT_TASK_NOT_FOUND", "目标后台任务不存在或不可读。") from exc
+        if st is None:
+            raise AgentControlError(404, "AGENT_TASK_NOT_FOUND", "目标后台任务不存在。")
+        if str(getattr(st, "sender_thread_id", "") or "").strip() != str(getattr(sender_thread, "thread_id", "") or "").strip():
+            raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "目标后台任务不属于当前会话。")
+
+        target_thread_id = str(getattr(st, "target_thread_id", "") or "").strip()
+        try:
+            target_thread, target_err = store.threads.load_report(target_thread_id)
+        except Exception as exc:
+            raise AgentControlError(503, "AGENT_THREAD_UNAVAILABLE", "目标后台执行会话暂时不可读取。") from exc
+        if target_thread is None or target_err is not None:
+            raise AgentControlError(404, "AGENT_THREAD_NOT_FOUND", "目标后台执行会话不可读取。")
+
+        if owner_id and getattr(target_thread, "owner_id", "") and str(target_thread.owner_id).strip() != owner_id:
+            raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "目标后台任务超出当前用户。")
+
+        from .execution_threads import IM_TASK_EXECUTION_KEY, execution_origin_thread
+        policy = (getattr(target_thread, "metadata", None) or {}).get(IM_TASK_EXECUTION_KEY)
+        if isinstance(policy, dict):
+            try:
+                origin_thread = execution_origin_thread(store.threads.require, target_thread)
+            except (DataCorruptionError, KeyError, FileNotFoundError) as exc:
+                raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "后台执行来源会话无效。") from exc
+            if str(getattr(origin_thread, "thread_id", "") or "").strip() != str(getattr(sender_thread, "thread_id", "") or "").strip():
+                raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "后台执行来源会话与当前会话不匹配。")
+            if str(policy.get("session_task_id") or "") not in {"", st.task_id}:
+                raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "后台执行策略中的任务引用不匹配。")
+            verified_root_id = str(policy.get("root_task_id") or getattr(target_thread, "workspace_task_id", "") or "").strip()
+        else:
+            verified_root_id = clean_root_id or str(getattr(target_thread, "workspace_task_id", "") or "").strip()
+
+        if clean_root_id and verified_root_id and clean_root_id != verified_root_id:
+            raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "卡片绑定的根任务与后台任务不一致。")
+
+        st_title = str(getattr(st, "goal", "") or getattr(st, "title", "") or "后台协调任务").strip()[:160]
+        st_status = str(getattr(st, "status", "") or "queued").strip().lower()
+        st_updated_at = float(getattr(st, "updated_at", 0.0) or 0.0)
+        selected_task_dict = {
+            "task_ref": f"stask:{st.task_id}",
+            "task_kind": "delegated_session_task",
+            "session_task_id": st.task_id,
+            "bound_root_id": verified_root_id or clean_root_id,
+            "target_thread_id": target_thread_id,
+            "title": st_title,
+            "status": st_status,
+            "updated_at": st_updated_at,
+        }
+
+    elif clean_root_id:
+        try:
+            link, link_err = store.tasks.load_report(clean_root_id)
+        except Exception as exc:
+            raise AgentControlError(503, "AGENT_ROOT_UNAVAILABLE", "当前主任务状态暂时不可读取。") from exc
+        if link is None or link_err is not None:
+            raise AgentControlError(404, "AGENT_ROOT_NOT_FOUND", "当前卡片绑定的主任务不存在。")
+        if str(getattr(link, "thread_id", "") or "").strip() != str(getattr(sender_thread, "thread_id", "") or "").strip():
+            raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "目标主任务不属于当前会话。")
+        verified_root_id = clean_root_id
+        target_thread = sender_thread
+        fg_title = str(getattr(link, "title", "") or getattr(link, "goal", "") or getattr(sender_thread, "title", "") or "当前会话主任务").strip()[:160]
+        fg_status = str(getattr(link, "status", "") or "running").strip().lower()
+        fg_updated_at = float(getattr(link, "updated_at", getattr(sender_thread, "updated_at", 0.0)) or 0.0)
+        selected_task_dict = {
+            "task_ref": f"root:{clean_root_id}",
+            "task_kind": "foreground_root",
+            "session_task_id": "",
+            "bound_root_id": clean_root_id,
+            "target_thread_id": str(getattr(sender_thread, "thread_id", "") or "").strip(),
+            "title": fg_title,
+            "status": fg_status,
+            "updated_at": fg_updated_at,
+        }
+
+    else:
+        fg_root_id = str(getattr(sender_thread, "workspace_task_id", "") or "").strip()
+        if fg_root_id:
+            try:
+                link, link_err = store.tasks.load_report(fg_root_id)
+            except Exception:
+                link, link_err = None, "read_error"
+            if link is not None and link_err is None and str(getattr(link, "thread_id", "") or "").strip() == str(getattr(sender_thread, "thread_id", "") or "").strip():
+                verified_root_id = fg_root_id
+                target_thread = sender_thread
+                fg_title = str(getattr(link, "title", "") or getattr(link, "goal", "") or getattr(sender_thread, "title", "") or "当前会话主任务").strip()[:160]
+                fg_status = str(getattr(link, "status", "") or "running").strip().lower()
+                fg_updated_at = float(getattr(link, "updated_at", getattr(sender_thread, "updated_at", 0.0)) or 0.0)
+                selected_task_dict = {
+                    "task_ref": f"root:{fg_root_id}",
+                    "task_kind": "foreground_root",
+                    "session_task_id": "",
+                    "bound_root_id": fg_root_id,
+                    "target_thread_id": str(getattr(sender_thread, "thread_id", "") or "").strip(),
+                    "title": fg_title,
+                    "status": fg_status,
+                    "updated_at": fg_updated_at,
+                }
+
+    task_map: dict[str, dict[str, object]] = {}
+    if selected_task_dict is not None:
+        task_map[str(selected_task_dict["task_ref"])] = selected_task_dict
+
+    session_tasks = getattr(store, "session_tasks", None)
+    if session_tasks is not None and hasattr(session_tasks, "list_page"):
+        try:
+            page = session_tasks.list_page(limit=32, cursor=None)
+            items = page.get("items") or []
+            sender_id = str(getattr(sender_thread, "thread_id", "") or "").strip()
+            for item in items:
+                if str(getattr(item, "sender_thread_id", "") or "").strip() == sender_id:
+                    st_id = str(getattr(item, "task_id", "") or "").strip()
+                    if not st_id:
+                        continue
+                    ref = f"stask:{st_id}"
+                    if ref not in task_map:
+                        task_map[ref] = {
+                            "task_ref": ref,
+                            "task_kind": "delegated_session_task",
+                            "session_task_id": st_id,
+                            "bound_root_id": "",
+                            "target_thread_id": str(getattr(item, "target_thread_id", "") or "").strip(),
+                            "title": str(getattr(item, "goal", "") or getattr(item, "title", "") or "后台协调任务").strip()[:160],
+                            "status": str(getattr(item, "status", "") or "queued").strip().lower(),
+                            "updated_at": float(getattr(item, "updated_at", 0.0) or 0.0),
+                        }
+        except Exception:
+            pass
+
+    all_tasks = sorted(
+        task_map.values(),
+        key=lambda t: float(t.get("updated_at") or 0.0),
+        reverse=True,
+    )[:clamped_task_limit]
+
+    if selected_task_dict is None and all_tasks:
+        selected_task_dict = all_tasks[0]
+        if selected_task_dict.get("task_kind") == "delegated_session_task" and session_tasks is not None:
+            clean_st_id = str(selected_task_dict.get("session_task_id") or "")
+            try:
+                st = session_tasks.load(clean_st_id)
+                if st is not None:
+                    target_thread, _ = store.threads.load_report(str(st.target_thread_id or "").strip())
+                    if target_thread is not None:
+                        from .execution_threads import IM_TASK_EXECUTION_KEY
+                        policy = (getattr(target_thread, "metadata", None) or {}).get(IM_TASK_EXECUTION_KEY)
+                        if isinstance(policy, dict):
+                            verified_root_id = str(policy.get("root_task_id") or getattr(target_thread, "workspace_task_id", "") or "").strip()
+                        else:
+                            verified_root_id = str(getattr(target_thread, "workspace_task_id", "") or "").strip()
+                        selected_task_dict["bound_root_id"] = verified_root_id
+            except Exception:
+                pass
+
+    nodes: list[dict[str, object]] = []
+    if selected_task_dict is not None:
+        main_status = str(selected_task_dict.get("status") or "").strip().lower()
+        main_terminal = main_status in {"done", "failed", "cancelled"}
+        if selected_task_dict.get("task_kind") == "delegated_session_task":
+            main_node = {
+                "node_id": f"main:{selected_task_dict['session_task_id']}",
+                "node_kind": "background_main",
+                "session_task_id": selected_task_dict["session_task_id"],
+                "target_thread_id": selected_task_dict["target_thread_id"],
+                "bound_root_id": selected_task_dict["bound_root_id"],
+                "run_id": "",
+                "parent_run_id": "",
+                "depth": 0,
+                "title": "后台协调主代理",
+                "status": main_status,
+                "terminal": main_terminal,
+                "can_view": False,
+                "can_guide": False,
+                "can_stop_branch": False,
+            }
+        else:
+            main_node = {
+                "node_id": f"main:{selected_task_dict['bound_root_id']}",
+                "node_kind": "foreground_main",
+                "session_task_id": "",
+                "target_thread_id": selected_task_dict["target_thread_id"],
+                "bound_root_id": selected_task_dict["bound_root_id"],
+                "run_id": "",
+                "parent_run_id": "",
+                "depth": 0,
+                "title": "当前会话主任务",
+                "status": main_status,
+                "terminal": main_terminal,
+                "can_view": False,
+                "can_guide": False,
+                "can_stop_branch": False,
+            }
+        nodes.append(main_node)
+
+        if verified_root_id:
+            manager = getattr(agent, "subagents", None)
+            if manager is not None:
+                local_store = getattr(manager, "local_store", None)
+                tree_reader = getattr(local_store, "list_agent_tree", None)
+                selected_reader = getattr(manager, "list_runs_by_ids_report", None)
+
+                subagent_tasks: list[object] = []
+                if callable(tree_reader) and callable(selected_reader):
+                    try:
+                        tree = tree_reader(verified_root_id)
+                        run_records = list(getattr(tree, "runs", ()) or ())
+                        matching_run_ids = [
+                            str(getattr(r, "run_id", "") or "").strip()
+                            for r in run_records
+                            if str(getattr(r, "root_task_id", "") or getattr(r, "root_id", "") or "").strip() in {"", verified_root_id}
+                            and str(getattr(r, "run_id", "") or "").strip()
+                        ]
+                        if matching_run_ids:
+                            report = selected_reader(matching_run_ids[:clamped_node_limit])
+                            subagent_tasks = list(report.runs or ())
+                    except Exception:
+                        subagent_tasks = []
+                else:
+                    try:
+                        all_runs_fn = getattr(manager, "list", None)
+                        if callable(all_runs_fn):
+                            raw_runs = all_runs_fn()
+                            subagent_tasks = [
+                                r for r in raw_runs
+                                if str(getattr(r, "root_id", "") or "").strip() == verified_root_id
+                            ]
+                    except Exception:
+                        subagent_tasks = []
+
+                for stask in subagent_tasks[: max(0, clamped_node_limit - 1)]:
+                    sub_id = str(getattr(stask, "id", "") or "").strip()
+                    if not sub_id:
+                        continue
+                    sub_status = str(getattr(stask, "status", "") or "PENDING").strip().upper()
+                    sub_term = task_status_in(sub_status, SUBAGENT_ENDED_STATUSES)
+                    sub_title = str(
+                        getattr(stask, "agent_name", "")
+                        or getattr(stask, "role", "")
+                        or getattr(stask, "goal", "")
+                        or getattr(stask, "description", "")
+                        or "subagent"
+                    ).strip()[:80]
+                    sub_depth = max(1, int(getattr(stask, "depth", 1) or 1))
+                    sub_parent = str(getattr(stask, "parent_id", "") or "").strip()
+                    sub_lifecycle = str(getattr(stask, "lifecycle_phase", "") or sub_status).strip().lower()
+                    sub_activity = str(
+                        getattr(stask, "activity", "")
+                        or getattr(stask, "goal", "")
+                        or getattr(stask, "description", "")
+                        or ""
+                    ).strip()[:160]
+
+                    nodes.append({
+                        "node_id": f"run:{sub_id}",
+                        "node_kind": "subagent",
+                        "run_id": sub_id,
+                        "parent_run_id": sub_parent,
+                        "root_id": verified_root_id,
+                        "depth": sub_depth,
+                        "title": sub_title,
+                        "status": sub_status,
+                        "lifecycle_phase": sub_lifecycle,
+                        "activity": sub_activity,
+                        "terminal": sub_term,
+                        "can_view": True,
+                        "can_guide": True,
+                        "can_stop_branch": True,
+                    })
+
+    clean_sel_id = str(selected_run_id or "").strip()
+    selected_node_id = "all_summary"
+    actual_selected_run_id = ""
+    selected_agent_view = None
+
+    if clean_sel_id and clean_sel_id != "all_summary":
+        if clean_sel_id.startswith("main:"):
+            selected_node_id = clean_sel_id
+        else:
+            raw_run_id = clean_sel_id[4:] if clean_sel_id.startswith("run:") else clean_sel_id
+            selected_node_id = f"run:{raw_run_id}"
+            actual_selected_run_id = raw_run_id
+            selected_agent_view = read_agent_view(
+                agent,
+                scope=scope,
+                run_id=raw_run_id,
+                after=max(0, int(event_after or 0)),
+                session_task_id=session_task_id,
+                bound_root_id=bound_root_id,
+            )
+
+    return {
+        "schema_version": "feishu_task_panel.v1",
+        "ok": True,
+        "sender_thread_id": str(getattr(sender_thread, "thread_id", "") or "").strip(),
+        "selected_task": selected_task_dict,
+        "tasks": all_tasks,
+        "nodes": nodes,
+        "selected_node_id": selected_node_id,
+        "selected_run_id": actual_selected_run_id,
+        "selected_agent_view": selected_agent_view,
+        "warnings": [],
+    }
 
 
 # LLM: Child input uses one caller-supplied stable message id and one exact
@@ -153,12 +512,16 @@ def send_agent_guidance(
     run_id: str,
     message: str,
     message_id: str,
+    session_task_id: str = "",
+    bound_root_id: str = "",
 ) -> dict[str, object]:
     store, thread, task = _authorized_agent_target(
         agent,
         scope=scope,
         run_id=run_id,
         operation="send_guidance",
+        session_task_id=session_task_id,
+        bound_root_id=bound_root_id,
     )
     content = str(message or "").strip()
     stable_id = str(message_id or "").strip()
@@ -631,6 +994,37 @@ def _resume_agent_for_guidance(
     }
 
 
+def _persist_stop_receipt(
+    agent: object,
+    run_id: str,
+    task: object,
+    receipt: dict[str, object],
+) -> None:
+    # LLM: 停止回执更新至运行态属性并持久化，供后续网络重试直接识别已终态和已确认清理。
+    attributes = getattr(task, "attributes", None)
+    if isinstance(attributes, dict):
+        attributes["user_agent_stop_receipt"] = dict(receipt)
+    elif attributes is None:
+        try:
+            task.attributes = {"user_agent_stop_receipt": dict(receipt)}
+        except Exception:
+            pass
+
+    manager = getattr(agent, "subagents", None)
+    mutate_fn = getattr(manager, "mutate", None)
+    if callable(mutate_fn):
+        def _reducer(current_task: object) -> None:
+            current_attrs = getattr(current_task, "attributes", None)
+            if not isinstance(current_attrs, dict):
+                current_attrs = {}
+                current_task.attributes = current_attrs
+            current_attrs["user_agent_stop_receipt"] = dict(receipt)
+        try:
+            mutate_fn(run_id, _reducer)
+        except Exception:
+            pass
+
+
 # LLM: 先核精确子树授权，已终态也可能有遗留资源；业务状态由取消域保留，不能直接早退略过资源。
 # 函数用途: 按用户明确控制停止当前子代理分支，并返回真实清理结果。
 def stop_agent(
@@ -639,12 +1033,16 @@ def stop_agent(
     scope: object,
     run_id: str,
     operation_id: str,
+    session_task_id: str = "",
+    bound_root_id: str = "",
 ) -> dict[str, object]:
     _store, _thread, task = _authorized_agent_target(
         agent,
         scope=scope,
         run_id=run_id,
         operation="cancel",
+        session_task_id=session_task_id,
+        bound_root_id=bound_root_id,
     )
     stable_id = str(operation_id or "").strip()
     if not stable_id:
@@ -674,12 +1072,16 @@ def enqueue_agent_stop(
     scope: object,
     run_id: str,
     operation_id: str,
+    session_task_id: str = "",
+    bound_root_id: str = "",
 ) -> dict[str, object]:
     _store, _thread, task = _authorized_agent_target(
         agent,
         scope=scope,
         run_id=run_id,
         operation="cancel",
+        session_task_id=session_task_id,
+        bound_root_id=bound_root_id,
     )
     stable_id = str(operation_id or "").strip()
     if not stable_id:
@@ -695,6 +1097,22 @@ def enqueue_agent_stop(
             _AGENT_STOP_ACTIVE.add(active_key)
 
     if not already_active:
+        existing_receipt = (getattr(task, "attributes", None) or {}).get("user_agent_stop_receipt")
+        if isinstance(existing_receipt, dict) and existing_receipt.get("cleanup_confirmed") is True:
+            with _AGENT_STOP_LOCK:
+                _AGENT_STOP_ACTIVE.discard(active_key)
+            status_str = str(getattr(task, "status", "") or "").strip().upper()
+            return {
+                "ok": True,
+                "operation_id": stable_id,
+                "run_id": stable_run_id,
+                "status": "confirmed" if status_str == "CANCELLED" else "already_terminal",
+                "already_active": False,
+                "replayed": str(existing_receipt.get("operation_id") or "") == stable_id,
+            }
+
+        was_non_cancel_terminal = _task_is_terminal(task) and str(getattr(task, "status", "") or "").strip().upper() != "CANCELLED"
+
         try:
             batch = prepare_subagent_stops(agent, [CancelSubagentTaskRequest(
                 task, "用户从代理详情页按 Esc 停止", source="user_agent_control",
@@ -704,11 +1122,23 @@ def enqueue_agent_stop(
                 _AGENT_STOP_ACTIVE.discard(active_key)
             raise AgentControlError(503, "AGENT_STOP_UNAVAILABLE", "停止准备未确认，请重新查看状态。") from exc
 
+        _persist_stop_receipt(agent, stable_run_id, task, {
+            "operation_id": stable_id,
+            "cleanup_confirmed": False,
+            "requested_at": time.time(),
+        })
+
         # LLM: worker 只消费已固定 batch；父通知在控制锁外，finally 释放本次临时去重键。
         # 函数用途: 清理用户点名的原分支，并把实际取消结果交给直属父级。
         def cancel() -> None:
             try:
                 result = cleanup_subagent_tree(batch, stable_run_id)
+                if result.get("ok"):
+                    _persist_stop_receipt(agent, stable_run_id, task, {
+                        "operation_id": stable_id,
+                        "cleanup_confirmed": True,
+                        "requested_at": time.time(),
+                    })
                 if result.get("cancel_status") == "CANCELLED":
                     _deliver_stopped_agent_to_parent(agent, stable_run_id, parent_thread=_thread)
             finally:
@@ -718,6 +1148,14 @@ def enqueue_agent_stop(
         threading.Thread(target=cancel, name=f"agent-stop:{stable_run_id}", daemon=True).start()
         if batch.unconfirmed:
             raise AgentControlError(503, "AGENT_STOP_UNCONFIRMED", "部分停止准备未确认；已选中的资源继续清理。")
+
+        return {
+            "ok": True,
+            "operation_id": stable_id,
+            "run_id": stable_run_id,
+            "status": "already_terminal" if was_non_cancel_terminal else "accepted",
+            "already_active": False,
+        }
 
     return {
         "ok": True,
@@ -867,6 +1305,8 @@ def _authorized_agent_target(
     scope: object,
     run_id: str,
     operation: str,
+    session_task_id: str = "",
+    bound_root_id: str = "",
 ) -> tuple[ConversationStore, object, object]:
     store = getattr(agent, "conversation_store", None)
     if not isinstance(store, ConversationStore):
@@ -877,30 +1317,111 @@ def _authorized_agent_target(
     if not conversation_id or not user_id or not channel:
         raise AgentControlError(400, "AGENT_SCOPE_INVALID", "当前会话身份不完整。")
     try:
-        thread, load_error = store.threads.resolve_report(
+        sender_thread, load_error = store.threads.resolve_report(
             channel=channel,
             channel_conversation_id=conversation_id,
             channel_user_id=user_id,
         )
     except Exception as exc:
         raise AgentControlError(503, "AGENT_THREAD_UNAVAILABLE", "当前会话暂时不可读取。") from exc
-    if thread is None or load_error is not None:
+    if sender_thread is None or load_error is not None:
         raise AgentControlError(404, "AGENT_THREAD_NOT_FOUND", "当前会话还没有可查看的代理任务。")
-    root_id = str(getattr(thread, "workspace_task_id", "") or "").strip()
-    try:
-        link, link_error = store.tasks.load_report(root_id)
-    except Exception as exc:
-        raise AgentControlError(503, "AGENT_ROOT_UNAVAILABLE", "当前主任务状态暂时不可读取。") from exc
-    if (
-        not root_id
-        or link is None
-        or link_error is not None
-        or str(getattr(link, "thread_id", "") or "").strip()
-        != str(getattr(thread, "thread_id", "") or "").strip()
-    ):
-        raise AgentControlError(404, "AGENT_ROOT_NOT_FOUND", "当前会话没有可操作的主任务树。")
-    if operation == "resolve_tool_approval" and str(run_id or "").strip() == root_id:
-        return store, thread, link
+
+    owner_id = str(
+        getattr(getattr(agent, "home_paths", None), "owner_id", "") or ""
+    ).strip()
+    clean_st_id = str(session_task_id or "").strip()
+    clean_root_id = str(bound_root_id or "").strip()
+
+    if not clean_st_id and not clean_root_id:
+        root_id = str(getattr(sender_thread, "workspace_task_id", "") or "").strip()
+        try:
+            link, link_error = store.tasks.load_report(root_id)
+        except Exception as exc:
+            raise AgentControlError(503, "AGENT_ROOT_UNAVAILABLE", "当前主任务状态暂时不可读取。") from exc
+        if (
+            not root_id
+            or link is None
+            or link_error is not None
+            or str(getattr(link, "thread_id", "") or "").strip()
+            != str(getattr(sender_thread, "thread_id", "") or "").strip()
+        ):
+            raise AgentControlError(404, "AGENT_ROOT_NOT_FOUND", "当前会话没有可操作的主任务树。")
+        verified_root_id = root_id
+        owning_thread = sender_thread
+
+    elif clean_st_id:
+        session_tasks = getattr(store, "session_tasks", None)
+        if session_tasks is None or not hasattr(session_tasks, "load"):
+            raise AgentControlError(503, "AGENT_TASK_UNAVAILABLE", "会话任务存储不可用。")
+        try:
+            st = session_tasks.load(clean_st_id)
+        except (OSError, ValueError) as exc:
+            raise AgentControlError(404, "AGENT_TASK_NOT_FOUND", "目标后台任务不存在或不可读。") from exc
+        if st is None:
+            raise AgentControlError(404, "AGENT_TASK_NOT_FOUND", "目标后台任务不存在。")
+        if str(getattr(st, "sender_thread_id", "") or "").strip() != str(getattr(sender_thread, "thread_id", "") or "").strip():
+            raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "目标后台任务不属于当前会话。")
+
+        target_thread_id = str(getattr(st, "target_thread_id", "") or "").strip()
+        try:
+            target_thread, target_err = store.threads.load_report(target_thread_id)
+        except Exception as exc:
+            raise AgentControlError(503, "AGENT_THREAD_UNAVAILABLE", "目标后台执行会话暂时不可读取。") from exc
+        if target_thread is None or target_err is not None:
+            raise AgentControlError(404, "AGENT_THREAD_NOT_FOUND", "目标后台执行会话不可读取。")
+
+        if owner_id and getattr(target_thread, "owner_id", "") and str(target_thread.owner_id).strip() != owner_id:
+            raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "目标后台任务超出当前用户。")
+
+        from .execution_threads import IM_TASK_EXECUTION_KEY, execution_origin_thread
+        policy = (getattr(target_thread, "metadata", None) or {}).get(IM_TASK_EXECUTION_KEY)
+        if isinstance(policy, dict):
+            try:
+                origin_thread = execution_origin_thread(store.threads.require, target_thread)
+            except (DataCorruptionError, KeyError, FileNotFoundError) as exc:
+                raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "后台执行来源会话无效。") from exc
+            if str(getattr(origin_thread, "thread_id", "") or "").strip() != str(getattr(sender_thread, "thread_id", "") or "").strip():
+                raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "后台执行来源会话与当前会话不匹配。")
+            if str(policy.get("session_task_id") or "") not in {"", st.task_id}:
+                raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "后台执行策略中的任务引用不匹配。")
+            verified_root_id = str(policy.get("root_task_id") or getattr(target_thread, "workspace_task_id", "") or "").strip()
+        else:
+            verified_root_id = clean_root_id or str(getattr(target_thread, "workspace_task_id", "") or "").strip()
+
+        if clean_root_id and verified_root_id and clean_root_id != verified_root_id:
+            raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "卡片绑定的根任务与后台任务不一致。")
+
+        if not verified_root_id:
+            raise AgentControlError(404, "AGENT_ROOT_NOT_FOUND", "目标后台任务尚未建立子代理主任务树。")
+
+        try:
+            link, link_err = store.tasks.load_report(verified_root_id)
+        except Exception as exc:
+            raise AgentControlError(503, "AGENT_ROOT_UNAVAILABLE", "目标后台任务状态暂时不可读取。") from exc
+        if (
+            link is None
+            or link_err is not None
+            or str(getattr(link, "thread_id", "") or "").strip() != str(getattr(target_thread, "thread_id", "") or "").strip()
+        ):
+            raise AgentControlError(404, "AGENT_ROOT_NOT_FOUND", "目标后台任务尚未建立子代理主任务树。")
+        owning_thread = target_thread
+
+    else:
+        try:
+            link, link_err = store.tasks.load_report(clean_root_id)
+        except Exception as exc:
+            raise AgentControlError(503, "AGENT_ROOT_UNAVAILABLE", "当前主任务状态暂时不可读取。") from exc
+        if link is None or link_err is not None:
+            raise AgentControlError(404, "AGENT_ROOT_NOT_FOUND", "当前卡片绑定的主任务不存在。")
+        if str(getattr(link, "thread_id", "") or "").strip() != str(getattr(sender_thread, "thread_id", "") or "").strip():
+            raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "目标主任务不属于当前会话。")
+        verified_root_id = clean_root_id
+        owning_thread = sender_thread
+
+    if operation == "resolve_tool_approval" and str(run_id or "").strip() == verified_root_id:
+        return store, owning_thread, link
+
     manager = getattr(agent, "subagents", None)
     if manager is None:
         raise AgentControlError(503, "AGENT_MANAGER_UNAVAILABLE", "子代理管理器不可用。")
@@ -908,8 +1429,10 @@ def _authorized_agent_target(
         task = manager.load(str(run_id or "").strip())
     except (FileNotFoundError, ValueError) as exc:
         raise AgentControlError(404, "AGENT_NOT_FOUND", "目标子代理不存在。") from exc
-    if str(getattr(task, "root_id", "") or "").strip() != root_id:
+
+    if str(getattr(task, "root_id", "") or "").strip() != verified_root_id:
         raise AgentControlError(403, "AGENT_OUTSIDE_CONVERSATION", "目标子代理不属于当前会话。")
+
     owner_id = str(
         getattr(getattr(agent, "home_paths", None), "owner_id", "") or ""
     ).strip()
@@ -920,12 +1443,13 @@ def _authorized_agent_target(
                 operation="view",
                 run_id=str(getattr(task, "id", "") or ""),
                 requester_owner=owner_id,
-                requester_run_id=root_id,
+                requester_run_id=verified_root_id,
             ),
             target=task,
         )
     except PermissionError as exc:
         raise AgentControlError(403, "AGENT_CONTROL_DENIED", "无权操作这个子代理。") from exc
+
     if operation != "view" and not _task_is_terminal(task):
         try:
             task = authorize_operation(
@@ -934,7 +1458,7 @@ def _authorized_agent_target(
                     operation=operation,
                     run_id=str(getattr(task, "id", "") or ""),
                     requester_owner=owner_id,
-                    requester_run_id=root_id,
+                    requester_run_id=verified_root_id,
                 ),
                 target=task,
             )
@@ -944,7 +1468,8 @@ def _authorized_agent_target(
                 "AGENT_CONTROL_DENIED",
                 "无权操作这个子代理。",
             ) from exc
-    return store, thread, task
+
+    return store, owning_thread, task
 
 
 # LLM: Terminal checks use the canonical status enum only; result prose and UI
@@ -960,6 +1485,7 @@ def _task_is_terminal(task: object) -> bool:
 __all__ = [
     "AgentControlError",
     "enqueue_agent_stop",
+    "list_authorized_task_panel",
     "read_agent_view",
     "resolve_agent_permission",
     "send_agent_guidance",

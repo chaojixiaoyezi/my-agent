@@ -53,6 +53,7 @@ from ..conversation.agent_activity import (
 from ..conversation.agent_control import (
     AgentControlError,
     enqueue_agent_stop,
+    list_authorized_task_panel,
     read_agent_view,
     resolve_agent_permission,
     send_agent_guidance,
@@ -1729,19 +1730,36 @@ def handle_client_notices(handler, server) -> None:
 
 # LLM: View requests reuse trusted-source middleware and one owner-resolved
 # GatewayControlScope. The base Gateway agent must never read a scoped user's run.
-# 函数用途: 从当前用户自己的 Agent 返回一个子代理详情和增量过程事件。
+# 函数用途: 从当前用户自己的 Agent 返回一个子代理详情或任务面板花名册。
 def handle_client_agent_view(handler, server) -> None:
     body = _read_agent_control_body(handler, server)
     if body is None:
         return
     try:
         owner_agent, scope = _agent_control_context(handler, server, body)
-        result = read_agent_view(
-            owner_agent,
-            scope=scope,
-            run_id=str(body.get("run_id") or ""),
-            after=max(0, _safe_request_int(body.get("event_after"))),
-        )
+        session_task_id = str(body.get("session_task_id") or "")
+        bound_root_id = str(body.get("bound_root_id") or "")
+        mode = str(body.get("mode") or "").strip().lower()
+        if mode == "panel":
+            result = list_authorized_task_panel(
+                owner_agent,
+                scope=scope,
+                session_task_id=session_task_id,
+                bound_root_id=bound_root_id,
+                selected_run_id=str(body.get("run_id") or ""),
+                event_after=max(0, _safe_request_int(body.get("event_after"))),
+                task_limit=_safe_request_int(body.get("task_limit")) or 8,
+                node_limit=_safe_request_int(body.get("node_limit")) or 32,
+            )
+        else:
+            result = read_agent_view(
+                owner_agent,
+                scope=scope,
+                run_id=str(body.get("run_id") or ""),
+                after=max(0, _safe_request_int(body.get("event_after"))),
+                session_task_id=session_task_id,
+                bound_root_id=bound_root_id,
+            )
     except AgentControlError as exc:
         _send_agent_control_error(handler, exc)
         return
@@ -1763,6 +1781,8 @@ def handle_client_agent_guidance(handler, server) -> None:
             run_id=str(body.get("run_id") or ""),
             message=str(body.get("message") or ""),
             message_id=str(body.get("message_id") or ""),
+            session_task_id=str(body.get("session_task_id") or ""),
+            bound_root_id=str(body.get("bound_root_id") or ""),
         )
     except AgentControlError as exc:
         _send_agent_control_error(handler, exc)
@@ -1858,6 +1878,8 @@ def handle_client_agent_stop(handler, server) -> None:
             scope=scope,
             run_id=str(body.get("run_id") or ""),
             operation_id=str(body.get("operation_id") or ""),
+            session_task_id=str(body.get("session_task_id") or ""),
+            bound_root_id=str(body.get("bound_root_id") or ""),
         )
     except AgentControlError as exc:
         _send_agent_control_error(handler, exc)
