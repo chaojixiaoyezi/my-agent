@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import time
 from itertools import count
+from types import SimpleNamespace
 
+from agent_py_agent.agent.runtime_context import current_subagent_run_id
 from agent_py_agent.tests._tool_runtime_harness import execute_approved_registry_test_call
 
 _TOOL_CALL_IDS = count(1)
@@ -31,14 +33,34 @@ def _execute_cancel_subagents(agent: object, arguments: dict[str, object]):
             role="assistant",
         )
         attempt_id = str(record["attempt_id"])
-    return execute_approved_registry_test_call(
-        agent.tools,
-        "cancel_subagents",
-        arguments,
-        run_id=run_id,
-        call_id=f"cancel-tool-call-{sequence}",
-        attempt_id=attempt_id,
+
+    bind_run_params = (
+        not current_subagent_run_id(agent)
+        and getattr(agent, "_current_run_params", None) is None
     )
+    had_previous = hasattr(agent, "_current_run_params")
+    previous = getattr(agent, "_current_run_params", None)
+    if bind_run_params:
+        agent._current_run_params = SimpleNamespace(
+            run_id=run_id,
+            task_id=run_id,
+            request_id=run_id,
+        )
+    try:
+        return execute_approved_registry_test_call(
+            agent.tools,
+            "cancel_subagents",
+            arguments,
+            run_id=run_id,
+            call_id=f"cancel-tool-call-{sequence}",
+            attempt_id=attempt_id,
+        )
+    finally:
+        if bind_run_params:
+            if had_previous:
+                agent._current_run_params = previous
+            else:
+                del agent._current_run_params
 
 
 def _execute_host_cancel_subagents(agent: object, arguments: dict[str, object]):
