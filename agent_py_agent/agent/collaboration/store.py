@@ -143,7 +143,6 @@ class CollaborationBaseStore:
             self.evidence_dir,
             self.participants_dir,
             self.decisions_dir,
-            self.handoff_items_dir,
         ):
             ensure_private_dir(path)
 
@@ -1278,6 +1277,7 @@ class CollaborationStore(CollaborationPendingRequestStore):
     # LLM: 交接项状态变更是只追加 JSONL（同 item_id 取最后一行）；写入由 locked_json_path / append_private_jsonl_records 串行。
     # 函数用途: 将交接项的最新状态快照追加到所属 case 的交接账本并更新活跃索引。
     def append_handoff_item(self, item: HandoffBoardItem) -> None:
+        ensure_private_dir(self.handoff_items_dir)
         path = self._handoff_items_path(item.case_id)
         append_private_jsonl_records(path, [item.to_dict()], sort_keys=True)
         if item.state != "closed":
@@ -1298,6 +1298,7 @@ class CollaborationStore(CollaborationPendingRequestStore):
                 except OSError:
                     pass
         else:
+            ensure_private_dir(self.handoff_items_dir)
             records = [item.to_dict() for item in items]
             write_private_jsonl_records(path, records, sort_keys=True)
         has_active = any(it.state != "closed" for it in items)

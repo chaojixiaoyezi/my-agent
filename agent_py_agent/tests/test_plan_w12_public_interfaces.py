@@ -221,14 +221,14 @@ def test_optional_channel_configuration_defaults_and_registry():
     from agent_py_agent.agent.settings.config import AgentConfig, load_config
     from agent_py_agent.agent.settings.parameter_registry import parameter_registry
 
-    keys = ('im_topic_aggregation_enabled', 'im_progress_cards_enabled')
-    assert all(hasattr(AgentConfig(), key) for key in keys)
+    expected = {'im_topic_aggregation_enabled': False, 'im_progress_cards_enabled': True}
+    assert all(hasattr(AgentConfig(), key) for key in expected)
     packaged = Path(__file__).parents[1] / 'config' / 'agent_config.yaml'
     config = load_config(packaged)
-    for key in keys:
+    for key, default in expected.items():
         spec = parameter_registry()[key]
-        assert getattr(config, key) is False and getattr(AgentConfig(), key) is False
-        assert spec.default is False and spec.description and spec.category == 'IM 通道'
+        assert getattr(config, key) is default and getattr(AgentConfig(), key) is default
+        assert spec.default is default and spec.description and spec.category == 'IM 通道'
 
 
 @pytest.mark.parametrize('broad', [False, True])
