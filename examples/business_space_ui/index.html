@@ -94,7 +94,7 @@
     </div>
     <div class="row">
       <label for="retire-disposition">退役处置</label>
-      <select id="retire-disposition"><option value="drain">排空(drain)</option><option value="reassign">重新分配(reassign)</option><option value="cancel">取消(cancel)</option></select>
+      <select id="retire-disposition"><option value="drain">排空(drain)</option><option value="cancel_tasks">取消在途任务(cancel_tasks)</option></select>
       <button id="team-retire">退役</button>
     </div>
     <label for="team-message">补充消息</label><textarea id="team-message" placeholder="只发往这里明确选择的 Agent"></textarea>
@@ -116,7 +116,13 @@
     <label for="changes-task-id">任务ID (task_id)</label><input id="changes-task-id" autocomplete="off"><button id="changes-get">读取变更</button><pre id="changes-result">尚未读取变更</pre>
     <h3>空间策略与权限</h3>
     <div class="row"><button id="policies-get">读取空间策略</button></div>
-    <label for="permission-target">权限目标引用 (target)</label><input id="permission-target" placeholder="agent_id 或 task_id" autocomplete="off"><button id="permissions-get">读取权限</button><pre id="delivery-info">尚未读取策略或权限</pre>
+    <label for="permission-target">权限目标引用 (target)</label>
+    <div class="row">
+      <select id="permission-target-kind"><option value="background_main">后台助手(background_main)</option><option value="controller">总控(controller)</option><option value="subagent">子代理(subagent)</option></select>
+      <input id="permission-target" placeholder="agent_id 或 task_id" autocomplete="off">
+      <button id="permissions-get">读取权限</button>
+    </div>
+    <pre id="delivery-info">尚未读取策略或权限</pre>
     <h3>待审核事项</h3><div id="approvals-data" class="muted">未知 · 审批仍须原用户票据与当前权限</div>
     <label for="approval-id">审批引用</label><input id="approval-id"><label for="response-ticket">本次宿主响应票据</label><input id="response-ticket" type="password" autocomplete="off">
     <label for="decision">决定</label><select id="decision"><option value="denied">拒绝</option><option value="approved">批准</option></select><button id="approval-decide">提交明确决定</button><pre id="approval-result">尚无审批回执</pre>

@@ -194,7 +194,10 @@ def consume_business_command(raw: str, *, session: BusinessCommandSession) -> di
             params = {'space_id': parts[0], 'name': parts[1]} if len(parts) >= 2 else {'name': parts[0]}
         elif action == 'background_agents.retire':
             parts = arg_text.split()
-            params = {'agent_id': parts[0], 'disposition': parts[1] if len(parts) > 1 else 'idle'}
+            disp = parts[1] if len(parts) > 1 else 'drain'
+            if disp == 'cancel':
+                disp = 'cancel_tasks'
+            params = {'agent_id': parts[0], 'disposition': disp}
         elif action == 'background_agents.model.set':
             parts = arg_text.split()
             params = {'agent_id': parts[0], 'model_profile_id': parts[1] if len(parts) > 1 else ''}
@@ -215,6 +218,27 @@ def consume_business_command(raw: str, *, session: BusinessCommandSession) -> di
                     raise ValueError('请先列出流程再使用编号')
                 identifier = session.workflow_table.resolve(identifier)
             params = {keys[0]: identifier}
+
+    if not arguments.lstrip().startswith('{') and 'expected_revision' in spec.native_request_schema.get('required', ()) and 'expected_revision' not in options:
+        if action.startswith('spaces.'):
+            cur = session.client.call('spaces.get', {'space_id': params['space_id']})
+            if not cur.get('ok'):
+                return cur
+            options['expected_revision'] = cur['data']['space']['revision']
+        elif action == 'background_agents.model.set':
+            cur = session.client.call('background_agents.model.get', {'agent_id': params['agent_id']})
+            if not cur.get('ok'):
+                return cur
+            options['expected_revision'] = cur['data']['selection_revision']
+        elif action.startswith('background_agents.'):
+            cur = session.client.call('background_agents.get', {'agent_id': params['agent_id']})
+            if not cur.get('ok'):
+                return cur
+            agent_info = cur['data']['agent']
+            rev = agent_info.get('identity_revision')
+            if rev is None:
+                rev = agent_info.get('revision')
+            options['expected_revision'] = rev
 
     result = session.client.send(session.client.prepare(action, params, **options))
     if action == 'workflows.list' and result.get('ok') is True:

@@ -4,18 +4,28 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from agent_py_agent import __version__
 from agent_py_agent.agent.common.build_identity import get_build_identity
+from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.gateway_parts.business_host_ports import wire_business_host_ports
 from agent_py_agent.agent.gateway_parts.http_handlers import handle_status
+from agent_py_agent.agent.gateway_parts.http_service import (
+    GatewayHTTPServer,
+    GatewayHTTPServerParams,
+)
+from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
 from agent_py_agent.agent.plugin_host.business_action_specs import business_action_spec
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.cli.chat_parts.slash_command_types import SlashCommandContext
 from agent_py_agent.cli.chat_parts.slash_commands import _handle_business_command
 from agent_py_agent.cli.chat_parts.tui_background_agents import TuiBackgroundAgents
@@ -104,7 +114,14 @@ def test_biz010_help_and_version_with_missing_config(monkeypatch):
         ["-m", "agent_py_agent", "workflow", "--help"],
         ["-m", "agent_py_agent", "team", "--help"],
     ]:
-        res = subprocess.run([python_bin, *args], env=env, capture_output=True, text=True, timeout=10)
+        res = subprocess.run(
+            [python_bin, *args],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=str(Path(__file__).resolve().parents[2]),
+        )
         assert res.returncode == 0, f"Failed for {args}: {res.stderr}"
 
 
@@ -410,3 +427,100 @@ def test_g3_v1301_v1302_tui_footer_and_blockers():
     for i in range(150):
         projection.toggle_expanded(f"item-{i}")
     assert len(projection._expanded) <= 100
+
+
+# LLM: 验证真实线网环境下，自然语言与位置参数 Slash 命令通过 Gateway 进行 CAS 乐观锁自动推导与闭环。
+# 函数用途: 端到端验证 /space rename, /space archive, /space restore, /team pause, /team resume, /team model, /team retire 的位置命令通过 consume_business_command 对真实 HTTP 网关的无缝调用。
+def test_positional_cli_slash_commands_cas_resolution_roundtrip(tmp_path, monkeypatch):
+    home = tmp_path / "cli-cas-home"
+    monkeypatch.setenv("MY_AGENT_HOME", str(home))
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            enable_tools=True,
+            business_spaces_enabled=True,
+            memory_path="memory.jsonl",
+            my_agent_home=str(home),
+        ),
+        tmp_path / "workspace",
+    )
+    wire_business_host_ports(agent)
+    server = GatewayHTTPServer(
+        0,
+        gateway_paths_from_root(agent.home_paths.root / "gateway"),
+        params=GatewayHTTPServerParams(agent=agent),
+    )
+    server.start()
+    try:
+        port = server.server.server_address[1]
+
+        def http_transport(path: str, payload: dict, timeout: float = 10.0) -> tuple[int, dict]:
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+            conn.request(
+                "POST",
+                path,
+                json.dumps(payload).encode("utf-8"),
+                {
+                    "Content-Type": "application/json",
+                    "X-Gateway-Token": server._local_client_credential,
+                    "X-User-Id": "business-alice",
+                    "X-Channel": "feishu",
+                    "Host": f"127.0.0.1:{port}",
+                },
+            )
+            res = conn.getresponse()
+            return res.status, json.loads(res.read())
+
+        client = BusinessClient(http_transport)
+        session = BusinessCommandSession(client)
+
+        # 1. /space create
+        res_create = consume_business_command("/space create 空间Alpha", session=session)
+        assert res_create["ok"] is True
+        space_id = res_create["data"]["space_id"]
+        assert res_create["data"]["name"] == "空间Alpha"
+        assert res_create["data"]["revision"] == 0
+
+        # 2. /space rename (自动拉取 spaces.get 获取 revision 0)
+        res_rename = consume_business_command(f"/space rename {space_id} 空间Alpha-新", session=session)
+        assert res_rename["ok"] is True
+        assert res_rename["data"]["space"]["name"] == "空间Alpha-新"
+        assert res_rename["data"]["space"]["revision"] == 1
+
+        # 3. /space archive (自动拉取 spaces.get 获取 revision 1)
+        res_archive = consume_business_command(f"/space archive {space_id}", session=session)
+        assert res_archive["ok"] is True
+        assert res_archive["data"]["space"]["state"] == "archived"
+        assert res_archive["data"]["space"]["revision"] == 2
+
+        # 4. /space restore (自动拉取 spaces.get 获取 revision 2)
+        res_restore = consume_business_command(f"/space restore {space_id}", session=session)
+        assert res_restore["ok"] is True
+        assert res_restore["data"]["space"]["state"] == "active"
+        assert res_restore["data"]["space"]["revision"] == 3
+
+        # 5. /team create
+        res_agent = consume_business_command(f"/team create {space_id} 助手1", session=session)
+        assert res_agent["ok"] is True
+        agent_id = res_agent["data"]["agent"]["agent_id"]
+
+        # 6. /team pause (自动拉取 background_agents.get 获取 identity_revision)
+        res_pause = consume_business_command(f"/team pause {agent_id}", session=session)
+        assert res_pause["ok"] is True
+        assert res_pause["data"]["agent"]["identity_state"] == "suspended"
+
+        # 7. /team resume (自动拉取 background_agents.get 获取 identity_revision)
+        res_resume = consume_business_command(f"/team resume {agent_id}", session=session)
+        assert res_resume["ok"] is True
+        assert res_resume["data"]["agent"]["identity_state"] == "available"
+
+        # 8. /team model (自动拉取 background_agents.model.get 获取 selection_revision)
+        res_model = consume_business_command(f"/team model {agent_id} default", session=session)
+        assert res_model["ok"] is True
+
+        # 9. /team retire 带简写 'cancel' 归一化为 'cancel_tasks' (自动拉取 identity_revision)
+        res_retire = consume_business_command(f"/team retire {agent_id} cancel", session=session)
+        assert res_retire["ok"] is True
+        assert res_retire["data"]["agent"]["identity_state"] == "retired"
+    finally:
+        server.stop()

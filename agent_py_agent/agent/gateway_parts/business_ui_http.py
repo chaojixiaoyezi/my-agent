@@ -46,6 +46,25 @@ def verify_csrf_token(server, token: str, owner_id: str, user_id: str = "") -> b
     return hmac.compare_digest(token.strip(), expected)
 
 
+# LLM: 浏览器端请求CSRF令牌强制门禁；同源请求校验CSRF与非cross-site，非浏览器请求(CLI/SDK)零侵入放行。
+# 函数用途: 对来自浏览器环境的POST/Stream/Upload请求强制校验CSRF Token与同源策略。
+def enforce_browser_request_token(handler, server, context, services) -> None:
+    headers = getattr(handler, "headers", None)
+    if headers is None:
+        return
+    origin = headers.get("Origin")
+    sec_site = headers.get("Sec-Fetch-Site")
+    csrf_token = headers.get("X-CSRF-Token")
+    if origin is None and sec_site is None and csrf_token is None:
+        return
+    if str(sec_site or "").strip().lower() == "cross-site":
+        raise HostAPIError("CAPABILITY_DENIED", 403, message="Request token invalid or missing")
+    owner_id = services.host.home_paths.owner_id
+    user_id = getattr(context, "subject_id", "") or ""
+    if not verify_csrf_token(server, str(csrf_token or ""), owner_id, str(user_id)):
+        raise HostAPIError("CAPABILITY_DENIED", 403, message="Request token invalid or missing")
+
+
 # LLM: 严格自工作区向内查找静态资产文件，防止向上路径穿越与符号链接逃逸。
 # 函数用途: 安全解析业务工作台静态资产的磁盘物理绝对路径。
 def _locate_ui_file(filename: str) -> Path:

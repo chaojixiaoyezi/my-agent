@@ -29,14 +29,15 @@
       return { ...(json ? {'Content-Type': 'application/json'} : {}), 'X-CSRF-Token': this.csrf() };
     }
     prepare(action, params, options = {}) {
-      const signature = options.mutating ? JSON.stringify([action, params, options.expected_revision, options.idempotency_key]) : null;
+      const expectedRev = options.expected_revision !== undefined ? options.expected_revision : options.expectedRevision;
+      const signature = options.mutating ? JSON.stringify([action, params, expectedRev, options.idempotency_key]) : null;
       if (signature) {
         const existing = [...this.pending.values()].find(call => call.signature === signature);
         if (existing) return existing;
       }
       const payload = {action, params, request_id: identifier()};
       if (options.mutating) payload.idempotency_key = options.idempotency_key || identifier();
-      if (options.expected_revision !== undefined) payload.expected_revision = options.expected_revision;
+      if (expectedRev !== undefined) payload.expected_revision = expectedRev;
       if (options.authorization_ticket) payload.authorization_ticket = options.authorization_ticket;
       return Object.freeze({body: JSON.stringify(payload), request_id: payload.request_id, signature});
     }
@@ -173,6 +174,11 @@
     }
   }
 
+  const _agentRevision = async (client, agentId) => {
+    const res = await client.call('background_agents.get', {agent_id: agentId});
+    return res.data?.agent?.identity_revision ?? res.data?.agent?.revision ?? 0;
+  };
+
   function createReferenceSurface(options = {}) {
     const fetcher = options.fetcher || (typeof globalThis !== 'undefined' && globalThis.fetch ? globalThis.fetch.bind(globalThis) : null);
     const csrf = options.csrf || (() => (typeof document !== 'undefined' ? (document.querySelector('meta[name="my-agent-csrf"]')?.content || document.querySelector('meta[name="csrf-token"]')?.content || '') : ''));
@@ -209,9 +215,18 @@
       team: {
         listAgents: (options = {}) => client.call('background_agents.list', options),
         getAgent: (agentId) => client.call('background_agents.get', {agent_id: agentId}),
-        suspendAgent: (agentId) => client.call('background_agents.suspend', {agent_id: agentId}, {mutating: true}),
-        resumeAgent: (agentId) => client.call('background_agents.resume', {agent_id: agentId}, {mutating: true}),
-        retireAgent: (agentId, disposition = 'drain', handoffAgentId) => client.call('background_agents.retire', {agent_id: agentId, disposition, ...(handoffAgentId ? {handoff_agent_id: handoffAgentId} : {})}, {mutating: true}),
+        suspendAgent: async (agentId, expectedRevision) => {
+          const rev = expectedRevision !== undefined ? expectedRevision : await _agentRevision(client, agentId);
+          return client.call('background_agents.suspend', {agent_id: agentId}, {mutating: true, expectedRevision: rev});
+        },
+        resumeAgent: async (agentId, expectedRevision) => {
+          const rev = expectedRevision !== undefined ? expectedRevision : await _agentRevision(client, agentId);
+          return client.call('background_agents.resume', {agent_id: agentId}, {mutating: true, expectedRevision: rev});
+        },
+        retireAgent: async (agentId, disposition = 'drain', handoffAgentId, expectedRevision) => {
+          const rev = expectedRevision !== undefined ? expectedRevision : await _agentRevision(client, agentId);
+          return client.call('background_agents.retire', {agent_id: agentId, disposition, ...(handoffAgentId ? {handoff_agent_id: handoffAgentId} : {})}, {mutating: true, expectedRevision: rev});
+        },
         sendMessage: (agentId, text, kind = 'message') => client.call('background_agents.messages.send', {agent_id: agentId, text, input_kind: kind}, {mutating: true}),
         listMessages: (target, options = {}) => client.call('messages.list', {target, ...options}),
         getAgentTree: (spaceId, rootAgentId) => client.call('agent_tree.get', {space_id: spaceId, root_agent_id: rootAgentId}),
@@ -427,25 +442,28 @@
   wire('team-suspend', async () => {
     const agentId = $('agent-id').value.trim();
     if (!agentId) throw new Error('请提供准确 Agent 引用');
-    show('team-result', await call('background_agents.suspend', {agent_id: agentId}, {mutating: true}));
+    const expectedRevision = await _agentRevision(api, agentId);
+    show('team-result', await call('background_agents.suspend', {agent_id: agentId}, {mutating: true, expectedRevision}));
   });
   wire('team-resume', async () => {
     const agentId = $('agent-id').value.trim();
     if (!agentId) throw new Error('请提供准确 Agent 引用');
-    show('team-result', await call('background_agents.resume', {agent_id: agentId}, {mutating: true}));
+    const expectedRevision = await _agentRevision(api, agentId);
+    show('team-result', await call('background_agents.resume', {agent_id: agentId}, {mutating: true, expectedRevision}));
   });
   wire('team-retire', async () => {
     const agentId = $('agent-id').value.trim();
     const disposition = $('retire-disposition').value;
     if (!agentId) throw new Error('请提供准确 Agent 引用');
-    show('team-result', await call('background_agents.retire', {agent_id: agentId, disposition}, {mutating: true}));
+    const expectedRevision = await _agentRevision(api, agentId);
+    show('team-result', await call('background_agents.retire', {agent_id: agentId, disposition}, {mutating: true, expectedRevision}));
   });
   wire('team-send', async () => show('team-result', await call('background_agents.messages.send', {
     agent_id: $('agent-id').value, text: $('team-message').value, input_kind: 'message'}, {mutating: true})));
   wire('team-messages', async () => {
     const agentId = $('agent-id').value.trim();
     if (!agentId) throw new Error('请提供准确 Agent 引用');
-    show('team-result', (await call('messages.list', {target: {kind: 'agent', id: agentId}})).data);
+    show('team-result', (await call('messages.list', {target: {kind: 'background_main', id: agentId}})).data);
   });
   wire('team-tree', async () => show('team-result', (await call('agent_tree.get', {space_id: space(), root_agent_id: $('agent-id').value})).data));
 
@@ -469,7 +487,8 @@
   wire('permissions-get', async () => {
     const target = $('permission-target').value.trim();
     if (!target) throw new Error('请提供权限目标引用');
-    show('delivery-info', (await call('permissions.get', {target: {kind: 'agent', id: target}})).data);
+    const kind = $('permission-target-kind')?.value || 'background_main';
+    show('delivery-info', (await call('permissions.get', {target: {kind, id: target}})).data);
   });
   wire('approval-decide', async () => show('approval-result', await call('approvals.decide', {
     approval_id: $('approval-id').value, decision: $('decision').value, response_ticket: $('response-ticket').value}, {mutating: true})));
