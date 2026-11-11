@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 
 from ..conversation.models import new_id
 
@@ -25,6 +26,12 @@ def new_evidence_id() -> str:
 
 def new_decision_id() -> str:
     return new_id("cdec")
+
+
+# LLM: 为跨代理交接板项目分配前缀为 hitem 的不透明唯一标识。
+# 函数用途: 生成新的交接项 ID。
+def new_handoff_item_id() -> str:
+    return new_id("hitem")
 
 
 def _tuple_of_strings(value: object) -> tuple[str, ...]:
@@ -309,6 +316,111 @@ class CaseDecision:
         )
 
 
+# LLM: 跨代理原生交接项模型，承载负责代理、输入版本冻结快照、排他写入集、
+#   送达凭据、接收方显式 ACK 与最终验收判定；不可变 dataclass 确保状态快照确定性。
+# 类用途: 表示单个任务交付物在交接板上的完整生命周期实体。
+@dataclass(frozen=True)
+class HandoffBoardItem:
+    item_id: str
+    case_id: str
+    request_id: str
+    responsible_actor: str
+    actor_kind: Literal["internal_run", "external_assistant"] | str
+    frozen_input_version: str
+    exclusive_write_set: tuple[str, ...]
+    state: Literal[
+        "draft",
+        "published",
+        "delivered",
+        "acked",
+        "submitted",
+        "accepted",
+        "changes_requested",
+        "closed",
+    ] | str
+    delivery_receipt: dict[str, object] = field(default_factory=dict)
+    recipient_ack: dict[str, object] | None = None
+    acceptance_verdict: dict[str, object] | None = None
+    evidence_ids: tuple[str, ...] = ()
+    idempotency_key: str = ""
+    created_at: float = 0.0
+    updated_at: float = 0.0
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    # LLM: 序列化为规范 dict，解包元组为列表，保持与协作 JSONL 格式兼容。
+    # 函数用途: 将交接项转为可持久化字典。
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["schema_version"] = SCHEMA_VERSION
+        payload["exclusive_write_set"] = list(self.exclusive_write_set)
+        payload["evidence_ids"] = list(self.evidence_ids)
+        if self.delivery_receipt is not None:
+            payload["delivery_receipt"] = dict(self.delivery_receipt)
+        if self.recipient_ack is not None:
+            payload["recipient_ack"] = dict(self.recipient_ack)
+        if self.acceptance_verdict is not None:
+            payload["acceptance_verdict"] = dict(self.acceptance_verdict)
+        return payload
+
+    # LLM: 从 dict 反序列化交接项，安全提取默认值并保障字段只读不可变。
+    # 函数用途: 从字典重构交接项不可变实体。
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> HandoffBoardItem:
+        delivery_receipt = data.get("delivery_receipt")
+        recipient_ack = data.get("recipient_ack")
+        acceptance_verdict = data.get("acceptance_verdict")
+        metadata = data.get("metadata")
+        return cls(
+            item_id=str(data.get("item_id") or ""),
+            case_id=str(data.get("case_id") or ""),
+            request_id=str(data.get("request_id") or ""),
+            responsible_actor=str(data.get("responsible_actor") or ""),
+            actor_kind=str(data.get("actor_kind") or "internal_run"),
+            frozen_input_version=str(data.get("frozen_input_version") or ""),
+            exclusive_write_set=_tuple_of_strings(data.get("exclusive_write_set")),
+            state=str(data.get("state") or "draft"),
+            delivery_receipt=delivery_receipt if isinstance(delivery_receipt, dict) else {},
+            recipient_ack=recipient_ack if isinstance(recipient_ack, dict) else None,
+            acceptance_verdict=acceptance_verdict if isinstance(acceptance_verdict, dict) else None,
+            evidence_ids=_tuple_of_strings(data.get("evidence_ids")),
+            idempotency_key=str(data.get("idempotency_key") or ""),
+            created_at=_float(data.get("created_at")),
+            updated_at=_float(data.get("updated_at") or data.get("created_at")),
+            metadata=metadata if isinstance(metadata, dict) else {},
+        )
+
+
+# LLM: 外部交互式助手安全文件邮箱路径布局；协调器与外部助手按单写者隔离。
+# 类用途: 定义协调器与外部交互式助手的双向隔离文件箱根目录与收发路径。
+@dataclass(frozen=True)
+class ExternalMailboxLayout:
+    root_dir: Path
+    coordinator_outbox_path: Path
+    actor_inbox_path: Path
+    actor_id: str
+
+    # LLM: 序列化为规范 dict，将路径转为字符串。
+    # 函数用途: 将邮箱布局转为字典表示。
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "root_dir": str(self.root_dir),
+            "coordinator_outbox_path": str(self.coordinator_outbox_path),
+            "actor_inbox_path": str(self.actor_inbox_path),
+            "actor_id": self.actor_id,
+        }
+
+    # LLM: 从 dict 反序列化邮箱布局。
+    # 函数用途: 从字典恢复邮箱路径布局对象。
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ExternalMailboxLayout:
+        return cls(
+            root_dir=Path(str(data.get("root_dir") or ".")),
+            coordinator_outbox_path=Path(str(data.get("coordinator_outbox_path") or "")),
+            actor_inbox_path=Path(str(data.get("actor_inbox_path") or "")),
+            actor_id=str(data.get("actor_id") or ""),
+        )
+
+
 __all__ = [
     "AgentCapability",
     "CaseDecision",
@@ -316,9 +428,12 @@ __all__ = [
     "CollaborationCase",
     "CollaborationRequest",
     "EvidencePacket",
+    "ExternalMailboxLayout",
+    "HandoffBoardItem",
     "SCHEMA_VERSION",
     "new_case_id",
     "new_decision_id",
     "new_evidence_id",
+    "new_handoff_item_id",
     "new_request_id",
 ]
