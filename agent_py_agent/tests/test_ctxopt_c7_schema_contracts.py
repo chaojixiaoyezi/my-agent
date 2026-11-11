@@ -31,15 +31,18 @@ from agent_py_agent.tests.ctxopt_c7_contract_snapshot import (
 
 # 7101c9fa2 有意收窄：create_subagents 顶层只留 items/batch_summary（items 必填且非空、每项 goal 非空），说明改为
 # “一项或多项统一用items”；task_progress 的 action 枚举去掉 create。以下四项按该提交后的当前生产 spec 重算，其余沿用冻结快照。
+# WS-F2 显式扩展：request_credentials 支持 access_scope 范围（owner/group/task），按生产 spec 同步 hash。
 _SCHEMA_HASHES = {
     **_SCHEMA_HASHES,
     'create_subagents': 'b46bdf6b78891e0cfc04917a0bb9b4f56404ce1096a3ebbe44a63acdcb912ffa',
     'create_subagents_media': 'e9e6d79ac58295060893e28372d8de6af9f304f873ec5d6fac4c28395519ed20',
     'task_progress': '28d00d48e4519db2f9fe8a0275104ce7062ebf84cce7af8145ea3fd921adb050',
+    'request_credentials': '392914c0437b5820c12c53c02c01fac68adf0524b64cb316f174de91b71a37d1',
 }
 _DESCRIPTION_HASHES = {
     **_DESCRIPTION_HASHES,
     'create_subagents': 'b653088995df2929e2d41b1e40a9ab6bfd014b46fedd8f86987810da58b29fa9',
+    'request_credentials': '62725dbd5cdb675aec12dc1fd13e524f9920c645b24fbee932d676a78a8b8437',
 }
 
 
