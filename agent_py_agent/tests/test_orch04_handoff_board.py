@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -32,6 +34,7 @@ from agent_py_agent.agent.collaboration.external_mailbox_adapter import (
 from agent_py_agent.agent.collaboration.handoff_board import (
     FrozenInputVersionMismatchError,
     HandoffBoardService,
+    HandoffError,
     HandoffWriteSetOverlapError,
     IdempotencyConflictError,
     InvalidStateTransitionError,
@@ -515,7 +518,7 @@ def test_manage_handoff_board_tool_scoped_gate_and_actions(
     assert len(list_res.result_envelope["items"]) >= 1
 
     # 7. 动作：sync_external_mailbox
-    coord_root = tmp_path / "tool_coord"
+    coord_root = (tmp_path / "workspace") / "tool_coord"
     sync_res = tool.execute_scoped({
         "action": "sync_external_mailbox",
         "root_dir": str(coord_root),
@@ -739,3 +742,315 @@ def test_ack_and_submit_idempotency_conflicts(
             frozen_input_version="v1.0",
             ack_id="ack-1",
         )
+
+
+def test_scenario_a_mailbox_path_traversal_and_confinement(
+    tmp_path: Path,
+    collab_store: CollaborationStore,
+    handoff_service: HandoffBoardService,
+) -> None:
+    """(a) actor_id="../escaped" and outside-workspace root_dir rejected with zero directories created outside authorized roots."""
+    authorized_root = tmp_path / "workspace"
+    authorized_root.mkdir(parents=True, exist_ok=True)
+    outside_root = tmp_path / "outside_workspace"
+
+    # 1. create_external_mailbox_layout rejects traversal actor_id
+    with pytest.raises(ExternalMailboxSecurityError) as exc_info:
+        create_external_mailbox_layout(authorized_root, "../escaped")
+    assert exc_info.value.error_code == "PATH_TRAVERSAL_FORBIDDEN"
+    assert not (tmp_path / "escaped").exists()
+
+    with pytest.raises(ExternalMailboxSecurityError) as exc_info_slash:
+        create_external_mailbox_layout(authorized_root, "actor/traversal")
+    assert exc_info_slash.value.error_code == "PATH_TRAVERSAL_FORBIDDEN"
+    assert not (authorized_root / "actor").exists()
+
+    # 2. Tool rejects outside-workspace root_dir
+    agent = SimpleNamespace(
+        collaboration_store=collab_store,
+        workspace_root=authorized_root,
+        _current_run_params=SimpleNamespace(run_id="run-test"),
+    )
+    tool = ManageHandoffBoardTool(agent=agent, service=handoff_service)
+    ctx = ToolInvocationContext(runtime_snapshot=MagicMock())
+
+    res = tool.execute_scoped({
+        "action": "sync_external_mailbox",
+        "root_dir": str(outside_root),
+        "actor_id": "legit-actor",
+    }, ctx)
+    assert not res.ok
+    assert res.reported_error_code == "PATH_TRAVERSAL_FORBIDDEN"
+    assert res.result_envelope["error_code"] == "PATH_TRAVERSAL_FORBIDDEN"
+    assert res.effect_outcome == "not_started"
+    assert not outside_root.exists()
+
+
+def test_scenario_b_mailbox_actor_mismatch_rejected(
+    tmp_path: Path,
+    collab_store: CollaborationStore,
+    handoff_service: HandoffBoardService,
+) -> None:
+    """(b) actor-A inbox attempting to ack/submit actor-B's item rejected with ACTOR_MISMATCH."""
+    case = collab_store.open_case({"thread_id": "t1"})
+    case_id = case.case_id
+
+    # Item belongs to actor-B
+    handoff_service.publish_item(
+        case_id=case_id,
+        request_id="req-b",
+        responsible_actor="actor-B",
+        frozen_input_version="v1.0",
+        item_id="item-b-target",
+    )
+
+    coord_root = tmp_path / "workspace" / "mailboxes"
+    coord_root.mkdir(parents=True, exist_ok=True)
+    layout_a = create_external_mailbox_layout(coord_root, "actor-A")
+    adapter = ExternalMailboxAdapter(allowed_roots=[coord_root])
+
+    # actor-A tries to ack and submit actor-B's item
+    inbox_records = [
+        {"action": "ack", "case_id": case_id, "item_id": "item-b-target", "frozen_input_version": "v1.0"},
+        {"action": "submit", "case_id": case_id, "item_id": "item-b-target", "evidence_ids": ["ev-spoofed"]},
+    ]
+    with open(layout_a.actor_inbox_path, "w", encoding="utf-8") as f:
+        for r in inbox_records:
+            f.write(json.dumps(r) + "\n")
+
+    report = adapter.sync_external_mailbox(handoff_service, layout_a)
+    assert len(report["errors"]) == 2
+    for err in report["errors"]:
+        assert err["error_code"] == "ACTOR_MISMATCH"
+        assert "actor-B" in err["error"]
+        assert "actor-A" in err["error"]
+
+    # Verify state not mutated
+    fresh_item = collab_store.load_handoff_item(case_id, "item-b-target")
+    assert fresh_item is not None
+    assert fresh_item.state == "published"
+    assert fresh_item.recipient_ack is None
+
+
+def test_scenario_c_repeated_sync_mailbox_cursor_idempotency(
+    tmp_path: Path,
+    collab_store: CollaborationStore,
+    handoff_service: HandoffBoardService,
+) -> None:
+    """(c) repeated sync_external_mailbox idempotency with zero spurious errors."""
+    case = collab_store.open_case({"thread_id": "t1"})
+    case_id = case.case_id
+
+    handoff_service.publish_item(
+        case_id=case_id,
+        request_id="req-c",
+        responsible_actor="actor-C",
+        frozen_input_version="v1.0",
+        item_id="item-c-flow",
+    )
+
+    coord_root = tmp_path / "workspace" / "mailboxes"
+    coord_root.mkdir(parents=True, exist_ok=True)
+    layout_c = create_external_mailbox_layout(coord_root, "actor-C")
+    adapter = ExternalMailboxAdapter(allowed_roots=[coord_root])
+
+    # 1. First sync with delivery outbox write
+    sync1 = adapter.sync_external_mailbox(handoff_service, layout_c)
+    assert sync1["errors"] == []
+    assert "item-c-flow" in sync1["delivered_item_ids"]
+
+    # 2. actor-C appends ACK to inbox
+    with open(layout_c.actor_inbox_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "action": "ack",
+            "case_id": case_id,
+            "item_id": "item-c-flow",
+            "frozen_input_version": "v1.0",
+            "ack_id": "ack-c-1",
+        }) + "\n")
+
+    sync2 = adapter.sync_external_mailbox(handoff_service, layout_c)
+    assert sync2["errors"] == []
+    assert "item-c-flow" in sync2["acked_item_ids"]
+
+    # 3. Repeated sync without any new inbox content
+    sync3 = adapter.sync_external_mailbox(handoff_service, layout_c)
+    assert sync3["errors"] == []
+    assert sync3["acked_item_ids"] == []
+    assert sync3["submitted_item_ids"] == []
+
+    # 4. actor-C appends submit to inbox
+    with open(layout_c.actor_inbox_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "action": "submit",
+            "case_id": case_id,
+            "item_id": "item-c-flow",
+            "evidence_ids": ["ev-c-1"],
+            "submission_id": "sub-c-1",
+        }) + "\n")
+
+    sync4 = adapter.sync_external_mailbox(handoff_service, layout_c)
+    assert sync4["errors"] == []
+    assert "item-c-flow" in sync4["submitted_item_ids"]
+
+    # 5. Repeated sync again: zero spurious InvalidStateTransitionError
+    sync5 = adapter.sync_external_mailbox(handoff_service, layout_c)
+    assert sync5["errors"] == []
+    assert sync5["submitted_item_ids"] == []
+
+
+def test_scenario_d_self_review_forbidden_and_subagent_reviewer_override(
+    tmp_path: Path,
+    collab_store: CollaborationStore,
+    handoff_service: HandoffBoardService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(d) SELF_REVIEW_FORBIDDEN on decide_acceptance and subagent reviewer_principal override."""
+    case = collab_store.open_case({"thread_id": "t1"})
+    case_id = case.case_id
+
+    item = handoff_service.publish_item(
+        case_id=case_id,
+        request_id="req-d",
+        responsible_actor="actor-dev",
+        frozen_input_version="v1.0",
+        item_id="item-d-review",
+    )
+    handoff_service.record_ack(case_id=case_id, item_id=item.item_id, recipient_ack={"status": "ok"}, frozen_input_version="v1.0")
+    handoff_service.submit_handoff(case_id=case_id, item_id=item.item_id, evidence_ids=["ev-d1"])
+
+    # 1. Direct service call rejecting self-review
+    with pytest.raises(HandoffError) as exc_info:
+        handoff_service.decide_acceptance(
+            case_id=case_id,
+            item_id=item.item_id,
+            verdict="accepted",
+            reviewer_principal="actor-dev",
+        )
+    assert exc_info.value.error_code == "SELF_REVIEW_FORBIDDEN"
+
+    # 2. Tool call in subagent context overrides reviewer_principal
+    subagent_run_id = "subagent-run-rev-001"
+    agent = SimpleNamespace(
+        collaboration_store=collab_store,
+        workspace_root=tmp_path / "workspace",
+        _current_run_params=SimpleNamespace(run_id=subagent_run_id),
+    )
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.orchestration.tools.handoff_board_tool.current_subagent_run_id",
+        lambda _agent: subagent_run_id,
+    )
+    monkeypatch.setattr(
+        "agent_py_agent.agent.agent_core.orchestration.tools.handoff_board_tool.authoritative_self_principal",
+        lambda _agent: (SimpleNamespace(run_id=subagent_run_id), ""),
+    )
+
+    tool = ManageHandoffBoardTool(agent=agent, service=handoff_service)
+    ctx = ToolInvocationContext(runtime_snapshot=MagicMock())
+
+    dec_res = tool.execute_scoped({
+        "action": "decide_acceptance",
+        "case_id": case_id,
+        "item_id": item.item_id,
+        "verdict": "accepted",
+        "reviewer_principal": "conflicting-reviewer-name",
+    }, ctx)
+    assert dec_res.ok
+    envelope = dec_res.result_envelope
+    assert envelope["item"]["acceptance_verdict"]["reviewer_principal"] == subagent_run_id
+    assert "scope_warnings" in envelope
+    assert len(envelope["scope_warnings"]) == 1
+    assert "conflicting-reviewer-name" in envelope["scope_warnings"][0]
+
+
+def test_scenario_e_concurrent_publish_race_enforces_writeset_overlap(
+    collab_store: CollaborationStore,
+    handoff_service: HandoffBoardService,
+) -> None:
+    """(e) two-thread threading.Barrier concurrent publish_item race enforcing HANDOFF_WRITESET_OVERLAP."""
+    case = collab_store.open_case({"thread_id": "t1"})
+    case_id = case.case_id
+
+    barrier = threading.Barrier(2)
+    results: list[dict[str, Any]] = []
+    errors: list[Exception] = []
+
+    def worker(worker_id: str, item_id: str) -> None:
+        try:
+            barrier.wait(timeout=5.0)
+            item = handoff_service.publish_item(
+                case_id=case_id,
+                request_id=f"req-{worker_id}",
+                responsible_actor=f"actor-{worker_id}",
+                frozen_input_version="v1.0",
+                exclusive_write_set=("shared/conflict_file.py",),
+                item_id=item_id,
+            )
+            results.append({"worker_id": worker_id, "item": item})
+        except Exception as exc:
+            errors.append(exc)
+
+    t1 = threading.Thread(target=worker, args=("1", "item-race-1"))
+    t2 = threading.Thread(target=worker, args=("2", "item-race-2"))
+
+    t1.start()
+    t2.start()
+    t1.join(timeout=10.0)
+    t2.join(timeout=10.0)
+
+    assert len(results) == 1
+    assert len(errors) == 1
+    assert isinstance(errors[0], HandoffWriteSetOverlapError)
+    assert errors[0].error_code == "HANDOFF_WRITESET_OVERLAP"
+
+    # Exactly 1 item in store
+    items = collab_store.case_handoff_items(case_id)
+    assert len(items) == 1
+
+
+def test_scenario_f_archive_closed_items_pruning_and_active_index(
+    collab_store: CollaborationStore,
+    handoff_service: HandoffBoardService,
+) -> None:
+    """(f) archive_closed_items pruning closed case JSONL from active list_all_handoff_items(state="published") scan."""
+    case_a = collab_store.open_case({"thread_id": "ta"})
+    case_b = collab_store.open_case({"thread_id": "tb"})
+
+    # Case A has 1 active item
+    item_a = handoff_service.publish_item(
+        case_id=case_a.case_id,
+        request_id="req-a",
+        responsible_actor="actor-A",
+        frozen_input_version="v1.0",
+        exclusive_write_set=("a.py",),
+        item_id="item-a-active",
+    )
+
+    # Case B has 1 item that gets closed
+    item_b = handoff_service.publish_item(
+        case_id=case_b.case_id,
+        request_id="req-b",
+        responsible_actor="actor-B",
+        frozen_input_version="v1.0",
+        exclusive_write_set=("b.py",),
+        item_id="item-b-closed",
+    )
+    handoff_service.close_item(case_id=case_b.case_id, item_id=item_b.item_id, reason="done")
+
+    # Before archiving: active index has both cases
+    active_idx_path = collab_store.handoff_items_dir / ".active_cases.json"
+    assert active_idx_path.exists()
+    assert case_a.case_id in collab_store.list_all_handoff_items(state="published")[0].case_id
+
+    # Archive closed items
+    archived = handoff_service.archive_closed_items(case_id=case_b.case_id)
+    assert "item-b-closed" in archived
+
+    # Case B JSONL should be pruned/unlinked since all its items were closed and archived
+    case_b_path = collab_store.handoff_items_dir / f"{case_b.case_id}.jsonl"
+    assert not case_b_path.exists()
+
+    # Querying published items consults active index and only returns Case A's item
+    published_items = collab_store.list_all_handoff_items(state="published", limit=10)
+    assert len(published_items) == 1
+    assert published_items[0].item_id == "item-a-active"

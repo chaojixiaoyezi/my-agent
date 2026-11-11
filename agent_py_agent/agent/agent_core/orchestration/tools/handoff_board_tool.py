@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from ....collaboration.external_mailbox_adapter import (
     ExternalMailboxAdapter,
+    ExternalMailboxSecurityError,
     create_external_mailbox_layout,
 )
 from ....collaboration.handoff_board import (
@@ -27,6 +28,7 @@ from ....collaboration.handoff_board import (
     InvalidStateTransitionError,
 )
 from ....collaboration.store import CollaborationStore
+from ....runtime_context import current_subagent_run_id
 from ....tooling.models import (
     ApprovalPolicy,
     BaseTool,
@@ -39,6 +41,7 @@ from ....tooling.models import (
     ToolModelSpec,
     ToolRuntimePolicy,
 )
+from ...runtime.owner_roots import runtime_owner_root
 from ..management_continuity import authoritative_self_principal
 
 if TYPE_CHECKING:
@@ -55,6 +58,7 @@ def build_manage_handoff_board_model_spec() -> ToolModelSpec:
         description="管理跨代理原生交接板（Handoff Board）项目生命周期与外部助手邮箱同步。",
         input_schema={
             "type": "object",
+            "additionalProperties": False,
             "properties": {
                 "action": {
                     "type": "string",
@@ -72,6 +76,7 @@ def build_manage_handoff_board_model_spec() -> ToolModelSpec:
                 "item_id": {"type": "string", "description": "交接项标识"},
                 "request_id": {"type": "string", "description": "关联协作请求标识"},
                 "responsible_actor": {"type": "string", "description": "负责代理标识"},
+                "actor_id": {"type": "string", "description": "外部助手标识（同 responsible_actor）"},
                 "actor_kind": {
                     "type": "string",
                     "enum": ["internal_run", "external_assistant"],
@@ -84,17 +89,22 @@ def build_manage_handoff_board_model_spec() -> ToolModelSpec:
                     "description": "排他独占写入文件/目录路径列表",
                 },
                 "recipient_ack": {"type": "object", "description": "接收方 ACK 回执字典"},
+                "ack_id": {"type": "string", "description": "ACK 回执去重标识"},
                 "evidence_ids": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "交付证据标识列表",
                 },
+                "submission_id": {"type": "string", "description": "交付提交去重标识"},
                 "verdict": {
                     "type": "string",
                     "enum": ["accepted", "changes_requested"],
                     "description": "验收判定结论",
                 },
+                "reviewer_principal": {"type": "string", "description": "验收评审主体标识"},
                 "reason": {"type": "string", "description": "判定说明或修改原因"},
+                "root_dir": {"type": "string", "description": "外部邮箱协调根目录路径"},
+                "state": {"type": "string", "description": "按交接项状态过滤"},
                 "idempotency_key": {"type": "string", "description": "幂等性去重键"},
                 "limit": {"type": "integer", "description": "分页返回上限"},
                 "cursor": {"type": "string", "description": "分页游标"},
@@ -331,7 +341,20 @@ class ManageHandoffBoardTool(BaseTool):
         item_id = str(params.get("item_id") or "").strip()
         verdict = str(params.get("verdict") or "").strip()
         reason = str(params.get("reason") or "").strip()
-        reviewer = str(params.get("reviewer_principal") or "coordinator").strip()
+        supplied_reviewer = str(params.get("reviewer_principal") or "").strip()
+        reviewer = supplied_reviewer or "coordinator"
+
+        scope_warnings: list[str] = []
+        if self.agent is not None and current_subagent_run_id(self.agent):
+            principal, _ = authoritative_self_principal(self.agent)
+            bound_run_id = str(principal.run_id or "").strip()
+            if bound_run_id:
+                if supplied_reviewer and supplied_reviewer != bound_run_id:
+                    scope_warnings.append(
+                        f"reviewer_principal '{supplied_reviewer}' overridden by authoritative run_id '{bound_run_id}'"
+                    )
+                reviewer = bound_run_id
+
         if not case_id or not item_id or not verdict:
             return self._failure("decide_acceptance 缺少 case_id, item_id 或 verdict。", "TOOL_INVALID_ARGUMENTS")
 
@@ -342,7 +365,10 @@ class ManageHandoffBoardTool(BaseTool):
             reviewer_principal=reviewer,
             reason=reason,
         )
-        return self._success({"item": item.to_dict()})
+        res_data: dict[str, Any] = {"item": item.to_dict()}
+        if scope_warnings:
+            res_data["scope_warnings"] = scope_warnings
+        return self._success(res_data)
 
     # LLM: 处理 sync_external_mailbox 动作。
     # 函数用途: 触发外部文件邮箱双向同步。
@@ -352,8 +378,26 @@ class ManageHandoffBoardTool(BaseTool):
         if not root_dir or not actor_id:
             return self._failure("sync_external_mailbox 缺少 root_dir 或 actor_id。", "TOOL_INVALID_ARGUMENTS")
 
-        layout = create_external_mailbox_layout(root_dir, actor_id)
-        adapter = ExternalMailboxAdapter(allowed_roots=[root_dir])
+        authorized_roots: list[Path] = []
+        if getattr(service, "workspace_root", None):
+            authorized_roots.append(Path(service.workspace_root).resolve())
+        if getattr(service, "store", None) and getattr(service.store, "root", None):
+            authorized_roots.append(Path(service.store.root).resolve())
+        if self.agent is not None:
+            try:
+                owner_root = runtime_owner_root(self.agent)
+                if owner_root:
+                    authorized_roots.append(Path(owner_root).resolve())
+            except Exception:
+                pass
+
+        try:
+            adapter = ExternalMailboxAdapter(allowed_roots=authorized_roots)
+            adapter.validate_confined_path(Path(root_dir))
+            layout = create_external_mailbox_layout(root_dir, actor_id)
+        except ExternalMailboxSecurityError as exc:
+            return self._failure(str(exc), exc.error_code)
+
         report = adapter.sync_external_mailbox(service, layout)
         return self._success(report)
 

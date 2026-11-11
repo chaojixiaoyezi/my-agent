@@ -155,107 +155,108 @@ class HandoffBoardService:
         allow_serialized_overlap: bool = False,
         now: float | None = None,
     ) -> HandoffBoardItem:
-        current_time_val = float(now if now is not None else time.time())
-        norm_write_set = normalize_paths(exclusive_write_set)
-        actual_item_id = item_id.strip() if item_id and item_id.strip() else new_handoff_item_id()
-        stable_key = idempotency_key.strip() or actual_item_id
+        with self.store.handoff_case_lock(case_id):
+            current_time_val = float(now if now is not None else time.time())
+            norm_write_set = normalize_paths(exclusive_write_set)
+            actual_item_id = item_id.strip() if item_id and item_id.strip() else new_handoff_item_id()
+            stable_key = idempotency_key.strip() or actual_item_id
 
-        digest_payload = {
-            "case_id": case_id,
-            "request_id": request_id,
-            "responsible_actor": responsible_actor,
-            "actor_kind": actor_kind,
-            "frozen_input_version": frozen_input_version,
-            "exclusive_write_set": list(norm_write_set),
-        }
-        current_digest = compute_payload_digest(digest_payload)
+            digest_payload = {
+                "case_id": case_id,
+                "request_id": request_id,
+                "responsible_actor": responsible_actor,
+                "actor_kind": actor_kind,
+                "frozen_input_version": frozen_input_version,
+                "exclusive_write_set": list(norm_write_set),
+            }
+            current_digest = compute_payload_digest(digest_payload)
 
-        # 检查是否已存在同 item_id 或同 stable_key 的交接项
-        existing_items = self.store.case_handoff_items(case_id)
-        for existing in existing_items:
-            existing_stable_key = existing.idempotency_key or existing.item_id
-            if existing.item_id == actual_item_id or existing_stable_key == stable_key:
-                existing_digest = str(existing.metadata.get("payload_digest") or "")
-                if not existing_digest:
-                    existing_digest = compute_payload_digest({
-                        "case_id": existing.case_id,
-                        "request_id": existing.request_id,
-                        "responsible_actor": existing.responsible_actor,
-                        "actor_kind": existing.actor_kind,
-                        "frozen_input_version": existing.frozen_input_version,
-                        "exclusive_write_set": list(existing.exclusive_write_set),
+            # 检查是否已存在同 item_id 或同 stable_key 的交接项
+            existing_items = self.store.case_handoff_items(case_id)
+            for existing in existing_items:
+                existing_stable_key = existing.idempotency_key or existing.item_id
+                if existing.item_id == actual_item_id or existing_stable_key == stable_key:
+                    existing_digest = str(existing.metadata.get("payload_digest") or "")
+                    if not existing_digest:
+                        existing_digest = compute_payload_digest({
+                            "case_id": existing.case_id,
+                            "request_id": existing.request_id,
+                            "responsible_actor": existing.responsible_actor,
+                            "actor_kind": existing.actor_kind,
+                            "frozen_input_version": existing.frozen_input_version,
+                            "exclusive_write_set": list(existing.exclusive_write_set),
+                        })
+                    if existing_digest == current_digest:
+                        return existing
+                    raise IdempotencyConflictError(
+                        f"IDEMPOTENCY_CONFLICT: Item {actual_item_id} (key={stable_key}) already exists with conflicting payload",
+                        details={
+                            "item_id": actual_item_id,
+                            "idempotency_key": stable_key,
+                            "existing_digest": existing_digest,
+                            "attempted_digest": current_digest,
+                        },
+                    )
+
+            # 独占写入集重叠检查（同 case 内其他处于活跃状态的交接项）
+            if norm_write_set and not allow_serialized_overlap:
+                for active_item in existing_items:
+                    if is_active_handoff_state(active_item.state) and active_item.exclusive_write_set:
+                        overlaps = paths_overlap(norm_write_set, active_item.exclusive_write_set)
+                        if overlaps:
+                            raise HandoffWriteSetOverlapError(
+                                f"HANDOFF_WRITESET_OVERLAP: Exclusive write set overlaps with active item {active_item.item_id}: {overlaps}",
+                                details={
+                                    "attempted_item_id": actual_item_id,
+                                    "active_item_id": active_item.item_id,
+                                    "active_state": active_item.state,
+                                    "overlapping_paths": overlaps,
+                                },
+                            )
+
+            meta = copy.deepcopy(metadata or {})
+            meta["payload_digest"] = current_digest
+
+            delivery_receipt: dict[str, object] = {}
+            # 内部 run 代理且挂接 conversation_store 时，记录观察事件与唤醒标识
+            if actor_kind == "internal_run" and self.conversation_store is not None:
+                case = self.store.load_case(case_id)
+                if case and case.thread_id:
+                    obs = self.conversation_store.observations.append({
+                        "thread_id": case.thread_id,
+                        "event_type": "handoff_item_published",
+                        "summary": f"交接项已就绪: {actual_item_id} (负责: {responsible_actor})",
+                        "urgency": case.priority,
+                        "source_agent_id": "handoff_board",
+                        "root_task_id": case.task_id,
+                        "evidence_refs": [],
+                        "requires_main_agent": False,
+                        "requires_llm_report": False,
+                        "now": current_time_val,
+                        "metadata": {"item_id": actual_item_id, "case_id": case_id},
                     })
-                if existing_digest == current_digest:
-                    return existing
-                raise IdempotencyConflictError(
-                    f"IDEMPOTENCY_CONFLICT: Item {actual_item_id} (key={stable_key}) already exists with conflicting payload",
-                    details={
-                        "item_id": actual_item_id,
-                        "idempotency_key": stable_key,
-                        "existing_digest": existing_digest,
-                        "attempted_digest": current_digest,
-                    },
-                )
+                    delivery_receipt["observation_id"] = getattr(obs, "observation_id", "")
 
-        # 独占写入集重叠检查（同 case 内其他处于活跃状态的交接项）
-        if norm_write_set and not allow_serialized_overlap:
-            for active_item in existing_items:
-                if is_active_handoff_state(active_item.state) and active_item.exclusive_write_set:
-                    overlaps = paths_overlap(norm_write_set, active_item.exclusive_write_set)
-                    if overlaps:
-                        raise HandoffWriteSetOverlapError(
-                            f"HANDOFF_WRITESET_OVERLAP: Exclusive write set overlaps with active item {active_item.item_id}: {overlaps}",
-                            details={
-                                "attempted_item_id": actual_item_id,
-                                "active_item_id": active_item.item_id,
-                                "active_state": active_item.state,
-                                "overlapping_paths": overlaps,
-                            },
-                        )
-
-        meta = copy.deepcopy(metadata or {})
-        meta["payload_digest"] = current_digest
-
-        delivery_receipt: dict[str, object] = {}
-        # 内部 run 代理且挂接 conversation_store 时，记录观察事件与唤醒标识
-        if actor_kind == "internal_run" and self.conversation_store is not None:
-            case = self.store.load_case(case_id)
-            if case and case.thread_id:
-                obs = self.conversation_store.observations.append({
-                    "thread_id": case.thread_id,
-                    "event_type": "handoff_item_published",
-                    "summary": f"交接项已就绪: {actual_item_id} (负责: {responsible_actor})",
-                    "urgency": case.priority,
-                    "source_agent_id": "handoff_board",
-                    "root_task_id": case.task_id,
-                    "evidence_refs": [],
-                    "requires_main_agent": False,
-                    "requires_llm_report": False,
-                    "now": current_time_val,
-                    "metadata": {"item_id": actual_item_id, "case_id": case_id},
-                })
-                delivery_receipt["observation_id"] = getattr(obs, "observation_id", "")
-
-        new_item = HandoffBoardItem(
-            item_id=actual_item_id,
-            case_id=case_id,
-            request_id=request_id,
-            responsible_actor=responsible_actor,
-            actor_kind=actor_kind,
-            frozen_input_version=frozen_input_version,
-            exclusive_write_set=norm_write_set,
-            state="published",
-            delivery_receipt=delivery_receipt,
-            recipient_ack=None,
-            acceptance_verdict=None,
-            evidence_ids=(),
-            idempotency_key=stable_key,
-            created_at=current_time_val,
-            updated_at=current_time_val,
-            metadata=meta,
-        )
-        self.store.append_handoff_item(new_item)
-        return new_item
+            new_item = HandoffBoardItem(
+                item_id=actual_item_id,
+                case_id=case_id,
+                request_id=request_id,
+                responsible_actor=responsible_actor,
+                actor_kind=actor_kind,
+                frozen_input_version=frozen_input_version,
+                exclusive_write_set=norm_write_set,
+                state="published",
+                delivery_receipt=delivery_receipt,
+                recipient_ack=None,
+                acceptance_verdict=None,
+                evidence_ids=(),
+                idempotency_key=stable_key,
+                created_at=current_time_val,
+                updated_at=current_time_val,
+                metadata=meta,
+            )
+            self.store.append_handoff_item(new_item)
+            return new_item
 
     # LLM: 记录传输层投递凭据，将交接项由 published 推进到 delivered。
     # 函数用途: 登记交付传输结果，支持幂等去重。
@@ -268,58 +269,59 @@ class HandoffBoardService:
         delivery_id: str = "",
         now: float | None = None,
     ) -> HandoffBoardItem:
-        current_time_val = float(now if now is not None else time.time())
-        item = self.store.load_handoff_item(case_id, item_id)
-        if item is None:
-            raise HandoffError(f"Handoff item not found: {item_id} in case {case_id}")
+        with self.store.handoff_case_lock(case_id):
+            current_time_val = float(now if now is not None else time.time())
+            item = self.store.load_handoff_item(case_id, item_id)
+            if item is None:
+                raise HandoffError(f"Handoff item not found: {item_id} in case {case_id}")
 
-        delivery_key = delivery_id.strip() or f"deliv_{item_id}"
-        receipt_digest = compute_payload_digest(delivery_receipt)
+            delivery_key = delivery_id.strip() or f"deliv_{item_id}"
+            receipt_digest = compute_payload_digest(delivery_receipt)
 
-        if item.state in {"delivered", "acked", "submitted", "accepted", "changes_requested", "closed"}:
-            prior_digest = str(item.metadata.get("delivery_digest") or "")
-            if prior_digest == receipt_digest:
+            if item.state in {"delivered", "acked", "submitted", "accepted", "changes_requested", "closed"}:
+                prior_digest = str(item.metadata.get("delivery_digest") or "")
+                if prior_digest == receipt_digest:
+                    return item
+                if item.state == "delivered":
+                    raise IdempotencyConflictError(
+                        f"IDEMPOTENCY_CONFLICT: Item {item_id} already has a delivery receipt with different payload",
+                        details={"item_id": item_id, "delivery_id": delivery_key},
+                    )
                 return item
-            if item.state == "delivered":
-                raise IdempotencyConflictError(
-                    f"IDEMPOTENCY_CONFLICT: Item {item_id} already has a delivery receipt with different payload",
-                    details={"item_id": item_id, "delivery_id": delivery_key},
+
+            if item.state != "published":
+                raise InvalidStateTransitionError(
+                    f"Cannot record delivery for item {item_id} in state {item.state}",
+                    details={"item_id": item_id, "current_state": item.state},
                 )
-            return item
 
-        if item.state != "published":
-            raise InvalidStateTransitionError(
-                f"Cannot record delivery for item {item_id} in state {item.state}",
-                details={"item_id": item_id, "current_state": item.state},
+            merged_receipt = dict(item.delivery_receipt)
+            merged_receipt.update(delivery_receipt)
+            merged_receipt["delivery_id"] = delivery_key
+
+            meta = copy.deepcopy(item.metadata)
+            meta["delivery_digest"] = receipt_digest
+
+            updated = HandoffBoardItem(
+                item_id=item.item_id,
+                case_id=item.case_id,
+                request_id=item.request_id,
+                responsible_actor=item.responsible_actor,
+                actor_kind=item.actor_kind,
+                frozen_input_version=item.frozen_input_version,
+                exclusive_write_set=item.exclusive_write_set,
+                state="delivered",
+                delivery_receipt=merged_receipt,
+                recipient_ack=item.recipient_ack,
+                acceptance_verdict=item.acceptance_verdict,
+                evidence_ids=item.evidence_ids,
+                idempotency_key=item.idempotency_key,
+                created_at=item.created_at,
+                updated_at=current_time_val,
+                metadata=meta,
             )
-
-        merged_receipt = dict(item.delivery_receipt)
-        merged_receipt.update(delivery_receipt)
-        merged_receipt["delivery_id"] = delivery_key
-
-        meta = copy.deepcopy(item.metadata)
-        meta["delivery_digest"] = receipt_digest
-
-        updated = HandoffBoardItem(
-            item_id=item.item_id,
-            case_id=item.case_id,
-            request_id=item.request_id,
-            responsible_actor=item.responsible_actor,
-            actor_kind=item.actor_kind,
-            frozen_input_version=item.frozen_input_version,
-            exclusive_write_set=item.exclusive_write_set,
-            state="delivered",
-            delivery_receipt=merged_receipt,
-            recipient_ack=item.recipient_ack,
-            acceptance_verdict=item.acceptance_verdict,
-            evidence_ids=item.evidence_ids,
-            idempotency_key=item.idempotency_key,
-            created_at=item.created_at,
-            updated_at=current_time_val,
-            metadata=meta,
-        )
-        self.store.append_handoff_item(updated)
-        return updated
+            self.store.append_handoff_item(updated)
+            return updated
 
     # LLM: 接收方显式确认接收，强制校验 frozen_input_version 严格匹配；推进到 acked。
     # 函数用途: 登记接收方确认回执，核验冻结输入版本。
@@ -333,67 +335,68 @@ class HandoffBoardService:
         ack_id: str = "",
         now: float | None = None,
     ) -> HandoffBoardItem:
-        current_time_val = float(now if now is not None else time.time())
-        item = self.store.load_handoff_item(case_id, item_id)
-        if item is None:
-            raise HandoffError(f"Handoff item not found: {item_id} in case {case_id}")
+        with self.store.handoff_case_lock(case_id):
+            current_time_val = float(now if now is not None else time.time())
+            item = self.store.load_handoff_item(case_id, item_id)
+            if item is None:
+                raise HandoffError(f"Handoff item not found: {item_id} in case {case_id}")
 
-        ack_key = ack_id.strip() or f"ack_{item_id}"
-        ack_digest = compute_payload_digest(recipient_ack)
+            ack_key = ack_id.strip() or f"ack_{item_id}"
+            ack_digest = compute_payload_digest(recipient_ack)
 
-        # 稳定 ID 幂等性检测
-        if item.state in {"acked", "submitted", "accepted", "changes_requested", "closed"}:
-            prior_ack_digest = str(item.metadata.get("ack_digest") or "")
-            if prior_ack_digest == ack_digest:
-                return item
-            if item.state == "acked":
-                raise IdempotencyConflictError(
-                    f"IDEMPOTENCY_CONFLICT: Item {item_id} already has an ACK with different payload",
-                    details={"item_id": item_id, "ack_id": ack_key},
+            # 稳定 ID 幂等性检测
+            if item.state in {"acked", "submitted", "accepted", "changes_requested", "closed"}:
+                prior_ack_digest = str(item.metadata.get("ack_digest") or "")
+                if prior_ack_digest == ack_digest:
+                    return item
+                if item.state == "acked":
+                    raise IdempotencyConflictError(
+                        f"IDEMPOTENCY_CONFLICT: Item {item_id} already has an ACK with different payload",
+                        details={"item_id": item_id, "ack_id": ack_key},
+                    )
+
+            # 输入版本严格校验
+            reported_version = frozen_input_version or str(recipient_ack.get("frozen_input_version") or "")
+            if reported_version != item.frozen_input_version:
+                raise FrozenInputVersionMismatchError(
+                    f"FROZEN_INPUT_VERSION_MISMATCH: Item {item_id} requires version {item.frozen_input_version!r}, got {reported_version!r}",
+                    details={
+                        "item_id": item_id,
+                        "expected_version": item.frozen_input_version,
+                        "reported_version": reported_version,
+                    },
                 )
 
-        # 输入版本严格校验
-        reported_version = frozen_input_version or str(recipient_ack.get("frozen_input_version") or "")
-        if reported_version != item.frozen_input_version:
-            raise FrozenInputVersionMismatchError(
-                f"FROZEN_INPUT_VERSION_MISMATCH: Item {item_id} requires version {item.frozen_input_version!r}, got {reported_version!r}",
-                details={
-                    "item_id": item_id,
-                    "expected_version": item.frozen_input_version,
-                    "reported_version": reported_version,
-                },
+            # 状态机约束：必须是 published, delivered, 或 changes_requested
+            if item.state not in {"published", "delivered", "changes_requested"}:
+                raise InvalidStateTransitionError(
+                    f"Cannot record ACK for item {item_id} in state {item.state}",
+                    details={"item_id": item_id, "current_state": item.state},
+                )
+
+            meta = copy.deepcopy(item.metadata)
+            meta["ack_digest"] = ack_digest
+
+            acked_item = HandoffBoardItem(
+                item_id=item.item_id,
+                case_id=item.case_id,
+                request_id=item.request_id,
+                responsible_actor=item.responsible_actor,
+                actor_kind=item.actor_kind,
+                frozen_input_version=item.frozen_input_version,
+                exclusive_write_set=item.exclusive_write_set,
+                state="acked",
+                delivery_receipt=item.delivery_receipt,
+                recipient_ack=dict(recipient_ack),
+                acceptance_verdict=item.acceptance_verdict,
+                evidence_ids=item.evidence_ids,
+                idempotency_key=item.idempotency_key,
+                created_at=item.created_at,
+                updated_at=current_time_val,
+                metadata=meta,
             )
-
-        # 状态机约束：必须是 published, delivered, 或 changes_requested
-        if item.state not in {"published", "delivered", "changes_requested"}:
-            raise InvalidStateTransitionError(
-                f"Cannot record ACK for item {item_id} in state {item.state}",
-                details={"item_id": item_id, "current_state": item.state},
-            )
-
-        meta = copy.deepcopy(item.metadata)
-        meta["ack_digest"] = ack_digest
-
-        acked_item = HandoffBoardItem(
-            item_id=item.item_id,
-            case_id=item.case_id,
-            request_id=item.request_id,
-            responsible_actor=item.responsible_actor,
-            actor_kind=item.actor_kind,
-            frozen_input_version=item.frozen_input_version,
-            exclusive_write_set=item.exclusive_write_set,
-            state="acked",
-            delivery_receipt=item.delivery_receipt,
-            recipient_ack=dict(recipient_ack),
-            acceptance_verdict=item.acceptance_verdict,
-            evidence_ids=item.evidence_ids,
-            idempotency_key=item.idempotency_key,
-            created_at=item.created_at,
-            updated_at=current_time_val,
-            metadata=meta,
-        )
-        self.store.append_handoff_item(acked_item)
-        return acked_item
+            self.store.append_handoff_item(acked_item)
+            return acked_item
 
     # LLM: 负责代理提交交付证据包；推进至 submitted（绝对禁止自动转入 accepted）。
     # 函数用途: 登记交付物证据包，推进状态为 submitted 供人工或终审判定。
@@ -408,78 +411,79 @@ class HandoffBoardService:
         submission_id: str = "",
         now: float | None = None,
     ) -> HandoffBoardItem:
-        current_time_val = float(now if now is not None else time.time())
-        item = self.store.load_handoff_item(case_id, item_id)
-        if item is None:
-            raise HandoffError(f"Handoff item not found: {item_id} in case {case_id}")
+        with self.store.handoff_case_lock(case_id):
+            current_time_val = float(now if now is not None else time.time())
+            item = self.store.load_handoff_item(case_id, item_id)
+            if item is None:
+                raise HandoffError(f"Handoff item not found: {item_id} in case {case_id}")
 
-        all_evidence_ids = list(item.evidence_ids)
-        for eid in evidence_ids:
-            s_eid = str(eid).strip()
-            if s_eid and s_eid not in all_evidence_ids:
-                all_evidence_ids.append(s_eid)
+            all_evidence_ids = list(item.evidence_ids)
+            for eid in evidence_ids:
+                s_eid = str(eid).strip()
+                if s_eid and s_eid not in all_evidence_ids:
+                    all_evidence_ids.append(s_eid)
 
-        if evidence_packets:
-            for packet in evidence_packets:
-                if isinstance(packet, dict):
-                    ev = self.store.submit_evidence(packet)
-                    if ev.evidence_id and ev.evidence_id not in all_evidence_ids:
-                        all_evidence_ids.append(ev.evidence_id)
-                elif hasattr(packet, "to_dict"):
-                    ev = self.store.submit_evidence(packet.to_dict())
-                    if ev.evidence_id and ev.evidence_id not in all_evidence_ids:
-                        all_evidence_ids.append(ev.evidence_id)
-                elif hasattr(packet, "evidence_id"):
-                    eid = str(packet.evidence_id or "").strip()
-                    if eid and eid not in all_evidence_ids:
-                        all_evidence_ids.append(eid)
+            if evidence_packets:
+                for packet in evidence_packets:
+                    if isinstance(packet, dict):
+                        ev = self.store.submit_evidence(packet)
+                        if ev.evidence_id and ev.evidence_id not in all_evidence_ids:
+                            all_evidence_ids.append(ev.evidence_id)
+                    elif hasattr(packet, "to_dict"):
+                        ev = self.store.submit_evidence(packet.to_dict())
+                        if ev.evidence_id and ev.evidence_id not in all_evidence_ids:
+                            all_evidence_ids.append(ev.evidence_id)
+                    elif hasattr(packet, "evidence_id"):
+                        eid = str(packet.evidence_id or "").strip()
+                        if eid and eid not in all_evidence_ids:
+                            all_evidence_ids.append(eid)
 
-        sub_digest = compute_payload_digest({
-            "evidence_ids": sorted(all_evidence_ids),
-            "payload": submission_payload or {},
-        })
+            sub_digest = compute_payload_digest({
+                "evidence_ids": sorted(all_evidence_ids),
+                "payload": submission_payload or {},
+            })
 
-        if item.state in {"submitted", "accepted", "changes_requested", "closed"}:
-            prior_sub_digest = str(item.metadata.get("submission_digest") or "")
-            if prior_sub_digest == sub_digest:
-                return item
-            if item.state == "submitted":
-                raise IdempotencyConflictError(
-                    f"IDEMPOTENCY_CONFLICT: Item {item_id} already submitted with different evidence payload",
-                    details={"item_id": item_id, "submission_id": submission_id},
+            if item.state in {"submitted", "accepted", "changes_requested", "closed"}:
+                prior_sub_digest = str(item.metadata.get("submission_digest") or "")
+                if prior_sub_digest == sub_digest:
+                    return item
+                if item.state == "submitted":
+                    raise IdempotencyConflictError(
+                        f"IDEMPOTENCY_CONFLICT: Item {item_id} already submitted with different evidence payload",
+                        details={"item_id": item_id, "submission_id": submission_id},
+                    )
+
+            if item.state not in {"acked", "changes_requested"}:
+                raise InvalidStateTransitionError(
+                    f"Cannot submit handoff for item {item_id} in state {item.state}; must be acked first",
+                    details={"item_id": item_id, "current_state": item.state},
                 )
 
-        if item.state not in {"acked", "changes_requested"}:
-            raise InvalidStateTransitionError(
-                f"Cannot submit handoff for item {item_id} in state {item.state}; must be acked first",
-                details={"item_id": item_id, "current_state": item.state},
+            meta = copy.deepcopy(item.metadata)
+            meta["submission_digest"] = sub_digest
+            if submission_payload:
+                meta["submission_payload"] = submission_payload
+
+            submitted_item = HandoffBoardItem(
+                item_id=item.item_id,
+                case_id=item.case_id,
+                request_id=item.request_id,
+                responsible_actor=item.responsible_actor,
+                actor_kind=item.actor_kind,
+                frozen_input_version=item.frozen_input_version,
+                exclusive_write_set=item.exclusive_write_set,
+                state="submitted",  # 铁律：永远不能自动 accepted！
+                delivery_receipt=item.delivery_receipt,
+                recipient_ack=item.recipient_ack,
+                acceptance_verdict=item.acceptance_verdict,
+                evidence_ids=tuple(all_evidence_ids),
+                idempotency_key=item.idempotency_key,
+                created_at=item.created_at,
+                updated_at=current_time_val,
+                metadata=meta,
             )
-
-        meta = copy.deepcopy(item.metadata)
-        meta["submission_digest"] = sub_digest
-        if submission_payload:
-            meta["submission_payload"] = submission_payload
-
-        submitted_item = HandoffBoardItem(
-            item_id=item.item_id,
-            case_id=item.case_id,
-            request_id=item.request_id,
-            responsible_actor=item.responsible_actor,
-            actor_kind=item.actor_kind,
-            frozen_input_version=item.frozen_input_version,
-            exclusive_write_set=item.exclusive_write_set,
-            state="submitted",  # 铁律：永远不能自动 accepted！
-            delivery_receipt=item.delivery_receipt,
-            recipient_ack=item.recipient_ack,
-            acceptance_verdict=item.acceptance_verdict,
-            evidence_ids=tuple(all_evidence_ids),
-            idempotency_key=item.idempotency_key,
-            created_at=item.created_at,
-            updated_at=current_time_val,
-            metadata=meta,
-        )
-        self.store.append_handoff_item(submitted_item)
-        return submitted_item
+            self.store.append_handoff_item(submitted_item)
+            return submitted_item
 
     # LLM: 协调器或授权父级执行显式验收判定（accepted 或 changes_requested）。
     # 函数用途: 对已提交的交接项执行人工或终审裁决。
@@ -494,53 +498,60 @@ class HandoffBoardService:
         metadata: dict[str, object] | None = None,
         now: float | None = None,
     ) -> HandoffBoardItem:
-        current_time_val = float(now if now is not None else time.time())
-        item = self.store.load_handoff_item(case_id, item_id)
-        if item is None:
-            raise HandoffError(f"Handoff item not found: {item_id} in case {case_id}")
+        with self.store.handoff_case_lock(case_id):
+            current_time_val = float(now if now is not None else time.time())
+            item = self.store.load_handoff_item(case_id, item_id)
+            if item is None:
+                raise HandoffError(f"Handoff item not found: {item_id} in case {case_id}")
 
-        if verdict not in {"accepted", "changes_requested"}:
-            raise HandoffError(f"Invalid acceptance verdict: {verdict!r}")
+            if reviewer_principal.strip() == item.responsible_actor:
+                raise HandoffError(
+                    "SELF_REVIEW_FORBIDDEN: responsible_actor cannot accept own handoff item",
+                    error_code="SELF_REVIEW_FORBIDDEN",
+                )
 
-        if item.state != "submitted":
-            raise InvalidStateTransitionError(
-                f"Cannot decide acceptance on item {item_id} in state {item.state}; must be submitted first",
-                details={"item_id": item_id, "current_state": item.state},
+            if verdict not in {"accepted", "changes_requested"}:
+                raise HandoffError(f"Invalid acceptance verdict: {verdict!r}")
+
+            if item.state != "submitted":
+                raise InvalidStateTransitionError(
+                    f"Cannot decide acceptance on item {item_id} in state {item.state}; must be submitted first",
+                    details={"item_id": item_id, "current_state": item.state},
+                )
+
+            verdict_record = {
+                "verdict": verdict,
+                "reviewer_principal": reviewer_principal,
+                "reason": reason,
+                "decided_at": current_time_val,
+                "metadata": metadata or {},
+            }
+
+            meta = copy.deepcopy(item.metadata)
+            meta["verdict_history"] = meta.get("verdict_history", [])
+            if isinstance(meta["verdict_history"], list):
+                meta["verdict_history"].append(verdict_record)
+
+            updated_item = HandoffBoardItem(
+                item_id=item.item_id,
+                case_id=item.case_id,
+                request_id=item.request_id,
+                responsible_actor=item.responsible_actor,
+                actor_kind=item.actor_kind,
+                frozen_input_version=item.frozen_input_version,
+                exclusive_write_set=item.exclusive_write_set,
+                state=verdict,
+                delivery_receipt=item.delivery_receipt,
+                recipient_ack=item.recipient_ack,
+                acceptance_verdict=verdict_record,
+                evidence_ids=item.evidence_ids,
+                idempotency_key=item.idempotency_key,
+                created_at=item.created_at,
+                updated_at=current_time_val,
+                metadata=meta,
             )
-
-        verdict_record = {
-            "verdict": verdict,
-            "reviewer_principal": reviewer_principal,
-            "reason": reason,
-            "decided_at": current_time_val,
-            "metadata": metadata or {},
-        }
-
-        meta = copy.deepcopy(item.metadata)
-        meta["verdict_history"] = meta.get("verdict_history", [])
-        if isinstance(meta["verdict_history"], list):
-            meta["verdict_history"].append(verdict_record)
-
-        updated_item = HandoffBoardItem(
-            item_id=item.item_id,
-            case_id=item.case_id,
-            request_id=item.request_id,
-            responsible_actor=item.responsible_actor,
-            actor_kind=item.actor_kind,
-            frozen_input_version=item.frozen_input_version,
-            exclusive_write_set=item.exclusive_write_set,
-            state=verdict,
-            delivery_receipt=item.delivery_receipt,
-            recipient_ack=item.recipient_ack,
-            acceptance_verdict=verdict_record,
-            evidence_ids=item.evidence_ids,
-            idempotency_key=item.idempotency_key,
-            created_at=item.created_at,
-            updated_at=current_time_val,
-            metadata=meta,
-        )
-        self.store.append_handoff_item(updated_item)
-        return updated_item
+            self.store.append_handoff_item(updated_item)
+            return updated_item
 
     # LLM: 显式关闭交接项，解除对写入集合的占用。
     # 函数用途: 将交接项置为 closed 终态。
@@ -552,35 +563,36 @@ class HandoffBoardService:
         reason: str = "",
         now: float | None = None,
     ) -> HandoffBoardItem:
-        current_time_val = float(now if now is not None else time.time())
-        item = self.store.load_handoff_item(case_id, item_id)
-        if item is None:
-            raise HandoffError(f"Handoff item not found: {item_id} in case {case_id}")
+        with self.store.handoff_case_lock(case_id):
+            current_time_val = float(now if now is not None else time.time())
+            item = self.store.load_handoff_item(case_id, item_id)
+            if item is None:
+                raise HandoffError(f"Handoff item not found: {item_id} in case {case_id}")
 
-        meta = copy.deepcopy(item.metadata)
-        meta["closed_reason"] = reason
-        meta["closed_at"] = current_time_val
+            meta = copy.deepcopy(item.metadata)
+            meta["closed_reason"] = reason
+            meta["closed_at"] = current_time_val
 
-        closed_item = HandoffBoardItem(
-            item_id=item.item_id,
-            case_id=item.case_id,
-            request_id=item.request_id,
-            responsible_actor=item.responsible_actor,
-            actor_kind=item.actor_kind,
-            frozen_input_version=item.frozen_input_version,
-            exclusive_write_set=item.exclusive_write_set,
-            state="closed",
-            delivery_receipt=item.delivery_receipt,
-            recipient_ack=item.recipient_ack,
-            acceptance_verdict=item.acceptance_verdict,
-            evidence_ids=item.evidence_ids,
-            idempotency_key=item.idempotency_key,
-            created_at=item.created_at,
-            updated_at=current_time_val,
-            metadata=meta,
-        )
-        self.store.append_handoff_item(closed_item)
-        return closed_item
+            closed_item = HandoffBoardItem(
+                item_id=item.item_id,
+                case_id=item.case_id,
+                request_id=item.request_id,
+                responsible_actor=item.responsible_actor,
+                actor_kind=item.actor_kind,
+                frozen_input_version=item.frozen_input_version,
+                exclusive_write_set=item.exclusive_write_set,
+                state="closed",
+                delivery_receipt=item.delivery_receipt,
+                recipient_ack=item.recipient_ack,
+                acceptance_verdict=item.acceptance_verdict,
+                evidence_ids=item.evidence_ids,
+                idempotency_key=item.idempotency_key,
+                created_at=item.created_at,
+                updated_at=current_time_val,
+                metadata=meta,
+            )
+            self.store.append_handoff_item(closed_item)
+            return closed_item
 
     # LLM: 按条件分页列出交接项；支持限制条数与游标分页。
     # 函数用途: 检索交接项列表与下一页游标。
@@ -606,7 +618,10 @@ class HandoffBoardService:
         if case_id:
             raw_items = self.store.case_handoff_items(case_id)
         else:
-            raw_items = self.store.list_all_handoff_items()
+            raw_items = self.store.list_all_handoff_items(
+                state=state,
+                responsible_actor=responsible_actor,
+            )
 
         filtered: list[HandoffBoardItem] = []
         for item in raw_items:
@@ -641,25 +656,41 @@ class HandoffBoardService:
         current_time_val = float(now if now is not None else time.time())
         archived_ids: list[str] = []
 
-        items_to_check: list[HandoffBoardItem] = []
         if case_id:
-            items_to_check = self.store.case_handoff_items(case_id)
+            target_case_ids = [case_id]
         else:
-            items_to_check = self.store.list_all_handoff_items()
+            if not self.store.handoff_items_dir.exists():
+                return archived_ids
+            target_case_ids = [
+                p.stem for p in sorted(self.store.handoff_items_dir.glob("*.jsonl"))
+            ]
 
-        for item in items_to_check:
-            if item.state not in {"closed", "accepted"}:
-                continue
-            if before_timestamp is not None and item.updated_at > before_timestamp:
-                continue
+        for cid in target_case_ids:
+            with self.store.handoff_case_lock(cid):
+                case_items = self.store.case_handoff_items(cid)
+                archived_for_this_case: set[str] = set()
 
-            dt = datetime.fromtimestamp(item.updated_at or current_time_val, tz=timezone.utc)
-            date_bucket = dt.strftime("%Y-%m-%d")
-            bucket_dir = self.archive_dir / date_bucket
-            ensure_private_dir(bucket_dir)
+                for item in case_items:
+                    if item.state not in {"closed", "accepted"}:
+                        continue
+                    if before_timestamp is not None and item.updated_at > before_timestamp:
+                        continue
 
-            dest_path = bucket_dir / f"{item.item_id}.json"
-            write_json_file_atomic(dest_path, item.to_dict())
-            archived_ids.append(item.item_id)
+                    dt = datetime.fromtimestamp(item.updated_at or current_time_val, tz=timezone.utc)
+                    date_bucket = dt.strftime("%Y-%m-%d")
+                    bucket_dir = self.archive_dir / date_bucket
+                    ensure_private_dir(bucket_dir)
+
+                    dest_path = bucket_dir / f"{item.item_id}.json"
+                    write_json_file_atomic(dest_path, item.to_dict())
+                    archived_ids.append(item.item_id)
+                    archived_for_this_case.add(item.item_id)
+
+                if archived_for_this_case:
+                    remaining_items = [
+                        it for it in case_items
+                        if it.item_id not in archived_for_this_case and it.state != "closed"
+                    ]
+                    self.store.rewrite_case_handoff_items(cid, remaining_items)
 
         return archived_ids
