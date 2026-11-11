@@ -38,6 +38,9 @@ from .agent_core.orchestration_tools import (
     CancelSubagentsTool,
     CreateSubagentsTool,
     ListAgentsTool,
+    ListPendingRequestsTool,
+    ManageHandoffBoardTool,
+    RequirementProvenanceTool,
     ResolveCapabilityRequestsTool,
 )
 from .agent_core.parameters import (
@@ -1404,9 +1407,15 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(CancelSubagentsTool(agent), live_gate="enable_subagents")
     agent.tools.register(SendGuidanceTool(agent), live_gate="enable_subagents")
     agent.tools.register(ResolveCapabilityRequestsTool(agent), live_gate="enable_subagents")
+    # 未决申请收件箱:只读;工具的可用性每次快照现读能力开关 orchestration_pending_inbox_enabled,关着时模型看不到也调不了。
+    agent.tools.register(ListPendingRequestsTool(agent), live_gate="enable_subagents")
     # 子代理可复用经验账(record_lesson):只写当前 child run 的 lessons.jsonl,结果收口合并成经验候选;
     # 注册表默认隐藏,只随子代理 allowed_tools 显式下发,主线程没有 child run 不提供。
     agent.tools.register(RecordLessonTool(agent), live_gate="enable_subagents")
+    # 原生交接板(manage_handoff_board)与需求溯源(manage_requirement_provenance):默认延迟收起(default_deferred=True);
+    # 首轮工具面保持原 29 项,需按需通过 tool_search 发现或由具备直属下级管理权限的协调代理加载使用。
+    agent.tools.register(ManageHandoffBoardTool(agent), live_gate="enable_subagents")
+    agent.tools.register(RequirementProvenanceTool(agent), live_gate="enable_subagents")
 
 
 # LLM: 工具执行复用能力读口，读取失败时关闭；注册时只绑定回调，不冻结策略。
@@ -1424,9 +1433,11 @@ __all__ = [
     "CODING_SUBAGENT_TOOLS",
     "CreateSubagentsTool",
     "ListAgentsTool",
+    "ManageHandoffBoardTool",
     "ONE_SHOT_TOOL_NAMES",
     "PARENT_PLANNER_READ_TOOLS",
     "READ_ONLY_SUBAGENT_TOOLS",
+    "RequirementProvenanceTool",
     "SendGuidanceTool",
     "SimpleAgent",
     "TaskProgressTool",

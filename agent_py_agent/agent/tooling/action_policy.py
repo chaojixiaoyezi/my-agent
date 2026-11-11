@@ -146,6 +146,10 @@ class ActionPolicy:
         if required_decision is not None:
             return required_decision
 
+        boundary_decision = _task_boundary_decision(request, effect)
+        if boundary_decision is not None:
+            return boundary_decision
+
         path_decision = _path_url_command_decision(request, runtime, effect)
         if path_decision is not None:
             return path_decision
@@ -153,10 +157,6 @@ class ActionPolicy:
         scope_decision = _configured_policy_decision(request, runtime, effect, command, kind="scope")
         if scope_decision is not None:
             return scope_decision
-
-        boundary_decision = _task_boundary_decision(request, effect)
-        if boundary_decision is not None:
-            return boundary_decision
 
         command_decision = _command_classification_decision(
             call,
@@ -489,7 +489,108 @@ def _task_boundary_decision(
             effect=effect,
             evidence={"boundary_error": read_error},
         )
+    prohibited_error = _prohibited_action_error(
+        boundary, request.call.tool_name, request.call.arguments
+    )
+    if prohibited_error:
+        return _deny(
+            "TOOL_PERMISSION_DENIED",
+            effect=effect,
+            evidence={"boundary_error": prohibited_error},
+        )
     return None
+
+
+def _prohibited_action_error(
+    boundary: dict[str, object] | None,
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> str:
+    if not isinstance(boundary, dict):
+        return ""
+    raw_prohibited = boundary.get("prohibited_actions")
+    if not raw_prohibited or not isinstance(raw_prohibited, (list, tuple, set, frozenset)):
+        return ""
+    prohibited = set(raw_prohibited)
+    normalized_tool = str(tool_name or "").strip().lower()
+
+    target_action = normalized_tool
+    if normalized_tool == "apply_patch":
+        target_action = str(arguments.get("patch") or "").strip().lower()
+    elif normalized_tool in {"run_command", "process_session", "terminal_session"}:
+        target_action = str(arguments.get("command") or arguments.get("cmd") or "").strip().lower()
+
+    if normalized_tool in prohibited or target_action in prohibited:
+        matched = normalized_tool if normalized_tool in prohibited else target_action
+        return f"Action '{matched}' is prohibited by delegation constraints."
+
+    if "git_push" in prohibited and (
+        target_action == "git_push" or "git push" in target_action or normalized_tool == "git_push"
+    ):
+        return "Action 'git_push' is prohibited by delegation constraints."
+
+    if "git_reset_hard" in prohibited and (
+        target_action == "git_reset_hard"
+        or "git reset --hard" in target_action
+        or "git reset -hard" in target_action
+        or normalized_tool == "git_reset_hard"
+    ):
+        return "Action 'git_reset_hard' is prohibited by delegation constraints."
+
+    if "spawn_children" in prohibited and (
+        normalized_tool in {"create_subagents", "spawn_children"}
+        or target_action in {"create_subagents", "spawn_children"}
+    ):
+        return "Action 'spawn_children' is prohibited by delegation constraints."
+
+    if "network_access" in prohibited and (
+        normalized_tool in {"web_search", "web_fetch", "network_access", "network_fetch"}
+        or target_action in {"web_search", "web_fetch", "network_access", "network_fetch"}
+        or "curl " in target_action
+        or target_action.startswith("curl")
+        or "wget " in target_action
+        or target_action.startswith("wget")
+        or "http://" in target_action
+        or "https://" in target_action
+    ):
+        return "Action 'network_access' is prohibited by delegation constraints."
+
+    if "network_fetch" in prohibited and (
+        normalized_tool in {"web_fetch", "network_fetch"}
+        or target_action in {"web_fetch", "network_fetch"}
+        or "curl " in target_action
+        or target_action.startswith("curl")
+        or "wget " in target_action
+        or target_action.startswith("wget")
+        or "http://" in target_action
+        or "https://" in target_action
+    ):
+        return "Action 'network_fetch' is prohibited by delegation constraints."
+
+    if "shell_execution" in prohibited and (
+        normalized_tool in {"run_command", "process_session", "terminal_session"}
+        or target_action in {"run_command", "process_session", "terminal_session", "shell_execution"}
+    ):
+        return "Action 'shell_execution' is prohibited by delegation constraints."
+
+    if "file_delete" in prohibited:
+        if normalized_tool == "file_delete" or target_action == "file_delete":
+            return "Action 'file_delete' is prohibited by delegation constraints."
+        import re
+
+        has_rm = bool(re.search(r"(?:^|[;&|\s])rm(?:\s|$)", target_action))
+        has_unlink = bool(re.search(r"(?:^|[;&|\s])unlink(?:\s|$)", target_action))
+        if (
+            has_rm
+            or has_unlink
+            or "shutil.rmtree" in target_action
+            or "os.remove" in target_action
+            or "os.unlink" in target_action
+            or "*** delete file:" in target_action
+        ):
+            return "Action 'file_delete' is prohibited by delegation constraints."
+
+    return ""
 
 
 # LLM: auto 只免去当前权限内的可选确认；宿主当次已核管理员 Full Access 仅免普通 MCP 的逐工具 always，插件及其他 always 仍本人确认。身份、路径、网络和插件 deny 不在此免除。

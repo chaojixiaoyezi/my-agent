@@ -22,10 +22,6 @@ from typing import TYPE_CHECKING, Any
 
 from ....capability.pack_tool_grant import pack_linked_tool_names
 from ....runtime_errors import runtime_error_report
-from ....subagents.authorization_gate import (
-    OperationRequest,
-    authorize_direct_child_operation,
-)
 from ....subagents.capability_scope import (
     direct_parent_tool_authority,
     partition_capability_paths_by_owner,
@@ -41,16 +37,23 @@ from ....subagents.models import (
 )
 from ....subagents.runner_session_liveness import has_fresh_runner_session
 from ....subagents.task_control import task_control_blocks_execution
+from ....subagents.utils import _new_id
 from ....tooling.models import (
     BaseTool,
     EffectResolverPolicy,
     IdempotencyPolicy,
     ResourceScopePolicy,
     ToolHandlerOutcome,
+    ToolInvocationContext,
     ToolRuntimePolicy,
 )
 from ....tooling.write_boundary import WRITE_TOOL_ORDER
-from ..create_policy import current_orchestration_requester_run_id
+from ..management_continuity import (
+    ManagedChildDenied,
+    authoritative_self_principal,
+    authorize_managed_child,
+    management_principals,
+)
 from ..tool_specs import build_resolve_capability_requests_model_spec
 
 if TYPE_CHECKING:
@@ -112,6 +115,17 @@ class ResolveCapabilityRequestsTool(BaseTool):
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
 
+    # LLM: Registry 受权入口必须先证明调用方宿主执行身份；缺上下文、裸线程或无执行编号均在任何申请读取、授权落盘和唤醒前拒绝，不推断身份也不改 execute() 直接宿主语义。
+    # 函数用途: 在统一注册表调用边界校验请求方身份已证明后再委托 execute()。
+    def execute_scoped(
+        self,
+        params: dict[str, object],
+        context: ToolInvocationContext,
+    ) -> ToolHandlerOutcome:
+        if not _scoped_requester_proven(self.agent, context):
+            return _unproven_requester_capability_failure()
+        return self.execute(params)
+
     # LLM: 工具响应必须是结构化 JSON（resolved/errors），失败也要给出机器可读原因；
     # grant 由 record_capability_grant 在同一个 canonical reducer 内结清 request，deny
     # 才保存当前 task 快照，避免授权和 runner 收口互相覆盖。
@@ -124,20 +138,19 @@ class ResolveCapabilityRequestsTool(BaseTool):
         if invalid is not None:
             return invalid
         try:
-            # 3.txt B.4：resolve capability 走统一授权查询门（owner + 子树）。
-            task = authorize_direct_child_operation(
-                self.agent.subagents,
-                OperationRequest(
-                    operation="resolve_capability",
-                    run_id=run_id,
-                    requester_owner=str(
-                        getattr(getattr(self.agent, "home_paths", None), "owner_id", "") or ""
-                    ),
-                    requester_run_id=_model_requester_run_id(self.agent),
-                ),
-            )
+            # 3.txt B.4：resolve capability 走统一授权查询门（owner + 子树）；管理身份可以是被证明的
+            # 定时延续原父任务。授权/拒绝是控制动作，无权时只如实拒绝，不转交、不改任何申请。
+            task = authorize_managed_child(
+                self.agent, operation="resolve_capability", run_id=run_id,
+            ).task
         except FileNotFoundError:
             return _error_result(f"run_id 不存在：{run_id}。{_known_children_hint(self.agent)}")
+        except ManagedChildDenied as exc:
+            parent = exc.authorized_parent_run_id
+            return _error_result(
+                f"无权操作 {run_id}：{exc}"
+                + (f"；有权裁决的直接父级是 {parent}，本次没有转交或改动任何申请" if parent else "")
+            )
         except PermissionError as exc:
             return _error_result(f"无权操作 {run_id}：{exc}")
         request_id = str(params.get("request_id") or "").strip()
@@ -406,21 +419,26 @@ def _no_pending_result(task: Any, run_id: str, decision: str) -> ToolHandlerOutc
     )
 
 
-# LLM: 名册只展示当前请求方的直接下级，不能因报错把兄弟树或孙代理 ID 泄露给模型。
+# LLM: 名册只展示当前管理身份的直接下级，不能因报错把兄弟树或孙代理 ID 泄露给模型。
+#   每个管理身份各读一次有界名册（最多 12 条），不做 owner 全量扫描。
 # 函数用途: run_id 打错时给出真实直属子代理名册，供模型自纠。
 def _known_children_hint(agent: Any) -> str:
     from ..dispatch.params import DispatchParams
     from ..dispatch.refs import dispatch_scope_tasks
 
-    requester_run_id = _model_requester_run_id(agent)
-    try:
-        tasks = dispatch_scope_tasks(agent, DispatchParams(parent_run_id=requester_run_id), limit=12)
-    except Exception:
-        return ""
+    principals, _warnings = management_principals(agent)
+    tasks: list[Any] = []
+    for principal in principals:
+        try:
+            scoped = dispatch_scope_tasks(agent, DispatchParams(parent_run_id=principal.run_id), limit=12)
+        except Exception:
+            return ""
+        tasks.extend(
+            task for task in scoped
+            if not principal.run_id or str(getattr(task, "parent_id", "") or "") == principal.run_id
+        )
     rows: list[tuple[int, int, str, str]] = []
     for task in tasks:
-        if requester_run_id and str(getattr(task, "parent_id", "") or "") != requester_run_id:
-            continue
         open_requests = sum(
             1
             for request in (getattr(task, "capability_requests", None) or [])
@@ -438,16 +456,10 @@ def _known_children_hint(agent: Any) -> str:
     return f"当前子代理: {listing}。用列表里的真实 run_id 重试。" if listing else ""
 
 
-# LLM: 子代理 runner 身份是递归父子关系的权威值；外层 gateway request 只在
-# 根主代理没有 runner 身份时兜底，不能让子代理借根请求越级裁决孙代理。
-# 函数用途: 返回当前模型可代表的代理 run id。
-def _model_requester_run_id(agent: Any) -> str:
-    return current_orchestration_requester_run_id(agent)
-
-
 # LLM: 授权后排队在原创建锁内复读任务；未决请求已闭合且无活 runner 才排队，旧裁决快照不得跨过新控制终态。
 #   canonical PAUSED（或已落盘未投影的控制）时已落盘的授予/拒绝审计照常保留，但不写 PENDING、不重开 TaskLink，只等显式恢复。
-# 函数用途: 把已完成的授权裁决转换成同一子代理的自动续跑状态，不复活后来被停止的孩子。
+#   ORCH-02-R4: 每次裁决生成唯一 continuation_id 并按 request_id 维护有界因果索引，保留历史因果记录。
+# 函数用途: 把已完成的授权裁决转换成同一子代理的自动续跑状态，写入 continuation 及其按请求划分的因果字典。
 def _queue_resolved_child_continuation(
     agent: Any,
     task: Any,
@@ -488,25 +500,39 @@ def _queue_resolved_child_continuation(
             "write_permission_blocked",
         }:
             task.failure_type = ""
-        attrs = dict(getattr(task, "attributes", {}) or {})
-        attrs["capability_resolution_continuation"] = {
-            "schema_version": "capability_resolution_continuation.v1",
+        now = time.time()
+        continuation_id = _new_id("cap_cont")
+        request_ids = [
+            str(item.get("request_id") or "")
+            for item in resolved
+            if str(item.get("request_id") or "").strip()
+        ]
+        continuation_record = {
+            "schema_version": "capability_resolution_continuation.v2",
+            "continuation_id": continuation_id,
             "decision": decision,
             "previous_status": previous_status,
             "status": "queued",
-            "queued_at": time.time(),
-            "request_ids": [
-                str(item.get("request_id") or "")
-                for item in resolved
-                if str(item.get("request_id") or "").strip()
-            ],
+            "queued_at": now,
+            "request_ids": request_ids,
         }
+        attrs = dict(getattr(task, "attributes", {}) or {})
+        attrs["capability_resolution_continuation"] = continuation_record
+        by_request = dict(attrs.get("capability_resolution_continuations_by_request") or {})
+        for req_id in request_ids:
+            by_request[req_id] = dict(continuation_record)
+        if len(by_request) > 64:
+            excess = len(by_request) - 64
+            for key in list(by_request.keys())[:excess]:
+                del by_request[key]
+        attrs["capability_resolution_continuations_by_request"] = by_request
         task.attributes = attrs
         agent.subagents.save(task, allow_terminal_reactivation=True)
         _reactivate_child_conversation_link(agent, run_id)
         return {
             "status": "queued",
             "run_id": run_id,
+            "continuation_id": continuation_id,
             "previous_status": previous_status,
             "next_status": TaskStatus.PENDING.value,
         }
@@ -705,6 +731,61 @@ def _resolution_outcome(payload: dict[str, object]) -> ToolHandlerOutcome:
         output,
         error_code=error_code,
         effect_outcome="failed",
+    )
+
+
+# LLM: 只信任当前线程的子代理 runner 上下文或带真实执行编号的 _current_run_params，且必须携带有效 ToolInvocationContext 快照；不从模型参数、工作目录或快照编号推断身份。
+# 函数用途: 判断注册表受权调用在进入能力申请裁决前是否具备已证明的请求方身份。
+def _scoped_requester_proven(agent: object, context: object) -> bool:
+    if not isinstance(context, ToolInvocationContext) or context.runtime_snapshot is None:
+        return False
+    from ....runtime_context import current_subagent_run_id
+
+    try:
+        if current_subagent_run_id(agent):
+            principal, _warning = authoritative_self_principal(agent)
+            return bool(str(principal.run_id or "").strip())
+        run_params = getattr(agent, "_current_run_params", None)
+        if run_params is None:
+            return False
+        has_exec_id = any(
+            isinstance(value, str) and bool(value.strip())
+            for value in (
+                getattr(run_params, "run_id", None),
+                getattr(run_params, "task_id", None),
+                getattr(run_params, "request_id", None),
+            )
+        )
+        if not has_exec_id:
+            return False
+        principal, _warning = authoritative_self_principal(agent)
+        return bool(str(principal.run_id or "").strip())
+    except Exception:  # noqa: BLE001 - 身份证明异常一律失败关闭
+        return False
+
+
+# LLM: 未证明身份在任何申请读取、授权落盘或唤醒前同步返回 TOOL_PERMISSION_DENIED + not_started，并保留 REQUESTER_IDENTITY_UNPROVEN 结构化原因。
+# 函数用途: 生成 resolve_capability_requests 在 execute_scoped 边界缺少已证明请求方身份时的拒绝结果。
+def _unproven_requester_capability_failure() -> ToolHandlerOutcome:
+    reason = "REQUESTER_IDENTITY_UNPROVEN"
+    message = "当前工具调用缺少已证明的请求方执行身份，本次没有读取或改动任何能力申请。"
+    details: dict[str, object] = {
+        "reason": reason,
+        "error": {"reason": reason, "message": message},
+    }
+    payload: dict[str, object] = {
+        "ok": False,
+        "reason": reason,
+        "message": message,
+        "details": details,
+    }
+    return ToolHandlerOutcome(
+        "resolve_capability_requests",
+        False,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        result_envelope={"details": details},
+        error_code="TOOL_PERMISSION_DENIED",
+        effect_outcome="not_started",
     )
 
 

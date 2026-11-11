@@ -129,9 +129,55 @@ class SubAgentRunnerContextService:
         )
         if exact_source_read_scope:
             read_roots = _merge_list(read_roots, [_model_task_dir(task)])
+
+        attrs = getattr(task, "attributes", None)
+        c_raw = attrs.get("delegation_constraints") if isinstance(attrs, dict) else None
+        has_exact_constraint_read = False
+        prohibited_actions: list[str] = []
+        if c_raw is not None:
+            runtime_raw = (
+                c_raw.get("actor_runtime", "native")
+                if isinstance(c_raw, dict)
+                else getattr(c_raw, "actor_runtime", "native")
+            )
+            if runtime_raw == "native":
+                allowed_inputs = (
+                    c_raw.get("allowed_read_inputs")
+                    if isinstance(c_raw, dict)
+                    else getattr(c_raw, "allowed_read_inputs", None)
+                ) or ()
+                exact_writes = (
+                    c_raw.get("exact_write_set")
+                    if isinstance(c_raw, dict)
+                    else getattr(c_raw, "exact_write_set", None)
+                ) or ()
+                out_dirs = (
+                    c_raw.get("allowed_output_dirs")
+                    if isinstance(c_raw, dict)
+                    else getattr(c_raw, "allowed_output_dirs", None)
+                ) or ()
+                prohibited_raw = (
+                    c_raw.get("prohibited_actions")
+                    if isinstance(c_raw, dict)
+                    else getattr(c_raw, "prohibited_actions", None)
+                ) or ()
+                if allowed_inputs:
+                    read_roots = _merge_list(
+                        read_roots,
+                        [
+                            *allowed_inputs,
+                            *exact_writes,
+                            *out_dirs,
+                            _model_task_dir(task),
+                        ],
+                    )
+                    has_exact_constraint_read = True
+                if prohibited_raw:
+                    prohibited_actions = list(prohibited_raw)
+
         # 输出声明不是授权；继承的 owner 范围、明确写根和正式 grant 是唯一权限来源。
         allowed_write_roots = _model_allowed_write_roots(task, grant_write_roots, report_roots)
-        return {
+        boundary: dict[str, object] = {
             "task_dir": _model_task_dir(task),
             # LLM: 会话运行时 keeps cwd separate from rollout/task storage. This is
             # the one host-authored cwd consumed by every relative-path tool;
@@ -152,9 +198,9 @@ class SubAgentRunnerContextService:
             # LLM: Exact modes are generic Tool Gateway controls activated only
             # by a fully typed source-worker identity, never by role/name text.
             # 函数用途: 来源工作者只读显式文件根和自己 run 的工具输出，普通子代理语义不变。
-            "read_scope_mode": "exact" if exact_source_read_scope else "owner",
+            "read_scope_mode": "exact" if (exact_source_read_scope or has_exact_constraint_read) else "owner",
             "artifact_read_scope_mode": (
-                "current_run" if exact_source_read_scope else "task"
+                "current_run" if (exact_source_read_scope or has_exact_constraint_read) else "task"
             ),
             # Large tool results are archived under the stable per-agent run
             # workspace, not under the shared task work directory.  Keep the
@@ -185,6 +231,9 @@ class SubAgentRunnerContextService:
             "output_json": task.output_json,
             "dependencies_json": task.dependencies_json,
         }
+        if prohibited_actions:
+            boundary["prohibited_actions"] = prohibited_actions
+        return boundary
 
     # LLM: 只读加载 canonical task 后共用 prepare/project，不改变原 ID、权限或持久状态；完整落盘仍由 write_execution_context 负责。
     # 函数用途: 为已存在的子代理构造当前执行上下文，沿同一投影保留 live 直属孩子与协作事实。

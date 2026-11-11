@@ -13,6 +13,10 @@ from ...subagents.tool_failure_ledger import recent_tool_failure
 from ...task_progress import progress_path, read_task_progress, task_progress_summary
 from ..runtime.owner_roots import runtime_owner_root
 
+# LLM: 与失败账展示窗口同宽；只用于 list_agents 的进展来源读取，窗口写满时连续次数只是下限。
+# 常量用途: 一次进展来源读取最多看的 tool_completed 事件数。
+_PROGRESS_TOOL_EVENT_WINDOW_COUNT = 200
+
 
 # LLM: 节点只投影 kernel 快照与既有只读事实；recent_tool_failure 在读取时从 owner 权威 runtime_events 现算，
 #   不写回任务、不新增状态文件。修改须同步 model_view 白名单与 list_agents 回归。
@@ -35,6 +39,71 @@ def node_from_kernel_run(agent: object, row: object) -> dict[str, object]:
     if failure := _recent_tool_failure(agent, str(node.get("run_id") or "")):
         node["recent_tool_failure"] = failure
     return node
+
+
+# LLM: ORCH03-R1：只给 list_agents 的有界节点调用（不进 /status、TUI 心跳这类热路径）。每项来源都给出 state：
+#   read / not_applicable（本地未托管、run 未登记、没有 Todo 文件）/ unreadable（读取报错）。attempt 读权威
+#   agent_runs.current_attempt_id 对应的 attempt 状态；tool_failures 的事实与可读性来自同一次有界读取，只统计当前
+#   attempt 的工具完成事件（展示用的跨 attempt 历史失败段仍由 recent_tool_failure 产生，不参与当前重试判断）；
+#   task_progress 给未关闭条目数与其中没有 owner 的条目数。只读，不写任何状态。
+# 函数用途: 为一个子代理读取进展分类所需的必需来源事实。
+def progress_source_facts(agent: object, run_id: str) -> dict[str, dict[str, object]]:
+    facts = _runtime_source_facts(getattr(getattr(agent, "subagents", None), "runtime_db", None), run_id)
+    facts["task_progress"] = _task_progress_source(agent, run_id)
+    return facts
+
+
+# LLM: ORCH03-R1-a/R1-b（PRO-MSG-034）：一次读 run 行、当前 attempt 与最近 _PROGRESS_TOOL_EVENT_WINDOW_COUNT 条
+#   tool_completed 事件；任何一步报错，attempt 与 tool_failures 一起记为 unreadable，不再用第二次探测替它作证。
+#   连续失败段只用 attempt_id 等于当前 attempt 的事件计算，旧 attempt 的失败不会变成“正在重试”。窗口写满时次数只是下限。
+# 函数用途: 读取 attempt 状态与当前 attempt 的工具失败段。
+def _runtime_source_facts(runtime_db: object, run_id: str) -> dict[str, dict[str, object]]:
+    import sqlite3
+
+    from ...subagents.tool_failure_ledger import event_tool_call_facts, tool_failure_streak
+
+    not_applicable = {"state": "not_applicable"}
+    if runtime_db is None or not run_id:
+        return {"attempt": dict(not_applicable), "tool_failures": dict(not_applicable)}
+    try:
+        run = runtime_db.agent_run_for_run_id(run_id)
+        if run is None:
+            return {"attempt": dict(not_applicable), "tool_failures": dict(not_applicable)}
+        attempt_id = str(run["current_attempt_id"] or "")
+        attempt = runtime_db.get_attempt(attempt_id) if attempt_id else None
+        events = runtime_db.events_for_agent_run(str(run["agent_run_id"]), event_type="tool_completed",
+                                                 limit=_PROGRESS_TOOL_EVENT_WINDOW_COUNT)
+    except (sqlite3.Error, OSError, AttributeError, KeyError, IndexError, TypeError):
+        return {"attempt": {"state": "unreadable"}, "tool_failures": {"state": "unreadable"}}
+    attempt_fact = {"state": "read", "status": str(attempt["status"] or "")} if attempt is not None else (
+        {"state": "unreadable"} if attempt_id else dict(not_applicable))
+    if not isinstance(events, list):
+        return {"attempt": attempt_fact, "tool_failures": {"state": "unreadable"}}
+    current = [event for event in events if isinstance(event, dict) and attempt_id
+               and str(event.get("attempt_id") or "") == attempt_id]
+    streak = tool_failure_streak(event_tool_call_facts(current),
+                                 window_full=len(events) >= _PROGRESS_TOOL_EVENT_WINDOW_COUNT)
+    projected = {key: streak.get(key) for key in ("tool", "error_code", "failure_stage", "consecutive_failures",
+                                                   "ongoing", "count_is_lower_bound") if key in streak}
+    return {"attempt": attempt_fact,
+            "tool_failures": {"state": "read", "attempt_id": attempt_id, "current_attempt_streak": projected}}
+
+
+# LLM: Todo 文件不存在是“不适用”；存在但读出 load_error 是读不出。只数条目，不读正文。
+# 函数用途: 读取子代理 Todo 的未关闭与未认领条目数。
+def _task_progress_source(agent: object, run_id: str) -> dict[str, object]:
+    from ...task_progress import read_task_progress_report, task_progress_status_is_closed
+
+    root = _progress_root(agent)
+    if not root or not run_id or not progress_path(root, run_id).exists():
+        return {"state": "not_applicable"}
+    progress, load_error = read_task_progress_report(root, run_id)
+    if load_error:
+        return {"state": "unreadable"}
+    items = [item for item in progress.get("items") or [] if isinstance(item, dict)]
+    open_items = [item for item in items if not task_progress_status_is_closed(item.get("status"))]
+    return {"state": "read", "open": len(open_items),
+            "unassigned_open": sum(1 for item in open_items if not str(item.get("owner") or "").strip())}
 
 
 # LLM: 只读 agent.subagents.runtime_db 这一 owner 权威库；没有库（本地非托管）或 run 未登记时不输出该字段。

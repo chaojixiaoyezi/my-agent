@@ -1,5 +1,5 @@
 # LLM: 优化只收敛模型输入，不扩大快照权限；本文件用真实注册、SQLite及原校验器验证，无外部网络或模型调用。
-# 模块用途: 钉住28项首轮工具、单一派工形状、六模式互斥及版本化旧输入边界。
+# 模块用途: 钉住28项原首轮工具（加已批准的收件箱共29项）、单一派工形状、六模式互斥及版本化旧输入边界。
 from __future__ import annotations
 
 import json
@@ -25,12 +25,37 @@ def surface_agent(tmp_path):
     return SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
 
 
-# LLM: 数量与成员同时钉住，不能通过隐藏其它主链工具凑28。
-# 函数用途: 验证skill反馈首轮稳定而三个低频会话工具可搜索加载。
-def test_initial_surface_is_28_and_skill_feedback_never_needs_loading(surface_agent):
+# LLM: 数量与成员同时钉住，不能通过隐藏其它主链工具凑数。ORCH-02（PRO-MSG-031）：未决申请收件箱是已批准的
+#   非延迟工具，默认开启时首轮为原28项加上恰好一个 list_pending_requests 共29项；关掉开关回到原28项且只少这一个，
+#   重新打开恢复同一集合。
+# 函数用途: 验证skill反馈首轮稳定、收件箱是唯一新增成员，而三个低频会话工具可搜索加载。
+def test_initial_surface_is_28_plus_the_inbox_and_skill_feedback_never_needs_loading(surface_agent):
+    import os
+    import time
+    from pathlib import Path
+
     registry = surface_agent.tools
-    names = {spec.name for spec in registry.model_visible_specs()}
-    assert len(names) == 28, sorted(names)
+
+    def surface():
+        return {spec.name for spec in registry.model_visible_specs()}
+
+    def switch(value, bump):
+        path = Path(surface_agent.capability_config_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"orchestration_pending_inbox_enabled: {value}\n", encoding="utf-8")
+        stamp = time.time() + bump
+        os.utime(path, (stamp, stamp))
+
+    names = surface()
+    switch("false", 2)
+    disabled = surface()
+    switch("true", 4)
+    reenabled = surface()
+
+    assert len(names) == 29, sorted(names)
+    assert names - disabled == {"list_pending_requests"} and disabled <= names
+    assert len(disabled) == 28, sorted(disabled)
+    assert reenabled == names
     assert "skill_feedback" in names
     assert "list_tools" not in registry.tools
     assert {"create_session_task", "get_session_task", "list_owner_sessions"}.isdisjoint(names)

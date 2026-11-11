@@ -803,9 +803,39 @@ def _resolve_through_operation_ledger(tmp_path, agent, arguments):
     return execution.result, store.get_tool_operation(owner_id="test-owner", run_id="test-run", operation_id="op-d2")
 
 
+# LLM: 为测试夹具中的父级代理绑定已证明的前台执行身份与活动 TaskLink。
+# 函数用途: 对齐后 031(2) 权限门，让受权注册表调用安全放行并练习底层错误处理分支。
+def _bind_test_parent_foreground(
+    agent: SimpleAgent,
+    task_id: str = "test-run",
+    thread_id: str = "thread-test-run",
+) -> None:
+    from types import SimpleNamespace
+
+    store = agent.conversation_store
+    thread = store.threads.get_or_create(
+        {"channel": "local", "channel_conversation_id": thread_id}
+    )
+    store.tasks.bind(
+        {"thread_id": thread.thread_id, "task_id": task_id, "goal": "父任务", "status": "active"}
+    )
+    agent._current_run_params = SimpleNamespace(
+        run_id=task_id,
+        task_id=task_id,
+        request_id=task_id,
+        task_attributes={
+            "conversation_task_id": task_id,
+            "conversation_thread_id": thread.thread_id,
+        },
+    )
+
+
 def test_out_of_bounds_grant_settles_operation_failed_not_unknown(tmp_path):
     """D2（2026-09-30 真实模型 G03）：越界 grant 经原执行器和操作账落成 failed，不是 UNKNOWN/manual_review。"""
     agent, task, request = _agent_and_blocked_task(str(tmp_path / "ws"))
+    _bind_test_parent_foreground(agent, "test-run")
+    task.parent_id = "test-run"
+    agent.subagents.save(task)
     result, record = _resolve_through_operation_ledger(
         tmp_path, agent, {"run_id": task.id, "decision": "grant", "reason": "越界", "write_roots": ["/etc/hosts"]},
     )
@@ -824,6 +854,7 @@ def test_tool_beyond_parent_grant_settles_operation_failed_not_unknown(tmp_path)
     agent = SimpleAgent(
         AgentConfig(enable_tools=True, memory_path="memory.jsonl", subagent_workspace="subs"), tmp_path / "ws",
     )
+    _bind_test_parent_foreground(agent, "test-run")
     task = agent.subagents.create_run(goal="调用不存在工具", thought="父级上限", plan=["申请"],
                                       allowed_tools=["capability_request"])
     agent.subagents.lifecycle.record_capability_request(
@@ -1001,8 +1032,10 @@ def test_parent_cannot_resolve_grandchild_capability_request():
 def test_cancelled_child_closes_leftover_open_request():
     with tempfile.TemporaryDirectory() as td:
         agent, task, request = _agent_and_blocked_task(td)
+        _bind_test_parent_foreground(agent, "task-test-run", thread_id="thread-test-run")
         task = agent.subagents.load(task.id)
         task.status = "BLOCKED"
+        task.parent_id = "task-test-run"
         agent.subagents.save(task)
         # seq 253 闭合：MANAGED authority 门要求 run 登记真实权威链。
         repo = agent.subagents.runtime_db

@@ -18,7 +18,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import append_private_jsonl_records, locked_json_path
+from ..common.json_io import (
+    append_private_jsonl_records,
+    locked_json_path,
+    write_json_file_atomic_unlocked,
+    write_private_jsonl_records,
+)
 from ..common.nofollow_fs import ensure_private_dir, read_bytes_beneath
 from ..common.opaque_id import validate_opaque_id
 from ..gateway_parts.io import read_json_file, write_json_file_atomic
@@ -34,6 +39,7 @@ from .models import (
     CollaborationCase,
     CollaborationRequest,
     EvidencePacket,
+    HandoffBoardItem,
     new_case_id,
     new_decision_id,
     new_evidence_id,
@@ -121,6 +127,7 @@ class CollaborationBaseStore:
         self.evidence_dir = self.root / "evidence"
         self.participants_dir = self.root / "participants"
         self.decisions_dir = self.root / "decisions"
+        self.handoff_items_dir = self.root / "handoff_items"
         self.capabilities_path = self.root / "agent_capabilities.json"
         self._ensure_dirs()
         self.history_index = CollaborationHistoryIndex(self.root)
@@ -136,6 +143,7 @@ class CollaborationBaseStore:
             self.evidence_dir,
             self.participants_dir,
             self.decisions_dir,
+            self.handoff_items_dir,
         ):
             ensure_private_dir(path)
 
@@ -299,6 +307,10 @@ class CollaborationBaseStore:
 
     def _decisions_path(self, case_id: str) -> Path:
         return self.decisions_dir / f"{case_id}.jsonl"
+
+    def _handoff_items_path(self, case_id: str) -> Path:
+        case_id = validate_opaque_id(case_id, kind="case_id")
+        return self.handoff_items_dir / f"{case_id}.jsonl"
 
 
 # ---------------------------------------------------------------------------
@@ -1224,3 +1236,152 @@ class CollaborationStore(CollaborationPendingRequestStore):
         snapshot = _CaseSnapshot.from_store(self, case_id)
         groups = _request_groups(snapshot)
         return _status_payload(snapshot, groups)
+
+    # LLM: 按 case 获取交接板独占文件锁，串行化读-核验-追加临界区。
+    # 函数用途: 返回针对单个 case 交接项的上下文锁。
+    @contextmanager
+    def handoff_case_lock(self, case_id: str):
+        clean_case_id = validate_opaque_id(case_id, kind="case_id")
+        ensure_private_dir(self.handoff_items_dir)
+        lock_path = self.handoff_items_dir / f"{clean_case_id}.lock"
+        with locked_json_path(lock_path):
+            yield
+
+    # LLM: 维护活跃（含非 closed 状态）case 索引集合 .active_cases.json。
+    # 函数用途: 在文件锁保护下原子更新活跃 case 索引表。
+    def _update_active_cases_index(self, case_id: str, *, is_active: bool) -> None:
+        ensure_private_dir(self.handoff_items_dir)
+        idx_path = self.handoff_items_dir / ".active_cases.json"
+        with locked_json_path(idx_path):
+            active_set: set[str] = set()
+            if idx_path.exists():
+                try:
+                    data = json.loads(idx_path.read_text(encoding="utf-8"))
+                    if isinstance(data, dict):
+                        active_set = set(data.get("active_cases", []))
+                    elif isinstance(data, list):
+                        active_set = set(data)
+                except Exception:
+                    active_set = set()
+            else:
+                for p in self.handoff_items_dir.glob("*.jsonl"):
+                    cid = p.stem
+                    items = self.case_handoff_items(cid)
+                    if any(it.state != "closed" for it in items):
+                        active_set.add(cid)
+            if is_active:
+                active_set.add(case_id)
+            else:
+                active_set.discard(case_id)
+            write_json_file_atomic_unlocked(idx_path, {"active_cases": sorted(active_set)})
+
+    # LLM: 交接项状态变更是只追加 JSONL（同 item_id 取最后一行）；写入由 locked_json_path / append_private_jsonl_records 串行。
+    # 函数用途: 将交接项的最新状态快照追加到所属 case 的交接账本并更新活跃索引。
+    def append_handoff_item(self, item: HandoffBoardItem) -> None:
+        path = self._handoff_items_path(item.case_id)
+        append_private_jsonl_records(path, [item.to_dict()], sort_keys=True)
+        if item.state != "closed":
+            self._update_active_cases_index(item.case_id, is_active=True)
+        else:
+            items = self.case_handoff_items(item.case_id)
+            has_active = any(it.state != "closed" for it in items)
+            self._update_active_cases_index(item.case_id, is_active=has_active)
+
+    # LLM: 原子重写指定 case 的交接项账本（归档清理时只保留非 closed 项，空则删除文件）。
+    # 函数用途: 重写 case 交接账本并同步更新活跃索引。
+    def rewrite_case_handoff_items(self, case_id: str, items: list[HandoffBoardItem]) -> None:
+        path = self._handoff_items_path(case_id)
+        if not items:
+            if path.exists():
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+        else:
+            records = [item.to_dict() for item in items]
+            write_private_jsonl_records(path, records, sort_keys=True)
+        has_active = any(it.state != "closed" for it in items)
+        self._update_active_cases_index(case_id, is_active=has_active)
+
+    # LLM: 读 case 的交接项快照；同 item_id 只保留最后一条，保持插入次序。
+    # 函数用途: 获取指定 case 下所有交接项的最新状态列表。
+    def case_handoff_items(self, case_id: str) -> list[HandoffBoardItem]:
+        items, _ = self.case_handoff_items_report(case_id)
+        return items
+
+    # LLM: 读交接项 JSONL 账本并返回解析结果与错误报告。
+    # 函数用途: 返回交接项实体列表与格式异常报告。
+    def case_handoff_items_report(
+        self,
+        case_id: str,
+    ) -> tuple[list[HandoffBoardItem], list[dict[str, Any]]]:
+        items: dict[str, HandoffBoardItem] = {}
+        path = self._handoff_items_path(case_id)
+        report = read_jsonl_report(path, context="collaboration.handoff_items.read")
+        for row in report.rows:
+            item = HandoffBoardItem.from_dict(row)
+            if item.item_id:
+                items[item.item_id] = item
+        return list(items.values()), report.load_errors
+
+    # LLM: 按 case_id 与 item_id 查询最新交接项实体。
+    # 函数用途: 返回单条交接项的最新快照或 None。
+    def load_handoff_item(self, case_id: str, item_id: str) -> HandoffBoardItem | None:
+        items = self.case_handoff_items(case_id)
+        for item in items:
+            if item.item_id == item_id:
+                return item
+        return None
+
+    # LLM: 遍历所有 case 的交接项，支持按 state 和 responsible_actor 过滤及早期上限截止。
+    # 函数用途: 跨 case 检索交接项列表，非 closed 状态优先使用活跃索引。
+    def list_all_handoff_items(
+        self,
+        *,
+        state: str | None = None,
+        responsible_actor: str | None = None,
+        limit: int | None = None,
+    ) -> list[HandoffBoardItem]:
+        results: list[HandoffBoardItem] = []
+        if not self.handoff_items_dir.exists():
+            return results
+
+        idx_path = self.handoff_items_dir / ".active_cases.json"
+        is_non_closed_query = state is not None and state != "closed"
+
+        case_ids: list[str] | None = None
+        if is_non_closed_query and idx_path.exists():
+            try:
+                data = json.loads(idx_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    case_ids = sorted(data.get("active_cases", []))
+                elif isinstance(data, list):
+                    case_ids = sorted(data)
+            except Exception:
+                case_ids = None
+
+        if case_ids is not None:
+            for case_id in case_ids:
+                items = self.case_handoff_items(case_id)
+                for item in items:
+                    if state is not None and item.state != state:
+                        continue
+                    if responsible_actor is not None and item.responsible_actor != responsible_actor:
+                        continue
+                    results.append(item)
+                    if limit is not None and len(results) >= limit:
+                        return results
+            return results
+
+        for path in sorted(self.handoff_items_dir.glob("*.jsonl")):
+            case_id = path.stem
+            items = self.case_handoff_items(case_id)
+            for item in items:
+                if state is not None and item.state != state:
+                    continue
+                if responsible_actor is not None and item.responsible_actor != responsible_actor:
+                    continue
+                results.append(item)
+                if limit is not None and len(results) >= limit:
+                    return results
+        return results

@@ -65,14 +65,45 @@ class ToolPolicyRequest:
 # explicit legacy tool names are removed before leaf/coordinator role logic.
 # 函数用途: 为孙代理计算不超过父级且不含退休控制入口的工具集合。
 def scheduled_child_tools(request: ToolPolicyRequest) -> list[str]:
-
     parent_tools = _clean_tools(request.parent_tools)
+    spec_attrs = getattr(request.spec, "attributes", None)
+    constraints_dict = spec_attrs.get("delegation_constraints") if isinstance(spec_attrs, dict) else None
+
+    permitted_tools: list[str] | None = None
+    prohibited_actions: tuple[str, ...] = ()
+    if isinstance(constraints_dict, dict):
+        raw_perm = constraints_dict.get("permitted_tools")
+        if raw_perm:
+            parent_set = set(parent_tools)
+            for tool in raw_perm:
+                if tool not in parent_set:
+                    raise PermissionError(
+                        f"TOOL_PERMISSION_DENIED: Permitted tool '{tool}' exceeds parent authority."
+                    )
+            permitted_tools = [t for t in raw_perm if t in parent_set]
+        prohibited_actions = tuple(constraints_dict.get("prohibited_actions") or ())
+
     explicit_tools = _clean_tools(getattr(request.spec, "allowed_tools", None))
     requested_tools = explicit_tools or parent_tools
-    if _can_spawn_children(request.role, request.spec):
+
+    if permitted_tools is not None:
+        candidates = list(permitted_tools)
+    elif _can_spawn_children(request.role, request.spec):
         candidates = [*requested_tools, *_DEFAULT_LEAF_CODING_TOOLS, *COORDINATOR_TOOLS]
+    else:
+        candidates = [*requested_tools, *_DEFAULT_LEAF_CODING_TOOLS]
+
+    if "spawn_children" in prohibited_actions:
+        candidates = [t for t in candidates if t not in _DIRECT_CHILD_CONTROL_TOOLS and t != "create_subagents"]
+    if "network_access" in prohibited_actions:
+        candidates = [t for t in candidates if t not in ("web_search", "web_fetch", "network_fetch")]
+    if "network_fetch" in prohibited_actions:
+        candidates = [t for t in candidates if t not in ("web_fetch", "network_fetch")]
+    if "shell_execution" in prohibited_actions:
+        candidates = [t for t in candidates if t not in ("run_command", "process_session", "terminal_session")]
+
+    if _can_spawn_children(request.role, request.spec) and "spawn_children" not in prohibited_actions:
         return _coordinator_tools(candidates, parent_tools=parent_tools)
-    candidates = [*requested_tools, *_DEFAULT_LEAF_CODING_TOOLS]
     return _leaf_write_tools(candidates, parent_tools=parent_tools)
 
 

@@ -265,7 +265,13 @@ def tool_catalog_result(registry, snapshot, context=None) -> ToolHandlerOutcome:
         self_context.update(provider(snapshot, context))
     payload = tool_manifest_payload(snapshot)
     if isinstance(payload.get("allowed_tools"), list):
-        payload["allowed_tools"] = [name for name in payload["allowed_tools"] if name != CATALOG_ONLY_TOOL_GRANT]
+        # B1-R3（PRO-MSG-030）：显式白名单原样进快照（执行授权仍以快照为准，不改）；只在模型可见的目录列表里去掉
+        # 声明 hidden_when_unavailable 且本快照不可用的工具名。其它不可用工具照常列出并保留诊断。
+        hidden = {name for name, tool in registry.tools.items()
+                  if getattr(type(tool), "hidden_when_unavailable", False) is True
+                  and name not in snapshot.available_tool_names}
+        payload["allowed_tools"] = [name for name in payload["allowed_tools"]
+                                    if name != CATALOG_ONLY_TOOL_GRANT and name not in hidden]
     payload["self_context"] = self_context
     payload["permission_mode"] = self_context["permissions"]["mode"]
     payload["tool_failure_taxonomy"] = payload["failure_taxonomy"]
@@ -1223,13 +1229,19 @@ def _registry_runtime_snapshot(registry, allowed_tools, run_id, owner_scope_root
             continue
         spec = getattr(tool, "model_spec", None)
         exposure = getattr(tool, "exposure", None)
+        # B1-R3：工具类显式声明 hidden_when_unavailable=True 时（结构属性，不看名字或原因文案），不可用就整体不进
+        # 本次快照：目录、不可用列表、self_context 与 tool_search 都看不到它的名字/类别/原因；其它工具的不可用诊断不变。
+        hidden_when_unavailable = getattr(type(tool), "hidden_when_unavailable", False) is True
+        availability = _safe_tool_availability(tool, registry=registry) if hidden_when_unavailable else None
+        if availability is not None and not availability.available:
+            continue
         if catalog_only and name == "tool_search":
             spec = _catalog_only_model_spec(spec)
         if isinstance(spec, ToolModelSpec) and (exposure is None or bool(getattr(exposure, "model_visible", True))):
             catalog_specs.append(spec)
         if name in registry.disabled_tool_names or (catalog_only and name == "tool_search" and "list_tools" in registry.disabled_tool_names):
             continue
-        availability = _safe_tool_availability(tool, registry=registry)
+        availability = availability or _safe_tool_availability(tool, registry=registry)
         if not availability.available:
             unavailable.append((name, availability.error_code or "TOOL_UNAVAILABLE", availability.reason))
             continue

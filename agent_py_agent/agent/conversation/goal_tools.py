@@ -199,10 +199,17 @@ class CreateGoalTool(BaseTool):
         self.agent = agent
 
     # LLM: 插话持久操作经 guidance 领域组件； Goal lock covers uniqueness and create; retain current task and execution lane. No implicit background dispatch.
+    #   ORCH-01：会话任务编号只是提名，先经 proven_goal_binding 与执行事实核对；证明不了就在写目标、任务登记和
+    #   attrs 之前返回 not_started，不能借提名给原父任务建目标。子代理与独立命令的身份照旧。
     # 函数用途: 保存当前代理的一个目标，已有未完成目标明确拒绝，避免悄悄重复开工。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
+        from .goal_binding import proven_goal_binding
+
         objective = str(params.get("objective") or "").strip()
-        thread_id, task_id, _goal_id, attrs = goal_binding(self.agent)
+        try:
+            thread_id, task_id, _goal_id, attrs = proven_goal_binding(self.agent)
+        except PermissionError as exc:
+            return _error("create_goal", str(exc), "GOAL_STATE_CONFLICT", effect_outcome="not_started")
         if not thread_id or not task_id or attrs is None:
             return _error(
                 "create_goal", "current thread context is unavailable", "GOAL_CONTEXT_REQUIRED"

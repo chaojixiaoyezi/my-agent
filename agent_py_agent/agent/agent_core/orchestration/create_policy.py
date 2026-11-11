@@ -317,11 +317,69 @@ def _role_policy(
                 linked = ()
             allowed_tools = list(dict.fromkeys([*allowed_tools, *linked]))
     allowed_tools = _within_parent_tool_authority(agent, allowed_tools)
+    from .delegation_constraints import (
+        ToolPermissionDeniedError,
+        extract_delegation_constraints,
+    )
+
+    constraints = extract_delegation_constraints(raw_params)
+    if constraints is None and agent is not None:
+        constraints = extract_delegation_constraints(None, agent=agent)
+    if constraints is not None:
+        if constraints.permitted_tools:
+            parent_scope = _parent_tool_authority_names(agent)
+            if parent_scope is not None:
+                for tool in constraints.permitted_tools:
+                    if tool not in parent_scope:
+                        raise ToolPermissionDeniedError(
+                            f"TOOL_PERMISSION_DENIED: Permitted tool '{tool}' exceeds parent authority."
+                        )
+            allowed_tools = [t for t in constraints.permitted_tools if parent_scope is None or t in parent_scope]
+        if "spawn_children" in constraints.prohibited_actions:
+            allowed_tools = [t for t in allowed_tools if t not in ("create_subagents", "spawn_children")]
+        if "network_access" in constraints.prohibited_actions:
+            allowed_tools = [t for t in allowed_tools if t not in ("web_search", "web_fetch", "network_fetch")]
+        if "network_fetch" in constraints.prohibited_actions:
+            allowed_tools = [t for t in allowed_tools if t not in ("web_fetch", "network_fetch")]
+        if "shell_execution" in constraints.prohibited_actions:
+            allowed_tools = [t for t in allowed_tools if t not in ("run_command", "process_session", "terminal_session")]
     from ...conversation.im_delegation_delivery import current_delegated_delivery_task
 
     if current_delegated_delivery_task(agent) is not None:
         allowed_tools = [name for name in allowed_tools if name != "send_message"]
     return RolePolicy(role=role, allowed_tools=allowed_tools)
+
+
+# LLM: 提取父级权威允许的工具名称集合，用作子级工具收窄的上界判定。
+# 函数用途: 返回父级可用工具集合供委托约束校验。
+def _parent_tool_authority_names(agent) -> set[str] | None:
+    from ...runtime_context import current_subagent_run_id
+    from ...subagents.capability_scope import current_creation_tool_authority
+    from ...tooling.registry import ToolRegistry
+
+    authority = current_creation_tool_authority()
+    base_tools: set[str] | None = None
+    if authority:
+        base_tools = set(authority["available_tool_names"])
+    else:
+        registry = getattr(agent, "tools", None)
+        if isinstance(registry, ToolRegistry):
+            current = getattr(agent, "_current_run_params", None)
+            snapshot = registry.runtime_snapshot(allowed_tools=getattr(current, "allowed_tools", None))
+            base_tools = set(snapshot.available_tool_names)
+
+    run_id = current_subagent_run_id(agent)
+    manager = getattr(agent, "subagents", None)
+    if run_id and manager:
+        try:
+            parent = manager.load(run_id)
+            parent_allowed = getattr(parent, "allowed_tools", None)
+            if parent is not None and parent_allowed:
+                parent_set = set(parent_allowed)
+                base_tools = (base_tools & parent_set) if base_tools is not None else parent_set
+        except Exception:
+            pass
+    return base_tools
 
 
 # LLM: 实际创建绑定immutable父快照及动作令牌；内部宿主按同owner快照取事实，返回规范名和可持久化限制，不按attributes造权。
@@ -586,6 +644,7 @@ def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[st
     _inherit_audit_guarantee(attrs, agent)
     _clamp_service_window_to_audit_deadline(attrs)
     _bind_host_owned_selection(attrs, raw_params, agent)
+    _bind_delegation_constraints(attrs, raw_params, agent)
     # 宿主由本次创建入口固定隐式联动边界，覆盖模型同名属性；后续仅授文档不能悄悄扩张只读/精确工具表。
     attrs["pack_linked_tools_allowed"] = (raw_params.get("_exact_allowed_tools") is not True
                                           and str(raw_params.get("tool_preset") or "") != "read_only")
@@ -604,6 +663,130 @@ def _bind_host_owned_selection(attrs: dict[str, object], raw_params: dict[str, o
     # 决策前后均会重建规格；这里只解析 canonical 选择，诊断交给真实 child 线程初始化，不能跨操作缓存。
     inherit_model_profile(attrs, agent, model=raw_params.get("model"), emit_diagnostic=False)
     inherit_reasoning_effort(attrs, agent, raw_params.get("effort"))
+
+
+# LLM: 提取并效验结构化委托约束，确保不超越父级范围并如实上报原生能力。
+# 函数用途: 在构造子代理属性时校验上界并冻结 delegation_constraints。
+def _bind_delegation_constraints(attrs: dict[str, object], raw_params: dict[str, object], agent) -> None:
+    from .create_constraints import delegated_product_write_roots
+    from .delegation_constraints import (
+        DelegationConstraintError,
+        DelegationScopeExceedsParentError,
+        StructuredDelegationConstraints,
+        ToolPermissionDeniedError,
+        evaluate_delegation_enforcement,
+        extract_delegation_constraints,
+        validate_delegation_constraints_upper_bound,
+    )
+
+    constraints = extract_delegation_constraints(raw_params)
+    parent_constraints = extract_delegation_constraints(None, agent=agent) if agent else None
+
+    if constraints is None and parent_constraints is not None:
+        new_depth = (
+            max(0, parent_constraints.max_descendant_depth - 1)
+            if parent_constraints.max_descendant_depth is not None
+            else None
+        )
+        constraints = StructuredDelegationConstraints(
+            schema_version=parent_constraints.schema_version,
+            actor_runtime=parent_constraints.actor_runtime,
+            max_cumulative_children=parent_constraints.max_cumulative_children,
+            allow_descendants=parent_constraints.allow_descendants,
+            max_descendant_depth=new_depth,
+            exact_write_set=parent_constraints.exact_write_set,
+            allowed_read_inputs=parent_constraints.allowed_read_inputs,
+            allowed_output_dirs=parent_constraints.allowed_output_dirs,
+            permitted_tools=parent_constraints.permitted_tools,
+            prohibited_actions=parent_constraints.prohibited_actions,
+        )
+    elif constraints is not None and parent_constraints is not None:
+        raw_c = (
+            raw_params.get("delegation_constraints")
+            if isinstance(raw_params.get("delegation_constraints"), dict)
+            else raw_params
+        )
+        raw_dict = raw_c if isinstance(raw_c, dict) else {}
+
+        max_cumulative = (
+            constraints.max_cumulative_children
+            if "max_cumulative_children" in raw_dict
+            else parent_constraints.max_cumulative_children
+        )
+        allow_descendants = (
+            constraints.allow_descendants
+            if "allow_descendants" in raw_dict
+            else parent_constraints.allow_descendants
+        )
+        if "max_descendant_depth" not in raw_dict:
+            max_depth = (
+                max(0, parent_constraints.max_descendant_depth - 1)
+                if (parent_constraints.max_descendant_depth is not None and parent_constraints.max_descendant_depth > 0)
+                else parent_constraints.max_descendant_depth
+            )
+        else:
+            max_depth = constraints.max_descendant_depth
+
+        if "exact_write_set" not in raw_dict and "allowed_output_dirs" not in raw_dict:
+            exact_write = parent_constraints.exact_write_set
+            allowed_output = parent_constraints.allowed_output_dirs
+        else:
+            exact_write = constraints.exact_write_set
+            allowed_output = constraints.allowed_output_dirs
+
+        allowed_read = (
+            constraints.allowed_read_inputs
+            if "allowed_read_inputs" in raw_dict
+            else parent_constraints.allowed_read_inputs
+        )
+        permitted_tools = (
+            constraints.permitted_tools
+            if "permitted_tools" in raw_dict
+            else parent_constraints.permitted_tools
+        )
+        combined_prohibited = tuple(
+            dict.fromkeys((*constraints.prohibited_actions, *parent_constraints.prohibited_actions))
+        )
+        constraints = StructuredDelegationConstraints(
+            schema_version=constraints.schema_version,
+            actor_runtime=constraints.actor_runtime,
+            max_cumulative_children=max_cumulative,
+            allow_descendants=allow_descendants,
+            max_descendant_depth=max_depth,
+            exact_write_set=exact_write,
+            allowed_read_inputs=allowed_read,
+            allowed_output_dirs=allowed_output,
+            permitted_tools=permitted_tools,
+            prohibited_actions=combined_prohibited,
+        )
+
+    if constraints is None:
+        return
+
+    # 1. 效验原生执行能力：若为 native 且含有未知 prohibited_actions token，则 fail closed
+    report = evaluate_delegation_enforcement(constraints)
+    if constraints.actor_runtime == "native" and report.unknown_enforcement_fields:
+        unknown_str = ", ".join(report.unknown_enforcement_fields)
+        raise DelegationConstraintError(
+            f"Unknown prohibited action tokens cannot be enforced natively: {unknown_str}",
+            error_code="TOOL_INVALID_ARGUMENTS",
+        )
+
+    # 2. 单调上界校验：不能超出父级已授权工具、写根、后代派发权限
+    parent_tools = _parent_tool_authority_names(agent)
+    parent_write_roots = list(delegated_product_write_roots(agent)) if agent else None
+    valid, err_msg = validate_delegation_constraints_upper_bound(
+        constraints,
+        parent_tools=parent_tools,
+        parent_write_roots=parent_write_roots,
+        parent_constraints=parent_constraints,
+    )
+    if not valid:
+        if "TOOL_PERMISSION_DENIED" in err_msg:
+            raise ToolPermissionDeniedError(err_msg)
+        raise DelegationScopeExceedsParentError(err_msg)
+
+    attrs["delegation_constraints"] = constraints.to_dict()
 
 
 # LLM: Every descendant keeps the originating ordinary-conversation request id as typed
