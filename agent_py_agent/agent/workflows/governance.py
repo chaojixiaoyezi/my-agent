@@ -8,6 +8,18 @@ from ..assets.descriptor import execution_definition_ref
 from .release_gate import WorkflowEffectAdmission, WorkflowReleaseGate
 
 
+# LLM: 继承str保持外部run_authorizer(record, phase)字符串回调100%向后兼容，同时以显式类型与preflight/resume/cancel控制阶段严格分离。
+# 类用途: 标识工作流真实步骤副作用准入阶段，防止名为preflight/resume/cancel的合法步骤误走控制旁路（FLAG-5）。
+class WorkflowEffectPhase(str):
+    """工作流步骤副作用阶段载体；作为str子类兼容外部authorizer，同时在治理与业务授权门内与控制阶段严格区分。"""
+
+    # LLM: 返回解包后的纯str步骤ID，供policy_provider与步骤表查询使用。
+    # 函数用途: 提取不带子类身份的纯字符串步骤编号。
+    @property
+    def step_id(self) -> str:
+        return str.__str__(self)
+
+
 def workflow_candidate_hash(definition):
     # 同候选必须含冻结脚本内容，而不是资产统计修订、名称或范围标签。
     pins = {step: {key: value for key, value in pin.items() if key != 'revision'}
@@ -26,27 +38,33 @@ class WorkflowGovernance:
         self.gate = WorkflowReleaseGate(receipt_reader=receipt_reader,
                                          authorization_check=authorization_check, clock=clock)
 
-    # LLM: 原生恢复仅核对原任务；终态发表恢复无当前步骤/新副作用；普通未知副作用仍对账，每次新增副作用仍绑定当前审核及原 attempt。
-    # 函数用途: 按原生/终态发表恢复分类选择完成读取、终态补发、通用对账或真实副作用审核。
+    # LLM: 仅非WorkflowEffectPhase的控制阶段（preflight/resume/cancel）走恢复分类或控制放行；任何WorkflowEffectPhase（含名为
+    #   preflight/resume/cancel的合法步骤）一律解包纯str步骤ID送policy_provider与WorkflowReleaseGate强制核验审核回执（FLAG-5）。
+    # 函数用途: 按显式阶段载体区分控制阶段与真实步骤副作用准入，防止控制同名步骤绕过发布门。
     def require_effect(self, record, phase):
         from .engine import _requires_native_agent_resume, _requires_terminal_publication_resume
 
-        if phase == 'resume' and _requires_terminal_publication_resume(record):
-            # 原步骤已全部确认、只差原 run 终态发表：不选择或伪造当前步骤，也不进入通用对账。
-            return None
-        # 创建头记录/取消本身不启动业务；等待恢复只读原完成链，尾部新副作用仍逐步审核。
-        unresolved = any(item.escalation_result.get('effect_started') and
-                         (item.needs_repair or item.status == 'running') for item in record.steps)
-        if phase == 'resume' and not _requires_native_agent_resume(record) and (record.effect_outcome == 'unknown' or unresolved):
-            step = next((item for item in record.steps if item.step_id == record.current_step_id), None)
-            if step is None:
-                step = next((item for item in record.steps if item.status not in
-                             ('succeeded', 'escalated_recovered', 'skipped')), None)
-            return self._reconcile(record, step)
-        if phase in ('preflight', 'resume', 'cancel'):
-            return None
-        step = next((item for item in record.steps if item.step_id == phase), None)
-        policy = self.policy_provider(record, phase)
+        is_control = not isinstance(phase, WorkflowEffectPhase)
+        if is_control:
+            if phase == 'resume' and _requires_terminal_publication_resume(record):
+                # 原步骤已全部确认、只差原 run 终态发表：不选择或伪造当前步骤，也不进入通用对账。
+                return None
+            # 创建头记录/取消本身不启动业务；等待恢复只读原完成链，尾部新副作用仍逐步审核。
+            unresolved = any(item.escalation_result.get('effect_started') and
+                             (item.needs_repair or item.status == 'running') for item in record.steps)
+            if phase == 'resume' and not _requires_native_agent_resume(record) and (record.effect_outcome == 'unknown' or unresolved):
+                step = next((item for item in record.steps if item.step_id == record.current_step_id), None)
+                if step is None:
+                    step = next((item for item in record.steps if item.status not in
+                                 ('succeeded', 'escalated_recovered', 'skipped')), None)
+                return self._reconcile(record, step)
+            if phase in ('preflight', 'resume', 'cancel'):
+                return None
+        step_id = phase.step_id if isinstance(phase, WorkflowEffectPhase) else (
+            str.__str__(phase) if isinstance(phase, str) else str(phase)
+        )
+        step = next((item for item in record.steps if item.step_id == step_id), None)
+        policy = self.policy_provider(record, step_id)
         if step is None or not isinstance(policy, dict):
             raise PermissionError('WORKFLOW_GOVERNANCE_UNAVAILABLE')
         definition = self.store.load_workflow_snapshot(record.workflow_run_id)

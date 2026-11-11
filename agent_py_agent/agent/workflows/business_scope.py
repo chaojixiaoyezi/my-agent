@@ -412,21 +412,26 @@ class WorkflowScopeService:
     # 函数用途: 为公共运行入口绑定当前 actor、生命周期和原恢复准入门。
     def _engine(self, actor, *, resolution_ref=None):
         from .engine import _requires_native_agent_resume, _requires_terminal_publication_resume
+        from .governance import WorkflowEffectPhase
 
-        # LLM: 每次运行预检、续跑、取消及步骤副作用前校验当前Actor权限、工作流活跃态、冻结空间范围与冻结业务上下文（G5a-R1）；只读不重选默认。
-        # 函数用途: 校验当前业务调用者对工作流运行阶段的操作授权与范围准入。
+        # LLM: 每次运行预检、续跑、取消及步骤副作用前校验当前Actor权限、工作流活跃态、冻结空间范围与冻结业务上下文（G5a-R1）；
+        #   仅非WorkflowEffectPhase的控制阶段享有cancel收回豁免与resume对账路由，同名步骤一律按真实执行副作用校验（FLAG-5）。
+        # 函数用途: 校验当前业务调用者对工作流控制阶段与步骤副作用阶段的操作授权、范围复核与治理准入。
         def authorize(record, phase):
-            # 取消只收回原工作，不重新取得执行准入；其它阶段仍守原执行授权。
-            self._authorize(actor, 'workflow_runs.cancel' if phase == 'cancel' else 'workflows.run', record.workflow_id)
+            is_control = not isinstance(phase, WorkflowEffectPhase)
+            is_cancel_control = is_control and phase == 'cancel'
+            is_resume_control = is_control and phase == 'resume'
+            # 取消控制只收回原工作，不重新取得执行准入；名为cancel的步骤副作用及所有其它阶段仍守workflows.run执行授权。
+            self._authorize(actor, 'workflow_runs.cancel' if is_cancel_control else 'workflows.run', record.workflow_id)
             current = self._get(record.workflow_id)
             if workflow_state(current)['lifecycle'] != 'active':
                 raise PermissionError('WORKFLOW_RECYCLED')
             if record.business_context and record.business_context.get('owner_id') != self.owner_id:
                 raise PermissionError('WORKFLOW_OWNER_MISMATCH')
-            if phase != 'cancel' and (record.scope_snapshot or record.business_context):
-                # G5a-R1：恢复控制写入前与每次后续副作用前，按当前范围核冻结空间；凡带冻结业务上下文的运行，不论
-                #   上下文端口类型，都以当前Actor经共享只读复核核当前空间/访问/绑定/项目；不重调端口、不重选默认，
-                #   取消不经此门以保收回能力。
+            if not is_cancel_control and (record.scope_snapshot or record.business_context):
+                # G5a-R1：恢复控制写入前与每次后续副作用（含名为cancel的步骤）前，按当前范围核冻结空间；凡带冻结业务上下文的运行，
+                #   不论上下文端口类型，都以当前Actor经共享只读复核核当前空间/访问/绑定/项目；不重调端口、不重选默认，
+                #   仅真正的取消控制豁免此门以保收回能力。
                 self._check_scope(workflow_state(current)['scope'], record.business_context.get('space_id'))
                 if record.business_context:
                     from ..conversation.business_context import revalidate_business_context
@@ -434,12 +439,12 @@ class WorkflowScopeService:
                     revalidate_business_context(actor=actor,
                         context=BusinessExecutionContext.from_dict(record.business_context))
             if self.governance is not None:
-                if phase == 'resume' and resolution_ref is not None:
+                if is_resume_control and resolution_ref is not None:
                     return self.governance.require_resolution(record, resolution_ref)
                 return self.governance.require_effect(record, phase)
             if resolution_ref is not None:
                 raise PermissionError('WORKFLOW_RESOLUTION_UNAVAILABLE')
-            if (phase == 'resume' and not _requires_native_agent_resume(record)
+            if (is_resume_control and not _requires_native_agent_resume(record)
                     and not _requires_terminal_publication_resume(record) and (record.effect_outcome == 'unknown'
                     or any(step.escalation_result.get('effect_started') and
                            (step.needs_repair or step.status == 'running') for step in record.steps))):

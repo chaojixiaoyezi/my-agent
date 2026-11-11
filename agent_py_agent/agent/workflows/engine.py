@@ -550,15 +550,25 @@ class _WorkflowRunLifecycle:
             return record
         return self._drive(record, definition, index + 1)
 
-    # LLM: 持原execution_lock先完整验身份并保存恢复ID，全部原责任确认前不得完成原control。
+    # LLM: 持原execution_lock先完整验身份并保存恢复ID，全部原责任确认前不得完成原control；retained占位避让队列探针瞬时锁。
     # 函数用途: 持续核实和取消同一批任务，未知或未停净时保持取消中。
     def cancel_workflow_run(self, workflow_run_id, *, expected_revision, operation_key):
         """取消不排在自身保留占位后；运行锁退出之后才按原证明结算占位。"""
+        from .run_store import _RunBusy
         restricted = self.store._concurrency_policy(workflow_run_id) != 'allow'
         workflow_id = self.store._read(workflow_run_id, 'run.json')['workflow_id'] if restricted else None
         try:
-            return self._cancel_workflow_run(workflow_run_id, expected_revision=expected_revision,
-                                             operation_key=operation_key)
+            for attempt in range(40):
+                try:
+                    return self._cancel_workflow_run(workflow_run_id, expected_revision=expected_revision,
+                                                     operation_key=operation_key)
+                except _RunBusy as exc:
+                    if not restricted or '不能重复续跑' in str(exc) or attempt == 39:
+                        raise
+                    proof = (self.store._read(workflow_run_id, 'run.json').get('concurrency_claim') or {})
+                    if proof.get('phase') != 'retained':
+                        raise
+                    time.sleep(0.005)
         finally:
             if restricted:
                 _reconcile_workflow_claim(self.owner_home, workflow_id, workflow_run_id)
@@ -1034,11 +1044,12 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             return
         self._analysis_step(record, spec, context, run=run)
 
-    # LLM: 批执行体不能竞争原run写锁；所有授权仍按真实run/step进行，原账本由协调线程发表。
-    # 函数用途: 记录副作用准入，不允许worker独自覆盖父步骤或运行快照。
+    # LLM: 批执行体不能竞争原run写锁；步骤副作用以WorkflowEffectPhase显式标记与控制阶段严格区分（FLAG-5），原账本由协调线程发表。
+    # 函数用途: 记录真实步骤副作用准入，不允许worker独自覆盖父步骤或运行快照。
     def _admit_effect(self, run, record):
+        from .governance import WorkflowEffectPhase
         from .release_gate import WorkflowEffectAdmission
-        admission = self._authorize_run(run, record.step_id)
+        admission = self._authorize_run(run, WorkflowEffectPhase(record.step_id))
         if isinstance(admission, WorkflowEffectAdmission):
             record.escalation_result['review_refs'] = list(admission.review_refs)
         if not run.ephemeral_debug and not getattr(run, '_batch_worker', False):
