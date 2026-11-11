@@ -9,6 +9,7 @@ from ...common.request_execution_ports import gateway_short_transaction
 """Runner attempt lifecycle helpers for subagent runs."""
 
 import time
+from typing import Any
 
 from ...common.id_generator import new_id as _framework_new_id
 from ...runtime_db.operations import RuntimeConflictError
@@ -60,10 +61,12 @@ def prepare_runner_attempt(
                 attempt_id = _framework_new_id("attempt_id")
             _recover_unsubmitted_agent_guidance(manager, task, attempt_id)
             now = time.time()
+            continuation_event_payload: dict[str, Any] | None = None
 
             # LLM: reducer 只更新启动所属字段，不覆盖并发授权；文件接纳在锁内复验并与 RUNNING 一起落盘。
             # 函数用途: 在最新任务上发布准确执行轮，保留准备期间产生的其它状态。
             def activate(current: SubAgentTask) -> None:
+                nonlocal continuation_event_payload
                 _assert_runner_attempt_start_allowed(current, resumable_user_stop=resumable_user_stop)
                 if manager.runtime_db is None:
                     from ..file_runner_start import activate_file_runner_start
@@ -82,6 +85,38 @@ def prepare_runner_attempt(
                 if runtime_task_id:
                     _persist_runtime_task_id(current, runtime_task_id)
 
+                attrs = dict(current.attributes or {})
+                cont = attrs.get("capability_resolution_continuation")
+                if isinstance(cont, dict):
+                    cont_status = str(cont.get("status") or "")
+                    continuation_id = str(cont.get("continuation_id") or "").strip()
+                    if cont_status == "queued" and continuation_id:
+                        updated_cont = dict(cont)
+                        updated_cont["status"] = "resumed"
+                        updated_cont["resumed_attempt_id"] = attempt_id
+                        updated_cont["resumed_at"] = now
+                        attrs["capability_resolution_continuation"] = updated_cont
+
+                        req_ids = [str(r) for r in updated_cont.get("request_ids") or []]
+                        decision = str(updated_cont.get("decision") or "")
+                        by_request = dict(attrs.get("capability_resolution_continuations_by_request") or {})
+                        for req_id in req_ids:
+                            if req_id in by_request and isinstance(by_request[req_id], dict):
+                                req_cont = dict(by_request[req_id])
+                                req_cont["status"] = "resumed"
+                                req_cont["resumed_attempt_id"] = attempt_id
+                                req_cont["resumed_at"] = now
+                                by_request[req_id] = req_cont
+                            else:
+                                by_request[req_id] = dict(updated_cont)
+                        attrs["capability_resolution_continuations_by_request"] = by_request
+                        current.attributes = attrs
+                        continuation_event_payload = {
+                            "continuation_id": continuation_id,
+                            "request_ids": req_ids,
+                            "decision": decision,
+                        }
+
             task = manager.mutate(run_id, activate)
             if (
                 not task_status_in(task.status, {TaskStatus.RUNNING.value})
@@ -89,6 +124,13 @@ def prepare_runner_attempt(
             ):
                 raise RuntimeError(
                     f"runner attempt rejected by canonical lifecycle: run_id={run_id}"
+                )
+            if continuation_event_payload is not None and getattr(manager, "runtime_db", None) is not None:
+                _emit_capability_continuation_resumed_event(
+                    manager.runtime_db,
+                    run_id=run_id,
+                    attempt_id=attempt_id,
+                    payload=continuation_event_payload,
                 )
             if resumable_user_stop:
                 from ...conversation.goal_delegation import transition_delegated_goal
@@ -101,6 +143,40 @@ def prepare_runner_attempt(
                 f"attempt_id={attempt_id}{suffix}",
             )
             return task
+
+
+# LLM: 发布能力裁决续跑绑定的权威运行事件；只由 prepare_runner_attempt 在成功激活时触发。
+# 函数用途: 向 runtime_events 追加一条绑定到 (agent_run_id, attempt_id) 的 capability_continuation.resumed 事件。
+def _emit_capability_continuation_resumed_event(
+    repo: object,
+    *,
+    run_id: str,
+    attempt_id: str,
+    payload: dict[str, Any],
+) -> None:
+    append = getattr(repo, "append_event", None)
+    if not callable(append):
+        return
+    lookup = getattr(repo, "agent_run_for_run_id", None)
+    agent_run_id = ""
+    if callable(lookup):
+        try:
+            row = lookup(run_id)
+            if row is not None:
+                agent_run_id = str(row["agent_run_id"] or "").strip()
+        except Exception:
+            agent_run_id = ""
+    if not agent_run_id:
+        return
+    try:
+        append(
+            event_type="capability_continuation.resumed",
+            attempt_id=attempt_id,
+            agent_run_id=agent_run_id,
+            payload=payload,
+        )
+    except Exception:
+        pass
 
 
 # LLM: 预留和激活在原写边界共用纯计数校验；坏账先于任何状态写入拒绝，用户停止只放宽终态，不覆盖坏账或准确attempt门。

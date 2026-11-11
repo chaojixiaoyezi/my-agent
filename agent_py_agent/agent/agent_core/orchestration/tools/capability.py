@@ -37,6 +37,7 @@ from ....subagents.models import (
 )
 from ....subagents.runner_session_liveness import has_fresh_runner_session
 from ....subagents.task_control import task_control_blocks_execution
+from ....subagents.utils import _new_id
 from ....tooling.models import (
     BaseTool,
     EffectResolverPolicy,
@@ -457,7 +458,8 @@ def _known_children_hint(agent: Any) -> str:
 
 # LLM: 授权后排队在原创建锁内复读任务；未决请求已闭合且无活 runner 才排队，旧裁决快照不得跨过新控制终态。
 #   canonical PAUSED（或已落盘未投影的控制）时已落盘的授予/拒绝审计照常保留，但不写 PENDING、不重开 TaskLink，只等显式恢复。
-# 函数用途: 把已完成的授权裁决转换成同一子代理的自动续跑状态，不复活后来被停止的孩子。
+#   ORCH-02-R4: 每次裁决生成唯一 continuation_id 并按 request_id 维护有界因果索引，保留历史因果记录。
+# 函数用途: 把已完成的授权裁决转换成同一子代理的自动续跑状态，写入 continuation 及其按请求划分的因果字典。
 def _queue_resolved_child_continuation(
     agent: Any,
     task: Any,
@@ -498,25 +500,39 @@ def _queue_resolved_child_continuation(
             "write_permission_blocked",
         }:
             task.failure_type = ""
-        attrs = dict(getattr(task, "attributes", {}) or {})
-        attrs["capability_resolution_continuation"] = {
-            "schema_version": "capability_resolution_continuation.v1",
+        now = time.time()
+        continuation_id = _new_id("cap_cont")
+        request_ids = [
+            str(item.get("request_id") or "")
+            for item in resolved
+            if str(item.get("request_id") or "").strip()
+        ]
+        continuation_record = {
+            "schema_version": "capability_resolution_continuation.v2",
+            "continuation_id": continuation_id,
             "decision": decision,
             "previous_status": previous_status,
             "status": "queued",
-            "queued_at": time.time(),
-            "request_ids": [
-                str(item.get("request_id") or "")
-                for item in resolved
-                if str(item.get("request_id") or "").strip()
-            ],
+            "queued_at": now,
+            "request_ids": request_ids,
         }
+        attrs = dict(getattr(task, "attributes", {}) or {})
+        attrs["capability_resolution_continuation"] = continuation_record
+        by_request = dict(attrs.get("capability_resolution_continuations_by_request") or {})
+        for req_id in request_ids:
+            by_request[req_id] = dict(continuation_record)
+        if len(by_request) > 64:
+            excess = len(by_request) - 64
+            for key in list(by_request.keys())[:excess]:
+                del by_request[key]
+        attrs["capability_resolution_continuations_by_request"] = by_request
         task.attributes = attrs
         agent.subagents.save(task, allow_terminal_reactivation=True)
         _reactivate_child_conversation_link(agent, run_id)
         return {
             "status": "queued",
             "run_id": run_id,
+            "continuation_id": continuation_id,
             "previous_status": previous_status,
             "next_status": TaskStatus.PENDING.value,
         }

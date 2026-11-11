@@ -204,9 +204,9 @@ def _decision(child: Any, request: Any, state: str, continuation: dict[str, Any]
     return {"state": "none", "evidence": "request_status", "decided_at": None}
 
 
-# LLM: 现有续跑记录只有 queued_at/request_ids，执行轮没有回指它的字段；因此有了之后的执行轮也只能报 unknown，
-#   绝不拿时间先后冒充因果。查看本身不唤醒、不续跑。
-# 函数用途: 根据续跑记录和当前执行轮给出排队/未知状态。
+# LLM: ORCH-02-R4：有 resumed_attempt_id 且经 RuntimeDB 确认该执行轮属于子代理时返回 resumed 状态；
+#   旧版记录或无因果关联的后续执行轮仍如实报 unknown(NO_CAUSAL_LINK)，不拿时间先后推断因果。
+# 函数用途: 根据续跑记录和当前执行轮给出已续跑/排队/未知状态。
 def _execution(agent: Any, child_id: str, state: str, continuation: dict[str, Any] | None,
                runtime_cache: dict[str, Any], coverage: dict[str, Any]) -> dict[str, object]:
     if state in {CAPABILITY_REQUEST_OPEN_STATUS, "INVALID", "GAP"}:
@@ -214,7 +214,43 @@ def _execution(agent: Any, child_id: str, state: str, continuation: dict[str, An
     if continuation is None:
         return {"state": "not_recorded"}
     queued_at = float(continuation.get("queued_at") or 0.0)
-    base = {"continuation_status": str(continuation.get("status") or ""), "queued_at": queued_at or None}
+    continuation_status = str(continuation.get("status") or "")
+    continuation_id = str(continuation.get("continuation_id") or "").strip()
+    resumed_attempt_id = str(continuation.get("resumed_attempt_id") or "").strip()
+    resumed_at = float(continuation.get("resumed_at") or 0.0)
+    base = {"continuation_status": continuation_status, "queued_at": queued_at or None}
+
+    if resumed_attempt_id:
+        repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+        if repo is None:
+            coverage["runtime_reads_failed"] += 1
+            return {"state": "unknown", "reason": "RUNTIME_UNREADABLE", **base}
+        try:
+            agent_run = repo.agent_run_for_run_id(child_id)
+            if agent_run is None:
+                coverage["runtime_reads_failed"] += 1
+                return {"state": "unknown", "reason": "RUNTIME_UNREADABLE", **base}
+            child_agent_run_id = str(agent_run["agent_run_id"] or "").strip()
+            attempt = repo.get_attempt(resumed_attempt_id)
+            if attempt is None or str(attempt["agent_run_id"] or "").strip() != child_agent_run_id:
+                coverage["runtime_reads_failed"] += 1
+                return {"state": "unknown", "reason": "RUNTIME_UNREADABLE", **base}
+            attempt_status_raw = str(attempt["status"] or "")
+            attempt_status = attempt_status_raw.strip().lower()
+            if attempt_status in {"running", "succeeded", "done", "failed", "cancelled"}:
+                return {
+                    "state": "resumed",
+                    "attempt_id": resumed_attempt_id,
+                    "attempt_status": attempt_status_raw,
+                    "continuation_id": continuation_id,
+                    "continuation_status": "resumed",
+                    "queued_at": queued_at or None,
+                    "resumed_at": resumed_at or None,
+                }
+        except Exception:
+            coverage["runtime_reads_failed"] += 1
+            return {"state": "unknown", "reason": "RUNTIME_UNREADABLE", **base}
+
     if child_id not in runtime_cache:
         runtime_cache[child_id] = _current_attempt(agent, child_id)
     attempt = runtime_cache[child_id]
@@ -245,13 +281,19 @@ def _current_attempt(agent: Any, child_id: str) -> Any:
         return _UNREADABLE
 
 
-# LLM: 续跑记录每次裁决会覆盖成最近一次，request_ids 不含本申请时它描述的是别的申请，不能借用。
-# 函数用途: 取出点名本申请的续跑记录。
+# LLM: ORCH-02-R4：优先从按请求归属的因果字典查找，回退到最近一次续跑记录；不匹配本申请返回 None。
+# 函数用途: 取出点名本申请的续跑记录，优先读取 capability_resolution_continuations_by_request。
 def _continuation(child: Any, request_id: str) -> dict[str, Any] | None:
-    record = (getattr(child, "attributes", None) or {}).get("capability_resolution_continuation")
-    if not isinstance(record, dict) or request_id not in [str(item) for item in record.get("request_ids") or []]:
-        return None
-    return record
+    attrs = getattr(child, "attributes", None) or {}
+    by_request = attrs.get("capability_resolution_continuations_by_request")
+    if isinstance(by_request, dict):
+        record = by_request.get(request_id)
+        if isinstance(record, dict):
+            return record
+    record = attrs.get("capability_resolution_continuation")
+    if isinstance(record, dict) and request_id in [str(item) for item in record.get("request_ids") or []]:
+        return record
+    return None
 
 
 # LLM: 读运行索引的父子投影只用于定位，随后必须加载规范记录并复核 parent_id；索引不完整时抛错交给覆盖统计。

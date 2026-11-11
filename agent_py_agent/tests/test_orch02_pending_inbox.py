@@ -674,3 +674,148 @@ def test_b1_r3_explicit_allowlist_catalog_hides_only_the_disabled_inbox(case):
         assert "tool_search" in payload["allowed_tools"] and json.loads(raw)
         assert "send_message" in payload["allowed_tools"]
         assert "send_message" in {item["name"] for item in payload["unavailable_tools"]}
+
+
+# LLM: ORCH-02-R4: 验证裁决续跑经 prepare_runner_attempt 激活后，准确绑定 resumed_attempt_id、
+#   投射为 resumed 状态，并向 RuntimeDB 写入 capability_continuation.resumed 运行事件。
+# 函数用途: 测试因果绑定的续跑从排队到激活全生命周期的状态投射与运行事件落地。
+def test_orch02_r4_causal_continuation_resumed_projection_and_event(case):
+    _open_request(case, "req-causal", directory_only=True)
+    _as_parent(case)
+    grant = ResolveCapabilityRequestsTool(case.agent).execute(
+        {"run_id": case.child_id, "request_id": "req-causal", "decision": "grant", "reason": "批准因果续跑"}
+    )
+    assert grant.ok, grant.output
+
+    # 裁决后尚未激活前，收件箱应报告 queued 状态
+    child_task = case.agent.subagents.load(case.child_id)
+    cont = child_task.attributes.get("capability_resolution_continuation") or {}
+    continuation_id = str(cont.get("continuation_id") or "")
+    assert continuation_id.startswith("cap_cont-")
+    assert cont.get("status") == "queued"
+    by_req = (child_task.attributes.get("capability_resolution_continuations_by_request") or {}).get("req-causal")
+    assert by_req is not None and by_req.get("continuation_id") == continuation_id
+
+    _, payload_before = _list(case.agent, include_resolved=True)
+    items_before = {item["request_id"]: item for item in payload_before["items"]}
+    assert items_before["req-causal"]["execution"]["state"] == "queued"
+    assert items_before["req-causal"]["execution"]["continuation_status"] == "queued"
+
+    # 执行轮激活，建立真实因果绑定
+    active = case.agent.subagents.lifecycle.prepare_runner_attempt(case.child_id)
+    attempt_id = active.runner_active_attempt_id
+    assert attempt_id
+
+    # 再次检查收件箱，应准确识别为 resumed 且状态为 running
+    _, payload_after = _list(case.agent, include_resolved=True)
+    items_after = {item["request_id"]: item for item in payload_after["items"]}
+    exec_after = items_after["req-causal"]["execution"]
+    assert exec_after["state"] == "resumed"
+    assert exec_after["attempt_id"] == attempt_id
+    assert exec_after["attempt_status"] == "running"
+    assert exec_after["continuation_id"] == continuation_id
+    assert exec_after["continuation_status"] == "resumed"
+    assert exec_after["queued_at"] is not None
+    assert exec_after["resumed_at"] is not None
+
+    # 核验 RuntimeDB 中的 capability_continuation.resumed 事件
+    repo = case.agent.subagents.runtime_db
+    events = repo.events_for_attempt(attempt_id)
+    resumed_events = [e for e in events if e.get("event_type") == "capability_continuation.resumed"]
+    assert len(resumed_events) == 1
+    event_payload = resumed_events[0].get("payload") or {}
+    assert event_payload.get("continuation_id") == continuation_id
+    assert event_payload.get("request_ids") == ["req-causal"]
+    assert event_payload.get("decision") == "grant"
+
+
+# LLM: ORCH-02-R4: 验证同一个子代理发生多次能力申请裁决与续跑时，按 request_id 隔离各自的因果链，
+#   后到的裁决不覆盖旧请求已有的 resumed 因果记录。
+# 函数用途: 测试同一子代理多轮次申请裁决时因果记录的多代隔离与持久性。
+def test_orch02_r4_multi_request_causal_isolation_across_resumptions(case):
+    # 第一轮：req-A 申请、裁决并激活
+    _open_request(case, "req-A", directory_only=True)
+    _as_parent(case)
+    grant_a = ResolveCapabilityRequestsTool(case.agent).execute(
+        {"run_id": case.child_id, "request_id": "req-A", "decision": "grant", "reason": "批准A"}
+    )
+    assert grant_a.ok, grant_a.output
+    active_a = case.agent.subagents.lifecycle.prepare_runner_attempt(case.child_id)
+    attempt_a = active_a.runner_active_attempt_id
+    cont_a = active_a.attributes["capability_resolution_continuations_by_request"]["req-A"]
+    cont_id_a = cont_a["continuation_id"]
+
+    # 结束第一轮并产生第二轮申请 req-B
+    repo = case.agent.subagents.runtime_db
+    with repo._runtime_connection() as conn:
+        conn.execute("UPDATE agent_attempts SET status='done', ended_at=? WHERE attempt_id=?", (time.time(), attempt_a))
+        conn.commit()
+
+    task = case.agent.subagents.load(case.child_id)
+    task.status = "BLOCKED"
+    case.agent.subagents.save(task)
+    _open_request(case, "req-B", directory_only=True)
+
+    grant_b = ResolveCapabilityRequestsTool(case.agent).execute(
+        {"run_id": case.child_id, "request_id": "req-B", "decision": "grant", "reason": "批准B"}
+    )
+    assert grant_b.ok, grant_b.output
+
+    # 第二轮激活前：req-A 保持 resumed(attempt_a)，req-B 处于 queued
+    _, payload_mid = _list(case.agent, include_resolved=True)
+    items_mid = {item["request_id"]: item for item in payload_mid["items"]}
+    assert items_mid["req-A"]["execution"]["state"] == "resumed"
+    assert items_mid["req-A"]["execution"]["attempt_id"] == attempt_a
+    assert items_mid["req-A"]["execution"]["continuation_id"] == cont_id_a
+    assert items_mid["req-B"]["execution"]["state"] == "queued"
+
+    # 第二轮激活
+    active_b = case.agent.subagents.lifecycle.prepare_runner_attempt(case.child_id)
+    attempt_b = active_b.runner_active_attempt_id
+    assert attempt_b != attempt_a
+
+    # 第二轮激活后：req-A 仍指向 attempt_a，req-B 指向 attempt_b
+    _, payload_after = _list(case.agent, include_resolved=True)
+    items_after = {item["request_id"]: item for item in payload_after["items"]}
+    assert items_after["req-A"]["execution"]["state"] == "resumed"
+    assert items_after["req-A"]["execution"]["attempt_id"] == attempt_a
+    assert items_after["req-A"]["execution"]["continuation_id"] == cont_id_a
+    assert items_after["req-B"]["execution"]["state"] == "resumed"
+    assert items_after["req-B"]["execution"]["attempt_id"] == attempt_b
+
+
+# LLM: ORCH-02-R4: 验证已终结的权威 attempt（done/failed/cancelled）依然保留已续跑事实，
+#   并且当 attempt 属于其他 agent_run 时如实报告不可读/未知。
+# 函数用途: 测试权威执行轮处于不同终态时收件箱依然如实保留 resumed 与隔离非法关联。
+def test_orch02_r4_terminal_attempt_preserves_resumed_and_foreign_attempt_fails_closed(case):
+    _open_request(case, "req-term", directory_only=True)
+    _as_parent(case)
+    grant = ResolveCapabilityRequestsTool(case.agent).execute(
+        {"run_id": case.child_id, "request_id": "req-term", "decision": "grant", "reason": "批准终结测试"}
+    )
+    assert grant.ok, grant.output
+    active = case.agent.subagents.lifecycle.prepare_runner_attempt(case.child_id)
+    attempt_id = active.runner_active_attempt_id
+
+    # 将 attempt 状态推进到 done
+    repo = case.agent.subagents.runtime_db
+    with repo._runtime_connection() as conn:
+        conn.execute("UPDATE agent_attempts SET status='done', ended_at=? WHERE attempt_id=?", (time.time(), attempt_id))
+        conn.commit()
+
+    _, payload = _list(case.agent, include_resolved=True)
+    items = {item["request_id"]: item for item in payload["items"]}
+    assert items["req-term"]["execution"]["state"] == "resumed"
+    assert items["req-term"]["execution"]["attempt_status"] == "done"
+
+    # 负面控制：篡改 resumed_attempt_id 指向不属于该子代理的 attempt_id
+    task = case.agent.subagents.load(case.child_id)
+    by_req = dict(task.attributes.get("capability_resolution_continuations_by_request") or {})
+    by_req["req-term"]["resumed_attempt_id"] = "attempt-foreign-run"
+    task.attributes["capability_resolution_continuations_by_request"] = by_req
+    case.agent.subagents.save(task)
+
+    _, foreign_payload = _list(case.agent, include_resolved=True)
+    foreign_items = {item["request_id"]: item for item in foreign_payload["items"]}
+    assert foreign_items["req-term"]["execution"]["state"] == "unknown"
+    assert foreign_items["req-term"]["execution"]["reason"] == "RUNTIME_UNREADABLE"
