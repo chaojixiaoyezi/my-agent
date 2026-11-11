@@ -136,14 +136,17 @@ def request_credential_card(agent, *, url='', authentication='collected', header
     with credential_stage("key_reference", key_validation=True):
         identity = json.dumps({'scope':_scope_identity(scope),'call_id':call_id},sort_keys=True).encode()
         reference = refresh_ref or 'cred_'+(hmac.digest(interaction_key(home,create=True),identity,'sha256').hex()[:32] if call_id else uuid.uuid4().hex)
+        schema_version = 'task_credential.v2' if access_scope == 'owner' else 'task_credential.v1'
         payload = {'kind':'task_credential','owner':asdict(owner_identity_from_config(agent.config)), 'channel':channel,
                    'actor_id':actor,'expires_at':time.time()+1800, 'credential_ref':reference,'scope':_scope_identity(scope),
                    'access_scope':access_scope}
+        if schema_version == 'task_credential.v2':
+            payload.update(schema_version=schema_version, origin=origin, collection_mode=options.collection_mode)
         owner = owner_identity_from_config(agent.config)
         if owner.owner_kind == 'group':
             payload.update(presentation={'kind':'group','chat_id':owner.owner_id}, submitter_policy='current_group_member')
         signed = sign_interaction_reference(home,payload)
-    row = {**payload,'schema_version':'task_credential.v2' if access_scope == 'owner' else 'task_credential.v1','reference':signed,'status':'pending',
+    row = {**payload,'schema_version':schema_version,'reference':signed,'status':'pending',
            'origin':origin,'target_url':url,'collection_mode':options.collection_mode,'authentication':authentication,
            'header_name':header_name,'job_id':job_id,'fields':fields,'auth_config':auth_config,
            'ttl_seconds':ttl_seconds,'generation':1,'delivery_state':'not_started'}
@@ -193,6 +196,8 @@ def _persist_credential_request(agent, row, scope, refresh_ref):
             signed_fields = {key:row[key] for key in ('kind','owner','channel','actor_id','expires_at','credential_ref','scope','generation')}
             signed_fields.update({key:row[key] for key in ('presentation','submitter_policy','access_scope',
                 'replaces_ref','replaces_generation','previous_submitter_actor_id') if key in row})
+            if row.get('schema_version') == 'task_credential.v2':
+                signed_fields.update({key: row[key] for key in ('schema_version', 'origin', 'collection_mode') if key in row})
             row['reference'] = sign_interaction_reference(home, signed_fields)
             if row.get('replaces_ref'):
                 with locked_json_path(path):
@@ -494,6 +499,8 @@ def _assert_credential_scope(agent, row, scope, url, *, require_ready=True, oper
     if (not row or row.get('owner') != asdict(owner_identity_from_config(agent.config))
             or row['channel'] != channel or row['origin'] != (credential_origin(url) if url else '')):
         raise ValueError('凭据不属于此调用或接口')
+    if row.get('schema_version', 'task_credential.v1') not in {'task_credential.v1', 'task_credential.v2'}:
+        raise ValueError('凭据不属于此调用或接口')
     if require_ready and (row.get('verification_status') == 'rejected' or row.get('status')!='ready' or credential_ready_expired(row, now=time.time())):
         raise ValueError('凭据未就绪、已过期或已撤销，请重新申请私人输入')
     from .task_credential_groups import group_credential_access
@@ -501,7 +508,8 @@ def _assert_credential_scope(agent, row, scope, url, *, require_ready=True, oper
         return
     if row.get('access_scope') == 'owner':
         if (
-            owner_identity_from_config(agent.config).owner_kind == 'group'
+            row.get('schema_version') != 'task_credential.v2'
+            or owner_identity_from_config(agent.config).owner_kind == 'group'
             or row.get('actor_id') != actor
             or (row.get('submitter_actor_id') and row.get('submitter_actor_id') != actor)
         ):

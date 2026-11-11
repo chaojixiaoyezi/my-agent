@@ -276,6 +276,8 @@ def assert_credential_record_signature(agent, row):
         valid = valid and all(payload.get(key) == row.get(key) for key in keys)
         valid = valid and payload.get('generation', 1) == row.get('generation', 1)
         valid = valid and payload.get('access_scope', 'task') == row.get('access_scope', 'task')
+        if isinstance(payload, dict) and (row.get('schema_version') == 'task_credential.v2' or payload.get('schema_version') == 'task_credential.v2'):
+            valid = valid and all(payload.get(k) == row.get(k) for k in ('schema_version', 'origin', 'collection_mode'))
     except (KeyError, TypeError, ValueError, UnicodeError):
         valid = False
     if not valid:

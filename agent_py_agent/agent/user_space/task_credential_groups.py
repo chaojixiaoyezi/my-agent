@@ -34,8 +34,23 @@ def new_credential_access_scope(agent, scope, *, url: str = "") -> str:
             return 'task'
         _context(agent, scope)
         return 'group'
+    has_url = isinstance(url, str) and bool(url.strip())
     if owner_kind == 'user':
-        return 'owner' if isinstance(url, str) and bool(url.strip()) else 'task'
+        return 'owner' if has_url else 'task'
+    if owner_kind == 'main' and has_url:
+        store = getattr(agent, 'conversation_store', None)
+        if store is not None:
+            root_task_id = getattr(scope, 'root_task_id', '')
+            link, link_err = store.tasks.load_report(root_task_id) if root_task_id else (None, 'empty')
+            link_thread_id = getattr(link, 'thread_id', '') if (not link_err and link is not None) else ''
+            origin_thread_id = link_thread_id or getattr(scope, 'thread_id', '')
+            if origin_thread_id:
+                thread, thread_err = store.threads.load_report(origin_thread_id)
+                channel = getattr(thread, 'channel', '')
+                if not channel and getattr(thread, 'channel_bindings', None):
+                    channel = getattr(thread.channel_bindings[0], 'channel', '')
+                if not thread_err and channel == 'feishu':
+                    return 'owner'
     return 'task'
 
 
@@ -152,6 +167,8 @@ def discover_owner_credentials(agent, *, url: str = '', name: str = '', operatio
                 os.close(descriptor)
         else:
             names = []
+        from .task_credential_forms import assert_credential_record_signature
+
         owner_rows = []
         for file_name in names:
             if re.fullmatch(r'cred_[0-9a-f]{32}\.json', file_name) is None:
@@ -168,13 +185,21 @@ def discover_owner_credentials(agent, *, url: str = '', name: str = '', operatio
                 continue
             if not isinstance(row, dict):
                 continue
+            if row.get('kind') != 'task_credential':
+                continue
             if _access_scope(row) != 'owner':
                 continue
-            if row.get('schema_version') not in {'task_credential.v1', 'task_credential.v2'}:
+            if row.get('schema_version') != 'task_credential.v2':
+                continue
+            if not isinstance(row.get('origin'), str) or not row['origin']:
                 continue
             if row.get('owner') != owner or row.get('channel') != channel or row.get('actor_id') != actor_id:
                 continue
             if row.get('credential_ref') + '.json' != file_name:
+                continue
+            try:
+                assert_credential_record_signature(agent, row)
+            except (KeyError, OSError, RuntimeError, TypeError, ValueError):
                 continue
             owner_rows.append(row)
     active = _current_rows(owner_rows)

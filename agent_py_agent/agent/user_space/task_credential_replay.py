@@ -17,6 +17,9 @@ def assert_credential_callback_identity(row, payload, body):
         raise ValueError('原卡代次或任务不匹配')
     if row.get('access_scope', 'task') != payload.get('access_scope', 'task'):
         raise ValueError('原卡凭据使用范围不匹配')
+    if row.get('schema_version') == 'task_credential.v2' or payload.get('schema_version') == 'task_credential.v2':
+        if not all(row.get(k) == payload.get(k) for k in ('schema_version', 'origin', 'collection_mode')):
+            raise ValueError('原卡凭据绑定不匹配')
     expected = (row['credential_ref'] if 'generation' not in row and 'generation' not in payload
                 else credential_input_id(payload['credential_ref'],payload.get('generation', row.get('generation'))))
     if row.get('input_id',row['credential_ref']) != expected:

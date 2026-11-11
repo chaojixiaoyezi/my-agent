@@ -42,7 +42,7 @@ from agent_py_agent.tests.test_ingestion_task_credential_scope import _active
 def _user_case(tmp_path, *, kind="user", url="https://example.com/api", authentication="basic", options=None):
     agent = _agent(tmp_path, kind=kind)
     agent.config.feishu_session_lock_enabled = False
-    thread, actor, claim = _active(agent)
+    thread, actor, claim = _active(agent, actor_id="ou_synthetic")
     bind_admin_channel_identity(agent.home_paths.root, "feishu", "ou_synthetic")
     sent = []
 
@@ -365,3 +365,146 @@ def test_owner_credential_rejection_marks_verification_status(tmp_path):
     # Using rejected credential raises error
     with pytest.raises(ValueError, match="凭据未就绪、已过期或已撤销"):
         credential_headers(case.agent, case.reference, "https://example.com/api")
+
+
+def test_bound_admin_feishu_dm_defaults_to_owner_scope_and_cross_task_reuse(tmp_path):
+    case = _user_case(tmp_path, kind="main", url="https://example.com/api")
+    row = case.row
+    assert row["access_scope"] == "owner"
+    assert row["schema_version"] == "task_credential.v2"
+    assert row["ttl_seconds"] == 0
+    assert row["origin"] == credential_origin("https://example.com/api")
+
+    # Complete credential submission
+    resolve_result = resolve_private_interaction(
+        case.agent, case.body, channel="feishu", actor_id="ou_synthetic"
+    )
+    assert resolve_result["ok"] is True
+
+    # 1. Discover owner credentials for the site
+    discovery = discover_owner_credentials(
+        case.agent, url="https://example.com/api", operation="find"
+    )
+    assert discovery["status"] == "ok"
+    assert discovery["total_count"] >= 1
+    assert discovery["selected_credential_ref"] == case.reference
+
+    # 2. Simulate another task under the bound-admin attempting to reuse the credential
+    case.agent.conversation_store.claims.finish(
+        {"thread_id": case.thread.thread_id, "claim_id": case.claim["claim_id"], "status": "finished"}
+    )
+    new_task_id = "task-bound-admin-789"
+    _active(case.agent, actor_id="ou_synthetic", root_id=new_task_id)
+
+    headers, secrets = credential_headers(
+        case.agent, case.reference, "https://example.com/api/v2"
+    )
+    assert headers["Authorization"].startswith("Basic ")
+    assert "Synthetic-API-Secret-123" in secrets
+
+
+def test_local_main_chat_channel_defaults_to_task_scope(tmp_path):
+    agent = _agent(tmp_path, kind="main")
+    agent.config.feishu_session_lock_enabled = False
+    store = agent.conversation_store
+    thread = store.threads.get_or_create({
+        "channel": "chat",
+        "channel_conversation_id": "conv-cli",
+        "channel_user_id": "user-cli",
+        "canonical_user_id": "user-cli",
+        "owner_id": agent.home_paths.owner_id,
+        "owner_home": str(agent.home_paths.owner_home_dir),
+    })
+    scope = SimpleNamespace(
+        active=True,
+        thread_id=thread.thread_id,
+        run_id="task-cli",
+        root_task_id="task-cli",
+    )
+    store.tasks.bind(
+        {"thread_id": thread.thread_id, "task_id": "task-cli", "goal": "CLI task", "status": "active"}
+    )
+    from agent_py_agent.agent.user_space.task_credential_groups import new_credential_access_scope
+
+    access_scope = new_credential_access_scope(agent, scope, url="https://example.com/api")
+    assert access_scope == "task"
+
+
+def test_v2_signature_and_schema_version_invariants_and_drift_rejection(tmp_path):
+    from agent_py_agent.agent.conversation.tool_approval_scope import tool_approval_scope
+    from agent_py_agent.agent.user_space.interaction_refs import verify_interaction_reference
+    from agent_py_agent.agent.user_space.task_credential_forms import (
+        assert_credential_record_signature,
+    )
+    from agent_py_agent.agent.user_space.task_credential_replay import (
+        assert_credential_callback_identity,
+    )
+    from agent_py_agent.agent.user_space.task_credentials import _assert_credential_scope
+
+    case = _user_case(tmp_path, url="https://example.com/api")
+    row = read_json_object_report(case.path, context="test").payload
+    scope = tool_approval_scope(case.agent, str(case.claim["task_id"]))
+
+    claims = verify_interaction_reference(
+        case.agent.home_paths.root,
+        row["reference"],
+        channel="feishu",
+        actor_id="ou_synthetic",
+        decision="submit",
+    )
+    assert claims.get("schema_version") == "task_credential.v2"
+    assert claims.get("origin") == credential_origin("https://example.com/api")
+    assert claims.get("collection_mode") == "username_password"
+
+    # 1. Mismatched origin in record
+    mismatched_origin_row = dict(row, origin="https://unrelated.example.com")
+    with pytest.raises(ValueError, match="原卡凭据绑定不匹配"):
+        assert_credential_callback_identity(mismatched_origin_row, claims, case.body)
+    with pytest.raises(ValueError, match="原凭据卡身份无法核验"):
+        assert_credential_record_signature(case.agent, mismatched_origin_row)
+    with pytest.raises(ValueError, match="凭据不属于此调用或接口"):
+        _assert_credential_scope(case.agent, mismatched_origin_row, scope, "https://example.com/api")
+
+    # 2. Mismatched collection_mode in record
+    mismatched_mode_row = dict(row, collection_mode="alternative_mode")
+    with pytest.raises(ValueError, match="原卡凭据绑定不匹配"):
+        assert_credential_callback_identity(mismatched_mode_row, claims, case.body)
+    with pytest.raises(ValueError, match="原凭据卡身份无法核验"):
+        assert_credential_record_signature(case.agent, mismatched_mode_row)
+
+    # 3. Unknown schema_version in record
+    unknown_schema_row = dict(row, schema_version="task_credential.v999")
+    with pytest.raises(ValueError, match="原卡凭据绑定不匹配"):
+        assert_credential_callback_identity(unknown_schema_row, claims, case.body)
+    with pytest.raises(ValueError, match="原凭据卡身份无法核验"):
+        assert_credential_record_signature(case.agent, unknown_schema_row)
+    with pytest.raises(ValueError, match="凭据不属于此调用或接口"):
+        _assert_credential_scope(case.agent, unknown_schema_row, scope, "https://example.com/api")
+
+    # 4. v1 schema with owner access_scope rejected by _assert_credential_scope
+    v1_owner_row = dict(row, schema_version="task_credential.v1")
+    with pytest.raises(ValueError, match="凭据不属于此调用或接口"):
+        _assert_credential_scope(case.agent, v1_owner_row, scope, "https://example.com/api", require_ready=False)
+
+    # 5. discover_owner_credentials skips tampered/unknown records cleanly
+    assert resolve_private_interaction(
+        case.agent, case.body, channel="feishu", actor_id="ou_synthetic"
+    )["ok"]
+
+    tampered_ref = "cred_" + ("f" * 32)
+    tampered_path = credential_path(case.agent.home_paths.owner_home_dir, tampered_ref)
+    tampered_record = dict(
+        row,
+        credential_ref=tampered_ref,
+        status="ready",
+        origin="https://modified.example.com",
+    )
+    write_json_file_atomic(tampered_path, tampered_record)
+
+    discovery = discover_owner_credentials(
+        case.agent, url="https://example.com/api", operation="find"
+    )
+    assert discovery["status"] == "ok"
+    discovered_refs = [c["credential_ref"] for c in discovery["credentials"]]
+    assert case.reference in discovered_refs
+    assert tampered_ref not in discovered_refs
