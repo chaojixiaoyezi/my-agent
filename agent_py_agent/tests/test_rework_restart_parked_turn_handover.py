@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_py_agent.agent.concurrency import restart_gate
+from agent_py_agent.agent.conversation import decision_policy
 from agent_py_agent.agent.gateway_parts import restart_service
 from agent_py_agent.agent.gateway_parts.io import read_json_file, write_json_file_atomic
 from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
@@ -29,9 +30,11 @@ _CONTINUATION = {"reason": "foreground_turn_unsettled", "ref": "gateway_admissio
 
 
 @pytest.fixture(autouse=True)
-def reset_gate():
+def reset_gate(monkeypatch):
+    monkeypatch.setattr(decision_policy, "_HOST_SHUTDOWN", False)
     restart_service.reset_restart_drain_state()
     yield
+    monkeypatch.setattr(decision_policy, "_HOST_SHUTDOWN", False)
     restart_service.reset_restart_drain_state()
 
 
