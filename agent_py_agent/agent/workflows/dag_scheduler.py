@@ -40,6 +40,7 @@ def _pending_step(spec: dict[str, Any]) -> StepExecutionRecord:
         0,
         0,
         False,
+        script_id=spec.get('script_id', ''),
         description=spec.get('description', ''),
         next_step_ids=tuple(spec.get('next_step_ids') or ()),
     )

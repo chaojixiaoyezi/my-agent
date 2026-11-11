@@ -241,6 +241,14 @@ class _WorkflowRunLifecycle:
                 raise ValueError('WORKFLOW_CONTEXT_ORIGIN_INVALID')
             definition['_business_context_origin'] = business_context_origin
         record.definition_version = definition_version
+        if trigger_kind == 'subworkflow':
+            from .subworkflow_steps import _ACTIVE_SUBWORKFLOW_DEPTH, _ACTIVE_SUBWORKFLOW_RUN_CHAIN
+            run_chain = _ACTIVE_SUBWORKFLOW_RUN_CHAIN.get()
+            if run_chain and not record.parent_workflow_run_id:
+                record.parent_workflow_run_id = run_chain[-1]
+            ctx_depth = _ACTIVE_SUBWORKFLOW_DEPTH.get()
+            if ctx_depth > 0:
+                record.subworkflow_depth = ctx_depth
         definition['_frozen_scripts'] = self._script_pins(definition['steps']) if version_pins is None else version_pins
         record = replace_run_record(record, dict(workflow_name=descriptor['name'], total_steps=len(definition['steps'])))
         execution_receipt(record, phase='preflight', effect_outcome='not_started',
@@ -1276,8 +1284,9 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                 record.escalation_result['query_health'] = payload((blocked or healths)[0])
             else:
                 record.escalation_result.pop('query_health', None)
-            published = self.store.save_step_result(run.workflow_run_id, record)
-            run.revision, run.effect_outcome = published.revision, 'unknown'
+            if not run.ephemeral_debug and not getattr(run, '_batch_worker', False):
+                published = self.store.save_step_result(run.workflow_run_id, record)
+                run.revision, run.effect_outcome = published.revision, 'unknown'
 
         # LLM: started证明先于派发写入；失败时不得把未分派批计作成功。
         # 函数用途: 为即将启动的批准备独立attempt及账本。
