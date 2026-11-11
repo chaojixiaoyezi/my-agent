@@ -548,4 +548,3 @@ def test_dag_cancellation_mid_wave(tmp_path):
 
     with pytest.raises(ToolCancelled):
         engine.run_workflow(flow)
-

@@ -514,4 +514,3 @@ def test_workflow_engine_executes_notification_step_formal_run(tmp_path: Path):
     assert len(delivered) == 1
     assert "value_42" in delivered[0]["message"]
     assert delivered[0]["channel"] == "owner_inbox"
-

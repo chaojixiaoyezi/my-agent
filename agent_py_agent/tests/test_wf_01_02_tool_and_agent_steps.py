@@ -779,4 +779,3 @@ def test_workflow_agent_steps_full_integration(tmp_path):
     cancel_success = agents.cancel(run, step)
     assert cancel_success is True
     assert step.escalation_result.get("cancellation_receipt") is not None
-
