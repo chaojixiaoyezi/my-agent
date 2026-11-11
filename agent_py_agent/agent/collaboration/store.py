@@ -34,6 +34,7 @@ from .models import (
     CollaborationCase,
     CollaborationRequest,
     EvidencePacket,
+    HandoffBoardItem,
     new_case_id,
     new_decision_id,
     new_evidence_id,
@@ -121,6 +122,7 @@ class CollaborationBaseStore:
         self.evidence_dir = self.root / "evidence"
         self.participants_dir = self.root / "participants"
         self.decisions_dir = self.root / "decisions"
+        self.handoff_items_dir = self.root / "handoff_items"
         self.capabilities_path = self.root / "agent_capabilities.json"
         self._ensure_dirs()
         self.history_index = CollaborationHistoryIndex(self.root)
@@ -136,6 +138,7 @@ class CollaborationBaseStore:
             self.evidence_dir,
             self.participants_dir,
             self.decisions_dir,
+            self.handoff_items_dir,
         ):
             ensure_private_dir(path)
 
@@ -299,6 +302,10 @@ class CollaborationBaseStore:
 
     def _decisions_path(self, case_id: str) -> Path:
         return self.decisions_dir / f"{case_id}.jsonl"
+
+    def _handoff_items_path(self, case_id: str) -> Path:
+        case_id = validate_opaque_id(case_id, kind="case_id")
+        return self.handoff_items_dir / f"{case_id}.jsonl"
 
 
 # ---------------------------------------------------------------------------
@@ -1224,3 +1231,61 @@ class CollaborationStore(CollaborationPendingRequestStore):
         snapshot = _CaseSnapshot.from_store(self, case_id)
         groups = _request_groups(snapshot)
         return _status_payload(snapshot, groups)
+
+    # LLM: 交接项状态变更是只追加 JSONL（同 item_id 取最后一行）；写入由 locked_json_path / append_private_jsonl_records 串行。
+    # 函数用途: 将交接项的最新状态快照追加到所属 case 的交接账本。
+    def append_handoff_item(self, item: HandoffBoardItem) -> None:
+        path = self._handoff_items_path(item.case_id)
+        append_private_jsonl_records(path, [item.to_dict()], sort_keys=True)
+
+    # LLM: 读 case 的交接项快照；同 item_id 只保留最后一条，保持插入次序。
+    # 函数用途: 获取指定 case 下所有交接项的最新状态列表。
+    def case_handoff_items(self, case_id: str) -> list[HandoffBoardItem]:
+        items, _ = self.case_handoff_items_report(case_id)
+        return items
+
+    # LLM: 读交接项 JSONL 账本并返回解析结果与错误报告。
+    # 函数用途: 返回交接项实体列表与格式异常报告。
+    def case_handoff_items_report(
+        self,
+        case_id: str,
+    ) -> tuple[list[HandoffBoardItem], list[dict[str, Any]]]:
+        items: dict[str, HandoffBoardItem] = {}
+        path = self._handoff_items_path(case_id)
+        report = read_jsonl_report(path, context="collaboration.handoff_items.read")
+        for row in report.rows:
+            item = HandoffBoardItem.from_dict(row)
+            if item.item_id:
+                items[item.item_id] = item
+        return list(items.values()), report.load_errors
+
+    # LLM: 按 case_id 与 item_id 查询最新交接项实体。
+    # 函数用途: 返回单条交接项的最新快照或 None。
+    def load_handoff_item(self, case_id: str, item_id: str) -> HandoffBoardItem | None:
+        items = self.case_handoff_items(case_id)
+        for item in items:
+            if item.item_id == item_id:
+                return item
+        return None
+
+    # LLM: 遍历所有 case 的交接项，支持按 state 和 responsible_actor 过滤。
+    # 函数用途: 跨 case 检索交接项列表。
+    def list_all_handoff_items(
+        self,
+        *,
+        state: str | None = None,
+        responsible_actor: str | None = None,
+    ) -> list[HandoffBoardItem]:
+        results: list[HandoffBoardItem] = []
+        if not self.handoff_items_dir.exists():
+            return results
+        for path in sorted(self.handoff_items_dir.glob("*.jsonl")):
+            case_id = path.stem
+            items = self.case_handoff_items(case_id)
+            for item in items:
+                if state is not None and item.state != state:
+                    continue
+                if responsible_actor is not None and item.responsible_actor != responsible_actor:
+                    continue
+                results.append(item)
+        return results

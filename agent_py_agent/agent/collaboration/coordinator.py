@@ -73,7 +73,7 @@ class CollaborationCoordinator:
         evidence = self.store.case_evidence(case.case_id)
         if not _should_close_case(case.priority, status, self.policy, now):
             return None
-        context = _close_context(case, status, evidence)
+        context = _close_context(case, status, evidence, store=self.store)
         wake_signal_id = self._raise_case_observation(case, context, now=now)
         decision = _case_close_decision(case, context, wake_signal_id, now)
         self.store.append_decision(decision)
@@ -187,12 +187,22 @@ def _decision_summary(
     )
 
 
-def _close_context(case, status: dict, evidence: list) -> dict:
+# LLM: 聚合 case 关闭所需的证据、丢失响应人、不可达目标与交接项信息生成决策快照。
+# 函数用途: 生成 case 关闭上下文字典。
+def _close_context(
+    case,
+    status: dict,
+    evidence: list,
+    store: CollaborationStore | None = None,
+) -> dict:
     missing = _dict_of_string_lists(status.get("missing_responder_agent_ids_by_request"))
     unavailable = _dict_of_string_lists(status.get("unavailable_target_agent_ids_by_request"))
     evidence_ids = tuple(item.evidence_id for item in evidence)
     summary = _decision_summary(case.title, case.summary, len(evidence), _summary_facts(status, missing, unavailable))
     metadata = _case_close_metadata(_CloseMetadataRequest(case.case_id, status, evidence_ids, missing, unavailable))
+    if store is not None and hasattr(store, "case_handoff_items"):
+        handoff_items = store.case_handoff_items(case.case_id)
+        metadata["handoff_item_ids"] = [item.item_id for item in handoff_items]
     return {
         "status": status,
         "evidence_ids": evidence_ids,
