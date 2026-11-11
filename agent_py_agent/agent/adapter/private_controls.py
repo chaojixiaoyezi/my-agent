@@ -17,6 +17,9 @@ from ..gateway_parts.local_client_token import LocalClientCredentialError
 
 logger = logging.getLogger(__name__)
 
+_FORM_ERROR_FIELDS = ("fields", "username", "secret", "target_url")
+_FORM_ERROR_REASONS = ("missing", "empty", "type", "too_long", "newline", "unexpected", "invalid_url")
+
 
 # LLM: 调用方只传本模块已核白名单或字面量，禁止传表单、回执正文或原始异常；日志故障不得阻断实际控制。
 # 函数用途: 尽力记录固定阶段，让磁盘或日志处理器异常不改变原卡片调用、返回和重试。
@@ -68,10 +71,17 @@ def tool_approval_card_action(adapter, norm: dict) -> dict | None:
     if value["kind"] == "my_agent_tool_approval" and result.get('status') in {'queued', 'unknown'}:
         return {'toast': {'type': 'warning', 'content': result['message']}}
     if not result.get("ok"):
-        return _control_failure_toast(str(result.get("error_code") or "IM_INTERACTION_INVALID"),
-                                      str(result.get("error_stage") or "interaction"))
+        return _control_failure_toast(
+            str(result.get("error_code") or "IM_INTERACTION_INVALID"),
+            str(result.get("error_stage") or "interaction"),
+            error_field=str(result.get("error_field") or ""),
+            error_reason=str(result.get("error_reason") or ""),
+        )
     _log_control_stage("completed", reason_code="IM_CONTROL_COMPLETED")
-    text = result.get("message") or ("私人配置已处理。" if value["kind"] in {"my_agent_task_credential", "my_agent_model_configuration", "my_agent_feishu_oauth"} else "已允许本次调用。" if result.get("decision") == "approved" else "已拒绝本次调用。")
+    if value.get("kind") == "my_agent_task_credential" and result.get("resume_status") == "task_inactive":
+        text = "凭据已安全保存（原任务已结束，后续访问该站点可直接复用）。"
+    else:
+        text = result.get("message") or ("私人配置已处理。" if value["kind"] in {"my_agent_task_credential", "my_agent_model_configuration", "my_agent_feishu_oauth"} else "已允许本次调用。" if result.get("decision") == "approved" else "已拒绝本次调用。")
     facts = result.get("clicked_by") or result.get("cancelled_by")
     if isinstance(facts,dict) and facts.get("clicked_at") and facts["clicked_at"] not in text:
         from ..user_space.interaction_actor_audit import interaction_actor_text
@@ -151,9 +161,25 @@ def _current_group_member(adapter, chat_id, actor):
     raise GroupMembershipError("IM_GROUP_MEMBERSHIP_BUDGET_EXCEEDED")
 
 
+def _credential_form_error_message(error_field: str = "", error_reason: str = "") -> str:
+    if error_reason == "newline":
+        return "凭据字段不能包含换行符，请修改后重新提交原卡，请勿在聊天中发送密码。"
+    if error_reason == "too_long":
+        return "凭据字段超出长度上限，请修改后重新提交原卡，请勿在聊天中发送密码。"
+    if error_field == "username":
+        return "请填写账号后重新提交原卡，请勿在聊天中发送密码。"
+    if error_field == "secret":
+        return "请填写密码或密钥后重新提交原卡，请勿在聊天中发送密码。"
+    if error_field == "target_url":
+        if error_reason in {"missing", "empty"}:
+            return "请填写目标链接后重新提交原卡，请勿在聊天中发送密码。"
+        return "目标链接无效，请填写完整的 HTTP 或 HTTPS 链接后重新提交原卡，请勿在聊天中发送密码。"
+    return "表单内容无效，请检查必填项和目标链接后重新提交原卡，请勿在聊天中发送密码。"
+
+
 # LLM: 展示和日志共用固定码/阶段白名单，form只说明原卡可改正；不复制HTTP正文、异常、表单或未知值，不放宽私人锁。
 # 函数用途: 返回固定失败提示并记录安全码；表单错误提示改正原卡，不复制HTTP正文或替换待填卡。
-def _control_failure_toast(code, stage):
+def _control_failure_toast(code, stage, *, error_field: str = "", error_reason: str = ""):
     messages = {
         "IM_CONTROL_CREDENTIAL_UNAVAILABLE": "宿主认证凭据不可用，请检查适配器与Gateway使用同一数据根和配置。",
         "IM_CONTROL_HTTP_AUTH_REJECTED": "Gateway拒绝宿主认证，请检查适配器的端口、数据根及认证配置。",
@@ -169,12 +195,16 @@ def _control_failure_toast(code, stage):
         "IM_INTERACTION_ALREADY_HANDLED": "这张卡片已处理，取消没有撤销或修改已完成的操作。",
         "LOCAL_CREDENTIAL_REQUIRED": "Gateway未收到有效宿主认证，请检查适配器认证配置。",
     }
-    if code not in messages:
-        code = "IM_CONTROL_PREPARATION_FAILED"
+    if code == "CREDENTIAL_FORM_INVALID":
+        msg = _credential_form_error_message(error_field, error_reason)
+    else:
+        if code not in messages:
+            code = "IM_CONTROL_PREPARATION_FAILED"
+        msg = messages.get(code, "卡片请求未完成，请检查宿主回调配置。")
     if stage not in {"prepare", "credential", "http", "transport", "response", "interaction", "execution", "form"}:
         stage = "interaction"
     _log_control_stage(stage, reason_code=code)
-    return {"toast": {"type": "error", "content": messages.get(code, "卡片请求未完成，请检查宿主回调配置。") + f"（{code}/{stage}）"}}
+    return {"toast": {"type": "error", "content": msg + f"（{code}/{stage}）"}}
 
 
 # LLM: 端口/数据根/token来自原宿主；HTTP仅字符串固定code映射stage，未知类型走原固定失败，不信任任意message/字段，超时未知不自动重放。
@@ -201,7 +231,15 @@ def _submit_control_request(adapter, actor, body):
             stages = {'IM_INTERACTION_INVALID':'interaction', 'LOCAL_CREDENTIAL_REQUIRED':'credential',
                       'IM_INTERACTION_HOST_UNAVAILABLE':'execution', 'CREDENTIAL_FORM_INVALID':'form'}
             if isinstance(provider_code, str) and provider_code in stages:
-                return {'ok':False, 'error_code':provider_code, 'error_stage':stages[provider_code]}
+                projected = {'ok': False, 'error_code': provider_code, 'error_stage': stages[provider_code]}
+                if provider_code == 'CREDENTIAL_FORM_INVALID' and isinstance(result, dict):
+                    err_field = result.get('error_field')
+                    err_reason = result.get('error_reason')
+                    if isinstance(err_field, str) and err_field in _FORM_ERROR_FIELDS:
+                        projected['error_field'] = err_field
+                    if isinstance(err_reason, str) and err_reason in _FORM_ERROR_REASONS:
+                        projected['error_reason'] = err_reason
+                return projected
         except (OSError, UnicodeError, ValueError):
             pass
         finally:

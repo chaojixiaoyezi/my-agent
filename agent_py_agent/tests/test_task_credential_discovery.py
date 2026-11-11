@@ -122,7 +122,7 @@ def test_original_tool_search_exposes_new_operations_only_with_current_authority
     payload = json.loads(found.output)
     schema = payload['tools'][0]['input_schema']
     assert {'list', 'find'} <= set(schema['properties']['operation']['enum'])
-    assert set(schema['properties']['access_scope']['enum']) == {'task', 'group'}
+    assert set(schema['properties']['access_scope']['enum']) == {'owner', 'task', 'group'}
     hidden = execute_registry_test_call(agent.tools, 'tool_search', {'query': 'request_credentials'},
         run_id=current.run_id, call_id='hidden-discovery', register_with=agent, allowed_tools=['tool_search'])
     assert hidden.ok and json.loads(hidden.output)['tools'] == []
