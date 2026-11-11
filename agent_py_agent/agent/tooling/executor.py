@@ -585,8 +585,10 @@ def _invoke_with_operation_policy(
     call: ToolCall,
     runtime: ToolRuntime,
     decision: ActionDecision,
-    started_at: float,
+    started_at: float | None = None,
 ) -> ToolHandlerOutcome:
+    if started_at is None:
+        started_at = time.monotonic()
     redacted_input = _bound_redacted_input(call.arguments)
 
     # LLM: 只调用本次冻结的原handler；停止先拒绝，可信迁移信息不进入模型参数。
@@ -611,11 +613,6 @@ def _invoke_with_operation_policy(
             )
         )
         outcome.duration_ms = max(0, _elapsed_ms(started_at))
-        if not outcome.effect_outcome:
-            if decision.resolved_effect == "read_only":
-                outcome.effect_outcome = "none" if outcome.ok else ("not_started" if not outcome.handler_executed else "failed")
-            else:
-                outcome.effect_outcome = "committed" if outcome.ok else ("not_started" if not outcome.handler_executed else "failed")
         outcome.result_envelope.setdefault("redacted_input", deepcopy(redacted_input))
         if call.input_migration:
             outcome.result_envelope["input_migration"] = dict(call.input_migration)
@@ -675,6 +672,7 @@ def _invoke_with_operation_policy(
             resource_scopes=resource_scopes,
             attempt_id=call.attempt_id,
             redacted_input=redacted_input,
+            settled_effect_outcome="none" if decision.resolved_effect == "read_only" else "committed",
         )
     )
 

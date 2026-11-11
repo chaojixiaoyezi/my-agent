@@ -130,7 +130,6 @@ class BusinessSpacesTool(BaseTool):
                 result['effect_outcome'] = effect
             outcome = ToolHandlerOutcome('business_spaces', True, json.dumps(result, ensure_ascii=False),
                 result_envelope=result)
-            outcome.effect_outcome = effect
             return outcome
         except BusinessError as error:
             # 已进入领域/原后端后，不能仅凭错误码推断未提交；包括提交后的CAS类错误。

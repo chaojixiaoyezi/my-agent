@@ -2118,7 +2118,7 @@
     "timestamp": 3,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "d9604af8d7aa0a95fe55a1692861dda19882a5bfa47a621fa100e96c2a42dc06",
+    "body_hash": "eacd8985c4face26a100f94d568b4b296a5474d8de54994095819dc8c4577637",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -2181,7 +2181,7 @@
         },
         {
           "role": "user",
-          "content": "# Tool Batch Execution Facts\n```json\n{\"batch_call_count\":1,\"calls\":[{\"call_id\":\"tool_call_id#1\",\"effect\":\"mutating\",\"effect_outcome\":\"committed\",\"handler_executed\":true,\"ok\":true,\"operation_id\":\"embedded_id#4\",\"refs\":[\"tool-operation://request_id#1/embedded_id#4\",\"fixture_root#1/gateway/home/owners/local/main/blobs/tool_outputs/create_subagents-tool_call_id#1-artifact_nonce#1-8c8a9fc3a5b2.json\"],\"status\":\"ok\",\"tool\":\"create_subagents\",\"tool_operation_action\":\"executed\",\"tool_operation_status\":\"succeeded\",\"verification_status\":\"succeeded\"}],\"omitted_batch_call_count\":0,\"raw_archive_refs\":[\"fixture_root#1/gateway/home/owners/local/main/audit/date#1.jsonl\"],\"request_call_count\":1,\"schema\":\"tool_batch_execution.v1\",\"scope\":\"latest_completed_tool_batch\",\"turn_id\":\"request_id#1:model:1:after-tools:0:model_turn_nonce#1\"}\n```\n仅补充该批已返回工具的执行状态；更早结果保留在原生历史、摘要及工具账本。未列出不表示未执行，勿因此重复调用；操作成功不等于整个任务完成，失败和未知不得当作成功。\n"
+          "content": "# Tool Batch Execution Facts\n```json\n{\"batch_call_count\":1,\"calls\":[{\"call_id\":\"tool_call_id#1\",\"effect\":\"mutating\",\"effect_outcome\":\"confirmed\",\"handler_executed\":true,\"ok\":true,\"operation_id\":\"embedded_id#4\",\"refs\":[\"tool-operation://request_id#1/embedded_id#4\",\"fixture_root#1/gateway/home/owners/local/main/blobs/tool_outputs/create_subagents-tool_call_id#1-artifact_nonce#1-8c8a9fc3a5b2.json\"],\"status\":\"ok\",\"tool\":\"create_subagents\",\"tool_operation_action\":\"executed\",\"tool_operation_status\":\"succeeded\",\"verification_status\":\"succeeded\"}],\"omitted_batch_call_count\":0,\"raw_archive_refs\":[\"fixture_root#1/gateway/home/owners/local/main/audit/date#1.jsonl\"],\"request_call_count\":1,\"schema\":\"tool_batch_execution.v1\",\"scope\":\"latest_completed_tool_batch\",\"turn_id\":\"request_id#1:model:1:after-tools:0:model_turn_nonce#1\"}\n```\n仅补充该批已返回工具的执行状态；更早结果保留在原生历史、摘要及工具账本。未列出不表示未执行，勿因此重复调用；操作成功不等于整个任务完成，失败和未知不得当作成功。\n"
         }
       ],
       "tools": [

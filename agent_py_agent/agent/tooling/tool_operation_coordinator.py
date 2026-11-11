@@ -99,6 +99,7 @@ class ToolOperationExecutionRequest:
     attempt_id: str = ""
     operation_attempt_id: str = ""
     redacted_input: dict[str, Any] | None = None
+    settled_effect_outcome: str = "committed"
 
 
 @dataclass(frozen=True)
@@ -544,7 +545,7 @@ def _settle_reconciled_operation(
                 holder_id=claim.record.holder_id,
                 generation=claim.record.generation,
                 status=terminal_status,
-                result=_result_payload(reconciled_result),
+                result=_result_payload(reconciled_result, request.settled_effect_outcome),
                 error_code=reconciled_result.error_code,
             )
         )
@@ -686,7 +687,7 @@ def _reopen_unknown_operation(
                 holder=attempt.holder,
                 lease_expires_at=attempt.lease_expires_at,
                 source_ref=source_ref,
-                reconciliation_result=_result_payload(reconciliation_result),
+                reconciliation_result=_result_payload(reconciliation_result, request.settled_effect_outcome),
             )
         )
     except Exception as exc:  # noqa: BLE001 - a competing reconciliation must win atomically
@@ -863,7 +864,7 @@ def _execute_claimed_operation(
                 holder_id=claim.record.holder_id,
                 generation=claim.record.generation,
                 status=operation_status,
-                result=_result_payload(result),
+                result=_result_payload(result, request.settled_effect_outcome),
                 error_code=result.error_code,
                 unknown_reason=unknown_reason,
             )
@@ -1176,10 +1177,18 @@ def _tool_execution_facts(result: ToolHandlerOutcome) -> dict[str, object]:
     return facts
 
 
-def _result_payload(result: ToolHandlerOutcome) -> dict[str, Any]:
+def _result_payload(
+    result: ToolHandlerOutcome,
+    settled_effect_outcome: str = "committed",
+) -> dict[str, Any]:
     redacted_input = {}
     if isinstance(result.result_envelope, dict) and isinstance(result.result_envelope.get("redacted_input"), dict):
         redacted_input = deepcopy(result.result_envelope["redacted_input"])
+    effect_outcome = (
+        settled_effect_outcome
+        if (result.ok and not result.effect_outcome)
+        else result.effect_outcome
+    )
     return {
         "schema_version": _RESULT_SCHEMA,
         "result_ref": _operation_result_ref(result),
@@ -1194,7 +1203,7 @@ def _result_payload(result: ToolHandlerOutcome) -> dict[str, Any]:
         "retryable": result.retryable,
         "recommended_action": result.recommended_action,
         "recovery_hint": result.recovery_hint,
-        "effect_outcome": result.effect_outcome,
+        "effect_outcome": effect_outcome,
         "effect_source_ref": result.effect_source_ref,
         "handler_executed": result.handler_executed,
         "failure_stage": result.failure_stage,
@@ -1223,6 +1232,12 @@ def _result_from_record(record: ToolOperationRecord) -> ToolHandlerOutcome:
             "已有副作用操作缺少可重放的完整结果，系统不会重复执行。",
         )
     try:
+        raw_effect = str(payload.get("effect_outcome") or "").strip().lower()
+        runtime_effect = (
+            ""
+            if (payload.get("ok") is True or raw_effect in {"none", "committed"})
+            else raw_effect
+        )
         result = ToolHandlerOutcome(
             tool=str(payload.get("tool") or record.tool),
             ok=payload.get("ok") is True,
@@ -1235,7 +1250,7 @@ def _result_from_record(record: ToolOperationRecord) -> ToolHandlerOutcome:
             ),
             error_code=str(payload.get("error_code") or ""),
             reported_error_code=str(payload.get("reported_error_code") or ""),
-            effect_outcome=str(payload.get("effect_outcome") or ""),
+            effect_outcome=runtime_effect,
             effect_source_ref=str(payload.get("effect_source_ref") or ""),
             handler_executed=payload.get("handler_executed") is True,
             failure_stage=str(payload.get("failure_stage") or ""),

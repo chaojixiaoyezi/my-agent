@@ -29,6 +29,7 @@ from agent_py_agent.agent.conversation.store_threads import create_thread_atomic
 from agent_py_agent.agent.gateway_parts.business_api_v13_readers import (
     default_observation_readers,
 )
+from agent_py_agent.agent.local_storage import LocalStore
 from agent_py_agent.agent.plugin_host.business_action_specs import (
     business_action_spec,
     validate_object,
@@ -36,6 +37,12 @@ from agent_py_agent.agent.plugin_host.business_action_specs import (
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 from agent_py_agent.agent.tooling.business_spaces_tool import BusinessSpacesTool
 from agent_py_agent.agent.tooling.executor import _bound_redacted_input
+from agent_py_agent.agent.tooling.models import BaseTool, ToolHandlerOutcome
+from agent_py_agent.tests._tool_runtime_harness import (
+    execute_canonical_test_call,
+    make_test_model_spec,
+    make_test_runtime_policy,
+)
 
 
 # LLM: 创建隔离测试环境，含ConversationStore、RuntimeRepository及基础线程。
@@ -282,7 +289,8 @@ def test_biz013_business_spaces_tool_effect_outcome_canonical():
 
     res_list = tool.execute({'action': 'spaces.list', 'params': {}, 'request_id': 'req-list-1234'})
     assert res_list.ok is True
-    assert res_list.effect_outcome == 'none'
+    assert res_list.effect_outcome == ''
+    assert res_list.result_envelope['effect_outcome'] == 'none'
 
     res_create = tool.execute({
         'action': 'spaces.create',
@@ -291,7 +299,8 @@ def test_biz013_business_spaces_tool_effect_outcome_canonical():
         'params': {'name': 'Valid Space'},
     })
     assert res_create.ok is True
-    assert res_create.effect_outcome == 'committed'
+    assert res_create.effect_outcome == ''
+    assert res_create.result_envelope['effect_outcome'] == 'committed'
 
     res_fail = tool.execute({
         'action': 'spaces.create',
@@ -640,3 +649,88 @@ def test_operations_get_canonical_workflow_run_store_and_path_confinement(tmp_pa
     for bad_id in unsafe_ids:
         with pytest.raises(BusinessError, match='OBSERVATION_NOT_FOUND'):
             env.service.query('operations.get', {'operation_id': bad_id}, actor=env.actor)
+
+
+class _BizMutatingTool(BaseTool):
+    def __init__(self) -> None:
+        self.calls = 0
+        self.model_spec = make_test_model_spec(
+            "biz_mutate",
+            description="biz mutate tool",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "password": {"type": "string"},
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        )
+        self.runtime_policy = make_test_runtime_policy("mutating")
+
+    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
+        self.calls += 1
+        return ToolHandlerOutcome(
+            "biz_mutate",
+            True,
+            json.dumps({"status": "created", "name": params["name"]}),
+            result_envelope={"created": True, "name": params["name"]},
+        )
+
+
+def test_biz013_executor_managed_operation_persists_committed_and_replays_cleanly(tmp_path: Path) -> None:
+    store = LocalStore(tmp_path / "local.db", enable_fts=False)
+    tool = _BizMutatingTool()
+    tools = {"biz_mutate": tool}
+
+    first = execute_canonical_test_call(
+        tmp_path,
+        tools=tools,
+        tool_name="biz_mutate",
+        arguments={"name": "test-space", "password": "secret-credentials"},
+        operation_store=store,
+        operation_owner_id="owner-biz",
+        run_id="run-biz-1",
+        call_id="call-biz-1",
+        operation_id="tool_call:biz_mutate:1",
+        idempotency_key="idemp-biz-1",
+    )
+
+    assert first.result.ok is True
+    assert first.result.effect_outcome == "confirmed"
+    assert tool.calls == 1
+
+    record = store.get_tool_operation(
+        owner_id="owner-biz",
+        run_id="run-biz-1",
+        operation_id="tool_call:biz_mutate:1",
+    )
+    assert record is not None
+    assert record.status == "succeeded"
+    assert isinstance(record.result, dict)
+    assert record.result["effect_outcome"] == "committed"
+    assert record.result["duration_ms"] >= 0
+    assert "redacted_input" in record.result
+    assert record.result["redacted_input"].get("name") == "test-space"
+    assert record.result["redacted_input"].get("password") == "<redacted>"
+
+    replay = execute_canonical_test_call(
+        tmp_path,
+        tools=tools,
+        tool_name="biz_mutate",
+        arguments={"name": "test-space", "password": "secret-credentials"},
+        operation_store=store,
+        operation_owner_id="owner-biz",
+        run_id="run-biz-1",
+        call_id="call-biz-2",
+        operation_id="tool_call:biz_mutate:1",
+        idempotency_key="idemp-biz-1",
+    )
+
+    assert replay.result.ok is True
+    assert replay.result.operation is not None
+    assert replay.result.operation.replayed is True
+    assert replay.result.effect_outcome == "confirmed"
+    assert replay.result.error_code != "TOOL_OPERATION_OUTCOME_UNKNOWN"
+    assert tool.calls == 1

@@ -2261,7 +2261,7 @@
     "call_index": 1,
     "ok": false,
     "handler_executed": true,
-    "error_code": "CANCELLED",
+    "error_code": "TOOL_OPERATION_OUTCOME_UNKNOWN",
     "raw_index": 13
   },
   {
@@ -2279,7 +2279,7 @@
     "disposition": "committed",
     "response": "",
     "ok": true,
-    "tool_calls": 1,
+    "tool_calls": 0,
     "tool_rounds": 1,
     "attempts": 1,
     "closeout_acknowledged": true

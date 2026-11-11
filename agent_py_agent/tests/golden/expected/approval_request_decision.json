@@ -4259,7 +4259,7 @@
     "timestamp": 4,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "e86ff4161c7de8f8475846c675ee117d1db26873d0a9dbc10cbe0140f96ac8ce",
+    "body_hash": "3a0660573ee426e9320c60abd00ff0d31a4a3a0e4067e8fa05d4abcd42bff1ab",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -4333,11 +4333,11 @@
         {
           "role": "tool",
           "tool_call_id": "tool_call_id#2",
-          "content": "[tool-result; tool=update_persona; status=succeeded; handler_executed=true; duration_ms=[timestamp#1..timestamp#2]; effect_outcome=committed]\n{\"ok\": true, \"changed\": true, \"action\": \"add\", \"target\": \"soul\", \"entry_id\": \"persona-3c490a974ef38d35\", \"prior_content\": \"\", \"content\": \"Fixture tone is concise.\", \"sha256\": \"5964eceafb023d7136e23559adfaad8a0a9b8a05a2f60a30bf8c24a19be8af33\", \"version\": 1, \"backup_ref\": \"persona/backups/soul/00000001-5964eceafb023d7136e23559adfaad8a0a9b8a05a2f60a30bf8c24a19be8af33.md\", \"hint\": \"人格文件已按结构化 entry_id 更新，下一轮起长期生效。\"}\n[tool-approval; status=approved; decision=approved; already_applied=true]\nThe user already approved this exact tool call and the host already applied that approval before execution. Do not wait for or request another approval."
+          "content": "[tool-result; tool=update_persona; status=succeeded; handler_executed=true; duration_ms=[timestamp#1..timestamp#2]; effect_outcome=confirmed]\n{\"ok\": true, \"changed\": true, \"action\": \"add\", \"target\": \"soul\", \"entry_id\": \"persona-3c490a974ef38d35\", \"prior_content\": \"\", \"content\": \"Fixture tone is concise.\", \"sha256\": \"5964eceafb023d7136e23559adfaad8a0a9b8a05a2f60a30bf8c24a19be8af33\", \"version\": 1, \"backup_ref\": \"persona/backups/soul/00000001-5964eceafb023d7136e23559adfaad8a0a9b8a05a2f60a30bf8c24a19be8af33.md\", \"hint\": \"人格文件已按结构化 entry_id 更新，下一轮起长期生效。\"}\n[tool-approval; status=approved; decision=approved; already_applied=true]\nThe user already approved this exact tool call and the host already applied that approval before execution. Do not wait for or request another approval."
         },
         {
           "role": "user",
-          "content": "# Tool Batch Execution Facts\n```json\n{\"batch_call_count\":1,\"calls\":[{\"call_id\":\"tool_call_id#2\",\"effect\":\"dangerous\",\"effect_outcome\":\"committed\",\"handler_executed\":true,\"ok\":true,\"operation_id\":\"operation_id#1\",\"refs\":[\"tool-operation://request_id#1/operation_id#1\"],\"status\":\"ok\",\"tool\":\"update_persona\",\"tool_approval\":{\"applied\":true,\"decision\":\"approved\",\"permission_id\":\"receipt_id#1\",\"status\":\"approved\"},\"tool_operation_action\":\"executed\",\"tool_operation_status\":\"succeeded\",\"verification_status\":\"succeeded\"}],\"omitted_batch_call_count\":0,\"raw_archive_refs\":[\"fixture_root#1/gateway/home/owners/local/main/audit/date#1.jsonl\"],\"request_call_count\":2,\"schema\":\"tool_batch_execution.v1\",\"scope\":\"latest_completed_tool_batch\",\"turn_id\":\"request_id#1:model:2:after-tools:1:model_turn_nonce#2\"}\n```\n仅补充该批已返回工具的执行状态；更早结果保留在原生历史、摘要及工具账本。未列出不表示未执行，勿因此重复调用；操作成功不等于整个任务完成，失败和未知不得当作成功。\n"
+          "content": "# Tool Batch Execution Facts\n```json\n{\"batch_call_count\":1,\"calls\":[{\"call_id\":\"tool_call_id#2\",\"effect\":\"dangerous\",\"effect_outcome\":\"confirmed\",\"handler_executed\":true,\"ok\":true,\"operation_id\":\"operation_id#1\",\"refs\":[\"tool-operation://request_id#1/operation_id#1\"],\"status\":\"ok\",\"tool\":\"update_persona\",\"tool_approval\":{\"applied\":true,\"decision\":\"approved\",\"permission_id\":\"receipt_id#1\",\"status\":\"approved\"},\"tool_operation_action\":\"executed\",\"tool_operation_status\":\"succeeded\",\"verification_status\":\"succeeded\"}],\"omitted_batch_call_count\":0,\"raw_archive_refs\":[\"fixture_root#1/gateway/home/owners/local/main/audit/date#1.jsonl\"],\"request_call_count\":2,\"schema\":\"tool_batch_execution.v1\",\"scope\":\"latest_completed_tool_batch\",\"turn_id\":\"request_id#1:model:2:after-tools:1:model_turn_nonce#2\"}\n```\n仅补充该批已返回工具的执行状态；更早结果保留在原生历史、摘要及工具账本。未列出不表示未执行，勿因此重复调用；操作成功不等于整个任务完成，失败和未知不得当作成功。\n"
         }
       ],
       "tools": [

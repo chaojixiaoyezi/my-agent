@@ -1460,6 +1460,6 @@ def register_business_tools(agent):
                 inner_tools = getattr(tools_obj, "tools", None)
                 if isinstance(inner_tools, dict) and tool.model_spec.name in inner_tools:
                     continue
-                if hasattr(tools_obj, "__contains__") and tool.model_spec.name in tools_obj:
+                if hasattr(type(tools_obj), "__contains__") and tool.model_spec.name in tools_obj:
                     continue
             agent.tools.register(tool)
