@@ -963,3 +963,382 @@ def test_r1_each_unreadable_execution_fact_alone_fails_closed(case, monkeypatch,
     assert case.parent_task_id not in [p.run_id for p in principals] and "SELF_TASK_UNPROVEN" in warnings
     assert guide.ok is False and deny.ok is False
     assert _child_messages(case) == [] and _request_status(case) == "OPEN"
+
+
+# ---------- PRO-MSG-031(2)：execute_scoped 边界缺请求方身份时失败关闭（REQUESTER_IDENTITY_UNPROVEN） ----------
+
+
+# LLM: 快照只采集 guidance、wake、会话任务与子代理目录的非锁文件原始字节及结构化状态，不触发任何修复或副作用。
+# 函数用途: 采集当前 owner 下消息箱、唤醒队列、子代理任务与能力申请的精确字节快照，验证拒绝路径零改动。
+def _control_plane_fact_bytes(case: Case, *extra_run_ids: str) -> dict[str, object]:
+    owner_home = Path(case.agent.home_paths.owner_home_dir)
+    tracked_files: dict[str, bytes] = {}
+    for path in sorted(owner_home.rglob("*")):
+        if not path.is_file():
+            continue
+        if path.name.endswith((".lock", ".guard")) or "sqlite" in path.name or path.name.endswith(".db"):
+            continue
+        rel = path.relative_to(owner_home).as_posix()
+        if "/conversations/" in f"/{rel}" or "/subagents/" in f"/{rel}" or rel.startswith("agents/"):
+            tracked_files[rel] = path.read_bytes()
+    run_ids = (case.child_id, *extra_run_ids)
+    return {
+        "files": tracked_files,
+        "child_guidance": [
+            (rid, [entry.to_dict() for entry in case.agent.conversation_store.guidance.pending("agent_run", rid)])
+            for rid in run_ids
+        ],
+        "parent_guidance": [
+            entry.to_dict()
+            for entry in case.agent.conversation_store.guidance.pending("task", case.parent_task_id)
+        ],
+        "wakes": [wake.to_dict() for wake in _thread_wakes(case)],
+    }
+
+
+# LLM: 统一核对注册表执行结果或直接 execute_scoped 结果的三要素：TOOL_PERMISSION_DENIED、not_started 与 REQUESTER_IDENTITY_UNPROVEN。
+# 函数用途: 断言一次未证明请求方身份的调用被精确失败关闭并携带结构化原因码。
+def _assert_unproven_requester_denied(result: object) -> None:
+    assert result.ok is False, getattr(result, "output", "")
+    assert result.error_code == "TOOL_PERMISSION_DENIED"
+    assert result.effect_outcome == "not_started"
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert payload["reason"] == "REQUESTER_IDENTITY_UNPROVEN"
+    assert payload["details"]["reason"] == "REQUESTER_IDENTITY_UNPROVEN"
+    assert payload["details"]["error"]["reason"] == "REQUESTER_IDENTITY_UNPROVEN"
+    metadata = getattr(result, "metadata", None)
+    if isinstance(metadata, dict):
+        envelope_details = metadata["handler_details"]["details"]
+        assert envelope_details["reason"] == "REQUESTER_IDENTITY_UNPROVEN"
+        assert envelope_details["error"]["reason"] == "REQUESTER_IDENTITY_UNPROVEN"
+    else:
+        envelope_details = result.result_envelope["details"]
+        assert envelope_details["reason"] == "REQUESTER_IDENTITY_UNPROVEN"
+        assert envelope_details["error"]["reason"] == "REQUESTER_IDENTITY_UNPROVEN"
+
+
+# LLM: 为指定子代理打开一条目录或工具能力申请，供父级或协调子代理正向与负向测试复用。
+# 函数用途: 在任意指定子代理 run 上追加一条 OPEN 状态的能力申请。
+def _open_request_for_run(agent: SimpleAgent, run_id: str, request_id: str = "req-1", *, directory_only: bool = True) -> None:
+    from agent_py_agent.agent.subagents.model_capabilities import CapabilityRequest
+
+    task = agent.subagents.load(run_id)
+    scope = (
+        {"path_scope": [str(Path(task.task_workspace_dir) / "out")]}
+        if directory_only
+        else {"requested_tools": ["run_command"]}
+    )
+    task.capability_requests = [
+        *task.capability_requests,
+        CapabilityRequest(
+            id=request_id,
+            from_run_id=run_id,
+            problem="需要写输出",
+            needed_capability="write_output",
+            status="OPEN",
+            created_at=time.time(),
+            **scope,
+        ),
+    ]
+    agent.subagents.save(task)
+
+
+# LLM: 沿真实子代理 runner 启动路径（reuse_pending=True）激活指定子代理的 generation-1 执行轮，供注册表 MANAGED 权威门核验。
+# 函数用途: 激活已创建子代理的 pending attempt 并返回 running 态的 attempt_id。
+def _activate_subagent_attempt(agent: SimpleAgent, subagent_run_id: str) -> str:
+    run_row = agent.subagents.runtime_db.agent_run_for_run_id(subagent_run_id)
+    assert run_row is not None
+    attempt_row = agent.subagents.runtime_db.create_attempt(
+        str(run_row["agent_run_id"]),
+        reuse_pending=True,
+    )
+    return str(attempt_row["attempt_id"])
+
+
+# LLM: 在真实裸工作线程上经 canonical registry.execute_tool 调用三项控制工具；即便调用账带已登记 attempt 也不得从参数/工作区推断请求方身份，且直接宿主 execute() 语义不变。
+# 函数用途: 验证裸线程经注册表执行 send_guidance、resolve_capability_requests、cancel_subagents 时全部前置失败关闭且持久化事实逐字节不变。
+def test_031_2_bare_thread_canonical_executor_rejects_all_three_tools_with_byte_identical_facts(case):
+    from agent_py_agent.tests._tool_runtime_harness import (
+         _authority_attempt_id,
+        execute_registry_test_call,
+    )
+
+    _open_request(case, "req-bare", directory_only=True)
+    # 先在主线程预先登记运行库 attempt，避免登记本身改动被测前后快照；裸线程不设任何 _current_run_params 或 runner 上下文。
+    attempt = _authority_attempt_id(case.agent, case.parent_task_id)
+    before = _control_plane_fact_bytes(case)
+    outcomes: dict[str, object] = {}
+
+    # LLM: 裸线程入口不设置 _current_run_params 与 subagent 上下文，模拟缺少宿主线程身份的注册表调用。
+    # 函数用途: 在无线程身份的工作线程上依次经注册表调用三项控制工具。
+    def bare_worker() -> None:
+        common = {"run_id": case.parent_task_id, "attempt_id": attempt}
+        outcomes["guide"] = execute_registry_test_call(
+            case.agent.tools,
+            "send_guidance",
+            {"target": case.child_id, "message": "裸线程消息"},
+            call_id="bare-guide",
+            operation_id="op-bare-guide",
+            **common,
+        )
+        outcomes["resolve"] = execute_registry_test_call(
+            case.agent.tools,
+            "resolve_capability_requests",
+            {"run_id": case.child_id, "request_id": "req-bare", "decision": "grant", "reason": "裸线程批准"},
+            call_id="bare-resolve",
+            operation_id="op-bare-resolve",
+            **common,
+        )
+        outcomes["cancel"] = execute_registry_test_call(
+            case.agent.tools,
+            "cancel_subagents",
+            {"run_id": case.child_id},
+            call_id="bare-cancel",
+            operation_id="op-bare-cancel",
+            **common,
+        )
+
+    worker = threading.Thread(target=bare_worker)
+    worker.start()
+    worker.join(30)
+    assert not worker.is_alive()
+
+    for key in ("guide", "resolve", "cancel"):
+        _assert_unproven_requester_denied(outcomes[key])
+    after = _control_plane_fact_bytes(case)
+    assert after == before
+    assert _request_status(case, "req-bare") == "OPEN"
+    assert case.agent.subagents.load(case.child_id).status != TaskStatus.CANCELLED.value
+
+
+# LLM: 缺失 ToolInvocationContext 或缺少真实执行编号（run_id/task_id/request_id 全空）时，execute_scoped 同样拒绝；直接调用 execute() 保持原宿主行为不变。
+# 函数用途: 验证缺上下文或空执行编号在 execute_scoped 边界失败关闭，同时不拓宽或破坏直接 execute() 宿主入口。
+def test_031_2_missing_context_and_empty_exec_id_fail_closed_while_direct_execute_stays_intact(case):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.tooling.models import ToolInvocationContext
+
+    _open_request(case, "req-ctx", directory_only=True)
+    _foreground(case.agent, case.thread, case.parent_task_id)
+    before = _control_plane_fact_bytes(case)
+
+    # 即使线程上有合法前台身份，缺失 invocation_context 也不能静默当成受信任宿主。
+    missing_guide = SendGuidanceTool(case.agent).execute_scoped(
+        {"target": case.child_id, "message": "缺上下文"}, None,  # type: ignore[arg-type]
+    )
+    missing_resolve = ResolveCapabilityRequestsTool(case.agent).execute_scoped(
+        {"run_id": case.child_id, "request_id": "req-ctx", "decision": "deny", "reason": "缺上下文"},
+        None,  # type: ignore[arg-type]
+    )
+    missing_cancel = CancelSubagentsTool(case.agent).execute_scoped(
+        {"run_id": case.child_id}, None,  # type: ignore[arg-type]
+    )
+    for item in (missing_guide, missing_resolve, missing_cancel):
+        _assert_unproven_requester_denied(item)
+    assert _control_plane_fact_bytes(case) == before
+
+    # 只有提名属性、没有任何执行编号（run_id/task_id/request_id 全空）也不能通过 execute_scoped。
+    snapshot = case.agent.tools.runtime_snapshot(run_id="snap-only")
+    ctx = ToolInvocationContext(runtime_snapshot=snapshot)
+    case.agent._current_run_params = SimpleNamespace(
+        run_id="",
+        task_id="",
+        request_id="   ",
+        task_attributes={"conversation_task_id": case.parent_task_id, "conversation_thread_id": case.thread.thread_id},
+    )
+    empty_guide = SendGuidanceTool(case.agent).execute_scoped({"target": case.child_id, "message": "空执行编号"}, ctx)
+    empty_resolve = ResolveCapabilityRequestsTool(case.agent).execute_scoped(
+        {"run_id": case.child_id, "request_id": "req-ctx", "decision": "grant", "reason": "空执行编号"}, ctx,
+    )
+    empty_cancel = CancelSubagentsTool(case.agent).execute_scoped({"run_id": case.child_id}, ctx)
+    for item in (empty_guide, empty_resolve, empty_cancel):
+        _assert_unproven_requester_denied(item)
+    assert _control_plane_fact_bytes(case) == before
+
+    # 直接宿主入口 execute() 语义不变：清除 _current_run_params 后直接调 execute() 仍沿原有宿主空门工作。
+    del case.agent._current_run_params
+    direct = SendGuidanceTool(case.agent).execute({"target": case.child_id, "message": "宿主直接调用"})
+    assert direct.ok is True
+    assert _child_messages(case) == ["宿主直接调用"]
+
+
+# LLM: 覆盖前台父任务、真实定时延续与子代理 runner 三条正向控制路径，全部经 canonical registry.execute_tool 走通三项工具。
+# 函数用途: 验证已证明身份的前台回合、定时延续回合和子代理工作线程经注册表执行三项工具均正常放行。
+def test_031_2_registry_positive_controls_foreground_scheduled_and_subagent_runner(case):
+    from agent_py_agent.agent.runtime_context import (
+        restore_current_subagent_context,
+        set_current_subagent_context,
+    )
+    from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
+
+    # 1) 前台父任务正向对照
+    child_fg = case.agent.subagents.create_run(
+        goal="前台子任务", thought="", plan=["做"], parent_id=case.parent_task_id, root_id=case.parent_task_id, depth=1,
+    )
+    _open_request_for_run(case.agent, child_fg.id, "req-fg", directory_only=True)
+    _foreground(case.agent, case.thread, case.parent_task_id)
+    fg_run = f"gwreq-{case.parent_task_id}"
+    fg_guide = execute_registry_test_call(
+        case.agent.tools, "send_guidance", {"target": child_fg.id, "message": "前台注册表消息"},
+        run_id=fg_run, call_id="fg-guide", register_with=case.agent,
+    )
+    fg_resolve = execute_registry_test_call(
+        case.agent.tools, "resolve_capability_requests",
+        {"run_id": child_fg.id, "request_id": "req-fg", "decision": "grant", "reason": "前台批准目录"},
+        run_id=fg_run, call_id="fg-resolve", register_with=case.agent,
+    )
+    fg_cancel = execute_registry_test_call(
+        case.agent.tools, "cancel_subagents", {"run_id": child_fg.id},
+        run_id=fg_run, call_id="fg-cancel", register_with=case.agent,
+    )
+    assert fg_guide.ok is True and json.loads(fg_guide.output)["scope_resolution"]["authority"] == "self"
+    assert fg_resolve.ok is True, fg_resolve.output
+    assert fg_cancel.ok is True, fg_cancel.output
+    assert case.agent.subagents.load(child_fg.id).status == TaskStatus.CANCELLED.value
+
+    # 2) 真实定时延续正向对照
+    _open_request(case, "req-sched", directory_only=True)
+    _start_scheduled_run(case)
+    with _bound(case):
+        sched_guide = execute_registry_test_call(
+            case.agent.tools, "send_guidance", {"target": case.child_id, "message": "定时注册表消息"},
+            run_id=case.run_id, call_id="sched-guide", register_with=case.agent,
+        )
+        sched_resolve = execute_registry_test_call(
+            case.agent.tools, "resolve_capability_requests",
+            {"run_id": case.child_id, "request_id": "req-sched", "decision": "deny", "reason": "定时拒绝申请"},
+            run_id=case.run_id, call_id="sched-resolve", register_with=case.agent,
+        )
+        sched_cancel = execute_registry_test_call(
+            case.agent.tools, "cancel_subagents", {"run_id": case.child_id},
+            run_id=case.run_id, call_id="sched-cancel", register_with=case.agent,
+        )
+    assert sched_guide.ok is True
+    assert json.loads(sched_guide.output)["scope_resolution"]["authority"] == AUTHORITY_SCHEDULED_CONTINUATION
+    assert sched_resolve.ok is True, sched_resolve.output
+    assert _request_status(case, "req-sched") == "CLOSED"
+    assert sched_cancel.ok is True, sched_cancel.output
+    assert case.agent.subagents.load(case.child_id).status == TaskStatus.CANCELLED.value
+
+    # 3) 子代理 runner 工作线程正向对照
+    coordinator, grandchild = _coordinator_child(case)
+    coord_attempt = _activate_subagent_attempt(case.agent, coordinator.id)
+    _open_request_for_run(case.agent, grandchild.id, "req-sub", directory_only=True)
+    runner_outcomes: dict[str, object] = {}
+
+    # LLM: 在独立工作线程进入真实 set_current_subagent_context 作用域并经注册表执行三项工具，退出时完整清理线程上下文。
+    # 函数用途: 模拟协调子代理 runner 线程管理其直属孙代理。
+    def runner_worker() -> None:
+        previous = set_current_subagent_context(case.agent, run_id=coordinator.id, attempt_id=coord_attempt)
+        try:
+            runner_outcomes["guide"] = execute_registry_test_call(
+                case.agent.tools, "send_guidance", {"target": grandchild.id, "message": "协调者补充"},
+                run_id=coordinator.id, attempt_id=coord_attempt, call_id="sub-guide",
+            )
+            runner_outcomes["resolve"] = execute_registry_test_call(
+                case.agent.tools, "resolve_capability_requests",
+                {"run_id": grandchild.id, "request_id": "req-sub", "decision": "grant", "reason": "协调者批准目录"},
+                run_id=coordinator.id, attempt_id=coord_attempt, call_id="sub-resolve",
+            )
+            runner_outcomes["cancel"] = execute_registry_test_call(
+                case.agent.tools, "cancel_subagents", {"run_id": grandchild.id},
+                run_id=coordinator.id, attempt_id=coord_attempt, call_id="sub-cancel",
+            )
+        finally:
+            restore_current_subagent_context(case.agent, previous)
+
+    thread = threading.Thread(target=runner_worker)
+    thread.start()
+    thread.join(30)
+    assert not thread.is_alive()
+    assert runner_outcomes["guide"].ok is True
+    assert json.loads(runner_outcomes["guide"].output)["scope_resolution"]["principal_run_id"] == coordinator.id
+    assert runner_outcomes["resolve"].ok is True, runner_outcomes["resolve"].output
+    assert runner_outcomes["cancel"].ok is True, runner_outcomes["cancel"].output
+    assert case.agent.subagents.load(grandchild.id).status == TaskStatus.CANCELLED.value
+
+
+# LLM: 伪造提名父任务或兄弟子代理冒充父级经注册表调用三项工具时，由既有权威身份门与直属下级门拒绝，且不改动目标持久化事实。
+# 函数用途: 验证注册表入口下伪造/错配身份的负向控制与持久化事实逐字节不变。
+def test_031_2_registry_forged_and_mismatched_identities_deny_without_mutating_facts(case):
+    from agent_py_agent.agent.runtime_context import (
+        restore_current_subagent_context,
+        set_current_subagent_context,
+    )
+    from agent_py_agent.tests._tool_runtime_harness import (
+        _authority_attempt_id,
+        execute_registry_test_call,
+    )
+
+    sibling = case.agent.subagents.create_run(
+        goal="兄弟代理", thought="", plan=["看"], parent_id=case.parent_task_id, root_id=case.parent_task_id, depth=1,
+    )
+    _open_request(case, "req-forged", directory_only=True)
+    _start_scheduled_run(case)
+    # 先预建两个调用方的运行库 attempt，随后采集精确控制面快照。
+    sched_attempt = _authority_attempt_id(case.agent, case.run_id)
+    sibling_attempt = _activate_subagent_attempt(case.agent, sibling.id)
+    params = case.agent._current_run_params
+    # 伪造 conversation_task_id 为父任务且清空线程证明（使转交也因无发送线程证明而拒绝），核验零写盘。
+    params.task_attributes = {"conversation_task_id": case.parent_task_id}
+    before = _control_plane_fact_bytes(case, sibling.id)
+
+    with _bound(case):
+        forged_guide = execute_registry_test_call(
+            case.agent.tools, "send_guidance", {"target": case.child_id, "message": "伪造补充"},
+            run_id=case.run_id, attempt_id=sched_attempt, call_id="forged-guide", operation_id="op-forged-guide",
+        )
+        forged_resolve = execute_registry_test_call(
+            case.agent.tools, "resolve_capability_requests",
+            {"run_id": case.child_id, "request_id": "req-forged", "decision": "grant", "reason": "伪造批准"},
+            run_id=case.run_id, attempt_id=sched_attempt, call_id="forged-resolve",
+        )
+        forged_cancel = execute_registry_test_call(
+            case.agent.tools, "cancel_subagents", {"run_id": case.child_id},
+            run_id=case.run_id, attempt_id=sched_attempt, call_id="forged-cancel",
+        )
+
+    sibling_outcomes: dict[str, object] = {}
+
+    # LLM: 兄弟子代理没有 agent_thread 绑定或不是目标的直接父级，不能直接控制目标子代理。
+    # 函数用途: 在兄弟子代理线程上尝试越权引导（无 operation_id 不转交）、裁决和取消目标子代理。
+    def sibling_worker() -> None:
+        previous = set_current_subagent_context(case.agent, run_id=sibling.id, attempt_id=sibling_attempt)
+        try:
+            # 传空 operation_id? Registry 会自动注入 __operation_id；为测纯拒绝零写盘，验证兄弟对裁决与取消的拒绝，以及缺线程证明的引导拒绝。
+            sibling_outcomes["guide"] = execute_registry_test_call(
+                case.agent.tools, "send_guidance", {"target": case.child_id, "message": "兄弟越权引导"},
+                run_id=sibling.id, attempt_id=sibling_attempt, call_id="sib-guide",
+            )
+            sibling_outcomes["resolve"] = execute_registry_test_call(
+                case.agent.tools, "resolve_capability_requests",
+                {"run_id": case.child_id, "request_id": "req-forged", "decision": "deny", "reason": "兄弟越权拒绝"},
+                run_id=sibling.id, attempt_id=sibling_attempt, call_id="sib-resolve",
+            )
+            sibling_outcomes["cancel"] = execute_registry_test_call(
+                case.agent.tools, "cancel_subagents", {"run_id": case.child_id},
+                run_id=sibling.id, attempt_id=sibling_attempt, call_id="sib-cancel",
+            )
+        finally:
+            restore_current_subagent_context(case.agent, previous)
+
+    thread = threading.Thread(target=sibling_worker)
+    thread.start()
+    thread.join(30)
+    assert not thread.is_alive()
+
+    for denied in (
+        forged_guide,
+        forged_resolve,
+        forged_cancel,
+        sibling_outcomes["guide"],
+        sibling_outcomes["resolve"],
+        sibling_outcomes["cancel"],
+    ):
+        assert denied.ok is False, denied.output
+        assert denied.error_code != "TOOL_AUTHORITY_CONTEXT_MISSING", denied.output
+        assert denied.handler_executed is True
+    assert _control_plane_fact_bytes(case, sibling.id) == before
+    assert _request_status(case, "req-forged") == "OPEN"
+    assert case.agent.subagents.load(case.child_id).status != TaskStatus.CANCELLED.value

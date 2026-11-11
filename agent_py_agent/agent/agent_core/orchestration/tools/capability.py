@@ -43,11 +43,13 @@ from ....tooling.models import (
     IdempotencyPolicy,
     ResourceScopePolicy,
     ToolHandlerOutcome,
+    ToolInvocationContext,
     ToolRuntimePolicy,
 )
 from ....tooling.write_boundary import WRITE_TOOL_ORDER
 from ..management_continuity import (
     ManagedChildDenied,
+    authoritative_self_principal,
     authorize_managed_child,
     management_principals,
 )
@@ -111,6 +113,17 @@ class ResolveCapabilityRequestsTool(BaseTool):
 
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
+
+    # LLM: Registry 受权入口必须先证明调用方宿主执行身份；缺上下文、裸线程或无执行编号均在任何申请读取、授权落盘和唤醒前拒绝，不推断身份也不改 execute() 直接宿主语义。
+    # 函数用途: 在统一注册表调用边界校验请求方身份已证明后再委托 execute()。
+    def execute_scoped(
+        self,
+        params: dict[str, object],
+        context: ToolInvocationContext,
+    ) -> ToolHandlerOutcome:
+        if not _scoped_requester_proven(self.agent, context):
+            return _unproven_requester_capability_failure()
+        return self.execute(params)
 
     # LLM: 工具响应必须是结构化 JSON（resolved/errors），失败也要给出机器可读原因；
     # grant 由 record_capability_grant 在同一个 canonical reducer 内结清 request，deny
@@ -702,6 +715,61 @@ def _resolution_outcome(payload: dict[str, object]) -> ToolHandlerOutcome:
         output,
         error_code=error_code,
         effect_outcome="failed",
+    )
+
+
+# LLM: 只信任当前线程的子代理 runner 上下文或带真实执行编号的 _current_run_params，且必须携带有效 ToolInvocationContext 快照；不从模型参数、工作目录或快照编号推断身份。
+# 函数用途: 判断注册表受权调用在进入能力申请裁决前是否具备已证明的请求方身份。
+def _scoped_requester_proven(agent: object, context: object) -> bool:
+    if not isinstance(context, ToolInvocationContext) or context.runtime_snapshot is None:
+        return False
+    from ....runtime_context import current_subagent_run_id
+
+    try:
+        if current_subagent_run_id(agent):
+            principal, _warning = authoritative_self_principal(agent)
+            return bool(str(principal.run_id or "").strip())
+        run_params = getattr(agent, "_current_run_params", None)
+        if run_params is None:
+            return False
+        has_exec_id = any(
+            isinstance(value, str) and bool(value.strip())
+            for value in (
+                getattr(run_params, "run_id", None),
+                getattr(run_params, "task_id", None),
+                getattr(run_params, "request_id", None),
+            )
+        )
+        if not has_exec_id:
+            return False
+        principal, _warning = authoritative_self_principal(agent)
+        return bool(str(principal.run_id or "").strip())
+    except Exception:  # noqa: BLE001 - 身份证明异常一律失败关闭
+        return False
+
+
+# LLM: 未证明身份在任何申请读取、授权落盘或唤醒前同步返回 TOOL_PERMISSION_DENIED + not_started，并保留 REQUESTER_IDENTITY_UNPROVEN 结构化原因。
+# 函数用途: 生成 resolve_capability_requests 在 execute_scoped 边界缺少已证明请求方身份时的拒绝结果。
+def _unproven_requester_capability_failure() -> ToolHandlerOutcome:
+    reason = "REQUESTER_IDENTITY_UNPROVEN"
+    message = "当前工具调用缺少已证明的请求方执行身份，本次没有读取或改动任何能力申请。"
+    details: dict[str, object] = {
+        "reason": reason,
+        "error": {"reason": reason, "message": message},
+    }
+    payload: dict[str, object] = {
+        "ok": False,
+        "reason": reason,
+        "message": message,
+        "details": details,
+    }
+    return ToolHandlerOutcome(
+        "resolve_capability_requests",
+        False,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        result_envelope={"details": details},
+        error_code="TOOL_PERMISSION_DENIED",
+        effect_outcome="not_started",
     )
 
 

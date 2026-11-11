@@ -18,6 +18,7 @@ from ...tooling.models import (
     ResourceScopePolicy,
     ToolHandlerOutcome,
     ToolInputPolicy,
+    ToolInvocationContext,
     ToolModelHints,
     ToolModelSpec,
     ToolRuntimePolicy,
@@ -25,6 +26,7 @@ from ...tooling.models import (
 from ..orchestration.management_continuity import (
     ManagedChildAuthorization,
     ManagedChildDenied,
+    authoritative_self_principal,
     authorize_managed_child,
     route_to_authorized_parent,
 )
@@ -66,6 +68,17 @@ class SendGuidanceTool(BaseTool):
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
         self.model_spec = build_send_guidance_model_spec()
+
+    # LLM: Registry 受权入口必须先证明调用方宿主执行身份；缺上下文、裸线程或无执行编号均在任何参数读取、转交和控制写前拒绝，不推断身份也不改 execute() 直接宿主语义。
+    # 函数用途: 在统一注册表调用边界校验请求方身份已证明后再委托 execute()。
+    def execute_scoped(
+        self,
+        params: dict[str, object],
+        context: ToolInvocationContext,
+    ) -> ToolHandlerOutcome:
+        if not _scoped_requester_proven(self.agent, context):
+            return _unproven_requester_guidance_error()
+        return self.execute(params)
 
     # LLM: 投递前必须过共享授权门并读取目标的权威 TaskStatus；只有仍可能进入执行轮的
     # 下级才可入队，终态/暂停/失败目标必须同步拒绝，不能制造永远无法消费的假 pending。
@@ -351,6 +364,62 @@ def build_send_guidance_model_spec() -> ToolModelSpec:
                 '{"tool":"send_guidance","target":"child-1","message":"把输出写到分配给你的目录，完成后继续原任务。"}',
             ),
         ),
+    )
+
+
+# LLM: 只信任当前线程的子代理 runner 上下文或带真实执行编号的 _current_run_params，且必须携带有效 ToolInvocationContext 快照；不从模型参数、工作目录或快照编号推断身份。
+# 函数用途: 判断注册表受权调用在进入控制逻辑前是否具备已证明的请求方身份。
+def _scoped_requester_proven(agent: object, context: object) -> bool:
+    if not isinstance(context, ToolInvocationContext) or context.runtime_snapshot is None:
+        return False
+    from ...runtime_context import current_subagent_run_id
+
+    try:
+        if current_subagent_run_id(agent):
+            principal, _warning = authoritative_self_principal(agent)
+            return bool(str(principal.run_id or "").strip())
+        run_params = getattr(agent, "_current_run_params", None)
+        if run_params is None:
+            return False
+        has_exec_id = any(
+            isinstance(value, str) and bool(value.strip())
+            for value in (
+                getattr(run_params, "run_id", None),
+                getattr(run_params, "task_id", None),
+                getattr(run_params, "request_id", None),
+            )
+        )
+        if not has_exec_id:
+            return False
+        principal, _warning = authoritative_self_principal(agent)
+        return bool(str(principal.run_id or "").strip())
+    except Exception:  # noqa: BLE001 - 身份证明异常一律失败关闭
+        return False
+
+
+# LLM: 未证明身份在任何读取、路由或追加前同步返回 TOOL_PERMISSION_DENIED + not_started，并把 REQUESTER_IDENTITY_UNPROVEN 同时写入 JSON 与 result_envelope.details。
+# 函数用途: 生成 execute_scoped 边界请求方身份未证明时的结构化拒绝结果。
+def _unproven_requester_guidance_error() -> ToolHandlerOutcome:
+    reason = "REQUESTER_IDENTITY_UNPROVEN"
+    message = "当前工具调用缺少已证明的请求方执行身份；消息没有投递或转交。"
+    details: dict[str, object] = {
+        "reason": reason,
+        "error": {"reason": reason, "message": message},
+    }
+    payload: dict[str, object] = {
+        "ok": False,
+        "error": "guidance_not_delivered",
+        "reason": reason,
+        "message": message,
+        "details": details,
+    }
+    return ToolHandlerOutcome(
+        _TOOL_NAME,
+        False,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        result_envelope={"details": details},
+        error_code="TOOL_PERMISSION_DENIED",
+        effect_outcome="not_started",
     )
 
 
