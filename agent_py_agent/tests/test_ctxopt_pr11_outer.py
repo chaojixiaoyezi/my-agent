@@ -44,6 +44,7 @@ def test_s11_invalid_prefix_stays_fail_closed(tmp_path, monkeypatch):
 def test_s12_cloud_operations_drive_authorization_and_tool():
     operations = getattr(cloud_auth, "CLOUD_OPERATIONS", {})
     assert set(operations) == {"sheet_meta", "sheet_read", "sheet_append", "sheet_update",
+                               "sheet_add", "sheet_rename",
                                "document_read", "document_append", "wiki_resolve"}
     assert frozenset(op.action for op in operations.values() if not op.write) == cloud_auth.READ_ACTIONS
     assert frozenset(op.action for op in operations.values() if op.write) == cloud_auth.WRITE_ACTIONS

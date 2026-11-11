@@ -71,7 +71,6 @@ def authorization_guidance(agent):
     required = sorted({scope for feature in features.values() if feature['identity'] == 'user'
                        for scope in feature['required_scopes']})
     result = permission_requirements(agent, required_scopes=required)
-    result['capabilities'] = features
     result['oauth_status'] = 'not_configured'
     result['configuration_status'] = 'not_configured'
     result['missing_requested_scopes'] = []
@@ -97,6 +96,7 @@ def authorization_guidance(agent):
     except (OSError, ValueError, TypeError):
         result['required_action'] = 'configure_application_oauth'
         result['setup_instructions'] = '部署者配置应用凭据与准确的 HTTPS OAuth 回调，并在开发者后台登记回调；随后发起本人授权。'
+        result['capabilities'] = features
         return result
     result['configuration_status'] = 'configured'
     result['missing_requested_scopes'] = sorted(set(required) - set(scopes))
@@ -108,10 +108,12 @@ def authorization_guidance(agent):
         status = feishu_oauth.oauth_status(agent)
     except (OSError, ValueError, TypeError, KeyError, RuntimeError):
         result['oauth_status'] = 'current_personal_identity_required'
+        result['capabilities'] = features
         return result
     result['oauth_status'] = status['status']
     result['granted_scopes'] = status['granted_scopes'].split()
     if status['status'] == 'ready' and not result['missing_requested_scopes']:
         result['required_action'] = ('none' if set(required).issubset(result['granted_scopes'])
                                      else 'reauthorize_current_user')
+    result['capabilities'] = features
     return result
