@@ -41,10 +41,11 @@ python -m agent_py_agent --help
 - `--plain`：普通终端聊天模式。
 - `--dir <path>`、`--workspace <path>`、`--workspace-root <path>`：原工作目录选择参数。
 - `-h`、`--help`：查看当前节点帮助。
+- `-V`、`--version`：查看当前版本与构建身份信息。
 
 全局参数放在根命令前。兼容器只定位真正的根命令，不扫描配置路径、目录、业务正文或 `--` 后的文本寻找旧名字；未知参数交给同一解析树拒绝。根选项当前只有零值或单值形式，新增多值形式必须先扩展明确的解码合同，不能猜值的边界。未带命令时保持原交互入口，不把合成分组误当成启动聊天。
 
-## 26 个规范根
+## 27 个规范根
 
 | 根 | 当前入口 | 用途 |
 |---|---|---|
@@ -74,6 +75,7 @@ python -m agent_py_agent --help
 | `team` | `my-agent team` | 本人后台团队（参数原样交给业务入口） |
 | `timeline` | `my-agent timeline` | 最近事件 |
 | `update` | `my-agent update` | 原升级入口 |
+| `workflow` | `my-agent workflow` | 本人业务工作流（参数原样交给业务入口） |
 
 ## 常用规范调用
 
@@ -182,7 +184,7 @@ Probe 输出每次样本、时间、Python 峰值内存与列明文件的源码�
 
 | 当前路径 | 本节点参数 |
 |---|---|
-| `my-agent` | `--config`, `--dir`, `--help`, `--plain`, `--workspace`, `--workspace-root`, `-h` |
+| `my-agent` | `--config`, `--dir`, `--help`, `--plain`, `--version`, `--workspace`, `--workspace-root`, `-V`, `-h` |
 | `my-agent status` | `--help`, `--json`, `--limit`, `--recent`, `-h` |
 | `my-agent timeline` | `--details`, `--event-type`, `--help`, `--json`, `--limit`, `--source-type`, `-h` |
 | `my-agent run` | `--delivery-contract-file`, `--dir`, `--help`, `--inject`, `--no-resume-context`, `--no-save`, `--prompt-file`, `--resume`, `--resume-context`, `--save`, `--show-prompt`, `--workspace`, `--workspace-root`, `-h` |
@@ -348,3 +350,4 @@ Probe 输出每次样本、时间、Python 峰值内存与列明文件的源码�
 | `my-agent admin identities remove` | `--help`, `-h` |
 | `my-agent space` | `--help`, `-h` |
 | `my-agent team` | `--help`, `-h` |
+| `my-agent workflow` | `--help`, `-h` |

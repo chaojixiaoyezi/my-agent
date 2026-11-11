@@ -17,7 +17,7 @@ from agent_py_agent.cli.argv_compat_v1 import (
 )
 from agent_py_agent.cli.parser import build_parser
 
-ROOTS = {"adapter", "admin", "audit", "background", "chat", "collaboration", "config", "context", "dev", "feishu", "gateway", "guidance", "home", "local-store", "memory", "resume", "run", "runtime", "skills", "space", "status", "subagents", "task", "team", "timeline", "update"}
+ROOTS = {"adapter", "admin", "audit", "background", "chat", "collaboration", "config", "context", "dev", "feishu", "gateway", "guidance", "home", "local-store", "memory", "resume", "run", "runtime", "skills", "space", "status", "subagents", "task", "team", "timeline", "update", "workflow"}
 
 
 # LLM: 直接读取真实 argparse 注册结果，不能用隐藏帮助或虚构清单替代删除。

@@ -26,7 +26,8 @@
       this.fetcher = fetcher; this.csrf = csrf; this.pending = new Map();
     }
     headers(json = true) {
-      return { ...(json ? {'Content-Type': 'application/json'} : {}), 'X-CSRF-Token': this.csrf() };
+      const token = this.csrf();
+      return { ...(json ? {'Content-Type': 'application/json'} : {}), ...(token ? {'X-CSRF-Token': token} : {}) };
     }
     prepare(action, params, options = {}) {
       const expectedRev = options.expected_revision !== undefined ? options.expected_revision : options.expectedRevision;

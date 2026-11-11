@@ -825,7 +825,7 @@ def _complete_background_slice(
                 runtime.store.session_tasks.record_turn_reply_linkage(
                     task.task_id, reply_message_id=commit.message_id
                 )
-        except Exception:
+        except Exception:  # best-effort: turn reply linkage is non-fatal metadata indexing
             pass
     return BackgroundMainAgentReport(
         thread_id=request.thread_id,
@@ -1468,13 +1468,13 @@ def _close_out_session_task_turn(
                         reply_message_id=f"reply-{closed.task_id}" if getattr(execution, "response", None) else "",
                         result_report_receipt=result_report_key(closed),
                     )
-                except Exception:
+                except Exception:  # best-effort: turn reply linkage is non-fatal metadata indexing
                     pass
 
         try:
             from .background_team_lifecycle import reconcile_background_identity
             reconcile_background_identity(agent, request.thread_id)
-        except Exception:
+        except Exception:  # best-effort: background team lifecycle reconciliation is non-fatal
             pass
 
         identity = execution.execution_identity or {}
