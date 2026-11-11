@@ -109,9 +109,14 @@ class GatewayBusinessDomain:
         if getattr(getattr(base, 'home_paths', None), 'owner_id', None) == scoped_home.owner_id:
             for name in ('business_reference_reader', 'business_active_references', 'business_governance',
                          'business_background', 'business_capabilities', 'business_projection',
-                         'business_context_provider', 'workflow_engine_factory', 'workflow_agent_steps'):
+                         'business_context_provider', 'workflow_engine_factory', 'workflow_agent_steps',
+                         'business_space_reference_resolver', 'business_workflow_reference_reader',
+                         'task_business_context', '_business_host_ports_wired'):
                 if hasattr(base, name):
                     setattr(host, name, getattr(base, name))
+        if getattr(base, '_business_host_ports_wired', False) or getattr(base, 'business_host_ports_enabled', False):
+            from ..gateway_parts.business_host_ports import wire_business_host_ports
+            wire_business_host_ports(host)
         key = (scoped_home.owner_id, str(scoped_home.owner_home_dir))
         services = self._services.get(key)
         if (services is None or services.host.config is not base.config
