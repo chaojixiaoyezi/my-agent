@@ -11,7 +11,9 @@ import pytest
 from agent_py_agent.agent.agent_core.orchestration.tools.requirement_provenance_tool import (
     RequirementProvenanceTool,
     build_manage_requirement_provenance_model_spec,
+    build_requirement_provenance_model_spec,
 )
+from agent_py_agent.agent.runtime_context import set_current_subagent_context
 from agent_py_agent.agent.tooling.models import ToolInvocationContext
 from agent_py_agent.agent.verification.project_facts import ProjectFacts
 from agent_py_agent.agent.verification.repository import (
@@ -766,3 +768,298 @@ def test_tool_actions_end_to_end(tmp_path: Path):
     assert len(data_query["records"]) == 1
     assert data_query["records"][0]["acceptance_status"] == "accepted"
     assert data_query["summary"]["is_closeout_ready"] is True
+
+
+# ---------------------------------------------------------------------------
+# 10. SB-F4 & SB-F5: Bound Author Immutability, Acceptance Verdict & Self-Acceptance
+# ---------------------------------------------------------------------------
+
+
+def test_bound_author_immutability(tmp_path: Path):
+    owner = tmp_path / "owner-auth"
+    project = tmp_path / "project"
+    project.mkdir()
+    context = VerificationContext("owner-auth", "thread-1", "task-1")
+    repo = VerificationEvidenceRepository(owner)
+
+    # 1. Bind requirement to run-alice
+    repo.bind_requirement(
+        context,
+        RequirementProvenanceRecord(
+            requirement_id="ORCH-AUTH-1",
+            owner_ref="owner-auth",
+            task_id="task-1",
+            root=str(project),
+            input_version="v1",
+            watched_paths=("a.py",),
+            author_principal_id="run-alice",
+        ),
+    )
+
+    # Attempting to re-bind with different author on SAME version fails closed
+    with pytest.raises(ValueError) as exc_bind:
+        repo.bind_requirement(
+            context,
+            RequirementProvenanceRecord(
+                requirement_id="ORCH-AUTH-1",
+                owner_ref="owner-auth",
+                task_id="task-1",
+                root=str(project),
+                input_version="v1",
+                watched_paths=("a.py",),
+                author_principal_id="fake-bob",
+            ),
+        )
+    assert "AUTHOR_PRINCIPAL_MISMATCH" in str(exc_bind.value)
+
+    # Re-binding with different author on NEW version succeeds
+    updated = repo.bind_requirement(
+        context,
+        RequirementProvenanceRecord(
+            requirement_id="ORCH-AUTH-1",
+            owner_ref="owner-auth",
+            task_id="task-1",
+            root=str(project),
+            input_version="v2",
+            watched_paths=("a.py",),
+            author_principal_id="run-bob",
+        ),
+    )
+    assert updated.author_principal_id == "run-bob"
+    assert updated.input_version == "v2"
+
+    # Attempting to record independent review with mismatched author fails closed
+    with pytest.raises(ValueError) as exc_rev:
+        repo.record_independent_review(
+            context,
+            IndependentReviewRecord(
+                review_id="rev-mismatch",
+                requirement_id="ORCH-AUTH-1",
+                reviewer_principal_id="reviewer-charlie",
+                author_principal_id="run-alice",  # Bound author is run-bob
+                reviewed_input_version="v2",
+                verdict="pass",
+                scope="code_review",
+            ),
+        )
+    assert "AUTHOR_PRINCIPAL_MISMATCH" in str(exc_rev.value)
+    assert "run-bob" in str(exc_rev.value)
+    assert "run-alice" in str(exc_rev.value)
+
+
+def test_acceptance_verdict_rejection_and_self_acceptance(tmp_path: Path):
+    owner = tmp_path / "owner-acc"
+    project = tmp_path / "project"
+    project.mkdir()
+    context = VerificationContext("owner-acc", "thread-1", "task-1")
+    repo = VerificationEvidenceRepository(owner)
+
+    repo.bind_requirement(
+        context,
+        RequirementProvenanceRecord(
+            requirement_id="ORCH-ACC-1",
+            owner_ref="owner-acc",
+            task_id="task-1",
+            root=str(project),
+            input_version="v1",
+            watched_paths=("a.py",),
+            author_principal_id="run-alice",
+        ),
+    )
+
+    # 1. Invalid acceptance verdict rejected
+    with pytest.raises(ValueError) as exc_invalid:
+        repo.record_acceptance(
+            context,
+            AcceptanceRecord(
+                acceptance_id="acc-inv",
+                requirement_id="ORCH-ACC-1",
+                accepted_by_principal_id="coord-lead",
+                accepted_input_version="v1",
+                verdict="invalid_verdict",  # type: ignore[arg-type]
+            ),
+        )
+    assert "INVALID_ACCEPTANCE_VERDICT" in str(exc_invalid.value)
+
+    # 2. Self-acceptance forbidden (author == accepted_by)
+    with pytest.raises(SelfReviewForbiddenError) as exc_self:
+        repo.record_acceptance(
+            context,
+            AcceptanceRecord(
+                acceptance_id="acc-self",
+                requirement_id="ORCH-ACC-1",
+                accepted_by_principal_id="run-alice",  # Author is run-alice
+                accepted_input_version="v1",
+                verdict="accepted",
+            ),
+        )
+    assert "SELF_REVIEW_FORBIDDEN" in str(exc_self.value)
+
+    # 3. Acceptance with verdict="rejected" sets acceptance_status to 'rejected'
+    acc_rej = repo.record_acceptance(
+        context,
+        AcceptanceRecord(
+            acceptance_id="acc-rej",
+            requirement_id="ORCH-ACC-1",
+            accepted_by_principal_id="coord-lead",
+            accepted_input_version="v1",
+            verdict="rejected",
+        ),
+    )
+    assert acc_rej.verdict == "rejected"
+    req_rej = repo.get_requirement("owner-acc", "ORCH-ACC-1")
+    assert req_rej is not None
+    assert req_rej.acceptance_status == "rejected"
+
+    # 4. Acceptance with verdict="changes_requested" sets acceptance_status to 'rejected'
+    acc_cr = repo.record_acceptance(
+        context,
+        AcceptanceRecord(
+            acceptance_id="acc-cr",
+            requirement_id="ORCH-ACC-1",
+            accepted_by_principal_id="coord-lead",
+            accepted_input_version="v1",
+            verdict="changes_requested",
+        ),
+    )
+    assert acc_cr.verdict == "changes_requested"
+    req_cr = repo.get_requirement("owner-acc", "ORCH-ACC-1")
+    assert req_cr is not None
+    assert req_cr.acceptance_status == "rejected"
+
+
+def test_verification_event_honesty_validation(tmp_path: Path):
+    owner = tmp_path / "owner-honest"
+    project = tmp_path / "project"
+    project.mkdir()
+    context = VerificationContext("owner-honest", "thread-1", "task-1")
+    repo = VerificationEvidenceRepository(owner)
+
+    repo.bind_requirement(
+        context,
+        RequirementProvenanceRecord(
+            requirement_id="ORCH-HONEST-1",
+            owner_ref="owner-honest",
+            task_id="task-1",
+            root=str(project),
+            input_version="v1",
+            watched_paths=("a.py",),
+            author_principal_id="run-alice",
+        ),
+    )
+
+    # 1. Non-empty events required when observation_scope != "unverified"
+    with pytest.raises(ObservationScopeHonestyError) as exc_empty:
+        repo.link_verification(
+            context,
+            requirement_id="ORCH-HONEST-1",
+            event_ids=[],
+            observation_scope="module_only",
+        )
+    assert "EMPTY_VERIFICATION_EVENTS" in str(exc_empty.value)
+
+    # 2. Non-existent verification event IDs fail closed
+    with pytest.raises(ObservationScopeHonestyError) as exc_unknown:
+        repo.link_verification(
+            context,
+            requirement_id="ORCH-HONEST-1",
+            event_ids=[999999],
+            observation_scope="module_only",
+        )
+    assert "UNKNOWN_VERIFICATION_EVENT_ID" in str(exc_unknown.value)
+
+    # 3. Failed verification events cannot promote observation scope
+    failed_ev = repo.record(context, _make_evidence(project, status="failed", scope="targeted"))
+    with pytest.raises(ObservationScopeHonestyError) as exc_failed:
+        repo.link_verification(
+            context,
+            requirement_id="ORCH-HONEST-1",
+            event_ids=[failed_ev["id"]],
+            observation_scope="module_only",
+        )
+    assert "FAILED_VERIFICATION_EVENT_LINKED" in str(exc_failed.value)
+
+    # 4. Genuine passed verification event succeeds honestly
+    passed_ev = repo.record(context, _make_evidence(project, status="passed", scope="targeted"))
+    linked = repo.link_verification(
+        context,
+        requirement_id="ORCH-HONEST-1",
+        event_ids=[passed_ev["id"]],
+        observation_scope="module_only",
+    )
+    assert linked.observation_scope == "module_only"
+    assert passed_ev["id"] in linked.verification_event_ids
+
+
+def test_subagent_runner_identity_enforcement_and_scope_warnings(tmp_path: Path):
+    owner_home = tmp_path / "owner-subagent"
+    owner_home.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+
+    agent = SimpleNamespace(
+        home_paths=SimpleNamespace(owner_home_dir=str(owner_home), owner_id="owner-subagent"),
+        root=str(project),
+        thread_id="thread-subagent",
+        _current_run_params=SimpleNamespace(run_id="run-alice", task_id="task-subagent", request_id="req-1"),
+    )
+    # Activate subagent runner context
+    set_current_subagent_context(agent, run_id="run-alice")
+
+    tool = RequirementProvenanceTool(agent)
+
+    # 1. Subagent bind_requirement defaults author to self_id ("run-alice")
+    bind_res = tool.execute({
+        "action": "bind_requirement",
+        "requirement_id": "ORCH-SUB-1",
+        "input_version": "v1",
+        "watched_paths": ["src/app.py"],
+    })
+    assert bind_res.ok is True
+    bind_data = json.loads(bind_res.output)
+    assert bind_data["requirement"]["author_principal_id"] == "run-alice"
+
+    # 2. Subagent bind_requirement with spoofed author is overridden with scope_warnings
+    bind_spoof = tool.execute({
+        "action": "bind_requirement",
+        "requirement_id": "ORCH-SUB-2",
+        "input_version": "v1",
+        "watched_paths": ["src/app.py"],
+        "author_principal_id": "spoofed-author",
+    })
+    assert bind_spoof.ok is True
+    spoof_data = json.loads(bind_spoof.output)
+    assert spoof_data["requirement"]["author_principal_id"] == "run-alice"
+    assert "scope_warnings" in spoof_data
+    assert "author_principal_id overridden by runner identity 'run-alice'" in spoof_data["scope_warnings"][0]
+
+    # 3. Subagent calling record_independent_review with spoofed reviewer is forced to run-alice
+    # Since author is run-alice, forced reviewer run-alice triggers SELF_REVIEW_FORBIDDEN fail closed
+    rev_spoof = tool.execute({
+        "action": "record_independent_review",
+        "requirement_id": "ORCH-SUB-1",
+        "reviewer_principal_id": "run-bob",  # Spoofed!
+        "reviewed_input_version": "v1",
+        "review_verdict": "pass",
+    })
+    assert rev_spoof.ok is False
+    assert rev_spoof.error_code == "TOOL_PERMISSION_DENIED"
+    rev_data = json.loads(rev_spoof.output)
+    assert rev_data["reason"] == "SELF_REVIEW_FORBIDDEN"
+    assert "scope_warnings" in rev_data
+    assert "reviewer_principal_id overridden by runner identity 'run-alice'" in rev_data["scope_warnings"][0]
+
+    # 4. Subagent calling record_acceptance with spoofed accepted_by is forced to run-alice
+    # Since author is run-alice, forced accepted_by run-alice triggers self-acceptance rejection
+    acc_spoof = tool.execute({
+        "action": "record_acceptance",
+        "requirement_id": "ORCH-SUB-1",
+        "accepted_by_principal_id": "run-bob",  # Spoofed!
+        "accepted_input_version": "v1",
+    })
+    assert acc_spoof.ok is False
+    assert acc_spoof.error_code == "TOOL_PERMISSION_DENIED"
+    acc_data = json.loads(acc_spoof.output)
+    assert acc_data["reason"] == "SELF_REVIEW_FORBIDDEN"
+    assert "scope_warnings" in acc_data
+    assert "accepted_by_principal_id overridden by runner identity 'run-alice'" in acc_data["scope_warnings"][0]

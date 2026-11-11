@@ -577,8 +577,16 @@ class VerificationEvidenceRepository:
             else:
                 created_at = existing["created_at"]
                 updated_at = now_text
-                author = record.author_principal_id or existing["author_principal_id"]
-                if record.input_version and record.input_version != existing["input_version"]:
+                existing_author = str(existing["author_principal_id"] or "").strip()
+                supplied_author = str(record.author_principal_id or "").strip()
+                is_version_changed = bool(record.input_version and record.input_version != existing["input_version"])
+                if not is_version_changed:
+                    if existing_author and supplied_author and existing_author != supplied_author:
+                        raise ValueError(
+                            "AUTHOR_PRINCIPAL_MISMATCH: cannot overwrite bound author without changing input_version"
+                        )
+                author = supplied_author or existing_author
+                if is_version_changed:
                     review_status = "stale"
                     acceptance_status = "invalidated"
                     invalidation_reason = "INPUT_VERSION_CHANGED"
@@ -666,16 +674,41 @@ class VerificationEvidenceRepository:
 
             int_event_ids = [int(eid) for eid in event_ids]
             has_integrated = False
-            if int_event_ids:
-                placeholders = ",".join("?" for _ in int_event_ids)
+            if observation_scope != "unverified":
+                if not int_event_ids:
+                    raise ObservationScopeHonestyError(
+                        "EMPTY_VERIFICATION_EVENTS: cannot promote observation_scope without verification events"
+                    )
+                unique_ids = list(set(int_event_ids))
+                placeholders = ",".join("?" for _ in unique_ids)
                 event_rows = conn.execute(
                     f"SELECT id, scope, status FROM verification_events WHERE owner_ref = ? AND id IN ({placeholders})",
-                    (context.owner_ref, *int_event_ids),
+                    (context.owner_ref, *unique_ids),
                 ).fetchall()
+                if len(event_rows) != len(unique_ids):
+                    raise ObservationScopeHonestyError(
+                        "UNKNOWN_VERIFICATION_EVENT_ID: all linked verification_event_ids must exist for this owner"
+                    )
+                if not all(er["status"] == "passed" for er in event_rows):
+                    raise ObservationScopeHonestyError(
+                        "FAILED_VERIFICATION_EVENT_LINKED: cannot promote observation_scope using failed verification events"
+                    )
                 for er in event_rows:
                     if er["scope"] == "full" and er["status"] == "passed":
                         has_integrated = True
                         break
+            else:
+                if int_event_ids:
+                    unique_ids = list(set(int_event_ids))
+                    placeholders = ",".join("?" for _ in unique_ids)
+                    event_rows = conn.execute(
+                        f"SELECT id, scope, status FROM verification_events WHERE owner_ref = ? AND id IN ({placeholders})",
+                        (context.owner_ref, *unique_ids),
+                    ).fetchall()
+                    for er in event_rows:
+                        if er["scope"] == "full" and er["status"] == "passed":
+                            has_integrated = True
+                            break
 
             review_row = conn.execute(
                 """
@@ -741,10 +774,13 @@ class VerificationEvidenceRepository:
                 (owner_ref, record.requirement_id),
             ).fetchone()
 
-            author = record.author_principal_id.strip()
-            if not author and req_row is not None:
-                author = str(req_row["author_principal_id"] or "").strip()
-
+            stored_author = str(req_row["author_principal_id"] or "").strip() if req_row is not None else ""
+            supplied_author = record.author_principal_id.strip()
+            if stored_author and supplied_author and stored_author != supplied_author:
+                raise ValueError(
+                    f"AUTHOR_PRINCIPAL_MISMATCH: requirement '{record.requirement_id}' is bound to author '{stored_author}', got '{supplied_author}'"
+                )
+            author = stored_author or supplied_author
             validate_independent_review(record.reviewer_principal_id, author)
 
             effective_record = IndependentReviewRecord(
@@ -835,22 +871,31 @@ class VerificationEvidenceRepository:
                     f"STALE_INPUT_VERSION: accepted input version '{record.accepted_input_version}' != requirement version '{current_ver}'"
                 )
 
-            if req_row["review_status"] != "approved":
-                raise ValueError(
-                    f"REQUIREMENT_NOT_APPROVED: cannot record acceptance when review_status is '{req_row['review_status']}'"
-                )
+            effective_verdict = (record.verdict or "accepted").strip()
+            if effective_verdict not in {"accepted", "rejected", "changes_requested"}:
+                raise ValueError(f"INVALID_ACCEPTANCE_VERDICT: '{effective_verdict}'")
 
-            if req_row["acceptance_status"] == "invalidated" and req_row["invalidation_reason"]:
-                raise ValueError(
-                    f"REQUIREMENT_INVALIDATED: requirement has been invalidated ({req_row['invalidation_reason']})"
-                )
+            stored_author = str(req_row["author_principal_id"] or "").strip()
+            if stored_author:
+                validate_independent_review(record.accepted_by_principal_id, stored_author)
+
+            if effective_verdict == "accepted":
+                if req_row["review_status"] != "approved":
+                    raise ValueError(
+                        f"REQUIREMENT_NOT_APPROVED: cannot record acceptance when review_status is '{req_row['review_status']}'"
+                    )
+
+                if req_row["acceptance_status"] == "invalidated" and req_row["invalidation_reason"]:
+                    raise ValueError(
+                        f"REQUIREMENT_INVALIDATED: requirement has been invalidated ({req_row['invalidation_reason']})"
+                    )
 
             effective_record = AcceptanceRecord(
                 acceptance_id=record.acceptance_id or f"acc-{now_text}",
                 requirement_id=record.requirement_id,
                 accepted_by_principal_id=record.accepted_by_principal_id.strip(),
                 accepted_input_version=record.accepted_input_version.strip(),
-                verdict=record.verdict or "accepted",
+                verdict=effective_verdict,
                 observation_scope=record.observation_scope or req_row["observation_scope"],
                 review_id=record.review_id or "",
                 evidence_refs=record.evidence_refs,
@@ -886,15 +931,16 @@ class VerificationEvidenceRepository:
                 ),
             )
 
+            new_acceptance_status = "accepted" if effective_verdict == "accepted" else "rejected"
             conn.execute(
                 """
                 UPDATE requirement_links
-                SET acceptance_status = 'accepted',
+                SET acceptance_status = ?,
                     invalidation_reason = '',
                     updated_at = ?
                 WHERE owner_ref = ? AND requirement_id = ?
                 """,
-                (now_text, owner_ref, effective_record.requirement_id),
+                (new_acceptance_status, now_text, owner_ref, effective_record.requirement_id),
             )
             conn.commit()
             return effective_record
