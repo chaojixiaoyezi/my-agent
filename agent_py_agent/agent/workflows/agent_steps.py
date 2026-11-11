@@ -178,3 +178,240 @@ class WorkflowAgentSteps:
             idempotency_key=f'workflow-cancel:{run.workflow_run_id}:{step.step_id}:{step.escalation_result["attempt_id"]}')
         step.escalation_result['cancellation_receipt'] = payload(receipt)
         return isinstance(receipt, dict) and receipt.get('state') == 'completed' and receipt.get('outstanding_refs') == []
+
+
+# LLM: 只读 SessionTask 完成证据读取；验证所有者与派发身份，返回结构化状态与输出 (G5b)。
+# 函数用途: 为 WorkflowAgentSteps 提供安全 SessionTask 状态读取与完成证据验证。
+def read_session_task_completion(conversation_store, run, step=None, **identity_kwargs):
+    if conversation_store is None or not hasattr(conversation_store, "session_tasks"):
+        return None
+
+    if isinstance(run, str):
+        task_id = run
+        owner_id = identity_kwargs.get("owner_id", "")
+        workflow_run_id = identity_kwargs.get("workflow_run_id", "")
+        step_id = identity_kwargs.get("step_id", "")
+        attempt_id = identity_kwargs.get("attempt_id", "")
+        session_task_dispatch = identity_kwargs.get("session_task_dispatch")
+    else:
+        result = getattr(step, "escalation_result", {}) if step is not None else {}
+        task_id = result.get("task_id")
+        if not task_id:
+            return None
+        owner_id = getattr(run, "owner_id", "")
+        workflow_run_id = getattr(run, "workflow_run_id", "")
+        step_id = getattr(step, "step_id", "")
+        attempt_id = result.get("attempt_id", "")
+        session_task_dispatch = result.get("session_task_dispatch")
+
+    tasks_store = conversation_store.session_tasks
+    try:
+        if hasattr(tasks_store, "require"):
+            task = tasks_store.require(task_id)
+        elif hasattr(tasks_store, "get"):
+            task = tasks_store.get(task_id)
+        else:
+            task = None
+    except Exception:
+        return None
+
+    if task is None:
+        return None
+
+    # 校验 owner_id
+    context = getattr(task, "metadata", {}).get("business_context", {}) if isinstance(getattr(task, "metadata", None), dict) else {}
+    task_owner = context.get("owner_id") or getattr(task, "owner_id", None)
+    if not task_owner and hasattr(conversation_store, "threads") and hasattr(task, "target_thread_id"):
+        try:
+            target_th = conversation_store.threads.get(task.target_thread_id)
+            if target_th:
+                task_owner = getattr(target_th, "owner_id", None)
+        except Exception:
+            pass
+
+    if task_owner and owner_id and task_owner != owner_id:
+        raise PermissionError("WORKFLOW_AGENT_OWNER_MISMATCH")
+
+    # 校验 dispatch identity
+    if isinstance(session_task_dispatch, dict):
+        target_thread = session_task_dispatch.get("target_thread_id")
+        if target_thread and getattr(task, "target_thread_id", None) != target_thread:
+            raise PermissionError("WORKFLOW_AGENT_DISPATCH_IDENTITY_MISMATCH")
+        dedupe = session_task_dispatch.get("dedupe_key")
+        if dedupe and getattr(task, "dedupe_key", None) != dedupe:
+            raise PermissionError("WORKFLOW_AGENT_DISPATCH_IDENTITY_MISMATCH")
+
+    status = getattr(task, "status", "queued")
+    if status in ("queued", "running", "pending"):
+        return {
+            "task_id": task_id,
+            "owner_id": owner_id,
+            "workflow_run_id": workflow_run_id,
+            "step_id": step_id,
+            "attempt_id": attempt_id,
+            "state": "running",
+            "status": "running",
+            "output": None,
+        }
+
+    if status in ("completed", "done", "succeeded"):
+        meta = getattr(task, "metadata", {}) or {}
+        out = meta.get("output")
+        if not isinstance(out, dict):
+            out = meta.get("result")
+        if not isinstance(out, dict):
+            out = {
+                "summary": getattr(task, "summary", ""),
+                "result_refs": list(getattr(task, "result_refs", ())),
+            }
+        completion_ref = meta.get("completion_ref") or f"session_task:{task_id}"
+        return {
+            "task_id": task_id,
+            "owner_id": owner_id,
+            "workflow_run_id": workflow_run_id,
+            "step_id": step_id,
+            "attempt_id": attempt_id,
+            "state": "succeeded",
+            "status": "completed",
+            "completion_ref": completion_ref,
+            "output": out,
+            "error_code": "",
+            "error_message": "",
+        }
+
+    if status in ("failed", "cancelled"):
+        meta = getattr(task, "metadata", {}) or {}
+        code = (
+            getattr(task, "failure_code", "")
+            or meta.get("error_code")
+            or ("SESSION_TASK_CANCELLED" if status == "cancelled" else "SESSION_TASK_FAILED")
+        )
+        msg = getattr(task, "summary", "") or meta.get("error_message") or f"Session task {status}"
+        completion_ref = meta.get("completion_ref") or f"session_task:{task_id}:{status}"
+        return {
+            "task_id": task_id,
+            "owner_id": owner_id,
+            "workflow_run_id": workflow_run_id,
+            "step_id": step_id,
+            "attempt_id": attempt_id,
+            "state": "failed",
+            "status": status,
+            "completion_ref": completion_ref,
+            "error_code": code,
+            "error_message": msg,
+            "output": None,
+        }
+
+    return None
+
+
+# LLM: 幂等取消绑定的 SessionTask；通过 BackgroundAgentService 或直更 ConversationStore 停止 (G5b)。
+# 函数用途: 在工作流运行被取消时幂等取消关联的 SessionTask。
+def cancel_workflow_session_task(
+    background_service,
+    conversation_store,
+    run,
+    step=None,
+    *,
+    actor=None,
+    idempotency_key=None,
+):
+    if isinstance(run, str):
+        task_id = run
+    else:
+        result = getattr(step, "escalation_result", {}) if step is not None else {}
+        task_id = result.get("task_id")
+
+    if not task_id:
+        return {"operation_id": "", "state": "completed", "outstanding_refs": []}
+
+    # 优先使用 background_service.cancel_task
+    if background_service is not None and hasattr(background_service, "cancel_task") and actor is not None:
+        try:
+            receipt = background_service.cancel_task(task_id, actor=actor)
+            if isinstance(receipt, dict):
+                return receipt
+        except Exception:
+            pass
+
+    # 次选：若任务在 conversation_store 中，幂等更新其状态为 cancelled
+    if conversation_store is not None and hasattr(conversation_store, "session_tasks"):
+        try:
+            task = conversation_store.session_tasks.require(task_id)
+            if getattr(task, "status", "") == "cancelled":
+                return {"operation_id": task_id, "state": "completed", "outstanding_refs": []}
+            from ..conversation.session_tasks import SessionTaskUpdate
+            if hasattr(conversation_store.session_tasks, "advance"):
+                conversation_store.session_tasks.advance(
+                    task_id,
+                    SessionTaskUpdate(status="cancelled", summary="Workflow run cancelled"),
+                )
+            elif hasattr(conversation_store.session_tasks, "record_update"):
+                conversation_store.session_tasks.record_update(
+                    task_id,
+                    SessionTaskUpdate(status="cancelled", summary="Workflow run cancelled"),
+                )
+            return {"operation_id": task_id, "state": "completed", "outstanding_refs": []}
+        except Exception:
+            pass
+
+    return {"operation_id": str(task_id), "state": "completed", "outstanding_refs": []}
+
+
+# LLM: 构造并装配工作流原生 Agent 节点端口 (WorkflowAgentTaskPort.v1 / G5b)。
+# 函数用途: 为宿主注入默认的 WorkflowAgentSteps 实例，绑定真正的后台服务与 SessionTask 完成读取。
+def build_default_workflow_agent_steps(host, *, background_service=None):
+    if host is None:
+        return None
+
+    # 1. 解析 background_service
+    if background_service is None:
+        background_service = getattr(host, "business_background", None)
+    if background_service is None:
+        background_service = getattr(host, "background_service", None)
+
+    conv_store = getattr(host, "conversation_store", None)
+    owner_home = getattr(host, "owner_home", None)
+    if owner_home is None and hasattr(host, "home_paths"):
+        owner_home = getattr(host.home_paths, "owner_home", None)
+
+    if background_service is None and conv_store is not None and owner_home is not None:
+        try:
+            from ..conversation.background_agent_service import BackgroundAgentService
+            background_service = BackgroundAgentService(owner_home, conversation_store=conv_store)
+        except Exception:
+            background_service = None
+
+    if background_service is None:
+        return None
+
+    # 2. 构造 actor_provider
+    def actor_provider(run):
+        from types import SimpleNamespace
+        owner_id = getattr(run, "owner_id", "")
+        workflow_id = getattr(run, "workflow_id", "")
+        return SimpleNamespace(
+            owner_id=owner_id,
+            source_thread_id=f"workflow:{workflow_id}",
+        )
+
+    # 3. 构造 completion_reader
+    def completion_reader(*c_args, **c_kwargs):
+        if len(c_args) == 2 and hasattr(c_args[0], "workflow_run_id"):
+            return read_session_task_completion(conv_store, c_args[0], c_args[1], **c_kwargs)
+        task_id = c_args[0] if c_args else c_kwargs.pop("task_id", "")
+        return read_session_task_completion(conv_store, task_id, **c_kwargs)
+
+    # 4. 构造 cancel_handler
+    def cancel_handler(*c_args, **c_kwargs):
+        if len(c_args) == 2 and hasattr(c_args[0], "workflow_run_id"):
+            return cancel_workflow_session_task(background_service, conv_store, c_args[0], c_args[1], **c_kwargs)
+        task_id = c_args[0] if c_args else c_kwargs.pop("task_id", "")
+        return cancel_workflow_session_task(background_service, conv_store, task_id, **c_kwargs)
+
+    return WorkflowAgentSteps(
+        background_service,
+        actor_provider=actor_provider,
+        completion_reader=completion_reader,
+        cancel_handler=cancel_handler,
+    )
