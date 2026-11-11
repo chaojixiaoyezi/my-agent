@@ -46,6 +46,8 @@ def public_workflow(tmp_path, monkeypatch):
     services = BusinessServices(host)
     authority = bind_business_context(host, actor=actor, authorize=lambda action, facts: access['allowed'])
     space = services.spaces.create({'name': '原空间'}, actor=services.actor(authority), idempotency_key='original-space')
+    # 生产原生入口(business_api.invoke)总以同一发行上下文签发的BusinessActor调用工作流领域；宿主Actor只留给后台提交/代理身份。
+    caller = services.actor(authority)
     background = _BusinessBackgroundService(services, authority)
     submissions, scripts, completions, engines = [], [], [], []
     submit, run_script = background.submit, ScriptRunner.run_script
@@ -77,7 +79,7 @@ def public_workflow(tmp_path, monkeypatch):
     context = BusinessExecutionContext(home.owner_id, space['space_id'], None, 'stask-parent',
         space['revision'], None, (), (), 'business-context.v1')
     api = WorkflowScopeService(home.owner_home_dir, owner_id=home.owner_id,
-        authorize=lambda current, action, ref: current is actor and access['allowed'],
+        authorize=lambda current, action, ref: current is caller and access['allowed'],
         context_provider=lambda current, request: context, agent_steps=agents, engine_factory=engine_factory)
     script(home.owner_home_dir, script_id='prefix')
     script(home.owner_home_dir, script_id='tail')
@@ -87,8 +89,9 @@ def public_workflow(tmp_path, monkeypatch):
             config={'instruction': '核对原输入'}), step('tail', script_id='tail')]}
     api.execute('workflows.create', {'definition': definition,
         'scope': {'scope_mode': 'spaces', 'space_ids': [space['space_id']]}},
-        actor=actor, idempotency_key='create-original')
-    return SimpleNamespace(home=home, store=store, actor=actor, access=access, api=api, background=background,
+        actor=caller, idempotency_key='create-original')
+    return SimpleNamespace(home=home, store=store, actor=caller, host_actor=actor, access=access, api=api,
+        background=background,
         agents=agents, runs=WorkflowRunStore(home.owner_home_dir), submissions=submissions,
         scripts=scripts, completions=completions, engines=engines, space=space)
 
@@ -328,13 +331,15 @@ def test_public_absent_retry_with_missing_identity_stays_closed(public_workflow,
     assert fixture.scripts == ['prefix'] and fixture.store.wakes.pending(limit=0) == []
 
 
+# LLM: 原缺席任务恢复前核验宿主代理身份、来源线程、目标线程、幂等键与owner一致；任一绑定漂移拒绝恢复且零新提交。
+# 函数用途: 验证原分派身份或绑定字段被篡改时缺席重试被权限门拒绝。
 @pytest.mark.parametrize('field', ['actor_source', 'sender_thread_id', 'target_thread_id', 'dedupe_key', 'owner'])
 def test_public_absent_retry_rejects_changed_original_binding(public_workflow, monkeypatch, field):
     fixture = public_workflow
     first, absent, _ = proven_absence(fixture, monkeypatch)
     other = fixture.store.threads.create(owner_id='alice', canonical_user_id='different-source')
     if field in ('actor_source', 'owner'):
-        changed = replace(fixture.actor, **({'source_thread_id': other.thread_id} if field == 'actor_source' else {'owner_id': 'bob'}))
+        changed = replace(fixture.host_actor, **({'source_thread_id': other.thread_id} if field == 'actor_source' else {'owner_id': 'bob'}))
         fixture.agents.actor_provider = lambda run: changed
     else:
         absent.steps[1].escalation_result['session_task_dispatch'][field] = 'different-key' if field == 'dedupe_key' else other.thread_id

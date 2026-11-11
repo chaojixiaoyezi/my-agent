@@ -161,14 +161,6 @@ class WorkflowRunContextFactory:
         return resolve_workflow_run_context(actor=actor, workflow_run_id=workflow_run_id,
             requested_space_id=request.get('space_id'), project_ref=request.get('project_ref'))
 
-    # LLM: 同一宿主端口复核它冻结过的上下文：只读核当前空间活跃、Actor访问及绑定/项目可用，不重选默认空间，
-    #   也不授予工具权限（G5a-R1）；失败抛原业务错误码，运行记录不变。
-    # 函数用途: 在恢复控制写入及每次后续副作用之前确认冻结业务上下文仍被当前授权允许。
-    def revalidate(self, actor, context):
-        from ..conversation.business_context import revalidate_business_context
-        from ..conversation.business_contracts import BusinessExecutionContext
-        revalidate_business_context(actor=actor, context=BusinessExecutionContext.from_dict(context))
-
 
 class WorkflowScopeService:
     """原动作目录与 UI/plugin 共用的 Owner 领域入口；不从请求猜当前业务身份。"""
@@ -421,6 +413,8 @@ class WorkflowScopeService:
     def _engine(self, actor, *, resolution_ref=None):
         from .engine import _requires_native_agent_resume, _requires_terminal_publication_resume
 
+        # LLM: 每次运行预检、续跑、取消及步骤副作用前校验当前Actor权限、工作流活跃态、冻结空间范围与冻结业务上下文（G5a-R1）；只读不重选默认。
+        # 函数用途: 校验当前业务调用者对工作流运行阶段的操作授权与范围准入。
         def authorize(record, phase):
             # 取消只收回原工作，不重新取得执行准入；其它阶段仍守原执行授权。
             self._authorize(actor, 'workflow_runs.cancel' if phase == 'cancel' else 'workflows.run', record.workflow_id)
@@ -430,11 +424,15 @@ class WorkflowScopeService:
             if record.business_context and record.business_context.get('owner_id') != self.owner_id:
                 raise PermissionError('WORKFLOW_OWNER_MISMATCH')
             if phase != 'cancel' and (record.scope_snapshot or record.business_context):
-                # G5a-R1：恢复控制写入前与每次后续副作用前，按当前范围核冻结空间并复核冻结上下文的当前业务准入；
-                #   只核不重选默认，取消不经此门以保收回能力。
+                # G5a-R1：恢复控制写入前与每次后续副作用前，按当前范围核冻结空间；凡带冻结业务上下文的运行，不论
+                #   上下文端口类型，都以当前Actor经共享只读复核核当前空间/访问/绑定/项目；不重调端口、不重选默认，
+                #   取消不经此门以保收回能力。
                 self._check_scope(workflow_state(current)['scope'], record.business_context.get('space_id'))
-                if record.business_context and isinstance(self.context_provider, WorkflowRunContextFactory):
-                    self.context_provider.revalidate(actor, record.business_context)
+                if record.business_context:
+                    from ..conversation.business_context import revalidate_business_context
+                    from ..conversation.business_contracts import BusinessExecutionContext
+                    revalidate_business_context(actor=actor,
+                        context=BusinessExecutionContext.from_dict(record.business_context))
             if self.governance is not None:
                 if phase == 'resume' and resolution_ref is not None:
                     return self.governance.require_resolution(record, resolution_ref)

@@ -36,6 +36,8 @@ from agent_py_agent.agent.workflows.run_store import (
 from agent_py_agent.agent.workflows.script_runner import ScriptRunner
 
 
+# LLM: 用真实领域服务、同一发行上下文签发的BusinessActor、双Store与治理门构造公开恢复夹具；宿主Actor仅用于后台任务提交身份。
+# 函数用途: 构造无治理/带治理两种模式下的公开工作流恢复测试环境。
 @pytest.fixture(params=[False, True], ids=['plain', 'governed'])
 def public_recovery(tmp_path, monkeypatch, request):
     """真实领域服务/引擎/双 Store/适配器；只观察调用，模型和脚本不得启动。"""
@@ -51,6 +53,8 @@ def public_recovery(tmp_path, monkeypatch, request):
     services = BusinessServices(host)
     authority = bind_business_context(host, actor=actor, authorize=lambda action, facts: access['allowed'])
     space = services.spaces.create({'name': '原空间'}, actor=services.actor(authority), idempotency_key='space')
+    # 生产原生入口(business_api.invoke)总以同一发行上下文签发的BusinessActor调用工作流领域；宿主Actor只留给后台提交/代理身份。
+    caller = services.actor(authority)
     background = _BusinessBackgroundService(services, authority)
     runs = WorkflowRunStore(home.owner_home_dir)
     submissions, completions, reviews, effects, resolutions, performances = [], [], [], [], [], []
@@ -107,7 +111,7 @@ def public_recovery(tmp_path, monkeypatch, request):
     context = BusinessExecutionContext('alice', space['space_id'], None, 'stask-parent',
         space['revision'], None, (), (), 'business-context.v1')
     api = WorkflowScopeService(home.owner_home_dir, owner_id='alice',
-        authorize=lambda current, action, ref: current is actor and access['allowed'] and action not in access['denied'],
+        authorize=lambda current, action, ref: current is caller and access['allowed'] and action not in access['denied'],
         context_provider=lambda current, params: context, agent_steps=agents, governance=guard,
         engine_factory=WorkflowEngine)
     definition = {'descriptor': {'id': 'original-flow', 'kind': 'workflow', 'name': '原任务恢复',
@@ -115,8 +119,9 @@ def public_recovery(tmp_path, monkeypatch, request):
         'steps': [{'step_id': 'agent', 'name': '原 Agent 步骤', 'mode': 'agent_task',
             'config': {'instruction': '核对原输入'}}]}
     api.execute('workflows.create', {'definition': definition,
-        'scope': {'scope_mode': 'spaces', 'space_ids': [space['space_id']]}}, actor=actor, idempotency_key='create')
-    return SimpleNamespace(home=home, store=store, actor=actor, access=access, api=api, background=background,
+        'scope': {'scope_mode': 'spaces', 'space_ids': [space['space_id']]}}, actor=caller, idempotency_key='create')
+    return SimpleNamespace(home=home, store=store, actor=caller, host_actor=actor, access=access, api=api,
+        background=background,
         runs=runs, agents=agents, guard=guard, space=space, context=context, submissions=submissions,
         completions=completions, reviews=reviews, effects=effects, resolutions=resolutions,
         performances=performances, completion_changes=completion_changes)

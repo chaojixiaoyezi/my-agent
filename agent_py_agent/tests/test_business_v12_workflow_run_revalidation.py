@@ -2,6 +2,7 @@
 #   与副作用前被拒且运行记录不变；范围恢复后同一运行可再续跑；撤销后取消仍可收口；运行中途撤销使后续步骤在副作用前被拒、
 #   脚本不执行。R2：原生服务缓存按工作流端口稳定来源失效（登记回退→显式覆盖、缺一显式、再回退）。只用 tmp 隔离 home；
 #   空间归档的阻塞端口原生未接线（G4），测试只供空阻塞列表让真实归档转换运行。
+#   R1补（MSG-027）：旧二参可调用上下文端口创建的运行同样以当前Actor复核冻结空间归档与项目撤销。
 #   R3（MSG-027）：非allow策略（skip_if_running/queue）的续跑在撤销后于真实dispatcher首次claim绑定/排队写入前被拒，
 #   运行账本与claim/队列字节不变且无瞬时写；有效对照经同一真实dispatcher建claim或排队后真实执行，排队/跳过准入
 #   回执如实投影为202 accepted / 未开始拒绝 / blocked（原把准入字典当运行记录读而断连）。
@@ -14,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.conversation.business_context import resolve_workflow_run_context
 from agent_py_agent.agent.workflows import concurrency_policy
 from agent_py_agent.agent.workflows import engine as workflow_engine
 from agent_py_agent.agent.workflows import run_store as workflow_run_store
@@ -142,6 +144,74 @@ def test_revocation_between_steps_refuses_the_next_side_effect_before_its_script
     assert (second.status, second.error_code) == ('failed', 'WORKFLOW_SPACE_MISMATCH')
     assert record.status != 'succeeded' and receipt['state'] != 'completed'
 
+
+# LLM: 验证显式二参可调用上下文端口创建的运行在续跑前同样以当前Actor复核空间归档与项目撤销（G5a-R1 / MSG-027），恢复后可正常续跑完成。
+# 函数用途: 验证旧二参上下文端口运行在空间归档或项目失活时拒绝续跑且零写改动。
+def test_callable_provider_runs_revalidate_archived_space_and_revoked_project_before_resume(native, monkeypatch):  # noqa: F811
+    server, agent = native
+    agent.business_active_references = lambda space_id, actor: []
+    projects = {'proj-r1-callable': 'available'}
+
+    # LLM: 仅向本Owner返回三参项目引用状态，不伪造其它引用类型。
+    # 函数用途: 为测试提供可控项目可用性状态的宿主引用只读端口。
+    def references(*args):
+        # 宿主引用端口（原生默认只解析task，没有项目来源）：只答本Owner项目行；单参工作流索引调用如实未知。
+        if len(args) == 3 and args[0] == 'project' and args[1] in projects:
+            return {'owner_id': agent.home_paths.owner_id, 'ref': args[1], 'space_id': None,
+                    'state': projects[args[1]]}
+        return None
+
+    # LLM: 模拟合法旧二参宿主上下文端口，只在首次启动冻结当前空间与项目引用。
+    # 函数用途: 以二参可调用形式解析并冻结工作流运行业务上下文。
+    def legacy_provider(actor, request):
+        # 合法旧二参宿主端口：自行经共享只读解析冻结当前空间/项目；逻辑task_id是宿主自有引用而非运行ID。
+        return resolve_workflow_run_context(actor=actor, workflow_run_id='host-legacy-task',
+            requested_space_id=request.get('space_id'), project_ref=request.get('project_ref'))
+
+    agent.business_reference_reader = references
+    _script(agent)
+    agent.workflow_engine_factory = lambda owner_home, **options: WorkflowEngine(owner_home, **options)
+    agent.business_context_provider = legacy_provider
+    space = ok(native, 'spaces.create', {'name': 'r1c-archived'}, idempotency_key='r1c-space-create-archive')['space_id']
+    project_space = ok(native, 'spaces.create', {'name': 'r1c-project', 'default_project_ref': 'proj-r1-callable'},
+                       idempotency_key='r1c-space-create-project')['space_id']
+    ok(native, 'workflows.create', _flow('r1-flow', scope={'scope_mode': 'spaces', 'space_ids': [space, project_space]}),
+       idempotency_key='r1c-flow-create-0001')
+    archived = _paused(native, agent, monkeypatch, space, 'r1c-run-archived-0001')
+    project = _paused(native, agent, monkeypatch, project_space, 'r1c-run-project-00001')
+    store = WorkflowRunStore(agent.home_paths.owner_home_dir)
+    frozen = store.load_run(project).business_context
+    assert (frozen['space_id'], frozen['project_ref'], frozen['task_id']) == (
+        project_space, 'proj-r1-callable', 'host-legacy-task')
+    assert store.load_run(archived).business_context['space_id'] == space
+    # 端口确是旧二参可调用而非工厂类；续跑不重调它选默认。
+    assert next(iter(server._business_services.values())).workflows.context_provider is legacy_provider
+
+    # LLM: 断言原生续跑被前置拒绝并返回预期HTTP状态码、错误码与not_started且运行记录零改动。
+    # 函数用途: 校验撤销条件下的续跑拒绝回执与运行账本不变性。
+    def refuse(run_id, key, code, status):
+        before = store.load_run(run_id).to_dict()
+        got, payload = call(native, 'workflow_runs.resume', {'workflow_run_id': run_id}, idempotency_key=key,
+                            expected_revision=before['revision'])
+        assert (got, (payload['error'] or {}).get('code'), payload['effect_outcome']) == (
+            status, code, 'not_started'), payload
+        assert store.load_run(run_id).to_dict() == before
+
+    revision = ok(native, 'spaces.get', {'space_id': space})['space']['revision']
+    ok(native, 'spaces.archive', {'space_id': space}, idempotency_key='r1c-space-archive-001', expected_revision=revision)
+    refuse(archived, 'r1c-resume-archived-01', 'SPACE_ARCHIVED', 503)
+    projects['proj-r1-callable'] = 'disabled'
+    refuse(project, 'r1c-resume-project-001', 'REFERENCE_NOT_FOUND', 404)
+    # 正对照：撤销解除后同一旧二参端口组合真实续跑两条运行并执行脚本。
+    projects['proj-r1-callable'] = 'available'
+    revision = ok(native, 'spaces.get', {'space_id': space})['space']['revision']
+    ok(native, 'spaces.restore', {'space_id': space}, idempotency_key='r1c-space-restore-001', expected_revision=revision)
+    for run_id, key in ((archived, 'r1c-resume-restored-01'), (project, 'r1c-resume-project-ok1')):
+        done = ok(native, 'workflow_runs.resume', {'workflow_run_id': run_id}, idempotency_key=key,
+                  expected_revision=store.load_run(run_id).revision)
+        finished = store.load_run(run_id)
+        assert done['state'] == 'completed' and finished.status == 'succeeded'
+        assert finished.steps[0].output_snapshot == {'total': 3}
 
 def test_native_services_follow_the_workflow_port_source(native, tmp_path):  # noqa: F811
     server, agent = native

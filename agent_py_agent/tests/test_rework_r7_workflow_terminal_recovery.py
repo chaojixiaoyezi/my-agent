@@ -45,6 +45,8 @@ def _workflow(workflow_id, contract=None):
             'config': {'instruction': '核对原输入'}}]}
 
 
+# LLM: 在同一home上装配真实领域服务、双Store、治理门与同一发行上下文签发的BusinessActor，支持重复调用模拟进程重启。
+# 函数用途: 为终态发表恢复测试装配或重装配工作流领域服务与宿主后台适配器。
 def _wire(f):
     """真实领域服务/引擎/双 Store/适配器；同一 home 再次装配即模拟进程重启。"""
     store = ConversationStore(f.home.owner_home_dir / 'conversations')
@@ -52,7 +54,7 @@ def _wire(f):
         config=AgentConfig(business_spaces_enabled=True, model_backend='echo'),
         run=lambda *a, **k: pytest.fail('terminal recovery must not run a model'))
     services = BusinessServices(host)
-    authority = bind_business_context(host, actor=f.actor, authorize=lambda action, facts: f.access['allowed'])
+    authority = bind_business_context(host, actor=f.host_actor, authorize=lambda action, facts: f.access['allowed'])
     background = _BusinessBackgroundService(services, authority)
     runs = WorkflowRunStore(f.home.owner_home_dir)
     submit = background.submit
@@ -97,17 +99,20 @@ def _wire(f):
         'author_id': 'writer', 'review_refs': ['review-1'], 'minimum_reviews': 1},
         receipt_reader=review, authorization_check=lambda receipt, record: f.access['review_allowed'],
         effect_reader=effect, resolution_reader=resolution) if f.governed else None
-    agents = WorkflowAgentSteps(background, actor_provider=lambda run: f.actor, completion_reader=completion)
+    agents = WorkflowAgentSteps(background, actor_provider=lambda run: f.host_actor, completion_reader=completion)
     api = WorkflowScopeService(f.home.owner_home_dir, owner_id='alice',
         authorize=lambda current, action, ref: (current is f.actor and f.access['allowed']
                                                 and action not in f.access['denied']),
         context_provider=lambda current, params: f.context, agent_steps=agents, governance=guard,
         engine_factory=WorkflowEngine)
+    # 生产原生入口(business_api.invoke)总以同一发行上下文签发的BusinessActor调用工作流领域；宿主Actor只留给后台提交/代理身份。
     f.__dict__.update(store=store, services=services, authority=authority, background=background,
-                      runs=runs, guard=guard, agents=agents, api=api)
+                      runs=runs, guard=guard, agents=agents, api=api, actor=services.actor(authority))
     return f
 
 
+# LLM: 构造隔离home下无治理/带治理两种终态发表恢复夹具，并挂接引擎执行观测钩子且禁止模型与脚本运行。
+# 函数用途: 提供工作流终态发表与恢复回归测试的基础夹具。
 @pytest.fixture(params=[False, True], ids=['plain', 'governed'])
 def terminal(tmp_path, monkeypatch, request):
     assert Path(engine_module.__file__).resolve().is_relative_to(Path(__file__).resolve().parents[1])
@@ -115,7 +120,7 @@ def terminal(tmp_path, monkeypatch, request):
     source = ConversationStore(home.owner_home_dir / 'conversations').threads.create(
         owner_id='alice', canonical_user_id='original-user')
     f = SimpleNamespace(home=home, governed=request.param, context=None, faults=[], resolution_state=None,
-        actor=HostChannelActor('alice', source.thread_id, 'original-entry', 'local', 'local', 'user'),
+        host_actor=HostChannelActor('alice', source.thread_id, 'original-entry', 'local', 'local', 'user'),
         access={'allowed': True, 'denied': set(), 'review_allowed': True},
         submissions=[], completions=[], reviews=[], effects=[], resolutions=[], performances=[], native=[])
     _wire(f)

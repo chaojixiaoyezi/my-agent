@@ -175,32 +175,44 @@ def test_governance_consumed_before_real_script_effect(tmp_path, invalid):
         assert done.steps[0].escalation_result['review_refs'] == ['review-1']
 
 
+# LLM: 带冻结业务上下文的运行每步以当前Actor经共享复核（G5a-R1）；本测因此用真实空间服务、真实BusinessActor与真实
+#   spaces.create（MSG-033 决定A），不再用假Actor与不存在的空间；授权身份比较、二参上下文端口与全部原断言不变。
+# 函数用途: 验证原生工具消费业务服务、保留宿主引擎对象并在授权撤回与owner注入时如实未开始。
 def test_native_tool_consumes_business_service_and_preserves_host_engine(tmp_path):
+    from agent_py_agent.agent.conversation.business_access import BusinessActor
     from agent_py_agent.agent.conversation.business_contracts import BusinessExecutionContext
+    from agent_py_agent.agent.conversation.business_spaces import BusinessSpaceService
     from agent_py_agent.agent.tooling.workflows_tool import WorkflowsTool
+    from agent_py_agent.agent.workflows.business_scope import WorkflowScopeService
     from agent_py_agent.agent.workflows.engine import WorkflowEngine
     from agent_py_agent.tests.test_workflow_script_engine import script, step
 
-    api, actor, authorized = service(tmp_path)
+    spaces = BusinessSpaceService(tmp_path, owner_id='alice', enabled=True)
+    actor = BusinessActor('alice', 'f4-native-user', spaces, lambda action, facts: True)
+    space = spaces.call('spaces.create', {'name': 'f4-native'}, actor=actor,
+                        idempotency_key='f4-native-space-create')['space_id']
+    authorized = {'value': True}
+    api = WorkflowScopeService(tmp_path, owner_id='alice',
+        authorize=lambda current, action, ref: current is actor and authorized['value'])
     api.context_provider = lambda current, request: BusinessExecutionContext(
-        'alice', 's1', None, 'stask-original', 1, None, (), (), 'business.v1')
+        'alice', space, None, 'stask-original', 1, None, (), (), 'business.v1')
     engine = WorkflowEngine(tmp_path)
     original_runner = engine.runner
     tool = WorkflowsTool(tmp_path, engine=engine)
     tool.business_service, tool.business_actor_provider = api, lambda: actor
     script(tmp_path)
     created = tool.execute({'action': 'workflows.create', 'definition': definition(steps=[step()]),
-        'scope': {'scope_mode': 'spaces', 'space_ids': ['s1']}, 'idempotency_key': 'native-create'})
+        'scope': {'scope_mode': 'spaces', 'space_ids': [space]}, 'idempotency_key': 'native-create'})
     assert created.ok, created.output
-    assert created.result_envelope['scope']['space_ids'] == ['s1']
-    started = tool.execute({'action': 'workflows.run', 'workflow_ref': 'daily', 'space_id': 's1',
+    assert created.result_envelope['scope']['space_ids'] == [space]
+    started = tool.execute({'action': 'workflows.run', 'workflow_ref': 'daily', 'space_id': space,
                             'idempotency_key': 'native-run'})
     assert started.ok, started.output
     saved = engine.store.load_run(started.result_envelope['workflow_run_id'])
     assert saved.status == 'succeeded' and saved.business_context['task_id'] == 'stask-original'
     assert saved.scope_revision == 1 and saved.final_output == {'value': 1}
     assert engine.runner is original_runner and engine.run_authorizer is None
-    replay = tool.execute({'action': 'workflows.run', 'workflow_ref': 'daily', 'space_id': 's1',
+    replay = tool.execute({'action': 'workflows.run', 'workflow_ref': 'daily', 'space_id': space,
                            'idempotency_key': 'native-run'})
     assert replay.ok and replay.result_envelope == started.result_envelope
     authorized['value'] = False

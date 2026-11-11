@@ -32,6 +32,8 @@ from agent_py_agent.tests.test_plugin_host_gateway_composition import (
 from agent_py_agent.tests.test_plugin_host_v2_grants import http_request
 
 
+# LLM: 用同一发行上下文签发的真实BusinessActor驱动工作流创建与启动，保留宿主Actor作为后台任务提交/取消身份。
+# 函数用途: 构造等待后台代理阶段的可取消工作流运行夹具。
 def make_workflow(host, *, governed=False, monkeypatch, source=None, workflow_id='r6-flow'):
     """用真实服务提交原 Agent 任务；禁止模型/脚本调用，只观察 submit。"""
     services = BusinessServices(host)
@@ -42,6 +44,8 @@ def make_workflow(host, *, governed=False, monkeypatch, source=None, workflow_id
     native_context = bind_business_context(host, actor=actor, authorize=lambda _a, _f: True)
     background = _BusinessBackgroundService(services, native_context)
     space = services.spaces.create({'name': '原工作流空间'}, actor=services.actor(native_context), idempotency_key='r6-space')
+    # 生产原生入口(business_api.invoke)总以同一发行上下文签发的BusinessActor调用工作流领域；宿主Actor只留给后台提交/代理身份。
+    caller = services.actor(native_context)
     runs = WorkflowRunStore(services.owner_home)
     submit = background.submit
 
@@ -53,10 +57,12 @@ def make_workflow(host, *, governed=False, monkeypatch, source=None, workflow_id
         handlers.append((task_id, actor, idempotency_key))
         return background.cancel_task(task_id, actor=actor, include_descendants=True)
 
+    # LLM: 记录工作流授权动作并同时支持原生BusinessActor与插件签发BusinessActor校验。
+    # 函数用途: 按owner、拒绝集合与Actor自身授权判断工作流动作是否允许。
     def authorize(current, action, ref):
         calls.append(action)
         allowed = getattr(current, 'owner_id', None) == owner and action not in access['denied']
-        return allowed and (current is actor or current.authorize(action, {'workflow_ref': ref}) is True)
+        return allowed and (current is caller or current.authorize(action, {'workflow_ref': ref}) is True)
 
     def review(ref, run, step_id):
         step = next(row for row in run.steps if row.step_id == step_id)
@@ -81,13 +87,14 @@ def make_workflow(host, *, governed=False, monkeypatch, source=None, workflow_id
         'access_targets': [], 'data_sources': [], 'credential_refs': [], 'io_contract': {}},
         'steps': [{'step_id': 'agent', 'name': '原 Agent 步骤', 'mode': 'agent_task',
             'config': {'instruction': '只核对原任务'}}]}
-    api.execute('workflows.create', {'definition': definition}, actor=actor, idempotency_key='r6-create')
-    result = api.execute('workflows.run', {'workflow_ref': workflow_id}, actor=actor, idempotency_key='r6-start')
+    api.execute('workflows.create', {'definition': definition}, actor=caller, idempotency_key='r6-create')
+    result = api.execute('workflows.run', {'workflow_ref': workflow_id}, actor=caller, idempotency_key='r6-start')
     run = runs.load_run(result['workflow_run_id'])
     assert run.status == 'waiting_for_agent' and len(submissions) == 1
     task = store.session_tasks.require(run.steps[0].escalation_result['task_id'])
     services.workflows = api
-    return SimpleNamespace(host=host, store=store, services=services, background=background, actor=actor,
+    return SimpleNamespace(host=host, store=store, services=services, background=background, actor=caller,
+        host_actor=actor,
         agents=agents, api=api, runs=runs, run=run, task=task, access=access, calls=calls,
         submissions=submissions, handlers=handlers, space=space, definition=definition)
 
@@ -225,13 +232,15 @@ def task_snapshot(case, task):
         case.store.claims.load_report(task.target_thread_id))
 
 
+# LLM: 宿主原生身份创建的私有子任务不在插件可见范围；插件取消不得越权清理私有后代任务，运行保持cancelling待原生收回。
+# 函数用途: 验证工作流插件取消不会清理原生宿主私有的后代后台任务。
 def test_workflow_plugin_cannot_clean_private_native_descendant(plugin_workflow):
     case = plugin_workflow
     target = case.background.create({'space_id': case.space['space_id'], 'name': '原生私有后代'},
-        actor=case.actor, idempotency_key='round-six-private-worker')['agent']['thread_id']
+        actor=case.host_actor, idempotency_key='round-six-private-worker')['agent']['thread_id']
     child_id = case.background.assign({'space_id': case.space['space_id'], 'agent_id': target,
         'instruction': '不可取消的原生后代', 'origin_task_id': case.task.task_id},
-        actor=case.actor, idempotency_key='round-six-private-descendant')['task_id']
+        actor=case.host_actor, idempotency_key='round-six-private-descendant')['task_id']
     child = case.store.session_tasks.require(child_id)
     before, root, dependencies = task_snapshot(case, child), task_snapshot(case, case.task), dependency_snapshot(case)
     status, result = plugin_cancel(case)
