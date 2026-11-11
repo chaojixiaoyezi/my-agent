@@ -84,7 +84,7 @@ def _runtime_source_facts(runtime_db: object, run_id: str) -> dict[str, dict[str
     streak = tool_failure_streak(event_tool_call_facts(current),
                                  window_full=len(events) >= _PROGRESS_TOOL_EVENT_WINDOW_COUNT)
     projected = {key: streak.get(key) for key in ("tool", "error_code", "failure_stage", "consecutive_failures",
-                                                   "ongoing") if key in streak}
+                                                   "ongoing", "count_is_lower_bound") if key in streak}
     return {"attempt": attempt_fact,
             "tool_failures": {"state": "read", "attempt_id": attempt_id, "current_attempt_streak": projected}}
 

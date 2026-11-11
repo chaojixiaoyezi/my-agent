@@ -1188,6 +1188,8 @@ def test_probe_errors_after_reap_settle_as_unconfirmed(agent_and_child, repo, mo
 # ---------- ORCH03 S3 复核反例（PRO-MSG-034）：R1-a / R1-b / R2-a / R2-b / R3-a ----------
 
 
+# LLM: 通过真实 persist_tool_runtime_ledger 向权威 runtime_db 写入指定 attempt_id 的工具完成事件，不手搓假事件字典。
+# 函数用途: 为指定子代理与 attempt 追加一条成功或授权失败的权威工具账本记录。
 def _tool_call(agent, child_id, index, ok, attempt_id):
     from types import SimpleNamespace
 
@@ -1253,6 +1255,8 @@ def test_r1b_failures_of_an_older_attempt_are_not_a_current_retry(agent_and_chil
     assert classify_node_progress(live, now=NOW, sources={**sources, "tool_failures": now_failing})["state"] == "retrying"
 
 
+# LLM: 直接读写权威子代理任务记录里的 allowed_write_roots 并落盘保存，供全视图仓库关联读取。
+# 函数用途: 批量设置一组子代理任务记录的允许写入根目录。
 def _write_repo(agent, run_ids, roots):
     for run_id in run_ids:
         task = agent.subagents.load(run_id)
@@ -1260,8 +1264,8 @@ def _write_repo(agent, run_ids, roots):
         agent.subagents.save(task)
 
 
-# R2-a：分类上限只决定给谁分类，不是独占证明；两个子代理都写同一仓库，上限 1 时被选中的那个仍是 shared。
-#   视图里有任务记录读不到时，整个视图证明不了独占（unproven）。
+# R2-a：分类上限只约束分类与 git 观察目标，不截断完整视图的独占关联计算；两个子代理都写同一仓库时，上限 1 下被选中的仍是 shared。
+#   完整视图只要在 _MAX_ASSOCIATION_NODES_COUNT 条数上限内但任一任务记录加载失败，立即短路并将全视图记为 unproven（非根/警告/超条数视图则 0 次加载直接短路为 unproven）。
 def test_r2a_child_limit_and_unreadable_records_never_make_a_shared_repo_exact(agent_and_child, repo, monkeypatch):
     agent, child_id, _ = agent_and_child
     sibling = _extra_children(agent, child_id, 1)[0]
@@ -1564,3 +1568,275 @@ def test_linux_expired_enumeration_and_slow_open_do_not_start_new_reads(tmp_path
 
     assert late_open is None
     assert len(opened) == 1 and closed == opened and reads == []
+
+
+# ---------- ORCH03-S3 残项（PRO-MSG-038）：S3-budget / S3-lower-bound ----------
+
+
+# LLM: 验证 PRO-MSG-038 ORCH03-S3-budget 短路契约：非根子树、warnings、scope_warnings、节点数超 256 的已知不完整视图必须 0 次调用
+#   subagents.load 与 git.observe，直接全部标为 unproven 并清空基线缓存；完整视图首条加载报错后也不再加载后续节点。
+# 函数用途: 确认已判不完整的视图做零无用加载短路，且单条任务记录报错立即停止继续加载前缀。
+def test_s3_budget_unproven_views_short_circuit_with_zero_task_loads(agent_and_child, repo, monkeypatch):
+    from agent_py_agent.agent.agent_core.orchestration.tools import list_agents as list_agents_mod
+
+    agent, child_id, _ = agent_and_child
+    s1, s2 = _extra_children(agent, child_id, 2)
+    _write_repo(agent, [child_id], [str(repo)])
+    _write_repo(agent, [s1, s2], [])
+    monkeypatch.setattr(agent, "workspace_roots", [repo.parent], raising=False)
+    _register(monkeypatch, [str(repo)])
+
+    root_snapshot = agent_tree_status_payload(agent, {"run_id": "task-T", "scope": "own_subtree"})
+    seeded = list_agents_mod.progress_read_context(agent, root_snapshot)
+    assert seeded.git[child_id]["association"] == "exact"
+    assert bool(getattr(agent, "_progress_git_previous", None))
+
+    subtree_snapshot = agent_tree_status_payload(agent, {"run_id": child_id, "scope": "own_subtree"})
+    warned_snapshot = {**root_snapshot, "warnings": ["LOAD_WARNING"]}
+    scope_warned_snapshot = {**root_snapshot, "scope_warnings": ["SCOPE_WARNING"]}
+    oversized_nodes = [
+        {"run_id": f"sub-over-{idx}", "status": "RUNNING", "root_id": "task-T"}
+        for idx in range(list_agents_mod._MAX_ASSOCIATION_NODES_COUNT + 2)
+    ]
+    oversized_snapshot = {**root_snapshot, "nodes": oversized_nodes}
+
+    loads: list[str] = []
+    validates: list[str] = []
+    observes: list[str] = []
+    real_load = agent.subagents.load
+    real_validate = git.validate_repo
+
+    # LLM: 记录 subagents.load 调用并转发，用于断言无收益加载次数为 0。
+    # 函数用途: 跟踪任务记录加载次数。
+    def tracked_load(run_id: str):
+        loads.append(run_id)
+        return real_load(run_id)
+
+    # LLM: 记录 validate_repo 调用并转发。
+    # 函数用途: 跟踪仓库校验调用次数。
+    def tracked_validate(path: Path, allowed: list[Path]):
+        validates.append(str(path))
+        return real_validate(path, allowed)
+
+    # LLM: 拦截 git.observe；不完整视图绝不允许触发任何 git 观察。
+    # 函数用途: 防止不完整视图下启动 git 观察。
+    def forbidden_observe(path: Path, **kwargs):
+        observes.append(str(path))
+        raise AssertionError("unproven view must not observe git")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(agent.subagents, "load", tracked_load)
+        patch.setattr(list_agents_mod, "_node_sources", lambda _a, _n: {})
+        patch.setattr(git, "validate_repo", tracked_validate)
+        patch.setattr(git, "observe", forbidden_observe)
+        for snap in (subtree_snapshot, warned_snapshot, scope_warned_snapshot, oversized_snapshot):
+            ctx = list_agents_mod.progress_read_context(agent, snap)
+            expected_ids = {str(n["run_id"]) for n in snap["nodes"]}
+            assert set(ctx.git) == expected_ids
+            assert all(dict(item) == {"association": "unproven", "repo": "", "previous": None} for item in ctx.git.values())
+
+    assert loads == [] and validates == [] and observes == []
+    assert not getattr(agent, "_progress_git_previous", None)
+
+    fail_loads: list[str] = []
+
+    # LLM: 首条任务记录抛出 OSError，验证完整视图一旦失真立即停止读取后续节点。
+    # 函数用途: 模拟首条任务记录损坏并记录实际触发的加载列表。
+    def fail_first_load(run_id: str):
+        fail_loads.append(run_id)
+        raise OSError("corrupt first task record")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(agent.subagents, "load", fail_first_load)
+        patch.setattr(list_agents_mod, "_node_sources", lambda _a, _n: {})
+        patch.setattr(git, "observe", forbidden_observe)
+        broken_ctx = list_agents_mod.progress_read_context(agent, root_snapshot)
+
+    assert len(fail_loads) == 1
+    assert all(dict(item) == {"association": "unproven", "repo": "", "previous": None} for item in broken_ctx.git.values())
+
+
+# LLM: 验证 PRO-MSG-038 ORCH03-S3-budget 关联与观察分离契约：全视图关联覆盖所有可见节点（保留跨上限的 shared 污染证明），
+#   但真实 git.observe 只对进入本次 child_limit 分类窗口的 exact 目标执行，未分类的 exact 节点绝不额外启动 git 进程。
+# 函数用途: 确认全视图关联计算与受 child_limit 约束的目标 git 观察严格分离。
+def test_s3_budget_separates_full_view_association_from_classified_git_observations(agent_and_child, repo, monkeypatch):
+    agent, child_id, _ = agent_and_child
+    unclassified_exact, sharer_a, sharer_b = _extra_children(agent, child_id, 3)
+    repo_b = repo.parent / "proj_b"
+    repo_c = repo.parent / "proj_c"
+    for extra_repo in (repo_b, repo_c):
+        extra_repo.mkdir()
+        _git(extra_repo, "init", "-q")
+        (extra_repo / "init.txt").write_text("x")
+        _git(extra_repo, "add", "init.txt")
+        _git(extra_repo, "commit", "-q", "-m", "init")
+
+    root_snapshot = agent_tree_status_payload(agent, {"run_id": "task-T", "scope": "own_subtree"})
+    ordered_ids = [str(node["run_id"]) for node in root_snapshot["nodes"]]
+    first_child = ordered_ids[0]
+    later_children = [rid for rid in ordered_ids[1:] if rid in {child_id, unclassified_exact, sharer_a, sharer_b}]
+    second_exact = later_children[0]
+    shared_pair = later_children[1:3]
+
+    _write_repo(agent, [first_child], [str(repo)])
+    _write_repo(agent, [second_exact], [str(repo_b)])
+    _write_repo(agent, shared_pair, [str(repo_c)])
+    monkeypatch.setattr(agent, "workspace_roots", [repo.parent], raising=False)
+    _register(monkeypatch, [str(repo), str(repo_b), str(repo_c)], limit=1)
+
+    observed_repos: list[str] = []
+    real_observe = git.observe
+
+    # LLM: 记录每次真实 git.observe 的目标仓库路径并执行真实观察。
+    # 函数用途: 验证只有已分类窗口内的 exact 仓库触发 git.observe。
+    def tracked_observe(path: Path, **kwargs):
+        observed_repos.append(str(path))
+        return real_observe(path, **kwargs)
+
+    monkeypatch.setattr(git, "observe", tracked_observe)
+    from agent_py_agent.agent.agent_core.orchestration.tools.list_agents import (
+        progress_read_context,
+    )
+
+    snap = agent_tree_status_payload(agent, {"run_id": "task-T", "scope": "own_subtree"})
+    ctx = progress_read_context(agent, snap)
+    payload = _list(agent, "task-T")
+
+    # limit=1 时只观察窗口内第 1 个 exact 节点所属的 repo，窗口外的 second_exact 虽保持全视图 exact 关联但不触发观察。
+    assert observed_repos == [str(repo), str(repo)]
+    assert ctx.git[first_child]["association"] == "exact" and "observation" in ctx.git[first_child]
+    assert ctx.git[second_exact]["association"] == "exact" and "observation" not in ctx.git[second_exact]
+    assert {ctx.git[rid]["association"] for rid in shared_pair} == {"shared"}
+    by_id = {row["run_id"]: row["progress"] for row in payload["nodes"]}
+    assert by_id[first_child]["sources"]["git_association"] == {"association": "exact", "repo": str(repo)}
+    assert by_id[second_exact]["reason"] == "NOT_CLASSIFIED_LIMIT"
+
+
+# LLM: 验证 PRO-MSG-038 ORCH03-S3-budget 共享截止与耗尽保真契约：快照构造、仓库校验、任务记录逐条加载、路径关联均纳入同一单调预算；
+#   任一阶段跨过截止立即保持 unproven、清空上一次样本缓存且不启动 git.observe。
+# 函数用途: 确认快照与关联准备阶段耗尽预算时严格回退为 unproven 且停止后续加载与观察。
+def test_s3_budget_exhaustion_across_snapshot_setup_and_loads_keeps_unproven(agent_and_child, repo, monkeypatch):
+    from agent_py_agent.agent.agent_core.orchestration.tools import list_agents as list_agents_mod
+
+    agent, child_id, _ = agent_and_child
+    s1, s2 = _extra_children(agent, child_id, 2)
+    _write_repo(agent, [child_id], [str(repo)])
+    _write_repo(agent, [s1, s2], [])
+    monkeypatch.setattr(agent, "workspace_roots", [repo.parent], raising=False)
+    _register(monkeypatch, [str(repo)])
+
+    # LLM: 种入一次真实成功观察，确保每次预算耗尽前都存在非空的 _progress_git_previous 正向对照基线。
+    # 函数用途: 建立并校验有效基线样本。
+    def seed_previous() -> None:
+        first = _list(agent, "task-T")
+        by_id = {row["run_id"]: row["progress"]["sources"] for row in first["nodes"]}
+        assert by_id[child_id]["git_association"] == {"association": "exact", "repo": str(repo)}
+        assert bool(getattr(agent, "_progress_git_previous", None))
+
+    # LLM: 拦截 git.observe，证明准备阶段超时后绝不启动任何 git 观察。
+    # 函数用途: 断言超时路径零 git 进程启动。
+    def never_observe(*_args, **_kwargs):
+        raise AssertionError("expired budget must not start git.observe")
+
+    seed_previous()
+    real_status = list_agents_mod.agent_tree_status_payload
+
+    # LLM: 在 ListAgentsTool.execute 构造快照阶段跨过共享 git 观察预算。
+    # 函数用途: 模拟快照创建耗时耗尽 git 预算。
+    def slow_snapshot(*args, **kwargs):
+        snap = real_status(*args, **kwargs)
+        time.sleep(0.04)
+        return snap
+
+    with monkeypatch.context() as patch:
+        patch.setattr(git, "GIT_OBSERVATION_BUDGET_SECONDS", 0.01)
+        patch.setattr(list_agents_mod, "agent_tree_status_payload", slow_snapshot)
+        patch.setattr(git, "observe", never_observe)
+        after_slow_snap = _list(agent, "task-T")
+    assert {row["progress"]["sources"]["git_association"]["association"] for row in after_slow_snap["nodes"]} == {"unproven"}
+    assert not getattr(agent, "_progress_git_previous", None)
+
+    seed_previous()
+    real_validate = git.validate_repo
+
+    # LLM: 在仓库路径校验阶段跨过预算。
+    # 函数用途: 模拟 validate_repo 慢路径跨过截止。
+    def slow_validate(path: Path, allowed: list[Path]):
+        checked = real_validate(path, allowed)
+        time.sleep(0.04)
+        return checked
+
+    with monkeypatch.context() as patch:
+        patch.setattr(git, "GIT_OBSERVATION_BUDGET_SECONDS", 0.01)
+        patch.setattr(git, "validate_repo", slow_validate)
+        patch.setattr(git, "observe", never_observe)
+        after_slow_validate = _list(agent, "task-T")
+    assert {row["progress"]["sources"]["git_association"]["association"] for row in after_slow_validate["nodes"]} == {"unproven"}
+    assert not getattr(agent, "_progress_git_previous", None)
+
+    seed_previous()
+    real_load = agent.subagents.load
+    loaded_ids: list[str] = []
+
+    # LLM: 首条任务记录加载跨过预算后，后续兄弟节点的记录不再继续加载。
+    # 函数用途: 模拟首条 subagents.load 跨过截止并记录实际加载次数。
+    def slow_first_load(run_id: str):
+        loaded_ids.append(run_id)
+        record = real_load(run_id)
+        time.sleep(0.04)
+        return record
+
+    root_snap = agent_tree_status_payload(agent, {"run_id": "task-T", "scope": "own_subtree"})
+    with monkeypatch.context() as patch:
+        patch.setattr(git, "GIT_OBSERVATION_BUDGET_SECONDS", 0.01)
+        patch.setattr(list_agents_mod, "_node_sources", lambda _a, _n: {})
+        patch.setattr(agent.subagents, "load", slow_first_load)
+        patch.setattr(git, "observe", never_observe)
+        after_slow_load = list_agents_mod.progress_read_context(agent, root_snap)
+    assert len(loaded_ids) == 1
+    assert all(dict(v)["association"] == "unproven" for v in after_slow_load.git.values())
+    assert not getattr(agent, "_progress_git_previous", None)
+
+    seed_previous()
+    real_assoc = git.associate_repos
+
+    # LLM: 在写入根 realpath 关联计算后跨过截止，同样不能把过期结果当成有效 exact 提交。
+    # 函数用途: 模拟 associate_repos 跨过截止时间。
+    def slow_assoc(write_roots, repos):
+        result = real_assoc(write_roots, repos)
+        time.sleep(0.04)
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(git, "GIT_OBSERVATION_BUDGET_SECONDS", 0.01)
+        patch.setattr(list_agents_mod, "_node_sources", lambda _a, _n: {})
+        patch.setattr(git, "associate_repos", slow_assoc)
+        patch.setattr(git, "observe", never_observe)
+        after_slow_assoc = list_agents_mod.progress_read_context(agent, root_snap)
+    assert all(dict(v)["association"] == "unproven" for v in after_slow_assoc.git.values())
+    assert not getattr(agent, "_progress_git_previous", None)
+
+
+# LLM: 验证 PRO-MSG-038 ORCH03-S3-lower-bound：当权威事件窗口未满时 current_attempt_streak 不伪造下界标记；当 200 条事件窗口写满
+#   且同码失败延伸至窗口起点时，node_rendering 完整保留 ledger 返回的 count_is_lower_bound=True。
+# 函数用途: 确认当前 attempt 连续失败段投影保留窗口截断下界精度标记。
+def test_s3_lower_bound_preserved_in_node_rendering_current_attempt_streak(agent_and_child):
+    from agent_py_agent.agent.agent_core.agent_tree.node_rendering import (
+        _PROGRESS_TOOL_EVENT_WINDOW_COUNT,
+    )
+
+    agent, child_id, _ = agent_and_child
+    current = agent.subagents.runtime_db.agent_run_for_run_id(child_id)["current_attempt_id"]
+
+    _tool_call(agent, child_id, 1, False, current)
+    _tool_call(agent, child_id, 2, False, current)
+    short_streak = _child_node(agent, child_id)["progress"]["sources"]["required"]["tool_failures"]["current_attempt_streak"]
+    assert short_streak["consecutive_failures"] == 2 and short_streak["ongoing"] is True
+    assert "count_is_lower_bound" not in short_streak
+
+    for index in range(3, _PROGRESS_TOOL_EVENT_WINDOW_COUNT + 5):
+        _tool_call(agent, child_id, index, False, current)
+    capped_streak = _child_node(agent, child_id)["progress"]["sources"]["required"]["tool_failures"]["current_attempt_streak"]
+    assert capped_streak["consecutive_failures"] == _PROGRESS_TOOL_EVENT_WINDOW_COUNT
+    assert capped_streak["ongoing"] is True
+    assert capped_streak["count_is_lower_bound"] is True
