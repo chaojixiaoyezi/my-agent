@@ -598,6 +598,20 @@ def _start_gateway_http(agent, paths, http_port: int, control_plane=None, drain_
     if http_port <= 0:
         return None
     config = control_plane.config if control_plane is not None else agent.config
+    if (
+        agent is not None
+        and bool(getattr(config, "business_spaces_enabled", False))
+        and getattr(agent, "business_host_ports_enabled", None) is not False
+        and getattr(config, "business_host_ports_enabled", True) is not False
+    ):
+        from ..agent.gateway_parts.business_host_ports import wire_business_host_ports
+
+        wire_business_host_ports(agent)
+        if getattr(agent, "tools", None) is not None:
+            from ..agent.gateway_parts.business_api import register_business_tools
+
+            register_business_tools(agent)
+
     additional = {"control_plane": control_plane, "drain_runtime": drain_runtime} if control_plane is not None else {}
     http_params = GatewayHTTPServerParams(
         auth_middleware=_build_gateway_auth_middleware(config),
