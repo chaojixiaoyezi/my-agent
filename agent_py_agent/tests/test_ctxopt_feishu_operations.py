@@ -12,6 +12,7 @@ def test_single_cloud_operation_authority():
     assert {action: (operation.resource_type, operation.write) for action, operation in operations.items()} == {
         'sheet_meta': ('sheet', False), 'sheet_read': ('sheet', False),
         'sheet_append': ('sheet', True), 'sheet_update': ('sheet', True),
+        'sheet_add': ('sheet', True), 'sheet_rename': ('sheet', True),
         'document_read': ('docx', False), 'document_append': ('docx', True),
         'wiki_resolve': ('wiki', False)}
     assert tool.CLOUD_OPERATIONS is operations

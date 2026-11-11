@@ -191,7 +191,7 @@ def test_b1_terminal_tool_events_get_one_bounded_same_card_edit_before_final(tmp
     assert len(patches) == 1 and patches[0][1].endswith('/om_card_original')
     card = json.loads(patches[0][2]['content'])
     panel = next(el for el in card['body']['elements'] if el.get('tag') == 'collapsible_panel')
-    assert sum('已完成' in el['text']['content'] for el in panel['elements']) == 5
+    assert sum('已完成' in el['header']['title']['content'] for el in panel['elements']) == 5
     assert len(case.logical_cards) == 1 and len(case.finals) == 1
     assert case.store.terminal_receipt('card-request')['disposition'] == 'sent'
 
