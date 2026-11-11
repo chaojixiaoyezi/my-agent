@@ -17,7 +17,9 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..common.json_io import write_json_file_atomic
 from ..common.nofollow_fs import ensure_private_dir
+from ..common.opaque_id import validate_opaque_id
 from .models import ExternalMailboxLayout
 
 if TYPE_CHECKING:
@@ -40,8 +42,15 @@ def create_external_mailbox_layout(
     root_dir: Path | str,
     actor_id: str,
 ) -> ExternalMailboxLayout:
+    raw_actor = str(actor_id or "").strip()
+    try:
+        actor_clean = validate_opaque_id(raw_actor, kind="actor_id")
+    except ValueError as exc:
+        raise ExternalMailboxSecurityError(
+            f"MAILBOX_SECURITY_VIOLATION: Invalid actor_id {actor_id!r}: {exc}",
+            error_code="PATH_TRAVERSAL_FORBIDDEN",
+        ) from exc
     root = Path(root_dir).resolve()
-    actor_clean = str(actor_id or "").strip()
     actor_dir = root / actor_clean
     ensure_private_dir(actor_dir)
     outbox = actor_dir / "coordinator_outbox.jsonl"
@@ -93,6 +102,8 @@ class ExternalMailboxAdapter:
     def read_actor_messages(
         self,
         layout: ExternalMailboxLayout,
+        *,
+        start_line: int = 0,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         valid_records: list[dict[str, Any]] = []
         quarantined: list[dict[str, Any]] = []
@@ -140,6 +151,8 @@ class ExternalMailboxAdapter:
         has_corrupt = False
         valid_lines: list[str] = []
         for line_no, raw_line in enumerate(lines, 1):
+            if line_no <= start_line:
+                continue
             line = raw_line.strip()
             if not line:
                 continue
@@ -216,7 +229,41 @@ class ExternalMailboxAdapter:
         now: float | None = None,
     ) -> dict[str, Any]:
         current_time_val = float(now if now is not None else time.time())
-        messages, quarantined = self.read_actor_messages(layout)
+
+        inbox_path = layout.actor_inbox_path
+        cursor_path = inbox_path.parent / ".coordinator_cursor.json"
+
+        processed_lines = 0
+        last_file_size = 0
+        if cursor_path.exists():
+            try:
+                with open(cursor_path, encoding="utf-8") as f:
+                    cdata = json.load(f)
+                if isinstance(cdata, dict):
+                    processed_lines = int(cdata.get("processed_lines") or 0)
+                    last_file_size = int(cdata.get("file_size") or 0)
+            except Exception:
+                processed_lines = 0
+                last_file_size = 0
+
+        current_file_size = 0
+        total_file_lines = 0
+        if inbox_path.exists():
+            try:
+                st = inbox_path.stat()
+                current_file_size = st.st_size
+                with open(inbox_path, encoding="utf-8", errors="replace") as f:
+                    for _ in f:
+                        total_file_lines += 1
+            except OSError:
+                current_file_size = 0
+                total_file_lines = 0
+
+        if current_file_size < last_file_size or total_file_lines < processed_lines:
+            # File shrunk, rotated, or truncated
+            processed_lines = 0
+
+        messages, quarantined = self.read_actor_messages(layout, start_line=processed_lines)
 
         delivered_item_ids: list[str] = []
         acked_item_ids: list[str] = []
@@ -233,6 +280,15 @@ class ExternalMailboxAdapter:
 
             try:
                 if action in {"ack", "record_ack"}:
+                    item = handoff_service.store.load_handoff_item(case_id, item_id)
+                    if item is None or item.responsible_actor != layout.actor_id:
+                        errors.append({
+                            "item_id": item_id,
+                            "action": action,
+                            "error_code": "ACTOR_MISMATCH",
+                            "error": f"item belongs to '{getattr(item, 'responsible_actor', '')}', not '{layout.actor_id}'",
+                        })
+                        continue
                     ack_payload = msg.get("recipient_ack") or msg.get("payload") or {}
                     frozen_ver = str(msg.get("frozen_input_version") or "")
                     ack_id = str(msg.get("ack_id") or msg.get("message_id") or "")
@@ -246,6 +302,15 @@ class ExternalMailboxAdapter:
                     )
                     acked_item_ids.append(item_id)
                 elif action in {"submit", "submit_handoff"}:
+                    item = handoff_service.store.load_handoff_item(case_id, item_id)
+                    if item is None or item.responsible_actor != layout.actor_id:
+                        errors.append({
+                            "item_id": item_id,
+                            "action": action,
+                            "error_code": "ACTOR_MISMATCH",
+                            "error": f"item belongs to '{getattr(item, 'responsible_actor', '')}', not '{layout.actor_id}'",
+                        })
+                        continue
                     evidence_ids = msg.get("evidence_ids") or ()
                     if isinstance(evidence_ids, (list, tuple)):
                         ev_tuple = tuple(str(x) for x in evidence_ids)
@@ -264,6 +329,19 @@ class ExternalMailboxAdapter:
                     submitted_item_ids.append(item_id)
             except Exception as exc:  # noqa: BLE001
                 errors.append({"item_id": item_id, "action": action, "error": str(exc)})
+
+        # 记录处理进度 cursor
+        if inbox_path.exists():
+            try:
+                write_json_file_atomic(
+                    cursor_path,
+                    {
+                        "processed_lines": max(processed_lines, total_file_lines),
+                        "file_size": current_file_size,
+                    },
+                )
+            except Exception as cursor_err:
+                logger.warning("Failed to persist mailbox coordinator cursor: %s", cursor_err)
 
         # 2. 检查是否有待投递给该 external_assistant 的 published 交接项
         all_items = handoff_service.store.list_all_handoff_items(
