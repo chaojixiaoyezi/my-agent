@@ -523,7 +523,8 @@ def _environment(metadata, folder, input_json, sources, *, host_credential_env_n
     # 不继承另一运行或操作者环境伪造的工作上下文；只有本启动器可注入当前冻结值。
     for key in tuple(environment):
         if key.startswith('MY_AGENT_SCRIPT_INPUT_') or key in (
-                'MY_AGENT_SCRIPT_WORK_CONTEXT_JSON', 'MY_AGENT_SCRIPT_WORK_CONTEXT_FILE', 'MY_AGENT_RUN_OUT'):
+                'MY_AGENT_SCRIPT_WORK_CONTEXT_JSON', 'MY_AGENT_SCRIPT_WORK_CONTEXT_FILE', 'MY_AGENT_RUN_OUT',
+                'MY_AGENT_SCRIPT_WATERMARK_JSON'):
             environment.pop(key, None)
     environment.update(PYTHONIOENCODING='utf-8', PAGER='cat', GIT_PAGER='cat', HOME=str(folder), TMPDIR=str(folder),
                        MY_AGENT_DATA_SOURCES_JSON=json.dumps(sources, ensure_ascii=False, allow_nan=False))
@@ -541,6 +542,18 @@ def _environment(metadata, folder, input_json, sources, *, host_credential_env_n
         environment.update(MY_AGENT_SCRIPT_INPUT_MODE='file', MY_AGENT_SCRIPT_INPUT_FILE=str(folder / 'input.json'))
     if work_context is not None:
         environment['MY_AGENT_SCRIPT_WORK_CONTEXT_JSON'] = json.dumps(work_context, ensure_ascii=False, allow_nan=False)
+    watermark_payload = None
+    if isinstance(work_context, dict) and 'watermark' in work_context:
+        watermark_payload = work_context['watermark']
+    elif isinstance(input_json, str):
+        try:
+            parsed_in = json.loads(input_json)
+            if isinstance(parsed_in, dict) and isinstance(parsed_in.get('watermark'), dict):
+                watermark_payload = parsed_in['watermark']
+        except Exception:
+            pass
+    if watermark_payload is not None:
+        environment['MY_AGENT_SCRIPT_WATERMARK_JSON'] = json.dumps(watermark_payload, ensure_ascii=False, allow_nan=False)
     for ref in metadata.get('credential_refs', ()):
         if ref.get('credential_id') and ref.get('target'):
             environment['CREDENTIAL_REF_' + ref['credential_id'].upper()] = ref['target']
