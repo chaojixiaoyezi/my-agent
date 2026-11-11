@@ -68,6 +68,49 @@ class ScheduleLifecyclePayload:
     conversation_bind_errors: list[dict[str, object]]
 
 
+# LLM: 在任何子代理准备或物化前先检查父级委托约束，禁止违反 allow_descendants、max_cumulative_children=0 或递归深度。
+# 函数用途: 前置拦截违反后代策略的派发请求，以 SUBAGENT_DESCENDANTS_FORBIDDEN 整批拒绝。
+def _check_descendant_forbidden(agent: object, *, tool_name: str = "create_subagents") -> ToolHandlerOutcome | None:
+    from .orchestration.delegation_constraints import extract_delegation_constraints
+
+    parent_run_id = current_subagent_run_id(agent)
+    manager = getattr(agent, "subagents", None)
+    parent_task = None
+    if manager is not None and parent_run_id:
+        try:
+            parent_task = manager.load(parent_run_id)
+        except Exception:
+            parent_task = None
+
+    constraints = extract_delegation_constraints(None, agent=agent)
+    if constraints is not None:
+        depth = getattr(parent_task, "depth", 0) if parent_task is not None else 0
+        depth_exceeded = (
+            constraints.max_descendant_depth is not None
+            and (depth + 1) > constraints.max_descendant_depth
+        )
+        if (
+            not constraints.allow_descendants
+            or constraints.max_cumulative_children == 0
+            or depth_exceeded
+            or "spawn_children" in constraints.prohibited_actions
+        ):
+            payload = {
+                "ok": False,
+                "error_code": "SUBAGENT_DESCENDANTS_FORBIDDEN",
+                "error": "当前子代理策略禁止创建后代（allow_descendants=False, max_cumulative_children=0 或深度超限）；本批没有创建任何子代理。",
+                "effect_outcome": "not_started",
+            }
+            return ToolHandlerOutcome(
+                tool_name,
+                False,
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                error_code="SUBAGENT_DESCENDANTS_FORBIDDEN",
+                effect_outcome="not_started",
+            )
+    return None
+
+
 # LLM: 原 manager 锁只覆盖准备/物化，Jev 锁外；typed pending 绑定原 prepared run，schedule_child_runs 仍唯一创建，不更换模型。
 # 函数用途: 在当前子代理名下创建下一层，只为新孩子保存经重新核验的待验证建议。
 def execute_child_creation(
@@ -76,6 +119,9 @@ def execute_child_creation(
     *,
     tool_name: str = "create_subagents",
 ) -> ToolHandlerOutcome:
+    descendant_check = _check_descendant_forbidden(agent, tool_name=tool_name)
+    if descendant_check is not None:
+        return descendant_check
     params = _schedule_tool_params(params)
     with _creation_guard(agent):
         prepared = _prepare_child_creation(agent, params, tool_name=tool_name)
@@ -123,7 +169,30 @@ def _prepare_child_creation(agent: object, params: dict, *, tool_name: str) -> H
     if isinstance(capacity, ToolHandlerOutcome):
         return capacity
     slots, limits = capacity
-    if len(child_specs) > slots:
+    new_count = len(child_specs)
+    manager = getattr(agent, "subagents", None)
+    if manager is not None and parent_run_id:
+        try:
+            parent = manager.load(parent_run_id)
+            if parent is not None:
+                reused_count = 0
+                for index, spec in enumerate(child_specs):
+                    canonical = scheduled_child_create_params(
+                        manager, parent, spec, sibling_index=len(parent.child_ids) + 1 + index,
+                    )
+                    if find_reusable_scheduled_child(manager, canonical) is not None:
+                        reused_count += 1
+                new_count = len(child_specs) - reused_count
+        except Exception:
+            pass
+
+    if limits.get("cumulative_cap") is not None:
+        cum_cap = limits["cumulative_cap"]
+        existing = limits.get("existing_cumulative", 0)
+        if existing + new_count > cum_cap:
+            return subagent_quota_result(len(child_specs), slots, limits)
+
+    if new_count > slots:
         return subagent_quota_result(len(child_specs), slots, limits)
     target_error = _hierarchy_target_error(agent, child_specs)
     if target_error:
@@ -208,6 +277,7 @@ def _materialize_child_creation(agent: object, params: dict, prepared: Hierarchy
             _schedule_validation_error_message(exc),
             tool_name=tool_name,
         )
+    _persist_scheduled_delegation_scopes(agent, result)
     lifecycle = _schedule_lifecycle(agent, result, params)
     auto_start = _schedule_auto_start_payload(lifecycle.auto_start)
     state_payload = dispatch_state_contract_payload(agent)
@@ -232,6 +302,31 @@ def _materialize_child_creation(agent: object, params: dict, prepared: Hierarchy
             tool_name=tool_name,
         ),
     )
+
+
+# LLM: 将递归物化新创建的子代理约束同步落入 delegations.granted_scope_json 权威表。
+# 函数用途: 在 schedule_child_runs 成功后更新 delegations 记录。
+def _persist_scheduled_delegation_scopes(agent: object, result: HierarchyScheduleResult) -> None:
+    manager = getattr(agent, "subagents", None)
+    if manager is None or not result.created_run_ids:
+        return
+    repo = getattr(manager, "runtime_db", None)
+    if repo is None:
+        return
+    for run_id in result.created_run_ids:
+        try:
+            task = manager.load(run_id)
+            if task and isinstance(getattr(task, "attributes", None), dict):
+                constraints_data = task.attributes.get("delegation_constraints")
+                if constraints_data:
+                    with repo._runtime_connection() as conn:
+                        conn.execute(
+                            "UPDATE delegations SET granted_scope_json = ? WHERE child_agent_run_id = ?",
+                            (json.dumps(constraints_data, ensure_ascii=False), run_id),
+                        )
+                        conn.commit()
+        except Exception:
+            pass
 
 
 def _schedule_error(

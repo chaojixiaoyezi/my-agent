@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 
 from ...settings.defaults import default_config_int
 from ...tooling.models import ToolHandlerOutcome
+
+if TYPE_CHECKING:
+    from .delegation_constraints import StructuredDelegationConstraints
 
 _DEFAULT_MAX_SUBAGENTS = default_config_int("max_subagents")
 
@@ -24,7 +28,7 @@ def checked_creation_capacity(
     agent: object,
 ) -> tuple[int, dict[str, int]] | ToolHandlerOutcome:
     try:
-        return available_creation_slots(agent)
+        slots, limits = available_creation_slots(agent)
     except SubagentCapacityStateError:
         return ToolHandlerOutcome(
             "create_subagents",
@@ -33,12 +37,15 @@ def checked_creation_capacity(
             error_code="SUBAGENT_CAPACITY_UNAVAILABLE",
             effect_outcome="not_started",
         )
+    if limits.get("descendants_forbidden"):
+        return subagent_quota_result(1, 0, limits)
+    return slots, limits
 
 
 # LLM: ``max_subagents`` is root-session scoped like 会话运行时 AgentControl;
 # explicit owner-policy caps remain owner-wide and count every non-terminal run.
 # All hierarchy levels must consume this one calculation rather than a per-parent shortcut.
-# 函数用途: 按当前根任务容量、全局管理员配额和单次上限计算真正可用的创建槽位。
+# 函数用途: 按当前根任务容量、全局管理员配额、累计上限和单次上限计算真正可用的创建槽位。
 def available_creation_slots(agent: object) -> tuple[int, dict[str, int]]:
     """Return the strictest remaining session/owner/task/per-call capacity."""
 
@@ -71,8 +78,24 @@ def available_creation_slots(agent: object) -> tuple[int, dict[str, int]]:
         candidates.append(per_call_cap)
     if task_cap:
         candidates.append(task_cap - task_active)
+
+    parent_constraints = parent_delegation_constraints(agent)
+    cumulative_cap: int | None = None
+    existing_cumulative = 0
+    remaining_cumulative: int | None = None
+
+    if parent_constraints is not None:
+        if not parent_constraints.allow_descendants:
+            candidates.append(0)
+        if parent_constraints.max_cumulative_children is not None:
+            cumulative_cap = max(0, int(parent_constraints.max_cumulative_children))
+            parent_id = _resolve_parent_run_id(agent)
+            existing_cumulative = cumulative_created_child_count(agent, parent_id)
+            remaining_cumulative = max(0, cumulative_cap - existing_cumulative)
+            candidates.append(remaining_cumulative)
+
     slots = max(0, min(candidates)) if candidates else _DEFAULT_MAX_SUBAGENTS
-    return slots, {
+    limits: dict[str, int] = {
         "session_cap": session_cap,
         "session_active": session_active,
         "owner_cap": owner_policy_cap,
@@ -82,6 +105,75 @@ def available_creation_slots(agent: object) -> tuple[int, dict[str, int]]:
         "task_active": task_active,
         "per_call_cap": per_call_cap,
     }
+    if parent_constraints is not None:
+        if not parent_constraints.allow_descendants:
+            limits["descendants_forbidden"] = 1
+            limits["allow_descendants"] = 0
+        if cumulative_cap is not None:
+            limits["cumulative_cap"] = cumulative_cap
+            limits["existing_cumulative"] = existing_cumulative
+            limits["remaining_cumulative"] = remaining_cumulative if remaining_cumulative is not None else 0
+
+    return slots, limits
+
+
+# LLM: 提取当前代理名下生效的结构化委托约束。
+# 函数用途: 返回当前代理的委托约束对象或 None。
+def parent_delegation_constraints(agent: object) -> StructuredDelegationConstraints | None:
+    from .delegation_constraints import extract_delegation_constraints
+
+    return extract_delegation_constraints(None, agent=agent)
+
+
+# LLM: 解析当前代理的父级标识，供累计创建量对账。
+# 函数用途: 获取当前 subagent run id 或根任务 id。
+def _resolve_parent_run_id(agent: object) -> str:
+    from ...runtime_context import current_subagent_run_id
+
+    scoped_id = current_subagent_run_id(agent)
+    if scoped_id:
+        return scoped_id
+    return _current_root_task_id(agent)
+
+
+# LLM: 权威累计创建子代理数从 delegations 表直读并在 creation_guard 事务内与 SubAgentTask.child_ids 对账；已终结/取消的子代理永不释放配额。
+# 函数用途: 统计当前父代理历史已创建的累计子代理总数。
+def cumulative_created_child_count(agent: object, parent_run_id: str | None = None) -> int:
+    resolved_parent_id = str(
+        parent_run_id or _resolve_parent_run_id(agent) or ""
+    ).strip()
+    if not resolved_parent_id:
+        return 0
+
+    db_count = 0
+    runtime_db = getattr(agent, "runtime_db", None) or getattr(
+        getattr(agent, "subagents", None), "runtime_db", None
+    )
+    if runtime_db is not None:
+        try:
+            with runtime_db._runtime_connection() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM delegations WHERE parent_agent_run_id = ?",
+                    (resolved_parent_id,),
+                ).fetchone()
+                if row and row[0] is not None:
+                    db_count = int(row[0])
+        except Exception:
+            pass
+
+    lineage_count = 0
+    manager = getattr(agent, "subagents", None)
+    if manager is not None:
+        try:
+            parent_task = manager.load(resolved_parent_id)
+            if parent_task is not None:
+                child_ids = getattr(parent_task, "child_ids", None)
+                if isinstance(child_ids, (list, tuple)):
+                    lineage_count = len(child_ids)
+        except Exception:
+            pass
+
+    return max(db_count, lineage_count)
 
 
 # LLM: This structured error is shared by root and nested create paths; callers
@@ -92,6 +184,46 @@ def subagent_quota_result(
     available: int,
     limits: dict[str, int],
 ) -> ToolHandlerOutcome:
+    if limits.get("descendants_forbidden"):
+        payload = {
+            "ok": False,
+            "error_code": "SUBAGENT_DESCENDANTS_FORBIDDEN",
+            "error": "当前代理策略禁止创建后代子代理（allow_descendants=False）。本批没有创建任何子代理。",
+            "requested": requested,
+            "available": 0,
+            "limits": limits,
+            "how_to_fix": "不要为此代理创建子代理；直接在当前代理内完成任务。",
+        }
+        return ToolHandlerOutcome(
+            "create_subagents",
+            False,
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            error_code="SUBAGENT_DESCENDANTS_FORBIDDEN",
+            effect_outcome="not_started",
+        )
+
+    if limits.get("cumulative_cap") is not None:
+        cum_cap = limits["cumulative_cap"]
+        existing = limits.get("existing_cumulative", 0)
+        remaining = limits.get("remaining_cumulative", 0)
+        if existing + requested > cum_cap or remaining < requested:
+            payload = {
+                "ok": False,
+                "error_code": "SUBAGENT_CUMULATIVE_LIMIT_EXCEEDED",
+                "error": "本次请求的子代理数量超过累计创建上限；已结束、取消或失败的子代理仍计入累计配额；没有创建任何部分批次。",
+                "requested": requested,
+                "available": available,
+                "limits": limits,
+                "how_to_fix": "减少 items 数量或复用已有的同名子代理；已结束或取消的子代理不释放累计配额。",
+            }
+            return ToolHandlerOutcome(
+                "create_subagents",
+                False,
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                error_code="SUBAGENT_CUMULATIVE_LIMIT_EXCEEDED",
+                effect_outcome="not_started",
+            )
+
     payload = {
         "ok": False,
         "error_code": "SUBAGENT_CAPACITY_EXCEEDED",
@@ -170,5 +302,7 @@ __all__ = [
     "SubagentCapacityStateError",
     "available_creation_slots",
     "checked_creation_capacity",
+    "cumulative_created_child_count",
+    "parent_delegation_constraints",
     "subagent_quota_result",
 ]

@@ -317,11 +317,48 @@ def _role_policy(
                 linked = ()
             allowed_tools = list(dict.fromkeys([*allowed_tools, *linked]))
     allowed_tools = _within_parent_tool_authority(agent, allowed_tools)
+    from .delegation_constraints import (
+        ToolPermissionDeniedError,
+        extract_delegation_constraints,
+    )
+
+    constraints = extract_delegation_constraints(raw_params)
+    if constraints is not None:
+        if constraints.permitted_tools:
+            parent_scope = _parent_tool_authority_names(agent)
+            if parent_scope is not None:
+                for tool in constraints.permitted_tools:
+                    if tool not in parent_scope:
+                        raise ToolPermissionDeniedError(
+                            f"TOOL_PERMISSION_DENIED: Permitted tool '{tool}' exceeds parent authority."
+                        )
+            allowed_tools = [t for t in constraints.permitted_tools if parent_scope is None or t in parent_scope]
+        if "spawn_children" in constraints.prohibited_actions:
+            allowed_tools = [t for t in allowed_tools if t not in ("create_subagents", "spawn_children")]
+        if "network_access" in constraints.prohibited_actions:
+            allowed_tools = [t for t in allowed_tools if t not in ("web_search", "web_fetch")]
     from ...conversation.im_delegation_delivery import current_delegated_delivery_task
 
     if current_delegated_delivery_task(agent) is not None:
         allowed_tools = [name for name in allowed_tools if name != "send_message"]
     return RolePolicy(role=role, allowed_tools=allowed_tools)
+
+
+# LLM: 提取父级权威允许的工具名称集合，用作子级工具收窄的上界判定。
+# 函数用途: 返回父级可用工具集合供委托约束校验。
+def _parent_tool_authority_names(agent) -> set[str] | None:
+    from ...subagents.capability_scope import current_creation_tool_authority
+    from ...tooling.registry import ToolRegistry
+
+    authority = current_creation_tool_authority()
+    if authority:
+        return set(authority["available_tool_names"])
+    registry = getattr(agent, "tools", None)
+    if isinstance(registry, ToolRegistry):
+        current = getattr(agent, "_current_run_params", None)
+        snapshot = registry.runtime_snapshot(allowed_tools=getattr(current, "allowed_tools", None))
+        return set(snapshot.available_tool_names)
+    return None
 
 
 # LLM: 实际创建绑定immutable父快照及动作令牌；内部宿主按同owner快照取事实，返回规范名和可持久化限制，不按attributes造权。
@@ -586,6 +623,7 @@ def create_task_attributes(raw_params: dict[str, object], agent=None) -> dict[st
     _inherit_audit_guarantee(attrs, agent)
     _clamp_service_window_to_audit_deadline(attrs)
     _bind_host_owned_selection(attrs, raw_params, agent)
+    _bind_delegation_constraints(attrs, raw_params, agent)
     # 宿主由本次创建入口固定隐式联动边界，覆盖模型同名属性；后续仅授文档不能悄悄扩张只读/精确工具表。
     attrs["pack_linked_tools_allowed"] = (raw_params.get("_exact_allowed_tools") is not True
                                           and str(raw_params.get("tool_preset") or "") != "read_only")
@@ -604,6 +642,50 @@ def _bind_host_owned_selection(attrs: dict[str, object], raw_params: dict[str, o
     # 决策前后均会重建规格；这里只解析 canonical 选择，诊断交给真实 child 线程初始化，不能跨操作缓存。
     inherit_model_profile(attrs, agent, model=raw_params.get("model"), emit_diagnostic=False)
     inherit_reasoning_effort(attrs, agent, raw_params.get("effort"))
+
+
+# LLM: 提取并效验结构化委托约束，确保不超越父级范围并如实上报原生能力。
+# 函数用途: 在构造子代理属性时校验上界并冻结 delegation_constraints。
+def _bind_delegation_constraints(attrs: dict[str, object], raw_params: dict[str, object], agent) -> None:
+    from .create_constraints import delegated_product_write_roots
+    from .delegation_constraints import (
+        DelegationConstraintError,
+        DelegationScopeExceedsParentError,
+        ToolPermissionDeniedError,
+        evaluate_delegation_enforcement,
+        extract_delegation_constraints,
+        validate_delegation_constraints_upper_bound,
+    )
+
+    constraints = extract_delegation_constraints(raw_params)
+    if constraints is None:
+        return
+
+    # 1. 效验原生执行能力：若为 native 且含有未知 prohibited_actions token，则 fail closed
+    report = evaluate_delegation_enforcement(constraints)
+    if constraints.actor_runtime == "native" and report.unknown_enforcement_fields:
+        unknown_str = ", ".join(report.unknown_enforcement_fields)
+        raise DelegationConstraintError(
+            f"Unknown prohibited action tokens cannot be enforced natively: {unknown_str}",
+            error_code="TOOL_INVALID_ARGUMENTS",
+        )
+
+    # 2. 单调上界校验：不能超出父级已授权工具、写根、后代派发权限
+    parent_tools = _parent_tool_authority_names(agent)
+    parent_write_roots = list(delegated_product_write_roots(agent)) if agent else None
+    parent_constraints = extract_delegation_constraints(None, agent=agent) if agent else None
+    valid, err_msg = validate_delegation_constraints_upper_bound(
+        constraints,
+        parent_tools=parent_tools,
+        parent_write_roots=parent_write_roots,
+        parent_constraints=parent_constraints,
+    )
+    if not valid:
+        if "TOOL_PERMISSION_DENIED" in err_msg:
+            raise ToolPermissionDeniedError(err_msg)
+        raise DelegationScopeExceedsParentError(err_msg)
+
+    attrs["delegation_constraints"] = constraints.to_dict()
 
 
 # LLM: Every descendant keeps the originating ordinary-conversation request id as typed
