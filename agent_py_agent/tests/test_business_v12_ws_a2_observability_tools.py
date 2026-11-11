@@ -498,3 +498,145 @@ def test_single_window_unfiltered_and_bounded_space_filter(tmp_path: Path):
     assert len(res_filtered['items']) == 2
     assert {it['run_id'] for it in res_filtered['items']} == {'run-space-b-0', 'run-space-b-1'}
     assert all(it['space_id'] == 'space-b' for it in res_filtered['items'])
+
+
+# LLM: 验证空间过滤多页分页时精确推进游标，零丢失零重复且尾部异空间记录不产生虚假空页。
+# 函数用途: 插入12个space-a与10个space-b交叉执行记录（尾部包含space-b），验证limit=5与limit=6两组分页。
+def test_space_filtered_multi_page_pagination_zero_dropped_zero_duplicates(tmp_path: Path):
+    env = _make_observability_env(tmp_path)
+    # 插入 12 个 space-a 执行与 10 个 space-b 执行（交替排列，尾部包含 space-b）
+    # 模式: 3a, 3b, 3a, 3b, 3a, 2b, 3a, 2b -> 总计 12 个 a，10 个 b
+    pattern = [
+        ('space-a', 3),
+        ('space-b', 3),
+        ('space-a', 3),
+        ('space-b', 3),
+        ('space-a', 3),
+        ('space-b', 2),
+        ('space-a', 3),
+        ('space-b', 2),
+    ]
+    a_idx, b_idx = 0, 0
+    expected_space_a_ids = []
+    for space, count in pattern:
+        for _ in range(count):
+            if space == 'space-a':
+                run_id = f'run-space-a-{a_idx:02d}'
+                a_idx += 1
+                expected_space_a_ids.append(run_id)
+            else:
+                run_id = f'run-space-b-{b_idx:02d}'
+                b_idx += 1
+            env.repo.record_run_creation(
+                owner_id=env.owner,
+                run_id=run_id,
+                thread_id='worker',
+                task_run_metadata={
+                    'business_context': BusinessExecutionContext(
+                        env.owner, space, None, env.task.task_id, 1, None, (), (), 'business-context.v1'
+                    ).to_dict(),
+                    'session_task_ref': env.task.task_id,
+                },
+            )
+    assert len(expected_space_a_ids) == 12
+
+    # 1. limit=5 分页验证：应返回 Page 1 (5), Page 2 (5), Page 3 (2, next_cursor is None)
+    page1 = env.service.query('executions.list', {'filter': {'space_id': 'space-a'}, 'limit': 5}, actor=env.actor)
+    assert len(page1['items']) == 5
+    assert page1['next_cursor'] is not None
+
+    page2 = env.service.query(
+        'executions.list',
+        {'filter': {'space_id': 'space-a'}, 'limit': 5, 'cursor': page1['next_cursor']},
+        actor=env.actor,
+    )
+    assert len(page2['items']) == 5
+    assert page2['next_cursor'] is not None
+
+    page3 = env.service.query(
+        'executions.list',
+        {'filter': {'space_id': 'space-a'}, 'limit': 5, 'cursor': page2['next_cursor']},
+        actor=env.actor,
+    )
+    assert len(page3['items']) == 2
+    assert page3['next_cursor'] is None
+
+    paged_a_ids = [item['run_id'] for item in page1['items'] + page2['items'] + page3['items']]
+    assert paged_a_ids == expected_space_a_ids
+
+    # 2. limit=6 分页验证：应返回 2 页各 6 条，且 Page 2 的 next_cursor 必为 None（尽管 DB 尾部存在 space-b 记录）
+    page1_6 = env.service.query('executions.list', {'filter': {'space_id': 'space-a'}, 'limit': 6}, actor=env.actor)
+    assert len(page1_6['items']) == 6
+    assert page1_6['next_cursor'] is not None
+
+    page2_6 = env.service.query(
+        'executions.list',
+        {'filter': {'space_id': 'space-a'}, 'limit': 6, 'cursor': page1_6['next_cursor']},
+        actor=env.actor,
+    )
+    assert len(page2_6['items']) == 6
+    assert page2_6['next_cursor'] is None
+
+    paged_a_ids_6 = [item['run_id'] for item in page1_6['items'] + page2_6['items']]
+    assert paged_a_ids_6 == expected_space_a_ids
+
+
+# LLM: 验证operations.get读取真实WorkflowRunStore记录及路径穿越防御。
+# 函数用途: 测试规范data/workflow_runs/<id>/run.json持久化记录读取与../等非安全ID被拒绝返回OBSERVATION_NOT_FOUND。
+def test_operations_get_canonical_workflow_run_store_and_path_confinement(tmp_path: Path):
+    from agent_py_agent.agent.workflows.models import WorkflowRunRecord
+    from agent_py_agent.agent.workflows.run_store import WorkflowRunStore
+
+    env = _make_observability_env(tmp_path)
+    wf_store = WorkflowRunStore(tmp_path)
+
+    # 1. 真实 WorkflowRunStore 成功记录 (status='succeeded')
+    succ_record = WorkflowRunRecord(
+        workflow_run_id='wf-run-real-succ',
+        workflow_id='wf-def-test',
+        owner_id=env.owner,
+        trigger_kind='manual',
+        status='succeeded',
+        started_at=1000.0,
+        ended_at=1005.0,
+        duration_ms=5000.0,
+        business_context={'space_id': 'space-a'},
+    )
+    wf_store.save_run(succ_record)
+
+    succ_res = env.service.query('operations.get', {'operation_id': 'wf-run-real-succ'}, actor=env.actor)
+    spec = business_action_spec('operations.get')
+    validate_object(spec.result_schema, succ_res)
+    assert succ_res['operation_id'] == 'wf-run-real-succ'
+    assert succ_res['state'] == 'completed'
+    assert succ_res['target_refs'] == ['space-a']
+    assert succ_res['error'] is None
+
+    # 2. 真实 WorkflowRunStore 失败记录 (status='failed')
+    fail_record = WorkflowRunRecord(
+        workflow_run_id='wf-run-real-fail',
+        workflow_id='wf-def-test',
+        owner_id=env.owner,
+        trigger_kind='manual',
+        status='failed',
+        started_at=1000.0,
+        ended_at=1008.0,
+        duration_ms=8000.0,
+        failed_step_id='step_failed_alpha',
+        business_context={'space_id': 'space-a'},
+    )
+    wf_store.save_run(fail_record)
+
+    fail_res = env.service.query('operations.get', {'operation_id': 'wf-run-real-fail'}, actor=env.actor)
+    validate_object(spec.result_schema, fail_res)
+    assert fail_res['operation_id'] == 'wf-run-real-fail'
+    assert fail_res['state'] == 'failed'
+    assert fail_res['error'] is not None
+    assert fail_res['error']['code'] == 'WORKFLOW_FAILED'
+    assert fail_res['error']['message'] == 'step_failed_alpha'
+
+    # 3. 路径穿越与非法 operation_id 均应安全返回 OBSERVATION_NOT_FOUND
+    unsafe_ids = ['../catalog', '..\\catalog', '.', '..', '/etc/passwd', 'receipts/op-receipt-123']
+    for bad_id in unsafe_ids:
+        with pytest.raises(BusinessError, match='OBSERVATION_NOT_FOUND'):
+            env.service.query('operations.get', {'operation_id': bad_id}, actor=env.actor)

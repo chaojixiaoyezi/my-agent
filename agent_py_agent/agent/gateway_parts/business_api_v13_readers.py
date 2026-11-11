@@ -24,7 +24,7 @@ from typing import Any
 from ..artifacts.registry import REGISTRY_RELATIVE_PATH, _record_from_payload
 from ..artifacts.registry_reader import latest_records_from_lines
 from ..common.log_redaction import redact_sensitive_value
-from ..common.nofollow_fs import read_bytes_beneath
+from ..common.nofollow_fs import read_bytes_beneath, read_text_beneath
 from ..conversation.background_team_lifecycle import background_identity
 from ..conversation.business_access import BusinessError
 from ..conversation.business_contracts import BusinessExecutionContext
@@ -242,6 +242,15 @@ class _StreamDecisionWindow:
 # LLM: 跨业务空间、工作流、后台助手及受管操作账本核验操作回执；仅本owner可见。
 # 函数用途: 跨多个持久事实源统一检索操作回执。
 def business_operation_receipt(home: Path, owner: str, store: Any, repo: Any, operation_id: str) -> dict[str, Any] | None:
+    if (
+        not isinstance(operation_id, str)
+        or not operation_id
+        or '/' in operation_id
+        or '\\' in operation_id
+        or operation_id in {'.', '..'}
+    ):
+        return None
+
     if repo is not None:
         try:
             with repo._runtime_connection() as conn:
@@ -286,28 +295,26 @@ def business_operation_receipt(home: Path, owner: str, store: Any, repo: Any, op
         except Exception:
             pass
 
-    receipt_dir = home / 'data' / 'business' / 'receipts'
-    if receipt_dir.is_dir():
-        file_path = receipt_dir / f"{operation_id}.json"
-        if file_path.is_file():
-            try:
-                data = json.loads(file_path.read_text('utf-8'))
-                if data.get('owner_id') == owner:
-                    result = data.get('receipt', {}).get('result', {})
-                    space_ref = result.get('space_id') or operation_id
-                    return {
-                        'operation_id': operation_id,
-                        'state': 'completed',
-                        'target_refs': [str(space_ref)],
-                        'error': None,
-                    }
-            except Exception:
-                pass
+    try:
+        raw_receipt = read_text_beneath(home, ('data', 'business', 'receipts', f"{operation_id}.json"))
+        if raw_receipt is not None:
+            data = json.loads(raw_receipt)
+            if data.get('owner_id') == owner:
+                result = data.get('receipt', {}).get('result', {})
+                space_ref = result.get('space_id') or operation_id
+                return {
+                    'operation_id': operation_id,
+                    'state': 'completed',
+                    'target_refs': [str(space_ref)],
+                    'error': None,
+                }
+    except Exception:
+        pass
 
-    catalog_path = home / 'data' / 'business' / 'catalog.json'
-    if catalog_path.is_file():
-        try:
-            catalog = json.loads(catalog_path.read_text('utf-8'))
+    try:
+        raw_catalog = read_text_beneath(home, ('data', 'business', 'catalog.json'))
+        if raw_catalog is not None:
+            catalog = json.loads(raw_catalog)
             for space in catalog.get('spaces', []):
                 if space.get('space_id') == operation_id or space.get('operation_id') == operation_id:
                     return {
@@ -316,20 +323,30 @@ def business_operation_receipt(home: Path, owner: str, store: Any, repo: Any, op
                         'target_refs': [str(space['space_id'])],
                         'error': None,
                     }
-        except Exception:
-            pass
+    except Exception:
+        pass
 
     if store is not None:
         try:
-            threads, _ = store.threads.list_report(limit=0)
+            direct = store.threads.load(operation_id)
+            if direct is not None and direct.owner_id == owner:
+                return {
+                    'operation_id': operation_id,
+                    'state': 'completed',
+                    'target_refs': [direct.thread_id],
+                    'error': None,
+                }
+            threads, _ = store.threads.list_report(limit=200)
             for th in threads:
                 if th.owner_id != owner:
                     continue
                 receipts = th.metadata.get('background_receipts', {})
                 retirement = th.metadata.get('background_retirement', {})
-                if (operation_id in receipts
-                        or retirement.get('operation_id') == operation_id
-                        or th.thread_id == operation_id):
+                if (
+                    operation_id in receipts
+                    or retirement.get('operation_id') == operation_id
+                    or th.thread_id == operation_id
+                ):
                     return {
                         'operation_id': operation_id,
                         'state': 'completed',
@@ -339,29 +356,65 @@ def business_operation_receipt(home: Path, owner: str, store: Any, repo: Any, op
         except Exception:
             pass
 
-    run_file = home / 'data' / 'workflows' / 'runs' / f"{operation_id}.json"
-    if run_file.is_file():
-        try:
-            run_data = json.loads(run_file.read_text('utf-8'))
+    try:
+        raw_run = read_text_beneath(home, ('data', 'workflow_runs', operation_id, 'run.json'))
+        if raw_run is not None:
+            run_data = json.loads(raw_run)
             if run_data.get('owner_id') == owner:
                 st = run_data.get('status', 'unknown')
-                state = 'completed' if st == 'succeeded' else (
-                    'failed' if st in ('failed', 'cancelled') else 'pending'
+                state = 'completed' if st in ('succeeded', 'skipped') else (
+                    'failed' if st in ('failed', 'cancelled') else (
+                        'pending' if st in ('queued', 'running', 'waiting_for_agent') else 'unknown'
+                    )
                 )
                 err = {
                     'code': 'WORKFLOW_FAILED',
-                    'message': 'WORKFLOW_FAILED',
+                    'message': str(run_data.get('failed_step_id') or 'WORKFLOW_FAILED'),
                     'retryable': False,
                     'details': [],
                 } if state == 'failed' else None
+                target_refs = [operation_id]
+                bctx = run_data.get('business_context') or {}
+                if isinstance(bctx, dict) and bctx.get('space_id'):
+                    target_refs = [str(bctx['space_id'])]
                 return {
                     'operation_id': operation_id,
                     'state': state,
-                    'target_refs': [operation_id],
+                    'target_refs': target_refs,
                     'error': err,
                 }
-        except Exception:
-            pass
+    except Exception:
+        pass
+
+    try:
+        raw_fallback = read_text_beneath(home, ('data', 'workflows', 'runs', f"{operation_id}.json"))
+        if raw_fallback is not None:
+            run_data = json.loads(raw_fallback)
+            if run_data.get('owner_id') == owner:
+                st = run_data.get('status', 'unknown')
+                state = 'completed' if st in ('succeeded', 'skipped') else (
+                    'failed' if st in ('failed', 'cancelled') else (
+                        'pending' if st in ('queued', 'running', 'waiting_for_agent') else 'unknown'
+                    )
+                )
+                err = {
+                    'code': 'WORKFLOW_FAILED',
+                    'message': str(run_data.get('failed_step_id') or 'WORKFLOW_FAILED'),
+                    'retryable': False,
+                    'details': [],
+                } if state == 'failed' else None
+                target_refs = [operation_id]
+                bctx = run_data.get('business_context') or {}
+                if isinstance(bctx, dict) and bctx.get('space_id'):
+                    target_refs = [str(bctx['space_id'])]
+                return {
+                    'operation_id': operation_id,
+                    'state': state,
+                    'target_refs': target_refs,
+                    'error': err,
+                }
+    except Exception:
+        pass
 
     return None
 
