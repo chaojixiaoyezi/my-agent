@@ -548,3 +548,90 @@ def test_dag_cancellation_mid_wave(tmp_path):
 
     with pytest.raises(ToolCancelled):
         engine.run_workflow(flow)
+
+
+def test_dag_parallel_workers_lock_isolation_and_atomic_persistence(tmp_path):
+    """验证4个并行同伴步骤同时触发重试与水位时，工作线程锁状态严格隔离且 run.json 保持原子持久化零丢失。"""
+    import threading
+
+    from agent_py_agent.agent.workflows.run_store import _HELD_LOCKS
+
+    step_attempts = {f"step_{i}": 0 for i in range(1, 5)}
+    worker_held_locks = []
+    lock = threading.Lock()
+
+    def analyze(spec, context, skills):
+        sid = spec["step_id"]
+        if sid in ("root", "join"):
+            return {"status": "ok"}
+        # 1. 验证工作线程锁凭据隔离：Worker 绝不继承协调线程的 _HELD_LOCKS.paths (SA-F3)
+        held = getattr(_HELD_LOCKS, "paths", set())
+        with lock:
+            worker_held_locks.append((sid, set(held)))
+            step_attempts[sid] += 1
+            att = step_attempts[sid]
+
+        if att == 1:
+            # 第一次执行：模拟瞬态 I/O 错误触发重试
+            exc = RuntimeError("simulated transient I/O error")
+            exc.error_code = "timeout"
+            raise exc
+
+        # 第二次执行：成功并提交单步验证水位
+        return {
+            "result": f"result_{sid}",
+            "watermark": {"cursor": 100 + int(sid.split("_")[1]), "shard": sid},
+        }
+
+    engine = WorkflowEngine(tmp_path, analysis_handler=analyze)
+
+    retry_policy = {
+        "max_attempts": 2,
+        "delay_seconds": 0.02,
+        "retryable_codes": ["timeout", "STEP_EXECUTION_ERROR"],
+    }
+
+    steps = [{"step_id": "root", "mode": "llm_skill_analysis"}]
+    for i in range(1, 5):
+        steps.append(
+            {
+                "step_id": f"step_{i}",
+                "mode": "llm_skill_analysis",
+                "depends_on": ["root"],
+                "retry_policy": retry_policy,
+            }
+        )
+    steps.append(
+        {
+            "step_id": "join",
+            "mode": "llm_skill_analysis",
+            "depends_on": [f"step_{i}" for i in range(1, 5)],
+        }
+    )
+
+    flow = _flow(steps, max_parallel_steps=4)
+
+    run = engine.run_workflow(flow)
+    assert run.status == "succeeded"
+
+    # 验证全部工作线程执行期间 _HELD_LOCKS.paths 均为空
+    assert len(worker_held_locks) >= 8  # 4 steps × 2 attempts
+    for sid, held_set in worker_held_locks:
+        assert held_set == set(), f"Worker thread for {sid} leaked held locks: {held_set}"
+
+    # 从磁盘直接重新加载 run.json，验证4个步骤的结果、重试历史与水位全部完整保留且零覆盖丢失
+    persisted_run = engine.store.load_run(run.workflow_run_id)
+    assert persisted_run.status == "succeeded"
+
+    step_map = {s.step_id: s for s in persisted_run.steps}
+    for i in range(1, 5):
+        sid = f"step_{i}"
+        assert sid in step_map
+        st = step_map[sid]
+        assert st.status == "succeeded"
+        assert st.attempt_count == 2
+        history = st.escalation_result.get("retry_history", [])
+        assert len(history) == 1
+        assert history[0]["attempt"] == 1
+        assert history[0]["error_code"] == "timeout"
+        assert st.watermark == {"cursor": 100 + i, "shard": sid}

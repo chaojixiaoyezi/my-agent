@@ -223,9 +223,10 @@ def read_session_task_completion(conversation_store, run, step=None, **identity_
     task_owner = context.get("owner_id") or getattr(task, "owner_id", None)
     if not task_owner and hasattr(conversation_store, "threads") and hasattr(task, "target_thread_id"):
         try:
-            target_th = conversation_store.threads.get(task.target_thread_id)
+            th_store = conversation_store.threads
+            target_th = th_store.load(task.target_thread_id) if hasattr(th_store, "load") else th_store.get(task.target_thread_id)
             if target_th:
-                task_owner = getattr(target_th, "owner_id", None)
+                task_owner = getattr(target_th, "owner_id", None) or (target_th.get("owner_id") if isinstance(target_th, dict) else None)
         except Exception:
             pass
 
@@ -358,6 +359,17 @@ def cancel_workflow_session_task(
     return {"operation_id": str(task_id), "state": "completed", "outstanding_refs": []}
 
 
+def make_session_task_completion_reader(conversation_store):
+    """构造沿准确 SessionTask->run/attempt 链读取结构化完成证据的 reader。"""
+    def completion_reader(*c_args, **c_kwargs):
+        if len(c_args) == 2 and hasattr(c_args[0], "workflow_run_id"):
+            return read_session_task_completion(conversation_store, c_args[0], c_args[1], **c_kwargs)
+        task_id = c_args[0] if c_args else c_kwargs.pop("task_id", "")
+        return read_session_task_completion(conversation_store, task_id, **c_kwargs)
+
+    return completion_reader
+
+
 # LLM: 构造并装配工作流原生 Agent 节点端口 (WorkflowAgentTaskPort.v1 / G5b)。
 # 函数用途: 为宿主注入默认的 WorkflowAgentSteps 实例，绑定真正的后台服务与 SessionTask 完成读取。
 def build_default_workflow_agent_steps(host, *, background_service=None):
@@ -396,11 +408,7 @@ def build_default_workflow_agent_steps(host, *, background_service=None):
         )
 
     # 3. 构造 completion_reader
-    def completion_reader(*c_args, **c_kwargs):
-        if len(c_args) == 2 and hasattr(c_args[0], "workflow_run_id"):
-            return read_session_task_completion(conv_store, c_args[0], c_args[1], **c_kwargs)
-        task_id = c_args[0] if c_args else c_kwargs.pop("task_id", "")
-        return read_session_task_completion(conv_store, task_id, **c_kwargs)
+    completion_reader = make_session_task_completion_reader(conv_store)
 
     # 4. 构造 cancel_handler
     def cancel_handler(*c_args, **c_kwargs):
