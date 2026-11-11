@@ -42,8 +42,8 @@ def prepare_subscription_push(server, body, authenticated_token):
     business_subscription_actor(owner_id, token_id, source_ref) -> 绑定该catalog的当前BusinessActor；
     它及service的submit_actor_provider必须实时重核来源权限，并保持原配置主体/线程身份。
     """
-    service_factory = getattr(server, 'business_subscriptions', None)
-    actor_factory = getattr(server, 'business_subscription_actor', None)
+    service_factory = getattr(server, 'business_subscriptions', getattr(getattr(server, 'agent', None), 'business_subscriptions', None))
+    actor_factory = getattr(server, 'business_subscription_actor', getattr(getattr(server, 'agent', None), 'business_subscription_actor', None))
     if not callable(service_factory) or not callable(actor_factory):
         raise RemotePushError('REMOTE_PUSH_SUBSCRIPTIONS_UNAVAILABLE', 503)
     service = service_factory(body['target_owner'])

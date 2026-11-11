@@ -419,16 +419,32 @@ class BusinessServices:
         if workflows is None:
             from ..workflows.business_scope import WorkflowScopeService
             engine_factory, context_provider = workflow_run_ports(host)
+            wf_reader = getattr(host, 'business_workflow_reference_reader', None)
+            if wf_reader is None and hasattr(host, 'business_reference_reader'):
+                legacy_reader = host.business_reference_reader
+                if callable(legacy_reader):
+                    from .business_host_ports import _inspect_callable_arity
+                    if _inspect_callable_arity(legacy_reader) == 1:
+                        wf_reader = legacy_reader
+            agent_steps_port = getattr(host, 'workflow_agent_steps', None)
+            if agent_steps_port is None and getattr(host, '_business_host_ports_wired', False):
+                from .business_host_ports import build_default_workflow_agent_steps
+                agent_steps_port = build_default_workflow_agent_steps(host)
             workflows = WorkflowScopeService(self.owner_home, owner_id=self.owner_id,
                 authorize=lambda actor, action, ref: actor.authorize(action, {'workflow_ref': ref}),
-                reference_reader=getattr(host, 'business_reference_reader', None),
+                reference_reader=wf_reader,
                 context_provider=context_provider,
-                agent_steps=getattr(host, 'workflow_agent_steps', None),
+                agent_steps=agent_steps_port,
                 governance=getattr(host, 'business_governance', None),
                 engine_factory=engine_factory)
         self.workflows = workflows
         self.background = background if background is not None else getattr(host, 'business_background', None)
-        self.capabilities = capabilities if capabilities is not None else getattr(host, 'business_capabilities', None)
+        if capabilities is None:
+            capabilities = getattr(host, 'business_capabilities', None)
+            if capabilities is None and (getattr(host, '_business_host_ports_wired', False) or getattr(getattr(host, 'config', None), 'business_host_ports_enabled', True)):
+                from ..capability.business_capabilities import BusinessCapabilityService
+                capabilities = BusinessCapabilityService(host)
+        self.capabilities = capabilities
         self.projection = projection if projection is not None else getattr(host, 'business_projection', None)
         self._default_projection = self.projection is None
         self.approvals = getattr(host, 'business_approval_decider', None)
@@ -443,8 +459,15 @@ class BusinessServices:
         if self._default_spaces:
             enabled = bool(getattr(self.host.config, 'business_spaces_enabled', False))
             if self._spaces is None:
+                space_resolver = getattr(self.host, 'business_space_reference_resolver', None)
+                if space_resolver is None and hasattr(self.host, 'business_reference_reader'):
+                    legacy_reader = self.host.business_reference_reader
+                    if callable(legacy_reader):
+                        from .business_host_ports import _inspect_callable_arity
+                        if _inspect_callable_arity(legacy_reader) >= 3:
+                            space_resolver = legacy_reader
                 self._spaces = BusinessSpaceService(self.owner_home, owner_id=self.owner_id, enabled=enabled,
-                    reference_resolver=getattr(self.host, 'business_reference_reader', None),
+                    reference_resolver=space_resolver,
                     active_references=getattr(self.host, 'business_active_references', None),
                     governance=getattr(self.host, 'business_governance', None))
             else:
@@ -558,9 +581,19 @@ class BusinessServices:
         return self._observation_ready(action)
 
     def actor(self, context):
+        authorizer = getattr(context.actor, 'content_authorizer', getattr(self.host, 'business_content_authorizer', None))
+
+        # LLM: 将 HostAPIError 异常映射为授权失败 False，满足 BusinessActor 的布尔契约。
+        # 函数用途: 供领域权限检查判断当前动作是否被授权。
+        def _actor_authorize(action, facts):
+            try:
+                return context.check(action, facts) is True
+            except HostAPIError:
+                return False
+
         return BusinessActor(self.owner_id, context.subject_id, self.spaces,
-            lambda action, facts: context.check(action, facts),
-            content_authorizer=getattr(context.actor, 'content_authorizer', None))
+            _actor_authorize,
+            content_authorizer=authorizer)
 
     # LLM: 每次新建绑定确切观察服务的actor；每一帧/查询仍复核原live上下文。
     # 函数用途: 区分空间操作身份和只读观察身份。
@@ -656,8 +689,15 @@ class BusinessServices:
 
             service = (self._workflow_cancel_service(context)
                 if action == 'workflow_runs.cancel' and isinstance(context.actor, AuthorizedCall) else self.workflows)
+            normalized_params = params
+            if isinstance(params, dict):
+                normalized_params = dict(params)
+                if 'workflow_ref' in normalized_params and isinstance(normalized_params['workflow_ref'], str) and normalized_params['workflow_ref'].startswith('workflow:'):
+                    normalized_params['workflow_ref'] = normalized_params['workflow_ref'][9:]
+                if 'workflow_id' in normalized_params and isinstance(normalized_params['workflow_id'], str) and normalized_params['workflow_id'].startswith('workflow:'):
+                    normalized_params['workflow_id'] = normalized_params['workflow_id'][9:]
             try:
-                return service.execute(action, params, actor=actor, **kwargs)
+                return service.execute(action, normalized_params, actor=actor, **kwargs)
             except WorkflowPolicyRefusal as error:
                 # 领域在副作用前作出的策略拒绝：结构化 not_started，而不是 OUTCOME_UNKNOWN。
                 raise BusinessError(error.error_code, details=error.details) from None
@@ -669,7 +709,21 @@ class BusinessServices:
             if backend is None:
                 from ..capability.business_capabilities import BusinessCapabilityService
                 backend = BusinessCapabilityService(self.host)
-            return backend.execute(action, params, context=context.business_context)
+            business_context = context.business_context
+            if business_context is None and isinstance(params, dict) and params.get('space_id'):
+                from ..conversation.business_contracts import BusinessExecutionContext
+                business_context = BusinessExecutionContext(
+                    self.owner_id,
+                    params['space_id'],
+                    params.get('project_ref'),
+                    params.get('task_id') or 'task-standalone',
+                    1,
+                    None,
+                    (),
+                    (),
+                    'business-context.v1'
+                )
+            return backend.execute(action, params, context=business_context)
         if action == 'messages.list':
             from .business_api_v13 import v13_conversation_messages
             conversation = v13_conversation_messages(params, context, self)
@@ -847,13 +901,20 @@ def native_business_context(handler, server):
         for key in ('business_projection', 'business_reference_reader', 'business_active_references',
                     'business_governance', 'business_background', 'business_capabilities',
                     'business_context_provider', 'workflow_engine_factory', 'workflow_agent_steps', 'subagents',
-                    'business_v13_providers', 'business_v13_clock'):
+                    'business_v13_providers', 'business_v13_clock',
+                    'business_space_reference_resolver', 'business_workflow_reference_reader',
+                    'task_business_context', '_business_host_ports_wired',
+                    'business_content_authorizer'):
             if hasattr(base, key):
                 setattr(host, key, getattr(base, key))
         # 同一Owner才复用基座已登记的owner绑定工作流引擎；其它Owner缺端口时如实未就绪。
         port_source = workflow_port_source(base)
         engine_factory, context_provider = workflow_run_ports(base, port_source)
         host.workflow_engine_factory, host.business_context_provider = engine_factory, context_provider
+
+    if getattr(base, '_business_host_ports_wired', False) or getattr(base, 'business_host_ports_enabled', False):
+        from .business_host_ports import wire_business_host_ports
+        wire_business_host_ports(host)
 
     def check(action, facts):
         middleware = getattr(handler, '_auth_middleware', None)
@@ -869,7 +930,10 @@ def native_business_context(handler, server):
             from ..user_space.local_user_store import LocalUserStore
             owner_state(LocalUserStore(home.root), owner)
         # 原批准票据必须走专用人类issuer；本通用JSON上下文不能签出批准。
-        return not resolve_business_action_spec(action).human_authorization_required
+        if resolve_business_action_spec(action).human_authorization_required:
+            auth_fn = getattr(host, 'business_content_authorizer', None)
+            return callable(auth_fn) and auth_fn(dict(facts)) is True
+        return True
 
     def background_actor(action):
         from uuid import uuid4
@@ -1125,6 +1189,9 @@ def handle_client_business_stream(handler, server):
 def _local_business_services(host):
     lock = vars(host).setdefault('_local_business_services_lock', RLock())
     with lock:
+        if getattr(host, '_business_host_ports_wired', False) or getattr(host, 'business_host_ports_enabled', False):
+            from .business_host_ports import wire_business_host_ports
+            wire_business_host_ports(host)
         store = getattr(host, 'conversation_store', None)
         storage = getattr(store, 'storage', None)
         root = getattr(storage, 'root', None)
@@ -1136,7 +1203,9 @@ def _local_business_services(host):
                 'business_projection', 'business_reference_reader', 'business_active_references',
                 'business_governance', 'business_background', 'business_capabilities',
                 'business_context_provider', 'workflow_engine_factory', 'workflow_agent_steps',
-                'business_approval_decider', 'business_v13_providers', 'business_v13_clock')))
+                'business_approval_decider', 'business_v13_providers', 'business_v13_clock',
+                'business_space_reference_resolver', 'business_workflow_reference_reader',
+                'task_business_context')))
         cached = getattr(host, '_local_business_services_cache', None)
         if (cached is None or cached[0] != key or cached[2].host is not host
                 or any(previous is not current for previous, current in zip(cached[1], sources))):

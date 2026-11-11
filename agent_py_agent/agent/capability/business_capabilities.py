@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 from dataclasses import dataclass
+from pathlib import Path
 
 from ..conversation.business_contracts import BusinessExecutionContext
 from .package_provider import list_installed_capability_packages
@@ -216,7 +217,7 @@ class BusinessCapabilityService:
             return {'items': [], 'next_cursor': None, 'coverage': 'unknown'}
         rows = _ledger_rows(SkillLearningStore.for_home(self.host.home_paths))
         items = []
-        phases = {'manual_get': 'read', 'adopted': 'selected', 'host_injected': 'visible', 'manual_search': 'considered'}
+        phases = {'manual_get': 'read', 'adopted': 'selected', 'host_injected': 'visible', 'manual_search': 'considered', 'executed': 'executed'}
         for row in rows:
             if not row.get('task_id') or type(row.get('sequence')) is not int:
                 continue
@@ -225,11 +226,66 @@ class BusinessCapabilityService:
                 continue
             if request.get('task_id') is not None and business.task_id != request['task_id']:
                 continue
+            reason_codes = ['original_skill_usage_ledger']
+            if row.get('mounted_first'):
+                reason_codes.append('mounted_first')
             items.append({'event_id': f"skill-usage:{row['sequence']}", 'space_id': business.space_id,
                           'task_id': business.task_id, 'run_id': None, 'method_ref': row['skill_id'],
-                          'phase': phases[row['event']], 'reason_codes': ['original_skill_usage_ledger'], 'receipt_ref': None})
+                          'phase': phases.get(row.get('event'), 'read'), 'reason_codes': reason_codes, 'receipt_ref': None})
+
+        # LLM: 从 runtime_db 读取真实工具执行记录并投影为 executed 阶段收据 (V03-06)。
+        # 函数用途: 补充执行阶段收据并保留 mounted_first 出处 (V03-04)。
+        try:
+            from ..runtime_db.repository import RuntimeRepository
+            from ..runtime_db.schema import runtime_db_path
+            r_path = runtime_db_path(Path(self.host.home_paths.owner_home_dir).resolve())
+            if r_path.exists():
+                repo = RuntimeRepository(r_path, read_only=True)
+                target_task_id = request.get('task_id') or context.task_id
+                if target_task_id:
+                    task_runs = repo.task_runs_for_task(str(target_task_id))
+                    for tr in task_runs:
+                        tr_id = tr['task_run_id'] if isinstance(tr, dict) or hasattr(tr, '__getitem__') else getattr(tr, 'task_run_id', None)
+                        if not tr_id:
+                            continue
+                        agent_runs = repo.agent_runs_for_task_run(tr_id)
+                        for ar in agent_runs:
+                            ar_id = ar['agent_run_id'] if isinstance(ar, dict) or hasattr(ar, '__getitem__') else getattr(ar, 'agent_run_id', None)
+                            if not ar_id:
+                                continue
+                            attempts = repo.attempts_for_run(ar_id)
+                            for att in attempts:
+                                att_id = att['attempt_id'] if isinstance(att, dict) or hasattr(att, '__getitem__') else getattr(att, 'attempt_id', None)
+                                if not att_id:
+                                    continue
+                                ops = repo.operations_for_attempt(att_id)
+                                for op in ops:
+                                    op_id = op['operation_id'] if isinstance(op, dict) or hasattr(op, '__getitem__') else getattr(op, 'operation_id', None)
+                                    op_type = op['operation_type'] if isinstance(op, dict) or hasattr(op, '__getitem__') else getattr(op, 'operation_type', None)
+                                    if not op_id or not op_type:
+                                        continue
+                                    r_codes = ['runtime_execution_receipt']
+                                    try:
+                                        space_obj = _space_for_context(self.host, context)
+                                        mounts = space_obj.get('mounts', []) if isinstance(space_obj, dict) else []
+                                    except Exception:
+                                        mounts = []
+                                    if any(m.get('package_ref') in op_type for m in mounts if isinstance(m, dict)):
+                                        r_codes.append('mounted_first')
+                                    items.append({
+                                        'event_id': f"runtime-exec:{op_id}",
+                                        'space_id': context.space_id,
+                                        'task_id': target_task_id,
+                                        'run_id': ar_id,
+                                        'method_ref': op_type,
+                                        'phase': 'executed',
+                                        'reason_codes': r_codes,
+                                        'receipt_ref': f"receipt:{op_id}"
+                                    })
+        except Exception:
+            pass
         page, cursor = _page(items, request, (owner, action, context.space_id, request.get('task_id')))
-        return {'items': page, 'next_cursor': cursor, 'coverage': 'partial' if rows else 'unknown'}
+        return {'items': page, 'next_cursor': cursor, 'coverage': 'partial' if (rows or items) else 'unknown'}
 
 
 def _page(rows, request, scope):
