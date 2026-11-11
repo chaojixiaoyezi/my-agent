@@ -180,26 +180,27 @@ def identity_outstanding(host, thread) -> tuple[list[str], list]:
             refs.append(f"approval:{appr_id}")
     except Exception:
         pass
-    # 未投递的 SessionTask 终态结果回报（只对 done/failed，不含 cancelled）
-    from .session_task_report import (
-        SESSION_TASK_DONE,
-        SESSION_TASK_FAILED,
-        delegated_result_report_pending,
-        result_report_key,
-    )
-    try:
-        if delegated_result_report_pending(host, thread.thread_id):
-            refs.append(f"undelivered_report:{thread.thread_id}")
-        for items in session_task_pages(store.session_tasks, target_thread_id=thread.thread_id):
-            for task in items:
-                if task.status in {SESSION_TASK_DONE, SESSION_TASK_FAILED} and str(getattr(task, "sender_thread_id", "") or "").strip():
-                    key = result_report_key(task)
-                    if store.guidance.receipt(key) is None:
-                        refs.append(f"undelivered_report:{task.task_id}")
-                    elif store.wakes.delivery_receipt(task.sender_thread_id, key) == "pending":
-                        refs.append(f"undelivered_wake:{task.task_id}")
-    except Exception:
-        refs.append("session_tasks:coverage_unknown")
+    # 委派任务未投递的结果回报与未结唤醒核验
+    from .execution_threads import IM_TASK_EXECUTION_KEY
+    if IM_TASK_EXECUTION_KEY in (thread.metadata or {}):
+        from .im_delegation_delivery import delegated_delivery_task
+        from .session_task_report import (
+            SESSION_TASK_DONE,
+            SESSION_TASK_FAILED,
+            delegated_result_report_pending,
+            result_report_key,
+        )
+
+        try:
+            dtask = delegated_delivery_task(host, thread.thread_id)
+            if dtask is not None and dtask.status in {SESSION_TASK_DONE, SESSION_TASK_FAILED}:
+                key = result_report_key(dtask)
+                if delegated_result_report_pending(host, thread.thread_id):
+                    refs.append(f"undelivered_report:{dtask.task_id}")
+                elif store.wakes.delivery_receipt(dtask.sender_thread_id, key) == "pending":
+                    refs.append(f"undelivered_wake:{dtask.task_id}")
+        except Exception:
+            refs.append("session_tasks:coverage_unknown")
     # 附加来源只允许宿主提供读取适配器；返回unknown不能被当作空列表。
     probe = getattr(host, "background_identity_obligations", None)
     if callable(probe):

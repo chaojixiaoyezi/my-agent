@@ -273,6 +273,119 @@ def test_biz_009_retirement_obligations_and_quota_release(tmp_path):
     assert quota_after["used"] == 0
 
 
+# LLM: 验证委派任务的未投递结果回报与未结唤醒准确阻止退休（保持 retiring），待交付结清后平滑收敛为 retired。
+# 函数用途: 验证 delegated 任务在结果回报未入队 (undelivered_report) 或 wake 待处理 (undelivered_wake) 时保持 retiring，直到结案。
+def test_delegated_report_and_wake_obligations_hold_retiring_until_delivered(tmp_path):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.conversation.execution_threads import (
+        EXECUTION_ORIGIN_KEY,
+        IM_TASK_EXECUTION_KEY,
+    )
+    from agent_py_agent.agent.conversation.session_task_report import (
+        result_report_key,
+    )
+
+    agent, actor = _make_agent_and_actor(tmp_path)
+    service = BackgroundAgentService(agent)
+
+    worker = service.create(
+        {"space_id": None, "name": "worker-delegated-retire", "after_task": "retire"},
+        actor=actor,
+        idempotency_key="create-delegated-retire",
+    )["agent"]
+    worker_id = worker["agent_id"]
+
+    # 创建委派任务并绑定到执行线程
+    source_thread = agent.conversation_store.threads.require(actor.source_thread_id)
+    recent = source_thread.channel_bindings[0]
+    binding = {
+        "channel": recent.channel,
+        "conversation_id": recent.channel_conversation_id,
+        "actor_id": recent.channel_user_id,
+    }
+    task = agent.conversation_store.session_tasks.create(
+        SessionTaskDraft(actor.source_thread_id, worker_id, "delegated work")
+    )
+    agent.conversation_store.threads.update_atomic(
+        worker_id,
+        lambda t: replace(
+            t,
+            metadata={
+                **t.metadata,
+                IM_TASK_EXECUTION_KEY: {
+                    "mode": "delegated",
+                    "session_task_id": task.task_id,
+                    "root_task_id": task.task_id,
+                },
+                EXECUTION_ORIGIN_KEY: {
+                    "source_thread_id": actor.source_thread_id,
+                    "kind": "delegated",
+                    "operation_key": "op-test-delegated",
+                    "binding": binding,
+                },
+            },
+        ),
+    )
+
+    # 任务已到终态但尚未写入结果回报 guidance
+    agent.conversation_store.session_tasks.advance(
+        task.task_id, SessionTaskUpdate(status="accepted")
+    )
+    agent.conversation_store.session_tasks.advance(
+        task.task_id, SessionTaskUpdate(status=SESSION_TASK_DONE, summary="work complete")
+    )
+
+    # 1. 未投递结果回报时：阻止 retired，保持 retiring
+    refs, _ = identity_outstanding(agent, agent.conversation_store.threads.require(worker_id))
+    assert f"undelivered_report:{task.task_id}" in refs
+    thread_retiring = reconcile_background_identity(agent, worker_id)
+    assert background_identity(thread_retiring).identity_state == "retiring"
+    assert service.get(worker_id, actor=actor)["agent"]["identity_state"] == "retiring"
+
+    # 2. 模拟 guidance 已入队，但 wake 处于 pending 状态
+    task = agent.conversation_store.session_tasks.require(task.task_id)
+    key = result_report_key(task)
+    agent.conversation_store.guidance.append_once(
+        {
+            "target_type": "thread",
+            "target_id": actor.source_thread_id,
+            "message": "Report complete",
+        },
+        dedupe_key=key,
+    )
+    agent.conversation_store.wakes.raise_signal(
+        {
+            "thread_id": actor.source_thread_id,
+            "reason": "session_message",
+            "urgency": "normal",
+            "dedupe_key": key,
+            "retain_handled": True,
+        }
+    )
+
+    # 处于 undelivered_wake 状态：依然保持 retiring
+    refs2, _ = identity_outstanding(agent, agent.conversation_store.threads.require(worker_id))
+    assert f"undelivered_wake:{task.task_id}" in refs2
+    thread_retiring2 = reconcile_background_identity(agent, worker_id)
+    assert background_identity(thread_retiring2).identity_state == "retiring"
+
+    # 3. 来源线程消费并 mark_handled 该 wake
+    wake = next(w for w in agent.conversation_store.wakes.pending(limit=0) if w.dedupe_key == key)
+    agent.conversation_store.wakes.mark_handled(wake.wake_signal_id)
+
+    # 义务全部结清：自动推进至 retired 并释放配额
+    refs3, _ = identity_outstanding(agent, agent.conversation_store.threads.require(worker_id))
+    assert f"undelivered_report:{task.task_id}" not in refs3
+    assert f"undelivered_wake:{task.task_id}" not in refs3
+    assert refs3 == []
+
+    thread_retired = reconcile_background_identity(agent, worker_id)
+    assert background_identity(thread_retired).identity_state == "retired"
+    assert service.get(worker_id, actor=actor)["agent"]["identity_state"] == "retired"
+    assert service.quota_summary(actor=actor)["used"] == 0
+
+
 # LLM: 验证 V09-02 素材按接受版本绑定，候选版本或跨空间资产直接 409 拒绝（effect_outcome='not_started'）。
 # 函数用途: 校验 tasks.submit 中 asset_refs 的接受版本冻结与未接受候选版本拦截。
 def test_asset_refs_accepted_version_freezing_and_409_rejection(tmp_path):
