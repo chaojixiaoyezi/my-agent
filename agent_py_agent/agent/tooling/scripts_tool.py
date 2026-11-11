@@ -159,15 +159,15 @@ def _post_commit_failure(name, error):
                     failure_stage='execution')
 
 
-# LLM: 危险动作在ask模式走原审批、在auto/full-access模式沿自主决策放行；资源按当前Owner工具实例串行。
-# 函数用途: 给两工具统一声明只读、写入与危险动作的真实效果。
+# LLM: 危险动作在ask模式走原审批、在auto/full-access模式沿自主决策放行；资源按细化动态身份锁定 (WF-06)。
+# 函数用途: 给两工具统一声明只读、写入与危险动作的真实效果，由工具实例提供精准动态资源锁。
 def _policy(name, reads, dangerous):
     return ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy('mutating', by_parameter=(('action', tuple(
             [(action, 'read_only') for action in reads] + [(action, 'dangerous') for action in dangerous])),)),
         approval_policy=ApprovalPolicy('dangerous'),
         idempotency_policy=IdempotencyPolicy('operation'),
-        resource_scopes=ResourceScopePolicy(mode='declared', static_scopes=(name + ':current_owner',)))
+        resource_scopes=ResourceScopePolicy(mode='none'))
 
 
 # LLM: Store与runner均绑定同一个可信Owner；纯schema/descriptor沿共享构造器，execute不接收执行身份或任意命令。
@@ -209,6 +209,33 @@ class ScriptsTool(BaseTool):
     def _workspace_root(self):
         return (self.workspace_root_provider() if callable(self.workspace_root_provider)
                 else self.workspace_root or getattr(self.runner, 'workspace_root', None))
+
+    # LLM: 细化脚本资源锁粒度 (WF-06)；只读动作与run执行不持定义写锁，定义变更动作仅锁当前脚本身份 script:<script_id>。
+    # 函数用途: 动态声明 claim 前要锁定的资源范围，避免 owner 级静态锁阻塞无关操作。
+    def effective_resource_scopes(
+        self,
+        arguments: dict[str, object],
+        write_boundary: dict | None,
+        workspace_root: object,
+    ) -> tuple[str, ...]:
+        action = str(arguments.get("action") or "").strip().lower()
+        if not action or action in ("list", "get", "check_sources", "versions", "diff"):
+            return ()
+        if action == "run":
+            return ()
+
+        target = ""
+        val = arguments.get("script_id")
+        if isinstance(val, str) and val.strip():
+            target = val.strip()
+        if not target:
+            descriptor = arguments.get("descriptor")
+            if isinstance(descriptor, dict):
+                target = str(descriptor.get("id") or "").strip()
+        if target:
+            clean_id = target.removeprefix("script:").strip()
+            return (f"script:{clean_id}",)
+        return ("script:create",)
 
     # LLM: 纯参数预检供原执行器claim前使用，不创建Owner或取得领域Store。
     # 函数用途: 返回条件必填及Schema错误，合法调用返回None。

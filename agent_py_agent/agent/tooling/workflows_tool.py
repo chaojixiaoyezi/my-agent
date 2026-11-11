@@ -221,6 +221,49 @@ class WorkflowsTool(BaseTool):
             'skill_snapshot': self.skill_snapshot_provider() if self.skill_snapshot_provider else None,
         }
 
+    # LLM: 细化工作流资源锁粒度 (WF-06)；只读动作与run/resume等执行不持定义写锁，定义变更动作仅锁当前工作流身份 workflow:<workflow_id>。
+    # 函数用途: 动态声明 claim 前要锁定的资源范围，避免 owner 级静态锁阻塞无关工作流的保存与编辑。
+    def effective_resource_scopes(
+        self,
+        arguments: dict[str, object],
+        write_boundary: dict | None,
+        workspace_root: object,
+    ) -> tuple[str, ...]:
+        action = str(arguments.get("action") or "").strip().lower()
+        if not action or action in self.READ_ONLY_ACTIONS:
+            return ()
+        if action in (
+            "run",
+            "resume",
+            "cancel",
+            "debug_step",
+            "workflows.run",
+            "workflow_runs.resume",
+            "workflow_runs.cancel",
+        ):
+            return ()
+
+        target = ""
+        for key in ("workflow_id", "workflow_ref"):
+            val = arguments.get(key)
+            if isinstance(val, str) and val.strip():
+                target = val.strip()
+                break
+        if not target:
+            definition = arguments.get("definition")
+            if isinstance(definition, dict):
+                target = str(
+                    definition.get("id")
+                    or (definition.get("descriptor") or {}).get("id")
+                    or ""
+                ).strip()
+        if target:
+            clean_id = target.removeprefix("workflow:").strip()
+            return (f"workflow:{clean_id}",)
+        if "cleanup" in action:
+            return ("workflow:cleanup",)
+        return ("workflow:create",)
+
     # LLM: 与直接execute共用无副作用预检，避免缺参动作先进入写操作账。
     # 函数用途: 按动作验证条件必填和参数Schema。
     def validate_invocation(self, params, context):
