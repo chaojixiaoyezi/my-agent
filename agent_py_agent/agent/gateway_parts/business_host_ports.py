@@ -234,15 +234,32 @@ def build_default_business_space_reference_resolver(host: Any) -> Callable[[str,
     return space_reference_resolver
 
 
+# LLM: 判定目标宿主是否启用了原生业务宿主端口装配。
+# 函数用途: 检查显式开关覆盖并回退至配置，支持 _business_host_ports_wired 与 config.business_host_ports_enabled。
+def is_business_host_ports_enabled(target: Any) -> bool:
+    if target is None:
+        return False
+    explicit = getattr(target, 'business_host_ports_enabled', None)
+    if explicit is False:
+        return False
+    if explicit is True:
+        return True
+    if getattr(target, '_business_host_ports_wired', False):
+        return True
+    config = getattr(target, 'config', None)
+    return bool(getattr(config, 'business_host_ports_enabled', False))
+
+
 # LLM: 构造工作流引用的默认单参数读者，依次扫描 5 类权威来源并计算阻断项。
 # 函数用途: 检查特定工作流当前是否有未结任务、调度订阅、嵌套引用、空间策略或运行中实例。
 def build_default_business_workflow_reference_reader(host: Any) -> Callable[[str], dict[str, Any]]:
     # 优先尝试加载并委派给 W2-WF6 的专用 reference_sources 模块
+    delegate = None
     try:
         from ..workflows.reference_sources import build_workflow_reference_reader as _wf6_builder
-        delegate = _wf6_builder(host)
-        if callable(delegate):
-            return delegate
+        raw_delegate = _wf6_builder(host)
+        if callable(raw_delegate):
+            delegate = raw_delegate
     except (ImportError, AttributeError):
         pass
 
@@ -253,7 +270,81 @@ def build_default_business_workflow_reference_reader(host: Any) -> Callable[[str
     # 函数用途: 扫描 SessionTask/Subscription/Workflow/Policy/WorkflowRun 检查引用并返回阻断列表。
     def workflow_reference_reader(workflow_ref: str) -> dict[str, Any]:
         clean_ref = str(workflow_ref)[9:] if str(workflow_ref).startswith('workflow:') else str(workflow_ref)
-        blockers: list[dict[str, str]] = []
+
+        if delegate is not None:
+            # 动态检查/同步最新 session_task_store，以防 conversation_store 是在建代理后绑定的
+            store = getattr(host, 'conversation_store', None)
+            dynamic_session_tasks = getattr(store, 'session_tasks', None)
+            if dynamic_session_tasks is not None and getattr(delegate, 'session_task_store', None) is None:
+                try:
+                    delegate.session_task_store = dynamic_session_tasks
+                except Exception:
+                    pass
+
+            res = delegate(workflow_ref)
+            coverage = res.get('coverage', 'complete') if isinstance(res, dict) else 'complete'
+            raw_blockers = res.get('blockers', []) if isinstance(res, dict) else []
+
+            blockers: list[dict[str, Any]] = []
+            seen_refs: set[str] = set()
+            for b in raw_blockers:
+                if not isinstance(b, dict):
+                    continue
+                b_norm = dict(b)
+                if b_norm.get('kind') == 'session_task':
+                    b_norm['kind'] = 'task'
+                r_id = str(b_norm.get('ref', ''))
+                if r_id:
+                    seen_refs.add(r_id)
+                blockers.append(b_norm)
+
+            # 补充检查可能在代理创建后绑定的内存/自定义 conversation_store.session_tasks
+            if dynamic_session_tasks is not None:
+                try:
+                    tasks = []
+                    if hasattr(dynamic_session_tasks, 'list_page'):
+                        page = dynamic_session_tasks.list_page(limit=100)
+                        tasks = page.get('items', []) if isinstance(page, dict) else []
+                    elif hasattr(dynamic_session_tasks, 'list_recent'):
+                        tasks = dynamic_session_tasks.list_recent(100)
+                    terminal_states = {'done', 'completed', 'failed', 'cancelled', 'terminated'}
+                    for task in tasks:
+                        status = getattr(task, 'status', '')
+                        if status in terminal_states:
+                            continue
+                        t_id = str(getattr(task, 'task_id', '') or task)
+                        if not t_id or t_id in seen_refs:
+                            continue
+                        meta = getattr(task, 'metadata', None) or {}
+                        bc = meta.get('business_context') if isinstance(meta, dict) else {}
+                        t_wf = (meta.get('workflow_ref') or meta.get('workflow_id')
+                                or (bc.get('workflow_ref') if isinstance(bc, dict) else None)
+                                or (bc.get('workflow_id') if isinstance(bc, dict) else None))
+                        dedupe_key = str(getattr(task, 'dedupe_key', '') or '')
+
+                        is_ref = False
+                        if t_wf in (workflow_ref, clean_ref) or (clean_ref and clean_ref in dedupe_key):
+                            is_ref = True
+                        elif isinstance(meta, dict) and clean_ref:
+                            try:
+                                if clean_ref in json.dumps(meta):
+                                    is_ref = True
+                            except Exception:
+                                pass
+
+                        if is_ref:
+                            blockers.append({
+                                'ref': t_id,
+                                'kind': 'task',
+                                'reason_code': 'ACTIVE_SESSION_TASK'
+                            })
+                            seen_refs.add(t_id)
+                except Exception:
+                    pass
+
+            return {'coverage': coverage, 'blockers': blockers[:100]}
+
+        blockers = []
 
         # 来源 (a): non-terminal SessionTasks
         store = getattr(host, 'conversation_store', None)
