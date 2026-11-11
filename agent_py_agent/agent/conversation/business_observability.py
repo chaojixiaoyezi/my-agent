@@ -678,19 +678,22 @@ class BusinessObservationService:
             current_after = after
             has_more = False
             next_pos = None
-            while len(collected_records) < limit and total_scanned < max_scan:
+            last_scanned_rowid = current_after
+            more_in_batch = False
+            while len(collected_records) <= limit and total_scanned < max_scan:
                 positions = conn.execute('SELECT rowid FROM agent_attempts WHERE rowid>? ORDER BY rowid LIMIT ?',
                                          (current_after, batch_size + 1)).fetchall()
                 if not positions:
-                    has_more = False
+                    more_in_batch = False
                     break
                 more_in_batch = len(positions) > batch_size
                 positions = positions[:batch_size]
                 total_scanned += len(positions)
-                current_after = positions[-1][0]
+                last_scanned_rowid = positions[-1][0]
+                current_after = last_scanned_rowid
                 where = 'aa.rowid IN (' + ','.join('?' for _ in positions) + ') AND t.owner_id=?'
                 values = [row[0] for row in positions] + [self.owner_id]
-                raw = conn.execute('SELECT ar.run_id,ar.current_attempt_id,ar.parent_agent_run_id,pa.run_id AS parent_run_id,'
+                raw = conn.execute('SELECT aa.rowid AS _rowid, ar.run_id,ar.current_attempt_id,ar.parent_agent_run_id,pa.run_id AS parent_run_id,'
                     't.thread_id,tr.metadata_json,aa.attempt_id,aa.status,aa.started_at,aa.ended_at,aa.metadata_json AS attempt_metadata '
                     'FROM agent_attempts aa JOIN agent_runs ar ON ar.agent_run_id=aa.agent_run_id '
                     'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id '
@@ -701,18 +704,22 @@ class BusinessObservationService:
                     if rec.space_id != filter_space:
                         continue
                     collected_records.append(rec)
-                    if len(collected_records) >= limit:
+                    if len(collected_records) > limit:
+                        has_more = True
+                        next_pos = {'revision': revision, 'after': collected_records[limit - 1].source_cursor}
                         break
-                next_pos = {'revision': revision, 'after': current_after}
-                if len(collected_records) >= limit:
-                    has_more = more_in_batch or True
+                if has_more:
                     break
                 if not more_in_batch:
-                    has_more = False
                     break
-            if total_scanned >= max_scan and len(collected_records) < limit:
-                hit_cap = True
-                has_more = True
+            if not has_more:
+                if total_scanned >= max_scan and more_in_batch:
+                    hit_cap = True
+                    has_more = True
+                    next_pos = {'revision': revision, 'after': last_scanned_rowid}
+                else:
+                    has_more = False
+                    next_pos = None
         if runtime_source_revision(self.runtime.db_path) != revision:
             raise BusinessError('CURSOR_EXPIRED')
         cov = 'partial' if hit_cap or (has_more and not collected_records) else 'complete'
@@ -769,8 +776,9 @@ class BusinessObservationService:
                 'effect_outcome': outcome, 'started_at': _timestamp(row['started_at']), 'ended_at': _timestamp(row['ended_at']),
                 'error': None, 'retry_refs': [], '_is_current': row['current_attempt_id'] == row['attempt_id'],
                 '_parent_run_id': row['parent_run_id'] or None}
+            rowid = row['_rowid'] if '_rowid' in row.keys() else 0
             rows.append(ObservationRecord(value, self.owner_id, value['space_id'], context.project_ref if context else None,
-                value['task_id'], value['thread_id'], value['run_id'], value['attempt_id']))
+                value['task_id'], value['thread_id'], value['run_id'], value['attempt_id'], source_cursor=rowid))
         return ObservationPage(tuple(rows), 'partial' if incomplete or more else 'complete',
                                revision, source_paged, next_position)
 
