@@ -13,6 +13,8 @@ from dataclasses import replace
 
 import pytest
 
+from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+from agent_py_agent.agent.assets.script_store import ScriptStore
 from agent_py_agent.agent.assets.workflow_store import WorkflowStepSpec, WorkflowStore
 from agent_py_agent.agent.workflows import batching, dag_scheduler
 from agent_py_agent.agent.workflows.batching import ForeachInvalid
@@ -635,3 +637,122 @@ def test_dag_parallel_workers_lock_isolation_and_atomic_persistence(tmp_path):
         assert history[0]["attempt"] == 1
         assert history[0]["error_code"] == "timeout"
         assert st.watermark == {"cursor": 100 + i, "shard": sid}
+
+
+def test_dag_multi_step_with_deterministic_script_id(tmp_path):
+    # SA-R2-F1: Verify real ScriptStore deterministic_script (script_id) in a multi-step depends_on DAG workflow
+    # preserves script_id through dag_scheduler._pending_step into StepExecutionRecord and persists into store.
+    scripts = ScriptStore(tmp_path)
+    scripts.save_script(
+        AssetDescriptor('script_a', 'script', 'Script A', owner_id='alice'),
+        'import json\nprint(json.dumps({"a_val": 42}))\n',
+    )
+    scripts.save_script(
+        AssetDescriptor('script_b', 'script', 'Script B', owner_id='alice'),
+        'import json\nprint(json.dumps({"b_val": 84}))\n',
+    )
+
+    steps = [
+        {
+            'step_id': 'step_a',
+            'mode': 'deterministic_script',
+            'script_id': 'script_a',
+        },
+        {
+            'step_id': 'step_b',
+            'mode': 'deterministic_script',
+            'script_id': 'script_b',
+            'depends_on': ['step_a'],
+        },
+    ]
+
+    flow = _flow(steps, descriptor={'id': 'wf_dag_scripts'})
+    engine = WorkflowEngine(tmp_path)
+    run = engine.run_workflow(flow)
+    assert run.status == 'succeeded'
+    assert len(run.steps) == 2
+
+    # Verify runtime record preserved script_id
+    step_a_rec = next(s for s in run.steps if s.step_id == 'step_a')
+    step_b_rec = next(s for s in run.steps if s.step_id == 'step_b')
+    assert step_a_rec.script_id == 'script_a'
+    assert step_b_rec.script_id == 'script_b'
+    assert step_a_rec.output_snapshot == {'a_val': 42}
+    assert step_b_rec.output_snapshot == {'b_val': 84}
+
+    # Verify persisted run in store also preserves script_id
+    persisted = engine.store.load_run(run.workflow_run_id)
+    assert persisted.status == 'succeeded'
+    p_step_a = next(s for s in persisted.steps if s.step_id == 'step_a')
+    p_step_b = next(s for s in persisted.steps if s.step_id == 'step_b')
+    assert p_step_a.script_id == 'script_a'
+    assert p_step_b.script_id == 'script_b'
+
+
+def test_dag_foreach_step_and_debug_step_side_effects(tmp_path):
+    # SA-R2-F2: Run a depends_on DAG workflow containing a foreach step (max_parallel=2)
+    # AND call engine.debug_step(..., allow_side_effects=True) on that foreach step,
+    # asserting completion within < 5s with accurate batches_summary persisted in engine.store.load_run(...).
+    scripts = ScriptStore(tmp_path)
+    scripts.save_script(
+        AssetDescriptor('produce_items', 'script', 'Producer', owner_id='alice'),
+        'import json\nprint(json.dumps({"items": ["alpha", "beta", "gamma", "delta"]}))\n',
+    )
+    scripts.save_script(
+        AssetDescriptor('process_item', 'script', 'Processor', owner_id='alice'),
+        'import json\nprint(json.dumps({"processed": True}))\n',
+    )
+
+    steps = [
+        {
+            'step_id': 'producer',
+            'mode': 'deterministic_script',
+            'script_id': 'produce_items',
+        },
+        {
+            'step_id': 'batch_proc',
+            'mode': 'deterministic_script',
+            'script_id': 'process_item',
+            'depends_on': ['producer'],
+            'foreach': {
+                'from': 'producer.items',
+                'batch_size': 1,
+                'max_parallel': 2,
+            },
+        },
+    ]
+
+    flow = _flow(steps, descriptor={'id': 'wf_foreach_dag'}, max_parallel_steps=2)
+    WorkflowStore(tmp_path).save_workflow(flow)
+    engine = WorkflowEngine(tmp_path)
+
+    t0 = time.monotonic()
+    run = engine.run_workflow('wf_foreach_dag')
+    duration = time.monotonic() - t0
+    assert duration < 5.0, f"Workflow execution took {duration:.2f}s, expected < 5s"
+    assert run.status == 'succeeded'
+
+    # Verify persisted batches_summary in engine.store.load_run
+    persisted = engine.store.load_run(run.workflow_run_id)
+    assert persisted.status == 'succeeded'
+    fe_step = next(s for s in persisted.steps if s.step_id == 'batch_proc')
+    assert fe_step.status == 'succeeded'
+    assert fe_step.batches_summary is not None
+    assert fe_step.batches_summary['total'] == 4
+    assert fe_step.batches_summary['completed'] == 4
+    assert fe_step.batches_summary['failed'] == 0
+    assert len(fe_step.batches) == 4
+
+    # Now call engine.debug_step(..., allow_side_effects=True) on the foreach step
+    t_dbg = time.monotonic()
+    dbg_res = engine.debug_step(
+        'wf_foreach_dag',
+        'batch_proc',
+        mock_inputs={'producer': {'items': ['item1', 'item2']}},
+        allow_side_effects=True,
+    )
+    dbg_duration = time.monotonic() - t_dbg
+    assert dbg_duration < 5.0, f"Debug step took {dbg_duration:.2f}s, expected < 5s"
+    assert dbg_res['status'] == 'succeeded'
+    assert dbg_res['side_effects_blocked'] is False
+    assert dbg_res['dry_run'] is False

@@ -1,5 +1,6 @@
 """Tests for WF-09 (Formal Nested Subworkflows) and WF-11 (Bounded Workflow/Step Health View)."""
 import json
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -599,3 +600,102 @@ def test_build_workflow_health_view_bounded_and_coverage(tmp_path):
     # Redaction: secret_token_xyz masked
     rep = workflow_state_report(run_store, 'wf_analytics', limit=50)
     assert rep['coverage'] == 'complete'
+
+
+def test_subworkflow_parallel_dag_siblings_no_deadlock_and_depth(tmp_path):
+    # SA-R2-F3 & SA-R2-F4: Parallel sibling subworkflow steps in DAG wave:
+    # wf_root runs: sub_a -> wf_mid_dag (which in turn has depends_on -> wf_leaf)
+    #               sub_b -> wf_leaf
+    # Verify:
+    # (a) zero deadlock (lock-free ancestry lookup in _collect_ancestry);
+    # (b) accurate parent_workflow_run_id and subworkflow_depth (1 and 2) on all child/grandchild runs;
+    # (c) subsequent top-level engine.run_workflow('wf_leaf') on the same engine instance has
+    #     parent_workflow_run_id == '' and subworkflow_depth == 0.
+    owner_home = tmp_path
+    engine = WorkflowEngine(owner_home)
+    store = WorkflowStore(owner_home)
+
+    _setup_script(owner_home, 'leaf_worker_script', {'leaf_out': 'ok'})
+    _setup_script(owner_home, 'mid_prep_script', {'mid_prep': 'ready'})
+
+    # 1. wf_leaf: single step deterministic script
+    leaf_step = WorkflowStepSpec('s_leaf', 'Leaf step', 'deterministic_script', script_id='leaf_worker_script')
+    wf_leaf = WorkflowDefinition(_descriptor('wf_leaf'), (leaf_step,))
+    store.save_workflow(wf_leaf)
+
+    # 2. wf_mid_dag: multi-step DAG with depends_on -> calls wf_leaf as subworkflow
+    mid_prep = WorkflowStepSpec('m_prep', 'Mid Prep', 'deterministic_script', script_id='mid_prep_script')
+    mid_sub = WorkflowStepSpec(
+        'm_sub',
+        'Mid Call Leaf',
+        'subworkflow',
+        subworkflow_ref='workflow:wf_leaf',
+        depends_on=['m_prep'],
+    )
+    wf_mid_dag = WorkflowDefinition(_descriptor('wf_mid_dag'), (mid_prep, mid_sub))
+    store.save_workflow(wf_mid_dag)
+
+    # 3. wf_root: DAG with two parallel sibling subworkflows sub_a and sub_b in the same wave
+    root_prep = WorkflowStepSpec('r_prep', 'Root Prep', 'deterministic_script', script_id='mid_prep_script')
+    sub_a = WorkflowStepSpec(
+        'sub_a',
+        'Call Mid DAG',
+        'subworkflow',
+        subworkflow_ref='workflow:wf_mid_dag',
+        depends_on=['r_prep'],
+    )
+    sub_b = WorkflowStepSpec(
+        'sub_b',
+        'Call Leaf Directly',
+        'subworkflow',
+        subworkflow_ref='workflow:wf_leaf',
+        depends_on=['r_prep'],
+    )
+    root_desc = _descriptor('wf_root', metadata={'execution_mode': 'dag', 'max_parallel_steps': 4})
+    wf_root = WorkflowDefinition(root_desc, (root_prep, sub_a, sub_b))
+    store.save_workflow(wf_root)
+
+    t0 = time.monotonic()
+    root_run = engine.run_workflow(wf_root)
+    elapsed = time.monotonic() - t0
+
+    # (a) Zero deadlock - completes within < 10s
+    assert elapsed < 10.0, f"Parallel subworkflows deadlocked or took too long: {elapsed:.2f}s"
+    assert root_run.status == 'succeeded'
+
+    step_map = {s.step_id: s for s in root_run.steps}
+    assert step_map['sub_a'].status == 'succeeded'
+    assert step_map['sub_b'].status == 'succeeded'
+
+    # (b) Accurate parent_workflow_run_id and subworkflow_depth on all child/grandchild runs
+    child_a_id = step_map['sub_a'].subworkflow_run_id
+    child_b_id = step_map['sub_b'].subworkflow_run_id
+    assert child_a_id and child_b_id
+
+    child_a_run = engine.store.load_run(child_a_id)
+    child_b_run = engine.store.load_run(child_b_id)
+
+    # Direct children of root: depth=1, parent=root_run.workflow_run_id
+    assert child_a_run.parent_workflow_run_id == root_run.workflow_run_id
+    assert child_a_run.subworkflow_depth == 1
+    assert child_b_run.parent_workflow_run_id == root_run.workflow_run_id
+    assert child_b_run.subworkflow_depth == 1
+
+    # Grandchild: child of mid_dag
+    mid_step_map = {s.step_id: s for s in child_a_run.steps}
+    grandchild_id = mid_step_map['m_sub'].subworkflow_run_id
+    assert grandchild_id
+
+    grandchild_run = engine.store.load_run(grandchild_id)
+    assert grandchild_run.parent_workflow_run_id == child_a_id
+    assert grandchild_run.subworkflow_depth == 2
+
+    # (c) Subsequent top-level engine.run_workflow('wf_leaf') on SAME engine instance
+    top_leaf_run = engine.run_workflow('wf_leaf')
+    assert top_leaf_run.status == 'succeeded'
+    assert top_leaf_run.parent_workflow_run_id == ''
+    assert top_leaf_run.subworkflow_depth == 0
+
+    persisted_top = engine.store.load_run(top_leaf_run.workflow_run_id)
+    assert persisted_top.parent_workflow_run_id == ''
+    assert persisted_top.subworkflow_depth == 0

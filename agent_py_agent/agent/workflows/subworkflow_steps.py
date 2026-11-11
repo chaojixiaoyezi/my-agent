@@ -63,10 +63,18 @@ def _collect_ancestry(run: WorkflowRunRecord, engine) -> tuple[tuple[str, ...], 
     while curr_parent_id and curr_parent_id not in visited_run_ids and len(store_ancestry) < 20:
         visited_run_ids.add(curr_parent_id)
         try:
-            parent_rec = engine.store.load_run(curr_parent_id)
-            if parent_rec and parent_rec.workflow_id:
-                store_ancestry.append(parent_rec.workflow_id)
-                curr_parent_id = getattr(parent_rec, 'parent_workflow_run_id', '')
+            read_raw = getattr(engine.store, '_read', None)
+            if callable(read_raw):
+                parent_data = read_raw(curr_parent_id, 'run.json')
+                wf_id = parent_data.get('workflow_id', '') if isinstance(parent_data, dict) else ''
+                next_parent_id = parent_data.get('parent_workflow_run_id', '') if isinstance(parent_data, dict) else ''
+            else:
+                parent_rec = engine.store.load_run(curr_parent_id)
+                wf_id = getattr(parent_rec, 'workflow_id', '') if parent_rec else ''
+                next_parent_id = getattr(parent_rec, 'parent_workflow_run_id', '') if parent_rec else ''
+            if wf_id:
+                store_ancestry.append(wf_id)
+                curr_parent_id = next_parent_id
             else:
                 break
         except Exception:
@@ -269,16 +277,7 @@ def execute_subworkflow_step(
     token_depth = _ACTIVE_SUBWORKFLOW_DEPTH.set(child_depth)
     token_chain = _ACTIVE_SUBWORKFLOW_RUN_CHAIN.set(new_run_chain)
 
-    orig_create_run = engine.store.create_run
-
-    def create_run_with_parent(record, workflow_snapshot=None):
-        if not getattr(record, 'parent_workflow_run_id', ''):
-            record.parent_workflow_run_id = run.workflow_run_id
-        record.subworkflow_depth = child_depth
-        return orig_create_run(record, workflow_snapshot)
-
     try:
-        engine.store.create_run = create_run_with_parent
         child_bc = None
         if isinstance(getattr(run, 'business_context', None), BusinessExecutionContext):
             child_bc = run.business_context
@@ -298,7 +297,6 @@ def execute_subworkflow_step(
             definition_version=definition_version,
         )
     finally:
-        engine.store.create_run = orig_create_run
         _ACTIVE_SUBWORKFLOW_ANCESTRY.reset(token_ancestry)
         _ACTIVE_SUBWORKFLOW_DEPTH.reset(token_depth)
         _ACTIVE_SUBWORKFLOW_RUN_CHAIN.reset(token_chain)
