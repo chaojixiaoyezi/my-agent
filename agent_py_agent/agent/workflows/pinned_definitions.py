@@ -95,3 +95,73 @@ def resolve_definition(owner_home, workflow_id, version):
             'code_sha256': pin['code_sha256'], 'source_scope': script_payload.get('source_scope', 'owner'),
             'execution_definition_ref': pin.get('execution_definition_ref') or script.get('execution_definition_ref')}
     return definition, frozen
+
+
+# LLM: 冻结当前或指定工作流定义的执行内容指纹，绝不向外暴露未固化的临时字段。
+# 函数用途: 返回包含 execution_definition_ref 与标准化定义的不可变快照。
+def freeze_execution_definition(owner_home, workflow_or_id):
+    from ..assets.descriptor import execution_definition_ref
+    from ..assets.workflow_store import WorkflowDefinition, WorkflowStore
+
+    if isinstance(workflow_or_id, (WorkflowDefinition, dict)):
+        definition = workflow_or_id.to_dict() if hasattr(workflow_or_id, 'to_dict') else dict(workflow_or_id)
+        ref = execution_definition_ref(definition, kind='workflow')
+        descriptor = definition.get('descriptor', {})
+        return {
+            'execution_definition_ref': ref,
+            'workflow_id': descriptor.get('id', ''),
+            'revision': descriptor.get('revision', 0),
+            'definition': definition,
+        }
+    workflow_id = str(workflow_or_id)
+    store = WorkflowStore(owner_home)
+    asset = store.get_workflow(workflow_id)
+    if asset is None:
+        raise PinnedDefinitionError('ASSET_VERSION_NOT_FOUND')
+    definition = asset.to_dict()
+    ref = execution_definition_ref(definition, kind='workflow')
+    return {
+        'execution_definition_ref': ref,
+        'workflow_id': asset.descriptor.id,
+        'revision': getattr(asset.descriptor, 'revision', 0),
+        'definition': definition,
+    }
+
+
+# LLM: 支持按整数版本或内容摘要 (digest) 校验并恢复工作流；不匹配时抛出 PinnedDefinitionError。
+# 函数用途: 为子工作流与回放机制提供固定版本定义解析。
+def resolve_pinned_definition(owner_home, workflow_id, pinned_ref=None, *, definition_version=None):
+    from ..assets.descriptor import execution_definition_ref
+    from ..assets.workflow_store import WorkflowStore
+
+    target_version = definition_version
+    if target_version is None and isinstance(pinned_ref, int):
+        target_version = pinned_ref
+
+    if target_version is not None:
+        if type(target_version) is not int or target_version < 1:
+            raise PinnedDefinitionError('ASSET_VERSION_NOT_FOUND')
+        definition, frozen_pins = resolve_definition(owner_home, workflow_id, target_version)
+    else:
+        store = WorkflowStore(owner_home)
+        asset = store.get_workflow(workflow_id)
+        if asset is None:
+            raise PinnedDefinitionError('ASSET_VERSION_NOT_FOUND')
+        definition = asset.to_dict()
+        frozen_pins = {}
+
+    actual_ref = execution_definition_ref(definition, kind='workflow')
+    if pinned_ref is not None and not isinstance(pinned_ref, int):
+        expected = str(pinned_ref).strip()
+        if expected.startswith('sha256:'):
+            expected = expected[len('sha256:'):].strip()
+        chk_ref = actual_ref
+        if chk_ref.startswith('sha256:'):
+            chk_ref = chk_ref[len('sha256:'):].strip()
+        if expected != chk_ref:
+            descriptor = definition.get('descriptor', {})
+            rev = str(descriptor.get('revision', ''))
+            if expected != rev:
+                raise PinnedDefinitionError('SUBWORKFLOW_PIN_MISMATCH')
+
+    return definition, frozen_pins
