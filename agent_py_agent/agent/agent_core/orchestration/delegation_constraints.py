@@ -297,6 +297,38 @@ def validate_delegation_constraints_upper_bound(
                     False,
                     f"DELEGATION_SCOPE_EXCEEDS_PARENT: Child prohibited_actions must include all parent prohibited actions: missing {sorted(missing_prohibited)}.",
                 )
+        if parent_constraints.actor_runtime == "native":
+            if parent_constraints.permitted_tools:
+                if not constraints.permitted_tools:
+                    return (
+                        False,
+                        "TOOL_PERMISSION_DENIED: Child cannot omit permitted_tools when parent has permitted_tools.",
+                    )
+                parent_permitted_set = set(parent_constraints.permitted_tools)
+                for tool in constraints.permitted_tools:
+                    if tool not in parent_permitted_set:
+                        return (
+                            False,
+                            f"TOOL_PERMISSION_DENIED: Permitted tool '{tool}' exceeds parent permitted_tools.",
+                        )
+            if parent_constraints.exact_write_set or parent_constraints.allowed_output_dirs:
+                if not (constraints.exact_write_set or constraints.allowed_output_dirs):
+                    return (
+                        False,
+                        "DELEGATION_SCOPE_EXCEEDS_PARENT: Child cannot omit write constraints when parent has write constraints.",
+                    )
+                parent_write_targets = [
+                    Path(r).expanduser().resolve(strict=False)
+                    for r in (*parent_constraints.exact_write_set, *parent_constraints.allowed_output_dirs)
+                    if str(r).strip()
+                ]
+                for path_str in (*constraints.exact_write_set, *constraints.allowed_output_dirs):
+                    p = Path(path_str).expanduser().resolve(strict=False)
+                    if not any(_is_subpath(p, root) for root in parent_write_targets):
+                        return (
+                            False,
+                            f"DELEGATION_SCOPE_EXCEEDS_PARENT: Write path '{path_str}' is outside parent write constraints.",
+                        )
 
     if parent_read_scope is not None:
         exact_roots = getattr(parent_read_scope, "exact_roots", None) or getattr(

@@ -932,3 +932,142 @@ def test_orch06_e_grandchild_inherits_parent_constraints(tmp_path):
     assert inherited.max_descendant_depth == 1
     assert "git_push" in inherited.prohibited_actions
     assert "shell_execution" in inherited.prohibited_actions
+
+
+def test_orch06_grandchild_monotonic_write_and_tool_scope_enforcement(tmp_path: Path):
+    """End-to-end unmocked SimpleAgent + CreateSubagentsTool grandchild monotonic scope enforcement."""
+    from agent_py_agent.agent.agent_core.orchestration_tools import CreateSubagentsTool
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.tooling.write_boundary import validate_write_boundary
+
+    home_dir = tmp_path / "home"
+    work_dir = tmp_path / "workspace"
+    home_dir.mkdir(parents=True, exist_ok=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    allowed_file = work_dir / "allowed.py"
+    allowed_file.touch()
+    forbidden_file = work_dir / "forbidden.py"
+    forbidden_file.touch()
+
+    config = AgentConfig(
+        model_backend="echo",
+        my_agent_home=str(home_dir),
+        execution_mode="local_unmanaged",
+    )
+    agent = SimpleAgent(config, work_dir)
+
+    parent_constraints = StructuredDelegationConstraints(
+        exact_write_set=(str(allowed_file),),
+        permitted_tools=("read_file", "write_file", "create_subagents"),
+        allowed_read_inputs=(str(allowed_file),),
+        max_cumulative_children=4,
+        allow_descendants=True,
+        max_descendant_depth=2,
+    )
+    parent_task = agent.subagents.create_run(
+        goal="constrained parent",
+        thought="plan",
+        plan=["step1"],
+    )
+    parent_task.extra_write_roots = [str(allowed_file)]
+    parent_task.allowed_write_roots = [str(allowed_file)]
+    parent_task.allowed_tools = ["read_file", "write_file", "create_subagents"]
+    parent_task.attributes["delegation_constraints"] = parent_constraints.to_dict()
+    agent.subagents.save(parent_task)
+
+    agent._current_run_params = RunParams(
+        task_attributes=parent_task.attributes,
+        host_channel_actor=None,
+    )
+    set_current_subagent_context(agent, run_id=parent_task.id, task_attributes=parent_task.attributes)
+    tool = CreateSubagentsTool(agent)
+
+    # 1. Constrained parent spawning grandchild with omitted delegation_constraints:
+    # grandchild allowed_write_roots stays narrowed to allowed.py (validate_write_boundary blocks forbidden.py)
+    out1 = tool.execute({
+        "items": [{"goal": "grandchild with omitted constraints", "role": "worker"}],
+    })
+    assert out1.ok is True, out1.output
+    grandchild_id1 = json.loads(out1.output)["created_run_ids"][0]
+    grandchild1 = agent.subagents.load(grandchild_id1)
+    assert grandchild1 is not None
+    assert str(allowed_file) in grandchild1.allowed_write_roots
+
+    boundary1 = {
+        "allowed_write_roots": grandchild1.allowed_write_roots,
+    }
+    err_allowed = validate_write_boundary(
+        "write_file",
+        {"path": str(allowed_file), "content": "ok"},
+        workspace_root=work_dir,
+        write_boundary=boundary1,
+    )
+    assert err_allowed == ""
+
+    err_forbidden = validate_write_boundary(
+        "write_file",
+        {"path": str(forbidden_file), "content": "no"},
+        workspace_root=work_dir,
+        write_boundary=boundary1,
+    )
+    assert err_forbidden != ""
+
+    # 2. Constrained parent spawning grandchild with exact_write_set=[forbidden.py]:
+    # rejected fail-closed (ok is False, effect_outcome == "not_started", DELEGATION_SCOPE_EXCEEDS_PARENT)
+    out2 = tool.execute({
+        "items": [
+            {
+                "goal": "grandchild exceeding write set",
+                "role": "worker",
+                "delegation_constraints": {
+                    "exact_write_set": [str(forbidden_file)],
+                },
+            }
+        ],
+    })
+    assert out2.ok is False
+    assert out2.effect_outcome == "not_started"
+    assert "DELEGATION_SCOPE_EXCEEDS_PARENT" in (out2.reported_error_code or out2.output)
+
+    # 3. Constrained parent spawning grandchild with permitted_tools=["read_file", "run_command"]:
+    # rejected fail-closed (ok is False, effect_outcome == "not_started", TOOL_PERMISSION_DENIED, no uncaught PermissionError)
+    out3 = tool.execute({
+        "items": [
+            {
+                "goal": "grandchild exceeding tool permissions",
+                "role": "worker",
+                "delegation_constraints": {
+                    "permitted_tools": ["read_file", "run_command"],
+                },
+            }
+        ],
+    })
+    assert out3.ok is False
+    assert out3.effect_outcome == "not_started"
+    assert "TOOL_PERMISSION_DENIED" in (out3.reported_error_code or out3.output)
+
+    # 4. Constrained parent spawning grandchild with partial tightening {"prohibited_actions": ["git_push"]}:
+    # succeeds while preserving parent's exact_write_set, allowed_read_inputs, permitted_tools, and max_cumulative_children
+    out4 = tool.execute({
+        "items": [
+            {
+                "goal": "grandchild with partial tightening",
+                "role": "worker",
+                "delegation_constraints": {
+                    "prohibited_actions": ["git_push"],
+                },
+            }
+        ],
+    })
+    assert out4.ok is True, out4.output
+    grandchild_id4 = json.loads(out4.output)["created_run_ids"][0]
+    grandchild4 = agent.subagents.load(grandchild_id4)
+    assert grandchild4 is not None
+    grandchild_c4 = StructuredDelegationConstraints.from_dict(grandchild4.attributes["delegation_constraints"])
+    assert grandchild_c4.exact_write_set == parent_constraints.exact_write_set
+    assert grandchild_c4.allowed_read_inputs == parent_constraints.allowed_read_inputs
+    assert grandchild_c4.permitted_tools == parent_constraints.permitted_tools
+    assert grandchild_c4.max_cumulative_children == parent_constraints.max_cumulative_children
+    assert "git_push" in grandchild_c4.prohibited_actions

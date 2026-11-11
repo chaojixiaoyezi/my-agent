@@ -353,18 +353,33 @@ def _role_policy(
 # LLM: 提取父级权威允许的工具名称集合，用作子级工具收窄的上界判定。
 # 函数用途: 返回父级可用工具集合供委托约束校验。
 def _parent_tool_authority_names(agent) -> set[str] | None:
+    from ...runtime_context import current_subagent_run_id
     from ...subagents.capability_scope import current_creation_tool_authority
     from ...tooling.registry import ToolRegistry
 
     authority = current_creation_tool_authority()
+    base_tools: set[str] | None = None
     if authority:
-        return set(authority["available_tool_names"])
-    registry = getattr(agent, "tools", None)
-    if isinstance(registry, ToolRegistry):
-        current = getattr(agent, "_current_run_params", None)
-        snapshot = registry.runtime_snapshot(allowed_tools=getattr(current, "allowed_tools", None))
-        return set(snapshot.available_tool_names)
-    return None
+        base_tools = set(authority["available_tool_names"])
+    else:
+        registry = getattr(agent, "tools", None)
+        if isinstance(registry, ToolRegistry):
+            current = getattr(agent, "_current_run_params", None)
+            snapshot = registry.runtime_snapshot(allowed_tools=getattr(current, "allowed_tools", None))
+            base_tools = set(snapshot.available_tool_names)
+
+    run_id = current_subagent_run_id(agent)
+    manager = getattr(agent, "subagents", None)
+    if run_id and manager:
+        try:
+            parent = manager.load(run_id)
+            parent_allowed = getattr(parent, "allowed_tools", None)
+            if parent is not None and parent_allowed:
+                parent_set = set(parent_allowed)
+                base_tools = (base_tools & parent_set) if base_tools is not None else parent_set
+        except Exception:
+            pass
+    return base_tools
 
 
 # LLM: 实际创建绑定immutable父快照及动作令牌；内部宿主按同owner快照取事实，返回规范名和可持久化限制，不按attributes造权。
@@ -686,19 +701,62 @@ def _bind_delegation_constraints(attrs: dict[str, object], raw_params: dict[str,
             prohibited_actions=parent_constraints.prohibited_actions,
         )
     elif constraints is not None and parent_constraints is not None:
+        raw_c = (
+            raw_params.get("delegation_constraints")
+            if isinstance(raw_params.get("delegation_constraints"), dict)
+            else raw_params
+        )
+        raw_dict = raw_c if isinstance(raw_c, dict) else {}
+
+        max_cumulative = (
+            constraints.max_cumulative_children
+            if "max_cumulative_children" in raw_dict
+            else parent_constraints.max_cumulative_children
+        )
+        allow_descendants = (
+            constraints.allow_descendants
+            if "allow_descendants" in raw_dict
+            else parent_constraints.allow_descendants
+        )
+        if "max_descendant_depth" not in raw_dict:
+            max_depth = (
+                max(0, parent_constraints.max_descendant_depth - 1)
+                if (parent_constraints.max_descendant_depth is not None and parent_constraints.max_descendant_depth > 0)
+                else parent_constraints.max_descendant_depth
+            )
+        else:
+            max_depth = constraints.max_descendant_depth
+
+        if "exact_write_set" not in raw_dict and "allowed_output_dirs" not in raw_dict:
+            exact_write = parent_constraints.exact_write_set
+            allowed_output = parent_constraints.allowed_output_dirs
+        else:
+            exact_write = constraints.exact_write_set
+            allowed_output = constraints.allowed_output_dirs
+
+        allowed_read = (
+            constraints.allowed_read_inputs
+            if "allowed_read_inputs" in raw_dict
+            else parent_constraints.allowed_read_inputs
+        )
+        permitted_tools = (
+            constraints.permitted_tools
+            if "permitted_tools" in raw_dict
+            else parent_constraints.permitted_tools
+        )
         combined_prohibited = tuple(
             dict.fromkeys((*constraints.prohibited_actions, *parent_constraints.prohibited_actions))
         )
         constraints = StructuredDelegationConstraints(
             schema_version=constraints.schema_version,
             actor_runtime=constraints.actor_runtime,
-            max_cumulative_children=constraints.max_cumulative_children,
-            allow_descendants=constraints.allow_descendants,
-            max_descendant_depth=constraints.max_descendant_depth,
-            exact_write_set=constraints.exact_write_set,
-            allowed_read_inputs=constraints.allowed_read_inputs,
-            allowed_output_dirs=constraints.allowed_output_dirs,
-            permitted_tools=constraints.permitted_tools,
+            max_cumulative_children=max_cumulative,
+            allow_descendants=allow_descendants,
+            max_descendant_depth=max_depth,
+            exact_write_set=exact_write,
+            allowed_read_inputs=allowed_read,
+            allowed_output_dirs=allowed_output,
+            permitted_tools=permitted_tools,
             prohibited_actions=combined_prohibited,
         )
 
