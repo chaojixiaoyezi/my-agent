@@ -39,6 +39,7 @@ from ..auth.middleware import (
 )
 from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..backends.http import unaccounted_probe_attempt_count
+from ..common.build_identity import get_build_identity
 from ..common.log_redaction import redact_sensitive_value
 from ..common.request_execution_ports import (
     RequestExecutionContextUnavailable,
@@ -246,6 +247,7 @@ def handle_status(handler, server) -> None:
         "uptime": time.time() - state.get("started_at", time.time()),
         "requests": counts,
         "runtime_prefix": str(state.get("runtime_prefix") or ""),
+        "build_identity": get_build_identity(),
     }
     in_flight_count, oldest_in_flight_age = model_call_inflight_snapshot()
     response["in_flight_model_call_count"] = in_flight_count

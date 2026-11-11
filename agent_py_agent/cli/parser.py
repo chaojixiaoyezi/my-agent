@@ -86,10 +86,18 @@ def build_parser(extension_registry: ExtensionRegistry | None = None) -> argpars
     add_config_subcommands(subparsers)
     add_feishu_subcommands(subparsers)
     add_admin_identity_subcommands(subparsers)
-    for namespace in ('space', 'team'):
-        business = subparsers.add_parser(namespace, help='本人业务空间与后台团队')
+    from .space_commands import cmd_space
+    from .team_commands import cmd_team
+    from .workflow_commands import cmd_workflow
+
+    for namespace, handler, help_desc in (
+        ('space', cmd_space, '本人业务空间管理'),
+        ('team', cmd_team, '后台团队管理'),
+        ('workflow', cmd_workflow, '工作流管理'),
+    ):
+        business = subparsers.add_parser(namespace, help=help_desc)
         business.add_argument('business_args', nargs=argparse.REMAINDER)
-        business.set_defaults(func=_cmd_business, business_namespace=namespace)
+        business.set_defaults(func=handler, business_namespace=namespace)
     if extension_registry is not None:
         subparsers.begin_extensions()
         extension_registry.register_cli_commands(subparsers)
@@ -152,6 +160,19 @@ def _build_root_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="使用普通终端聊天模式，不进入应用内滚动历史界面",
     )
+    from ..agent.common.build_identity import get_build_identity
+
+    build_info = get_build_identity()
+    version_text = f"my-agent {build_info.get('version', '')}"
+    if build_info.get("git_sha"):
+        version_text += f" ({build_info['git_sha']})"
+    parser.add_argument(
+        "-V",
+        "--version",
+        action="version",
+        version=version_text,
+        help="显示版本与构建信息并退出",
+    )
     add_workspace_arguments(parser)
     parser.legacy_input_boundary = True
     return parser
@@ -188,6 +209,19 @@ def _interactive_argv(argv: Sequence[str], command: str) -> list[str]:
     return [*argv, "chat"]
 
 
+# LLM: 预检 argv 是否为帮助或版本查询，在触碰任何文件系统配置或扩展发现之前快速分流，
+# 确保损坏或不存在的配置路径不破坏基础 CLI 的自省能力（BIZ-010）。
+# 函数用途: 判断命令行参数中是否包含帮助或版本开关（遇到 -- 停止判定）。
+def _is_help_or_version_invocation(argv: Sequence[str]) -> bool:
+    target_flags = {"-h", "--help", "-V", "--version"}
+    for token in argv:
+        if token == "--":
+            break
+        if token in target_flags:
+            return True
+    return False
+
+
 # LLM: Dispatch interactive commands before extension/config bootstrap; all other routes preserve
 # the existing full parser and extension registration behavior. argv injection exists for tests.
 #   内部worker须先走原dispatcher核C启动模式，再进入任何配置/扩展引导；普通命令返回None，保原Count0路径。
@@ -213,12 +247,24 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # H3：在模型命令的沙箱里宿主状态只读，CLI 起不来时给结构化错误码（只看宿主设的标记和错误码，见 host_state_guard）。
     with host_state_read_only_guard():
+        # BIZ-010: Help and version flags must succeed without loading external config.
+        if _is_help_or_version_invocation(effective_argv):
+            parser = build_parser(None)
+            try:
+                args = parser.parse_args(effective_argv)
+                return args.func(args)
+            except SystemExit as exc:
+                return int(exc.code or 0)
+
         bootstrap = argparse.ArgumentParser(add_help=False)
         bootstrap.add_argument("--config", default=str(default_config_path()))
         bootstrap_args, _ = bootstrap.parse_known_args(effective_argv)
         config = load_config(bootstrap_args.config)
         extension_registry = load_extension_registry(config.extension_plugins)
         parser = build_parser(extension_registry)
-        args = parser.parse_args(effective_argv)
+        try:
+            args = parser.parse_args(effective_argv)
+        except SystemExit as exc:
+            return int(exc.code or 0)
         args.app_scrollback = not bool(getattr(args, "plain", False))
         return args.func(args)

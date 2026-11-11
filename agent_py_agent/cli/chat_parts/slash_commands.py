@@ -69,27 +69,26 @@ def handle_common_slash_command(
 
 
 # LLM: 目录来自显式模式选定的宿主；原 revision 与命令交互引用分别传递，不借聊天回合或模型执行权限。
-# 函数用途: 在输入线程外提交插件管理或业务命令，并展示原宿主结果。
+# 函数用途: 在输入线程外提交插件管理或业务空间/团队/流程命令，并展示原宿主结果。
 def _handle_business_command(user, ctx, include_plain_help):
-    import json
-
-    from ...agent.gateway_parts.business_api import business_command_request, run_business_command
-    from ...agent.plugin_host.errors import HostAPIError
+    del include_plain_help
+    head, _, tail = user.strip().partition(" ")
     command = parse_conversation_control(user)
-    if command is None or command.kind not in {'space', 'team'}:
+    cmd_kind = command.kind if (command is not None and command.kind in {"space", "team"}) else (head[1:] if head in {"/space", "/team", "/workflow"} else "")
+    if cmd_kind not in {"space", "team", "workflow"}:
         return None
+    from .tui_business_spaces import handle_tui_business_command
+
     try:
-        if ctx.use_gateway:
-            from ..chat_client_context import post_gateway_json
-            _, result = post_gateway_json(ctx.agent, '/client/business',
-                business_command_request(command.kind, command.value), timeout=10.0,
-                conversation_id=ctx.conversation_id)
-        else:
-            result = run_business_command(ctx.agent, command.kind, command.value)
-        ctx.print_line(json.dumps(result, ensure_ascii=False))
-    except (HostAPIError, ValueError, OSError):
-        ctx.print_line('业务命令失败；未重试，也未切换到其它宿主。')
-    return True
+        return handle_tui_business_command(
+            user,
+            agent=ctx.agent,
+            print_line=ctx.print_line,
+            session_id=str(getattr(ctx, "conversation_id", "") or ""),
+        )
+    except Exception:
+        ctx.print_line("业务命令失败；未重试，也未切换到其它宿主。")
+        return True
 
 
 def _handle_plugin_command(user: str, ctx: SlashCommandContext, include_plain_help: bool) -> bool | None:

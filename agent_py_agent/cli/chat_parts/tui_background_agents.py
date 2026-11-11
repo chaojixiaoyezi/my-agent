@@ -21,6 +21,10 @@ class TuiBackgroundAgents:
         self.running_count: int | None = None
         self.coverage = 'unknown'
         self._pages: dict[str, dict] = {}
+        self._scheduling_cache: dict[str, dict] = {}
+        self._expanded: set[str] = set()
+        self._subagent_cache: dict[str, dict] = {}
+        self._usage_cache: dict[str, dict] = {}
         self._lock = threading.RLock()
 
     # LLM: 底栏只读一个有界页；Owner总量取完整配额事实，名册分页不影响它，运行数仍要求完整工作事实。
@@ -164,7 +168,8 @@ class TuiBackgroundAgents:
             return tuple(result)
 
     # LLM: 身份状态和当前工作独立本地化；缺少work_state时不把available写成待命。
-    # 函数用途: 沿原列表渲染显示空间、后台Agent及有界分页入口。
+    # 展示模型配置标识与调度/阻断原因码，并在条目展开时附带展示有界子代理及用量信息（V13-02 / ROUTE-02）。
+    # 函数用途: 沿原列表渲染显示空间、后台Agent（含模型与调度阻断）及有界分页/展开详情入口。
     def lines(self, selected: str = '', *, space_id: str | None = None) -> tuple[str, ...]:
         coverage = self.list_coverage(space_id)
         result = [f'后台团队 · 覆盖 {coverage} · 费用未知',
@@ -178,8 +183,33 @@ class TuiBackgroundAgents:
             identity = {'available': '可接单', 'suspended': '已挂起', 'retiring': '退役中', 'retired': '已退役'}.get(str(row.get('identity_state') or ''), '未知')
             work = {'idle': '待命（无进行中任务）', 'running': '运行中', 'waiting': '等待', 'queued': '排队',
                     'failed': '失败', 'completed': '已完成', 'cancelled': '已取消'}.get(str(row.get('work_state') or ''), '未知')
-            result.append(marker + str(row.get('name') or row['agent_id']) + ' · ' + str(row.get('space_id') or '无归属') +
-                          f' · 身份：{identity} · 工作：{work} · ' + str(row.get('purpose') or '工作摘要未知'))
+            line = marker + str(row.get('name') or row['agent_id']) + ' · ' + str(row.get('space_id') or '无归属') + \
+                   f' · 身份：{identity} · 工作：{work}'
+            if row.get('model_profile_id'):
+                line += f' · 模型：{row["model_profile_id"]}'
+            scheduling = row.get('scheduling') or self._scheduling_cache.get(row['agent_id'])
+            if scheduling and isinstance(scheduling, dict):
+                sched_state = scheduling.get('state') or '未知'
+                reason_code = scheduling.get('reason_code') or ''
+                blocker_str = f'（阻断：{reason_code}）' if reason_code else ''
+                line += f' · 调度：{sched_state}{blocker_str}'
+            line += ' · ' + str(row.get('purpose') or '工作摘要未知')
+            result.append(line)
+            if row['agent_id'] in self._expanded:
+                subagents = self._subagent_cache.get(row['agent_id'], {}).get('items', [])
+                if subagents:
+                    for sub in subagents[:10]:
+                        sub_id = sub.get('run_id') or sub.get('agent_id') or 'sub'
+                        sub_state = sub.get('status') or sub.get('state') or 'unknown'
+                        result.append(f'    └─ 子代理 [{sub_id}] 状态：{sub_state}')
+                usage = self._usage_cache.get(row['agent_id'])
+                if usage and isinstance(usage, dict):
+                    actual = usage.get('actual') if isinstance(usage.get('actual'), dict) else {}
+                    total = usage.get('total_tokens')
+                    if total is None and actual:
+                        total = (actual.get('input_tokens') or 0) + (actual.get('output_tokens') or 0)
+                    if total is not None:
+                        result.append(f'    └─ 用量：{total} tokens')
         if not rows:
             result.append('没有可显示的条目' if coverage == 'complete' else '未连接或资料不完整，数量未知')
         return tuple(result)
@@ -225,9 +255,75 @@ class TuiBackgroundAgents:
     def load_tree(self, space_id: str | None, agent_id: str) -> dict:
         return self.client.call('agent_tree.get', {'space_id': space_id, 'root_agent_id': agent_id})
 
+    # LLM: 按需读取指定来源引用的日志内容。
+    # 函数用途: 委托后端读取一次执行日志。
     def load_log(self, source_ref: str) -> dict:
         return self.client.call('logs.read', {'source_ref': source_ref})
 
+    # LLM: 按需读取后台助手的调度状态与阻断原因码，并写入受限大小的本地字典（V13-02 / ROUTE-02）。
+    # 函数用途: 获取并缓存单个后台助手的调度和阻断事实。
+    def load_scheduling(self, agent_id: str) -> dict:
+        result = self.client.call('background_agents.get', {'agent_id': agent_id})
+        if result.get('ok') is True:
+            data = result.get('data', {})
+            if isinstance(data, dict) and 'scheduling' in data:
+                with self._lock:
+                    if len(self._scheduling_cache) >= 100:
+                        self._scheduling_cache.pop(next(iter(self._scheduling_cache)))
+                    self._scheduling_cache[agent_id] = data['scheduling']
+        return result
+
+    # LLM: 遵循 AGENTS.md Rule 13 有界窗口与分页游标，按需分页读取子代理列表，防止大列表无限占内存（V13-02）。
+    # 函数用途: 为指定后台助手读取一页子代理执行记录。
+    def load_subagents(self, agent_id: str, *, limit: int = 10, cursor: str | None = None) -> dict:
+        bounded_limit = max(1, min(int(limit or 10), 50))
+        params: dict[str, object] = {'parent_run_id': agent_id, 'limit': bounded_limit}
+        if cursor:
+            params['cursor'] = cursor
+        result = self.client.call('subagents.list', params)
+        if result.get('ok') is True:
+            data = result.get('data', {})
+            with self._lock:
+                if len(self._subagent_cache) >= 100:
+                    self._subagent_cache.pop(next(iter(self._subagent_cache)))
+                self._subagent_cache[agent_id] = data
+        return result
+
+    # LLM: 按需读取指定后台助手的用量统计事实，防止不必要的后台轮询（V13-02）。
+    # 函数用途: 读取并缓存助手的资源或 token 用量数据。
+    def load_usage(self, agent_id: str, *, space_id: str | None = None) -> dict:
+        flt: dict[str, object] = {'agent_id': agent_id}
+        if space_id is not None:
+            flt['space_id'] = space_id
+        result = self.client.call('usage.get', {'filter': flt})
+        if result.get('ok') is True:
+            data = result.get('data', {})
+            with self._lock:
+                if len(self._usage_cache) >= 100:
+                    self._usage_cache.pop(next(iter(self._usage_cache)))
+                self._usage_cache[agent_id] = data
+        return result
+
+    # LLM: 切换指定助手的展开状态；受有界滑窗大小上限约束，杜绝状态集合无限膨胀。
+    # 函数用途: 在展开与折叠之间切换并返回新状态。
+    def toggle_expanded(self, item_id: str) -> bool:
+        with self._lock:
+            if item_id in self._expanded:
+                self._expanded.remove(item_id)
+                return False
+            if len(self._expanded) >= 100:
+                self._expanded.pop()
+            self._expanded.add(item_id)
+            return True
+
+    # LLM: 检查指定条目是否处于展开查看模式。
+    # 函数用途: 返回当前条目是否展开。
+    def is_expanded(self, item_id: str) -> bool:
+        with self._lock:
+            return item_id in self._expanded
+
+    # LLM: 为给定的后台助手生成不可变的会话输入调用包。
+    # 函数用途: 构建发往后台助手的业务输入 PreparedBusinessCall。
     def prepare_input(self, agent_id: str, text: str) -> PreparedBusinessCall:
         return self.client.prepare('background_agents.messages.send',
                                    {'agent_id': agent_id, 'text': text, 'input_kind': 'message'})
