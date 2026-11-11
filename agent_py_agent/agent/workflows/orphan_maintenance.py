@@ -66,8 +66,17 @@ def cleanup_status(service, definition):
     if definition.descriptor.source_scope != 'owner' or definition.descriptor.scope_layer != 'owner':
         blockers.append({'ref': definition.descriptor.id, 'kind': 'read_only', 'reason_code': 'READ_ONLY'})
     try:
-        references = service.reference_reader(definition.descriptor.id) if callable(service.reference_reader) else None
-    except (OSError, ValueError, LookupError):
+        if callable(getattr(service, 'reference_reader', None)):
+            try:
+                references = service.reference_reader(definition.descriptor.id)
+            except TypeError:
+                try:
+                    references = service.reference_reader('workflow', definition.descriptor.id, getattr(service, 'owner_id', None))
+                except Exception:
+                    references = None
+        else:
+            references = None
+    except (OSError, ValueError, LookupError, TypeError):
         references = None
     if (not isinstance(references, dict) or references.get('coverage') != 'complete'
             or not isinstance(references.get('blockers'), list)):
