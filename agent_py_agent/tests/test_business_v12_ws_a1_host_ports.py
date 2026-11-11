@@ -13,6 +13,7 @@ from agent_py_agent.agent.gateway_parts.business_host_ports import (
     build_default_business_active_references,
     build_default_business_space_reference_resolver,
     build_default_business_workflow_reference_reader,
+    build_default_governance_ports,
     build_default_task_business_context,
     build_default_workflow_agent_steps,
     is_business_host_ports_enabled,
@@ -56,6 +57,10 @@ def test_g4_native_host_ports_readiness_and_archive(native):  # noqa: F811
         assert iface_action in supported_after
     for asset_action in ('assets.list', 'assets.get', 'assets.register', 'assets.unlink'):
         assert asset_action in supported_after
+
+    # BIZ-004: 治理端口未配置时，policies.* 动作不公布
+    assert 'policies.apply' not in supported_after
+    assert 'policies.apply' not in allowed_after
 
     # 3. interfaces.list 可正常调用
     status, payload = call(native, 'interfaces.list', {'space_id': sid})
@@ -318,3 +323,274 @@ def test_business_host_ports_wiring_order_and_production_default(native, monkeyp
     assert gateway_host._business_host_ports_wired is True
     assert gateway_host.business_capabilities is not None
     assert gateway_host.business_workflow_reference_reader is not None
+
+
+# LLM: 验证真实能力包 dict 记录、ConversationStore 代理身份与 WorkflowStore 定义引用解析。
+# 函数用途: 验证 space_reference_resolver 对 package dict、agent 线程与 workflow 定义的标准合约支持。
+def test_space_reference_resolver_canonical_store_contracts(native, monkeypatch):  # noqa: F811
+    server, agent = native
+    wire_business_host_ports(agent)
+    resolver = build_default_business_space_reference_resolver(agent)
+
+    # 1. package: 支持真实 list_installed_capability_packages 返回的 dict 项与 capability: 前缀
+    from agent_py_agent.agent.capability import package_provider
+
+    dict_pkg = {
+        'package_id': 'pkg.finance.ledger',
+        'name': 'pkg.finance.ledger',
+        'package_ref': 'pkg.finance.ledger',
+        'version': '1.0.0',
+        'digest': 'sha256-digest-abc12345',
+        'enabled': True,
+    }
+    disabled_pkg = {
+        'package_id': 'pkg.legacy.tool',
+        'name': 'pkg.legacy.tool',
+        'package_ref': 'pkg.legacy.tool',
+        'digest': 'sha256-legacy-999',
+        'enabled': False,
+    }
+    monkeypatch.setattr(package_provider, 'list_installed_capability_packages', lambda home: [dict_pkg, disabled_pkg])
+
+    # 通过 package_id 匹配
+    res1 = resolver('package', 'pkg.finance.ledger', None)
+    assert res1 is not None
+    assert res1['state'] == 'available'
+    assert res1['version_ref'] == 'sha256-digest-abc12345'
+    assert res1['package_ref'] == 'pkg.finance.ledger'
+
+    # 通过 capability: 前缀匹配 (emitted by spaces.packages.catalog)
+    res2 = resolver('package', 'capability:pkg.finance.ledger', None)
+    assert res2 is not None
+    assert res2['state'] == 'available'
+    assert res2['version_ref'] == 'sha256-digest-abc12345'
+
+    # 禁用包状态投影为 disabled
+    res_dis = resolver('package', 'pkg.legacy.tool', None)
+    assert res_dis is not None
+    assert res_dis['state'] == 'disabled'
+
+    # 2. agent: 真实 store.threads.load 与 list_threads/list_report 查找
+    th = agent.conversation_store.threads.create(
+        title='finance-agent-alpha',
+        owner_id=agent.home_paths.owner_id,
+    )
+    # 通过精确 thread_id 加载
+    res_th = resolver('agent', th.thread_id, None)
+    assert res_th is not None
+    assert res_th['state'] == 'available'
+    assert res_th['kind'] == 'agent'
+
+    # 通过 title / background agent name 查找
+    res_title = resolver('agent', 'finance-agent-alpha', None)
+    assert res_title is not None
+    assert res_title['state'] == 'available'
+
+    # 退役后台代理返回 retired 状态
+    from dataclasses import replace
+
+    th_retired = agent.conversation_store.threads.create(
+        title='retired-agent-beta',
+        owner_id=agent.home_paths.owner_id,
+    )
+    th_retired_obj = agent.conversation_store.threads.load(th_retired.thread_id)
+    th_retired_meta = dict(getattr(th_retired_obj, 'metadata', None) or {})
+    th_retired_meta['background_agent'] = {
+        'name': 'retired-agent-beta',
+        'identity_state': 'retired',
+    }
+    agent.conversation_store.threads.update_atomic(th_retired.thread_id, lambda t: replace(t, metadata=th_retired_meta))
+    res_ret = resolver('agent', th_retired.thread_id, None)
+    assert res_ret is not None
+    assert res_ret['state'] == 'retired'
+
+    # 3. workflow: 真实 WorkflowStore.get_workflow 支持
+    wf_id = 'wf-contract-test-' + uuid.uuid4().hex[:8]
+    ok(native, 'workflows.create', {'definition': definition(wf_id)}, idempotency_key='wf-create-contract-001')
+
+    # 裸 workflow id
+    res_wf = resolver('workflow', wf_id, None)
+    assert res_wf is not None
+    assert res_wf['state'] == 'available'
+    assert res_wf['kind'] == 'workflow'
+
+    # 带 workflow: 规范前缀
+    res_wf_prefix = resolver('workflow', f'workflow:{wf_id}', None)
+    assert res_wf_prefix is not None
+    assert res_wf_prefix['state'] == 'available'
+
+
+# LLM: 验证 active_references 阻断 spaces.archive：活跃后台代理、非终态工作流与 catalog.json 订阅。
+# 函数用途: 验证 spaces.archive 针对 3 类异构活跃引用的阻断行为。
+def test_active_references_blocks_spaces_archive(native):  # noqa: F811
+    server, agent = native
+    wire_business_host_ports(agent)
+    if hasattr(server, '_business_services'):
+        server._business_services.clear()
+
+    space = ok(native, 'spaces.create', {'name': 'archive-blockers-space'}, idempotency_key='sp-create-blk-0001')
+    sid = space['space_id']
+
+    # 1. 活跃 background_agent 阻断
+    from dataclasses import replace
+
+    th_bg = agent.conversation_store.threads.create(
+        title='active-bg-worker',
+        owner_id=agent.home_paths.owner_id,
+    )
+    agent.conversation_store.threads.update_atomic(
+        th_bg.thread_id,
+        lambda t: replace(t, metadata={'background_agent': {'space_id': sid, 'name': 'active-bg-worker', 'identity_state': 'active'}})
+    )
+
+    ar_fn = build_default_business_active_references(agent)
+    blockers = ar_fn(sid, None)
+    assert any(b['kind'] == 'agent' and b['reason_code'] == 'ACTIVE_AGENT' and b['ref'] == th_bg.thread_id for b in blockers)
+
+    # 验证 spaces.archive 被阻断，space 未被归档
+    res_arc = ok(native, 'spaces.archive', {'space_id': sid}, idempotency_key='sp-arc-blk-0000001', expected_revision=space['revision'])
+    assert res_arc['space']['state'] == 'active'
+    assert any(b['kind'] == 'agent' for b in res_arc['blockers'])
+
+    # 将代理标记为 retired 后解除代理阻断
+    agent.conversation_store.threads.update_atomic(
+        th_bg.thread_id,
+        lambda t: replace(t, metadata={'background_agent': {'space_id': sid, 'name': 'active-bg-worker', 'identity_state': 'retired'}})
+    )
+
+    # 2. 处于非终态 (如 waiting_for_agent / running) 的 WorkflowRun 阻断
+    from agent_py_agent.agent.workflows.run_store import WorkflowRunRecord, WorkflowRunStore
+    rstore = WorkflowRunStore(Path(agent.home_paths.owner_home_dir).resolve())
+    run_rec = WorkflowRunRecord(
+        workflow_run_id='wf-run-wait-agent-01',
+        workflow_id='wf-sample',
+        owner_id=agent.home_paths.owner_id,
+        trigger_kind='manual',
+        status='waiting_for_agent',
+        started_at=100.0,
+        ended_at=0.0,
+        duration_ms=0.0,
+        business_context={'space_id': sid},
+    )
+    rstore.save_run(run_rec)
+
+    blockers_wf = ar_fn(sid, None)
+    assert any(b['kind'] == 'workflow_run' and b['reason_code'] == 'ACTIVE_WORKFLOW_RUN' and b['ref'] == 'wf-run-wait-agent-01' for b in blockers_wf)
+
+    # 将运行标记为 completed 终态
+    run_rec.status = 'completed'
+    rstore.save_run(run_rec)
+
+    # 3. catalog.json 活跃订阅阻断
+    owner_home = Path(agent.home_paths.owner_home_dir).resolve()
+    cat_dir = owner_home / 'data' / 'business'
+    cat_dir.mkdir(parents=True, exist_ok=True)
+    cat_file = cat_dir / 'catalog.json'
+    cat_data = json.loads(cat_file.read_text(encoding='utf-8')) if cat_file.is_file() else {}
+    cat_data.setdefault('subscriptions', {})['sub-catalog-001'] = {
+        'subscription_id': 'sub-catalog-001',
+        'space_id': sid,
+        'state': 'active',
+        'revision': 1,
+    }
+    cat_file.write_text(json.dumps(cat_data), encoding='utf-8')
+
+    blockers_sub = ar_fn(sid, None)
+    assert any(b['kind'] == 'subscription' and b['reason_code'] == 'ACTIVE_SUBSCRIPTION' and b['ref'] == 'sub-catalog-001' for b in blockers_sub)
+
+    # 移除/暂停活跃订阅后成功归档
+    cat_data['subscriptions']['sub-catalog-001']['state'] = 'paused'
+    cat_file.write_text(json.dumps(cat_data), encoding='utf-8')
+
+    archive_final = ok(native, 'spaces.archive', {'space_id': sid}, idempotency_key='sp-arc-blk-0000002', expected_revision=space['revision'])
+    assert archive_final['space']['state'] == 'archived'
+    assert archive_final['blockers'] == []
+
+
+# LLM: 验证 _start_gateway_http 自动装配业务宿主端口与 G4 工具，且 BIZ-004 治理端口未显式配置时不广播。
+# 函数用途: 测试网关进程启动时自动调用 wire_business_host_ports 与 register_business_tools，及治理端口防虚假公布。
+def test_gateway_startup_wiring_and_biz_004_governance_guard(native, monkeypatch):  # noqa: F811
+    server, agent = native
+
+    # 1. 验证 BIZ-004：wire_business_host_ports 不再自动注入 business_governance，policies.* 动作不公布
+    assert getattr(agent, 'business_governance', None) is None
+    wire_business_host_ports(agent)
+    assert getattr(agent, 'business_governance', None) is None
+
+    if hasattr(server, '_business_services'):
+        server._business_services.clear()
+    caps = ok(native, 'system.capabilities')
+    supported = set(caps['supported_actions'])
+    assert 'policies.apply' not in supported
+    assert 'policies.get' not in supported
+    assert 'policies.preview' not in supported
+
+    # 显式构造默认治理桥接器时，验证 authorize_policy_change 和返回键对齐
+    gov = build_default_governance_ports(agent)
+
+    # authorize_policy_change: 无 authorization_ref 返回 False
+    assert gov.authorize_policy_change('sp-1', {'workflow_ref': 'wf-1'}, None) is False
+    assert gov.authorize_policy_change('sp-1', {'workflow_ref': 'wf-1'}, '') is False
+    # 无 business_content_authorizer 返回 False
+    assert gov.authorize_policy_change('sp-1', {'workflow_ref': 'wf-1'}, 'auth-ref-1') is False
+    # 有 business_content_authorizer 且审批通过返回 True
+    agent.business_content_authorizer = lambda facts: True
+    assert gov.authorize_policy_change('sp-1', {'workflow_ref': 'wf-1'}, 'auth-ref-1') is True
+    agent.business_content_authorizer = lambda facts: False
+    assert gov.authorize_policy_change('sp-1', {'workflow_ref': 'wf-1'}, 'auth-ref-1') is False
+    agent.business_content_authorizer = None
+
+    # 对齐 get_policy / preview_policy / apply_policy 返回键
+    p_get = gov.get_policy('sp-1')
+    assert {'policy_ref', 'readable_rules', 'revision'} <= set(p_get.keys())
+    p_prev = gov.preview_policy('sp-1', {'workflow_ref': 'wf-1'})
+    assert {'diff', 'approval_required', 'affected_runs'} <= set(p_prev.keys())
+    p_app = gov.apply_policy('sp-1', {'workflow_ref': 'wf-1'}, authorization_ref='auth-1')
+    assert {'policy_ref', 'revision', 'effective_for'} <= set(p_app.keys())
+
+    # 2. 验证 _start_gateway_http 在 business_spaces_enabled=True 时自动接线并注册工具
+    from agent_py_agent.cli import gateway_process
+
+    registered_tools = []
+    fake_tools = SimpleNamespace(
+        register=lambda tool: registered_tools.append(tool),
+        get=lambda name: None,
+        __contains__=lambda self, name: any(getattr(t, 'model_spec', None) and t.model_spec.name == name for t in registered_tools),
+    )
+    fake_agent = SimpleNamespace(
+        config=SimpleNamespace(
+            business_spaces_enabled=True,
+            business_host_ports_enabled=True,
+            gateway_bind_host='127.0.0.1',
+        ),
+        home_paths=agent.home_paths,
+        conversation_store=agent.conversation_store,
+        tools=fake_tools,
+    )
+
+    captured_params = []
+    monkeypatch.setattr(gateway_process, 'start_http_server', lambda port, paths, params=None: captured_params.append(params) or 'started')
+
+    res = gateway_process._start_gateway_http(fake_agent, SimpleNamespace(state=Path('/tmp/state.json')), 8888)
+    assert res == 'started'
+    assert fake_agent._business_host_ports_wired is True
+    assert fake_agent.business_space_reference_resolver is not None
+    # 验证 G4 工具已注册 (spaces_archive, interfaces_*, assets_*)
+    tool_names = [getattr(getattr(t, 'model_spec', None), 'name', '') for t in registered_tools]
+    assert 'business_spaces_archive' in tool_names
+    assert any(name.startswith('business_interfaces_') for name in tool_names)
+    assert any(name.startswith('business_assets_') for name in tool_names)
+
+    # 验证 business_spaces_enabled=False 时不装配
+    fake_agent_disabled = SimpleNamespace(
+        config=SimpleNamespace(
+            business_spaces_enabled=False,
+            business_host_ports_enabled=True,
+            gateway_bind_host='127.0.0.1',
+        ),
+        home_paths=agent.home_paths,
+        conversation_store=agent.conversation_store,
+        tools=fake_tools,
+    )
+    gateway_process._start_gateway_http(fake_agent_disabled, SimpleNamespace(state=Path('/tmp/state.json')), 8888)
+    assert getattr(fake_agent_disabled, '_business_host_ports_wired', False) is False

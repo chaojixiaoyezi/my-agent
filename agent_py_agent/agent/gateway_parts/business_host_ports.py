@@ -100,16 +100,22 @@ def build_default_business_space_reference_resolver(host: Any) -> Callable[[str,
                     from ..capability.package_provider import list_installed_capability_packages
                     pkgs = list_installed_capability_packages(owner_home_path)
                     for pkg in pkgs:
-                        pkg_id = getattr(pkg, 'package_id', None) or getattr(pkg, 'name', None)
-                        pkg_ref = getattr(pkg, 'package_ref', pkg_id)
-                        if str(ref_id) in (str(pkg_id), str(pkg_ref)):
-                            return {
+                        pkg_id = (pkg.get('package_id') or pkg.get('name')) if isinstance(pkg, dict) else (getattr(pkg, 'package_id', None) or getattr(pkg, 'name', None))
+                        pkg_ref = (pkg.get('package_ref') or pkg_id) if isinstance(pkg, dict) else getattr(pkg, 'package_ref', pkg_id)
+                        enabled = pkg.get('enabled', True) if isinstance(pkg, dict) else getattr(pkg, 'enabled', True)
+                        digest = (pkg.get('digest') or pkg.get('version_ref') or pkg.get('version')) if isinstance(pkg, dict) else (getattr(pkg, 'digest', None) or getattr(pkg, 'version_ref', None) or getattr(pkg, 'version', None))
+                        matches = (str(pkg_id), str(pkg_ref), f"capability:{pkg_id}") if pkg_id else (str(pkg_ref),)
+                        if str(ref_id) in matches:
+                            res = {
                                 'owner_id': owner_id,
                                 'ref': str(ref_id),
                                 'package_ref': str(pkg_ref),
-                                'state': 'available' if getattr(pkg, 'enabled', True) else 'disabled',
+                                'state': 'available' if enabled else 'disabled',
                                 'kind': 'package'
                             }
+                            if digest:
+                                res['version_ref'] = str(digest)
+                            return res
                 except (OSError, ValueError, RuntimeError):
                     return None
             return None
@@ -131,14 +137,49 @@ def build_default_business_space_reference_resolver(host: Any) -> Callable[[str,
             store = getattr(host, 'conversation_store', None)
             if store is not None and hasattr(store, 'threads'):
                 try:
-                    thread = store.threads.get(str(ref_id))
+                    thread = store.threads.load(str(ref_id)) if hasattr(store.threads, 'load') else store.threads.get(str(ref_id))
                     if thread is not None:
+                        meta = getattr(thread, 'metadata', None) or {}
+                        bg = meta.get('background_agent') if isinstance(meta, dict) else {}
+                        identity_state = bg.get('identity_state') if isinstance(bg, dict) else None
+                        is_retired = (identity_state == 'retired') or bool(meta.get('retired', False)) if isinstance(meta, dict) else False
                         return {
                             'owner_id': owner_id,
                             'ref': str(ref_id),
-                            'state': 'available',
+                            'state': 'retired' if is_retired else 'available',
                             'kind': 'agent'
                         }
+                    threads = []
+                    if hasattr(store.threads, 'list_threads'):
+                        try:
+                            threads = list(store.threads.list_threads(limit=100))[:100]
+                        except TypeError:
+                            threads = list(store.threads.list_threads())[:100]
+                    elif hasattr(store.threads, 'list_report'):
+                        rep = store.threads.list_report(limit=100)
+                        if isinstance(rep, tuple):
+                            threads = rep[0][:100]
+                        elif hasattr(rep, 'rows'):
+                            threads = getattr(rep, 'rows', [])[:100]
+                        else:
+                            threads = list(rep)[:100]
+                    elif hasattr(store.threads, 'list_recent'):
+                        threads = list(store.threads.list_recent(100))[:100]
+
+                    for th in threads:
+                        th_title = getattr(th, 'title', '')
+                        th_meta = getattr(th, 'metadata', None) or {}
+                        th_bg = th_meta.get('background_agent') if isinstance(th_meta, dict) else {}
+                        th_bg_name = th_bg.get('name') if isinstance(th_bg, dict) else None
+                        if str(ref_id) in (str(th_title), str(th_bg_name)):
+                            identity_state = th_bg.get('identity_state') if isinstance(th_bg, dict) else None
+                            is_retired = (identity_state == 'retired') or bool(th_meta.get('retired', False)) if isinstance(th_meta, dict) else False
+                            return {
+                                'owner_id': owner_id,
+                                'ref': str(ref_id),
+                                'state': 'retired' if is_retired else 'available',
+                                'kind': 'agent'
+                            }
                 except (OSError, ValueError, RuntimeError):
                     pass
             # 允许内置/已知命名代理身份
@@ -199,7 +240,8 @@ def build_default_business_space_reference_resolver(host: Any) -> Callable[[str,
                 try:
                     from ..assets.workflow_store import WorkflowStore
                     wstore = WorkflowStore(owner_home_path)
-                    definition = wstore.get(clean_ref)
+                    fn = getattr(wstore, 'get_workflow', None) or getattr(wstore, 'get', None)
+                    definition = fn(clean_ref) if fn is not None else None
                     if definition is not None:
                         return {
                             'owner_id': owner_id,
@@ -207,7 +249,7 @@ def build_default_business_space_reference_resolver(host: Any) -> Callable[[str,
                             'state': 'available',
                             'kind': 'workflow'
                         }
-                except (OSError, ValueError, LookupError, RuntimeError):
+                except (OSError, ValueError, LookupError, RuntimeError, FileNotFoundError):
                     return None
             return None
 
@@ -406,16 +448,19 @@ def build_default_business_workflow_reference_reader(host: Any) -> Callable[[str
             try:
                 from ..assets.workflow_store import WorkflowStore
                 wstore = WorkflowStore(owner_home_path)
-                definitions = wstore.list() if hasattr(wstore, 'list') else []
+                definitions = (wstore.list_workflows() if hasattr(wstore, 'list_workflows')
+                               else (wstore.list() if hasattr(wstore, 'list') else []))
                 for other_def in definitions[:100]:
-                    other_id = getattr(getattr(other_def, 'descriptor', None), 'id', None)
+                    descriptor = getattr(other_def, 'descriptor', None)
+                    other_id = getattr(descriptor, 'asset_id', None) or getattr(descriptor, 'id', None) or getattr(other_def, 'workflow_id', None)
                     if other_id == clean_ref:
                         continue
-                    steps = getattr(getattr(other_def, 'definition', None), 'steps', [])
+                    steps = getattr(other_def, 'steps', None) or getattr(getattr(other_def, 'definition', None), 'steps', ())
                     for step in steps:
                         step_kind = getattr(step, 'kind', '')
-                        step_wf = getattr(step, 'workflow_ref', '') or getattr(step, 'target', '')
-                        if step_kind == 'workflow' and step_wf in (workflow_ref, clean_ref):
+                        step_mode = getattr(step, 'mode', '')
+                        step_wf = getattr(step, 'workflow_ref', '') or getattr(step, 'subworkflow_ref', '') or getattr(step, 'target', '')
+                        if (step_mode in ('subworkflow', 'workflow') or step_kind == 'workflow') and step_wf in (workflow_ref, clean_ref):
                             blockers.append({
                                 'ref': str(other_id or 'subworkflow'),
                                 'kind': 'workflow_step',
@@ -456,13 +501,13 @@ def build_default_business_workflow_reference_reader(host: Any) -> Callable[[str
                 rstore = WorkflowRunStore(owner_home_path)
                 if hasattr(rstore, 'list_runs'):
                     runs = rstore.list_runs(limit=50)
-                    settled_states = {'completed', 'failed', 'cancelled', 'settled'}
+                    settled_states = {'succeeded', 'completed', 'failed', 'cancelled', 'settled'}
                     for run in runs:
                         if getattr(run, 'workflow_id', None) == clean_ref:
                             status = getattr(run, 'status', '')
                             if status not in settled_states:
                                 blockers.append({
-                                    'ref': str(getattr(run, 'run_id', 'run')),
+                                    'ref': str(getattr(run, 'workflow_run_id', None) or getattr(run, 'run_id', 'run')),
                                     'kind': 'workflow_run',
                                     'reason_code': 'ACTIVE_WORKFLOW_RUN'
                                 })
@@ -521,12 +566,29 @@ def build_default_business_active_references(host: Any) -> Callable[[str, Any], 
             try:
                 threads = []
                 if hasattr(store.threads, 'list_threads'):
-                    threads = store.threads.list_threads()[:50]
+                    try:
+                        threads = list(store.threads.list_threads(limit=100))[:100]
+                    except TypeError:
+                        threads = list(store.threads.list_threads())[:100]
+                elif hasattr(store.threads, 'list_report'):
+                    rep = store.threads.list_report(limit=100)
+                    if isinstance(rep, tuple):
+                        threads = rep[0][:100]
+                    elif hasattr(rep, 'rows'):
+                        threads = getattr(rep, 'rows', [])[:100]
+                    else:
+                        threads = list(rep)[:100]
                 elif hasattr(store.threads, 'list_recent'):
-                    threads = store.threads.list_recent(50)
+                    threads = list(store.threads.list_recent(100))[:100]
+
                 for thread in threads:
                     meta = getattr(thread, 'metadata', None) or {}
-                    if meta.get('space_id') == space_id and not meta.get('retired', False):
+                    is_active = False
+                    if isinstance(meta, dict):
+                        bg = meta.get('background_agent')
+                        if (isinstance(bg, dict) and bg.get('space_id') == space_id and bg.get('identity_state') != 'retired') or (meta.get('space_id') == space_id and not meta.get('retired', False)):
+                            is_active = True
+                    if is_active:
                         blockers.append({
                             'ref': str(getattr(thread, 'thread_id', 'thread')),
                             'kind': 'agent',
@@ -535,18 +597,19 @@ def build_default_business_active_references(host: Any) -> Callable[[str, Any], 
             except (OSError, ValueError, RuntimeError):
                 pass
 
-        # 3. running/paused WorkflowRunStore runs
+        # 3. running/paused/queued/waiting_for_agent WorkflowRunStore runs
         if owner_home_path is not None:
             try:
                 from ..workflows.run_store import WorkflowRunStore
                 rstore = WorkflowRunStore(owner_home_path)
                 if hasattr(rstore, 'list_runs'):
                     runs = rstore.list_runs(limit=50)
+                    settled_states = {'succeeded', 'completed', 'failed', 'cancelled', 'settled'}
                     for run in runs:
                         bc = getattr(run, 'business_context', None) or {}
-                        if bc.get('space_id') == space_id and getattr(run, 'status', '') in ('running', 'paused', 'queued'):
+                        if bc.get('space_id') == space_id and getattr(run, 'status', '') not in settled_states:
                             blockers.append({
-                                'ref': str(getattr(run, 'run_id', 'run')),
+                                'ref': str(getattr(run, 'workflow_run_id', None) or getattr(run, 'run_id', 'run')),
                                 'kind': 'workflow_run',
                                 'reason_code': 'ACTIVE_WORKFLOW_RUN'
                             })
@@ -556,18 +619,41 @@ def build_default_business_active_references(host: Any) -> Callable[[str, Any], 
         # 4. active ManagedSubscriptionService items
         if owner_home_path is not None:
             try:
+                seen_sub_ids: set[str] = set()
+                # Check data/business/catalog.json subscriptions
+                catalog_path = owner_home_path / 'data' / 'business' / 'catalog.json'
+                if catalog_path.is_file():
+                    with catalog_path.open('r', encoding='utf-8') as f:
+                        catalog_data = json.load(f)
+                    subs_raw = catalog_data.get('subscriptions', {}) if isinstance(catalog_data, dict) else {}
+                    subs_items = subs_raw.values() if isinstance(subs_raw, dict) else (subs_raw if isinstance(subs_raw, list) else [])
+                    for sub in subs_items:
+                        if isinstance(sub, dict) and sub.get('space_id') == space_id and sub.get('state', 'active') == 'active':
+                            sub_id = str(sub.get('subscription_id') or 'subscription')
+                            if sub_id not in seen_sub_ids:
+                                seen_sub_ids.add(sub_id)
+                                blockers.append({
+                                    'ref': sub_id,
+                                    'kind': 'subscription',
+                                    'reason_code': 'ACTIVE_SUBSCRIPTION'
+                                })
+
+                # Fallback: data/subscriptions.json
                 sub_file = owner_home_path / 'data' / 'subscriptions.json'
                 if sub_file.is_file():
                     with sub_file.open('r', encoding='utf-8') as f:
                         subs = json.load(f)
-                    sub_list = subs.values() if isinstance(subs, dict) else subs
+                    sub_list = subs.values() if isinstance(subs, dict) else (subs if isinstance(subs, list) else [])
                     for sub in sub_list:
-                        if isinstance(sub, dict) and sub.get('space_id') == space_id and sub.get('enabled', True):
-                            blockers.append({
-                                'ref': str(sub.get('subscription_id') or 'subscription'),
-                                'kind': 'subscription',
-                                'reason_code': 'ACTIVE_SUBSCRIPTION'
-                            })
+                        if isinstance(sub, dict) and sub.get('space_id') == space_id and sub.get('enabled', True) and sub.get('state', 'active') == 'active':
+                            sub_id = str(sub.get('subscription_id') or 'subscription')
+                            if sub_id not in seen_sub_ids:
+                                seen_sub_ids.add(sub_id)
+                                blockers.append({
+                                    'ref': sub_id,
+                                    'kind': 'subscription',
+                                    'reason_code': 'ACTIVE_SUBSCRIPTION'
+                                })
             except (OSError, ValueError, RuntimeError):
                 pass
 
@@ -658,25 +744,40 @@ def build_default_governance_ports(host: Any) -> Any:
     class _DefaultGovernanceBridge:
         # LLM: 初始化默认治理桥接适配器。
         # 方法用途: 绑定 owner 路径与标识。
-        def __init__(self, owner_home: Path, owner_id: str) -> None:
-            self.owner_home, self.owner_id = owner_home, owner_id
+        def __init__(self, owner_home: Path, owner_id: str, host: Any = None) -> None:
+            self.owner_home, self.owner_id, self.host = owner_home, owner_id, host
 
         # LLM: 查询空间生效策略。
         # 方法用途: 查询指定空间生效策略规则。
         def get_policy(self, space_id: str, *, actor: Any = None) -> dict[str, Any]:
+            policy_ref = f'policy:{space_id}'
+            readable_rules: list[str] = []
+            revision = 1
             try:
                 from ..business_spaces.gap158_w2_policy_store import get_snapshot
                 snapshot = get_snapshot(self.owner_home, space_id)
                 if snapshot is not None:
-                    return {'policy': snapshot, 'revision': getattr(snapshot, 'revision', 1)}
+                    revision = getattr(snapshot, 'revision', 1)
+                    policy_ref = getattr(snapshot, 'policy_ref', policy_ref)
+                    readable_rules = list(getattr(snapshot, 'readable_rules', []))
             except Exception:
                 pass
-            return {'policy': {'space_id': space_id, 'rules': []}, 'revision': 1}
+            return {
+                'policy_ref': str(policy_ref),
+                'readable_rules': readable_rules,
+                'revision': revision,
+            }
 
         # LLM: 预览策略变动及其审批需求。
         # 方法用途: 评估新策略是否需要审批和相关告警。
         def preview_policy(self, space_id: str, policy: dict[str, Any], *, actor: Any = None) -> dict[str, Any]:
-            return {'space_id': space_id, 'policy': policy, 'approval_required': False, 'warnings': []}
+            target_wf = str(policy.get('workflow_ref', ''))
+            diff = [{'target_ref': space_id, 'field': 'workflow_ref', 'before': '', 'after': target_wf}] if target_wf else []
+            return {
+                'diff': diff,
+                'approval_required': False,
+                'affected_runs': [],
+            }
 
         # LLM: 应用策略变动并提交持久化变更。
         # 方法用途: 执行策略持久化与版本递增。
@@ -685,7 +786,17 @@ def build_default_governance_ports(host: Any) -> Any:
                          authorization_ref: str | None = None, commit_guard: Callable[[], None] | None = None) -> dict[str, Any]:
             if callable(commit_guard):
                 commit_guard()
-            return {'space_id': space_id, 'policy': policy, 'revision': (expected_revision or 0) + 1}
+            rev = (expected_revision or 0) + 1
+            pref = str(policy.get('workflow_ref') or f'policy:{space_id}')
+            return {
+                'policy_ref': pref,
+                'revision': rev,
+                'effective_for': {
+                    'new_tasks': True,
+                    'active_tasks_changed': False,
+                    'security_revocation_immediate': True,
+                },
+            }
 
         # LLM: 决定或裁决待决审批。
         # 方法用途: 记录审批决定。
@@ -697,12 +808,34 @@ def build_default_governance_ports(host: Any) -> Any:
         # 方法用途: 校验是否具有变更策略的授权。
         def authorize_policy_change(self, space_id: str, policy: dict[str, Any], authorization_ref: str | None,
                                     *, actor: Any = None, expected_revision: int | None = None) -> bool:
-            return True
+            if not authorization_ref:
+                return False
+            auth_fn = getattr(self.host, 'business_content_authorizer', None)
+            if not callable(auth_fn):
+                return False
+            facts = {
+                'space_id': space_id,
+                'policy': policy,
+                'authorization_ref': authorization_ref,
+                'expected_revision': expected_revision,
+                'actor': actor,
+            }
+            try:
+                if auth_fn(facts) is True:
+                    return True
+            except TypeError:
+                pass
+            try:
+                if auth_fn(space_id, policy, authorization_ref) is True:
+                    return True
+            except Exception:
+                return False
+            return False
 
     owner_home = getattr(getattr(host, 'home_paths', None), 'owner_home_dir', None)
     owner_id = getattr(getattr(host, 'home_paths', None), 'owner_id', '')
     owner_home_path = Path(owner_home).resolve() if owner_home else Path('/tmp')
-    return _DefaultGovernanceBridge(owner_home_path, owner_id)
+    return _DefaultGovernanceBridge(owner_home_path, owner_id, host=host)
 
 
 # LLM: 一键向指定的 Agent / Host 注入所有标准原生业务端口。
@@ -725,9 +858,6 @@ def wire_business_host_ports(target: Any) -> Any:
 
     if not hasattr(receiver, 'workflow_agent_steps') or getattr(receiver, 'workflow_agent_steps', None) is None:
         receiver.workflow_agent_steps = build_default_workflow_agent_steps(receiver)
-
-    if not hasattr(receiver, 'business_governance') or getattr(receiver, 'business_governance', None) is None:
-        receiver.business_governance = build_default_governance_ports(receiver)
 
     if not hasattr(receiver, 'task_business_context') or getattr(receiver, 'task_business_context', None) is None:
         receiver.task_business_context = build_default_task_business_context(receiver)
