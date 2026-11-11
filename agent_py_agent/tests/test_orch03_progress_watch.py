@@ -1468,3 +1468,99 @@ def test_member_scans_stop_reading_once_the_deadline_has_passed(tmp_path, monkey
     assert len(queried) == 1
     assert git._group_has_live_members(43210, 1, time.monotonic() - 1) is None
     assert len(listed) == 1 and len(queried) == 1
+
+
+# LLM: 验证 PRO-MSG-039 的 scandir 收尾契约：目录句柄关闭完之前不能提前放走 True/False，关闭跨过截止或报 OSError 一律返回 None；
+#   同时保留充裕截止下的 True/False 正向对照。
+# 函数用途: 确认 Linux 组扫描只在 scandir 关闭完成且仍未过截止时才提交布尔结论。
+def test_linux_scandir_close_must_finish_before_committing_conclusion(tmp_path, monkeypatch):
+    (tmp_path / "live").mkdir()
+    (tmp_path / "absent").mkdir()
+    live_root = _fake_proc(tmp_path / "live", {"101": _stat(101, "S", 100)})
+    absent_root = _fake_proc(tmp_path / "absent", {"102": _stat(102, "S", 7)})
+    assert git._linux_group_has_live_members(100, 1, time.monotonic() + 5, live_root) is True
+    assert git._linux_group_has_live_members(100, 1, time.monotonic() + 5, absent_root) is False
+
+    real_scandir = os.scandir
+    closed: list[str] = []
+    fail_close = False
+
+    class _ControlledScandir:
+        # LLM: 包装真实 os.scandir 句柄，不伪造目录项。
+        # 函数用途: 记录真实目录扫描器实例。
+        def __init__(self, path: str):
+            self._path = path
+            self._inner = real_scandir(path)
+
+        # LLM: 直接委托真实 scandir.__enter__。
+        # 函数用途: 进入真实目录迭代上下文。
+        def __enter__(self):
+            return self._inner.__enter__()
+
+        # LLM: 先真实关闭底层目录句柄，再注入慢关闭或关闭报错。
+        # 函数用途: 模拟 scandir.__exit__ 跨过截止时间或抛出 OSError。
+        def __exit__(self, *exc_info):
+            result = self._inner.__exit__(*exc_info)
+            closed.append(self._path)
+            if fail_close:
+                raise OSError("scandir close failed")
+            time.sleep(0.04)
+            return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(git.os, "scandir", _ControlledScandir)
+        live_late = git._linux_group_has_live_members(100, 1, time.monotonic() + 0.01, live_root)
+        absent_late = git._linux_group_has_live_members(100, 1, time.monotonic() + 0.01, absent_root)
+        fail_close = True
+        close_error = git._linux_group_has_live_members(100, 1, time.monotonic() + 5, live_root)
+
+    assert closed == [live_root, absent_root, live_root]
+    assert live_late is None and absent_late is None and close_error is None
+
+
+# LLM: 验证 PRO-MSG-039 的工作量预算契约：初始截止已过时不启动 os.scandir；os.open 跨过截止时不发起 os.read 且在 finally 中关闭真实 fd。
+# 函数用途: 确认 Linux 组扫描在枚举前及 open 后、read 前均遵守绝对截止并无泄漏关闭文件描述符。
+def test_linux_expired_enumeration_and_slow_open_do_not_start_new_reads(tmp_path, monkeypatch):
+    root = _fake_proc(tmp_path, {"101": _stat(101, "S", 100)})
+    assert git._linux_group_has_live_members(100, 1, time.monotonic() + 5, root) is True
+
+    scandir_calls: list[str] = []
+    real_scandir = os.scandir
+    with monkeypatch.context() as patch:
+        patch.setattr(git.os, "scandir", lambda path: scandir_calls.append(path) or real_scandir(path))
+        expired = git._linux_group_has_live_members(100, 1, time.monotonic() - 1, root)
+    assert expired is None and scandir_calls == []
+
+    real_open, real_read, real_close = os.open, os.read, os.close
+    opened: list[int] = []
+    reads: list[int] = []
+    closed: list[int] = []
+
+    # LLM: 调用真实 os.open 打开 stat 文件后延迟跨过截止，不模拟假 fd。
+    # 函数用途: 复现慢速 open 跨过截止时间的边界。
+    def slow_open(*args, **kwargs):
+        fd = real_open(*args, **kwargs)
+        opened.append(fd)
+        time.sleep(0.04)
+        return fd
+
+    # LLM: 记录所有进入 os.read 的真实 fd 并转发。
+    # 函数用途: 观察过截止后是否仍发起了新的读取。
+    def tracked_read(fd: int, count: int) -> bytes:
+        reads.append(fd)
+        return real_read(fd, count)
+
+    # LLM: 记录所有进入 os.close 的真实 fd 并转发关闭。
+    # 函数用途: 确认已打开的真实 fd 在提前返回路径上仍被关闭。
+    def tracked_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(git.os, "open", slow_open)
+        patch.setattr(git.os, "read", tracked_read)
+        patch.setattr(git.os, "close", tracked_close)
+        late_open = git._linux_group_has_live_members(100, 1, time.monotonic() + 0.01, root)
+
+    assert late_open is None
+    assert len(opened) == 1 and closed == opened and reads == []

@@ -452,8 +452,14 @@ def _group_has_live_members(group: int, root_pid: int, deadline: float, proc_roo
     return None
 
 
+# LLM: 流式枚举 /proc，受条目上限与同一绝对截止约束；初始枚举前与每次 open 后、read 前均检查截止，避免过截止后启动新读取；
+#   命中活成员只记 live 并跳出，等 scandir 上下文关闭完成后再复核截止才落定 True/False，任何 OSError 或超时均返回 None。
+# 函数用途: 在 Linux /proc 下受截止时间约束地检查进程组是否仍有非僵尸活成员。
 def _linux_group_has_live_members(group: int, root_pid: int, deadline: float, proc_root: str) -> bool | None:
+    if time.monotonic() >= deadline:
+        return None
     scanned = 0
+    live = False
     try:
         with os.scandir(proc_root) as entries:
             for entry in entries:
@@ -465,6 +471,8 @@ def _linux_group_has_live_members(group: int, root_pid: int, deadline: float, pr
                 try:
                     fd = os.open(os.path.join(proc_root, entry.name, "stat"), os.O_RDONLY)
                     try:
+                        if time.monotonic() >= deadline:
+                            return None
                         raw = os.read(fd, _MAX_PROC_STAT_BYTES)
                     finally:
                         os.close(fd)
@@ -477,10 +485,11 @@ def _linux_group_has_live_members(group: int, root_pid: int, deadline: float, pr
                 if len(parts) < 3 or not parts[2].lstrip("-").isdigit():
                     return None
                 if int(parts[2]) == group and parts[0] != "Z":
-                    return None if time.monotonic() >= deadline else True
+                    live = True
+                    break
     except OSError:
         return None
-    return None if time.monotonic() >= deadline else False
+    return None if time.monotonic() >= deadline else live
 
 
 # LLM: SIGCHLD 被设成忽略时内核自动回收子进程，pid 钉不住；此外不能证明别处没有抢先回收的代码（见模块说明）。
