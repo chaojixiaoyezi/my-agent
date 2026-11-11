@@ -321,8 +321,10 @@ def _persist_delegation_scope(manager: Any, task: Any) -> None:
     try:
         with repo._runtime_connection() as conn:
             conn.execute(
-                "UPDATE delegations SET granted_scope_json = ? WHERE child_agent_run_id = ?",
-                (json.dumps(constraints_data, ensure_ascii=False), task_id),
+                """UPDATE delegations SET granted_scope_json = ?
+                WHERE child_agent_run_id = ?
+                   OR child_agent_run_id IN (SELECT agent_run_id FROM agent_runs WHERE run_id = ?)""",
+                (json.dumps(constraints_data, ensure_ascii=False), task_id, task_id),
             )
             conn.commit()
     except Exception:

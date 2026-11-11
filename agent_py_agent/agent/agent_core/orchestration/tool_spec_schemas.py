@@ -38,6 +38,22 @@ _CREATE_ITEM_PARAMETER_SCHEMA: dict[str, Any] = {
     "long_running": {"type": "boolean"},
     "service_window_seconds": {"type": "integer", "minimum": 1},
     "audit_source_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "delegation_constraints": {
+        "type": "object",
+        "properties": {
+            "schema_version": {"type": "string"},
+            "actor_runtime": {"type": "string", "enum": ["native", "external_instruction_only"]},
+            "max_cumulative_children": {"type": "integer", "minimum": 0},
+            "allow_descendants": {"type": "boolean"},
+            "max_descendant_depth": {"type": "integer", "minimum": 0},
+            "exact_write_set": {"type": "array", "items": {"type": "string"}},
+            "allowed_read_inputs": {"type": "array", "items": {"type": "string"}},
+            "allowed_output_dirs": {"type": "array", "items": {"type": "string"}},
+            "permitted_tools": {"type": "array", "items": {"type": "string"}},
+            "prohibited_actions": {"type": "array", "items": {"type": "string"}},
+        },
+        "additionalProperties": False,
+    },
 }
 # capability 开关 subagent_input_media_enabled 打开时才进入 schema：media_ref 是 64 位十六进制内容哈希，宿主解析端再校验格式。
 _CREATE_INPUT_MEDIA_ITEM_SCHEMA: dict[str, Any] = {

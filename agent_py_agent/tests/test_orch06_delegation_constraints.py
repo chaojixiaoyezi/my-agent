@@ -60,6 +60,7 @@ from agent_py_agent.agent.subagents.services.hierarchy.write_policy import (
     ChildWriteRootRequest,
     requested_child_write_roots,
 )
+from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
 from agent_py_agent.agent.tooling.write_boundary import validate_write_boundary
 
 # -----------------------------------------------------------------------------
@@ -645,3 +646,289 @@ def test_is_action_prohibited_matches_commands_and_actions():
     assert prohibited is True
     prohibited, _ = is_action_prohibited("web_fetch", constraints)
     assert prohibited is True
+
+
+# -----------------------------------------------------------------------------
+# 7. Regression Tests (a)-(f) for Rework SB-R3
+# -----------------------------------------------------------------------------
+
+
+def test_orch06_f_from_dict_rejects_bool_and_negative_integers():
+    """StructuredDelegationConstraints.from_dict rejects bool and negative integers."""
+    c_bool = StructuredDelegationConstraints.from_dict(
+        {"max_cumulative_children": True, "max_descendant_depth": False}
+    )
+    assert c_bool.max_cumulative_children is None
+    assert c_bool.max_descendant_depth is None
+
+    c_neg = StructuredDelegationConstraints.from_dict(
+        {"max_cumulative_children": -1, "max_descendant_depth": -5}
+    )
+    assert c_neg.max_cumulative_children is None
+    assert c_neg.max_descendant_depth is None
+
+    c_valid = StructuredDelegationConstraints.from_dict(
+        {"max_cumulative_children": 3, "max_descendant_depth": 0}
+    )
+    assert c_valid.max_cumulative_children == 3
+    assert c_valid.max_descendant_depth == 0
+
+
+def _make_test_tool_call(snapshot, tool_name: str, arguments: dict) -> ToolCall:
+    runtime = snapshot.runtime(tool_name)
+    schema_hash = runtime.model_spec.schema_hash if runtime is not None else "sha256:" + ("0" * 64)
+    return ToolCall(
+        call_id="call-test",
+        tool_name=tool_name,
+        arguments=arguments,
+        source_protocol="native",
+        schema_hash=schema_hash,
+        run_id="run-test-1",
+        turn_id="turn-1",
+        attempt_id="attempt-1",
+    )
+
+
+def test_orch06_a_action_policy_allows_create_subagents_constraints_and_rejects_unknown(tmp_path):
+    """ActionPolicy().decide allows items[0].delegation_constraints and rejects unknown keys."""
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings.config import AgentConfig
+    from agent_py_agent.agent.tooling.action_policy import ActionPolicy, ActionPolicyRequest
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    snapshot = agent.tools.runtime_snapshot()
+
+    # Allowed valid delegation_constraints
+    call_valid = _make_test_tool_call(
+        snapshot,
+        "create_subagents",
+        {
+            "items": [
+                {
+                    "goal": "do something safely",
+                    "delegation_constraints": {
+                        "max_cumulative_children": 2,
+                        "allow_descendants": True,
+                        "prohibited_actions": ["git_push"],
+                    },
+                }
+            ]
+        },
+    )
+    dec_valid = ActionPolicy().decide(ActionPolicyRequest(call_valid, snapshot, tmp_path, approval_mode="auto"))
+    assert dec_valid.status == "allow"
+
+    # Rejected unknown keys inside delegation_constraints
+    call_invalid = _make_test_tool_call(
+        snapshot,
+        "create_subagents",
+        {
+            "items": [
+                {
+                    "goal": "bad constraint",
+                    "delegation_constraints": {
+                        "unknown_property_xyz": "not_allowed",
+                    },
+                }
+            ]
+        },
+    )
+    dec_invalid = ActionPolicy().decide(ActionPolicyRequest(call_invalid, snapshot, tmp_path, approval_mode="auto"))
+    assert dec_invalid.status == "deny"
+    assert "TOOL_INVALID_ARGUMENTS" in dec_invalid.reason_codes
+
+
+def test_orch06_b_runtimedb_delegations_fk_join_and_count(tmp_path):
+    """SubAgentManager + RuntimeRepository.record_run_creation persists granted_scope_json and counts via FK join."""
+    from agent_py_agent.agent.agent_core.orchestration.create_constraints import (
+        _persist_delegation_scope,
+    )
+
+    repo = RuntimeRepository(tmp_path / "runtime.db")
+    manager = SubAgentManager(tmp_path)
+    manager.runtime_db = repo
+    manager.owner_id = "owner-1"
+
+    parent_task = manager.create_run(
+        goal="parent task",
+        thought="parent plan",
+        plan=["step1"],
+    )
+    parent_task.attributes["delegation_constraints"] = StructuredDelegationConstraints(
+        max_cumulative_children=5
+    ).to_dict()
+    manager.save(parent_task)
+
+    child_task = manager.create_run(
+        goal="child task",
+        thought="child plan",
+        plan=["step1"],
+        parent_id=parent_task.id,
+    )
+    child_task.attributes["delegation_constraints"] = StructuredDelegationConstraints(
+        max_cumulative_children=2,
+        prohibited_actions=("git_push",),
+    ).to_dict()
+    manager.save(child_task)
+
+    # Update granted_scope_json via _persist_delegation_scope (matches child_agent_run_id via agent_runs FK join)
+    _persist_delegation_scope(manager, child_task)
+
+    # Verify delegation row has updated granted_scope_json
+    with repo._runtime_connection() as conn:
+        row = conn.execute(
+            """SELECT d.granted_scope_json FROM delegations d
+            LEFT JOIN agent_runs p ON p.agent_run_id = d.parent_agent_run_id
+            WHERE p.run_id = ? OR d.parent_agent_run_id = ?""",
+            (parent_task.id, parent_task.id),
+        ).fetchone()
+        assert row is not None
+        saved_scope = json.loads(row[0])
+        assert saved_scope["max_cumulative_children"] == 2
+        assert "git_push" in saved_scope["prohibited_actions"]
+
+    # Verify cumulative_created_child_count counts via FK join on agent_runs.run_id
+    agent = SimpleNamespace(
+        subagents=manager,
+        runtime_db=repo,
+        _current_subagent_run_id=parent_task.id,
+    )
+    assert cumulative_created_child_count(agent, parent_task.id) == 1
+
+
+def test_orch06_c_child_write_boundary_enforces_allowed_read_inputs(tmp_path):
+    """Child write_boundary sets read_scope_mode='exact' and exact_read_boundary_error enforces allowed_read_inputs."""
+    from agent_py_agent.agent.tooling.runtime_boundary import exact_read_boundary_error
+
+    manager = SubAgentManager(tmp_path)
+    allowed_file = tmp_path / "allowed.txt"
+    allowed_file.write_text("allowed data", encoding="utf-8")
+    blocked_sibling = tmp_path / "sibling_secret.txt"
+    blocked_sibling.write_text("secret data", encoding="utf-8")
+
+    task = manager.create_run(
+        goal="read only allowed",
+        thought="plan",
+        plan=["p"],
+    )
+    task.attributes["delegation_constraints"] = StructuredDelegationConstraints(
+        actor_runtime="native",
+        allowed_read_inputs=(str(allowed_file),),
+    ).to_dict()
+    manager.save(task)
+
+    boundary = manager.runner_context._build_write_boundary(task)
+    assert boundary["read_scope_mode"] == "exact"
+
+    # Reading allowed_file succeeds (no boundary error)
+    err_allowed = exact_read_boundary_error(
+        "read_file",
+        {"path": str(allowed_file)},
+        workspace_root=tmp_path,
+        write_boundary=boundary,
+    )
+    assert err_allowed == ""
+
+    # Reading unlisted sibling file is blocked with boundary error
+    err_blocked = exact_read_boundary_error(
+        "read_file",
+        {"path": str(blocked_sibling)},
+        workspace_root=tmp_path,
+        write_boundary=boundary,
+    )
+    assert err_blocked != ""
+
+
+def test_orch06_d_action_policy_blocks_prohibited_actions(tmp_path):
+    """ActionPolicy blocks git push, rm, and run_command when prohibited_actions are set."""
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings.config import AgentConfig
+    from agent_py_agent.agent.tooling.action_policy import ActionPolicy, ActionPolicyRequest
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
+    snapshot = agent.tools.runtime_snapshot()
+
+    # 1. Block git_push command
+    boundary_push = {"prohibited_actions": ["git_push"]}
+    call_push = _make_test_tool_call(
+        snapshot,
+        "run_command",
+        {"command": "git push origin main"},
+    )
+    dec_push = ActionPolicy().decide(ActionPolicyRequest(call_push, snapshot, tmp_path, write_boundary=boundary_push, approval_mode="auto"))
+    assert dec_push.status == "deny"
+    assert "TOOL_PERMISSION_DENIED" in dec_push.reason_codes
+
+    # 2. Block file_delete (rm command)
+    boundary_rm = {"prohibited_actions": ["file_delete"]}
+    call_rm = _make_test_tool_call(
+        snapshot,
+        "run_command",
+        {"command": "rm some_file.txt"},
+    )
+    dec_rm = ActionPolicy().decide(ActionPolicyRequest(call_rm, snapshot, tmp_path, write_boundary=boundary_rm, approval_mode="auto"))
+    assert dec_rm.status == "deny"
+    assert "TOOL_PERMISSION_DENIED" in dec_rm.reason_codes
+
+    # 3. Block shell_execution (all run_command blocked)
+    boundary_shell = {"prohibited_actions": ["shell_execution"]}
+    call_shell = _make_test_tool_call(
+        snapshot,
+        "run_command",
+        {"command": "echo safe"},
+    )
+    dec_shell = ActionPolicy().decide(ActionPolicyRequest(call_shell, snapshot, tmp_path, write_boundary=boundary_shell, approval_mode="auto"))
+    assert dec_shell.status == "deny"
+    assert "TOOL_PERMISSION_DENIED" in dec_shell.reason_codes
+
+    # 4. Block apply_patch with delete file
+    call_patch_del = _make_test_tool_call(
+        snapshot,
+        "apply_patch",
+        {"patch": "*** Delete File: unwanted.py\n"},
+    )
+    dec_patch = ActionPolicy().decide(ActionPolicyRequest(call_patch_del, snapshot, tmp_path, write_boundary=boundary_rm, approval_mode="auto"))
+    assert dec_patch.status == "deny"
+    assert "TOOL_PERMISSION_DENIED" in dec_patch.reason_codes
+
+
+def test_orch06_e_grandchild_inherits_parent_constraints(tmp_path):
+    """Grandchild creation without explicit delegation_constraints inherits parent constraints."""
+    from agent_py_agent.agent.agent_core.orchestration.create_policy import (
+        _bind_delegation_constraints,
+    )
+
+    manager = SubAgentManager(tmp_path)
+    parent_c = StructuredDelegationConstraints(
+        max_cumulative_children=4,
+        allow_descendants=True,
+        max_descendant_depth=2,
+        prohibited_actions=("git_push", "shell_execution"),
+    )
+    parent_task = manager.create_run(
+        goal="parent coordinator",
+        thought="plan",
+        plan=["p"],
+    )
+    parent_task.attributes["delegation_constraints"] = parent_c.to_dict()
+    manager.save(parent_task)
+
+    agent = SimpleNamespace(
+        subagents=manager,
+        _current_subagent_run_id=parent_task.id,
+        _current_run_params=RunParams(task_attributes=parent_task.attributes, host_channel_actor=None),
+        tools=None,
+    )
+    set_current_subagent_context(agent, run_id=parent_task.id, task_attributes=parent_task.attributes)
+
+    # Grandchild params without explicit delegation_constraints
+    grandchild_attrs: dict[str, object] = {}
+    _bind_delegation_constraints(grandchild_attrs, raw_params={}, agent=agent)
+
+    assert "delegation_constraints" in grandchild_attrs
+    inherited = StructuredDelegationConstraints.from_dict(grandchild_attrs["delegation_constraints"])
+    assert inherited.max_cumulative_children == 4
+    # max_descendant_depth is decremented from 2 to 1
+    assert inherited.max_descendant_depth == 1
+    assert "git_push" in inherited.prohibited_actions
+    assert "shell_execution" in inherited.prohibited_actions
