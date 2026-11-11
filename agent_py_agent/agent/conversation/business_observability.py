@@ -629,15 +629,7 @@ class BusinessObservationService:
         limit = min(100, request.limit)
         selected_run = params.get('run_id')
         selected_attempt = params.get('attempt_id')
-        filter_space = (params.get('filter') or {}).get('space_id') or params.get('space_id')
-        collected_records = []
-        max_scan = 1000
-        total_scanned = 0
-        hit_cap = False
-        batch_size = max(50, limit)
-        current_after = after
-        has_more = False
-        next_pos = None
+        filter_space = (params.get('filter') or {}).get('space_id')
         with self.runtime._runtime_connection() as conn:
             if selected_run is not None:
                 where = 'ar.run_id=? AND t.owner_id=?'
@@ -656,6 +648,36 @@ class BusinessObservationService:
                 if runtime_source_revision(self.runtime.db_path) != revision:
                     raise BusinessError('CURSOR_EXPIRED')
                 return self._execution_page(raw, more=False, revision=revision, source_paged=True)
+            if not filter_space:
+                positions = conn.execute('SELECT rowid FROM agent_attempts WHERE rowid>? ORDER BY rowid LIMIT ?',
+                                         (after, limit + 1)).fetchall()
+                more = len(positions) > limit
+                positions = positions[:limit]
+                next_position = {'revision': revision, 'after': positions[-1][0]} if more else None
+                if not positions:
+                    if runtime_source_revision(self.runtime.db_path) != revision:
+                        raise BusinessError('CURSOR_EXPIRED')
+                    return ObservationPage(coverage='complete', revision=revision, source_paged=True)
+                where = 'aa.rowid IN (' + ','.join('?' for _ in positions) + ') AND t.owner_id=?'
+                values = [row[0] for row in positions] + [self.owner_id]
+                raw = conn.execute('SELECT ar.run_id,ar.current_attempt_id,ar.parent_agent_run_id,pa.run_id AS parent_run_id,'
+                    't.thread_id,tr.metadata_json,aa.attempt_id,aa.status,aa.started_at,aa.ended_at,aa.metadata_json AS attempt_metadata '
+                    'FROM agent_attempts aa JOIN agent_runs ar ON ar.agent_run_id=aa.agent_run_id '
+                    'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id '
+                    'LEFT JOIN agent_runs pa ON pa.agent_run_id=ar.parent_agent_run_id WHERE ' + where +
+                    ' ORDER BY aa.rowid LIMIT ?', [*values, limit]).fetchall()
+                if runtime_source_revision(self.runtime.db_path) != revision:
+                    raise BusinessError('CURSOR_EXPIRED')
+                return self._execution_page(raw, more=more, revision=revision, source_paged=True, next_position=next_position)
+
+            collected_records = []
+            max_scan = 1000
+            total_scanned = 0
+            hit_cap = False
+            batch_size = max(50, limit)
+            current_after = after
+            has_more = False
+            next_pos = None
             while len(collected_records) < limit and total_scanned < max_scan:
                 positions = conn.execute('SELECT rowid FROM agent_attempts WHERE rowid>? ORDER BY rowid LIMIT ?',
                                          (current_after, batch_size + 1)).fetchall()
@@ -676,7 +698,7 @@ class BusinessObservationService:
                     ' ORDER BY aa.rowid LIMIT ?', [*values, batch_size]).fetchall()
                 batch_page = self._execution_page(raw)
                 for rec in batch_page.records:
-                    if filter_space is not None and rec.space_id != filter_space:
+                    if rec.space_id != filter_space:
                         continue
                     collected_records.append(rec)
                     if len(collected_records) >= limit:
@@ -991,11 +1013,7 @@ class BusinessObservationService:
         if self.runtime is not None and generation != 'unavailable':
             coverage = 'complete'
         limit = params.get('limit', 50)
-        batch_size = max(50, limit)
-        max_scan = 1000
-        total_scanned = 0
-        hit_cap = False
-        has_more_rows = False
+        filter_space = (params.get('filter') or {}).get('space_id')
         if self.runtime is not None and generation != 'unavailable':
             with self.runtime._runtime_connection() as conn:
                 if native_execution:
@@ -1006,6 +1024,76 @@ class BusinessObservationService:
                     raise BusinessError('CURSOR_EXPIRED')
                 if position is None:
                     after = retained_after
+
+                if not filter_space:
+                    raw = conn.execute('SELECT e.*,ar.run_id,ar.agent_run_id AS canonical_agent_run_id,'
+                        'aa.agent_run_id AS attempt_agent_run_id,ar.task_run_id AS agent_task_run_id,ar.status AS agent_status,'
+                        'pa.run_id AS parent_run_id,tr.task_run_id AS canonical_task_run_id,tr.task_id AS canonical_task_id,'
+                        'tr.metadata_json,tr.status AS task_run_status,tr.updated_at AS task_run_updated_at,t.owner_id,t.thread_id,'
+                        'agent_task.owner_id AS agent_owner_id,attempt_task.owner_id AS attempt_owner_id,'
+                        'EXISTS(SELECT 1 FROM agent_runs child WHERE child.parent_agent_run_id=ar.agent_run_id '
+                        'AND child.task_run_id=tr.task_run_id) AS has_children '
+                        'FROM runtime_events e LEFT JOIN agent_attempts aa ON aa.attempt_id=e.attempt_id '
+                        'LEFT JOIN agent_runs ar ON ar.agent_run_id=COALESCE(NULLIF(e.agent_run_id,\'\'),aa.agent_run_id) '
+                        'LEFT JOIN task_runs agent_tr ON agent_tr.task_run_id=ar.task_run_id '
+                        'LEFT JOIN tasks agent_task ON agent_task.task_id=agent_tr.task_id '
+                        'LEFT JOIN agent_runs attempt_ar ON attempt_ar.agent_run_id=aa.agent_run_id '
+                        'LEFT JOIN task_runs attempt_tr ON attempt_tr.task_run_id=attempt_ar.task_run_id '
+                        'LEFT JOIN tasks attempt_task ON attempt_task.task_id=attempt_tr.task_id '
+                        'LEFT JOIN agent_runs pa ON pa.agent_run_id=ar.parent_agent_run_id AND pa.task_run_id=ar.task_run_id '
+                        'LEFT JOIN task_runs tr ON tr.task_run_id=COALESCE(NULLIF(e.task_run_id,\'\'),ar.task_run_id) '
+                        'LEFT JOIN tasks t ON t.task_id=tr.task_id WHERE e.seq>? ORDER BY e.seq LIMIT ?',
+                        (after, limit)).fetchall()
+                    if native_execution:
+                        execution_page = self._event_execution_page(conn, raw)
+                    else:
+                        execution_page = self._source('executions', params)
+                    execution = {(row.run_id, row.attempt_id): row for row in execution_page.records}
+                    coverage = execution_page.coverage
+                    for source in raw:
+                        if (source['owner_id'] not in (None, self.owner_id)
+                                and (not source['agent_run_id'] or source['agent_owner_id'] not in (None, self.owner_id))
+                                and (not source['attempt_id'] or source['attempt_owner_id'] not in (None, self.owner_id))):
+                            after = source['seq']
+                            continue
+                        if (source['canonical_task_run_id'] is None or source['owner_id'] is None
+                                or source['attempt_id'] and source['attempt_agent_run_id'] != source['canonical_agent_run_id']
+                                or (source['agent_run_id'] or source['attempt_id'])
+                                and source['agent_task_run_id'] != source['canonical_task_run_id']):
+                            coverage = 'partial'
+                            break
+                        if source['owner_id'] != self.owner_id:
+                            after = source['seq']
+                            continue
+                        row = (execution.get((source['run_id'], source['attempt_id'])) if source['attempt_id']
+                            else self._event_without_attempt(source))
+                        if row is None:
+                            coverage = 'partial'
+                            break
+                        after = source['seq']
+                        event_facts = ObservationRecord({**row.value, 'occurred_at': _timestamp(source['created_at'])},
+                            row.owner_id, row.space_id, row.project_ref, row.task_id, row.thread_id, row.run_id, row.attempt_id)
+                        if not self._visible(event_facts, 'events.list', params, actor):
+                            continue
+                        cursor = self.cursor(scope, {'generation': generation, 'after': after})
+                        node = ({'kind': 'subagent' if row.value.get('_parent_run_id') else 'background_main', 'id': row.run_id}
+                            if row.run_id is not None else None)
+                        kind = 'ExecutionView' if row.attempt_id is not None else 'NodeView' if node else 'TaskView'
+                        events.append({'stream_item': 'event', 'event_id': source['event_id'], 'cursor': cursor,
+                            'event_type': source['event_type'], 'occurred_at': _timestamp(source['created_at']) or '', 'node': node,
+                            'space_id': row.space_id, 'project_ref': row.project_ref, 'task_id': row.task_id,
+                            'run_id': row.run_id, 'attempt_id': row.attempt_id, 'operation_id': None,
+                            'payload': _view(kind, row.value), 'coverage': execution_page.coverage})
+                    if self._event_generation() != generation:
+                        raise BusinessError('CURSOR_EXPIRED')
+                    return {'events': events, 'next_cursor': self.cursor(scope, {'generation': generation, 'after': after}),
+                        'coverage': coverage, 'reset_required': False}
+
+                batch_size = max(50, limit)
+                max_scan = 1000
+                total_scanned = 0
+                hit_cap = False
+                has_more_rows = False
                 while len(events) < limit and total_scanned < max_scan:
                     raw = conn.execute('SELECT e.*,ar.run_id,ar.agent_run_id AS canonical_agent_run_id,'
                         'aa.agent_run_id AS attempt_agent_run_id,ar.task_run_id AS agent_task_run_id,ar.status AS agent_status,'

@@ -300,7 +300,25 @@ def test_biz013_business_spaces_tool_effect_outcome_canonical():
         'params': {'name': 'Error Space'},
     })
     assert res_fail.ok is False
-    assert res_fail.effect_outcome == 'failed'
+    assert res_fail.effect_outcome == 'unknown'
+
+    class ExplicitErrorService(FakeService):
+        def call(self, action, params, actor, expected_revision=None, idempotency_key=None):
+            err = BusinessError('BUSINESS_SPACE_DUPLICATE')
+            err.effect_outcome = 'failed'
+            raise err
+
+    explicit_service = ExplicitErrorService()
+    actor_explicit = BusinessActor('local/test', 'user', explicit_service, lambda a, f: True)
+    tool_explicit = BusinessSpacesTool(explicit_service, actor=actor_explicit)
+    res_explicit = tool_explicit.execute({
+        'action': 'spaces.create',
+        'request_id': 'req-create-1236',
+        'idempotency_key': 'idemp-key-12345680',
+        'params': {'name': 'Error Space'},
+    })
+    assert res_explicit.ok is False
+    assert res_explicit.effect_outcome == 'failed'
 
     res_bad = tool.execute({'action': 'spaces.create', 'params': {}, 'request_id': 'req-bad'})
     assert res_bad.ok is False
@@ -433,3 +451,50 @@ def test_operations_get_reader_conforms_to_schema(tmp_path: Path):
 
     with pytest.raises(BusinessError, match='OBSERVATION_NOT_FOUND'):
         env.service.query('operations.get', {'operation_id': 'non-existent-op'}, actor=env.actor)
+
+
+# LLM: 验证filter_space缺失时单窗口保持partial覆盖，指定filter_space时执行有界过滤扫描。
+# 函数用途: 回归测试单窗口无过滤截断与按空间有界扫描。
+def test_single_window_unfiltered_and_bounded_space_filter(tmp_path: Path):
+    env = _make_observability_env(tmp_path)
+    # 建立 3 个 space-a 执行与 2 个 space-b 执行
+    for i in range(3):
+        env.repo.record_run_creation(
+            owner_id=env.owner,
+            run_id=f'run-space-a-{i}',
+            thread_id='worker',
+            task_run_metadata={
+                'business_context': BusinessExecutionContext(
+                    env.owner, 'space-a', None, env.task.task_id, 1, None, (), (), 'business-context.v1'
+                ).to_dict(),
+                'session_task_ref': env.task.task_id,
+            },
+        )
+    for j in range(2):
+        env.repo.record_run_creation(
+            owner_id=env.owner,
+            run_id=f'run-space-b-{j}',
+            thread_id='worker',
+            task_run_metadata={
+                'business_context': BusinessExecutionContext(
+                    env.owner, 'space-b', None, env.task.task_id, 1, None, (), (), 'business-context.v1'
+                ).to_dict(),
+                'session_task_ref': env.task.task_id,
+            },
+        )
+
+    # 1. filter_space 为 None 时：单窗口 limit=2，存在后续记录，coverage 保持 'partial'
+    res_unfiltered = env.service.query('executions.list', {'limit': 2}, actor=env.actor)
+    assert len(res_unfiltered['items']) == 2
+    assert res_unfiltered['next_cursor'] is not None
+    assert res_unfiltered['coverage'] == 'partial'
+
+    # 2. filter_space="space-b" 时：跨过前部 space-a 记录，有界扫描检索出 space-b 记录
+    res_filtered = env.service.query(
+        'executions.list',
+        {'filter': {'space_id': 'space-b'}, 'limit': 10},
+        actor=env.actor,
+    )
+    assert len(res_filtered['items']) == 2
+    assert {it['run_id'] for it in res_filtered['items']} == {'run-space-b-0', 'run-space-b-1'}
+    assert all(it['space_id'] == 'space-b' for it in res_filtered['items'])
