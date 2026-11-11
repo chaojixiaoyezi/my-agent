@@ -19,6 +19,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from ..artifacts.registry import REGISTRY_RELATIVE_PATH, _record_from_payload
 from ..artifacts.registry_reader import latest_records_from_lines
@@ -238,6 +239,133 @@ class _StreamDecisionWindow:
                 close()
 
 
+# LLM: 跨业务空间、工作流、后台助手及受管操作账本核验操作回执；仅本owner可见。
+# 函数用途: 跨多个持久事实源统一检索操作回执。
+def business_operation_receipt(home: Path, owner: str, store: Any, repo: Any, operation_id: str) -> dict[str, Any] | None:
+    if repo is not None:
+        try:
+            with repo._runtime_connection() as conn:
+                row = conn.execute(
+                    "SELECT x.*, ar.run_id, t.thread_id, tr.metadata_json FROM tool_operations x "
+                    "JOIN agent_runs ar ON ar.agent_run_id=x.agent_run_id "
+                    "JOIN task_runs tr ON tr.task_run_id=ar.task_run_id "
+                    "JOIN tasks t ON t.task_id=tr.task_id "
+                    "WHERE x.operation_id=? AND t.owner_id=?",
+                    (operation_id, owner),
+                ).fetchone()
+                if row is not None:
+                    status = row['status']
+                    state = 'completed' if status == 'SUCCEEDED' else (
+                        'failed' if status in ('FAILED', 'CANCELLED') else (
+                            'pending' if status in ('CLAIMED', 'EXECUTING') else 'unknown'
+                        )
+                    )
+                    outcome = {}
+                    if row['outcome_json']:
+                        try:
+                            outcome = json.loads(row['outcome_json'])
+                        except Exception:
+                            outcome = {}
+                    err_code = outcome.get('error_code')
+                    error = {
+                        'code': str(err_code or status),
+                        'message': str(err_code or status),
+                        'retryable': False,
+                        'details': [],
+                    } if state == 'failed' else None
+                    target_refs = [operation_id]
+                    result_obj = outcome.get('result')
+                    if isinstance(result_obj, dict) and isinstance(result_obj.get('result_ref'), str) and result_obj['result_ref']:
+                        target_refs = [result_obj['result_ref']]
+                    return {
+                        'operation_id': operation_id,
+                        'state': state,
+                        'target_refs': target_refs,
+                        'error': error,
+                    }
+        except Exception:
+            pass
+
+    receipt_dir = home / 'data' / 'business' / 'receipts'
+    if receipt_dir.is_dir():
+        file_path = receipt_dir / f"{operation_id}.json"
+        if file_path.is_file():
+            try:
+                data = json.loads(file_path.read_text('utf-8'))
+                if data.get('owner_id') == owner:
+                    result = data.get('receipt', {}).get('result', {})
+                    space_ref = result.get('space_id') or operation_id
+                    return {
+                        'operation_id': operation_id,
+                        'state': 'completed',
+                        'target_refs': [str(space_ref)],
+                        'error': None,
+                    }
+            except Exception:
+                pass
+
+    catalog_path = home / 'data' / 'business' / 'catalog.json'
+    if catalog_path.is_file():
+        try:
+            catalog = json.loads(catalog_path.read_text('utf-8'))
+            for space in catalog.get('spaces', []):
+                if space.get('space_id') == operation_id or space.get('operation_id') == operation_id:
+                    return {
+                        'operation_id': operation_id,
+                        'state': 'completed',
+                        'target_refs': [str(space['space_id'])],
+                        'error': None,
+                    }
+        except Exception:
+            pass
+
+    if store is not None:
+        try:
+            threads, _ = store.threads.list_report(limit=0)
+            for th in threads:
+                if th.owner_id != owner:
+                    continue
+                receipts = th.metadata.get('background_receipts', {})
+                retirement = th.metadata.get('background_retirement', {})
+                if (operation_id in receipts
+                        or retirement.get('operation_id') == operation_id
+                        or th.thread_id == operation_id):
+                    return {
+                        'operation_id': operation_id,
+                        'state': 'completed',
+                        'target_refs': [th.thread_id],
+                        'error': None,
+                    }
+        except Exception:
+            pass
+
+    run_file = home / 'data' / 'workflows' / 'runs' / f"{operation_id}.json"
+    if run_file.is_file():
+        try:
+            run_data = json.loads(run_file.read_text('utf-8'))
+            if run_data.get('owner_id') == owner:
+                st = run_data.get('status', 'unknown')
+                state = 'completed' if st == 'succeeded' else (
+                    'failed' if st in ('failed', 'cancelled') else 'pending'
+                )
+                err = {
+                    'code': 'WORKFLOW_FAILED',
+                    'message': 'WORKFLOW_FAILED',
+                    'retryable': False,
+                    'details': [],
+                } if state == 'failed' else None
+                return {
+                    'operation_id': operation_id,
+                    'state': state,
+                    'target_refs': [operation_id],
+                    'error': err,
+                }
+        except Exception:
+            pass
+
+    return None
+
+
 # LLM: 注册只核schema与来源存在性，不能读取历史正文或计算资源快照；坏源在实际读取时保持unknown。
 # 函数用途: 廉价装配同owner默认reader，不接受请求选择owner或文件路径。
 def default_observation_readers(owner_home, owner_id, store, runtime, *, resource_provider=None) -> dict:
@@ -251,7 +379,13 @@ def default_observation_readers(owner_home, owner_id, store, runtime, *, resourc
     readers = {}
     resource_available = source.resource_exists()
     if source.opens_table('tool_operations'):
-        readers.update({'tool_calls': source.tool_calls, 'tool_calls.get': source.tool_detail})
+        readers.update({
+            'tool_calls': source.tool_calls,
+            'tool_calls.get': source.tool_detail,
+            'changes.get': source.changes,
+            'permissions.get': source.permissions,
+            'operations.get': source.operations,
+        })
     media = home / 'artifacts' / 'business' / REGISTRY_RELATIVE_PATH
     if source.runtime_artifacts or media.is_file():
         readers.update({'artifacts': source.artifacts, 'artifacts.get': source.artifact_detail})
@@ -397,11 +531,15 @@ class _OwnerReaders:
                 duration = result['duration_ms'] if settled and result else None
                 ref = result['result_ref'] if settled and result else row['operation_id']
             error_code = outcome.get('error_code')
+            stored_input = result.get('redacted_input') if isinstance(result, dict) else None
+            if stored_input is None and isinstance(result, dict) and isinstance(result.get('result_envelope'), dict):
+                stored_input = result['result_envelope'].get('redacted_input')
+            redacted_input = stored_input if isinstance(stored_input, dict) else {}
             value = {'operation_id': row['operation_id'], 'run_id': row['run_id'], 'attempt_id': row['attempt_id'],
                 'task_id': None, 'tool_name': row['operation_type'], 'status': row['status'],
                 'executed': executed, 'effect_outcome': effect, 'duration_ms': duration,
                 'error': {'code': error_code, 'message': error_code, 'retryable': False, 'details': []} if error_code else None,
-                'result_ref': ref, '_input': {}}
+                'result_ref': ref, '_input': redacted_input}
             record = self.record(value, row)
             value['task_id'] = record.task_id
             records.append(record)
@@ -420,6 +558,210 @@ class _OwnerReaders:
                 records.append(self.wrap({'tool_call': value, 'redacted_input': row.value['_input'],
                     'result_ref': value['result_ref'], 'effect_outcome': value['effect_outcome']}, row))
         return ObservationPage(tuple(records))
+
+    # LLM: 变更详情按task读取代码与媒体变更；非本owner任务拒绝披露。
+    # 函数用途: 返回任务的代码或产物变更事实及证据引用。
+    def changes(self, params):
+        task_id = params['task_id']
+        candidate_ref = params.get('candidate_ref')
+        records = []
+        task_row = None
+        space_id, project_ref, thread_id = None, None, None
+        meta = {}
+        if self.repo is not None:
+            with self.repo._runtime_connection() as conn:
+                task_row = conn.execute(
+                    "SELECT t.*, tr.metadata_json FROM tasks t "
+                    "LEFT JOIN task_runs tr ON tr.task_id=t.task_id "
+                    "WHERE t.task_id=? AND t.owner_id=?",
+                    (task_id, self.owner),
+                ).fetchone()
+                if task_row is not None:
+                    thread_id = task_row['thread_id'] or None
+                    if task_row['metadata_json']:
+                        try:
+                            meta = json.loads(task_row['metadata_json'])
+                        except Exception:
+                            meta = {}
+        task_obj = None
+        if self.store is not None:
+            try:
+                task_obj = _observation_task(self.store, task_id)
+                if task_obj is not None:
+                    target_thread = _observation_thread(self.store, task_obj.target_thread_id)
+                    if target_thread.owner_id != self.owner:
+                        task_obj = None
+                    else:
+                        thread_id = thread_id or task_obj.target_thread_id
+                        meta.update(task_obj.metadata)
+            except Exception:
+                task_obj = None
+        if task_row is None and task_obj is None:
+            return ObservationPage()
+
+        ctx_raw = meta.get('business_context')
+        context = BusinessExecutionContext.from_dict(ctx_raw) if ctx_raw else None
+        if context:
+            space_id = context.space_id
+            project_ref = context.project_ref
+
+        raw_changes = meta.get('changes', [])
+        changes_list = []
+        if isinstance(raw_changes, list):
+            for ch in raw_changes[:100]:
+                if isinstance(ch, dict) and 'target_ref' in ch and 'field' in ch and 'before' in ch and 'after' in ch:
+                    target_ref = str(ch['target_ref']).strip()
+                    field_name = str(ch['field']).strip()[:128]
+                    if target_ref and field_name:
+                        changes_list.append({
+                            'target_ref': target_ref,
+                            'field': field_name,
+                            'before': ch['before'],
+                            'after': ch['after'],
+                        })
+
+        evidence_refs = []
+        raw_refs = meta.get('evidence_refs') or meta.get('result_refs') or []
+        if isinstance(raw_refs, list):
+            for ref in raw_refs[:100]:
+                if isinstance(ref, str) and ref.strip():
+                    evidence_refs.append(ref.strip()[:128])
+        if task_obj is not None and hasattr(task_obj, 'result_refs'):
+            for ref in task_obj.result_refs[:100]:
+                if isinstance(ref, str) and ref.strip() and ref.strip() not in evidence_refs:
+                    evidence_refs.append(ref.strip()[:128])
+        if self.repo is not None:
+            try:
+                with self.repo._runtime_connection() as conn:
+                    art_rows = conn.execute(
+                        "SELECT ar.artifact_record_id, ar.rel_path, ar.content_digest FROM artifact_records ar "
+                        "JOIN agent_runs agr ON agr.agent_run_id=ar.agent_run_id "
+                        "JOIN task_runs tr ON tr.task_run_id=agr.task_run_id "
+                        "WHERE tr.task_id=? LIMIT 100",
+                        (task_id,),
+                    ).fetchall()
+                    for arow in art_rows:
+                        aid = arow['artifact_record_id']
+                        if aid not in evidence_refs:
+                            evidence_refs.append(aid)
+                        if not any(c['target_ref'] == aid for c in changes_list):
+                            changes_list.append({
+                                'target_ref': aid,
+                                'field': 'content_digest',
+                                'before': None,
+                                'after': arow['content_digest'],
+                            })
+            except Exception:
+                pass
+        if candidate_ref and candidate_ref not in evidence_refs:
+            evidence_refs.append(str(candidate_ref)[:128])
+
+        value = {
+            'changes': changes_list,
+            'evidence_refs': evidence_refs[:100],
+            'coverage': 'complete',
+        }
+        records.append(ObservationRecord(value, self.owner, space_id, project_ref, task_id, thread_id))
+        return ObservationPage(tuple(records))
+
+    # LLM: 有效权限摘要按目标节点计算生效范围及来源；只读展示，不提升或赋予权限。
+    # 函数用途: 返回目标节点的有效资源范围及来源。
+    def permissions(self, params):
+        target = params['target']
+        task_id = params.get('task_id')
+        kind = target['kind']
+        target_id = target['id']
+        space_ids = []
+        thread_ids = []
+        task_ids = [task_id] if task_id else []
+        project_ref = None
+        revision = 0
+
+        found = False
+        if kind == 'controller':
+            found = True
+            thread_ids.append(target_id)
+        elif kind == 'background_main':
+            if self.store is not None:
+                try:
+                    thread = _observation_thread(self.store, target_id)
+                    if thread is not None and thread.owner_id == self.owner:
+                        found = True
+                        thread_ids.append(thread.thread_id)
+                        identity = background_identity(thread)
+                        if identity:
+                            if identity.space_id:
+                                space_ids.append(identity.space_id)
+                            project_ref = identity.project_ref
+                            revision = identity.identity_revision
+                except Exception:
+                    pass
+        elif kind == 'subagent':
+            if self.repo is not None:
+                with self.repo._runtime_connection() as conn:
+                    row = conn.execute(
+                        "SELECT ar.run_id, t.thread_id, t.owner_id, tr.metadata_json FROM agent_runs ar "
+                        "JOIN task_runs tr ON tr.task_run_id=ar.task_run_id "
+                        "JOIN tasks t ON t.task_id=tr.task_id WHERE ar.run_id=? AND t.owner_id=?",
+                        (target_id, self.owner),
+                    ).fetchone()
+                    if row is not None:
+                        found = True
+                        if row['thread_id']:
+                            thread_ids.append(row['thread_id'])
+                        try:
+                            meta = json.loads(row['metadata_json'])
+                            ctx = BusinessExecutionContext.from_dict(meta.get('business_context'))
+                            if ctx:
+                                if ctx.space_id:
+                                    space_ids.append(ctx.space_id)
+                                project_ref = ctx.project_ref
+                                if ctx.task_id and ctx.task_id not in task_ids:
+                                    task_ids.append(ctx.task_id)
+                        except Exception:
+                            pass
+        if not found and self.store is not None:
+            try:
+                thread = _observation_thread(self.store, target_id)
+                if thread is not None and thread.owner_id == self.owner:
+                    found = True
+                    thread_ids.append(thread.thread_id)
+            except Exception:
+                pass
+        if not found:
+            return ObservationPage()
+
+        effective_scope = {
+            'owner_id': self.owner,
+            'space_ids': space_ids,
+            'project_ref': project_ref,
+            'task_ids': task_ids,
+            'thread_ids': thread_ids,
+            'permission_revision': revision,
+        }
+        sources = [{
+            'kind': kind,
+            'source_ref': target_id,
+            'revision': revision if revision > 0 else None,
+        }]
+        value = {
+            'effective_scope': effective_scope,
+            'unavailable': [],
+            'sources': sources,
+        }
+        rec = ObservationRecord(value, self.owner, space_ids[0] if space_ids else None, project_ref,
+            task_ids[0] if task_ids else None, thread_ids[0] if thread_ids else None)
+        return ObservationPage((rec,))
+
+    # LLM: 稳定操作回执按多来源检索；跨owner操作拒绝披露。
+    # 函数用途: 返回操作的耐久执行回执与终态。
+    def operations(self, params):
+        operation_id = params['operation_id']
+        receipt = business_operation_receipt(self.home, self.owner, self.store, self.repo, operation_id)
+        if receipt is None:
+            return ObservationPage()
+        rec = ObservationRecord(receipt, self.owner)
+        return ObservationPage((rec,))
 
     # LLM: 详情包装不能丢弃授权事实。
     # 函数用途: 复用原记录的身份生成详情行。

@@ -123,10 +123,18 @@ class BusinessSpacesTool(BaseTool):
         try:
             result = self.service.call(request['action'], request['params'], actor=self.actor,
                 expected_revision=request.get('expected_revision'), idempotency_key=request.get('idempotency_key'))
-            return ToolHandlerOutcome('business_spaces', True, json.dumps(result, ensure_ascii=False), result_envelope=result)
+            spec = business_action_spec(request['action'])
+            is_read = spec.host_mode == 'read' or spec.metadata.get('effect') == 'read'
+            effect = 'none' if is_read else 'committed'
+            if isinstance(result, dict):
+                result['effect_outcome'] = effect
+            outcome = ToolHandlerOutcome('business_spaces', True, json.dumps(result, ensure_ascii=False),
+                result_envelope=result)
+            outcome.effect_outcome = effect
+            return outcome
         except BusinessError as error:
             # 已进入领域/原后端后，不能仅凭错误码推断未提交；包括提交后的CAS类错误。
-            return self._failure(error.code)
+            return self._failure(error.code, effect='failed')
         except (OSError, ValueError, TypeError):
             # 原子rename后fsync/结算也可能报错；保留unknown，不自动重放或泄露原异常。
-            return self._failure('STORE_UNAVAILABLE')
+            return self._failure('STORE_UNAVAILABLE', effect='unknown')
