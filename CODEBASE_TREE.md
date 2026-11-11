@@ -1,3 +1,42 @@
+## 2026-11-10 业务空间 v1.2、工作流引擎（WF-01..11）与编排控制面（ORCH-01..06）新增生产模块
+
+```text
+agent_py_agent/
+|-- agent/
+|   |-- agent_core/
+|   |   `-- orchestration/
+|   |       |-- delegation_constraints.py          # ORCH-06 委派约束校验、权限单调上界与防越权
+|   |       |-- git_progress_adapter.py            # ORCH-03 Git 进度适配器与事件流发射
+|   |       |-- management_continuity.py           # ORCH-01 任务连续性管理与跨代次交接
+|   |       |-- pending_inbox.py                   # ORCH-02 待处理收件箱与幂等投递
+|   |       |-- progress_watch.py                  # ORCH-03 进度观察器与生命周期心跳
+|   |       `-- tools/
+|   |           |-- handoff_board_tool.py          # ORCH-04 交接板查询与状态管理工具
+|   |           |-- pending_requests.py            # ORCH-02 待处理请求列表与消费工具
+|   |           `-- requirement_provenance_tool.py # ORCH-05 需求来源追踪与出处证明工具
+|   |-- collaboration/
+|   |   |-- external_mailbox_adapter.py            # 外部邮箱适配器与双向消息中继
+|   |   `-- handoff_board.py                       # 跨 Agent 交接看板与状态维护
+|   |-- common/
+|   |   `-- build_identity.py                      # 构建身份指纹与环境元数据生成
+|   |-- conversation/
+|   |   `-- background_scheduling_view.py          # 后台调度视图与活跃任务投影
+|   |-- gateway_parts/
+|   |   |-- business_host_ports.py                 # 业务空间 v1.2 宿主端口装配与桥接
+|   |   `-- business_ui_http.py                    # 业务空间 UI HTTP 静态资源与接口挂载
+|   |-- verification/
+|   |   `-- requirement_provenance.py              # 需求出处证明核验与追溯链
+|   `-- workflows/
+|       |-- conditions.py                          # WF-04 条件表达式求值与分支跳转
+|       |-- dag_scheduler.py                       # WF-08 DAG 依赖拓扑排序与并行调度
+|       |-- notification_steps.py                  # WF-05 通知步骤执行与通道投递
+|       |-- reference_sources.py                   # 引用源解析与参数动态绑定
+|       |-- step_retry.py                          # WF-03 步骤重试策略与退避机制
+|       |-- step_watermarks.py                     # WF-10 步骤水位线追踪与断点续作
+|       |-- subworkflow_steps.py                   # WF-09 子工作流嵌套调用与状态隔离
+|       `-- tool_steps.py                          # WF-01 工具步骤执行与输入输出映射
+```
+
 ## 2026-11-09 附件登记来源与资产描述符
 
 ```text

@@ -1454,4 +1454,12 @@ def register_business_tools(agent):
     services = _local_business_services(agent)
     for spec in business_action_specs().values():
         if services.ready(spec.action):
-            agent.tools.register(BusinessTool(spec))
+            tool = BusinessTool(spec)
+            tools_obj = getattr(agent, "tools", None)
+            if tools_obj is not None:
+                inner_tools = getattr(tools_obj, "tools", None)
+                if isinstance(inner_tools, dict) and tool.model_spec.name in inner_tools:
+                    continue
+                if hasattr(tools_obj, "__contains__") and tool.model_spec.name in tools_obj:
+                    continue
+            agent.tools.register(tool)

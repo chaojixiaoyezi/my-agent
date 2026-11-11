@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1444,
+  "count": 1463,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -428,6 +428,126 @@
       "description": "派活进度种子最多同时打开的目标数，防并发目标过多。"
     },
     {
+      "name": "GIT_CLEANUP_RESERVE_SECONDS",
+      "file": "agent_py_agent/agent/agent_core/orchestration/git_progress_adapter.py",
+      "value": 2,
+      "unit": "秒",
+      "category": "上限预算",
+      "description": "常量用途: 为 git 进程组清理与确认预留的时长。"
+    },
+    {
+      "name": "GIT_COMMAND_TIMEOUT_SECONDS",
+      "file": "agent_py_agent/agent/agent_core/orchestration/git_progress_adapter.py",
+      "value": 5,
+      "unit": "秒",
+      "category": "超时",
+      "description": "常量用途: 限制单条 git 命令的运行时长。"
+    },
+    {
+      "name": "GIT_OBSERVATION_BUDGET_SECONDS",
+      "file": "agent_py_agent/agent/agent_core/orchestration/git_progress_adapter.py",
+      "value": 10,
+      "unit": "秒",
+      "category": "上限预算",
+      "description": "常量用途: 限制一次 git 观察的总时长。"
+    },
+    {
+      "name": "MAX_GIT_OUTPUT_BYTES",
+      "file": "agent_py_agent/agent/agent_core/orchestration/git_progress_adapter.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "常量用途: 限制一次 git 命令读取的输出量。"
+    },
+    {
+      "name": "_DARWIN_LIST_CAPACITY_COUNT",
+      "file": "agent_py_agent/agent/agent_core/orchestration/git_progress_adapter.py",
+      "value": 4096,
+      "unit": "个",
+      "category": "其它",
+      "description": "常量用途: macOS libproc 一次列 pid 的缓冲条数；写满视为列不全。"
+    },
+    {
+      "name": "_GROUP_PROBE_INTERVAL_SECONDS",
+      "file": "agent_py_agent/agent/agent_core/orchestration/git_progress_adapter.py",
+      "value": 0.02,
+      "unit": "秒",
+      "category": "其它",
+      "description": "组清理确认的探测间隔。"
+    },
+    {
+      "name": "_MAX_PROC_SCAN_ENTRIES",
+      "file": "agent_py_agent/agent/agent_core/orchestration/git_progress_adapter.py",
+      "value": 65536,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "Linux 上查组成员时最多扫这么多个 /proc 条目，超出就算“不知道”，观察判为清理未确认。"
+    },
+    {
+      "name": "_MAX_PROC_STAT_BYTES",
+      "file": "agent_py_agent/agent/agent_core/orchestration/git_progress_adapter.py",
+      "value": 4096,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "常量用途: 单个 /proc/<pid>/stat 最多读的字节数；读满视为解析不了（查不清），不当作不存在。"
+    },
+    {
+      "name": "MAX_ROUTED_MESSAGE_CHARS",
+      "file": "agent_py_agent/agent/agent_core/orchestration/management_continuity.py",
+      "value": 16384,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "转交正文上限：只够描述一次补充要求，防止无权方借转交塞入大段内容。"
+    },
+    {
+      "name": "MAX_EXAMINED_REQUESTS_COUNT",
+      "file": "agent_py_agent/agent/agent_core/orchestration/pending_inbox.py",
+      "value": 200,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "常量用途: 限制一次收件箱读取检查的申请条数。"
+    },
+    {
+      "name": "MAX_PAGE_ITEMS_COUNT",
+      "file": "agent_py_agent/agent/agent_core/orchestration/pending_inbox.py",
+      "value": 200,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "常量用途: 限制一次收件箱读取的条目数和子代理记录读取数。"
+    },
+    {
+      "name": "DEFAULT_PROGRESS_CHECK_CHILD_LIMIT_COUNT",
+      "file": "agent_py_agent/agent/agent_core/orchestration/progress_watch.py",
+      "value": 20,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "常量用途: 一次快照里参与进展分类的默认节点数。"
+    },
+    {
+      "name": "HEARTBEAT_STALE_AFTER_SECONDS",
+      "file": "agent_py_agent/agent/agent_core/orchestration/progress_watch.py",
+      "value": 300,
+      "unit": "秒",
+      "category": "其它",
+      "description": "常量用途: 判定心跳是否仍可作为存活证据的时长。"
+    },
+    {
+      "name": "PROGRESS_STALE_AFTER_SECONDS",
+      "file": "agent_py_agent/agent/agent_core/orchestration/progress_watch.py",
+      "value": 600,
+      "unit": "秒",
+      "category": "其它",
+      "description": "常量用途: 判定“进展事件停滞”的时长。"
+    },
+    {
+      "name": "RETRYING_MIN_FAILURES_COUNT",
+      "file": "agent_py_agent/agent/agent_core/orchestration/progress_watch.py",
+      "value": 2,
+      "unit": "个",
+      "category": "重试",
+      "description": "常量用途: 判定“正在重试”的连续失败次数。"
+    },
+    {
       "name": "_DEFAULT_MAX_DIRECTIVE_CHARS",
       "file": "agent_py_agent/agent/agent_core/orchestration/shared_context.py",
       "value": 1600,
@@ -458,6 +578,38 @@
       "unit": "个",
       "category": "其它",
       "description": "共享上下文默认最多打包的记录条数，控制子代理输入量。"
+    },
+    {
+      "name": "_APPROVAL_READ_BUDGET_SECONDS",
+      "file": "agent_py_agent/agent/agent_core/orchestration/tools/list_agents.py",
+      "value": 1.0,
+      "unit": "秒",
+      "category": "上限预算",
+      "description": "常量用途: 一次 list_agents 读工具审批账的总时长（所有根共用一个截止）。"
+    },
+    {
+      "name": "_APPROVAL_SCAN_LIMIT_COUNT",
+      "file": "agent_py_agent/agent/agent_core/orchestration/tools/list_agents.py",
+      "value": 128,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "常量用途: 每个根一次审批目录扫描最多看的条目数；没扫完就记为读不出，不当作没有审批。"
+    },
+    {
+      "name": "_MAX_ASSOCIATION_NODES_COUNT",
+      "file": "agent_py_agent/agent/agent_core/orchestration/tools/list_agents.py",
+      "value": 256,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "常量用途: 一次完整视图做仓库独占关联允许的最多节点数。"
+    },
+    {
+      "name": "_MAX_GIT_PREVIOUS_ENTRIES_COUNT",
+      "file": "agent_py_agent/agent/agent_core/orchestration/tools/list_agents.py",
+      "value": 128,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "常量用途: 限制挂在 agent 上的上一次 git 观察缓存条数。"
     },
     {
       "name": "_LIST_SESSIONS_DEFAULT_COUNT",
