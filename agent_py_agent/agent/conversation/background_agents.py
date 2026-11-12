@@ -146,12 +146,30 @@ class BackgroundAgentService:
             raise ValueError("IDEMPOTENCY_KEY_REQUIRED")
         return _digest([actor.owner_id, actor.source_thread_id, key])
 
-    def _profile(self, requested=None):
+    def _profile(self, requested=None, *, source_profile: str = ""):
         from ..settings.model_profiles import selected_model_config
         from ..settings.model_provider_schema import ModelProfileError
         from ..settings.thread_model_selection import default_model_profile_id
 
-        profile = requested or default_model_profile_id(self.host)
+        effective_source = source_profile or getattr(self, "_current_source_profile", "")
+
+        if requested:
+            try:
+                selected_model_config(self.host, profile_id=requested)
+                return requested
+            except ModelProfileError as exc:
+                # BIZ-006：写入前的确定性拒绝必须是结构化 not_started，不能被运输层归成 OUTCOME_UNKNOWN。
+                code = "MODEL_PROFILE_NOT_FOUND" if getattr(exc, "reason", "") == "profile_not_found" else "MODEL_PROFILE_UNAVAILABLE"
+                raise BusinessError(code) from exc
+
+        if effective_source:
+            try:
+                selected_model_config(self.host, profile_id=effective_source)
+                return effective_source
+            except ModelProfileError:
+                pass
+
+        profile = default_model_profile_id(self.host)
         if not profile:
             raise BusinessError("MODEL_PROFILE_REQUIRED")
         try:
@@ -188,7 +206,17 @@ class BackgroundAgentService:
                 self._thread(identifier, actor)
                 quota.track(identifier)
                 return {"agent": self._agent_view(existing), "revision": background_identity(existing).identity_revision}
-            profile = self._profile(request.get("model_profile_id"))
+            source_profile = str(getattr(source, "model_profile_id", "") or "").strip()
+            explicit = bool(request.get("model_profile_id"))
+            self._current_source_profile = source_profile
+            try:
+                try:
+                    profile = self._profile(request.get("model_profile_id"), source_profile=source_profile)
+                except TypeError:
+                    profile = self._profile(request.get("model_profile_id"))
+            finally:
+                self._current_source_profile = ""
+            selection_source = "explicit" if explicit else ("inherited" if (source_profile and profile == source_profile) else "default")
             identity = BackgroundAgentIdentity(identifier, source.thread_id, request["space_id"], request.get("project_ref"),
                                                "available", request.get("after_task", "reuse"), 1)
             current = time.time()
@@ -199,8 +227,8 @@ class BackgroundAgentService:
             thread = create_thread_atomic(self.store.threads, ConversationThread(
                 thread_id=identifier, canonical_user_id=source.canonical_user_id, owner_id=actor.owner_id,
                 owner_home=str(self.host.home_paths.owner_home_dir), model_profile_id=profile,
-                model_selection_revision=1, model_selection_source="explicit" if request.get("model_profile_id") else "default",
-                model_selection_last_explicit_revision=1 if request.get("model_profile_id") else 0,
+                model_selection_revision=1, model_selection_source=selection_source,
+                model_selection_last_explicit_revision=1 if explicit else 0,
                 model_selection_selected_at=current, title=request["name"], created_at=current, updated_at=current,
                 metadata=metadata,
             ))

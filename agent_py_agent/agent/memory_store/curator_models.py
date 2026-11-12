@@ -430,10 +430,41 @@ def parse_curator_extraction(text: str) -> CuratorExtraction:
     # 结构化生成仍强制主字段;缺失补全是纯宿主侧确定性修复,不引入新权威。
     if missing:
         payload = {**payload, **{key: _EMPTY_FIELD_DEFAULT[key] for key in missing}}
-    # v3既有输出没有链接字段；仅补空值，不能替模型选择锚点。
+    # 宿主容错: 补齐模型偶发漏掉的可空/空列表字段, 不影响未知属性和核心必填字段的严格校验。
+    if isinstance(payload.get("daily_events"), list):
+        normalized_events = []
+        for item in payload["daily_events"]:
+            if isinstance(item, dict):
+                norm_item = dict(item)
+                for key in ("message_refs", "tool_refs", "artifact_refs", "decisions", "lessons", "next_actions"):
+                    if key not in norm_item:
+                        norm_item[key] = []
+                normalized_events.append(norm_item)
+            else:
+                normalized_events.append(item)
+        payload["daily_events"] = normalized_events
+
     if isinstance(payload.get("candidates"), list):
-        payload["candidates"] = [dict(item, link_candidate_id=item.get("link_candidate_id"))
-            if isinstance(item, dict) else item for item in payload["candidates"]]
+        normalized_candidates = []
+        for item in payload["candidates"]:
+            if isinstance(item, dict):
+                norm_item = dict(item)
+                for key in ("source_message_refs", "source_tool_refs", "source_artifact_refs", "conflicts_with"):
+                    if key not in norm_item:
+                        norm_item[key] = []
+                for key in ("observed_at", "valid_from", "valid_until", "target_entry_id", "link_candidate_id"):
+                    if key not in norm_item:
+                        norm_item[key] = None
+                if isinstance(norm_item.get("scope"), dict):
+                    scope_dict = dict(norm_item["scope"])
+                    for key in ("applies_when", "excludes_when"):
+                        if key not in scope_dict:
+                            scope_dict[key] = None
+                    norm_item["scope"] = scope_dict
+                normalized_candidates.append(norm_item)
+            else:
+                normalized_candidates.append(item)
+        payload["candidates"] = normalized_candidates
     validate_curator_response_payload(payload, curator_response_schema())
     return CuratorExtraction(
         daily_events=tuple(_parse_daily_draft(item) for item in _object_array(payload, "daily_events")),

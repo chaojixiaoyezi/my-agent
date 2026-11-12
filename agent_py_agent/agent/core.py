@@ -255,11 +255,18 @@ def _curator_model_router(agent: object, config: AgentConfig, curator_config: Me
             return CuratorModelRouting(CuratorModelRoute(fixed, backend, provider, model, is_default=True), warnings=warnings)
         plan = curator_thread_profiles(agent, thread_ids)
         default = CuratorModelRoute(plan.default_profile_id, backend, provider, model, is_default=True)
-        routes = {key: _curator_profile_route(key, value) for key, value in plan.configs.items()}
+        route_failures: dict[str, str] = {}
+        routes = {key: _curator_profile_route(key, value, out_reasons=route_failures) for key, value in plan.configs.items()}
         broken = {key for key, value in routes.items() if value is None}
         groups = {thread: key for thread, key in plan.thread_profiles.items() if key not in broken}
-        reasons = {**plan.fallback_reasons,
-                   **{thread: "backend_unavailable" for thread, key in plan.thread_profiles.items() if key in broken}}
+        reasons = {
+            **plan.fallback_reasons,
+            **{
+                thread: route_failures.get(key, "backend_unavailable")
+                for thread, key in plan.thread_profiles.items()
+                if key in broken
+            },
+        }
         return CuratorModelRouting(default, {key: value for key, value in routes.items() if value is not None},
                                    groups, reasons, warnings)
 
@@ -294,13 +301,21 @@ def _fixed_curator_profile_usable(agent: object, profile_id: str) -> bool:
 
 # LLM: 使用已解析的模型档案配置构造关闭流式输出的Curator专用后端路由，失败时安全返回None交由调用方回退。
 # 函数用途: 用一个会话档案的完整配置建无工具非流式后端；建不出来返回 None（调用方退回默认组）。
-def _curator_profile_route(profile_id: str, profile_config: object):
+def _curator_profile_route(profile_id: str, profile_config: object, out_reasons: dict[str, str] | None = None):
     from .memory_store.curator_models import CuratorModelRoute
 
     scoped = replace(profile_config, stream_enabled=False)
     try:
         backend = get_backend(str(scoped.model_backend), scoped)
     except Exception:  # noqa: BLE001 - 后端构造失败只让这批会话退回默认模型，不中断整理。
+        if out_reasons is not None:
+            out_reasons[profile_id] = "backend_unavailable"
+        return None
+    if getattr(backend, "name", "") == "anthropic_compatible" and "specific" not in getattr(
+        getattr(backend, "model_request_capabilities", None), "native_tool_choices", ("specific",)
+    ):
+        if out_reasons is not None:
+            out_reasons[profile_id] = "forced_tool_choice_not_supported"
         return None
     return CuratorModelRoute(profile_id, backend, str(scoped.model_backend), str(scoped.model_name))
 
@@ -460,6 +475,7 @@ def _skill_learning_service(agent: object, config: AgentConfig) -> SkillLearning
             protection_provider=lambda: learning_protection_for_agent(agent),
             lesson_provider=lambda: SkillProposalService(agent.home_paths, config=config),
             deployment_root=agent.home_paths.root,
+            backend_provider=lambda: _curator_backend(agent, str(getattr(agent.config, "memory_curator_model_profile", "") or "").strip())[0],
         ),
     )
 
