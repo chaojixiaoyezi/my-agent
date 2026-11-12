@@ -158,16 +158,29 @@ def test_biz_005_workflow_ref_normalization(native):  # noqa: F811
     assert res_norm['workflow']['workflow_ref'] == flow_id
 
 
-# LLM: 验证 BIZ-011 / G5b：原生 SessionTask 代理步骤集成。
-# 函数用途: 验证原生宿主下 workflow_agent_steps 为 None 且缺少执行器时拒绝 agent_task。
+# 默认端口已接入真实后台服务；显式缺执行器的拒绝反例仍须保留，不能把旧缺陷固化为生产预期。
 def test_biz_011_workflow_agent_steps(native):  # noqa: F811
     server, agent = native
     wire_business_host_ports(agent)
 
-    # 1. 原生宿主下 build_default_workflow_agent_steps 返回 None
-    assert build_default_workflow_agent_steps(agent) is None
-    # 2. 接线后 agent.workflow_agent_steps 仍为 None
-    assert agent.workflow_agent_steps is None
+    from agent_py_agent.agent.conversation.background_agents import BackgroundAgentService
+    from agent_py_agent.agent.workflows.agent_steps import WorkflowAgentSteps
+
+    # 原默认构造与组合根接线都必须绑定同一实际宿主及其原任务仓，不接受占位对象。
+    default_steps = build_default_workflow_agent_steps(agent)
+    wired_steps = agent.workflow_agent_steps
+    for steps in (default_steps, wired_steps):
+        assert isinstance(steps, WorkflowAgentSteps)
+        assert isinstance(steps.background_service, BackgroundAgentService)
+        assert steps.background_service.host is agent
+        assert steps.background_service.store is agent.conversation_store
+        assert callable(steps.completion_reader) and callable(steps.cancel_handler)
+        assert callable(steps.bind_host_call)
+        # 端口存在不表示凭空拥有来源身份；无当前通道来源时仍准确拒绝。
+        with pytest.raises(PermissionError, match='WORKFLOW_AGENT_ACTOR_REQUIRED'):
+            steps.actor_provider(SimpleNamespace(owner_id=agent.home_paths.owner_id))
+    wire_business_host_ports(agent)
+    assert agent.workflow_agent_steps is wired_steps
 
     # 3. 校验 WorkflowEngine 在 agent_steps=None 下执行 agent_task 步骤抛出 WORKFLOW_AGENT_EXECUTOR_UNAVAILABLE
     from agent_py_agent.agent.assets.descriptor import AssetDescriptor, AssetRefs, IOContract

@@ -1,3 +1,13 @@
+## 2026-11-12 默认 Agent 端口旧预期迁移（仅测试）
+
+来源：冻结 `81fc5b062` 后追加的24文件组合为508个唯一节点、507通过和1失败。唯一失败固定要求默认 WorkflowAgentSteps 缺席；非作者独审回查原 G5b 合同，确认缺席是尚未接通期间的状态，不是永久需求。只更新 `test_business_v12_ws_a1_host_ports.py` 中该函数的两条旧预期，不改变产品实现。
+
+做法：默认构造及组合根接线均核对原 WorkflowAgentSteps、真实 BackgroundAgentService、同一宿主及原任务仓；实际执行缺来源身份的拒绝，并验证重复接线保持原对象。显式 `WorkflowEngine(agent_steps=None)` 的 `_perform` 拒绝和完整运行失败反例原样保留，经 AST 核对该尾部及函数外全部测试不变。执行前后逐项核对6481个受控文件，当时只有这个测试文件变化，所有产品字节与冻结候选一致。
+
+实际验证：改后原失败文件及两个相邻原生端口/真实后台测试文件共39个唯一节点全部通过，零失败、错误、跳过。原24文件的508节点运行仍记507通过/1失败，不改写旧XML；与此前517节点和本次39节点按同名节点最新有效观察去重，证据并集为1025个当前通过节点，**不是单次1025节点组合**，也不是128条需求全部通过。测试名字中的BIZ-011与总账“孤立Workflow授权接线”不同，不能据此关闭该需求。
+
+复现：在源码根预先创建隔离 HOME/MY_AGENT_HOME/TMPDIR；设置 `PYTHONSAFEPATH=1`、`PYTHONPATH="$PWD:$PWD/agent_py_agent"`、`MY_AGENT_CONFIG="$PWD/agent_py_agent/config/agent_config.yaml"`，清空 MY_AGENT_RUNTIME_CONFIG、MY_AGENT_RUNTIME_CONFIG_LAYERS 及 PYTEST_ADDOPTS；运行 `python3 -B -m pytest -q --tb=short -p no:cacheprovider agent_py_agent/tests/test_business_v12_ws_a1_host_ports.py agent_py_agent/tests/test_acceptance_workflow_native_ports.py agent_py_agent/tests/test_acceptance_workflow_native_background.py`。独审原文、运行输入、源字节核对和原始JUnit见验收交付 `output/repair/integration-business-expanded/`。真实provider、连续交互TUI及完整128项目标观察点仍未验证。
+
 ## 2026-11-12 原生工作流端口与业务错误回执集成
 
 来源：128项能力验收的原生工具/DAG、后台 waiting/恢复/取消与客户端错误封套缺口。在集成提交 `0aa832593` 上接入经非作者限定复审的端口与客户端切片，保留既有完成计时、来源恢复及 `completion_clock → effect_reconciliation` 错误阶段映射；不引入第二权限源、操作账或替代后台服务。
