@@ -159,7 +159,7 @@
     "timestamp": 2,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "9577eb15b13f2f4f0f30e660c2e6c1441e5af3416cc7d0a1de68a9e7dc004518",
+    "body_hash": "4ca0ab81ec4613de163eb140fe63f362b15ca63a10d2c927e0d25e08ea723e3c",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -1506,7 +1506,7 @@
           "type": "function",
           "function": {
             "name": "request_credentials",
-            "description": "用真实安全卡收集秘密，禁止要求在普通聊天填写；发卡不访问目标。request常规账号密码用collection_mode=username_password；authentication=collected时url可由用户在卡片填。只有request_delivery.status=confirmed可称已发卡，waiting_input不等于已填或已保存。已有credential_ref用status查安全状态；find只接受真实同origin URL，空匹配不证明旧引用未填写。群站点先find准确URL或list已授权凭据；selected_credential_ref由宿主按本人优先选择，可直接交web_fetch。本人的401/403或失败不得静默换他人账号；仅用户撤销自己的引用后可重find。旧task群卡仅在用户明确要求时share本人可分享引用。仅缺失或用户明确新增/换账号才request；群新卡默认群共享、个人来源仅本人，可显式access_scope=task。request已指定basic/bearer等方案时保存后即可用；collected仅保存，使用前configure原引用与准确方案，由宿主注入秘密。job_id仅绑定已有本人监控。",
+            "description": "用真实安全卡收集秘密，禁止要求在普通聊天填写；发卡不访问目标。request常规账号密码用collection_mode=username_password；authentication=collected时url可由用户在卡片填。只有request_delivery.status=confirmed可称已发卡，waiting_input不等于已填或已保存。已有credential_ref用status查安全状态；find只接受真实同origin URL，空匹配不证明旧引用未填写。群聊与个人私聊在访问需认证站点前，都必须先用operation=find加目标URL查当前已授权凭据；selected_credential_ref非空时直接复用交web_fetch，避免发卡打扰用户。本人的401/403或失败不得静默换他人账号；仅用户撤销自己的引用后可重find。旧task群卡仅在用户明确要求时share本人可分享引用。仅当find为空或遇到明确HTTP 401（verification_status=rejected）时才request；个人来源绑定URL时默认owner跨任务同站点复用，无URL为task，群新卡默认group本群共享。request已指定basic/bearer等方案时保存后即可用；collected仅保存，使用前configure原引用与准确方案，由宿主注入秘密。job_id仅绑定已有本人监控。",
             "parameters": {
               "additionalProperties": false,
               "anyOf": [
@@ -1682,8 +1682,9 @@
                   "type": "string"
                 },
                 "access_scope": {
-                  "description": "新卡使用范围；省略由原宿主决定：群新卡默认group本群共享，个人仅task。个人来源不能选group。",
+                  "description": "新卡使用范围；省略由原宿主决定：个人来源绑定URL时默认owner（本人跨任务同站点复用，无URL时为task），群新卡默认group本群共享。个人来源不能选group。",
                   "enum": [
+                    "owner",
                     "group",
                     "task"
                   ],
@@ -2150,7 +2151,7 @@
     "timestamp": 3,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "e26c9019cceaf2009706818e37d416becf97b9355c8d3ec66e883051d6574a04",
+    "body_hash": "af1ca623c0fe8a912e2a8042c5d00ea8ea746508b40a96471dc36d15d5c0d807",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -3520,7 +3521,7 @@
           "type": "function",
           "function": {
             "name": "request_credentials",
-            "description": "用真实安全卡收集秘密，禁止要求在普通聊天填写；发卡不访问目标。request常规账号密码用collection_mode=username_password；authentication=collected时url可由用户在卡片填。只有request_delivery.status=confirmed可称已发卡，waiting_input不等于已填或已保存。已有credential_ref用status查安全状态；find只接受真实同origin URL，空匹配不证明旧引用未填写。群站点先find准确URL或list已授权凭据；selected_credential_ref由宿主按本人优先选择，可直接交web_fetch。本人的401/403或失败不得静默换他人账号；仅用户撤销自己的引用后可重find。旧task群卡仅在用户明确要求时share本人可分享引用。仅缺失或用户明确新增/换账号才request；群新卡默认群共享、个人来源仅本人，可显式access_scope=task。request已指定basic/bearer等方案时保存后即可用；collected仅保存，使用前configure原引用与准确方案，由宿主注入秘密。job_id仅绑定已有本人监控。",
+            "description": "用真实安全卡收集秘密，禁止要求在普通聊天填写；发卡不访问目标。request常规账号密码用collection_mode=username_password；authentication=collected时url可由用户在卡片填。只有request_delivery.status=confirmed可称已发卡，waiting_input不等于已填或已保存。已有credential_ref用status查安全状态；find只接受真实同origin URL，空匹配不证明旧引用未填写。群聊与个人私聊在访问需认证站点前，都必须先用operation=find加目标URL查当前已授权凭据；selected_credential_ref非空时直接复用交web_fetch，避免发卡打扰用户。本人的401/403或失败不得静默换他人账号；仅用户撤销自己的引用后可重find。旧task群卡仅在用户明确要求时share本人可分享引用。仅当find为空或遇到明确HTTP 401（verification_status=rejected）时才request；个人来源绑定URL时默认owner跨任务同站点复用，无URL为task，群新卡默认group本群共享。request已指定basic/bearer等方案时保存后即可用；collected仅保存，使用前configure原引用与准确方案，由宿主注入秘密。job_id仅绑定已有本人监控。",
             "parameters": {
               "additionalProperties": false,
               "anyOf": [
@@ -3696,8 +3697,9 @@
                   "type": "string"
                 },
                 "access_scope": {
-                  "description": "新卡使用范围；省略由原宿主决定：群新卡默认group本群共享，个人仅task。个人来源不能选group。",
+                  "description": "新卡使用范围；省略由原宿主决定：个人来源绑定URL时默认owner（本人跨任务同站点复用，无URL时为task），群新卡默认group本群共享。个人来源不能选group。",
                   "enum": [
+                    "owner",
                     "group",
                     "task"
                   ],
@@ -4259,7 +4261,7 @@
     "timestamp": 4,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "3a0660573ee426e9320c60abd00ff0d31a4a3a0e4067e8fa05d4abcd42bff1ab",
+    "body_hash": "ef4e273c0e7b08775ee79d8821ed454b071f92fd7020556975b123af3d8de193",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -5652,7 +5654,7 @@
           "type": "function",
           "function": {
             "name": "request_credentials",
-            "description": "用真实安全卡收集秘密，禁止要求在普通聊天填写；发卡不访问目标。request常规账号密码用collection_mode=username_password；authentication=collected时url可由用户在卡片填。只有request_delivery.status=confirmed可称已发卡，waiting_input不等于已填或已保存。已有credential_ref用status查安全状态；find只接受真实同origin URL，空匹配不证明旧引用未填写。群站点先find准确URL或list已授权凭据；selected_credential_ref由宿主按本人优先选择，可直接交web_fetch。本人的401/403或失败不得静默换他人账号；仅用户撤销自己的引用后可重find。旧task群卡仅在用户明确要求时share本人可分享引用。仅缺失或用户明确新增/换账号才request；群新卡默认群共享、个人来源仅本人，可显式access_scope=task。request已指定basic/bearer等方案时保存后即可用；collected仅保存，使用前configure原引用与准确方案，由宿主注入秘密。job_id仅绑定已有本人监控。",
+            "description": "用真实安全卡收集秘密，禁止要求在普通聊天填写；发卡不访问目标。request常规账号密码用collection_mode=username_password；authentication=collected时url可由用户在卡片填。只有request_delivery.status=confirmed可称已发卡，waiting_input不等于已填或已保存。已有credential_ref用status查安全状态；find只接受真实同origin URL，空匹配不证明旧引用未填写。群聊与个人私聊在访问需认证站点前，都必须先用operation=find加目标URL查当前已授权凭据；selected_credential_ref非空时直接复用交web_fetch，避免发卡打扰用户。本人的401/403或失败不得静默换他人账号；仅用户撤销自己的引用后可重find。旧task群卡仅在用户明确要求时share本人可分享引用。仅当find为空或遇到明确HTTP 401（verification_status=rejected）时才request；个人来源绑定URL时默认owner跨任务同站点复用，无URL为task，群新卡默认group本群共享。request已指定basic/bearer等方案时保存后即可用；collected仅保存，使用前configure原引用与准确方案，由宿主注入秘密。job_id仅绑定已有本人监控。",
             "parameters": {
               "additionalProperties": false,
               "anyOf": [
@@ -5828,8 +5830,9 @@
                   "type": "string"
                 },
                 "access_scope": {
-                  "description": "新卡使用范围；省略由原宿主决定：群新卡默认group本群共享，个人仅task。个人来源不能选group。",
+                  "description": "新卡使用范围；省略由原宿主决定：个人来源绑定URL时默认owner（本人跨任务同站点复用，无URL时为task），群新卡默认group本群共享。个人来源不能选group。",
                   "enum": [
+                    "owner",
                     "group",
                     "task"
                   ],
