@@ -636,9 +636,10 @@ def _hierarchy_child_spec(
     try:
         attrs = create_task_attributes(raw, agent)
     except (ModelProfileError, SubagentInputMediaError) as exc:
+        code = "" if type(exc) is ModelProfileError else str(getattr(exc, "error_code", "") or "")
         return ToolHandlerOutcome(
             tool_name, False, str(exc),
-            error_code=str(getattr(exc, "error_code", "") or "TOOL_INVALID_ARGUMENTS"), effect_outcome="not_started",
+            error_code=code or "TOOL_INVALID_ARGUMENTS", effect_outcome="not_started",
         )
     attrs["host_agent_name_origin.v1"] = {"explicit": bool(str(raw.get("agent_name") or "").strip())}
     return HierarchyChildSpec(

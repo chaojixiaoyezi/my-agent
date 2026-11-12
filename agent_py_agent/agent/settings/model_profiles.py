@@ -152,6 +152,7 @@ def read_model_profiles(path: Path) -> dict:
         if data["selected"] != "default" and data["selected"] not in data["profiles"] and not shared_profile_key(data["selected"]):
             raise ModelProfileError("模型配置选择无效。")
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        logging.getLogger(__name__).warning("模型目录校验未通过，未覆盖已有配置，原因=catalog_invalid")
         raise ModelProfileError("模型配置文件损坏，未覆盖已有配置。") from exc
     return data
 

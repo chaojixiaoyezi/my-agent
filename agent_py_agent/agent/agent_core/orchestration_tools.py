@@ -245,9 +245,10 @@ def _role_suffix(role: str) -> str:
 # LLM: 模型引用错误沿原 TOOL_INVALID_ARGUMENTS；附件引用错误带自己的结构化码（异常属性），都是整批 not_started。
 # 函数用途: 把创建前属性装配抛出的参数错误转成模型可修正的 not_started 回执。
 def _not_started_create_result(exc: Exception) -> ToolHandlerOutcome:
+    code = "" if type(exc) is ModelProfileError else str(getattr(exc, "error_code", "") or "")
     return ToolHandlerOutcome(
         "create_subagents", False, str(exc),
-        error_code=str(getattr(exc, "error_code", "") or "TOOL_INVALID_ARGUMENTS"), effect_outcome="not_started",
+        error_code=code or "TOOL_INVALID_ARGUMENTS", effect_outcome="not_started",
     )
 
 

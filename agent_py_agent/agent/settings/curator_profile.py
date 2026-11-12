@@ -106,9 +106,15 @@ def clear_auxiliary_profile_cooldown(profile_id: str) -> None:
 # 函数用途: 返回后台所需的完整配置，失败保留缺配置身份与结构化诊断，绝不切换服务商。
 def curator_model_config(agent: object, profile_id: str):
     try:
-        if not profile_id or profile_id == "default":
+        resolved_id = profile_id
+        if resolved_id == "selected":
+            from .model_profiles import _default_for_owner
+
+            owner_sel = _default_profile_id(agent)
+            resolved_id = _default_for_owner(agent) if owner_sel in {"", "default"} else owner_sel
+        if not resolved_id or resolved_id == "default":
             raise ModelProfileError("请填写已保存的模型档案编号；部署默认不是模型档案。", reason="profile_not_found")
-        return selected_model_config(agent, profile_id=profile_id)
+        return selected_model_config(agent, profile_id=resolved_id)
     except ModelProfileError as exc:
         raise ModelNotConfiguredError(profile_id=profile_id, profile_reason=exc.reason) from exc
     except OSError as exc:

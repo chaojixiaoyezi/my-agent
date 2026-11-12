@@ -494,7 +494,17 @@ def test_curator_backend_follows_owner_selected_profile(tmp_path):
     from agent_py_agent.agent.memory_store.curator_models import MemoryCuratorConfig
 
     host = Host(tmp_path)
-    placeholder = AgentConfig(model_backend="echo", model_name="gpt-4o-mini")
+    default_off = AgentConfig(model_backend="echo", model_name="gpt-4o-mini")
+    off_backend, off_provider, off_model = _build_memory_curator_backend(
+        host, default_off, MemoryCuratorConfig.from_agent_config(default_off)
+    )
+    assert (off_provider, off_model) == ("", "")
+
+    placeholder = AgentConfig(
+        model_backend="echo",
+        model_name="gpt-4o-mini",
+        memory_curator_model_profile="selected",
+    )
     curator_config = MemoryCuratorConfig.from_agent_config(placeholder)
 
     # 未选目录模型就是未配置，部署 echo 也不能充当正式目录旁路。

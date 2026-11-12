@@ -210,7 +210,11 @@ def _build_memory_curator_backend(
 ) -> tuple[object, str, str]:
     from .settings.curator_profile import effective_auxiliary_model_profile
 
-    auxiliary = effective_auxiliary_model_profile(getattr(agent, "config", config))
+    auxiliary = (
+        str(getattr(curator_config, "model_profile", "") or "").strip()
+        or effective_auxiliary_model_profile(config)
+        or effective_auxiliary_model_profile(getattr(agent, "config", None))
+    )
     backend, provider, model, fallback = _curator_backend(agent, auxiliary)
     if fallback:
         logging.getLogger(__name__).info("记忆整理指定档案在本用户不可用，原因=%s，本次不整理。", fallback)
