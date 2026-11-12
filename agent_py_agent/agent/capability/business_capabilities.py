@@ -101,8 +101,9 @@ def resolve_business_capabilities(*, context: BusinessExecutionContext, request:
                 or (card.kind in {'script', 'workflow'} and card.source in {'owner', 'workspace'}
                     and all(name in tool_names for name in card.metadata.get('tools_required', ())))):
             authorized.append(hit)
-    # 原分数和同分顺序不变；只把同一授权集合里匹配的有效挂载移前，不添加候选。
-    authorized.sort(key=lambda hit: (0, preferred[_method_ref(hit.card)]) if _method_ref(hit.card) in preferred else (1, 0))
+    # 有效挂载先按相关性、同分按挂载位置；未挂载保留原顺序，不添加候选或改变授权。
+    authorized.sort(key=lambda hit: (0, -hit.score, preferred[_method_ref(hit.card)])
+                    if _method_ref(hit.card) in preferred else (1, 0, 0))
     if request.limit:
         authorized = authorized[:request.limit]
     candidates = []
