@@ -154,7 +154,7 @@ def test_off_batch_never_creates_tool_card_and_persists_gate(tmp_path, monkeypat
     'feishu_oauth_scopes: [offline_access] # scope item\n',
 ])
 def test_oauth_scope_node_preserves_neighbor_history_and_comments(tmp_path, field):
-    import yaml
+    yaml = pytest.importorskip("yaml")
     prefix, _ = _installation(tmp_path)
     config = prefix / 'data/config/capability_config.yaml'
     original = 'before: {keep: [1, true]}\n' + field + '# neighbor comment\nfeishu_chat_history_enabled: false # history\nafter: keep\n'
@@ -177,7 +177,7 @@ def test_oauth_scope_node_preserves_neighbor_history_and_comments(tmp_path, fiel
 
 @pytest.mark.parametrize('failure_stage', ['config', 'completed'])
 def test_oauth_scope_prepared_retry_keeps_other_migrations(tmp_path, monkeypatch, failure_stage):
-    import yaml
+    yaml = pytest.importorskip("yaml")
     prefix, _ = _installation(tmp_path)
     marker = prefix / installer.MARKER
     original_record = json.loads(marker.read_text())
