@@ -502,7 +502,7 @@ def _bounded_value(value: object, budget: BackgroundContextBudget, *, depth: int
     if isinstance(value, (int, float, bool)) or value is None:
         return value
     if depth >= budget.max_depth:
-        required = _reference_skeleton(value)
+        required = _reference_skeleton(value, budget, depth=depth)
         if isinstance(required, dict):
             return {**required, "_truncated_depth": True}
         if isinstance(required, list):
@@ -518,7 +518,7 @@ def _bounded_value(value: object, budget: BackgroundContextBudget, *, depth: int
             str(key): deepcopy(item) if _exact_reference_key(str(key)) else _bounded_value(item, budget, depth=depth + 1)
             for key, item in items[: budget.max_dict_items]
         }
-        bounded.update({key: item for key, item in (_reference_skeleton(value) or {}).items() if key not in bounded})
+        bounded.update({key: item for key, item in (_reference_skeleton(value, budget, depth=depth) or {}).items() if key not in bounded})
         if len(items) > len(bounded):
             bounded["_truncated_dict_items"] = len(items) - len(bounded)
         return bounded
@@ -545,17 +545,40 @@ def _exact_reference_key(key: str) -> bool:
 
 # LLM: 引用保护先于数量/深度裁剪；只复制结构化身份/地址及其祖先容器，不从普通正文造引用或授权。
 # 函数用途: 在极小预算下找回被字段窗口挡住的任务路径、续跑引用和深层身份。
-def _reference_skeleton(value: object) -> Any:
+def _reference_skeleton(
+    value: object,
+    budget: BackgroundContextBudget | None = None,
+    *,
+    depth: int = 0,
+) -> Any:
+    if budget is not None and depth > budget.max_depth + 2:
+        return None
     if isinstance(value, dict):
         result = {}
-        for key, item in value.items():
-            required = deepcopy(item) if _exact_reference_key(str(key)) else _reference_skeleton(item)
+        items = list(value.items())
+        if budget is not None:
+            max_scan = max(16, budget.max_dict_items * 4)
+            items = items[:max_scan]
+        for key, item in items:
+            required = deepcopy(item) if _exact_reference_key(str(key)) else _reference_skeleton(item, budget, depth=depth + 1)
             if required is not None:
                 result[str(key)] = required
         return result or None
     if isinstance(value, (list, tuple)):
-        result = [_reference_skeleton(item) for item in value]
-        return [item for item in result if item is not None] or None
+        raw_items = list(value)
+        if budget is not None:
+            limit = max(1, budget.max_list_items)
+            items = raw_items[:limit]
+        else:
+            limit = len(raw_items)
+            items = raw_items
+        result = [_reference_skeleton(item, budget, depth=depth + 1) for item in items]
+        kept = [item for item in result if item is not None]
+        if not kept:
+            return None
+        if budget is not None and len(raw_items) > limit:
+            kept.append({"_truncated_ref_items": len(raw_items) - limit})
+        return kept
     return None
 
 

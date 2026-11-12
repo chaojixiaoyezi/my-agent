@@ -185,6 +185,8 @@ def _kernel_query(agent: object, params: dict[str, object]) -> SubagentKernelQue
     current = getattr(agent, "_current_run_params", None)
     attrs = getattr(current, "task_attributes", None)
     thread_id = str(attrs.get("conversation_thread_id") or "").strip() if isinstance(attrs, dict) else ""
+    if not thread_id:
+        thread_id = str(params.get("conversation_thread_id") or "").strip()
     if not root_id and not run_id and thread_id:
         return SubagentKernelQuery(scope="conversation_thread", conversation_thread_id=thread_id)
     return SubagentKernelQuery(root_id=root_id, run_id=run_id, scope=scope)

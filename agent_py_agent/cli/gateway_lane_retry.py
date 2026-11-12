@@ -20,7 +20,11 @@ from ..agent.backends.errors import (
     is_provider_environment_fault,
     provider_error_http_status,
 )
-from ..agent.conversation.compact_guard import ConversationCompactError, is_provider_quota_failure
+from ..agent.conversation.compact_guard import (
+    ConversationCompactError,
+    is_compact_transient_provider_failure,
+    is_provider_quota_failure,
+)
 from ..agent.gateway_parts.loop_health import loop_health
 from ..agent.runtime_db.operations import RuntimeRecoveryRequiredError
 from ..agent.user_space.owner_quota import OwnerQuotaUnavailable
@@ -61,11 +65,11 @@ class BackgroundLaneRetry:
     #   其余从 delay 起连续翻倍冷却并封顶；远端 400/413 这类请求问题、临时断线都不是环境故障。环境暂停打一行日志。
     # 函数用途: 失败后记住这条车道要等配置、等环境恢复，还是等一段冷却时间。
     def failed(self, owner: str, thread_id: str, exc: Exception, *, delay: float,
-               wait_for_inbound_marker: str | None = None) -> None:
+               wait_for_inbound_marker: str | None = None, headless: bool = False) -> None:
         key = (owner, thread_id)
         with self._lock:
             previous = self._failures.get(key)
-            row = _next_failure(previous, exc, delay)
+            row = _next_failure(previous, exc, delay, headless=headless)
             if row.waiting_for_user_input:
                 row = replace(row, inbound_marker=wait_for_inbound_marker)
             if key not in self._failures and len(self._failures) >= 1024:
@@ -188,10 +192,21 @@ class BackgroundLaneRetry:
 #   环境暂停紧接上一轮环境暂停才翻倍，否则从 60 秒起；普通失败从调用方 delay 起连续翻倍，
 #   封顶 LANE_ENVIRONMENT_PROBE_MAX_SECONDS；切换条件类型后重新起步，不读异常正文。
 # 函数用途: 根据上一条记录和本次异常算出这条车道新的失败记录。
-def _next_failure(previous: _LaneFailure | None, exc: Exception, delay: float) -> _LaneFailure:
+def _next_failure(
+    previous: _LaneFailure | None,
+    exc: Exception,
+    delay: float,
+    *,
+    headless: bool = False,
+) -> _LaneFailure:
     now = time.monotonic()
     # 压缩包装的额度错误仍由原环境探测/模型指纹恢复，不能强制等待新消息。
-    if isinstance(exc, (RuntimeRecoveryRequiredError, ConversationCompactError)) and not is_provider_quota_failure(exc):
+    if (
+        not headless
+        and isinstance(exc, (RuntimeRecoveryRequiredError, ConversationCompactError))
+        and not is_provider_quota_failure(exc)
+        and not is_compact_transient_provider_failure(exc)
+    ):
         return _LaneFailure(0.0, False, waiting_for_user_input=True)
     if isinstance(exc, OwnerQuotaUnavailable):
         count = previous.wait_count + 1 if previous is not None and previous.waiting_for_storage else 1

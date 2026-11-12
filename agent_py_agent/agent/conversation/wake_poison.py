@@ -498,12 +498,12 @@ def _is_transient(error: Exception) -> bool:
     from ..contracts.model_call_ledger import find_model_call_admission_error
     from ..runtime_db.operations import RuntimeConflictError
     from .background_execution import BackgroundCompactSliceYield
-    from .compact_guard import is_provider_quota_failure
+    from .compact_guard import is_compact_transient_provider_failure, is_provider_quota_failure
 
     if isinstance(error, (InterruptedError, BlockingIOError, TimeoutError, ProviderTimeoutError,
                           RuntimeConflictError, BackgroundCompactSliceYield)):
         return True
-    if is_provider_transient_error(error) or is_provider_quota_failure(error):
+    if is_provider_transient_error(error) or is_provider_quota_failure(error) or is_compact_transient_provider_failure(error):
         return True
     if find_model_call_admission_error(error) is not None:
         return True

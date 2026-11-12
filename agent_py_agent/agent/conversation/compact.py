@@ -15,6 +15,7 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from contextlib import closing
+from copy import deepcopy
 from dataclasses import MISSING, dataclass, field, fields, replace
 from functools import partial
 from typing import TYPE_CHECKING, Protocol
@@ -107,6 +108,7 @@ from .models import (
     is_audit_background_transcript_entry,
 )
 from .native_history import (
+    CANONICAL_NATIVE_MESSAGES_METADATA_KEY,
     _row_turn_identity,
     canonical_native_messages_from_metadata,
     iter_provider_history_messages_from_rows,
@@ -924,6 +926,72 @@ def _select_compact_partition(request, partitions, protected_suffix):
     return partitions[-1]
 
 
+# LLM: 对强行或承压压缩，历史失败回合（执行前崩溃且无助手文本）的超大原生信封只提取有界前缀（4000字符），
+#   不修改磁盘上的规范JSONL，使存量投毒线程在下一次压缩中自动自愈。
+# 函数用途: 在构造压缩候选前，将失败回合的投影消息限制在有界长度内，防止COMPACT_CANDIDATE_TOO_LARGE死锁。
+def _sanitize_failed_turn_projections(rows: Sequence[MessageLogEntry]) -> Sequence[MessageLogEntry]:
+    failed_turns: set[str] = set()
+    for row in rows:
+        meta = row.metadata if isinstance(row.metadata, dict) else {}
+        is_failed = (
+            str(meta.get("turn_end_reason") or "").strip().lower() == "error"
+            or str(meta.get("runtime_status") or "").strip().lower() == "failed"
+        )
+        is_empty_assistant = row.role == "assistant" and not str(row.content or "").strip()
+        envelope = meta.get(CANONICAL_NATIVE_MESSAGES_METADATA_KEY) if isinstance(meta, dict) else None
+        envelope_str = json.dumps(envelope, ensure_ascii=False) if isinstance(envelope, dict) else ""
+        if is_failed and (is_empty_assistant or len(envelope_str) > 8_000 or len(str(row.content or "")) > 8_000):
+            turn_id = _row_turn_identity(row)
+            if turn_id:
+                failed_turns.add(turn_id)
+            elif is_empty_assistant and len(envelope_str) > 8_000:
+                failed_turns.add(row.message_id or "__anonymous_failed__")
+
+    if not failed_turns:
+        return rows
+
+    sanitized: list[MessageLogEntry] = []
+    for row in rows:
+        meta = row.metadata if isinstance(row.metadata, dict) else {}
+        turn_id = _row_turn_identity(row)
+        is_failed_turn = (turn_id in failed_turns) if turn_id else (
+            (row.message_id in failed_turns or "__anonymous_failed__" in failed_turns)
+            or (
+                (
+                    str(meta.get("turn_end_reason") or "").strip().lower() == "error"
+                    or str(meta.get("runtime_status") or "").strip().lower() == "failed"
+                )
+                and row.role == "assistant"
+                and not str(row.content or "").strip()
+            )
+        )
+        envelope = meta.get(CANONICAL_NATIVE_MESSAGES_METADATA_KEY) if isinstance(meta, dict) else None
+        envelope_str = json.dumps(envelope, ensure_ascii=False) if isinstance(envelope, dict) else ""
+        if is_failed_turn and (len(envelope_str) > 4_000 or len(str(row.content or "")) > 4_000):
+            new_meta = deepcopy(meta)
+            if isinstance(new_meta.get(CANONICAL_NATIVE_MESSAGES_METADATA_KEY), dict):
+                env_dict = new_meta[CANONICAL_NATIVE_MESSAGES_METADATA_KEY]
+                msgs = env_dict.get("messages")
+                if isinstance(msgs, list):
+                    for msg in msgs:
+                        if isinstance(msg, dict):
+                            content = msg.get("content")
+                            if isinstance(content, str) and len(content) > 4_000:
+                                msg["content"] = content[:4_000] + "...[truncated excerpt]"
+                            elif isinstance(content, list):
+                                for block in content:
+                                    if isinstance(block, dict):
+                                        if isinstance(block.get("text"), str) and len(block["text"]) > 4_000:
+                                            block["text"] = block["text"][:4_000] + "...[truncated excerpt]"
+            new_content = row.content
+            if len(new_content) > 4_000:
+                new_content = new_content[:4_000] + "...[truncated excerpt]"
+            sanitized.append(replace(row, content=new_content, metadata=new_meta))
+        else:
+            sanitized.append(row)
+    return sanitized
+
+
 # LLM: 分区在模型调用前冻结为一个候选；真实完整请求仍须通过原容量门、取消检查与 checkpoint CAS。
 # 函数用途: 对一次确定的历史分区生成并提交摘要，软目标未达到也不再次调用模型换区。
 def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
@@ -933,6 +1001,8 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
     # 随图摘要只对"窗口上限/供应商施压"的恢复关闭；options.force 本身（一次压完前缀）不构成禁用理由。
     media_decision = resolve_compact_media_policy(request.agent, forced=request.pressure_forced, thread=request.thread)
     safe_prefix, protected_suffix = _split_nontext_transcript_suffix(request.pending, media_policy=media_decision.policy)
+    if (request.forced or request.pressure_forced) and safe_prefix:
+        safe_prefix = _sanitize_failed_turn_projections(safe_prefix)
     if not safe_prefix:
         raise ConversationCompactError("没有可完整文字摘要的历史前缀，保留原始媒体", code="COMPACT_SOURCE_EMPTY")
     partitions = (

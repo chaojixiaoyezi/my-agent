@@ -984,6 +984,20 @@ def _persist_partial_native_turn(callback: object, params: ToolLoopExecuteParams
     if not native:
         return
     cancelled = isinstance(exc, (InterruptedError, KeyboardInterrupt))
+    has_media = any(
+        isinstance(m, dict)
+        and isinstance(m.get("content"), list)
+        and any(isinstance(b, dict) and b.get("type") != "text" for b in m["content"])
+        for m in native
+    )
+    if (
+        not cancelled
+        and not has_media
+        and not params.executed_tools
+        and not params.archive_tool_calls
+        and not any(isinstance(m, dict) and m.get("role") == "assistant" for m in native)
+    ):
+        return
     result = AgentRunResult(
         prompt="", response="", backend="tool_loop", used_memories=0,
         canonical_native_messages=native,
@@ -1441,9 +1455,9 @@ def _completed_turn_native_messages(
 def _replayable_turn_history(history: list[object], trigger: object) -> list[object]:
     from ...backends.tool_ir import RuntimeFactsTurn
     from ...prompting_parts.runtime_injection import is_runtime_injection_source
-    from .turn_trigger import lifecycle_wake_trigger
+    from .turn_trigger import lifecycle_wake_trigger, session_task_trigger
 
-    if lifecycle_wake_trigger(trigger) is None:
+    if lifecycle_wake_trigger(trigger) is None and session_task_trigger(trigger) is None:
         return history
     return [
         item for item in history

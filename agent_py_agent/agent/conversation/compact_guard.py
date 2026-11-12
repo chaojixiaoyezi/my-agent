@@ -266,10 +266,57 @@ def is_provider_quota_failure(exc: BaseException) -> bool:
     return is_provider_quota_exhausted_error(exc) or compact_error_is_provider_quota(exc)
 
 
+# LLM: 检查压缩调用异常链中是否存在瞬态提供者错误（限流、超时、不可用），供车道退避与毒丸统一判定。
+# 函数用途: 判定压缩异常是否由瞬态提供者失败引发（排除额度用完），便于调度退避而非永久停等用户输入。
+def is_compact_transient_provider_failure(exc: BaseException) -> bool:
+    from ..backends.errors import ProviderTransientError
+
+    if is_provider_quota_failure(exc):
+        return False
+    transient_codes = {
+        "PROVIDER_RATE_LIMITED",
+        "PROVIDER_UNAVAILABLE",
+        "PROVIDER_TIMEOUT",
+        "TRANSIENT_ERROR",
+        "COMPACT_PROVIDER_RATE_LIMITED",
+        "COMPACT_PROVIDER_UNAVAILABLE",
+        "COMPACT_PROVIDER_TIMEOUT",
+        "COMPACT_TRANSIENT_ERROR",
+    }
+    queue: list[BaseException] = [exc]
+    seen: set[int] = set()
+    links_checked = 0
+    while queue and links_checked < 6:
+        curr = queue.pop(0)
+        if curr is None or id(curr) in seen:
+            continue
+        seen.add(id(curr))
+        links_checked += 1
+        if isinstance(curr, ProviderTransientError):
+            return True
+        code = compact_exception_code(curr)
+        if code in transient_codes:
+            return True
+        err_code = str(getattr(curr, "error_code", "") or "").strip().upper()
+        if err_code in transient_codes:
+            return True
+        c_code = str(getattr(curr, "code", "") or "").strip().upper()
+        if c_code in transient_codes:
+            return True
+        for next_link in (getattr(curr, "__cause__", None), getattr(curr, "__context__", None)):
+            if isinstance(next_link, BaseException) and id(next_link) not in seen:
+                queue.append(next_link)
+    return False
+
+
 # LLM: 工具循环内与宿主恢复统一先规范化 code/error_code/reason_code/failure_reason 四字段；
 #   任一硬阻断码优先于瞬态异常类型。仅显式标注摘要解析的分支允许包含 JSONDecodeError；未知或结构性分支（含未标注 JSON 错误）一律保持不可降级失败关闭。
 # 函数用途: 用统一结构化错误码判定摘要能否续跑，补齐软码但不让瞬断类型洗掉取消、权限或CAS硬停。
-def compact_failure_is_degradable(exc: BaseException) -> tuple[bool, str]:
+def compact_degradation_decision(
+    exc: BaseException,
+    *,
+    degrade_eligible: bool = False,
+) -> tuple[bool, str]:
     import builtins
     from asyncio import CancelledError as AsyncCancelledError
     from concurrent.futures import CancelledError as FutureCancelledError
@@ -296,6 +343,8 @@ def compact_failure_is_degradable(exc: BaseException) -> tuple[bool, str]:
     }
     soft = {"FAILED", "SUMMARY_EMPTY", "EMPTY_SUMMARY", "BUDGET_EXCEEDED", "TIMEOUT", "CIRCUIT_OPEN",
             "MODEL_CALL_FAILED", "PARSE_FAILED", "BACKEND_UNAVAILABLE"}
+    if degrade_eligible:
+        soft = soft | {"CANDIDATE_TOO_LARGE", "SOURCE_EMPTY"}
     pending, seen, eligible = [(exc, False)], set(), False
     reason = compact_exception_code(exc)
     while pending:
@@ -340,6 +389,14 @@ def compact_failure_is_degradable(exc: BaseException) -> tuple[bool, str]:
     return eligible, reason
 
 
+def compact_failure_is_degradable(
+    exc: BaseException,
+    *,
+    degrade_eligible: bool = False,
+) -> tuple[bool, str]:
+    return compact_degradation_decision(exc, degrade_eligible=degrade_eligible)
+
+
 # LLM: 两条压缩链（会话 transcript 与活动回合）的 failed 进度都从这里取失败字段：安全错误码，加上错误自带的
 #   容量计量（若有；测不出为 None 的项整项缺失）。只读异常对象，不改熔断账；字段必须经 compact_progress 白名单才会外发。
 # 函数用途: 把一次压缩失败整理成进度事件要带的字段，让“候选过大”失败留下候选大小与上限。
@@ -358,10 +415,13 @@ __all__ = [
     "ConversationCompactCircuitOpenError",
     "ConversationCompactError",
     "compact_circuit_is_open",
+    "compact_degradation_decision",
     "compact_exception_code",
     "compact_failure_progress_fields",
     "compact_failure_is_degradable",
     "compact_partitions",
+    "is_compact_transient_provider_failure",
+    "is_provider_quota_failure",
     "raise_if_compact_interrupted",
     "record_compact_failure",
     "record_compact_vision_failure",
