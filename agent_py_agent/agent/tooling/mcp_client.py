@@ -170,7 +170,7 @@ class MCPServerConfig:
     # silently changing whether a server's tools are direct or deferred.
     # 函数用途: 从配置映射构造 MCP 服务声明，并校验超时、展示分类和风险等级。
     @classmethod
-    def from_mapping(cls, name: str, raw: object) -> MCPServerConfig:
+    def from_mapping(cls, name: str, raw: object, *, default_timeout: float | None = None) -> MCPServerConfig:
         """从 config 的一条 ``mcp_servers.<name>`` 映射构造，做最小健壮性归一化。"""
         if not isinstance(raw, dict):
             raise MCPError(
@@ -197,12 +197,17 @@ class MCPServerConfig:
         tool_effects = _configured_tool_effects(raw.get("tool_effects"), server_name=name)
         tool_approvals = parse_tool_approvals(raw.get("tool_approvals"), server_name=name)
         tool_observations = parse_tool_observations(raw.get("tool_observations"), server_name=name)
+        effective_default_timeout = (
+            float(default_timeout)
+            if default_timeout is not None and float(default_timeout) > 0
+            else _DEFAULT_TOOL_TIMEOUT_SECONDS
+        )
         return cls(
             name=name,
             command=command,
             args=[str(item) for item in args_raw],
             env={str(k): str(v) for k, v in env_raw.items()},
-            timeout=_coerce_timeout(raw.get("timeout"), _DEFAULT_TOOL_TIMEOUT_SECONDS),
+            timeout=_coerce_timeout(raw.get("timeout"), effective_default_timeout),
             connect_timeout=_coerce_timeout(raw.get("connect_timeout"), _DEFAULT_CONNECT_TIMEOUT_SECONDS),
             cwd=str(raw.get("cwd") or "").strip(),
             max_content_chars=_coerce_positive_int(raw.get("max_content_chars"), _DEFAULT_MAX_CONTENT_CHARS),
@@ -635,16 +640,56 @@ class MCPStdioClient:
     def call_tool(self, tool_name: str, arguments: dict[str, Any], *, transport: MCPTransport | None = None,
                   authority_check: Callable[[], None] | None = None,
                   request_meta: dict[str, object] | None = None) -> dict[str, Any]:
+        is_standalone = self._activation is None and transport is None
         try:
-            selected = transport if transport is not None else self.connection()
-            with self._state_lock:
-                self._require_current(selected)
+            if is_standalone and not self._closed.is_set():
+                with self._state_lock:
+                    current_transport = self._transport
+                    needs_reconnect = (
+                        current_transport is None
+                        or not current_transport.is_running()
+                        or (
+                            getattr(getattr(current_transport, "binding", None), "process", None) is not None
+                            and current_transport.binding.process.poll() is not None
+                        )
+                    )
+                if needs_reconnect:
+                    if authority_check is not None:
+                        authority_check()
+                    selected = self.reconnect()
+                else:
+                    selected = self.connection()
+            else:
+                selected = transport if transport is not None else self.connection()
+                with self._state_lock:
+                    self._require_current(selected)
         except MCPError as exc:
             exc.effect_outcome = "not_started"
             raise
+
         params = {"name": tool_name, "arguments": arguments or {}}
         if request_meta is not None:
             params["_meta"] = request_meta
-        result = selected.request("tools/call", params,
-                                  timeout=self.config.timeout, authority_check=authority_check)
+
+        try:
+            result = selected.request("tools/call", params,
+                                      timeout=self.config.timeout, authority_check=authority_check)
+        except MCPError as exc:
+            if is_standalone and not self._closed.is_set() and exc.code == "MCP_CONNECTION_CLOSED" and exc.effect_outcome == "not_started":
+                try:
+                    self.disconnect(transport=selected)
+                except Exception:
+                    pass
+                if authority_check is not None:
+                    authority_check()
+                try:
+                    selected = self.reconnect()
+                    result = selected.request("tools/call", params,
+                                              timeout=self.config.timeout, authority_check=authority_check)
+                except MCPError as retry_exc:
+                    if not retry_exc.effect_outcome:
+                        retry_exc.effect_outcome = "not_started"
+                    raise
+            else:
+                raise
         return _normalize_call_result(result, self.config.max_content_chars)

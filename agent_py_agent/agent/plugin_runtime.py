@@ -11,6 +11,7 @@ import threading
 import time
 from dataclasses import asdict, replace
 from pathlib import Path
+from typing import Any
 
 from .attempt.sandbox import SandboxUnavailableError
 from .capability._agents_contract_fields import AgentsContractError
@@ -23,6 +24,7 @@ from .capability.agents_source_processes import (
 )
 from .common.nofollow_fs import open_directory_beneath
 from .common.strict_json import load_strict_json
+from .gateway_parts.process_control import is_pid_alive
 from .plugin_activation_record import installation_tool_declarations, pinned_catalog_json_from_tools
 from .plugin_activation_ref import PluginActivationRef
 from .plugin_entry import FILES_DIRECTORY
@@ -305,6 +307,10 @@ def _require_legacy_policy_ready(owner, policy, host_exclusive_roots: tuple[Path
         raise SandboxUnavailableError(f"SANDBOX_UNAVAILABLE: {problem}")
 
 
+class PluginResourceUnsettledError(RuntimeError, ValueError):
+    """Raised when plugin runtime previous generation resources remain unsettled."""
+
+
 # LLM: 一个客户端只属于安装表中的固定代次；沿原 MCP 重连/关闭与资源登记，不接收包提供的 owner、argv 或宿主地址。
 # 类用途: 保存插件连接和同连接已验工具，供共享权限视图分别生成目录。
 class PluginMCPClient(MCPStdioClient):
@@ -489,12 +495,42 @@ class PluginMCPClient(MCPStdioClient):
             records, errors = transaction.list_records()
             if errors:
                 raise ValueError("插件原资源目录不可读")
+            unsettled: list[dict[str, Any]] = []
             for record in records:
                 if record.get("activation_scope") != asdict(self.activation_ref.scope):
                     continue
-                if record["status"] == "unknown" or (record["stop_requested"]
-                        and ((record.get("termination") or {}).get("cleanup") or {}).get("confirmed") is not True):
-                    raise ValueError("插件原资源退出尚未确认")
+                is_unsettled = record.get("status") == "unknown" or (
+                    record.get("stop_requested")
+                    and ((record.get("termination") or {}).get("cleanup") or {}).get("confirmed") is not True
+                )
+                if not is_unsettled:
+                    continue
+
+                host_pid = int(record.get("pid") or 0)
+                child_pid = int(record.get("child_pid") or 0)
+                host_alive = host_pid > 0 and is_pid_alive(host_pid)
+                child_alive = child_pid > 0 and is_pid_alive(child_pid)
+
+                if host_alive or child_alive or (host_pid <= 0 and child_pid <= 0 and record.get("status") == "unknown"):
+                    unsettled.append(record)
+                else:
+                    # Provably dead: auto-clear by updating record in transaction if supported
+                    updated = dict(record)
+                    termination = dict(updated.get("termination") or {})
+                    cleanup = dict(termination.get("cleanup") or {})
+                    cleanup["confirmed"] = True
+                    termination["cleanup"] = cleanup
+                    updated["termination"] = termination
+                    if updated.get("status") in ("unknown", None) or updated.get("stop_requested"):
+                        updated["status"] = "stopped"
+                    try:
+                        if hasattr(transaction, "write"):
+                            transaction.write(updated)
+                    except Exception:
+                        pass
+
+            if unsettled:
+                raise PluginResourceUnsettledError("plugin runtime previous generation resources remain unsettled: 插件原资源退出尚未确认")
 
     # LLM: 完整分页来自固定 transport；名称、说明和规范 schema 全部相符才构造代理，任一坏项拒绝整包而非部分发布。
     # 函数用途: 验证当前服务确实提供所安装的工具，并沿原 MCP 代理生成受控能力。
