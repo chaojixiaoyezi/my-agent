@@ -580,9 +580,11 @@ class _OwnerReaders:
                     'running' if row['status'] == 'EXECUTING' else 'unknown')
                 if effect not in ('none', 'not_started', 'committed', 'running', 'unknown'):
                     effect = 'unknown'
-                executed = result['handler_executed'] if settled and result else bool(row['handler_started_at'])
-                duration = result['duration_ms'] if settled and result else None
-                ref = result['result_ref'] if settled and result else row['operation_id']
+                # UNKNOWN未结算不等于没有回执：只保留已严格校验的执行旁证，不提升副作用状态。
+                has_receipt = bool(result) and (settled or row['status'] == 'UNKNOWN')
+                executed = result['handler_executed'] if has_receipt else bool(row['handler_started_at'])
+                duration = result['duration_ms'] if has_receipt else None
+                ref = result['result_ref'] if has_receipt else row['operation_id']
             error_code = outcome.get('error_code')
             stored_input = result.get('redacted_input') if isinstance(result, dict) else None
             if stored_input is None and isinstance(result, dict) and isinstance(result.get('result_envelope'), dict):
