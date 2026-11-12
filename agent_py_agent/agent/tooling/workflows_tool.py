@@ -172,7 +172,8 @@ class WorkflowsTool(BaseTool):
                  workspace_root_provider=None, skill_snapshot_provider=None, workspace_root=None, im_notifier=None,
                  runner_options_provider=None, business_service=None, business_actor_provider=None,
                  business_binding_provider=None,
-                 run_params_provider=None, schedule_ids_provider=None):
+                 run_params_provider=None, schedule_ids_provider=None, runtime_ports_provider=None,
+                 execution_scope_provider=None):
         self.owner_home = Path(owner_home).absolute()
         _owner(self.owner_home, store)
         _owner(self.owner_home, engine)
@@ -185,6 +186,8 @@ class WorkflowsTool(BaseTool):
         self.business_service, self.business_actor_provider = business_service, business_actor_provider
         self.business_binding_provider = business_binding_provider
         self.run_params_provider, self.schedule_ids_provider = run_params_provider, schedule_ids_provider
+        self.runtime_ports_provider = runtime_ports_provider
+        self.execution_scope_provider = execution_scope_provider
         _owner(self.owner_home, getattr(business_service, 'store', None))
 
     # LLM: 每次run/resume冻结当前宿主上下文到本次浅拷贝engine，整次调用只用它；缓存engine仅共享RunStore/回调/解析器，
@@ -195,12 +198,12 @@ class WorkflowsTool(BaseTool):
             return self.engine
         options = self._skill_options()
         engine = copy.copy(self._engine(_options=options))
+        params = self.run_params_provider() if self.run_params_provider is not None else None
         if options != self._lazy_engine_options:
             # 同范围复用已冻结的解析器；快照变化只影响本次副本，不能改写等待中的执行器。
             engine.skill_resolver = lambda step, context: _resolve_owner_skills(self.owner_home, step, context, **options)
             engine.skill_details_resolver = lambda ids: [_skill_descriptor(self.owner_home, reference, **options) for reference in ids]
         if self.run_params_provider is not None:
-            params = self.run_params_provider()
             on_chunk = getattr(params, 'effective_on_chunk', None)
             sink = getattr(on_chunk, 'write_workflow_step_progress', None)
             engine.step_observer = sink if callable(sink) else None
@@ -211,6 +214,15 @@ class WorkflowsTool(BaseTool):
             from ..workflows.script_runner import ScriptRunner
             engine.runner = ScriptRunner(self.owner_home, workspace_root=options['workspace_root'],
                                          **self.runner_options_provider())
+        if self.runtime_ports_provider is not None:
+            dispatcher, invoke = self.runtime_ports_provider()
+            engine.tool_dispatcher = dispatcher
+            engine.invoke_host_context = invoke
+            handler = engine.analysis_handler
+            if callable(handler) and callable(getattr(handler, 'bind_run_params', None)) and params is not None:
+                engine.analysis_handler = lambda *args: invoke(lambda: handler(*args))
+        if self.execution_scope_provider is not None:
+            engine.execution_scope = self.execution_scope_provider(params)
         return engine
 
     # LLM: None表示无快照，空受限快照仍原样传递；项目只来自宿主且每次读取，不缓存其它Owner权限。
@@ -300,7 +312,8 @@ class WorkflowsTool(BaseTool):
             current = run_authorizer(record, phase)
             return previous if current is None else current
 
-        engine.run_authorizer = authorize
+        invoke = getattr(engine, 'invoke_host_context', None)
+        engine.run_authorizer = (lambda record, phase: invoke(lambda: authorize(record, phase))) if callable(invoke) else authorize
         if agent_steps is not None:
             engine.agent_steps = agent_steps
         return engine

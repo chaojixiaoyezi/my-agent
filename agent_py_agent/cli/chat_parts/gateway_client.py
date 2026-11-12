@@ -495,7 +495,19 @@ class NetworkGatewayObserver:
                 value = json.loads(raw.decode("utf-8"))
                 return response.status, value if isinstance(value, dict) else {}
         except urllib.error.HTTPError as error:
-            return error.code, {}
+            from http.client import HTTPException
+
+            # 错误封套同样有界且严格解码；坏正文只保留HTTP状态，不断言业务未执行。
+            # HTTPError也是响应流，成功、超限或读取/解析失败都必须关闭，不能重发写请求。
+            try:
+                with error:
+                    raw = error.read(STREAM_CHUNK_READ_MAX_BYTES + 1)
+                    if len(raw) > STREAM_CHUNK_READ_MAX_BYTES:
+                        return error.code, {}
+                    value = json.loads(raw.decode("utf-8"))
+                    return error.code, value if isinstance(value, dict) else {}
+            except (OSError, ValueError, HTTPException):
+                return error.code, {}
         except (OSError, ValueError, urllib.error.URLError):
             return 0, {}
 

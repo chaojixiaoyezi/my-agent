@@ -693,6 +693,28 @@ class BusinessServices:
 
             service = (self._workflow_cancel_service(context)
                 if action == 'workflow_runs.cancel' and isinstance(context.actor, AuthorizedCall) else self.workflows)
+            bind = getattr(getattr(service, 'agent_steps', None), 'bind_host_call', None)
+            if (action in ('workflows.run', 'workflow_runs.resume', 'workflow_runs.cancel')
+                    and callable(bind) and not isinstance(context.actor, AuthorizedCall)):
+                from copy import copy
+
+                from ..conversation.host_actor import HostChannelActor
+
+                background = _BusinessBackgroundService(self, context)
+
+                def workflow_actor(record):
+                    # 原context仍逐次授权；真实来源只由本次宿主factory发行，不从workflow/core ID造人。
+                    context.check(action, {'owner_id': record.owner_id, 'workflow_ref': record.workflow_id,
+                        'workflow_run_id': record.workflow_run_id})
+                    current = context.actor_factory(action) if callable(context.actor_factory) else context.actor
+                    if not isinstance(current, HostChannelActor):
+                        raise BusinessError('ACTOR_REQUIRED')
+                    background._actor(current)
+                    return current
+
+                local = copy(service)
+                local.agent_steps = bind(background_service=background, actor_provider=workflow_actor)
+                service = local
             normalized_params = params
             if isinstance(params, dict):
                 normalized_params = dict(params)
@@ -700,11 +722,20 @@ class BusinessServices:
                     normalized_params['workflow_ref'] = normalized_params['workflow_ref'][9:]
                 if 'workflow_id' in normalized_params and isinstance(normalized_params['workflow_id'], str) and normalized_params['workflow_id'].startswith('workflow:'):
                     normalized_params['workflow_id'] = normalized_params['workflow_id'][9:]
-            try:
-                return service.execute(action, normalized_params, actor=actor, **kwargs)
-            except WorkflowPolicyRefusal as error:
-                # 领域在副作用前作出的策略拒绝：结构化 not_started，而不是 OUTCOME_UNKNOWN。
-                raise BusinessError(error.error_code, details=error.details) from None
+            with ExitStack() as stack:
+                if (action == 'workflow_runs.cancel' and callable(bind)
+                        and not isinstance(context.actor, AuthorizedCall)):
+                    # 原生读取组合没有停止接口；沿原W2控制入口租用准确owner完整实例。
+                    # 租用覆盖整个取消及对账，取得后重核同一live授权，不改共享默认端口。
+                    host = _BackgroundPort(self)._complete_host(context, stack)
+                    context.check(action, {'owner_id': self.owner_id, **normalized_params})
+                    background = _BusinessBackgroundService(self, context, host=host)
+                    service.agent_steps = bind(background_service=background, actor_provider=workflow_actor)
+                try:
+                    return service.execute(action, normalized_params, actor=actor, **kwargs)
+                except WorkflowPolicyRefusal as error:
+                    # 领域在副作用前作出的策略拒绝：结构化 not_started，而不是 OUTCOME_UNKNOWN。
+                    raise BusinessError(error.error_code, details=error.details) from None
         if implementer == 'W2':
             background_context = context if isinstance(self.background, _BackgroundPort) else context.business_context
             return self.background.execute(action, params, actor=context.actor, context=background_context, **kwargs)

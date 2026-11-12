@@ -211,14 +211,22 @@ def test_waiting_run_keeps_its_own_runner_when_another_run_starts(case, monkeypa
         'run-b', 'task-b', True, False)
     assert (out_b / 'report.txt').read_text() == 'B\n'
     assert (out_a / 'a.txt').read_text() == 'A\n' and not (out_a / 'b.txt').exists()
-    # 每次调用各得一个浅拷贝：只有 runner 不同，RunStore/回调/解析器/workspace 都与缓存共用。
+    # 每次调用各得一个浅拷贝；原Store/解析器/workspace共享，新增宿主端口与runner只属于本次调用。
     cached = case.tool._lazy_engine
     engine_a, engine_b = engines
     assert engine_a is not engine_b and cached is not engine_a and cached is not engine_b
     for engine in engines:
-        shared = {key: value for key, value in vars(engine).items() if key != 'runner'}
-        assert shared.keys() == vars(cached).keys() - {'runner'}
+        local = {'runner', 'tool_dispatcher', 'invoke_host_context', 'execution_scope'}
+        shared = {key: value for key, value in vars(engine).items() if key not in local}
+        assert shared.keys() == vars(cached).keys() - local
         assert all(value is vars(cached)[key] for key, value in shared.items())
+    assert engine_a.tool_dispatcher is not engine_b.tool_dispatcher
+    assert engine_a.tool_dispatcher.params.run_id == 'run-a'
+    assert engine_b.tool_dispatcher.params.run_id == 'run-b'
+    assert engine_a.tool_dispatcher.boundary != engine_b.tool_dispatcher.boundary
+    assert engine_a.invoke_host_context is not engine_b.invoke_host_context
+    assert engine_a.execution_scope is not engine_b.execution_scope
+    assert not hasattr(cached, 'tool_dispatcher') and cached.execution_scope is None
     assert (engine_a.runner.work_context['run_id'], engine_b.runner.work_context['run_id']) == ('run-a', 'run-b')
     assert cached.runner.work_context is None  # 缓存从不持有任一调用的 runner
     _assert_distinct_receipts(case, (run_a, 'flow-a', ['analyze', 'probe']), (run_b, 'flow-b', ['write']))

@@ -1,3 +1,17 @@
+## 2026-11-12 原生工作流端口与业务错误回执集成
+
+来源：128项能力验收的原生工具/DAG、后台 waiting/恢复/取消与客户端错误封套缺口。在集成提交 `0aa832593` 上接入经非作者限定复审的端口与客户端切片，保留既有完成计时、来源恢复及 `completion_clock → effect_reconciliation` 错误阶段映射；不引入第二权限源、操作账或替代后台服务。
+
+做法：执行期在原运行锁内绑定请求局部端口，默认工具仍交原 Executor 即时核权、审批与类型化拒绝；后台沿真实 BusinessCallContext actor、BackgroundAgentService、Scheduler、runtime/core 运行。取消保持原授权复核与真实退出证明，UNKNOWN 仅对账不重派。NetworkGatewayObserver 对 HTTPError 有界读回并关闭原流，合法 UTF-8/JSON 字典保留业务封套，坏正文仍按未知处理，不增加重试。
+
+新增 `test_acceptance_workflow_native_ports.py`、`test_acceptance_workflow_native_background.py`、`test_acceptance_business_error_transport.py`；原 scope 与 Agent 组合测试只补依赖/端口隔离断言，保留原有效业务断言。真实后台测试仅替换底层模型，不人工完成 SessionTask、补 wake 或写任务终态。
+
+实际验证：macOS/Python 3.14.4 下25文件组合的原始 JUnit 为 **517个唯一节点全部通过，零失败/错误/跳过**，包含上一轮全部303个生命周期节点。随后仅四文件导入排序/分组及同名冗余别名修正，归一化这些导入差异后的 AST、全部 assert 均一致；排版后两个原生测试文件 **30个唯一节点全部通过**，是517节点的子集，不合计为547。改动的11个Python路径 Ruff（禁缓存）及 `git diff --check` 通过。原红测、旧阶段失败和未定因读取竞态仍保留。
+
+复现：在仓库根，使用隔离 HOME/MY_AGENT_HOME/TMPDIR（先建临时目录父目录）、`PYTHONSAFEPATH=1`、`PYTHONPATH="$PWD:$PWD/agent_py_agent"`、`MY_AGENT_CONFIG="$PWD/agent_py_agent/config/agent_config.yaml"`，清空 MY_AGENT_RUNTIME_CONFIG 与 MY_AGENT_RUNTIME_CONFIG_LAYERS；执行 `python3 -B -m pytest -q --tb=short -p no:cacheprovider agent_py_agent/tests/test_acceptance_workflow_native_ports.py agent_py_agent/tests/test_acceptance_workflow_native_background.py agent_py_agent/tests/test_acceptance_business_error_transport.py`。这是定向入口，不代替25文件组合；完整文件清单、执行前后源摘要、导入等价证明和两份原始 JUnit 见验收交付 `output/repair/integration-native-client/`。
+
+范围：本地原生客户端/真实回环 HTTP 与确定性底层模型链路通过，不代表真实 provider、完整交互 TUI、安装发行、跨平台、另一台机器或完整128项验收通过。未推送、部署或改动正式 Gateway。
+
 ## 2026-11-12 工作流完成交接、来源恢复与清理计时
 
 来源：128项能力验收的模板来源、完成计时与回收修复，基线 `1b70870c7`，在集成前像 `e3a9c5869` 上接入冻结九文件候选。新增 `test_acceptance_template_provenance.py`、`test_acceptance_workflow_completion_clock.py`、`test_acceptance_workflow_completion_handoff.py`、`test_acceptance_workflow_completion_lifecycle.py`，保留原有效断言。

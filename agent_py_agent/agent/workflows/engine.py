@@ -175,7 +175,7 @@ class _WorkflowRunLifecycle:
                  step_retry_runner=None,
                  watermark_committer=None,
                  dag_scheduler=None,
-                 unattended_failure_notifier=None):
+                 unattended_failure_notifier=None, execution_scope=None):
         self.owner_home = Path(owner_home).absolute()
         self.workspace_root = workspace_root
         self.store, self.runner = WorkflowRunStore(owner_home), ScriptRunner(owner_home, workspace_root=workspace_root)
@@ -193,6 +193,7 @@ class _WorkflowRunLifecycle:
         self.watermark_committer = watermark_committer
         self.dag_scheduler = dag_scheduler
         self.unattended_failure_notifier = unattended_failure_notifier
+        self.execution_scope = execution_scope
 
     # LLM: 首次执行冻结定义及依赖；准入前后重读原run，queued只读复核不再争执行权；取消终态不伪报准入，owner_id不授权。
     # 函数用途: 新建运行账本并顺序执行步骤。
@@ -853,6 +854,13 @@ class WorkflowEngine(_WorkflowRunLifecycle):
     # LLM: 失败保存若确认原run已经终结则返回耐久记录；支持DAG并行波次调度委托与顺序执行回退。
     # 函数用途: 调度后缀步骤，更新当前进度并结算整次运行。
     def _drive(self, record, definition, start):
+        # scope只包真正取得原run执行锁后的执行，不包准入/排队；回放终态不创建宿主attempt。
+        if self.execution_scope is not None:
+            with self.execution_scope(self, record) as engine:
+                return engine._drive_in_scope(record, definition, start)
+        return self._drive_in_scope(record, definition, start)
+
+    def _drive_in_scope(self, record, definition, start):
         # 内部/已排队调用也不得先发表新attempt；资格错误不转换为失败批次或可恢复执行。
         validate_definition_eligibility(definition)
         state = {'record': record, 'phase': 'preflight', 'started': bool(start), 'committed': False}

@@ -3,6 +3,7 @@
 # 模块用途: 装配Owner一等公民工具、本机管理员运行治理和只读目录；注册不创建服务、不触发运行维护。
 import functools
 import json
+from contextlib import contextmanager
 from dataclasses import replace
 
 from ..backends.errors import ProviderRequestRejectedError
@@ -307,6 +308,118 @@ def _workflow_business_binding(agent):
     return services.workflows, services.actor(context)
 
 
+def _workflow_runtime_ports(agent):
+    """冻结本次宿主线程依赖；worker只在原身份下重入Registry，不复制授权决定。"""
+    from .tool_loop.round_execution import (
+        _capture_parallel_thread_context,
+        run_with_parallel_thread_context,
+    )
+
+    context = _capture_parallel_thread_context(agent)
+    params = getattr(agent, '_current_run_params', None)
+    if params is None and not any(name == '_current_run_params' for name, _ in context.transient_values):
+        # 原业务来源没有模型轮时，授权回调仍核原None来源；不能被稍后core执行轮的内部身份替换。
+        context = replace(context, transient_values=(*context.transient_values, ('_current_run_params', None)))
+
+    def invoke(call, *, executor_checks_authority=False):
+        # 安装线程属性不是续租/授权；原run已结束或attempt被替换时，先由同一canonical门拒绝。
+        require = getattr(agent.tools.operation_store, 'require_authority', None)
+        if not executor_checks_authority and params is not None and callable(require):
+            from ..runtime_db.managed_operation_store import ToolOperationAuthorityRequest
+            require(ToolOperationAuthorityRequest(owner_id=agent.home_paths.owner_id,
+                run_id=str(getattr(params, 'run_id', '') or ''),
+                task_id=str(getattr(params, 'task_id', '') or ''),
+                attempt_id=str(getattr(params, 'attempt_id', '') or ''),
+                operation_id='workflow-host-context', tool_name='workflows'))
+        return run_with_parallel_thread_context(agent, context, call)
+
+    return _WorkflowToolDispatcher(agent, params, invoke), invoke
+
+
+@contextmanager
+def _workflow_execution_scope(agent, caller_params, engine, record):
+    """已有caller复用原轮；无模型的原生运行在实际执行期进入同一core宿主生命周期。"""
+    if caller_params is not None:
+        yield engine
+        return
+    import copy
+
+    from ..workflows.script_runner import ScriptRunner
+    from .host_turn_scope import host_turn_scope
+    from .runtime.loop_models import RunParams
+
+    if record.owner_id and record.owner_id != agent.home_paths.owner_id:
+        raise PermissionError('WORKFLOW_OWNER_MISMATCH')
+    # 只复用原运行的准确ID；core负责登记/校验attempt，字符串本身不授予执行权。
+    params = RunParams(run_id=record.workflow_run_id, request_id='workflow-' + record.workflow_run_id,
+        source='workflow', save=False)
+    with host_turn_scope(agent, '', params, reason='workflow_execution', tool_rounds=0) as turn:
+        bound = copy.copy(engine)
+        bound.tool_dispatcher, invoke = _workflow_runtime_ports(agent)
+        bound.invoke_host_context = invoke
+        handler = bound.analysis_handler
+        bind = getattr(handler, 'bind_run_params', None)
+        if callable(bind):
+            handler = bind(turn.params)
+        if callable(handler):
+            bound.analysis_handler = lambda *args: invoke(lambda: handler(*args))
+        authorize = bound.run_authorizer
+        if callable(authorize):
+            bound.run_authorizer = lambda record, phase: invoke(lambda: authorize(record, phase))
+        bound.runner = ScriptRunner(bound.owner_home, workspace_root=bound.workspace_root,
+            **_script_runtime_options(agent))
+        yield bound
+        current = bound.store.load_run(record.workflow_run_id)
+        turn.runtime_status = 'ok' if current.status == 'succeeded' else 'cancelled' if current.status == 'cancelled' else 'failed'
+
+
+class _WorkflowToolDispatcher:
+    """工作流到唯一工具执行器的适配；不按工具声明或工作流输入扩大授权快照。"""
+
+    def __init__(self, agent, params, invoke):
+        self.agent, self.params, self.invoke = agent, params, invoke
+        self.registry = agent.tools
+        self.snapshot = self.registry.runtime_snapshot(allowed_tools=getattr(params, 'allowed_tools', None),
+            run_id=str(getattr(params, 'run_id', '') or ''))
+        from .tool_runtime_ledger import write_boundary_with_runtime_ledger
+        self.boundary = write_boundary_with_runtime_ledger(agent, params) if params is not None else None
+
+    def execute_scoped(self, tool_name, arguments, *, owner_id, space_id, idempotency_key, logical_step_key, run, step):
+        # 原effect attempt变化不产生新操作身份；未确认写由原coordinator拒绝重放，不再建第二账。
+        from ..tooling.runtime_contracts import ToolCall
+
+        if owner_id and owner_id != self.agent.home_paths.owner_id:
+            raise PermissionError('WORKFLOW_OWNER_MISMATCH')
+        runtime = self.snapshot.runtime(tool_name)
+        if runtime is None:
+            return {'ok': False, 'error_code': 'TOOL_NOT_ALLOWED', 'effect_outcome': 'not_started'}
+        params = self.params
+        run_id = str(getattr(params, 'run_id', '') or '')
+        attempt_id = str(getattr(params, 'attempt_id', '') or '')
+        if not run_id or not attempt_id:
+            # WorkflowRun/effect attempt不是core执行权，绝不代填；实际scope必须先绑定原canonical轮。
+            return {'ok': False, 'error_code': 'TOOL_AUTHORITY_CONTEXT_MISSING', 'effect_outcome': 'not_started'}
+        turn_id = str(getattr(params, 'request_id', '') or run_id)
+        call = ToolCall(call_id=logical_step_key, tool_name=tool_name, arguments=arguments, source_protocol='text',
+            schema_hash=runtime.model_spec.schema_hash, run_id=run_id, turn_id=turn_id, attempt_id=attempt_id,
+            operation_id=logical_step_key, idempotency_key=logical_step_key)
+
+        def execute():
+            result = self.registry.execute_tool(call, write_boundary=self.boundary, runtime_snapshot=self.snapshot,
+                trusted_run_context={'interactive': callable(getattr(getattr(params, 'on_chunk', None), 'request_permission', None)),
+                    'task_attributes': dict(getattr(params, 'task_attributes', None) or {}),
+                    'run_scope': {'run_id': run_id, 'task_id': str(getattr(params, 'task_id', '') or ''),
+                        'attempt_id': attempt_id}},
+                cancellation_token=getattr(params, 'cancellation_token', None)).result
+            return {**result.to_dict(), 'ok': result.ok,
+                'operation_id': result.operation.operation_id if result.operation is not None else call.operation_id,
+                'effect_outcome': result.effect_outcome, 'error_message': result.output if not result.ok else ''}
+
+        # 工具仍由原Executor在handler前实时核权并投影typed拒绝；前置裸异常会丢失未执行与稳定操作引用。
+        # 分析器/authorizer不经过Executor，继续使用invoke默认的canonical检查。
+        return self.invoke(execute, executor_checks_authority=True)
+
+
 # LLM: main/user脚本、数据源与工作流统一动态读取当前经校验工作区与受限快照；治理仍只给可信管理员，目录开关不扩授权。
 # 函数用途: 登记Owner与项目工作区脚本/数据源/工作流、管理员治理与目录入口，不刷新或启动领域服务。
 def register_self_map(agent):
@@ -324,6 +437,8 @@ def register_self_map(agent):
                 skill_snapshot_provider=lambda: agent.current_skill_snapshot(),
                 analysis_handler=_workflow_analysis_handler(agent),
                 business_binding_provider=functools.partial(_workflow_business_binding, agent),
+                runtime_ports_provider=functools.partial(_workflow_runtime_ports, agent),
+                execution_scope_provider=lambda params: functools.partial(_workflow_execution_scope, agent, params),
                 run_params_provider=lambda: getattr(agent, '_current_run_params', None),
                 im_notifier=im_notifier, runner_options_provider=runner_options))
             if is_permission_admin(getattr(agent, 'home_paths', None)):

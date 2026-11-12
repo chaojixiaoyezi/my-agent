@@ -584,7 +584,9 @@ def test_build_default_workflow_agent_steps_composition(tmp_path):
         business_background=bg_service,
     )
 
-    agents = build_default_workflow_agent_steps(host)
+    # 此旧Mock组合只显式提供其测试身份；真实默认builder不再替缺来源的宿主伪造thread。
+    agents = build_default_workflow_agent_steps(host, actor_provider=lambda run: SimpleNamespace(
+        owner_id=run.owner_id, source_thread_id=f'workflow:{run.workflow_id}'))
     assert isinstance(agents, WorkflowAgentSteps)
 
     # Actor provider 验证
@@ -773,7 +775,8 @@ def test_workflow_agent_steps_full_integration(tmp_path):
         business_background=bg_service,
     )
 
-    agents = build_default_workflow_agent_steps(host)
+    agents = build_default_workflow_agent_steps(host, actor_provider=lambda run: SimpleNamespace(
+        owner_id=run.owner_id, source_thread_id=f'workflow:{run.workflow_id}'))
     assert agents is not None
 
     draft = SessionTaskDraft(

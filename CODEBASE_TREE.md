@@ -1,3 +1,14 @@
+## 2026-11-12 原生端口与客户端回执回归
+
+```text
+agent_py_agent/tests/
+|-- test_acceptance_workflow_native_ports.py      # 原装配、执行期scope与类型化拒绝
+|-- test_acceptance_workflow_native_background.py # 真实后台waiting/恢复/取消，最低模型替身
+`-- test_acceptance_business_error_transport.py   # 生产客户端HTTP错误正文与流关闭
+```
+
+生产装配沿 `agent/agent_core/self_map_bootstrap.py`、`agent/tooling/workflows_tool.py`、`agent/workflows/engine.py`、`agent/workflows/agent_steps.py` 及 `agent/gateway_parts/business_api.py`；错误运输沿 `cli/chat_parts/gateway_client.py`。复用原执行权限、后台任务与操作回执，不新增权限账或后台状态源。
+
 ## 2026-11-12 工作流完成交接回归
 
 ```text

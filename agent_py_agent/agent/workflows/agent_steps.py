@@ -407,7 +407,7 @@ def make_session_task_completion_reader(conversation_store):
 
 # LLM: 构造并装配工作流原生 Agent 节点端口 (WorkflowAgentTaskPort.v1 / G5b)。
 # 函数用途: 为宿主注入默认的 WorkflowAgentSteps 实例，绑定真正的后台服务与 SessionTask 完成读取。
-def build_default_workflow_agent_steps(host, *, background_service=None):
+def build_default_workflow_agent_steps(host, *, background_service=None, actor_provider=None):
     if host is None:
         return None
 
@@ -418,34 +418,26 @@ def build_default_workflow_agent_steps(host, *, background_service=None):
         background_service = getattr(host, "background_service", None)
 
     conv_store = getattr(host, "conversation_store", None)
-    owner_home = getattr(host, "owner_home", None)
-    if owner_home is None and hasattr(host, "home_paths"):
-        owner_home = getattr(host.home_paths, "owner_home", None)
-
-    if background_service is None and conv_store is not None and owner_home is not None:
-        try:
-            from ..conversation.background_agent_service import BackgroundAgentService
-            background_service = BackgroundAgentService(owner_home, conversation_store=conv_store)
-        except Exception:
-            background_service = None
+    if background_service is None and conv_store is not None:
+        from ..conversation.background_agents import BackgroundAgentService
+        background_service = BackgroundAgentService(host)
 
     if background_service is None:
         return None
 
-    # 2. 构造 actor_provider
-    def actor_provider(run):
-        from types import SimpleNamespace
-        owner_id = getattr(run, "owner_id", "")
-        workflow_id = getattr(run, "workflow_id", "")
-        return SimpleNamespace(
-            owner_id=owner_id,
-            source_thread_id=f"workflow:{workflow_id}",
-        )
+    # 只消费宿主的原始通道身份；工作流ID不是来源thread，缺真实来源时不猜造本机发起人。
+    if actor_provider is None:
+        def actor_provider(run):
+            from ..gateway_parts.business_api import _model_business_actor
+            actor = _model_business_actor(host)
+            if actor is None:
+                raise PermissionError('WORKFLOW_AGENT_ACTOR_REQUIRED')
+            return actor
 
     # 3. 构造 completion_reader
     completion_reader = make_session_task_completion_reader(conv_store)
 
-    # 4. 构造 cancel_handler
+    # 默认端口只消费原服务的取消证明；服务异常不能退回直接改SessionTask终态冒充退出。
     def cancel_handler(
         target: Any = None,
         step: Any = None,
@@ -455,26 +447,19 @@ def build_default_workflow_agent_steps(host, *, background_service=None):
         idempotency_key: str | None = None,
     ):
         if target is not None and hasattr(target, "workflow_run_id") and step is not None:
-            return cancel_workflow_session_task(
-                background_service,
-                conv_store,
-                target,
-                step,
-                actor=actor,
-                idempotency_key=idempotency_key,
-            )
-        resolved_task_id = str(target) if target else task_id
-        return cancel_workflow_session_task(
-            background_service,
-            conv_store,
-            resolved_task_id,
-            actor=actor,
-            idempotency_key=idempotency_key,
-        )
+            resolved_task_id = step.escalation_result.get('task_id')
+        else:
+            resolved_task_id = str(target) if target else task_id
+        if not resolved_task_id:
+            return {'operation_id': '', 'state': 'completed', 'outstanding_refs': []}
+        return background_service.cancel_task(resolved_task_id, actor=actor)
 
-    return WorkflowAgentSteps(
+    port = WorkflowAgentSteps(
         background_service,
         actor_provider=actor_provider,
         completion_reader=completion_reader,
         cancel_handler=cancel_handler,
     )
+    # 仅原默认builder发行这个绑定口；组合根按请求重建副本，显式自定义端口没有此口就保持原样。
+    port.bind_host_call = lambda **options: build_default_workflow_agent_steps(host, **options)
+    return port
