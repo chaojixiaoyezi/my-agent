@@ -51,12 +51,13 @@ CODE_VERSION_MISSING = "SKILL_LEARNING_VERSION_MISSING"
 
 # LLM: code 是唯一机器判断字段；detail 只放字段名、guard pattern ID 等结构化事实，不复制 Skill 正文。
 # 类用途: 表示一次发布、回滚或删除被闸门拒绝。
-class SkillLearningGateError(Exception):
+class SkillLearningGateError(SkillLearningStoreError):
     # LLM: 构造时复制 detail，避免调用方之后修改原字典。
     # 函数用途: 保存结果码与结构化细节。
     def __init__(self, code: str, detail: dict[str, object] | None = None) -> None:
         super().__init__(code)
         self.code = code
+        self.reason = code
         self.detail = dict(detail or {})
 
 

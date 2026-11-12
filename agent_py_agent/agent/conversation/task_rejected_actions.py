@@ -2,10 +2,13 @@
 # 模块用途: 保持同任务跨片、Compact 和重启的拒绝事实，避免新的调用 ID 把已拒绝操作重新询问。
 from __future__ import annotations
 
+import logging
 from hashlib import sha256
 
 from ..common.json_io import read_json_object_report
 from .input_dependencies import _mutate, input_dependency_path
+
+_LOGGER = logging.getLogger(__name__)
 
 
 # LLM: 使用唯一 SessionTaskStore 子目录及独立命名空间，原 run/task 不从自然语言恢复。
@@ -26,14 +29,22 @@ def sync_task_rejected_actions(agent, params):
     fields = {'tool_name', 'run_id', 'operation_id', 'idempotency_key', 'args_hash',
               'approval_id', 'decision', 'reason_code', 'status'}
     current = [{k: v for k, v in item.items() if k in fields} for item in params.runtime_rejected_actions]
-    path = input_dependency_path(agent, key)
+    try:
+        path = input_dependency_path(agent, key)
+    except (InterruptedError, KeyboardInterrupt):
+        raise
+    except Exception as exc:
+        _LOGGER.warning("failed to resolve input dependency path: %s", exc, exc_info=True)
+        return
     if not current and not path.exists():
         return
     if not current:
         report = read_json_object_report(path, context="task_rejections.read")
         if report.load_error:
-            raise ValueError("原任务拒绝记录不可读")
-        params.runtime_rejected_actions[:] = report.payload["runtime_rejected_actions"]
+            _LOGGER.warning("task rejections file unreadable: %s", report.load_error)
+            return
+        payload = report.payload if isinstance(report.payload, dict) else {}
+        params.runtime_rejected_actions[:] = list(payload.get("runtime_rejected_actions", []))
         return
     # LLM: 精确字段合并只能追加拒绝；同参数未来调用不能覆盖历史原因。
     # 函数用途: 在原记录锁内合并同任务拒绝集合。
@@ -43,5 +54,22 @@ def sync_task_rejected_actions(agent, params):
             if item not in items:
                 items.append(item)
         return {'schema_version': 'task-rejected-actions.v1', 'runtime_rejected_actions': items}
-    row = _mutate(agent, key, merge)
-    params.runtime_rejected_actions[:] = row['runtime_rejected_actions']
+    try:
+        row = _mutate(agent, key, merge)
+        params.runtime_rejected_actions[:] = list(row.get('runtime_rejected_actions', []))
+    except (InterruptedError, KeyboardInterrupt):
+        raise
+    except Exception as exc:
+        _LOGGER.warning("failed to persist task rejected actions: %s", exc, exc_info=True)
+
+
+def append_task_rejected_action(agent: object, params: object, action: dict | None = None) -> None:
+    """Safely append and persist a task rejected action."""
+    if action and hasattr(params, "runtime_rejected_actions"):
+        params.runtime_rejected_actions.append(action)
+    try:
+        sync_task_rejected_actions(agent, params)
+    except (InterruptedError, KeyboardInterrupt):
+        raise
+    except Exception as exc:
+        _LOGGER.warning("append_task_rejected_action failed: %s", exc, exc_info=True)

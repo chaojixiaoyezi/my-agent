@@ -11,7 +11,8 @@ to write advisory evidence must never change the underlying tool result.
 
 import logging
 import sqlite3
-from dataclasses import asdict, replace
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,32 @@ from .repository import VerificationContext, VerificationEvidence, VerificationE
 # the last event as `verification_evidence` and adds the ordered `verification_evidence_chain`. When a
 # verifier ran but a pipe, `;`, `||` or background `&` hid its exit status, nothing is written to the ledger
 # and the envelope carries `verification_skipped` so the model can rerun it in a countable form.
+@dataclass
+class VerificationItem:
+    passed: bool = False
+    message: str = ""
+    details: dict[str, object] = field(default_factory=dict)
+
+
+class VerificationRuntime:
+    """Runtime verifier execution and isolation."""
+
+    @staticmethod
+    def verify(verifier: Callable, context: object) -> VerificationItem:
+        try:
+            res = verifier(context)
+            if isinstance(res, VerificationItem):
+                return res
+            if isinstance(res, bool):
+                return VerificationItem(passed=res)
+            return VerificationItem(passed=True, details=res if isinstance(res, dict) else {})
+        except (InterruptedError, KeyboardInterrupt):
+            raise
+        except Exception as exc:
+            logging.getLogger(__name__).warning("verifier internal error: %s", exc, exc_info=True)
+            return VerificationItem(passed=False, message=f"verifier internal error: {type(exc).__name__}")
+
+
 # 函数用途: 根据真实工具结果记录测试证据、标记旧证据过期并写入Owner工具调用耗时遥测；已落账通过事实反馈本run采用的准确自学版本，不改变原工具结果。
 def record_tool_verification(
     agent: object,
@@ -76,8 +103,10 @@ def record_tool_verification(
                 additions["verification_state"] = states
         if additions:
             result = _with_verification_metadata(result, additions)
-    except (AttributeError, OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
-        pass
+    except (InterruptedError, KeyboardInterrupt):
+        raise
+    except Exception as exc:
+        logging.getLogger(__name__).warning("verification recording failed: %s", exc, exc_info=True)
     if learning_evidence:
         from ..capability.skill_learning_host_feedback import observe_command_verifications
         from ..capability.skill_learning_store import SkillLearningStoreError
@@ -85,7 +114,9 @@ def record_tool_verification(
         # 真实验证metadata已经保留；学习存储失败单列诊断，不能冒充反馈成功或改写工具事实。
         try:
             diagnostics = observe_command_verifications(agent, call, learning_evidence)
-        except (OSError, SkillLearningStoreError) as error:
+        except (InterruptedError, KeyboardInterrupt):
+            raise
+        except (OSError, SkillLearningStoreError, Exception) as error:
             logging.getLogger(__name__).exception('skill_learning_feedback_storage_failed')
             diagnostics = [{'status': 'error', 'reason': getattr(error, 'code', 'SKILL_LEARNING_STORAGE_ERROR'),
                             'error_type': type(error).__name__}]
@@ -93,6 +124,8 @@ def record_tool_verification(
             result = _with_verification_metadata(result, {'skill_learning_feedback': diagnostics})
     try:
         _record_tool_telemetry(agent, context or _verification_context(agent), call, result)
+    except (InterruptedError, KeyboardInterrupt):
+        raise
     except Exception:
         pass
     return result

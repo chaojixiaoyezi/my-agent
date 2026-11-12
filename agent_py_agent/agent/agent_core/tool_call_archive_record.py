@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+
+_LOGGER = logging.getLogger(__name__)
 
 from ..artifacts.registry import (
     ARTIFACT_ROLE_METADATA_KEY,
@@ -281,8 +284,17 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
                 record.result,
             ),
         )
-        output_record = externalize_tool_output_record(request)
-        output_record.update(write_tool_output_fail_safe_checkpoint(request))
+        try:
+            output_record = externalize_tool_output_record(request)
+            output_record.update(write_tool_output_fail_safe_checkpoint(request))
+        except (InterruptedError, KeyboardInterrupt):
+            raise
+        except (OSError, TypeError, ValueError) as exc:
+            _LOGGER.warning("failed to externalize tool output record: %s", exc, exc_info=True)
+            output_record = {
+                "output": str(getattr(record.result, "output", ""))[:1000],
+                "archive_write_error": type(exc).__name__,
+            }
     _cap_output_preview(agent, output_record)
     output_record["parameters"] = dict(record.call.arguments)
     output_record["model_parameters"] = dict(record.model_visible_call.arguments)
@@ -569,24 +581,29 @@ def _register_tool_result_artifacts(
                     SHELL_PREIMAGE_POLICY_METADATA_KEY: SHELL_PREIMAGE_POLICY_EXCLUDE,
                 }
             )
-        registered = register_artifact(
-            ArtifactRegistration(
-                workspace_root=workspace_root,
-                path=path,
-                run_id=str(scope.get("run_id") or record.params.run_id or ""),
-                task_id=str(scope.get("task_id") or record.params.task_id or ""),
-                agent_id=str(scope.get("owner_id") or scope.get("run_id") or record.params.run_id or ""),
-                kind=kind,
-                source="tool_result",
-                created_by_tool=record.result.tool_name,
-                status=status,
-                metadata=metadata,
+        try:
+            registered = register_artifact(
+                ArtifactRegistration(
+                    workspace_root=workspace_root,
+                    path=path,
+                    run_id=str(scope.get("run_id") or record.params.run_id or ""),
+                    task_id=str(scope.get("task_id") or record.params.task_id or ""),
+                    agent_id=str(scope.get("owner_id") or scope.get("run_id") or record.params.run_id or ""),
+                    kind=kind,
+                    source="tool_result",
+                    created_by_tool=record.result.tool_name,
+                    status=status,
+                    metadata=metadata,
+                )
             )
-        )
-        ref["artifact_id"] = registered.artifact_id
-        output_record.setdefault("artifact_registry_refs", [])
-        if isinstance(output_record["artifact_registry_refs"], list):
-            output_record["artifact_registry_refs"].append(registered.to_dict())
+            ref["artifact_id"] = registered.artifact_id
+            output_record.setdefault("artifact_registry_refs", [])
+            if isinstance(output_record["artifact_registry_refs"], list):
+                output_record["artifact_registry_refs"].append(registered.to_dict())
+        except (InterruptedError, KeyboardInterrupt):
+            raise
+        except (OSError, TypeError, ValueError) as exc:
+            _LOGGER.warning("failed to register tool result artifact: %s", exc, exc_info=True)
 
 
 # LLM: 删除记录只接受绝对路径且当前确实缺失；普通引用继续要求实际文件，不把失败正文当文件。

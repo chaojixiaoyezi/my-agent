@@ -8,12 +8,53 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import ClassVar, Literal
+
+logger = logging.getLogger(__name__)
+
+_APPROVAL_REJECTION_MESSAGES: Mapping[str, str] = {
+    "APPROVAL_TIMEOUT": "确认已超时，当前操作已拒绝且未执行。",
+    "APPROVAL_NONINTERACTIVE": "此操作仍需人工确认，当前群或后台任务不等待审批，已拒绝且未执行。",
+    "APPROVAL_UNAVAILABLE": "没有可用的审批接收端，当前操作已拒绝且未执行。",
+    "APPROVAL_TRANSPORT_FAILED": "审批卡发送失败，当前操作已拒绝且未执行。",
+}
+
+
+def _must_propagate_tool_exceptions() -> tuple[type[BaseException], ...]:
+    exceptions: list[type[BaseException]] = [InterruptedError, KeyboardInterrupt]
+    try:
+        from ...common.cancellation import ToolCancelled
+        exceptions.append(ToolCancelled)
+    except ImportError:
+        pass
+    try:
+        from ...common.request_execution_ports import (
+            RequestExecutionContextUnavailable,
+            RequestExecutionOutcomeUncertainError,
+        )
+        exceptions.extend([RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError])
+    except ImportError:
+        pass
+    try:
+        from ...common.tool_write_context import ToolWriteContextUnavailable
+        exceptions.append(ToolWriteContextUnavailable)
+    except ImportError:
+        pass
+    try:
+        from ...backends.bounded_call import BoundedCallExitUnconfirmedError
+        exceptions.append(BoundedCallExitUnconfirmedError)
+    except ImportError:
+        pass
+    return tuple(exceptions)
+
+
+_MUST_PROPAGATE_TOOL_EXCEPTIONS = _must_propagate_tool_exceptions()
 
 from ...backends import ModelResponse
 from ...concurrency.interrupt import is_interrupted, register_interrupt_callback
@@ -198,6 +239,9 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
     # (TOOL_ACTION_NOT_REQUIRED, handler_executed=False),并做有界计数。
     if _no_action_gate_active(request.params):
         return _gate_all_calls_for_no_action(request, calls)
+    if getattr(request.params, "no_action_gate_halt", False):
+        object.__setattr__(request.params, "no_action_gate_halt", False)
+        object.__setattr__(request.params, _NO_ACTION_GATE_STREAK_ATTR, 0)
     progress = _ToolRoundProgress()
     position = 0
     while position < len(calls):
@@ -390,18 +434,35 @@ def _execute_parallel_step(
     )
     transition_index = 0
     for outcome_idx, outcome_call, started_at, execution in outcomes:
-        execution = _resolve_tool_approval(
-            request,
-            outcome_idx,
-            outcome_call,
-            execution,
-        )
-        wrote_output, transition = _record_execution(
-            request,
-            outcome_idx,
-            started_at,
-            execution,
-        )
+        try:
+            execution = _resolve_tool_approval(
+                request,
+                outcome_idx,
+                outcome_call,
+                execution,
+            )
+            wrote_output, transition = _record_execution(
+                request,
+                outcome_idx,
+                started_at,
+                execution,
+            )
+        except _MUST_PROPAGATE_TOOL_EXCEPTIONS:
+            raise
+        except Exception as exc:
+            logger.error(
+                "unexpected tool pipeline error for %s",
+                getattr(outcome_call, "tool_name", getattr(outcome_call, "name", "tool")),
+                exc_info=True,
+            )
+            wrote_output, transition = _record_bulkhead_fallback(
+                request,
+                outcome_idx,
+                outcome_call,
+                started_at,
+                exc,
+                started_emitted=True,
+            )
         progress.subagent_output_written |= wrote_output
         if transition and not transition_index:
             _remember_runtime_transition(
@@ -451,25 +512,45 @@ def _execute_serial_step(
     idx = position + 1
     call = calls[position]
     started_at = time.monotonic()
-    if _should_defer_orchestration(progress.stateful_orchestration_seen, call.tool_name):
-        _emit_tool_progress(ToolProgressEvent(request, idx, call, "started", "开始"))
-        execution = _synthetic_execution(
-            call,
-            _deferred_orchestration_result(call),
-            "ORCHESTRATION_CALL_DEFERRED",
-        )
-    else:
-        execution = _execute_owned_serial(request,
-            ToolCallExecuteParams(
-                request.params,
-                request.tool_rounds,
-                idx,
+    started_emitted = False
+    try:
+        if _should_defer_orchestration(progress.stateful_orchestration_seen, call.tool_name):
+            _emit_tool_progress(ToolProgressEvent(request, idx, call, "started", "开始"))
+            started_emitted = True
+            execution = _synthetic_execution(
                 call,
-                model_call=_model_visible_call(request, idx, call),
-            ), emit_started=True,
+                _deferred_orchestration_result(call),
+                "ORCHESTRATION_CALL_DEFERRED",
+            )
+        else:
+            started_emitted = True
+            execution = _execute_owned_serial(request,
+                ToolCallExecuteParams(
+                    request.params,
+                    request.tool_rounds,
+                    idx,
+                    call,
+                    model_call=_model_visible_call(request, idx, call),
+                ), emit_started=True,
+            )
+            execution = _resolve_tool_approval(request, idx, call, execution)
+        wrote_output, transition = _record_execution(request, idx, started_at, execution)
+    except _MUST_PROPAGATE_TOOL_EXCEPTIONS:
+        raise
+    except Exception as exc:
+        logger.error(
+            "unexpected tool pipeline error for %s",
+            getattr(call, "tool_name", getattr(call, "name", "tool")),
+            exc_info=True,
         )
-        execution = _resolve_tool_approval(request, idx, call, execution)
-    wrote_output, transition = _record_execution(request, idx, started_at, execution)
+        wrote_output, transition = _record_bulkhead_fallback(
+            request,
+            idx,
+            call,
+            started_at,
+            exc,
+            started_emitted=started_emitted,
+        )
     progress.handled_count = idx
     progress.subagent_output_written |= wrote_output
     progress.stateful_orchestration_seen |= call.tool_name in _STATEFUL_ORCHESTRATION_TOOLS
@@ -723,10 +804,10 @@ def _rejected_approval_execution(
     else:
         message = "用户取消了这次工具调用，工具没有执行。" if cancelled else "用户拒绝了这次工具调用，工具没有执行。"
     if decision.reason_code:
-        message = {"APPROVAL_TIMEOUT": "确认已超时，当前操作已拒绝且未执行。",
-                   "APPROVAL_NONINTERACTIVE": "此操作仍需人工确认，当前群或后台任务不等待审批，已拒绝且未执行。",
-                   "APPROVAL_UNAVAILABLE": "没有可用的审批接收端，当前操作已拒绝且未执行。",
-                   "APPROVAL_TRANSPORT_FAILED": "审批卡发送失败，当前操作已拒绝且未执行。"}[decision.reason_code]
+        message = _APPROVAL_REJECTION_MESSAGES.get(
+            decision.reason_code,
+            str(getattr(decision, "message", "") or "工具执行未获批准。"),
+        )
     if decision.feedback:
         message = (
             f"{message}\n用户反馈：{decision.feedback}\n"
@@ -758,7 +839,11 @@ def _rejected_approval_execution(
             status=status,
             metadata={
                 "action_decision": action_decision.to_dict(),
-                "approval_decision": decision.to_dict(),
+                "approval_decision": (
+                    decision.to_dict()
+                    if hasattr(decision, "to_dict")
+                    else getattr(decision, "__dict__", {"decision": str(decision)})
+                ),
             },
         ),
     )
@@ -897,7 +982,37 @@ def _started_parallel_call(request, idx, call, context, queued):
     execution = _queued_call_gate(request, call) if queued else None
     if execution is None:
         _emit_tool_progress(ToolProgressEvent(request, idx, call, "started", "开始"))
-        execution = _execute_parallel_call(request, idx, call, context)
+        try:
+            execution = _execute_parallel_call(request, idx, call, context)
+        except _MUST_PROPAGATE_TOOL_EXCEPTIONS:
+            raise
+        except Exception as exc:
+            logger.error(
+                "unexpected tool pipeline error for %s",
+                getattr(call, "tool_name", getattr(call, "name", "tool")),
+                exc_info=True,
+            )
+            output_json = json.dumps(
+                {
+                    "ok": False,
+                    "error_code": "INTERNAL_ERROR",
+                    "error": f"工具执行内部异常 ({type(exc).__name__})，已隔离该工具调用以保护当前回合继续运行。",
+                },
+                ensure_ascii=False,
+            )
+            fallback_result = ToolResult.failed(
+                call,
+                output_json,
+                error_code="INTERNAL_ERROR",
+                failure_stage="runtime_gate",
+                facts=ToolFailureFacts(
+                    status="failed",
+                    effect_outcome="unknown",
+                    duration_ms=max(0, int((time.monotonic() - started_at) * 1000)),
+                    metadata={"reported_error_code": "INTERNAL_ERROR"},
+                ),
+            )
+            execution = _synthetic_execution(call, fallback_result, "INTERNAL_ERROR")
     return idx, call, started_at, execution
 
 
@@ -1088,6 +1203,74 @@ def _record_execution(
     return False, _runtime_transition_after_tool(result)
 
 
+def _record_bulkhead_fallback(
+    request: ToolRoundExecutionRequest,
+    idx: int,
+    call: ToolCall,
+    started_at: float,
+    exc: Exception,
+    *,
+    started_emitted: bool = True,
+) -> tuple[bool, dict[str, str] | None]:
+    output_json = json.dumps(
+        {
+            "ok": False,
+            "error_code": "INTERNAL_ERROR",
+            "error": f"工具执行内部异常 ({type(exc).__name__})，已隔离该工具调用以保护当前回合继续运行。",
+        },
+        ensure_ascii=False,
+    )
+    fallback_result = ToolResult.failed(
+        call,
+        output_json,
+        error_code="INTERNAL_ERROR",
+        failure_stage="runtime_gate",
+        facts=ToolFailureFacts(
+            status="failed",
+            effect_outcome="unknown",
+            duration_ms=max(0, int((time.monotonic() - started_at) * 1000)),
+            metadata={"reported_error_code": "INTERNAL_ERROR"},
+        ),
+    )
+    if started_emitted:
+        try:
+            _emit_tool_progress(
+                ToolProgressEvent(
+                    request,
+                    idx,
+                    call,
+                    "finished",
+                    _finished_status(fallback_result),
+                    started_at,
+                    fallback_result,
+                )
+            )
+        except Exception:
+            pass
+    try:
+        request.record_one(
+            ToolCallRecordParams(
+                request.params,
+                request.tool_rounds,
+                idx,
+                call,
+                fallback_result,
+                ("received", "normalized", "failed", "persisted", "projected"),
+                model_call=_model_visible_call(request, idx, call),
+                actor=request.actor,
+                decision_ref=request.decision_ref,
+            )
+        )
+    except Exception as record_exc:
+        logger.warning(
+            "bulkhead fallback record_one failed for %s: %s",
+            getattr(call, "tool_name", getattr(call, "name", "tool")),
+            record_exc,
+            exc_info=True,
+        )
+    return False, None
+
+
 # LLM: 只在模型发起的记录之后取走决策点刚计划的宿主动作（params.host_actions，决策点在 record_one 里追加）；actor=decision 的
 #   请求不再取（防递归）。每条动作执行一次、不重试、不改选候选；列表取空为止。
 # 函数用途: 把 action_candidate 自动执行计划逐条交给宿主动作执行。
@@ -1114,12 +1297,23 @@ def _execute_host_action(request: ToolRoundExecutionRequest, idx: int, action: H
     call = action.call
     started_at = time.monotonic()
     _emit_tool_progress(ToolProgressEvent(host_request, host_idx, call, "started", "开始"))
-    execution = host_request.execute_one(
-        ToolCallExecuteParams(host_request.params, host_request.tool_rounds, host_idx, call, actor=host_request.actor)
-    )
-    execution = _resolve_tool_approval(host_request, host_idx, call, execution)
-    _record_execution(host_request, host_idx, started_at, execution)
-    record_auto_execution(request.agent, action, execution.result)
+    try:
+        execution = host_request.execute_one(
+            ToolCallExecuteParams(host_request.params, host_request.tool_rounds, host_idx, call, actor=host_request.actor)
+        )
+        execution = _resolve_tool_approval(host_request, host_idx, call, execution)
+        _record_execution(host_request, host_idx, started_at, execution)
+        record_auto_execution(request.agent, action, execution.result)
+    except _MUST_PROPAGATE_TOOL_EXCEPTIONS:
+        raise
+    except Exception as exc:
+        logger.error(
+            "unexpected host action tool error for %s",
+            getattr(call, "tool_name", getattr(call, "name", "tool")),
+            exc_info=True,
+        )
+        _record_bulkhead_fallback(host_request, host_idx, call, started_at, exc, started_emitted=True)
+        record_auto_execution(request.agent, action, None)
 
 
 # LLM: 模型发起的审批请求原样不动；决策发起的在 binding 里加 actor/decision_ref（结构化，消费方据此展示“决策自动执行”），

@@ -228,27 +228,32 @@ def _trace_runner_stage(bundle: RunnerStageTraceBundle) -> None:
     except Exception as exc:
         _warn_runner_trace_error(exc, context="runner_stage_trace.subagents.load", run_id=run_id)
         return
-    task = _touch_active_heartbeat_chain(bundle.agent.subagents, task)
-    task = _persist_runner_activity(bundle.agent.subagents, task, bundle)
-    from ...subagents.debug_trace import SubAgentDebugTraceRequest, write_subagent_debug_trace
+    try:
+        task = _touch_active_heartbeat_chain(bundle.agent.subagents, task)
+        task = _persist_runner_activity(bundle.agent.subagents, task, bundle)
+        from ...subagents.debug_trace import SubAgentDebugTraceRequest, write_subagent_debug_trace
 
-    write_subagent_debug_trace(
-        SubAgentDebugTraceRequest(
-            manager=bundle.agent.subagents,
-            level=3,
-            event_type=bundle.event_type,
-            task=task,
-            payload={
-                "source": str(getattr(bundle.params, "source", "") or ""),
-                "request_id": str(getattr(bundle.params, "request_id", "") or ""),
-                "runtime_run_id": str(getattr(bundle.params, "run_id", "") or ""),
-                "runtime_task_id": str(getattr(bundle.params, "task_id", "") or ""),
-                "tool_rounds": int(bundle.tool_rounds or 0),
-                **bundle.payload,
-                **_detail_trace_payload(bundle.agent.subagents, task, bundle),
-            },
+        write_subagent_debug_trace(
+            SubAgentDebugTraceRequest(
+                manager=bundle.agent.subagents,
+                level=3,
+                event_type=bundle.event_type,
+                task=task,
+                payload={
+                    "source": str(getattr(bundle.params, "source", "") or ""),
+                    "request_id": str(getattr(bundle.params, "request_id", "") or ""),
+                    "runtime_run_id": str(getattr(bundle.params, "run_id", "") or ""),
+                    "runtime_task_id": str(getattr(bundle.params, "task_id", "") or ""),
+                    "tool_rounds": int(bundle.tool_rounds or 0),
+                    **bundle.payload,
+                    **_detail_trace_payload(bundle.agent.subagents, task, bundle),
+                },
+            )
         )
-    )
+    except (InterruptedError, KeyboardInterrupt):
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        _LOGGER.warning("stage trace failed: %s", exc, exc_info=True)
 
 
 # LLM: 这是一份宿主观测到的有界活动投影，不保存模型正文或隐式推理；
@@ -447,15 +452,21 @@ def _detail_trace_payload(manager: Any, task: Any, bundle: RunnerStageTraceBundl
     }
     for label, value in bundle.detail_payload.items():
         payload[f"{label}_preview"] = preview_debug_trace_text(value)
-        detail_ref = write_subagent_debug_detail(
-            SubAgentDebugDetailRequest(
-                manager,
-                task,
-                event_type=bundle.event_type,
-                label=label,
-                value=value,
+        try:
+            detail_ref = write_subagent_debug_detail(
+                SubAgentDebugDetailRequest(
+                    manager,
+                    task,
+                    event_type=bundle.event_type,
+                    label=label,
+                    value=value,
+                )
             )
-        )
+        except (InterruptedError, KeyboardInterrupt):
+            raise
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            _LOGGER.warning("write subagent debug detail failed: %s", exc, exc_info=True)
+            detail_ref = ""
         if detail_ref:
             payload[f"{label}_detail_ref"] = Path(detail_ref)
     return payload
