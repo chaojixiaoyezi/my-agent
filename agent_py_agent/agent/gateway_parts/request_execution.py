@@ -1687,28 +1687,36 @@ def _host_shutdown_resume_marker(failure: Exception | None, request_path: Path, 
 def _is_compact_transient_failure(exc: BaseException | None) -> bool:
     if exc is None:
         return False
-    from ..backends.errors import ProviderTransientError
+    from ..backends.errors import ProviderTimeoutError, ProviderTransientError
     from ..conversation import compact_guard
 
     checker = getattr(compact_guard, "is_compact_transient_provider_failure", None)
     if callable(checker):
         try:
-            return bool(checker(exc))
+            if checker(exc):
+                return True
         except Exception:
             pass
     current: BaseException | None = exc
     for _ in range(6):
         if current is None:
             break
-        if isinstance(current, ProviderTransientError):
+        if isinstance(current, (ProviderTransientError, ProviderTimeoutError, TimeoutError, ConnectionError)):
             return True
         code = str(getattr(current, "error_code", "") or getattr(current, "code", "") or "").strip().upper()
-        if code in {
-            "PROVIDER_RATE_LIMITED",
-            "PROVIDER_UNAVAILABLE",
-            "PROVIDER_TIMEOUT",
-            "TRANSIENT_ERROR",
-        } or (code.startswith("COMPACT_") and any(sub in code for sub in ("TIMEOUT", "TRANSIENT", "RATE_LIMIT", "UNAVAILABLE", "503", "429"))):
+        if (
+            code in {
+                "PROVIDER_RATE_LIMITED",
+                "PROVIDER_UNAVAILABLE",
+                "PROVIDER_TIMEOUT",
+                "TRANSIENT_ERROR",
+                "MODEL_STREAM_INCOMPLETE",
+                "PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED",
+                "COMPACT_TRANSIENT_FAILURE",
+            }
+            or (code.startswith("COMPACT_") and any(sub in code for sub in ("TIMEOUT", "TRANSIENT", "RATE_LIMIT", "UNAVAILABLE", "503", "429")))
+            or (code.startswith("COMPACT_PROVIDER") and "QUOTA" not in code)
+        ):
             return True
         current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
     return False

@@ -160,10 +160,17 @@ _RETRY_SECONDS_BY_CODE = {CURATOR_MODEL_NOT_CONFIGURED: CURATOR_NOT_CONFIGURED_R
 
 
 # LLM: 唯一的失败退避口径，发现层 owner_wake_discovery 与 curator._run_pending_when_due 都必须调用它；只按
-#   结构化失败码判断，不读异常正文。同步 test_curator_model_not_configured.py、test_curator_observation_identity.py。
-# 函数用途: 按上次失败码给出这次重试前要等待的秒数。
-def curator_failure_retry_seconds(failure_code: str, base_seconds: int) -> int:
-    return _RETRY_SECONDS_BY_CODE.get(failure_code, base_seconds)
+#   结构化失败码判断，不读异常正文。连续失败时呈 10m -> 30m -> 60m 阶梯递增，探测成功后立即归零自动恢复。
+# 函数用途: 按上次失败码与连续失败次数给出这次重试前要等待的秒数。
+def curator_failure_retry_seconds(
+    failure_code: str, base_seconds: int, *, consecutive_failures: int = 0
+) -> int:
+    code_floor = _RETRY_SECONDS_BY_CODE.get(failure_code, base_seconds)
+    if consecutive_failures <= 0:
+        return code_floor
+    step = 600 if consecutive_failures == 1 else (1800 if consecutive_failures == 2 else 3600)
+    return max(step, code_floor)
+
 
 
 # LLM: 纯函数；previous 是本次之前最近的已结束运行记录（新到旧）。本次失败码是确定性失败，且之前紧挨着的
@@ -235,6 +242,7 @@ class MemoryCuratorState:
     last_daily_finalize_date: str = ""
     last_committed_run_id: str = ""
     candidate_scan_cursor: dict = field(default_factory=dict)
+    consecutive_failures: int = 0
 
     # LLM: 空对象=首次初始化(允许); 非空但无任何已知字段=纯未知字段
     # fail-closed(seq1625 P0 遗留: {"not":"a state"} 不得静默复用默认 state);
@@ -371,7 +379,7 @@ def validate_curator_state(state: MemoryCuratorState) -> None:
         raise ValueError("memory curator active_lease must be an object")
     if any(
         int(value) < 0
-        for value in (state.processed_count, state.candidate_count, state.daily_event_count)
+        for value in (state.processed_count, state.candidate_count, state.daily_event_count, getattr(state, "consecutive_failures", 0) or 0)
     ):
         raise ValueError("memory curator counters cannot be negative")
     if not isinstance(state.pending_reasons, list) or any(

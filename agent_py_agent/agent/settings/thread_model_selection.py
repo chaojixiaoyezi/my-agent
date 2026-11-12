@@ -18,6 +18,7 @@ from .model_profiles import (
 from .model_provider_schema import ModelProfileGeneration
 
 SUBAGENT_MODEL_ADVICE_KEY = "host_subagent_model_advice.v1"
+AUXILIARY_MODEL_OPERATIONS = frozenset({"auxiliary_list", "auxiliary_select", "auxiliary_off"})
 # 模型指纹摘要的连接字段（生成连接版本摘要那一组，另加模型名与会话头）：密钥、接口地址、协议、模型名、请求头或登录代次
 # 换了任何一个，环境级故障都可能已经修好。漏掉的字段只会让放行退回探测时刻，不会误放行。
 _FINGERPRINT_CONNECTION_FIELDS = (
@@ -86,6 +87,9 @@ def execute_local_model_operation(agent: object, session_id: str, operation: str
 
     if operation in EMBEDDING_OPERATIONS:
         return execute_embedding_operation(agent, operation, payload)
+    if operation in AUXILIARY_MODEL_OPERATIONS:
+        from ..gateway_parts.model_profile_service import execute_auxiliary_model_operation
+        return execute_auxiliary_model_operation(agent, operation, payload)
     store = getattr(agent, "conversation_store", None)
     if store is None or not str(session_id).strip():
         raise ModelProfileError("模型选择需要可用的本地会话存储与会话编号。")

@@ -67,7 +67,15 @@ def candidate_scan_deadline(state, interval_seconds, *, source_present=False):
     failure = parse_time(state.last_failure_at)
     if state.last_failure_code and failure is not None:
         from .curator_models import curator_failure_retry_seconds
-        deadline = max(deadline, failure.timestamp() + curator_failure_retry_seconds(state.last_failure_code, cadence))
+        deadline = max(
+            deadline,
+            failure.timestamp()
+            + curator_failure_retry_seconds(
+                state.last_failure_code,
+                cadence,
+                consecutive_failures=max(0, int(getattr(state, "consecutive_failures", 0) or 0)),
+            ),
+        )
     return deadline
 
 

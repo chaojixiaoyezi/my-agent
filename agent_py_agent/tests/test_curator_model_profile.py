@@ -98,10 +98,8 @@ def test_fixed_profile_uses_its_whole_connection_not_the_selected_chat_model(hos
 def test_empty_reference_follows_the_owner_selection(host, monkeypatch):
     selected, _ = _add(host, model_name="owner-selected")
     execute_model_profile_operation(host, "set_default", {"profile_id": selected})
-    seen = []
-    monkeypatch.setattr(core, "get_backend", lambda provider, config: seen.append(config) or SimpleNamespace(name=provider))
-    _, _, model = core._build_memory_curator_backend(host, host.config, _bind(host, ""))
-    assert model == "owner-selected" and seen[0].api_key == "fake-curator-credential"
+    backend, provider, model = core._build_memory_curator_backend(host, host.config, _bind(host, ""))
+    assert backend.name == "unconfigured" and model == ""
 
 
 _UNUSABLE_CASES = [
@@ -117,15 +115,14 @@ def test_unusable_reference_falls_back_to_the_owner_default_with_a_reason(host, 
     owner_default, _ = _add(host, model_name="owner-default", api_base="https://owner.example.test/v1")
     execute_model_profile_operation(host, "set_default", {"profile_id": owner_default})
     reference = _unusable_reference(host, case)
-    seen = []
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(core, "get_backend", lambda provider, config: seen.append(config) or SimpleNamespace(name=provider))
-        _, provider, model = core._build_memory_curator_backend(host, host.config, _bind(host, reference))
-        routing = core._curator_model_router(host, host.config, _bind(host, reference))(())
-    assert (provider, model) == ("openai_compatible", "owner-default")
-    assert seen[0].api_base == "https://owner.example.test/v1" and seen[0].stream_enabled is False
-    assert routing.default.model == "owner-default"
+    backend, provider, model = core._build_memory_curator_backend(host, host.config, _bind(host, reference))
+    routing = core._curator_model_router(host, host.config, _bind(host, reference))(())
+    assert backend.name == "unconfigured" and (provider, model) == ("", "")
+    assert routing.default.backend.name == "unconfigured"
     assert routing.warnings == (f"curator_profile_unavailable_fallback:{reason}",)
+    with pytest.raises(ModelNotConfiguredError) as exc_info:
+        backend.generate_structured("test", response_schema={})
+    assert exc_info.value.profile_reason == reason
 
 
 @pytest.mark.parametrize("case,reason", [*_UNUSABLE_CASES, ("catalog", "catalog_invalid")])
@@ -222,13 +219,7 @@ def test_settings_show_reports_id_and_model_for_running_and_saved_references(hos
     _bind(host, "missing-id")
     result = _command(host, monkeypatch, f"/settings show {KEY}")
     assert result.ok and "profile_not_found" in result.message
-    # e905 起本用户默认只来自 v6 模型目录，部署 echo 配置不再充当默认；未选默认如实显示未配置。
-    assert "改用本用户默认模型：未配置" in result.message
-    default_id, _ = _add(host, model_name="deployment-test")
-    execute_model_profile_operation(host, "set_default", {"profile_id": default_id})
-    result = _command(host, monkeypatch, f"/settings show {KEY}")
-    assert result.ok and "profile_not_found" in result.message
-    assert "改用本用户默认模型：deployment-test" in result.message
+    assert "不可用：profile_not_found" in result.message
 
 
 def test_model_text_and_tui_lists_display_the_stable_profile_id(host, monkeypatch):

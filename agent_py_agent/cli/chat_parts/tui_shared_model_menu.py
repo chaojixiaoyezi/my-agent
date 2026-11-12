@@ -76,3 +76,11 @@ async def choose_initial_model(app, agent, session_id: str) -> str:
         return str(result.get("message") or "初始模型设置未确认，请重新读取列表。")
     name = next((row["model_name"] for row in rows if row["id"] == selected), "")
     return f"其他用户的初始模型已设为 {name}（已开放共享）。" if name else "已清除其他用户的初始模型，没选过模型的用户用部署默认。"
+
+
+# LLM: 委托主模型菜单的后台辅助模型选择对话框。
+# 函数用途: 提供「后台辅助模型」选择入口别名。
+async def choose_auxiliary_model(app, agent, session_id: str) -> str:
+    from .tui_model_menu import _auxiliary_menu
+
+    return await _auxiliary_menu(app, agent, session_id)

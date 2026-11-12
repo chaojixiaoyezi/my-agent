@@ -964,7 +964,11 @@ def curator_work_is_due(owner_home, state, *, curator_config=None, timezone_name
     now = time.time()
     current = localized_now(datetime.fromtimestamp(now,timezone.utc),timezone_name)
     failure = parse_time(state.last_failure_at)
-    backoff = curator_failure_retry_seconds(state.last_failure_code,max(30,min(300,config.interval_seconds)))
+    backoff = curator_failure_retry_seconds(
+        state.last_failure_code,
+        max(30, min(300, config.interval_seconds)),
+        consecutive_failures=max(0, int(getattr(state, "consecutive_failures", 0) or 0)),
+    )
     if state.last_failure_code and failure is not None and now-failure.timestamp() < backoff:
         _add_deadline(deadline_out,failure.timestamp()+backoff)
         return False

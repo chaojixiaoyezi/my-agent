@@ -208,69 +208,56 @@ def _build_memory_curator_backend(
     config: AgentConfig,
     curator_config: MemoryCuratorConfig,
 ) -> tuple[object, str, str]:
-    backend, provider, model, fallback = _curator_backend(agent, curator_config.model_profile)
+    from .settings.curator_profile import effective_auxiliary_model_profile
+
+    auxiliary = effective_auxiliary_model_profile(getattr(agent, "config", config))
+    backend, provider, model, fallback = _curator_backend(agent, auxiliary)
     if fallback:
-        logging.getLogger(__name__).info("记忆整理指定档案在本用户不可用，原因=%s，改用本用户默认模型。", fallback)
+        logging.getLogger(__name__).info("记忆整理指定档案在本用户不可用，原因=%s，本次不整理。", fallback)
     return backend, provider, model
 
 
-# LLM: 不写日志里的退回事实（路由器每次运行都会调它）；返回（后端, provider, model, 退回原因）。
-# 函数用途: 按指定档案（不可用时本 owner 默认模型）建一个无工具非流式后端；都不可用时返回未配置后端。
+# LLM: 统一后台辅助模型：空值直接返回UnconfiguredBackend，指定档案无法解析也直接返回UnconfiguredBackend，零回退。
+# 函数用途: 按指定档案建一个无工具非流式后端；未配置或不可用时返回未配置后端。
 def _curator_backend(agent: object, profile_id: str) -> tuple[object, str, str, str]:
     from .backends.base import UnconfiguredBackend
     from .backends.errors import ModelNotConfiguredError
-    from .settings.curator_profile import curator_model_config_with_fallback
+    from .settings.curator_profile import curator_model_config
 
+    if not profile_id:
+        exc = ModelNotConfiguredError(profile_id="", profile_reason="profile_not_configured")
+        return UnconfiguredBackend(exc), "", "", ""
     try:
-        profile_config, fallback = curator_model_config_with_fallback(agent, profile_id)
+        profile_config = curator_model_config(agent, profile_id)
     except ModelNotConfiguredError as exc:
         logging.getLogger(__name__).warning("记忆策展模型不可用，原因=%s，本次不整理。", exc.profile_reason)
-        return UnconfiguredBackend(exc), "", "", ""
+        return UnconfiguredBackend(exc), "", "", str(exc.profile_reason or "profile_unavailable")
     scoped_config = replace(profile_config, stream_enabled=False)
     provider, model = str(scoped_config.model_backend), str(scoped_config.model_name)
-    return get_backend(provider, scoped_config), provider, model, fallback
+    return get_backend(provider, scoped_config), provider, model, ""
 
 
-# LLM: 记忆整理留空档案时（2026-10-02 用户拍板）按消息来源会话的主代理模型走：每次运行由 Curator 传入本批会话编号，
-#   这里用 settings.curator_profile.curator_thread_profiles 只读解析（不写会话），默认组每次现建（owner 换了默认模型也能跟上），
-#   其余档案各建一个无工具非流式后端。建某个后端失败时，那批会话退回默认组并记 backend_unavailable，不让整次运行失败。
-#   指定了 memory_curator_model_profile 且本 owner 解析得到时返回 None，Curator 全批用固定档案，与改动前一致；解析不到时
-#   返回只有一个组的路由器：每次运行重新解析（档案又能用了就用它），仍不可用就用本 owner 默认模型并带整批警告
-#   curator_profile_unavailable_fallback:<原因>，不按会话分组。用到 owner 默认模型时再记 curator_default_model_source:<来源>。
-# 函数用途: 为后台记忆整理构造“会话 → 模型”的路由器，或在固定档案可用时返回 None。
+# LLM: 记忆整理统一由 effective_auxiliary_model_profile 指定（留空关闭，指定时独占解析），绝不退回或按会话路由。
+# 函数用途: 为后台记忆整理构造“会话 → 模型”的路由器，统一指向后台辅助模型。
 def _curator_model_router(agent: object, config: AgentConfig, curator_config: MemoryCuratorConfig):
     from .memory_store.curator_models import CuratorModelRoute, CuratorModelRouting
-    from .settings.curator_profile import curator_thread_profiles
+    from .settings.curator_profile import effective_auxiliary_model_profile
 
-    fixed = curator_config.model_profile
+    fixed = effective_auxiliary_model_profile(getattr(agent, "config", config)) or curator_config.model_profile
     if fixed and _fixed_curator_profile_usable(agent, fixed):
         return None
 
-    # LLM: 按给定会话集合动态选择后台记忆整理模型后端，并在固定档案不可用时附带降级告警。
-    # 函数用途: 为一次Curator整理批次解析具体的模型路由与回退信息。
     def route(thread_ids: tuple[str, ...]) -> CuratorModelRouting:
-        backend, provider, model, fallback = _curator_backend(agent, fixed)
-        warnings = _curator_route_warnings(agent, fixed, fallback)
-        if fixed:
-            return CuratorModelRouting(CuratorModelRoute(fixed, backend, provider, model, is_default=True), warnings=warnings)
-        plan = curator_thread_profiles(agent, thread_ids)
-        default = CuratorModelRoute(plan.default_profile_id, backend, provider, model, is_default=True)
-        route_failures: dict[str, str] = {}
-        routes = {key: _curator_profile_route(key, value, out_reasons=route_failures) for key, value in plan.configs.items()}
-        broken = {key for key, value in routes.items() if value is None}
-        groups = {thread: key for thread, key in plan.thread_profiles.items() if key not in broken}
-        reasons = {
-            **plan.fallback_reasons,
-            **{
-                thread: route_failures.get(key, "backend_unavailable")
-                for thread, key in plan.thread_profiles.items()
-                if key in broken
-            },
-        }
-        return CuratorModelRouting(default, {key: value for key, value in routes.items() if value is not None},
-                                   groups, reasons, warnings)
+        auxiliary = effective_auxiliary_model_profile(getattr(agent, "config", config)) or curator_config.model_profile
+        if not auxiliary:
+            backend, provider, model, fallback = _curator_backend(agent, "")
+            return CuratorModelRouting(CuratorModelRoute("", backend, "", "", is_default=True))
+        backend, provider, model, fallback = _curator_backend(agent, auxiliary)
+        warnings = [f"curator_profile_unavailable_fallback:{fallback}"] if fallback else []
+        return CuratorModelRouting(CuratorModelRoute(auxiliary, backend, provider, model, is_default=True), warnings=tuple(warnings))
 
     return route
+
 
 
 # LLM: 只在用到 owner 默认模型时记来源（留空、或指定档案退回）；指定档案能用时什么都不记。都是结构化短词，
@@ -457,25 +444,37 @@ def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
     agent.skill_learning = _skill_learning_service(agent, config)
 
 
-# LLM: 自学习关闭时返回 None，收口与 Gateway 车道都按缺席处理；开启时与 Curator 共用同一 backend（owner 选定模型、
-#   非流式），快照只读当前owner视图；只生成待确认候选，维护保护原任务/监控引用。
+# LLM: 自学习关闭时返回 None，收口与 Gateway 车道都按缺席处理；开启时与 Curator 共用统一后台辅助模型（非流式）；
+#   留空时返回 None（0次后台调用，不退回默认模型），指定且可用时解析该模型后端。
 # 函数用途: 按自学习开关为当前 owner 创建自动总结 Skill 服务。
 def _skill_learning_service(agent: object, config: AgentConfig) -> SkillLearningService | None:
-    if not config.enable_self_learning:
+    if not getattr(config, "enable_self_learning", False):
         return None
     from .capability.skill_learning_protection import learning_protection_for_agent
+    from .settings.curator_profile import effective_auxiliary_model_profile
+
+    def resolve_backend():
+        prof = effective_auxiliary_model_profile(getattr(agent, "config", config))
+        if not prof:
+            return None
+        backend, _, _, fallback = _curator_backend(agent, prof)
+        if getattr(backend, "name", "") == "unconfigured" or fallback:
+            return None
+        return backend
+
+    curator_be = getattr(getattr(agent, "memory_curator", None), "backend", None)
     return SkillLearningService(
         SkillLearningStore.for_home(agent.home_paths),
         SkillLearningSettings.from_config(config),
         SkillLearningRuntime(
-            backend=agent.memory_curator.backend,
+            backend=curator_be,
             snapshot_provider=lambda: agent.skills_service.snapshot_for(),
             guard_config=config,
             owner_id=str(agent.home_paths.owner_id or "local/main"),
             protection_provider=lambda: learning_protection_for_agent(agent),
             lesson_provider=lambda: SkillProposalService(agent.home_paths, config=config),
             deployment_root=agent.home_paths.root,
-            backend_provider=lambda: _curator_backend(agent, str(getattr(agent.config, "memory_curator_model_profile", "") or "").strip())[0],
+            backend_provider=resolve_backend,
         ),
     )
 

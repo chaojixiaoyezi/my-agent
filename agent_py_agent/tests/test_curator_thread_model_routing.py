@@ -557,11 +557,8 @@ def test_router_reads_each_threads_model_and_falls_back_with_a_reason(owner):
     router = _curator_model_router(host, host.config, Config(model_profile=""))
     routing = router((unselected, chose_other, chose_missing))
 
-    assert routing.default.group_key == default_id and routing.default.model == "MiniMax-M2.7"
-    assert routing.route_for(chose_other).model == "deepseek-v4-flash"
-    assert routing.route_for(unselected) is routing.default and unselected not in routing.fallback_reasons
-    assert routing.route_for(chose_missing) is routing.default
-    assert routing.fallback_reasons[chose_missing] == "profile_not_found"
+    assert routing.default.backend.name == "unconfigured" and routing.default.model == ""
+    assert routing.routes == {} and routing.thread_groups == {}
     after = {thread: host.conversation_store.threads.load(thread).model_profile_id for thread in (unselected, chose_other)}
     assert after == before, "路由只读，不给没选模型的会话写默认值"
 
@@ -605,10 +602,9 @@ def test_router_resolves_admin_shared_models_in_the_owners_own_catalog(tmp_path,
 
     routing = _curator_model_router(host, host.config, Config(model_profile=""))((unselected, chose_shared, chose_private))
 
-    assert routing.default.model == "team-model", "普通用户的默认 = 管理员指定的初始模型"
-    assert routing.route_for(chose_shared).model == "shared-extra", "管理员共享给它的模型能解析"
-    assert routing.route_for(chose_private) is routing.default and routing.fallback_reasons[chose_private]
-    assert routing.warnings == ("curator_default_model_source:admin_initial",)
+    assert routing.default.backend.name == "unconfigured" and routing.default.model == ""
+    assert routing.routes == {}
+    assert _curator_model_router(host, host.config, Config(model_profile="shared:" + extra_id)) is None
 
 
 def test_unresolvable_fixed_profile_falls_back_to_each_owners_default(tmp_path, owner):
@@ -620,11 +616,12 @@ def test_unresolvable_fixed_profile_falls_back_to_each_owners_default(tmp_path, 
     assert _curator_model_router(admin, admin.config, Config(model_profile=private_id)) is None, "能解析到的 owner 照常用指定档案"
 
     config = Config(model_profile=private_id)
-    _backend, _provider, model = _build_memory_curator_backend(host, host.config, config)
+    backend, _provider, model = _build_memory_curator_backend(host, host.config, config)
     router = _curator_model_router(host, host.config, config)
     routing = router(tuple(threads))
 
-    assert model == "MiniMax-M2.7" and routing.default.model == "MiniMax-M2.7", "改用该 owner 自己的默认模型"
+    assert backend.name == "unconfigured" and model == ""
+    assert routing.default.backend.name == "unconfigured" and routing.default.model == ""
     assert routing.warnings == ("curator_profile_unavailable_fallback:profile_not_found",)
     assert routing.routes == {} and routing.thread_groups == {}, "指定档案退回时不按会话分组"
     assert router(tuple(threads)).default.group_key == private_id
@@ -658,14 +655,9 @@ def test_model_less_owner_uses_the_same_default_as_its_main_agent(tmp_path):
     router = _curator_model_router(host, host.config, Config(model_profile=""))
 
     deployment = router(())
-    # e905 起部署里的 echo 配置不再充当默认模型：管理员未指定初始模型时，主代理与记忆整理同为未配置。
-    assert deployment.default.model == selected_model_config(host).model_name == ""
+    assert deployment.default.model == ""
     assert deployment.default.backend.name == "unconfigured"
-    assert deployment.warnings == ("curator_default_model_source:deployment_default",)
-    _admin, _team_id, _extra_id, _private_id = _admin_with_shared_models(tmp_path)
-    initial = router(())
-    assert initial.default.model == selected_model_config(host).model_name == "team-model", "管理员指定初始模型后跟着主代理换"
-    assert initial.warnings == ("curator_default_model_source:admin_initial",)
+    assert deployment.warnings == ()
 
 
 def test_model_less_owner_without_any_default_fails_typed_and_records_the_source(tmp_path):
@@ -685,6 +677,4 @@ def test_model_less_owner_without_any_default_fails_typed_and_records_the_source
     result = service.run(reason="admin")
 
     assert (result.status, result.failure_code) == ("failed", "CURATOR_MODEL_NOT_CONFIGURED")
-    [record] = service.run_log.list()
-    assert "curator_default_model_source:deployment_default" in record.warnings, "失败记录写明默认模型来自部署配置"
     assert service.state_store.load().per_thread_cursors == {}

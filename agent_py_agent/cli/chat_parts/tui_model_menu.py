@@ -314,14 +314,17 @@ async def _vector_menu(app, agent, session_id: str) -> str:
 
 
 # LLM: 共享与初始模型的权限以 Gateway 回执为准（只有管理员能改），菜单不做授权判断。
-# 函数用途: 「默认模型与共享」二级菜单：我的新会话默认、共享给其他用户、其他用户的初始模型。
+# 函数用途: 「默认模型与共享」二级菜单：我的新会话默认、后台辅助模型、共享给其他用户、其他用户的初始模型。
 async def _defaults_menu(app, agent, session_id: str, runtime) -> str:
     kind = await _choose_action(app, "默认模型与共享", [
         ("set_default", "我的新会话默认模型（不修改已打开的会话）"),
+        ("auxiliary", "后台辅助模型（记忆整理与技能自学习）"),
         ("sharing", "共享给其他用户（管理员；开放或撤销）"),
         ("initial", "其他用户的初始模型（管理员；没自己选过模型的用户用它）")])
     if kind == "set_default":
         return await _select_model(app, agent, session_id, runtime, operation="set_default")
+    if kind == "auxiliary":
+        return await _auxiliary_menu(app, agent, session_id)
     from .tui_shared_model_menu import choose_initial_model, manage_shared_models
 
     if kind == "sharing":
@@ -329,3 +332,33 @@ async def _defaults_menu(app, agent, session_id: str, runtime) -> str:
     if kind == "initial":
         return await choose_initial_model(app, agent, session_id)
     return ""
+
+
+# LLM: 选择后台辅助模型（统一用于记忆整理与技能自学习）；选择后即刻生效，无需重启Gateway。
+# 函数用途: 「默认模型与共享 → 后台辅助模型」单选框与关闭操作。
+async def _auxiliary_menu(app, agent, session_id: str) -> str:
+    listing = await _request(app, agent, session_id, "auxiliary_list")
+    if listing.get("ok") is not True:
+        return str(listing.get("message") or "读取后台辅助模型失败，配置未修改。")
+    current = str(listing.get("auxiliary_profile_id") or "")
+    status_label = f"当前后台辅助模型：{current}" if current else "当前未指定后台辅助模型（已关闭后台自动整理与自学习）"
+    rows = [("", f"{'● ' if not current else ''}不指定（关闭后台自动整理与自学习）")]
+    for row in listing.get("choices", []):
+        mark = "● " if row["id"] == current else ""
+        label = f"{mark}{row['model_name']} · {row.get('provider_name') or ''} · 档案编号：{row['id']}"
+        if row.get("shared"):
+            label += "（管理员共享）"
+        rows.append((row["id"], label))
+    choices = RadioList(rows, default=current, select_on_focus=True)
+    selected = await _dialog(
+        app,
+        "后台辅助模型（记忆整理与技能自学习）",
+        HSplit([Label(status_label), choices]),
+        (("保存", lambda: choices.current_value), ("返回", None)),
+        focus=choices,
+    )
+    if selected is None:
+        return ""
+    operation, payload = ("auxiliary_select", {"profile_id": selected}) if selected else ("auxiliary_off", {})
+    result = await _request(app, agent, session_id, operation, payload)
+    return str(result.get("message") or ("已保存。" if result.get("ok") else "保存失败。"))

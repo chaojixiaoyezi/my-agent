@@ -269,7 +269,7 @@ def is_provider_quota_failure(exc: BaseException) -> bool:
 # LLM: 检查压缩调用异常链中是否存在瞬态提供者错误（限流、超时、不可用），供车道退避与毒丸统一判定。
 # 函数用途: 判定压缩异常是否由瞬态提供者失败引发（排除额度用完），便于调度退避而非永久停等用户输入。
 def is_compact_transient_provider_failure(exc: BaseException) -> bool:
-    from ..backends.errors import ProviderTransientError
+    from ..backends.errors import ProviderTimeoutError, ProviderTransientError
 
     if is_provider_quota_failure(exc):
         return False
@@ -278,10 +278,13 @@ def is_compact_transient_provider_failure(exc: BaseException) -> bool:
         "PROVIDER_UNAVAILABLE",
         "PROVIDER_TIMEOUT",
         "TRANSIENT_ERROR",
+        "MODEL_STREAM_INCOMPLETE",
+        "PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED",
         "COMPACT_PROVIDER_RATE_LIMITED",
         "COMPACT_PROVIDER_UNAVAILABLE",
         "COMPACT_PROVIDER_TIMEOUT",
         "COMPACT_TRANSIENT_ERROR",
+        "COMPACT_TRANSIENT_FAILURE",
     }
     queue: list[BaseException] = [exc]
     seen: set[int] = set()
@@ -292,17 +295,32 @@ def is_compact_transient_provider_failure(exc: BaseException) -> bool:
             continue
         seen.add(id(curr))
         links_checked += 1
-        if isinstance(curr, ProviderTransientError):
+        if isinstance(curr, (ProviderTransientError, ProviderTimeoutError, TimeoutError, ConnectionError)):
             return True
         code = compact_exception_code(curr)
-        if code in transient_codes:
-            return True
+        if (
+            code in transient_codes
+            or (code.startswith("COMPACT_") and any(sub in code for sub in ("TIMEOUT", "TRANSIENT", "RATE_LIMIT", "UNAVAILABLE", "503", "429")))
+            or (code.startswith("COMPACT_PROVIDER") and not is_provider_quota_failure(curr))
+        ):
+            if not is_provider_quota_failure(curr):
+                return True
         err_code = str(getattr(curr, "error_code", "") or "").strip().upper()
-        if err_code in transient_codes:
-            return True
+        if (
+            err_code in transient_codes
+            or (err_code.startswith("COMPACT_") and any(sub in err_code for sub in ("TIMEOUT", "TRANSIENT", "RATE_LIMIT", "UNAVAILABLE", "503", "429")))
+            or (err_code.startswith("COMPACT_PROVIDER") and not is_provider_quota_failure(curr))
+        ):
+            if not is_provider_quota_failure(curr):
+                return True
         c_code = str(getattr(curr, "code", "") or "").strip().upper()
-        if c_code in transient_codes:
-            return True
+        if (
+            c_code in transient_codes
+            or (c_code.startswith("COMPACT_") and any(sub in c_code for sub in ("TIMEOUT", "TRANSIENT", "RATE_LIMIT", "UNAVAILABLE", "503", "429")))
+            or (c_code.startswith("COMPACT_PROVIDER") and not is_provider_quota_failure(curr))
+        ):
+            if not is_provider_quota_failure(curr):
+                return True
         for next_link in (getattr(curr, "__cause__", None), getattr(curr, "__context__", None)):
             if isinstance(next_link, BaseException) and id(next_link) not in seen:
                 queue.append(next_link)

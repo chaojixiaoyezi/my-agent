@@ -33,6 +33,8 @@ from ..agent.user_space.owner_quota import OwnerQuotaUnavailable
 LANE_ENVIRONMENT_PROBE_BASE_SECONDS = 60.0
 # 环境级故障探测间隔封顶 900 秒：翻倍退避到上限后不再增长
 LANE_ENVIRONMENT_PROBE_MAX_SECONDS = 900.0
+# 后台 headless (thread-bg-*) 车道连续失败自动重试上限（达到后暂停等待新输入/新任务派发）
+_MAX_HEADLESS_CONSECUTIVE_RETRIES = 3
 
 
 # LLM: 不保存异常正文、配置或密钥；模型依赖不靠计时解除，普通错误仍按单调时钟冷却。
@@ -77,11 +79,19 @@ class BackgroundLaneRetry:
             self._failures[key] = row
         if row.waiting_for_user_input and (previous is None or not previous.waiting_for_user_input
                                           or previous.inbound_marker != row.inbound_marker):
-            logging.getLogger(__name__).warning(
-                "BACKGROUND_LANE_WAITING_FOR_USER_INPUT owner=%s thread_id=%s error_type=%s",
-                owner, thread_id, type(exc).__name__,
-                extra={"failure_class": "waiting_for_user_input"},
-            )
+            if headless:
+                err_code = str(getattr(exc, "error_code", "") or getattr(exc, "code", "") or type(exc).__name__)
+                logging.getLogger(__name__).warning(
+                    "HEADLESS_BACKGROUND_LANE_RETRY_CAP_REACHED owner=%s thread_id=%s error_code=%s retry_cap=3/3",
+                    owner, thread_id, err_code,
+                    extra={"failure_class": "headless_retry_cap_reached"},
+                )
+            else:
+                logging.getLogger(__name__).warning(
+                    "BACKGROUND_LANE_WAITING_FOR_USER_INPUT owner=%s thread_id=%s error_type=%s",
+                    owner, thread_id, type(exc).__name__,
+                    extra={"failure_class": "waiting_for_user_input"},
+                )
         if row.waiting_for_storage and row.wait_count == 1:
             _log_lane_event("storage_wait", key, {"wait_count": row.wait_count,
                 "next_check_at": row.retry_at, "error_type": type(exc).__name__})
@@ -200,10 +210,26 @@ def _next_failure(
     headless: bool = False,
 ) -> _LaneFailure:
     now = time.monotonic()
+    if headless:
+        attempt = (previous.wait_count + 1) if previous is not None else 1
+        if attempt >= _MAX_HEADLESS_CONSECUTIVE_RETRIES:
+            return _LaneFailure(0.0, False, waiting_for_user_input=True, wait_count=attempt)
+        if isinstance(exc, OwnerQuotaUnavailable):
+            interval = min(30.0, 2.0 ** min(attempt - 1, 5))
+            return _LaneFailure(now + interval, False, waiting_for_storage=True, wait_count=attempt)
+        if isinstance(exc, ModelNotConfiguredError):
+            return _LaneFailure(0.0, True, wait_count=attempt)
+        if not (is_provider_environment_fault(exc) or is_provider_quota_failure(exc)):
+            interval = min(LANE_ENVIRONMENT_PROBE_MAX_SECONDS, max(0.0, delay) * 2.0 ** min(attempt - 1, 5))
+            return _LaneFailure(now + interval, False, wait_count=attempt)
+        interval = LANE_ENVIRONMENT_PROBE_BASE_SECONDS
+        if previous is not None and previous.waiting_for_environment:
+            interval = min(previous.probe_interval * 2, LANE_ENVIRONMENT_PROBE_MAX_SECONDS)
+        return _LaneFailure(now + interval, False, waiting_for_environment=True, probe_interval=interval, wait_count=attempt)
+
     # 压缩包装的额度错误仍由原环境探测/模型指纹恢复，不能强制等待新消息。
     if (
-        not headless
-        and isinstance(exc, (RuntimeRecoveryRequiredError, ConversationCompactError))
+        isinstance(exc, (RuntimeRecoveryRequiredError, ConversationCompactError))
         and not is_provider_quota_failure(exc)
         and not is_compact_transient_provider_failure(exc)
     ):
