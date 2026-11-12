@@ -34,9 +34,11 @@ class RuntimeDatabaseDeferred(sqlite3.OperationalError):
     sqlite_errorname = "SQLITE_BUSY"
     status = "deferred"
     code = "RUNTIME_DB_RECOVERY_DEFERRED"
+    error_code = "RUNTIME_DB_RECOVERY_DEFERRED"
 
     def __init__(self, reason):
         self.reason = reason
+        self.error_code = self.code
         super().__init__(self.code + ": " + reason)
 
 

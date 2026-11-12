@@ -82,7 +82,8 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
             payload["top_p"] = self.top_p
         tools = tools_for_choice(request.tools, request.tool_choice)
         if tools:
-            payload["tools"] = [{"type": "function", "name": tool["name"], "description": tool.get("description", ""),
+            payload["tools"] = [{"type": "function", "name": tool["name"],
+                                 "description": str(tool.get("description") or "").strip() or f"Tool {tool['name']}",
                                  "parameters": tool["input_schema"], "strict": False} for tool in tools]
             choice = request.tool_choice
             from ..tooling.runtime_contracts import ToolChoice

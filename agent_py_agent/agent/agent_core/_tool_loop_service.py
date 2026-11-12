@@ -2097,6 +2097,16 @@ def execute_tool_loop(agent, params: ToolLoopExecuteParams) -> ToolLoopRunResult
             if final_response:
                 break
 
+        if final_response and not str(getattr(final_response, "text", "") or "").strip():
+            if str(getattr(final_response, "runtime_reason", "") or "") == REPEATED_IDENTICAL_TOOL_FAILURE:
+                halt = getattr(params, "identical_failure_halt", None)
+                tool_name = getattr(halt, "tool_name", "") or "工具"
+                err_code = getattr(halt, "error_code", "") or REPEATED_IDENTICAL_TOOL_FAILURE
+                final_response = replace(
+                    final_response,
+                    text=f"系统已结束本轮：{tool_name} 连续执行失败（{err_code}）。任务和目标已保留，请调整后重试。",
+                )
+
         from .tool_loop.reply_diagnostic import ReplyLoopFacts, attach_user_reply_diagnostic
 
         attach_user_reply_diagnostic(params, final_response, ReplyLoopFacts(repair_counters, tool_rounds))
@@ -2523,8 +2533,16 @@ def _clear_identical_failure_halt(params: object) -> None:
 def _identical_failure_response(agent, params: ToolLoopExecuteParams) -> ModelResponse:
     backend = str(getattr(getattr(agent, "backend", None), "name", "") or "tool_loop")
     child = _is_subagent_task_local_run(params)
+    text = ""
+    if getattr(params, "identical_failure_halt", None) is not None:
+        text = identical_failure_closeout_text(params.identical_failure_halt, for_child=child)
+    if not str(text or "").strip():
+        halt = getattr(params, "identical_failure_halt", None)
+        tool_name = getattr(halt, "tool_name", "") or "工具"
+        err_code = getattr(halt, "error_code", "") or REPEATED_IDENTICAL_TOOL_FAILURE
+        text = f"系统已结束本轮：{tool_name} 连续执行失败（{err_code}）。任务和目标已保留，请调整后重试。"
     return ModelResponse(
-        text=identical_failure_closeout_text(params.identical_failure_halt, for_child=child),
+        text=text,
         backend=backend,
         runtime_status="blocked" if child else "unfinished",
         runtime_reason=REPEATED_IDENTICAL_TOOL_FAILURE,

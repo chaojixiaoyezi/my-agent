@@ -26,11 +26,14 @@ _MAX_USAGE_TAG_COUNT = 16
 # LLM: 此类错误仅使用固定脱敏文案；reason 是解析器提供的结构化原因，不从文案反推，不包含凭据。
 # 类用途: 表示用户可以在模型表单中修正的配置错误。
 class ModelProfileError(ValueError):
+    error_code = "MODEL_PROFILE_UNAVAILABLE"
+
     # LLM: 默认原因用于旧校验分支；用途、停用与缺凭据在唯一连接解析点给出明确原因，调用方不能解析中文。
     # 函数用途: 同时携带可展示说明和机器可读的档案不可用原因。
     def __init__(self, message: str, *, reason: str = "catalog_invalid") -> None:
         super().__init__(message)
         self.reason = reason
+        self.error_code = "MODEL_PROFILE_UNAVAILABLE"
 
 
 # LLM: 持久代次由原保存事务生成 UUID4，不接受秘密摘要或任意展示文本；缺失只在显式旧版迁移中表示未知。

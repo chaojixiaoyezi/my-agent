@@ -1457,7 +1457,33 @@ class RuntimeRepository(
         ).fetchone()
         facts = dict(row) if row is not None else {}
         events = self._foreground_recovery_events_conn(conn, task_id=task_id)
-        pending = [event for event in events if not event["delivered_event_id"]]
+        raw_pending = [event for event in events if not event["delivered_event_id"]]
+        pending = []
+        for event in raw_pending:
+            ev_attempt_id = str(event["attempt_id"] or "")
+            ev_thread_id = str(event["thread_id"] or facts.get("thread_id") or "")
+            newer_terminal = conn.execute(
+                "SELECT at.attempt_id FROM agent_attempts at "
+                "JOIN agent_runs ar ON ar.agent_run_id=at.agent_run_id "
+                "JOIN task_runs tr ON tr.task_run_id=ar.task_run_id "
+                "JOIN tasks t ON t.task_id=tr.task_id "
+                "WHERE (t.task_id=? OR t.thread_id=?) "
+                "AND ar.role='main' "
+                "AND at.started_at > (SELECT COALESCE(e_at.started_at, 0) FROM agent_attempts e_at WHERE e_at.attempt_id=?) "
+                "AND at.status IN ('completed', 'failed', 'cancelled', 'done') "
+                "ORDER BY at.started_at DESC LIMIT 1",
+                (task_id, ev_thread_id, ev_attempt_id),
+            ).fetchone()
+            if newer_terminal is not None:
+                newer_attempt_id = newer_terminal["attempt_id"]
+                unsettled_ops = conn.execute(
+                    "SELECT 1 FROM tool_operations WHERE attempt_id=? AND (status IN ('executing', 'unknown') "
+                    "OR (status='claimed' AND handler_started_at > 0)) LIMIT 1",
+                    (newer_attempt_id,),
+                ).fetchone()
+                if unsettled_ops is None:
+                    continue
+            pending.append(event)
         reason = _main_agent_recovery_reason(facts.get("run_status", ""), facts.get("attempt_status", ""))
         if not reason and pending:
             reason = "foreground_recovery_handoff_pending"
