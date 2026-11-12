@@ -156,7 +156,7 @@ def _call_gateway_api(
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
         with open_authenticated_request(req, timeout=timeout) as resp:
-            content = resp.read(65536).decode("utf-8")
+            content = resp.read().decode("utf-8")
             payload = json.loads(content) if content else {}
             return resp.status, payload
     except urllib.error.HTTPError as exc:
@@ -176,7 +176,15 @@ def is_panel_command(text: str) -> bool:
     """匹配 /agents 或 /panel 指令（支持可选参数）。"""
     if not isinstance(text, str):
         return False
-    return bool(_PANEL_CMD_REGEX.match(text.strip()))
+    match = _PANEL_CMD_REGEX.match(text.strip())
+    if not match:
+        return False
+    if match.group(1).lower() == "panel":
+        return True
+    arg = (match.group(2) or "").strip()
+    if not arg:
+        return True
+    return arg.startswith(("stask_", "stask:", "root:"))
 
 
 def parse_panel_command_arg(text: str) -> str:
