@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 
 from ...agent.plugin_host.errors import HostAPIError
 from ..space_commands import BusinessClient, PreparedBusinessCall, business_client_for_agent
@@ -53,9 +54,16 @@ class TuiBackgroundAgents:
         else:
             self.count = len(self.rows) if complete else None
         known_work = {'idle', 'running', 'waiting', 'queued', 'failed', 'completed', 'cancelled'}
-        running = sum(row.get('work_state') == 'running' for row in self.rows)
-        self.running_count = running if (complete and self.count is not None and running <= self.count <= len(self.rows)
-            and all(isinstance(row.get('work_state'), str) and row['work_state'] in known_work for row in self.rows)) else None
+        if isinstance(data.get('quota'), dict) and data['quota'].get('coverage') == 'complete' and type(self.count) is int and self.count >= 0 and not data.get('next_cursor'):
+            non_retired = [row for row in self.rows if row.get('identity_state') != 'retired']
+            if len(non_retired) >= self.count and all(isinstance(row.get('work_state'), str) and row['work_state'] in known_work for row in non_retired):
+                self.running_count = sum(row.get('work_state') == 'running' for row in non_retired)
+            else:
+                self.running_count = None
+        else:
+            running = sum(row.get('work_state') == 'running' for row in self.rows)
+            self.running_count = running if (complete and self.count is not None and running <= self.count <= len(self.rows)
+                and all(isinstance(row.get('work_state'), str) and row['work_state'] in known_work for row in self.rows)) else None
         # 只合并本页已经观察到的准确身份，不能用第一页缺席推断其它空间内Agent消失。
         latest = {row['agent_id']: row for row in self.rows}
         with self._lock:
@@ -232,8 +240,13 @@ class TuiBackgroundAgents:
                 self.coverage = 'unknown'
         data = result.get('data') if result.get('ok') is True else None
         if not isinstance(data, dict) or not isinstance(data.get('items'), list):
+            err = result.get('error') if isinstance(result.get('error'), dict) else {}
+            err_code = err.get('code') or result.get('error_code', 'TRANSPORT_ERROR')
+            err_msg = err.get('message') or result.get('error_message', '')
             return {'items': [], 'coverage': 'unknown', 'next_cursor': cursor,
-                    'read_denied': result.get('http_status') in (401, 403, 404)}
+                    'read_denied': result.get('http_status') in (401, 403, 404),
+                    'error_code': err_code, 'error_message': err_msg,
+                    'http_status': result.get('http_status')}
         coverage = data.get('coverage', 'unknown')
         items, message_ids = [], set()
         for row in data['items'][:100]:
@@ -397,6 +410,54 @@ def submit_business_input(event, params, text: str, *, has_media: bool = False) 
         params.input_area.buffer.reset()
         event.app.invalidate()
         return True
+    if text in ('/clear', '/new'):
+        thread_id = getattr(snapshot, 'active_thread_id', '') or agent_id
+        runtime.publish_conversation_reset(thread_id)
+        if navigation:
+            navigation._business_messages.pop(thread_id, None)
+            navigation._business_history.pop(thread_id, None)
+        runtime.set_notice('已重置当前后台会话本地视图；后台Agent席位与空间保持不变', duration_seconds=4)
+        params.input_area.buffer.reset()
+        event.app.invalidate()
+        return True
+    if text in ('/pause', '/suspend', '/resume', '/retire'):
+        action_name = 'suspend' if text in ('/pause', '/suspend') else ('resume' if text == '/resume' else 'retire')
+
+        async def run_lifecycle():
+            import asyncio
+            get_res = await asyncio.to_thread(projection.client.call, 'background_agents.get', {'agent_id': agent_id})
+            if not get_res.get('ok'):
+                err = get_res.get('error') if isinstance(get_res.get('error'), dict) else {}
+                err_code = err.get('code') or get_res.get('error_code', 'GET_FAILED')
+                outcome = get_res.get('effect_outcome', 'not_started')
+                runtime.write_console(f"获取后台Agent状态失败：{err_code} (outcome: {outcome})")
+                runtime.set_notice(f"操作失败：{err_code} · {outcome}；可按 Ctrl+G 返回", duration_seconds=4)
+                event.app.invalidate()
+                return
+            agent_data = get_res.get('data', {}).get('agent', {})
+            rev = agent_data.get('revision')
+            call_params = {'agent_id': agent_id}
+            if action_name == 'retire':
+                call_params['disposition'] = 'drain'
+            prepared_call = projection.client.prepare(f'background_agents.{action_name}', call_params, expected_revision=rev)
+            res = await asyncio.to_thread(projection.client.send, prepared_call)
+            await asyncio.to_thread(projection.refresh)
+            if res.get('ok'):
+                new_rev = res.get('data', {}).get('revision', rev)
+                runtime.write_console(f"后台Agent {agent_id} {action_name} 成功：状态 {res.get('state', 'completed')}，版本 {new_rev}")
+                runtime.set_notice(f"状态更新：{action_name} 成功（版本 {new_rev}）", duration_seconds=4)
+            else:
+                err = res.get('error') if isinstance(res.get('error'), dict) else {}
+                err_code = err.get('code') or res.get('error_code', 'ACTION_FAILED')
+                outcome = res.get('effect_outcome', 'unknown')
+                runtime.write_console(f"后台Agent {action_name} 失败：{err_code} (outcome: {outcome})")
+                runtime.set_notice(f"执行失败：{err_code} · {outcome}；可按 Ctrl+G 返回", duration_seconds=4)
+            event.app.invalidate()
+
+        event.app.create_background_task(run_lifecycle())
+        params.input_area.buffer.reset()
+        event.app.invalidate()
+        return True
     if text.startswith('/') and text != '/tree' and not text.startswith('/log '):
         runtime.set_notice('当前为后台会话；Ctrl+G 返回后使用 /team 等命令，未发送。', duration_seconds=3)
         return True
@@ -420,7 +481,8 @@ def submit_business_input(event, params, text: str, *, has_media: bool = False) 
 
     event.app.create_background_task(send())
     if prepared is not None:
-        runtime.write_console('你：' + text)
+        req_id = f"bg-msg-{time.time_ns()}"
+        runtime.enqueue_prompt(req_id, text, queued=False, observed=True)
     params.input_area.buffer.reset()
     event.app.invalidate()
     return True

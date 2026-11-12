@@ -49,6 +49,15 @@ def _digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+class BackgroundAgentListIndex(SessionListIndex):
+    """隔离前台 chat threads，确保后台 seat 索引互不污染且按 version 平滑自愈。"""
+
+    def __init__(self, root, *, reader):
+        super().__init__(root, kind="thread", reader=reader)
+        self.path = self.root.parent / f".{self.root.name}-background_agents_v2-list.sqlite3"
+        self.scope = hashlib.sha256(f"{self.root.resolve()}:background_agents_v2".encode()).hexdigest()[:24]
+
+
 def _params(action, request):
     return validate_object(request, business_action_spec(action).params_schema)
 
@@ -134,8 +143,12 @@ class BackgroundAgentService:
     def _index(self):
         def read(path):
             thread, error = _read_thread_record_report(path)
-            return thread.to_dict() if thread else {}, error
-        return SessionListIndex(self.store.storage.threads_dir, kind="thread", reader=read)
+            if error is not None:
+                return {}, error
+            if thread is None or background_identity(thread) is None:
+                return {"owner_id": "__foreground__"}, None
+            return thread.to_dict(), None
+        return BackgroundAgentListIndex(self.store.storage.threads_dir, reader=read)
 
     def _publish(self, thread):
         self._index().publish(self.store.storage.thread_path(thread.thread_id))
@@ -333,9 +346,28 @@ class BackgroundAgentService:
         if params.get("space_id"):
             self._space(params["space_id"], actor)
         page = self._index().page(limit=params.get("limit", 50), cursor=params.get("cursor"), filter_key=actor.owner_id)
+        candidate_threads = [ConversationThread.from_dict(payload) for payload in page["items"]]
+        if not params.get("cursor"):
+            seen_ids = {t.thread_id for t in candidate_threads}
+            quota = BackgroundAgentQuota(self)
+            try:
+                with quota._connection() as conn:
+                    rows = conn.execute("SELECT thread_id FROM active_refs WHERE owner_id=?", (actor.owner_id,)).fetchall()
+                    active_ids = {r[0] for r in rows if r and r[0]}
+            except Exception:
+                active_ids = set()
+            for tid in sorted(active_ids - seen_ids):
+                path = self.store.storage.thread_path(tid)
+                thread, error = _read_thread_record_report(path)
+                if not error and thread is not None:
+                    try:
+                        self._publish(thread)
+                    except Exception:
+                        pass
+                    candidate_threads.append(thread)
+            candidate_threads.sort(key=lambda t: (-float(getattr(t, "updated_at", 0) or 0), getattr(t, "thread_id", "")))
         items = []
-        for payload in page["items"]:
-            thread = ConversationThread.from_dict(payload)
+        for thread in candidate_threads:
             identity = background_identity(thread)
             if thread.owner_id != actor.owner_id or identity is None or ("space_id" in params and identity.space_id != params["space_id"]):
                 continue
@@ -345,6 +377,8 @@ class BackgroundAgentService:
                 continue
             self._space(identity.space_id, actor)
             items.append(self._agent_view(thread))
+            if len(items) >= params.get("limit", 50):
+                break
         return {"items": items, "next_cursor": page["next_cursor"],
                 "coverage": "partial" if page["load_errors"] else page["coverage"],
                 "quota": self.quota_summary(actor=actor)}

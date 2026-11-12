@@ -545,11 +545,22 @@ class BusinessObservationService:
                 context.project_ref if context else facts.project_ref, task.task_id if task else None, thread.thread_id)
             if not self._visible(message_facts, 'messages.list', params, actor):
                 continue
-            if len(row.content) > 262144:
-                raise BusinessError('RESULT_LIMIT_EXCEEDED')
+            _MAX_MESSAGE_VIEW_CHARS = 262144
+            original_len = len(row.content)
+            if original_len > _MAX_MESSAGE_VIEW_CHARS:
+                suffix = f"\n...[单条历史消息过长已截断预览，原长度 {original_len} 字符]..."
+                raw_text = row.content[: _MAX_MESSAGE_VIEW_CHARS - len(suffix) - 256] + suffix
+                text = str(redact_sensitive_value(raw_text))
+                if len(text) > _MAX_MESSAGE_VIEW_CHARS:
+                    text = text[: _MAX_MESSAGE_VIEW_CHARS - len(suffix)] + suffix
+            else:
+                text = str(redact_sensitive_value(row.content))
+                if len(text) > _MAX_MESSAGE_VIEW_CHARS:
+                    suffix = f"\n...[单条历史消息过长已截断预览，原长度 {original_len} 字符]..."
+                    text = text[: _MAX_MESSAGE_VIEW_CHARS - len(suffix)] + suffix
             items.append({'message_id': row.message_id, 'thread_id': thread.thread_id,
                 'task_id': message_facts.task_id, 'space_id': message_facts.space_id, 'role': row.role,
-                'text': redact_sensitive_value(row.content), 'occurred_at': _timestamp(row.created_at),
+                'text': text, 'occurred_at': _timestamp(row.created_at),
                 'source': {'kind': 'canonical_message', 'source_ref': row.message_id, 'revision': None}, 'artifact_refs': []})
         offset += len(selected)
         next_position = ({'before': page.after, 'offset': offset, 'bound_limit': bound_limit} if offset < len(page.rows)

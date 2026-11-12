@@ -2063,6 +2063,15 @@ class TuiRuntime(_TuiSessionRuntimeMixin):
                 self._notice_until = 0.0
             return self._notice_text
 
+    def notice_kind(self) -> str:
+        now = time.monotonic()
+        with self._lock:
+            if self._notice_text and now >= self._notice_until:
+                self._notice_text = ""
+                self._notice_kind = ""
+                self._notice_until = 0.0
+            return self._notice_kind
+
     # LLM: Periodic refresh stays alive only for time-varying typed state. Expired notices and
     # committed background terminals each request exactly one follow-up frame so an invalidate
     # racing the prior render cannot leave stale Working/final text painted. A retained terminal-
@@ -3144,6 +3153,15 @@ def _consume_gateway_turn_event(
         return _close_resumed_turn_generation(adapter, payload)
     if kind == "host_notice":
         return _publish_host_notice(adapter, payload)
+    if kind == "runtime_notice":
+        info = payload.get("runtime_notice") if isinstance(payload.get("runtime_notice"), Mapping) else payload
+        text = str(info.get("text") or "").strip()
+        level = str(info.get("level") or "warning").strip()
+        if text:
+            notice_kind = "warning" if level == "warning" else str(info.get("notice_kind") or "interaction")
+            adapter.runtime.set_notice(text, duration_seconds=8.0, notice_kind=notice_kind)
+            return True
+        return False
     if kind == "permission_requested" and isinstance(payload.get("permission"), dict):
         adapter._permissions.open(ToolApprovalRequest.from_mapping(payload["permission"]))
         return True
