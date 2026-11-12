@@ -7,10 +7,13 @@ from __future__ import annotations
 """
 
 import json
+import logging
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
+
+_LOGGER = logging.getLogger(__name__)
 
 from ..tooling.models import (
     ToolFailureStage,
@@ -162,8 +165,13 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         outcome = guarded_tool_call_result(prepared_request) or prepared_promotion_outcome
         if outcome is None:
             # 能力包 v2 块 3：本 run 第一次改工作区之前记基线（开关关着时零开销）。
-            _pack_verification_hooks().capture_baseline_before_tool(
-                runtime_request.agent, runtime_request.request.params, call.tool_name)
+            try:
+                _pack_verification_hooks().capture_baseline_before_tool(
+                    runtime_request.agent, runtime_request.request.params, call.tool_name)
+            except (InterruptedError, KeyboardInterrupt):
+                raise
+            except Exception as exc:
+                _LOGGER.warning("capture baseline before tool failed: %s", exc, exc_info=True)
             return None
         return apply_tool_execution_facts(
             outcome,
@@ -208,14 +216,50 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         "call_id": execution.call.call_id,
         **execution.call.arguments,
     }
-    result = _record_passive_verification(runtime_request.agent, execution.call, result)
-    result = _pack_verification_hooks().attach_post_write_verification(
-        runtime_request.agent, runtime_request.request.params, result)
+    try:
+        result = _record_passive_verification(runtime_request.agent, execution.call, result)
+    except (InterruptedError, KeyboardInterrupt):
+        raise
+    except Exception as exc:
+        _LOGGER.warning("passive verification failed: %s", exc, exc_info=True)
+
+    try:
+        result = _pack_verification_hooks().attach_post_write_verification(
+            runtime_request.agent, runtime_request.request.params, result)
+    except (InterruptedError, KeyboardInterrupt):
+        raise
+    except Exception as exc:
+        _LOGGER.warning("attach post write verification failed: %s", exc, exc_info=True)
+
     execution = replace(execution, result=result)
-    audit_privileged_tool_call(runtime_request.agent, executable_payload, result)  # 特权动作落审计(审计 #13)
+
+    try:
+        audit_privileged_tool_call(runtime_request.agent, executable_payload, result)  # 特权动作落审计(审计 #13)
+    except (InterruptedError, KeyboardInterrupt):
+        raise
+    except Exception as exc:
+        _LOGGER.warning("audit privileged tool call failed: %s", exc, exc_info=True)
+
+    from ..tooling.write_boundary import WRITE_TOOL_NAMES
+    if execution.call.tool_name in WRITE_TOOL_NAMES and getattr(result, "ok", False):
+        try:
+            from ..capability.skill_learning_host_feedback import record_user_skill_edit_after_tool
+            written_path = execution.call.arguments.get("path")
+            record_user_skill_edit_after_tool(runtime_request.agent, written_path)
+        except (InterruptedError, KeyboardInterrupt):
+            raise
+        except Exception as exc:
+            _LOGGER.warning("record user skill edit failed: %s", exc, exc_info=True)
+
     if one_shot_keys and _one_shot_result_consumes_key(result):
         runtime_request.request.params.one_shot_tool_calls.update(one_shot_keys)
-    trace_runner_tool_call_finished(_finished_trace_request(runtime_request, result))
+
+    try:
+        trace_runner_tool_call_finished(_finished_trace_request(runtime_request, result))
+    except (InterruptedError, KeyboardInterrupt):
+        raise
+    except Exception as exc:
+        _LOGGER.warning("trace runner tool call finished failed: %s", exc, exc_info=True)
     return execution
 
 
@@ -391,7 +435,7 @@ def _promote_conversation_task_for_work_tool(
 
     try:
         promoted = promote_conversation_task_for_run(runtime_request.agent, runtime_request.request.params)
-    except InterruptedError:
+    except (InterruptedError, KeyboardInterrupt):
         return ToolHandlerOutcome(
             tool_name or "conversation_task_binding",
             False,
@@ -399,6 +443,9 @@ def _promote_conversation_task_for_work_tool(
             error_code="CANCELLED",
             effect_outcome="not_started",
         )
+    except Exception as exc:
+        _LOGGER.warning("promote conversation task failed: %s", exc, exc_info=True)
+        promoted = None
     if promoted is not None:
         return None
     if not conversation_thread_id:

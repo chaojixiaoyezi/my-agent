@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -37,7 +39,9 @@ def capture_baseline_before_tool(agent: object, params: object, tool_name: str) 
         return
     try:
         capture_pack_baseline(agent, params)
-    except _HOOK_ERRORS:
+    except (InterruptedError, KeyboardInterrupt):
+        raise
+    except Exception:
         return
 
 
@@ -52,8 +56,10 @@ def attach_post_write_verification(agent: object, params: object, result: object
     try:
         with bind_cancellation_token(getattr(params, "cancellation_token", None) or current_cancellation_token()):
             summaries = verify_written_files(agent, params, written_paths(details))
-    except _HOOK_ERRORS:
-        return result
+    except (InterruptedError, KeyboardInterrupt):
+        raise
+    except Exception as exc:
+        summaries = [{"status": "warning", "error": f"pack verification error: {type(exc).__name__}"}]
     if not summaries:
         return result
     details["pack_verification"] = summaries
@@ -69,8 +75,39 @@ def closeout_rework_block(agent: object, params: object) -> str:
     try:
         with bind_cancellation_token(getattr(params, "cancellation_token", None) or current_cancellation_token()):
             return pack_verification_closeout_block(agent, params)
-    except _HOOK_ERRORS:
+    except (InterruptedError, KeyboardInterrupt):
+        raise
+    except Exception:
         return ""
+
+
+def run_pack_verification_hooks(
+    agent: object,
+    params: object,
+    hook: Callable | None = None,
+    payload: str | bytes | dict | None = None,
+) -> list[dict[str, object]]:
+    """Safe runner for pack verification hooks with json parsing guard."""
+    parsed = {}
+    if payload:
+        try:
+            if isinstance(payload, (str, bytes)):
+                parsed = json.loads(payload)
+            elif isinstance(payload, dict):
+                parsed = payload
+        except (json.JSONDecodeError, TypeError, ValueError):
+            parsed = {}
+    if callable(hook):
+        try:
+            res = hook(agent, params, parsed)
+            if isinstance(res, list):
+                return res
+            return [res] if isinstance(res, dict) else []
+        except (InterruptedError, KeyboardInterrupt):
+            raise
+        except Exception as exc:
+            return [{"status": "warning", "error": f"pack verification hook error: {type(exc).__name__}"}]
+    return []
 
 
 # LLM: artifact_refs 里标 deleted 的是旧地址墓碑，不算写出的文件；去重并保持回执里的顺序。

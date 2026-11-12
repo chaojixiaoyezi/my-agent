@@ -2,11 +2,13 @@
 # 模块用途: 把已落账的客观验证结果反馈给当前实际采用的方法，环境错误和普通工具成功不算质量证据。
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, replace
+from pathlib import Path
 
 from .skill_learning_maintenance import LearningObservationSource, observe_learning
 from .skill_learning_publish import SkillLearningGateError
-from .skill_learning_store import SkillLearningStore
+from .skill_learning_store import SkillLearningStore, SkillLearningStoreError
 
 _TARGET_KEYS = ('skill_id','skill_name','target_skill_id','asset_id','asset_ref','method_id','target_skill_ids')
 _HASH_KEYS = ('sha256','content_hash','content_sha256','skill_content_hash','version_hash')
@@ -52,8 +54,12 @@ def _observe(agent,params,outcome,receipt,evidence=None):
     current = getattr(agent,'_current_run_params',None)
     if not run_id or getattr(current,'run_id',None) != run_id or getattr(current,'attempt_id',None) != getattr(params,'attempt_id',None):
         return
-    store = SkillLearningStore.for_home(agent.home_paths)
-    registry = store.load_registry()
+    try:
+        store = SkillLearningStore.for_home(agent.home_paths)
+        registry = store.load_registry()
+    except (SkillLearningStoreError, OSError, ValueError) as exc:
+        logging.getLogger(__name__).warning("failed to load registry in _observe: %s", exc, exc_info=True)
+        return []
     evidence = evidence or {}
     adopted = [(row, [fact for fact in row.maintenance.get('observations', [])
                      if fact.get('authority') == 'model' and fact.get('outcome') == 'adopted'
@@ -78,6 +84,37 @@ def _observe(agent,params,outcome,receipt,evidence=None):
                 diagnostics.append({'status': 'stale', 'reason': error.code,
                                     'skill_id': 'owner:' + row.name, 'receipt_ref': receipt})
     return diagnostics
+
+
+def execute_skill_learning_host_action(agent: object, action: object) -> object:
+    """Execute skill learning host action guarding against store errors."""
+    try:
+        if callable(action):
+            return action(agent)
+        return None
+    except (InterruptedError, KeyboardInterrupt):
+        raise
+    except (SkillLearningStoreError, OSError, ValueError) as exc:
+        logging.getLogger(__name__).warning("execute_skill_learning_host_action error: %s", exc, exc_info=True)
+        return None
+
+
+def record_user_skill_edit_after_tool(agent: object, path: str | Path | None) -> None:
+    """Record user edit on learned skill file after tool execution, guarding against crashes."""
+    if not path or not getattr(getattr(agent, "config", None), "enable_self_learning", False):
+        return
+    home_paths = getattr(agent, "home_paths", None)
+    if home_paths is None:
+        return
+    try:
+        store = SkillLearningStore.for_home(home_paths)
+        fn = getattr(store, "record_user_edit_if_tracked", None)
+        if callable(fn):
+            fn(path)
+    except (InterruptedError, KeyboardInterrupt):
+        raise
+    except Exception as exc:
+        logging.getLogger(__name__).warning("failed to record user skill edit: %s", exc, exc_info=True)
 
 
 # LLM: 历史采用只用于歧义判断；返回名称+内容hash，不把历史采用变为当前版本的adoption事实。
