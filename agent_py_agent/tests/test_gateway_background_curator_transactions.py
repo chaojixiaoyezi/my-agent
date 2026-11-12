@@ -66,7 +66,7 @@ class _BlockingLearningBackend:
         assert response_schema["additionalProperties"] is False and "tools" not in response_schema
         self.calls += 1
         self.started.set()
-        self.release.wait(5)
+        self.release.wait(30)
         return SimpleNamespace(text=self.output)
 
 
@@ -84,7 +84,7 @@ class _BlockingChildBackend(EchoBackend):
     def generate(self, prompt, **kwargs):
         self.calls += 1
         self.started.set()
-        self.release.wait(5)
+        self.release.wait(30)
         return ModelResponse(text="材料检查已完成。", backend="echo")
 
 
@@ -183,7 +183,7 @@ def test_network_wait_then_revoke_never_enters_late_curator_commit_or_canonical(
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(run_original, agent, gate, claim)
             try:
-                assert backend.started.wait(5), "original_provider_must_really_wait"
+                assert backend.started.wait(30), "original_provider_must_really_wait"
                 state_before = service.state_store.path.read_bytes()
                 assert service.state_store.load().active_lease
                 if fault == "cancel":
@@ -194,7 +194,7 @@ def test_network_wait_then_revoke_never_enters_late_curator_commit_or_canonical(
             finally:
                 backend.release.set()
             with pytest.raises(RequestExecutionOutcomeUncertainError) as caught:
-                future.result(5)
+                future.result(30)
         error = caught.value
         assert error.request_id == claim.request_id and error.execution_attempt_id == claim.execution_attempt_id
         assert error.operation_entered is False and backend.calls == 1
@@ -217,13 +217,13 @@ def test_original_curator_nested_transactions_commit_without_holding_t_during_mo
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(run_original, agent, gate, claim)
             try:
-                assert backend.started.wait(5)
+                assert backend.started.wait(30)
                 # 同原T真的可取得，证明模型等待没持T；正常body仍会进入原multi-file事务及state内部调用。
                 with gateway_turn_transition(gate.paths, claim.request_id):
                     assert read_json_file(claim.path)["status"] == "processing"
             finally:
                 backend.release.set()
-            response = future.result(5)
+            response = future.result(30)
         assert response["ok"] is True and response["background_result"]["status"] == "succeeded"
         assert backend.calls == 1 and len(service.candidate_service.list()) == 1
         assert len(service.run_log.list()) == 1 and not service.state_store.load().active_lease

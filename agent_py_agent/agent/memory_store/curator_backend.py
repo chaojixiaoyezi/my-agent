@@ -8,6 +8,7 @@ import contextvars
 import json
 import logging
 import re
+import threading
 import time
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
@@ -442,14 +443,28 @@ def call_backend_with_timeout(
     from ..gateway_parts.multiprocess_execution import current_worker_execution
 
     wait_for_exit = current_worker_execution() is not None
+    completed_worker: list[threading.Thread] = []
+
+    def _run_transport() -> object:
+        try:
+            return _generate_with_original_transport(generate, prompt, response_schema)
+        finally:
+            completed_worker.append(threading.current_thread())
+
     try:
         with provider_request_budget(timeout_seconds):
-            return call_with_deadline(
-                lambda: _generate_with_original_transport(generate, prompt, response_schema),
-                deadline=deadline,
-                resource_key=_CuratorBackendResource(backend),
-                wait_for_exit=wait_for_exit,
-            )
+            try:
+                return call_with_deadline(
+                    _run_transport,
+                    deadline=deadline,
+                    resource_key=_CuratorBackendResource(backend),
+                    wait_for_exit=wait_for_exit,
+                )
+            finally:
+                # Count0 仅在原运输已实际返回或抛错后等当前 worker 线程走完几微秒 C 退出收尾，
+                # 消除同实例紧邻重试撞上未释放 _tstate_lock 的假 busy；超时未退出的请求不进此分支。
+                if not wait_for_exit and completed_worker:
+                    completed_worker[0].join(timeout=max(0.0, deadline - time.monotonic()))
     except (BoundedCallBusyError, BoundedCallStillRunningError) as exc:
         raise CuratorModelStillRunningError("记忆模型旧请求或清理尚未退出，当前不能叠加调用") from exc
     except BoundedCallTimeoutError as exc:
