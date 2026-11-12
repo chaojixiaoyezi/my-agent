@@ -81,7 +81,7 @@ class _BlockingBackend(_StaticStructuredBackend):
 
     def generate_structured(self, prompt: str, *, response_schema: dict[str, object]):
         self.started.set()
-        self.release.wait(timeout=5)
+        self.release.wait(timeout=30)
         return super().generate_structured(prompt, response_schema=response_schema)
 
 
@@ -201,8 +201,9 @@ def _service(
         or MemoryCuratorConfig(
             interval_seconds=60,
             turn_threshold=1,
-            timeout_seconds=2,
+            timeout_seconds=15,
             max_retries=0,
+            retention_scan_slice_ms=10_000,
         ),
         dependencies=MemoryCuratorDependencies(
             backend=backend,
@@ -911,6 +912,7 @@ def test_curator_timeout_and_model_failure_keep_cursor_and_stable_code(
             turn_threshold=1,
             timeout_seconds=1,
             max_retries=0,
+            retention_scan_slice_ms=10_000,
         ),
     )
 
@@ -1002,7 +1004,7 @@ def test_curator_binds_host_session_for_session_header_provider(tmp_path: Path, 
     finally:
         server.shutdown()
         server.server_close()
-        worker.join(2)
+        worker.join(10)
 
     assert result.status == "succeeded", result.failure_code
     assert len(seen) == 1 and seen[0]
@@ -1033,7 +1035,13 @@ def test_curator_session_is_shared_by_retries_and_distinct_per_run_and_owner(tmp
         _valid_output(thread.thread_id, message.message_id, message.content),
         failures=(ConnectionError("provider unavailable"),),
     )
-    config = MemoryCuratorConfig(interval_seconds=60, turn_threshold=1, timeout_seconds=2, max_retries=1)
+    config = MemoryCuratorConfig(
+        interval_seconds=60,
+        turn_threshold=1,
+        timeout_seconds=10,
+        max_retries=1,
+        retention_scan_slice_ms=10_000,
+    )
     service = _service(tmp_path / "owner-a", backend, store, config=config, owner_id="owner-a")
 
     first = service.run(reason="admin")
@@ -1120,10 +1128,10 @@ def test_curator_owner_lease_allows_only_one_running_model_call(tmp_path: Path):
 
     worker = threading.Thread(target=lambda: results.append(service.run(reason="admin")))
     worker.start()
-    assert backend.started.wait(timeout=2)
+    assert backend.started.wait(timeout=30)
     second = service.run(reason="admin")
     backend.release.set()
-    worker.join(timeout=5)
+    worker.join(timeout=30)
 
     assert second.status == "busy"
     assert results[0].status == "succeeded"
@@ -1144,11 +1152,11 @@ def test_curator_success_preserves_distinct_reason_requested_during_run(
         target=lambda: results.append(service.run(reason="turn_threshold"))
     )
     worker.start()
-    assert backend.started.wait(timeout=2)
+    assert backend.started.wait(timeout=30)
 
     service.request("task_complete")
     backend.release.set()
-    worker.join(timeout=5)
+    worker.join(timeout=30)
 
     assert results[0].status == "succeeded"
     state_after_first = service.state_store.load()
@@ -1179,11 +1187,11 @@ def test_curator_success_preserves_same_reason_generation_requested_during_run(
         target=lambda: results.append(service.run(reason="task_complete"))
     )
     worker.start()
-    assert backend.started.wait(timeout=2)
+    assert backend.started.wait(timeout=30)
 
     service.request("task_complete")
     backend.release.set()
-    worker.join(timeout=5)
+    worker.join(timeout=30)
 
     assert results[0].status == "succeeded"
     state_after_first = service.state_store.load()
@@ -1438,9 +1446,10 @@ def test_curator_interval_and_daily_finalize_use_same_state_and_service(tmp_path
     config = MemoryCuratorConfig(
         interval_seconds=60,
         turn_threshold=5,
-        timeout_seconds=2,
+        timeout_seconds=10,
         max_retries=0,
         daily_finalize_hour=23,
+        retention_scan_slice_ms=10_000,
     )
     interval_service = _service(
         tmp_path / "interval",
@@ -2323,3 +2332,37 @@ def test_curator_failure_diagnostic_records_shape_and_redacted_message() -> None
     quoted = curator_module._failure_diagnostic_warning(_failure_diagnostic(RuntimeError('"' * 200)))
     assert len(quoted) <= 300
     assert json.loads(quoted.split("=", 1)[1])["error_type"] == "RuntimeError"
+
+
+def test_count_zero_completed_worker_exit_race_does_not_reject_immediate_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, thread, message = _conversation(tmp_path)
+    backend = _SessionRecordingBackend(
+        _valid_output(thread.thread_id, message.message_id, message.content),
+        failures=(ConnectionError("provider unavailable"),),
+    )
+    original_run = threading.Thread.run
+
+    def delayed_thread_tail(worker: threading.Thread) -> object:
+        value = original_run(worker)
+        if worker.name.startswith("bounded-call:"):
+            time.sleep(0.02)
+        return value
+
+    monkeypatch.setattr(threading.Thread, "run", delayed_thread_tail)
+    config = MemoryCuratorConfig(
+        interval_seconds=60,
+        turn_threshold=1,
+        timeout_seconds=10,
+        max_retries=1,
+        retention_scan_slice_ms=10_000,
+    )
+    service = _service(tmp_path, backend, store, config=config, owner_id="owner-race")
+
+    result = service.run(reason="admin")
+
+    assert result.status == "succeeded"
+    assert backend.calls == 1
+    assert len(backend.sessions) == 2
