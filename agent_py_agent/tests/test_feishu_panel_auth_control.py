@@ -493,15 +493,26 @@ def test_enqueue_agent_stop_idempotency_and_already_terminal(tmp_path, monkeypat
 
     # Allow cleanup to complete
     release_cleanup.set()
-    time.sleep(0.1)
+    for th in threading.enumerate():
+        if th.name == f"agent-stop:{child.id}":
+            th.join(timeout=5.0)
+            break
 
     # Case B: post-cleanup replay returns confirmed
-    replay = enqueue_agent_stop(
-        agent,
-        scope=scope,
-        run_id=child.id,
-        operation_id="op-stop-first",
-    )
+    deadline = time.time() + 5.0
+    replay = None
+    while time.time() < deadline:
+        replay = enqueue_agent_stop(
+            agent,
+            scope=scope,
+            run_id=child.id,
+            operation_id="op-stop-first",
+        )
+        if replay.get("status") == "confirmed":
+            break
+        time.sleep(0.02)
+
+    assert replay is not None, "Timed out waiting for stop receipt to confirm"
     assert replay["status"] == "confirmed"
     assert replay["replayed"] is True
     assert replay["already_active"] is False
