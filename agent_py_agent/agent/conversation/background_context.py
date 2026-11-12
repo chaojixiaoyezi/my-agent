@@ -834,6 +834,7 @@ def _agent_tree_payload(
             state.agent,
             {
                 "visible_run_ids": visible_run_ids,
+                "conversation_thread_id": state.thread.thread_id,
                 "allowed_tools": background_allowed_tools(
                     state.config, request=state.policy_request
                 ),
@@ -1006,7 +1007,10 @@ def _recovery_snapshot(
 ) -> dict[str, Any]:
     claim = store.claims.load(thread_id)
     previous = claim.get("previous_claim") if isinstance(claim.get("previous_claim"), dict) else {}
-    tree = agent_tree_status_payload(agent, {"visible_run_ids": visible_run_ids})
+    tree = agent_tree_status_payload(
+        agent,
+        {"visible_run_ids": visible_run_ids, "conversation_thread_id": thread_id},
+    )
     records = latest_artifact_records(getattr(agent, "root", "."))
     payload = {
         "schema_version": "background_recovery_snapshot.v1",

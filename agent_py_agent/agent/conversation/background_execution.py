@@ -28,6 +28,7 @@ from .background_context import (
 from .background_history_seed import prepare_background_history_or_raise, refresh_background_history
 from .claim_execution_binding import publish_claim_runtime_authority
 from .compact_carry import compact_overflow_carry
+from .compact_guard import ConversationCompactError
 from .compact_progress import COMPACT_TRIGGER_PREFLIGHT
 from .local_run_control import LocalRunControl
 from .models import ConversationThread
@@ -312,7 +313,10 @@ def run_background_turn_with_compact(
         promoted_task_attrs.update(_promoted_task_binding_attrs(run_params))
         slice_request_id = slice_request_id or run_params.request_id
         if recovering and (recovery is None or not recovery.committed):
-            raise RuntimeError("background compact recovery did not commit")
+            raise ConversationCompactError(
+                "background compact recovery could not reduce context",
+                code="COMPACT_CANDIDATE_TOO_LARGE",
+            )
         if recovery is not None and recovery.committed:
             current = recovery.committed_thread
             committed_generations += 1
@@ -332,7 +336,15 @@ def run_background_turn_with_compact(
         run_params.compact_context = history.compact_context
         if history.compact_source is None or (not history.compact_source.messages and not carried_archive_tool_calls
                                              and native_compact_carry is None):
-            raise RuntimeError("background compact has no recoverable source")
+            raise ConversationCompactError(
+                "background compact has no recoverable source",
+                code="COMPACT_SOURCE_EMPTY",
+            )
+        if recovering and (recovery is None or not recovery.committed):
+            raise ConversationCompactError(
+                "background compact recovery could not reduce context",
+                code="COMPACT_CANDIDATE_TOO_LARGE",
+            )
         recovering, compact_trigger_source = True, str(getattr(result, "runtime_source", "") or "")
 
 
