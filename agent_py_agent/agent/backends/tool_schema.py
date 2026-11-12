@@ -82,7 +82,7 @@ def tool_model_spec_to_anthropic_tool(spec: ToolModelSpec) -> dict[str, Any]:
 
     return {
         "name": spec.name,
-        "description": spec.description,
+        "description": str(spec.description or "").strip() or f"Tool {spec.name}",
         "input_schema": tool_model_spec_to_input_schema(spec),
     }
 

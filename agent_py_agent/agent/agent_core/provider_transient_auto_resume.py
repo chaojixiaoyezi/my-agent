@@ -81,6 +81,7 @@ def run_with_provider_transient_auto_resume(
     # 预算从第一次尝试开始计时：尝试耗时、退避等待和它的抖动都算在里面。
     budget = provider_transient_total_budget_seconds(policy)
     started_at = time.monotonic()
+    last_exc: Exception | None = None
     for attempt, delay in enumerate(delays, start=1):
         _raise_if_interrupted()
         try:
@@ -89,6 +90,7 @@ def run_with_provider_transient_auto_resume(
             raise  # 用户/任务中断绝不重试: 中断标记必须被消费, 不能进入退避重连
         except Exception as exc:
             _raise_unless_provider_transient(exc)
+            last_exc = exc
             if callable(retry_guard) and not retry_guard():
                 raise
             # 配置阶梯+随机抖动(批3):多实例同撞限流时错峰重试,防共振雪崩。
@@ -118,6 +120,8 @@ def run_with_provider_transient_auto_resume(
         _raise_if_interrupted()
     _raise_if_interrupted()
     if callable(retry_guard) and not retry_guard():
+        if last_exc is not None:
+            raise last_exc
         raise RuntimeError("provider retry blocked by durable request state")
     return operation()
 

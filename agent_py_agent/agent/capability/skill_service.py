@@ -545,12 +545,18 @@ def _skill_tree_state(
             and all(_path_stat_signature(Path(row[0])) == row for row in cached.stats[1:])):
         state = replace(cached, validated_at=now)
     else:
-        for _ in range(3):
+        scanned = None
+        for attempt in range(5):
             scanned = _scan_skill_tree_stats(path)
             if scanned is not None:
                 break
+            time.sleep(0.005 * (attempt + 1))
         else:
-            raise OSError("skill directory changed during stat scan")
+            import logging
+            logging.getLogger(__name__).debug("skill directory changed during stat scan; using best-effort snapshot: %s", path)
+            scanned = _scan_skill_tree_stats(path, best_effort=True)
+            if scanned is None:
+                scanned = ((first,), False)
         stats, settled = scanned
         digest = "" if len(stats[0]) < 7 and stats[0][2] == errno.ENOENT else hashlib.sha256(repr(stats).encode()).hexdigest()
         state = _SkillTreeState(stats, digest, settled, now)
@@ -575,7 +581,7 @@ def _skill_tree_state(
 # LLM: 每个目录在列名首末核同一stat；之后再变会使缓存下一次复核失效，不跟随目录符号链接。
 #   第二项在列名之前逐目录冻结：全部目录mtime已离开2秒窗口才为True，不能在使用时再判。
 # 函数用途: 获取不会把新增文件永久遗漏的确定性全目录元数据，变化时返回None供有界重扫。
-def _scan_skill_tree_stats(root: Path) -> tuple[tuple[tuple, ...], bool] | None:
+def _scan_skill_tree_stats(root: Path, *, best_effort: bool = False) -> tuple[tuple[tuple, ...], bool] | None:
     pending, signatures, settled = [root], [], True
     while pending:
         path = pending.pop()
@@ -584,8 +590,18 @@ def _scan_skill_tree_stats(root: Path) -> tuple[tuple[tuple, ...], bool] | None:
         if len(before) < 7 or not stat.S_ISDIR(before[6]) or stat.S_ISLNK(before[-1]):
             continue
         settled = settled and cache_entry_trustworthy(before[1])
-        children = tuple(sorted(path.iterdir()))
-        if _path_stat_signature(path) != before:
+        try:
+            children = tuple(sorted(
+                p for p in path.iterdir()
+                if not (p.name.endswith(".tmp") or p.name.startswith(".tmp"))
+            ))
+        except FileNotFoundError:
+            continue
+        except OSError:
+            if best_effort:
+                continue
+            return None
+        if not best_effort and _path_stat_signature(path) != before:
             return None
         pending.extend(reversed(children))
     return tuple(signatures), settled

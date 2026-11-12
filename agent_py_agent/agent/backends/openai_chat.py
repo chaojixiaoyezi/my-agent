@@ -540,7 +540,7 @@ def _openai_tools_from_native(tools: list[dict[str, Any]]) -> list[dict[str, Any
                 "type": "function",
                 "function": {
                     "name": str(tool["name"]),
-                    "description": str(tool.get("description") or ""),
+                    "description": str(tool.get("description") or "").strip() or f"Tool {tool['name']}",
                     "parameters": _stable_json_object_keys(dict(tool.get("input_schema") or {})),
                 },
             }

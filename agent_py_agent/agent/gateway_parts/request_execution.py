@@ -362,16 +362,26 @@ def _start_gateway_request_lease(
 # LLM: 原模型仍在排队前冻结；只捕获此次已有 owner 设置读取，退出清理。观察不能移动冻结点或改有效模型。
 # 函数用途: 执行 Gateway 对话并固定本会话模型，关闭观察不增加配置读盘或改变出站输入。
 def _run_gateway_ask(context: request_context.GatewayAskRunContext):
+    from ..runtime_db.recovery_guard import RuntimeDatabaseDeferred
     from ..settings.model_profiles import capture_selected_model_read
     from ..settings.model_scope import selected_model_scope
 
-    prompt = str(context.request.get("prompt") or context.request.get("goal") or "").strip()
-    preflight = request_context.preflight_gateway_conversation(request_context.GatewayConversationLoadRequest(
-        context.agent, context.request, context.request_id, prompt, context.on_chunk,
-    ))
-    _require_gateway_conversation_ready(context.request, preflight)
-    with capture_selected_model_read() as captured, selected_model_scope(context.agent, thread_id=preflight.thread_id):
-        return _run_gateway_ask_with_model(context, captured=captured[0] if captured else None)
+    backoffs = (0.05, 0.15, 0.30)
+    for attempt in range(len(backoffs) + 1):
+        try:
+            prompt = str(context.request.get("prompt") or context.request.get("goal") or "").strip()
+            preflight = request_context.preflight_gateway_conversation(request_context.GatewayConversationLoadRequest(
+                context.agent, context.request, context.request_id, prompt, context.on_chunk,
+            ))
+            _require_gateway_conversation_ready(context.request, preflight)
+            with capture_selected_model_read() as captured, selected_model_scope(context.agent, thread_id=preflight.thread_id):
+                return _run_gateway_ask_with_model(context, captured=captured[0] if captured else None)
+        except RuntimeDatabaseDeferred as exc:
+            reason = str(getattr(exc, "reason", "") or "")
+            if reason in {"recovery_pending", "generation_busy"} and attempt < len(backoffs):
+                time.sleep(backoffs[attempt])
+                continue
+            raise
 
 
 # LLM: 原模型快照覆盖排队；首次只加载Compact来源，完整准备后先压缩再选模，发送拒绝沿新上下文回退；重复执行不重新决策。
@@ -713,8 +723,23 @@ def _run_gateway_turn_with_conversation_compact(
         if isinstance(run_params, _BotGatewayRunParams) and bot_guard is None:
             bot_guard = BotExecutionGuard(run_params.bot_execution_policy, carried_archive_tool_calls)
         _run_started = time.monotonic()
-        with bot_execution_scope(context.agent, bot_guard):
-            result = context.agent.run(prompt, params=run_params)
+        from ..conversation.compact_guard import ConversationCompactCircuitOpenError
+
+        try:
+            with bot_execution_scope(context.agent, bot_guard):
+                result = context.agent.run(prompt, params=run_params)
+        except ConversationCompactCircuitOpenError as circuit_err:
+            trigger = str(getattr(run_params, "compact_trigger_source", "") or "")
+            if trigger in ("", COMPACT_TRIGGER_PREFLIGHT):
+                import logging
+                logging.getLogger(__name__).warning("Preflight compact circuit open, proceeding with degrade_without_compact: %s", circuit_err)
+                if observer is not None:
+                    observer.compact_recovery = None
+                run_params.native_compact_carry = None
+                with bot_execution_scope(context.agent, bot_guard):
+                    result = context.agent.run(prompt, params=run_params)
+            else:
+                raise
         if observer is not None and observer.compact_recovery is not None and observer.compact_recovery.committed:
             current = observer.compact_recovery.host_state
         _record_gateway_stage(context.stages, "run_ms", _run_started)
@@ -734,14 +759,21 @@ def _run_gateway_turn_with_conversation_compact(
         )
         # 溢出结果的 runtime_source 就是结构化触发来源（preflight / provider_error / tool_context_overflow）。
         run_params.compact_trigger_source = str(getattr(result, "runtime_source", "") or "")
-        current = _gateway_compact_overflowing_turn(
-            context,
-            prompt,
-            current,
-            run_params,
-            carried_archive_tool_calls,
-            observer=observer,
-        )
+        try:
+            current = _gateway_compact_overflowing_turn(
+                context,
+                prompt,
+                current,
+                run_params,
+                carried_archive_tool_calls,
+                observer=observer,
+            )
+        except ConversationCompactCircuitOpenError as circuit_err:
+            if run_params.compact_trigger_source == COMPACT_TRIGGER_PREFLIGHT:
+                import logging
+                logging.getLogger(__name__).warning("Preflight compact circuit open during overflow, proceeding with degrade_without_compact: %s", circuit_err)
+                return result, current
+            raise
     raise ConversationPersistenceError("当前会话压缩后仍超过模型上下文上限")
 
 
@@ -1567,7 +1599,7 @@ def _handle_gateway_request(
             with _measure_gateway_stage(stage_timings, "resume_check_ms"):
                 restart_marker = None if uncertain or cleanup_only else _host_shutdown_resume_marker(failure, request_path, context["request_id"])
                 resume_marker = None if uncertain or cleanup_only else restart_marker if restart_marker is not None else _provider_transient_turn_resume_marker(
-                    agent, context, response, chunk_writer
+                    agent, context, response, chunk_writer, failure=failure
                 )
             resume_field = "restart_resume" if restart_marker is not None else "provider_transient_resume"
             # 回合结束必收口未消费的补充消息（会话运行时 语义：pending input 不得挂在已结束
@@ -1650,6 +1682,38 @@ def _host_shutdown_resume_marker(failure: Exception | None, request_path: Path, 
             "reason_code": admission.closure.error_code}
 
 
+# LLM: 委托给 compact_guard.is_compact_transient_provider_failure（若存在），否则检查异常链 up to depth 6。
+# 函数用途: 跨 worktree 兼容地判定压缩异常是否由底层 ProviderTransientError 导致。
+def _is_compact_transient_failure(exc: BaseException | None) -> bool:
+    if exc is None:
+        return False
+    from ..backends.errors import ProviderTransientError
+    from ..conversation import compact_guard
+
+    checker = getattr(compact_guard, "is_compact_transient_provider_failure", None)
+    if callable(checker):
+        try:
+            return bool(checker(exc))
+        except Exception:
+            pass
+    current: BaseException | None = exc
+    for _ in range(6):
+        if current is None:
+            break
+        if isinstance(current, ProviderTransientError):
+            return True
+        code = str(getattr(current, "error_code", "") or getattr(current, "code", "") or "").strip().upper()
+        if code in {
+            "PROVIDER_RATE_LIMITED",
+            "PROVIDER_UNAVAILABLE",
+            "PROVIDER_TIMEOUT",
+            "TRANSIENT_ERROR",
+        } or (code.startswith("COMPACT_") and any(sub in code for sub in ("TIMEOUT", "TRANSIENT", "RATE_LIMIT", "UNAVAILABLE", "503", "429"))):
+            return True
+        current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+    return False
+
+
 # LLM: 供应商临时故障的回合级自动续跑判定：只认结构化错误码白名单（PROVIDER_TRANSIENT_TURN_RESUME_CODES）
 #   + 配置开关（provider_transient_turn_resume_max_count，0=关闭）+ 未达续跑上限（provider_resume_count
 #   跨 Gateway 重启累计）；MODEL_STREAM_INCOMPLETE 还要求本回合已有已完成工具往返（tool_rounds>0，
@@ -1659,7 +1723,9 @@ def _host_shutdown_resume_marker(failure: Exception | None, request_path: Path, 
 #   用满（count >= max_count）时不再续跑，但按 TURN_RESUME_LIMIT 先例给失败答复附“发继续接着做”提示。
 #   改动同步 test_provider_transient_turn_resume 与 turn_resume_notice。
 # 函数用途: 判断这次失败要不要交给“供应商故障自动续跑”；要就返回结构化标记，否则 None。
-def _provider_transient_turn_resume_marker(agent, context, response: dict, chunk_writer) -> dict | None:
+def _provider_transient_turn_resume_marker(
+    agent, context, response: dict, chunk_writer, *, failure: Exception | None = None
+) -> dict | None:
     if response.get("ok") is not False:
         return None
     if request_binding.gateway_cancel_requested(context["request_path"], context["request_id"]):
@@ -1669,8 +1735,14 @@ def _provider_transient_turn_resume_marker(agent, context, response: dict, chunk
     )
     if max_count <= 0:
         return None
+    from ..backends.errors import ProviderTransientError
+
     error_code = str(response.get("error_code") or "").strip()
-    if error_code not in PROVIDER_TRANSIENT_TURN_RESUME_CODES:
+    is_transient = (
+        error_code in PROVIDER_TRANSIENT_TURN_RESUME_CODES
+        or (failure is not None and (isinstance(failure, ProviderTransientError) or _is_compact_transient_failure(failure)))
+    )
+    if not is_transient:
         return None
     tool_rounds = max(
         int(response.get("tool_rounds") or 0),
@@ -1688,7 +1760,7 @@ def _provider_transient_turn_resume_marker(agent, context, response: dict, chunk
         return None
     return {
         "schema_version": "gateway_provider_transient_resume.v1",
-        "error_code": error_code,
+        "error_code": error_code or "TRANSIENT_ERROR",
         "resume_count": count + 1,
         "tool_rounds": tool_rounds,
     }

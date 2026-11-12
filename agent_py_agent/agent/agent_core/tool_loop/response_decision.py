@@ -716,7 +716,18 @@ def _tool_calls_decision(
         request.response, native=_native_tool_use_active(request.params)
     )
     # 形成了可执行调用：连续“参数无效”计数清零，下一次坏参数重新获得纠正机会。
-    counters = replace(request.counters, invalid_arguments_repairs=0)
+    # 当当前响应非截断时，重置协议修复、截断写修复与截断输出修复计数。
+    is_truncated = bool(getattr(request.response, "truncated", False)) or _is_provider_length_truncated(request.response)
+    if not is_truncated:
+        counters = replace(
+            request.counters,
+            invalid_arguments_repairs=0,
+            protocol_repairs=0,
+            truncated_write_repairs=0,
+            truncated_output_repairs=0,
+        )
+    else:
+        counters = replace(request.counters, invalid_arguments_repairs=0)
     return ToolLoopResponseDecision("run_tools", clean_response, calls, counters)
 
 
@@ -1134,11 +1145,18 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         # 交付出口（唯一）：若上一枪还有"已产生但没交付"的合法正文，按到达顺序无损并进这次交付；
         # 交付对象仍取自本轮，因此 final_prompt/final_response/usage 的来源同一。没有前导段落时
         # 原样返回 final_response（对象同一，零开销）。
+        is_truncated = bool(getattr(final_response, "truncated", False)) or _is_provider_length_truncated(final_response)
+        clean_counters = replace(
+            request.counters,
+            protocol_repairs=0,
+            truncated_write_repairs=0,
+            truncated_output_repairs=0,
+        ) if not is_truncated else request.counters
         return ToolLoopResponseDecision(
             "break",
             _provider_timeout_probe_delivery(request, final_response),
             [],
-            request.counters,
+            clean_counters,
         )
     if request.counters.protected_marker_repairs < 1:
         return ToolLoopResponseDecision(

@@ -317,6 +317,8 @@ def gateway_client_error_message(error_code: object) -> str:
             "当前任务的状态与执行绑定不一致，本轮未继续；不是聊天记录丢失。"
             "请核对运行诊断；确认旧执行已经停止后，可用 /goal resume 显式恢复目标。"
         ),
+        "MODEL_PROFILE_UNAVAILABLE": "当前会话绑定的模型档案不可用或已被移除，请使用 /model 切换可用模型后重试。",
+        "RUNTIME_DB_RECOVERY_DEFERRED": "运行时数据库正在执行短暂恢复维护，本轮尚未开始执行；请稍后重试。",
     }
     if code in messages:
         return messages[code]
@@ -342,6 +344,10 @@ PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED_STATUS_TEXT = "已到自动重试�
 PROVIDER_TRANSIENT_TURN_RESUME_CODES = frozenset({
     "MODEL_STREAM_INCOMPLETE",
     "PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED",
+    "PROVIDER_RATE_LIMITED",
+    "PROVIDER_UNAVAILABLE",
+    "TRANSIENT_ERROR",
+    "PROVIDER_TIMEOUT",
 })
 
 
