@@ -409,7 +409,8 @@ class WorkflowsTool(BaseTool):
             return _outcome('workflows', exc.data, False, exc.code, effect_outcome='not_started')
         except WorkflowExecutionError as exc:
             return _outcome('workflows', exc.receipt, False, 'TOOL_EXECUTION_FAILED',
-                            effect_outcome=exc.receipt['effect_outcome'], failure_stage='execution')
+                            effect_outcome=exc.receipt['effect_outcome'], failure_stage=(
+                                'effect_reconciliation' if exc.failure_stage == 'completion_clock' else 'execution'))
         except HostAPIError as exc:
             return _outcome('workflows', {'error_code': exc.code}, False, exc.code,
                             effect_outcome='not_started' if exc.outcome == 'not_started' else 'unknown')

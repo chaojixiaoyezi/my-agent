@@ -165,6 +165,7 @@ def _definition_refs(definition):
 # LLM: 坏包条目跳过并标覆盖不足，不伪造完整模板库。
 # 函数用途: 从已安装包和原全局工作流层投影模板。
 def list_templates(call):
+    from ..capability.package_resources import package_resource_reference
     from ..gateway_parts.business_api_v13 import v13_require_access, v13_schema
     v13_require_access(call)
     if call.params.get('space_id'):
@@ -177,6 +178,8 @@ def list_templates(call):
                 continue
             try:
                 definition = _validate_definition(strict_json(package.read(member.path), maximum=262144))
+                # 来源随可编辑定义一起交付；只记录原成员身份，不给派生副本授予包写权。
+                definition['descriptor'].setdefault('metadata', {})['derived_from'] = package_resource_reference(package, member.path)
                 candidates.append((definition, 'package', package.package_id, package.stable_id + ':' + member.path))
             except (HostAPIError, ValueError, TypeError, KeyError):
                 partial = True

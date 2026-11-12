@@ -338,6 +338,9 @@ class WorkflowStore(_AssetStore):
     def _save(self, definition):
         previous = self._get(definition.descriptor.id)
         metadata = dict(definition.descriptor.metadata)
+        # 创建时的派生出处不是可编辑正文；所有写入口都沿锁内原记录保留它。
+        if previous is not None and 'derived_from' in previous.descriptor.metadata:
+            metadata['derived_from'] = previous.descriptor.metadata['derived_from']
         if previous is None:
             metadata['_run_summary_generation'] = uuid.uuid4().hex
         elif '_run_summary_generation' in previous.descriptor.metadata:
@@ -614,12 +617,34 @@ class WorkflowStore(_AssetStore):
             # LLM: 摘要与去重凭据同一资产事务发表，治理时间戳仍写回原业务metadata。
             # 函数用途: 提交本次合并结果，成功后才允许spool清理。
             def commit(summary, metadata):
-                if BUSINESS_WORKFLOW_METADATA in metadata:
-                    state = json.loads(json.dumps(metadata[BUSINESS_WORKFLOW_METADATA]))
-                    state['last_run_at'] = time.time()
-                    if state['scope']['scope_mode'] == 'unassigned':
-                        state['orphan_since'] = state['last_run_at']
-                    metadata = {**metadata, BUSINESS_WORKFLOW_METADATA: state}
                 self._save(replace(definition, descriptor=replace(descriptor, runtime_summary=summary, metadata=metadata)))
             run_summary_spool.fold(self.owner_home, 'workflow', workflow_id, descriptor.runtime_summary, descriptor.metadata, commit)
             return self._readback_after_commit(workflow_id)
+
+    def _record_completed_run(self, record, workflow_snapshot):
+        """仅消费已发表的运行终态；锁内重读，只推进业务计时，不回写冻结正文或归属。"""
+        from ..workflows.run_store import _concurrency_settled
+        source = (workflow_snapshot or {}).get('descriptor', {})
+        if (record.status not in ('succeeded', 'failed', 'cancelled')
+                or not _concurrency_settled(record)
+                or source.get('scope_layer', 'owner') != 'owner'
+                or source.get('source_scope', 'owner') != 'owner'
+                or source.get('owner_id') != record.owner_id
+                or BUSINESS_WORKFLOW_METADATA not in source.get('metadata', {})
+                or type(record.ended_at) not in (int, float)
+                or not math.isfinite(record.ended_at) or record.ended_at <= 0):
+            return
+        with self._locked():
+            current = self._get(record.workflow_id)
+            if (current is None or current.descriptor.owner_id != record.owner_id
+                    or BUSINESS_WORKFLOW_METADATA not in current.descriptor.metadata):
+                return
+            state = json.loads(json.dumps(current.descriptor.metadata[BUSINESS_WORKFLOW_METADATA]))
+            previous = state.get('last_run_at')
+            if previous is not None and previous >= record.ended_at:
+                return
+            state['last_run_at'] = record.ended_at
+            if state['scope']['scope_mode'] == 'unassigned':
+                state['orphan_since'] = max(state.get('orphan_since') or record.ended_at, record.ended_at)
+            self._save(replace(current, descriptor=replace(current.descriptor,
+                metadata={**current.descriptor.metadata, BUSINESS_WORKFLOW_METADATA: state})))

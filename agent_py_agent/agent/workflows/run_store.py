@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from contextlib import contextmanager
+from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
-from threading import local
+from threading import Lock, local
 
 from ..common.cancellation import raise_if_cancelled
 from ..common.json_io import locked_json_path
@@ -22,6 +25,76 @@ from .models import (
 )
 
 _HELD_LOCKS = local()
+_COMPLETION_HANDOFF = ContextVar('workflow_completion_handoff', default=None)
+
+
+class _CompletionHandoff:
+    """每线程最外层真实运行锁拥有一帧；跨线程只交接完成值，不交接持锁资格。"""
+
+    def __init__(self, owner_home, run_id, upstream=None):
+        self._guard = Lock()
+        self._pending = {}
+        self._closed = False
+        self.owner_home = owner_home
+        self.run_id = run_id
+        self.upstream = upstream
+
+    def add(self, owner_home, record, snapshot):
+        identity = (str(owner_home), record.workflow_id, record.owner_id)
+        with self._guard:
+            if self._closed:
+                return False
+            previous = self._pending.get(identity)
+            if previous is None or previous[1].ended_at < record.ended_at:
+                self._pending[identity] = (owner_home, record, snapshot)
+            return True
+
+    def close(self):
+        """关闭和取出完成值必须原子：晚到者由已释放自身锁的线程负责发表。"""
+        with self._guard:
+            self._closed = True
+            pending, self._pending = self._pending, {}
+        return tuple(pending.values())
+
+    def finish(self, primary_error):
+        pending = self.close()
+        errors = []
+        # 本帧的真实运行锁已经释放。不得让关闭的上游 ContextVar 再接收完成值。
+        token = _COMPLETION_HANDOFF.set(None)
+        try:
+            for home, record, snapshot in pending:
+                if self.upstream is not None and self.upstream.add(home, record, snapshot):
+                    continue
+                try:
+                    _publish_completed_run(home, record, snapshot)
+                except Exception as cause:
+                    error = (cause if isinstance(cause, WorkflowExecutionError) else
+                             WorkflowExecutionError(record, cause, failure_stage='completion_clock'))
+                    errors.append(error)
+            if not errors:
+                return
+            failures = [error.receipt.copy() for error in errors]
+            if primary_error is not None:
+                # 取消、退出、原执行异常的对象/cause/record保持原样；附属失败只作旁证。
+                for error in errors:
+                    primary_error.add_note('completion_clock: ' + type(error.cause).__name__ + ': ' + str(error))
+                if isinstance(primary_error, WorkflowExecutionError):
+                    primary_error.receipt.setdefault('completion_clock_failures', []).extend(failures)
+                return
+            root = next((record for _, record, _ in pending
+                         if record.workflow_run_id == self.run_id), None)
+            if root is None:
+                try:
+                    root = WorkflowRunStore(self.owner_home).load_run(self.run_id)
+                except (OSError, ValueError, TypeError) as error:
+                    # 非业务调用可能只有外层锁而没有运行；不凭空构造它的终态。
+                    errors[0].add_note('completion root unavailable: ' + str(error))
+            error = (WorkflowExecutionError(root, errors[0].cause, failure_stage='completion_clock')
+                     if root is not None else errors[0])
+            error.receipt['completion_clock_failures'] = failures
+            raise error from errors[0].cause
+        finally:
+            _COMPLETION_HANDOFF.reset(token)
 
 
 # LLM: 仅投影同一原运行事实；兼容公共DTO增量字段尚未集成的读者，不建立第二个运行账或状态机。
@@ -67,8 +140,14 @@ def _run_payload(record):
 class WorkflowExecutionError(RuntimeError):
     # LLM: 错误包装不得再次依赖坏步骤可序列化；降级回执仍来自原run和已确认前缀。
     # 函数用途: 给异常出口保留完整记录，坏输出时提供可安全传递的最小回执。
-    def __init__(self, record, error):
+    def __init__(self, record, error, *, failure_stage='execution'):
         super().__init__(str(error))
+        self.failure_stage = failure_stage
+        self.cause = error
+        if failure_stage == 'completion_clock':
+            # 原终态不因附属计时失败改写；仅回执的阶段表明失败发生在提交之后。
+            record = deepcopy(record)
+            execution_receipt(record, phase=failure_stage, effect_outcome='unknown')
         self.record = record
         try:
             self.receipt = _run_payload(record)
@@ -76,6 +155,12 @@ class WorkflowExecutionError(RuntimeError):
             self.receipt = {'workflow_id': record.workflow_id, 'status': record.status,
                 'needs_repair': record.needs_repair, **execution_receipt(record)}
         self.error_code = 'WORKFLOW_EXECUTION_FAILED'
+        if failure_stage == 'completion_clock':
+            self.error_code = 'WORKFLOW_COMPLETION_CLOCK_FAILED'
+            self.receipt.update(error_code=self.error_code, error_type=type(error).__name__,
+                error=str(error), terminal_committed=(record.status in ('succeeded', 'failed', 'cancelled')
+                    and _concurrency_settled(record)),
+                next_action='retry_same_key_completion_clock_only')
 
 
 def _concurrency_settled(record):
@@ -143,6 +228,37 @@ def _decode_run(data):
     return record
 
 
+def _publish_completed_run(owner_home, record, snapshot):
+    """附属计时只能在全部运行锁之外发表；嵌套调用按来源仅保留最新完成值。"""
+    from ..assets.workflow_store import BUSINESS_WORKFLOW_METADATA
+    source = (snapshot or {}).get('descriptor', {})
+    if (record.status not in ('succeeded', 'failed', 'cancelled')
+            or not _concurrency_settled(record)
+            or type(record.ended_at) not in (int, float)
+            or not math.isfinite(record.ended_at) or record.ended_at <= 0
+            or source.get('scope_layer', 'owner') != 'owner'
+            or source.get('source_scope', 'owner') != 'owner'
+            or source.get('owner_id') != record.owner_id
+            or BUSINESS_WORKFLOW_METADATA not in source.get('metadata', {})):
+        return
+    # 复制Context可以遮住当前帧，但不能遮住本线程真实持锁事实。
+    # 锁内完成值始终交给真实锁栈拥有的帧，ContextVar只承担跨线程归属。
+    held = getattr(_HELD_LOCKS, 'paths', set())
+    handoff = (getattr(_HELD_LOCKS, 'handoff', None) if held else _COMPLETION_HANDOFF.get())
+    if held and handoff is None:
+        raise RuntimeError('WORKFLOW_COMPLETION_LOCK_FRAME_MISSING')
+    if handoff is not None and handoff.add(owner_home, record, snapshot):
+        return
+    if held:
+        raise RuntimeError('WORKFLOW_COMPLETION_LOCK_FRAME_CLOSED')
+    # 复制的上下文可以比原帧活得更久；关闭帧拒收后，本调用在锁外自行发表。
+    from ..assets.workflow_store import WorkflowStore
+    try:
+        WorkflowStore(owner_home)._record_completed_run(record, snapshot)
+    except Exception as error:
+        raise WorkflowExecutionError(record, error, failure_stage='completion_clock') from error
+
+
 # LLM: 运行编号先单段验证，正文IO不能依赖safe_path预检；锁与数据分工，根路径只取宿主构造参数。
 # 类用途: 管理Owner下的冻结工作流定义和可恢复运行账本。
 class WorkflowRunStore:
@@ -176,15 +292,34 @@ class WorkflowRunStore:
             yield
             return
         ensure_private_dir(folder, canonical_root=self.owner_home)
+        # worker拥有自己的真实锁栈；上游只接仍存活时交回的完成值。
+        upstream = _COMPLETION_HANDOFF.get()
+        handoff = getattr(_HELD_LOCKS, 'handoff', None) if held else None
+        token = None
+        if not held:
+            handoff = _CompletionHandoff(self.owner_home, workflow_run_id, upstream)
+            token = _COMPLETION_HANDOFF.set(handoff)
+        primary_error = None
         try:
-            with locked_json_path(path, blocking=not execution):
-                _HELD_LOCKS.paths = held | {key}
-                try:
-                    yield
-                finally:
-                    _HELD_LOCKS.paths = held
-        except BlockingIOError as exc:
-            raise _RunBusy('工作流正在执行，运行锁繁忙') from exc
+            try:
+                with locked_json_path(path, blocking=not execution):
+                    _HELD_LOCKS.paths = held | {key}
+                    previous_handoff = getattr(_HELD_LOCKS, 'handoff', None)
+                    _HELD_LOCKS.handoff = handoff
+                    try:
+                        yield
+                    finally:
+                        _HELD_LOCKS.paths = held
+                        _HELD_LOCKS.handoff = previous_handoff
+            except BlockingIOError as exc:
+                raise _RunBusy('工作流正在执行，运行锁繁忙') from exc
+        except BaseException as error:
+            primary_error = error
+            raise
+        finally:
+            if token is not None:
+                _COMPLETION_HANDOFF.reset(token)
+                handoff.finish(primary_error)
 
     # LLM: name只由固定文件名与安全单段编号组成；缺失记录不能冒充空JSON。
     # 函数用途: 从Owner根读取一个工作流运行账本对象。
@@ -242,6 +377,9 @@ class WorkflowRunStore:
                 self._write_step(record.workflow_run_id, step)
             _write_json(self.owner_home, parts, data)
             record.revision = revision + 1
+            # 先有原运行的耐久完成证明；只在最外层运行锁退出后发表附属计时。
+            if record.status in ('succeeded', 'failed', 'cancelled'):
+                _publish_completed_run(self.owner_home, deepcopy(record), data.get('workflow_snapshot'))
 
     # LLM: 先发表独立快照再更新运行；全部终态拒绝普通晚到改写，显式恢复不允许复活cancelled。
     # 函数用途: 保存已存在步骤并推进位置，保留终态保护及同状态运行元数据更新。

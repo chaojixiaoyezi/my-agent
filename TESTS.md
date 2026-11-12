@@ -1,3 +1,13 @@
+## 2026-11-12 工作流完成交接、来源恢复与清理计时
+
+来源：128项能力验收的模板来源、完成计时与回收修复，基线 `1b70870c7`，在集成前像 `e3a9c5869` 上接入冻结九文件候选。新增 `test_acceptance_template_provenance.py`、`test_acceptance_workflow_completion_clock.py`、`test_acceptance_workflow_completion_handoff.py`、`test_acceptance_workflow_completion_lifecycle.py`，保留原有效断言。
+
+覆盖：完成值在全部真实运行锁释放后发表；普通附属异常不覆盖主异常对象，控制退出不吞；合法条件跳过可重放；整条冻结父子链与原资产codec校验先于任何计时写入；合法非业务空owner保持兼容，损坏来源零写入、成功步骤零重执行。模板来源冻结与完成时钟沿原资产状态维护，不新增持久事实源。
+
+当前 macOS/Python 3.14.4 的16文件组合经原始JUnit逐节点核对为303通过、零失败/错误/跳过，九文件hash与独审冻结源一致。首次同一组合303项均在桌面守卫初始化时报临时目录父目录不存在；只补建父目录后，同源码、同节点集合转绿。失败原件保留，不能改记为通过。Ruff与diff检查通过；未验证真实provider、完整TUI、发行包、跨平台及完整128项。
+
+定向复现（仓库根、隔离HOME/MY_AGENT_HOME/TMPDIR，提前创建临时目录的父目录）：`PYTHONPATH="$PWD:$PWD/agent_py_agent" python3 -B -m pytest -q --tb=short -p no:cacheprovider agent_py_agent/tests/test_acceptance_template_provenance.py agent_py_agent/tests/test_acceptance_workflow_completion_{clock,handoff,lifecycle}.py`。该四文件命令不是16文件303项组合的替代；完整组合与原始JUnit留在本轮验收交付的 `output/repair/integration-lifecycle/`。
+
 ## 2026-11-10 候选分支集成验收：业务空间 v1.2、工作流引擎（WF-01..11）与编排控制面（ORCH-01..06）
 
 Stream A（`repair/business-v12-20261110`）与 Stream B（`feat/orchestration-control-20261110`）双流合并至候选分支 `candidate/business-v12-orch-20261110`，完成常量目录统一投影、Golden 回放基线同步及全套定向回归测试：

@@ -1,3 +1,29 @@
+## 2026-11-12 工作流完成交接回归
+
+```text
+agent_py_agent/tests/
+|-- test_acceptance_template_provenance.py       # 模板冻结来源及原入口编辑
+|-- test_acceptance_workflow_completion_clock.py # 完成计时与回收索引
+|-- test_acceptance_workflow_completion_handoff.py # 父子运行锁外完成交接
+`-- test_acceptance_workflow_completion_lifecycle.py # 异常、恢复及来源反例
+```
+
+生产行为沿原 `agent/workflows/run_store.py`、`business_scope.py`、`agent/assets/workflow_store.py` 维护；未新增独立事实仓或公开接口。
+
+## 2026-11-12 业务工作台资源随包分发
+
+```text
+agent_py_agent/
+|-- static/business_space_ui/
+|   |-- index.html                         # 工作台页面，引用固定包内脚本路由
+|   `-- app.js                             # 工作台脚本，原字节随 wheel 与 pyc 发行
+`-- tests/
+    |-- test_acceptance_business_ui_package.py # 包资源、精确错误与 GET/HEAD 合同
+    `-- test_acceptance_observation_projections.py # 原 producer、观测 reader 与真实回环 HTTP
+```
+
+工作台资源已从 `examples/business_space_ui/` 迁入唯一包内目录，由 `pyproject.toml` 的 package-data 声明收录。运行时仅由 `agent/gateway_parts/business_ui_http.py` 经 `importlib.resources.files` 读取，不回退到工作目录或示例目录；只有两个固定 UI 资源支持新增 HEAD。该结构说明不代表浏览器、完整发行或外部网络验收已经完成。
+
 ## 2026-11-10 业务空间 v1.2、工作流引擎（WF-01..11）与编排控制面（ORCH-01..06）新增生产模块
 
 ```text

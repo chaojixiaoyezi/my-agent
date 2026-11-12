@@ -12,7 +12,7 @@ import time
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from ..assets.descriptor import asset_descriptor_from_definition
+from ..assets.descriptor import AssetDescriptor, asset_descriptor_from_definition
 from ..assets.workflow_store import (
     BUSINESS_WORKFLOW_METADATA,
     WorkflowDefinition,
@@ -455,6 +455,111 @@ class WorkflowScopeService:
             raise PermissionError('WORKFLOW_BUSINESS_ENGINE_UNAVAILABLE')
         return self.engine_factory(self.store.owner_home, run_authorizer=authorize, agent_steps=self.agent_steps)
 
+    @staticmethod
+    def _completion_children(record, snapshot):
+        """只从冻结步骤/批attempt确定子ID；不枚举目录，也不搜索运行历史。"""
+        import uuid
+
+        from .subworkflow_steps import _resolve_target_child_workflow_id
+
+        specs = {spec['step_id']: spec for spec in snapshot.get('steps', ())}
+        for step in record.steps:
+            if step.mode != 'subworkflow':
+                continue
+            spec = specs.get(step.step_id, {})
+            receipt = step.escalation_result.get('subworkflow_receipt') or {}
+            if not isinstance(receipt, dict):
+                raise ValueError('SUBWORKFLOW_COMPLETION_LINK_INVALID')
+            # 条件假/尚未启动的合法步骤没有子调用；只对有执行证据的链接要求target。
+            if not (step.subworkflow_run_id or receipt or step.escalation_result.get('effect_started')
+                    or any(batch.get('attempt_id') or batch.get('status') == 'succeeded'
+                           for batch in step.batches)):
+                continue
+            target = _resolve_target_child_workflow_id(spec)
+            if not target or spec.get('mode') != 'subworkflow':
+                raise ValueError('SUBWORKFLOW_COMPLETION_LINK_INVALID')
+            if spec.get('foreach') is not None:
+                # 原批账保存attempt而非子回执；与原执行器使用同一个确定性UUID5规则。
+                for batch in step.batches:
+                    attempt = batch.get('attempt_id')
+                    if not attempt:
+                        if batch.get('status') == 'succeeded':
+                            raise ValueError('SUBWORKFLOW_COMPLETION_LINK_INVALID')
+                        continue
+                    if not isinstance(attempt, str):
+                        raise ValueError('SUBWORKFLOW_COMPLETION_LINK_INVALID')
+                    child_id = uuid.uuid5(uuid.NAMESPACE_URL,
+                        f'subworkflow:{record.workflow_run_id}:{step.step_id}:{attempt}').hex
+                    yield child_id, target, batch.get('status') == 'succeeded'
+                continue
+            attempt = step.escalation_result.get('attempt_id') or step.attempt_count
+            if not (step.subworkflow_run_id or receipt or step.escalation_result.get('effect_started')):
+                continue
+            child_id = uuid.uuid5(uuid.NAMESPACE_URL,
+                f'subworkflow:{record.workflow_run_id}:{step.step_id}:{attempt}').hex
+            if ((step.subworkflow_run_id and step.subworkflow_run_id != child_id)
+                    or receipt and (receipt.get('child_run_id') != child_id
+                        or receipt.get('child_workflow_id') != target)):
+                raise ValueError('SUBWORKFLOW_COMPLETION_LINK_INVALID')
+            yield child_id, target, bool(step.subworkflow_run_id or receipt)
+
+    def _repair_completion_clocks(self, engine, root, snapshot, actor):
+        """先核全树关联和当前权限，再只补原完成计时；不改run/step或重新执行。"""
+        from .run_store import WorkflowExecutionError, _decode_run, _publish_completed_run
+
+        pending, checked, seen = [(root, snapshot)], [], set()
+        while pending:
+            record, frozen = pending.pop()
+            if record.workflow_run_id in seen or record.owner_id != self.owner_id:
+                raise PermissionError('WORKFLOW_OWNER_OR_COMPLETION_LINK_MISMATCH')
+            seen.add(record.workflow_run_id)
+            source = frozen.get('descriptor') if isinstance(frozen, dict) else None
+            if not isinstance(source, dict) or source.get('id') != record.workflow_id:
+                raise ValueError('WORKFLOW_COMPLETION_SNAPSHOT_ID_MISMATCH')
+            metadata = source.get('metadata', {})
+            if not isinstance(metadata, dict):
+                raise ValueError('WORKFLOW_COMPLETION_SNAPSHOT_SOURCE_INVALID')
+            # 来源合法性独立于业务计时资格；冻结字典仍须通过原资产codec，空Owner沿原执行合同允许。
+            descriptor = AssetDescriptor.from_dict(source)
+            if descriptor.owner_id and descriptor.owner_id != record.owner_id:
+                raise ValueError('WORKFLOW_COMPLETION_SNAPSHOT_SOURCE_MISMATCH')
+            # 无业务元数据的合法来源无需计时；业务来源损坏不能被publisher的no-op洗成成功。
+            if BUSINESS_WORKFLOW_METADATA in metadata and (
+                    source.get('owner_id') != record.owner_id
+                    or source.get('scope_layer', 'owner') != 'owner'
+                    or source.get('source_scope', 'owner') != 'owner'):
+                raise ValueError('WORKFLOW_COMPLETION_SNAPSHOT_SOURCE_MISMATCH')
+            self._authorize(actor, 'workflows.run', record.workflow_id)
+            # 沿原控制预检核权限和范围；只补计时，不申请不存在的run步骤副作用审批。
+            engine.run_authorizer(record, 'preflight')
+            checked.append((record, frozen))
+            for child_id, target, required in self._completion_children(record, frozen):
+                try:
+                    raw = engine.store._read(child_id, 'run.json')
+                except FileNotFoundError:
+                    if required:
+                        raise
+                    # 已准备attempt但尚未生成子运行，不等于存在一条完成计时。
+                    continue
+                child = _decode_run(raw)
+                if (child.workflow_run_id != child_id or child.workflow_id != target
+                        or child.parent_workflow_run_id != record.workflow_run_id
+                        or child.subworkflow_depth != record.subworkflow_depth + 1):
+                    raise ValueError('SUBWORKFLOW_COMPLETION_LINK_INVALID')
+                pending.append((child, raw['workflow_snapshot']))
+        errors = []
+        for record, frozen in reversed(checked):
+            # 不持任何运行锁；再次使用原授权门，计时写入仍走原资产的来源/终态校验。
+            engine.run_authorizer(record, 'preflight')
+            try:
+                _publish_completed_run(self.store.owner_home, record, frozen)
+            except WorkflowExecutionError as error:
+                errors.append(error)
+        if errors:
+            error = WorkflowExecutionError(root, errors[0].cause, failure_stage='completion_clock')
+            error.receipt['completion_clock_failures'] = [item.receipt.copy() for item in errors]
+            raise error
+
     # LLM: 运行身份由Owner+幂等键派生，同键重放非阻塞读取原运行快照与持久准入回执，不争抢执行锁或再次准入；
     #   仍在排队的原运行按admission.json如实返回202 accepted，进入执行或终态后按原运行真实状态返回。
     # 函数用途: 以冻结上下文和范围启动一次原生工作流运行，或如实回放同键原运行回执。
@@ -481,6 +586,8 @@ class WorkflowScopeService:
                 raise PermissionError('WORKFLOW_OWNER_MISMATCH')
             if (raw_run.get('workflow_snapshot') or {}).get('_operation_intent') != intent:
                 raise BusinessError('IDEMPOTENCY_CONFLICT')
+            # 原终态已发表而计时写回失败时，同键命令只补发计时，不重跑已确认步骤。
+            self._repair_completion_clocks(engine, saved, raw_run['workflow_snapshot'], actor)
             if saved.status == 'queued' and not callable(getattr(engine, 'concurrency_admission_observer', None)):
                 try:
                     admission = engine.store._read(identity, 'admission.json')
