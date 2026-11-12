@@ -195,19 +195,22 @@ def build_default_business_space_reference_resolver(host: Any) -> Callable[[str,
         # 5. artifact_version: 产物版本文件
         if kind == 'artifact_version':
             if owner_home_path is not None:
-                art_dir = owner_home_path / 'artifacts'
-                if art_dir.is_dir():
-                    clean_name = os.path.basename(str(ref_id))
-                    target = art_dir / clean_name
-                    if target.exists():
-                        return {
-                            'owner_id': owner_id,
-                            'ref': str(ref_id),
-                            'artifact_id': str(ref_id),
-                            'version_ref': str(ref_id),
-                            'state': 'available',
-                            'kind': 'artifact_version'
-                        }
+                from ..conversation.business_access import BusinessError, require_actor
+                from ..plugin_host.errors import HostAPIError
+                from .business_artifacts_http import artifact_version_reference
+
+                try:
+                    require_actor(actor)
+                    if (actor.owner_id != owner_id
+                            or Path(actor.service.owner_root).resolve() != owner_home_path):
+                        return None
+                    return artifact_version_reference(owner_home_path, owner_id, ref_id)
+                except HostAPIError as error:
+                    if error.code == 'STORE_UNAVAILABLE':
+                        raise BusinessError('STORE_UNAVAILABLE') from error
+                    return None
+                except (OSError, ValueError):
+                    return None
             return None
 
         # 6. project: 项目引用

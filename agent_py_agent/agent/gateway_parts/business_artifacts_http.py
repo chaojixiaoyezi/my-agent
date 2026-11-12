@@ -55,14 +55,75 @@ def select_range(value, if_range, etag, size):
 
 
 def _registry(services):
-    root = services.owner_home.joinpath(*_ROOT)
-    parts = (*_ROOT, *REGISTRY_RELATIVE_PATH.parts)
-    raw = read_bytes_beneath(services.owner_home, parts) or b''
+    return _registry_at(services.owner_home, _ROOT)
+
+
+def _registry_at(owner_home, relative_root):
+    root = owner_home.joinpath(*relative_root)
+    parts = (*relative_root, *REGISTRY_RELATIVE_PATH.parts)
+    raw = read_bytes_beneath(owner_home, parts) or b''
+    try:
+        lines = raw.decode('utf-8').split('\n')
+    except UnicodeDecodeError:
+        raise HostAPIError('STORE_UNAVAILABLE', 503) from None
     records, errors = latest_records_from_lines(root / REGISTRY_RELATIVE_PATH,
-        raw.decode('utf-8').split('\n'), _record_from_payload)
+        lines, _record_from_payload)
     if errors:
         raise HostAPIError('STORE_UNAVAILABLE', 503)
     return records, len(raw)
+
+
+def _verified_blob(owner_home, parts, record, *, start=0, end=-1, max_bytes=None):
+    """只读取原登记路径的nofollow FD；登记与运输共用字节、尺寸及读取前后身份核验。"""
+    if (record.path != str(owner_home.joinpath(*parts)) or record.status != 'ready'
+            or not re.fullmatch(r'[0-9a-f]{64}', record.sha256)
+            or record.size_bytes < 0 or max_bytes is not None and record.size_bytes > max_bytes):
+        raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+    fd = open_readonly_file_beneath(owner_home, parts)
+    try:
+        before, digest, size, chunks = os.fstat(fd), hashlib.sha256(), 0, []
+        while chunk := os.read(fd, 65536):
+            if size + len(chunk) > record.size_bytes:
+                raise HostAPIError('ARTIFACT_CHANGED', 409)
+            digest.update(chunk)
+            left, right = max(0, start - size), min(len(chunk), end + 1 - size)
+            if left < right:
+                chunks.append(chunk[left:right])
+            size += len(chunk)
+        if digest.hexdigest() != record.sha256 or size != record.size_bytes or _fingerprint(before) != _fingerprint(os.fstat(fd)):
+            raise HostAPIError('ARTIFACT_CHANGED', 409)
+    finally:
+        os.close(fd)
+    return b''.join(chunks)
+
+
+def artifact_version_reference(owner_home, owner_id, version_ref):
+    """按原registry定位版本；拒绝歧义，不从外部版本引用构造文件路径。"""
+    records, _ = _registry_at(owner_home, _ROOT)
+    matches = [row for row in records.values() if row.metadata.get('version_ref') == version_ref]
+    if matches:
+        if len(matches) != 1:
+            return None
+        record = matches[0]
+        if (record.source != 'business_upload' or record.metadata.get('owner_id') != owner_id
+                or not record.metadata.get('space_id')
+                or not re.fullmatch(r'artifact-[0-9a-f]{40}', record.artifact_id)):
+            return None
+        _verified_blob(owner_home, (*_ROOT, record.artifact_id + '.blob'), record, max_bytes=UPLOAD_MAX_BYTES)
+        return {'owner_id': owner_id, 'space_id': record.metadata['space_id'], 'ref': version_ref,
+                'artifact_id': record.artifact_id, 'version_ref': version_ref,
+                'content_sha256': record.sha256, 'state': 'available', 'kind': 'artifact_version'}
+    # 保留Owner原registry中的旧文件引用；路径必须与原登记一致，且本次重新核字节。
+    records, _ = _registry_at(owner_home, ())
+    record = records.get(version_ref)
+    if record is None or version_ref != os.path.basename(version_ref):
+        return None
+    if record.metadata.get('owner_id', owner_id) != owner_id:
+        return None
+    _verified_blob(owner_home, ('artifacts', version_ref), record)
+    return {'owner_id': owner_id, 'ref': version_ref, 'artifact_id': record.artifact_id,
+            'version_ref': version_ref, 'content_sha256': record.sha256,
+            'space_id': record.metadata.get('space_id'), 'state': 'available', 'kind': 'artifact_version'}
 
 
 def _check(context, services, space_id, task_id, *, upload=False):
@@ -125,7 +186,9 @@ def upload_artifact(source, fields, filename, context, services):
     data = b''.join(chunks)
     sha = hashlib.sha256(data).hexdigest()
     identity = hashlib.sha256(canonical_json([services.owner_id, context.subject_id, fields['idempotency_key']]).encode()).hexdigest()
-    artifact_id, version = 'artifact-' + identity[:40], 'version-' + sha[:40]
+    artifact_id = 'artifact-' + identity[:40]
+    # 版本查询端口只接收version_ref；不同产物即使字节相同也必须能无歧义定位。
+    version = 'version-' + hashlib.sha256(canonical_json([artifact_id, sha]).encode()).hexdigest()[:40]
     fingerprint = hashlib.sha256(canonical_json([services.owner_id, sid, tid, sha]).encode()).hexdigest()
     root = services.owner_home.joinpath(*_ROOT)
     path = root / (artifact_id + '.blob')
@@ -160,7 +223,7 @@ def artifact_content(artifact_id, version_ref, context, services, *, range_heade
     validate_object({'version_ref': version_ref}, standalone_schema(business_api()['media_routes'][1]['request_query']))
     records, _ = _registry(services)
     record = records.get(artifact_id)
-    if (record is None or record.metadata.get('owner_id') != services.owner_id
+    if (record is None or record.status != 'ready' or record.metadata.get('owner_id') != services.owner_id
             or record.metadata.get('version_ref') != version_ref or record.source != 'business_upload'):
         raise HostAPIError('RESOURCE_NOT_FOUND', 404)
     try:
@@ -173,29 +236,15 @@ def artifact_content(artifact_id, version_ref, context, services, *, range_heade
     etag = '"' + record.sha256 + '"'
     status, start, end = select_range(range_header, if_range, etag, record.size_bytes)
     try:
-        fd = open_readonly_file_beneath(services.owner_home, (*_ROOT, expected.name))
+        content = _verified_blob(services.owner_home, (*_ROOT, expected.name), record,
+                                 start=start, end=end, max_bytes=UPLOAD_MAX_BYTES)
     except (OSError, ValueError):
         raise HostAPIError('RESOURCE_NOT_FOUND', 404) from None
-    try:
-        before, digest, size, chunks = os.fstat(fd), hashlib.sha256(), 0, []
-        while chunk := os.read(fd, 65536):
-            if size + len(chunk) > UPLOAD_MAX_BYTES:
-                raise HostAPIError('ARTIFACT_CHANGED', 409)
-            digest.update(chunk)
-            left, right = max(0, start - size), min(len(chunk), end + 1 - size)
-            if left < right:
-                chunks.append(chunk[left:right])
-            size += len(chunk)
-        if digest.hexdigest() != record.sha256 or size != record.size_bytes or _fingerprint(before) != _fingerprint(os.fstat(fd)):
-            raise HostAPIError('ARTIFACT_CHANGED', 409)
-        _check(context, services, record.metadata['space_id'], record.task_id or None)
-    finally:
-        os.close(fd)
-    content = b''.join(chunks)
+    _check(context, services, record.metadata['space_id'], record.task_id or None)
     headers = {'Content-Type': record.mime_type, 'Content-Length': str(len(content)), 'ETag': etag,
         'Accept-Ranges': 'bytes', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'attachment'}
     if status == 206:
-        headers['Content-Range'] = f'bytes {start}-{end}/{size}'
+        headers['Content-Range'] = f'bytes {start}-{end}/{record.size_bytes}'
     return status, headers, content
 
 
