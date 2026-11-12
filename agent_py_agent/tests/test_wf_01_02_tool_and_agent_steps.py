@@ -682,6 +682,32 @@ def test_cancel_workflow_session_task_idempotency(tmp_path):
     assert bg_service.cancelled_tasks[0] == ("task-xyz", "owner-1")
 
 
+def test_cancel_workflow_session_task_pending_on_failure():
+    class FailingBackgroundService:
+        def cancel_task(self, task_id: str, *, actor: Any = None):
+            raise RuntimeError("background service cancel failure")
+
+    class FailingSessionTasks:
+        def require(self, task_id: str):
+            raise KeyError(f"task not found: {task_id}")
+
+    bg_service = FailingBackgroundService()
+    conv_store = SimpleNamespace(session_tasks=FailingSessionTasks())
+    run = SimpleNamespace(owner_id="owner-1", workflow_run_id="run-1")
+    step = SimpleNamespace(step_id="s1", escalation_result={"task_id": "task-fail-xyz", "attempt_id": "att-1"})
+
+    receipt = cancel_workflow_session_task(
+        bg_service,
+        conv_store,
+        run,
+        step,
+        actor=SimpleNamespace(owner_id="owner-1"),
+    )
+    assert receipt["operation_id"] == "task-fail-xyz"
+    assert receipt["state"] == "pending"
+    assert receipt["outstanding_refs"] == ["task-fail-xyz"]
+
+
 def test_tool_step_bearer_token_redaction_in_receipt():
     def auth_tool(args, **kwargs):
         return {"auth_header": "Bearer secret_token_12345", "user": "alice"}
