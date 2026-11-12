@@ -228,7 +228,6 @@ def test_footer_composition_respects_total_display_width(width, options) -> None
     {"is_pasting": True},
     {"help_open": True},
     {"background_sync_failed": True},
-    {"notice": "操作已确认"},
 ])
 def test_footer_status_and_help_keep_full_width_with_business_badges(options) -> None:
     snapshot = TuiStateStore().snapshot()
@@ -240,6 +239,29 @@ def test_footer_status_and_help_keep_full_width_with_business_badges(options) ->
     )).footer
 
     assert decorated == expected
+
+
+def test_footer_notice_suppresses_badges_on_narrow_width() -> None:
+    snapshot = TuiStateStore().snapshot()
+    context = TuiRenderContext(width=20, notice="操作已确认")
+    decorated = render_tui_snapshot(snapshot, replace(
+        context, route_enabled=True, business_agents_enabled=True,
+        background_process_count=2, background_agent_count=3, background_agent_running_count=1,
+    )).footer
+    expected = render_tui_snapshot(snapshot, context).footer
+    assert decorated == expected
+
+
+def test_footer_notice_coexists_with_badges_on_wide_width() -> None:
+    snapshot = TuiStateStore().snapshot()
+    context = TuiRenderContext(
+        width=120, notice="操作已确认", route_enabled=True, business_agents_enabled=True,
+        background_process_count=2, background_agent_count=3, background_agent_running_count=1,
+    )
+    frame = render_tui_snapshot(snapshot, context)
+    text = fragments_text(frame.footer)
+    assert "操作已确认" in text
+    assert "后台Agent：运行 1 / 总 3" in text
 
 
 # LLM: route 与业务开关只作为上下文输入，不得变成普通底栏前缀或未知数量徽标。

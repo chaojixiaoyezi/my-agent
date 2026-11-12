@@ -303,11 +303,13 @@ class TuiRenderContext:
     route_enabled: bool | None = None
     business_identity_state: str = ''
     business_work_state: str = ''
+    notice_kind: str = ''
 
     # LLM: width 最小一列，名称字段只做展示字符串规范，不获得路径或配置控制权。
     # 函数用途: 规范渲染上下文、任务视口及后台计数，保证动画与刷新使用明确类型。
     def __post_init__(self) -> None:
         object.__setattr__(self, "width", max(1, int(self.width or 1)))
+        object.__setattr__(self, "notice_kind", str(self.notice_kind or ""))
         object.__setattr__(self, "background_sync_failed", bool(self.background_sync_failed))
         object.__setattr__(self, "agent_name", str(self.agent_name or "my-agent"))
         object.__setattr__(self, "version", str(self.version or ""))
@@ -3301,9 +3303,10 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
             text += f' · 身份：{identity} · 工作：{work}'
         if context.notice:
             text += ' · ' + context.notice
-        return (('class:tui-muted', _fit_text(text, context.width, 'left').rstrip()),)
+        style = 'class:tui-context-warning' if context.notice_kind == 'warning' else 'class:tui-muted'
+        return ((style, _fit_text(text, context.width, 'left').rstrip()),)
     if not context.background_watch_active and snapshot.permission is None:
-        if (context.is_pasting or context.background_sync_failed or context.help_open or context.notice
+        if (context.is_pasting or context.background_sync_failed or context.help_open
                 or any(block.role == 'connection' for block in snapshot.active_blocks)):
             return _render_footer_base(snapshot, context)
         business_selected = context.selected_agent_run_id == 'business:agents'
@@ -3318,6 +3321,16 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
         if context.background_process_count:
             process_badge = f' · {"› " if process_selected else ""}⚡ 后台驻留 {context.background_process_count} 项'
             process_badge = _fit_text(process_badge, context.width - display_width_text(business_badge), 'left').rstrip()
+        if context.notice:
+            b_width = display_width_text(business_badge)
+            p_width = display_width_text(process_badge)
+            if context.width - b_width - p_width >= 24:
+                pass
+            elif context.width - b_width >= 24:
+                process_badge = ''
+            else:
+                business_badge = ''
+                process_badge = ''
         remaining = context.width - display_width_text(business_badge) - display_width_text(process_badge)
         # 尾标占满时不再构造最小一列的上下文，避免额外拼出一个省略号。
         base = _render_footer_base(snapshot, replace(
@@ -3333,7 +3346,8 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
         text = "  Ctrl+G / Esc 返回 · 后台进程只读观察 · ↑↓ 切换输出"
         if context.notice:
             text += " · " + context.notice
-        return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
+        style = "class:tui-context-warning" if context.notice_kind == "warning" else "class:tui-muted"
+        return ((style, _fit_text(text, context.width, "left").rstrip()),)
     return _render_footer_base(snapshot, context)
 
 
@@ -3364,8 +3378,9 @@ def _render_footer_base(snapshot: TuiViewSnapshot, context: TuiRenderContext) ->
     # 网络回执、复制和停止反馈必须短暂覆盖常驻快捷键，否则用户只会看见
     # “Ctrl+G/Esc”而误以为刚才的输入或操作没有发生。
     if context.notice:
+        style = "class:tui-context-warning" if context.notice_kind == "warning" else "class:tui-muted"
         return ((
-            "class:tui-muted",
+            style,
             _fit_text("  " + context.notice, context.width, "left").rstrip(),
         ),)
     history_hint = _history_mouse_hint(context)

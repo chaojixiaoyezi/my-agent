@@ -294,16 +294,68 @@ class TuiAgentNavigationState:
             # 只核本页至多100个ID；整页与已见消息不衔接时，保留跨页新增产生的未读缺口。
             history_gap = (not more and bool(result.get('next_cursor') and result['items'])
                            and not any(row['message_id'] in seen for row in result['items']))
-            for row in result['items']:
-                if row['message_id'] not in seen:
-                    runtime.write_console(str(row.get('role', '未知')) + '：' + str(row.get('text', '')))
+
+            def _row_to_event(row):
+                msg_id = str(row.get('message_id') or '')
+                role = str(row.get('role') or 'user')
+                text = str(row.get('text') or '')
+                req_id = f"history:{thread_id}:{msg_id}"
+                block_id = f"history:{thread_id}:{msg_id}:{role}"
+                kind_map = {
+                    'user': 'user_message',
+                    'assistant': 'assistant_completed',
+                    'tool': 'tool_completed',
+                    'host': 'system_message',
+                }
+                kind = kind_map.get(role, 'user_message')
+                payload = {'text': text, 'message_id': msg_id, 'thread_id': thread_id}
+                if role == 'tool':
+                    tool_name = str(row.get('tool_name') or 'tool')
+                    payload['tool'] = tool_name
+                    payload['title'] = tool_name
+                    payload['detail'] = text
+                return {
+                    'schema': 'conversation_history_display.v1',
+                    'kind': kind,
+                    'phase': 'completed',
+                    'request_id': req_id,
+                    'block_id': block_id,
+                    'payload': payload,
+                }
+
+            page_events = []
+            for row in result.get('items', []):
+                if row.get('message_id') and row['message_id'] not in seen:
+                    page_events.append(_row_to_event(row))
                     seen.add(row['message_id'])
+
+            if page_events:
+                previous_ids = {b.block_id for b in runtime.store.snapshot().stable_blocks}
+                runtime._publish_recovered_display_events(tuple(page_events))
+                if more:
+                    inserted_ids = [
+                        b.block_id for b in runtime.store.snapshot().stable_blocks
+                        if b.block_id not in previous_ids
+                    ]
+                    if inserted_ids:
+                        runtime._publish('history_page_prepended', 'completed',
+                                         f"history-page:{thread_id}:{cursor or len(seen)}",
+                                         {'block_ids': inserted_ids})
+
+            if result.get('coverage') == 'unknown':
+                err = result.get('error') if isinstance(result.get('error'), dict) else {}
+                err_code = result.get('error_code') or err.get('code') or 'LOAD_FAILED'
+                runtime.set_notice(
+                    f'完整会话读取失败（{err_code}），coverage=unknown；可执行 /history 重试或按 Ctrl+G 返回主会话',
+                    duration_seconds=8.0, notice_kind='warning')
+                return
+
             # 正常刷新不消费旧续点；跨页缺口只重建更近的历史入口，更老未读页仍在其后方可达。
-            if result['coverage'] != 'unknown' and (more or history_gap or thread_id not in self._business_history):
+            if result.get('coverage') != 'unknown' and (more or history_gap or thread_id not in self._business_history):
                 self._business_history[thread_id] = {'next_cursor': result.get('next_cursor')}
             next_cursor = self._business_history.get(thread_id, {}).get('next_cursor')
             continuation = ' · /history 加载下一页' if next_cursor else ''
-            runtime.set_notice('会话覆盖：' + str(result['coverage']) + continuation + ' · Ctrl+G 返回', duration_seconds=4)
+            runtime.set_notice('会话覆盖：' + str(result.get('coverage', 'unknown')) + continuation + ' · Ctrl+G 返回', duration_seconds=4)
 
         # LLM: I/O在导航锁外；成功/失败显示均绑定原reset代次，finally始终释放本thread的加载标记。
         # 函数用途: 读取一个有界页，再通过原runtime合同发表或丢弃迟到结果。
@@ -312,9 +364,12 @@ class TuiAgentNavigationState:
                 result = projection.conversation(target['agent_id'], thread_id=thread_id, cursor=cursor)
                 with self._lock:
                     runtime.apply_conversation_snapshot(generation, lambda: publish_page(result))
-            except Exception:
-                runtime.apply_conversation_snapshot(generation, lambda: runtime.set_notice(
-                    '完整会话读取失败；覆盖未知，Ctrl+G 返回', duration_seconds=4))
+            except Exception as exc:
+                err_code = type(exc).__name__
+                with self._lock:
+                    runtime.apply_conversation_snapshot(generation, lambda: runtime.set_notice(
+                        f'完整会话读取失败（{err_code}），coverage=unknown；可执行 /history 重试或按 Ctrl+G 返回主会话',
+                        duration_seconds=8.0, notice_kind='warning'))
             finally:
                 with self._lock:
                     self._business_loading.discard(thread_id)

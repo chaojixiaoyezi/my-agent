@@ -161,6 +161,7 @@ def _make_render_context_factory(
                 for block in view_snapshot.active_blocks
             ),
             notice=active_runtime.notice(),
+            notice_kind=active_runtime.notice_kind(),
             background_sync_failed=sync_snapshot.background_sync_failed,
             has_stash=interaction_snapshot.has_stash,
             is_pasting=interaction_snapshot.is_pasting,

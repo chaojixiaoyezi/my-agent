@@ -141,8 +141,16 @@ def enter(case, thread='background-a', *, wait=True):
 
 def texts(runtime):
     snapshot = runtime.store.snapshot()
-    return [block.text for block in (*snapshot.stable_blocks, *snapshot.active_blocks)
-            if block.block_id.startswith('console:')]
+    out = []
+    for block in (*snapshot.stable_blocks, *snapshot.active_blocks):
+        if block.block_id.startswith('console:'):
+            out.append(block.text)
+        elif block.block_id.startswith('history:'):
+            role = block.role
+            role_map = {"user": "user", "assistant": "assistant", "tool": "tool", "system": "host"}
+            role_name = role_map.get(role, role)
+            out.append(f"{role_name}：{block.text}")
+    return out
 
 
 def refresh(case):
