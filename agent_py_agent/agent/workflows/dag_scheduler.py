@@ -415,6 +415,8 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
                         step.max_attempts = int(pol.get('max_attempts', 1))
                 step.escalation_result['attempt_id'] = uuid.uuid4().hex
                 step.next_step_ids = tuple(sorted(reverse_deps.get(sid, ())))
+                # Coordinator thread marks effect_started before dispatching worker
+                step.escalation_result['effect_started'] = True
 
                 state.update(record=record, phase='step_publish')
                 record = engine.store.save_step_result(record.workflow_run_id, step)

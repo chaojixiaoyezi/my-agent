@@ -756,3 +756,134 @@ def test_dag_foreach_step_and_debug_step_side_effects(tmp_path):
     assert dbg_res['status'] == 'succeeded'
     assert dbg_res['side_effects_blocked'] is False
     assert dbg_res['dry_run'] is False
+
+
+def test_dag_failed_step_persists_effect_started_and_triggers_reconciliation_fence(tmp_path):
+    # Verify failed DAG step persists effect_started=True and needs_repair=True,
+    # satisfying the business-scope resume fence.
+    def analyze(spec, context, skills):
+        sid = spec['step_id']
+        if sid == 'second_wave_fail':
+            raise RuntimeError('simulated deterministic execution error')
+        return {'ok': True}
+
+    engine = WorkflowEngine(tmp_path, analysis_handler=analyze)
+
+    flow = _flow(
+        [
+            {'step_id': 'root', 'mode': 'llm_skill_analysis'},
+            {
+                'step_id': 'second_wave_fail',
+                'mode': 'llm_skill_analysis',
+                'depends_on': ['root'],
+            },
+        ],
+        max_parallel_steps=2,
+    )
+
+    run = engine.run_workflow(flow)
+    assert run.status == 'failed'
+    assert run.failed_step_id == 'second_wave_fail'
+
+    persisted = engine.store.load_run(run.workflow_run_id)
+    assert persisted.status == 'failed'
+    failed_step = next(s for s in persisted.steps if s.step_id == 'second_wave_fail')
+    assert failed_step.status == 'failed'
+    assert failed_step.escalation_result.get('effect_started') is True
+    assert failed_step.needs_repair is True
+
+    # Evaluate business-scope resume condition (workflows/business_scope.py L447-451) inline
+    is_resume_control = True
+    requires_native_agent = (
+        persisted.status == 'waiting_for_agent'
+        or any(
+            step.mode in ('agent_conversation', 'human_escalation')
+            and not step.escalation_result.get('completion_ref')
+            for step in persisted.steps
+        )
+    )
+    requires_terminal_pub = (
+        persisted.status == 'paused_for_resume'
+        and persisted.phase == 'terminal'
+    )
+    has_unreconciled_effect = any(
+        step.escalation_result.get('effect_started')
+        and (step.needs_repair or step.status == 'running')
+        for step in persisted.steps
+    )
+    reconciliation_required = (
+        is_resume_control
+        and not requires_native_agent
+        and not requires_terminal_pub
+        and (persisted.effect_outcome == 'unknown' or has_unreconciled_effect)
+    )
+    assert has_unreconciled_effect is True
+    assert reconciliation_required is True
+
+
+def test_dag_success_run_persists_effect_started_and_excludes_skipped_steps(tmp_path):
+    # Verify that in a successful DAG run, every executed step has effect_started=True
+    # while skipped branches have no effect_started.
+    def analyze(spec, context, skills):
+        sid = spec['step_id']
+        if sid == 'root':
+            return {'score': 20}
+        if sid == 'independent':
+            return {'indep': 'ok'}
+        return {'val': 1}
+
+    engine = WorkflowEngine(tmp_path, analysis_handler=analyze)
+
+    flow = _flow(
+        [
+            {'step_id': 'root', 'mode': 'llm_skill_analysis'},
+            {
+                'step_id': 'high_score_only',
+                'mode': 'llm_skill_analysis',
+                'depends_on': ['root'],
+                'condition': {
+                    'op': 'gt',
+                    'ref': {'step_id': 'root', 'key': 'score'},
+                    'value': 80,
+                },
+            },
+            {
+                'step_id': 'cascaded_dependent',
+                'mode': 'llm_skill_analysis',
+                'depends_on': ['high_score_only'],
+            },
+            {
+                'step_id': 'independent',
+                'mode': 'llm_skill_analysis',
+                'depends_on': ['root'],
+            },
+        ],
+        max_parallel_steps=2,
+    )
+
+    run = engine.run_workflow(flow)
+    assert run.status == 'succeeded'
+
+    persisted = engine.store.load_run(run.workflow_run_id)
+    assert persisted.status == 'succeeded'
+
+    step_map = {s.step_id: s for s in persisted.steps}
+    assert step_map['root'].status == 'succeeded'
+    assert step_map['independent'].status == 'succeeded'
+    assert step_map['high_score_only'].status == 'skipped'
+    assert step_map['cascaded_dependent'].status == 'skipped'
+
+    # Every executed step has effect_started is True
+    assert step_map['root'].escalation_result.get('effect_started') is True
+    assert step_map['independent'].escalation_result.get('effect_started') is True
+
+    # Every skipped step does NOT have effect_started
+    assert not step_map['high_score_only'].escalation_result.get('effect_started')
+    assert not step_map['cascaded_dependent'].escalation_result.get('effect_started')
+
+    # Comprehensive check across all steps in persisted run
+    for step in persisted.steps:
+        if step.status == 'succeeded':
+            assert step.escalation_result.get('effect_started') is True
+        elif step.status == 'skipped':
+            assert not step.escalation_result.get('effect_started')
