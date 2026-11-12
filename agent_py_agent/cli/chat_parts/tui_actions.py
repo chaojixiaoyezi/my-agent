@@ -244,6 +244,8 @@ def _tui_submit_control_operation(
         return handled
     if (command.kind, command.operation) == ("model", "view") or str(text or "").strip() == "/effort":
         return False  # 单独 /model、/effort 由 TUI 本地菜单处理（菜单选中后再发带参数的形式）；带参数的文字形式发给 Gateway。
+    if command.kind in {"space", "team"}:
+        return False  # /space、/team 是业务空间/团队命令，由业务适配器经 /client/business 执行；它们不是会话控制，不进入控制 outbox。
     if command.kind == "context":
         from .tui_block_renderer import render_tui_context_usage_report
 
