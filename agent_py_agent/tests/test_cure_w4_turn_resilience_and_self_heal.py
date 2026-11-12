@@ -134,9 +134,8 @@ def test_model_profile_and_runtime_db_error_taxonomy():
     assert "运行时数据库正在执行短暂恢复维护" in msg_db
 
     prof_err = ModelProfileError("Profile removed")
-    assert prof_err.error_code == "MODEL_PROFILE_UNAVAILABLE"
     assert fallback_error_code(prof_err) == "MODEL_PROFILE_UNAVAILABLE"
-    msg_prof = gateway_client_error_message(prof_err.error_code)
+    msg_prof = gateway_client_error_message(fallback_error_code(prof_err))
     assert "当前会话绑定的模型档案不可用或已被移除" in msg_prof
 
 

@@ -71,6 +71,10 @@ def fallback_error_code(exc: BaseException) -> str:
     code = str(getattr(exc, "error_code", "") or "")
     if code:
         return code
+    from .settings.model_provider_schema import ModelProfileError
+
+    if isinstance(exc, ModelProfileError):
+        return "MODEL_PROFILE_UNAVAILABLE"
     if is_provider_timeout_error(exc):
         return "PROVIDER_TIMEOUT"
     if is_provider_transient_error(exc):

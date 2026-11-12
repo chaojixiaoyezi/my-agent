@@ -557,7 +557,7 @@ def _reference_skeleton(
         result = {}
         items = list(value.items())
         if budget is not None:
-            max_scan = max(16, budget.max_dict_items * 4)
+            max_scan = max(128, budget.max_dict_items * 8)
             items = items[:max_scan]
         for key, item in items:
             required = deepcopy(item) if _exact_reference_key(str(key)) else _reference_skeleton(item, budget, depth=depth + 1)

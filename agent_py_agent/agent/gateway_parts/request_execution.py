@@ -1710,12 +1710,10 @@ def _is_compact_transient_failure(exc: BaseException | None) -> bool:
                 "PROVIDER_UNAVAILABLE",
                 "PROVIDER_TIMEOUT",
                 "TRANSIENT_ERROR",
-                "MODEL_STREAM_INCOMPLETE",
                 "PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED",
                 "COMPACT_TRANSIENT_FAILURE",
             }
             or (code.startswith("COMPACT_") and any(sub in code for sub in ("TIMEOUT", "TRANSIENT", "RATE_LIMIT", "UNAVAILABLE", "503", "429")))
-            or (code.startswith("COMPACT_PROVIDER") and "QUOTA" not in code)
         ):
             return True
         current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
@@ -1743,12 +1741,14 @@ def _provider_transient_turn_resume_marker(
     )
     if max_count <= 0:
         return None
-    from ..backends.errors import ProviderTransientError
-
     error_code = str(response.get("error_code") or "").strip()
     is_transient = (
         error_code in PROVIDER_TRANSIENT_TURN_RESUME_CODES
-        or (failure is not None and (isinstance(failure, ProviderTransientError) or _is_compact_transient_failure(failure)))
+        or (
+            failure is not None
+            and error_code.startswith("COMPACT")
+            and _is_compact_transient_failure(failure)
+        )
     )
     if not is_transient:
         return None

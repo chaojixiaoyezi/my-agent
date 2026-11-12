@@ -946,7 +946,7 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
 
         native_carry = capture_native_compact_carry(agent, loop_params, final_response)
     except (Exception, KeyboardInterrupt) as exc:
-        _persist_partial_native_turn(params.partial_turn_callback, loop_params, exc)
+        _persist_partial_native_turn(params.partial_turn_callback, loop_params, exc, agent=agent)
         raise
     return RuntimeLoopResult(
         final_prompt=final_prompt,
@@ -975,13 +975,50 @@ def _execute_runtime_loop(agent, params: RuntimeLoopParams):
 
 # LLM: 异常快照只含当前 run 的原生 IR；精确会话归属、幂等与写盘修复由原宿主出口负责。
 # 函数用途: 在抛回原异常前保存已完成的工具往返；没有原生历史就不生成空的助手回复。
-def _persist_partial_native_turn(callback: object, params: ToolLoopExecuteParams, exc: BaseException) -> None:
+def _clear_unpersisted_first_turn_usage(agent: object, params: ToolLoopExecuteParams) -> None:
+    if agent is None:
+        return
+    try:
+        from dataclasses import replace as _dc_replace
+
+        from ...conversation.context_usage import _context_usage_thread_id
+
+        store = getattr(agent, "conversation_store", None)
+        thread_id = _context_usage_thread_id(params)
+        if store is None or not thread_id:
+            return
+        msg_path = store.storage.message_path(thread_id)
+        if msg_path.exists():
+            return
+        store.threads.update_atomic(
+            thread_id,
+            lambda row: (
+                _dc_replace(row, model_context_usage={})
+                if (
+                    not msg_path.exists()
+                    and row.compact_generation == 0
+                    and row.compacted_through_byte_offset == 0
+                    and not row.compacted_through_message_id
+                    and row.model_context_usage
+                )
+                else row
+            ),
+        )
+    except Exception:
+        pass
+
+
+def _persist_partial_native_turn(
+    callback: object, params: ToolLoopExecuteParams, exc: BaseException, *, agent: object = None
+) -> None:
     from ..models import AgentRunResult
 
     if not callable(callback):
+        _clear_unpersisted_first_turn_usage(agent, params)
         return
     native = _completed_turn_native_messages(params, None)
     if not native:
+        _clear_unpersisted_first_turn_usage(agent, params)
         return
     cancelled = isinstance(exc, (InterruptedError, KeyboardInterrupt))
     has_media = any(
@@ -997,6 +1034,7 @@ def _persist_partial_native_turn(callback: object, params: ToolLoopExecuteParams
         and not params.archive_tool_calls
         and not any(isinstance(m, dict) and m.get("role") == "assistant" for m in native)
     ):
+        _clear_unpersisted_first_turn_usage(agent, params)
         return
     result = AgentRunResult(
         prompt="", response="", backend="tool_loop", used_memories=0,

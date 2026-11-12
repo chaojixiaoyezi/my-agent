@@ -443,7 +443,6 @@ class GuidancePendingIndex(ObservationIndex):
             return [], []
 
         queue_path = self.storage.guidance_path(target_type, target_id)
-        # 纯读快速通道 1：索引与队列文件均不存在且无脏记录时，无需加写锁或初始化 SQLite，直接返回空
         dirty_has_entries = False
         if self.dirty_dir.exists():
             try:
@@ -452,12 +451,7 @@ class GuidancePendingIndex(ObservationIndex):
             except OSError:
                 dirty_has_entries = True
 
-        if not self.path.exists() and not queue_path.exists() and not dirty_has_entries:
-            self._remember_quiet(scope, signature, math.inf)
-            self.last_work = {'bytes_read': 0, 'bytes_written': 0, 'json_decodes': 0}
-            return [], []
-
-        # 纯读快速通道 2：SQLite 索引已就绪且队列无未提交漂移时，通过只读连接查询，避免 exclusive flock
+        # 纯读快速通道：SQLite 索引已就绪且队列无未提交漂移时，通过只读连接查询，避免 exclusive flock
         if self.path.exists() and not dirty_has_entries:
             try:
                 with self._read_connection(blocking=False, deadline=None) as conn:

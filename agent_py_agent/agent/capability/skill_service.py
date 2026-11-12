@@ -121,6 +121,14 @@ class _RootManifest:
     keyed: dict[str, tuple[tuple[str, str], SkillManifestItem]]
 
 
+class _BoundedTreeCache(OrderedDict):
+    """持有所属 SkillsService 容量回调的目录状态缓存。"""
+
+    def __init__(self, capacity_provider: Callable[[], int] | None = None) -> None:
+        super().__init__()
+        self.capacity_provider = capacity_provider
+
+
 # LLM: 一个服务是 prompt、工具与子代理的唯一快照来源；能力包提供者只给原安装事实的投影，不给私有扫描根。
 # 类用途: 汇集用户可用方法与能力包，固定逐轮身份并在来源变化后重建缓存。
 class SkillsService:
@@ -149,7 +157,8 @@ class SkillsService:
         self._extra_roots: tuple[Path, ...] = ()
         # 缺失的工作区根不参与身份，相同技能树共用一份内容，工作区仅在出口绑定。
         self._cache: OrderedDict[tuple[str, str], tuple[str, str, tuple[SkillRoot, ...], SkillSnapshot]] = OrderedDict()
-        self._cache_floor = cache_entries if type(cache_entries) is int and cache_entries > 0 else _SERVICE_CACHE_MAX_ENTRIES
+        self._explicit_cache_entries = cache_entries if type(cache_entries) is int and cache_entries > 0 else None
+        self._cache_floor = self._explicit_cache_entries or _SERVICE_CACHE_MAX_ENTRIES
         # _manifest_cache 是最近一次使用的 (roots, signature, manifest, errors)。
         self._manifest_cache: tuple | None = None
         # 内容缓存和清单缓存共同持有根引用，最后一个引用释放时回收该根的发现结果。
@@ -158,7 +167,7 @@ class SkillsService:
         self._root_refs: dict[SkillRoot, int] = {}
         self._contents: dict[str, SkillSnapshot] = {}
         self._content_refs: dict[str, int] = {}
-        self._root_states: OrderedDict[str, tuple[tuple, _SkillTreeState]] = OrderedDict()
+        self._root_states: OrderedDict[str, tuple[tuple, _SkillTreeState]] = _BoundedTreeCache(lambda: self._capacity)
         # 兼容已有宿主观察口，只有 _root_states 持有真实状态。
         self._trees = self._root_states
         # 弱引用保留在途工作区投影的对象身份，历史工作区不再占内容缓存槽。
@@ -172,6 +181,8 @@ class SkillsService:
 
     @property
     def _capacity(self) -> int:
+        if self._explicit_cache_entries is not None:
+            return self._explicit_cache_entries
         return cache_capacity.owner_agents(self._cache_floor) if cache_capacity is not None else self._cache_floor
 
     # LLM: 新根集合须同时清除快照与stat缓存，不能跨来源复用旧manifest。
@@ -243,6 +254,7 @@ class SkillsService:
             cached = None if force_reload else self._cache.get(cache_key)
             if cached is not None:
                 self._cache.move_to_end(cache_key)
+                self._trim_caches_locked()
         if cached is not None and cached[1] == content_key:
             return self._bind_workspace(cached[3], workspace, fingerprint, content_key)
 
@@ -550,7 +562,9 @@ def _skill_tree_state(
             scanned = _scan_skill_tree_stats(path)
             if scanned is not None:
                 break
-            time.sleep(0.005 * (attempt + 1))
+            _sleep = getattr(time, "sleep", None)
+            if callable(_sleep):
+                _sleep(0.005 * (attempt + 1))
         else:
             import logging
             logging.getLogger(__name__).debug("skill directory changed during stat scan; using best-effort snapshot: %s", path)
@@ -564,7 +578,11 @@ def _skill_tree_state(
     with _PROCESS_SKILL_CACHE_LOCK:
         if cache is not None and key is not None:
             cache[str(path)] = (key, state)
-            capacity = cache_capacity.owner_agents(_SERVICE_CACHE_MAX_ENTRIES) if cache_capacity is not None else _SERVICE_CACHE_MAX_ENTRIES
+            capacity_fn = getattr(cache, "capacity_provider", None)
+            if callable(capacity_fn):
+                capacity = capacity_fn()
+            else:
+                capacity = cache_capacity.owner_agents(_SERVICE_CACHE_MAX_ENTRIES) if cache_capacity is not None else _SERVICE_CACHE_MAX_ENTRIES
             while len(cache) > capacity:
                 cache.pop(next(iter(cache)))
         elif builtin and key is not None and len(state.stats) <= _PROCESS_ROOT_CACHE_MAX_PATHS:

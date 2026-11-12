@@ -271,7 +271,7 @@ def test_curator_extract_for_route_immediate_fallback(tmp_path: Path) -> None:
 
 
 def test_parse_curator_extraction_optional_field_normalization() -> None:
-    """parse_curator_extraction defaults optional missing keys while enforcing strict schema."""
+    """parse_curator_extraction defaults optional top-level warnings & link_candidate_id while enforcing strict schema."""
     valid_base = {
         "schema_version": CURATOR_OUTPUT_SCHEMA_VERSION,
         "daily_events": [{
@@ -279,27 +279,47 @@ def test_parse_curator_extraction_optional_field_normalization() -> None:
             "summary": "did work",
             "actor": "user",
             "origin": "user_explicit",
+            "message_refs": [],
+            "tool_refs": [],
+            "artifact_refs": [],
+            "decisions": [],
+            "lessons": [],
+            "next_actions": [],
         }],
         "candidates": [{
             "candidate_type": "long_term_fact",
             "content": "fact",
             "subject_key": "fact.k",
-            "scope": {"scope_type": "personal", "scope_key": "personal"},
+            "scope": {
+                "scope_type": "personal",
+                "scope_key": "personal",
+                "applies_when": None,
+                "excludes_when": None,
+            },
             "origin": "user_explicit",
             "confidence": 0.8,
             "proposed_action": "add",
             "promotion_target": "long_term",
+            "source_message_refs": [],
+            "source_tool_refs": [],
+            "source_artifact_refs": [],
+            "conflicts_with": [],
+            "observed_at": None,
+            "valid_from": None,
+            "valid_until": None,
+            "target_entry_id": None,
         }],
         "processed_message_refs": [],
         "processed_audit_refs": [],
         "unresolved_refs": [],
-        "warnings": [],
         "next_cursor": {"per_thread_cursors": [], "last_audit_event_id": None},
     }
 
     parsed = parse_curator_extraction(json.dumps(valid_base))
+    assert parsed.warnings == ()
     assert parsed.daily_events[0].artifact_refs == ()
     assert parsed.daily_events[0].decisions == ()
+    assert not parsed.candidates[0].link_candidate_id
     assert not parsed.candidates[0].valid_until
     assert not parsed.candidates[0].scope.applies_when
     assert parsed.candidates[0].conflicts_with == ()

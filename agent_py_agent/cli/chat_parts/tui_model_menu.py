@@ -318,9 +318,9 @@ async def _vector_menu(app, agent, session_id: str) -> str:
 async def _defaults_menu(app, agent, session_id: str, runtime) -> str:
     kind = await _choose_action(app, "默认模型与共享", [
         ("set_default", "我的新会话默认模型（不修改已打开的会话）"),
-        ("auxiliary", "后台辅助模型（记忆整理与技能自学习）"),
         ("sharing", "共享给其他用户（管理员；开放或撤销）"),
-        ("initial", "其他用户的初始模型（管理员；没自己选过模型的用户用它）")])
+        ("initial", "其他用户的初始模型（管理员；没自己选过模型的用户用它）"),
+        ("auxiliary", "后台辅助模型（记忆整理与技能自学习）")])
     if kind == "set_default":
         return await _select_model(app, agent, session_id, runtime, operation="set_default")
     if kind == "auxiliary":

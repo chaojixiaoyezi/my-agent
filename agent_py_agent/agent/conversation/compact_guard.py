@@ -278,7 +278,6 @@ def is_compact_transient_provider_failure(exc: BaseException) -> bool:
         "PROVIDER_UNAVAILABLE",
         "PROVIDER_TIMEOUT",
         "TRANSIENT_ERROR",
-        "MODEL_STREAM_INCOMPLETE",
         "PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED",
         "COMPACT_PROVIDER_RATE_LIMITED",
         "COMPACT_PROVIDER_UNAVAILABLE",
@@ -301,7 +300,6 @@ def is_compact_transient_provider_failure(exc: BaseException) -> bool:
         if (
             code in transient_codes
             or (code.startswith("COMPACT_") and any(sub in code for sub in ("TIMEOUT", "TRANSIENT", "RATE_LIMIT", "UNAVAILABLE", "503", "429")))
-            or (code.startswith("COMPACT_PROVIDER") and not is_provider_quota_failure(curr))
         ):
             if not is_provider_quota_failure(curr):
                 return True
@@ -309,7 +307,6 @@ def is_compact_transient_provider_failure(exc: BaseException) -> bool:
         if (
             err_code in transient_codes
             or (err_code.startswith("COMPACT_") and any(sub in err_code for sub in ("TIMEOUT", "TRANSIENT", "RATE_LIMIT", "UNAVAILABLE", "503", "429")))
-            or (err_code.startswith("COMPACT_PROVIDER") and not is_provider_quota_failure(curr))
         ):
             if not is_provider_quota_failure(curr):
                 return True
@@ -317,7 +314,6 @@ def is_compact_transient_provider_failure(exc: BaseException) -> bool:
         if (
             c_code in transient_codes
             or (c_code.startswith("COMPACT_") and any(sub in c_code for sub in ("TIMEOUT", "TRANSIENT", "RATE_LIMIT", "UNAVAILABLE", "503", "429")))
-            or (c_code.startswith("COMPACT_PROVIDER") and not is_provider_quota_failure(curr))
         ):
             if not is_provider_quota_failure(curr):
                 return True

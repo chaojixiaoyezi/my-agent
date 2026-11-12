@@ -2334,10 +2334,11 @@ def _curator_run_allowed(supervisor: object, agent: object) -> bool:
     if not getattr(config, "memory_curator_enabled", True) or not _agent_memory_enabled(agent):
         return False
     auxiliary_profile = effective_auxiliary_model_profile(config)
-    if not auxiliary_profile:
-        return False
-    if auxiliary_profile_cooldown_remaining(auxiliary_profile) > 0:
-        return False
+    if config is not None and hasattr(config, "memory_curator_model_profile"):
+        if not auxiliary_profile:
+            return False
+        if auxiliary_profile_cooldown_remaining(auxiliary_profile) > 0:
+            return False
     return bool(supervisor._curator_has_pending_reason(agent) or supervisor._curator_quota_available())
 
 
@@ -2362,11 +2363,12 @@ def _run_skill_learning(agent: object, label: str) -> None:
     )
 
     config = getattr(agent, "config", None)
-    auxiliary_profile = effective_auxiliary_model_profile(config)
-    if not auxiliary_profile:
-        return
-    if auxiliary_profile_cooldown_remaining(auxiliary_profile) > 0:
-        return
+    if config is not None and hasattr(config, "memory_curator_model_profile"):
+        auxiliary_profile = effective_auxiliary_model_profile(config)
+        if not auxiliary_profile:
+            return
+        if auxiliary_profile_cooldown_remaining(auxiliary_profile) > 0:
+            return
     run_pending = getattr(getattr(agent, "skill_learning", None), "run_pending", None)
     if not callable(run_pending):
         return

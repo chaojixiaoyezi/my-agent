@@ -56,6 +56,30 @@ def _must_propagate_tool_exceptions() -> tuple[type[BaseException], ...]:
 
 _MUST_PROPAGATE_TOOL_EXCEPTIONS = _must_propagate_tool_exceptions()
 
+
+def _must_propagate_round_exception(exc: BaseException) -> bool:
+    if isinstance(exc, _MUST_PROPAGATE_TOOL_EXCEPTIONS):
+        return True
+    try:
+        from ...contracts.model_call_ledger import find_model_call_admission_error
+        if find_model_call_admission_error(exc) is not None:
+            return True
+    except ImportError:
+        pass
+    try:
+        from ...conversation.agent_tool_approval import find_approval_retirement_error
+        if find_approval_retirement_error(exc) is not None:
+            return True
+    except ImportError:
+        pass
+    try:
+        from ...gateway_parts.private_approval_control import is_private_approval_transport_error
+        if is_private_approval_transport_error(exc):
+            return True
+    except ImportError:
+        pass
+    return False
+
 from ...backends import ModelResponse
 from ...concurrency.interrupt import is_interrupted, register_interrupt_callback
 from ...contracts.model_call_ledger import (
@@ -431,6 +455,7 @@ def _execute_parallel_step(
         request,
         calls[position:parallel_end],
         start_idx=position + 1,
+        bulkhead=True,
     )
     transition_index = 0
     for outcome_idx, outcome_call, started_at, execution in outcomes:
@@ -444,6 +469,8 @@ def _execute_parallel_step(
         except _MUST_PROPAGATE_TOOL_EXCEPTIONS:
             raise
         except Exception as exc:
+            if _must_propagate_round_exception(exc):
+                raise
             logger.error(
                 "unexpected tool pipeline error for %s",
                 getattr(outcome_call, "tool_name", getattr(outcome_call, "name", "tool")),
@@ -539,6 +566,8 @@ def _execute_serial_step(
     except _MUST_PROPAGATE_TOOL_EXCEPTIONS:
         raise
     except Exception as exc:
+        if _must_propagate_round_exception(exc):
+            raise
         logger.error(
             "unexpected tool pipeline error for %s",
             getattr(call, "tool_name", getattr(call, "name", "tool")),
@@ -911,10 +940,11 @@ def _execute_parallel_segment(
     calls: list[ToolCall],
     *,
     start_idx: int,
+    bulkhead: bool = False,
 ) -> list[tuple[int, ToolCall, float, ToolExecution]]:
     context = _capture_parallel_thread_context(request.agent)
     scheduler = scheduler_for_agent(request.agent)
-    items = [_round_work_item(request, start_idx + offset, call, context, scheduler is not None)
+    items = [_round_work_item(request, start_idx + offset, call, context, scheduler is not None, bulkhead=bulkhead)
              for offset, call in enumerate(calls)]
     token = getattr(request.params, "cancellation_token", None)
     cancel = getattr(token, "cancel", None)
@@ -966,8 +996,8 @@ def _request_tool_snapshot(request):
 
 # LLM: 每项独立Context；入队取消工厂仍走原启动屏障合成配对结果，不提前报告started。
 # 函数用途: 为并行调用绑定正确优先级和取消结果。
-def _round_work_item(request, idx, call, context, queued):
-    invoke = partial(_started_parallel_call, request, idx, call, context, queued)
+def _round_work_item(request, idx, call, context, queued, *, bulkhead: bool = False):
+    invoke = partial(_started_parallel_call, request, idx, call, context, queued, bulkhead=bulkhead)
     return ToolWorkItem(call.call_id, invoke, cancelled_result=invoke, sqlite_reuse=True,
                         priority='control' if _is_control_lane_call(call, _request_tool_snapshot(request)) else 'normal')
 
@@ -981,7 +1011,7 @@ def _submit_round_item(request, scheduler, item):
 
 # LLM: 排队不算handler开始；获额度后重查关门/取消/compact，原合成结果负责后续配对落账。
 # 函数用途: 在实际worker开始点产生进度并执行或拒绝当前调用。
-def _started_parallel_call(request, idx, call, context, queued):
+def _started_parallel_call(request, idx, call, context, queued, *, bulkhead: bool = False):
     started_at = time.monotonic()
     execution = _queued_call_gate(request, call) if queued else None
     if execution is None:
@@ -991,6 +1021,8 @@ def _started_parallel_call(request, idx, call, context, queued):
         except _MUST_PROPAGATE_TOOL_EXCEPTIONS:
             raise
         except Exception as exc:
+            if not bulkhead or _must_propagate_round_exception(exc):
+                raise
             logger.error(
                 "unexpected tool pipeline error for %s",
                 getattr(call, "tool_name", getattr(call, "name", "tool")),
@@ -1294,6 +1326,8 @@ def _record_execution(
     except _MUST_PROPAGATE_TOOL_EXCEPTIONS:
         raise
     except Exception as exc:
+        if _must_propagate_round_exception(exc):
+            raise
         logger.warning(
             "post-result bookkeeping failed for %s: %s",
             getattr(call, "tool_name", getattr(call, "name", "tool")),
@@ -1412,6 +1446,8 @@ def _execute_host_action(request: ToolRoundExecutionRequest, idx: int, action: H
     except _MUST_PROPAGATE_TOOL_EXCEPTIONS:
         raise
     except Exception as exc:
+        if _must_propagate_round_exception(exc):
+            raise
         logger.error(
             "unexpected host action tool error for %s",
             getattr(call, "tool_name", getattr(call, "name", "tool")),
