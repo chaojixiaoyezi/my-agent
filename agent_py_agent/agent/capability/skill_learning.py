@@ -122,6 +122,7 @@ class SkillLearningRuntime:
     deployment_root: Path | None = None
     promotion_verifier: Callable | None = default_machine_promotion_verifier
     task_completion_host: object | None = field(default=None, repr=False, compare=False)
+    backend_provider: Callable[[], object] | None = None
 
 
 # LLM: status 取 idle/busy/daily_limit/retry 或账本事件名（published/updated/skipped/rejected/failed/dropped）；
@@ -420,9 +421,14 @@ class SkillLearningService:
     # 函数用途: 发起无工具结构化总结；仅自主后台模式附带四载体指导，普通/显式总结保持原提示合同。
     def _call_model(self, material: SkillLearningMaterial) -> object:
         session = "skill-learning:" + str(material.request.get("request_key") or "")
+        backend = (
+            self.runtime.backend_provider()
+            if callable(self.runtime.backend_provider)
+            else self.runtime.backend
+        ) or self.runtime.backend
         with provider_session_scope((self.runtime.owner_id,), session):
             return call_backend_with_timeout(
-                self.runtime.backend,
+                backend,
                 prompt=skill_learning_prompt(material, include_carrier_guidance=(
                     self.settings.autonomous_verified and material.request.get('requested_by') != 'user')),
                 response_schema=skill_learning_response_schema(),

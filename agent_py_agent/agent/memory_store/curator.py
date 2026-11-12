@@ -1246,7 +1246,7 @@ class _CuratorRunMixin:
         except Exception as exc:
             code = _failure_code(exc)
             default = route.get("default")
-            if default is None or route.get("is_default", True) or code not in CURATOR_DEFAULT_FALLBACK_CODES:
+            if default is None or route.get("is_default", True) or not (code in CURATOR_DEFAULT_FALLBACK_CODES or _is_deterministic_thread_model_rejection(exc)):
                 raise
             route["failure_warnings"] = (f"curator_thread_model_failed:{code}",)
         result = self._extract_with(default.backend, context, batch)
@@ -2006,6 +2006,37 @@ def _failure_code(exc: BaseException) -> str:
     return "CURATOR_MODEL_FAILED"
 
 
+# LLM: 判定异常是否属于确定性拒绝（配置/能力不兼容或 400/401/403 永久拒绝），供 _extract_for_route 决定是否在本次运行内立即回退默认模型。
+# 函数用途: 检查异常链是否包含确定性拒绝错误。
+def _is_deterministic_thread_model_rejection(exc: BaseException) -> bool:
+    from ..backends.errors import ProviderConfigurationError, ProviderRequestRejectedError
+
+    queue: list[BaseException] = [exc]
+    seen: set[int] = set()
+    depth = 0
+    while queue and depth < 4:
+        item = queue.pop(0)
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        depth += 1
+        if isinstance(item, ProviderRequestRejectedError):
+            status = getattr(item, "provider_http_status", None)
+            if status is None:
+                status = getattr(item, "status_code", None)
+            if status in {400, 401, 403}:
+                return True
+        elif isinstance(item, ProviderConfigurationError):
+            return True
+        cause = getattr(item, "__cause__", None)
+        if cause is not None and isinstance(cause, BaseException) and id(cause) not in seen:
+            queue.append(cause)
+        context = getattr(item, "__context__", None)
+        if context is not None and isinstance(context, BaseException) and id(context) not in seen:
+            queue.append(context)
+    return False
+
+
 # LLM: 输入读取错误只保留既有稳定码，不把损坏行正文写入状态或运行审计。
 # 函数用途: 汇总增量输入读取失败码。
 def _load_error_code(errors: tuple[dict[str, object], ...]) -> str:
@@ -2083,6 +2114,7 @@ __all__ = [
     "MemoryCuratorDependencies",
     "MemoryCuratorIdentity",
     "MemoryCuratorService",
+    "_is_deterministic_thread_model_rejection",
 ]
 
 

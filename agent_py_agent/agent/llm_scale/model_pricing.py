@@ -41,6 +41,10 @@ _DEFAULT_PRICING: dict[str, ModelPrice] = {
     # 默认主模型 MiniMax-M2.7 走 "MiniMax" 前缀,避免每次调用刷"未知模型"告警 + 按最贵档高估成本。
     "MiniMax": ModelPrice(0.30, 1.20),
     "mimo": ModelPrice(0.30, 1.20),
+    "gpt-6": ModelPrice(2.50, 10.0),
+    "gpt-5": ModelPrice(2.00, 8.0),
+    "gpt-4": ModelPrice(2.50, 10.0),
+    "deepseek": ModelPrice(0.27, 1.10),
 }
 _DEFAULT_PRICE = ModelPrice(15.0, 75.0)  # 未知模型:保守按最贵档估,不低估成本
 _OVERRIDES: dict[str, ModelPrice] = {}

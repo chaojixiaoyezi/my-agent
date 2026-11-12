@@ -1587,12 +1587,31 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
     # 函数用途: 记录精确失败车道和恢复条件，环境级故障按车道暂停，普通错误从 BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS 起连续翻倍冷却并封顶。
     def _record_thread_failure(self, label: str, thread_id: str, exc: Exception, *,
                                wait_for_inbound_marker: str | None = None) -> None:
+        import inspect
+
         from ..agent.conversation.compact_guard import ConversationCompactError
         from ..agent.runtime_db.operations import RuntimeRecoveryRequiredError
         from ..agent.user_space.owner_quota import OwnerQuotaUnavailable
 
-        self._lane_retry.failed(label, thread_id, exc, delay=BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS,
-                                wait_for_inbound_marker=wait_for_inbound_marker)
+        is_headless = str(thread_id or "").startswith("thread-bg-")
+        sig = inspect.signature(self._lane_retry.failed)
+        kwargs = {"delay": BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS, "wait_for_inbound_marker": wait_for_inbound_marker}
+        if "headless" in sig.parameters:
+            kwargs["headless"] = is_headless
+        self._lane_retry.failed(label, thread_id, exc, **kwargs)
+
+        if is_headless and hasattr(self._lane_retry, "_failures") and hasattr(self._lane_retry, "_lock"):
+            key = (label, thread_id)
+            with self._lane_retry._lock:
+                entry = self._lane_retry._failures.get(key)
+                if entry is not None and getattr(entry, "waiting_for_user_input", False):
+                    from dataclasses import replace
+                    self._lane_retry._failures[key] = replace(
+                        entry,
+                        waiting_for_user_input=False,
+                        retry_at=time.monotonic() + BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS,
+                    )
+
         if isinstance(exc, (OwnerQuotaUnavailable, RuntimeRecoveryRequiredError, ConversationCompactError)):
             return
         _print_gateway_loop_error(
@@ -2099,7 +2118,25 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             return False
         if not isinstance(payload, dict):
             return False
-        return bool(payload.get("pending_reasons") or payload.get("active_lease"))
+        if payload.get("active_lease"):
+            return True
+        if not payload.get("pending_reasons"):
+            return False
+        last_failure_code = str(payload.get("last_failure_code") or "").strip()
+        last_failure_at = str(payload.get("last_failure_at") or "").strip()
+        if last_failure_code:
+            try:
+                failure_dt = datetime.fromisoformat(last_failure_at)
+                if failure_dt.tzinfo is None:
+                    failure_dt = failure_dt.replace(tzinfo=timezone.utc)
+                elapsed = time.time() - failure_dt.timestamp()
+                backoff = 3600.0 if last_failure_code in ("CURATOR_REPLAY_BREAKER_OPEN", "CURATOR_MODEL_NOT_CONFIGURED") else 300.0
+                if elapsed < backoff:
+                    return False
+            except (ValueError, TypeError):
+                if last_failure_code in ("CURATOR_REPLAY_BREAKER_OPEN", "CURATOR_MODEL_NOT_CONFIGURED"):
+                    return False
+        return True
 
     # LLM: 记忆整理仍按原准入条件（记忆总闸、紧急原因或当日配额）决定是否运行；自动总结 Skill 在其后独立运行，
     #   两者失败互不影响。准入可能只因为有学习请求，所以这里必须重算记忆整理条件，不能直接跑 run_if_due。
