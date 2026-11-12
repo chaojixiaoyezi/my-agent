@@ -329,25 +329,27 @@ def test_dag_diamond_execution_order_and_inputs_map(tmp_path):
 
 
 def test_dag_parallel_timing_proof(tmp_path):
-    sleep_duration = 0.12
+    import threading
+
+    barrier = threading.Barrier(2, timeout=5.0)
 
     def analyze(spec, context, skills):
-        time.sleep(sleep_duration)
+        sid = spec['step_id']
+        if sid in ('fetch_1', 'fetch_2'):
+            barrier.wait()
         return {'ok': True}
 
     engine = WorkflowEngine(tmp_path, analysis_handler=analyze)
 
-    # 根节点启动 -> 4个并行检索节点 -> 聚合汇聚节点
+    # 根节点启动 -> 2个并行检索节点 -> 聚合汇聚节点
     flow = _flow(
         [
             {'step_id': 'root', 'mode': 'llm_skill_analysis'},
             {'step_id': 'fetch_1', 'mode': 'llm_skill_analysis', 'depends_on': ['root']},
             {'step_id': 'fetch_2', 'mode': 'llm_skill_analysis', 'depends_on': ['root']},
-            {'step_id': 'fetch_3', 'mode': 'llm_skill_analysis', 'depends_on': ['root']},
-            {'step_id': 'fetch_4', 'mode': 'llm_skill_analysis', 'depends_on': ['root']},
-            {'step_id': 'join', 'mode': 'llm_skill_analysis', 'depends_on': ['fetch_1', 'fetch_2', 'fetch_3', 'fetch_4']},
+            {'step_id': 'join', 'mode': 'llm_skill_analysis', 'depends_on': ['fetch_1', 'fetch_2']},
         ],
-        max_parallel_steps=4,
+        max_parallel_steps=2,
     )
 
     t0 = time.monotonic()
@@ -355,9 +357,8 @@ def test_dag_parallel_timing_proof(tmp_path):
     elapsed = time.monotonic() - t0
 
     assert run.status == 'succeeded'
-    # 若顺序执行，6步总耗时 > 6 * 0.12 = 0.72s
-    # 4并发执行下，fetch_1..4耗时重叠，总耗时约为 3 * 0.12 = 0.36s (严控在 0.55s 以内以提供确定性时序证明)
-    assert elapsed < 0.55, f"Parallel timing proof failed: elapsed={elapsed:.3f}s"
+    # 使用 threading.Barrier(2) 确定性证明两个并行分支同时执行（若顺序执行则超时抛出 BrokenBarrierError）
+    assert elapsed < 5.0, f"Parallel timing proof failed: elapsed={elapsed:.3f}s"
 
 
 def test_dag_mid_wave_failure_draining_no_lost_receipts(tmp_path):

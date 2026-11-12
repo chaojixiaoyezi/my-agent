@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1463,
+  "count": 1464,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -58,6 +58,14 @@
       "unit": "个",
       "category": "重试",
       "description": "幂等发送最多尝试 3 次：飞书接口偶发网络错误时重发，靠 message_id 去重防止重复投递。"
+    },
+    {
+      "name": "FEISHU_CARD_MAX_AGE_SECONDS",
+      "file": "agent_py_agent/agent/adapter/feishu_agent_panel.py",
+      "value": 1209300,
+      "unit": "秒",
+      "category": "上限预算",
+      "description": "飞书卡片最长更新生命周期（14 天减 5 分钟安全缓冲）"
     },
     {
       "name": "_DEFAULT_EXPIRE_SECONDS",
