@@ -451,7 +451,11 @@ def refresh_registered_mcp_client(
     }
     replacement = {name: tool for name, tool in current.items() if name not in old_names}
     registered = 0
-    proxy_transport = None if isinstance(client, MCPStdioClient) and client._activation is None else transport
+    proxy_transport = (
+        None
+        if isinstance(MCPStdioClient, type) and isinstance(client, MCPStdioClient) and client._activation is None
+        else transport
+    )
     for info in tools:
         try:
             proxy = build_proxy_tool(

@@ -59,7 +59,8 @@ _ACTIVE_TURN_EMPTY_REPLY_NUDGE = (
 )
 
 
-_MAX_CUMULATIVE_TURN_REPAIRS = 10
+# 单回合累计纠偏总次数上限
+_MAX_CUMULATIVE_TURN_REPAIR_COUNT = 10
 
 
 # LLM: 各类修复预算只在当前工具循环累计；字段不代表工具执行记录或同目标连续失败，不得混用。
@@ -468,7 +469,7 @@ def _protocol_violation_decision(
         "不要把工具调用写进正文、代码块或解释文字。"
     )
     max_repairs = max(1, int(getattr(request.params, "max_protocol_repairs", 2) or 2))
-    if getattr(request.counters, "cumulative_turn_repairs", 0) >= _MAX_CUMULATIVE_TURN_REPAIRS:
+    if getattr(request.counters, "cumulative_turn_repairs", 0) >= _MAX_CUMULATIVE_TURN_REPAIR_COUNT:
         return ToolLoopResponseDecision(
             "break",
             ModelResponse(
@@ -743,16 +744,7 @@ def _tool_calls_decision(
         request.response, native=_native_tool_use_active(request.params)
     )
     # 形成了可执行调用：连续“参数无效”计数清零，下一次坏参数重新获得纠正机会。
-    # 当当前响应非截断时，重置协议修复、截断写修复与截断输出修复计数。
-    is_truncated = bool(getattr(request.response, "truncated", False)) or _is_provider_length_truncated(request.response)
-    if not is_truncated:
-        reset_fields = {"invalid_arguments_repairs": 0}
-        for field_name in ("protocol_repairs", "truncated_write_repairs", "truncated_output_repairs"):
-            if hasattr(request.counters, field_name):
-                reset_fields[field_name] = 0
-        counters = replace(request.counters, **reset_fields)
-    else:
-        counters = replace(request.counters, invalid_arguments_repairs=0)
+    counters = replace(request.counters, invalid_arguments_repairs=0)
     return ToolLoopResponseDecision("run_tools", clean_response, calls, counters)
 
 
@@ -851,7 +843,7 @@ def _native_truncated_write_decision(
         return None
     if not _has_truncated_empty_write(calls):
         return None
-    if getattr(request.counters, "cumulative_turn_repairs", 0) >= _MAX_CUMULATIVE_TURN_REPAIRS:
+    if getattr(request.counters, "cumulative_turn_repairs", 0) >= _MAX_CUMULATIVE_TURN_REPAIR_COUNT:
         return ToolLoopResponseDecision(
             "break",
             ModelResponse(
@@ -1061,7 +1053,7 @@ def _downgrade_next_call_reasoning(request: _NoToolCallsRequest) -> ToolLoopRepa
 def _truncated_output_resume_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDecision | None:
     if not _is_provider_length_truncated(request.response):
         return None
-    if getattr(request.counters, "cumulative_turn_repairs", 0) >= _MAX_CUMULATIVE_TURN_REPAIRS:
+    if getattr(request.counters, "cumulative_turn_repairs", 0) >= _MAX_CUMULATIVE_TURN_REPAIR_COUNT:
         return ToolLoopResponseDecision(
             "break",
             ModelResponse(
@@ -1172,7 +1164,7 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
             #   于是同一策略原地打转——两个子代理各被截断 3/4 次、重启 4/5 个 attempt、耗掉 35 分钟才
             #   碰巧跑完。这里改成轮内续跑：先把断点续写指令回灌，同一个 run 再走一轮；超限才按
             #   unfinished 收口，让上游按既有恢复路径处理。
-            if getattr(request.counters, "cumulative_turn_repairs", 0) >= _MAX_CUMULATIVE_TURN_REPAIRS:
+            if getattr(request.counters, "cumulative_turn_repairs", 0) >= _MAX_CUMULATIVE_TURN_REPAIR_COUNT:
                 final_response = replace(
                     final_response,
                     runtime_status="unfinished",

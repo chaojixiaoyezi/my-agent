@@ -34,7 +34,7 @@ LANE_ENVIRONMENT_PROBE_BASE_SECONDS = 60.0
 # 环境级故障探测间隔封顶 900 秒：翻倍退避到上限后不再增长
 LANE_ENVIRONMENT_PROBE_MAX_SECONDS = 900.0
 # 后台 headless (thread-bg-*) 车道连续失败自动重试上限（达到后暂停等待新输入/新任务派发）
-_MAX_HEADLESS_CONSECUTIVE_RETRIES = 3
+_MAX_HEADLESS_CONSECUTIVE_RETRY_COUNT = 3
 
 
 # LLM: 不保存异常正文、配置或密钥；模型依赖不靠计时解除，普通错误仍按单调时钟冷却。
@@ -212,7 +212,7 @@ def _next_failure(
     now = time.monotonic()
     if headless:
         attempt = (previous.wait_count + 1) if previous is not None else 1
-        if attempt >= _MAX_HEADLESS_CONSECUTIVE_RETRIES:
+        if attempt >= _MAX_HEADLESS_CONSECUTIVE_RETRY_COUNT:
             return _LaneFailure(0.0, False, waiting_for_user_input=True, wait_count=attempt)
         if isinstance(exc, OwnerQuotaUnavailable):
             interval = min(30.0, 2.0 ** min(attempt - 1, 5))

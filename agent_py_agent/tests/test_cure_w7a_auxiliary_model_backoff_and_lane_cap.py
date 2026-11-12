@@ -38,7 +38,7 @@ from agent_py_agent.agent.settings.thread_model_selection import (
     AUXILIARY_MODEL_OPERATIONS,
 )
 from agent_py_agent.cli.gateway_lane_retry import (
-    _MAX_HEADLESS_CONSECUTIVE_RETRIES,
+    _MAX_HEADLESS_CONSECUTIVE_RETRY_COUNT,
     BackgroundLaneRetry,
 )
 from agent_py_agent.cli.gateway_loops import _curator_run_allowed, _run_skill_learning
@@ -276,7 +276,7 @@ def test_headless_lane_retry_cap_and_latching():
     assert row2.wait_count == 2
     assert row2.waiting_for_user_input is False
 
-    # Attempt 3 (_MAX_HEADLESS_CONSECUTIVE_RETRIES = 3): waiting_for_user_input=True
+    # Attempt 3 (_MAX_HEADLESS_CONSECUTIVE_RETRY_COUNT = 3): waiting_for_user_input=True
     retry.failed(owner, thread_id, exc, delay=5.0, wait_for_inbound_marker="m1", headless=True)
     row3 = retry._failures[(owner, thread_id)]
     assert row3.wait_count == 3

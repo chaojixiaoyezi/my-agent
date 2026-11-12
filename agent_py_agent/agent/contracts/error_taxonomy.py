@@ -75,6 +75,26 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="核对reason、完整输入、输出上限和窗口；沿原压缩恢复或修正明确配置，不原样重放、不删除原始来源或伪造一token预算。",
     ),
+    "INTERNAL_ERROR": ErrorContract(
+        code="INTERNAL_ERROR", category="execution", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="宿主或工具内部执行出现未预期异常；核对结构化错误摘要与副作用状态，不原样盲目重放调用。",
+    ),
+    "POST_TOOL_BOOKKEEPING_WARNING": ErrorContract(
+        code="POST_TOOL_BOOKKEEPING_WARNING", category="execution", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="工具主体已执行，仅后置记账或钩子出现非致命异常；保留已有执行结果，禁止重放原副作用调用。",
+    ),
+    "RUNTIME_DB_RECOVERY_DEFERRED": ErrorContract(
+        code="RUNTIME_DB_RECOVERY_DEFERRED", category="resource", retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint="运行时数据库正在执行短暂恢复维护且本轮尚未开始；等待维护完成后重试，不修改持久状态。",
+    ),
+    "SINGLE_AGENT_HANDOFF_NOT_NEEDED": ErrorContract(
+        code="SINGLE_AGENT_HANDOFF_NOT_NEEDED", category="contract", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="当前为单代理独立执行，无需创建跨代理交接单；请改用 todo 工具管理个人待办或直接执行目标任务。",
+    ),
     # LLM: INT.REG仅补分类，不签发发布、继承、重放或越权许可；未知副作用必须先核原回执。
     # 配置用途: 登记冻结接口合同及当前生产代码实际发出的错误，保留明确恢复边界。
     "ASSET_VERSION_NOT_FOUND": ErrorContract(

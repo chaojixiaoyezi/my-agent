@@ -56,6 +56,7 @@ _BUILTIN_PROMPT_PREFIX = "builtin:"
 _LEGACY_DEFAULT_PROMPT = "prompts/default.md"
 _BUILTIN_PROMPT_TEXT_CACHE: dict[str, str] = {}
 _BUILTIN_PROMPT_CACHE_LOCK = threading.Lock()
+# 内置提示词文本缓存最大条目数上限
 _BUILTIN_PROMPT_CACHE_MAX_ENTRIES = 64
 _SKILL_CATALOG_DEGRADED = "# Available Skills\n- catalog_state: degraded (skill_search 仍可按需检索与读取)"
 # 沟通节奏只交给主模型判断；不创建计时器、额外采样或机器完成门，也不要求逐工具重复说明。

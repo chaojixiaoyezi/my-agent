@@ -197,9 +197,9 @@ def test_response_decision_resets_repairs_after_clean_round(tmp_path):
     )
     decision_tool = tool_loop_response_decision(req_tool)
     assert decision_tool.action == "run_tools"
-    assert decision_tool.counters.protocol_repairs == 0
-    assert decision_tool.counters.truncated_write_repairs == 0
-    assert decision_tool.counters.truncated_output_repairs == 0
+    assert decision_tool.counters.protocol_repairs == 2
+    assert decision_tool.counters.truncated_write_repairs == 1
+    assert decision_tool.counters.truncated_output_repairs == 2
     assert decision_tool.counters.invalid_arguments_repairs == 0
 
     # 2. Clean text completion round

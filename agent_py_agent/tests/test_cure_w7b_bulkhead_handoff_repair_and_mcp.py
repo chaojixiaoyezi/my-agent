@@ -23,7 +23,7 @@ from agent_py_agent.agent.agent_core.orchestration.tools.handoff_board_tool impo
     build_manage_handoff_board_model_spec,
 )
 from agent_py_agent.agent.agent_core.tool_loop.response_decision import (
-    _MAX_CUMULATIVE_TURN_REPAIRS,
+    _MAX_CUMULATIVE_TURN_REPAIR_COUNT,
     ToolLoopRepairCounters,
     ToolLoopResponseDecisionRequest,
     _inc_protocol,
@@ -243,7 +243,7 @@ def test_cumulative_turn_repair_ceiling_stops_at_10() -> None:
     assert counters.cumulative_turn_repairs == 2
 
     # Advance cumulative_turn_repairs to 10
-    counters = replace(counters, cumulative_turn_repairs=_MAX_CUMULATIVE_TURN_REPAIRS)
+    counters = replace(counters, cumulative_turn_repairs=_MAX_CUMULATIVE_TURN_REPAIR_COUNT)
 
     req = ToolLoopResponseDecisionRequest(
         agent=MagicMock(),

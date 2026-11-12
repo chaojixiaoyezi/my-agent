@@ -511,7 +511,7 @@ class PluginMCPClient(MCPStdioClient):
                 host_alive = host_pid > 0 and is_pid_alive(host_pid)
                 child_alive = child_pid > 0 and is_pid_alive(child_pid)
 
-                if host_alive or child_alive or (host_pid <= 0 and child_pid <= 0 and record.get("status") == "unknown"):
+                if record.get("status") == "unknown" or host_alive or child_alive:
                     unsettled.append(record)
                 else:
                     # Provably dead: auto-clear by updating record in transaction if supported

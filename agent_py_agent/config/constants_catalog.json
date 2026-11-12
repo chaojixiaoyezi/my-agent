@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1464,
+  "count": 1467,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -978,6 +978,14 @@
       "unit": "个",
       "category": "其它",
       "description": "连续这么多次都给不出合法工具参数，就按原错误结束本轮（成功执行一轮工具后重新计数）。"
+    },
+    {
+      "name": "_MAX_CUMULATIVE_TURN_REPAIR_COUNT",
+      "file": "agent_py_agent/agent/agent_core/tool_loop/response_decision.py",
+      "value": 10,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "单回合累计纠偏总次数上限"
     },
     {
       "name": "_MAX_EMPTY_TEXT_REPAIR_COUNT",
@@ -8044,6 +8052,14 @@
       "description": "程序文件摘要每次读入的块大小（字节）。"
     },
     {
+      "name": "_BUILTIN_PROMPT_CACHE_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/prompting_parts/builder.py",
+      "value": 64,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "内置提示词文本缓存最大条目数上限"
+    },
+    {
       "name": "_OWNER_WORKSPACE_ENVELOPE_MAX_CHARS",
       "file": "agent_py_agent/agent/prompting_parts/builder.py",
       "value": 6000,
@@ -11442,6 +11458,14 @@
       "unit": "秒",
       "category": "上限预算",
       "description": "环境级故障探测间隔封顶 900 秒：翻倍退避到上限后不再增长"
+    },
+    {
+      "name": "_MAX_HEADLESS_CONSECUTIVE_RETRY_COUNT",
+      "file": "agent_py_agent/cli/gateway_lane_retry.py",
+      "value": 3,
+      "unit": "个",
+      "category": "重试",
+      "description": "后台 headless (thread-bg-*) 车道连续失败自动重试上限（达到后暂停等待新输入/新任务派发）"
     },
     {
       "name": "LOOP_ERROR_BACKOFF_BASE_SECONDS",
