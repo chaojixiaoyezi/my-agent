@@ -675,73 +675,7 @@ def build_default_workflow_agent_steps(host: Any) -> Any | None:
     except (ImportError, AttributeError):
         pass
 
-    store = getattr(host, 'conversation_store', None)
-    if store is None:
-        return None
-
-    try:
-        from ..conversation.business_access import BusinessActor
-        from ..conversation.session_messaging import cancel_owned_session_task
-        from ..workflows.agent_steps import WorkflowAgentSteps
-        from .business_api import BackgroundAgentService
-
-        default_owner_id = getattr(getattr(host, 'home_paths', None), 'owner_id', '')
-        background_service = BackgroundAgentService(host)
-
-        # LLM: 构造执行工作流代理步骤所需的调用者身份。
-        # 函数用途: 返回绑定 workflow_run 标识的 BusinessActor 实例。
-        def actor_provider(run: Any) -> BusinessActor:
-            return BusinessActor(run.owner_id, f"workflow-run:{getattr(run, 'workflow_run_id', 'unknown')}", host, lambda action, facts: True)
-
-        # LLM: 读取 SessionTask 执行完成状态和结构化回执。
-        # 函数用途: 将底层会话任务终态投影为工作流步骤可识别的执行回执。
-        def completion_reader(
-            task_id: str,
-            *,
-            owner_id: str = '',
-            workflow_run_id: str = '',
-            step_id: str = '',
-            attempt_id: str = '',
-            session_task_dispatch: Any = None,
-        ) -> dict[str, Any] | None:
-            try:
-                stask = store.session_tasks.load(str(task_id))
-            except (OSError, ValueError, RuntimeError):
-                return None
-            if stask is None:
-                return None
-            status = getattr(stask, 'status', '')
-            if status in ('pending', 'queued', 'running'):
-                return None
-            outcome = 'completed' if status == 'done' else ('failed' if status == 'failed' else 'cancelled')
-            result = getattr(stask, 'result', None)
-            output = result if isinstance(result, dict) else {'result': result}
-            return {
-                'task_id': str(task_id),
-                'owner_id': owner_id or default_owner_id,
-                'workflow_run_id': workflow_run_id,
-                'step_id': step_id,
-                'attempt_id': attempt_id,
-                'status': outcome,
-                'completion_ref': str(getattr(stask, 'completion_ref', None) or f"task:{task_id}:{status}"),
-                'output': output,
-            }
-
-        # LLM: 取消正在运行的会话代理任务并级联子任务。
-        # 函数用途: 触发关联 SessionTask 的取消流程。
-        def cancel_handler(task_id: str, *, actor: Any = None, idempotency_key: str = '') -> dict[str, Any]:
-            try:
-                task, _ = background_service._owned_task(task_id, actor)
-                cancel_owned_session_task(host, task, include_descendants=True,
-                    authorize_task=lambda canonical_task: True)
-            except Exception:
-                pass
-            return {'state': 'completed', 'outstanding_refs': []}
-
-        return WorkflowAgentSteps(background_service, actor_provider=actor_provider,
-                                completion_reader=completion_reader, cancel_handler=cancel_handler)
-    except Exception:
-        return None
+    return None
 
 
 # LLM: 构造空间治理与审批决定的桥接适配器。

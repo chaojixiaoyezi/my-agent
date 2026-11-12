@@ -159,55 +159,73 @@ def test_biz_005_workflow_ref_normalization(native):  # noqa: F811
 
 
 # LLM: 验证 BIZ-011 / G5b：原生 SessionTask 代理步骤集成。
-# 函数用途: 测试 WorkflowAgentSteps 的 submit、completion 与 cancel 闭环。
-def test_biz_011_workflow_agent_steps(native, monkeypatch):  # noqa: F811
+# 函数用途: 验证原生宿主下 workflow_agent_steps 为 None 且缺少执行器时拒绝 agent_task。
+def test_biz_011_workflow_agent_steps(native):  # noqa: F811
     server, agent = native
     wire_business_host_ports(agent)
 
-    steps = build_default_workflow_agent_steps(agent)
-    assert steps is not None
+    # 1. 原生宿主下 build_default_workflow_agent_steps 返回 None
+    assert build_default_workflow_agent_steps(agent) is None
+    # 2. 接线后 agent.workflow_agent_steps 仍为 None
+    assert agent.workflow_agent_steps is None
 
-    run = SimpleNamespace(
+    # 3. 校验 WorkflowEngine 在 agent_steps=None 下执行 agent_task 步骤抛出 WORKFLOW_AGENT_EXECUTOR_UNAVAILABLE
+    from agent_py_agent.agent.assets.descriptor import AssetDescriptor, AssetRefs, IOContract
+    from agent_py_agent.agent.assets.workflow_store import (
+        WorkflowDefinition,
+        WorkflowStepSpec,
+        WorkflowStore,
+    )
+    from agent_py_agent.agent.workflows.engine import WorkflowEngine, _pending
+    from agent_py_agent.agent.workflows.models import WorkflowRunRecord
+
+    owner_home = Path(agent.home_paths.owner_home_dir).resolve()
+    engine = WorkflowEngine(owner_home, agent_steps=None)
+
+    step_spec = {"step_id": "step-a1", "name": "Agent Step", "mode": "agent_task", "config": {}}
+    record = _pending(step_spec)
+    run = WorkflowRunRecord(
+        workflow_run_id="run-agent-unavailable-1",
+        workflow_id="wf-agent-test",
         owner_id=agent.home_paths.owner_id,
-        workflow_run_id='wf-run-agent-001',
-        business_context={'space_id': 'sp-agent-01', 'owner_id': agent.home_paths.owner_id}
+        trigger_kind="manual",
+        status="running",
+        started_at=0.0,
+        ended_at=None,
+        duration_ms=None,
+        current_step_id="step-a1",
+        steps=(record,),
+        inputs={},
+        final_output={},
     )
-    step = SimpleNamespace(
-        step_id='step-a1',
-        escalation_result={'attempt_id': 'att-1'}
+    engine.store.save_run(run)
+    definition = {"descriptor": {"id": "wf-agent-test", "version": "1.0.0"}, "steps": [step_spec]}
+
+    with pytest.raises(ValueError, match="WORKFLOW_AGENT_EXECUTOR_UNAVAILABLE"):
+        engine._perform(record, step_spec, {}, definition, run)
+
+    # 完整工作流运行同样记录 WORKFLOW_AGENT_EXECUTOR_UNAVAILABLE 步骤失败
+    descriptor = AssetDescriptor(
+        id="wf-agent-test",
+        kind="workflow",
+        name="Agent Workflow Test",
+        summary="Test",
+        version="1.0.0",
+        owner_id=agent.home_paths.owner_id,
+        access_targets=(),
+        data_sources=(),
+        credential_refs=(),
+        io_contract=IOContract(),
+        refs=AssetRefs(),
     )
-    spec = {
-        'config': {
-            'instruction': 'execute step instruction'
-        }
-    }
-
-    # 模拟 background_service.submit
-    monkeypatch.setattr(steps.background_service, 'submit', lambda req, actor, idempotency_key: {
-        'task_id': 'stask-0099', 'state': 'accepted', 'operation_id': 'op-99'
-    })
-
-    steps.submit(run, spec, step)
-    assert step.escalation_result.get('task_id') == 'stask-0099'
-    assert step.escalation_result.get('submission_state') == 'accepted'
-
-    # 模拟任务运行中 completion 为 None
-    stask_running = SimpleNamespace(task_id='stask-0099', status='running', result=None)
-    monkeypatch.setattr(agent.conversation_store.session_tasks, 'load', lambda tid: stask_running)
-    assert steps.completion(run, step) is None
-
-    # 模拟任务完成 completion 结构化回执
-    stask_done = SimpleNamespace(task_id='stask-0099', status='done', result={'key': 'value'}, completion_ref='task:stask-0099:done')
-    monkeypatch.setattr(agent.conversation_store.session_tasks, 'load', lambda tid: stask_done)
-    comp = steps.completion(run, step)
-    assert comp is not None
-    assert comp['status'] == 'completed'
-    assert comp['output'] == {'key': 'value'}
-
-    # 模拟任务取消
-    cancelled = steps.cancel(run, step)
-    assert cancelled is True
-    assert step.escalation_result.get('cancellation_receipt', {}).get('state') == 'completed'
+    wf = WorkflowDefinition(
+        descriptor,
+        (WorkflowStepSpec(step_id="step-a1", name="Agent Step", mode="agent_task", config={}),),
+    )
+    WorkflowStore(owner_home).save_workflow(wf)
+    result = engine.run_workflow(wf, inputs={})
+    assert result.status == "failed"
+    assert result.steps[0].error_message == "WORKFLOW_AGENT_EXECUTOR_UNAVAILABLE"
 
 
 # LLM: 验证 BIZ-012：回收引用读者与 owner_maintenance 完整覆盖与阻断。

@@ -347,23 +347,24 @@ def cancel_workflow_session_task(
         try:
             task = conversation_store.session_tasks.require(task_id)
             if getattr(task, "status", "") == "cancelled":
-                return {"operation_id": task_id, "state": "completed", "outstanding_refs": []}
+                return {"operation_id": str(task_id), "state": "completed", "outstanding_refs": []}
             from ..conversation.session_tasks import SessionTaskUpdate
             if hasattr(conversation_store.session_tasks, "advance"):
                 conversation_store.session_tasks.advance(
                     task_id,
                     SessionTaskUpdate(status="cancelled", summary="Workflow run cancelled"),
                 )
+                return {"operation_id": str(task_id), "state": "completed", "outstanding_refs": []}
             elif hasattr(conversation_store.session_tasks, "record_update"):
                 conversation_store.session_tasks.record_update(
                     task_id,
                     SessionTaskUpdate(status="cancelled", summary="Workflow run cancelled"),
                 )
-            return {"operation_id": task_id, "state": "completed", "outstanding_refs": []}
+                return {"operation_id": str(task_id), "state": "completed", "outstanding_refs": []}
         except Exception:
             pass
 
-    return {"operation_id": str(task_id), "state": "completed", "outstanding_refs": []}
+    return {"operation_id": str(task_id), "state": "pending", "outstanding_refs": [str(task_id)]}
 
 
 def make_session_task_completion_reader(conversation_store):
