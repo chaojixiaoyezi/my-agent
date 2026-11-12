@@ -22,6 +22,7 @@
 - 一个概念一个权威位置。task workspace、memory、artifact、subagent state、compact ledger、config 都必须有唯一 canonical path / canonical schema；projection/index 只能做查找和展示。
 - 配置必须真的生效。用户配置、默认 YAML、dataclass 默认值、测试覆盖不能互相打架；不允许“配置里改了，运行时还读写死值”。
 - 状态和控制必须结构化。停止、取消、暂停、恢复、接管、验收、授权要走 control event/tool 参数/status 字段，不解析普通自然语言触发。
+- **严禁笼统“统一报错”吞掉具体原因（No Generic / Unified Opaque Error Masking）**。无论是给模型看的工具错误回执（`ToolResult`）、业务接口回执，还是给用户看的界面提示，严禁只返回一句笼统无细节的统一报错（如只回 `INTERNAL_ERROR: Tool execution failed`、`操作失败`、`覆盖 unknown` 或把单条消息超长吞成空白页）。任何拦截、拒绝或异常兜底都必须明确给出：① **具体原因与精确错误码**（业务拦截写清为什么不该调，如单代理独立干活无需建跨代理交接单；异常兜底附带脱敏后的真实异常类型与关键摘要）；② **当前是否已产生副作用**（如 `not_started` 未执行 vs 工具主体已执行成功、仅后置归档写入失败）；③ **明确下一步动作建议**（改用哪个工具/修正什么参数、是否禁止原样盲目重试），让模型与用户一次看懂，杜绝瞎猜硬试浪费 Token。
 - 状态别名不隐式兼容。旧标签、多语言词表和模型口头“完成/成功/失败”不能自动变成当前协议状态；确需迁移时要写显式结构化迁移记录。
 - 大输出、compact、resume 是底层能力，不是 prompt 技巧。长文件、长工具输出、长任务必须依赖 chunk、cursor、coverage ledger、archive 和 resume summary。
 - 优先复用已验证的通用实现。会话、活动回合、Compact、Skill、工具、计划、子代理、停止与引导统一适配 owner/thread/task 事实源；长期记忆、人格、持久调度和通道投递各守模块边界，不再并行维护第二套状态。
