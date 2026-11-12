@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-from pathlib import Path
+from importlib.resources import files
+from importlib.resources.abc import Traversable
 
 from ..conversation.business_access import BusinessError
 from ..plugin_host.errors import HostAPIError
@@ -65,17 +66,35 @@ def enforce_browser_request_token(handler, server, context, services) -> None:
         raise HostAPIError("CAPABILITY_DENIED", 403, message="Request token invalid or missing")
 
 
-# LLM: 严格自工作区向内查找静态资产文件，防止向上路径穿越与符号链接逃逸。
-# 函数用途: 安全解析业务工作台静态资产的磁盘物理绝对路径。
-def _locate_ui_file(filename: str) -> Path:
-    repo_root = Path(__file__).resolve().parents[3]
-    candidate = repo_root / "examples" / "business_space_ui" / filename
-    if candidate.is_file():
-        return candidate
-    alt = Path(__file__).resolve().parents[2] / "examples" / "business_space_ui" / filename
-    if alt.is_file():
-        return alt
-    raise FileNotFoundError(f"Business UI asset {filename} not found")
+# 源码、wheel 和无源码 pyc 共用唯一包内资源，不从工作目录或 examples 补找。
+def _locate_ui_file(filename: str) -> Traversable:
+    if filename not in {"index.html", "app.js"}:
+        raise ValueError("不支持的业务界面资源名称")
+    return files("agent_py_agent").joinpath("static", "business_space_ui", filename)
+
+
+class _BusinessUIResourceError(HostAPIError):
+    """资源故障与认证拒绝分开；不公开物理路径或底层异常文本。"""
+
+    def __init__(self, filename: str, cause: OSError | UnicodeError) -> None:
+        if isinstance(cause, FileNotFoundError):
+            code = "BUSINESS_UI_ASSET_MISSING"
+        elif isinstance(cause, UnicodeError):
+            code = "BUSINESS_UI_ASSET_INVALID"
+        else:
+            code = "BUSINESS_UI_ASSET_UNREADABLE"
+        super().__init__(code, 500, message=(
+            f"包内业务界面资源 {filename} 无法读取（{type(cause).__name__}）；"
+            "请校验并重新安装同版本完整发行包，勿盲目重试。"
+        ))
+
+
+def _read_ui_file(filename: str) -> str:
+    # 将读盘/解码置于窄边界，避免坏 UTF-8 落入外层 ValueError 认证拒绝分支。
+    try:
+        return _locate_ui_file(filename).read_bytes().decode("utf-8")
+    except (OSError, UnicodeError) as error:
+        raise _BusinessUIResourceError(filename, error) from error
 
 
 # LLM: 提供同源认证的工作台HTML托管，严格限制CSP与无缓存并注入当前Owner与用户的会话CSRF Token。
@@ -93,9 +112,7 @@ def handle_business_ui(handler, server) -> None:
         user_id = getattr(context, "subject_id", "") or ""
         csrf_token = generate_csrf_token(server, owner_id, str(user_id))
 
-        html_path = _locate_ui_file("index.html")
-        with open(html_path, encoding="utf-8") as file_handle:
-            raw_html = file_handle.read()
+        raw_html = _read_ui_file("index.html")
 
         injected_html = raw_html.replace(
             '<meta name="csrf-token" content="">',
@@ -121,6 +138,8 @@ def handle_business_ui(handler, server) -> None:
         handler.end_headers()
         if handler.command != "HEAD":
             handler.wfile.write(body)
+    except _BusinessUIResourceError as error:
+        handler._send_json(error.status, {"error": error.to_payload(), "effect_outcome": error.outcome})
     except HostAPIError as error:
         handler._send_json(error.status, {"error": {"code": error.code}})
     except (BusinessError, ValueError):
@@ -142,9 +161,7 @@ def handle_business_ui_app_js(handler, server) -> None:
             return
         native_business_context(handler, server)
 
-        js_path = _locate_ui_file("app.js")
-        with open(js_path, encoding="utf-8") as file_handle:
-            js_content = file_handle.read()
+        js_content = _read_ui_file("app.js")
 
         body = js_content.encode("utf-8")
         handler.send_response(200)
@@ -157,6 +174,8 @@ def handle_business_ui_app_js(handler, server) -> None:
         handler.end_headers()
         if handler.command != "HEAD":
             handler.wfile.write(body)
+    except _BusinessUIResourceError as error:
+        handler._send_json(error.status, {"error": error.to_payload(), "effect_outcome": error.outcome})
     except HostAPIError as error:
         handler._send_json(error.status, {"error": {"code": error.code}})
     except (BusinessError, ValueError):

@@ -4,6 +4,7 @@ from __future__ import annotations
 import http.client
 import importlib
 import json
+import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -165,12 +166,12 @@ def test_auth_disabled_keeps_explicit_single_machine_behavior(tmp_path, monkeypa
 
 
 # LLM: 直接遍历规范路由表并经真实HTTP分发逐条验证；固定数量、唯一性与安全档位，不运行真实业务处理器。
-# 函数用途: 确认40条已审路由共用唯一注册表，业务、产物和请求事件入口仍要求宿主凭据。
+# 函数用途: 确认46条已审路由共用唯一注册表，新增HEAD仅限两个业务UI入口，安全档位不变。
 def test_dispatch_registry_is_single_source_and_tiers_match_review(tmp_path, monkeypatch):
     routes = getattr(http_service, "GATEWAY_HTTP_ROUTES", None)
     assert routes is not None, "分发和观察须复用同一张结构化路由表"
     pairs = [(method, route.template, route.access_tier) for method, group in routes.items() for route in group]
-    assert len(pairs) == 44 and len({(method, template) for method, template, _ in pairs}) == 44
+    assert len(pairs) == 46 and len({(method, template) for method, template, _ in pairs}) == 46
     assert ("POST", "/v1/chat/completions", "credential") in pairs
     assert ("POST", "/api/llm/test", "credential") in pairs
     assert ("POST", "/client/goal", "credential") in pairs
@@ -184,9 +185,15 @@ def test_dispatch_registry_is_single_source_and_tiers_match_review(tmp_path, mon
         ("GET", "/client/business/artifacts/*/content", "credential"),
         ("GET", "/client/business/ui", "credential"),
         ("GET", "/client/business/ui/app.js", "credential"),
+        ("HEAD", "/client/business/ui", "credential"),
+        ("HEAD", "/client/business/ui/app.js", "credential"),
         ("POST", "/client/business", "credential"),
         ("POST", "/client/business/stream", "credential"),
         ("POST", "/client/business/artifacts", "credential"),
+    }
+    assert {(method, path, tier) for method, path, tier in pairs if method == "HEAD"} == {
+        ("HEAD", "/client/business/ui", "credential"),
+        ("HEAD", "/client/business/ui/app.js", "credential"),
     }
     # 浏览器 OAuth 回调不携宿主头，仍由原处理器验签 state/actor；观察写入口必须持宿主凭据。
     assert {(method, path) for method, path, tier in pairs if tier == "public"} == {
@@ -196,7 +203,7 @@ def test_dispatch_registry_is_single_source_and_tiers_match_review(tmp_path, mon
         ("POST", "/plugin-host/query"), ("POST", "/plugin-host/v2/call"), ("POST", "/plugin-host/v2/stream"),
     }
     assert {path for _, path, tier in pairs if tier == "admin"} == {"/sessions/*/channels", "/admin/summary", "/stop", "/sessions/*/bind", "/api/admin/*"}
-    # 所有路由真正经过 do_GET/do_POST，未知路径404；只替换业务处理，不并排造观察路由表。
+    # 所有路由真正经过 do_GET/do_POST/do_HEAD，未知路径404；只替换业务处理，不并排造观察路由表。
     called = []
     handlers = {}
     for method, group in routes.items():
@@ -216,8 +223,21 @@ def test_dispatch_registry_is_single_source_and_tiers_match_review(tmp_path, mon
     try:
         port = server.server.server_address[1]
         for method, template, _tier in pairs:
-            assert _request(port, method, template.replace("*", "fixture-id")) == (200, {"route": template})
-        assert len(called) == len(pairs) == 44
+            if method == "HEAD":
+                # HTTPResponse.read() 会隐藏非法HEAD正文，须直接核对线上字节。
+                request = f"HEAD {template} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+                with socket.create_connection(("127.0.0.1", port), timeout=5) as connection:
+                    connection.sendall(request.encode("ascii"))
+                    with connection.makefile("rb") as stream:
+                        assert int(stream.readline().split(b" ", 2)[1]) == 200
+                        headers = http.client.parse_headers(stream)
+                        assert headers["Content-Type"] == "application/json; charset=utf-8"
+                        assert int(headers["Content-Length"]) == len(json.dumps({"route": template}, ensure_ascii=False).encode("utf-8"))
+                        assert stream.read() == b""
+            else:
+                assert _request(port, method, template.replace("*", "fixture-id")) == (200, {"route": template})
+            assert called[-1] == template
+        assert len(called) == len(pairs) == 46
         assert _request(port, "GET", "/no-route")[0] == 404
     finally:
         server.stop()

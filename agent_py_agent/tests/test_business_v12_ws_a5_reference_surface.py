@@ -88,7 +88,7 @@ def _request(
 # LLM: 驱动 Node.js 运行前端协议测试，确保 app.js 在真实 JS 引擎中零报错。
 # 函数用途: 在独立的 Node 子进程中执行测试脚本并断言退出码为 0。
 def _run_node(script: str, **fixtures) -> None:
-    app_path = Path(__file__).resolve().parents[2] / "examples/business_space_ui/app.js"
+    app_path = Path(__file__).resolve().parents[1] / "static/business_space_ui/app.js"
     assert app_path.is_file(), "参考消费端脚本不存在"
     node = shutil.which("node")
     assert node, "需要 Node 环境运行前端参考接线验收"
@@ -150,7 +150,7 @@ def test_reference_surface_authenticated_html_serving_and_csrf_injection(native_
     assert verify_csrf_token(server, token, "other-owner", "alice-owner") is False
 
     # 验证磁盘上的静态源文件没有被修改（仍保持 content=""）
-    disk_path = Path(__file__).resolve().parents[2] / "examples/business_space_ui/index.html"
+    disk_path = Path(__file__).resolve().parents[1] / "static/business_space_ui/index.html"
     with open(disk_path, encoding="utf-8") as file_handle:
         disk_content = file_handle.read()
     assert '<meta name="csrf-token" content="">' in disk_content
@@ -341,7 +341,7 @@ const assert = require('node:assert/strict');
 # LLM: 验证 HTML 模板中 6 面板全部存在且包含所需控制按钮。
 # 函数用途: 验证 index.html 的 6 面板结构与 DOM 控件完整性。
 def test_reference_surface_html_panels_and_buttons_contract():
-    html_path = Path(__file__).resolve().parents[2] / "examples/business_space_ui/index.html"
+    html_path = Path(__file__).resolve().parents[1] / "static/business_space_ui/index.html"
     with open(html_path, encoding="utf-8") as file_handle:
         html = file_handle.read()
     for panel in ("controller", "materials", "packages", "team", "executions", "delivery"):
@@ -556,7 +556,7 @@ def test_reference_surface_aligned_schemas_real_http_roundtrip(tmp_path, monkeyp
     try:
         port = server.server.server_address[1]
         gateway_url = f"http://127.0.0.1:{port}"
-        app_path = Path(__file__).resolve().parents[2] / "examples/business_space_ui/app.js"
+        app_path = Path(__file__).resolve().parents[1] / "static/business_space_ui/app.js"
         node = shutil.which("node")
         assert node, "需要 Node 环境运行参考消费端真实线缆往返验收"
 

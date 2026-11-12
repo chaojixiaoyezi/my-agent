@@ -32,7 +32,7 @@ from agent_py_agent.cli.space_commands import (
     consume_business_command,
 )
 
-APP = Path(__file__).resolve().parents[2] / 'examples/business_space_ui/app.js'
+APP = Path(__file__).resolve().parents[1] / 'static/business_space_ui/app.js'
 ALICE = OwnerIdentity.provider_user('feishu', 'business-alice')
 GROUP = OwnerIdentity.provider_group('feishu', 'business-group')
 MAIN = OwnerIdentity.local_main()

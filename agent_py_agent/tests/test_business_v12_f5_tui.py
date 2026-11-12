@@ -323,7 +323,7 @@ def test_footer_orders_team_and_watch_after_existing_controls():
 
 
 def run_web(script, **fixtures):
-    path = Path(__file__).resolve().parents[2] / 'examples/business_space_ui/app.js'
+    path = Path(__file__).resolve().parents[1] / 'static/business_space_ui/app.js'
     assert path.is_file(), '参考 Web 尚未实现'
     node = shutil.which('node')
     assert node, '此验收需要 Node 来运行前端协议测试'
@@ -376,7 +376,7 @@ const assert = require('node:assert/strict');
 
 
 def test_web_has_six_real_panels_and_no_sample_success():
-    path = Path(__file__).resolve().parents[2] / 'examples/business_space_ui/index.html'
+    path = Path(__file__).resolve().parents[1] / 'static/business_space_ui/index.html'
     assert path.is_file()
     html = path.read_text()
     for name in ('controller', 'materials', 'packages', 'team', 'executions', 'delivery'):

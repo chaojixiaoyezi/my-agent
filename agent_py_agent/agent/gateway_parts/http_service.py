@@ -175,6 +175,10 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self._dispatch_route("GET")
 
+    # HEAD 仅有路由表中两个固定 UI 入口；保留原凭据/同源/协调器门和无正文写回。
+    def do_HEAD(self) -> None:
+        self._dispatch_route("HEAD")
+
     # LLM: 写请求同样先核宿主凭据，角色/owner/副作用仍由原处理器复核。
     # 函数用途: 分发HTTP写入口并只观察旧客户端流量。
     def do_POST(self) -> None:

@@ -104,6 +104,8 @@ exclude = ["agent_py_agent.tests*"]
 
 [tool.setuptools.package-data]
 agent_py_agent = [
+  "static/business_space_ui/index.html",
+  "static/business_space_ui/app.js",
   "config/*.yaml",
   "config/*.json",
   "prompts/*.md",

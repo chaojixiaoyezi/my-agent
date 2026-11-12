@@ -15,13 +15,19 @@ class GatewayHTTPRoute:
     handler_module: str = ""
 
 
+# GET/HEAD 共用同两个静态入口，不能把事件流等其它 GET 隐式开放为 HEAD。
+_BUSINESS_UI_ROUTES = (
+    GatewayHTTPRoute("/client/business/ui", "handle_business_ui", "credential", ".business_ui_http"),
+    GatewayHTTPRoute("/client/business/ui/app.js", "handle_business_ui_app_js", "credential", ".business_ui_http"),
+)
+
+
 GATEWAY_HTTP_ROUTES = {
     "GET": (
         GatewayHTTPRoute("/client/requests/*/events", "handle_request_events", "credential", ".request_event_routes"),
         GatewayHTTPRoute("/v1/requests/*/events", "handle_request_events", "credential", ".request_event_routes"),
         GatewayHTTPRoute("/api/admin/*", "handle_admin_api_get", "admin", ".admin_api"),
-        GatewayHTTPRoute("/client/business/ui", "handle_business_ui", "credential", ".business_ui_http"),
-        GatewayHTTPRoute("/client/business/ui/app.js", "handle_business_ui_app_js", "credential", ".business_ui_http"),
+        *_BUSINESS_UI_ROUTES,
         GatewayHTTPRoute("/client/business/artifacts/*/content", "handle_business_artifact_content", "credential", ".business_artifacts_http"),
         GatewayHTTPRoute("/status", "_handle_status", "public"),
         GatewayHTTPRoute("/feishu/oauth/callback*", "handle_feishu_oauth_callback", "public", ".feishu_oauth_service"),
@@ -33,6 +39,7 @@ GATEWAY_HTTP_ROUTES = {
         GatewayHTTPRoute("/admin/summary", "_handle_admin_summary", "admin"),
         GatewayHTTPRoute("/metrics", "_handle_metrics", "public"),
     ),
+    "HEAD": _BUSINESS_UI_ROUTES,
     "POST": (
         GatewayHTTPRoute("/v1/chat/completions", "handle_openai_chat_completions", "credential", ".openai_compat_routes"),
         GatewayHTTPRoute("/api/llm/test", "handle_llm_gateway_test", "credential", ".openai_compat_routes"),
@@ -77,7 +84,7 @@ def match_gateway_http_route(method: str, path: str) -> GatewayHTTPRoute | None:
     if method == 'GET' and path.startswith('/client/business/artifacts/'):
         from urllib.parse import urlsplit
         path = urlsplit(path).path
-    if method == "GET" and clean_path in {"/client/business/ui", "/client/business/ui/app.js"}:
+    if method in {"GET", "HEAD"} and clean_path in {"/client/business/ui", "/client/business/ui/app.js"}:
         path = clean_path
     return next((route for route in GATEWAY_HTTP_ROUTES.get(method, ()) if _route_matches(route.template, path)), None)
 

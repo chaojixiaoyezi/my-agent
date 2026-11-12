@@ -268,13 +268,15 @@ def test_update_services_uses_canonical_prefix_paths_and_restores_old_channel(tm
     monkeypatch.setattr(installer, "active_processes", lambda _: [])
     installer.install(_bundle(tmp_path / "bundle"), prefix)
     config = prefix / "data/config/agent_config.yaml"
-    config.write_text('my_agent_home: ""\ngateway_workspace: ' + json.dumps(workspace) + '\n')
+    config.write_text('my_agent_home: ""\ngateway_workspace: ' + json.dumps(workspace, ensure_ascii=False) + '\n')
     owner = installer.workspace_path(prefix)
     service = Path(workspace) if Path(workspace).is_absolute() else owner / "workspace" / (workspace or "runtime/services/gateway")
     # 绝对覆盖使用 tmp_path，不能让测试往真正 /tmp 公共服务路径写 PID。
     if workspace.startswith("/"):
         service = tmp_path / "absolute-service"
-        config.write_text('my_agent_home: ""\ngateway_workspace: ' + json.dumps(str(service)) + '\n')
+        # 简化 YAML 按字面保留引号内文本；夹具不能把中文目录写成不受支持的 Unicode 转义。
+        config.write_text('my_agent_home: ""\ngateway_workspace: ' + json.dumps(str(service), ensure_ascii=False) + '\n')
+    assert installer._update_service_paths(prefix).root == service
     service.mkdir(parents=True)
     write_pid_record(service / "gateway.pid")
     write_pid_record(service / "adapter.pid")
