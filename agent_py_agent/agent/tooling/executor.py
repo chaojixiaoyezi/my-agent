@@ -781,10 +781,18 @@ def _workspace_operation_scopes(
     handler = getattr(runtime, "handler", None)
     extractor = getattr(handler, "effective_write_roots", None)
     if extractor is not None and request.workspace_root is not None:
-        for root in extractor(
-            call.arguments, request.write_boundary, request.workspace_root
-        ):
-            scopes = scopes + (f"workspace:{root}",)
+        try:
+            for root in extractor(
+                call.arguments, request.write_boundary, request.workspace_root
+            ):
+                scopes = scopes + (f"workspace:{root}",)
+        except ResourceScopeResolutionError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - scope failure fail-closed
+            tool_identifier = getattr(call, "tool_name", None) or getattr(call, "name", "tool")
+            raise ResourceScopeResolutionError(
+                f"{tool_identifier}: write scope resolution failed: {type(exc).__name__}"
+            ) from exc
     # seq 266 #3：运行期才可确定的资源（cancel 的 root 子树/status 展开目标、
     # audit 的当前 Audit、dispatch 的自动选池）由工具结构化声明
     # （BaseTool.effective_resource_scopes 协议，BaseTool 默认 ()）在 claim 前

@@ -657,6 +657,14 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandl
                 handler_started = True
                 _notify_handler_started(request)
                 result = request.tool.execute_scoped(params, request.invocation_context)
+            if not isinstance(result, ToolHandlerOutcome):
+                result = ToolHandlerOutcome(
+                    request.tool_name,
+                    False,
+                    json.dumps({"error": f"invalid handler return type: {type(result).__name__}"}, ensure_ascii=False),
+                    error_code="INTERNAL_ERROR",
+                    effect_outcome="unknown",
+                )
     except ToolCancelled as exc:
         raise_if_transport_uncertain(exc)
         if isinstance(exc, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable, ToolWriteContextUnavailable)):
@@ -677,15 +685,30 @@ def execute_authorized_tool(request: AuthorizedToolDispatchRequest) -> ToolHandl
             "检查参数后重试;若反复失败,换一种方法或工具完成同一目标。",
             error_code="TOOL_ERROR",
         )
-    return apply_tool_execution_facts(
-        result,
-        failure_stage=(
-            None
-            if result.ok or result.failure_stage
-            else (ToolFailureStage.EXECUTION if handler_started else ToolFailureStage.RUNTIME_GATE)
-        ),
-        handler_executed=handler_started,
-    )
+    try:
+        return apply_tool_execution_facts(
+            result,
+            failure_stage=(
+                None
+                if result.ok or result.failure_stage
+                else (ToolFailureStage.EXECUTION if handler_started else ToolFailureStage.RUNTIME_GATE)
+            ),
+            handler_executed=handler_started,
+        )
+    except Exception as exc:
+        raise_if_transport_uncertain(exc)
+        if isinstance(exc, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable, ToolWriteContextUnavailable, ToolCancelled, InterruptedError, KeyboardInterrupt)):
+            raise
+        fallback = ToolHandlerOutcome(
+            request.tool_name,
+            False,
+            json.dumps({"error": f"apply tool execution facts failed: {type(exc).__name__}"}, ensure_ascii=False),
+            error_code="INTERNAL_ERROR",
+            effect_outcome="unknown",
+        )
+        fallback.failure_stage = ToolFailureStage.EXECUTION if handler_started else ToolFailureStage.RUNTIME_GATE
+        fallback.handler_executed = handler_started
+        return fallback
 
 
 # LLM: 受管原代次在handler前复核；失效只返回未执行的结构化拒绝，不进入handler，已发生结果/清理不经本门。

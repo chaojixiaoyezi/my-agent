@@ -732,9 +732,20 @@ class ToolHandlerOutcome:
     diagnostic_ref: str = field(default="", kw_only=True)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.result_envelope, dict):
+            object.__setattr__(self, "result_envelope", {})
+        else:
+            object.__setattr__(self, "result_envelope", dict(self.result_envelope))
+
+        if self.output is None:
+            object.__setattr__(self, "output", "")
+        elif not isinstance(self.output, str):
+            object.__setattr__(self, "output", str(self.output))
+
         self.handler_executed = bool(self.handler_executed)
         self.failure_stage = _normalized_tool_failure_stage(self.failure_stage)
         self.duration_ms = _nonnegative_duration_ms(self.duration_ms)
+        self.error_code = str(self.error_code or "").strip()
         self.effect_outcome = str(self.effect_outcome or "").strip().lower()
         # failed=进程完整退出自报失败(确定性, 2026-08-15 长代码真机: unittest
         # 校验命令失败被归 unknown 导致任务死; 退出码+输出是结构化确定事实)。
@@ -760,7 +771,7 @@ class ToolHandlerOutcome:
         control_code = self.error_code or reported_code
         self.reported_error_code = str(reported_code or "UNKNOWN_ERROR").strip().upper()
         contract = error_contract(control_code) if control_code else error_contract("UNKNOWN_ERROR")
-        self.error_code = contract.code
+        self.error_code = control_code if control_code == "INTERNAL_ERROR" else contract.code
         self.error_category = contract.category
         self.retryable = contract.retryable
         self.recommended_action = contract.recommended_action

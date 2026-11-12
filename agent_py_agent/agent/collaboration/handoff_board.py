@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from ..common.nofollow_fs import ensure_private_dir
 from ..gateway_parts.io import write_json_file_atomic
 from .models import (
+    CollaborationCase,
     EvidencePacket,
     HandoffBoardItem,
     new_decision_id,
@@ -138,6 +139,13 @@ class HandoffBoardService:
         self.workspace_root = Path(workspace_root).resolve() if workspace_root else None
         self.archive_dir = self.store.root / "archived_handoff_items"
 
+    def _require_existing_case(self, case_id: str) -> CollaborationCase:
+        if not case_id or not isinstance(case_id, str):
+            raise ValueError("invalid collaboration case_id: empty or non-string")
+        if "/" in case_id or "\\" in case_id or ".." in case_id:
+            raise ValueError(f"invalid collaboration case_id: {case_id}")
+        return self.store.load_case(case_id)
+
     # LLM: 发布交接项到指定 case；检查重叠写入集并计算载荷摘要；支持幂等去重。
     # 函数用途: 在交接板上发布新交接项，状态进入 published。
     def publish_item(
@@ -155,7 +163,9 @@ class HandoffBoardService:
         allow_serialized_overlap: bool = False,
         now: float | None = None,
     ) -> HandoffBoardItem:
+        self._require_existing_case(case_id)
         with self.store.handoff_case_lock(case_id):
+            self.store.load_case(case_id)
             current_time_val = float(now if now is not None else time.time())
             norm_write_set = normalize_paths(exclusive_write_set)
             actual_item_id = item_id.strip() if item_id and item_id.strip() else new_handoff_item_id()
@@ -269,7 +279,9 @@ class HandoffBoardService:
         delivery_id: str = "",
         now: float | None = None,
     ) -> HandoffBoardItem:
+        self._require_existing_case(case_id)
         with self.store.handoff_case_lock(case_id):
+            self.store.load_case(case_id)
             current_time_val = float(now if now is not None else time.time())
             item = self.store.load_handoff_item(case_id, item_id)
             if item is None:
@@ -335,7 +347,9 @@ class HandoffBoardService:
         ack_id: str = "",
         now: float | None = None,
     ) -> HandoffBoardItem:
+        self._require_existing_case(case_id)
         with self.store.handoff_case_lock(case_id):
+            self.store.load_case(case_id)
             current_time_val = float(now if now is not None else time.time())
             item = self.store.load_handoff_item(case_id, item_id)
             if item is None:
@@ -411,7 +425,9 @@ class HandoffBoardService:
         submission_id: str = "",
         now: float | None = None,
     ) -> HandoffBoardItem:
+        self._require_existing_case(case_id)
         with self.store.handoff_case_lock(case_id):
+            self.store.load_case(case_id)
             current_time_val = float(now if now is not None else time.time())
             item = self.store.load_handoff_item(case_id, item_id)
             if item is None:
@@ -498,7 +514,9 @@ class HandoffBoardService:
         metadata: dict[str, object] | None = None,
         now: float | None = None,
     ) -> HandoffBoardItem:
+        self._require_existing_case(case_id)
         with self.store.handoff_case_lock(case_id):
+            self.store.load_case(case_id)
             current_time_val = float(now if now is not None else time.time())
             item = self.store.load_handoff_item(case_id, item_id)
             if item is None:
@@ -563,7 +581,9 @@ class HandoffBoardService:
         reason: str = "",
         now: float | None = None,
     ) -> HandoffBoardItem:
+        self._require_existing_case(case_id)
         with self.store.handoff_case_lock(case_id):
+            self.store.load_case(case_id)
             current_time_val = float(now if now is not None else time.time())
             item = self.store.load_handoff_item(case_id, item_id)
             if item is None:
@@ -616,6 +636,7 @@ class HandoffBoardService:
 
         raw_items: list[HandoffBoardItem] = []
         if case_id:
+            self._require_existing_case(case_id)
             raw_items = self.store.case_handoff_items(case_id)
         else:
             raw_items = self.store.list_all_handoff_items(
@@ -694,3 +715,53 @@ class HandoffBoardService:
                     self.store.rewrite_case_handoff_items(cid, remaining_items)
 
         return archived_ids
+
+    def read_case_entries(self, case_id: str) -> list[HandoffBoardItem]:
+        self._require_existing_case(case_id)
+        with self.store.handoff_case_lock(case_id):
+            self.store.load_case(case_id)
+            return self.store.case_handoff_items(case_id)
+
+    def block(
+        self,
+        *,
+        case_id: str,
+        item_id: str,
+        reviewer_principal: str = "coordinator",
+        reason: str = "blocked",
+        metadata: dict[str, object] | None = None,
+        now: float | None = None,
+    ) -> HandoffBoardItem:
+        return self.decide_acceptance(
+            case_id=case_id,
+            item_id=item_id,
+            verdict="changes_requested",
+            reviewer_principal=reviewer_principal,
+            reason=reason,
+            metadata=metadata,
+            now=now,
+        )
+
+    publish = publish_item
+    claim = record_ack
+    complete = submit_handoff
+    release = decide_acceptance
+    cancel = close_item
+    read = list_items
+
+
+HandoffBoard = HandoffBoardService
+
+__all__ = [
+    "FrozenInputVersionMismatchError",
+    "HandoffBoard",
+    "HandoffBoardService",
+    "HandoffError",
+    "HandoffWriteSetOverlapError",
+    "IdempotencyConflictError",
+    "InvalidStateTransitionError",
+    "compute_payload_digest",
+    "is_active_handoff_state",
+    "normalize_paths",
+    "paths_overlap",
+]

@@ -1240,6 +1240,8 @@ class CollaborationStore(CollaborationPendingRequestStore):
     # 函数用途: 返回针对单个 case 交接项的上下文锁。
     @contextmanager
     def handoff_case_lock(self, case_id: str):
+        if not case_id or not isinstance(case_id, str) or "/" in case_id or "\\" in case_id or ".." in case_id:
+            raise ValueError("invalid collaboration case_id")
         clean_case_id = validate_opaque_id(case_id, kind="case_id")
         ensure_private_dir(self.handoff_items_dir)
         lock_path = self.handoff_items_dir / f"{clean_case_id}.lock"

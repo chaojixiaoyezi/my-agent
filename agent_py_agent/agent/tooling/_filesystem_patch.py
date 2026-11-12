@@ -167,10 +167,16 @@ class ApplyPatchTool(FileSystemTool):
             for raw_path in (change.get("path"), change.get("move_to")):
                 if not raw_path:
                     continue
-                path = Path(str(raw_path))
-                if not path.is_absolute():
-                    path = workspace_root / path
-                roots.append(str(path.resolve()))
+                try:
+                    path = Path(str(raw_path))
+                    if not path.is_absolute():
+                        path = workspace_root / path
+                    roots.append(str(path.resolve()))
+                except (OSError, RuntimeError, ValueError):
+                    try:
+                        roots.append(str(Path(workspace_root).resolve()))
+                    except Exception:
+                        pass
         return tuple(dict.fromkeys(roots))
 
     # LLM: artifact_refs 和语法观察只来自实际提交；诊断预算属于本次调用，部分失败保留原 effect，不解析输出正文。

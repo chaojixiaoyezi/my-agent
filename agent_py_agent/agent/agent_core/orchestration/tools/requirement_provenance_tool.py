@@ -423,7 +423,7 @@ class RequirementProvenanceTool(BaseTool):
             "manage_requirement_provenance",
             True,
             json.dumps(payload, ensure_ascii=False, indent=2),
-            result_envelope={"details": {"scope_warnings": list(scope_warnings)}} if scope_warnings else None,
+            result_envelope={"details": {"scope_warnings": list(scope_warnings)}} if scope_warnings else {},
         )
 
     # LLM: 处理关联测试命令证据动作（link_verification）。
@@ -542,7 +542,7 @@ class RequirementProvenanceTool(BaseTool):
             "manage_requirement_provenance",
             True,
             json.dumps(payload, ensure_ascii=False, indent=2),
-            result_envelope={"details": {"scope_warnings": list(scope_warnings)}} if scope_warnings else None,
+            result_envelope={"details": {"scope_warnings": list(scope_warnings)}} if scope_warnings else {},
         )
 
     # LLM: 处理阶段与最终验收动作（record_acceptance）。
@@ -618,7 +618,7 @@ class RequirementProvenanceTool(BaseTool):
             "manage_requirement_provenance",
             True,
             json.dumps(payload, ensure_ascii=False, indent=2),
-            result_envelope={"details": {"scope_warnings": list(scope_warnings)}} if scope_warnings else None,
+            result_envelope={"details": {"scope_warnings": list(scope_warnings)}} if scope_warnings else {},
         )
 
     # LLM: 处理需求溯源查询动作（query_provenance）。

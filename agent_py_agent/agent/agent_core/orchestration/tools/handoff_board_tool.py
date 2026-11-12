@@ -69,9 +69,21 @@ def build_manage_handoff_board_model_spec() -> ToolModelSpec:
                         "decide_acceptance",
                         "sync_external_mailbox",
                         "list_items",
+                        "open_case",
+                        "list_cases",
+                        "publish",
+                        "claim",
+                        "complete",
+                        "release",
+                        "block",
+                        "cancel",
+                        "read",
                     ],
                     "description": "交接板管理动作",
                 },
+                "title": {"type": "string", "description": "协作单标题"},
+                "summary": {"type": "string", "description": "协作单摘要描述"},
+                "priority": {"type": "string", "description": "优先级 (normal, high, low)"},
                 "case_id": {"type": "string", "description": "所属协作 case 标识"},
                 "item_id": {"type": "string", "description": "交接项标识"},
                 "request_id": {"type": "string", "description": "关联协作请求标识"},
@@ -225,19 +237,36 @@ class ManageHandoffBoardTool(BaseTool):
             return self._failure("无法解析交接板底层存储服务。", "SERVICE_UNAVAILABLE")
 
         try:
-            if action == "publish_item":
+            if action == "open_case":
+                return self._handle_open_case(service, params)
+            if action == "list_cases":
+                return self._handle_list_cases(service, params)
+            if action in {"publish", "publish_item"}:
                 return self._handle_publish(service, params)
-            if action == "record_ack":
+            if action in {"claim", "record_ack"}:
                 return self._handle_ack(service, params)
-            if action == "submit_handoff":
+            if action in {"complete", "submit_handoff"}:
                 return self._handle_submit(service, params)
-            if action == "decide_acceptance":
+            if action in {"release", "block", "decide_acceptance"}:
                 return self._handle_decide(service, params)
+            if action in {"cancel", "close_item"}:
+                return self._handle_close(service, params)
+            if action in {"read", "list_items"}:
+                return self._handle_list(service, params)
             if action == "sync_external_mailbox":
                 return self._handle_sync_mailbox(service, params)
-            if action == "list_items":
-                return self._handle_list(service, params)
             return self._failure(f"未知交接板动作: {action!r}", "TOOL_INVALID_ARGUMENTS")
+        except KeyError as exc:
+            return self._failure(
+                str(exc),
+                "RESOURCE_NOT_FOUND",
+                details={
+                    "error": str(exc),
+                    "hint": "请先通过 action='list_cases' 查询已有协作单，或通过 action='open_case' 创建新协作单。",
+                },
+            )
+        except (ValueError, TypeError) as exc:
+            return self._failure(str(exc), "TOOL_INVALID_ARGUMENTS")
         except HandoffError as exc:
             return self._failure(str(exc), exc.error_code, details=exc.details)
         except Exception as exc:  # noqa: BLE001
@@ -268,16 +297,60 @@ class ManageHandoffBoardTool(BaseTool):
                 return self._service
         return None
 
+    def _handle_open_case(self, service: HandoffBoardService, params: dict[str, object]) -> ToolHandlerOutcome:
+        title = str(params.get("title") or params.get("summary") or "").strip()
+        summary = str(params.get("summary") or params.get("title") or "").strip()
+        if not title and not summary:
+            return self._failure("open_case 必须指定 title 或 summary。", "TOOL_INVALID_ARGUMENTS")
+
+        created_by = str(params.get("created_by") or params.get("responsible_actor") or params.get("actor_id") or "").strip()
+        if self.agent is not None and current_subagent_run_id(self.agent):
+            principal, _ = authoritative_self_principal(self.agent)
+            self_id = str(principal.run_id or "").strip()
+            if self_id:
+                created_by = self_id
+        elif not created_by and self.agent is not None:
+            try:
+                principal, _ = authoritative_self_principal(self.agent)
+                created_by = str(getattr(principal, "run_id", "") or "").strip()
+            except Exception:
+                pass
+
+        req_payload = {
+            "title": title or summary,
+            "summary": summary or title,
+            "priority": str(params.get("priority") or "normal").strip(),
+            "created_by": created_by or "coordinator",
+            "thread_id": str(params.get("thread_id") or "").strip(),
+            "task_id": str(params.get("task_id") or "").strip(),
+            "required_capabilities": params.get("required_capabilities") or [],
+            "metadata": params.get("metadata") or {},
+        }
+        case = service.store.open_case(req_payload)
+        return self._success({"action": "open_case", "case": case.to_dict()})
+
+    def _handle_list_cases(self, service: HandoffBoardService, params: dict[str, object]) -> ToolHandlerOutcome:
+        status = str(params.get("status") or "").strip() or None
+        raw_limit = params.get("limit")
+        limit = self._parse_limit(raw_limit, default=20, max_val=100)
+        cases = service.store.list_cases(status=status)
+        cases_data = [c.to_dict() for c in cases[:limit]]
+        return self._success({"action": "list_cases", "cases": cases_data, "total_count": len(cases)})
+
     # LLM: 处理 publish_item 动作。
     # 函数用途: 发布交接项。
     def _handle_publish(self, service: HandoffBoardService, params: dict[str, object]) -> ToolHandlerOutcome:
         case_id = str(params.get("case_id") or "").strip()
+        if not case_id:
+            return self._failure("publish 缺少 case_id。", "TOOL_INVALID_ARGUMENTS")
+        service._require_existing_case(case_id)
+
         request_id = str(params.get("request_id") or "").strip()
-        actor = str(params.get("responsible_actor") or "").strip()
+        actor = str(params.get("responsible_actor") or params.get("actor_id") or "").strip()
         actor_kind = str(params.get("actor_kind") or "internal_run").strip()
         ver = str(params.get("frozen_input_version") or "").strip()
-        if not case_id or not actor or not ver:
-            return self._failure("publish_item 缺少 case_id, responsible_actor 或 frozen_input_version。", "TOOL_INVALID_ARGUMENTS")
+        if not actor or not ver:
+            return self._failure("publish 缺少 responsible_actor 或 frozen_input_version。", "TOOL_INVALID_ARGUMENTS")
 
         write_set = params.get("exclusive_write_set") or ()
         if isinstance(write_set, (list, tuple)):
@@ -302,15 +375,23 @@ class ManageHandoffBoardTool(BaseTool):
     def _handle_ack(self, service: HandoffBoardService, params: dict[str, object]) -> ToolHandlerOutcome:
         case_id = str(params.get("case_id") or "").strip()
         item_id = str(params.get("item_id") or "").strip()
-        recipient_ack = params.get("recipient_ack") or {}
-        frozen_ver = str(params.get("frozen_input_version") or "").strip()
         if not case_id or not item_id:
-            return self._failure("record_ack 缺少 case_id 或 item_id。", "TOOL_INVALID_ARGUMENTS")
+            return self._failure("claim / record_ack 缺少 case_id 或 item_id。", "TOOL_INVALID_ARGUMENTS")
+        service._require_existing_case(case_id)
+        recipient_ack = params.get("recipient_ack") or {"status": "claimed"}
+        frozen_ver = str(params.get("frozen_input_version") or "").strip()
+        if not frozen_ver:
+            try:
+                existing = service.store.load_handoff_item(case_id, item_id)
+                if existing is not None:
+                    frozen_ver = existing.frozen_input_version
+            except Exception:
+                pass
 
         item = service.record_ack(
             case_id=case_id,
             item_id=item_id,
-            recipient_ack=dict(recipient_ack) if isinstance(recipient_ack, dict) else {},
+            recipient_ack=dict(recipient_ack) if isinstance(recipient_ack, dict) else {"ack": recipient_ack},
             frozen_input_version=frozen_ver or None,
             ack_id=str(params.get("idempotency_key") or params.get("ack_id") or "").strip(),
         )
@@ -322,11 +403,14 @@ class ManageHandoffBoardTool(BaseTool):
         case_id = str(params.get("case_id") or "").strip()
         item_id = str(params.get("item_id") or "").strip()
         if not case_id or not item_id:
-            return self._failure("submit_handoff 缺少 case_id 或 item_id。", "TOOL_INVALID_ARGUMENTS")
+            return self._failure("complete / submit_handoff 缺少 case_id 或 item_id。", "TOOL_INVALID_ARGUMENTS")
+        service._require_existing_case(case_id)
 
         ev_ids = params.get("evidence_ids") or ()
         if isinstance(ev_ids, (list, tuple)):
             ev_tuple = tuple(str(x) for x in ev_ids)
+        elif params.get("evidence_id"):
+            ev_tuple = (str(params.get("evidence_id")).strip(),)
         else:
             ev_tuple = ()
 
@@ -334,6 +418,7 @@ class ManageHandoffBoardTool(BaseTool):
             case_id=case_id,
             item_id=item_id,
             evidence_ids=ev_tuple,
+            submission_payload=params.get("submission_payload") if isinstance(params.get("submission_payload"), dict) else None,
             submission_id=str(params.get("idempotency_key") or params.get("submission_id") or "").strip(),
         )
         return self._success({"item": item.to_dict()})
@@ -341,9 +426,22 @@ class ManageHandoffBoardTool(BaseTool):
     # LLM: 处理 decide_acceptance 动作。
     # 函数用途: 执行终审验收裁决。
     def _handle_decide(self, service: HandoffBoardService, params: dict[str, object]) -> ToolHandlerOutcome:
+        action = str(params.get("action") or "").strip().lower()
         case_id = str(params.get("case_id") or "").strip()
         item_id = str(params.get("item_id") or "").strip()
+        if not case_id or not item_id:
+            return self._failure("decide_acceptance 缺少 case_id 或 item_id。", "TOOL_INVALID_ARGUMENTS")
+        service._require_existing_case(case_id)
+
         verdict = str(params.get("verdict") or "").strip()
+        if not verdict:
+            if action == "release":
+                verdict = "accepted"
+            elif action == "block":
+                verdict = "changes_requested"
+            else:
+                return self._failure("decide_acceptance 缺少 verdict。", "TOOL_INVALID_ARGUMENTS")
+
         reason = str(params.get("reason") or "").strip()
         supplied_reviewer = str(params.get("reviewer_principal") or "").strip()
         reviewer = supplied_reviewer or "coordinator"
@@ -359,9 +457,6 @@ class ManageHandoffBoardTool(BaseTool):
                     )
                 reviewer = bound_run_id
 
-        if not case_id or not item_id or not verdict:
-            return self._failure("decide_acceptance 缺少 case_id, item_id 或 verdict。", "TOOL_INVALID_ARGUMENTS")
-
         item = service.decide_acceptance(
             case_id=case_id,
             item_id=item_id,
@@ -373,6 +468,16 @@ class ManageHandoffBoardTool(BaseTool):
         if scope_warnings:
             res_data["scope_warnings"] = scope_warnings
         return self._success(res_data)
+
+    def _handle_close(self, service: HandoffBoardService, params: dict[str, object]) -> ToolHandlerOutcome:
+        case_id = str(params.get("case_id") or "").strip()
+        item_id = str(params.get("item_id") or "").strip()
+        if not case_id or not item_id:
+            return self._failure("cancel / close_item 缺少 case_id 或 item_id。", "TOOL_INVALID_ARGUMENTS")
+        service._require_existing_case(case_id)
+        reason = str(params.get("reason") or "cancelled").strip()
+        item = service.close_item(case_id=case_id, item_id=item_id, reason=reason)
+        return self._success({"item": item.to_dict()})
 
     # LLM: 处理 sync_external_mailbox 动作。
     # 函数用途: 触发外部文件邮箱双向同步。
@@ -417,6 +522,17 @@ class ManageHandoffBoardTool(BaseTool):
         report = adapter.sync_external_mailbox(service, layout)
         return self._success(report)
 
+    def _parse_limit(self, raw_limit: object, default: int = 50, max_val: int = 200) -> int:
+        if raw_limit is None:
+            return default
+        try:
+            val = int(raw_limit)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"limit must be a positive integer, got: {raw_limit!r}") from exc
+        if val <= 0:
+            raise ValueError(f"limit must be a positive integer, got: {val}")
+        return min(val, max_val)
+
     # LLM: 处理 list_items 动作。
     # 函数用途: 检索交接项列表与游标。
     def _handle_list(self, service: HandoffBoardService, params: dict[str, object]) -> ToolHandlerOutcome:
@@ -424,8 +540,11 @@ class ManageHandoffBoardTool(BaseTool):
         state = str(params.get("state") or "").strip() or None
         actor = str(params.get("responsible_actor") or params.get("actor_id") or "").strip() or None
         raw_limit = params.get("limit")
-        limit = int(raw_limit) if raw_limit is not None else 50
+        limit = self._parse_limit(raw_limit, default=50, max_val=200)
         cursor = str(params.get("cursor") or "").strip() or None
+
+        if case_id:
+            service._require_existing_case(case_id)
 
         res = service.list_items(
             case_id=case_id,
@@ -443,6 +562,7 @@ class ManageHandoffBoardTool(BaseTool):
         message: str,
         error_code: str,
         details: dict[str, Any] | None = None,
+        effect_outcome: str = "not_started",
     ) -> ToolHandlerOutcome:
         det = details or {}
         payload = {
@@ -457,7 +577,7 @@ class ManageHandoffBoardTool(BaseTool):
             json.dumps(payload, ensure_ascii=False, indent=2),
             result_envelope={"details": det, "error_code": error_code},
             error_code=error_code,
-            effect_outcome="not_started",
+            effect_outcome=effect_outcome,
         )
 
     # LLM: 构造标准化成功 ToolHandlerOutcome。
@@ -466,6 +586,7 @@ class ManageHandoffBoardTool(BaseTool):
         payload = {
             "ok": True,
             "result": data,
+            **data,
         }
         return ToolHandlerOutcome(
             "manage_handoff_board",
@@ -473,3 +594,12 @@ class ManageHandoffBoardTool(BaseTool):
             json.dumps(payload, ensure_ascii=False, indent=2),
             result_envelope=data,
         )
+
+
+HandoffBoardTool = ManageHandoffBoardTool
+
+__all__ = [
+    "HandoffBoardTool",
+    "ManageHandoffBoardTool",
+    "build_manage_handoff_board_model_spec",
+]

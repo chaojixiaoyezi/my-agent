@@ -25,6 +25,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from ..backends.bounded_call import BoundedCallExitUnconfirmedError
+from ..common.cancellation import ToolCancelled
 from ..common.request_execution_ports import (
     RequestExecutionContextUnavailable,
     RequestExecutionOutcomeUncertainError,
@@ -520,6 +521,8 @@ def _settle_reconciled_operation(
     reconciled_result.effect_source_ref = (
         reconciled_result.effect_source_ref or source_ref
     )
+    if not isinstance(getattr(reconciled_result, "result_envelope", None), dict):
+        object.__setattr__(reconciled_result, "result_envelope", {})
     reconciled_result.result_envelope.update(first_dispatch_at=claim.record.first_dispatch_at,
         component_receipts=deepcopy(claim.record.component_receipts))
     apply_tool_execution_facts(reconciled_result, handler_executed=False)
@@ -772,6 +775,8 @@ def _unknown_claim_result(
         reported_error_code=reported,
     )
     result.effect_outcome = "not_started"
+    if not isinstance(getattr(result, "result_envelope", None), dict):
+        object.__setattr__(result, "result_envelope", {})
     result.result_envelope["reported_tool_result"] = _reported_tool_result_facts(prior)
     result.result_envelope.update(first_dispatch_at=claim.record.first_dispatch_at,
         component_receipts=deepcopy(claim.record.component_receipts))
@@ -831,70 +836,119 @@ def _execute_claimed_operation(
 ) -> ToolHandlerOutcome:
     with tool_write_claim_scope(request, claim), _operation_dispatch_scope(request, claim) as dispatch:
         result = _invoke_with_lease_renewal(request, claim)
-    result.result_envelope.update(first_dispatch_at=dispatch.record.first_dispatch_at,
-        component_receipts=deepcopy(dispatch.record.component_receipts))
-    operation_status = _operation_status_for_result(result)
-    unknown_reason = ""
-    if operation_status == TOOL_OPERATION_UNKNOWN:
-        result = _unknown_outcome_result(request, result)
-        unknown_reason = (
-            f"effect_outcome_unknown:{result.reported_error_code or result.error_code}"
-        )
-    action = (
-        "executed_after_reconciliation"
-        if claim.reason
-        else ("reconcile" if operation_status == TOOL_OPERATION_UNKNOWN else "executed")
-    )
-    result.effect_source_ref = result.effect_source_ref or claim.reason
-    _attach_operation_facts(
-        result,
-        request,
-        status=operation_status,
-        action=action,
-        source_ref=claim.reason,
-    )
     try:
-        request.store.finish_tool_operation(
-            ToolOperationCompletionRequest(
-                owner_id=claim.record.owner_id,
-                run_id=claim.record.run_id,
-                operation_id=claim.record.operation_id,
-                holder_id=claim.record.holder_id,
-                generation=claim.record.generation,
-                status=operation_status,
-                result=_result_payload(result, request.settled_effect_outcome, redacted_input=request.redacted_input),
-                error_code=result.error_code,
-                unknown_reason=unknown_reason,
+        if not isinstance(getattr(result, "result_envelope", None), dict):
+            object.__setattr__(result, "result_envelope", {})
+        result.result_envelope.update(first_dispatch_at=dispatch.record.first_dispatch_at,
+            component_receipts=deepcopy(dispatch.record.component_receipts))
+        operation_status = _operation_status_for_result(result)
+        unknown_reason = ""
+        if operation_status == TOOL_OPERATION_UNKNOWN:
+            result = _unknown_outcome_result(request, result)
+            unknown_reason = (
+                f"effect_outcome_unknown:{result.reported_error_code or result.error_code}"
             )
+        action = (
+            "executed_after_reconciliation"
+            if claim.reason
+            else ("reconcile" if operation_status == TOOL_OPERATION_UNKNOWN else "executed")
         )
-    except Exception as exc:  # noqa: BLE001 - effect already happened; never invite retry
-        raise_if_transport_uncertain(exc)
-        if isinstance(exc, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable, ToolWriteContextUnavailable)):
-            raise
-        # LLM: 工具返回值只是提供方报告；权威账本没有保存终态时，成功与否都必须降级为 unknown，
-        # 否则模型会把“提供方说成功”误当成可恢复、可收口的机器事实。
-        # 函数用途: 返回不可自动重试的未知结果，同时只保留原结果的安全结构化旁证。
-        result = _completion_persistence_unknown_result(
-            request,
-            result,
-        )
+        result.effect_source_ref = result.effect_source_ref or claim.reason
         _attach_operation_facts(
             result,
             request,
-            status="unknown",
-            action="completion_persistence_failed",
+            status=operation_status,
+            action=action,
+            source_ref=claim.reason,
+        )
+        try:
+            request.store.finish_tool_operation(
+                ToolOperationCompletionRequest(
+                    owner_id=claim.record.owner_id,
+                    run_id=claim.record.run_id,
+                    operation_id=claim.record.operation_id,
+                    holder_id=claim.record.holder_id,
+                    generation=claim.record.generation,
+                    status=operation_status,
+                    result=_result_payload(result, request.settled_effect_outcome, redacted_input=request.redacted_input),
+                    error_code=result.error_code,
+                    unknown_reason=unknown_reason,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - effect already happened; never invite retry
+            raise_if_transport_uncertain(exc)
+            if isinstance(exc, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable, ToolWriteContextUnavailable, ToolCancelled, InterruptedError, KeyboardInterrupt)):
+                raise
+            # LLM: 工具返回值只是提供方报告；权威账本没有保存终态时，成功与否都必须降级为 unknown，
+            # 否则模型会把“提供方说成功”误当成可恢复、可收口的机器事实。
+            # 函数用途: 返回不可自动重试的未知结果，同时只保留原结果的安全结构化旁证。
+            result = _completion_persistence_unknown_result(
+                request,
+                result,
+            )
+            _attach_operation_facts(
+                result,
+                request,
+                status="unknown",
+                action="completion_persistence_failed",
+                diagnostic=type(exc).__name__,
+                storage_error=exc,
+            )
+            return result
+        if operation_status in {TOOL_OPERATION_SUCCEEDED, TOOL_OPERATION_FAILED}:
+            _notify_operation_settled(
+                request,
+                status=operation_status,
+                source_ref=result.effect_source_ref,
+                replayed=False,
+            )
+        return result
+    except Exception as exc:
+        raise_if_transport_uncertain(exc)
+        if isinstance(exc, (BoundedCallExitUnconfirmedError, RequestExecutionContextUnavailable, ToolWriteContextUnavailable, ToolCancelled, InterruptedError, KeyboardInterrupt)):
+            raise
+        try:
+            request.store.finish_tool_operation(
+                ToolOperationCompletionRequest(
+                    owner_id=claim.record.owner_id,
+                    run_id=claim.record.run_id,
+                    operation_id=claim.record.operation_id,
+                    holder_id=claim.record.holder_id,
+                    generation=claim.record.generation,
+                    status=TOOL_OPERATION_FAILED,
+                    result=_result_payload(
+                        ToolHandlerOutcome(
+                            request.tool_name,
+                            False,
+                            json.dumps({"error": f"coordinator post-execution failed: {type(exc).__name__}"}, ensure_ascii=False),
+                            error_code="INTERNAL_ERROR",
+                            effect_outcome="unknown",
+                        ),
+                        request.settled_effect_outcome,
+                        redacted_input=request.redacted_input,
+                    ),
+                    error_code="INTERNAL_ERROR",
+                    unknown_reason=f"coordinator_post_execution_error:{type(exc).__name__}",
+                )
+            )
+        except Exception:
+            pass
+        fallback = ToolHandlerOutcome(
+            request.tool_name,
+            False,
+            json.dumps({"ok": False, "error": f"coordinator post-execution failed: {type(exc).__name__}"}, ensure_ascii=False),
+            error_code="INTERNAL_ERROR",
+            effect_outcome="unknown",
+        )
+        _attach_operation_facts(
+            fallback,
+            request,
+            status=TOOL_OPERATION_FAILED,
+            action="coordinator_post_execution_failed",
             diagnostic=type(exc).__name__,
             storage_error=exc,
         )
-        return result
-    if operation_status in {TOOL_OPERATION_SUCCEEDED, TOOL_OPERATION_FAILED}:
-        _notify_operation_settled(
-            request,
-            status=operation_status,
-            source_ref=result.effect_source_ref,
-            replayed=False,
-        )
-    return result
+        return apply_tool_execution_facts(fallback, failure_stage=ToolFailureStage.EXECUTION, handler_executed=True)
 
 
 # LLM: Recovery cleanup is strictly downstream of authoritative terminal persistence. Hook
@@ -1397,6 +1451,8 @@ def _attach_operation_facts(
         facts["diagnostic"] = str(diagnostic)[:240]
     if source_ref:
         facts["reconciliation_source_ref"] = str(source_ref)[:240]
+    if not isinstance(getattr(result, "result_envelope", None), dict):
+        object.__setattr__(result, "result_envelope", {})
     if storage_error is not None:
         details = sqlite_error_details(storage_error)
         if details:
