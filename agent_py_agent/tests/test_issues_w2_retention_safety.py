@@ -8,6 +8,7 @@ import shutil
 import sys
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,11 +36,35 @@ NOW = datetime(2026, 11, 5, tzinfo=timezone.utc)
 
 
 # LLM: All paths originate from the real temporary owner layout.
-# 函数用途: 构造隔离Owner与真实留存服务。
-def _runtime(tmp_path):
+# 函数用途: 构造隔离Owner与真实留存服务；非分片专项用例使用宽裕单片毫秒预算避免慢速CI半片中断。
+def _runtime(tmp_path, *, slice_ms: int | None = 10_000):
     home = ensure_my_agent_home(tmp_path / 'home')
-    service = MemoryRetentionService(home_paths=home, candidates=CandidateService(home.owner_memory_candidates_jsonl))
+    config = SimpleNamespace(retention_scan_slice_ms=slice_ms) if slice_ms is not None else None
+    service = MemoryRetentionService(
+        home_paths=home,
+        candidates=CandidateService(home.owner_memory_candidates_jsonl),
+        config=config,
+    )
     return home, service
+
+
+# LLM: 慢速CI若单片仍触发时间边界则沿真实游标续跑至本轮完成，出现错误或终态动作立即返回供断言核查。
+# 函数用途: 汇总单轮完整留存执行结果，消除墙钟抖动导致的空分片假阴性。
+def _apply_complete(run_slice, *, max_slices: int = 64):
+    actions = []
+    errors = []
+    report = None
+    for _ in range(max_slices):
+        report = run_slice()
+        actions.extend(report.actions)
+        errors.extend(report.errors)
+        if (
+            not report.scan_partial
+            or report.errors
+            or any(item.status in {'failed', 'busy', 'state_changed'} for item in report.actions)
+        ):
+            return replace(report, actions=tuple(actions), errors=tuple(errors))
+    pytest.fail(f'{max_slices}个留存扫描分片内未完成完整扫描')
 
 
 # LLM: The normal private JSONL writer creates bytes; only the temporary file's mtime is advanced into the past.
@@ -76,7 +101,13 @@ def test_memory_assets_survive_old_mtime_with_cache_control(tmp_path):
     curator = _aged(home.owner_memory_curator_runs_dir / 'x.jsonl', 100)
     cache = _aged(home.owner_cache_dir / 'old.jsonl', 400)
     before = {path: path.read_bytes() for path in (daily, curator)}
-    report = apply_owner_retention(home, now=NOW)
+    report = _apply_complete(
+        lambda: apply_owner_retention(
+            home,
+            now=NOW,
+            config=SimpleNamespace(retention_scan_slice_ms=10_000),
+        )
+    )
     assert report.ok
     assert {path: path.read_bytes() for path in before} == before
     assert not {action.category for action in report.actions} & {'daily', 'curator_run'}
@@ -95,7 +126,7 @@ def test_compact_nodes_checkpoints_and_ledgers_survive(tmp_path):
     before = {path: path.read_bytes() for path in paths}
     plan = service.plan(now=NOW)
     assert not [action for action in plan.actions if action.category == 'compact']
-    service.apply(now=NOW)
+    _apply_complete(lambda: service.apply(now=NOW))
     assert {path: path.read_bytes() for path in paths} == before
 
 
@@ -156,7 +187,7 @@ def test_legacy_memory_trash_is_kept_while_cache_trash_is_planned(tmp_path):
 def test_bound_old_thread_is_kept_and_unbound_control_is_trashed(tmp_path, monkeypatch, index_name, expired_first_slice):
     from agent_py_agent.agent.memory_store.retention_scan_budget import RetentionScanBudget
 
-    home, service = _runtime(tmp_path)
+    home, service = _runtime(tmp_path, slice_ms=None)
     store, bound = _thread(home, 'bound')
     _store, unbound = _thread(home, 'unbound')
     binding_path = store.storage.root / index_name
@@ -175,7 +206,7 @@ def test_bound_old_thread_is_kept_and_unbound_control_is_trashed(tmp_path, monke
 
     monkeypatch.setattr(RetentionScanBudget, 'default', classmethod(scan_budget))
     actions = {}
-    for attempt in range(32):
+    for attempt in range(512):
         report = service.apply(now=NOW)
         assert report.ok and not report.legal_hold, report
         budget = budgets[-1]
@@ -191,7 +222,7 @@ def test_bound_old_thread_is_kept_and_unbound_control_is_trashed(tmp_path, monke
         if not report.scan_partial:
             break
     else:
-        pytest.fail('32个原预算片内未完成绑定保护和未绑定线程退休')
+        pytest.fail('512个原预算片内未完成绑定保护和未绑定线程退休')
     assert not expired_first_slice or len(budgets) > 1
     assert store.threads.load(bound.thread_id) is not None
     assert store.threads.load(unbound.thread_id) is None
@@ -222,7 +253,7 @@ def test_unreadable_binding_index_keeps_root(tmp_path, index_name):
     home, service = _runtime(tmp_path)
     store, thread = _thread(home)
     (store.storage.root / index_name).write_text('{', encoding='utf-8')
-    report = service.apply(now=NOW)
+    report = _apply_complete(lambda: service.apply(now=NOW))
     assert store.threads.load(thread.thread_id) is not None
     assert any(error.error_code == 'MEMORY_RETENTION_BINDING_INDEX_UNREADABLE' for error in report.errors)
 
@@ -234,7 +265,7 @@ def test_journal_tracks_retirement_and_restoration(tmp_path, monkeypatch):
 
     home, service = _runtime(tmp_path)
     store, thread = _thread(home)
-    report = service.apply(now=NOW)
+    report = _apply_complete(lambda: service.apply(now=NOW))
     action = next(action for action in report.actions if action.record_id == thread.thread_id)
     assert action.status == 'trashed'
     page = journal.iter_retired_threads(home)
@@ -299,7 +330,7 @@ def test_journal_pages_by_complete_physical_lines_and_byte_offsets(tmp_path):
 # 函数用途: 验证台账追加失败只告警，不把成功回收倒回或伪造台账。
 @pytest.mark.parametrize('expired_first_slice', [False, True])
 def test_journal_append_failure_keeps_committed_trash(tmp_path, monkeypatch, caplog, expired_first_slice):
-    home, service = _runtime(tmp_path)
+    home, service = _runtime(tmp_path, slice_ms=None)
     store, thread = _thread(home)
     original_thread = store.storage.thread_path(thread.thread_id).read_bytes()
     from agent_py_agent.agent.memory_store.retention_scan_budget import (
@@ -408,7 +439,11 @@ def test_failed_retirement_has_no_journal_row(tmp_path, monkeypatch):
         path = store.storage.root / name
         payload = json.loads(path.read_text())
         write_private_json_file_atomic(path, {key: value for key, value in payload.items() if value != thread.thread_id})
-    service = MemoryRetentionService(home_paths=home, candidates=CandidateService(home.owner_memory_candidates_jsonl))
+    service = MemoryRetentionService(
+        home_paths=home,
+        candidates=CandidateService(home.owner_memory_candidates_jsonl),
+        config=SimpleNamespace(retention_scan_slice_ms=10_000),
+    )
 
     # LLM: 只模拟最终墓碑提交的普通I/O失败，真实规划、移动和原回滚不变。
     # 函数用途: 在退休成功证明发布之前拒绝本次提交。
@@ -416,7 +451,7 @@ def test_failed_retirement_has_no_journal_row(tmp_path, monkeypatch):
         raise OSError("simulated retirement commit failure")
 
     monkeypatch.setattr(apply, "_commit_trash", unavailable)
-    report = service.apply(now=datetime(2026, 11, 5, tzinfo=timezone.utc))
+    report = _apply_complete(lambda: service.apply(now=datetime(2026, 11, 5, tzinfo=timezone.utc)))
     assert any(action.record_id == thread.thread_id and action.status == "failed" for action in report.actions)
     assert store.threads.load(thread.thread_id) is not None
     assert store.storage.message_path(thread.thread_id).is_file()

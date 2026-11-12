@@ -1039,7 +1039,7 @@ def test_script_delete_same_key_interleaving_retains_proof(v13_native, delete_re
     entered, contending, release = Event(), Event(), Event()
     guard = Lock()
     active = {'current': 0, 'maximum': 0, 'calls': 0}
-    held = {'thread': None, 'locks': set(), 'contended_path': None}
+    held = {'thread': None, 'mutexes': (), 'contended_path': None}
     original_path_lock = json_io.path_thread_lock
     original_delete = scripts._NativeCASStore._delete
     key, script_id = 'r4-interleaved-delete-key-0001', 'r4-interleaved'
@@ -1051,31 +1051,41 @@ def test_script_delete_same_key_interleaving_retains_proof(v13_native, delete_re
 
     def observe_path_lock(path):
         handle = original_path_lock(path)
-        if get_ident() != held['thread'] and id(handle.lock) in held['locks']:
-            # 先用同一实际锁证明竞争失败，再走原获取器；不靠调度快慢推测第二请求是否已竞争。
-            if handle.lock.acquire(blocking=False):
-                handle.lock.release()
-                raise AssertionError('首请求仍在等待时原生锁已提前释放')
-            held['contended_path'] = str(path)
-            contending.set()
+        with guard:
+            waiting = not release.is_set() and not contending.is_set()
+            other_thread = held['thread'] is not None and get_ident() != held['thread']
+            same_mutex = any(handle is mutex for mutex in held['mutexes'])
+            if waiting and other_thread and same_mutex:
+                # 先用同一实际锁证明竞争失败，再走原获取器；不靠调度快慢推测第二请求是否已竞争。
+                if handle.lock.acquire(blocking=False):
+                    handle.lock.release()
+                    raise AssertionError('首请求仍在等待时原生锁已提前释放')
+                held['contended_path'] = str(path)
+                contending.set()
         return handle
 
     def delete(store, item):
+        with json_io._JSON_FILE_LOCKS_GUARD:
+            observed_mutexes = tuple(
+                mutex for name, mutex in json_io._JSON_FILE_LOCKS.items()
+                if name.startswith(str(store.owner_home) + os.sep) and mutex.lock.locked()
+            )
+        assert observed_mutexes, '原生删除没有实持的 owner 锁'
         with guard:
             active['current'] += 1
             active['calls'] += 1
             active['maximum'] = max(active['maximum'], active['current'])
-        held['thread'] = get_ident()
-        with json_io._JSON_FILE_LOCKS_GUARD:
-            held['locks'] = {id(mutex.lock) for name, mutex in json_io._JSON_FILE_LOCKS.items()
-                if name.startswith(str(store.owner_home) + os.sep) and mutex.lock.locked()}
-        assert held['locks'], '原生删除没有实持的 owner 锁'
+            held['thread'] = get_ident()
+            held['mutexes'] = observed_mutexes
         entered.set()
         try:
             assert release.wait(10), '未收到第二个请求的交错释放'
+            with guard:
+                held['mutexes'] = ()
             return original_delete(store, item)
         finally:
             with guard:
+                held['mutexes'] = ()
                 active['current'] -= 1
 
     monkeypatch.setattr(json_io, 'path_thread_lock', observe_path_lock)
