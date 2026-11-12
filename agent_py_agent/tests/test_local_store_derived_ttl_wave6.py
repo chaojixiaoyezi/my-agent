@@ -1089,12 +1089,15 @@ def _source_failure(monkeypatch, case, timing, error=None):
     return calls
 
 
-def _maintain_reference_case(case, transition, *, now=NOW):
+def _maintain_reference_case(case, transition, *, now=NOW, config=None):
+    from agent_py_agent.agent.settings.config import AgentConfig
     from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
 
+    # 显式给足单拍留存扫描时间预算，避免高负载 CI 调度抖动触发默认 25ms 分片暂停。
+    effective_config = AgentConfig(retention_scan_slice_ms=30_000) if config is None else config
     options = {'commit_transition': lambda operation: operation()} if transition else {}
     return run_owner_retention_if_due(case.home, now=now, include_global_indexes=False,
-        quota_max_ms=5000, **options)
+        quota_max_ms=5000, config=effective_config, **options)
 
 
 def _reference_marker(case):
@@ -1239,4 +1242,32 @@ def test_gptpro_r1_execution_uncertainty_propagates_exact_original(
             prune(store, now=NOW)
     assert calls and caught.value is error
     assert ids(store) == before
+    _assert_reference_records(case)
+
+
+@pytest.mark.parametrize('transition', [False, True])
+def test_paused_retention_slice_still_preserves_expired_and_resumes_pin_error_report(
+    tmp_path, monkeypatch, reference_fd_guard, transition
+):
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    case = _reference_case(tmp_path)
+    calls = _source_failure(monkeypatch, case, 'report')
+    store, _explicit, _inferred, expired = case.entries[0]
+
+    paused = _maintain_reference_case(
+        case, transition, now=NOW,
+        config=AgentConfig(retention_scan_slice_entries=1, retention_scan_slice_ms=30_000),
+    )
+    assert paused.ran and paused.retention.scan_partial
+    assert calls and store.get_record(expired.id) is not None
+    assert _reference_marker(case)['maintenance_partial'] is True
+
+    settled = _maintain_reference_case(case, transition, now=NOW + 1)
+    assert settled.ran and not settled.retention.scan_partial
+    assert store.get_record(expired.id) is not None
+    assert any(error['error_code'] == 'MEMORY_RETENTION_PIN_SOURCE_UNREADABLE'
+               and error['path'] == str(case.state) for error in settled.retention.load_errors)
+    assert _reference_marker(case)['derived_records_pruned'] == {
+        'executed': False, 'reason': 'retention_not_safe'}
     _assert_reference_records(case)
