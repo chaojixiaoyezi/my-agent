@@ -1600,18 +1600,6 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
             kwargs["headless"] = is_headless
         self._lane_retry.failed(label, thread_id, exc, **kwargs)
 
-        if is_headless and hasattr(self._lane_retry, "_failures") and hasattr(self._lane_retry, "_lock"):
-            key = (label, thread_id)
-            with self._lane_retry._lock:
-                entry = self._lane_retry._failures.get(key)
-                if entry is not None and getattr(entry, "waiting_for_user_input", False):
-                    from dataclasses import replace
-                    self._lane_retry._failures[key] = replace(
-                        entry,
-                        waiting_for_user_input=False,
-                        retry_at=time.monotonic() + BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS,
-                    )
-
         if isinstance(exc, (OwnerQuotaUnavailable, RuntimeRecoveryRequiredError, ConversationCompactError)):
             return
         _print_gateway_loop_error(
@@ -2333,12 +2321,22 @@ def _curator_candidate_is_admitted(
     return False
 
 
-# LLM: 原记忆整理准入条件原样保留：全局 memory_curator_enabled、owner 记忆总闸开启，且有紧急原因
-#   （pending reason/active lease）或当日配额。车道只因自学习运转时，这里让记忆整理保持不运行。
+# LLM: 记忆整理准入条件：全局 memory_curator_enabled、owner 记忆总闸开启、后台辅助模型已配置且不在冷却期，
+#   并且有紧急原因（pending reason/active lease）或当日配额。辅助模型未配置时返回 False（0次后台LLM调用）。
 # 函数用途: 判断这个 agent 现在能否运行记忆整理。
 def _curator_run_allowed(supervisor: object, agent: object) -> bool:
+    from ..agent.settings.curator_profile import (
+        auxiliary_profile_cooldown_remaining,
+        effective_auxiliary_model_profile,
+    )
+
     config = getattr(agent, "config", None)
     if not getattr(config, "memory_curator_enabled", True) or not _agent_memory_enabled(agent):
+        return False
+    auxiliary_profile = effective_auxiliary_model_profile(config)
+    if not auxiliary_profile:
+        return False
+    if auxiliary_profile_cooldown_remaining(auxiliary_profile) > 0:
         return False
     return bool(supervisor._curator_has_pending_reason(agent) or supervisor._curator_quota_available())
 
@@ -2355,9 +2353,20 @@ def _skill_learning_pending(agent: object) -> bool:
         return False
 
 
-# LLM: 自动总结失败只写诊断，不影响同车道的记忆整理结果与其它 owner。
+# LLM: 自动总结失败只写诊断，不影响同车道的记忆整理结果与其它 owner；辅助模型未配置或在冷却期时直接跳过。
 # 函数用途: 处理这个 agent 最早的一条自动总结 Skill 请求。
 def _run_skill_learning(agent: object, label: str) -> None:
+    from ..agent.settings.curator_profile import (
+        auxiliary_profile_cooldown_remaining,
+        effective_auxiliary_model_profile,
+    )
+
+    config = getattr(agent, "config", None)
+    auxiliary_profile = effective_auxiliary_model_profile(config)
+    if not auxiliary_profile:
+        return
+    if auxiliary_profile_cooldown_remaining(auxiliary_profile) > 0:
+        return
     run_pending = getattr(getattr(agent, "skill_learning", None), "run_pending", None)
     if not callable(run_pending):
         return

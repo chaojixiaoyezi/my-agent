@@ -87,36 +87,6 @@ def test_curator_skips_profiles_lacking_specific_tool_choice(monkeypatch) -> Non
     assert route_with_reasons is None
     assert out_reasons.get("minimax-prof") == "forced_tool_choice_not_supported"
 
-    plan = SimpleNamespace(
-        default_profile_id="default-prof",
-        configs={"minimax-prof": profile_config},
-        thread_profiles={"thread-1": "minimax-prof"},
-        fallback_reasons={},
-    )
-    monkeypatch.setattr(
-        "agent_py_agent.agent.settings.curator_profile.curator_thread_profiles",
-        lambda *a, **k: plan,
-    )
-    monkeypatch.setattr(
-        "agent_py_agent.agent.core._curator_backend",
-        lambda *a, **k: (SimpleNamespace(name="default_be"), "prov", "mod", ""),
-    )
-    monkeypatch.setattr(
-        "agent_py_agent.agent.core._curator_route_warnings",
-        lambda *a, **k: (),
-    )
-
-    fake_agent = SimpleNamespace(config=SimpleNamespace())
-    router = _curator_model_router(
-        fake_agent,
-        SimpleNamespace(),
-        MemoryCuratorConfig(model_profile=""),
-    )
-    routing = router(("thread-1",))
-    assert "thread-1" not in routing.thread_groups
-    assert routing.fallback_reasons.get("thread-1") == "forced_tool_choice_not_supported"
-    assert "minimax-prof" not in routing.routes
-
 
 def test_skill_learning_dynamic_backend_provider(tmp_path: Path) -> None:
     """SkillLearningService calls backend_provider dynamically when provided."""
@@ -182,7 +152,11 @@ def test_skill_learning_service_wiring(tmp_path: Path, monkeypatch) -> None:
     assert service is not None
     assert callable(service.runtime.backend_provider)
     resolved = service.runtime.backend_provider()
-    assert resolved is backend_obj
+    assert resolved is None
+
+    fake_agent.config.memory_curator_model_profile = "aux-prof"
+    resolved2 = service.runtime.backend_provider()
+    assert resolved2 is backend_obj
 
 
 def test_deterministic_thread_model_rejection_detection() -> None:

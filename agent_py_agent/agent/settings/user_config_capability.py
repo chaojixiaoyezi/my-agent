@@ -252,7 +252,7 @@ BOUNDARY_KEYS: dict[str, str] = {
     "plugin_legacy_sandbox_default": "决定老插件以后授权的收紧默认；仅管理员/settings可改，模型不能改或降级固定激活",
     "api_key": "供应商凭据，不能由模型改写",
     "api_key_env": "供应商凭据来源，不能由模型改写",
-    "memory_curator_model_profile": "决定把记忆内容发给哪个服务商；仅用户经 /settings 修改，模型不能改",
+    "memory_curator_model_profile": "后台辅助模型（统一用于记忆整理与技能自学习）档案编号；留空关闭后台自动整理与自学习，仅用户经 /model 或 /settings 修改，模型不能改",
     "embedding_model_profile": ("决定把记忆内容发给哪个嵌入服务商；用户经 /settings 或 /model → 选择模型 → 向量模型 修改。"
                                 "模型只在本机管理员下、目标是本人目录里的嵌入档案且端点主机与默认对话模型相同时，经 manage_models "
                                 "代为设置（用户 10-02 拍板；比对的是启动时的默认对话模型）；主机不同要用户自己在 /model 里选。"

@@ -345,7 +345,11 @@ class _CuratorLifecycleMixin:
         current: datetime,
     ) -> CuratorRunResult:
         last_failure = _parse_time(state.last_failure_at)
-        retry_after = curator_failure_retry_seconds(state.last_failure_code, max(30, min(300, self.config.interval_seconds)))
+        retry_after = curator_failure_retry_seconds(
+            state.last_failure_code,
+            max(30, min(300, self.config.interval_seconds)),
+            consecutive_failures=max(0, int(getattr(state, "consecutive_failures", 0) or 0)),
+        )
         if (
             state.last_failure_code
             and last_failure is not None
@@ -406,6 +410,10 @@ class _CuratorLifecycleMixin:
                     failure_code=state_code,
                     now=finished_at,
                 )
+                from ..settings.curator_profile import record_auxiliary_profile_failure
+                profile_to_cool = str(context.route.get("group_key") or getattr(self.config, "model_profile", "") or "").strip()
+                if profile_to_cool:
+                    record_auxiliary_profile_failure(profile_to_cool, failure_code)
             except CuratorStateCorruptError as exc:
                 # 失败落账阶段发现 state 损坏: 同样隔离留证, 不推进任何事实。
                 return self._corrupt_failure(context.reason, exc)
@@ -725,6 +733,10 @@ class _CuratorExecutionMixin:
         )
         prepared = _without_identity_conflicts(self.candidate_service, outputs)
         finished_at = utc_now_iso()
+        from ..settings.curator_profile import clear_auxiliary_profile_cooldown
+        profile_to_clear = str(context.route.get("group_key") or getattr(self.config, "model_profile", "") or "").strip()
+        if profile_to_clear:
+            clear_auxiliary_profile_cooldown(profile_to_clear)
         run_record = _successful_run_record(
             context,
             prepared,

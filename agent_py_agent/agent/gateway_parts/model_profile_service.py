@@ -24,6 +24,7 @@ from ..settings.embedding_selection import (
     execute_embedding_operation,
 )
 from ..settings.model_profiles import ModelProfileError, execute_model_profile_operation
+from ..settings.thread_model_selection import AUXILIARY_MODEL_OPERATIONS
 from ..user_space.group_authorization import GroupAuthorizationError
 from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
 from .control_service import _scope_request_payload, resolve_gateway_scope_owner
@@ -68,9 +69,13 @@ def handle_client_models(handler, server) -> None:
             return
         config_host, thread = _scoped_model_host(server.agent, scope)
         operation = str(body.get("operation") or "")
-        # 向量模型是全局设置（不属于会话），管理员判定在 embedding_selection 里按已认证 owner 做。
-        result = (execute_embedding_operation(config_host, operation, body) if operation in EMBEDDING_OPERATIONS
-                  else execute_model_profile_operation(config_host, operation, body, thread_id=thread.thread_id))
+        # 向量模型是全局设置；后台辅助模型统一用于记忆整理与技能自学习。
+        if operation in AUXILIARY_MODEL_OPERATIONS:
+            result = execute_auxiliary_model_operation(config_host, operation, body)
+        elif operation in EMBEDDING_OPERATIONS:
+            result = execute_embedding_operation(config_host, operation, body)
+        else:
+            result = execute_model_profile_operation(config_host, operation, body, thread_id=thread.thread_id)
         if operation == "list":
             result["model_execution"] = _model_execution_snapshot(server.agent, scope, config_host, thread.thread_id)
     except (GlobalWriteError, RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError,
@@ -360,3 +365,89 @@ def render_model_choices(listing: dict) -> str:
         lines.append(str(listing["warning"]))
     lines.append("新增或修改模型请使用模型卡的私人表单或终端 TUI，普通聊天里不收发密钥。")
     return "\n".join(lines)
+
+
+# LLM: 执行后台辅助模型（记忆整理与技能自学习）查看、选择与关闭操作。
+# 函数用途: 处理 auxiliary_list、auxiliary_select、auxiliary_off 操作，并保持配置持久化与即刻生效。
+def execute_auxiliary_model_operation(host: object, operation: str, payload: dict) -> dict:
+    from ..settings.curator_profile import (
+        clear_auxiliary_profile_cooldown,
+        effective_auxiliary_model_profile,
+    )
+    from ..settings.model_profiles import execute_model_profile_operation, selected_model_config
+    from ..settings.parameter_changes import (
+        ChangeOrigin,
+        WritePaths,
+        set_parameter,
+        user_settings_write_scope,
+    )
+    from ..settings.user_config_capability import user_config_path
+
+    if operation == "auxiliary_list":
+        listing = execute_model_profile_operation(host, "list", {})
+        current_profile = effective_auxiliary_model_profile(getattr(host, "config", None))
+        choices = [
+            p for p in listing.get("profiles", [])
+            if p.get("id") != "default" and p.get("available", True) and p.get("capability", "agentic") == "agentic"
+        ]
+        return {
+            "ok": True,
+            "auxiliary_profile_id": current_profile,
+            "selected": current_profile,
+            "choices": choices,
+            "profiles": listing.get("profiles", []),
+        }
+    if operation == "auxiliary_select":
+        profile_id = str(payload.get("profile_id") or "").strip()
+        if not profile_id or profile_id == "default":
+            return {"ok": False, "message": "请选择有效的模型档案编号。", "error_code": "INVALID_PROFILE_ID"}
+        try:
+            cfg = selected_model_config(host, profile_id=profile_id)
+        except Exception as exc:
+            return {"ok": False, "message": f"所选模型档案不可用：{exc}", "error_code": "PROFILE_UNAVAILABLE"}
+        user_path = user_config_path(getattr(host, "config", None))
+        if user_path is not None and user_path.is_file():
+            with user_settings_write_scope():
+                set_parameter(
+                    "memory_curator_model_profile",
+                    profile_id,
+                    paths=WritePaths(user_path=user_path),
+                    origin=ChangeOrigin(actor="user", reason="/model 辅助模型"),
+                )
+        if hasattr(host, "config"):
+            host.config.memory_curator_model_profile = profile_id
+        if hasattr(host, "agent") and hasattr(host.agent, "config"):
+            host.agent.config.memory_curator_model_profile = profile_id
+        clear_auxiliary_profile_cooldown(profile_id)
+        return {
+            "ok": True,
+            "profile_id": profile_id,
+            "selected": profile_id,
+            "model_name": getattr(cfg, "model_name", profile_id),
+            "message": f"已将后台辅助模型（记忆整理与技能自学习）设置为 {profile_id}。",
+        }
+    if operation == "auxiliary_off":
+        user_path = user_config_path(getattr(host, "config", None))
+        if user_path is not None and user_path.is_file():
+            with user_settings_write_scope():
+                set_parameter(
+                    "memory_curator_model_profile",
+                    "",
+                    paths=WritePaths(user_path=user_path),
+                    origin=ChangeOrigin(actor="user", reason="/model 辅助模型"),
+                )
+        if hasattr(host, "config"):
+            host.config.memory_curator_model_profile = ""
+        if hasattr(host, "agent") and hasattr(host.agent, "config"):
+            host.agent.config.memory_curator_model_profile = ""
+        return {
+            "ok": True,
+            "profile_id": "",
+            "selected": "",
+            "message": "已关闭后台辅助模型（后台记忆整理与技能自学习已停用）。",
+        }
+    return {"ok": False, "message": f"未知的辅助模型操作：{operation}"}
+
+
+class ModelProfileService:
+    execute_auxiliary_model_operation = staticmethod(execute_auxiliary_model_operation)

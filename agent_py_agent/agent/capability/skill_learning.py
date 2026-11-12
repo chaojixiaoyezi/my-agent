@@ -403,15 +403,29 @@ class SkillLearningService:
                 return SkillLearningRunResult(STATUS_DAILY_LIMIT, request_key=str(request.get("request_key") or ""))
             if not reserve_deployment_learning(self.runtime.deployment_root,self.settings.global_daily_limit):
                 return SkillLearningRunResult("global_daily_limit",request_key=str(request.get("request_key") or ""))
+        from ..settings.curator_profile import (
+            auxiliary_profile_cooldown_remaining,
+            clear_auxiliary_profile_cooldown,
+            record_auxiliary_profile_failure,
+        )
+
+        aux_profile = str(getattr(getattr(self.runtime, "guard_config", None), "memory_curator_model_profile", "") or "").strip()
+        if aux_profile and auxiliary_profile_cooldown_remaining(aux_profile) > 0:
+            return SkillLearningRunResult(STATUS_BUSY, request_key=str(request.get("request_key") or ""))
+
         material = _material(self.store, request, _snapshot_entries(self.runtime.snapshot_provider))
         try:
             response = self._call_model(material)
+            if aux_profile:
+                clear_auxiliary_profile_cooldown(aux_profile)
         except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
                 ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
             raise
         except CuratorModelStillRunningError:
             return SkillLearningRunResult(STATUS_BUSY, request_key=str(request.get("request_key") or ""))
         except Exception as exc:  # noqa: BLE001 - 供应商故障只影响这一条请求，按重试合同记账。
+            if aux_profile:
+                record_auxiliary_profile_failure(aux_profile, type(exc).__name__)
             return self._retry_or_drop(path, request, exc)
         event = self._decide(material, str(getattr(response, "text", "") or ""))
         return self._finish(path, request, event)
@@ -426,6 +440,8 @@ class SkillLearningService:
             if callable(self.runtime.backend_provider)
             else self.runtime.backend
         ) or self.runtime.backend
+        if backend is None or getattr(backend, "name", "") == "unconfigured":
+            raise RuntimeError("SKILL_LEARNING_MODEL_NOT_CONFIGURED")
         with provider_session_scope((self.runtime.owner_id,), session):
             return call_backend_with_timeout(
                 backend,

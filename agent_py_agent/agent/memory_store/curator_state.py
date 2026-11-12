@@ -209,10 +209,12 @@ class MemoryCuratorStateStore:
             with locked_json_path(self.path):
                 current = self._load_unlocked()
                 _require_lease(current, lease_id)
+                next_failures = max(0, int(getattr(current, "consecutive_failures", 0) or 0)) + 1
                 updated = replace(
                     current,
                     last_failure_at=failed_at,
                     last_failure_code=str(failure_code or "CURATOR_FAILED").strip(),
+                    consecutive_failures=next_failures,
                     active_lease={},
                 )
                 self._write_unlocked(updated)
@@ -602,6 +604,7 @@ def build_success_state(
         per_thread_cursors=cursors,
         last_success_at=committed_at,
         last_failure_code="",
+        consecutive_failures=0,
         active_lease=({**current.active_lease, "phase": "promotion"} if commit.retain_lease else {}),
         processed_count=current.processed_count
         + max(0, int(commit.processed_messages))
