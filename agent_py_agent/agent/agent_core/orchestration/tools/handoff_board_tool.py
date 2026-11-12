@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 def build_manage_handoff_board_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="manage_handoff_board",
-        description="管理跨代理原生交接板（Handoff Board）项目生命周期与外部助手邮箱同步。",
+        description="管理跨代理原生交接板（Handoff Board）项目生命周期与外部助手邮箱同步。本工具严格用于多代理/子代理协作任务交接（multi-agent / subagent collaboration），单代理独立执行时严禁调用本工具（单代理步骤进度记录请使用 Todo 工具）。",
         input_schema={
             "type": "object",
             "additionalProperties": False,
@@ -303,6 +303,63 @@ class ManageHandoffBoardTool(BaseTool):
         if not title and not summary:
             return self._failure("open_case 必须指定 title 或 summary。", "TOOL_INVALID_ARGUMENTS")
 
+        agent = self.agent or getattr(self, "_agent", None)
+        if agent is not None and getattr(agent, "subagents", None) is not None:
+            parent_run_id = current_subagent_run_id(agent)
+            is_background_agent = False
+            thread_id = str(params.get("thread_id") or getattr(agent, "current_thread_id", None) or getattr(getattr(agent, "_current_thread", None), "thread_id", "") or "").strip()
+            conv_store = getattr(agent, "conversation_store", None) or getattr(service, "conversation_store", None)
+            if conv_store is not None and thread_id:
+                try:
+                    thread_obj = conv_store.threads.get(thread_id)
+                    if thread_obj is not None:
+                        from ....conversation.background_team_lifecycle import background_identity
+                        if background_identity(thread_obj) is not None or getattr(thread_obj, "thread_kind", "") == "background_agent":
+                            is_background_agent = True
+                except Exception:
+                    pass
+
+            subagents_mgr = getattr(agent, "subagents", None)
+            subagent_runs_count = 0
+            root_id = str(getattr(getattr(agent, "_current_run_params", None), "run_id", "") or getattr(getattr(agent, "_current_run_params", None), "task_id", "") or "").strip()
+            if root_id and hasattr(subagents_mgr, "list_runs_for_root_report"):
+                try:
+                    report = subagents_mgr.list_runs_for_root_report(root_id)
+                    subagent_runs_count = len(getattr(report, "runs", ()))
+                except Exception:
+                    pass
+            if subagent_runs_count == 0 and thread_id and hasattr(subagents_mgr, "list_current_runs_report"):
+                try:
+                    report = subagents_mgr.list_current_runs_report(thread_id=thread_id)
+                    subagent_runs_count = len(getattr(report, "runs", ()))
+                except Exception:
+                    pass
+            if subagent_runs_count == 0 and not root_id and not thread_id and hasattr(subagents_mgr, "list_runs"):
+                try:
+                    subagent_runs_count = len(subagents_mgr.list_runs())
+                except Exception:
+                    pass
+
+            if not parent_run_id and not is_background_agent and subagent_runs_count == 0:
+                message = "当前处于单代理前台独立执行环境，无需创建跨代理交接单；单代理步骤与进度管理请改用 Todo 工具推进，请勿重试 manage_handoff_board。"
+                details = {
+                    "error_code": "SINGLE_AGENT_HANDOFF_NOT_NEEDED",
+                    "effect_outcome": "not_started",
+                    "retryable": False,
+                    "next_action": "use_todo_tool",
+                    "message": message,
+                }
+                outcome = ToolHandlerOutcome(
+                    "manage_handoff_board",
+                    False,
+                    json.dumps({"ok": False, **details}, ensure_ascii=False, indent=2),
+                    result_envelope={"retryable": False, "effect_outcome": "not_started", "next_action": "use_todo_tool", "details": details},
+                    error_code="SINGLE_AGENT_HANDOFF_NOT_NEEDED",
+                    effect_outcome="not_started",
+                )
+                object.__setattr__(outcome, "error_code", "SINGLE_AGENT_HANDOFF_NOT_NEEDED")
+                return outcome
+
         created_by = str(params.get("created_by") or params.get("responsible_actor") or params.get("actor_id") or "").strip()
         if self.agent is not None and current_subagent_run_id(self.agent):
             principal, _ = authoritative_self_principal(self.agent)
@@ -332,9 +389,17 @@ class ManageHandoffBoardTool(BaseTool):
     def _handle_list_cases(self, service: HandoffBoardService, params: dict[str, object]) -> ToolHandlerOutcome:
         status = str(params.get("status") or "").strip() or None
         raw_limit = params.get("limit")
-        limit = self._parse_limit(raw_limit, default=20, max_val=100)
+        limit = self._parse_limit(raw_limit, default=10, max_val=20)
         cases = service.store.list_cases(status=status)
-        cases_data = [c.to_dict() for c in cases[:limit]]
+        cases_data = [
+            {
+                "case_id": c.case_id,
+                "status": c.status,
+                "title": c.title,
+                "updated_at": c.updated_at,
+            }
+            for c in cases[:limit]
+        ]
         return self._success({"action": "list_cases", "cases": cases_data, "total_count": len(cases)})
 
     # LLM: 处理 publish_item 动作。
@@ -571,7 +636,7 @@ class ManageHandoffBoardTool(BaseTool):
             "message": message,
             "details": det,
         }
-        return ToolHandlerOutcome(
+        outcome = ToolHandlerOutcome(
             "manage_handoff_board",
             False,
             json.dumps(payload, ensure_ascii=False, indent=2),
@@ -579,6 +644,8 @@ class ManageHandoffBoardTool(BaseTool):
             error_code=error_code,
             effect_outcome=effect_outcome,
         )
+        object.__setattr__(outcome, "error_code", error_code)
+        return outcome
 
     # LLM: 构造标准化成功 ToolHandlerOutcome。
     # 函数用途: 返回成功结果封装。

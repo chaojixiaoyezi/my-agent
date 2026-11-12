@@ -441,12 +441,6 @@ def _execute_parallel_step(
                 outcome_call,
                 execution,
             )
-            wrote_output, transition = _record_execution(
-                request,
-                outcome_idx,
-                started_at,
-                execution,
-            )
         except _MUST_PROPAGATE_TOOL_EXCEPTIONS:
             raise
         except Exception as exc:
@@ -462,6 +456,14 @@ def _execute_parallel_step(
                 started_at,
                 exc,
                 started_emitted=True,
+                effect_outcome="unknown",
+            )
+        else:
+            wrote_output, transition = _record_execution(
+                request,
+                outcome_idx,
+                started_at,
+                execution,
             )
         progress.subagent_output_written |= wrote_output
         if transition and not transition_index:
@@ -534,7 +536,6 @@ def _execute_serial_step(
                 ), emit_started=True,
             )
             execution = _resolve_tool_approval(request, idx, call, execution)
-        wrote_output, transition = _record_execution(request, idx, started_at, execution)
     except _MUST_PROPAGATE_TOOL_EXCEPTIONS:
         raise
     except Exception as exc:
@@ -550,7 +551,10 @@ def _execute_serial_step(
             started_at,
             exc,
             started_emitted=started_emitted,
+            effect_outcome="unknown",
         )
+    else:
+        wrote_output, transition = _record_execution(request, idx, started_at, execution)
     progress.handled_count = idx
     progress.subagent_output_written |= wrote_output
     progress.stateful_orchestration_seen |= call.tool_name in _STATEFUL_ORCHESTRATION_TOOLS
@@ -996,7 +1000,10 @@ def _started_parallel_call(request, idx, call, context, queued):
                 {
                     "ok": False,
                     "error_code": "INTERNAL_ERROR",
-                    "error": f"工具执行内部异常 ({type(exc).__name__})，已隔离该工具调用以保护当前回合继续运行。",
+                    "effect_outcome": "unknown",
+                    "retryable": False,
+                    "cause": f"{type(exc).__name__}: {str(exc)[:240]}",
+                    "error": f"工具执行发生内部异常（{type(exc).__name__}: {str(exc)[:160]}），请勿使用完全相同的参数原样盲目重试；请检查参数或改用替代工具推进。",
                 },
                 ensure_ascii=False,
             )
@@ -1009,7 +1016,7 @@ def _started_parallel_call(request, idx, call, context, queued):
                     status="failed",
                     effect_outcome="unknown",
                     duration_ms=max(0, int((time.monotonic() - started_at) * 1000)),
-                    metadata={"reported_error_code": "INTERNAL_ERROR"},
+                    metadata={"reported_error_code": "INTERNAL_ERROR", "retryable": False},
                 ),
             )
             execution = _synthetic_execution(call, fallback_result, "INTERNAL_ERROR")
@@ -1160,6 +1167,88 @@ def _restore_parallel_thread_context(
             delattr(agent, name)
 
 
+def _ensure_minimal_tool_context_pairing(
+    request: ToolRoundExecutionRequest,
+    idx: int,
+    call: ToolCall,
+    result: ToolResult,
+) -> None:
+    context = getattr(request.params, "tool_context", None)
+    call_id = getattr(call, "call_id", "")
+    if isinstance(context, list):
+        already_present = any(
+            isinstance(item, str) and ((call_id and call_id in item) or f"index={idx}" in item)
+            for item in context
+        )
+        if not already_present:
+            tag, suffix = ("tool", "") if request.actor == "model" else ("host-action", f" actor={request.actor}")
+            rendered_payload = json.dumps({"tool": call.tool_name, "arguments": call.arguments}, ensure_ascii=False)
+            rendered_result = str(getattr(result, "output", "") or getattr(result, "content", "") or "")
+            context.append(
+                f"[{tag}-record round={request.tool_rounds} index={idx}{suffix}]\n"
+                f"{rendered_payload}\n"
+                f"[{tag}-output-record round={request.tool_rounds} index={idx}{suffix}]\n"
+                f"{rendered_result}"
+            )
+    if request.actor == "model":
+        try:
+            from ..tool_ir_history import native_tool_ir_history, record_tool_call_ir
+            history = native_tool_ir_history(request.params)
+            already_in_ir = any(getattr(item, "call_id", None) == call_id for item in history)
+            if not already_in_ir:
+                model_call = _model_visible_call(request, idx, call)
+                record_tool_call_ir(
+                    request.params,
+                    tool_rounds=request.tool_rounds,
+                    call=model_call,
+                    result=result,
+                )
+        except Exception:
+            pass
+
+
+def _emit_post_tool_bookkeeping_notice(
+    request: ToolRoundExecutionRequest,
+    exc: Exception,
+) -> None:
+    text = f"⚠ 后台归档/自学习记录写入失败（{type(exc).__name__}），当前工具结果已生效，任务不受影响"
+    on_chunk = getattr(request.params, "effective_on_chunk", None) or getattr(request.params, "on_chunk", None)
+    sink = getattr(on_chunk, "__self__", None) or on_chunk
+
+    writer = None
+    if hasattr(sink, "write_runtime_notice") and callable(getattr(sink, "write_runtime_notice", None)):
+        writer = sink
+    elif hasattr(on_chunk, "write_runtime_notice") and callable(getattr(on_chunk, "write_runtime_notice", None)):
+        writer = on_chunk
+    if writer is not None:
+        try:
+            writer.write_runtime_notice(
+                level="warning",
+                notice_kind="warning",
+                error_code="POST_TOOL_BOOKKEEPING_WARNING",
+                text=text,
+            )
+        except Exception:
+            pass
+
+    runtime = (
+        getattr(request.agent, "runtime", None)
+        or getattr(sink, "runtime", None)
+        or getattr(request.params, "runtime", None)
+    )
+    set_notice = getattr(runtime, "set_notice", None)
+    if callable(set_notice):
+        try:
+            set_notice(text, duration_seconds=8.0, notice_kind="warning")
+        except TypeError:
+            try:
+                set_notice(text, duration_seconds=8.0)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+
 def _record_execution(
     request: ToolRoundExecutionRequest,
     idx: int,
@@ -1173,33 +1262,46 @@ def _record_execution(
             duration_ms=(time.monotonic() - started_at) * 1000,
         )
         execution = replace(execution, result=result)
-    _emit_tool_progress(
-        ToolProgressEvent(
-            request,
-            idx,
-            call,
-            "finished",
-            _finished_status(result),
-            started_at,
-            result,
+    try:
+        _emit_tool_progress(
+            ToolProgressEvent(
+                request,
+                idx,
+                call,
+                "finished",
+                _finished_status(result),
+                started_at,
+                result,
+            )
         )
-    )
-    request.record_one(
-        ToolCallRecordParams(
-            request.params,
-            request.tool_rounds,
-            idx,
-            call,
-            result,
-            execution.states,
-            model_call=_model_visible_call(request, idx, call),
-            actor=request.actor,
-            decision_ref=request.decision_ref,
+    except Exception:
+        pass
+    try:
+        request.record_one(
+            ToolCallRecordParams(
+                request.params,
+                request.tool_rounds,
+                idx,
+                call,
+                result,
+                execution.states,
+                model_call=_model_visible_call(request, idx, call),
+                actor=request.actor,
+                decision_ref=request.decision_ref,
+            )
         )
-    )
-    _run_host_actions(request, idx)
-    # 会话运行时 式循环中，写任何文件（包括历史 output.json）都只是工具结果；
-    # 不能跳过下一次模型采样或由宿主据产物内容强制收口。
+        _run_host_actions(request, idx)
+    except _MUST_PROPAGATE_TOOL_EXCEPTIONS:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "post-result bookkeeping failed for %s: %s",
+            getattr(call, "tool_name", getattr(call, "name", "tool")),
+            exc,
+            exc_info=True,
+        )
+        _ensure_minimal_tool_context_pairing(request, idx, call, result)
+        _emit_post_tool_bookkeeping_notice(request, exc)
     return False, _runtime_transition_after_tool(result)
 
 
@@ -1211,12 +1313,16 @@ def _record_bulkhead_fallback(
     exc: Exception,
     *,
     started_emitted: bool = True,
+    effect_outcome: str = "unknown",
 ) -> tuple[bool, dict[str, str] | None]:
     output_json = json.dumps(
         {
             "ok": False,
             "error_code": "INTERNAL_ERROR",
-            "error": f"工具执行内部异常 ({type(exc).__name__})，已隔离该工具调用以保护当前回合继续运行。",
+            "effect_outcome": effect_outcome,
+            "retryable": False,
+            "cause": f"{type(exc).__name__}: {str(exc)[:240]}",
+            "error": f"工具执行发生内部异常（{type(exc).__name__}: {str(exc)[:160]}），请勿使用完全相同的参数原样盲目重试；请检查参数或改用替代工具推进。",
         },
         ensure_ascii=False,
     )
@@ -1227,9 +1333,9 @@ def _record_bulkhead_fallback(
         failure_stage="runtime_gate",
         facts=ToolFailureFacts(
             status="failed",
-            effect_outcome="unknown",
+            effect_outcome=effect_outcome,
             duration_ms=max(0, int((time.monotonic() - started_at) * 1000)),
-            metadata={"reported_error_code": "INTERNAL_ERROR"},
+            metadata={"reported_error_code": "INTERNAL_ERROR", "retryable": False},
         ),
     )
     if started_emitted:
@@ -1268,6 +1374,7 @@ def _record_bulkhead_fallback(
             record_exc,
             exc_info=True,
         )
+        _ensure_minimal_tool_context_pairing(request, idx, call, fallback_result)
     return False, None
 
 
@@ -1302,8 +1409,6 @@ def _execute_host_action(request: ToolRoundExecutionRequest, idx: int, action: H
             ToolCallExecuteParams(host_request.params, host_request.tool_rounds, host_idx, call, actor=host_request.actor)
         )
         execution = _resolve_tool_approval(host_request, host_idx, call, execution)
-        _record_execution(host_request, host_idx, started_at, execution)
-        record_auto_execution(request.agent, action, execution.result)
     except _MUST_PROPAGATE_TOOL_EXCEPTIONS:
         raise
     except Exception as exc:
@@ -1312,8 +1417,11 @@ def _execute_host_action(request: ToolRoundExecutionRequest, idx: int, action: H
             getattr(call, "tool_name", getattr(call, "name", "tool")),
             exc_info=True,
         )
-        _record_bulkhead_fallback(host_request, host_idx, call, started_at, exc, started_emitted=True)
+        _record_bulkhead_fallback(host_request, host_idx, call, started_at, exc, started_emitted=True, effect_outcome="unknown")
         record_auto_execution(request.agent, action, None)
+        return
+    _record_execution(host_request, host_idx, started_at, execution)
+    record_auto_execution(request.agent, action, execution.result)
 
 
 # LLM: 模型发起的审批请求原样不动；决策发起的在 binding 里加 actor/decision_ref（结构化，消费方据此展示“决策自动执行”），

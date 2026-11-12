@@ -849,6 +849,16 @@ def terminate_process_tree(
             return ProcessTerminationReceipt("identity_unavailable", False, None, len(snapshot), (pid,))
         if not same:
             return ProcessTerminationReceipt("identity_changed", False, None, len(snapshot), (pid,))
+    if not complete and snapshot.get(pid) and _same_process(pid, snapshot[pid]):
+        for _ in range(2):
+            time.sleep(0.01)
+            retry_snapshot, retry_complete = _fresh_process_tree_snapshot(pid)
+            if not retry_snapshot.get(pid) or not _birth_tokens_match(snapshot[pid], retry_snapshot[pid]):
+                break
+            _merge_tree_snapshot(snapshot, retry_snapshot, set())
+            if retry_complete:
+                complete = True
+                break
     method = "already_gone"
     # 已证明消失的进程实例不再重查：PID 在宽限期后被新进程复用时，os.kill 探测会重新成功，
     # 但那已经是另一个实例；只有快照里同 PID 换了出生标识（根的新后代）才重新纳入核对。

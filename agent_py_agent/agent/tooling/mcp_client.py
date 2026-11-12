@@ -640,20 +640,29 @@ class MCPStdioClient:
     def call_tool(self, tool_name: str, arguments: dict[str, Any], *, transport: MCPTransport | None = None,
                   authority_check: Callable[[], None] | None = None,
                   request_meta: dict[str, object] | None = None) -> dict[str, Any]:
+        reconnected = False
         is_standalone = self._activation is None and transport is None
         try:
             if is_standalone and not self._closed.is_set():
                 with self._state_lock:
                     current_transport = self._transport
+                    is_initial_start = current_transport is None
                     needs_reconnect = (
-                        current_transport is None
-                        or not current_transport.is_running()
-                        or (
-                            getattr(getattr(current_transport, "binding", None), "process", None) is not None
-                            and current_transport.binding.process.poll() is not None
+                        current_transport is not None
+                        and (
+                            not current_transport.is_running()
+                            or (
+                                getattr(getattr(current_transport, "binding", None), "process", None) is not None
+                                and current_transport.binding.process.poll() is not None
+                            )
                         )
                     )
                 if needs_reconnect:
+                    if authority_check is not None:
+                        authority_check()
+                    selected = self.reconnect()
+                    reconnected = True
+                elif is_initial_start:
                     if authority_check is not None:
                         authority_check()
                     selected = self.reconnect()
@@ -684,6 +693,7 @@ class MCPStdioClient:
                     authority_check()
                 try:
                     selected = self.reconnect()
+                    reconnected = True
                     result = selected.request("tools/call", params,
                                               timeout=self.config.timeout, authority_check=authority_check)
                 except MCPError as retry_exc:
@@ -692,4 +702,17 @@ class MCPStdioClient:
                     raise
             else:
                 raise
-        return _normalize_call_result(result, self.config.max_content_chars)
+        normalized = _normalize_call_result(result, self.config.max_content_chars)
+        if reconnected and isinstance(normalized, dict):
+            normalized["reconnected"] = True
+            normalized["reconnect_warning"] = (
+                "MCP 服务连接中断后已自动重连；此前该 MCP 进程内的内存会话态已重置，请结合当前结果核对上下文。"
+            )
+            warning_suffix = "\n[提示：MCP 连接已自动重连，此前进程内会话态已重置]"
+            if "preview" in normalized and isinstance(normalized["preview"], str):
+                normalized["preview"] += warning_suffix
+            elif "preview" not in normalized:
+                normalized["preview"] = warning_suffix.lstrip()
+            if isinstance(normalized.get("content"), str):
+                normalized["content"] += warning_suffix
+        return normalized

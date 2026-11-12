@@ -633,6 +633,30 @@ class BufferedChunkStreamWriter(StreamLiveness):
         self.flush()
         self._write_event({"kind": "turn_resumed", "cause": str(cause or "").strip()})
 
+    def write_runtime_notice(
+        self,
+        *,
+        level: str = "warning",
+        notice_kind: str = "warning",
+        error_code: str = "",
+        text: str = "",
+    ) -> bool:
+        if not self.rich_transcript or not str(text or "").strip():
+            return False
+        self.flush()
+        self._write_event(
+            {
+                "kind": "runtime_notice",
+                "runtime_notice": {
+                    "level": str(level or "warning"),
+                    "notice_kind": str(notice_kind or "warning"),
+                    "error_code": str(error_code or ""),
+                    "text": str(text).strip()[:240],
+                },
+            }
+        )
+        return True
+
     # LLM: 工具轮数来自结构化 progress，不能从输出文本或动画推断。
     # 函数用途: 返回当前请求已经观察到的最大工具轮号。
     @property

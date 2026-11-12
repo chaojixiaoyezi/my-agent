@@ -59,6 +59,9 @@ _ACTIVE_TURN_EMPTY_REPLY_NUDGE = (
 )
 
 
+_MAX_CUMULATIVE_TURN_REPAIRS = 10
+
+
 # LLM: 各类修复预算只在当前工具循环累计；字段不代表工具执行记录或同目标连续失败，不得混用。
 # 类用途: 保存互相独立的纠偏次数，让每次裁决保留已用预算而不创建第二份失败账。
 # LLM: 本工具循环各类修复预算分别累计，不能从计数推断同一文件连续失败；修改须同步裁决与原生恢复测试。
@@ -89,13 +92,19 @@ class ToolLoopRepairCounters:
     # 有进展就把 empty_text_repairs 归 0；旧成功回执重放（ok=True 但 handler_executed=False、
     # operation.replayed=True）不算新进展（review36 R36-1）。
     empty_text_progress_marker: int = 0
+    # 本轮累计纠偏次数上限（protocol + truncated_write + truncated_output），交替纠偏达 10 次强制收敛停止
+    cumulative_turn_repairs: int = 0
 
 
 # LLM: 截断续跑与"分块写纠偏"是两件事：前者针对最终答复被输出上限截断，后者针对工具参数被截断。
 #   分开计数，避免互相吃掉预算。
 # 函数用途: 增加一次截断续跑计数，同时保留其他修复计数。
 def _inc_truncated_output(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
-    return replace(counters, truncated_output_repairs=counters.truncated_output_repairs + 1)
+    return replace(
+        counters,
+        truncated_output_repairs=counters.truncated_output_repairs + 1,
+        cumulative_turn_repairs=counters.cumulative_turn_repairs + 1,
+    )
 
 
 # LLM: 超时续跑同样是有界的一次性修复，计数与截断续跑、协议修复、空正文 nudge 全部独立。
@@ -177,13 +186,21 @@ def _inc_unresolved_runtime_issue(counters: ToolLoopRepairCounters) -> ToolLoopR
 
 
 def _inc_protocol(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
-    return replace(counters, protocol_repairs=counters.protocol_repairs + 1)
+    return replace(
+        counters,
+        protocol_repairs=counters.protocol_repairs + 1,
+        cumulative_turn_repairs=counters.cumulative_turn_repairs + 1,
+    )
 
 
 # LLM: 截断分块纠偏与协议修复分开计数：两者预算不能互相吞掉，也不能共用一个上限解释。
 # 函数用途: 增加一次"截断长内容写"的分块纠偏计数。
 def _inc_truncated_write(counters: ToolLoopRepairCounters) -> ToolLoopRepairCounters:
-    return replace(counters, truncated_write_repairs=counters.truncated_write_repairs + 1)
+    return replace(
+        counters,
+        truncated_write_repairs=counters.truncated_write_repairs + 1,
+        cumulative_turn_repairs=counters.cumulative_turn_repairs + 1,
+    )
 
 
 # LLM: 空正文 nudge 有界(默认 2 次连续无进展):工具执行后模型必须产出终态正文或继续调工具,
@@ -454,6 +471,19 @@ def _protocol_violation_decision(
         "不要把工具调用写进正文、代码块或解释文字。"
     )
     max_repairs = max(1, int(getattr(request.params, "max_protocol_repairs", 2) or 2))
+    if request.counters.cumulative_turn_repairs >= _MAX_CUMULATIVE_TURN_REPAIRS:
+        return ToolLoopResponseDecision(
+            "break",
+            ModelResponse(
+                text=str(getattr(request.response, "text", "") or ""),
+                backend=str(getattr(request.response, "backend", "") or "tool_loop"),
+                runtime_status="failed",
+                runtime_reason="cumulative_turn_repairs_exceeded",
+                runtime_source="tool_loop",
+            ),
+            [],
+            request.counters,
+        )
     if request.counters.protocol_repairs < max_repairs:
         return ToolLoopResponseDecision(
             "continue",
@@ -826,6 +856,19 @@ def _native_truncated_write_decision(
         return None
     if not _has_truncated_empty_write(calls):
         return None
+    if request.counters.cumulative_turn_repairs >= _MAX_CUMULATIVE_TURN_REPAIRS:
+        return ToolLoopResponseDecision(
+            "break",
+            ModelResponse(
+                text=str(getattr(request.response, "text", "") or ""),
+                backend=str(getattr(request.response, "backend", "") or "tool_loop"),
+                runtime_status="failed",
+                runtime_reason="cumulative_turn_repairs_exceeded",
+                runtime_source="tool_loop",
+            ),
+            [],
+            request.counters,
+        )
     # 未完成响应整轮零执行，不会生成工具失败记录；预算只按本工具循环已追加的纠偏次数累计。
     attempts = int(request.counters.truncated_write_repairs) + 1
     if attempts >= _NATIVE_TRUNCATED_WRITE_LOOP_COUNT:
@@ -1023,6 +1066,19 @@ def _downgrade_next_call_reasoning(request: _NoToolCallsRequest) -> ToolLoopRepa
 def _truncated_output_resume_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDecision | None:
     if not _is_provider_length_truncated(request.response):
         return None
+    if request.counters.cumulative_turn_repairs >= _MAX_CUMULATIVE_TURN_REPAIRS:
+        return ToolLoopResponseDecision(
+            "break",
+            ModelResponse(
+                text=str(getattr(request.response, "text", "") or ""),
+                backend=str(getattr(request.response, "backend", "") or "tool_loop"),
+                runtime_status="unfinished",
+                runtime_reason="cumulative_turn_repairs_exceeded",
+                runtime_source="tool_loop",
+            ),
+            [],
+            request.counters,
+        )
     if request.counters.truncated_output_repairs >= _TRUNCATED_OUTPUT_RESUME_COUNT:
         return None
     from ..tool_model_generation import arm_output_limit_resume_segment
@@ -1121,6 +1177,14 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
             #   于是同一策略原地打转——两个子代理各被截断 3/4 次、重启 4/5 个 attempt、耗掉 35 分钟才
             #   碰巧跑完。这里改成轮内续跑：先把断点续写指令回灌，同一个 run 再走一轮；超限才按
             #   unfinished 收口，让上游按既有恢复路径处理。
+            if request.counters.cumulative_turn_repairs >= _MAX_CUMULATIVE_TURN_REPAIRS:
+                final_response = replace(
+                    final_response,
+                    runtime_status="unfinished",
+                    runtime_reason="cumulative_turn_repairs_exceeded",
+                    runtime_source="tool_loop",
+                )
+                return ToolLoopResponseDecision("break", final_response, [], request.counters)
             if request.counters.truncated_output_repairs < _TRUNCATED_OUTPUT_RESUME_COUNT:
                 from ..tool_model_generation import arm_output_limit_resume_segment
 
