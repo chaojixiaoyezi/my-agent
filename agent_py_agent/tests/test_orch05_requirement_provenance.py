@@ -1063,3 +1063,332 @@ def test_subagent_runner_identity_enforcement_and_scope_warnings(tmp_path: Path)
     assert acc_data["reason"] == "SELF_REVIEW_FORBIDDEN"
     assert "scope_warnings" in acc_data
     assert "accepted_by_principal_id overridden by runner identity 'run-alice'" in acc_data["scope_warnings"][0]
+
+
+# ---------------------------------------------------------------------------
+# 11. Re-acceptance after invalidation lifecycle (PW-R1 / P1-01)
+# ---------------------------------------------------------------------------
+
+
+def test_reacceptance_after_path_invalidation(tmp_path: Path):
+    owner = tmp_path / "owner-test"
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "src").mkdir()
+    file_app = project / "src" / "app.py"
+    file_app.write_text("print('v1')\n")
+
+    context = VerificationContext("owner-test", "thread-1", "task-1")
+    repo = VerificationEvidenceRepository(owner)
+
+    # 1. Bind v1 -> pass review v1 -> accept v1
+    repo.bind_requirement(
+        context,
+        RequirementProvenanceRecord(
+            requirement_id="ORCH-REACCEPT-PATH",
+            owner_ref="owner-test",
+            task_id="task-1",
+            root=str(project),
+            input_version="v1",
+            watched_paths=(str(file_app),),
+            author_principal_id="alice",
+        ),
+    )
+    repo.record_independent_review(
+        context,
+        IndependentReviewRecord(
+            review_id="rev-1",
+            requirement_id="ORCH-REACCEPT-PATH",
+            reviewer_principal_id="bob",
+            author_principal_id="alice",
+            reviewed_input_version="v1",
+            verdict="pass",
+            scope="code_review",
+        ),
+    )
+    repo.record_acceptance(
+        context,
+        AcceptanceRecord(
+            acceptance_id="acc-1",
+            requirement_id="ORCH-REACCEPT-PATH",
+            accepted_by_principal_id="charlie",
+            accepted_input_version="v1",
+        ),
+    )
+    req1 = repo.get_requirement("owner-test", "ORCH-REACCEPT-PATH")
+    assert req1 is not None
+    assert req1.acceptance_status == "accepted"
+    assert req1.invalidation_reason == ""
+
+    # 2. Invalidate via mark_edited
+    edit_res = repo.mark_edited(context, root=project, paths=[str(file_app)])
+    assert "ORCH-REACCEPT-PATH" in edit_res.get("invalidated_requirements", [])
+    req_inv = repo.get_requirement("owner-test", "ORCH-REACCEPT-PATH")
+    assert req_inv is not None
+    assert req_inv.review_status == "stale"
+    assert req_inv.acceptance_status == "invalidated"
+    assert req_inv.invalidation_reason == "WATCHED_PATH_MODIFIED"
+
+    # 3. Pass re-review v1 -> accept
+    repo.record_independent_review(
+        context,
+        IndependentReviewRecord(
+            review_id="rev-2",
+            requirement_id="ORCH-REACCEPT-PATH",
+            reviewer_principal_id="bob",
+            author_principal_id="alice",
+            reviewed_input_version="v1",
+            verdict="pass",
+            scope="code_review",
+        ),
+    )
+    acc = repo.record_acceptance(
+        context,
+        AcceptanceRecord(
+            acceptance_id="acc-2",
+            requirement_id="ORCH-REACCEPT-PATH",
+            accepted_by_principal_id="charlie",
+            accepted_input_version="v1",
+        ),
+    )
+    assert acc.verdict == "accepted"
+    req_final = repo.get_requirement("owner-test", "ORCH-REACCEPT-PATH")
+    assert req_final is not None
+    assert req_final.acceptance_status == "accepted"
+    assert req_final.invalidation_reason == ""
+
+
+def test_reacceptance_after_version_rebind_invalidation(tmp_path: Path):
+    owner = tmp_path / "owner-test"
+    project = tmp_path / "project"
+    project.mkdir()
+    context = VerificationContext("owner-test", "thread-1", "task-1")
+    repo = VerificationEvidenceRepository(owner)
+
+    # 1. Bind v1 -> pass review v1 -> accept v1
+    repo.bind_requirement(
+        context,
+        RequirementProvenanceRecord(
+            requirement_id="ORCH-REACCEPT-VER",
+            owner_ref="owner-test",
+            task_id="task-1",
+            root=str(project),
+            input_version="v1",
+            watched_paths=("src/core.py",),
+            author_principal_id="alice",
+        ),
+    )
+    repo.record_independent_review(
+        context,
+        IndependentReviewRecord(
+            review_id="rev-v1",
+            requirement_id="ORCH-REACCEPT-VER",
+            reviewer_principal_id="bob",
+            author_principal_id="alice",
+            reviewed_input_version="v1",
+            verdict="pass",
+            scope="code_review",
+        ),
+    )
+    repo.record_acceptance(
+        context,
+        AcceptanceRecord(
+            acceptance_id="acc-v1",
+            requirement_id="ORCH-REACCEPT-VER",
+            accepted_by_principal_id="charlie",
+            accepted_input_version="v1",
+        ),
+    )
+
+    # 2. Re-bind with updated input_version v2
+    rebound = repo.bind_requirement(
+        context,
+        RequirementProvenanceRecord(
+            requirement_id="ORCH-REACCEPT-VER",
+            owner_ref="owner-test",
+            task_id="task-1",
+            root=str(project),
+            input_version="v2",
+            watched_paths=("src/core.py",),
+            author_principal_id="alice",
+        ),
+    )
+    assert rebound.input_version == "v2"
+    assert rebound.review_status == "stale"
+    assert rebound.acceptance_status == "invalidated"
+    assert rebound.invalidation_reason == "INPUT_VERSION_CHANGED"
+
+    # 3. Pass review v2 -> accept at v2
+    repo.record_independent_review(
+        context,
+        IndependentReviewRecord(
+            review_id="rev-v2",
+            requirement_id="ORCH-REACCEPT-VER",
+            reviewer_principal_id="bob",
+            author_principal_id="alice",
+            reviewed_input_version="v2",
+            verdict="pass",
+            scope="code_review",
+        ),
+    )
+    acc2 = repo.record_acceptance(
+        context,
+        AcceptanceRecord(
+            acceptance_id="acc-v2",
+            requirement_id="ORCH-REACCEPT-VER",
+            accepted_by_principal_id="charlie",
+            accepted_input_version="v2",
+        ),
+    )
+    assert acc2.verdict == "accepted"
+    req_final = repo.get_requirement("owner-test", "ORCH-REACCEPT-VER")
+    assert req_final is not None
+    assert req_final.acceptance_status == "accepted"
+    assert req_final.invalidation_reason == ""
+
+
+def test_reacceptance_negative_no_rereview_raises(tmp_path: Path):
+    owner = tmp_path / "owner-test"
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "src").mkdir()
+    file_app = project / "src" / "app.py"
+    file_app.write_text("print('app')\n")
+
+    context = VerificationContext("owner-test", "thread-1", "task-1")
+    repo = VerificationEvidenceRepository(owner)
+
+    repo.bind_requirement(
+        context,
+        RequirementProvenanceRecord(
+            requirement_id="ORCH-NEG-1",
+            owner_ref="owner-test",
+            task_id="task-1",
+            root=str(project),
+            input_version="v1",
+            watched_paths=(str(file_app),),
+            author_principal_id="alice",
+        ),
+    )
+    repo.record_independent_review(
+        context,
+        IndependentReviewRecord(
+            review_id="rev-1",
+            requirement_id="ORCH-NEG-1",
+            reviewer_principal_id="bob",
+            author_principal_id="alice",
+            reviewed_input_version="v1",
+            verdict="pass",
+            scope="code_review",
+        ),
+    )
+    repo.record_acceptance(
+        context,
+        AcceptanceRecord(
+            acceptance_id="acc-1",
+            requirement_id="ORCH-NEG-1",
+            accepted_by_principal_id="charlie",
+            accepted_input_version="v1",
+        ),
+    )
+
+    # Invalidate via mark_edited
+    repo.mark_edited(context, root=project, paths=[str(file_app)])
+
+    # Attempt to accept with no re-review must fail with REQUIREMENT_NOT_APPROVED
+    with pytest.raises(ValueError) as exc_info:
+        repo.record_acceptance(
+            context,
+            AcceptanceRecord(
+                acceptance_id="acc-invalid",
+                requirement_id="ORCH-NEG-1",
+                accepted_by_principal_id="charlie",
+                accepted_input_version="v1",
+            ),
+        )
+    assert "REQUIREMENT_NOT_APPROVED" in str(exc_info.value)
+
+
+def test_reacceptance_negative_changes_requested_does_not_clear_invalidation(tmp_path: Path):
+    owner = tmp_path / "owner-test"
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "src").mkdir()
+    file_app = project / "src" / "app.py"
+    file_app.write_text("print('app')\n")
+
+    context = VerificationContext("owner-test", "thread-1", "task-1")
+    repo = VerificationEvidenceRepository(owner)
+
+    repo.bind_requirement(
+        context,
+        RequirementProvenanceRecord(
+            requirement_id="ORCH-NEG-2",
+            owner_ref="owner-test",
+            task_id="task-1",
+            root=str(project),
+            input_version="v1",
+            watched_paths=(str(file_app),),
+            author_principal_id="alice",
+        ),
+    )
+    repo.record_independent_review(
+        context,
+        IndependentReviewRecord(
+            review_id="rev-1",
+            requirement_id="ORCH-NEG-2",
+            reviewer_principal_id="bob",
+            author_principal_id="alice",
+            reviewed_input_version="v1",
+            verdict="pass",
+            scope="code_review",
+        ),
+    )
+    repo.record_acceptance(
+        context,
+        AcceptanceRecord(
+            acceptance_id="acc-1",
+            requirement_id="ORCH-NEG-2",
+            accepted_by_principal_id="charlie",
+            accepted_input_version="v1",
+        ),
+    )
+
+    # Invalidate via mark_edited
+    repo.mark_edited(context, root=project, paths=[str(file_app)])
+    req_inv = repo.get_requirement("owner-test", "ORCH-NEG-2")
+    assert req_inv is not None
+    assert req_inv.invalidation_reason == "WATCHED_PATH_MODIFIED"
+
+    # Re-review with changes_requested
+    repo.record_independent_review(
+        context,
+        IndependentReviewRecord(
+            review_id="rev-cr",
+            requirement_id="ORCH-NEG-2",
+            reviewer_principal_id="bob",
+            author_principal_id="alice",
+            reviewed_input_version="v1",
+            verdict="changes_requested",
+            scope="code_review",
+        ),
+    )
+
+    # invalidation_reason must NOT be cleared by changes_requested review
+    req_after_cr = repo.get_requirement("owner-test", "ORCH-NEG-2")
+    assert req_after_cr is not None
+    assert req_after_cr.review_status == "changes_requested"
+    assert req_after_cr.invalidation_reason == "WATCHED_PATH_MODIFIED"
+
+    # Attempt to accept must still fail with REQUIREMENT_NOT_APPROVED
+    with pytest.raises(ValueError) as exc_info:
+        repo.record_acceptance(
+            context,
+            AcceptanceRecord(
+                acceptance_id="acc-cr",
+                requirement_id="ORCH-NEG-2",
+                accepted_by_principal_id="charlie",
+                accepted_input_version="v1",
+            ),
+        )
+    assert "REQUIREMENT_NOT_APPROVED" in str(exc_info.value)

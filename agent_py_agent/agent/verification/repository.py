@@ -837,11 +837,12 @@ class VerificationEvidenceRepository:
                     """
                     UPDATE requirement_links
                     SET review_status = ?,
+                        invalidation_reason = CASE WHEN ? = 'approved' THEN '' ELSE invalidation_reason END,
                         author_principal_id = CASE WHEN author_principal_id != '' THEN author_principal_id ELSE ? END,
                         updated_at = ?
                     WHERE owner_ref = ? AND requirement_id = ?
                     """,
-                    (new_review_status, author, now_text, owner_ref, effective_record.requirement_id),
+                    (new_review_status, new_review_status, author, now_text, owner_ref, effective_record.requirement_id),
                 )
             conn.commit()
             return effective_record
