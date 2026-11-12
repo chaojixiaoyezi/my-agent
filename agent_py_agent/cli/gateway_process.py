@@ -86,6 +86,8 @@ from ..agent.gateway_parts.io import (
     update_json_file_atomic,
     write_json_file_atomic,
 )
+from ..agent.gateway_parts.standalone_lifecycle import record_standalone_stop_observation
+from ..agent.gateway_parts.standalone_stop import record_standalone_stop
 
 # LLM: 就绪判据只有一份实现，位于 agent.gateway_parts.status_rendering：state/heartbeat 任一匹配 PID、
 #   且记录属于本次 spawn 的那一代（not_before − 容差）、且 status=running 才算就绪。这里只导入转发，
@@ -1580,12 +1582,12 @@ def _run_standalone_gateway(args, lifecycle) -> int:
         _record_surviving_background_sessions_state(paths, cleanup_report, context=run_context)
     if (termination_status == "stopped" and exit_code == 0 and cleanup_report.get("drain_complete")
             and not (handover_result and handover_result.get("forced_after_drain_timeout"))):
-        from ..agent.gateway_parts.standalone_lifecycle import record_standalone_stop_observation
-
-        record_standalone_stop_observation(lifecycle, run_context, cleanup_report)
-        from ..agent.gateway_parts.standalone_stop import record_standalone_stop
-
-        record_standalone_stop(run_context, lifecycle, cleanup_report)
+        try:
+            record_standalone_stop_observation(lifecycle, run_context, cleanup_report)
+            record_standalone_stop(run_context, lifecycle, cleanup_report)
+        except Exception as stop_obs_exc:
+            log_gateway_event(agent, "gateway_stop_observation_failed", {"error": str(stop_obs_exc)})
+            logging.getLogger(__name__).warning("gateway stop observation failed: %s", stop_obs_exc)
     if termination_kind == "planned_restart" and exit_code == 0 and handover_result and handover_result.get("handover_allowed"):
         command = _gateway_start_command(_gateway_start_options_from_args(args, workspace_root=agent.root))
         exit_code = hand_over_to_successor(

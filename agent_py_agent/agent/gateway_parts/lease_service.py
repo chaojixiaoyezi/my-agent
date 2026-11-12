@@ -20,7 +20,12 @@ from typing import TYPE_CHECKING
 
 from ..settings.defaults import default_config_float
 from .audit_service import audit_heartbeat_abandoned
-from .io import gateway_turn_transition, read_json_file_report, update_json_file_atomic
+from .io import (
+    gateway_turn_transition,
+    read_json_file_report,
+    try_gateway_turn_transition,
+    update_json_file_atomic,
+)
 from .logging import _report_gateway_side_effect_error
 from .paths import gateway_paths_from_root
 
@@ -96,6 +101,23 @@ def refresh_processing_lease(
     ).ok
 
 
+def refresh_request_lease(
+    request_path: Path,
+    *,
+    request_id: str,
+    worker_id: str = "",
+    execution_attempt_id: str = "",
+    lease_epoch: int = 0,
+) -> bool:
+    return refresh_processing_lease(
+        request_path,
+        request_id=request_id,
+        worker_id=worker_id,
+        execution_attempt_id=execution_attempt_id,
+        lease_epoch=lease_epoch,
+    )
+
+
 def refresh_processing_lease_report(
     request_path: Path,
     *,
@@ -105,7 +127,22 @@ def refresh_processing_lease_report(
     lease_epoch: int = 0,
 ) -> LeaseRefreshReport:
     paths = gateway_paths_from_root(_gateway_root_for_processing_path(request_path))
-    with gateway_turn_transition(paths, request_id):
+    acquired_context = None
+    for attempt in range(3):
+        ctx = try_gateway_turn_transition(paths, request_id)
+        acquired = ctx.__enter__()
+        if acquired:
+            acquired_context = ctx
+            break
+        ctx.__exit__(None, None, None)
+        if attempt < 2:
+            time.sleep(0.03)
+
+    if acquired_context is None:
+        # 回合转换锁当前由其他操作持有；非阻塞跳过本拍心跳，避免线程拥塞
+        return LeaseRefreshReport(False)
+
+    try:
         read_report = read_json_file_report(request_path, context="gateway.lease.request.read")
         if read_report.load_error is not None:
             return LeaseRefreshReport(False, read_report.load_error)
@@ -140,6 +177,8 @@ def refresh_processing_lease_report(
             _report_gateway_side_effect_error("gateway_lease_heartbeat", request_id, exc)
             return LeaseRefreshReport(False)
         return LeaseRefreshReport(matched_ref[0])
+    finally:
+        acquired_context.__exit__(None, None, None)
 
 
 # LLM: Production requests live under root/requests/processing; focused tests may use a direct

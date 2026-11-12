@@ -441,6 +441,55 @@ class GuidancePendingIndex(ObservationIndex):
         if self._quiet_hit(scope, signature):
             self.last_work = {'bytes_read': 0, 'bytes_written': 0, 'json_decodes': 0}
             return [], []
+
+        queue_path = self.storage.guidance_path(target_type, target_id)
+        # 纯读快速通道 1：索引与队列文件均不存在且无脏记录时，无需加写锁或初始化 SQLite，直接返回空
+        dirty_has_entries = False
+        if self.dirty_dir.exists():
+            try:
+                with os.scandir(self.dirty_dir) as it:
+                    dirty_has_entries = any(True for _ in it)
+            except OSError:
+                dirty_has_entries = True
+
+        if not self.path.exists() and not queue_path.exists() and not dirty_has_entries:
+            self._remember_quiet(scope, signature, math.inf)
+            self.last_work = {'bytes_read': 0, 'bytes_written': 0, 'json_decodes': 0}
+            return [], []
+
+        # 纯读快速通道 2：SQLite 索引已就绪且队列无未提交漂移时，通过只读连接查询，避免 exclusive flock
+        if self.path.exists() and not dirty_has_entries:
+            try:
+                with self._read_connection(blocking=False, deadline=None) as conn:
+                    if conn is not None and self._acks_current(conn):
+                        queue_synced = False
+                        if not queue_path.exists():
+                            queue_synced = True
+                        else:
+                            row = conn.execute("SELECT stamp, offset FROM sources WHERE path=?", (str(queue_path),)).fetchone()
+                            if row is not None and row["stamp"] == _identity(queue_path):
+                                queue_synced = True
+                        if queue_synced:
+                            args = [target_type, target_id]
+                            if include_delivered:
+                                sql = 'SELECT * FROM entries WHERE target_type=? AND target_id=? ORDER BY sequence DESC'
+                            else:
+                                sql = "SELECT e.* FROM pending p JOIN entries e ON e.id=p.id WHERE p.target_type=? AND p.target_id=? AND p.status='pending' ORDER BY p.sequence DESC"
+                            if limit > 0:
+                                sql += ' LIMIT ?'
+                                args.append(limit)
+                            read_rows = conn.execute(sql, args).fetchall()
+                            errors = [{'code': 'GUIDANCE_QUEUE_INVALID', 'context': 'conversation.guidance.read',
+                                       'path': str(queue_path), 'offset': r[0], 'message': r[1]}
+                                      for r in conn.execute('SELECT offset,error FROM errors WHERE path=? ORDER BY offset', (str(queue_path),))]
+                            if not read_rows and not errors:
+                                self._remember_quiet(scope, signature, math.inf)
+                            else:
+                                self._quiet = None
+                            return list(reversed(read_rows)), errors
+            except Exception:
+                pass
+
         complete = self.refresh(target_type, target_id)
         if not complete:
             raise GuidanceIndexIncomplete('guidance index recovery is partial; retry continues its cursor')
@@ -464,6 +513,64 @@ class GuidancePendingIndex(ObservationIndex):
         else:
             self._quiet = None
         return list(reversed(rows)), errors
+
+    def has_pending(self, target_type=None, target_id=None) -> bool:
+        """Fast lock-free check for pending guidance entries."""
+        if not self.path.exists():
+            if target_type and target_id:
+                queue_path = self.storage.guidance_path(target_type, target_id)
+                if not queue_path.exists():
+                    return False
+            return False
+        try:
+            with self._read_connection(blocking=False, deadline=None) as conn:
+                if conn is not None:
+                    if target_type is not None and target_id is not None:
+                        row = conn.execute(
+                            "SELECT 1 FROM pending WHERE target_type=? AND target_id=? AND status='pending' LIMIT 1",
+                            (target_type, target_id),
+                        ).fetchone()
+                    elif target_type is not None:
+                        row = conn.execute(
+                            "SELECT 1 FROM pending WHERE target_type=? AND status='pending' LIMIT 1",
+                            (target_type,),
+                        ).fetchone()
+                    else:
+                        row = conn.execute("SELECT 1 FROM pending WHERE status='pending' LIMIT 1").fetchone()
+                    return row is not None
+        except Exception:
+            pass
+        if target_type and target_id:
+            rows, _ = self.rows(target_type, target_id, limit=1, include_delivered=False)
+            return len(rows) > 0
+        return False
+
+    def list_pending(self, target_type=None, target_id=None, limit=20) -> list[dict]:
+        """Fast query for pending guidance entries."""
+        if not self.path.exists():
+            return []
+        try:
+            with self._read_connection(blocking=False, deadline=None) as conn:
+                if conn is not None:
+                    args = []
+                    where = "p.status='pending'"
+                    if target_type is not None:
+                        where += " AND p.target_type=?"
+                        args.append(target_type)
+                    if target_id is not None:
+                        where += " AND p.target_id=?"
+                        args.append(target_id)
+                    sql = f"SELECT e.* FROM pending p JOIN entries e ON e.id=p.id WHERE {where} ORDER BY p.sequence DESC"
+                    if limit > 0:
+                        sql += " LIMIT ?"
+                        args.append(limit)
+                    return list(conn.execute(sql, args).fetchall())
+        except Exception:
+            pass
+        if target_type and target_id:
+            rows, _ = self.rows(target_type, target_id, limit=limit, include_delivered=False)
+            return rows
+        return []
 
     def _quiet_signature(self, scope):
         target_type, target_id, _limit, _include_delivered = scope

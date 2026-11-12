@@ -15,6 +15,7 @@ from __future__ import annotations
 - 已经有工具记录时，最后放工具记录和继续指令，让模型从最新工具结果往下走
 """
 
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
@@ -53,6 +54,9 @@ if TYPE_CHECKING:
 
 _BUILTIN_PROMPT_PREFIX = "builtin:"
 _LEGACY_DEFAULT_PROMPT = "prompts/default.md"
+_BUILTIN_PROMPT_TEXT_CACHE: dict[str, str] = {}
+_BUILTIN_PROMPT_CACHE_LOCK = threading.Lock()
+_BUILTIN_PROMPT_CACHE_MAX_ENTRIES = 64
 _SKILL_CATALOG_DEGRADED = "# Available Skills\n- catalog_state: degraded (skill_search 仍可按需检索与读取)"
 # 沟通节奏只交给主模型判断；不创建计时器、额外采样或机器完成门，也不要求逐工具重复说明。
 _ASSISTANT_PROGRESS_GUIDANCE = (
@@ -196,6 +200,20 @@ class PromptBuilder:
             self.persona_repository = PersonaRepository.from_home_paths(home_paths)
         # root 仍只负责解析 prompt 文件；workspace_root 是模型相对路径和写入落点的唯一事实。
         self.workspace_root = workspace_root or root
+        self._prewarm_builtin_prompt_cache()
+
+    def _prewarm_builtin_prompt_cache(self) -> None:
+        try:
+            default_builtin = _builtin_prompt_root() / _LEGACY_DEFAULT_PROMPT
+            if default_builtin.is_file():
+                text = default_builtin.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
+                with _BUILTIN_PROMPT_CACHE_LOCK:
+                    key = f"{_BUILTIN_PROMPT_PREFIX}{_LEGACY_DEFAULT_PROMPT}"
+                    if len(_BUILTIN_PROMPT_TEXT_CACHE) >= _BUILTIN_PROMPT_CACHE_MAX_ENTRIES and key not in _BUILTIN_PROMPT_TEXT_CACHE:
+                        _BUILTIN_PROMPT_TEXT_CACHE.pop(next(iter(_BUILTIN_PROMPT_TEXT_CACHE)))
+                    _BUILTIN_PROMPT_TEXT_CACHE[key] = text
+        except OSError:
+            pass
 
     # LLM: 按解析后的真实路径与原始字节 SHA-256 去重；保留首次顺序、来源标签及必需资源缺失错误。
     # 函数用途: 同一提示文件在配置、相对/绝对路径、symlink 与 builtin 别名中只注入一次。
@@ -212,16 +230,36 @@ class PromptBuilder:
         seen: set[tuple[str, str]] = set()
         for name in [*configured, *(extra_files or [])]:
             path, source, required = _resolve_prompt_file(self.root, str(name))
-            if not path.is_file():
+            is_builtin = source.startswith(_BUILTIN_PROMPT_PREFIX)
+            text: str | None = None
+            raw: bytes | None = None
+            try:
+                if path.is_file():
+                    raw = path.read_bytes()
+                    text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+                    if is_builtin:
+                        with _BUILTIN_PROMPT_CACHE_LOCK:
+                            if len(_BUILTIN_PROMPT_TEXT_CACHE) >= _BUILTIN_PROMPT_CACHE_MAX_ENTRIES and source not in _BUILTIN_PROMPT_TEXT_CACHE:
+                                _BUILTIN_PROMPT_TEXT_CACHE.pop(next(iter(_BUILTIN_PROMPT_TEXT_CACHE)))
+                            _BUILTIN_PROMPT_TEXT_CACHE[source] = text
+            except OSError:
+                text = None
+                raw = None
+
+            if text is None and is_builtin:
+                with _BUILTIN_PROMPT_CACHE_LOCK:
+                    text = _BUILTIN_PROMPT_TEXT_CACHE.get(source)
+
+            if text is None:
                 if required:
                     raise FileNotFoundError(f"内置 prompt 资源不存在: {source} ({path})")
                 continue
-            raw = path.read_bytes()
-            identity = (str(path.resolve(strict=False)), sha256(raw).hexdigest())
+
+            digest = sha256(raw if raw is not None else text.encode("utf-8")).hexdigest()
+            identity = (str(path.resolve(strict=False)), digest)
             if identity in seen:
                 continue
             seen.add(identity)
-            text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
             chunks.append(f"# Prompt File: {source}\n" + text)
         return chunks
 
@@ -532,8 +570,25 @@ def _resolve_prompt_file(root: Path, name: str) -> tuple[Path, str, bool]:
 # LLM: 调用方已完成来源解析；这里只读一次正文，缺少必需builtin资源仍抛异常，不缓存内容。
 # 函数用途: 共用去重列表和单文件入口的读取与错误处理。
 def _read_resolved_prompt_file(path: Path, source: str, required: bool) -> str | None:
-    if path.is_file():
-        return f"# Prompt File: {source}\n" + path.read_text(encoding="utf-8")
+    is_builtin = source.startswith(_BUILTIN_PROMPT_PREFIX)
+    text: str | None = None
+    try:
+        if path.is_file():
+            text = path.read_text(encoding="utf-8")
+            if is_builtin:
+                with _BUILTIN_PROMPT_CACHE_LOCK:
+                    if len(_BUILTIN_PROMPT_TEXT_CACHE) >= _BUILTIN_PROMPT_CACHE_MAX_ENTRIES and source not in _BUILTIN_PROMPT_TEXT_CACHE:
+                        _BUILTIN_PROMPT_TEXT_CACHE.pop(next(iter(_BUILTIN_PROMPT_TEXT_CACHE)))
+                    _BUILTIN_PROMPT_TEXT_CACHE[source] = text
+    except OSError:
+        text = None
+
+    if text is None and is_builtin:
+        with _BUILTIN_PROMPT_CACHE_LOCK:
+            text = _BUILTIN_PROMPT_TEXT_CACHE.get(source)
+
+    if text is not None:
+        return f"# Prompt File: {source}\n" + text
     if required:
         raise FileNotFoundError(f"内置 prompt 资源不存在: {source} ({path})")
     return None

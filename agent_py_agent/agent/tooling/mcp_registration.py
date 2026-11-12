@@ -342,7 +342,7 @@ def _mcp_keywords(server_name: str, tool_name: str, effect: str) -> list[str]:
     return keywords
 
 
-def parse_mcp_servers(raw: object) -> list[MCPServerConfig]:
+def parse_mcp_servers(raw: object, *, default_timeout: float | None = None) -> list[MCPServerConfig]:
     """从 config 的 ``mcp_servers`` 值解析出 server 配置列表。
 
     接受 ``{name: {command,args,env,...}}`` 映射；非法条目记日志跳过（不影响其他 server）。
@@ -353,7 +353,7 @@ def parse_mcp_servers(raw: object) -> list[MCPServerConfig]:
     configs: list[MCPServerConfig] = []
     for name, cfg in raw.items():
         try:
-            configs.append(MCPServerConfig.from_mapping(str(name), cfg))
+            configs.append(MCPServerConfig.from_mapping(str(name), cfg, default_timeout=default_timeout))
         except MCPError as exc:
             logger.warning("跳过非法 MCP server 配置 '%s'：%s", name, exc)
     return configs
@@ -367,6 +367,7 @@ def register_mcp_servers(
     *,
     host_credential_env_names: frozenset[str] = frozenset(),
     mcp_client_factory: MCPClientFactory | None = None,
+    default_timeout: float | None = None,
 ) -> list[MCPStdioClient]:
     """连接所有配置的 MCP server，把已发现的工具注册进 ``registry``。
 
@@ -376,7 +377,7 @@ def register_mcp_servers(
     若 ``mcp_servers`` 为空则直接返回空列表，**不启动任何子进程**（零开销）。
     可选工厂只替换客户端构造，不进入 MCP 配置或模型 Schema，也不替代原生命周期合同。
     """
-    configs = parse_mcp_servers(mcp_servers)
+    configs = parse_mcp_servers(mcp_servers, default_timeout=default_timeout)
     if not configs:
         return []
 
@@ -450,6 +451,7 @@ def refresh_registered_mcp_client(
     }
     replacement = {name: tool for name, tool in current.items() if name not in old_names}
     registered = 0
+    proxy_transport = transport if getattr(client, "_activation", None) is not None else None
     for info in tools:
         try:
             proxy = build_proxy_tool(
@@ -458,7 +460,7 @@ def refresh_registered_mcp_client(
                 info,
                 effect=client.config.effect_for_tool(info.name),
                 catalog_category=client.config.catalog_category,
-                transport=transport,
+                transport=proxy_transport,
             )
         except (TypeError, ValueError) as exc:
             logger.warning(

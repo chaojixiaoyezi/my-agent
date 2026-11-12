@@ -621,41 +621,68 @@ class NetworkGatewayObserver:
         request_id = request.terminal_path.stem
         quoted = urllib.parse.quote(request_id, safe="")
         include = "assistant_text_delta,assistant_text_reset,assistant_text_done,workflow_step_progress"
-        deadline = request.deadline
+
+        now_mono = time.monotonic()
+        now_wall = time.time()
+        raw_deadline = float(getattr(request, "deadline", 0.0) or 0.0)
+        if raw_deadline > 1e8:
+            hard_mono_deadline = now_mono + max(0.0, raw_deadline - now_wall)
+        elif raw_deadline > 0:
+            hard_mono_deadline = now_mono + raw_deadline
+        else:
+            hard_mono_deadline = float("inf")
+
+        inactivity_timeout = float(getattr(request, "inactivity_timeout_seconds", 0) or 0)
+        default_inactivity = max(_WAIT_POLL_STEPS_SECONDS[-1], inactivity_timeout) if inactivity_timeout > 0 else float("inf")
+        rolling_deadline = now_mono + default_inactivity
+
+        last_observed_heartbeat = None
+        last_observed_updated_at = None
+
+        def refresh_inactivity_deadline() -> None:
+            nonlocal rolling_deadline
+            timeout_span = default_inactivity if default_inactivity < float("inf") else max(_WAIT_POLL_STEPS_SECONDS[-1] * 4, 30.0)
+            rolling_deadline = time.monotonic() + timeout_span
+
+        def current_remaining_seconds() -> float:
+            effective_deadline = min(hard_mono_deadline, rolling_deadline)
+            return max(0.1, effective_deadline - time.monotonic())
+
         failures = 0
         while True:
             if callable(request.is_wait_cancelled) and request.is_wait_cancelled():
                 return {}
-            if time.time() >= deadline:
+            now = time.monotonic()
+            if now >= min(hard_mono_deadline, rolling_deadline):
                 if request.on_wait_timeout is None:
                     return {}
                 request.on_wait_timeout()
-                deadline = time.time() + max(_WAIT_POLL_STEPS_SECONDS[-1], request.inactivity_timeout_seconds)
+                rolling_deadline = time.monotonic() + max(_WAIT_POLL_STEPS_SECONDS[-1], inactivity_timeout)
             if not self._http_only:
                 headers = {**self._headers(), "Accept": "text/event-stream"}
                 if self.cursor:
                     headers["Last-Event-ID"] = self.cursor
                 target = urllib.request.Request(self.base_url + f"/client/requests/{quoted}/events?include={include}", headers=headers)
                 try:
-                    with open_authenticated_request(target, timeout=max(0.1, deadline - time.time())) as response:
+                    with open_authenticated_request(target, timeout=current_remaining_seconds()) as response:
                         for kind, data, cursor in self._frames(response):
                             if callable(request.is_wait_cancelled) and request.is_wait_cancelled():
                                 return {}
                             if kind == "progress" and isinstance(data, dict) and isinstance(data.get("event"), dict):
                                 self._emit(request, data["event"])
-                                if request.inactivity_timeout_seconds > 0:
-                                    deadline = time.time() + request.inactivity_timeout_seconds
+                                refresh_inactivity_deadline()
                             elif kind == "reset":
                                 self.cursor, self.line_cursor = "", 0
                                 if callable(request.on_event):
                                     request.on_event({"kind": "assistant_text_reset", "request_id": request_id})
+                                refresh_inactivity_deadline()
                             elif kind == "terminal" and isinstance(data, dict) and isinstance(data.get("result"), dict):
                                 return data["result"]
                             if cursor.startswith(f"v1:{request_id}:") and "\x00" not in cursor:
                                 parts = cursor.split(":")
                                 if len(parts) == 5 and parts[3].isdecimal() and parts[4].isdecimal():
                                     self.cursor, self.line_cursor = cursor, int(parts[3])
-                            if time.time() >= deadline:
+                            if time.monotonic() >= min(hard_mono_deadline, rolling_deadline):
                                 break
                     failures += 1
                 except urllib.error.HTTPError as error:
@@ -675,26 +702,45 @@ class NetworkGatewayObserver:
                 if not self._http_only:
                     time.sleep(_WAIT_POLL_STEPS_SECONDS[0])
                     continue
-            status, result = self.request_json("GET", f"/result/{quoted}", total_deadline_seconds=max(0.1, deadline-time.time()))
+            status, result = self.request_json("GET", f"/result/{quoted}", total_deadline_seconds=current_remaining_seconds())
             if status in (401, 403):
                 raise PermissionError("Gateway网络结果未获授权")
+            if isinstance(result, dict):
+                heartbeat = result.get("lease_heartbeat_at")
+                updated_at = result.get("updated_at")
+                phase = str(result.get("status_phase") or "")
+                if heartbeat is not None and heartbeat != last_observed_heartbeat:
+                    last_observed_heartbeat = heartbeat
+                    refresh_inactivity_deadline()
+                if updated_at is not None and updated_at != last_observed_updated_at:
+                    last_observed_updated_at = updated_at
+                    refresh_inactivity_deadline()
+                if (phase in ("waiting_for_approval", "permission", "tool_approval")
+                        or result.get("waiting_for_approval")
+                        or result.get("agent_permission_requests")):
+                    refresh_inactivity_deadline()
             terminal = status == 200
             while True:
                 if callable(request.is_wait_cancelled) and request.is_wait_cancelled():
                     return {}
-                status, batch = self.request_json("GET", f"/progress/{quoted}?since={self.line_cursor}&include={include}", total_deadline_seconds=max(0.1, deadline-time.time()))
+                status, batch = self.request_json("GET", f"/progress/{quoted}?since={self.line_cursor}&include={include}", total_deadline_seconds=current_remaining_seconds())
                 if status in (401, 403):
                     raise PermissionError("Gateway网络观察未获授权")
                 if status == 200:
-                    for event in batch.get("events", []):
+                    events = batch.get("events", [])
+                    if events:
+                        refresh_inactivity_deadline()
+                    for event in events:
                         self._emit(request, event)
+                        if isinstance(event, dict) and event.get("kind") in ("agent_tool_approval", "tool_approval", "permission"):
+                            refresh_inactivity_deadline()
                     next_cursor = max(self.line_cursor, int(batch.get("next", self.line_cursor)))
                     if terminal and next_cursor == self.line_cursor:
                         return result
                     self.line_cursor = next_cursor
                 if not terminal:
                     break
-                if time.time() >= deadline:
+                if time.monotonic() >= min(hard_mono_deadline, rolling_deadline):
                     return result
                 if status != 200:
                     time.sleep(_WAIT_POLL_STEPS_SECONDS[-1])
