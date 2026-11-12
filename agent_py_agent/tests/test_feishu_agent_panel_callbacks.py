@@ -13,6 +13,7 @@ import pytest
 from agent_py_agent.agent.adapter.feishu import FeishuAdapter, _reply_after_card_action
 from agent_py_agent.agent.adapter.feishu_agent_panel import (
     FEISHU_CARD_MAX_AGE_SECONDS,
+    _call_gateway_api,
     _panel_state_path,
     _read_panel_state,
     _valid_card_receipt,
@@ -31,6 +32,7 @@ from agent_py_agent.agent.adapter.feishu_card import (
 )
 from agent_py_agent.agent.adapter.feishu_progress_card import render_progress_card
 from agent_py_agent.agent.adapter.feishu_ws import _card_action_key
+from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
 from agent_py_agent.agent.conversation.execution_threads import (
     EXECUTION_ORIGIN_KEY,
     IM_TASK_EXECUTION_KEY,
@@ -1023,3 +1025,132 @@ def test_anti_forwarding_empty_message_or_chat_id_fails_closed(tmp_path) -> None
         assert "FEISHU_AUTH_FAILED" in str(exc_info.value)
     finally:
         server.stop()
+
+
+def test_panel_gateway_client_reads_full_large_panel_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    """验证 _call_gateway_api 在 200 响应体大于 64 KiB 时完整读取并正确解析，不发生截断或回落空面板。"""
+    from agent_py_agent.agent.adapter import feishu_agent_panel
+
+    monkeypatch.setattr(
+        feishu_agent_panel,
+        "GatewayClientCredentials",
+        lambda path, token: SimpleNamespace(headers=lambda: {}),
+    )
+
+    panel = {
+        "selected_task": {"task_ref": "task_1", "title": "Test Task", "status": "running"},
+        "nodes": [
+            {
+                "node_id": "main:root",
+                "node_kind": "foreground_main",
+                "title": "Main Task",
+                "status": "running",
+            },
+            *[
+                {
+                    "node_id": f"run:term_{i}",
+                    "run_id": f"term_{i}",
+                    "node_kind": "subagent",
+                    "terminal": True,
+                    "status": "done",
+                    "result_summary": "结" * 4000,
+                }
+                for i in range(6)
+            ],
+            {
+                "node_id": "run:live",
+                "run_id": "live",
+                "node_kind": "subagent",
+                "terminal": False,
+                "status": "running",
+                "can_guide": True,
+                "can_stop_branch": True,
+            },
+        ],
+        "selected_node_id": "run:live",
+        "selected_run_id": "live",
+    }
+    body = json.dumps(panel, ensure_ascii=False).encode("utf-8")
+    assert len(body) > 65536
+
+    class MockResponse:
+        def __init__(self, data: bytes, status: int = 200) -> None:
+            self._data = data
+            self.status = status
+
+        def read(self, amt: int | None = None) -> bytes:
+            if amt is None:
+                return self._data
+            return self._data[:amt]
+
+        def __enter__(self) -> MockResponse:
+            return self
+
+        def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+            pass
+
+    monkeypatch.setattr(
+        feishu_agent_panel,
+        "open_authenticated_request",
+        lambda req, timeout=None: MockResponse(body),
+    )
+
+    fake_adapter = SimpleNamespace(
+        _gateway_port=18888,
+        my_agent_home="/private/tmp/fake_home",
+        _gateway_auth_token="auth_token",
+    )
+
+    status_code, payload = _call_gateway_api(
+        fake_adapter,
+        "/client/agent-view",
+        {"mode": "panel"},
+        "ou_user_1",
+        "p2p",
+    )
+    assert status_code == 200
+    assert payload == panel
+
+    view = build_panel_view(
+        payload,
+        "fp1.x.y",
+        {"audience": "dm", "selected_target_ref": "run:live"},
+        next_revision=2,
+    )
+    assert view.get("agent_selector") is not None
+    assert len(view["agent_selector"]["options"]) == 9
+    action_ids = [str(act.get("id") or "") for act in view.get("actions", [])]
+    assert "guide" in action_ids
+    assert "stop" in action_ids
+
+
+@pytest.mark.parametrize(
+    "cmd_text",
+    [
+        "/agents show",
+        "/agents refresh",
+        "/agents reset",
+        "/agents source url https://example.com/AGENTS.md",
+        '/agents write "x"',
+        "/agents confirm p1",
+        "/agents receipt p1",
+        "/agents owner feishu/user/x show",
+    ],
+)
+def test_agents_rule_commands_fall_through_to_dispatch(cmd_text: str) -> None:
+    """验证 AGENTS 规则指令不被飞书控制面板捕获，保留 kind=agents 供底层控制分发。"""
+    assert is_panel_command(cmd_text) is False
+    control = parse_conversation_control(cmd_text)
+    assert control is not None
+    assert control.kind == "agents"
+
+    # 验证常规面板指令形式仍被面板正常接收
+    for panel_cmd in [
+        "/agents",
+        "/agents stask_123",
+        "/agents stask:abc",
+        "/agents root:task_1",
+        "/panel",
+        "/panel task_1",
+    ]:
+        assert is_panel_command(panel_cmd) is True
