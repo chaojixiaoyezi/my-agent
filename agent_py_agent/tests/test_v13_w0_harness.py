@@ -41,7 +41,9 @@ def v13_native(tmp_path, monkeypatch):
     monkeypatch.setenv('MY_AGENT_HOME', str(root))
     monkeypatch.setenv('HOME', str(tmp_path / 'os-home'))
     agent = SimpleAgent(AgentConfig(model_backend='echo', enable_tools=False,
-        business_spaces_enabled=True, memory_path='memory.jsonl'), tmp_path / 'workspace')
+        business_spaces_enabled=True, memory_path='memory.jsonl',
+        gateway_http_socket_timeout_seconds=30.0, gateway_http_queue_timeout_seconds=30.0,
+        gateway_http_birth_gate_timeout_seconds=10.0), tmp_path / 'workspace')
     agent.business_v13_providers = dict(_PROVIDER_BINDINGS)
     server = GatewayHTTPServer(0, gateway_paths_from_root(agent.home_paths.root / 'gateway'),
         params=GatewayHTTPServerParams(agent=agent))
@@ -61,8 +63,9 @@ def v13_call(server, action, params, *, user, idempotency_key=None, expected_rev
         request['idempotency_key'] = idempotency_key
     if expected_revision is not None:
         request['expected_revision'] = expected_revision
-    connection = http.client.HTTPConnection('127.0.0.1', server.server.server_address[1], timeout=20)
-    headers = {'Content-Type': 'application/json', 'X-Gateway-Token': server._local_client_credential,
+    connection = http.client.HTTPConnection('127.0.0.1', server.server.server_address[1], timeout=30)
+    headers = {'Content-Type': 'application/json', 'Connection': 'close',
+        'X-Gateway-Token': server._local_client_credential,
         'X-User-Id': user, 'X-Channel': 'feishu'}
     try:
         connection.request('POST', '/client/business', json.dumps(request), headers)

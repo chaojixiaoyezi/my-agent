@@ -192,9 +192,25 @@ def test_same_borrow_quota_policy_updates_original_object_and_rejects_bad_or_dis
 
 
 def test_same_owner_successful_search_n_plus_one_can_evict_clean_resource(tmp_path, monkeypatch):
-    with original_case(tmp_path, monkeypatch) as (_agent, _path, row, _body, server, _runtime):
+    from dataclasses import replace
+
+    from agent_py_agent.tests import test_coordinator_private_credential_transactions as case_module
+
+    # 用小容量走真实 owner_agent_pool_max_agents -> CoordinatorMemoryResources._capacity 解析链，
+    # 完整验证 N+1 / N+2 干净资源逐出不变量，同时避免慢速 CI 上构造 130 个独立 owner 超时。
+    original_config_with_owner = case_module._config_with_owner
+    monkeypatch.setattr(
+        case_module,
+        "_config_with_owner",
+        lambda config, owner: replace(
+            original_config_with_owner(config, owner),
+            owner_agent_pool_max_agents=3,
+        ),
+    )
+    with original_case(tmp_path, monkeypatch) as (_agent, _path, _row, _body, server, _runtime):
         server.control_plane.config.memory_semantic_recall = False
         holder = server.coordinator_memory_resources
+        assert holder._capacity == 3
         for number in range(holder._capacity + 2):
             actor = "j3-lru-owner-" + str(number)
             status, result = memory_post(server, actor, operation="remember", content="needle " + actor)
@@ -202,6 +218,11 @@ def test_same_owner_successful_search_n_plus_one_can_evict_clean_resource(tmp_pa
             status, result = memory_post(server, actor, query="needle")
             assert status == 200 and result["ok"], result
         assert len(holder._entries) == holder._capacity
+        assert {key[4] for key in holder._entries} == {
+            "providers/feishu/users/j3-lru-owner-2",
+            "providers/feishu/users/j3-lru-owner-3",
+            "providers/feishu/users/j3-lru-owner-4",
+        }
         assert all(not entry.future.result().long_term._pending_access for entry in holder._entries.values())
         assert server.agent is None
 
