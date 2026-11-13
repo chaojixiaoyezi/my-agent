@@ -50,6 +50,14 @@ def test_create_subagents_model_spec_uses_template_index_not_full_prompt():
     assert "role" not in spec.input_schema["properties"]
     assert "你是执行子代理" not in role_detail
     assert "count" not in spec.parameter_descriptions
+    # 模型必须看到两种字段的实际作用；说明不改变原有数组参数协议。
+    allowed = item_schema["properties"]["allowed_tools"]
+    permitted = item_schema["properties"]["delegation_constraints"]["properties"]["permitted_tools"]
+    assert allowed["type"] == permitted["type"] == "array"
+    assert allowed["items"] == permitted["items"] == {"type": "string"}
+    assert "补齐默认" in allowed["description"]
+    assert "覆盖 allowed_tools" in permitted["description"]
+    assert "审批不能绕过" in permitted["description"]
     assert "count" not in spec.input_schema["properties"]
     assert "count" not in item_schema["properties"]
     assert spec.input_schema["required"] == ["items"]

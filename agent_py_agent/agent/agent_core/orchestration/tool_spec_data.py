@@ -61,7 +61,7 @@ _CREATE_PARAMETER_DETAILS = {
     "model": "仅当用户要求或任务需要独立模型时填写。只认当前 owner 已新增配置；同名多配置用回执中的 id，未知模型先请用户 /model 新增，不传地址或密钥。每个 item 可分别选择；子孙默认继续继承其直接父级。",
     "effort": "仅当用户要求或任务明显需要不同思考深度时填写（例如简单检索用 low、难题用 max）。宿主按模型实际支持的方式换算，模型不支持时按服务商默认运行；每个 item 可分别选择，子孙默认继承直接父级。",
     "tool_preset": "省略时自动；coding 给基础读写工具；read_only 只给读取/搜索/查看工具；none 只表示不覆盖自动策略。",
-    "allowed_tools": "一般省略；不完整列表不会剥夺子代理基础读写能力。",
+    "allowed_tools": "初始工具选择。普通角色仍会补齐默认发现和任务工具。创建时需要精确清单请用 delegation_constraints.permitted_tools。所有工具仍受父级授权上界约束。",
     "allowed_skills": (
         "可选 Skill 名称或 stable_id 列表；能力包使用 capability:<package_id>。"
         "授权分别填各item.allowed_skills；未填时沿宿主默认策略，goal或input_refs中提及包不等于授权。"
