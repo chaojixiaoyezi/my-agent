@@ -492,8 +492,6 @@ def _with_usage_summary(store: SkillLearningStore, result: dict[str, Any]) -> di
             summary = reader() if callable(reader) else reader
             if isinstance(summary, dict):
                 result["skill_usage"] = summary
-                if "daily_history" in summary and "daily_history" not in result:
-                    result["daily_history"] = summary["daily_history"]
     except Exception:  # noqa: BLE001 - 辅助统计失败不影响原状态查询。
         result["skill_usage_warning"] = "SKILL_USAGE_UNAVAILABLE"
     return result
@@ -522,6 +520,7 @@ def _feedback_overview(agent: object, store: SkillLearningStore, registry: Any) 
         if registry.skills[name].maintenance.get("state") == "archived"
     ]
     mode = str(getattr(cfg, "self_learning_maintenance_mode", "autonomous") or "autonomous").strip().lower()
+    overflow = getattr(store, "overflow_requests", None)
     legacy = {
         "ok": True,
         "self_learning_enabled": bool(getattr(cfg, "enable_self_learning", False)),
@@ -538,6 +537,8 @@ def _feedback_overview(agent: object, store: SkillLearningStore, registry: Any) 
         ],
         "archived_skills_count": len(archived_skills),
         "pending_requests_count": _pending_request_count(store),
+        "overflow_requests_count": len(overflow()) if callable(overflow) else 0,
+        "daily_history": dict(getattr(registry, "daily_history", {}) or {}),
         "daily_summarization_calls": {
             "owner_date": registry.daily_date,
             "owner_calls": registry.daily_calls,
