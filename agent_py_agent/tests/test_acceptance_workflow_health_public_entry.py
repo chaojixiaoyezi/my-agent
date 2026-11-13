@@ -196,7 +196,7 @@ def test_health_feature_disabled_no_sample(wire, monkeypatch):
 
 
 def test_helper_dependency_preserves_partial_coverage(wire):
-    """同签名helper尚未合入时保留真红，不复制兄弟算法或放松断言。"""
+    """入口窗口的partial覆盖必须传到唯一helper；不复制兄弟算法或放松断言。"""
     agent, client = wire
     assert client.call('workflows.create', {'definition': flow('sample', [])})['ok']
     for n in range(60):
@@ -304,7 +304,7 @@ def test_service_returns_only_requested_workflow_no_reference_reads(host, monkey
 
 
 def test_server_wire_observation_does_not_hide_client_gap(wire):
-    """真实observer/HTTP服务观察；不替代仍为红色的Client.prepare验收。"""
+    """真实observer/HTTP服务观察；客户端解析已接线，本项仍不替代其完整权限矩阵。"""
     from agent_py_agent.agent.gateway_parts.business_api_v13 import v13_action_spec
     from agent_py_agent.agent.plugin_host.schemas import validate_object
 
