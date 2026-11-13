@@ -92,6 +92,16 @@ def require_revision(expected: object, actual: int) -> None:
         raise BusinessError('REVISION_CONFLICT')
 
 
+def content_authorization_facts(owner_id, action, params, expected_revision):
+    """采用类变更只凭同一动作、完整规范参数和目标版本的摘要授权。"""
+    import hashlib
+    import json
+    digest = hashlib.sha256(json.dumps(params, sort_keys=True, ensure_ascii=False,
+        separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+    return {**params, 'owner_id': owner_id, 'action': action, 'parameters_sha256': digest,
+            'expected_revision': expected_revision}
+
+
 def require_content_authorization(actor: BusinessActor, facts: dict) -> None:
     if actor.content_authorizer is None or actor.content_authorizer(dict(facts)) is not True:
         raise BusinessError('HUMAN_RESPONSE_REQUIRED')

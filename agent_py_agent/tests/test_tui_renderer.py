@@ -1144,7 +1144,7 @@ def test_pending_and_queued_inputs_stay_fixed_above_composer() -> None:
 
     assert not any("排队消息" in line or "当前任务补充" in line for line in transcript_text)
     assert fixed_text == [
-        "• 将在下一次工具调用后送入当前回合",
+        "• 插话已排队，等待当前回合接收",
         "  ↳ 当前任务补充",
         "• 已排队的后续消息",
         "  ↳ 排队消息",

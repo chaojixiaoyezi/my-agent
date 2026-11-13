@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from .business_access import (
     BusinessError,
+    content_authorization_facts,
     require_access,
     require_content_authorization,
     require_revision,
@@ -81,9 +82,8 @@ class BusinessAssetService:
                 self._artifact(version['artifact_ref'], actor=actor, space_id=row['space_id'], project_ref=row['project_ref'])
             return validate_result(action, service.page(action, params, _copy(row['versions']), state, actor=actor))
         def content_guard():
-            require_content_authorization(actor, {'owner_id': service.owner_id, 'space_id': params['space_id'],
-                'asset_id': params['asset_id'], 'version_ref': params['version_ref'],
-                'expected_revision': expected_revision, 'evidence_ref': params.get('evidence_ref')})
+            require_content_authorization(actor, content_authorization_facts(
+                service.owner_id, action, params, expected_revision))
 
         def mutate(current, values):
             sid = values['space_id']

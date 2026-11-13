@@ -116,6 +116,7 @@ class SandboxHostPolicy:
     host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
     full_access_other_owner_homes: str = field(default="read_only", kw_only=True)
     host_exclusive_paths: tuple[Path, ...] = field(default=(), kw_only=True, repr=False)
+    exact_read_scope: bool = field(default=False, kw_only=True)
 
 
 class SandboxUnavailableError(SandboxUnavailable):
@@ -441,8 +442,10 @@ class AttemptExecutionSandbox:
             # B7：整根只读形态下，private_read_roots（v8/受限策略的隐藏根）并进 hidden_paths，由 _read_only_root_argv
             # tmpfs 盖住再把工作目录/写根挂回去；H2 的 hidden_paths（插件库）照旧。owner 隔离形态的 private_read_roots
             # 仍走 bwrap 不挂载语义，不受影响（那条路径不读 hidden_paths 的收窄逻辑）。
+            # allowlist 从空根显式挂载，不暴露私有祖先；再遮盖祖先会盖掉获准子路径。
             hidden_paths=((*self.spec.private_read_roots, *self.spec.hidden_paths)
-                          if self.spec.read_only_root else self.spec.hidden_paths),
+                          if self.spec.read_only_root and self.spec.read_mode != "allowlist"
+                          else self.spec.hidden_paths),
         )
         argv = build_bwrap_argv(spec)
         _require_linux_file_isolation(spec.hidden_paths, argv)

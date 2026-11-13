@@ -245,6 +245,7 @@ class ToolExecutor:
                 runtime_guard_policy=request.runtime_guard_policy,
                 approval_mode=request.approval_mode,
                 admin_full_access=request.admin_full_access,
+                owner_id=request.operation_owner_id,
                 required_action=request.required_action,
                 require_model_visibility=request.require_model_visibility,
             )
@@ -832,6 +833,32 @@ def _durable_operation_scopes(scopes: tuple[str, ...]) -> tuple[str, ...]:
 
 # LLM: handler读取原快照与owner墙；独立owner只取宿主顶层身份，嵌套旧run_scope仍由原入口规范化，不授身份断言权。
 # 函数用途: 把已通过权限门的调用和是否进入副作用账本的事实转成不可变 registry 执行请求。
+def _human_approval_check(request, call):
+    """仅原执行器闭包持有当前规范调用与批准记录，模型参数不能提供此能力。"""
+    from ..contracts.gates.tool_approval_binding import (
+        ApprovalBindingFacts,
+        has_current_human_approval,
+    )
+    runtime = request.runtime_snapshot.runtime(call.tool_name)
+    if runtime is None or not runtime.runtime_policy.approval_policy.require_human:
+        return None
+    def check():
+        if _cancelled(request):
+            raise PermissionError("HUMAN_RESPONSE_REQUIRED")
+        boundary = request.write_boundary or {}
+        actions = boundary.get('approved_actions', ())
+        facts = ApprovalBindingFacts(tool_name=call.tool_name, run_id=call.run_id,
+            operation_id=call.operation_id, idempotency_key=call.idempotency_key, args_hash=call.args_hash,
+            approved_actions=tuple(actions) if isinstance(actions, (list, tuple)) else (),
+            owner_id=request.operation_owner_id)
+        if not has_current_human_approval(facts, time.time()):
+            raise PermissionError('HUMAN_RESPONSE_REQUIRED')
+        authority = _operation_authority_check(request, call)
+        if authority is not None:
+            authority()
+    return check
+
+
 def _invoke_request(
     request: ToolExecutorRequest,
     call: ToolCall,
@@ -867,6 +894,7 @@ def _invoke_request(
         cancellation_token=request.cancellation_token,
         execution_authority_check=_operation_authority_check(request, call),
         tool_dispatch=_nested_dispatch(request, call),
+        human_approval_check=_human_approval_check(request, call),
         on_handler_started=request.on_handler_started,
         owner_id=str(owner_id or ""),
         registry_owner_id=request.operation_owner_id,

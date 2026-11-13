@@ -636,8 +636,11 @@ def _build_runtime_approval_request(
         request_id=request.params.request_id,
         round_number=request.tool_rounds,
         call_index=idx,
-        description=_approval_description(request, idx, execution.call),
+        description=_approval_description(request, idx, execution.call,
+            require_human=execution.decision.evidence.get("human_confirmation_required") is True),
         grant_key=_owner_grant_key(request, execution.call),
+        require_human=execution.decision.evidence.get("human_confirmation_required") is True,
+        owner_id=request.agent.home_paths.owner_id,
     )
     from ...user_space.approval_mode import deployment_approval_config
     valid = True
@@ -819,12 +822,15 @@ def _approval_description(
     request: ToolRoundExecutionRequest,
     idx: int,
     call: ToolCall,
+    *, require_human: bool = False,
 ) -> str:
-    detail = _payload_progress_detail(call)
+    # 强制真人确认必须能看到完整目标、版本及参数；正文仍走同一隐私净化，不走进度摘要截断。
+    detail = (json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)
+              if require_human else _payload_progress_detail(call))
     public_detail = _public_progress_text(
         ToolProgressEvent(request, idx, call, "started", "等待审批"),
         detail,
-        max_chars=240,
+        max_chars=None if require_human else 240,
     )
     return f"{call.tool_name}({public_detail})" if public_detail else call.tool_name
 

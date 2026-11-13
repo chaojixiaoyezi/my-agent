@@ -12,6 +12,9 @@ agent_py_agent/tests/test_business_event_unbound_prefix.py          # 无绑定�
 agent_py_agent/tests/test_business_cursor_error_details.py          # 查询游标失效后的恢复提示与流重连
 agent_py_agent/tests/test_active_input_between_tool_segments.py     # 工具批次中的插话与已启动调用
 agent_py_agent/tests/test_capability_active_delivery_path.py        # 申请从子代理到父代理消费确认
+agent_py_agent/tests/test_content_adoption_human_approval.py        # 采用正式版本的单次真人授权与回放
+agent_py_agent/tests/test_business_asset_version_freeze.py         # 采用新版本后已受理任务和子树保留原版本
+agent_py_agent/tests/test_orch06_exact_shell_read_scope.py          # 进程工具的精确读范围与后端不可用
 agent_py_agent/tests/test_business_subscription_wiring.py            # 业务订阅原生接口、授权和撤回
 agent_py_agent/tests/test_workflow_notification_delivery_truth.py    # 工作流本地记账与通道投递回执
 agent_py_agent/tests/test_workflow_reconciliation_public_diagnostic.py # 写后超时及可信核验恢复

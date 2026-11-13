@@ -7,7 +7,9 @@ import pytest
 
 from agent_py_agent.agent.workflows.models import StepExecutionRecord, WorkflowRunRecord
 from agent_py_agent.agent.workflows.query_health import (
-    build_workflow_health_view, summarize_run_step_health, workflow_state_report,
+    build_workflow_health_view,
+    summarize_run_step_health,
+    workflow_state_report,
 )
 
 

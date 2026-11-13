@@ -2,6 +2,25 @@
 
 状态：2026-10-21 底座第一阶段落地中（`agent_py_agent/agent/assets/`、`workflows/`、`observability/`、`tooling/`、`gateway_parts/plugin_broker_api.py`）。
 
+## 研判隔离的当前可用边界（2026-11-12）
+
+`llm_skill_analysis` 的 `config.analysis_isolation="stateless_skill"` 可用：仅将步骤输入、前步输出和指定 Skill 材料交给无状态模型调用，不开放工具，不载入主会话或写记忆。
+
+`lightweight_subagent` 尚未实现具备真实截止期限和逐次只读效果核验的执行器。显式选择时，生产入口在模型及工具执行前返回 `WORKFLOW_ISOLATION_UNAVAILABLE`，记录 `effect_outcome=not_started` 和替代建议；不会静默换成无状态分析。传入一个 callable 也不能启用此能力。
+
+需要先读取材料再研判时，使用两个明确步骤：
+
+```json
+[
+  {"step_id":"read","name":"读取材料","mode":"tool_call","on_error":"fail",
+   "tool_spec":{"tool_name":"read_file","arguments_map":{"path":{"step_id":"$inputs","key":"path"}}}},
+  {"step_id":"analyze","name":"无状态研判","mode":"llm_skill_analysis","on_error":"fail",
+   "config":{"analysis_isolation":"stateless_skill"}}
+]
+```
+
+工具步骤仍经当前 owner 的原生 dispatch、工具快照及权限门；工作流配置不能新增工具授权。前步输出作为后步 `prior_outputs` 提供，研判阶段不自行调工具。该组合已经过本地真实读文件步骤和原分析主链验证；它不代表已实现轻量子代理，也不替代部署后的模型验收。
+
 ## 1. 背景与解决的核心问题
 
 1. **终结工作流与固化脚本靠记忆散乱存放**：

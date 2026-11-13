@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
@@ -15,6 +16,7 @@ class ApprovalBindingFacts:
     idempotency_key: str
     args_hash: str
     approved_actions: tuple[object, ...] = ()
+    owner_id: str = ""
 
 
 def evaluate_approval_binding_gate(facts: ApprovalBindingFacts | Mapping[str, object]) -> GateDecision:
@@ -31,6 +33,26 @@ def evaluate_approval_binding_gate(facts: ApprovalBindingFacts | Mapping[str, ob
             )
         return GateDecision.deny("approval_binding", "APPROVAL_BINDING_MISMATCH", evidence=_safe_action_evidence(action))
     return GateDecision.need_approval("approval_binding", "APPROVAL_REQUIRED", evidence={"tool_name": item.tool_name})
+
+
+
+def has_current_human_approval(facts: ApprovalBindingFacts, now: float) -> bool:
+    """只消费同一规范调用的单次真人批准；普通策略放行或过期记录不产生内容授权。"""
+    if not evaluate_approval_binding_gate(facts).allowed:
+        return False
+    for action in facts.approved_actions:
+        if not isinstance(action, Mapping) or _binding_identity(action) != _binding_identity_from_facts(facts):
+            continue
+        if (not facts.owner_id or action.get('owner_id') != facts.owner_id
+                or not _base_identity_matches(action, facts) or action.get('human_confirmation_required') != 'true'):
+            continue
+        try:
+            deadline = float(action.get('approval_expires_at', 0))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(deadline) and deadline > now:
+            return True
+    return False
 
 
 def approval_id_for_binding(facts: ApprovalBindingFacts | Mapping[str, object]) -> str:

@@ -3145,7 +3145,7 @@ def _render_pending_steers(
         if child_terminal:
             label = "子代理已结束；以下插话未获模型消费确认，不会自动重发"
         elif turn_active:
-            label = "将在下一次工具调用后送入当前回合"
+            label = "工具正在运行，插话已排队" if context.has_active_tools else "插话已排队，等待当前回合接收"
         else:
             # 主回合已经终态:再承诺"下一次工具调用"就是假话(那一轮不会再有工具调用)。
             label = "当前回合已结束；以下插话未获模型消费确认"
@@ -3212,7 +3212,7 @@ def _render_compact_input_receipts(
         if child_terminal:
             pending_label = "• 子代理已结束；插话未获消费确认"
         elif turn_active:
-            pending_label = "• 等待当前回合接收"
+            pending_label = "• 工具正在运行，插话已排队" if context.has_active_tools else "• 等待当前回合接收"
         else:
             pending_label = "• 当前回合已结束；插话未获消费确认"
         append_single_line(f"{pending_label}（{len(queued_steers)} 条）")

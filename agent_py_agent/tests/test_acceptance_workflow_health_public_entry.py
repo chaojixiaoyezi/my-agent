@@ -15,6 +15,8 @@ from agent_py_agent.tests.test_acceptance_workflow_native_ports import (
     wire,
 )
 
+_FIXTURES = (host, wire)
+
 
 def snapshot(root):
     return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()

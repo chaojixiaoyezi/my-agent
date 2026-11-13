@@ -596,6 +596,7 @@ def attach_run_task_workspace_context(agent, params, user_prompt: str):
         # 无人应答——这个环境事实必须告知模型;gateway 有 guidance 补发渠道、chat
         # 可多轮,不注入。
         single_shot=str(getattr(params, "source", "") or "").strip() == "cli_run",
+        delivery_output_dir=(result.output_dir if getattr(params, "business_context", None) is not None else None),
     )
     next_inject = _append_once(list(getattr(params, "inject", None) or []), injection)
     next_attrs = _task_attributes_with_workspace(getattr(params, "task_attributes", None), result)
@@ -833,6 +834,7 @@ def _workspace_prompt_section(
     *,
     primary_workspace_root: Path,
     single_shot: bool = False,
+    delivery_output_dir: Path | None = None,
 ) -> str:
     lines = [
         "# Current Task Workspace",
@@ -840,6 +842,13 @@ def _workspace_prompt_section(
         "- output/、work/、tasks/ 等名称都是 cwd 内的普通目录，不是宿主运行目录的别名。",
         "- 文件按家目录整理约定或用户明确要求放置；续作保留原文件位置，内部运行归档由宿主管理。",
     ]
+    if delivery_output_dir is not None:
+        # 业务任务已有宿主交付目录；告知位置但不把运行归档改成 cwd，也不把工作文件自动当作交付。
+        lines.extend([
+            f"- 本任务已声明交付目录: {delivery_output_dir}（不改变 cwd 或写入权限）",
+            "- 新的最终交付文件放在该目录，并使用能返回结构化文件回执的文件工具写入。"
+            "仅由 shell 写出的普通工作文件、或在答复中提到的路径，不会自动成为已登记交付物。",
+        ])
     if single_shot:
         lines.append("- 单次运行：中途提问不会收到应答；采用合理假设推进，最终如实报告完成情况或阻碍。")
     return "\n".join(lines)

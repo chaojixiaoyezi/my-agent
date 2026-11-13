@@ -108,8 +108,11 @@ class ToolApprovalRequest:
     def approved_binding(self, decision: ToolApprovalDecision) -> dict[str, str]:
         if decision.permission_id != self.permission_id or not decision.approved:
             raise ValueError("approval decision does not approve this request")
+        if self.binding.get("human_confirmation_required") == "true" and decision.decision != "approved":
+            raise ValueError("human confirmation permits only an explicit one-time decision")
         return {
             **self.binding,
+            **({"approval_expires_at": str(approval_deadline(self))} if self.binding.get("human_confirmation_required") == "true" else {}),
             "approval_id": self.permission_id,
             "status": "APPROVED",
         }
@@ -248,10 +251,10 @@ def approval_deadline(request: ToolApprovalRequest, recorded_expires_at: object 
     return request.requested_at + CapabilityConfig().tool_approval_timeout_seconds
 
 
-# LLM: 只读宿主附加的 plugin_gate_ref；未知非空引用也强制询问，解析与精确批准在执行器，合同层不反向导入插件实现。
+# LLM: 只读宿主附加的插件门或强制真人标记；两者都禁自动批准与缓存，精确批准仍由原执行器验证。
 # 函数用途: 为两请求入口、两等待入口和自主提供者统一判断是否禁止自动批准。
 def plugin_gate_required(request: ToolApprovalRequest) -> bool:
-    return bool(request.binding.get("plugin_gate_ref"))
+    return bool(request.binding.get("plugin_gate_ref") or request.binding.get("human_confirmation_required") == "true")
 
 
 # LLM: permission_id 只从 canonical ToolCall 身份哈希产生；description 是已脱敏展示摘要，不参与 id 或授权绑定。
@@ -266,6 +269,8 @@ def build_tool_approval_request(
     call_index: int,
     description: str,
     grant_key: str = "",
+    require_human: bool = False,
+    owner_id: str = "",
 ) -> ToolApprovalRequest:
     binding = {
         "tool_name": call.tool_name,
@@ -274,7 +279,12 @@ def build_tool_approval_request(
         "idempotency_key": call.idempotency_key,
         "args_hash": call.args_hash,
     }
-    if str(grant_key or "").strip():
+    if require_human:
+        if not owner_id:
+            raise ValueError("human confirmation requires canonical owner")
+        binding["human_confirmation_required"] = "true"
+        binding["owner_id"] = owner_id
+    if str(grant_key or "").strip() and not require_human:
         # 操作授权键来自工具 runtime policy 的结构化声明，进入 binding 后与决定一起被消费方核对。
         binding["grant_key"] = str(grant_key).strip()
     identity = json.dumps(
@@ -300,6 +310,8 @@ def build_tool_approval_request(
             "feedback_placeholder": "可选：告诉 my-agent 接下来怎么做",
         },
     ]
+    if require_human:
+        options = options[:1]
     if binding.get("grant_key"):
         options.append(
             {

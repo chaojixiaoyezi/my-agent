@@ -111,6 +111,7 @@ class ActionPolicyRequest:
     now: float = 0.0
     require_model_visibility: bool = True
     admin_full_access: bool = False
+    owner_id: str = ""
     # 只能由原宿主执行链传入；不从ToolCall.arguments或角色/目录投影恢复。
     business_actor: object | None = field(default=None, kw_only=True, repr=False, compare=False)
     business_context: object | None = field(default=None, kw_only=True, repr=False, compare=False)
@@ -602,6 +603,7 @@ def _approval_decision(
     effect: str,
 ) -> tuple[ActionDecision | None, bool]:
     mode = runtime.runtime_policy.approval_policy.mode
+    human_required = runtime.runtime_policy.approval_policy.require_human
     always_effects = runtime.runtime_policy.approval_policy.always_effects
     sandbox_mode = runtime.runtime_policy.sandbox_policy.mode
     effect_contained = sandbox_effect_is_contained(
@@ -609,24 +611,35 @@ def _approval_decision(
         request.call.arguments,
     )
     if (
-        mode != "always"
+        not human_required
+        and mode != "always"
         and sandbox_mode == "required"
         and effect == "dangerous"
         and effect_contained
     ):
         return None, False
-    required = (
+    required = human_required or (
         (mode == "always" and (not always_effects or effect in always_effects))
         or (mode == "mutating" and effect in {"mutating", "dangerous"})
         or (mode == "dangerous" and effect == "dangerous")
     )
     if not required:
         return None, False
-    if request.approval_mode == "auto" and (mode != "always" or _admin_full_access_mcp(request, runtime)):
+    if not human_required and request.approval_mode == "auto" and (mode != "always" or _admin_full_access_mcp(request, runtime)):
         return None, False
     boundary = request.write_boundary if isinstance(request.write_boundary, dict) else {}
     approved = boundary.get("approved_actions")
     approved_actions = tuple(approved) if isinstance(approved, (list, tuple)) else ()
+    if human_required:
+        import time
+
+        from ..contracts.gates.tool_approval_binding import has_current_human_approval
+        facts = ApprovalBindingFacts(tool_name=request.call.tool_name, run_id=request.call.run_id,
+            operation_id=request.call.operation_id, idempotency_key=request.call.idempotency_key,
+            args_hash=request.call.args_hash, approved_actions=approved_actions,
+            owner_id=request.owner_id)
+        if not has_current_human_approval(facts, time.time()):
+            approved_actions = ()
     decision = evaluate_approval_binding_gate(
         ApprovalBindingFacts(
             tool_name=request.call.tool_name,
@@ -649,7 +662,7 @@ def _approval_decision(
         request.call,
         "APPROVAL_REQUIRED",
         effect=effect,
-        evidence={"gate": decision.to_dict()},
+        evidence={"gate": decision.to_dict(), "human_confirmation_required": human_required},
         approval_kind="tool_action",
     ), False
 

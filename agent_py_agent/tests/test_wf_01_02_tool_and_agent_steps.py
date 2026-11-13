@@ -39,9 +39,7 @@ from agent_py_agent.agent.workflows.agent_steps import (
     read_session_task_completion,
 )
 from agent_py_agent.agent.workflows.analysis_isolation import (
-    DEFAULT_ISOLATION_ALLOWED_TOOLS,
-    FORBIDDEN_ISOLATION_TOOLS,
-    WorkflowIsolationToolForbidden,
+    WorkflowIsolationUnavailable,
     resolve_analysis_isolation,
     run_isolated_analysis,
 )
@@ -482,78 +480,26 @@ def test_tool_step_formal_dag_execution_with_workflow_engine(tmp_path):
 # WF-02: Analysis Isolation Tests
 # ==============================================================================
 
-def test_analysis_isolation_backward_compatibility():
-    # 未传 isolation_executor 时保持 100% 向后兼容
-    res_default = resolve_analysis_isolation({})
-    assert res_default == {"requested": "stateless_skill", "mode": "stateless_skill", "note": ""}
-
-    res_subagent = resolve_analysis_isolation({"analysis_isolation": "lightweight_subagent"})
-    assert res_subagent == {
-        "requested": "lightweight_subagent",
-        "mode": "stateless_skill",
-        "note": "minimal_profile_entry_unavailable",
-    }
+def test_analysis_isolation_explicit_supported_mode():
+    assert resolve_analysis_isolation({}) == {
+        "requested": "stateless_skill", "mode": "stateless_skill", "note": ""}
+    assert resolve_analysis_isolation({"analysis_isolation": "stateless_skill"})['mode'] == 'stateless_skill'
 
 
-def test_analysis_isolation_active_lightweight_subagent():
-    def mock_executor(spec, context, profile):
-        return {"analysis": "ok"}
-
-    res = resolve_analysis_isolation(
-        {"analysis_isolation": "lightweight_subagent"},
-        step_config={"allowed_tools": ["read_file", "search_text"], "max_turns": 2, "timeout_seconds": 15.0},
-        isolation_executor=mock_executor,
-    )
-    assert res["requested"] == "lightweight_subagent"
-    assert res["mode"] == "lightweight_subagent"
-    assert res["note"] == ""
-    profile = res["profile"]
-    assert profile["allowed_tools"] == ("read_file", "search_text")
-    assert profile["memory_write"] is False
-    assert profile["stateless_transcript"] is True
-    assert profile["max_turns"] == 2
-    assert profile["timeout_seconds"] == 15.0
+@pytest.mark.parametrize('executor', [None, lambda *args, **kwargs: {}])
+def test_analysis_isolation_never_trusts_arbitrary_executor(executor):
+    with pytest.raises(WorkflowIsolationUnavailable) as caught:
+        resolve_analysis_isolation({'analysis_isolation': 'lightweight_subagent'},
+            step_config={'allowed_tools': ['custom_writer'], 'max_turns': 0}, isolation_executor=executor)
+    assert caught.value.effect_outcome == 'not_started'
+    assert caught.value.details['retry_same_configuration'] is False
 
 
-def test_analysis_isolation_forbids_mutating_tools():
-    def mock_executor(spec, context, profile):
-        return {}
-
-    for forbidden_tool in ("bash", "write_file", "delete_file", "exec", "workflows"):
-        with pytest.raises(WorkflowIsolationToolForbidden) as excinfo:
-            resolve_analysis_isolation(
-                {"analysis_isolation": "lightweight_subagent"},
-                step_config={"allowed_tools": [forbidden_tool]},
-                isolation_executor=mock_executor,
-            )
-        assert excinfo.value.error_code == "WORKFLOW_ISOLATION_TOOL_FORBIDDEN"
-
-
-def test_run_isolated_analysis_successful_and_structured():
-    def mock_executor(spec, context, profile):
-        assert profile["memory_write"] is False
-        assert profile["stateless_transcript"] is True
-        return {"summary": "Analysis complete", "confidence": 0.95}
-
-    result = run_isolated_analysis(
-        spec={"config": {"allowed_tools": ["read_file"]}},
-        context=SimpleNamespace(),
-        isolation_executor=mock_executor,
-    )
-    assert result == {"summary": "Analysis complete", "confidence": 0.95}
-
-
-def test_run_isolated_analysis_validates_json_structure():
-    # 模拟返回非 JSON 字符串
-    def bad_executor(spec, context, profile):
-        return "Not a JSON string"
-
-    with pytest.raises(ValueError, match="valid JSON object"):
-        run_isolated_analysis(
-            spec={},
-            context=None,
-            isolation_executor=bad_executor,
-        )
+def test_legacy_isolated_helper_does_not_execute_injected_callable():
+    def forbidden(*args, **kwargs):
+        pytest.fail('未验证的callable不能成为隔离能力')
+    with pytest.raises(WorkflowIsolationUnavailable):
+        run_isolated_analysis({}, None, isolation_executor=forbidden)
 
 
 # ==============================================================================

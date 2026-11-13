@@ -8,6 +8,7 @@ import time
 from contextlib import nullcontext
 from dataclasses import fields, replace
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 
 from ..assets import AssetPostCommitReadbackError
@@ -220,7 +221,7 @@ class WorkflowsTool(BaseTool):
             engine.invoke_host_context = invoke
             handler = engine.analysis_handler
             if callable(handler) and callable(getattr(handler, 'bind_run_params', None)) and params is not None:
-                engine.analysis_handler = lambda *args: invoke(lambda: handler(*args))
+                engine.analysis_handler = wraps(handler)(lambda *args: invoke(lambda: handler(*args)))
         if self.execution_scope_provider is not None:
             engine.execution_scope = self.execution_scope_provider(params)
         return engine

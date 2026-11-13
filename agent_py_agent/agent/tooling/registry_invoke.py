@@ -83,6 +83,7 @@ class RegistryToolInvokeRequest:
     owner_type: str = "main_agent"
     cancellation_token: object | None = None
     execution_authority_check: Callable[[], None] | None = None
+    human_approval_check: Callable[[], None] | None = None
     tool_dispatch: object | None = None
     # Canonical executor supplies the exact immutable binding selected from the
     # run snapshot. Missing bindings fail closed; this is not a public adapter.
@@ -198,6 +199,18 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutco
         request.allowed_tools,
     )
     tool_params = _with_task_workspace_relative_path(tool_params, request)
+    exact_roots = exact_read_roots(request.write_boundary, request.workspace_root)
+    # 未能把既有进程收窄到本次白名单时不能借它启动新效果；读取/关闭旧句柄仍保留。
+    if exact_roots is not None and (request.tool_name == "lsp" or (
+        request.tool_name == "terminal_session" and tool_params.get("action") in {"start", "write"}
+    )):
+        return apply_tool_execution_facts(
+            structured_tool_error(request.tool_name,
+                "EXACT_PROCESS_READ_SCOPE_UNSUPPORTED: 当前进程入口不能强制本次精确读取范围。",
+                "本次未执行；请使用精确范围内的文件工具，或在已授权工作目录使用 run_command。",
+                error_code="SANDBOX_UNAVAILABLE"),
+            failure_stage=ToolFailureStage.RUNTIME_GATE, handler_executed=False,
+        )
     read_denied = _read_boundary_denied(request, tool_params)
     if read_denied is not None:
         return apply_tool_execution_facts(
@@ -258,6 +271,7 @@ def _invocation_context(request: RegistryToolInvokeRequest) -> ToolInvocationCon
     return ToolInvocationContext(
         runtime_snapshot=_invocation_snapshot(request), cancellation_token=request.cancellation_token,
         execution_authority_check=request.execution_authority_check, tool_dispatch=request.tool_dispatch,
+        human_approval_check=request.human_approval_check,
         execution_permission_context=_execution_permission_context(request),
         workspace_read_context=build_workspace_read_context(
             cwd=request.workspace_root, write_boundary=request.write_boundary, path_policy=policy,
@@ -371,6 +385,7 @@ def _request_local_tool_for_invocation(
         process_tool = getattr(scoped, "shell_tool", scoped)
         # 网络总开关只由宿主 boundary 下发，文件 full-access 或一次工具审批不能覆盖。
         process_tool._sandbox_network_access = (request.write_boundary or {}).get("network_access_mode") != "disabled"
+        process_tool._sandbox_exact_read_scope = exact_read_roots(request.write_boundary, request.workspace_root) is not None
         # 宿主按本次不可变 boundary 下发祖先只读范围；它可被更具体正式写根覆盖，和精确锁分开。
         process_tool._sandbox_forbidden_write_roots = tuple(
             Path(value) for value in _boundary_path_strings(request.write_boundary or {}, "forbidden_write_roots")
@@ -532,6 +547,9 @@ def _sandbox_read_roots_for_invocation(
         or not isinstance(request.write_boundary, dict)
     ):
         return ()
+    exact = exact_read_roots(request.write_boundary, request.workspace_root)
+    if exact is not None:
+        return exact
     roots = _normalized_roots(request.workspace_root, request.workspace_roots)
     for key in ("allowed_read_roots", "owner_workspace_dir"):
         _append_boundary_roots(

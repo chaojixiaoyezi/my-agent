@@ -1569,6 +1569,16 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             record.status, record.needs_repair = 'failed', True
             record.error_code, record.error_message = 'ANALYZER_UNAVAILABLE', '未提供真实技能分析回调'
             return
+        preflight = getattr(self.analysis_handler, 'preflight', None)
+        if callable(preflight):
+            from .analysis_isolation import WorkflowIsolationUnavailable
+            try:
+                preflight(payload(spec))  # 能力拒绝发生在模型调用和效果准入之前。
+            except WorkflowIsolationUnavailable as error:
+                record.status, record.needs_repair = 'failed', True
+                record.error_code, record.error_message = error.error_code, str(error)
+                record.escalation_result['analysis_isolation'] = dict(error.details)
+                return
         record.llm_involved = record.llm_involved or getattr(self.analysis_handler, 'llm_involved', True) is not False
         if run is not None:
             self._admit_effect(run, record)

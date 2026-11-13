@@ -750,3 +750,53 @@ def test_runtime_cwd_prompt_does_not_scan_old_child_outputs(tmp_path, monkeypatc
     assert "普通目录" in section
     assert "relay_legacy_outputs" not in section
     assert "最终交付物写这里" not in section
+
+
+@pytest.mark.parametrize('business_task', [False, True])
+def test_only_bound_business_task_exposes_existing_delivery_directory(tmp_path, business_task):
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        attach_run_task_workspace_context,
+    )
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+    from agent_py_agent.agent.conversation.business_contracts import BusinessExecutionContext
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path / 'home')), tmp_path / 'work')
+    owner = agent.home_paths.owner_id
+    params = RunParams(request_id='delivery-guidance', run_id='delivery-guidance', task_id='delivery-guidance',
+        source='gateway', business_context=(BusinessExecutionContext(owner, 'space-a', None,
+            'delivery-guidance', 1, None, (), (), 'business-context.v1') if business_task else None),
+        task_attributes={'conversation_thread_id': 'thread-a', 'conversation_task_id': 'delivery-guidance',
+                         'conversation_execution_cwd': str(tmp_path / 'work')})
+    updated = attach_run_task_workspace_context(agent, params, '创建交付文件')
+    prompt = '\n'.join(updated.inject)
+    output = updated.task_attributes['run_workspace']['output_dir']
+    assert (f'本任务已声明交付目录: {output}' in prompt) is business_task
+    assert f'cwd: {tmp_path / "work"}' in prompt
+    assert updated.task_attributes['conversation_execution_cwd'] == str(tmp_path / 'work')
+    if business_task:
+        assert '不会自动成为已登记交付物' in prompt
+
+
+def test_delivery_collection_keeps_unregistered_and_working_files_out(tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core._finalization_service import _structured_delivery_artifacts
+    from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
+
+    output = tmp_path / 'output'
+    output.mkdir()
+    deliverable = output / 'result.json'
+    deliverable.write_text('{"total":4530}')
+    working = tmp_path / 'working.json'
+    working.write_text('{"draft":true}')
+    ready = register_artifact(ArtifactRegistration(workspace_root=tmp_path, path=deliverable,
+        run_id='run-a', task_id='task-a', created_by_tool='write_file')).to_dict()
+    other = register_artifact(ArtifactRegistration(workspace_root=tmp_path, path=working,
+        run_id='run-a', task_id='task-a', created_by_tool='write_file')).to_dict()
+    ctx = SimpleNamespace(task_attributes={'run_workspace': {'output_dir': str(output)}},
+                          archive_tool_calls=[{'artifact_registry_refs': [ready, other]}])
+    assert [row['path'] for row in _structured_delivery_artifacts(ctx)] == [str(deliverable)]
+    ctx.archive_tool_calls = [{'tool': 'run_command', 'output': str(deliverable)}]
+    assert _structured_delivery_artifacts(ctx) == []

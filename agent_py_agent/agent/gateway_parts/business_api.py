@@ -63,6 +63,7 @@ class BusinessCallContext:
     host_provider: object = field(default=None, repr=False)
     selected_space_id: str | None = None
     session_space_source: object = field(default=None, repr=False)
+    content_authorizer: object = field(default=None, repr=False)
 
     def check(self, action, facts):
         if self not in _ISSUED or not callable(self.authorize):
@@ -611,7 +612,7 @@ class BusinessServices:
         return self._observation_ready(action)
 
     def actor(self, context):
-        authorizer = getattr(context.actor, 'content_authorizer', getattr(self.host, 'business_content_authorizer', None))
+        authorizer = context.content_authorizer or getattr(context.actor, 'content_authorizer', getattr(self.host, 'business_content_authorizer', None))
 
         # LLM: 将 HostAPIError 异常映射为授权失败 False，满足 BusinessActor 的布尔契约。
         # 函数用途: 供领域权限检查判断当前动作是否被授权。
@@ -1527,6 +1528,7 @@ def register_business_tools(agent):
     if not bool(getattr(agent.config, 'business_spaces_enabled', False)):
         return
     from ..tooling.models import (
+        ApprovalPolicy,
         BaseTool,
         ConcurrencyPolicy,
         EffectResolverPolicy,
@@ -1543,6 +1545,7 @@ def register_business_tools(agent):
     class BusinessTool(BaseTool):
         def __init__(self, spec):
             self.action = spec.action
+            self.content_authorization_required = spec.metadata.get("content_authorization_required") is True
             family = spec.action.split('.')[0]
             title, keywords = {
                 'spaces': ('业务空间', ('业务空间', '空间', 'space', 'spaces', '/space')),
@@ -1578,6 +1581,7 @@ def register_business_tools(agent):
                     default_deferred=True, deferred_summary=purpose))
             effect = {'read': 'read_only', 'configure': 'mutating', 'execute': 'dangerous'}.get(spec.metadata['effect'], 'mutating')
             self.runtime_policy = ToolRuntimePolicy(effect_resolver=EffectResolverPolicy(default_effect=effect),
+                approval_policy=ApprovalPolicy("always", require_human=True) if self.content_authorization_required else ApprovalPolicy(),
                 sandbox_policy=SandboxPolicy('none'), concurrency_policy=ConcurrencyPolicy('serial'),
                 idempotency_policy=IdempotencyPolicy('operation'), output_policy=OutputPolicy(trust='runtime'),
                 resource_scopes=ResourceScopePolicy(mode='declared', static_scopes=('business:current_owner',)))
@@ -1585,10 +1589,30 @@ def register_business_tools(agent):
         # LLM: 每次执行仍取当前上下文并复核动作，不持有注册时或上一调用的actor。
         # 函数用途: 从注册工具进入同一个本地业务调用边界。
         def execute(self, params):
+            return self._execute(params)
+
+        def execute_scoped(self, params, invocation):
+            return self._execute(params, invocation)
+
+        def _execute(self, params, invocation=None):
             try:
                 if params.get('action') != self.action:
                     raise HostAPIError('INVALID_SCHEMA')
                 context, services = local_business_context(agent, model=True)
+                if self.content_authorization_required:
+                    from ..conversation.business_access import content_authorization_facts
+                    proof = getattr(invocation, 'human_approval_check', None)
+                    expected = content_authorization_facts(context.owner_id, self.action, params['params'], params.get('expected_revision'))
+                    def authorize_content(facts):
+                        if not callable(proof) or facts != expected:
+                            return False
+                        try:
+                            proof()
+                        except PermissionError:
+                            return False
+                        return True
+                    context = replace(context, content_authorizer=authorize_content)
+                    _ISSUED.add(context)
                 if self.action == 'tasks.assign' and isinstance(params.get('params'), dict) and 'space_id' not in params['params']:
                     params = {**params, 'params': {**params['params'], 'space_id': context.selected_space_id}}
                 status, result = execute_business(params, context, services)

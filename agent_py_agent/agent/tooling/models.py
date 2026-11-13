@@ -335,6 +335,7 @@ class ApprovalPolicy:
     #   带 grant_key 并多出 approved_owner 选项；自主模式不放行未授权的这类调用。只能声明 schema 里的公开参数。
     owner_grant_parameters: tuple[tuple[str, tuple[str, ...]], ...] = ()
     always_effects: tuple[str, ...] = ()
+    require_human: bool = False
 
     # LLM: 校验仅固化宿主声明，无状态或授权副作用；非 always 的策略不能用 effect 名单改变语义。
     # 函数用途: 规范化审批策略，拒绝未知副作用声明并保留原默认行为。
@@ -343,6 +344,8 @@ class ApprovalPolicy:
         if mode not in {"never", "dangerous", "mutating", "always"}:
             raise ValueError(f"invalid tool approval mode: {mode}")
         object.__setattr__(self, "mode", mode)
+        if type(self.require_human) is not bool or self.require_human and mode != "always":
+            raise ValueError("human confirmation requires an always approval policy")
         effects = tuple(self.always_effects)
         if (effects and mode != "always") or any(value not in {"read_only", "mutating", "dangerous"} for value in effects):
             raise ValueError("always effects require an always policy and valid effects")
@@ -1322,6 +1325,7 @@ class ToolInvocationContext:
     execution_permission_context: Mapping[str, object] | None = field(default=None, repr=False, compare=False)
     # 仅原执行器注入的只读内部派发器，不进入模型参数或共享handler。
     tool_dispatch: object | None = field(default=None, repr=False, compare=False)
+    human_approval_check: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass

@@ -784,8 +784,13 @@ def _sandbox_exec(
     protected_persona_root 只形成更精确的只读覆盖；它不会把已解除 owner 墙的
     Full Access 降回 WorkspaceOnly。H3：宿主托管文件（配置、运行状态、本任务核验记录）总是并进只读覆盖（任何模式）。
     """
-    from ..attempt.sandbox import AttemptExecutionSandbox, AttemptSandboxSpec, gateway_bound_ports
-    from .sandbox import strict_posix_shell_argv
+    from ..attempt.sandbox import (
+        AttemptExecutionSandbox,
+        AttemptSandboxSpec,
+        gateway_bound_ports,
+        system_read_roots_for_platform,
+    )
+    from .sandbox import allowlisted_directory, strict_posix_shell_argv
 
     host_policy = host_policy or SandboxHostPolicy()
     protection = write_protection or SandboxWriteProtection()
@@ -837,8 +842,12 @@ def _sandbox_exec(
         ) + tuple(path.resolve(strict=False) if path.exists() or path.is_symlink() else path
                   for path in host_paths.readonly),
         write_scope_denied_roots=protection.denied_roots,
-        implicit_attempt_write_roots=write_roots is None,
-        full_access=full_access,
+        implicit_attempt_write_roots=write_roots is None and not host_policy.exact_read_scope,
+        full_access=full_access and not host_policy.exact_read_scope,
+        # 精确读合同必须进入平台沙箱；不能因本地管理员或宽 cwd 退回 owner 全读。
+        read_only_root=host_policy.exact_read_scope,
+        read_mode="allowlist" if host_policy.exact_read_scope else None,
+        system_read_roots=system_read_roots_for_platform() if host_policy.exact_read_scope else (),
         network_access=host_policy.network_access,
         host_credential_env_names=host_policy.host_credential_env_names,
         # 只在 owner 隔离时生效：Full Access 没有 owner 墙，也就没有私有目录读拒绝。
@@ -853,6 +862,11 @@ def _sandbox_exec(
         # 不在 Gateway 进程里（CLI run、测试）注册表为空，不加规则。full_access 也带（这一档只剩第 (1) 层）。
         deny_gateway_ports=gateway_bound_ports(),
     )
+    # Shell 自行启动 argv，须复用与 sandbox.run 相同的 cwd 准入，不能把宽 cwd 加回白名单。
+    if host_policy.exact_read_scope and not allowlisted_directory(
+        spec.attempt_view, (*spec.system_read_roots, *spec.public_read_roots, *spec.extra_write_roots)
+    ):
+        raise SandboxUnavailable("SANDBOX_UNAVAILABLE: RESTRICTED_CWD_NOT_ALLOWLISTED")
     sandbox = (AttemptExecutionSandbox if sandbox_factory is None else sandbox_factory)(spec)
     if sandbox_factory is not None:
         sandbox.require_ready()
@@ -954,7 +968,7 @@ def _background_command_argv(
     sandbox_factory: SandboxFactory | None = None,
 ) -> list[str]:
     host_policy = host_policy or SandboxHostPolicy()
-    if owner_home or protected_persona_root or os.name == "posix":
+    if owner_home or protected_persona_root or os.name == "posix" or host_policy.exact_read_scope:
         argv, use_shell = _sandbox_exec(command, target, owner_home, protected_persona_root,
                                         write_roots, read_roots, write_protection, host_policy=host_policy,
                                         **({"sandbox_factory": sandbox_factory} if sandbox_factory is not None else {}))
@@ -1468,7 +1482,8 @@ class ShellTool(BaseTool):
                                             host_policy=SandboxHostPolicy(self.host_private_roots, getattr(self, '_sandbox_network_access', True),
                                                                           self.host_credential_env_names,
                                                                           full_access_other_owner_homes=self.full_access_other_owner_homes,
-                                                                          host_exclusive_paths=self.host_exclusive_paths),
+                                                                          host_exclusive_paths=self.host_exclusive_paths,
+                                                                          exact_read_scope=getattr(self, "_sandbox_exact_read_scope", False)),
                                             **({"sandbox_factory": self.sandbox_factory} if self.sandbox_factory is not None else {}))
             jobs_dir = self.workspace_root / ".background_jobs"
             ensure_private_dir(jobs_dir)
@@ -1758,7 +1773,8 @@ def _sandbox_boundary_facts(
     host_files = (*host_readonly_paths_for(owner_text, ""),
                   *(Path(str(path)).expanduser().resolve(strict=False) for path in (protected or ())))
     writable = tuple(Path(str(root)).expanduser().resolve(strict=False) for root in read_write)
-    read_only = (request.tool.path_access_policy.owner_scope_root, *(read_roots or ()),
+    owner_read = () if getattr(request.tool, "_sandbox_exact_read_scope", False) else (request.tool.path_access_policy.owner_scope_root,)
+    read_only = (*owner_read, *(read_roots or ()),
                  *(path for path in host_files if any(path.is_relative_to(root) for root in writable)))
     facts: dict[str, object] = {
         "sandbox_active": True,
@@ -1806,18 +1822,23 @@ def _build_protected_shell_outcome(
 ) -> ToolHandlerOutcome:
     tool = request.tool
     owner_scoped = tool.path_access_policy.owner_scope_root is not None
+    exact_read = getattr(tool, "_sandbox_exact_read_scope", False)
     # 只读隔离按平台沙箱的结构化事实如实投影：Linux 隐藏未挂载路径，macOS 只限写。
     hidden = owner_scoped and sandbox_hides_host_paths()
-    if owner_scoped:
+    if exact_read:
+        output += "\n[sandbox_scope] read_scope=exact；命令仅可读取结构化授权的输入、写根及运行所需系统文件；未授权路径拒绝读取。"
+    elif owner_scoped:
         home_hidden = bool(_redirected_home(os.environ.get("HOME"), tool.path_access_policy.owner_scope_root,
                                             tool.host_private_roots))
         notice = _sandbox_scope_notice(hidden, private_hidden=bool(tool.host_private_roots), home_hidden=home_hidden)
         output = f"{output}\n{notice}"
     sandbox: dict[str, object] = {
-        "file_scope": "owner_workspace_only" if owner_scoped else "full_access",
+        "file_scope": "exact" if exact_read else "owner_workspace_only" if owner_scoped else "full_access",
         "external_host_paths_hidden": hidden,
         "host_path_absence_proven": False,
     }
+    if exact_read:
+        sandbox["read_scope_enforced"] = process_facts.get("status") != "not_started"
     if owner_scoped and tool.sandbox_boundary_facts:
         sandbox.update(_sandbox_boundary_facts(request, error_code, process_facts))
     if request.task_records:
@@ -2341,6 +2362,7 @@ def _run_shell_command(
         tool.path_access_policy.owner_scope_root
         or tool.protected_persona_root
         or os.name == "posix"
+        or getattr(tool, "_sandbox_exact_read_scope", False)
     ):
         return _run_attempt_sandboxed_shell_command(
             tool,
@@ -2401,7 +2423,8 @@ def _run_attempt_sandboxed_shell_command(
         SandboxWriteProtection(tuple(sandbox_protected_paths or ()), getattr(tool, "_sandbox_forbidden_write_roots", ())),
         host_policy=SandboxHostPolicy(tool.host_private_roots, getattr(tool, '_sandbox_network_access', True), tool.host_credential_env_names,
                                       full_access_other_owner_homes=getattr(tool, "full_access_other_owner_homes", "read_only"),
-                                      host_exclusive_paths=getattr(tool, 'host_exclusive_paths', ())),
+                                      host_exclusive_paths=getattr(tool, 'host_exclusive_paths', ()),
+                                      exact_read_scope=getattr(tool, "_sandbox_exact_read_scope", False)),
         **({"sandbox_factory": getattr(tool, "sandbox_factory", None)} if getattr(tool, "sandbox_factory", None) is not None else {}),
     )
     deadline = time.monotonic() + max(0.0, float(timeout))
