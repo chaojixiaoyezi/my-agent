@@ -2126,11 +2126,14 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
                     return False
         return True
 
-    # LLM: 记忆整理仍按原准入条件（记忆总闸、紧急原因或当日配额）决定是否运行；自动总结 Skill 在其后独立运行，
-    #   两者失败互不影响。准入可能只因为有学习请求，所以这里必须重算记忆整理条件，不能直接跑 run_if_due。
+    # LLM: 记忆整理仍按原准入条件（记忆总闸、紧急原因或当日配额）决定是否运行；辅助模型缺席或冷却时仅允许跑零模型确定性维护；
+    #   自动总结 Skill 在其后独立运行，两者失败互不影响。
     # 函数用途: 在策展车道里依次执行到期的记忆整理和待处理的自动总结 Skill。
     def _safe_run_curator(self, agent: object, label: str) -> object:
-        result = self._run_memory_curator(agent, label) if _curator_run_allowed(self, agent) else None
+        if _curator_run_allowed(self, agent):
+            result = self._run_memory_curator(agent, label)
+        else:
+            result = _run_memory_curator_maintenance(agent, label)
         _run_skill_learning(agent, label)
         return result
 
@@ -2314,7 +2317,7 @@ def _curator_candidate_is_admitted(
     key = id(agent)
     if key in supervisor._curator_inflight:
         return False
-    if _curator_run_allowed(supervisor, agent) or _skill_learning_pending(agent):
+    if _curator_run_allowed(supervisor, agent) or _curator_maintenance_due(agent) or _skill_learning_pending(agent):
         return True
     if is_soft:
         _evict_soft_curator_agent(pool, key)
@@ -2342,37 +2345,84 @@ def _curator_run_allowed(supervisor: object, agent: object) -> bool:
     return bool(supervisor._curator_has_pending_reason(agent) or supervisor._curator_quota_available())
 
 
-# LLM: 只读 agent.skill_learning 的持久队列；服务缺席（自学习关闭）或检查异常都按没有请求处理。
-# 函数用途: 判断这个 agent 是否有待处理的自动总结 Skill 请求。
-def _skill_learning_pending(agent: object) -> bool:
-    has_pending = getattr(getattr(agent, "skill_learning", None), "has_pending", None)
-    if not callable(has_pending):
+# LLM: 仅在全局及 owner 记忆总闸开启且 curator 暴露确定性 run_maintenance_if_due 时允许零模型维护准入。
+# 函数用途: 检查无辅助模型场景下是否应放行记忆策展确定性维护。
+def _curator_maintenance_due(agent: object) -> bool:
+    config = getattr(agent, "config", None)
+    if not getattr(config, "memory_curator_enabled", True) or not _agent_memory_enabled(agent):
         return False
+    curator = getattr(agent, "memory_curator", None)
+    return callable(getattr(curator, "run_maintenance_if_due", None))
+
+
+# LLM: 辅助模型缺席或冷却时执行零 LLM 的记忆维护（归档旧经验/压缩候选），绝不调 run_if_due。
+# 函数用途: 安全运行记忆策展的确定性维护。
+def _run_memory_curator_maintenance(agent: object, label: str) -> object:
+    if not _curator_maintenance_due(agent):
+        return None
+    curator = getattr(agent, "memory_curator", None)
+    run_maint = getattr(curator, "run_maintenance_if_due", None)
+    if not callable(run_maint):
+        return None
     try:
-        return bool(has_pending())
-    except Exception:
+        return run_maint()
+    except Exception as exc:
+        _print_gateway_loop_error("gateway_memory_curator.maintenance", label, exc)
+        return None
+
+
+# LLM: 判定当前技能学习车道是否缺少可用后台模型（未配置且无显式注入后端，或正处于冷却期）。
+# 函数用途: 返回学习车道当前是否只能运行确定性维护而应推迟模型消费。
+def _learning_model_unavailable(config: object, learning: object) -> bool:
+    if config is None or not hasattr(config, "memory_curator_model_profile"):
         return False
-
-
-# LLM: 自动总结失败只写诊断，不影响同车道的记忆整理结果与其它 owner；辅助模型未配置或在冷却期时直接跳过。
-# 函数用途: 处理这个 agent 最早的一条自动总结 Skill 请求。
-def _run_skill_learning(agent: object, label: str) -> None:
     from ..agent.settings.curator_profile import (
         auxiliary_profile_cooldown_remaining,
         effective_auxiliary_model_profile,
     )
 
-    config = getattr(agent, "config", None)
-    if config is not None and hasattr(config, "memory_curator_model_profile"):
-        auxiliary_profile = effective_auxiliary_model_profile(config)
-        if not auxiliary_profile:
-            return
-        if auxiliary_profile_cooldown_remaining(auxiliary_profile) > 0:
-            return
-    run_pending = getattr(getattr(agent, "skill_learning", None), "run_pending", None)
+    auxiliary_profile = effective_auxiliary_model_profile(config)
+    if auxiliary_profile:
+        return auxiliary_profile_cooldown_remaining(auxiliary_profile) > 0
+    explicit_backend = getattr(getattr(learning, "runtime", None), "backend", None)
+    if explicit_backend is not None and getattr(explicit_backend, "name", "") != "unconfigured":
+        return False
+    return True
+
+
+# LLM: 只读 agent.skill_learning 的持久队列；服务缺席（自学习关闭）或检查异常都按没有请求处理。
+# 函数用途: 判断这个 agent 是否有待处理的自动总结 Skill 请求。
+def _skill_learning_pending(agent: object) -> bool:
+    learning = getattr(agent, "skill_learning", None)
+    has_pending = getattr(learning, "has_pending", None)
+    if not callable(has_pending):
+        return False
+    try:
+        config = getattr(agent, "config", None)
+        if _learning_model_unavailable(config, learning):
+            has_maint = getattr(learning, "has_maintenance_work", None)
+            return bool(callable(has_maint) and has_maint())
+        return bool(has_pending())
+    except Exception:
+        return False
+
+
+# LLM: 自动总结失败只写诊断，不影响同车道的记忆整理结果与其它 owner；辅助模型未配置或在冷却期时不消费 FIFO、不调模型，
+#   仅在自主维护或待接管提案到期时执行零模型维护（maintenance_only=True）。
+# 函数用途: 处理这个 agent 最早的一条自动总结 Skill 请求或确定性维护。
+def _run_skill_learning(agent: object, label: str) -> None:
+    learning = getattr(agent, "skill_learning", None)
+    run_pending = getattr(learning, "run_pending", None)
     if not callable(run_pending):
         return
+    config = getattr(agent, "config", None)
+    model_unavailable = _learning_model_unavailable(config, learning)
     try:
+        if model_unavailable:
+            has_maint = getattr(learning, "has_maintenance_work", None)
+            if callable(has_maint) and has_maint():
+                run_pending(maintenance_only=True)
+            return
         run_pending()
     except Exception as exc:
         _print_gateway_loop_error("gateway_skill_learning.iteration", label, exc)
@@ -2382,6 +2432,15 @@ def _run_skill_learning(agent: object, label: str) -> None:
 # 函数用途: 判断后台策展车道是否需要运转。
 def _background_curation_enabled(agent: object) -> bool:
     config = getattr(agent, "config", None)
+    raw_path = getattr(config, "config_path", None)
+    if raw_path is not None and str(raw_path).strip():
+        try:
+            if Path(raw_path).expanduser().is_file():
+                from ..agent.settings.live_switches import refresh_live_switches
+
+                refresh_live_switches(config)
+        except Exception:
+            pass
     return bool(getattr(config, "memory_curator_enabled", True) or getattr(config, "enable_self_learning", False))
 
 

@@ -318,7 +318,20 @@ def test_update_of_skill_not_used_this_turn_is_rejected(tmp_path: Path) -> None:
 
 def test_max_skills_limits_creation_only(tmp_path: Path) -> None:
     settings = SkillLearningSettings(min_tool_rounds=3, max_skills=1)
-    ctx = _runtime(tmp_path, _output(), _output(name="another-skill"), settings=settings)
+    distinct = _output(
+        name="another-skill",
+        description="使用 pg_dump 在隔离目录导出冷备快照并校对哈希完整性。",
+        when_to_use="需要定时导出数据库冷备快照并核对校验和时。",
+        tags=["postgres", "backup"],
+        body=(
+            "# PostgreSQL 冷备导出与校验\n\n## 步骤\n\n"
+            "1. 先查询各数据表的行数与事务版本号并记录清单。\n"
+            "2. 在隔离临时目录执行 pg_dump 导出归档，避免占用线上连接。\n"
+            "3. 校验导出文件的哈希与可读性后再写入目标目录。\n\n"
+            "## 验证方法\n\n在独立临时库还原抽样检查记录总数，核对前后校验和完全一致。"
+        ),
+    )
+    ctx = _runtime(tmp_path, _output(), distinct, settings=settings)
     _publish_first(ctx)
     ctx.service.enqueue_from_finalize(_ctx("run-2"))
 

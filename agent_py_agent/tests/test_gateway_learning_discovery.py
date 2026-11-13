@@ -230,6 +230,7 @@ def test_actual_c_claim_consumes_only_registry_maintenance_source(tmp_path, monk
             service.runtime = replace(service.runtime, protection_provider=revoke_before_write)
         if fault == "mode_changed":
             service.settings = replace(service.settings, maintenance_mode="observe")
+            agent.config.self_learning_maintenance_mode = "observe"
         before = {p: p.read_bytes() for p in service.store.pending_requests()}
         proposals = list_learning_proposals(service.store)
         p3 = reservation_file(gate.paths, claim.request_id)
