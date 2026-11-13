@@ -1,6 +1,13 @@
 ## 2026-11-12 连续交互复核返工
 
 ```text
+agent_py_agent/agent/conversation/
+|-- task_artifact_observation.py              # 原任务索引、登记簿与交付文件的准确产物读取
+agent_py_agent/tests/
+|-- test_task_artifact_native_lookup.py       # 产物ID点查、版本漂移、范围与旧索引回填
+```
+
+```text
 agent_py_agent/agent/agent_core/tool_loop/
 |-- tool_wait_input.py                       # 工具等待期间的本人输入与原通道答复
 agent_py_agent/tests/

@@ -513,7 +513,9 @@ def default_observation_readers(owner_home, owner_id, store, runtime, *, resourc
         })
     media = home / 'artifacts' / 'business' / REGISTRY_RELATIVE_PATH
     if source.runtime_artifacts or media.is_file():
-        readers.update({'artifacts': source.artifacts, 'artifacts.get': source.artifact_detail})
+        readers['artifacts'] = source.artifacts
+    if source.runtime_artifacts or media.is_file() or store is not None:
+        readers['artifacts.get'] = source.artifact_detail
     if store is not None:
         readers['changes.get'] = source.changes
         archive = Path(store.storage.root) / 'display_archives'
@@ -954,10 +956,59 @@ class _OwnerReaders:
     # LLM: 指定旧版本不回退latest，无安全内容运输口的runtime快照不暴露路径。
     # 函数用途: 返回精确产物版本和原业务媒体读取引用。
     def artifact_detail(self, params):
+        from ..conversation.task_artifact_observation import _read_source, task_artifact
+
+        found, artifact, task, context = task_artifact(self.store, self.home, self.owner,
+            params['artifact_id'], params.get('version_ref'))
+        if found:
+            if artifact is None:
+                return ObservationPage()
+            value = {'artifact': artifact, 'version_ref': artifact['version_ref'],
+                     'read_ref': artifact['artifact_id'], 'available': artifact['available']}
+            return ObservationPage((ObservationRecord(value, self.owner,
+                context.space_id if context else None, context.project_ref if context else None,
+                task.task_id, task.target_thread_id),))
+        # 点详情不调用全量artifacts列表：旧runtime来源也只按准确ID取一页。
         records = []
-        for row in self.artifacts(params).records:
+        selected = []
+        if self.runtime_artifacts:
+            with self.repo._runtime_connection() as conn:
+                ids = [row[0] for row in conn.execute(
+                    'SELECT rowid FROM artifact_records WHERE artifact_record_id=? LIMIT 2',
+                    (params['artifact_id'],)).fetchall()]
+            for row in self.joined('artifact_records', rowids=ids):
+                value = {'artifact_id': row['artifact_record_id'], 'version_ref': row['content_digest'],
+                    'name': Path(row['rel_path']).name, 'mime_type': 'application/octet-stream',
+                    'size_bytes': row['size'], 'content_sha256': row['content_digest'],
+                    'task_id': None, 'space_id': None, 'available': False}
+                record = self.record(value, row)
+                value.update(task_id=record.task_id, space_id=record.space_id)
+                selected.append(record)
+        parts = ('artifacts', 'business', *REGISTRY_RELATIVE_PATH.parts)
+        raw = _read_source(self.home, parts, 2 * 1024 * 1024, 'ARTIFACT_REGISTRY_UNREADABLE')
+        if raw is not None:
+            from ..conversation.business_observability import ObservationSourceError
+            if len(raw) > 2 * 1024 * 1024:
+                raise ObservationSourceError('HOST_NOT_READY', details={'reason': 'ARTIFACT_REGISTRY_READ_BUDGET',
+                    'next_action': '原媒体登记簿超过点查询只读预算，不能把截断记录当最新版本。'})
+            try:
+                media, errors = latest_records_from_lines(self.home.joinpath(*parts), raw.decode('utf-8').splitlines(), _record_from_payload)
+            except (OSError, ValueError, TypeError) as error:
+                raise ObservationSourceError('HOST_NOT_READY', details={'reason': 'ARTIFACT_REGISTRY_UNREADABLE',
+                    'next_action': '原媒体登记簿无法解析，修复后重试。'}) from error
+            if errors:
+                raise ObservationSourceError('HOST_NOT_READY', details={'reason': 'ARTIFACT_REGISTRY_UNREADABLE',
+                    'next_action': '原媒体登记簿有坏记录，修复后重试。'})
+            item = media.get(params['artifact_id'])
+            if item is not None and item.metadata.get('owner_id') == self.owner and item.source == 'business_upload':
+                meta = item.metadata
+                value = {'artifact_id': item.artifact_id, 'version_ref': meta['version_ref'], 'name': meta['display_name'],
+                    'mime_type': item.mime_type, 'size_bytes': item.size_bytes, 'content_sha256': item.sha256,
+                    'task_id': item.task_id or None, 'space_id': meta['space_id'], 'available': item.status == 'ready'}
+                selected.append(ObservationRecord(value, self.owner, meta['space_id'], task_id=item.task_id or None))
+        for row in selected:
             value = row.value
-            if value['artifact_id'] == params['artifact_id'] and params.get('version_ref', value['version_ref']) == value['version_ref']:
+            if params.get('version_ref', value['version_ref']) == value['version_ref']:
                 records.append(self.wrap({'artifact': value, 'version_ref': value['version_ref'],
                     'read_ref': value['artifact_id'], 'available': value['available']}, row))
         return ObservationPage(tuple(records))

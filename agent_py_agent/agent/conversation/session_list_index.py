@@ -82,6 +82,13 @@ class SessionListIndex:
             conn.execute("CREATE INDEX IF NOT EXISTS list_order_all ON entries(sort_at DESC, path DESC)")
             conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
             conn.execute("INSERT OR IGNORE INTO meta VALUES ('revision', ?)", (str(time.time_ns()),))
+            if self.kind == 'session_task':
+                conn.execute('CREATE TABLE IF NOT EXISTS artifact_refs (artifact_id TEXT, task_path TEXT, PRIMARY KEY(artifact_id,task_path))')
+                conn.execute('CREATE INDEX IF NOT EXISTS artifact_refs_task ON artifact_refs(task_path)')
+                conn.execute('CREATE TABLE IF NOT EXISTS artifact_errors (task_path TEXT PRIMARY KEY)')
+                conn.execute('CREATE TRIGGER IF NOT EXISTS artifact_entry_deleted AFTER DELETE ON entries BEGIN '
+                             'DELETE FROM artifact_refs WHERE task_path=OLD.path; '
+                             'DELETE FROM artifact_errors WHERE task_path=OLD.path; END')
             return conn
         except BaseException as error:
             _close_failed_factory(conn, error)
@@ -109,6 +116,21 @@ class SessionListIndex:
             filter_key = str(payload.get(self._filter_field()) or "")
         conn.execute("INSERT OR REPLACE INTO entries VALUES (?,?,?,?,?)",
                      (relative, sort_at, filter_key, version, generation))
+        if self.kind == 'session_task':
+            conn.execute('DELETE FROM artifact_refs WHERE task_path=?', (relative,))
+            conn.execute('DELETE FROM artifact_errors WHERE task_path=?', (relative,))
+            metadata = payload.get('metadata', {}) if error is None else {}
+            refs = metadata.get('result_artifacts', []) if isinstance(metadata, dict) else None
+            invalid = error is not None or not isinstance(refs, list)
+            for item in refs if isinstance(refs, list) else []:
+                identifier = item.get('artifact_id') if isinstance(item, dict) else None
+                if (not isinstance(identifier, str) or not identifier or len(identifier.encode()) > 128
+                        or '/' in identifier or '\\' in identifier):
+                    invalid = True
+                    continue
+                conn.execute('INSERT OR IGNORE INTO artifact_refs VALUES(?,?)', (identifier, relative))
+            if invalid:
+                conn.execute('INSERT OR IGNORE INTO artifact_errors VALUES(?)', (relative,))
 
     def publish(self, path: Path) -> None:
         """只在原成功提交后调用；索引写失败不回滚已提交的canonical。"""
@@ -222,3 +244,44 @@ class SessionListIndex:
                 self.scope, revision, filter_key, last["sort_at"], last["path"]], separators=(",", ":")).encode()).decode() if last and len(rows) > limit and not changed else None
             return {"items": result, "next_cursor": next_cursor,
                     "coverage": "complete" if complete else "partial", "load_errors": errors}
+
+
+    def artifact_tasks(self, artifact_id: str, *, limit: int = 2) -> dict:
+        """只在原session_task索引定位候选；旧行每次32条回填，返回前重读原记录。"""
+        if self.kind != 'session_task' or type(limit) is not int or not 1 <= limit <= 10:
+            raise ValueError('invalid artifact task lookup')
+        with self._connection() as conn:
+            complete = self._refresh(conn)
+            if self._meta(conn, 'artifact_backfill_complete') != '1':
+                after = self._meta(conn, 'artifact_backfill_after')
+                rows = conn.execute('SELECT path FROM entries WHERE path>? ORDER BY path LIMIT 33', (after,)).fetchall()
+                for row in rows[:32]:
+                    self._record(conn, self.root / row['path'], int(self._meta(conn, 'generation', '0')))
+                if rows:
+                    self._put_meta(conn, 'artifact_backfill_after', rows[min(32, len(rows)) - 1]['path'])
+                if len(rows) <= 32 and complete:
+                    self._put_meta(conn, 'artifact_backfill_complete', 1)
+            complete = complete and self._meta(conn, 'artifact_backfill_complete') == '1'
+            candidates = conn.execute('SELECT e.path,e.stamp FROM artifact_refs a JOIN entries e ON e.path=a.task_path '
+                'WHERE a.artifact_id=? ORDER BY e.path LIMIT ?', (artifact_id, limit + 1)).fetchall()
+            if len(candidates) > limit:
+                complete = False
+            items, errors = [], []
+            for row in candidates[:limit]:
+                path = self.root / row['path']
+                payload, error = self.reader(path)
+                if error is not None:
+                    errors.append('ARTIFACT_TASK_SOURCE_UNREADABLE')
+                    complete = False
+                    continue
+                # 索引只定位，当前原记录必须仍宣称同一ID；失效行通过原发布路径修复。
+                refs = payload.get('metadata', {}).get('result_artifacts', [])
+                if not any(isinstance(item, dict) and item.get('artifact_id') == artifact_id for item in refs):
+                    self._record(conn, path, int(self._meta(conn, 'generation', '0')))
+                    complete = False
+                    continue
+                items.append(payload)
+            if conn.execute('SELECT 1 FROM artifact_errors LIMIT 1').fetchone():
+                complete = False
+            return {'items': items, 'coverage': 'complete' if complete else 'partial', 'load_errors': errors,
+                    'truncated': len(candidates) > limit}
