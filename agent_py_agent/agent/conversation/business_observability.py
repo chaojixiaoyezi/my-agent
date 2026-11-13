@@ -12,6 +12,7 @@ import json
 import os
 import sqlite3
 import time
+from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -895,18 +896,54 @@ class BusinessObservationService:
         return ObservationPage(tuple(rows), 'partial' if incomplete or more else 'complete',
                                revision, source_paged, next_position)
 
+    def _tree_threads(self, params, executions):
+        """复用后台身份有界索引，并点读本页执行和管理关系引用的线程。"""
+        if self.store is None:
+            return (), 'unknown', False
+        from .background_agents import background_agent_index
+        from .models import ConversationThread
+
+        page = background_agent_index(self.store).page(limit=100, filter_key=self.owner_id)
+        threads = {value['thread_id']: ConversationThread.from_dict(value) for value in page['items']}
+        incomplete = bool(page['load_errors']) or page['coverage'] != 'complete'
+        requested = {row.thread_id for row in executions if row.thread_id}
+        if params.get('root_agent_id'):
+            requested.add(params['root_agent_id'])
+        for identifier in requested:
+            try:
+                thread = _observation_thread(self.store, identifier)
+            except KeyError:
+                continue  # root_agent_id 也允许精确 run_id，不要求存在同名线程。
+            except (OSError, ValueError, TypeError):
+                incomplete = True
+                continue
+            if thread.owner_id == self.owner_id:
+                threads[identifier] = thread
+        managers = {identity.managed_by_thread_id for thread in threads.values()
+                    if (identity := background_identity(thread)) is not None}
+        for identifier in managers - threads.keys():
+            try:
+                thread = _observation_thread(self.store, identifier)
+            except (KeyError, OSError, ValueError, TypeError):
+                incomplete = True
+                continue
+            if thread.owner_id == self.owner_id:
+                threads[identifier] = thread
+        more = page['next_cursor'] is not None
+        return threads.values(), 'partial' if incomplete or more else 'complete', more
+
     # LLM: 线程原对象与其它本请求观察共用读取，节点/边仍逐条授权，不跨请求保存。
     # 函数用途: 从规范执行和线程生成准确范围的观察树。
     def _tree(self, params, actor):
-        execution_page = self._source('executions', params)
+        execution_params = {**params, 'filter': {**params.get('filter', {}), 'space_id': params['space_id']}}
+        execution_page = self._source('executions', execution_params)
+        execution_coverage = ('partial' if execution_page.next_position is not None
+                              else execution_page.coverage)
         executions = [row for row in execution_page.records if row.value.get('_is_current')
                       and self._visible(row, 'agent_tree.get', params, actor)]
         records, edges, controllers = {}, [], {}
-        thread_coverage = 'unknown'
+        threads, thread_coverage, more_threads = self._tree_threads(params, executions)
         if self.store is not None:
-            threads, errors = _observation_cached((self.store.threads, 'list', None),
-                lambda: self.store.threads.list_report(limit=0))
-            thread_coverage = 'partial' if errors else 'complete'
             for thread in threads:
                 _observation_cached((self.store.threads, 'record', thread.thread_id), lambda: thread)
                 if thread.owner_id != self.owner_id:
@@ -924,17 +961,21 @@ class BusinessObservationService:
                 record = ObservationRecord(value, self.owner_id, identity.space_id, identity.project_ref, thread_id=thread.thread_id)
                 if self._visible(record, 'agent_tree.get', params, actor):
                     records[thread.thread_id] = record
-        for row in list(records.values()):
-            identifier = row.value['managed_by_thread_id']
-            if identifier in controllers:
-                thread = controllers[identifier]
+        controller_refs = {row.thread_id for row in executions}
+        controller_refs.update(row.value['managed_by_thread_id'] for row in records.values())
+        controller_refs.add(params.get('root_agent_id'))
+        for identifier, thread in controllers.items():
+            if identifier in controller_refs:
                 value = {'kind': 'controller', 'id': identifier, 'thread_id': identifier, 'parent_run_id': None,
                     'managed_by_thread_id': None, 'space_id': None, 'task_id': None, 'run_id': None,
                     'model_profile_id': thread.model_profile_id or None, 'status': thread.status, 'has_children': False}
                 control = ObservationRecord(value, self.owner_id, params['space_id'], thread_id=identifier)
                 if self._visible(control, 'agent_tree.get', params, actor):
                     records[identifier] = control
-                    edges.append({'from_id': identifier, 'to_id': row.value['id'], 'relation': 'manages'})
+        for row in list(records.values()):
+            identifier = row.value['managed_by_thread_id']
+            if identifier in records:
+                edges.append({'from_id': identifier, 'to_id': row.value['id'], 'relation': 'manages'})
         for row in executions:
             value = {'kind': 'subagent' if row.value.get('_parent_run_id') else 'background_main',
                 'id': row.run_id, 'thread_id': row.thread_id, 'parent_run_id': row.value.get('_parent_run_id'),
@@ -958,12 +999,19 @@ class BusinessObservationService:
             record.value['has_children'] = bool(children[identifier])
         root = params.get('root_agent_id')
         if root is not None and root not in records:
-            raise BusinessError('OBSERVATION_NOT_FOUND' if execution_page.coverage == thread_coverage == 'complete' else 'HOST_NOT_READY')
+            complete = execution_coverage == thread_coverage == 'complete'
+            raise BusinessError('OBSERVATION_NOT_FOUND' if complete else 'HOST_NOT_READY', details={
+                'reason_code': 'TREE_ROOT_NOT_FOUND' if complete else 'TREE_ROOT_OUTSIDE_OBSERVED_WINDOW',
+                'root_agent_id': root,
+                'execution_coverage': execution_coverage,
+                'thread_coverage': thread_coverage,
+                'next_action': '核对当前空间及根节点 ID。来源未读全时可用原执行分页或准确运行详情继续查询。',
+            })
         roots = [root] if root else sorted(set(records) - {edge['to_id'] for edge in edges})
-        frontier, selected, seen, has_more = [(item, 0) for item in roots], [], set(), False
+        frontier, selected, seen, has_more = deque((item, 0) for item in roots), [], set(), False
         depth = params.get('max_depth', 20)
         while frontier:
-            identifier, level = frontier.pop(0)
+            identifier, level = frontier.popleft()
             if identifier in seen:
                 continue
             seen.add(identifier)
@@ -972,13 +1020,13 @@ class BusinessObservationService:
                 frontier.extend((child, level + 1) for child in sorted(children[identifier]))
             elif children[identifier]:
                 has_more = True
-        page = ObservationPage(tuple(selected), _coverage((thread_coverage, execution_page.coverage)))
+        page = ObservationPage(tuple(selected), _coverage((thread_coverage, execution_coverage)))
         chosen, cursor = self._paginate(selected, page, 'agent_tree.get', params, actor)
         ids = {record.value['id'] for record in chosen}
         return {'nodes': [_view('NodeView', row.value) for row in chosen],
             'edges': [edge for edge in edges if edge['to_id'] in ids], 'next_cursor': cursor,
             'coverage': _coverage((page.coverage, 'partial' if has_more or cursor else 'complete')),
-            'has_more_descendants': has_more or cursor is not None or execution_page.next_position is not None}
+            'has_more_descendants': has_more or more_threads or cursor is not None or execution_page.next_position is not None}
 
     # LLM: 内部非catalog端口不放宽usage授权；每组及其所有成员仍先核与末核，缓存不含裁决。
     # 函数用途: 对单窗口的多个准确子范围读取用量，可将已整窗授权的事件供模型次数聚合复用。
