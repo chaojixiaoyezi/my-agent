@@ -10,7 +10,11 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from .message_replay import MessageSnapshotRows, filtered_message_rows, message_rows_iterator
-from .native_history import provider_history_messages_from_rows
+from .native_history import (
+    completed_gateway_final_attempts,
+    provider_history_messages_from_rows,
+    superseded_gateway_final,
+)
 
 
 # LLM: 每次迭代与随机访问都现读现投影，不缓存结果；切片保持同一规则，长度来自已冻结的行数。
@@ -86,7 +90,11 @@ def freeze_history_source(
 # 函数用途: 在文本准备边界把来源解析成 (role, content) 序列。
 def history_source_text_messages(source: ConversationHistorySource) -> tuple[tuple[str, str], ...]:
     messages: list[tuple[str, str]] = []
-    for row in source.projected_rows():
+    projected = source.projected_rows()
+    completed = completed_gateway_final_attempts(projected)
+    for row in projected:
+        if superseded_gateway_final(row, completed):
+            continue
         role = str(getattr(row, "role", "") or "").strip().lower()
         content = str(getattr(row, "content", "") or "")
         if role in {"user", "assistant"} and (content or source.keep_empty_text):

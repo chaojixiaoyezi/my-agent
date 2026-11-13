@@ -14,7 +14,11 @@ from .history_order import order_history_events
 from .history_page import history_group_identity
 from .host_notices import host_notices_from
 from .models import is_audit_background_transcript_entry
-from .native_history import canonical_native_messages_from_metadata
+from .native_history import (
+    canonical_native_messages_from_metadata,
+    completed_gateway_final_attempts,
+    superseded_gateway_final,
+)
 
 HISTORY_DISPLAY_SCHEMA = "conversation_history_display.v1"
 
@@ -24,13 +28,15 @@ HISTORY_DISPLAY_SCHEMA = "conversation_history_display.v1"
 def conversation_history_display_events(
     rows: Sequence[object],
 ) -> tuple[dict[str, object], ...]:
+    completed = completed_gateway_final_attempts(rows)
+    visible_rows = [row for row in rows if not superseded_gateway_final(row, completed)]
     delivery_groups = {
         (getattr(row, "thread_id", ""), str(row.metadata["conversation_request_id"])): history_group_identity(row)
-        for row in rows
+        for row in visible_rows
         if background_display_turn_from_row(row) and row.metadata.get("conversation_request_id")
     }
     groups: dict[str, list[object]] = {}
-    for row in rows:
+    for row in visible_rows:
         if is_audit_background_transcript_entry(row):
             continue
         if getattr(row, "role", "") not in {"user", "assistant", DISPLAY_CHECKPOINT_ROLE}:

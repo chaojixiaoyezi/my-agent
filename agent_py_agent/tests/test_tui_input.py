@@ -2674,3 +2674,83 @@ def test_up_preserves_explicit_agent_selection():
     event = SimpleNamespace(arg=1, app=SimpleNamespace(invalidate=MagicMock()))
     tui_keybindings._handle_up_keybinding(event, params)
     move_selection.assert_called_once_with(-1)
+
+
+@pytest.mark.parametrize("page", ["main", "child", "business", "business-empty", "watch", "watch-empty"])
+@pytest.mark.parametrize("queued", [False, True])
+def test_up_real_navigation_preserves_queue_on_read_only_pages(monkeypatch, page, queued):
+    from agent_py_agent.cli.chat_parts.tui_agent_navigation import TuiAgentNavigationState
+    from agent_py_agent.tests.test_business_v12_f5_tui import ProtocolTransport, client, dto, module
+
+    runtime = TuiRuntime("up-real-navigation")
+    navigation = TuiAgentNavigationState(runtime)
+    if page.startswith("business"):
+        responses = {} if page == "business-empty" else {
+            "spaces.list": {"items": [dto("SpaceView", space_id="sp_1", name="空间")],
+                            "coverage": "complete", "next_cursor": None}}
+        agents = module("chat_parts.tui_background_agents").TuiBackgroundAgents(client(ProtocolTransport(responses)))
+        agents.refresh()
+        navigation.update_business_agents(agents)
+        assert navigation.move_selection(1) and navigation.enter_selected()
+    elif page.startswith("watch"):
+        navigation.update_background_watch_rows([{"session_id": "bg-process-1", "alive": True}])
+        assert navigation.move_selection(1) and navigation.enter_selected()
+        if page == "watch-empty":
+            navigation.update_background_watch_rows([])
+    elif page == "child":
+        navigation.update_rows("", [{"run_id": "child-1", "status": "RUNNING"}])
+        assert navigation.move_selection(1) and navigation.enter_selected()
+    jobs = Queue()
+    pending = [int(queued)]
+    if queued:
+        runtime.enqueue_prompt("queued-real", "editable", queued=True)
+        jobs.put(_job("queued-real", "editable"))
+    input_area = TextArea(multiline=True)
+    history_up = MagicMock()
+    monkeypatch.setattr(input_area.buffer, "auto_up", history_up)
+    params = SimpleNamespace(
+        input_area=input_area, jobs=jobs, tui_runtime=runtime,
+        exit_armed_at_ref=[0.0], eof_armed_at_ref=[0.0],
+        escape_armed_at_ref=[0.0], escape_armed_text_ref=[""],
+        state_lock=threading.Lock(), pending_jobs_ref_for_enqueue=pending,
+        interaction_state=TuiInteractionState(), agent_navigation=navigation,
+    )
+    event = SimpleNamespace(arg=1, app=SimpleNamespace(invalidate=MagicMock()))
+    tui_keybindings._handle_up_keybinding(event, params)
+    if page.startswith(("business", "watch")):
+        assert input_area.text == ""
+        assert pending == [int(queued)]
+        assert jobs.qsize() == int(queued)
+        assert len(runtime.store.snapshot().queued_inputs) == int(queued)
+        history_up.assert_not_called()
+        if page in {"business", "watch"}:
+            assert navigation.snapshot().selected_run_id
+    elif queued:
+        assert input_area.text == "editable"
+        assert pending == [0] and jobs.empty()
+        assert runtime.store.snapshot().queued_inputs == ()
+        history_up.assert_not_called()
+    else:
+        history_up.assert_called_once_with(count=1, go_to_start_of_line_if_history_changes=True)
+
+
+def test_up_real_navigation_top_selection_remains_selected(monkeypatch):
+    from agent_py_agent.cli.chat_parts.tui_agent_navigation import TuiAgentNavigationState
+
+    navigation = TuiAgentNavigationState(TuiRuntime("up-top-row"))
+    navigation.update_rows("", [{"run_id": "child-1", "status": "RUNNING"}])
+    assert navigation.move_selection(1)
+    input_area = TextArea(multiline=True)
+    history_up = MagicMock()
+    monkeypatch.setattr(input_area.buffer, "auto_up", history_up)
+    params = SimpleNamespace(input_area=input_area, agent_navigation=navigation,
+        exit_armed_at_ref=[0.0], eof_armed_at_ref=[0.0],
+        escape_armed_at_ref=[0.0], escape_armed_text_ref=[""])
+    event = SimpleNamespace(arg=1, app=SimpleNamespace(invalidate=MagicMock()))
+    for _ in range(3):
+        tui_keybindings._handle_up_keybinding(event, params)
+    assert navigation.snapshot().selected_run_id == "child-1"
+    assert navigation.clear_selection()
+    monkeypatch.setattr(tui_keybindings, "_restore_editable_queue", lambda _params: False)
+    tui_keybindings._handle_up_keybinding(event, params)
+    history_up.assert_called_once_with(count=1, go_to_start_of_line_if_history_changes=True)

@@ -143,6 +143,8 @@ def _clone_cached_task_link(link: ThreadTaskLink) -> ThreadTaskLink:
         and link.capability_selection_corruption is None
         and link.host_channel_actor is None
         and link.host_message_context is None
+        and link.cutoff_continuation is None
+        and link.host_user_origin is None
     ):
         return replace(link)
     return replace(
@@ -168,6 +170,8 @@ def _clone_cached_task_link(link: ThreadTaskLink) -> ThreadTaskLink:
         host_message_context=copy.deepcopy(link.host_message_context)
         if link.host_message_context is not None
         else None,
+        cutoff_continuation=copy.deepcopy(link.cutoff_continuation),
+        host_user_origin=copy.deepcopy(link.host_user_origin),
     )
 
 

@@ -899,7 +899,7 @@ def test_active_turn_user_input_reopens_the_model_reply_sink_once(tmp_path) -> N
             "target_id": "main-run-1",
             "message": "顺便回答一句，原任务继续。",
             "now": 10.0,
-            "metadata": {"channel_message_id": "steer-client-1"},
+            "metadata": {"channel_message_id": "steer-client-1", "kind": "active_turn_user_input"},
         }
     )
 
@@ -952,7 +952,7 @@ def test_task_local_waiting_parent_replies_to_consumed_guidance_before_yield(
             "target_id": parent.id,
             "message": "先回复已经收到，再继续等待研究员。",
             "now": 10.0,
-            "metadata": {"channel_message_id": "steer-client-1"},
+            "metadata": {"channel_message_id": "steer-client-1", "kind": "active_turn_user_input"},
         }
     )
     prompts: list[str] = []
@@ -1008,6 +1008,7 @@ def test_consumed_guidance_reply_obligation_uses_structured_ids(tmp_path) -> Non
             "target_id": "main-run-1",
             "message": "先回复我，再继续。",
             "now": 10.0,
+            "metadata": {"kind": "active_turn_user_input"},
         }
     )
     params = _tool_loop_params(run_id="main-run-1")

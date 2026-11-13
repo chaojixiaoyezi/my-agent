@@ -40,10 +40,11 @@ from ..conversation.tool_context_window import (
     TERMINAL_TOOL_FOLD_METADATA_KEY,
     build_conversation_terminal_tool_fold,
 )
-from ..runtime_errors import runtime_error_report
+from ..runtime_errors import DataCorruptionError, runtime_error_report
 from ..tooling.operation_verification import public_operation_verification
 from ..turn_end import normalize_turn_end_reason, result_turn_end_reason
 from . import request_binding
+from .history_ledger import GatewayHistoryLedger, HistoryIndexPending, legacy_repair_page
 from .io import (
     read_json_file_report,
 )
@@ -594,61 +595,56 @@ def append_gateway_conversation_message(
     metadata = metadata if isinstance(metadata, dict) else {}
     channel_message_id = str(metadata.get("message_id") or "") if role == "user" else ""
     try:
-        # 与原 recent_report(limit=100) 同窗同错，只保留去重所需字段，不驻留正文；判定顺序与原实现相同。
-        facts, errors = store.messages.recent_projection_report(conversation.thread_id, limit=100, project=_dedupe_facts)
-        if errors and not _garbage_row_errors(errors):
-            raise OSError("conversation message ledger could not be read reliably")
-        normalized_part_id = (
-            str(assistant_part_id or "final").strip() or "final" if role == "assistant" else ""
-        )
-        if any(
-            _gateway_message_matches_part(
-                fact,
-                role=role,
-                request_id=request_id,
-                channel_message_id=channel_message_id,
-                assistant_part_id=normalized_part_id,
+        ledger = GatewayHistoryLedger(store)
+        with ledger.connection() as ledger_conn:
+            if not ledger.catch_up(ledger_conn, conversation.thread_id):
+                logger.warning("GATEWAY_HISTORY_INDEX_PENDING thread=%s; append not_started, retry repair", conversation.thread_id)
+                return False
+            normalized_part_id = (
+                str(assistant_part_id or "final").strip() or "final" if role == "assistant" else ""
+            )
+            if ledger.matches(
+                ledger_conn, conversation.thread_id, role=role, request_id=request_id,
+                channel_message_id=channel_message_id, assistant_part_id=normalized_part_id,
                 execution_attempt_id=str(request.get("execution_attempt_id") or ""),
                 turn_end_reason=assistant_turn.end_reason if assistant_turn else "",
-            )
-            for fact in facts
-        ):
-            return True
-        entry_metadata: dict[str, object] = {
-            "conversation_request_id": request_id,
-            "gateway_request_id": request_id,
-            "delivery_artifacts": _metadata_artifact_refs(delivery_artifacts),
-        }
-        entry_metadata.update(request_binding.gateway_message_work_scope(request))
-        if role == "user":
-            # 当前用户消息的消息级来源=回合冻结事实（显式不可学原样保留）；旧线程上下文无来源时
-            # 只给本条补用户对话来源，不追认历史；后台/派活唤醒不经过本入口。
-            frozen = thread_source_projection(getattr(conversation, "learning_source", None))
-            entry_metadata[LEARNING_SOURCE_KEY] = frozen or user_dialogue_projection()
-        if role == "assistant":
-            entry_metadata["assistant_part_id"] = normalized_part_id
-            if request.get("execution_attempt_id"):
-                entry_metadata["gateway_execution_attempt_id"] = str(request["execution_attempt_id"])
-        if role == "assistant" and operation_verification is not None:
-            entry_metadata["operation_verification"] = public_operation_verification(
-                operation_verification
-            )
-        if role == "assistant" and isinstance(terminal_tool_fold, dict):
-            fold = dict(terminal_tool_fold)
-            if fold:
-                entry_metadata[TERMINAL_TOOL_FOLD_METADATA_KEY] = fold
-        if role == "assistant" and normalized_part_id == "final" and assistant_turn is not None:
-            entry_metadata.update(assistant_turn.metadata())
-        entry = store.messages.append(
-            {
-                "thread_id": conversation.thread_id,
-                "role": role,
-                "content": content,
-                "channel": gateway_request_channel(request) or thread_channel(store, conversation.thread_id),
-                "channel_message_id": channel_message_id,
-                "metadata": entry_metadata,
+            ):
+                return True
+            entry_metadata: dict[str, object] = {
+                "conversation_request_id": request_id,
+                "gateway_request_id": request_id,
+                "delivery_artifacts": _metadata_artifact_refs(delivery_artifacts),
             }
-        )
+            entry_metadata.update(request_binding.gateway_message_work_scope(request))
+            if role == "user":
+                # 当前用户消息的消息级来源=回合冻结事实（显式不可学原样保留）；旧线程上下文无来源时
+                # 只给本条补用户对话来源，不追认历史；后台/派活唤醒不经过本入口。
+                frozen = thread_source_projection(getattr(conversation, "learning_source", None))
+                entry_metadata[LEARNING_SOURCE_KEY] = frozen or user_dialogue_projection()
+            if role == "assistant":
+                entry_metadata["assistant_part_id"] = normalized_part_id
+                if request.get("execution_attempt_id"):
+                    entry_metadata["gateway_execution_attempt_id"] = str(request["execution_attempt_id"])
+            if role == "assistant" and operation_verification is not None:
+                entry_metadata["operation_verification"] = public_operation_verification(
+                    operation_verification
+                )
+            if role == "assistant" and isinstance(terminal_tool_fold, dict):
+                fold = dict(terminal_tool_fold)
+                if fold:
+                    entry_metadata[TERMINAL_TOOL_FOLD_METADATA_KEY] = fold
+            if role == "assistant" and normalized_part_id == "final" and assistant_turn is not None:
+                entry_metadata.update(assistant_turn.metadata())
+            entry = store.messages.append(
+                {
+                    "thread_id": conversation.thread_id,
+                    "role": role,
+                    "content": content,
+                    "channel": gateway_request_channel(request) or thread_channel(store, conversation.thread_id),
+                    "channel_message_id": channel_message_id,
+                    "metadata": entry_metadata,
+                }
+            )
         try:
             index_conversation_message(agent, store, entry)
         except Exception as exc:
@@ -703,6 +699,7 @@ def _queue_gateway_conversation_repair(
         "conversation_request_id": request_id,
         "gateway_request_id": request_id,
         "repair": True,
+        "gateway_repair_queued_at_ns": time.time_ns(),
         "delivery_artifacts": _metadata_artifact_refs(delivery_artifacts),
     }
     repair_metadata.update(request_binding.gateway_message_work_scope(request))
@@ -729,8 +726,8 @@ def _queue_gateway_conversation_repair(
         "channel_message_id": "",
         "metadata": repair_metadata,
     }
-    # Keep the legacy final filename so an upgrade can consume already queued repairs.
-    # Additional commentary parts receive their own non-colliding typed suffix.
+    # 无执行身份的旧格式保留原文件名；有身份的 final 明确带类型，旧包仍由通用重放消费。
+    # 每条 commentary 保留独立编号，不与 final 覆盖。
     if role == "assistant" and normalized_part_id != "final":
         filename = f"{request_id}-{role}-{normalized_part_id.replace(':', '-')}.json"
     else:
@@ -742,13 +739,15 @@ def _queue_gateway_conversation_repair(
         if any(identity):
             suffix = hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:24]
             priority = "1" if repair_metadata.get("turn_end_reason") == "completed" else "0"
-            filename = f"{filename[:-5]}-{priority}-{suffix}.json"
+            stem = f"{request_id}-{role}-final" if normalized_part_id == "final" else filename[:-5]
+            filename = f"{stem}-{priority}-{suffix}.json"
     path = Path(root) / "message_repairs" / filename
     try:
         from .io import write_json_file_atomic
 
         # message_repairs 含消息正文，落盘走已私有的原子写（目录 0700、文件出生 0600）。
-        write_json_file_atomic(path, payload)
+        with GatewayHistoryLedger(store).connection():
+            write_json_file_atomic(path, payload)
         indexed = getattr(agent, "_conversation_indexed_threads", set())
         indexed.discard(conversation.thread_id)
     except Exception as exc:
@@ -768,12 +767,20 @@ def repair_gateway_conversation_messages(
         _degrade(load_errors, runtime_error_report(exc, context="gateway.conversation.tail_seal"))
     root = getattr(getattr(store, "storage", None), "root", None)
     repair_dir = Path(root) / "message_repairs" if root else None
-    if repair_dir is None or not repair_dir.exists():
+    if repair_dir is None:
         return
-    processed = 0
-    for path in sorted(repair_dir.glob("*.json")):
-        if processed >= 100:
-            break
+    ledger = GatewayHistoryLedger(store)
+    # 旧目录仅做有界迁移入口。提交队列后才删旧文件，崩溃重入按原路径去重。
+    # 尚未迁移完整时不消费部分队列，避免文件枚举顺序抢先决定成功 attempt。
+    exhausted = False
+    candidates = []
+    exhausted = True
+    if repair_dir.exists():
+        candidates, exhausted = legacy_repair_page(repair_dir)
+    for entry in candidates:
+        if not entry.name.endswith(".json") or not entry.is_file(follow_symlinks=False):
+            continue
+        path = Path(entry.path)
         report = read_json_file_report(path, context="gateway.conversation.repair.read")
         if report.load_error is not None:
             try:
@@ -784,37 +791,58 @@ def repair_gateway_conversation_messages(
             _degrade(load_errors, report.load_error)
             logger.warning("GATEWAY_REPAIR_FILE_QUARANTINED path=%s archived=%s", path, archived)
             continue
-        processed += 1
-        payload = report.payload
-        if str(payload.get("thread_id") or "") != thread_id:
-            continue
         try:
-            # 与原 recent_report(limit=200) 同窗同错，只保留去重所需字段，不驻留正文；判定顺序与原实现相同。
-            facts, errors = store.messages.recent_projection_report(thread_id, limit=200, project=_dedupe_facts)
-            if errors and not _garbage_row_errors(errors):
-                load_errors.extend(errors)
-                continue
-            request_id = str((payload.get("metadata") or {}).get("gateway_request_id") or "")
-            role = str(payload.get("role") or "")
-            metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-            part_id = str(metadata.get("assistant_part_id") or "final").strip() or "final"
-            already_written = any(
-                _gateway_message_matches_part(
-                    fact,
-                    role=role,
-                    request_id=request_id,
+            with ledger.connection() as conn:
+                # 锁内重读同名包，防排队者在首读后原子替换，再被迁移误删。
+                if not path.exists():
+                    continue
+                current = read_json_file_report(path, context="gateway.conversation.repair.read")
+                if current.load_error is not None:
+                    raise DataCorruptionError(str(current.load_error))
+                ledger.import_repair(conn, entry.name, current.payload, path.stat().st_mtime_ns)
+                conn.commit()
+                path.unlink(missing_ok=True)
+        except Exception as exc:
+            load_errors.append(runtime_error_report(exc, context="gateway.conversation.repair.import"))
+            exhausted = False
+    if not exhausted:
+        _degrade(load_errors, runtime_error_report(
+            HistoryIndexPending("GATEWAY_REPAIR_MIGRATION_PENDING: bounded import incomplete; no transcript append, retry"),
+            context="gateway.conversation.repair.migration"))
+        return
+    try:
+        with ledger.connection() as conn:
+            if conn.execute("SELECT 1 FROM repairs WHERE thread=? LIMIT 1", (thread_id,)).fetchone() is None:
+                return
+            if not ledger.catch_up(conn, thread_id):
+                _degrade(load_errors, runtime_error_report(
+                    HistoryIndexPending("GATEWAY_HISTORY_INDEX_PENDING: canonical index incomplete; no transcript append, retry"),
+                    context="gateway.conversation.repair.index"))
+                return
+            pending = conn.execute(
+                "SELECT id,payload FROM repairs WHERE thread=? ORDER BY queued,id LIMIT 100",
+                (thread_id,),
+            ).fetchall()
+            for repair_id, raw in pending:
+                payload = json.loads(raw)
+                metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+                if not ledger.matches(
+                    conn, thread_id, role=str(payload.get("role") or ""),
+                    request_id=str(metadata.get("gateway_request_id") or ""),
                     channel_message_id=str(payload.get("channel_message_id") or ""),
-                    assistant_part_id=part_id,
+                    assistant_part_id=str(metadata.get("assistant_part_id") or "final"),
                     execution_attempt_id=str(metadata.get("gateway_execution_attempt_id") or ""),
                     turn_end_reason=str(metadata.get("turn_end_reason") or ""),
-                )
-                for fact in facts
-            )
-            if not already_written:
-                store.messages.append(payload)
-            path.unlink()
-        except Exception as exc:
-            load_errors.append(runtime_error_report(exc, context="gateway.conversation.repair.append"))
+                ):
+                    store.messages.append(payload)
+                    if not ledger.catch_up(conn, thread_id):
+                        raise HistoryIndexPending("GATEWAY_HISTORY_INDEX_PENDING: append committed, indexing pending; retry safely")
+                conn.execute("DELETE FROM repairs WHERE id=?", (repair_id,))
+    except Exception as exc:
+        error = runtime_error_report(exc, context="gateway.conversation.repair.append")
+        error.update(transcript_side_effects="unknown",
+                     next_action="Retry reconciliation against canonical history; do not rerun model or tools")
+        load_errors.append(error)
 
 
 # LLM: Dedupe uses request plus a host-authored assistant part id. Legacy assistant rows without
@@ -857,20 +885,23 @@ def _gateway_message_matches_part(
     same_request = str(metadata.get("gateway_request_id") or "") == request_id
     if role == "assistant":
         row_part = str(metadata.get("assistant_part_id") or "final").strip() or "final"
-        if not same_request or row_part != assistant_part_id:
+        if not same_request:
             return False
+        previous_attempt = str(metadata.get("gateway_execution_attempt_id") or "")
         previous_reason = normalize_turn_end_reason(metadata.get("turn_end_reason"))
         # 一个逻辑请求的成功终稿不可被迟到的旧尝试覆盖，补交与直接写入共用此门。
-        if assistant_part_id == "final" and previous_reason == "completed":
-            return True
-        previous_attempt = str(metadata.get("gateway_execution_attempt_id") or "")
+        if row_part == "final" and previous_reason == "completed":
+            if assistant_part_id == "final" or previous_attempt != execution_attempt_id:
+                return True
+        if row_part != assistant_part_id:
+            return False
         if previous_attempt and execution_attempt_id and previous_attempt != execution_attempt_id:
             return False
         # 保留失败尝试的原生历史；同请求恢复完成必须追加，不能被旧 final 吞掉。
         # 缺少 attempt 的旧记录仍沿原幂等规则，只有明确的未完成 -> 完成允许前进。
         return not (assistant_part_id == "final"
                     and normalize_turn_end_reason(turn_end_reason) == "completed"
-                    and previous_reason in {"error", "aborted", "interrupted", "max-tokens"})
+                    and previous_reason in {"error", "aborted", "interrupted", "max-tokens", "blocked"})
     return bool(
         same_request
         or (

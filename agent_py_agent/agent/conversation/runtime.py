@@ -722,8 +722,9 @@ def _background_goal_delivery_mode(
     deliver: bool,
     delivery_reason: str,
     route_ownership: str,
+    user_reply_required: bool = False,
 ) -> tuple[bool, str, bool]:
-    if getattr(execution_result, "user_reply_accepted", False):
+    if user_reply_required or getattr(execution_result, "user_reply_accepted", False):
         return deliver, delivery_reason, False
     idle_slice = _background_goal_idle_slice(
         goal, request, execution_result, agent=agent, store=store
@@ -1114,6 +1115,9 @@ class BackgroundMainAgentRuntime:
         )
         if required_notice(self.agent, request) is not None:
             return deliver_required_notice(self, request, execution_result)
+        from .guidance_reply_obligations import pending
+
+        reply_input_ids = pending(self.store.storage, request.thread_id, request.task_id)
         deliver, delivery_reason = _background_delivery_decision(
             self.agent,
             request,
@@ -1121,12 +1125,20 @@ class BackgroundMainAgentRuntime:
             resolved_channel=channel,
             resolved_route_supports_proactive=route_supports_proactive,
             resolved_route_supports_transcript=route_supports_transcript,
-            user_reply_accepted=execution_result.user_reply_accepted,
+            user_reply_accepted=bool(reply_input_ids) or execution_result.user_reply_accepted,
         )
+        from .technical_continuation import suppress_intermediate
+
+        identity = execution_result.execution_identity or {}
+        if suppress_intermediate(self.store, task_id=request.task_id,
+                                 run_id=identity.get("run_id", ""),
+                                 attempt_id=identity.get("attempt_id", "")):
+            deliver, delivery_reason = False, "technical_cutoff_pending"
         deliver, delivery_reason, local_transcript_only = _background_goal_delivery_mode(
             goal_context.goal, request, execution_result, agent=self.agent,
             store=self.store, deliver=deliver, delivery_reason=delivery_reason,
             route_ownership=route_ownership,
+            user_reply_required=bool(reply_input_ids),
         )
         return _complete_background_slice(
             self,
@@ -1638,7 +1650,18 @@ def _is_active_turn_lifecycle_continuation(
 # 能力控制片完成根任务后允许原模型回复进入交付；旧失败遇到已接续的源 run 也读当前子树和邮箱。
 # 这里只读结构化状态，正文/附件过滤与幂等仍归交付层；同步当前失败、能力完成和旧信封交错回归。
 # 函数用途: 决定后台模型回复是否进入用户会话；原开始快照不能吞掉长工作片已吸收结果后的最终汇报。
-def _background_delivery_decision(
+def _background_delivery_decision(agent, request, *, store=None, user_reply_accepted=False, **route):
+    deliver, reason = _base_background_delivery_decision(agent, request, store=store, **route)
+    # /btw、审计和取消保持原合同；仅用户回复被子代理等待抑制时才覆盖。
+    if not deliver and user_reply_accepted and reason in {
+        "thread_goal_lifecycle_internal", "partial_subagent_success",
+        "subagent_capability_request_open_internal", "subagent_capability_granted_internal",
+    }:
+        return True, "active_turn_user_reply"
+    return deliver, reason
+
+
+def _base_background_delivery_decision(
     agent: object,
     request: BackgroundRunRequest,
     *,
@@ -1646,7 +1669,6 @@ def _background_delivery_decision(
     resolved_channel: str | None = None,
     resolved_route_supports_proactive: bool | None = None,
     resolved_route_supports_transcript: bool | None = None,
-    user_reply_accepted: bool = False,
 ) -> tuple[bool, str]:
     """Keep partial child integration internal and publish one fresh terminal turn."""
     task_status = _background_task_link_status(agent, request, store=store)
@@ -1668,8 +1690,6 @@ def _background_delivery_decision(
         return False, f"task_{task_status}"
     # 用户问题在本轮被实际接收后，最初的后台唤醒原因不能吞掉模型答复。
     # 取消、目标终态和窄范围审计限制仍由上面的原合同处理。
-    if user_reply_accepted:
-        return True, "active_turn_user_reply"
     task_completed = task_status == "completed"
     if reason == "thread_goal_continue":
         if task_completed:
@@ -1727,6 +1747,16 @@ def _background_delivery_decision(
             if valid_report_event
             else (False, "audit_finding_not_reportable")
         )
+    if reason == "technical_cutoff_continue":
+        related, state_error = _related_subagent_runs(agent, request.task_id)
+        if state_error and state_error != "subagent_root_not_found":
+            return False, state_error
+        from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
+
+        children = [task for task in related if str(getattr(task, "id", "")) != request.task_id]
+        if any(not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES) for task in children):
+            return False, "technical_continuation_children_active"
+        return True, "technical_continuation_completion"
     if reason != "subagent_runner_finished":
         return True, "non_subagent_completion"
     status = str(metadata.get("status") or "").strip().upper()
@@ -2033,6 +2063,9 @@ def _wake_signal_should_skip(
     signal: WakeSignal,
     lifecycle_reason: str,
 ) -> bool:
+    from .technical_continuation import WAKE_REASON, claim_wake
+    if lifecycle_reason == WAKE_REASON:
+        return not claim_wake(agent, store, signal)
     return _wake_signal_is_stale(
         agent,
         store,
@@ -5006,6 +5039,16 @@ def _complete_wake_report(
     if scheduler.scheduler_service is not None:
         scheduler.scheduler_service.repository.record_waiting_delivery(report, now=time.time())
     scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
+    from .technical_continuation import WAKE_REASON, publish_pending, receipt_for
+    cutoff = None
+    if (getattr(getattr(scheduler.runtime.agent, "config", None), "technical_cutoff_continuation_enabled", False)
+            and signal.root_task_id):
+        cutoff = receipt_for(scheduler.store.tasks.load(str(signal.root_task_id)))
+    cutoff_owns_next = cutoff is not None and cutoff.status in {"pending", "claimed", "stopped"}
+    if cutoff_owns_next:
+        publish_pending(scheduler.runtime.agent, scheduler.store, str(signal.root_task_id or ""))
+    elif lifecycle_reason == WAKE_REASON and report.goal_continuation_allowed:
+        _ensure_goal_progress_wake_chain(scheduler, signal, now=now)
     if lifecycle_reason in {"audit_finding", "audit_capacity_alert"}:
         from .task_promotion import complete_named_audit_task_if_settled
 
@@ -5013,11 +5056,11 @@ def _complete_wake_report(
             scheduler.runtime.agent,
             str(signal.root_task_id or "").strip(),
         )
-    if lifecycle_reason == "thread_goal_continue":
+    if lifecycle_reason == "thread_goal_continue" and not cutoff_owns_next:
         continue_goal_after_report(
             _background_goal_dependencies(scheduler), signal, report=report, now=now,
         )
-    if lifecycle_reason == "subagent_runner_finished" and report.goal_continuation_allowed:
+    if lifecycle_reason == "subagent_runner_finished" and report.goal_continuation_allowed and not cutoff_owns_next:
         _ensure_goal_progress_wake_chain(scheduler, signal, now=now)
     if scheduler.scheduler_service is not None:
         scheduler.scheduler_service.reconcile_waiting_run(

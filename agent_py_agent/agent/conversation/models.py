@@ -267,6 +267,10 @@ class ThreadTaskLink:
     input_dependency_refs: tuple[str, ...] = ()
     # 宿主只在同线程、同工作区换代时填写；旧记录缺失时为空，不根据任务ID形状猜测。
     superseded_by_task_id: str = ""
+    # 宿主技术截断的一份有界续跑回执；不保存正文或派生执行权限。
+    cutoff_continuation: dict[str, Any] | None = None
+    # 原用户请求的宿主出处；正常收口只冻结出处，不生成续跑回执。
+    host_user_origin: dict[str, str] | None = None
 
     # LLM: None 完全省略选择键，保持旧序列化字节；损坏 marker 原值保留，不能因更新状态/pins 丢弃证据或重建 pending。
     #   续跑字段同理：空集合完全省略键，旧档案经普通状态更新重写后字节不变。
@@ -274,6 +278,10 @@ class ThreadTaskLink:
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         selection = payload.pop("capability_selection")
+        if self.cutoff_continuation is None:
+            payload.pop("cutoff_continuation")
+        if self.host_user_origin is None:
+            payload.pop("host_user_origin")
         corruption = payload.pop("capability_selection_corruption")
         refs = payload.pop("continuation_refs")
         diagnostics = payload.pop("continuation_diagnostics")
@@ -363,6 +371,8 @@ class ThreadTaskLink:
                 for item in (data.get("continuation_refs") or [])
                 if isinstance(item, dict)
             ),
+            cutoff_continuation=data.get("cutoff_continuation"),
+            host_user_origin=data.get("host_user_origin"),
             continuation_diagnostics=tuple(
                 dict(item)
                 for item in (data.get("continuation_diagnostics") or [])
@@ -488,6 +498,9 @@ class ConversationThread:
     title: str = ""
     status: str = "active"
     summary: str = ""
+    # 与已有消息追加后的线程更新同次发布；新用户输入使旧技术续跑代次失效。
+    last_user_message_id: str = ""
+    last_user_request_id: str = ""
     compacted_through_message_id: str = ""
     compacted_through_byte_offset: int = 0
     compact_generation: int = 0
@@ -601,6 +614,9 @@ class ConversationThread:
         for key in ("conversation_methods", "loaded_tool_names", "learning_source"):
             if not getattr(self, key):
                 payload.pop(key, None)
+        for key in ("last_user_message_id", "last_user_request_id"):
+            if not getattr(self, key):
+                payload.pop(key, None)
         return payload
 
     # LLM: 原 v10 及更早记录三选择字段全缺才归一为未知；坏/部分字段和未知 thread 版本拒绝，不补造手动事件。
@@ -631,6 +647,8 @@ class ConversationThread:
             owner_id=str(data.get("owner_id") or ""),
             owner_home=str(data.get("owner_home") or ""),
             model_profile_id=str(data.get("model_profile_id") or ""),
+            last_user_message_id=str(data.get("last_user_message_id") or ""),
+            last_user_request_id=str(data.get("last_user_request_id") or ""),
             **_model_selection_fields(data),
             model_selection_selected_at=data.get("model_selection_selected_at"),
             decision_settings=decision_settings,

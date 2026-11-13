@@ -311,6 +311,7 @@ def acknowledge_injected_turn_input(
                     store.guidance.acknowledgements.consume_submitted(
                         turn_id,
                         consumable_entries,
+                        consuming_task_id=str((getattr(params, "task_attributes", None) or {}).get("conversation_task_id") or getattr(params, "task_id", "") or ""),
                         provider_call_id=str(
                             state.get("_guidance_submission_id") or ""
                         ).strip(),
@@ -330,7 +331,9 @@ def acknowledge_injected_turn_input(
                 if str(getattr(entry, "guidance_id", "") or "") in delivered_ids
             ]
             # 只用宿主已确认的本人输入建立公开回复义务，跨会话事件保持内部来源。
-            user_ids = {entry.guidance_id for entry in consumed_entries if not _guidance_origin_kind(entry)}
+            from ...conversation.guidance_reply_obligations import direct_user_input
+
+            user_ids = {entry.guidance_id for entry in consumed_entries if direct_user_input(entry)}
             for packet in getattr(params, "active_turn_user_inputs", ()) or ():
                 if user_ids and set(packet.get("input_ids", ())).issubset(user_ids) and packet.get("input_ids"):
                     packet["user_reply_accepted"] = True
@@ -354,7 +357,7 @@ def acknowledge_injected_turn_input(
             guidance_pending.difference_update(delivered_ids)
             _forget_guidance_ack_entries(state, delivered_ids)
             state.pop("_guidance_submission_id", None)
-            _require_active_turn_user_reply(state, delivered_ids)
+            _require_active_turn_user_reply(state, list(user_ids))
             acknowledged += len(delivered_ids)
 
     event_pending = state.get("_task_event_ack_ids")

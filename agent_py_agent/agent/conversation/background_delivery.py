@@ -161,6 +161,11 @@ def _record_background_owner_response(
         frozen_retry=frozen_retry,
         public_receipt=public_receipt,
     )
+    if frozen_retry is None:
+        from .guidance_reply_obligations import pending
+
+        message_metadata["user_reply_input_ids"] = list(pending(
+            delivery.store.storage, request.thread_id, request.task_id))
     if display_snapshot is not None and frozen_retry is None:
         message_metadata["goal_continuation_allowed"] = display_snapshot.get("goal_continuation_allowed") is True
     if delivery_target_key:
@@ -216,6 +221,12 @@ def _record_background_owner_response(
     )
     # 多线observer已将完整目标回执和原结果写入同一outbox；共享账本错误由observer上抛，不伪装为单目标失败。
     frozen_now = _freeze_pending_owner_delivery(delivery.store, replace(freeze, persisted=commit.persisted)) if delivery_observer is None else False
+    if background_owner_delivery_committed(request, target=delivery_context.target,
+            ownership=route.ownership, canonical_record=route.canonical_record, commit=commit):
+        from .guidance_reply_obligations import settle
+
+        settle(delivery.store.storage, request.thread_id, request.task_id,
+               message_metadata.get("user_reply_input_ids", ()))
     return replace(commit, outbox_frozen=frozen_now) if frozen_now else commit
 
 
@@ -912,7 +923,7 @@ def _delivery_satisfies_request(
     ):
         return False
     reason = str(request.reason or "").strip().lower()
-    if reason == "scheduled_job_due":
+    if reason != "audit_finding":
         return True
     if reason != "audit_finding" or not audit_finding_report_event(request):
         return False
@@ -940,7 +951,9 @@ def _delivery_satisfies_request(
 def message_tool_delivery_reason(request: BackgroundDeliveryRequest) -> str:
     if str(request.reason or "").strip().lower() == "audit_finding":
         return "audit_finding_report"
-    return "scheduled_message_tool_delivery"
+    if str(request.reason or "").strip().lower() == "scheduled_job_due":
+        return "scheduled_message_tool_delivery"
+    return "message_tool_delivery"
 
 
 # LLM: 调用方只传共核后且满足原reason/refs的回执；沿原external_sent冻结出口补canonical，失败重入不再次外发。

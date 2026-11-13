@@ -63,6 +63,8 @@ class FinalizationService:
         from .model.visible_response import commit_visible_response
 
         commit_visible_response(ctx, ctx.final_response, boundary="terminal")
+        from ..conversation.technical_continuation import record_closeout
+        cutoff_receipt = record_closeout(self._agent, ctx)
         from ..conversation.required_user_action import defer_required_action_completion
         if _conversation_turn_is_terminal(ctx) and not defer_required_action_completion(self._agent, ctx):
             # 会话运行时 的普通 turn 以运行时最终响应事件结束；不解析“做完了”等自然语言，
@@ -110,7 +112,8 @@ class FinalizationService:
                 model_calls,
             )
         )
-        _schedule_typed_unfinished_continuation(self._agent, ctx)
+        if cutoff_receipt is None or cutoff_receipt.status not in {"pending", "stopped"}:
+            _schedule_typed_unfinished_continuation(self._agent, ctx)
         from .runtime.goal_accounting import finish_goal_turn_accounting
 
         finish_goal_turn_accounting(self._agent, ctx.task_attributes)

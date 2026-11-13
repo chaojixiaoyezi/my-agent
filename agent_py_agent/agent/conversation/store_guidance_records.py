@@ -31,6 +31,7 @@ class GuidanceOnceReceipt:
     # 指纹口径版本：0 = 旧回执没记版本（a646a4885 前后各写过一种口径，校验时两种任一匹配即可），
     # 1/2 = 明确口径，按版本严格重算。见 GUIDANCE_INPUT_DIGEST_VERSION。
     input_digest_version: int = 0
+    reply_delivered: bool = False
 
     # LLM: Receipt serialization stays schema-neutral at the store boundary; callers consume
     # typed fields and must not infer delivery state from filenames or prose.
@@ -47,6 +48,7 @@ class GuidanceOnceReceipt:
             "submission_id": self.submission_id,
             "submitted_at": self.submitted_at,
             "input_digest_version": int(self.input_digest_version),
+            "reply_delivered": self.reply_delivered,
             **({"migration": dict(self.migration)} if self.migration else {}),
         }
 
@@ -124,6 +126,7 @@ class GuidanceOnceReceipt:
             submitted_at=float(data.get("submitted_at") or 0.0),
             migration=migration,
             input_digest_version=_digest_version_from_payload(data.get("input_digest_version")),
+            reply_delivered=data.get("reply_delivered") is True,
         )
         if not receipt.dedupe_key or not receipt.input_digest or not receipt.entry.guidance_id:
             raise DataCorruptionError("conversation guidance receipt identity is invalid")

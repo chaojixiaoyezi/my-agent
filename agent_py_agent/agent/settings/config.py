@@ -389,6 +389,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     # 只给普通主会话追加执行中沟通软引导，不额外采样、不改变历史或执行终态。
     assistant_progress_updates_enabled: bool = True
+    technical_cutoff_continuation_enabled: bool = True
     workspace_root: str | list[str] = ""
     # 未配置时允许打开 Gateway/TUI 和 /model，但不选厂商、不调用模型；echo 仅供显式离线调试。
     model_backend: str = field(default="", metadata={"host_only": True, "model_projection": True})

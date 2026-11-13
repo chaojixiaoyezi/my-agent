@@ -488,15 +488,25 @@ class MessageStore:
             created_at=now(request.get("now")),
             metadata=request.get("metadata") or {},
         )
+        # 用户输入先推进旧续跑失效标记：即使后续消息追加失败，也只能保守停旧任务。
+        # 每条消息仍只更新线程一次；模型只有在消息追加成功后才能进入执行。
+        def mark_activity():
+            self._update_thread_atomic(
+                thread.thread_id,
+                lambda latest: replace(
+                    latest,
+                    updated_at=max(latest.updated_at, entry.created_at),
+                    **({"last_user_message_id": entry.message_id,
+                        "last_user_request_id": str(entry.metadata.get("conversation_request_id") or "")}
+                       if entry.role == "user" else {}),
+                ),
+            )
+        if entry.role == "user":
+            mark_activity()
         # 私有追加：0600/0700，存量宽权限消息账本下次写入即收紧；内容逐字节不变。
         append_private_jsonl_records_unlocked(self.storage.message_path(thread_id), [entry.to_dict()], sort_keys=True)
-        self._update_thread_atomic(
-            thread.thread_id,
-            lambda latest: replace(
-                latest,
-                updated_at=max(latest.updated_at, entry.created_at),
-            ),
-        )
+        if entry.role != "user":
+            mark_activity()
         return entry
 
     # LLM: typed display在原锁内恢复布局并封口后写本thread账本；不更新活动、Memory、执行或Compact状态。

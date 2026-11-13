@@ -39,6 +39,8 @@ system_prompt: "你是 my-agent，一个使用当前授权工具完成真实任�
 # 主会话执行中沟通只控制新增模型软引导：复杂任务按发现与动作简短说明，普通短答不强制。
 # false 时不注入新指导；不改变供应商阶段、历史、工具终态，不增加定时模型请求；重启 Gateway 后生效。
 assistant_progress_updates_enabled: true
+# 宿主技术截断后按原任务最多续跑三片；新输入、取消、无实际进展会停止。
+technical_cutoff_continuation_enabled: true
 
 # Todo 收尾只做 终端交互 风格的模型软提醒：最终回复前核对当前 exact id。
 # false 时不注入该额外上下文；宿主不猜测打勾、阻断最终回复或增加隐藏调用，显式 covers 仍按子代理 DONE 事件更新。

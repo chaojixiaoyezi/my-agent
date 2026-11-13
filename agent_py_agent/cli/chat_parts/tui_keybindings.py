@@ -1407,7 +1407,7 @@ def _handle_escape_keybinding(event, params: TuiCreateKeybindingsParams) -> None
 
 
 # LLM: Up 必须先按当前渲染宽度走软折视觉行；只有到视觉顶边才允许恢复 queue，再由 Buffer 处理逻辑行/history。
-# 函数用途: 空输入且显式选中代理时导航代理，其余保持折行、队列和历史导航顺序。
+# 函数用途: 空输入时导航已选代理或只读列表，其余保持折行、队列和历史导航顺序。
 def _handle_up_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     buffer = params.input_area.buffer
     if buffer.complete_state is not None:
@@ -1417,7 +1417,11 @@ def _handle_up_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     navigation = _agent_navigation_snapshot(params)
     if (
         not str(buffer.text or "")
-        and str(getattr(navigation, "selected_run_id", "") or "")
+        and (
+            str(getattr(navigation, "selected_run_id", "") or "")
+            or getattr(navigation, "business_list_active", False)
+            or getattr(navigation, "background_watch_active", False)
+        )
     ):
         mover = getattr(
             getattr(params, "agent_navigation", None),
@@ -1428,6 +1432,9 @@ def _handle_up_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
             _reset_exit_arms(params)
             event.app.invalidate()
             return
+    # 只读页面即使没有可选行，也不能回取执行队列或修改输入历史。
+    if getattr(navigation, "can_send_input", True) is False:
+        return
     if move_input_cursor_by_wrapped_rows(
         buffer,
         width=_input_visual_width(event, params),

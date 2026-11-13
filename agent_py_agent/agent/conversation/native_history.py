@@ -16,6 +16,7 @@ from collections.abc import Iterable, Sequence
 from copy import deepcopy
 from typing import Any
 
+from ..turn_end import normalize_turn_end_reason
 from .display_checkpoint import is_display_checkpoint
 from .input_media import _history_media_content, _InputMediaDelivery
 from .message_replay import message_rows_iterator
@@ -63,8 +64,8 @@ def provider_history_native_messages_from_metadata(metadata: object) -> tuple[di
 
 
 # LLM: A final-row canonical envelope replaces every visible row bearing the same structured
-# request identity for provider replay only. Visible prose is still preserved independently for
-# TUI/search/text backends, and turns without an envelope keep the legacy role/text projection.
+# request identity for provider replay only. 原始记录保持不变；TUI/text与本入口仅在明确成功重试存在时略过失败final，
+# 没有信封的回合继续使用role/text投影。
 # display行不参与选择；重放核心只保存envelope行位置，列表接口仍返回一次独占隔离投影。
 # 函数用途: 为需要完整内存请求的调用者物化原生历史，摘要可直接复用同一迭代核心。
 def provider_history_messages_from_rows(rows: Iterable[object]) -> tuple[dict[str, Any], ...]:
@@ -75,10 +76,11 @@ def provider_history_messages_from_rows(rows: Iterable[object]) -> tuple[dict[st
 # 函数用途: 顺序生成独立原生消息，保持identified/匿名重复及display过滤语义，不驻留全部历史正文。
 def iter_provider_history_messages_from_rows(rows: Iterable[object]):
     selected = rows if isinstance(rows, Sequence) else tuple(rows)
+    completed = completed_gateway_final_attempts(selected)
     envelopes, anonymous_envelopes = {}, {}
     with message_rows_iterator(selected) as iterator:
         for index, row in enumerate(iterator):
-            if is_display_checkpoint(row) or not _has_native_envelope(row):
+            if is_display_checkpoint(row) or superseded_gateway_final(row, completed) or not _has_native_envelope(row):
                 continue
             identity = _row_turn_identity(row)
             if identity:
@@ -88,7 +90,7 @@ def iter_provider_history_messages_from_rows(rows: Iterable[object]):
     emitted: set[str] = set()
     with message_rows_iterator(selected) as iterator:
         for index, row in enumerate(iterator):
-            if is_display_checkpoint(row):
+            if is_display_checkpoint(row) or superseded_gateway_final(row, completed):
                 continue
             identity = _row_turn_identity(row)
             envelope = envelopes.get(identity) if identity else None
@@ -104,6 +106,39 @@ def iter_provider_history_messages_from_rows(rows: Iterable[object]):
             legacy = _legacy_row_message(row)
             if legacy is not None:
                 yield legacy
+
+
+def completed_gateway_final_attempts(rows: Iterable[object]) -> dict[tuple[str, str], str]:
+    """只在调用者已选定的行内索引成功终稿；不读额外历史，不改写原始记录。"""
+    completed = {}
+    with message_rows_iterator(rows) as iterator:
+        for row in iterator:
+            metadata = getattr(row, 'metadata', None)
+            if not isinstance(metadata, dict) or getattr(row, 'role', '') != 'assistant':
+                continue
+            request = metadata.get('gateway_request_id')
+            if (not isinstance(request, str) or not request or metadata.get('background_delivery_reason')
+                    or str(metadata.get('assistant_part_id') or 'final').strip() != 'final'
+                    or normalize_turn_end_reason(metadata.get('turn_end_reason')) != 'completed'):
+                continue
+            # 同请求可有不同执行attempt；第一次明确成功使此前/迟到失败终稿失去当前展示资格。
+            completed.setdefault((str(getattr(row, 'thread_id', '')), request),
+                                 str(metadata.get('gateway_execution_attempt_id') or ''))
+    return completed
+
+
+def superseded_gateway_final(row: object, completed: dict[tuple[str, str], str]) -> bool:
+    """只隐藏已有成功重试的失败final；commentary、未知状态及独立后台片仍原样保留。"""
+    metadata = getattr(row, 'metadata', None)
+    if not isinstance(metadata, dict) or getattr(row, 'role', '') != 'assistant':
+        return False
+    if (metadata.get('background_delivery_reason')
+            or str(metadata.get('assistant_part_id') or 'final').strip() != 'final'
+            or normalize_turn_end_reason(metadata.get('turn_end_reason')) not in
+               {'error', 'aborted', 'interrupted', 'max-tokens', 'blocked'}):
+        return False
+    request = metadata.get('gateway_request_id')
+    return isinstance(request, str) and bool(request) and (str(getattr(row, 'thread_id', '')), request) in completed
 
 
 # LLM: 显式message_id仍合并最后信封；缺ID没有持久身份，只能按本次序列位置独立回放，不能借对象地址跨遍匹配。

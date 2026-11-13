@@ -51,6 +51,7 @@ class ConversationStorage:
         self.guidance_input_index_dir = self.root / "guidance_input_index"
         self.guidance_submission_batches_dir = self.root / "guidance_submission_batches"
         self.guidance_ack_batches_dir = self.root / "guidance_ack_batches"
+        self.guidance_reply_obligations_path = self.root / "guidance_reply_obligations.sqlite3"
         self.goals_dir = self.root / "goals"
         self.wake_queue_dir = self.root / "wake_queue"
         self.wake_handled_dir = self.wake_queue_dir / "handled"

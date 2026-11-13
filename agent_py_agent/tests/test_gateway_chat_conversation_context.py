@@ -2402,8 +2402,9 @@ def test_gateway_returns_answer_and_repairs_assistant_transcript_on_next_turn(
     )
     assert result.response
     assert result.conversation_persist_degraded is True
-    repair_path = agent.conversation_store.storage.root / "message_repairs" / "gw-repair-assistant.json"
-    assert repair_path.exists()
+    repair_paths = list((agent.conversation_store.storage.root / "message_repairs").glob("gw-repair-assistant*.json"))
+    assert len(repair_paths) == 1
+    repair_path = repair_paths[0]
     repair_payload = json.loads(repair_path.read_text(encoding="utf-8"))
     repair_verification = repair_payload["metadata"]["operation_verification"]
     assert repair_verification["groups"][0]["label"] == "remember/add"

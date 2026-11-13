@@ -404,6 +404,10 @@ def test_repair_keeps_one_hundred_readable_file_budget(session):
     errors = _GatewayLoadErrors()
     request_history.repair_gateway_conversation_messages(store, thread_id, errors)
     assert not errors and not errors.warnings
-    assert [path.name for path in repair_dir.glob("*.json")] == ["readable-100.json"]
+    # 旧文件已原子迁入可排序队列；本轮仍仅消费100条，剩余一条下轮处理。
+    from agent_py_agent.agent.gateway_parts.history_ledger import GatewayHistoryLedger
+    with GatewayHistoryLedger(store).connection() as conn:
+        assert conn.execute("SELECT count(*) FROM repairs WHERE thread=?", (thread_id,)).fetchone()[0] == 1
+    assert not list(repair_dir.glob("*.json"))
     rows, row_errors = store.messages.recent_report(thread_id, limit=0)
     assert not row_errors and [row.content for row in rows] == ["first", *(f"repair-{index}" for index in range(100))]

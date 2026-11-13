@@ -1,3 +1,16 @@
+## 2026-11-12 连续交互复核返工
+
+```text
+agent_py_agent/agent/
+|-- conversation/guidance_reply_obligations.py  # 已消费本人插话与真实交付的待办身份
+|-- conversation/technical_continuation.py      # 有界技术截断、原任务受理、领取和失效
+`-- gateway_parts/history_ledger.py             # 历史精确索引和待重放的持久队列
+agent_py_agent/tests/test_technical_cutoff_continuation.py  # 技术截断、原调度器执行与恢复
+agent_py_agent/tests/test_guidance_reply_obligation_bounds.py # 回复义务按页结清及故障恢复
+agent_py_agent/tests/test_workflow_scope_error_details.py    # 工作流范围的约束与可执行错误说明
+docs/reviews/CONTINUITY_R3_REVIEW_20261112.md                # Opus v2 复核后的英文说明
+```
+
 ## 2026-11-12 会话空间选择与派工归属
 
 ```text

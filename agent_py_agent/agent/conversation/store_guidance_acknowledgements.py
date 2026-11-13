@@ -47,6 +47,7 @@ class GuidanceAcknowledgements:
         entries: list[GuidanceEntry] | tuple[GuidanceEntry, ...],
         *,
         provider_call_id: str = "",
+        consuming_task_id: str = "",
         now: float | None = None,
     ) -> tuple[str, ...]:
         turn_id = str(expected_turn_id or "").strip()
@@ -74,6 +75,7 @@ class GuidanceAcknowledgements:
             "items": items,
             "provider_call_id": call_id,
             "committed_at": committed_at,
+            "consuming_task_id": consuming_task_id,
         }
         with self.ledger.turn_guard(turn_id):
             if call_id:
@@ -180,6 +182,11 @@ class GuidanceAcknowledgements:
             transition = receipt_path.with_name(f".{receipt_path.name}.transition")
             with locked_file_transition(transition):
                 receipt = self.ledger.read_receipt(receipt_path)
+                from .guidance_reply_obligations import register
+
+                # ACK 批次已原子提交；先发表欠账，再补消费投影，崩溃重放不丢义务。
+                register(self.storage, (receipt.entry,), task_id=str(batch.get("consuming_task_id") or ""),
+                         delivered=receipt.reply_delivered)
                 if receipt.status != "consumed":
                     receipt = replace(receipt, status="consumed", updated_at=time.time())
                     self.ledger.write_receipt(receipt_path, receipt.to_dict(), writer=write_json_file_atomic)
