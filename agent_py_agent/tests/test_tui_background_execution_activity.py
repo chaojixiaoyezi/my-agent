@@ -32,7 +32,8 @@ class Client:
             return {'ok': True, 'data': {'coverage': 'complete', 'next_cursor': None, 'items': [{
                 'operation_id': 'op-' + run, 'run_id': run, 'attempt_id': 'attempt', 'task_id': 'task',
                 'tool_name': 'create_subagents' if run == 'wake-real' else 'run_command',
-                'status': self.status, 'effect_outcome': 'unknown',
+                'status': self.status, 'executed': True,
+                'effect_outcome': 'running' if self.status == 'EXECUTING' else 'unknown',
                 'error': {'code': 'EXACT_FAILURE', 'message': '原错误'} if self.status == 'FAILED' else None}]}}
         if action == 'background_agents.list':
             return {'ok': True, 'data': {'coverage': 'complete', 'next_cursor': None, 'items': []}}
@@ -150,3 +151,24 @@ def test_current_execution_survives_unavailable_historical_tree_and_uses_exact_a
     assert activity['tools'][0]['run_id'] == 'wake-real'
     assert activity['coverage'] == 'partial'
     assert client.calls[-1][1]['filter'] == {'run_id': 'wake-real', 'attempt_id': 'attempt'}
+
+
+def test_unknown_and_unstarted_claimed_are_host_status_not_running_tools():
+    runtime = TuiRuntime('unknown-seat')
+    navigation = TuiAgentNavigationState(runtime)
+    operation = {'run_id': 'run', 'attempt_id': 'attempt', 'operation_id': 'operation',
+                 'tool_name': 'run_command', 'status': 'CLAIMED', 'executed': False, 'effect_outcome': 'unknown'}
+    def publish():
+        navigation._publish_business_activity('seat', runtime, {'tools': [dict(operation)], 'coverage': 'complete'})
+    publish()
+    assert not any(block.role == 'tool' for block in runtime.store.snapshot().active_blocks)
+    assert any('排队（工具主体未启动）' in str(block) for block in runtime.store.snapshot().stable_blocks)
+    operation.update(status='EXECUTING', executed=True, effect_outcome='running')
+    publish()
+    assert sum(block.role == 'tool' for block in runtime.store.snapshot().active_blocks) == 1
+    operation.update(status='UNKNOWN', effect_outcome='unknown')
+    publish()
+    snapshot = runtime.store.snapshot()
+    assert not any(block.role == 'tool' for block in snapshot.active_blocks)
+    assert not any(block.role == 'tool' for block in snapshot.stable_blocks)
+    assert any('结果待核' in str(block) and 'UNKNOWN' in str(block) for block in snapshot.stable_blocks)

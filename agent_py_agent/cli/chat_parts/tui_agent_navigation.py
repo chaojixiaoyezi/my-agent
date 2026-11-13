@@ -397,20 +397,35 @@ class TuiAgentNavigationState:
             if seen.get(key) == fingerprint:
                 continue
             status = row.get('status')
+            error = row.get('error') if isinstance(row.get('error'), dict) else {}
+            detail = ' · '.join(str(value) for value in (row['run_id'], status,
+                '主体已启动' if row.get('executed') is True else '主体未启动' if row.get('executed') is False else '主体启动未知',
+                row.get('effect_outcome'), error.get('code'), error.get('message')) if value)
+            block_id = 'business-operation:' + key
+            request_id = 'business-execution:' + row['run_id']
             if status == 'SUCCEEDED':
                 kind, phase, ok = 'tool_completed', 'completed', True
             elif status in {'FAILED', 'CANCELLED'}:
                 kind, phase, ok = 'tool_failed', 'failed', False
-            else:
+            elif status == 'EXECUTING' and row.get('executed') is True and row.get('effect_outcome') == 'running':
                 kind, phase, ok = 'tool_started', 'started', None
-            error = row.get('error') if isinstance(row.get('error'), dict) else {}
-            detail = ' · '.join(str(value) for value in (row['run_id'], status,
-                row.get('effect_outcome'), error.get('code'), error.get('message')) if value)
-            runtime._publish(kind, phase, 'business-operation:' + key,
-                {'tool': row['tool_name'], 'title': row['tool_name'], 'detail': detail,
-                 'ok': ok, 'operation_id': row['operation_id'], 'run_id': row['run_id'],
-                 'attempt_id': row['attempt_id'], 'error_code': error.get('code')},
-                request_id='business-execution:' + row['run_id'])
+            else:
+                # 这里只结束本地观察动画，不伪造工具成功/失败；未知执行仍保留为待核。
+                if any(block.block_id == block_id for block in runtime.store.snapshot().active_blocks):
+                    runtime._publish('background_activity_completed', 'completed', block_id, {}, request_id=request_id)
+                label = ('排队（工具主体未启动）' if status == 'CLAIMED' and row.get('executed') is False
+                         else '结果待核' if status == 'UNKNOWN' or row.get('effect_outcome') == 'unknown'
+                         else '执行状态待核')
+                runtime._publish('system_message', 'completed', block_id + ':state:' + str(status),
+                    {'text': row['tool_name'] + ' · ' + label + ' · ' + detail,
+                     'operation_id': row['operation_id'], 'run_id': row['run_id'],
+                     'attempt_id': row['attempt_id'], 'observed_status': status}, request_id=request_id)
+                kind = ''
+            if kind:
+                runtime._publish(kind, phase, block_id,
+                    {'tool': row['tool_name'], 'title': row['tool_name'], 'detail': detail,
+                     'ok': ok, 'operation_id': row['operation_id'], 'run_id': row['run_id'],
+                     'attempt_id': row['attempt_id'], 'error_code': error.get('code')}, request_id=request_id)
             seen[key] = fingerprint
             while len(seen) > 256:
                 seen.pop(next(iter(seen)))
