@@ -39,6 +39,7 @@ agent_py_agent/tests/test_workflow_native_governance.py      # 独立审核、�
 agent_py_agent/agent/workflows/reference_index.py           # 反向引用派生索引、提交标记与有界历史发现
 agent_py_agent/tests/test_workflow_reference_index.py        # 逐页恢复、坏记录跳过及跨用户扫描并发
 agent_py_agent/tests/test_business_usage_bounded_paging.py   # 使用记录来源分页、跨页范围及游标失效
+agent_py_agent/tests/test_business_command_log_sources.py  # 原操作结果引用、命令双流和日志覆盖往返
 docs/reviews/CONTINUITY_R3_REVIEW_20261112.md                # Opus v2 复核后的英文说明
 ```
 

@@ -435,6 +435,7 @@ def default_observation_readers(owner_home, owner_id, store, runtime, *, resourc
         readers.update({
             'tool_calls': source.tool_calls,
             'tool_calls.get': source.tool_detail,
+            'logs.read': source.logs,
             'changes.get': source.changes,
             'permissions.get': source.permissions,
             'operations.get': source.operations,
@@ -894,6 +895,8 @@ class _OwnerReaders:
     # 函数用途: 按原archive_id返回有界且脱敏的日志页。
     def logs(self, params):
         source = params['source_ref']
+        if source.startswith('tool-operation://'):
+            return self.operation_logs(params)
         if not re.fullmatch('[0-9a-f]{32}', source):
             return ObservationPage()
         root = Path(self.store.storage.root) / 'display_archives'
@@ -933,6 +936,74 @@ class _OwnerReaders:
         value = {'chunks': [{'stream': 'host', 'text': selected, 'start_cursor': start_ref,
             'end_cursor': end_ref, 'byte_count': len(selected.encode('utf-8'))}] if selected else [],
             'next_cursor': cursor, 'coverage': 'partial' if cursor else 'complete', 'truncated': False, 'gap': None}
+        return ObservationPage((self.wrap(value, facts),))
+
+    def operation_logs(self, params):
+        """由原工具回执读取独立输出流，沿相同操作归属和权限返回分页。"""
+        source = params['source_ref']
+        operation_id = source.rsplit('/', 1)[-1]
+        records = self.tool_calls({'operation_id': operation_id}).records
+        if not records or records[0].value['result_ref'] != source:
+            return ObservationPage()
+        facts = records[0]
+        rows = self.joined('tool_operations', operation_id=operation_id)
+        if not rows:
+            return ObservationPage()
+        result = json.loads(rows[0]['outcome_json']).get('result', {})
+        if result.get('result_ref') != source:
+            raise BusinessError('CURSOR_EXPIRED')
+        envelope = result.get('result_envelope') or {}
+        display = envelope.get('display') or {}
+        if not isinstance(display, dict) or display.get('kind') != 'command':
+            return ObservationPage((self.wrap({'chunks': [], 'next_cursor': None,
+                'coverage': 'unknown', 'truncated': False,
+                'gap': {'reason_code': 'STRUCTURED_COMMAND_LOG_UNAVAILABLE',
+                    'from_cursor': params.get('cursor'), 'to_cursor': None,
+                    'reset_required': False}}, facts),))
+        header = {'operation_id': operation_id, 'return_code': display.get('return_code'),
+            'redacted_input': facts.value['_input']}
+        streams = [('host', json.dumps(header, ensure_ascii=False, sort_keys=True))]
+        complete = display.get('capture_complete') is True
+        truncated = False
+        for name in ('stdout', 'stderr'):
+            text = display.get(name)
+            if isinstance(text, str):
+                streams.append((name, text))
+            else:
+                complete = False
+            truncated = truncated or display.get(name + '_truncated') is True
+        streams = [(name, redact_sensitive_value(text).encode('utf-8')) for name, text in streams]
+        digest = hashlib.sha256(b''.join(name.encode() + b'\0' + text for name, text in streams)).hexdigest()
+        cursor_source = source + '#' + digest
+        page, offset = self.log_position(cursor_source, params.get('cursor'))
+        if page >= len(streams) or offset > len(streams[page][1]):
+            raise BusinessError('CURSOR_EXPIRED')
+        chunks, remaining = [], params.get('max_bytes', 262144)
+        while page < len(streams) and remaining:
+            name, raw = streams[page]
+            selected = raw[offset:offset + remaining].decode('utf-8', errors='ignore')
+            length = len(selected.encode('utf-8'))
+            if not length and offset < len(raw):
+                if chunks:
+                    break
+                raise BusinessError('INVALID_SCHEMA', details={
+                    'reason': 'LOG_BYTE_LIMIT_SPLITS_UTF8', 'minimum_max_bytes': 4,
+                    'next_action': '将 max_bytes 提高至至少 4 后重试。'})
+            if length:
+                chunks.append({'stream': name, 'text': selected, 'byte_count': length,
+                    'start_cursor': self.log_cursor(cursor_source, page, offset),
+                    'end_cursor': self.log_cursor(cursor_source, page, offset + length)})
+            offset += length
+            remaining -= length
+            if offset == len(raw):
+                page, offset = page + 1, 0
+        cursor = self.log_cursor(cursor_source, page, offset) if page < len(streams) else None
+        gap = None if complete and not truncated else {
+            'reason_code': 'COMMAND_CAPTURE_TRUNCATED' if truncated else 'COMMAND_CAPTURE_INCOMPLETE',
+            'from_cursor': None, 'to_cursor': None, 'reset_required': False}
+        value = {'chunks': chunks, 'next_cursor': cursor,
+            'coverage': 'complete' if cursor is None and gap is None else 'partial',
+            'truncated': truncated, 'gap': gap}
         return ObservationPage((self.wrap(value, facts),))
 
     # LLM: 线程列表和distinct身份按请求复用，不从过滤字段捏造空间归属或缓存授权。
