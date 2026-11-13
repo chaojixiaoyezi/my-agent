@@ -17,6 +17,9 @@ def background_compact_scope(request, decision=None) -> CompactScope:
     if is_narrow_audit_event(request.reason):
         scope = CompactScope(kind="turn", task_id=request.task_id,
                              turn_id=getattr(request, "conversation_turn_id", ""))
+    elif decision is not None and decision.managed_session:
+        scope = CompactScope(kind="session_task", task_id=decision.task_id, task_ids=tuple(sorted(decision.task_ids)),
+                             created_at=(decision.exact_link or {}).get("created_at", 0.0))
     elif decision is not None and decision.detached:
         link = decision.exact_link or {}
         scope = CompactScope(

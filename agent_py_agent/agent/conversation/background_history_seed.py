@@ -15,6 +15,7 @@ from .background_context import (
     BackgroundContextLoad,
     BackgroundContextRequest,
     TaskScopeDecision,
+    background_task_scope_id,
     detached_task_rows,
     history_scope_selector_factory,
     is_narrow_audit_event,
@@ -48,6 +49,10 @@ def history_scope_rows(
         return []
     # 只有"本轮 exact task 确实是 detached named"才应用锚点/lineage；
     # 普通轮、无 task 轮（含 bundle 里恰好存在旧 Goal）必须完整继承历史。
+    if decision.managed_session:
+        from .background_context import _context_row_matches_task_ids
+
+        return [row for row in rows if _context_row_matches_task_ids(row.to_dict(), decision.task_ids | decision.request_ids)]
     if not decision.detached or not decision.exact_link:
         return list(rows)
     # 同一份算法：把权威行投影成 dict 交给既有 detached 行选择器，再按 message_id 映射回对象，
@@ -247,7 +252,7 @@ def background_conversation_history_seed(
         agent,
         store,
         thread,
-        str(getattr(request, "task_id", "") or "").strip(),
+        background_task_scope_id(request),
         getattr(agent, "config", None),
         policy_request,
         load_errors,

@@ -51,6 +51,16 @@ class BackgroundContextRequest(Protocol):
 
 # LLM: 仅格式化给模型的既有投影，保持键排序与 Unicode；不决定字段可信度或持久状态。
 # 函数用途: 把已筛选的结构化事实显示为稳定 JSON 段，便于复用请求前缀。
+def background_task_scope_id(request):
+    """复用宿主已传递的派活身份；普通request/task身份不变，不从正文猜订单。"""
+    selected = str(getattr(request, 'host_session_task_id', '') or '').strip()
+    wake = getattr(request, 'wake_signal', None)
+    metadata = wake.get('metadata', {}) if isinstance(wake, dict) else {}
+    if not selected and str(getattr(request, 'reason', '') or '') == 'session_task' and isinstance(metadata, dict):
+        selected = str(metadata.get('session_task_id') or '').strip()
+    return selected or str(getattr(request, 'task_id', '') or '').strip()
+
+
 def json_block(value: Any) -> str:
     return "```json\n" + json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n```"
 
@@ -99,6 +109,8 @@ class BackgroundContextLoad:
     policy_request: BackgroundToolPolicyRequest | None
     load_errors: list[dict[str, Any]]
     task_scope_ids: list[frozenset[str]] = field(default_factory=list, repr=False, compare=False)
+    session_task_scope: list[bool] = field(default_factory=list, repr=False, compare=False)
+    session_task_request_ids: list[frozenset[str]] = field(default_factory=list, repr=False, compare=False)
 
 
 # LLM: 仅保存一次已读取的后台材料；不授予身份或执行权，不进入持久状态，候选渲染不能重新触发进度写账。
@@ -141,7 +153,7 @@ def prepare_background_context(
     include_recent_messages: bool = True, context_bundle: dict[str, Any] | None = None,
 ) -> PreparedBackgroundContext:
     policy_request = tool_policy_request(agent, request, proactive_delivery_available=proactive_delivery_available)
-    task_id = str(getattr(request, "task_id", "") or "").strip()
+    task_id = background_task_scope_id(request)
     payload = _prepare_context_payload(
         agent, store, thread, task_id, policy_request,
         active_wake_signal=model_visible_wake_signal(getattr(request, "wake_signal", None)),
@@ -464,6 +476,8 @@ class TaskScopeDecision:
     task_ids: frozenset[str]
     exact_link: dict[str, Any] | None
     detached: bool
+    managed_session: bool = False
+    request_ids: frozenset[str] = frozenset()
 
 
 # LLM: exact_link 必须按本轮 task_id 精确匹配；无 task_id 的普通事件不做任何范围收缩。
@@ -480,12 +494,34 @@ def task_scope_decision(
         (row for row in task_rows if str(row.get("task_id") or "").strip() == task_id),
         None,
     )
+    managed = _managed_session_scope(state)
     return TaskScopeDecision(
         task_id=task_id,
         task_ids=frozenset(_task_context_ids(state)),
         exact_link=exact_link,
         detached=_is_detached_named_task_link(exact_link),
+        managed_session=managed,
+        request_ids=state.session_task_request_ids[0] if managed else frozenset(),
     )
+
+
+def _managed_session_scope(state):
+    """受管订单只继承原订单上下文；取消范围不再充当历史范围。"""
+    if state.session_task_scope:
+        return state.session_task_scope[0]
+    tasks = getattr(state.store, 'session_tasks', None)
+    task = tasks.load(state.task_id) if tasks is not None else None
+    managed = task is not None and 'business_context' in task.metadata
+    if managed:
+        from .business_contracts import BusinessExecutionContext
+
+        context = BusinessExecutionContext.from_dict(task.metadata['business_context'])
+        if (task.target_thread_id != state.thread.thread_id or context.task_id != state.task_id
+                or context.owner_id != state.thread.owner_id):
+            raise ValueError('SESSION_TASK_HISTORY_SCOPE_MISMATCH')
+    state.session_task_request_ids.append(frozenset({str(getattr(task, "conversation_request_id", "") or "")} - {""}) if managed else frozenset())
+    state.session_task_scope.append(managed)
+    return managed
 
 
 # LLM: 仅用结构化事件类型、直属parent和depth排除越级观察；普通观察与缺旧字段兼容，不解析正文或修改原账。
@@ -524,7 +560,7 @@ def _task_scoped_operational_context(
     projection neither copies history nor classifies natural-language text.
     """
     decision = task_scope_decision(state, bundle)
-    if messages_deferred and not decision.detached:
+    if messages_deferred and not (decision.detached or decision.managed_session):
         rows, errors = state.store.messages.recent_report(
             state.thread.thread_id, limit=CONVERSATION_CONTEXT_RECENT_LIMIT_COUNT,
         )
@@ -532,7 +568,7 @@ def _task_scoped_operational_context(
         bundle = {**bundle, "messages": [row.to_dict() for row in rows]}
     if not decision.task_id:
         return bundle
-    task_ids = set(decision.task_ids)
+    task_ids = set(decision.task_ids | decision.request_ids)
     task_rows = _dict_rows(bundle.get("tasks"))
     scoped = dict(bundle)
     scoped["tasks"] = [row for row in task_rows if _context_row_matches_task_ids(row, task_ids)]
@@ -552,6 +588,10 @@ def _task_scoped_operational_context(
         for row in _dict_rows(bundle.get("goals"))
         if _context_row_matches_task_ids(row, task_ids)
     ]
+    if decision.managed_session:
+        link = {**(decision.exact_link or {}), "context_anchor_message_id": "", "created_at": 0.0}
+        projected = _detached_named_task_context(state, scoped, link, task_ids)
+        return projected
     if decision.detached:
         return _detached_named_task_context(state, scoped, decision.exact_link or {}, task_ids)
     return scoped
@@ -686,6 +726,8 @@ def history_scope_selector_factory(decision: TaskScopeDecision):
     # LLM: positions是当前固定EOF内全部非display消息的只读位置，缺锚点不能退到时间扩大范围。
     # 函数用途: 只编译一次原范围谓词，将消息元数据直接投影给唯一任务筛选算法。
     def compile_selector(positions):
+        if frozen.managed_session:
+            return lambda row: _context_row_matches_task_ids({"metadata": row.metadata}, frozen.task_ids | frozen.request_ids)
         if not frozen.detached or not frozen.exact_link:
             return lambda _row: True
         predicate = detached_row_selector(frozen.exact_link, frozen.task_ids, positions)
@@ -727,6 +769,8 @@ _TASK_CONTEXT_ID_KEYS = (
     "root_task_id",
     "conversation_task_id",
     "gateway_request_id",
+    "conversation_request_id",
+    "session_task_id",
 )
 
 
@@ -917,7 +961,7 @@ def tool_policy_request(
     snapshot = policy_snapshot_from_request(request)
     store = getattr(agent, "conversation_store", None)
     thread_id = str(getattr(request, "thread_id", "") or "").strip()
-    task_id = str(getattr(request, "task_id", "") or "").strip()
+    task_id = background_task_scope_id(request)
     wake = getattr(request, "wake_signal", None)
     wake_meta = (wake.get("metadata") if isinstance(wake, dict) else getattr(wake, "metadata", None)) or {}
     goal_id = str(wake_meta.get("goal_id") or "").strip() if isinstance(wake_meta, dict) else ""

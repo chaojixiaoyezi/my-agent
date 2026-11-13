@@ -404,10 +404,12 @@ def _background_owner_message_metadata(
         source = derive_source_projection(wake_metadata)
     if source is None:
         source = background_projection()
+    from .background_context import background_task_scope_id
+
     metadata: dict[str, object] = {
         "conversation_request_id": request.conversation_turn_id,
         "reason": request.reason,
-        "task_id": request.task_id,
+        "task_id": background_task_scope_id(request),
         "delivery_artifacts": [dict(item) for item in delivery_artifacts],
         "projection_status": projection_status,
         "background_delivery_reason": delivery_reason,

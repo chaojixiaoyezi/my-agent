@@ -21,7 +21,7 @@ class CompactScope:
     # LLM: 构造与账本读取共用同一校验，不得宽松转换坏身份或默许全线程携带局部字段。
     # 函数用途: 拒绝不完整和相互矛盾的范围事实，避免坏 checkpoint 扩大历史读取。
     def __post_init__(self) -> None:
-        if type(self.kind) is not str or self.kind not in {"thread", "task", "turn"}:
+        if type(self.kind) is not str or self.kind not in {"thread", "task", "turn", "session_task"}:
             raise ValueError("Compact 作用域类型无效")
         if type(self.task_ids) is not tuple or any(type(value) is not str for value in (
             self.task_id, self.turn_id, self.anchor_message_id, *self.task_ids,
@@ -35,7 +35,7 @@ class CompactScope:
             self.task_id, self.turn_id, self.task_ids, self.anchor_message_id, self.created_at,
         )):
             raise ValueError("全线程 Compact 不得带局部身份")
-        if self.kind == "task" and (not self.task_id or self.turn_id or not self.created_at):
+        if self.kind in {"task", "session_task"} and (not self.task_id or self.turn_id or not self.created_at):
             raise ValueError("任务 Compact 缺少身份或创建时间")
         if self.kind == "turn" and (not self.turn_id or self.created_at or self.anchor_message_id or self.task_ids):
             raise ValueError("活动轮 Compact 身份无效")

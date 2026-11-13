@@ -443,6 +443,8 @@ def _persist_background_native_turn(store: ConversationStore, request: Backgroun
     # 窄范围审计事件不是普通会话续接，沿原隔离合同保存，不把内部事件写入用户模型历史。
     if is_narrow_audit_event(request.reason):
         return
+    from .background_context import background_task_scope_id
+
     native = canonical_native_messages_envelope(getattr(result, "canonical_native_messages", None))
     internal_result = str(getattr(result, "internal_response", "") or "")
     if not native and not internal_result:
@@ -451,7 +453,7 @@ def _persist_background_native_turn(store: ConversationStore, request: Backgroun
         "thread_id": request.thread_id, "role": "assistant", "content": "", "channel": request.route_channel,
         "metadata": {
             "conversation_request_id": request.conversation_turn_id,
-            "assistant_part_id": "native", "task_id": request.task_id,
+            "assistant_part_id": "native", "task_id": background_task_scope_id(request),
             "turn_end_reason": result_turn_end_reason(result),
             CANONICAL_NATIVE_MESSAGES_METADATA_KEY: native,
             "internal_execution_result": internal_result,
