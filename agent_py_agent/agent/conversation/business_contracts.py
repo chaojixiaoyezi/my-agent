@@ -212,8 +212,16 @@ class WorkflowScope(_BusinessDTO):
         _enum(self.scope_mode, 'scope_mode', ('owner_global', 'spaces', 'unassigned'))
         _counter(self.scope_revision, 'scope_revision')
         _freeze_refs(self, 'space_ids')
-        if self.scope_mode == 'spaces':
-            if not self.space_ids or len(set(self.space_ids)) != len(self.space_ids):
-                raise ValueError('spaces 范围必须非空且空间编号唯一')
-        elif self.space_ids:
-            raise ValueError('owner_global/unassigned 范围的空间集合必须为空')
+        constraint = ('minItems' if not self.space_ids else 'uniqueItems') if self.scope_mode == 'spaces' else 'maxItems'
+        invalid = (not self.space_ids or len(set(self.space_ids)) != len(self.space_ids)) if self.scope_mode == 'spaces' else bool(self.space_ids)
+        if invalid:
+            from .business_access import BusinessError
+
+            expected = {'minItems': 1, 'maxItems': 0, 'uniqueItems': True}[constraint]
+            action = {'minItems': 'spaces 范围至少指定一个空间。',
+                      'maxItems': f'{self.scope_mode} 范围必须清空空间集合。',
+                      'uniqueItems': 'spaces 范围必须移除重复的空间编号。'}[constraint]
+            raise BusinessError('INVALID_SCHEMA', details={
+                'field_path': '$.scope.space_ids', 'constraint': constraint, 'expected': expected,
+                'schema_selector': self.scope_mode, 'next_action': action + '修正后重新提交；本次未开始执行。',
+            })

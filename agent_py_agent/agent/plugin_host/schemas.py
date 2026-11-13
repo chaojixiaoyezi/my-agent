@@ -139,8 +139,9 @@ def closed(required: dict, optional: dict | None = None) -> dict:
 # LLM: defaults只在明确缺字段时注入，显式null不是省略。
 # 函数用途: 按静态schema验证输入并应用规范默认值。
 def validate_object(value: object, schema: dict) -> dict:
-    if not isinstance(value, dict) or not validate_tool_input(value, schema).ok:
-        raise HostAPIError("INVALID_SCHEMA")
+    validation = validate_tool_input(value, schema)
+    if not isinstance(value, dict) or not validation.ok:
+        raise _invalid_schema(_schema_diagnostic(value, schema, schema))
     _validate_units(value, schema)
     result = json.loads(canonical_json(value))
     for key, field in schema.get("properties", {}).items():
@@ -149,21 +150,69 @@ def validate_object(value: object, schema: dict) -> dict:
     return result
 
 
+def _invalid_schema(details: dict) -> HostAPIError:
+    """沿原错误码与副作用合同携带安全的约束事实，不回显参数值。"""
+    error = HostAPIError('INVALID_SCHEMA')
+    error.details = details
+    return error
+
+
+def _schema_diagnostic(value, schema, root, *, path='$', depth=0, selector='') -> dict:
+    """复用原校验器，唯一const判别分支只用于解释失败，不改变合法性结论。"""
+    if depth <= JSON_DEPTH_COUNT:
+        if '$ref' in schema:
+            return _schema_diagnostic(value, _unit_reference(root, schema['$ref']), root,
+                                      path=path, depth=depth + 1, selector=selector)
+        for keyword in ('oneOf', 'anyOf'):
+            candidates = []
+            for branch in schema.get(keyword, []):
+                constants = {key: prop['const'] for key, prop in branch.get('properties', {}).items()
+                             if isinstance(prop, dict) and 'const' in prop}
+                if constants and isinstance(value, dict) and all(key in value and type(value[key]) is type(item) and value[key] == item
+                                                           for key, item in constants.items()):
+                    candidates.append((branch, constants))
+            if len(candidates) == 1:
+                branch, constants = candidates[0]
+                return _schema_diagnostic(value, branch, root, path=path, depth=depth + 1,
+                    selector=canonical_json(constants)[:256])
+        if isinstance(value, dict):
+            for key, child in schema.get('properties', {}).items():
+                if key in value and not validate_tool_input(value[key], {**child, '$defs': root.get('$defs', {})}).ok:
+                    return _schema_diagnostic(value[key], child, root, path=f'{path}.{key}',
+                                              depth=depth + 1, selector=selector)
+    validation = validate_tool_input(value, {**schema, '$defs': root.get('$defs', {})})
+    issue = validation.issues[0] if validation.issues else None
+    constraint = issue.keyword if issue else 'type'
+    expected = issue.expected if issue else 'object'
+    if expected is not None and type(expected) not in (str, int, float, bool):
+        expected = canonical_json(expected)[:256]
+    details = {'field_path': (path + issue.path[1:] if issue else path)[:512],
+               'constraint': constraint, 'expected': expected,
+               'next_action': '按此字段约束修正参数后重新提交；本次未开始执行。'}
+    if constraint == 'minItems':
+        details['next_action'] = f'至少提供 {expected} 个条目后重新提交；本次未开始执行。'
+    elif constraint == 'maxItems':
+        details['next_action'] = f'最多保留 {expected} 个条目后重新提交；本次未开始执行。'
+    if selector:
+        details['schema_selector'] = selector
+    return details
+
+
 # 单位校验复用原 validator 的分支匹配与原根，避免孤立分支丢失 defs 或误选不匹配 oneOf。
 # active 只阻断同一值/同一 schema 的无进展环；JsonValue 递归到不同子值仍然有效。
-def _validate_units(value, schema: dict, *, root: dict | None = None, active: frozenset = frozenset()) -> None:
+def _validate_units(value, schema: dict, *, root: dict | None = None, active: frozenset = frozenset(), path: str = "$") -> None:
     root = schema if root is None else root
     marker = (id(value), id(schema))
     if marker in active:
         raise HostAPIError("INVALID_SCHEMA")
     active = active | {marker}
     if "$ref" in schema:
-        _validate_units(value, _unit_reference(root, schema["$ref"]), root=root, active=active)
+        _validate_units(value, _unit_reference(root, schema["$ref"]), root=root, active=active, path=path)
     for branch in schema.get("allOf", []):
-        _validate_units(value, branch, root=root, active=active)
+        _validate_units(value, branch, root=root, active=active, path=path)
     for keyword in ("oneOf", "anyOf"):
         if keyword in schema:
-            _validate_unit_branches(value, schema[keyword], keyword, root, active)
+            _validate_unit_branches(value, schema[keyword], keyword, root, active, path)
     kind = schema.get("type")
     kinds = kind if isinstance(kind, list) else [kind]
     if value is not None and "integer" in kinds and set(kinds) <= {"integer", "null"} and type(value) is not int:
@@ -185,12 +234,13 @@ def _validate_units(value, schema: dict, *, root: dict | None = None, active: fr
         for key, item in value.items():
             additional = schema.get("additionalProperties", {})
             child = schema.get("properties", {}).get(key, additional if isinstance(additional, dict) else {})
-            _validate_units(item, child, root=root, active=active)
+            _validate_units(item, child, root=root, active=active, path=f"{path}.{key}")
     if isinstance(value, list):
         if schema.get("uniqueItems") and len({canonical_json(item) for item in value}) != len(value):
-            raise HostAPIError("INVALID_SCHEMA")
-        for item in value:
-            _validate_units(item, schema.get("items", {}), root=root, active=active)
+            raise _invalid_schema({'field_path': path, 'constraint': 'uniqueItems', 'expected': True,
+                                   'next_action': '移除重复条目后重新提交；本次未开始执行。'})
+        for index, item in enumerate(value):
+            _validate_units(item, schema.get("items", {}), root=root, active=active, path=f"{path}[{index}]")
 
 
 def _unit_reference(root: dict, reference: object) -> dict:
@@ -208,19 +258,23 @@ def _unit_reference(root: dict, reference: object) -> dict:
     return target
 
 
-def _validate_unit_branches(value, branches: list, keyword: str, root: dict, active: frozenset) -> None:
+def _validate_unit_branches(value, branches: list, keyword: str, root: dict, active: frozenset, path: str) -> None:
     matched = 0
+    rejected = []
     for branch in branches:
         if not _branch_is_valid(value, branch, root, "$", 0):
             continue
         try:
-            _validate_units(value, branch, root=root, active=active)
-        except HostAPIError:
+            _validate_units(value, branch, root=root, active=active, path=path)
+        except HostAPIError as error:
+            rejected.append(error)
             continue
         matched += 1
         if keyword == "anyOf":
             return
     if matched != 1:
+        if len(rejected) == 1 and getattr(rejected[0], 'details', None):
+            raise rejected[0]
         raise HostAPIError("INVALID_SCHEMA")
 
 
