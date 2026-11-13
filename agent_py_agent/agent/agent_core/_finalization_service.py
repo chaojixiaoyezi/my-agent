@@ -69,8 +69,16 @@ class FinalizationService:
         if _conversation_turn_is_terminal(ctx) and not defer_required_action_completion(self._agent, ctx):
             # 会话运行时 的普通 turn 以运行时最终响应事件结束；不解析“做完了”等自然语言，
             # 也不再扫描 output/ 或要求模型额外提交验收。
-            from ..conversation.task_promotion import complete_current_conversation_task
+            from ..conversation.business_contracts import BusinessExecutionContext
+            from ..conversation.task_promotion import (
+                complete_current_conversation_task,
+                promote_conversation_task_for_run,
+            )
 
+            current = getattr(self._agent, "_current_run_params", None)
+            # 原受管订单即使无需工具，也须在同轮收口前建立原TaskLink；不依赖可关闭的运行归档。
+            if isinstance(getattr(current, "business_context", None), BusinessExecutionContext):
+                promote_conversation_task_for_run(self._agent, current)
             complete_current_conversation_task(
                 self._agent,
                 ctx.task_attributes,

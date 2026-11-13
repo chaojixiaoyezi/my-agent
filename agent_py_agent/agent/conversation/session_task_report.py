@@ -93,6 +93,12 @@ def finish_task_for_turn(
     if task is None:
         return None
     tasks = agent.conversation_store.session_tasks
+    # 仅已完成原TaskLink才可发表受管订单终态，避免等待片占用唯一结果回执。
+    # 复用已解析的原任务，不额外扫描历史，也不由模型回复判断是否还有工作。
+    if outcome.ok and isinstance((getattr(task, "metadata", None) or {}).get("business_context"), dict):
+        link, error = agent.conversation_store.tasks.link_report(task.target_thread_id, task.task_id)
+        if error is not None or link is None or link.status != "completed":
+            return None
     target_status = SESSION_TASK_DONE if outcome.ok else SESSION_TASK_FAILED
     try:
         updated = tasks.advance(

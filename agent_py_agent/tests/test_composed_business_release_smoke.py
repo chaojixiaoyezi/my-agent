@@ -11,6 +11,8 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.backends.base import EchoBackend, _utc_now_iso
@@ -330,29 +332,43 @@ def test_same_order_composed_release_smoke(native, monkeypatch):  # noqa: F811
 
 
 def test_managed_order_closeout_requires_original_link_completion(monkeypatch):
-    """活子任务/未读结果保留accepted；只认原TaskLink完成，旧普通派活不新增门。"""
-    from agent_py_agent.agent.conversation import (
-        im_delegation_delivery,
-        runtime,
-        session_task_report,
-    )
+    from agent_py_agent.agent.conversation import session_task_report
 
     closed = []
-    monkeypatch.setattr(im_delegation_delivery, 'delegated_delivery_task', lambda *_a, **_k: None)
-    monkeypatch.setattr(session_task_report, 'close_out_turn', lambda *_a: closed.append(True))
-    task = SimpleNamespace(task_id='original-order', metadata={'business_context':{'task_id':'original-order'}})
+    task = SimpleNamespace(task_id='original-order', target_thread_id='controller', metadata={'business_context':{}})
     monkeypatch.setattr(session_task_report, 'task_for_turn', lambda *_a: task)
-    request = SimpleNamespace(thread_id='controller', task_id='original-order')
-    result = SimpleNamespace(runtime_status='', error=None, response='本回合回复', execution_identity={})
+    tasks = SimpleNamespace(advance=lambda *_a: closed.append(True))
     for status, error, expected in [('active', None, False), (None, None, False),
                                     ('completed', ValueError('unreadable'), False), ('completed', None, True)]:
         def link_report(thread_id, task_id):
             assert (thread_id, task_id) == ('controller', 'original-order')
             return (SimpleNamespace(status=status) if status is not None else None), error
-        agent = SimpleNamespace(conversation_store=SimpleNamespace(tasks=SimpleNamespace(link_report=link_report)))
+        agent = SimpleNamespace(conversation_store=SimpleNamespace(session_tasks=tasks, tasks=SimpleNamespace(link_report=link_report)))
         before = len(closed)
-        runtime._close_out_session_task_turn(agent, request, result, turn_id='original-turn')
+        session_task_report.finish_task_for_turn(agent, 'original-turn', session_task_report.TaskTurnOutcome(ok=True))
         assert (len(closed) == before + 1) is expected
     task.metadata = {}
-    runtime._close_out_session_task_turn(agent, request, result, turn_id='original-turn')
+    session_task_report.finish_task_for_turn(agent, 'original-turn', session_task_report.TaskTurnOutcome(ok=True))
     assert len(closed) == 2
+
+
+@pytest.mark.parametrize('workspace_enabled', [True, False])
+def test_simple_managed_order_without_tools_closes_in_same_turn(native, monkeypatch, workspace_enabled):  # noqa: F811
+    from agent_py_agent.cli.gateway_loops import _build_background_scheduler
+    from agent_py_agent.tests.test_business_v12_background_scheduling import add_echo_profile
+
+    agent = native[1]
+    agent.config.run_task_workspace_enabled = workspace_enabled
+    add_echo_profile(agent)
+    wire = _Wire(native)
+    space = wire.call('spaces.create', {'name':'simple-managed-order'})
+    wire.call('controllers.ensure')
+    accepted = wire.call('tasks.submit', {'space_id':space['space_id'], 'instruction':'仅回复一句收到。'})
+    task = agent.conversation_store.session_tasks.require(accepted['task_id'])
+    monkeypatch.setattr(EchoBackend, 'generate', lambda backend, *_a, **_k: ModelResponse('收到。', backend.name))
+    scheduler = _build_background_scheduler(agent, FakeDeliveryService())
+    scheduler.tick_thread(task.target_thread_id)
+    updated = agent.conversation_store.session_tasks.require(task.task_id)
+    link, error = agent.conversation_store.tasks.link_report(task.target_thread_id, task.task_id)
+    assert updated.status == 'done' and link.status == 'completed' and error is None
+    assert updated.summary == '收到。'

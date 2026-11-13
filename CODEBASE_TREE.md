@@ -10,6 +10,7 @@ agent_py_agent/tests/
 |-- test_composed_business_release_smoke.py                       # 同单派工、独审、发布、原会话实际收件
 |-- test_reviewer_frozen_material.py                              # 冻结材料归属、版本、容量与读取边界
 |-- test_subagent_reviewer_contract.py                            # 原生审核角色的工具授权与派工
+|-- test_tool_operation_result_ref_wire.py                       # 完整工具结果 URI 经业务列表和详情往返
 |-- test_workflow_artifact_delivery_edges.py                      # 文件读取、响应码、范围和完整性
 `-- test_workflow_run_out_resume_batches.py                       # 恢复尝试、批次文件与业务客户端查询
 ```
