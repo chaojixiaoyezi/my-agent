@@ -6,18 +6,22 @@
 # 模块用途: 读写有界请求及溢出缓冲、每日总结调用历史、登记表和版本；不调用模型，不代替正式发布确认。
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import math
 import os
 import re
-import shutil
+import stat
 import time
 import uuid
+from collections.abc import Callable, Collection
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import MISSING, dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..common.json_io import (
     append_private_jsonl_capped,
@@ -27,7 +31,13 @@ from ..common.json_io import (
     write_json_file_atomic_unlocked,
 )
 from ..common.nofollow_fs import (
+    NoFollowPathError,
+    _openat_directory,
+    _openat_file,
+    _validate_relative_parts,
     list_names_beneath,
+    open_directory_beneath,
+    read_bytes_beneath,
     read_text_beneath,
     unlink_file_beneath,
     write_text_atomic_beneath,
@@ -37,6 +47,11 @@ from ..user_space.owner_quota import (
     OwnerQuotaChange,
     owner_quota_enforcer_from_policy,
 )
+from .skill_snapshot import skill_content_sha256
+from .skills import MAX_SKILL_BYTES
+
+if TYPE_CHECKING:
+    from ..runtime_db.repository import RuntimeRepository
 
 REQUEST_SCHEMA_VERSION = "my-agent.skill-learning-request.v1"
 REGISTRY_SCHEMA_VERSION = "my-agent.skill-learning-registry.v1"
@@ -66,19 +81,66 @@ CODE_QUEUE_FULL = "SKILL_LEARNING_QUEUE_FULL"
 CODE_USER_REQUEST_INELIGIBLE = "SKILL_LEARNING_USER_REQUEST_INELIGIBLE"
 CODE_REQUEST_CORRUPT = "SKILL_LEARNING_REQUEST_CORRUPT"
 CODE_REGISTRY_CORRUPT = "SKILL_LEARNING_REGISTRY_CORRUPT"
+CODE_EVIDENCE_INCOMPLETE = "SKILL_LEARNING_EVIDENCE_INCOMPLETE"
+CODE_MAINTENANCE_OBSERVE_ONLY = "SKILL_LEARNING_OBSERVE_ONLY"
+CODE_ARCHIVE_EXPIRED = "SKILL_LEARNING_ARCHIVE_EXPIRED"
 
 _REQUEST_FILE_RE = re.compile(r"[0-9]{13}-[0-9a-f]{16}\.json")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_SKILL_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,127}")
+_FAMILY_RE = re.compile(r"^$|^[0-9a-f]{64}$")
+_VALID_MAINT_STATES = frozenset({"trial", "active", "cooled", "archived", "disabled"})
+_VALID_MAINT_QUALITIES = frozenset({"trial", "established", "unreliable"})
+_VALID_USAGE_COVERAGES = frozenset({"exact", "lower_bound", "unknown"})
+_VALID_OWNERSHIPS = frozenset({"machine", "user_modified", "owner_layout", "unknown"})
+_VALID_OP_KINDS = frozenset({"archive", "restore", "displace_publish", "evict", "remove", "rollback"})
+_VALID_OP_PHASES = frozenset({"prepared", "moved", "committed", "cleanup"})
+_VALID_CURSOR_PHASES = frozenset({"recover", "usage", "ownership", "lifecycle", "versions", "receipts", "done"})
+_STABLE_VERSION_KEYS = frozenset({"version", "revision", "sha256", "established_at"})
+_CURSOR_KEYS = frozenset({"phase", "after_name", "after_entry", "source_generation", "started_at", "retry_after"})
+_LIFECYCLE_OP_KEYS = frozenset({
+    "operation_id",
+    "kind",
+    "phase",
+    "skill_name",
+    "expected_revision",
+    "expected_sha256",
+    "source_rel",
+    "target_rel",
+    "versions_rel",
+    "candidate_rel",
+    "tombstone_rel",
+    "candidate_name",
+    "candidate_sha256",
+    "candidate_revision",
+    "cleanup_cursor",
+    "event_id",
+    "created_at",
+    "reason_code",
+})
+_LIFECYCLE_OP_REQUIRED = frozenset({
+    "operation_id",
+    "kind",
+    "phase",
+    "skill_name",
+    "expected_revision",
+    "expected_sha256",
+    "source_rel",
+    "target_rel",
+    "versions_rel",
+    "created_at",
+})
 
 
 # LLM: code 是唯一机器判断字段；登记表损坏时 fail closed，调用方不能把它当成空登记表继续写。
 # 类用途: 表示自学 Skill 落盘状态读不出或不合规。
 class SkillLearningStoreError(Exception):
-    # LLM: 只保存结果码和人读说明，不携带文件正文。
+    # LLM: 只保存结果码、结构化细节和人读说明，不携带文件正文。
     # 函数用途: 构造一次带结果码的存储错误。
-    def __init__(self, code: str, message: str = "") -> None:
+    def __init__(self, code: str, message: str = "", *, detail: dict[str, object] | None = None) -> None:
         super().__init__(message or code)
         self.code = code
+        self.detail = dict(detail or {})
 
 
 # LLM: sha256 是发布时 SKILL.md 全文的 skill_content_sha256，与 SkillsService 快照条目的 content_sha256 同算法；
@@ -131,14 +193,25 @@ class LearnedSkill:
         runs = payload.get("source_run_ids") or []
         if not isinstance(runs, list) or not all(isinstance(item, str) for item in runs):
             raise ValueError("learned skill source_run_ids must be a list of ids")
-        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,127}",_text(payload,"name")) or payload.get("layout","learned") not in {"owner","learned"}:
+        if not _SKILL_NAME_RE.fullmatch(_text(payload, "name")) or payload.get("layout", "learned") not in {"owner", "learned"}:
             raise ValueError("learned skill layout/name invalid")
+        raw_op_id = payload.get("last_operation_id")
+        if raw_op_id is not None and not isinstance(raw_op_id, str):
+            raise ValueError("learned skill last_operation_id must be a string")
+        raw_maint = payload.get("maintenance")
+        if raw_maint is None:
+            maint = {}
+        elif not isinstance(raw_maint, dict):
+            raise ValueError("learned skill maintenance must be an object")
+        else:
+            maint = _validate_maintenance(raw_maint)
         return cls(_text(payload, "name"), version, sha, _text(payload, "created_at"),
-                   _text(payload, "updated_at"), tuple(runs), revision, str(payload.get("last_operation_id") or ""), dict(payload.get("maintenance") or {}), str(payload.get("layout") or "learned"))
+                   _text(payload, "updated_at"), tuple(runs), revision, raw_op_id or "", maint, str(payload.get("layout") or "learned"))
 
 
 # LLM: skills 是自学 Skill 的唯一登记；blocked_names 是用户删过的名字，自动流程永不再新建；
-#   daily_date/daily_calls与最近30日daily_history仅统计总结模型调用，不统计Skill正文使用。
+#   blocked_task_families 保存用户/三次负反馈永久停用的同类方法指纹；pending_operation 记录可恢复目录转换意图；
+#   usage_watermark 与 runtime receipt sequence 属于不同域，绝不混用比较。
 # 类用途: registry.json 的完整内容。
 @dataclass(frozen=True)
 class SkillLearningRegistry:
@@ -150,8 +223,13 @@ class SkillLearningRegistry:
     daily_history: dict[str, int] = field(default_factory=dict)
     assets: dict[str, dict] = field(default_factory=dict)
     last_maintenance_at: float = 0
+    usage_watermark: int = 0
+    maintenance_cursor: dict = field(default_factory=dict)
+    pending_operation: dict | None = None
+    blocked_task_families: tuple[str, ...] = ()
+    catalog_generation: str = ""
 
-    # LLM: 保持原schema和单日快照，另存有界每日调用历史；不改正式Skill登记事实。
+    # LLM: 保持原schema和单日快照，另存有界每日调用历史与增量维护/意图状态；不改正式Skill登记事实。
     # 函数用途: 转成写入 registry.json 的字典。
     def to_record(self) -> dict[str, object]:
         return {
@@ -160,10 +238,25 @@ class SkillLearningRegistry:
             "blocked_names": sorted(set(self.blocked_names)),
             "daily": {"date": self.daily_date, "calls": self.daily_calls},
             "daily_history": dict(self.daily_history),
-            "import_operations":dict(self.import_operations),
+            "import_operations": dict(self.import_operations),
             "assets": dict(self.assets),
             "last_maintenance_at": self.last_maintenance_at,
+            "usage_watermark": int(self.usage_watermark),
+            "maintenance_cursor": dict(self.maintenance_cursor),
+            "pending_operation": dict(self.pending_operation) if self.pending_operation is not None else None,
+            "blocked_task_families": sorted(set(self.blocked_task_families)),
+            "catalog_generation": str(self.catalog_generation),
         }
+
+    # LLM: 纯计数接口；只统计单次磁盘归属核验通过的在役（非 archived）机器管辖条目，不触发隐藏磁盘IO。
+    # 函数用途: 计算当前真实占用所有者配额上限的在役自学 Skill 数量。
+    def live_count(self, *, managed_names: Collection[str]) -> int:
+        allowed = set(managed_names)
+        return sum(
+            1
+            for name, record in self.skills.items()
+            if name in allowed and record.maintenance.get("state") != "archived"
+        )
 
 
 # LLM: 事件只含身份/hash/结果码/有界reason及可选载体；carrier仅展示静态选择，不授执行权，不写正文。
@@ -210,25 +303,66 @@ def _same_owner_admission(admission: object, owner_root: Path) -> bool:
 # LLM: 所有路径都从 owner 规范布局推导；构造不创建任何目录，第一次写入时才创建。
 # 类用途: 一个owner的学习存储，热请求20条、溢出100条并保留独立每日总结调用历史。
 class SkillLearningStore:
-    # LLM: 只绑定原owner根与热/溢出目录，不在构造中创建目录或自动消费请求。
-    # 函数用途: 绑定自学数据目录与 owner Skill 根。
-    def __init__(self, directory: Path, skills_root: Path) -> None:
+    # LLM: 只绑定原owner根与热/溢出目录，不在构造中创建目录、打开runtime.db或触发外部provider调用。
+    # 函数用途: 绑定自学数据目录与 owner Skill 根，并接收延迟宿主运行库提供方。
+    def __init__(
+        self,
+        directory: Path,
+        skills_root: Path,
+        *,
+        usage_runtime_provider: Callable[[], RuntimeRepository | None] | None = None,
+    ) -> None:
         self.directory = Path(directory)
         self.skills_root = Path(skills_root)
         self.learned_root = self.skills_root / LEARNED_DIR_NAME
         self.requests_dir = self.directory / "requests"
         self.overflow_requests_dir = self.directory / "requests_overflow"
+        self.archived_dir = self.directory / "archived"
         self.registry_path = self.directory / "registry.json"
         self.ledger_path = self.directory / "ledger.jsonl"
         self.versions_dir = self.directory / "versions"
         self.removed_dir = self.directory / "removed"
         self._quota_admission = ContextVar("skill_learning_quota", default=None)
+        self._usage_runtime_provider = usage_runtime_provider
 
-    # LLM: 与 SkillProposalService 同一推导：数据目录来自 owner_skill_learning_dir，Skill 根是 owner_home/skills。
+    # LLM: 与 SkillProposalService 同一推导：数据目录来自 owner_skill_learning_dir，Skill 根是 owner_home/skills；
+    #   仅转发宿主提供方而不提前求值，未传时保持传统只读/无精确回执语义，绝不从磁盘残留 DB 回退打开。
     # 函数用途: 按 owner 路径投影构造存储。
     @classmethod
-    def for_home(cls, home_paths: object) -> SkillLearningStore:
-        return cls(Path(home_paths.owner_skill_learning_dir), Path(home_paths.owner_home_dir) / "skills")
+    def for_home(
+        cls,
+        home_paths: object,
+        *,
+        usage_runtime_provider: Callable[[], RuntimeRepository | None] | None = None,
+    ) -> SkillLearningStore:
+        return cls(
+            Path(home_paths.owner_skill_learning_dir),
+            Path(home_paths.owner_home_dir) / "skills",
+            usage_runtime_provider=usage_runtime_provider,
+        )
+
+    # LLM: 仅在真正需要读写运行库回执时才求值宿主提供方，并强制校验其规范库路径属于当前 owner。
+    # 函数用途: 返回经属主校验的当前 owner 运行库实例；未配置或显式无托管时返回 None。
+    def _runtime_repository(self) -> RuntimeRepository | None:
+        provider = getattr(self, "_usage_runtime_provider", None)
+        if provider is None:
+            return None
+        repo = provider()
+        if repo is None:
+            return None
+        from ..runtime_db.schema import runtime_db_path
+
+        expected = runtime_db_path(self.skills_root.parent).expanduser().resolve(strict=False)
+        actual_raw = getattr(repo, "db_path", None)
+        if not actual_raw:
+            raise SkillLearningStoreError(CODE_EVIDENCE_INCOMPLETE, "runtime repository missing db_path")
+        actual = Path(actual_raw).expanduser().resolve(strict=False)
+        if actual != expected:
+            raise SkillLearningStoreError(
+                CODE_EVIDENCE_INCOMPLETE,
+                f"runtime repository path mismatch: expected {expected}, got {actual}",
+            )
+        return repo
 
     # LLM: owner配额→state锁固定顺序；登记、队列、版本、导入同源事务，不能在持锁期间调用模型或发网络请求。
     #   admission仅供已先持本owner原配额准入、且在整个调用期间保持持有的宿主调用方（提炼）传入：复用它取state锁，
@@ -496,22 +630,30 @@ class SkillLearningStore:
                 unlink_file_beneath(self.directory, (folder, name))
             self._recover_requests_locked()
 
-    # LLM: 文件不存在视为空登记表；存在但损坏时抛 REGISTRY_CORRUPT，绝不按空表覆盖写回。
+    # LLM: 文件不存在视为空登记表；存在、为符号链接或损坏时抛 REGISTRY_CORRUPT，绝不按空表覆盖写回。
     # 函数用途: 读取登记表。
     def load_registry(self) -> SkillLearningRegistry:
-        if not self.registry_path.is_file():
+        if self.registry_path.is_symlink():
+            raise SkillLearningStoreError(CODE_REGISTRY_CORRUPT, "skill learning registry must not be a symlink")
+        if not self.registry_path.exists():
             return SkillLearningRegistry()
         report = read_json_object_report(self.registry_path, context="skill_learning.registry")
         try:
             if report.load_error is not None:
                 raise ValueError("unreadable registry")
             registry = _registry_from(report.payload)
-            # 旧登记没有高水位：只从既有不可变版本文件恢复编号，不重用回滚前已出现的版本名。
+            # 旧登记没有高水位：只从受管版本目录已有版本文件名恢复编号，不跟随链接、不重用回滚前编号。
             records = report.payload.get("skills", {})
-            migrated = {name: replace(item, revision=max(item.revision, max((_version_number(path) for path in (self.versions_dir / name).glob("v*.md")), default=item.version)))
-                        if "revision" not in records[name] else item for name, item in registry.skills.items()}
+            migrated: dict[str, LearnedSkill] = {}
+            for name, item in registry.skills.items():
+                if "revision" not in records[name]:
+                    version_names = list_names_beneath(self.directory, ("versions", name))
+                    highest = max((_version_name_number(entry) for entry in version_names), default=item.version)
+                    migrated[name] = replace(item, revision=max(item.revision, highest))
+                else:
+                    migrated[name] = item
             return replace(registry, skills=migrated)
-        except (TypeError, ValueError) as exc:
+        except (OSError, TypeError, ValueError) as exc:
             raise SkillLearningStoreError(CODE_REGISTRY_CORRUPT, str(exc)) from exc
 
     # LLM: 调用方必须已持 state_lock；原子替换整份登记表。
@@ -561,16 +703,93 @@ class SkillLearningStore:
 
         return load_skill_usage_summary(self)
 
+    # LLM: 只看requests与requests_overflow两个受管目录的合法宿主请求文件名；不读正文、不恢复、不解析registry.json。
+    # 函数用途: O(1)目录扫描判断是否存在待处理学习请求。
+    def has_requests(self) -> bool:
+        for folder in ("requests", "requests_overflow"):
+            for name in list_names_beneath(self.directory, (folder,)):
+                if _REQUEST_FILE_RE.fullmatch(name):
+                    return True
+        return False
+
+    # LLM: 唯一机器管辖归属核验边界；layout=owner、已标记owner_layout/user_modified与已证实正文hash失配是常规排除；
+    #   符号链接、缺失、超限、不可读、未收敛prepared/moved操作或unknown标记一律fail-closed抛SKILL_LEARNING_EVIDENCE_INCOMPLETE。
+    # 函数用途: 返回当前磁盘核验通过的机器管辖自学 Skill 映射（可选择是否含已归档条目）。
+    def managed_records(
+        self,
+        registry: SkillLearningRegistry,
+        *,
+        include_archived: bool = False,
+    ) -> dict[str, LearnedSkill]:
+        pending = registry.pending_operation
+        if pending is not None and pending.get("phase") in {"prepared", "moved"}:
+            raise SkillLearningStoreError(
+                CODE_EVIDENCE_INCOMPLETE,
+                f"unrecovered pending lifecycle operation {pending.get('operation_id')}",
+                detail={"operation_id": pending.get("operation_id"), "phase": pending.get("phase")},
+            )
+        verified: dict[str, LearnedSkill] = {}
+        for name, record in sorted(registry.skills.items()):
+            maint = record.maintenance
+            is_archived = maint.get("state") == "archived"
+            if is_archived and not include_archived:
+                continue
+            ownership = maint.get("ownership")
+            if record.layout == "owner" or ownership in {"owner_layout", "user_modified"}:
+                continue
+            if ownership == "unknown":
+                raise SkillLearningStoreError(
+                    CODE_EVIDENCE_INCOMPLETE,
+                    f"skill {name} ownership is unknown",
+                    detail={"skill_name": name, "reason": "ownership_unknown"},
+                )
+            anchor = self.directory if is_archived else self.skills_root
+            rel_parts = ("archived", name, "SKILL.md") if is_archived else (LEARNED_DIR_NAME, name, "SKILL.md")
+            text = _read_managed_skill_text_strict(anchor, rel_parts, skill_name=name)
+            if skill_content_sha256(text) != record.sha256:
+                # 磁盘存在完整常规文件且正文摘要明确不同，确认用户已接管修改，作排除项而非未决证据。
+                continue
+            verified[name] = record
+        return verified
+
     # LLM: feedback负责adopted权限与claim；过滤MISSING后按公开关键字形状调用台账，保留显式None与故障软失败。
     # 函数用途: 接通现有采用反馈的可选写账钩子，不确认或发布任何Skill内容。
     def record_skill_usage(
-        self, *, event, skill_id, source, kind="skill",
-        request_id=MISSING, thread_id=MISSING, task_id=MISSING, chars=MISSING,
+        self,
+        *,
+        event: str,
+        skill_id: str,
+        source: str,
+        kind: str = "skill",
+        request_id: object = MISSING,
+        thread_id: object = MISSING,
+        task_id: object = MISSING,
+        chars: object = MISSING,
+        body_chars: object = MISSING,
+        content_sha256: object = MISSING,
+        task_key: object = MISSING,
+        incarnation_id: object = MISSING,
+        activation_id: object = MISSING,
+        strike_epoch: object = MISSING,
     ) -> None:
         from .skill_usage_ledger import record_skill_usage_event
 
-        params = dict(event=event, skill_id=skill_id, source=source, kind=kind,
-                      request_id=request_id, thread_id=thread_id, task_id=task_id, chars=chars)
+        params = dict(
+            event=event,
+            skill_id=skill_id,
+            source=source,
+            kind=kind,
+            request_id=request_id,
+            thread_id=thread_id,
+            task_id=task_id,
+            chars=chars,
+            body_chars=body_chars,
+            content_sha256=content_sha256,
+            task_key=task_key,
+            incarnation_id=incarnation_id,
+            activation_id=activation_id,
+            strike_epoch=strike_epoch,
+        )
         record_skill_usage_event(self, **{key: value for key, value in params.items() if value is not MISSING})
 
     # LLM: 每个发布修订存不可变全文供回滚和在途快照；同编号异内容拒绝，暂不清理仍可能被引用的版本。调用方必须已持 state_lock，
@@ -584,7 +803,7 @@ class SkillLearningStore:
             if existing != text:
                 raise SkillLearningStoreError("SKILL_LEARNING_VERSION_CONFLICT")
             return
-        self.check_write(path,text)
+        self.check_write(path, text)
         write_text_atomic_beneath(self.directory, ("versions", name, path.name), text)
 
     # LLM: 版本文件不存在（已被裁剪或从未保存）时返回 None，由回滚方给出结构化拒绝。
@@ -592,24 +811,1587 @@ class SkillLearningStore:
     def read_version(self, name: str, version: int) -> str | None:
         return read_text_beneath(self.directory, ("versions", name, f"v{version}.md"))
 
-    # LLM: 删除不物理删文件：整个 learned/<name>/ 目录移到 removed/<name>-<时间>/；目录不存在时什么都不做。
+    # LLM: 从已校验位置安全移至 removed/<name>-<时间戳>/，不跟随符号链接；目录不存在时什么都不做。
     # 函数用途: 把一个自学 Skill 目录移出扫描范围并返回归档位置。
-    def archive_removed(self, name: str) -> Path | None:
-        source = self.skill_path(name).parent
-        if not source.exists():
+    def archive_removed(
+        self,
+        name: str,
+        *,
+        record: LearnedSkill | None = None,
+        stamp: str = "",
+    ) -> Path | None:
+        if record is None:
+            record = self.load_registry().skills.get(name)
+        src_root, src_parts = self._skill_dir_location(name, record=record)
+        try:
+            src_parent_fd = open_directory_beneath(src_root, src_parts[:-1], require_dir_fd=True)
+        except FileNotFoundError:
             return None
-        target = self.removed_dir / f"{name}-{int(time.time() * 1000):013d}"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(source), str(target))
-        return target
+        try:
+            try:
+                os.stat(src_parts[-1], dir_fd=src_parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return None
+            base_stamp = stamp or f"{int(time.time() * 1000):013d}"
+            target_name = f"{name}-{base_stamp}"
+            dst_parent_fd = open_directory_beneath(self.directory, ("removed",), create=True, require_dir_fd=True)
+            try:
+                try:
+                    os.stat(target_name, dir_fd=dst_parent_fd, follow_symlinks=False)
+                    target_name = f"{name}-{base_stamp}-{uuid.uuid4().hex[:8]}"
+                except FileNotFoundError:
+                    pass
+                _rename_entry_with_exdev_fallback(
+                    src_parent_fd,
+                    src_parts[-1],
+                    dst_parent_fd,
+                    target_name,
+                    src_root=src_root,
+                    src_parts=src_parts,
+                    dst_root=self.directory,
+                    dst_parts=("removed", target_name),
+                )
+            finally:
+                os.close(dst_parent_fd)
+            return self.removed_dir / target_name
+        finally:
+            os.close(src_parent_fd)
 
-    # LLM: 发布目录固定为 skills/learned/<name>/SKILL.md，名字已由输出合同限定为安全目录名。
-    # 函数用途: 返回某个自学 Skill 的 SKILL.md 路径。
-    def skill_path(self, name: str) -> Path:
-        record = self.load_registry().skills.get(name)
+    # LLM: 始终返回在役路径（skills/<name>/SKILL.md 或 skills/learned/<name>/SKILL.md）；批量调用应传入已加载的 record 避免重读登记表。
+    # 函数用途: 返回某个自学 Skill 的在役 SKILL.md 路径。
+    def skill_path(self, name: str, *, record: LearnedSkill | None = None) -> Path:
+        if record is None:
+            record = self.load_registry().skills.get(name)
         if record and record.layout == "owner":
             return self.skills_root / name / "SKILL.md"
         return self.learned_root / name / "SKILL.md"
+
+    # LLM: 返回归档目录内 SKILL.md 的规范路径；调用方不得把该路径与在役扫描目录混用。
+    # 函数用途: 返回某个已归档自学 Skill 的 SKILL.md 规范路径。
+    def archived_skill_path(self, name: str) -> Path:
+        return self.archived_dir / name / "SKILL.md"
+
+    # LLM: 按给定登记事实返回当前物理正文应驻留的规范 SKILL.md 路径（已归档则在 archived/，否则为在役路径）。
+    # 函数用途: 根据布局与维护状态返回 Skill 正文规范路径。
+    def canonical_skill_path(self, name: str, *, record: LearnedSkill) -> Path:
+        if record.layout != "owner" and record.maintenance.get("state") == "archived":
+            return self.archived_skill_path(name)
+        return self.skill_path(name, record=record)
+
+    # LLM: 外部/维护/重启恢复入口；在 state_lock 内推进任意未完结 pending_operation 及有界墓碑/版本目录清理。
+    #   预算 0 解析为内置有界默认（128 项 / 8 MiB / 50 ms），绝不走无界扫描或忽略 cleanup 阶段。
+    # 函数用途: 有界收敛中断的生命周期目录转换与后续清理。
+    def recover_lifecycle(
+        self,
+        *,
+        batch_count: int = 0,
+        batch_bytes: int = 0,
+        batch_ms: int = 0,
+    ) -> dict[str, object]:
+        with self.state_lock():
+            registry = self.load_registry()
+            _, outcome = self._recover_lifecycle_locked(
+                registry,
+                batch_count=batch_count,
+                batch_bytes=batch_bytes,
+                batch_ms=batch_ms,
+            )
+            return outcome
+
+    # LLM: 调用方已持 state_lock；推进单条 pending_operation（prepared -> moved -> committed -> cleanup），
+    #   用户修改一律安全退让并交出机器管辖，不覆盖用户文件；清理阶段按配额增量推进。
+    # 函数用途: 在持有 state_lock 时有界恢复一条未完结的生命周期操作。
+    def _recover_lifecycle_locked(
+        self,
+        registry: SkillLearningRegistry,
+        *,
+        batch_count: int = 0,
+        batch_bytes: int = 0,
+        batch_ms: int = 0,
+        now: float | None = None,
+    ) -> tuple[SkillLearningRegistry, dict[str, object]]:
+        op = registry.pending_operation
+        if op is None:
+            return registry, {
+                "status": "idle",
+                "resumed": False,
+                "completed": True,
+                "actions": 0,
+                "bytes_freed": 0,
+                "remaining": False,
+                "operation_id": "",
+            }
+        kind = str(op.get("kind") or "")
+        op_id = str(op.get("operation_id") or "")
+        skill_name = str(op.get("skill_name") or "")
+        ts = time.time() if now is None else float(now)
+        if op.get("phase") == "cleanup":
+            return self._cleanup_operation_locked(
+                registry,
+                op,
+                batch_count=batch_count,
+                batch_bytes=batch_bytes,
+                batch_ms=batch_ms,
+            )
+        if kind == "archive":
+            return self._recover_archive_locked(registry, op, ts=ts)
+        if kind == "restore":
+            return self._recover_restore_locked(registry, op, ts=ts)
+        if kind == "displace_publish":
+            return self._recover_displace_publish_locked(registry, op, ts=ts)
+        if kind == "evict":
+            return self._recover_evict_locked(
+                registry, op, batch_count=batch_count, batch_bytes=batch_bytes, batch_ms=batch_ms
+            )
+        if kind == "remove":
+            return self._recover_remove_locked(
+                registry, op, batch_count=batch_count, batch_bytes=batch_bytes, batch_ms=batch_ms
+            )
+        if kind == "rollback":
+            return self._recover_rollback_locked(registry, op, ts=ts)
+        raise SkillLearningStoreError(
+            CODE_REGISTRY_CORRUPT,
+            f"unsupported pending operation kind {kind}",
+            detail={"operation_id": op_id, "skill_name": skill_name},
+        )
+
+    # LLM: 所有生命周期过渡入口先收敛遗留未完操作，保证任何时刻至多只有一条 pending_operation 推进。
+    # 函数用途: 为新生命周期过渡准备干净且已收敛的登记表。
+    def _prepare_clean_registry_locked(
+        self,
+        registry: SkillLearningRegistry,
+        *,
+        now: float | None = None,
+    ) -> SkillLearningRegistry:
+        current = registry
+        while current.pending_operation is not None:
+            current, outcome = self._recover_lifecycle_locked(current, now=now)
+            if outcome.get("remaining") and outcome.get("actions", 0) == 0:
+                raise SkillLearningStoreError(
+                    CODE_EVIDENCE_INCOMPLETE,
+                    f"pending lifecycle operation {current.pending_operation.get('operation_id')} blocked",
+                    detail={"operation_id": current.pending_operation.get("operation_id")},
+                )
+        return current
+
+    # LLM: 归档过渡：先写 pending_operation，再复核 hash 后移至 archived/，最后原子提交状态；支持进程中断前向收敛。
+    # 函数用途: 在 state_lock 内安全归档一个机器管辖的在役 Skill。
+    def _transition_archive_locked(
+        self,
+        registry: SkillLearningRegistry,
+        name: str,
+        *,
+        now: float | None = None,
+        reason_code: str = "idle_archive",
+    ) -> tuple[SkillLearningRegistry, LearnedSkill]:
+        registry = self._prepare_clean_registry_locked(registry, now=now)
+        current = registry.skills.get(name)
+        if current is None or current.layout == "owner" or current.maintenance.get("state") == "archived":
+            raise SkillLearningStoreError(
+                CODE_EVIDENCE_INCOMPLETE,
+                f"skill {name} is not an active learned skill eligible for archive",
+                detail={"skill_name": name},
+            )
+        ts = time.time() if now is None else float(now)
+        op_id = uuid.uuid4().hex
+        src_rel = self._encode_rel("skills", LEARNED_DIR_NAME, name)
+        dst_rel = self._encode_rel("store", "archived", name)
+        ver_rel = self._encode_rel("store", "versions", name)
+        op: dict[str, object] = {
+            "operation_id": op_id,
+            "kind": "archive",
+            "phase": "prepared",
+            "skill_name": name,
+            "expected_revision": current.revision,
+            "expected_sha256": current.sha256,
+            "source_rel": src_rel,
+            "target_rel": dst_rel,
+            "versions_rel": ver_rel,
+            "created_at": ts,
+            "reason_code": str(reason_code or "idle_archive"),
+        }
+        src_root, src_parts = self._resolve_op_rel(src_rel)
+        dst_root, dst_parts = self._resolve_op_rel(dst_rel)
+        status, observed_sha = self._dir_skill_sha256_nofollow(src_root, src_parts)
+        if status == "ok" and observed_sha != current.sha256:
+            updated = replace(
+                current,
+                maintenance={**current.maintenance, "ownership": "user_modified"},
+            )
+            self.save_registry(replace(registry, skills={**registry.skills, name: updated}))
+            raise SkillLearningStoreError(
+                "SKILL_LEARNING_USER_MODIFIED",
+                f"skill {name} modified by user before archival",
+                detail={"skill_name": name, "state": "user_modified"},
+            )
+        if status != "ok":
+            raise SkillLearningStoreError(
+                CODE_EVIDENCE_INCOMPLETE,
+                f"skill {name} unreadable before archival",
+                detail={"skill_name": name},
+            )
+        with ExitStack() as rollback:
+            rollback.push(self._make_op_rollback(registry, op, undo_actions=[]))
+            self.save_registry(replace(registry, pending_operation=op))
+            undo_actions: list[Callable[[], None]] = []
+            rollback.pop_all()
+            rollback.push(self._make_op_rollback(registry, op, undo_actions=undo_actions))
+            # 移动前一刻再核身份，拦截锁间隙的外部修改。
+            status2, sha2 = self._dir_skill_sha256_nofollow(src_root, src_parts)
+            if status2 == "ok" and sha2 != current.sha256:
+                handoff_rec = replace(current, maintenance={**current.maintenance, "ownership": "user_modified"})
+                self.save_registry(replace(registry, skills={**registry.skills, name: handoff_rec}, pending_operation=None))
+                rollback.pop_all()
+                raise SkillLearningStoreError(
+                    "SKILL_LEARNING_USER_MODIFIED",
+                    f"skill {name} modified by user immediately before archival rename",
+                    detail={"skill_name": name, "state": "user_modified"},
+                )
+            if status2 != "ok":
+                raise SkillLearningStoreError(CODE_EVIDENCE_INCOMPLETE, f"skill {name} unavailable for archival")
+            self._move_dir_nofollow(src_root, src_parts, dst_root, dst_parts)
+            undo_actions.append(lambda: self._move_dir_nofollow(dst_root, dst_parts, src_root, src_parts))
+            next_record = self._archived_record(current, op_id=op_id, ts=ts)
+            committed = replace(
+                registry,
+                skills={**registry.skills, name: next_record},
+                pending_operation=None,
+            )
+            self.save_registry(committed)
+            rollback.pop_all()
+        return committed, next_record
+
+    # LLM: 恢复归档过渡：把 archived/<name> 安全迁回 learned/<name>，保留激活身份与打击纪元，重置空闲基线。
+    # 函数用途: 在 state_lock 内把已归档的自学 Skill 恢复到在役目录。
+    def _transition_restore_locked(
+        self,
+        registry: SkillLearningRegistry,
+        name: str,
+        *,
+        now: float | None = None,
+    ) -> tuple[SkillLearningRegistry, LearnedSkill]:
+        registry = self._prepare_clean_registry_locked(registry, now=now)
+        current = registry.skills.get(name)
+        if current is None or current.layout == "owner" or current.maintenance.get("state") != "archived":
+            raise SkillLearningStoreError(
+                CODE_EVIDENCE_INCOMPLETE,
+                f"skill {name} is not an archived learned skill",
+                detail={"skill_name": name},
+            )
+        ts = time.time() if now is None else float(now)
+        op_id = uuid.uuid4().hex
+        src_rel = self._encode_rel("store", "archived", name)
+        dst_rel = self._encode_rel("skills", LEARNED_DIR_NAME, name)
+        ver_rel = self._encode_rel("store", "versions", name)
+        op: dict[str, object] = {
+            "operation_id": op_id,
+            "kind": "restore",
+            "phase": "prepared",
+            "skill_name": name,
+            "expected_revision": current.revision,
+            "expected_sha256": current.sha256,
+            "source_rel": src_rel,
+            "target_rel": dst_rel,
+            "versions_rel": ver_rel,
+            "created_at": ts,
+            "reason_code": "restore",
+        }
+        src_root, src_parts = self._resolve_op_rel(src_rel)
+        dst_root, dst_parts = self._resolve_op_rel(dst_rel)
+        status, observed_sha = self._dir_skill_sha256_nofollow(src_root, src_parts)
+        if status != "ok" or observed_sha != current.sha256:
+            if status == "ok":
+                handoff_rec = replace(current, maintenance={**current.maintenance, "ownership": "user_modified"})
+                self.save_registry(replace(registry, skills={**registry.skills, name: handoff_rec}))
+                raise SkillLearningStoreError(
+                    "SKILL_LEARNING_USER_MODIFIED",
+                    f"archived skill {name} hash mismatch",
+                    detail={"skill_name": name, "state": "user_modified"},
+                )
+            raise SkillLearningStoreError(
+                CODE_EVIDENCE_INCOMPLETE,
+                f"archived skill {name} missing or unreadable",
+                detail={"skill_name": name},
+            )
+        if self._dir_exists_nofollow(dst_root, dst_parts):
+            raise SkillLearningStoreError(
+                CODE_EVIDENCE_INCOMPLETE,
+                f"restore destination already exists for {name}",
+                detail={"skill_name": name},
+            )
+        with ExitStack() as rollback:
+            undo_actions: list[Callable[[], None]] = []
+            rollback.push(self._make_op_rollback(registry, op, undo_actions=undo_actions))
+            self.save_registry(replace(registry, pending_operation=op))
+            self._move_dir_nofollow(src_root, src_parts, dst_root, dst_parts)
+            undo_actions.append(lambda: self._move_dir_nofollow(dst_root, dst_parts, src_root, src_parts))
+            next_record = self._restored_record(current, op_id=op_id, ts=ts)
+            committed = replace(
+                registry,
+                skills={**registry.skills, name: next_record},
+                pending_operation=None,
+            )
+            self.save_registry(committed)
+            rollback.pop_all()
+        return committed, next_record
+
+    # LLM: 单事务容量置换发布：同一配额/状态锁内把淘汰者在役目录归档并移入暂存候选，再提交双条目更新；
+    #   受害者若在最后关头被用户改写，标记 user_modified 并安全终止而不碰用户正文。
+    # 函数用途: 原子执行容量淘汰归档与新候选 Skill 发布。
+    def _transition_displace_publish_locked(
+        self,
+        registry: SkillLearningRegistry,
+        *,
+        victim_name: str,
+        candidate_record: LearnedSkill,
+        candidate_text: str,
+        candidate_assets: dict[str, dict[str, object]] | None = None,
+        now: float | None = None,
+    ) -> tuple[SkillLearningRegistry, LearnedSkill, LearnedSkill]:
+        registry = self._prepare_clean_registry_locked(registry, now=now)
+        victim = registry.skills.get(victim_name)
+        if victim is None or victim.layout == "owner" or victim.maintenance.get("state") == "archived":
+            raise SkillLearningStoreError(
+                CODE_EVIDENCE_INCOMPLETE,
+                f"victim {victim_name} is not an active learned skill",
+                detail={"skill_name": victim_name},
+            )
+        ts = time.time() if now is None else float(now)
+        op_id = uuid.uuid4().hex
+        src_rel = self._encode_rel("skills", LEARNED_DIR_NAME, victim_name)
+        dst_rel = self._encode_rel("store", "archived", victim_name)
+        stage_rel = self._encode_rel("store", "tx_stage", op_id)
+        ver_rel = self._encode_rel("store", "versions", candidate_record.name)
+        cand_live_path = self.learned_root / candidate_record.name / "SKILL.md"
+        cand_ver_path = self.versions_dir / candidate_record.name / f"v{candidate_record.revision}.md"
+        admission = self._quota_admission.get()
+        if admission is None:
+            raise RuntimeError("学习写入缺少原配额事务")
+        cand_bytes = len(candidate_text.encode("utf-8"))
+        admission.check([
+            OwnerQuotaChange(cand_live_path, cand_bytes),
+            OwnerQuotaChange(cand_ver_path, cand_bytes),
+        ])
+        if self._dir_exists_nofollow(self.skills_root, (LEARNED_DIR_NAME, candidate_record.name)):
+            raise SkillLearningStoreError(
+                CODE_EVIDENCE_INCOMPLETE,
+                f"candidate target directory already exists for {candidate_record.name}",
+                detail={"skill_name": candidate_record.name},
+            )
+        src_root, src_parts = self._resolve_op_rel(src_rel)
+        dst_root, dst_parts = self._resolve_op_rel(dst_rel)
+        stage_root, stage_parts = self._resolve_op_rel(stage_rel)
+        cand_parts = (LEARNED_DIR_NAME, candidate_record.name)
+        status, observed_sha = self._dir_skill_sha256_nofollow(src_root, src_parts)
+        if status == "ok" and observed_sha != victim.sha256:
+            handoff_rec = replace(victim, maintenance={**victim.maintenance, "ownership": "user_modified"})
+            self.save_registry(replace(registry, skills={**registry.skills, victim_name: handoff_rec}))
+            raise SkillLearningStoreError(
+                "SKILL_LEARNING_VICTIM_USER_MODIFIED",
+                f"victim {victim_name} modified by user before displacement",
+                detail={"skill_name": victim_name, "state": "user_modified"},
+            )
+        if status != "ok":
+            raise SkillLearningStoreError(
+                CODE_EVIDENCE_INCOMPLETE,
+                f"victim {victim_name} unreadable before displacement",
+                detail={"skill_name": victim_name},
+            )
+        if self._dir_exists_nofollow(dst_root, dst_parts):
+            raise SkillLearningStoreError(
+                CODE_EVIDENCE_INCOMPLETE,
+                f"archived destination already exists for displacement victim {victim_name}",
+                detail={"skill_name": victim_name},
+            )
+        final_candidate = replace(candidate_record, last_operation_id=op_id)
+        victim_archived = self._archived_record(victim, op_id=op_id, ts=ts)
+        op: dict[str, object] = {
+            "operation_id": op_id,
+            "kind": "displace_publish",
+            "phase": "prepared",
+            "skill_name": victim.name,
+            "expected_revision": victim.revision,
+            "expected_sha256": victim.sha256,
+            "source_rel": src_rel,
+            "target_rel": dst_rel,
+            "versions_rel": ver_rel,
+            "candidate_rel": stage_rel,
+            "candidate_name": final_candidate.name,
+            "candidate_sha256": final_candidate.sha256,
+            "candidate_revision": final_candidate.revision,
+            "created_at": ts,
+            "reason_code": "cap_displace",
+        }
+        with ExitStack() as rollback:
+            undo_actions: list[Callable[[], None]] = []
+            rollback.push(self._make_op_rollback(registry, op, undo_actions=undo_actions))
+            write_text_atomic_beneath(self.directory, (*stage_parts, "SKILL.md"), candidate_text)
+            undo_actions.append(lambda: self._purge_bounded_dir_beneath(
+                stage_root, stage_parts, remaining_count=32, remaining_bytes=8_388_608,
+                deadline=time.monotonic() + 2.0, allow_zero_start=True, prefix="abort",
+            ))
+            existed_ver = self.read_version(final_candidate.name, final_candidate.revision) is not None
+            if not existed_ver:
+                write_text_atomic_beneath(
+                    self.directory,
+                    ("versions", final_candidate.name, f"v{final_candidate.revision}.md"),
+                    candidate_text,
+                )
+                undo_actions.append(lambda: unlink_file_beneath(
+                    self.directory, ("versions", final_candidate.name, f"v{final_candidate.revision}.md")
+                ))
+            self.save_registry(replace(registry, pending_operation=op))
+            # 移出受害者前一刻最后核对正文 hash。
+            status2, sha2 = self._dir_skill_sha256_nofollow(src_root, src_parts)
+            if status2 == "ok" and sha2 != victim.sha256:
+                handoff_rec = replace(victim, maintenance={**victim.maintenance, "ownership": "user_modified"})
+                next_reg = replace(registry, skills={**registry.skills, victim_name: handoff_rec}, pending_operation=None)
+                self.save_registry(next_reg)
+                # 清理暂存候选题与未提交版本文件。
+                for fn in reversed(undo_actions):
+                    fn()
+                rollback.pop_all()
+                raise SkillLearningStoreError(
+                    "SKILL_LEARNING_VICTIM_USER_MODIFIED",
+                    f"victim {victim_name} modified immediately before displacement rename",
+                    detail={"skill_name": victim_name, "state": "user_modified"},
+                )
+            if status2 != "ok":
+                raise SkillLearningStoreError(CODE_EVIDENCE_INCOMPLETE, f"victim {victim_name} unavailable")
+            self._move_dir_nofollow(src_root, src_parts, dst_root, dst_parts)
+            undo_actions.append(lambda: self._move_dir_nofollow(dst_root, dst_parts, src_root, src_parts))
+            self.save_registry(replace(registry, pending_operation={**op, "phase": "moved"}))
+            self._move_dir_nofollow(stage_root, stage_parts, self.skills_root, cand_parts)
+            undo_actions.append(lambda: self._move_dir_nofollow(self.skills_root, cand_parts, stage_root, stage_parts))
+            committed = replace(
+                registry,
+                skills={
+                    **registry.skills,
+                    victim_name: victim_archived,
+                    final_candidate.name: final_candidate,
+                },
+                assets=(registry.assets if candidate_assets is None else dict(candidate_assets)),
+                pending_operation=None,
+            )
+            self.save_registry(committed)
+            rollback.pop_all()
+        self._try_rmdir_if_empty(self.directory, ("tx_stage",))
+        return committed, victim_archived, final_candidate
+
+    # LLM: 自动清理（过期淘汰或三次负反馈退场）：先核磁盘 hash 仍归机器所有，移至隔离墓碑再删行，最后有界清除 versions 与墓碑；
+    #   闲置过期不写 blocked_names/family；三次负反馈退场必须同步封禁名字与任务家族指纹。
+    # 函数用途: 在 state_lock 内可恢复地驱逐或退场一个机器管辖 Skill。
+    def _transition_evict_locked(
+        self,
+        registry: SkillLearningRegistry,
+        name: str,
+        *,
+        now: float | None = None,
+        block: bool = False,
+        block_family: str = "",
+        reason_code: str = "idle_expired",
+        cleanup_budget: tuple[int, int, int] = (0, 0, 0),
+    ) -> SkillLearningRegistry:
+        registry = self._prepare_clean_registry_locked(registry, now=now)
+        current = registry.skills.get(name)
+        if current is None or current.layout == "owner":
+            raise SkillLearningStoreError(
+                CODE_EVIDENCE_INCOMPLETE,
+                f"skill {name} is not an eligible learned skill for eviction",
+                detail={"skill_name": name},
+            )
+        ts = time.time() if now is None else float(now)
+        op_id = uuid.uuid4().hex
+        src_root, src_parts = self._skill_dir_location(name, record=current)
+        src_rel = (
+            self._encode_rel("store", *src_parts)
+            if src_root == self.directory
+            else self._encode_rel("skills", *src_parts)
+        )
+        tomb_name = f"{name}-{op_id[:12]}"
+        tomb_rel = self._encode_rel("store", "removed", tomb_name)
+        ver_rel = self._encode_rel("store", "versions", name)
+        status, observed_sha = self._dir_skill_sha256_nofollow(src_root, src_parts)
+        extra_status = self._dir_extra_entries_status_nofollow(src_root, src_parts)
+        if extra_status == "extra" or (status == "ok" and observed_sha != current.sha256):
+            handoff = replace(current, maintenance={**current.maintenance, "ownership": "user_modified"})
+            updated = replace(registry, skills={**registry.skills, name: handoff})
+            self.save_registry(updated)
+            raise SkillLearningStoreError(
+                "SKILL_LEARNING_USER_MODIFIED",
+                f"skill {name} modified by user before eviction",
+                detail={"skill_name": name, "state": "user_modified"},
+            )
+        if status != "ok" or extra_status != "clean":
+            raise SkillLearningStoreError(
+                CODE_EVIDENCE_INCOMPLETE,
+                f"skill {name} unreadable before eviction",
+                detail={"skill_name": name},
+            )
+        resolved_reason = "third_strike_retire" if block and reason_code in {"", "idle_expired"} else str(reason_code or "idle_expired")
+        op: dict[str, object] = {
+            "operation_id": op_id,
+            "kind": "evict",
+            "phase": "prepared",
+            "skill_name": name,
+            "expected_revision": current.revision,
+            "expected_sha256": current.sha256,
+            "source_rel": src_rel,
+            "target_rel": tomb_rel,
+            "tombstone_rel": tomb_rel,
+            "versions_rel": ver_rel,
+            "created_at": ts,
+            "reason_code": resolved_reason,
+        }
+        tomb_root, tomb_parts = self._resolve_op_rel(tomb_rel)
+        family_to_block = block_family or str(current.maintenance.get("task_family_fingerprint") or "")
+        with ExitStack() as rollback:
+            undo_actions: list[Callable[[], None]] = []
+            rollback.push(self._make_op_rollback(registry, op, undo_actions=undo_actions))
+            self.save_registry(replace(registry, pending_operation=op))
+            self._move_dir_nofollow(src_root, src_parts, tomb_root, tomb_parts)
+            undo_actions.append(lambda: self._move_dir_nofollow(tomb_root, tomb_parts, src_root, src_parts))
+            cleanup_op = {**op, "phase": "cleanup"}
+            committed = self._apply_removal_commit(
+                registry,
+                current,
+                pending_operation=cleanup_op,
+                block_name=bool(block or resolved_reason == "third_strike_retire"),
+                block_family=family_to_block if (block or resolved_reason == "third_strike_retire") else "",
+            )
+            self.save_registry(committed)
+            rollback.pop_all()
+        try:
+            committed, _ = self._cleanup_operation_locked(
+                committed,
+                cleanup_op,
+                batch_count=cleanup_budget[0],
+                batch_bytes=cleanup_budget[1],
+                batch_ms=cleanup_budget[2],
+            )
+        except OSError:
+            pass
+        return committed
+
+    # LLM: 用户显式删除或回滚到 0 版（remove）：保留 removed/<name>-<stamp> 作为用户归档（不设 tombstone_rel），
+    #   即使原目录已被用户手改或手动删除也允许完成登记移除，并封禁名字与已知家族，随后有界清理 versions/<name>。
+    # 函数用途: 在 state_lock 内可恢复地执行用户删除操作。
+    def _transition_remove_locked(
+        self,
+        registry: SkillLearningRegistry,
+        name: str,
+        *,
+        now: float | None = None,
+        reason_code: str = "user_removed",
+        cleanup_budget: tuple[int, int, int] = (0, 0, 0),
+    ) -> tuple[SkillLearningRegistry, SkillLearningEvent]:
+        registry = self._prepare_clean_registry_locked(registry, now=now)
+        current = registry.skills.get(name)
+        if current is None:
+            raise SkillLearningStoreError("SKILL_LEARNING_NOT_LEARNED", f"skill {name} not learned")
+        ts = time.time() if now is None else float(now)
+        op_id = uuid.uuid4().hex
+        src_root, src_parts = self._skill_dir_location(name, record=current)
+        src_rel = (
+            self._encode_rel("store", *src_parts)
+            if src_root == self.directory
+            else self._encode_rel("skills", *src_parts)
+        )
+        stamp = f"{int(ts * 1000):013d}-{op_id[:8]}"
+        dst_name = f"{name}-{stamp}"
+        dst_rel = self._encode_rel("store", "removed", dst_name)
+        ver_rel = self._encode_rel("store", "versions", name)
+        ver_exists = self._dir_exists_nofollow(self.directory, ("versions", name))
+        op: dict[str, object] = {
+            "operation_id": op_id,
+            "kind": "remove",
+            "phase": "prepared",
+            "skill_name": name,
+            "expected_revision": current.revision,
+            "expected_sha256": current.sha256,
+            "source_rel": src_rel,
+            "target_rel": dst_rel,
+            "tombstone_rel": None,
+            "versions_rel": ver_rel,
+            "created_at": ts,
+            "reason_code": str(reason_code or "user_removed"),
+        }
+        dst_root, dst_parts = self._resolve_op_rel(dst_rel)
+        family = str(current.maintenance.get("task_family_fingerprint") or "")
+        if not _SHA256_RE.fullmatch(family):
+            text = read_text_beneath(src_root, (*src_parts, "SKILL.md"))
+            if text is not None:
+                family = skill_family_fingerprint(text)
+            else:
+                ver_text = self.read_version(name, current.version)
+                family = skill_family_fingerprint(ver_text) if ver_text is not None else ""
+        with ExitStack() as rollback:
+            undo_actions: list[Callable[[], None]] = []
+            rollback.push(self._make_op_rollback(registry, op, undo_actions=undo_actions))
+            self.save_registry(replace(registry, pending_operation=op))
+            if self._entry_exists_nofollow(src_root, src_parts):
+                self._move_entry_to_removed_nofollow(src_root, src_parts, dst_root, dst_parts)
+                undo_actions.append(lambda: self._move_entry_to_removed_nofollow(dst_root, dst_parts, src_root, src_parts))
+            cleanup_op = {**op, "phase": "cleanup"} if ver_exists else None
+            committed = self._apply_removal_commit(
+                registry,
+                current,
+                pending_operation=cleanup_op,
+                block_name=True,
+                block_family=family,
+            )
+            self.save_registry(committed)
+            rollback.pop_all()
+        if cleanup_op is not None:
+            try:
+                committed, _ = self._cleanup_operation_locked(
+                    committed,
+                    cleanup_op,
+                    batch_count=cleanup_budget[0],
+                    batch_bytes=cleanup_budget[1],
+                    batch_ms=cleanup_budget[2],
+                )
+            except OSError:
+                pass
+        return committed, SkillLearningEvent(EVENT_REMOVED, "", current.name, current.version, current.sha256)
+
+    # LLM: 可恢复回滚：先保存 pending_operation，再写入新修订版本文件与替换 SKILL.md，最后提交登记状态；
+    #   若调用 save_registry 前失败则未碰磁盘正文；若提交后异常则 readback 确认已提交绝不倒退版本。
+    # 函数用途: 在 state_lock 内原子且可崩溃恢复地把 Skill 正文回滚到已证实历史版本。
+    def _transition_rollback_locked(
+        self,
+        registry: SkillLearningRegistry,
+        *,
+        current: LearnedSkill,
+        next_record: LearnedSkill,
+        target_version: int,
+        target_sha256: str,
+        target_text: str,
+        reason_code: str = "rollback",
+        now: float | None = None,
+    ) -> tuple[SkillLearningRegistry, LearnedSkill]:
+        registry = self._prepare_clean_registry_locked(registry, now=now)
+        ts = time.time() if now is None else float(now)
+        op_id = uuid.uuid4().hex
+        src_root, src_parts = self._skill_dir_location(current.name, record=current)
+        if src_root != self.skills_root:
+            raise SkillLearningStoreError(CODE_EVIDENCE_INCOMPLETE, f"cannot rollback non-live skill {current.name}")
+        live_rel = self._encode_rel("skills", *src_parts)
+        ver_rel = self._encode_rel("store", "versions", current.name)
+        cand_ver_rel = self._encode_rel("store", "versions", current.name, f"v{target_version}.md")
+        live_path = self.skill_path(current.name, record=current)
+        next_ver_path = self.versions_dir / current.name / f"v{next_record.revision}.md"
+        admission = self._quota_admission.get()
+        if admission is None:
+            raise RuntimeError("学习写入缺少原配额事务")
+        target_bytes = len(target_text.encode("utf-8"))
+        changes = [OwnerQuotaChange(live_path, target_bytes)]
+        existed_ver = self.read_version(current.name, next_record.revision) is not None
+        if not existed_ver:
+            changes.append(OwnerQuotaChange(next_ver_path, target_bytes))
+        admission.check(changes)
+        status, observed_sha = self._dir_skill_sha256_nofollow(src_root, src_parts)
+        if status == "ok" and observed_sha != current.sha256:
+            handoff_rec = replace(current, maintenance={**current.maintenance, "ownership": "user_modified"})
+            self.save_registry(replace(registry, skills={**registry.skills, current.name: handoff_rec}))
+            raise SkillLearningStoreError(
+                "SKILL_LEARNING_USER_MODIFIED",
+                f"skill {current.name} modified by user before rollback",
+                detail={"skill_name": current.name, "state": "user_modified"},
+            )
+        if status != "ok":
+            raise SkillLearningStoreError(
+                CODE_EVIDENCE_INCOMPLETE,
+                f"skill {current.name} unreadable before rollback",
+                detail={"skill_name": current.name},
+            )
+        previous_body = read_text_beneath(src_root, (*src_parts, "SKILL.md"))
+        if previous_body is None:
+            raise SkillLearningStoreError(CODE_EVIDENCE_INCOMPLETE, f"skill {current.name} unreadable before rollback")
+        final_record = replace(next_record, last_operation_id=op_id)
+        op: dict[str, object] = {
+            "operation_id": op_id,
+            "kind": "rollback",
+            "phase": "prepared",
+            "skill_name": current.name,
+            "expected_revision": current.revision,
+            "expected_sha256": current.sha256,
+            "source_rel": live_rel,
+            "target_rel": live_rel,
+            "versions_rel": ver_rel,
+            "candidate_rel": cand_ver_rel,
+            "candidate_name": current.name,
+            "candidate_sha256": target_sha256,
+            "candidate_revision": final_record.revision,
+            "created_at": ts,
+            "reason_code": str(reason_code or "rollback"),
+        }
+        with ExitStack() as rollback:
+            undo_actions: list[Callable[[], None]] = []
+            rollback.push(self._make_op_rollback(registry, op, undo_actions=undo_actions))
+            self.save_registry(replace(registry, pending_operation=op))
+            replace_skill_file(live_path, target_text)
+            undo_actions.append(lambda: replace_skill_file(live_path, previous_body))
+            if not existed_ver:
+                self.save_version(current.name, final_record.revision, target_text)
+                undo_actions.append(lambda: unlink_file_beneath(
+                    self.directory, ("versions", current.name, f"v{final_record.revision}.md")
+                ))
+            else:
+                self.save_version(current.name, final_record.revision, target_text)
+            committed = replace(
+                registry,
+                skills={**registry.skills, current.name: final_record},
+                pending_operation=None,
+            )
+            self.save_registry(committed)
+            rollback.pop_all()
+        return committed, final_record
+
+    def _archived_record(self, current: LearnedSkill, *, op_id: str, ts: float) -> LearnedSkill:
+        return replace(
+            current,
+            revision=max(current.revision, current.version) + 1,
+            updated_at=utc_now(),
+            last_operation_id=op_id,
+            maintenance={**current.maintenance, "state": "archived", "archived_at": float(ts)},
+        )
+
+    def _restored_record(self, current: LearnedSkill, *, op_id: str, ts: float) -> LearnedSkill:
+        maint = dict(current.maintenance)
+        maint["state"] = "active" if maint.get("quality") == "established" else "trial"
+        maint["restored_at"] = float(ts)
+        maint.pop("archived_at", None)
+        return replace(
+            current,
+            revision=max(current.revision, current.version) + 1,
+            updated_at=utc_now(),
+            last_operation_id=op_id,
+            maintenance=maint,
+        )
+
+    def _apply_removal_commit(
+        self,
+        registry: SkillLearningRegistry,
+        current: LearnedSkill,
+        *,
+        pending_operation: dict[str, object] | None,
+        block_name: bool,
+        block_family: str,
+    ) -> SkillLearningRegistry:
+        skills = {key: value for key, value in registry.skills.items() if key != current.name}
+        skill_asset_ids = {f"owner:{current.name}", current.name}
+        assets = {
+            key: value
+            for key, value in registry.assets.items()
+            if not (isinstance(value, dict) and value.get("kind") == "skill" and value.get("asset_id") in skill_asset_ids)
+        }
+        blocked_names = tuple(dict.fromkeys([*registry.blocked_names, current.name])) if block_name else registry.blocked_names
+        if block_family and _SHA256_RE.fullmatch(block_family):
+            blocked_families = tuple(dict.fromkeys([*registry.blocked_task_families, block_family]))
+        else:
+            blocked_families = registry.blocked_task_families
+        return replace(
+            registry,
+            skills=skills,
+            assets=assets,
+            blocked_names=blocked_names,
+            blocked_task_families=blocked_families,
+            pending_operation=pending_operation,
+        )
+
+    def _cleanup_operation_locked(
+        self,
+        registry: SkillLearningRegistry,
+        op: dict[str, object],
+        *,
+        batch_count: int = 0,
+        batch_bytes: int = 0,
+        batch_ms: int = 0,
+    ) -> tuple[SkillLearningRegistry, dict[str, object]]:
+        eff_count = int(batch_count) if batch_count > 0 else 128
+        eff_bytes = int(batch_bytes) if batch_bytes > 0 else 8_388_608
+        eff_ms = int(batch_ms) if batch_ms > 0 else 50
+        deadline = time.monotonic() + eff_ms / 1000.0
+        actions = 0
+        freed = 0
+        cursor = ""
+        remaining = False
+        try:
+            ver_rel = str(op.get("versions_rel") or "")
+            if ver_rel:
+                root, parts = self._resolve_op_rel(ver_rel)
+                done_dir, did, dbytes, cur = self._purge_bounded_dir_beneath(
+                    root,
+                    parts,
+                    remaining_count=max(0, eff_count - actions),
+                    remaining_bytes=max(0, eff_bytes - freed),
+                    deadline=deadline,
+                    allow_zero_start=(actions == 0),
+                    prefix="versions",
+                )
+                actions += did
+                freed += dbytes
+                if not done_dir:
+                    remaining = True
+                    cursor = cur
+            tomb_rel = op.get("tombstone_rel")
+            if not remaining and tomb_rel:
+                root, parts = self._resolve_op_rel(str(tomb_rel))
+                done_dir, did, dbytes, cur = self._purge_bounded_dir_beneath(
+                    root,
+                    parts,
+                    remaining_count=max(0, eff_count - actions),
+                    remaining_bytes=max(0, eff_bytes - freed),
+                    deadline=deadline,
+                    allow_zero_start=(actions == 0),
+                    prefix="tombstone",
+                )
+                actions += did
+                freed += dbytes
+                if not done_dir:
+                    remaining = True
+                    cursor = cur
+        except OSError as exc:
+            updated_op = {**op, "phase": "cleanup", "cleanup_cursor": cursor or str(op.get("cleanup_cursor") or "")}
+            next_reg = replace(registry, pending_operation=updated_op)
+            self.save_registry(next_reg)
+            return next_reg, {
+                "status": "pending",
+                "resumed": True,
+                "completed": False,
+                "kind": str(op.get("kind") or ""),
+                "skill_name": str(op.get("skill_name") or ""),
+                "operation_id": str(op.get("operation_id") or ""),
+                "phase": "cleanup",
+                "actions": actions,
+                "bytes_freed": freed,
+                "remaining": True,
+                "error": type(exc).__name__,
+            }
+        if remaining:
+            updated_op = {**op, "phase": "cleanup", "cleanup_cursor": cursor}
+            next_reg = replace(registry, pending_operation=updated_op)
+            self.save_registry(next_reg)
+            return next_reg, {
+                "status": "pending",
+                "resumed": True,
+                "completed": False,
+                "kind": str(op.get("kind") or ""),
+                "skill_name": str(op.get("skill_name") or ""),
+                "operation_id": str(op.get("operation_id") or ""),
+                "phase": "cleanup",
+                "actions": actions,
+                "bytes_freed": freed,
+                "remaining": True,
+            }
+        next_reg = replace(registry, pending_operation=None)
+        self.save_registry(next_reg)
+        return next_reg, {
+            "status": "recovered",
+            "resumed": True,
+            "completed": True,
+            "kind": str(op.get("kind") or ""),
+            "skill_name": str(op.get("skill_name") or ""),
+            "operation_id": str(op.get("operation_id") or ""),
+            "phase": "done",
+            "actions": actions,
+            "bytes_freed": freed,
+            "remaining": False,
+        }
+
+    def _handoff_corrupt_op_locked(
+        self,
+        registry: SkillLearningRegistry,
+        op: dict[str, object],
+        *,
+        ownership: str,
+        reason: str,
+    ) -> tuple[SkillLearningRegistry, dict[str, object]]:
+        name = str(op.get("skill_name") or "")
+        skills = dict(registry.skills)
+        current = skills.get(name)
+        if current is not None:
+            skills[name] = replace(current, maintenance={**current.maintenance, "ownership": ownership})
+        next_reg = replace(registry, skills=skills, pending_operation=None)
+        self.save_registry(next_reg)
+        return next_reg, {
+            "status": "recovered",
+            "resumed": True,
+            "completed": True,
+            "kind": str(op.get("kind") or ""),
+            "skill_name": name,
+            "operation_id": str(op.get("operation_id") or ""),
+            "phase": "done",
+            "actions": 1,
+            "bytes_freed": 0,
+            "remaining": False,
+            "handoff": ownership,
+            "reason": reason,
+        }
+
+    def _recover_archive_locked(
+        self,
+        registry: SkillLearningRegistry,
+        op: dict[str, object],
+        *,
+        ts: float,
+    ) -> tuple[SkillLearningRegistry, dict[str, object]]:
+        name = str(op["skill_name"])
+        op_id = str(op["operation_id"])
+        expected_sha = str(op["expected_sha256"])
+        src_root, src_parts = self._resolve_op_rel(str(op["source_rel"]))
+        dst_root, dst_parts = self._resolve_op_rel(str(op["target_rel"]))
+        src_status, src_sha = self._dir_skill_sha256_nofollow(src_root, src_parts)
+        dst_status, dst_sha = self._dir_skill_sha256_nofollow(dst_root, dst_parts)
+        current = registry.skills.get(name)
+        if src_status == "ok" and src_sha == expected_sha and dst_status == "missing":
+            self._move_dir_nofollow(src_root, src_parts, dst_root, dst_parts)
+            src_status, dst_status, dst_sha = "missing", "ok", expected_sha
+        if src_status == "missing" and dst_status == "ok" and dst_sha == expected_sha:
+            if current is None:
+                next_reg = replace(registry, pending_operation=None)
+                self.save_registry(next_reg)
+                return next_reg, {
+                    "status": "recovered", "resumed": True, "completed": True, "kind": "archive",
+                    "skill_name": name, "operation_id": op_id, "phase": "done", "actions": 1, "bytes_freed": 0, "remaining": False,
+                }
+            updated = current if current.maintenance.get("state") == "archived" else self._archived_record(current, op_id=op_id, ts=ts)
+            next_reg = replace(registry, skills={**registry.skills, name: updated}, pending_operation=None)
+            self.save_registry(next_reg)
+            return next_reg, {
+                "status": "recovered", "resumed": True, "completed": True, "kind": "archive",
+                "skill_name": name, "operation_id": op_id, "phase": "done", "actions": 1, "bytes_freed": 0, "remaining": False,
+            }
+        if src_status == "ok" and src_sha != expected_sha and dst_status == "missing":
+            return self._handoff_corrupt_op_locked(registry, op, ownership="user_modified", reason="user_modified_before_archive")
+        return self._handoff_corrupt_op_locked(registry, op, ownership="unknown", reason="archive_state_uncertain")
+
+    def _recover_restore_locked(
+        self,
+        registry: SkillLearningRegistry,
+        op: dict[str, object],
+        *,
+        ts: float,
+    ) -> tuple[SkillLearningRegistry, dict[str, object]]:
+        name = str(op["skill_name"])
+        op_id = str(op["operation_id"])
+        expected_sha = str(op["expected_sha256"])
+        src_root, src_parts = self._resolve_op_rel(str(op["source_rel"]))
+        dst_root, dst_parts = self._resolve_op_rel(str(op["target_rel"]))
+        src_status, src_sha = self._dir_skill_sha256_nofollow(src_root, src_parts)
+        dst_status, dst_sha = self._dir_skill_sha256_nofollow(dst_root, dst_parts)
+        current = registry.skills.get(name)
+        if src_status == "ok" and src_sha == expected_sha and dst_status == "missing":
+            self._move_dir_nofollow(src_root, src_parts, dst_root, dst_parts)
+            src_status, dst_status, dst_sha = "missing", "ok", expected_sha
+        if src_status == "missing" and dst_status == "ok" and dst_sha == expected_sha:
+            if current is None:
+                next_reg = replace(registry, pending_operation=None)
+                self.save_registry(next_reg)
+                return next_reg, {
+                    "status": "recovered", "resumed": True, "completed": True, "kind": "restore",
+                    "skill_name": name, "operation_id": op_id, "phase": "done", "actions": 1, "bytes_freed": 0, "remaining": False,
+                }
+            updated = current if current.maintenance.get("state") != "archived" else self._restored_record(current, op_id=op_id, ts=ts)
+            next_reg = replace(registry, skills={**registry.skills, name: updated}, pending_operation=None)
+            self.save_registry(next_reg)
+            return next_reg, {
+                "status": "recovered", "resumed": True, "completed": True, "kind": "restore",
+                "skill_name": name, "operation_id": op_id, "phase": "done", "actions": 1, "bytes_freed": 0, "remaining": False,
+            }
+        if src_status == "ok" and src_sha != expected_sha:
+            return self._handoff_corrupt_op_locked(registry, op, ownership="user_modified", reason="user_modified_in_archive")
+        return self._handoff_corrupt_op_locked(registry, op, ownership="unknown", reason="restore_state_uncertain")
+
+    def _recover_displace_publish_locked(
+        self,
+        registry: SkillLearningRegistry,
+        op: dict[str, object],
+        *,
+        ts: float,
+    ) -> tuple[SkillLearningRegistry, dict[str, object]]:
+        victim_name = str(op["skill_name"])
+        op_id = str(op["operation_id"])
+        expected_sha = str(op["expected_sha256"])
+        cand_name = str(op.get("candidate_name") or "")
+        cand_sha = str(op.get("candidate_sha256") or "")
+        cand_rev = int(op.get("candidate_revision") or 1)
+        src_root, src_parts = self._resolve_op_rel(str(op["source_rel"]))
+        dst_root, dst_parts = self._resolve_op_rel(str(op["target_rel"]))
+        stage_rel = str(op.get("candidate_rel") or "")
+        stage_root, stage_parts = self._resolve_op_rel(stage_rel)
+        cand_parts = (LEARNED_DIR_NAME, cand_name)
+        vic_live_status, vic_live_sha = self._dir_skill_sha256_nofollow(src_root, src_parts)
+        vic_arch_status, vic_arch_sha = self._dir_skill_sha256_nofollow(dst_root, dst_parts)
+        stage_status, stage_sha = self._dir_skill_sha256_nofollow(stage_root, stage_parts)
+        cand_live_status, cand_live_sha = self._dir_skill_sha256_nofollow(self.skills_root, cand_parts)
+
+        # 若受害者仍在原位且已被用户修改，立即退让并清理未发布的暂存候选。
+        if vic_live_status == "ok" and vic_live_sha != expected_sha and vic_arch_status == "missing":
+            self._cleanup_aborted_candidate(stage_root, stage_parts, cand_name, cand_rev, registry)
+            return self._handoff_corrupt_op_locked(registry, op, ownership="user_modified", reason="victim_user_modified")
+
+        # 推进受害者移动（若尚未移出）。
+        if vic_live_status == "ok" and vic_live_sha == expected_sha and vic_arch_status == "missing":
+            if (stage_status == "ok" and stage_sha == cand_sha) or (cand_live_status == "ok" and cand_live_sha == cand_sha):
+                self._move_dir_nofollow(src_root, src_parts, dst_root, dst_parts)
+                vic_live_status, vic_arch_status, vic_arch_sha = "missing", "ok", expected_sha
+            else:
+                self._cleanup_aborted_candidate(stage_root, stage_parts, cand_name, cand_rev, registry)
+                next_reg = replace(registry, pending_operation=None)
+                self.save_registry(next_reg)
+                return next_reg, {
+                    "status": "recovered", "resumed": True, "completed": True, "kind": "displace_publish",
+                    "skill_name": victim_name, "operation_id": op_id, "phase": "done", "actions": 1, "bytes_freed": 0, "remaining": False,
+                }
+
+        # 受害者已归档：推进候选移入并提交，或回退受害者。
+        if vic_live_status == "missing" and vic_arch_status == "ok" and vic_arch_sha == expected_sha:
+            if cand_live_status == "missing" and stage_status == "ok" and stage_sha == cand_sha:
+                self._move_dir_nofollow(stage_root, stage_parts, self.skills_root, cand_parts)
+                cand_live_status, cand_live_sha = "ok", cand_sha
+            if cand_live_status == "ok" and cand_live_sha == cand_sha:
+                cand_text = _read_managed_skill_text_strict(self.skills_root, (*cand_parts, "SKILL.md"), skill_name=cand_name)
+                if self.read_version(cand_name, cand_rev) is None:
+                    self.save_version(cand_name, cand_rev, cand_text)
+                skills = dict(registry.skills)
+                victim = skills.get(victim_name)
+                if victim is not None:
+                    skills[victim_name] = self._archived_record(victim, op_id=op_id, ts=ts)
+                if cand_name not in skills:
+                    now_iso = utc_now()
+                    skills[cand_name] = LearnedSkill(
+                        cand_name,
+                        cand_rev,
+                        cand_sha,
+                        now_iso,
+                        now_iso,
+                        (),
+                        cand_rev,
+                        op_id,
+                        {
+                            "state": "trial",
+                            "quality": "trial",
+                            "quality_basis": "trial_unproven",
+                            "pinned": False,
+                            "baseline_at": float(op.get("created_at") or ts),
+                            "independent_uses": 0,
+                            "independent_uses_coverage": "exact",
+                            "uses_since_hurt": 0,
+                            "hurt_count": 0,
+                            "strike_epoch": 0,
+                            "incarnation_id": uuid.uuid4().hex,
+                            "activation_id": uuid.uuid4().hex,
+                            "epoch_started_at": float(op.get("created_at") or ts),
+                            "usage_receipt_sequence": 0,
+                            "ownership": "machine",
+                            "observations": [],
+                            "task_family_fingerprint": skill_family_fingerprint(cand_text),
+                        },
+                        "learned",
+                    )
+                next_reg = replace(registry, skills=skills, pending_operation=None)
+                self.save_registry(next_reg)
+                self._try_rmdir_if_empty(self.directory, ("tx_stage",))
+                return next_reg, {
+                    "status": "recovered", "resumed": True, "completed": True, "kind": "displace_publish",
+                    "skill_name": victim_name, "operation_id": op_id, "phase": "done", "actions": 1, "bytes_freed": 0, "remaining": False,
+                }
+            # 候选未到位且暂存失效：安全回退受害者到原在役目录。
+            if cand_live_status == "missing" and not self._dir_exists_nofollow(src_root, src_parts):
+                self._move_dir_nofollow(dst_root, dst_parts, src_root, src_parts)
+                self._cleanup_aborted_candidate(stage_root, stage_parts, cand_name, cand_rev, registry)
+                next_reg = replace(registry, pending_operation=None)
+                self.save_registry(next_reg)
+                return next_reg, {
+                    "status": "recovered", "resumed": True, "completed": True, "kind": "displace_publish",
+                    "skill_name": victim_name, "operation_id": op_id, "phase": "done", "actions": 1, "bytes_freed": 0, "remaining": False,
+                }
+        return self._handoff_corrupt_op_locked(registry, op, ownership="unknown", reason="displace_state_uncertain")
+
+    def _cleanup_aborted_candidate(
+        self,
+        stage_root: Path,
+        stage_parts: tuple[str, ...],
+        cand_name: str,
+        cand_rev: int,
+        registry: SkillLearningRegistry,
+    ) -> None:
+        self._purge_bounded_dir_beneath(
+            stage_root, stage_parts, remaining_count=32, remaining_bytes=8_388_608,
+            deadline=time.monotonic() + 2.0, allow_zero_start=True, prefix="abort",
+        )
+        self._try_rmdir_if_empty(self.directory, ("tx_stage",))
+        if cand_name and cand_name not in registry.skills:
+            unlink_file_beneath(self.directory, ("versions", cand_name, f"v{cand_rev}.md"))
+            self._try_rmdir_if_empty(self.directory, ("versions", cand_name))
+
+    def _recover_evict_locked(
+        self,
+        registry: SkillLearningRegistry,
+        op: dict[str, object],
+        *,
+        batch_count: int = 0,
+        batch_bytes: int = 0,
+        batch_ms: int = 0,
+    ) -> tuple[SkillLearningRegistry, dict[str, object]]:
+        name = str(op["skill_name"])
+        expected_sha = str(op["expected_sha256"])
+        current = registry.skills.get(name)
+        if current is None:
+            return self._cleanup_operation_locked(
+                registry, op, batch_count=batch_count, batch_bytes=batch_bytes, batch_ms=batch_ms
+            )
+        src_root, src_parts = self._resolve_op_rel(str(op["source_rel"]))
+        tomb_root, tomb_parts = self._resolve_op_rel(str(op.get("tombstone_rel") or op["target_rel"]))
+        src_status, src_sha = self._dir_skill_sha256_nofollow(src_root, src_parts)
+        src_extra = self._dir_extra_entries_status_nofollow(src_root, src_parts)
+        tomb_status, tomb_sha = self._dir_skill_sha256_nofollow(tomb_root, tomb_parts)
+        tomb_extra = self._dir_extra_entries_status_nofollow(tomb_root, tomb_parts)
+        if (src_extra == "extra" or (src_status == "ok" and src_sha != expected_sha)) and (
+            tomb_status == "missing" and tomb_extra == "missing"
+        ):
+            return self._handoff_corrupt_op_locked(registry, op, ownership="user_modified", reason="user_modified_before_evict")
+        if src_status == "ok" and src_sha == expected_sha and src_extra == "clean" and tomb_status == "missing" and tomb_extra == "missing":
+            self._move_dir_nofollow(src_root, src_parts, tomb_root, tomb_parts)
+            src_status, src_extra = "missing", "missing"
+            tomb_status, tomb_sha, tomb_extra = "ok", expected_sha, "clean"
+        if tomb_extra == "extra" and src_status == "missing" and not self._entry_exists_nofollow(src_root, src_parts):
+            self._move_dir_nofollow(tomb_root, tomb_parts, src_root, src_parts)
+            return self._handoff_corrupt_op_locked(
+                registry, op, ownership="user_modified", reason="user_extra_files_before_evict"
+            )
+        if src_status == "missing" and tomb_status == "ok" and tomb_sha == expected_sha and tomb_extra == "clean":
+            should_block = op.get("reason_code") == "third_strike_retire"
+            family = str(current.maintenance.get("task_family_fingerprint") or "")
+            if not _SHA256_RE.fullmatch(family):
+                text = read_text_beneath(tomb_root, (*tomb_parts, "SKILL.md"))
+                family = skill_family_fingerprint(text) if text is not None else ""
+            cleanup_op = {**op, "phase": "cleanup"}
+            committed = self._apply_removal_commit(
+                registry,
+                current,
+                pending_operation=cleanup_op,
+                block_name=should_block,
+                block_family=family if should_block else "",
+            )
+            self.save_registry(committed)
+            return self._cleanup_operation_locked(
+                committed, cleanup_op, batch_count=batch_count, batch_bytes=batch_bytes, batch_ms=batch_ms
+            )
+        return self._handoff_corrupt_op_locked(registry, op, ownership="unknown", reason="evict_state_uncertain")
+
+    def _recover_remove_locked(
+        self,
+        registry: SkillLearningRegistry,
+        op: dict[str, object],
+        *,
+        batch_count: int = 0,
+        batch_bytes: int = 0,
+        batch_ms: int = 0,
+    ) -> tuple[SkillLearningRegistry, dict[str, object]]:
+        name = str(op["skill_name"])
+        current = registry.skills.get(name)
+        if current is None:
+            return self._cleanup_operation_locked(
+                registry, op, batch_count=batch_count, batch_bytes=batch_bytes, batch_ms=batch_ms
+            )
+        src_root, src_parts = self._resolve_op_rel(str(op["source_rel"]))
+        dst_root, dst_parts = self._resolve_op_rel(str(op["target_rel"]))
+        if self._entry_exists_nofollow(src_root, src_parts) and not self._entry_exists_nofollow(dst_root, dst_parts):
+            self._move_entry_to_removed_nofollow(src_root, src_parts, dst_root, dst_parts)
+        family = str(current.maintenance.get("task_family_fingerprint") or "")
+        if not _SHA256_RE.fullmatch(family):
+            text = read_text_beneath(dst_root, (*dst_parts, "SKILL.md"))
+            if text is None:
+                text = self.read_version(name, current.version)
+            family = skill_family_fingerprint(text) if text is not None else ""
+        ver_exists = self._dir_exists_nofollow(self.directory, ("versions", name))
+        cleanup_op = {**op, "phase": "cleanup"} if ver_exists else None
+        committed = self._apply_removal_commit(
+            registry,
+            current,
+            pending_operation=cleanup_op,
+            block_name=True,
+            block_family=family,
+        )
+        self.save_registry(committed)
+        if cleanup_op is None:
+            return committed, {
+                "status": "recovered", "resumed": True, "completed": True, "kind": "remove",
+                "skill_name": name, "operation_id": str(op.get("operation_id") or ""), "phase": "done",
+                "actions": 1, "bytes_freed": 0, "remaining": False,
+            }
+        return self._cleanup_operation_locked(
+            committed, cleanup_op, batch_count=batch_count, batch_bytes=batch_bytes, batch_ms=batch_ms
+        )
+
+    def _recover_rollback_locked(
+        self,
+        registry: SkillLearningRegistry,
+        op: dict[str, object],
+        *,
+        ts: float,
+    ) -> tuple[SkillLearningRegistry, dict[str, object]]:
+        name = str(op["skill_name"])
+        op_id = str(op["operation_id"])
+        expected_sha = str(op["expected_sha256"])
+        cand_sha = str(op.get("candidate_sha256") or "")
+        cand_rev = int(op.get("candidate_revision") or (int(op["expected_revision"]) + 1))
+        src_root, src_parts = self._resolve_op_rel(str(op["source_rel"]))
+        ver_file_root, ver_file_parts = self._resolve_op_rel(str(op.get("candidate_rel") or ""))
+        current = registry.skills.get(name)
+        if current is None:
+            next_reg = replace(registry, pending_operation=None)
+            self.save_registry(next_reg)
+            return next_reg, {
+                "status": "recovered", "resumed": True, "completed": True, "kind": "rollback",
+                "skill_name": name, "operation_id": op_id, "phase": "done", "actions": 1, "bytes_freed": 0, "remaining": False,
+            }
+        ver_text = read_text_beneath(ver_file_root, ver_file_parts)
+        if ver_text is None or not cand_sha or skill_content_sha256(ver_text) != cand_sha:
+            return self._handoff_corrupt_op_locked(registry, op, ownership="unknown", reason="rollback_version_missing")
+        target_ver = _version_name_number(ver_file_parts[-1]) or current.version
+        live_status, live_sha = self._dir_skill_sha256_nofollow(src_root, src_parts)
+        if live_status == "ok" and live_sha == expected_sha:
+            replace_skill_file(self.skill_path(name, record=current), ver_text)
+            live_status, live_sha = "ok", cand_sha
+        if live_status == "ok" and live_sha == cand_sha:
+            if self.read_version(name, cand_rev) is None:
+                self.save_version(name, cand_rev, ver_text)
+            if current.last_operation_id != op_id:
+                maint = dict(current.maintenance)
+                stable = maint.get("previous_stable")
+                if is_proven_stable_version(stable) and stable["version"] == target_ver and stable["sha256"] == cand_sha:
+                    est_at = float(stable["established_at"])
+                    maint.update({
+                        "state": "active",
+                        "quality": "established",
+                        "quality_basis": "rollback_established",
+                        "established_at": est_at,
+                        "helped_count": 0,
+                        "hurt_count": 0,
+                        "independent_uses": 0,
+                        "independent_uses_coverage": "exact",
+                        "uses_since_hurt": 0,
+                        "activation_id": uuid.uuid4().hex,
+                        "epoch_started_at": ts,
+                        "observations": [],
+                        "rolled_back_from": current.sha256,
+                    })
+                    maint.pop("previous_stable", None)
+                    maint.pop("previous_verification", None)
+                else:
+                    maint.update({
+                        "state": "active",
+                        "quality": "trial",
+                        "quality_basis": "manual_revert",
+                        "helped_count": 0,
+                        "hurt_count": 0,
+                        "independent_uses": 0,
+                        "uses_since_hurt": 0,
+                        "activation_id": uuid.uuid4().hex,
+                        "epoch_started_at": ts,
+                        "observations": [],
+                        "rolled_back_from": current.sha256,
+                    })
+                    maint.pop("established_at", None)
+                maint["task_family_fingerprint"] = skill_family_fingerprint(ver_text)
+                current = replace(
+                    current,
+                    version=target_ver,
+                    revision=cand_rev,
+                    sha256=cand_sha,
+                    updated_at=utc_now(),
+                    last_operation_id=op_id,
+                    maintenance=maint,
+                )
+            next_reg = replace(registry, skills={**registry.skills, name: current}, pending_operation=None)
+            self.save_registry(next_reg)
+            return next_reg, {
+                "status": "recovered", "resumed": True, "completed": True, "kind": "rollback",
+                "skill_name": name, "operation_id": op_id, "phase": "done", "actions": 1, "bytes_freed": 0, "remaining": False,
+            }
+        if live_status == "ok":
+            return self._handoff_corrupt_op_locked(registry, op, ownership="user_modified", reason="user_modified_during_rollback")
+        return self._handoff_corrupt_op_locked(registry, op, ownership="unknown", reason="rollback_state_uncertain")
+
+    def _make_op_rollback(
+        self,
+        before_registry: SkillLearningRegistry,
+        op: dict[str, object],
+        *,
+        undo_actions: list[Callable[[], None]],
+    ):
+        def _callback(exc_type, primary, traceback):
+            if exc_type is None:
+                return False
+            try:
+                raw_text = read_text_beneath(self.directory, ("registry.json",))
+                raw_doc = json.loads(raw_text) if raw_text is not None else {}
+                if _is_op_committed_in_raw(raw_doc, op):
+                    if primary is not None:
+                        primary.add_note("lifecycle_commit_preserved_on_post_save_error")
+                    return False
+                for undo in reversed(undo_actions):
+                    undo()
+                if isinstance(raw_doc, dict):
+                    raw_pending = raw_doc.get("pending_operation")
+                    if isinstance(raw_pending, dict) and raw_pending.get("operation_id") == op["operation_id"]:
+                        write_json_file_atomic_unlocked(self.registry_path, before_registry.to_record())
+            except BaseException as rollback_error:
+                if primary is None:
+                    raise
+                primary.add_note("lifecycle_rollback_failed:" + type(rollback_error).__name__)
+            return False
+
+        return _callback
+
+    def _skill_dir_location(self, name: str, *, record: LearnedSkill | None) -> tuple[Path, tuple[str, ...]]:
+        if record and record.layout == "owner":
+            return self.skills_root, (name,)
+        if record and record.maintenance.get("state") == "archived":
+            return self.directory, ("archived", name)
+        return self.skills_root, (LEARNED_DIR_NAME, name)
+
+    def _store_rel_prefix_parts(self) -> tuple[str, ...]:
+        owner_norm = Path(os.path.abspath(os.path.normpath(str(self.skills_root.parent.expanduser()))))
+        store_norm = Path(os.path.abspath(os.path.normpath(str(self.directory.expanduser()))))
+        try:
+            parts = store_norm.relative_to(owner_norm).parts
+            return parts if parts else ("__store__",)
+        except ValueError:
+            return ("__store__",)
+
+    def _encode_rel(self, root_kind: str, *subparts: str) -> str:
+        _validate_relative_parts(subparts)
+        if root_kind == "skills":
+            return "/".join((self.skills_root.name, *subparts))
+        return "/".join((*self._store_rel_prefix_parts(), *subparts))
+
+    def _resolve_op_rel(self, rel: str) -> tuple[Path, tuple[str, ...]]:
+        parts = tuple(rel.split("/")) if rel else ()
+        try:
+            _validate_relative_parts(parts)
+        except ValueError as exc:
+            raise SkillLearningStoreError(CODE_REGISTRY_CORRUPT, f"invalid lifecycle path: {rel}") from exc
+        if parts[0] == self.skills_root.name and len(parts) > 1:
+            return self.skills_root, parts[1:]
+        prefix = self._store_rel_prefix_parts()
+        if parts[:len(prefix)] == prefix and len(parts) > len(prefix):
+            return self.directory, parts[len(prefix):]
+        raise SkillLearningStoreError(CODE_REGISTRY_CORRUPT, f"lifecycle path outside owner root: {rel}")
+
+    def _dir_exists_nofollow(self, root: Path, parts: tuple[str, ...]) -> bool:
+        try:
+            parent_fd = open_directory_beneath(root, parts[:-1], require_dir_fd=True)
+        except FileNotFoundError:
+            return False
+        except NoFollowPathError:
+            return True
+        try:
+            st = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+            return stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode)
+        except FileNotFoundError:
+            return False
+        finally:
+            os.close(parent_fd)
+
+    def _entry_exists_nofollow(self, root: Path, parts: tuple[str, ...]) -> bool:
+        try:
+            parent_fd = open_directory_beneath(root, parts[:-1], require_dir_fd=True)
+        except FileNotFoundError:
+            return False
+        except NoFollowPathError:
+            return True
+        try:
+            os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+            return True
+        except FileNotFoundError:
+            return False
+        finally:
+            os.close(parent_fd)
+
+    def _dir_skill_sha256_nofollow(self, root: Path, dir_parts: tuple[str, ...]) -> tuple[str, str]:
+        try:
+            parent_fd = open_directory_beneath(root, dir_parts[:-1], require_dir_fd=True)
+        except FileNotFoundError:
+            return "missing", ""
+        except OSError as exc:
+            return "uncertain", type(exc).__name__
+        try:
+            try:
+                st = os.stat(dir_parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return "missing", ""
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+                return "uncertain", "not_regular_dir"
+        finally:
+            os.close(parent_fd)
+        try:
+            text = _read_managed_skill_text_strict(root, (*dir_parts, "SKILL.md"), skill_name=dir_parts[-1])
+        except SkillLearningStoreError as exc:
+            return "uncertain", str(exc)
+        return "ok", skill_content_sha256(text)
+
+    def _dir_extra_entries_status_nofollow(self, root: Path, dir_parts: tuple[str, ...]) -> str:
+        """检查托管技能目录是否存在 SKILL.md 之外的额外文件或子目录。"""
+        try:
+            dir_fd = open_directory_beneath(root, dir_parts, require_dir_fd=True)
+        except FileNotFoundError:
+            return "missing"
+        except OSError:
+            return "uncertain"
+        try:
+            names = os.listdir(dir_fd)
+        except OSError:
+            return "uncertain"
+        finally:
+            os.close(dir_fd)
+        return "extra" if any(name != "SKILL.md" for name in names) else "clean"
+
+    def _move_dir_nofollow(
+        self,
+        src_root: Path,
+        src_parts: tuple[str, ...],
+        dst_root: Path,
+        dst_parts: tuple[str, ...],
+    ) -> None:
+        src_parent_fd = open_directory_beneath(src_root, src_parts[:-1], require_dir_fd=True)
+        try:
+            src_st = os.stat(src_parts[-1], dir_fd=src_parent_fd, follow_symlinks=False)
+            if stat.S_ISLNK(src_st.st_mode) or not stat.S_ISDIR(src_st.st_mode):
+                raise SkillLearningStoreError(CODE_EVIDENCE_INCOMPLETE, "managed skill directory is not regular")
+            dst_parent_fd = open_directory_beneath(dst_root, dst_parts[:-1], create=True, require_dir_fd=True)
+            try:
+                try:
+                    os.stat(dst_parts[-1], dir_fd=dst_parent_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise SkillLearningStoreError(CODE_EVIDENCE_INCOMPLETE, f"destination already exists: {'/'.join(dst_parts)}")
+                _rename_entry_with_exdev_fallback(
+                    src_parent_fd,
+                    src_parts[-1],
+                    dst_parent_fd,
+                    dst_parts[-1],
+                    src_root=src_root,
+                    src_parts=src_parts,
+                    dst_root=dst_root,
+                    dst_parts=dst_parts,
+                )
+            finally:
+                os.close(dst_parent_fd)
+        finally:
+            os.close(src_parent_fd)
+
+    def _move_entry_to_removed_nofollow(
+        self,
+        src_root: Path,
+        src_parts: tuple[str, ...],
+        dst_root: Path,
+        dst_parts: tuple[str, ...],
+    ) -> None:
+        src_parent_fd = open_directory_beneath(src_root, src_parts[:-1], require_dir_fd=True)
+        try:
+            os.stat(src_parts[-1], dir_fd=src_parent_fd, follow_symlinks=False)
+            dst_parent_fd = open_directory_beneath(dst_root, dst_parts[:-1], create=True, require_dir_fd=True)
+            try:
+                _rename_entry_with_exdev_fallback(
+                    src_parent_fd,
+                    src_parts[-1],
+                    dst_parent_fd,
+                    dst_parts[-1],
+                    src_root=src_root,
+                    src_parts=src_parts,
+                    dst_root=dst_root,
+                    dst_parts=dst_parts,
+                )
+            finally:
+                os.close(dst_parent_fd)
+        finally:
+            os.close(src_parent_fd)
+
+    def _purge_bounded_dir_beneath(
+        self,
+        root: Path,
+        rel_parts: tuple[str, ...],
+        *,
+        remaining_count: int,
+        remaining_bytes: int,
+        deadline: float,
+        allow_zero_start: bool,
+        prefix: str,
+    ) -> tuple[bool, int, int, str]:
+        stack: list[tuple[str, ...]] = [rel_parts]
+        done = 0
+        freed = 0
+        while stack:
+            current_parts = stack[-1]
+            try:
+                dir_fd = open_directory_beneath(root, current_parts, require_dir_fd=True)
+            except FileNotFoundError:
+                stack.pop()
+                continue
+            child_subdir: tuple[str, ...] | None = None
+            hit_limit = False
+            cursor_name = ""
+            try:
+                entries = sorted(os.scandir(dir_fd), key=lambda item: item.name)
+                for entry in entries:
+                    st = os.stat(entry.name, dir_fd=dir_fd, follow_symlinks=False)
+                    if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode):
+                        child_subdir = (*current_parts, entry.name)
+                        break
+                    file_size = 0 if stat.S_ISLNK(st.st_mode) else max(0, int(st.st_size))
+                    can_step = (done < remaining_count) and (
+                        (done == 0 and allow_zero_start)
+                        or (freed + file_size <= remaining_bytes and time.monotonic() < deadline)
+                    )
+                    if not can_step:
+                        hit_limit = True
+                        cursor_name = entry.name
+                        break
+                    os.unlink(entry.name, dir_fd=dir_fd)
+                    done += 1
+                    freed += file_size
+                else:
+                    os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+            if child_subdir is not None:
+                stack.append(child_subdir)
+                continue
+            if hit_limit:
+                return False, done, freed, f"{prefix}:{cursor_name}"
+            try:
+                parent_fd = open_directory_beneath(root, current_parts[:-1], require_dir_fd=True)
+            except FileNotFoundError:
+                stack.pop()
+                continue
+            try:
+                os.rmdir(current_parts[-1], dir_fd=parent_fd)
+                os.fsync(parent_fd)
+            except OSError as exc:
+                if exc.errno != errno.ENOENT:
+                    raise
+            finally:
+                os.close(parent_fd)
+            stack.pop()
+        return True, done, freed, ""
+
+    def _try_rmdir_if_empty(self, root: Path, parts: tuple[str, ...]) -> None:
+        try:
+            parent_fd = open_directory_beneath(root, parts[:-1], require_dir_fd=True)
+        except OSError:
+            return
+        try:
+            os.rmdir(parts[-1], dir_fd=parent_fd)
+        except OSError:
+            pass
+        finally:
+            os.close(parent_fd)
 
 
 # LLM: owner由Store路径隔离，root/task优先，旧请求才退thread/run；成对轨迹与谱系检查由_mergeable_requests承担。
@@ -666,7 +2448,7 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# LLM: 原登记校验保持；新增每日历史严格校验且兼容缺字段旧表，损坏不得当空表覆盖。
+# LLM: 严格兼容解析 v1 登记表与新增有界状态字段（游标/待完操作/家族封禁/代次），损坏不得当空表覆盖。
 # 函数用途: 从 registry.json 内容恢复登记表。
 def _registry_from(payload: object) -> SkillLearningRegistry:
     if not isinstance(payload, dict) or payload.get("schema_version") != REGISTRY_SCHEMA_VERSION:
@@ -679,18 +2461,385 @@ def _registry_from(payload: object) -> SkillLearningRegistry:
         raise ValueError("registry skill key does not match its name")
     blocked = payload.get("blocked_names") or []
     daily = payload.get("daily") or {}
-    if not isinstance(blocked, list) or not isinstance(daily, dict):
+    if not isinstance(blocked, list) or not all(isinstance(item, str) for item in blocked) or not isinstance(daily, dict):
         raise ValueError("registry blocked_names/daily have invalid shape")
     calls = daily.get("calls") or 0
     if isinstance(calls, bool) or not isinstance(calls, int) or calls < 0:
         raise ValueError("registry daily calls must be a non-negative integer")
-    daily_date = str(daily.get("date") or "")
+    daily_date = daily.get("date")
+    if daily_date is None:
+        daily_date = ""
+    elif not isinstance(daily_date, str):
+        raise ValueError("registry daily date must be a string")
     history = _registry_daily_history(payload.get("daily_history", {}), daily_date, calls)
-    assets, clock = payload.get('assets', {}), payload.get('last_maintenance_at', 0)
-    if not isinstance(assets, dict) or type(clock) not in (int, float) or not 0 <= clock < float('inf'):
-        raise ValueError('registry assets/maintenance invalid')
-    return SkillLearningRegistry(skills, tuple(str(item) for item in blocked), daily_date, calls,
-                                 dict(payload.get("import_operations") or {}), history, assets, clock)
+    assets = payload.get("assets", {})
+    clock = payload.get("last_maintenance_at", 0)
+    if (
+        not isinstance(assets, dict)
+        or isinstance(clock, bool)
+        or not isinstance(clock, (int, float))
+        or not math.isfinite(clock)
+        or clock < 0
+    ):
+        raise ValueError("registry assets/maintenance invalid")
+    usage_watermark = payload.get("usage_watermark", 0)
+    if isinstance(usage_watermark, bool) or not isinstance(usage_watermark, int) or usage_watermark < 0:
+        raise ValueError("registry usage_watermark must be a non-negative integer")
+    cursor = _validate_maintenance_cursor(payload.get("maintenance_cursor"))
+    pending_op = _validate_lifecycle_operation(payload.get("pending_operation"))
+    raw_families = payload.get("blocked_task_families") or []
+    if not isinstance(raw_families, list) or not all(
+        isinstance(item, str) and _SHA256_RE.fullmatch(item) for item in raw_families
+    ):
+        raise ValueError("registry blocked_task_families has invalid shape")
+    catalog_generation = payload.get("catalog_generation", "")
+    if not isinstance(catalog_generation, str):
+        raise ValueError("registry catalog_generation must be a string")
+    return SkillLearningRegistry(
+        skills=skills,
+        blocked_names=tuple(dict.fromkeys(blocked)),
+        daily_date=daily_date,
+        daily_calls=calls,
+        import_operations=dict(payload.get("import_operations") or {}),
+        daily_history=history,
+        assets=assets,
+        last_maintenance_at=clock,
+        usage_watermark=usage_watermark,
+        maintenance_cursor=cursor,
+        pending_operation=pending_op,
+        blocked_task_families=tuple(dict.fromkeys(raw_families)),
+        catalog_generation=catalog_generation,
+    )
+
+
+def _is_nonneg_int(value: object) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+
+
+def _is_nonneg_num(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+        and value >= 0
+    )
+
+
+# LLM: 校验历史稳定指针（StableVersion）；保留缺省 established_at 的历史可读性，绝不虚构旧证明时间。
+# 函数用途: 校验并规范化 previous_stable 字段。
+def _validate_stable_version(raw: object) -> dict[str, object]:
+    if not isinstance(raw, dict):
+        raise ValueError("stable version must be an object")
+    keys = set(raw.keys())
+    if not ({"version", "revision", "sha256"} <= keys <= _STABLE_VERSION_KEYS):
+        raise ValueError("stable version has missing or unsupported keys")
+    ver = raw["version"]
+    rev = raw["revision"]
+    sha = raw["sha256"]
+    if not _is_nonneg_int(ver) or ver < 1 or not _is_nonneg_int(rev) or rev < ver:
+        raise ValueError("stable version/revision invalid")
+    if not isinstance(sha, str) or not _SHA256_RE.fullmatch(sha):
+        raise ValueError("stable version sha256 invalid")
+    out: dict[str, object] = {"version": ver, "revision": rev, "sha256": sha}
+    if "established_at" in raw:
+        est = raw["established_at"]
+        if not _is_nonneg_num(est):
+            raise ValueError("stable version established_at invalid")
+        out["established_at"] = est
+    return out
+
+
+# LLM: 只有含正数 established_at 的历史稳定指针才是已证实可回滚目标，未证实试用版绝不充当回滚锚点。
+# 函数用途: 判断回滚目标指针是否具备已证实稳定证明。
+def is_proven_stable_version(raw: object) -> bool:
+    try:
+        cleaned = _validate_stable_version(raw)
+    except ValueError:
+        return False
+    est = cleaned.get("established_at")
+    return isinstance(est, (int, float)) and not isinstance(est, bool) and float(est) > 0
+
+
+# LLM: 校验 Maintenance 已知字段类型（允许 unrelated/legacy 扩展字段保留，不抛弃原有数据，legacy hurt>3 保持可读）。
+# 函数用途: 校验登记记录内的 maintenance 对象。
+def _validate_maintenance(raw: object) -> dict[str, object]:
+    if not isinstance(raw, dict):
+        raise ValueError("maintenance must be an object")
+    data = dict(raw)
+    enum_checks = (
+        ("state", _VALID_MAINT_STATES),
+        ("quality", _VALID_MAINT_QUALITIES),
+        ("independent_uses_coverage", _VALID_USAGE_COVERAGES),
+        ("ownership", _VALID_OWNERSHIPS),
+    )
+    for key, allowed in enum_checks:
+        if key in data and data[key] not in allowed:
+            raise ValueError(f"maintenance.{key} invalid")
+    for key in ("quality_basis", "incarnation_id", "activation_id", "last_negative_receipt"):
+        if key in data and not isinstance(data[key], str):
+            raise ValueError(f"maintenance.{key} must be a string")
+    if "pinned" in data and not isinstance(data["pinned"], bool):
+        raise ValueError("maintenance.pinned must be a boolean")
+    if "ever_used" in data and data["ever_used"] is not None and not isinstance(data["ever_used"], bool):
+        raise ValueError("maintenance.ever_used must be boolean or null")
+    if (
+        "legacy_last_activity_upper_bound" in data
+        and data["legacy_last_activity_upper_bound"] is not None
+        and not _is_nonneg_num(data["legacy_last_activity_upper_bound"])
+    ):
+        raise ValueError("maintenance.legacy_last_activity_upper_bound invalid")
+    for key in ("baseline_at", "last_used_at", "restored_at", "cooled_at", "archived_at", "epoch_started_at", "established_at"):
+        if key in data and not _is_nonneg_num(data[key]):
+            raise ValueError(f"maintenance.{key} must be a non-negative number")
+    for key in ("independent_uses", "uses_since_hurt", "hurt_count", "strike_epoch", "usage_receipt_sequence", "helped_count"):
+        if key in data and not _is_nonneg_int(data[key]):
+            raise ValueError(f"maintenance.{key} must be a non-negative integer")
+    if "previous_stable" in data:
+        data["previous_stable"] = _validate_stable_version(data["previous_stable"])
+    if "observations" in data:
+        obs = data["observations"]
+        if not isinstance(obs, list) or len(obs) > 200 or not all(isinstance(item, dict) for item in obs):
+            raise ValueError("maintenance.observations invalid")
+    if "task_family_fingerprint" in data:
+        fam = data["task_family_fingerprint"]
+        if not isinstance(fam, str) or not _FAMILY_RE.fullmatch(fam):
+            raise ValueError("maintenance.task_family_fingerprint invalid")
+    return data
+
+
+# LLM: 严格校验 MaintenanceCursor，禁止额外未声明键。
+# 函数用途: 校验并复制维护进度游标。
+def _validate_maintenance_cursor(raw: object) -> dict[str, object]:
+    if raw is None or raw == {}:
+        return {}
+    if not isinstance(raw, dict) or not (set(raw.keys()) <= _CURSOR_KEYS):
+        raise ValueError("maintenance_cursor has invalid shape or extra keys")
+    if "phase" in raw and raw["phase"] not in _VALID_CURSOR_PHASES:
+        raise ValueError("maintenance_cursor.phase invalid")
+    for key in ("after_name", "after_entry", "source_generation"):
+        if key in raw and not isinstance(raw[key], str):
+            raise ValueError(f"maintenance_cursor.{key} must be a string")
+    for key in ("started_at", "retry_after"):
+        if key in raw and not _is_nonneg_num(raw[key]):
+            raise ValueError(f"maintenance_cursor.{key} invalid")
+    return dict(raw)
+
+
+# LLM: 严格校验 LifecycleOperation（additionalProperties=false）；保证崩溃恢复不会信任损坏意图。
+# 函数用途: 校验并复制 pending_operation。
+def _validate_lifecycle_operation(raw: object) -> dict[str, object] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("pending_operation must be an object or null")
+    keys = set(raw.keys())
+    if not (_LIFECYCLE_OP_REQUIRED <= keys <= _LIFECYCLE_OP_KEYS):
+        raise ValueError("pending_operation has missing or unsupported keys")
+    for key in ("operation_id", "skill_name", "source_rel", "target_rel", "versions_rel"):
+        if not isinstance(raw[key], str) or not raw[key]:
+            raise ValueError(f"pending_operation.{key} must be a non-empty string")
+    if not _SKILL_NAME_RE.fullmatch(str(raw["skill_name"])):
+        raise ValueError("pending_operation.skill_name invalid")
+    if raw["kind"] not in _VALID_OP_KINDS or raw["phase"] not in _VALID_OP_PHASES:
+        raise ValueError("pending_operation kind/phase invalid")
+    if not _is_nonneg_int(raw["expected_revision"]) or int(raw["expected_revision"]) < 1:
+        raise ValueError("pending_operation.expected_revision invalid")
+    if not isinstance(raw["expected_sha256"], str) or not _SHA256_RE.fullmatch(raw["expected_sha256"]):
+        raise ValueError("pending_operation.expected_sha256 invalid")
+    if not _is_nonneg_num(raw["created_at"]):
+        raise ValueError("pending_operation.created_at invalid")
+    for key in ("candidate_rel", "tombstone_rel", "candidate_name", "candidate_sha256"):
+        if key in raw and raw[key] is not None and not isinstance(raw[key], str):
+            raise ValueError(f"pending_operation.{key} must be string or null")
+    if raw.get("candidate_name") is not None and not _SKILL_NAME_RE.fullmatch(str(raw["candidate_name"])):
+        raise ValueError("pending_operation.candidate_name invalid")
+    if raw.get("candidate_sha256") is not None and not _SHA256_RE.fullmatch(str(raw["candidate_sha256"])):
+        raise ValueError("pending_operation.candidate_sha256 invalid")
+    if "candidate_revision" in raw and raw["candidate_revision"] is not None:
+        cand_rev = raw["candidate_revision"]
+        if not _is_nonneg_int(cand_rev) or int(cand_rev) < 1:
+            raise ValueError("pending_operation.candidate_revision invalid")
+    for key in ("cleanup_cursor", "event_id", "reason_code"):
+        if key in raw and not isinstance(raw[key], str):
+            raise ValueError(f"pending_operation.{key} must be a string")
+    return dict(raw)
+
+
+# LLM: 与 asset_promotion.task_family_fingerprint("skill", {"body": body}) 同算法，供底层发布/迁移复用而无循环依赖。
+# 函数用途: 根据 SKILL.md 完整正文计算标准化任务家族指纹。
+def skill_family_fingerprint(body: str) -> str:
+    stripped = re.sub(r"\A---\n.*?\n---\n", "", body, flags=re.S)
+    stripped = re.sub(r"^#{1,6}[^\n]*", "", stripped, flags=re.M)
+    signature = re.findall(r"[\w]+", stripped.casefold())
+    return hashlib.sha256(json.dumps(["skill", signature], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def _read_managed_skill_text_strict(root: Path, rel_parts: tuple[str, ...], *, skill_name: str) -> str:
+    try:
+        raw = read_bytes_beneath(root, rel_parts, max_bytes=MAX_SKILL_BYTES, require_dir_fd=True)
+    except (OSError, ValueError) as exc:
+        raise SkillLearningStoreError(
+            CODE_EVIDENCE_INCOMPLETE,
+            f"unreadable managed skill file for {skill_name}: {exc}",
+            detail={"skill_name": skill_name, "reason": type(exc).__name__},
+        ) from exc
+    if raw is None:
+        raise SkillLearningStoreError(
+            CODE_EVIDENCE_INCOMPLETE,
+            f"missing managed skill file for {skill_name}",
+            detail={"skill_name": skill_name, "reason": "missing"},
+        )
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SkillLearningStoreError(
+            CODE_EVIDENCE_INCOMPLETE,
+            f"corrupt UTF-8 in managed skill file for {skill_name}",
+            detail={"skill_name": skill_name, "reason": "invalid_utf8"},
+        ) from exc
+
+
+def _is_op_committed_in_raw(raw_doc: object, op: dict[str, object]) -> bool:
+    if not isinstance(raw_doc, dict):
+        return False
+    skills = raw_doc.get("skills")
+    if not isinstance(skills, dict):
+        return False
+    op_id = str(op.get("operation_id") or "")
+    kind = str(op.get("kind") or "")
+    skill_name = str(op.get("skill_name") or "")
+    if kind in {"remove", "evict"}:
+        pending = raw_doc.get("pending_operation")
+        pending_ok = pending is None or (
+            isinstance(pending, dict)
+            and pending.get("operation_id") == op_id
+            and pending.get("phase") in {"committed", "cleanup"}
+        )
+        return (skill_name not in skills) and pending_ok
+    if kind in {"archive", "restore", "rollback"}:
+        row = skills.get(skill_name)
+        return isinstance(row, dict) and row.get("last_operation_id") == op_id
+    if kind == "displace_publish":
+        cand_name = str(op.get("candidate_name") or "")
+        row = skills.get(cand_name)
+        return isinstance(row, dict) and row.get("last_operation_id") == op_id
+    return False
+
+
+def _rename_entry_with_exdev_fallback(
+    src_parent_fd: int,
+    src_name: str,
+    dst_parent_fd: int,
+    dst_name: str,
+    *,
+    src_root: Path,
+    src_parts: tuple[str, ...],
+    dst_root: Path,
+    dst_parts: tuple[str, ...],
+) -> None:
+    try:
+        os.rename(src_name, dst_name, src_dir_fd=src_parent_fd, dst_dir_fd=dst_parent_fd)
+        os.fsync(dst_parent_fd)
+        os.fsync(src_parent_fd)
+        return
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+    _copy_entry_nofollow(src_root, src_parts, dst_root, dst_parts)
+    _remove_entry_nofollow(src_root, src_parts)
+
+
+def _copy_entry_nofollow(
+    src_root: Path,
+    src_parts: tuple[str, ...],
+    dst_root: Path,
+    dst_parts: tuple[str, ...],
+) -> None:
+    src_parent_fd = open_directory_beneath(src_root, src_parts[:-1], require_dir_fd=True)
+    try:
+        st = os.stat(src_parts[-1], dir_fd=src_parent_fd, follow_symlinks=False)
+        if stat.S_ISLNK(st.st_mode):
+            target = os.readlink(src_parts[-1], dir_fd=src_parent_fd)
+            dst_parent_fd = open_directory_beneath(dst_root, dst_parts[:-1], create=True, require_dir_fd=True)
+            try:
+                os.symlink(target, dst_parts[-1], dir_fd=dst_parent_fd)
+                os.fsync(dst_parent_fd)
+            finally:
+                os.close(dst_parent_fd)
+            return
+        if not stat.S_ISDIR(st.st_mode):
+            raise NoFollowPathError("managed source entry is neither directory nor symlink")
+    finally:
+        os.close(src_parent_fd)
+    stack: list[tuple[tuple[str, ...], tuple[str, ...]]] = [(src_parts, dst_parts)]
+    while stack:
+        cur_src, cur_dst = stack.pop()
+        src_fd = open_directory_beneath(src_root, cur_src, require_dir_fd=True)
+        dst_fd = open_directory_beneath(dst_root, cur_dst, create=True, require_dir_fd=True)
+        try:
+            for entry in sorted(os.scandir(src_fd), key=lambda item: item.name):
+                est = os.stat(entry.name, dir_fd=src_fd, follow_symlinks=False)
+                if stat.S_ISLNK(est.st_mode):
+                    os.symlink(os.readlink(entry.name, dir_fd=src_fd), entry.name, dir_fd=dst_fd)
+                elif stat.S_ISDIR(est.st_mode):
+                    stack.append(((*cur_src, entry.name), (*cur_dst, entry.name)))
+                elif stat.S_ISREG(est.st_mode):
+                    in_fd = _openat_file(src_fd, entry.name, os.O_RDONLY, 0o600)
+                    out_fd = -1
+                    try:
+                        out_fd = os.open(entry.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dst_fd)
+                        while chunk := os.read(in_fd, 65536):
+                            view = memoryview(chunk)
+                            while view:
+                                written = os.write(out_fd, view)
+                                if written <= 0:
+                                    raise OSError("short write during cross-device copy")
+                                view = view[written:]
+                        os.fsync(out_fd)
+                    finally:
+                        if out_fd >= 0:
+                            os.close(out_fd)
+                        os.close(in_fd)
+            os.fsync(dst_fd)
+        finally:
+            os.close(dst_fd)
+            os.close(src_fd)
+
+
+def _remove_entry_nofollow(root: Path, parts: tuple[str, ...]) -> None:
+    parent_fd = open_directory_beneath(root, parts[:-1], require_dir_fd=True)
+    try:
+        st = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            os.unlink(parts[-1], dir_fd=parent_fd)
+            os.fsync(parent_fd)
+            return
+    finally:
+        os.close(parent_fd)
+    stack: list[tuple[str, ...]] = [parts]
+    while stack:
+        cur = stack[-1]
+        dir_fd = open_directory_beneath(root, cur, require_dir_fd=True)
+        child: tuple[str, ...] | None = None
+        try:
+            for entry in os.scandir(dir_fd):
+                est = os.stat(entry.name, dir_fd=dir_fd, follow_symlinks=False)
+                if stat.S_ISDIR(est.st_mode) and not stat.S_ISLNK(est.st_mode):
+                    child = (*cur, entry.name)
+                    break
+                os.unlink(entry.name, dir_fd=dir_fd)
+        finally:
+            os.close(dir_fd)
+        if child is not None:
+            stack.append(child)
+            continue
+        pfd = open_directory_beneath(root, cur[:-1], require_dir_fd=True)
+        try:
+            os.rmdir(cur[-1], dir_fd=pfd)
+            os.fsync(pfd)
+        finally:
+            os.close(pfd)
+        stack.pop()
 
 
 # LLM: 每日历史只保留UTC最近30天的整数计数；合法ISO日期作结构化键，不靠展示文字推断日期。
@@ -735,22 +2884,42 @@ def _text(payload: dict, key: str) -> str:
 # LLM: 版本文件名固定 v<N>.md；按数字而不是字典序排序，v10 排在 v9 之后。
 # 函数用途: 取版本文件的版本号。
 def _version_number(path: Path) -> int:
-    digits = path.stem[1:]
+    return _version_name_number(path.name)
+
+
+def _version_name_number(name: str) -> int:
+    if not (name.startswith("v") and name.endswith(".md")):
+        return 0
+    digits = name[1:-3]
     return int(digits) if digits.isdigit() else 0
 
 
-# LLM: 发布与回滚共用：只在目标 SKILL.md 所在目录写临时文件再原子替换，保留用户放进同目录的其它文件。
+# LLM: 发布与回滚共用：只在目标 SKILL.md 所在目录写临时文件并落盘同步再原子替换，拒绝链接且保留用户同目录其它文件。
 # 函数用途: 原子替换一个 SKILL.md 文件。
 def replace_skill_file(path: Path, text: str) -> None:
+    if path.is_symlink() or path.parent.is_symlink():
+        raise NoFollowPathError("refusing to replace symlinked skill file")
     tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     try:
-        tmp.write_text(text, encoding="utf-8")
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, path)
+        if hasattr(os, "O_DIRECTORY"):
+            dir_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
     finally:
         tmp.unlink(missing_ok=True)
 
 
 __all__ = [
+    "CODE_ARCHIVE_EXPIRED",
+    "CODE_EVIDENCE_INCOMPLETE",
+    "CODE_MAINTENANCE_OBSERVE_ONLY",
     "CODE_QUEUE_FULL",
     "CODE_REGISTRY_CORRUPT",
     "CODE_REQUEST_CORRUPT",
@@ -771,7 +2940,9 @@ __all__ = [
     "SkillLearningRegistry",
     "SkillLearningStore",
     "SkillLearningStoreError",
+    "is_proven_stable_version",
     "replace_skill_file",
     "request_key",
+    "skill_family_fingerprint",
     "utc_now",
 ]

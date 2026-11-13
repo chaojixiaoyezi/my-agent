@@ -52,7 +52,11 @@ from .package_snapshot import package_read_parameters
 from .router import CapabilityRouter, tokenize
 from .skill_learning_store import SkillLearningStore
 from .skill_snapshot import PACKAGE_PIN_ERROR_MESSAGES, SkillSnapshotError
-from .skill_usage_ledger import record_skill_usage_event, record_skill_usage_events
+from .skill_usage_ledger import (
+    learning_usage_binding,
+    record_skill_usage_event,
+    record_skill_usage_events,
+)
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -241,9 +245,17 @@ class SkillSearchTool(BaseTool):
             payload = {**_package_navigation(package), **payload}
             outcome = _package_read_outcome(payload, max(0, int(config.tool_output_preview_chars)))
             if action == "get":
+                body_len = len(payload.get("body") or "")
                 record_method_read(self.agent, package, resource_path)
-                record_skill_usage_event(self.agent, event="manual_get", skill_id=package_id,
-                                         kind="capability_package", source="package", chars=len(payload.get("body") or ""))
+                record_skill_usage_event(
+                    self.agent,
+                    event="manual_get",
+                    skill_id=package_id,
+                    kind="capability_package",
+                    source="package",
+                    chars=body_len,
+                    body_chars=body_len,
+                )
                 if outcome.ok and package.mcp_runtime == "on_demand" and package.mcp_tool_names:
                     outcome = replace(outcome, result_envelope={**outcome.result_envelope, "capability_package_tools": {
                         "package_id": package.package_id, "activation_id": package.activation_id,
@@ -302,7 +314,16 @@ class SkillSearchTool(BaseTool):
         }
         outcome = ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
         record_method_read(self.agent, entry)
-        record_skill_usage_event(self.agent, event="manual_get", skill_id=entry.stable_id, source=entry.source, chars=len(body))
+        binding = learning_usage_binding(self.agent, entry)
+        record_skill_usage_event(
+            self.agent,
+            event="manual_get",
+            skill_id=entry.stable_id,
+            source=entry.source,
+            chars=len(body),
+            body_chars=len(body),
+            **binding,
+        )
         return outcome
 
 
@@ -318,7 +339,8 @@ def _record_search_matches(agent, matches: list[dict]) -> None:
                    "thread_id": attrs.get("conversation_thread_id", "")}
         batch = [{"event": "manual_search", "kind": match["kind"],
                   "skill_id": match["package_id"] if match["kind"] == "capability_package" else match["skill_id"],
-                  "source": "package" if match["kind"] == "capability_package" else match["source"], **context}
+                  "source": "package" if match["kind"] == "capability_package" else match["source"],
+                  "body_chars": 0, **context}
                  for match in matches if match["kind"] in {"skill", "capability_package"}]
         record_skill_usage_events(SkillLearningStore.for_home(agent.home_paths), batch)
     except Exception:  # noqa: BLE001 - 附带统计不能改变搜索成功事实。

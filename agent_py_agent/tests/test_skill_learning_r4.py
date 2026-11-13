@@ -145,16 +145,30 @@ def test_r5_f11_rollback_preserves_adoption_history_against_ambiguous_receipt(tm
     ctx = _runtime(tmp_path)
     store = ctx.store
     publish_learned_skill(store, PublishRequest(decision('skill-a')))
+    with store.state_lock():
+        reg = store.load_registry()
+        v1_existing = reg.skills['skill-a']
+        v1_proven = replace(
+            v1_existing,
+            maintenance={
+                **v1_existing.maintenance,
+                'quality': 'established',
+                'established_at': 1000.0,
+            },
+        )
+        store.save_registry(replace(reg, skills={**reg.skills, 'skill-a': v1_proven}))
     v1_row = store.load_registry().skills['skill-a']
     changed = replace(decision('skill-a'), decision='update', update_target='skill-a', body=BODY + '\nv2-body')
     publish_learned_skill(store, PublishRequest(changed, expected_revision=v1_row.revision, expected_sha256=v1_row.sha256))
     v2_hash = store.load_registry().skills['skill-a'].sha256
-    for idx in range(2):
+    for idx in range(3):
         observe_learning(store, 'skill-a', sha256=v2_hash, task_id=f'fail-{idx}',
                          outcome='adopted', source=LearningObservationSource(run_id='run-rb'))
         observe_learning(store, 'skill-a', sha256=v2_hash, task_id=f'fail-{idx}',
                          outcome='ineffective', source=LearningObservationSource(
                              run_id='run-rb', authority='host', receipt_id=f'neg-{idx}'))
+        if store.load_registry().skills['skill-a'].sha256 == v1_row.sha256:
+            break
     assert store.load_registry().skills['skill-a'].sha256 == v1_row.sha256
     publish_learned_skill(store, PublishRequest(decision('skill-b')))
     _adopt(store, 'skill-b', 'run-rb')

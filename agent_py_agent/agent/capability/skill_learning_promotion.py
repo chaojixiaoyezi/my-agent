@@ -16,8 +16,10 @@ def promote_verified_skill(store, publish, verifier=None, *, commit=None):
     from . import skill_learning_host_feedback as feedback
     from .asset_promotion import business_validated
     from .skill_learning_publish import (
+        CODE_LEARNING_DISABLED,
         SkillLearningGateError,
         _redacted_publish,
+        _resolve_live_policy,
         _stage_and_check,
         publish_learned_skill,
         render_learned_skill,
@@ -26,13 +28,16 @@ def promote_verified_skill(store, publish, verifier=None, *, commit=None):
     safe, redacted = _redacted_publish(deepcopy(publish))
     if redacted:
         return None
+    policy_enable, _, _, effective_guard = _resolve_live_policy(safe)
+    if policy_enable is False:
+        raise SkillLearningGateError(CODE_LEARNING_DISABLED, {"enable_self_learning": False})
     structural = default_machine_promotion_verifier(safe)
     if structural.get('error_code') in {'MANUAL_ONLY_TARGET', 'MACHINE_DRAFT_NAME_INVALID'}:
         raise SkillLearningGateError(structural['error_code'])
     if structural['status'] != 'passed':
         return None
     with store.state_lock():
-        _stage_and_check(store, safe, render_learned_skill(safe.decision))
+        _stage_and_check(store, replace(safe, guard_config=effective_guard), render_learned_skill(safe.decision))
     sha = skill_content_sha256(render_learned_skill(safe.decision))
     verifier = default_machine_promotion_verifier if verifier is None else verifier
     original = getattr(verifier, 'func', verifier)
@@ -79,11 +84,18 @@ def _propose_or_promote_locked(store, publish, verifier, autonomous_verified, co
     )
     from .skill_learning_proposals import list_learning_proposals, propose_learning
     from .skill_learning_publish import (
+        CODE_LEARNING_DISABLED,
         CODE_LIMIT_REACHED,
         SkillLearningGateError,
         _family_record_locked,
+        _resolve_live_policy,
     )
-    from .skill_learning_store import SkillLearningEvent
+    from .skill_learning_store import (
+        CODE_EVIDENCE_INCOMPLETE,
+        CODE_MAINTENANCE_OBSERVE_ONLY,
+        SkillLearningEvent,
+        SkillLearningStoreError,
+    )
 
     req = publish.request if isinstance(publish.request, dict) else {}
     extra = {k: req[k] for k in ('kind', 'code', 'entry_source', 'steps', 'io_contract', 'sample_inputs',
@@ -102,12 +114,30 @@ def _propose_or_promote_locked(store, publish, verifier, autonomous_verified, co
         _commit(commit, lambda: register_asset(store, kind=carrier, asset_id=cand['name'], asset=cand,
             source={'origin': 'S3', 'proposal_id': event.reason}, state='candidate'))
         return replace(event, carrier=carrier)
+    policy_enable, policy_mode, effective_max, _ = _resolve_live_policy(publish)
+    if policy_enable is False:
+        raise SkillLearningGateError(CODE_LEARNING_DISABLED, {"enable_self_learning": False})
     identity = asset_identity('skill', asdict(publish.decision), store.skills_root.parent)
     with store.state_lock():
-        registry = store.load_registry()
-        if (publish.decision.decision == 'create' and publish.max_skills > 0
-                and len(registry.skills) >= publish.max_skills and publish.decision.name not in registry.skills):
-            raise SkillLearningGateError(CODE_LIMIT_REACHED)
+        registry = store._prepare_clean_registry_locked(store.load_registry())
+        try:
+            managed = store.managed_records(registry, include_archived=False)
+        except SkillLearningStoreError as exc:
+            if exc.code == CODE_EVIDENCE_INCOMPLETE:
+                raise SkillLearningGateError(CODE_EVIDENCE_INCOMPLETE, exc.detail) from exc
+            raise
+        live = registry.live_count(managed_names=managed.keys())
+        if (publish.decision.decision == 'create' and effective_max > 0
+                and live >= effective_max and publish.decision.name not in registry.skills):
+            if policy_mode == 'observe':
+                raise SkillLearningGateError(
+                    CODE_MAINTENANCE_OBSERVE_ONLY,
+                    {"limit": effective_max, "live": live, "mode": "observe"},
+                )
+            # 预检只做保守验证，绝不在 preflight 淘汰现役技能；
+            # 若存在实时 protection_provider，最终准入与 R-2 置换统一延迟到 publish_learned_skill 短锁内完成。
+            if not (autonomous_verified and publish.protection_provider is not None):
+                raise SkillLearningGateError(CODE_LIMIT_REACHED, {"limit": effective_max, "live": live})
         reusable = _family_record_locked(store, registry, publish) if publish.decision.decision == 'create' else None
     if reusable is not None:
         return SkillLearningEvent('skipped', 'SKILL_LEARNING_FAMILY_REUSED', skill_name=reusable.name)
