@@ -173,7 +173,8 @@ def _policy(name, reads, dangerous):
 # LLM: Store与runner均绑定同一个可信Owner；纯schema/descriptor沿共享构造器，execute不接收执行身份或任意命令。
 # 类用途: 为Agent提供脚本目录、管理、源评估和受控运行工具。
 class ScriptsTool(BaseTool):
-    model_spec = _spec('scripts', '管理Owner固化脚本、标准提取Key与源评估；脚本应输出单行JSON对象到stdout；run仅单次覆盖数据源。',
+    model_spec = _spec('scripts', '管理Owner固化脚本、标准提取Key与源评估；脚本应输出单行JSON对象到stdout；run仅单次覆盖数据源。'
+        '正式工作流步骤要交付文件时，写入宿主提供的MY_AGENT_RUN_OUT目录。',
         ['list', 'get', 'register', 'update', 'update_sources', 'record_candidate', 'run', 'delete', 'check_sources',
          'versions', 'diff', 'rollback', 'promote_draft'], {
             'expected_revision': {'type': ['integer', 'null'], 'minimum': 0},

@@ -2,6 +2,12 @@
 
 状态：2026-10-21 底座第一阶段落地中（`agent_py_agent/agent/assets/`、`workflows/`、`observability/`、`tooling/`、`gateway_parts/plugin_broker_api.py`）。
 
+## 将脚本文件交付给业务任务
+
+脚本在正规工作流步骤中从环境变量 `MY_AGENT_RUN_OUT` 取得输出目录，将要交付的文件写进该目录。成功归档后，`workflows.inspect_run` 的 `steps[].output_artifacts` 返回相对路径、大小、SHA-256 和 `artifact_id`。业务任务可将这两个标识传给 `artifacts.get`，其中 `version_ref` 使用原 SHA-256，再通过原产物内容接口下载。
+
+编号指向原工作流运行、步骤尝试和清单条目。查询和下载均核实冻结业务任务、所属空间、读取权限以及原文件版本。输出到 stdout 的文件路径仅作为脚本返回数据。
+
 ## 原生独立审核接入（2026-11-12 源码候选）
 
 工作流可在 `descriptor.metadata.workflow_review_policy` 声明 `steps`、`minimum_reviews` 和 `ttl_seconds`。步骤进入副作用准入时，通过原 ORCH 证据库登记审核需求，版本绑定运行、步骤、尝试、候选定义和业务范围。作者身份来自活跃宿主调用，调用退出后失效。

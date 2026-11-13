@@ -187,6 +187,10 @@ class RunListIndex:
             if version < 2:
                 conn.execute('CREATE TABLE IF NOT EXISTS pending(run_id TEXT PRIMARY KEY)')
                 conn.execute('PRAGMA user_version=2')
+            if version < 3:
+                conn.execute('CREATE TABLE IF NOT EXISTS artifact_run_keys('
+                             'run_key TEXT NOT NULL, run_id TEXT NOT NULL, PRIMARY KEY(run_key,run_id))')
+                conn.execute('PRAGMA user_version=3')
             yield conn
 
     # LLM: 待发表队列用主键索引，不把原子写临时文件当作未确认规范提交。
@@ -218,6 +222,23 @@ class RunListIndex:
                     WHERE excluded.revision >= runs.revision''',
                     (row['workflow_run_id'], row['workflow_id'], row['status'], -row['started_at'], row.get('revision', 0)))
                 conn.execute('DELETE FROM legacy WHERE run_id=?', (row['workflow_run_id'],))
+                run_id = row['workflow_run_id']
+                if len(run_id) > 64:
+                    from .run_artifacts import workflow_artifact_run_key
+                    conn.execute('INSERT OR IGNORE INTO artifact_run_keys VALUES(?,?)',
+                                 (workflow_artifact_run_key(run_id), run_id))
+
+    def artifact_run_ids(self, run_key):
+        """只读已有的长运行定位键，重复候选交由读取端拒绝，绝不扫描历史归档。"""
+        path = safe_path(self.owner_home, 'data', 'workflow_run_index.sqlite3')
+        if not path.is_file():
+            return ()
+        # 初始化旧索引会枚举运行目录，陌生编号的只读点查不能触发初始化。
+        with index_connection(self.owner_home, path.name) as conn:
+            if conn.execute('PRAGMA user_version').fetchone()[0] < 3:
+                return ()
+            return tuple(row[0] for row in conn.execute(
+                'SELECT run_id FROM artifact_run_keys WHERE run_key=? LIMIT 2', (run_key,)))
 
     # LLM: SQL 选择有界窗口后关闭连接，运行锁与新发布可按原 run→index 顺序执行。
     # 函数用途: 读取尚未迁移的名称游标，limit=None 仅供迁移期精确合并余集。

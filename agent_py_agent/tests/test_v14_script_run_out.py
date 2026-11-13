@@ -81,7 +81,9 @@ def assert_artifacts(row, home, run_id):
     assert len(row.output_artifacts) == 1
     item = row.output_artifacts[0]
     raw = (output / item['path']).read_bytes()
-    assert item == {'path': 'result.txt', 'size_bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
+    name_digest = hashlib.sha256(b'result.txt').hexdigest()[:24]
+    assert item == {'path': 'result.txt', 'size_bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest(),
+                    'artifact_id': f'wfart-{run_id}-{output.name}-{name_digest}'}
     assert raw == '中文产物'.encode()
     assert not list(output.parent.glob('.staging-*'))
 

@@ -1068,6 +1068,13 @@ class _OwnerReaders:
         )
         from ..conversation.task_artifact_observation import _error, _read_source, task_artifact
 
+        if params['artifact_id'].startswith('wfart-'):
+            from ..conversation.workflow_artifact_observation import workflow_artifact
+
+            facts, _, _ = workflow_artifact(self, params['artifact_id'], params.get('version_ref'))
+            artifact = facts.value
+            return ObservationPage((self.wrap({'artifact': artifact, 'version_ref': artifact['version_ref'],
+                'read_ref': artifact['artifact_id'], 'available': artifact['available']}, facts),))
         registered = registered_artifact(self, params['artifact_id'], params.get('version_ref'), discover=False)
         if registered is not None:
             facts, _, _ = registered

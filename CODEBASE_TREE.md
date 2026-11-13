@@ -5,8 +5,10 @@ agent_py_agent/agent/
 |-- artifacts/registry_locator.py                 # 由原登记构建可重建的产物位置索引
 `-- conversation/
     |-- artifact_access.py                        # 读取产物内容前核对本次观察和下载的授权
-    `-- registered_artifact_observation.py        # 沿原执行和任务读取已登记的精确文件版本
+    |-- registered_artifact_observation.py        # 沿原执行和任务读取已登记的精确文件版本
+    `-- workflow_artifact_observation.py          # 核对工作流原步骤归档、业务任务归属和读取权限
 agent_py_agent/tests/
+|-- test_workflow_business_artifact_download.py   # 原工作流文件通过业务客户端查询、下载及越权拒绝
 |-- test_agent_run_final_report_ownership.py       # 收尾与文件发布交错时保留已交付报告
 |-- test_leaf_provenance_review.py                 # 叶审核的来源、候选、并发换绑和历史回执权限
 |-- test_native_session_task_child_continuation.py # 原任务完成通知、合并输入与恢复的冻结上下文

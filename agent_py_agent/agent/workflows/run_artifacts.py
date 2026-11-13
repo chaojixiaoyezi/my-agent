@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import stat
 import uuid
@@ -22,6 +23,41 @@ from ..user_space.owner_quota import OwnerQuotaChange, OwnerQuotaExceeded, Owner
 from .models import safe_path
 
 _RUN_OUT_TARGET = ContextVar('workflow_run_out_target', default=None)
+
+
+def workflow_artifact_run_key(workflow_run_id: str) -> str:
+    """长的自定义运行编号沿原运行索引点查，公开编号保持在接口的128字节内。"""
+    if len(workflow_run_id) > 64:
+        return '~' + hashlib.sha256(workflow_run_id.encode()).hexdigest()[:63]
+    return workflow_run_id
+
+
+def workflow_artifact_id(workflow_run_id: str, step_attempt_id: str, relative_path: str) -> str:
+    """编号只定位原运行及其清单；同名文件在不同尝试中保持独立。"""
+    run_key = workflow_artifact_run_key(workflow_run_id)
+    file_key = hashlib.sha256(relative_path.encode('utf-8', 'surrogatepass')).hexdigest()[:24]
+    return f'wfart-{run_key}-{step_attempt_id}-{file_key}'
+
+
+def parse_workflow_artifact_id(value: str) -> tuple[str, str, str] | None:
+    """路径不进入公开输入；解析结果仅用于定位，仍需重核业务归属、原清单及字节。"""
+    if not isinstance(value, str) or len(value) > 128 or not value.startswith('wfart-'):
+        return None
+    parts = value[6:].rsplit('-', 2)
+    if len(parts) != 3:
+        return None
+    run_key, attempt, file_key = parts
+    if (not re.fullmatch(r'(?:[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}|~[0-9a-f]{63})', run_key)
+            or not re.fullmatch('[0-9a-f]{32}', attempt) or not re.fullmatch('[0-9a-f]{24}', file_key)):
+        return None
+    return run_key, attempt, file_key
+
+
+def workflow_artifact_run_ids(owner_home: Path, run_key: str) -> tuple[str, ...]:
+    if not run_key.startswith('~'):
+        return (run_key,)
+    from .run_list_index import RunListIndex
+    return RunListIndex(owner_home).artifact_run_ids(run_key)
 
 
 # LLM: 机器码不由异常文字推导，所有归档失败均阻止步骤成功。
@@ -215,8 +251,11 @@ class RunArtifactBatch:
                         relative = parts[1:]
                         write_bytes_atomic_beneath(self.target.owner_home,
                             (*self.parent_parts, self.staging_name, *relative), data)
-                        artifacts.append({'path': '/'.join(relative), 'size_bytes': len(data),
-                                          'sha256': hashlib.sha256(data).hexdigest()})
+                        relative_path = '/'.join(relative)
+                        artifacts.append({'path': relative_path, 'size_bytes': len(data),
+                                          'sha256': hashlib.sha256(data).hexdigest(),
+                                          'artifact_id': workflow_artifact_id(self.target.workflow_run_id,
+                                                                              self.target.attempt_id, relative_path)})
                     self.artifacts = tuple(artifacts)
                 except BaseException as error:
                     self._rollback(error)

@@ -132,7 +132,8 @@ class WorkflowsTool(BaseTool):
     ACTIONS = ('list', 'get', 'save', 'delete', 'bind_skill', 'unbind_skill', 'run', 'resume', 'inspect_run', 'preview',
                'versions', 'diff', 'impact', 'rollback', 'draft', 'publish', 'status', *WORKFLOW_ACTION_FIELDS)
     READ_ONLY_ACTIONS = ('list', 'get', 'inspect_run', 'preview', 'versions', 'diff', 'impact', 'status', *WORKFLOW_READ_ACTIONS)
-    model_spec = _spec('workflows', '管理Owner工作流、自动脚本/Skill引用、动态技能绑定、运行与断点续跑；步骤输出含_pause_for_resume=true可正常暂停等待确认，再用resume+patched_step_output续跑。',
+    model_spec = _spec('workflows', '管理Owner工作流、脚本/Skill引用、运行与断点续跑。步骤输出_pause_for_resume=true可暂停，再用resume+patched_step_output续跑。'
+        '业务任务的脚本将交付文件写入环境变量MY_AGENT_RUN_OUT指向的目录；从inspect_run的steps[].output_artifacts取得artifact_id和sha256，按原版本交付。',
         list(ACTIONS), {
             'expected_revision': {'type': ['integer', 'null'], 'minimum': 0},
             **{key: {'type': ['integer', 'null'], 'minimum': 1} for key in ('version', 'from_version', 'to_version')},

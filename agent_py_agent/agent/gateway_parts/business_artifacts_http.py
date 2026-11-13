@@ -235,11 +235,19 @@ def _native_registry_content(artifact_id, version_ref, context, services, *, ran
     observation = services.observation
     source = _OwnerReaders(services.owner_home, services.owner_id, store, observation.runtime)
     authority = (observation, services.observation_actor(context), 'artifacts.get')
-    found = registered_artifact(source, artifact_id, version_ref, with_content=False, authority=authority)
+    workflow_source = artifact_id.startswith('wfart-')
+    if workflow_source:
+        from ..conversation.workflow_artifact_observation import workflow_artifact
+
+        found = workflow_artifact(source, artifact_id, version_ref, with_content=False, authority=authority)
+    else:
+        found = registered_artifact(source, artifact_id, version_ref, with_content=False, authority=authority)
     record = content = None
     if found is not None:
         facts, record, content = found
         space_id, task_id = facts.space_id, facts.task_id
+        if workflow_source and not facts.value['available']:
+            raise HostAPIError('ARTIFACT_CONTENT_MISSING', 404)
     elif registry_locator.lookup(services.owner_home, artifact_id) is not None:
         raise HostAPIError('RESOURCE_NOT_FOUND', 404)
     else:
@@ -269,6 +277,11 @@ def _native_registry_content(artifact_id, version_ref, context, services, *, ran
             space_id=facts.space_id, project_ref=facts.project_ref, task_id=facts.task_id,
             thread_id=facts.thread_id, run_id=facts.run_id, attempt_id=facts.attempt_id)
         _check(context, services, space_id, task_id)
+        if workflow_source:
+            latest, pinned, _ = workflow_artifact(source, artifact_id, version_ref, with_content=False, authority=authority)
+            if (latest.owner_id, latest.task_id, latest.thread_id, pinned.path, pinned.sha256, pinned.size_bytes) != (
+                    facts.owner_id, facts.task_id, facts.thread_id, record.path, record.sha256, record.size_bytes):
+                raise HostAPIError('ARTIFACT_CHANGED', 409)
     check_visible()
     if record.status != 'ready':
         raise HostAPIError('RESOURCE_NOT_FOUND', 404)
