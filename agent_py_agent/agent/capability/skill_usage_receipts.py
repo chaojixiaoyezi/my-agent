@@ -12,9 +12,10 @@ import json
 import re
 import time
 from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+if TYPE_CHECKING:
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 
 # 中文说明：SQLite metadata 命名空间与序列化版本号，固定按契约 sm-*:v1 前缀隔离。
 RECEIPT_SCHEMA_VERSION_STR = "v1"
