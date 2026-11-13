@@ -459,17 +459,15 @@ def _runner_allowed_tools(task: SubAgentTask, tools: list[str]) -> list[str]:
     return [item for item in filtered if item != "capability_request"]
 
 
-# 让子代理能读自己的输入文件，同时不扩大写入权限。
+# 只有已预检的结构化必需输入授予读权；goal提取和模型hint仅作上下文，不能进入授权根。
 def _task_required_read_roots(task: object) -> list[str]:
     manifest = getattr(task, "context_manifest", None)
     if isinstance(manifest, dict):
         raw = manifest.get("required_read_paths")
-        hint_raw = manifest.get("hint_read_paths")
     else:
         raw = getattr(manifest, "required_read_paths", None)
-        hint_raw = getattr(manifest, "hint_read_paths", None)
     roots: list[str] = []
-    for item in [*text_or_sequence_strings(raw), *text_or_sequence_strings(hint_raw)]:
+    for item in text_or_sequence_strings(raw):
         text = str(item or "").strip()
         if not text or "://" in text:
             continue

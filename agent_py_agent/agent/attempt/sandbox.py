@@ -707,12 +707,12 @@ def _macos_write_scope_rules(allowed: tuple[Path, ...], denied: tuple[Path, ...]
     return lines
 
 
-# LLM: 两平台同步 run 与插件工厂共用 allowlisted_directory；白名单外 cwd 直接拒绝，不继承宿主 cwd、不扩权或回退宽读。
+# LLM: 两平台同步run共用cwd判定；获准根的祖先仅以元数据/空目录脚手架可达，其余cwd仍拒绝，不扩大内容读取。
 #   macOS 用 Popen cwd 显式切目录；Linux cwd=None 由已构造 argv 的 --chdir 在命名空间内切换。
 # 函数用途: 决定同步沙箱启动使用的工作目录，未获准时在启动前抛结构化不可用错误。
 def _sandbox_process_cwd(spec: AttemptSandboxSpec, platform_name: str) -> Path | None:
     roots = (*spec.system_read_roots, *spec.public_read_roots, *spec.extra_write_roots)
-    if spec.read_mode == "allowlist" and not allowlisted_directory(spec.attempt_view, roots):
+    if spec.read_mode == "allowlist" and not allowlisted_directory(spec.attempt_view, roots, metadata_ancestor=True):
         raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: RESTRICTED_CWD_NOT_ALLOWLISTED")
     return spec.attempt_view if platform_name == "Darwin" else None
 

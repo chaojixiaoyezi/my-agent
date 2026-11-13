@@ -472,15 +472,16 @@ def _build_bwrap_base_argv(spec: SandboxSpec) -> list[str]:
     return argv
 
 
-# LLM: allowlist 不得隐式重开 cwd；插件规格工厂与 Attempt 同步 run 共用这个真实路径根覆盖判定，不按字符串前缀放行兄弟目录。
+# LLM: allowlist 不得隐式重开 cwd；metadata_ancestor仅允许已授权根的祖先作为cwd，平台只给元数据/空目录脚手架，不授予目录内容读取。
 #   单个根解析失败（启动前被删、权限变化）只当它不覆盖 cwd，由调用方给结构化拒绝，不抛未处理异常（3a 终审补）。
 # 函数用途: 判断工作目录是否已经包含在系统、只读授权或写根中，只读文件系统事实，不新授权限。
-def allowlisted_directory(path: Path, roots: tuple[Path, ...]) -> bool:
+def allowlisted_directory(path: Path, roots: tuple[Path, ...], *, metadata_ancestor: bool = False) -> bool:
     try:
         resolved = Path(path).expanduser().resolve(strict=True)
     except (OSError, RuntimeError, TypeError, ValueError):
         return False
-    return any(_is_relative_to(resolved, root) for root in _resolved_existing_roots(roots))
+    return any(_is_relative_to(resolved, root) or (metadata_ancestor and _is_relative_to(root, resolved))
+               for root in _resolved_existing_roots(roots))
 
 
 # LLM: 只做 strict 解析并跳过解析失败的根；不放宽任何根，结果只会让覆盖判定更严。

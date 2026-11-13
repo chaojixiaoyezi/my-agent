@@ -862,9 +862,10 @@ def _sandbox_exec(
         # 不在 Gateway 进程里（CLI run、测试）注册表为空，不加规则。full_access 也带（这一档只剩第 (1) 层）。
         deny_gateway_ports=gateway_bound_ports(),
     )
-    # Shell 自行启动 argv，须复用与 sandbox.run 相同的 cwd 准入，不能把宽 cwd 加回白名单。
+    # Shell 自行启动 argv，须复用与 sandbox.run 相同的cwd准入；授权文件的祖先仅作cwd，不加回内容白名单。
     if host_policy.exact_read_scope and not allowlisted_directory(
-        spec.attempt_view, (*spec.system_read_roots, *spec.public_read_roots, *spec.extra_write_roots)
+        spec.attempt_view, (*spec.system_read_roots, *spec.public_read_roots, *spec.extra_write_roots),
+        metadata_ancestor=True,
     ):
         raise SandboxUnavailable("SANDBOX_UNAVAILABLE: RESTRICTED_CWD_NOT_ALLOWLISTED")
     sandbox = (AttemptExecutionSandbox if sandbox_factory is None else sandbox_factory)(spec)

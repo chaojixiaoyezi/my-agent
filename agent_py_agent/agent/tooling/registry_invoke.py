@@ -201,17 +201,18 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutco
     )
     tool_params = _with_task_workspace_relative_path(tool_params, request)
     exact_roots = exact_read_roots(request.write_boundary, request.workspace_root)
-    # 未能把既有进程收窄到本次白名单时不能借它启动新效果；读取/关闭旧句柄仍保留。
+    # 旧句柄没有启动时精确读范围证明；不能将同会话身份升级为内容读权。停止/关闭仍按原控制权限执行。
     if exact_roots is not None and (request.tool_name == "lsp" or (
-        request.tool_name == "terminal_session" and tool_params.get("action") in {"start", "write"}
-    )):
-        return apply_tool_execution_facts(
-            structured_tool_error(request.tool_name,
+        request.tool_name == "terminal_session" and tool_params.get("action") not in {"resize", "close"}
+    ) or (request.tool_name == "process_session" and tool_params.get("action") != "stop"
+    ) or (request.tool_name == "controlled_exec" and tool_params.get("apply") is True)):
+        blocked = structured_tool_error(request.tool_name,
                 "EXACT_PROCESS_READ_SCOPE_UNSUPPORTED: 当前进程入口不能强制本次精确读取范围。",
                 "本次未执行；请使用精确范围内的文件工具，或在已授权工作目录使用 run_command。",
-                error_code="SANDBOX_UNAVAILABLE"),
-            failure_stage=ToolFailureStage.RUNTIME_GATE, handler_executed=False,
-        )
+                error_code="SANDBOX_UNAVAILABLE")
+        blocked.effect_outcome = "not_started"
+        return apply_tool_execution_facts(blocked,
+            failure_stage=ToolFailureStage.RUNTIME_GATE, handler_executed=False)
     read_denied = _read_boundary_denied(request, tool_params)
     if read_denied is not None:
         return apply_tool_execution_facts(
@@ -241,7 +242,7 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutco
         request=request,
         workspace_roots=workspace_roots,
     )
-    return _execute_with_temporary_tool_context(
+    outcome = _execute_with_temporary_tool_context(
         execution_tool,
         workspace_roots=workspace_roots,
         allowed_private_hosts=_boundary_string_tuple(request.write_boundary, "allowed_private_hosts"),
@@ -259,6 +260,24 @@ def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutco
             )
         ),
     )
+    if exact_roots is not None and request.tool_name in {"process_session", "terminal_session"}:
+        # 控制回执也可能夹带旧stdout/command；只投影实际控制事实，不清除原失败或unknown副作用。
+        try:
+            payload = json.loads(outcome.output)
+        except (TypeError, ValueError):
+            payload = {}
+        keys = {"session_id", "status", "exit_code", "columns", "rows", "signal", "confirmed",
+                "stop_requested", "termination_confirmed", "cleanup_confirmed"}
+        safe = {key: value for key, value in payload.items()
+                if key in keys and type(value) in (str, bool, int, float, type(None))} if isinstance(payload, dict) else {}
+        safe["content_withheld_reason"] = "EXACT_HANDLE_READ_SCOPE_UNVERIFIED"
+        safe["next_action"] = "旧句柄缺少启动读取范围证明，内容未公开；请在原授权上下文核验控制结果，未知结果禁止盲目重试。"
+        if outcome.error_code:
+            safe["error_code"] = outcome.error_code
+        outcome.output = json.dumps(safe, ensure_ascii=False)
+        outcome.result_envelope = {"exact_read_scope": {"content_withheld": True,
+            "reason_code": "EXACT_HANDLE_READ_SCOPE_UNVERIFIED"}}
+    return outcome
 
 
 # LLM: 读取/写入范围只读当前请求的宿主字段，与业务 arguments 分离；沿原墙外授权派生，不按 workspace 列表猜权限。
@@ -551,7 +570,16 @@ def _sandbox_read_roots_for_invocation(
         return ()
     exact = exact_read_roots(request.write_boundary, request.workspace_root)
     if exact is not None:
-        return exact
+        configured = request.tools.get(request.tool_name)
+        configured = getattr(configured, "shell_tool", configured)
+        registered_policy = getattr(configured, "path_access_policy", None)
+        owner = request.owner_scope_root or getattr(registered_policy, "owner_scope_root", None)
+        policy = PathAccessPolicy.from_values(mode=request.path_access_mode,
+            dangerous_roots=request.path_dangerous_roots, owner_scope_root=owner,
+            agent_home_root=getattr(registered_policy, "agent_home_root", None) or data_root_from_boundary(request.write_boundary))
+        external = granted_external_work_roots(request.write_boundary, owner)
+        # exact只能收窄owner墙；目录授权也不能包含其它owner或宿主数据根。
+        return tuple(root for root in exact if policy.check_with_external_roots(root, external).allowed)
     roots = _normalized_roots(request.workspace_root, request.workspace_roots)
     for key in ("allowed_read_roots", "owner_workspace_dir"):
         _append_boundary_roots(
@@ -820,6 +848,13 @@ def _tool_params_with_runtime_boundary(request: AuthorizedToolDispatchRequest) -
                 request.write_boundary,
                 raw_write_roots,
             )
+            if exact_read_roots(request.write_boundary, request.workspace_root) is not None:
+                process_tool = getattr(request.tool, "shell_tool", request.tool)
+                policy = getattr(process_tool, "path_access_policy", None)
+                if policy is not None:
+                    external = getattr(process_tool, "granted_external_roots", ())
+                    params["__sandbox_write_roots"] = [root for root in params["__sandbox_write_roots"]
+                        if policy.check_with_external_roots(Path(root), external).allowed]
         elif request.tool_name in {"run_command", "terminal_session"}:
             # owner-scoped 进程一旦携带结构化 boundary，漏写 allowed_write_roots
             # 只能解释为“没有授权写根”，不能回落成 cwd 隐式可写。没有 boundary 的
