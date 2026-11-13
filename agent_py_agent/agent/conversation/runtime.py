@@ -498,6 +498,7 @@ class GoalRuntimeContext:
     other_goals: tuple[object, ...] = ()
     durable_task_id: str = ""
     durable_task_objective: str = ""
+    session_task_origin: tuple[object, str] | None = None
 
 
 
@@ -543,9 +544,19 @@ def _goal_runtime_context(
         scheduled = execution_run(agent, request)
         if scheduled is not None:
             origin_task_id, origin_objective = str(scheduled["run_id"]), str(scheduled["prompt"])
+    from .execution_threads import lifecycle_session_task_origin
+
+    session_origin = lifecycle_session_task_origin(store, request.thread_id, task_id, request.wake_signal,
+        reason=request.reason)
+    if session_origin is not None:
+        session_task, session_objective = session_origin
+        if origin_task_id and origin_task_id != session_task.task_id:
+            raise DataCorruptionError('SESSION_TASK_LIFECYCLE_ORIGIN_CONFLICT')
+        origin_task_id, origin_objective = session_task.task_id, session_objective
+        task_objective = session_objective
     if not link_error and _is_active_turn_lifecycle_continuation(request, task_objective):
         task_objective = _background_request_objective(
-            store, request, durable_task_id=origin_task_id,
+            store, request, durable_task_id=origin_task_id, session_origin=session_origin, origin_resolved=True,
         ) or task_objective
     if (
         goal is None
@@ -558,6 +569,7 @@ def _goal_runtime_context(
             subagent_phase=phase,
             state_error=state_error,
             durable_task_id=origin_task_id, durable_task_objective=origin_objective,
+            session_task_origin=session_origin,
         )
     if not phase and not state_error:
         phase, state_error = _goal_subagent_phase(agent, task_id)
@@ -570,6 +582,7 @@ def _goal_runtime_context(
         state_error=state_error or ("goal_state_load_error" if goals_error else ""),
         other_goals=tuple(item for item in goals if item.goal_id != goal.goal_id),
         durable_task_id=origin_task_id, durable_task_objective=origin_objective,
+        session_task_origin=session_origin,
     )
 
 
@@ -622,17 +635,24 @@ def _background_request_objective(
     request: BackgroundRunRequest,
     *,
     durable_task_id: str = "",
+    session_origin: tuple[object, str] | None = None,
+    origin_resolved: bool = False,
 ) -> str:
-    from .execution_threads import delegated_session_task
+    from .execution_threads import delegated_session_task, lifecycle_session_task_origin
 
+    if not origin_resolved:
+        session_origin = lifecycle_session_task_origin(store, request.thread_id, request.task_id, request.wake_signal,
+            reason=request.reason)
     delegated = delegated_session_task(store, request.thread_id)
     if delegated is not None:
         return delegated.goal
     pending = set(_background_active_turn_request_ids(request))
     if durable_task_id and durable_task_id == request.task_id:
         pending.discard(durable_task_id)
+    if session_origin is not None:
+        pending.discard(session_origin[0].task_id)
     if not pending:
-        return ""
+        return session_origin[1] if session_origin is not None else ""
     selected: list[str] = []
     before: int | None = None
     while pending:
@@ -649,7 +669,7 @@ def _background_request_objective(
             selected.append(row.content)
             pending.remove(request_id)
         if not pending:
-            return "\n\n".join(reversed(selected))
+            return "\n\n".join(([session_origin[1]] if session_origin is not None else []) + list(reversed(selected)))
         if not page.before or (before is not None and page.before >= before):
             raise DataCorruptionError("background request input is missing from its conversation")
         before = page.before
@@ -2444,17 +2464,28 @@ def _run_params(
         carried_archive_tool_calls=carried_tool_calls,
         # 与前台同源的会话历史：后台切片不再只带一份有界摘要指针。
         conversation_history_seed=history_seed,
-        business_context=_business_context_from_wake(agent, thread_id, request),
+        business_context=_business_context_from_wake(
+            agent, thread_id, request, session_origin=resolved_goal_context.session_task_origin, origin_resolved=True),
     )
 
 
-def _business_context_from_wake(agent, thread_id: str, request: BackgroundRunRequest):
+def _business_context_from_wake(agent, thread_id: str, request: BackgroundRunRequest, *,
+                                session_origin=None, origin_resolved=False):
     from .business_contracts import BusinessExecutionContext
 
     session_task_id = _session_task_id_from_wake(request)
-    if not session_task_id or agent is None:
+    if agent is None:
         return None
-    task = agent.conversation_store.session_tasks.load(session_task_id)
+    if not session_task_id:
+        from .execution_threads import lifecycle_session_task_origin
+
+        origin = session_origin if origin_resolved else lifecycle_session_task_origin(
+            agent.conversation_store, thread_id, request.task_id, request.wake_signal, reason=request.reason)
+        session_task_id = origin[0].task_id if origin is not None else ""
+    if not session_task_id:
+        return None
+    task = (session_origin[0] if session_origin is not None
+            else agent.conversation_store.session_tasks.load(session_task_id))
     if task is None or "business_context" not in task.metadata:
         return None
     context = BusinessExecutionContext.from_dict(task.metadata["business_context"])
