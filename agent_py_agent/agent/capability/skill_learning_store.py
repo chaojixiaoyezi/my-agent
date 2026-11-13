@@ -1145,6 +1145,7 @@ class SkillLearningStore:
         victim_name: str,
         candidate_record: LearnedSkill,
         candidate_text: str,
+        candidate_assets: dict[str, dict[str, object]] | None = None,
         now: float | None = None,
     ) -> tuple[SkillLearningRegistry, LearnedSkill, LearnedSkill]:
         registry = self._prepare_clean_registry_locked(registry, now=now)
@@ -1269,6 +1270,7 @@ class SkillLearningStore:
                     victim_name: victim_archived,
                     final_candidate.name: final_candidate,
                 },
+                assets=(registry.assets if candidate_assets is None else dict(candidate_assets)),
                 pending_operation=None,
             )
             self.save_registry(committed)
@@ -1310,7 +1312,8 @@ class SkillLearningStore:
         tomb_rel = self._encode_rel("store", "removed", tomb_name)
         ver_rel = self._encode_rel("store", "versions", name)
         status, observed_sha = self._dir_skill_sha256_nofollow(src_root, src_parts)
-        if status == "ok" and observed_sha != current.sha256:
+        extra_status = self._dir_extra_entries_status_nofollow(src_root, src_parts)
+        if extra_status == "extra" or (status == "ok" and observed_sha != current.sha256):
             handoff = replace(current, maintenance={**current.maintenance, "ownership": "user_modified"})
             updated = replace(registry, skills={**registry.skills, name: handoff})
             self.save_registry(updated)
@@ -1319,7 +1322,7 @@ class SkillLearningStore:
                 f"skill {name} modified by user before eviction",
                 detail={"skill_name": name, "state": "user_modified"},
             )
-        if status != "ok":
+        if status != "ok" or extra_status != "clean":
             raise SkillLearningStoreError(
                 CODE_EVIDENCE_INCOMPLETE,
                 f"skill {name} unreadable before eviction",
@@ -1943,13 +1946,23 @@ class SkillLearningStore:
         src_root, src_parts = self._resolve_op_rel(str(op["source_rel"]))
         tomb_root, tomb_parts = self._resolve_op_rel(str(op.get("tombstone_rel") or op["target_rel"]))
         src_status, src_sha = self._dir_skill_sha256_nofollow(src_root, src_parts)
+        src_extra = self._dir_extra_entries_status_nofollow(src_root, src_parts)
         tomb_status, tomb_sha = self._dir_skill_sha256_nofollow(tomb_root, tomb_parts)
-        if src_status == "ok" and src_sha == expected_sha and tomb_status == "missing":
-            self._move_dir_nofollow(src_root, src_parts, tomb_root, tomb_parts)
-            src_status, tomb_status, tomb_sha = "missing", "ok", expected_sha
-        if src_status == "ok" and src_sha != expected_sha and tomb_status == "missing":
+        tomb_extra = self._dir_extra_entries_status_nofollow(tomb_root, tomb_parts)
+        if (src_extra == "extra" or (src_status == "ok" and src_sha != expected_sha)) and (
+            tomb_status == "missing" and tomb_extra == "missing"
+        ):
             return self._handoff_corrupt_op_locked(registry, op, ownership="user_modified", reason="user_modified_before_evict")
-        if src_status == "missing" and tomb_status == "ok" and tomb_sha == expected_sha:
+        if src_status == "ok" and src_sha == expected_sha and src_extra == "clean" and tomb_status == "missing" and tomb_extra == "missing":
+            self._move_dir_nofollow(src_root, src_parts, tomb_root, tomb_parts)
+            src_status, src_extra = "missing", "missing"
+            tomb_status, tomb_sha, tomb_extra = "ok", expected_sha, "clean"
+        if tomb_extra == "extra" and src_status == "missing" and not self._entry_exists_nofollow(src_root, src_parts):
+            self._move_dir_nofollow(tomb_root, tomb_parts, src_root, src_parts)
+            return self._handoff_corrupt_op_locked(
+                registry, op, ownership="user_modified", reason="user_extra_files_before_evict"
+            )
+        if src_status == "missing" and tomb_status == "ok" and tomb_sha == expected_sha and tomb_extra == "clean":
             should_block = op.get("reason_code") == "third_strike_retire"
             family = str(current.maintenance.get("task_family_fingerprint") or "")
             if not _SHA256_RE.fullmatch(family):
@@ -2050,8 +2063,8 @@ class SkillLearningStore:
             if current.last_operation_id != op_id:
                 maint = dict(current.maintenance)
                 stable = maint.get("previous_stable")
-                if op.get("reason_code") == "third_strike_rollback" or is_proven_stable_version(stable):
-                    est_at = float(stable.get("established_at") or ts) if isinstance(stable, dict) else ts
+                if is_proven_stable_version(stable) and stable["version"] == target_ver and stable["sha256"] == cand_sha:
+                    est_at = float(stable["established_at"])
                     maint.update({
                         "state": "active",
                         "quality": "established",
@@ -2068,6 +2081,7 @@ class SkillLearningStore:
                         "rolled_back_from": current.sha256,
                     })
                     maint.pop("previous_stable", None)
+                    maint.pop("previous_verification", None)
                 else:
                     maint.update({
                         "state": "active",
@@ -2078,10 +2092,12 @@ class SkillLearningStore:
                         "independent_uses": 0,
                         "uses_since_hurt": 0,
                         "activation_id": uuid.uuid4().hex,
+                        "epoch_started_at": ts,
                         "observations": [],
                         "rolled_back_from": current.sha256,
                     })
                     maint.pop("established_at", None)
+                maint["task_family_fingerprint"] = skill_family_fingerprint(ver_text)
                 current = replace(
                     current,
                     version=target_ver,
@@ -2218,6 +2234,22 @@ class SkillLearningStore:
         except SkillLearningStoreError as exc:
             return "uncertain", str(exc)
         return "ok", skill_content_sha256(text)
+
+    def _dir_extra_entries_status_nofollow(self, root: Path, dir_parts: tuple[str, ...]) -> str:
+        """检查托管技能目录是否存在 SKILL.md 之外的额外文件或子目录。"""
+        try:
+            dir_fd = open_directory_beneath(root, dir_parts, require_dir_fd=True)
+        except FileNotFoundError:
+            return "missing"
+        except OSError:
+            return "uncertain"
+        try:
+            names = os.listdir(dir_fd)
+        except OSError:
+            return "uncertain"
+        finally:
+            os.close(dir_fd)
+        return "extra" if any(name != "SKILL.md" for name in names) else "clean"
 
     def _move_dir_nofollow(
         self,

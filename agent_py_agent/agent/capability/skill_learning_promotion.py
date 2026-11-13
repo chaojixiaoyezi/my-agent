@@ -119,7 +119,7 @@ def _propose_or_promote_locked(store, publish, verifier, autonomous_verified, co
         raise SkillLearningGateError(CODE_LEARNING_DISABLED, {"enable_self_learning": False})
     identity = asset_identity('skill', asdict(publish.decision), store.skills_root.parent)
     with store.state_lock():
-        registry = store.load_registry()
+        registry = store._prepare_clean_registry_locked(store.load_registry())
         try:
             managed = store.managed_records(registry, include_archived=False)
         except SkillLearningStoreError as exc:

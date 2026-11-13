@@ -478,7 +478,7 @@ def test_r2_victim_ranking_displacement_extra_files_and_user_edit_handoff(tmp_pa
     original_transition = store._transition_displace_publish_locked
     triggered = False
 
-    def race_once(registry, *, victim_name, candidate_record, candidate_text, now=None):
+    def race_once(registry, *, victim_name, candidate_record, candidate_text, candidate_assets=None, now=None):
         nonlocal triggered
         if not triggered and victim_name == "tier0-unused-new":
             triggered = True
@@ -488,6 +488,7 @@ def test_r2_victim_ranking_displacement_extra_files_and_user_edit_handoff(tmp_pa
             victim_name=victim_name,
             candidate_record=candidate_record,
             candidate_text=candidate_text,
+            candidate_assets=candidate_assets,
             now=now,
         )
 
@@ -1001,3 +1002,347 @@ def test_bounded_incremental_cleanup_post_commit_error_and_additive_registry_com
     assert loaded.skills["post-commit"].maintenance["hurt_count"] == 5
     assert loaded.skills["post-commit"].maintenance["future_hint"] == "preserve-me"
     assert isinstance(loaded, SkillLearningRegistry)
+
+
+def test_p1_recover_rollback_does_not_promote_unproven_trial_and_clears_verification(tmp_path: Path):
+    home, store = _home_and_store(tmp_path)
+    # 场景 A：v1 已证实 -> v2 试用 -> v3 试用；人工回滚 v3->v2 时崩溃（previous_stable 仍指 v1），
+    # 恢复绝不能把未证实的 v2 晋升为 established，也不能伪造 established_at。
+    _publish(store, "rb-trial", body=f"{BODY}\n\n# v1")
+    with store.state_lock():
+        reg = store.load_registry()
+        v1 = reg.skills["rb-trial"]
+        v1_stable = {
+            "version": 1,
+            "revision": 1,
+            "sha256": v1.sha256,
+            "established_at": 1000.0,
+        }
+        reg = replace(
+            reg,
+            skills={
+                **reg.skills,
+                "rb-trial": replace(
+                    v1,
+                    maintenance={
+                        **v1.maintenance,
+                        "state": "active",
+                        "quality": "established",
+                        "quality_basis": "verified",
+                        "established_at": 1000.0,
+                    },
+                ),
+            },
+        )
+        store.save_registry(reg)
+    for ver in (2, 3):
+        cur = store.load_registry().skills["rb-trial"]
+        publish_learned_skill(
+            store,
+            PublishRequest(
+                replace(decision("rb-trial"), decision="update", update_target="rb-trial", body=f"{BODY}\n\n# v{ver}"),
+                expected_revision=cur.revision,
+                expected_sha256=cur.sha256,
+            ),
+        )
+    v2_text = store.read_version("rb-trial", 2) or ""
+    v2_sha = skill_content_sha256(v2_text)
+    with store.state_lock():
+        reg = store.load_registry()
+        cur = reg.skills["rb-trial"]
+        store.save_registry(
+            replace(
+                reg,
+                skills={
+                    **reg.skills,
+                    "rb-trial": replace(
+                        cur,
+                        maintenance={**cur.maintenance, "previous_verification": {"note": "stale-v3"}},
+                    ),
+                },
+            )
+        )
+    script_a = f"""
+import os
+from pathlib import Path
+from agent_py_agent.agent.capability.skill_learning_publish import revert_learned_skill
+from agent_py_agent.agent.capability.skill_learning_store import SkillLearningStore
+from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+home = ensure_my_agent_home(Path({str(home.root)!r}))
+store = SkillLearningStore.for_home(home)
+orig_save = store.save_registry
+
+def crash_pending(reg_obj):
+    orig_save(reg_obj)
+    if reg_obj.pending_operation is not None:
+        os._exit(77)
+
+store.save_registry = crash_pending
+revert_learned_skill(store, "rb-trial")
+"""
+    proc_a = _run_crash_subprocess(home.root, script_a)
+    assert proc_a.returncode == 77, proc_a.stderr
+
+    fresh = SkillLearningStore.for_home(home)
+    report = fresh.recover_lifecycle()
+    assert report["completed"] is True
+    rec = fresh.load_registry().skills["rb-trial"]
+    assert rec.version == 2 and rec.sha256 == v2_sha
+    assert rec.maintenance["quality"] == "trial"
+    assert rec.maintenance["quality_basis"] == "manual_revert"
+    assert "established_at" not in rec.maintenance
+    assert rec.maintenance["previous_stable"] == v1_stable
+    assert rec.maintenance["task_family_fingerprint"] == skill_family_fingerprint(v2_text)
+
+    # 场景 B：v1 已证实 -> v2 试用；回退到已证实 v1 时崩溃，恢复后保留原 established_at 并清理 previous_verification。
+    _publish(fresh, "rb-proven", body=f"{BODY}\n\n# v1")
+    with fresh.state_lock():
+        reg = fresh.load_registry()
+        v1p = reg.skills["rb-proven"]
+        fresh.save_registry(
+            replace(
+                reg,
+                skills={
+                    **reg.skills,
+                    "rb-proven": replace(
+                        v1p,
+                        maintenance={
+                            **v1p.maintenance,
+                            "state": "active",
+                            "quality": "established",
+                            "quality_basis": "verified",
+                            "established_at": 1000.0,
+                        },
+                    ),
+                },
+            )
+        )
+    curp = fresh.load_registry().skills["rb-proven"]
+    publish_learned_skill(
+        fresh,
+        PublishRequest(
+            replace(decision("rb-proven"), decision="update", update_target="rb-proven", body=f"{BODY}\n\n# v2"),
+            expected_revision=curp.revision,
+            expected_sha256=curp.sha256,
+        ),
+    )
+    v1p_text = fresh.read_version("rb-proven", 1) or ""
+    v1p_sha = skill_content_sha256(v1p_text)
+    with fresh.state_lock():
+        reg = fresh.load_registry()
+        curp = reg.skills["rb-proven"]
+        fresh.save_registry(
+            replace(
+                reg,
+                skills={
+                    **reg.skills,
+                    "rb-proven": replace(
+                        curp,
+                        maintenance={**curp.maintenance, "previous_verification": {"note": "clear-me"}},
+                    ),
+                },
+            )
+        )
+    script_b = f"""
+import os
+from pathlib import Path
+from agent_py_agent.agent.capability.skill_learning_publish import _rollback_to_proven_stable_locked
+from agent_py_agent.agent.capability.skill_learning_store import SkillLearningStore
+from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+home = ensure_my_agent_home(Path({str(home.root)!r}))
+store = SkillLearningStore.for_home(home)
+orig_save = store.save_registry
+
+def crash_proven(reg_obj):
+    orig_save(reg_obj)
+    if reg_obj.pending_operation is not None:
+        os._exit(77)
+
+store.save_registry = crash_proven
+with store.state_lock():
+    reg = store.load_registry()
+    _rollback_to_proven_stable_locked(store, reg, reg.skills["rb-proven"], now=2500.0)
+"""
+    proc_b = _run_crash_subprocess(home.root, script_b)
+    assert proc_b.returncode == 77, proc_b.stderr
+
+    fresh2 = SkillLearningStore.for_home(home)
+    fresh2.recover_lifecycle()
+    recp = fresh2.load_registry().skills["rb-proven"]
+    assert recp.version == 1 and recp.sha256 == v1p_sha
+    assert recp.maintenance["quality"] == "established"
+    assert recp.maintenance["established_at"] == 1000.0
+    assert "previous_stable" not in recp.maintenance
+    assert "previous_verification" not in recp.maintenance
+    assert recp.maintenance["task_family_fingerprint"] == skill_family_fingerprint(v1p_text)
+
+
+def test_p1_evict_preserves_extra_user_files_on_sync_and_crash_recovery(tmp_path: Path):
+    home, store = _home_and_store(tmp_path)
+    # 1) 在役与归档目录中用户新增额外文件/子目录：同步驱逐必须拒绝删除并交权 user_modified。
+    _publish(store, "live-extra")
+    (store.learned_root / "live-extra" / "notes.txt").write_text("user notes", encoding="utf-8")
+    (store.learned_root / "live-extra" / "scripts").mkdir()
+    (store.learned_root / "live-extra" / "scripts" / "tool.py").write_text("print(1)\n", encoding="utf-8")
+    with store.state_lock():
+        with pytest.raises(SkillLearningStoreError) as exc_live:
+            store._transition_evict_locked(store.load_registry(), "live-extra", block=True, now=100.0)
+    assert exc_live.value.code == "SKILL_LEARNING_USER_MODIFIED"
+    assert (store.learned_root / "live-extra" / "notes.txt").read_text(encoding="utf-8") == "user notes"
+    assert (store.learned_root / "live-extra" / "scripts" / "tool.py").exists()
+    reg_live = store.load_registry()
+    assert reg_live.skills["live-extra"].maintenance["ownership"] == "user_modified"
+    assert "live-extra" not in reg_live.blocked_names
+
+    _publish(store, "arch-extra", body=f"{BODY}\n\n# arch")
+    with store.state_lock():
+        store._transition_archive_locked(store.load_registry(), "arch-extra", now=100.0)
+    (store.archived_dir / "arch-extra" / "extra.txt").write_text("keep archive extra", encoding="utf-8")
+    with store.state_lock():
+        with pytest.raises(SkillLearningStoreError) as exc_arch:
+            store._transition_evict_locked(store.load_registry(), "arch-extra", now=110.0)
+    assert exc_arch.value.code == "SKILL_LEARNING_USER_MODIFIED"
+    assert (store.archived_dir / "arch-extra" / "extra.txt").read_text(encoding="utf-8") == "keep archive extra"
+    assert store.load_registry().skills["arch-extra"].maintenance["ownership"] == "user_modified"
+
+    # 2) 崩溃恢复场景（移入墓碑前后）：目录含额外用户文件时必须恢复原位并交权 user_modified，不删除用户文件。
+    _publish(store, "crash-extra", body=f"{BODY}\n\n# crash-extra")
+    script = f"""
+import os
+from pathlib import Path
+from agent_py_agent.agent.capability.skill_learning_store import SkillLearningStore
+from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+home = ensure_my_agent_home(Path({str(home.root)!r}))
+store = SkillLearningStore.for_home(home)
+orig_move = store._move_dir_nofollow
+calls = 0
+
+def drop_extra_and_crash(src_root, src_parts, dst_root, dst_parts):
+    global calls
+    calls += 1
+    orig_move(src_root, src_parts, dst_root, dst_parts)
+    (dst_root.joinpath(*dst_parts) / "user_extra.txt").write_text("do not delete", encoding="utf-8")
+    os._exit(77)
+
+store._move_dir_nofollow = drop_extra_and_crash
+with store.state_lock():
+    store._transition_evict_locked(store.load_registry(), "crash-extra", now=200.0)
+"""
+    proc = _run_crash_subprocess(home.root, script)
+    assert proc.returncode == 77, proc.stderr
+    fresh = SkillLearningStore.for_home(home)
+    report = fresh.recover_lifecycle()
+    assert report["completed"] is True
+    assert (fresh.learned_root / "crash-extra" / "user_extra.txt").read_text(encoding="utf-8") == "do not delete"
+    assert (fresh.learned_root / "crash-extra" / "SKILL.md").exists()
+    rec_crash = fresh.load_registry()
+    assert rec_crash.pending_operation is None
+    assert rec_crash.skills["crash-extra"].maintenance["ownership"] == "user_modified"
+
+
+def test_p1_displace_abort_leaves_no_orphan_assets_and_retire_fail_closed(tmp_path: Path, monkeypatch):
+    home, store = _home_and_store(tmp_path)
+    # 1) 置换中止（首个受害者转为用户手改，唯一剩余技能受保护 -> CODE_LIMIT_REACHED）：
+    # 绝不能把未发布候选的 trial 资产条留在 registry.assets 中。
+    _publish(store, "victim-user", body=f"{BODY}\n\n# victim-user")
+    _publish(store, "victim-prot", body=f"{BODY}\n\n# victim-prot")
+    orig_transition = store._transition_displace_publish_locked
+
+    def modify_victim_once(registry, *, victim_name, candidate_record, candidate_text, candidate_assets=None, now=None):
+        if victim_name == "victim-user":
+            store.skill_path("victim-user").write_text("# user took over\n", encoding="utf-8")
+        return orig_transition(
+            registry,
+            victim_name=victim_name,
+            candidate_record=candidate_record,
+            candidate_text=candidate_text,
+            candidate_assets=candidate_assets,
+            now=now,
+        )
+
+    monkeypatch.setattr(store, "_transition_displace_publish_locked", modify_victim_once)
+    with pytest.raises(SkillLearningGateError) as exc_lim:
+        _publish(
+            store,
+            "cand-abort",
+            body="1. Run abort check.\n2. Keep assets clean.",
+            max_skills=1,
+            protection_provider=lambda: {"protection_complete": True, "protected_ids": ("owner:victim-prot",)},
+        )
+    assert exc_lim.value.code == CODE_LIMIT_REACHED
+    reg_after = store.load_registry()
+    assert "cand-abort" not in reg_after.skills
+    assert not any(
+        isinstance(row, dict) and row.get("asset_id") in {"owner:cand-abort", "cand-abort"}
+        for row in reg_after.assets.values()
+    )
+    monkeypatch.setattr(store, "_transition_displace_publish_locked", orig_transition)
+
+    # 1b) 崩溃后恢复中止置换（写 pending_operation 后进程停止且暂存失效）：同样不留孤立资产条目。
+    script_abort = f"""
+import os
+from pathlib import Path
+from agent_py_agent.agent.capability.skill_learning_publish import PublishRequest, publish_learned_skill
+from agent_py_agent.agent.capability.skill_learning_store import SkillLearningStore
+from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+from agent_py_agent.tests.test_wave7_autonomous_learning_closure import decision
+from dataclasses import replace
+
+home = ensure_my_agent_home(Path({str(home.root)!r}))
+store = SkillLearningStore.for_home(home)
+orig_save = store.save_registry
+
+def crash_on_displace_prepared(reg_obj):
+    orig_save(reg_obj)
+    if reg_obj.pending_operation and reg_obj.pending_operation.get("kind") == "displace_publish":
+        os._exit(77)
+
+store.save_registry = crash_on_displace_prepared
+publish_learned_skill(
+    store,
+    PublishRequest(
+        replace(decision("cand-crash-abort"), body="1. Run crash abort check.\\n2. Keep assets clean.", when_to_use="cand-crash-abort"),
+        max_skills=1,
+        protection_provider=lambda: {{"protection_complete": True, "protected_ids": ()}},
+    ),
+)
+"""
+    proc_abort = _run_crash_subprocess(home.root, script_abort)
+    assert proc_abort.returncode == 77, proc_abort.stderr
+    # 模拟用户同时接管受害者，迫使恢复阶段中止本次置换。
+    store.skill_path("victim-prot").write_text("# user edited during displace crash\n", encoding="utf-8")
+    fresh_abort = SkillLearningStore.for_home(home)
+    abort_report = fresh_abort.recover_lifecycle()
+    assert abort_report["completed"] is True
+    reg_crash_abort = fresh_abort.load_registry()
+    assert reg_crash_abort.pending_operation is None
+    assert "cand-crash-abort" not in reg_crash_abort.skills
+    assert not any(
+        isinstance(row, dict) and row.get("asset_id") in {"owner:cand-crash-abort", "cand-crash-abort"}
+        for row in reg_crash_abort.assets.values()
+    )
+
+    # 2) _retire_third_strike_locked 在任务家族为空且磁盘为符号链接时必须结构化 fail-closed。
+    _publish(store, "symlink-retire", body=f"{BODY}\n\n# symlink-retire")
+    with store.state_lock():
+        reg = store.load_registry()
+        cur = reg.skills["symlink-retire"]
+        reg = replace(
+            reg,
+            skills={
+                **reg.skills,
+                "symlink-retire": replace(cur, maintenance={**cur.maintenance, "task_family_fingerprint": ""}),
+            },
+        )
+        store.save_registry(reg)
+        skill_file = store.skill_path("symlink-retire")
+        target_outside = tmp_path / "outside.md"
+        target_outside.write_text("# outside\n", encoding="utf-8")
+        skill_file.unlink()
+        skill_file.symlink_to(target_outside)
+        with pytest.raises(SkillLearningStoreError) as exc_sym:
+            _retire_third_strike_locked(store, store.load_registry(), store.load_registry().skills["symlink-retire"])
+        assert exc_sym.value.code == CODE_EVIDENCE_INCOMPLETE
