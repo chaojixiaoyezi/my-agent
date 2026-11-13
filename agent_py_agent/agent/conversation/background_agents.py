@@ -76,6 +76,18 @@ def _agent_view(thread):
     return view
 
 
+def background_agent_index(store):
+    """后台身份与树共用原索引、规范reader，不增加影子目录。"""
+    def read(path):
+        thread, error = _read_thread_record_report(path)
+        if error is not None:
+            return {}, error
+        if thread is None or background_identity(thread) is None:
+            return {"owner_id": "__foreground__"}, None
+        return thread.to_dict(), None
+    return BackgroundAgentListIndex(store.storage.threads_dir, reader=read)
+
+
 class BackgroundAgentService:
     def __init__(self, host):
         self.host = host
@@ -141,14 +153,7 @@ class BackgroundAgentService:
         return thread
 
     def _index(self):
-        def read(path):
-            thread, error = _read_thread_record_report(path)
-            if error is not None:
-                return {}, error
-            if thread is None or background_identity(thread) is None:
-                return {"owner_id": "__foreground__"}, None
-            return thread.to_dict(), None
-        return BackgroundAgentListIndex(self.store.storage.threads_dir, reader=read)
+        return background_agent_index(self.store)
 
     def _publish(self, thread):
         self._index().publish(self.store.storage.thread_path(thread.thread_id))
@@ -267,28 +272,28 @@ class BackgroundAgentService:
 
     # LLM: 工作态核对同thread的claim、canonical任务和有界guidance报告；坏账或覆盖不足不假称idle。
     # 函数用途: 给身份DTO添加独立当前工作观察，available从不等价于running。
-    def _agent_view(self, thread, *, guidance=None):
+    def _agent_view(self, thread, *, guidance=None, task_page=None, execution_state=None):
         view = _agent_view(thread)
         view["work_state"] = "unknown"
         try:
+            page = task_page if task_page is not None else self.store.session_tasks.list_page(
+                target_thread_id=thread.thread_id, limit=100)
+            if execution_state is None:
+                execution, known_running, execution_error = self._execution_for_tasks(thread, page)
+            else:
+                execution, known_running, execution_error = execution_state
+            if known_running:
+                view["work_state"] = "running"
+                return view
+            if execution_error or page["load_errors"]:
+                return view
             claim, error = self.store.claims.load_report(thread.thread_id)
             if error or (claim and claim.get("thread_id") != thread.thread_id):
-                return view
-            if claim.get("status") == "running":
-                execution = self._execution_view(thread)
-                if execution is not None:
-                    view["work_state"] = "running"
-                return view
-            if claim and claim.get("status") not in {"finished", "failed", "cancelled"}:
-                return view
-            page = self.store.session_tasks.list_page(target_thread_id=thread.thread_id, limit=100)
-            if page["load_errors"]:
                 return view
             pending = [task for task in page["items"] if task.status not in SESSION_TASK_TERMINAL_STATUSES]
             if pending:
                 view["work_state"] = "waiting"
             elif page["coverage"] == "complete" and page["next_cursor"] is None:
-                # get() 已读过同一有界报告时复用它：一次调用只读一次原消息队列，两个投影看到同一事实。
                 inputs, errors = (guidance if guidance is not None
                                   else self.store.guidance.pending_report("thread", thread.thread_id, limit=100))
                 if errors:
@@ -296,7 +301,6 @@ class BackgroundAgentService:
                 if inputs:
                     view["work_state"] = "waiting"
                 elif page["items"]:
-                    # BIZ-008：工作态按最近一条终态任务的事实聚合；被取消/已完成的任务不因更早一次失败尝试的claim显示为failed。
                     latest = max(page["items"], key=lambda task: task.updated_at)
                     view["work_state"] = "failed" if latest.status == "failed" else "idle"
                 else:
@@ -304,6 +308,64 @@ class BackgroundAgentService:
         except (OSError, ValueError, TypeError, KeyError, RuntimeError, sqlite3.Error):
             pass
         return view
+
+    def _execution_for_tasks(self, thread, page):
+        """已核验运行与剩余覆盖分别保留；单current字段不猜多运行的代表。"""
+        from .background_execution_view import ExecutionViewError, thread_execution_view
+        from .run_claim import detached_task_claim_scope_id
+
+        incomplete = bool(page['load_errors'] or page['coverage'] != 'complete' or page['next_cursor'] is not None)
+        executions, errors = {}, []
+        def capture(read):
+            try:
+                execution = read()
+            except ExecutionViewError as error:
+                errors.append(error.code)
+                return None
+            except (OSError, ValueError, TypeError, KeyError, RuntimeError, sqlite3.Error):
+                errors.append('EXECUTION_AUTHORITY_UNAVAILABLE')
+                return None
+            if execution is not None:
+                executions[(execution['run_id'], execution['attempt_id'])] = execution
+            return execution
+
+        def ordinary():
+            claim, error = self.store.claims.load_report(thread.thread_id)
+            if error or (claim and claim.get('thread_id') != thread.thread_id):
+                raise ExecutionViewError('CLAIM_UNREADABLE')
+            return self._execution_view(thread)
+        capture(ordinary)
+        runtime = getattr(getattr(self.host, 'subagents', None), 'runtime_db', None)
+        services = getattr(self, 'services', None)
+        if services is not None:
+            runtime = getattr(services.observation, 'runtime', runtime)
+        scopes = set()
+        for task in page['items']:
+            control = task.metadata.get('cancellation_control', {})
+            owed = isinstance(control, dict) and bool(control.get('outstanding_refs'))
+            if task.status in SESSION_TASK_TERMINAL_STATUSES and not owed:
+                continue
+            def detached():
+                link, error = self.store.tasks.link_report(thread.thread_id, task.task_id)
+                if error:
+                    raise ExecutionViewError('TASK_LINK_UNREADABLE')
+                if link is None or link.cancellation_scope != 'detached':
+                    return None
+                scope = detached_task_claim_scope_id(thread.thread_id, task.task_id)
+                if scope in scopes:
+                    return None
+                scopes.add(scope)
+                execution = thread_execution_view(self.store, runtime, thread, claim_scope_id=scope)
+                if execution is not None and execution['task_id'] != task.task_id:
+                    raise ExecutionViewError('EXECUTION_AUTHORITY_UNAVAILABLE')
+                return execution
+            capture(detached)
+        known_running = bool(executions)
+        if len(executions) > 1:
+            return None, known_running, 'MULTIPLE_ACTIVE_EXECUTIONS'
+        if errors:
+            return None, known_running, errors[0]
+        return next(iter(executions.values()), None), known_running, ('EXECUTION_SOURCE_INCOMPLETE' if incomplete else '')
 
     def _controller_id(self, actor):
         return "thread-controller-" + _digest([actor.owner_id, "business-controller.v1"])[:32]
@@ -392,12 +454,13 @@ class BackgroundAgentService:
         resolved_id = thread.thread_id
         page = self.store.session_tasks.list_page(target_thread_id=resolved_id, limit=100)
         open_tasks = [task for task in page["items"] if task.status not in SESSION_TASK_TERMINAL_STATUSES]
-        execution_error = ""
+        execution_error, known_running = "", False
         try:
-            execution = self._execution_view(thread)
+            execution, known_running, execution_error = self._execution_for_tasks(thread, page)
         except (OSError, ValueError, TypeError, KeyError, RuntimeError, sqlite3.Error) as exc:
             execution = None
-            execution_error = str(exc) if str(exc) in {"CLAIM_UNREADABLE", "EXECUTION_AUTHORITY_UNAVAILABLE"} else "EXECUTION_AUTHORITY_UNAVAILABLE"
+            from .background_execution_view import ExecutionViewError
+            execution_error = exc.code if isinstance(exc, ExecutionViewError) else 'EXECUTION_AUTHORITY_UNAVAILABLE'
         guidance, pending_inputs = None, None
         if not open_tasks and not page["load_errors"]:
             try:
@@ -412,8 +475,11 @@ class BackgroundAgentService:
             model_ready=ready, model_reason=reason, pending_inputs=pending_inputs, tasks_complete=complete)
         if execution_error and scheduling["state"] not in {"paused", "retiring", "retired"}:
             # 执行身份读失败不能冒充 no_work；保留失败码，不领取或消费任何工作。
-            scheduling.update(state="unknown", reason_code=execution_error, coverage="partial")
-        return {"agent": self._agent_view(thread, guidance=guidance), "current_execution": execution,
+            scheduling.update(reason_code=execution_error, coverage="partial")
+            if execution is None:
+                scheduling["state"] = "unknown"
+        return {"agent": self._agent_view(thread, guidance=guidance, task_page=page,
+                                          execution_state=(execution, known_running, execution_error)), "current_execution": execution,
                 "pending_tasks": [self._task_view(task, execution) for task in open_tasks],
                 "allowed_actions": ["background_agents.get", "background_agents.messages.send", "background_agents.suspend",
                                     "background_agents.resume", "background_agents.retire", "background_agents.model.set"],
