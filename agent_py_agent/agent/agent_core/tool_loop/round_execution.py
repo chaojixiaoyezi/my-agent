@@ -1107,14 +1107,14 @@ def _execute_parallel_call(
             model_call=_model_visible_call(request, idx, call))))
 
 
-# LLM: 串行与批准重试共用单项边界及控制通道；正owner/global额度转worker并同步晋升，双0保留当前线程。
+# LLM: 串行与批准重试共用单项边界及控制通道；启用等待答复时使用工作线程，并同步工作区晋升。
 # 函数用途: 为一条原执行请求安装可选owner额度和始终复用的独立SQLite作用域。
 def _execute_owned_serial(request, work, *, emit_started=False):
     scheduler = scheduler_for_agent(request.agent)
     waiting = wait_input_reply_enabled(request)
     context = _capture_parallel_thread_context(request.agent) if scheduler is not None or waiting else None
     promoted = []
-    invoke = partial(_owned_serial_call, request, work, context, emit_started, scheduler is not None or waiting, promoted)
+    invoke = partial(_owned_serial_call, request, work, context, emit_started, scheduler is not None, promoted)
     item = ToolWorkItem(work.call.call_id, invoke, getattr(request.params, "cancellation_token", None),
                        lambda: _synthetic_execution(work.call, _interrupted_result(work.call), "CANCELLED"), True,
                        priority='control' if _is_control_lane_call(work.call, _request_tool_snapshot(request)) else 'normal')
@@ -1135,7 +1135,7 @@ def _execute_owned_serial(request, work, *, emit_started=False):
     return execution
 
 
-# LLM: 原execute请求含actor/model_call；正额度排队才重查屏障与切线程上下文，0直接在本线程执行不回滚晋升。
+# LLM: 正额度排队后重查屏障；直接准入的等待线程沿原已通过的屏障，独立安装线程上下文并保留晋升。
 # 函数用途: 检查串行排队后的屏障，按需安装宿主线程身份并记录工作区晋升。
 def _owned_serial_call(request, work, context, emit_started, queued, promoted):
     execution = _queued_call_gate(request, work.call) if queued else None
@@ -1143,7 +1143,7 @@ def _owned_serial_call(request, work, context, emit_started, queued, promoted):
         return execution
     if emit_started:
         _emit_tool_progress(ToolProgressEvent(request, work.idx, work.call, "started", "开始"))
-    if not queued:
+    if context is None:
         return request.execute_one(work)
 
     # LLM: 工作线程内完成工作区晋升后先捕获最新值，外层finally再恢复worker线程原身份。

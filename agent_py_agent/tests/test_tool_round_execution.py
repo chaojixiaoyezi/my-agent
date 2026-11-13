@@ -543,7 +543,7 @@ def _approval_pending(request) -> ToolExecution:
     )
 
 
-def test_tool_round_approval_resumes_same_call_without_model_retry() -> None:
+def test_tool_round_approval_resumes_same_call_without_model_retry(tmp_path) -> None:
     executed: list[ToolCall] = []
     recorded: list[ToolResult] = []
 
@@ -578,7 +578,7 @@ def test_tool_round_approval_resumes_same_call_without_model_retry() -> None:
 
     execute_tool_round(
         _round_request(
-            agent=SimpleNamespace(),
+            agent=SimpleNamespace(home_paths=SimpleNamespace(owner_id="round-owner", root=tmp_path)),
             params=params,
             tool_rounds=1,
             response=ModelResponse(text="", backend="test"),
@@ -607,7 +607,7 @@ def test_tool_round_approval_resumes_same_call_without_model_retry() -> None:
     assert "only inspect the target" in params.tool_context[-1]
 
 
-def test_tool_round_permission_denial_records_one_nonexecuted_result() -> None:
+def test_tool_round_permission_denial_records_one_nonexecuted_result(tmp_path) -> None:
     executed: list[ToolCall] = []
     recorded: list[ToolResult] = []
 
@@ -635,7 +635,7 @@ def test_tool_round_permission_denial_records_one_nonexecuted_result() -> None:
 
     execute_tool_round(
         _round_request(
-            agent=SimpleNamespace(),
+            agent=SimpleNamespace(home_paths=SimpleNamespace(owner_id="round-owner", root=tmp_path)),
             params=params,
             tool_rounds=1,
             response=ModelResponse(text="", backend="test"),
@@ -654,7 +654,7 @@ def test_tool_round_permission_denial_records_one_nonexecuted_result() -> None:
     assert params.runtime_rejected_actions[0]["args_hash"] == executed[0].args_hash
 
 
-def test_tool_round_same_call_after_denial_is_rejected_without_second_prompt() -> None:
+def test_tool_round_same_call_after_denial_is_rejected_without_second_prompt(tmp_path) -> None:
     executed: list[ToolCall] = []
     recorded: list[ToolResult] = []
     permission_prompts: list[str] = []
@@ -684,7 +684,7 @@ def test_tool_round_same_call_after_denial_is_rejected_without_second_prompt() -
     for tool_rounds in (1, 2):
         execute_tool_round(
             _round_request(
-                agent=SimpleNamespace(),
+                agent=SimpleNamespace(home_paths=SimpleNamespace(owner_id="round-owner", root=tmp_path)),
                 params=params,
                 tool_rounds=tool_rounds,
                 response=ModelResponse(text="", backend="test"),
@@ -705,7 +705,7 @@ def test_tool_round_same_call_after_denial_is_rejected_without_second_prompt() -
     assert all(result.handler_executed is False for result in recorded)
 
 
-def test_tool_round_changed_args_after_denial_may_request_permission_again() -> None:
+def test_tool_round_changed_args_after_denial_may_request_permission_again(tmp_path) -> None:
     permission_prompts: list[str] = []
 
     class DenialConsumer:
@@ -732,7 +732,7 @@ def test_tool_round_changed_args_after_denial_may_request_permission_again() -> 
     for tool_rounds, command in ((1, "sh"), (2, "python3 -q")):
         execute_tool_round(
             _round_request(
-                agent=SimpleNamespace(),
+                agent=SimpleNamespace(home_paths=SimpleNamespace(owner_id="round-owner", root=tmp_path)),
                 params=params,
                 tool_rounds=tool_rounds,
                 response=ModelResponse(text="", backend="test"),
@@ -1125,19 +1125,30 @@ def test_segment_compact_query_error_propagates_before_any_handler_or_record(mon
 
 
 def test_conflicting_segment_keeps_calls_on_the_serial_path_without_losing_results(monkeypatch):
-    caller_thread = threading.get_ident()
+    active, peak = 0, 0
+    guard = threading.Lock()
     executed = []
     records = []
 
     def execute_one(call_request):
-        executed.append((call_request.idx, threading.get_ident()))
-        return _success(call_request, "read serially")
+        nonlocal active, peak
+        with guard:
+            active += 1
+            peak = max(peak, active)
+            executed.append(call_request.idx)
+        try:
+            time.sleep(0.005)
+            return _success(call_request, "read serially")
+        finally:
+            with guard:
+                active -= 1
 
     # 现行 read/read 允许重叠；这里由冲突事实生产者注入冲突，核对真实循环的串行与记账因果。
     monkeypatch.setattr(segment_planning, "concurrency_conflicts", lambda _left, _right: True)
     execute_tool_round(_planning_reader_request(execute_one, lambda record: records.append(record.idx)))
 
-    assert executed == [(1, caller_thread), (2, caller_thread), (3, caller_thread)]
+    assert executed == [1, 2, 3]
+    assert peak == 1 and active == 0
     assert records == [1, 2, 3]
 
 
