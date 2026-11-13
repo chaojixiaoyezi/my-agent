@@ -1170,6 +1170,15 @@ class VerificationEvidenceRepository:
         limit: int = 100,
         candidate: RequirementProvenanceRecord | None = None,
     ) -> list[IndependentReviewRecord]:
+        rows, _ = self.independent_review_page(
+            owner_ref, requirement_id=requirement_id, limit=limit, candidate=candidate)
+        return rows
+
+    def independent_review_page(
+        self, owner_ref: str, *, requirement_id: str | None = None,
+        limit: int = 100, candidate: RequirementProvenanceRecord | None = None,
+    ) -> tuple[list[IndependentReviewRecord], bool]:
+        """多取一条判断覆盖，在同一次读取中固定审核顺序与完整性。"""
         limit_bounded = min(max(1, int(limit or 100)), 200)
         query = "SELECT * FROM independent_reviews WHERE owner_ref = ?"
         params: list[Any] = [owner_ref]
@@ -1182,12 +1191,12 @@ class VerificationEvidenceRepository:
             # 旧工作流回执通过调用方原运行/步骤/尝试哈希核验，已带归属的回执须精确匹配。
             query += " AND (candidate_ref = ? OR candidate_ref = '')"
             params.append(_candidate_binding_ref(candidate))
-        query += " ORDER BY created_at DESC LIMIT ?"
-        params.append(limit_bounded)
+        query += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        params.append(limit_bounded + 1)
 
         with _DB_LOCK, self._connection() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
-            return [_row_to_review_record(r) for r in rows]
+            return [_row_to_review_record(r) for r in rows[:limit_bounded]], len(rows) > limit_bounded
 
     # LLM: 分页查询某需求或 owner 的验收事实历史。
     # 函数用途: 列出满足条件的验收事实记录列表。

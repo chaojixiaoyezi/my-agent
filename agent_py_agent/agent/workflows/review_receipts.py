@@ -22,7 +22,8 @@ def pending_review_error(run):
                 and run.get('workflow_run_id') and pending.get('workflow_run_id') == run['workflow_run_id']
                 and pending.get('step_id') == step['step_id'] and pending.get('attempt_id')
                 and pending['attempt_id'] == escalation.get('attempt_id')
-                and code in ('WORKFLOW_REVIEW_REQUIRED', 'WORKFLOW_REVIEW_STALE', 'WORKFLOW_REVIEW_CHANGES_REQUESTED')):
+                and code in ('WORKFLOW_REVIEW_REQUIRED', 'WORKFLOW_REVIEW_STALE', 'WORKFLOW_REVIEW_CHANGES_REQUESTED',
+                             'WORKFLOW_REVIEW_HISTORY_INCOMPLETE')):
             return code
     return ''
 

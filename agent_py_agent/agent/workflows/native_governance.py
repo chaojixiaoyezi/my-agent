@@ -99,30 +99,39 @@ class NativeWorkflowGovernance(WorkflowOperationRecovery):
                 or not requirement.author_principal_id):
             raise WorkflowReviewPending(binding, reason='WORKFLOW_REVIEW_STALE')
         # 原库查询有200条上限；只接受同规范版本/机器scope的有效记录，不把任意pass升级为执行批准。
-        reviews = self.repository.list_independent_reviews(
+        reviews, has_more = self.repository.independent_review_page(
             self.owner_id, requirement_id=binding['requirement_id'], limit=200, candidate=requirement)
+        if has_more:
+            error = WorkflowReviewPending(binding, reason='WORKFLOW_REVIEW_HISTORY_INCOMPLETE')
+            error.details['recommended_action'] = ('同候选审核历史超过200条，不能据截断窗口证明所有审核者已通过；'
+                '本次未执行。请由原任务修订候选并绑定新版本重新审核，不要继续给原候选追加替票或盲目恢复。')
+            raise error
         receipts = {}
         now = time.time()
         seen_reviewers = set()
+        changes_requested = False
         for review in reviews:
-            if review.reviewer_principal_id in seen_reviewers:
-                continue
-            seen_reviewers.add(review.reviewer_principal_id)
             if (review.reviewed_input_version != binding['input_version'] or review.scope != 'workflow_effect.v1'
-                    or review.author_principal_id != requirement.author_principal_id or review.verdict != 'pass'):
+                    or review.author_principal_id != requirement.author_principal_id
+                    or review.verdict not in {'pass', 'changes_requested'}):
                 continue
             try:
                 expires = datetime.fromisoformat(review.created_at.replace('Z', '+00:00')).timestamp() + policy.get('ttl_seconds', 86400)
             except (ValueError, TypeError):
                 continue
-            if expires <= now:
+            if expires <= now or review.reviewer_principal_id in seen_reviewers:
+                continue
+            # 只在同用途、同候选且有效的意见中选该审核者最新一条；别人的pass不撤销他的返工。
+            seen_reviewers.add(review.reviewer_principal_id)
+            if review.verdict == 'changes_requested':
+                changes_requested = True
                 continue
             receipts[review.review_id] = {'receipt_ref': review.review_id, 'owner_id': self.owner_id,
                 'task_id': record.business_context.get('task_id', ''), 'workflow_run_id': record.workflow_run_id,
                 'step_id': step.step_id, 'attempt_id': binding['attempt_id'], 'candidate_hash': binding['candidate_hash'],
                 'author_id': requirement.author_principal_id, 'reviewer_id': review.reviewer_principal_id,
                 'decision': 'approved', 'expires_at': expires}
-        if requirement.review_status == 'changes_requested':
+        if changes_requested:
             raise WorkflowReviewPending(binding, reason='WORKFLOW_REVIEW_CHANGES_REQUESTED')
         minimum = policy.get('minimum_reviews', 1)
         missing = minimum - len({row['reviewer_id'] for row in receipts.values()})

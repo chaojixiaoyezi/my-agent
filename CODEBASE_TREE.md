@@ -12,6 +12,7 @@ agent_py_agent/tests/
 |-- test_subagent_reviewer_contract.py                            # 原生审核角色的工具授权与派工
 |-- test_tool_operation_result_ref_wire.py                       # 完整工具结果 URI 经业务列表和详情往返
 |-- test_workflow_artifact_delivery_edges.py                      # 文件读取、响应码、范围和完整性
+|-- test_workflow_review_changes_requested_gate.py                # 独立审核退票、撤回和完整性
 `-- test_workflow_run_out_resume_batches.py                       # 恢复尝试、批次文件与业务客户端查询
 ```
 

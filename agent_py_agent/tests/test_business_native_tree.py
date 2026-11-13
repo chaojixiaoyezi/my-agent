@@ -65,4 +65,3 @@ def test_unassigned_tree_only_returns_unassigned_executions(background_http):
     assert status == 200, listing
     ids = {row['id'] for row in listing['data']['nodes']}
     assert 'unassigned-work' in ids and 'observed-' + task.task_id not in ids
-
