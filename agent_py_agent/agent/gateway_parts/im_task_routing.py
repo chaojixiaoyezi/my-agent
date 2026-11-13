@@ -77,6 +77,7 @@ def prepare_im_task_dispatch(context, conversation, prompt: str):
         raise DataCorruptionError("IM 任务路由与原请求不符")
     if marker["kind"] == "chat":
         return None
+    business_options = _selected_business_context(context, conversation)
     host_input = _message_context(context, conversation)
     if host_input is not None and host_input.input_media:
         from dataclasses import asdict
@@ -88,6 +89,7 @@ def prepare_im_task_dispatch(context, conversation, prompt: str):
                                      source_binding={key: snapshot[key] for key in ("channel", "conversation_id", "actor_id")})
     policy = {"mode": "delegated", "preference_revision": snapshot["preference_revision"],
               "package_refs": list(marker["package_refs"])}
+    # 旧字段仅保留执行线程展示与重放合同，不参与业务上下文授权。
     if snapshot.get("space_id"):
         policy["space_id"] = str(snapshot["space_id"])
     if snapshot.get("target_agent_id"):
@@ -102,16 +104,66 @@ def prepare_im_task_dispatch(context, conversation, prompt: str):
         return replace(current, metadata={**current.metadata, IM_TASK_EXECUTION_KEY: existing or policy})
 
     thread = context.agent.conversation_store.threads.update_atomic(thread.thread_id, bind_policy)
-    from ..conversation.session_task_dispatch import dispatch_owned_background_task
+    from ..conversation.session_task_dispatch import (
+        SessionTaskDispatchError,
+        dispatch_owned_background_task,
+    )
 
     config = capability_config_for_agent(context.agent) or CapabilityConfig()
     outcome = dispatch_owned_background_task(context.agent, source_thread_id=conversation.thread_id,
                                             target_thread=thread, goal=prompt, config=config,
-                                            host_message_context=host_input)
+                                            host_message_context=host_input, **business_options)
     if not outcome.ok:
-        raise DataCorruptionError("IM 后台任务派发结果未确认")
+        raise SessionTaskDispatchError(outcome)
     task_id = load_strict_json(outcome.output)["task_id"]
     return context.agent.conversation_store.session_tasks.load(task_id)
+
+
+def _selected_business_context(context, conversation):
+    """只消费受理空间快照；旧委派显示字段不签发业务权限。"""
+    from ..conversation.business_access import BusinessError
+    from ..conversation.business_context import (
+        resolve_business_context,
+        revalidate_business_context,
+    )
+    from ..conversation.business_contracts import BusinessContextIntent
+    from ..conversation.host_actor import actor_from_scope
+    from .business_api import _local_business_services, bind_business_context
+    from .request_space import REQUEST_SPACE_KEY, request_space_for_execution
+
+    if context.request.get(REQUEST_SPACE_KEY) is None:
+        return {}
+    scope = getattr(conversation, 'scope', None)
+    actor = actor_from_scope(context.agent, scope, conversation.thread_id, context.request_id)
+    if actor is None:
+        raise DataCorruptionError('受理空间缺少可信 IM 发起人')
+    home = context.agent.home_paths
+    selected = request_space_for_execution(context.request, owner_id=home.owner_id,
+        thread_id=conversation.thread_id, actor_id=actor.actor_id)
+
+    def authorize(action, facts):
+        current = actor_from_scope(context.agent, scope, conversation.thread_id, context.request_id)
+        return (current == actor and facts.get('owner_id', home.owner_id) == home.owner_id
+            and request_space_for_execution(context.request, owner_id=home.owner_id,
+                thread_id=conversation.thread_id, actor_id=actor.actor_id) == selected)
+
+    authority = bind_business_context(context.agent, authorize=authorize,
+        subject_id=actor.actor_id, actor=actor, selected_space_id=selected['space_id'])
+    services = _local_business_services(context.agent)
+    business_actor = services.actor(authority)
+    state = services.spaces.authorize_call('spaces.get', {'space_id': selected['space_id']}, actor=business_actor)
+    space = state['spaces'][selected['space_id']]
+    if space['state'] != 'active':
+        raise BusinessError('SPACE_ARCHIVED')
+    intent = BusinessContextIntent(home.owner_id, selected['space_id'], space['default_project_ref'], None)
+
+    def factory(task_id):
+        authority.check('tasks.assign', {'owner_id': home.owner_id, 'space_id': intent.requested_space_id})
+        return resolve_business_context(actor=business_actor, task_id=task_id,
+            requested_space_id=intent.requested_space_id, project_ref=intent.project_ref, binding_id=None)
+
+    return {'business_context_intent': intent, 'business_context_factory': factory,
+            'business_context_validator': lambda value: revalidate_business_context(actor=business_actor, context=value)}
 
 
 # LLM: 只消费本次认证metadata/scope及顶层input_media，按原owner重验；无引用但有图同样保存，模型attrs不作来源。

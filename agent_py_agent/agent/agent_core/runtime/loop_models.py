@@ -61,6 +61,8 @@ class RunParams:
     task_attributes: dict | None = None
     # 宿主专有冻结身份，不能从模型 attributes 或工具参数恢复；replace 在同一片内保留。
     host_channel_actor: HostChannelActor | None = None
+    # 仅Gateway受理后注入；不从模型attributes或子任务恢复，当前请求重试由replace保留。
+    host_session_space: dict | None = field(default=None, kw_only=True, repr=False, metadata={"host_only": True})
     # 仅当前认证入站请求的引用绑定；不写模型 attrs、不继承到新请求或子代理，不承担群授权。
     host_message_references: tuple[tuple[str, str], ...] = ()
     # 同一次认证入站的唯一typed输入；消息引用字段仅为其原只读投影，不从模型attrs构造。

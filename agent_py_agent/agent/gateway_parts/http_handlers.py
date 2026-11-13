@@ -1215,21 +1215,24 @@ def _handle_idempotent_ordinary_ask(
 def _prepare_http_gateway_input(server, scope, payload):
     from . import multiprocess_coordinator as coordinator
     from .control_plane import GatewayControlPlane
-    from .im_dispatch_policy import IM_DISPATCH_KEY, capture_im_dispatch
+    from .im_dispatch_policy import IM_DISPATCH_KEY, capture_gateway_input_context
     from .multiprocess_route import OwnerRouteMismatchError
     from .request_owner_binding import bind_request_owner, frozen_request_owner
+    from .request_space import REQUEST_SPACE_KEY
 
+    if REQUEST_SPACE_KEY in payload:
+        raise ValueError("客户端不能指定宿主受理空间快照")
     lease = coordinator.coordinator_for_root(server.paths.root, context=server.paths)
     if lease is None:
         if coordinator.coordinator_role_present(server.paths.root, context=server.paths):
             raise OwnerRouteMismatchError("coordinator_input_source_changed")
         prepared = bind_request_owner(server.agent, payload)
-        snapshot = capture_im_dispatch(server.agent, replace(scope, resolved_owner=frozen_request_owner(prepared)))
+        snapshot, space = capture_gateway_input_context(server.agent, replace(scope, resolved_owner=frozen_request_owner(prepared)))
     else:
         from ..owner_scoped_pool import _config_with_owner
         from ..user_space.home_layout import home_paths
         from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
-        from .im_dispatch_policy import capture_im_dispatch_for_owner
+        from .im_dispatch_policy import capture_gateway_input_context_for_owner
 
         control = lease.control_plane
         owner = frozen_request_owner(payload)
@@ -1238,13 +1241,15 @@ def _prepare_http_gateway_input(server, scope, payload):
             raise OwnerRouteMismatchError("coordinator_input_source_required")
         home = home_paths_with_owner(home_paths(control.home_root), resolve_owner_home(control.home_root, owner))
         prepared = payload
-        snapshot = capture_im_dispatch_for_owner(
+        snapshot, space = capture_gateway_input_context_for_owner(
             home_paths=home, config=_config_with_owner(control.config, owner),
             scope=replace(scope, resolved_owner=owner), capability_root=control.agent_root,
             capability_config_path=control.capability_config_path,
         )
     if snapshot is not None:
         prepared[IM_DISPATCH_KEY] = snapshot
+    if space is not None:
+        prepared[REQUEST_SPACE_KEY] = space
     return prepared
 
 

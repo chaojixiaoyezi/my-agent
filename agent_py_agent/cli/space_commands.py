@@ -1,8 +1,8 @@
 """空间/团队/流程的薄命令消费端：宿主认证 HTTP 是唯一业务执行入口。"""
 from __future__ import annotations
 
-import json
 import copy
+import json
 from dataclasses import dataclass, field
 from functools import lru_cache, partial
 from uuid import uuid4
@@ -17,11 +17,6 @@ from agent_py_agent.agent.plugin_host.schemas import validate_object
 
 # 冻结回执中 HTTP 200 只对应 completed、202 只对应 accepted；服务端回执没有 ok 字段。
 _CONFIRMED_STATES = {200: 'completed', 202: 'accepted'}
-# V02-02：冻结动作目录没有切换会话当前空间的写入动作。会话执行用的空间在派发任务时由
-# 业务上下文（space_id）冻结，`/space use` 只能只读展示，不得把 spaces.get 当成切换成功。
-_SWITCH_UNSUPPORTED_CODE = 'SPACES_SWITCH_UNSUPPORTED'
-_SWITCH_UNSUPPORTED_WARNING = ('未切换会话当前空间：宿主没有 spaces.use 类写入动作；'
-                               '下一次任务的归属空间仍由派发时的 space_id 决定。')
 
 
 def _action_spec(action: str):
@@ -98,23 +93,6 @@ def _receipt(request: dict, status: int, body: object) -> dict:
     return {**envelope, 'ok': ok, 'http_status': status, 'idempotency_key': request.get('idempotency_key')}
 
 
-def _space_use_result(detail: dict) -> dict:
-    """V02-02：把 `/space use` 的只读详情投影成「明确未切换」，绝不返回切换成功。
-
-    宿主只有按任务冻结的业务上下文，没有可以复用的会话当前空间写入动作；因此不新建客户端
-    本地选择（那会与真实派发不一致），而是保留详情、把 ok 置 False 并给出稳定错误码。
-    """
-    if not isinstance(detail, dict) or detail.get('ok') is not True:
-        return detail  # 详情本身就没读成功：原样上抛，不覆盖真实错误。
-    data = detail.get('data') or {}
-    space = data.get('space') or {}
-    return {**detail, 'ok': False, 'state': 'blocked', 'operation_id': None, 'effect_outcome': 'none',
-            'data': {**data, 'space_id': space.get('space_id', ''), 'switch': 'not_performed'},
-            'warnings': [*(detail.get('warnings') or []), _SWITCH_UNSUPPORTED_WARNING],
-            'error': {'code': _SWITCH_UNSUPPORTED_CODE, 'message': _SWITCH_UNSUPPORTED_WARNING,
-                      'retryable': False, 'details': []}}
-
-
 @dataclass(frozen=True)
 class PreparedBusinessCall:
     """投递前冻结原参数与幂等键；未知回执只允许核对或重送同一对象。"""
@@ -176,7 +154,7 @@ _VERB_MAP = {
         'list': 'spaces.list',
         'show': 'spaces.get',
         'get': 'spaces.get',
-        'use': 'spaces.get',  # 只读详情；consume_business_command 会把它投影成「明确未切换」，不报成功。
+        'use': 'sessions.space.set',
         'packages': 'spaces.packages.list',
         'rename': 'spaces.update',
         'archive': 'spaces.archive',
@@ -217,9 +195,9 @@ def consume_business_command(raw: str, *, session: BusinessCommandSession) -> di
     if action is None:
         action = prefixes[head] + '.' + verb_lower
     if head == '/space' and verb_lower == 'use' and not arguments.strip():
-        # V02-02：use 没有写入端口；缺参数时明确拒绝，不发送必被 schema 拒绝的空请求。
+        # 缺失目标空间时不发送写入请求。
         raise ValueError('用法：/space use <space_id>')
-    spec = business_action_spec(action)
+    spec = _action_spec(action)
     options: dict[str, object] = {}
     if not arguments:
         params = {}
@@ -274,7 +252,12 @@ def consume_business_command(raw: str, *, session: BusinessCommandSession) -> di
             params = {keys[0]: identifier}
 
     if not arguments.lstrip().startswith('{') and 'expected_revision' in spec.native_request_schema.get('required', ()) and 'expected_revision' not in options:
-        if action.startswith('spaces.'):
+        if action == 'sessions.space.set':
+            cur = session.client.call('sessions.space.get', {})
+            if not cur.get('ok'):
+                return cur
+            options['expected_revision'] = cur['data']['revision']
+        elif action.startswith('spaces.'):
             cur = session.client.call('spaces.get', {'space_id': params['space_id']})
             if not cur.get('ok'):
                 return cur
@@ -295,9 +278,6 @@ def consume_business_command(raw: str, *, session: BusinessCommandSession) -> di
             options['expected_revision'] = rev
 
     result = session.client.send(session.client.prepare(action, params, **options))
-    if head == '/space' and verb_lower == 'use':
-        # V02-02：use 只拿到详情，没有改变任何会话状态；不得按 200/completed 报告切换成功。
-        return _space_use_result(result)
     if action == 'workflows.list' and result.get('ok') is True:
         from .workflow_commands import WorkflowTable
 

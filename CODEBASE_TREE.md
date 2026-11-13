@@ -1,3 +1,20 @@
+## 2026-11-12 会话空间选择与派工归属
+
+```text
+agent_py_agent/
+|-- agent/conversation/session_space.py                    # 线程内按发送者持久化选择和版本
+|-- agent/gateway_parts/request_space.py                   # 受理快照与执行身份校验
+|-- agent/gateway_parts/business_api_v13_session_space.py  # HTTP 与主模型共用的选择读写
+`-- tests/
+    |-- test_session_space_selection_wire.py               # 真实 HTTP 与并发切换
+    |-- test_gateway_request_space.py                      # 受理、重放和真实客户端会话标识
+    |-- test_model_selected_space_dispatch.py              # 模型派工、显式覆盖和子代理隔离
+    |-- test_model_session_space_tools.py                  # 模型选择命令及可信调用来源
+    |-- test_im_session_space_dispatch.py                  # IM 委派任务归属与重放
+    `-- test_thread_binding_lookup_cache.py                # 精确绑定缓存的失效和容量
+docs/reviews/SESSION_SPACE_REVIEW_20261112.md               # 本地候选的英文审阅说明和提示词
+```
+
 ## 2026-11-12 连续交互修复与独审入口
 
 ```text

@@ -1042,6 +1042,13 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         if link is not None:
             attrs = {**(attrs or {}), "conversation_task_id": task_id}
     actor = _gateway_host_actor(context.agent, conversation, context.request_id)
+    from .request_space import REQUEST_SPACE_KEY, request_space_for_execution
+
+    space = None
+    if REQUEST_SPACE_KEY in request:
+        space = request_space_for_execution(request, owner_id=str(context.agent.home_paths.owner_id),
+            thread_id=conversation.thread_id,
+            actor_id=actor.actor_id if actor is not None else str(request.get("user_id") or ""))
     references = _gateway_message_references(request, conversation)
     from ..conversation.quoted_context import quoted_context_facts
 
@@ -1088,6 +1095,7 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
         root_user_prompt=inputs.prompt,
         task_attributes=attrs,
         host_channel_actor=actor,
+        host_session_space=space,
         host_message_references=references,
         host_message_context=host_input,
         context_scope="conversation" if conversation.thread_id else "default",

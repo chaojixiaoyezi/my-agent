@@ -150,7 +150,9 @@ class SessionTaskDispatchPlan:
 
 # LLM: 宿主自动派工只允许准确来源下的同 owner 独立线程，不开放模型跨会话管理员权限；沿原记录/正文/唤醒及配额。
 # 函数用途: 将冻结IM工作项及typed原输入送入同owner后台线程，重放必须同引用快照，不再唤醒或扣额。
-def dispatch_owned_background_task(agent, *, source_thread_id: str, target_thread, goal: str, config, host_message_context=None):
+def dispatch_owned_background_task(agent, *, source_thread_id: str, target_thread, goal: str, config, host_message_context=None,
+                                   business_context_intent=None, business_context_factory=None,
+                                   business_context_validator=None):
     from .execution_threads import EXECUTION_ORIGIN_KEY, execution_origin_thread
     from .session_tasks import SESSION_TASK_TERMINAL_STATUSES
 
@@ -171,12 +173,28 @@ def dispatch_owned_background_task(agent, *, source_thread_id: str, target_threa
     snapshot = host_message_context.to_record() if host_message_context is not None else None
     if previous is not None and previous.metadata.get(CONTEXT_KEY) != snapshot:
         return session_task_dispatch_error('原派活引用输入冲突。', error_code=SESSION_IDENTITY_UNAVAILABLE)
+    if (previous is not None and previous.metadata.get('business_context_intent') is not None
+            and business_context_intent is None):
+        return session_task_dispatch_error('原派活受理空间快照缺失。', error_code=SESSION_IDENTITY_UNAVAILABLE)
+    if business_context_intent is not None and previous is not None:
+        from .business_contracts import BusinessContextIntent, BusinessExecutionContext
+
+        original = BusinessContextIntent.from_dict(previous.metadata.get('business_context_intent'))
+        if (original.owner_id != business_context_intent.owner_id
+                or original.requested_space_id != business_context_intent.requested_space_id):
+            return session_task_dispatch_error('原派活空间意图冲突。', error_code=SESSION_IDENTITY_UNAVAILABLE)
+        if not callable(business_context_validator):
+            return session_task_dispatch_error('原派活空间缺少权限复核。', error_code=SESSION_IDENTITY_UNAVAILABLE)
+        business_context_validator(BusinessExecutionContext.from_dict(previous.metadata.get('business_context')))
+        business_context_intent = original
     if previous is not None and previous.status in SESSION_TASK_TERMINAL_STATUSES:
         return ToolHandlerOutcome(SESSION_TASK_TOOL_NAME, True, json.dumps({"task_id": previous.task_id, "status": previous.status}))
     if previous is None and (error := session_task_pair_limit_error(agent, source_thread_id, target_thread.thread_id, config)):
         return error
     return dispatch_session_task(agent, plan, target_thread, config, count_pair=previous is None,
-                                 host_message_context=host_message_context)
+                                 host_message_context=host_message_context,
+                                 business_context_intent=business_context_intent,
+                                 business_context_factory=business_context_factory)
 
 
 

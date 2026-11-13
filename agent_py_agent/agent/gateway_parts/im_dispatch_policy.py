@@ -23,14 +23,21 @@ if TYPE_CHECKING:
 IM_DISPATCH_KEY = "host_im_dispatch.v1"
 
 
+def _space_enabled(config):
+    return bool(getattr(config, "business_spaces_enabled", False))
+
+
 # LLM: 原Agent入口保留可信身份与能力上界；仅按准确绑定读取route，已接受的请求不经过此入口重算。
 # 函数用途: 为IM宿主冻结当前会话路由与来源，不从正文推断单轮覆盖。
-def capture_im_dispatch(base_agent, scope) -> dict | None:
-    if base_agent is None or supports_transcript_delivery(scope.channel):
-        return None
+def capture_gateway_input_context(base_agent, scope) -> tuple[dict | None, dict | None]:
+    if base_agent is None:
+        return None, None
     from .control_service import _request_agent_for_scope
 
+    local_transcript = supports_transcript_delivery(scope.channel)
     agent = _request_agent_for_scope(base_agent, scope)
+    if local_transcript and not _space_enabled(agent.config):
+        return None, None
     store = getattr(agent, "conversation_store", None)
     if store is not None:
         thread, error = store.threads.resolve_report(channel=scope.channel,
@@ -39,26 +46,54 @@ def capture_im_dispatch(base_agent, scope) -> dict | None:
             raise ValueError("route thread binding is unreadable")
     else:
         thread = route_thread_for_paths(agent.home_paths, agent.config, scope)
-    return _capture_snapshot(
+    from .request_space import capture_request_space
+
+    space = capture_request_space(agent.home_paths, thread, actor_id=scope.user_id) if _space_enabled(agent.config) else None
+    dispatch = None if local_transcript else _capture_snapshot(
         agent.home_paths, agent.config, scope, capability_config_for_agent(agent),
         live_policy=getattr(agent, "owner_policy", None), thread=thread,
     )
 
+    return dispatch, space
+
+
+def capture_im_dispatch(base_agent, scope) -> dict | None:
+    if base_agent is None or supports_transcript_delivery(scope.channel):
+        return None
+    return capture_gateway_input_context(base_agent, scope)[0]
+
 
 # LLM: 只接受宿主已解析且与完整规范 home 一致的 owner；配置只缩小能力，不签权。capability 来源必须显式沿原构造 root/准确覆盖路径，不从 owner home 推断。
 # 函数用途: 冷 Gateway 无需构造 Agent 或 Store 即可冻结原 host_im_dispatch.v1 字段；调用方仍负责租约、来源和实际配置解析。
+def capture_gateway_input_context_for_owner(
+    *, home_paths: MyAgentHomePaths, config: AgentConfig, scope: GatewayControlScope,
+    capability_root: str | Path, capability_config_path: str | Path | None = None,
+) -> tuple[dict | None, dict | None]:
+    _require_scope_owner(home_paths, scope)
+    from .request_space import capture_request_space
+
+    local_transcript = supports_transcript_delivery(scope.channel)
+    if local_transcript and not _space_enabled(config):
+        return None, None
+    thread = route_thread_for_paths(home_paths, config, scope)
+    space = capture_request_space(home_paths, thread, actor_id=scope.user_id) if _space_enabled(config) else None
+    dispatch = None if local_transcript else _capture_snapshot(
+        home_paths, config, scope,
+        capability_config_for_paths(root=capability_root, user_path=capability_config_path),
+        thread=thread,
+    )
+
+    return dispatch, space
+
+
 def capture_im_dispatch_for_owner(
     *, home_paths: MyAgentHomePaths, config: AgentConfig, scope: GatewayControlScope,
     capability_root: str | Path, capability_config_path: str | Path | None = None,
 ) -> dict | None:
     if supports_transcript_delivery(scope.channel):
         return None
-    _require_scope_owner(home_paths, scope)
-    return _capture_snapshot(
-        home_paths, config, scope,
-        capability_config_for_paths(root=capability_root, user_path=capability_config_path),
-        thread=route_thread_for_paths(home_paths, config, scope),
-    )
+    return capture_gateway_input_context_for_owner(home_paths=home_paths, config=config, scope=scope,
+        capability_root=capability_root, capability_config_path=capability_config_path)[0]
 
 
 # LLM: 不能从模型、role、原始 channel 或配置补造 owner；完整路径集合必须匹配纯规范工厂，避免只比较显示 ID 后读到别人的策略。

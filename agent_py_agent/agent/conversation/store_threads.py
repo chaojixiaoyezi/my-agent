@@ -91,6 +91,13 @@ _THREAD_RECORD_CACHE: OrderedDict[str, _CachedThread] = OrderedDict()
 # 线程记录只读缓存当前累计估算字节数，随缓存增删维护。
 _THREAD_RECORD_CACHE_TOTAL_BYTES: int = 0
 
+# 精确绑定热读只保存请求过的键；不把整个历史绑定表常驻内存。
+_BINDING_LOOKUP_CACHE_MAX_ENTRIES = 4096
+_BINDING_LOOKUP_CACHE_MAX_ENTRY_BYTES = 8192
+_BINDING_LOOKUP_CACHE: OrderedDict[tuple[str, str], tuple[tuple[int, int, int, int], str]] = OrderedDict()
+_BINDING_LOOKUP_CACHE_LOCK = threading.Lock()
+
+
 
 # LLM: canonical线程来自JSON：精确内置容器递归复制、标量共享，非JSON扩展保留通用deepcopy，不把浅副本当隔离。
 # 函数用途: 低开销复制线程的嵌套元数据，避免对每个JSON标量重复通用类型分派。
@@ -485,12 +492,10 @@ class ThreadStore:
         channel_conversation_id: str,
         channel_user_id: str,
     ) -> tuple[ConversationThread | None, dict[str, Any] | None]:
-        bindings, error = self._read_bindings_report()
+        thread_id, error = self._read_binding_report(
+            _binding_key(channel, channel_conversation_id, channel_user_id))
         if error is not None:
             return None, error
-        thread_id = str(
-            bindings.get(_binding_key(channel, channel_conversation_id, channel_user_id)) or ""
-        )
         thread, error = self.load_report(thread_id) if thread_id else (None, None)
         if error is None and thread is not None:
             scope = [channel, channel_user_id, channel_conversation_id]
@@ -990,6 +995,31 @@ class ThreadStore:
             _drop_cached_thread(path)
         thread = ConversationThread.from_dict(payload)
         return _clone_cached_thread(thread)
+
+    def _read_binding_report(self, binding_key: str) -> tuple[str, dict[str, Any] | None]:
+        """缓存精确键的稳定文件观察；每次仍实时加载线程及继任指针。"""
+        path = self.storage.bindings_path
+        cache_key = (str(path), binding_key)
+        before = _file_fingerprint(path)
+        if before is not None:
+            with _BINDING_LOOKUP_CACHE_LOCK:
+                cached = _BINDING_LOOKUP_CACHE.get(cache_key)
+                if cached is not None and cached[0] == before:
+                    _BINDING_LOOKUP_CACHE.move_to_end(cache_key)
+                    return cached[1], None
+        # 不持有全局缓存锁读盘；文件改变、损坏或删除都沿原读口处理。
+        bindings, error = self._read_bindings_report()
+        thread_id = str(bindings.get(binding_key) or '') if error is None else ''
+        after = _file_fingerprint(path)
+        with _BINDING_LOOKUP_CACHE_LOCK:
+            _BINDING_LOOKUP_CACHE.pop(cache_key, None)
+            if (error is None and before is not None and before == after
+                    and sum(len(value.encode('utf-8')) for value in (*cache_key, thread_id))
+                    <= _BINDING_LOOKUP_CACHE_MAX_ENTRY_BYTES):
+                _BINDING_LOOKUP_CACHE[cache_key] = (after, thread_id)
+                while len(_BINDING_LOOKUP_CACHE) > _BINDING_LOOKUP_CACHE_MAX_ENTRIES:
+                    _BINDING_LOOKUP_CACHE.popitem(last=False)
+        return thread_id, error
 
     # LLM: store_threads 的持久化合同：读回通道到线程索引，损坏时返回错误，禁止静默创建替代绑定；修改须同步本领域调用方与存储回归。
     # 函数用途: 读回通道到线程索引，损坏时返回错误，禁止静默创建替代绑定。

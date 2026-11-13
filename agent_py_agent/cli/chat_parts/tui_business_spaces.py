@@ -1,8 +1,7 @@
 """TUI 的业务命令适配；只消费明确 slash，不读取 Owner 业务文件。"""
 from __future__ import annotations
 
-# LLM: TUI 与聊天共用 BusinessCommandSession，保证同一会话内的工作流编号一致；会话当前空间
-# 不由客户端保存（没有写入端口），/space use 只展示详情并明确未切换（V02-02 / V07-03 / V13-03）。
+# LLM: TUI 与聊天共用 BusinessCommandSession；当前空间由宿主认证会话持久化，客户端不缓存选择。
 # 命令执行过程持有线程锁避免并发渲染交织，不读取底层文件系统（V02-02 / V07-03 / V13-03）。
 # 模块用途: 统一适配 /space、/team 与 /workflow 的终端交互命令。
 import json
@@ -41,11 +40,8 @@ def handle_tui_business_command(raw: str, *, agent: object, print_line: Callable
             for row in result['display_rows']:
                 print_line(' | '.join(row))
             print_line('覆盖：' + str(result.get('data', {}).get('coverage', 'unknown')))
-        elif result and (result.get('data') or {}).get('switch') == 'not_performed':
-            # V02-02：让「未切换」在终端可见，不把只读详情渲染成切换成功。
-            space = (result.get('data') or {}).get('space') or {}
-            print_line(f"空间：{space.get('name', '')}（{space.get('space_id', '')}）")
-            print_line(str((result.get('error') or {}).get('message', '')))
+        elif result and result.get('ok') and raw.strip().startswith('/space use '):
+            print_line(f"当前会话空间：{result['data']['space_id']}")
         elif result and 'rendered' in result and any(raw.strip().startswith(p) for p in ('/workflow show', '/workflow get')):
             print_line(str(result['rendered']))
         else:

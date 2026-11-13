@@ -269,7 +269,7 @@ def _block_non_business_paths(monkeypatch, output: list[str]) -> None:
     ("raw", "action"),
     [
         ("/space list", "spaces.list"),
-        ("/space use space-1", "spaces.get"),
+        ("/space use space-1", "sessions.space.set"),
         ("/team list", "background_agents.list"),
     ],
 )
@@ -285,8 +285,9 @@ def test_enter_dispatches_space_and_team_as_business(
 
     tui_keybindings._submit_input_area(event, params)
 
-    assert [item["path"] for item in business_only_wire] == ["/client/business"]
-    assert business_only_wire[0]["body"]["action"] == action
+    actions = (["sessions.space.get", action] if raw.startswith("/space use ") else [action])
+    assert [item["path"] for item in business_only_wire] == ["/client/business"] * len(actions)
+    assert [item["body"]["action"] for item in business_only_wire] == actions
     assert reconciler.rows == []
     assert output, "业务命令必须打印回执"
     assert IDLE_STOP_TEXT not in "\n".join(output)
@@ -310,7 +311,8 @@ def test_enter_replays_the_pty_probe_sequence(
 
     assert [item["body"]["action"] for item in business_only_wire] == [
         "spaces.list",
-        "spaces.get",
+        "sessions.space.get",
+        "sessions.space.set",
         "workflows.list",
         "background_agents.list",
     ]

@@ -61,6 +61,8 @@ class BusinessCallContext:
     business_context: object = field(default=None, repr=False)
     actor_factory: object = field(default=None, repr=False)
     host_provider: object = field(default=None, repr=False)
+    selected_space_id: str | None = None
+    session_space_source: object = field(default=None, repr=False)
 
     def check(self, action, facts):
         if self not in _ISSUED or not callable(self.authorize):
@@ -76,10 +78,10 @@ class BusinessCallContext:
 
 
 def bind_business_context(host, *, authorize, subject_id='host', actor=None, business_context=None, actor_factory=None,
-                          host_provider=None):
+                          host_provider=None, selected_space_id=None):
     """仅可信宿主调用；JSON、复制DTO和展示allowed_actions都不能恢复此活跃身份。"""
     context = BusinessCallContext(host, host.home_paths.owner_id, subject_id, authorize, actor, business_context,
-                                  actor_factory, host_provider)
+                                  actor_factory, host_provider, selected_space_id)
     _ISSUED.add(context)
     return context
 
@@ -996,6 +998,27 @@ def native_business_context(handler, server):
         return HostChannelActor(home.owner_id, source.thread_id, 'business-' + uuid4().hex,
             channel, scope.conversation_id, user_id)
 
+    def business_session_space(action, params, *, services, expected_revision=None, idempotency_key=''):
+        from .business_api_v13_session_space import session_space_operation
+
+        context.check(action, {'owner_id': home.owner_id, **params})
+        store = getattr(host, 'conversation_store', None)
+        if store is None:
+            raise HostAPIError('HOST_NOT_READY', 503)
+        binding = {'channel': channel, 'channel_conversation_id': scope.conversation_id,
+                   'channel_user_id': user_id}
+        thread, error = store.threads.resolve_report(**binding)
+        if error:
+            raise HostAPIError('HOST_NOT_READY', 503)
+        if action == 'sessions.space.set':
+            source = background_actor(action)
+            thread = store.threads.require(source.source_thread_id)
+        return session_space_operation(home, store.threads, thread, actor_id=user_id,
+            action=action, params=params, services=services, context=context,
+            expected_revision=expected_revision, idempotency_key=idempotency_key)
+
+    host.business_session_space = business_session_space
+
     # LLM: 原生管理员判定留在请求闭包，不能被业务RBAC角色或缓存替代。
     # 函数用途: 复用原认证中间件当前管理员裁决。
     def native_admin():
@@ -1336,13 +1359,39 @@ def local_business_context(host, *, model=False):
             raise HostAPIError('CAPABILITY_DENIED', 403) from None
     local_actor = actor is not None and actor.channel in LOCAL_PRIVATE_CHANNELS
     local_binding = _model_request_binding(host) if local_actor else None
+    from .request_space import REQUEST_SPACE_KEY, request_space_for_execution
+
+    def accepted_space():
+        snapshot = getattr(current_run, 'host_session_space', None)
+        if not model or snapshot is None:
+            return None
+        if actor is None:
+            raise ValueError('受理空间缺少当前宿主发起人')
+        return request_space_for_execution({REQUEST_SPACE_KEY: snapshot}, owner_id=host.home_paths.owner_id,
+            thread_id=actor.source_thread_id, actor_id=actor.actor_id)
+
+    try:
+        selected_space = accepted_space()
+    except (ValueError, TypeError, KeyError):
+        raise HostAPIError('CAPABILITY_DENIED', 403) from None
 
     def check(action, facts):
         spec = resolve_business_action_spec(action)
         if spec.human_authorization_required:
             return False
         if model:
+            if action in {'sessions.space.get', 'sessions.space.set'}:
+                # 选择当前会话只属于真实Gateway主回合；子代理与无入站来源的工具宿主不能修改父会话。
+                attrs = getattr(current_run, 'task_attributes', None) or {}
+                if (getattr(current_run, 'source', '') != 'gateway' or actor is None
+                        or actor.source_thread_id != attrs.get('conversation_thread_id')):
+                    return False
             if getattr(host, '_current_run_params', None) is not current_run:
+                return False
+            try:
+                if accepted_space() != selected_space:
+                    return False
+            except (ValueError, TypeError, KeyError):
                 return False
             try:
                 if local_actor:
@@ -1359,8 +1408,20 @@ def local_business_context(host, *, model=False):
                 return False
         return facts.get('owner_id', host.home_paths.owner_id) == host.home_paths.owner_id
 
-    return bind_business_context(host, authorize=check, actor=actor,
-        subject_id=actor.actor_id if actor is not None else 'host'), _local_business_services(host)
+    def session_space_source(action):
+        # 该闭包只由本次model=True入口签发；重用actor或一般业务context不能恢复此来源。
+        if not check(action, {'owner_id': host.home_paths.owner_id}) or actor is None:
+            raise HostAPIError('SESSION_SPACE_SOURCE_REQUIRED', 403,
+                message='会话空间操作要求当前已认证的Gateway主回合；请在原会话中调用。')
+        return host.conversation_store.threads.require(actor.source_thread_id), actor.actor_id
+
+    context = bind_business_context(host, authorize=check, actor=actor,
+        subject_id=actor.actor_id if actor is not None else 'host',
+        selected_space_id=selected_space['space_id'] if selected_space is not None else None)
+    if model:
+        context = replace(context, session_space_source=session_space_source)
+        _ISSUED.add(context)
+    return context, _local_business_services(host)
 
 
 def business_command_request(namespace, text):
@@ -1442,6 +1503,7 @@ def register_business_tools(agent):
                 'spaces': ('业务空间', ('业务空间', '空间', 'space', 'spaces', '/space')),
                 'background_agents': ('后台代理', ('后台代理', '常驻代理', 'background_agents', 'team', '/team')),
                 'tasks': ('后台任务', ('后台任务', '派活', '派任务', '分配任务', '布置任务', '交给后台代理', 'tasks')),
+                'sessions': ('会话空间', ('当前空间', '选择空间', '切换空间', '/space use', 'sessions.space')),
             }.get(family, ('业务动作', (spec.action,)))
             verbs = {
                 'list': ('列出', '列表', '查询'), 'get': ('查看', '详情', '查询'),
@@ -1453,11 +1515,19 @@ def register_business_tools(agent):
                 'follow_up': ('追问', '补充要求', '继续'), 'cancel': ('取消', '停止'),
             }.get(spec.action.partition('.')[2], ()) if family in {'spaces', 'background_agents', 'tasks'} else ()
             purpose = (verbs[0] if verbs else '') + title + '：' + spec.action
+            if spec.action in {'sessions.space.get', 'sessions.space.set'}:
+                purpose = ('查看' if spec.action.endswith('.get') else '切换') + '当前会话空间：' + spec.action
             if family == 'tasks' and spec.metadata['effect'] == 'execute':
                 purpose += '（异步执行；结束后结果自动回报本会话）'
+            model_schema = _model_business_schema(spec.native_request_schema)
+            description = purpose
+            if spec.action == 'tasks.assign':
+                params_schema = model_schema['properties']['params']
+                params_schema['required'] = [key for key in params_schema['required'] if key != 'space_id']
+                description += '；省略 space_id 使用本次消息受理时选中的空间，显式 null 表示未归属空间'
             self.model_spec = ToolModelSpec('business_' + spec.action.replace('.', '_'),
-                purpose + '；直接调用内置工具，状态和权限由当前宿主复核。',
-                _model_business_schema(spec.native_request_schema),
+                description + '；直接调用内置工具，状态和权限由当前宿主复核。',
+                model_schema,
                 hints=ToolModelHints(category=family if family in {'spaces', 'background_agents', 'tasks'} else 'business',
                     keywords=(*keywords, *verbs), use_cases=(purpose,),
                     default_deferred=True, deferred_summary=purpose))
@@ -1474,6 +1544,8 @@ def register_business_tools(agent):
                 if params.get('action') != self.action:
                     raise HostAPIError('INVALID_SCHEMA')
                 context, services = local_business_context(agent, model=True)
+                if self.action == 'tasks.assign' and isinstance(params.get('params'), dict) and 'space_id' not in params['params']:
+                    params = {**params, 'params': {**params['params'], 'space_id': context.selected_space_id}}
                 status, result = execute_business(params, context, services)
             except HostAPIError as error:
                 status, result = error.status, {'error': {'code': error.code}, 'effect_outcome': error.outcome}
@@ -1488,7 +1560,10 @@ def register_business_tools(agent):
                 effect_outcome=tool_effect if status >= 400 else '')
 
     services = _local_business_services(agent)
-    for spec in business_action_specs().values():
+    from .business_api_v13 import v13_action_spec
+
+    specs = [*business_action_specs().values(), *(v13_action_spec(name) for name in ('sessions.space.get', 'sessions.space.set'))]
+    for spec in specs:
         if services.ready(spec.action):
             tool = BusinessTool(spec)
             tools_obj = getattr(agent, "tools", None)
