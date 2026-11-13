@@ -966,6 +966,7 @@ class BusinessObservationService:
         execution_coverage = ('partial' if execution_page.next_position is not None
                               else execution_page.coverage)
         executions = [row for row in execution_page.records if row.value.get('_is_current')
+                      and row.space_id == params['space_id']
                       and self._visible(row, 'agent_tree.get', params, actor)]
         records, edges, controllers = {}, [], {}
         threads, thread_coverage, more_threads = self._tree_threads(params, executions)

@@ -147,6 +147,18 @@ def test_duplicate_mount_identity_rejected_even_with_different_flags(world):
         'mounts': [{'package_ref': 'pkg'}, {'package_ref': 'pkg', 'enabled': False}]}, revision=0, key='duplicates'))
 
 
+def test_mount_list_displays_current_authorized_name_without_changing_binding(world):
+    sid = world.create()['space_id']
+    world.add_ref('package', 'pkg', name='任务巡检')
+    world.call('spaces.packages.set', {'space_id': sid, 'mounts': [{'package_ref': 'pkg', 'enabled': False}]},
+               revision=0, key='mount')
+    first = world.call('spaces.packages.list', {'space_id': sid})['items'][0]
+    assert (first['name'], first['package_ref'], first['enabled']) == ('任务巡检', 'pkg', False)
+    world.add_ref('package', 'pkg', name='另一空间的名称', space_id='other-space')
+    denied = world.call('spaces.packages.list', {'space_id': sid})['items'][0]
+    assert denied['availability']['state'] == 'denied' and 'name' not in denied
+
+
 def test_mount_preview_and_reads_do_not_write(world):
     sid = world.create()['space_id']
     before = {str(p): p.read_bytes() for p in world.root.rglob('*') if p.is_file()}

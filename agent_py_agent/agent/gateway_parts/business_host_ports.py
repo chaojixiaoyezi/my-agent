@@ -115,6 +115,9 @@ def build_default_business_space_reference_resolver(host: Any) -> Callable[[str,
                             }
                             if digest:
                                 res['version_ref'] = str(digest)
+                            name = pkg.get('name') if isinstance(pkg, dict) else getattr(pkg, 'name', None)
+                            if isinstance(name, str) and 0 < len(name) <= 160:
+                                res['name'] = name
                             return res
                 except (OSError, ValueError, RuntimeError):
                     return None

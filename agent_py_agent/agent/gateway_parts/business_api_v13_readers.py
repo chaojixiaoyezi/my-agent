@@ -619,18 +619,46 @@ class _OwnerReaders:
         records = []
         request = source_page or ObservationSourcePage(limit=100)
         revision = runtime_source_revision(self.repo.db_path)
-        after = source_after(request, revision)
+        filters = params.get('filter') or {}
+        scoped_recent = bool(filters.get('run_id') or filters.get('attempt_id'))
+        if scoped_recent and request.position is not None:
+            position = request.position
+            if (type(position) is not dict or set(position) != {'revision', 'before'}
+                    or position['revision'] != revision or type(position['before']) is not int or position['before'] < 1):
+                raise BusinessError('CURSOR_EXPIRED')
+            after = position['before']
+        else:
+            after = source_after(request, revision)
         next_position = None
         if 'operation_id' in params:
             selected = self.joined('tool_operations', operation_id=params['operation_id'])
         else:
             limit = min(100, request.limit)
+            scope, values = '', []
+            if filters.get('run_id'):
+                scope = ('agent_run_id IN (SELECT ar.agent_run_id FROM agent_runs ar '
+                         'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id '
+                         'JOIN tasks t ON t.task_id=tr.task_id WHERE ar.run_id=? AND t.owner_id=?) AND ')
+                values.extend((filters['run_id'], self.owner))
+            if filters.get('attempt_id'):
+                scope += ('attempt_id IN (SELECT aa.attempt_id FROM agent_attempts aa '
+                          'JOIN agent_runs ar ON ar.agent_run_id=aa.agent_run_id '
+                          'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id '
+                          'JOIN tasks t ON t.task_id=tr.task_id WHERE aa.attempt_id=? AND t.owner_id=?) AND ')
+                values.extend((filters['attempt_id'], self.owner))
             with self.repo._runtime_connection() as conn:
-                positions = conn.execute('SELECT rowid FROM tool_operations WHERE rowid>? ORDER BY rowid LIMIT ?',
-                                         (after, limit + 1)).fetchall()
+                if scope:
+                    # 选中执行时从这个run或attempt最新工具向前翻页，旧ASC游标到升级后显式过期。
+                    positions = conn.execute('SELECT rowid FROM tool_operations WHERE ' + scope +
+                        'rowid<? ORDER BY rowid DESC LIMIT ?', (*values, after or (1 << 63) - 1, limit + 1)).fetchall()
+                else:
+                    positions = conn.execute('SELECT rowid FROM tool_operations WHERE rowid>? ORDER BY rowid LIMIT ?',
+                                             (after, limit + 1)).fetchall()
             if len(positions) > limit:
-                next_position = {'revision': revision, 'after': positions[limit - 1][0]}
+                next_position = {'revision': revision, 'before' if scope else 'after': positions[limit - 1][0]}
             selected = self.joined('tool_operations', rowids=[row[0] for row in positions[:limit]])
+            if scope:
+                selected.reverse()
         for row in selected:
             outcome = json.loads(row['outcome_json'])
             if not isinstance(outcome, dict):

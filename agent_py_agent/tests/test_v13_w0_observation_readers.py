@@ -153,6 +153,22 @@ def test_envelope_fields_closed(background_http):
     assert detail['data']['tool_call']['task_id'] == task.task_id
 
 
+def test_selected_runtime_tools_show_latest_page_and_exact_attempt(background_http):
+    services, _, runtime, run, operations, _ = seeded(background_http)
+    wire(services, runtime)
+    with runtime._runtime_connection() as conn:
+        run_id = conn.execute('SELECT run_id FROM agent_runs WHERE agent_run_id=?', (run['agent_run_id'],)).fetchone()[0]
+    params = {'filter': {'run_id': run_id, 'attempt_id': run['attempt_id']}, 'limit': 1}
+    status, first = background_call(background_http, 'tool_calls.list', params)
+    assert status == 200 and [r['operation_id'] for r in first['data']['items']] == [operations[-1]], first
+    status, second = background_call(background_http, 'tool_calls.list', {**params, 'cursor': first['data']['next_cursor']})
+    assert status == 200 and [r['operation_id'] for r in second['data']['items']] == [operations[0]], second
+    assert not second['data']['next_cursor']
+    status, wrong = background_call(background_http, 'tool_calls.list', {
+        'filter': {'run_id': 'foreign-run', 'attempt_id': run['attempt_id']}, 'limit': 1})
+    assert status == 200 and wrong['data']['items'] == [] and not wrong['data']['next_cursor']
+
+
 # LLM: 逐记录授权不相信cursor；坏来源不能悄悄变complete。
 # 函数用途: 验证撤权、跨owner以及同一已安装源损坏。
 def test_round_trip_matrix(background_http):

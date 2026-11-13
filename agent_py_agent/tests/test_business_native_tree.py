@@ -45,3 +45,20 @@ def test_native_tree_includes_controller_without_persistent_background_seat(back
     assert {'from_id': task.target_thread_id, 'to_id': run_id, 'relation': 'executes'} in tree['data']['edges']
     assert {'from_id': run_id, 'to_id': 'tree-child', 'relation': 'child_of'} in tree['data']['edges']
 
+
+def test_unassigned_tree_only_returns_unassigned_executions(background_http):
+    status, space = background_call(background_http, 'spaces.create', {'name': '空间限定'}, idempotency_key='scope-space')
+    assert status == 200, space
+    status, response = background_call(background_http, 'tasks.submit', {
+        'space_id': space['data']['space_id'], 'instruction': '空间内任务'}, idempotency_key='scope-task')
+    assert status == 200, response
+    [services] = background_http[0]._business_services.values()
+    task = services.host.conversation_store.session_tasks.require(response['data']['task_id'])
+    repo, _ = seed_observed_runtime(services, task)
+    repo.record_run_creation(owner_id=services.owner_id, run_id='unassigned-work', thread_id=task.target_thread_id)
+    status, listing = background_call(background_http, 'agent_tree.get', {
+        'space_id': None, 'root_agent_id': task.target_thread_id, 'include_completed': True})
+    assert status == 200, listing
+    ids = {row['id'] for row in listing['data']['nodes']}
+    assert 'unassigned-work' in ids and 'observed-' + task.task_id not in ids
+

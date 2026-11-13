@@ -210,8 +210,12 @@ class BusinessSpaceService:
         if row.get('state') not in ('available', 'disabled', 'not_connected'):
             raise BusinessError('REFERENCE_NOT_FOUND')
         # 仅取定位字段，绝不复制path、Base64或插件任意metadata到业务账。
-        return {key: row[key] for key in ('owner_id', 'space_id', 'project_ref', 'state', 'ref',
+        projection = {key: row[key] for key in ('owner_id', 'space_id', 'project_ref', 'state', 'ref',
             'version_ref', 'artifact_id', 'content_sha256', 'package_ref') if key in row}
+        name = row.get('name')
+        if kind == 'package' and isinstance(name, str) and 0 < len(name) <= 160:
+            projection['name'] = name
+        return projection
 
     # LLM: 原末核、CAS 和指纹不变；小快照与逐键回执沿同一日志提交，重放不解析旧回执历史。
     # 函数用途: 在原 quota→目录锁内执行目录变更或返回准确的永久幂等结果。
@@ -286,6 +290,8 @@ class BusinessSpaceService:
                 current = self.reference('package', mount['package_ref'], actor=actor, space_id=row['space_id'])
                 mount['availability']['state'] = current['state']
                 mount['version_ref'] = current.get('version_ref')
+                if 'name' in current:
+                    mount['name'] = current['name']
             except BusinessError as error:
                 mount['availability'].update(state='denied' if error.code == 'SPACE_SCOPE_MISMATCH' else 'missing', reason_code=error.code)
         return result
