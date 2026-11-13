@@ -1,6 +1,20 @@
 ## 2026-11-12 连续交互复核返工
 
 ```text
+agent_py_agent/agent/
+|-- artifacts/registry_locator.py                 # 由原登记构建可重建的产物位置索引
+`-- conversation/
+    |-- artifact_access.py                        # 读取产物内容前核对本次观察和下载的授权
+    `-- registered_artifact_observation.py        # 沿原执行和任务读取已登记的精确文件版本
+agent_py_agent/tests/
+|-- test_agent_run_final_report_ownership.py       # 收尾与文件发布交错时保留已交付报告
+|-- test_leaf_provenance_review.py                 # 叶审核的来源、候选、并发换绑和历史回执权限
+|-- test_native_session_task_child_continuation.py # 原任务完成通知、合并输入与恢复的冻结上下文
+|-- test_registered_run_artifact_routes.py         # 授权读取原运行产物、定位恢复与内容漂移
+`-- test_tui_background_execution_activity.py      # 业务空间挂载及选中后台代理的工具与孩子
+```
+
+```text
 agent_py_agent/agent/conversation/
 |-- subagent_message_observation.py          # 从原执行和任务链接定位获准访问的子线程及消息来源
 agent_py_agent/tests/
