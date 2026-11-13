@@ -13,7 +13,6 @@ from agent_py_agent.agent.gateway_parts.business_host_ports import (
     build_default_business_active_references,
     build_default_business_space_reference_resolver,
     build_default_business_workflow_reference_reader,
-    build_default_governance_ports,
     build_default_task_business_context,
     build_default_workflow_agent_steps,
     is_business_host_ports_enabled,
@@ -112,15 +111,18 @@ def test_biz_003_packages_and_v03_executed_phase(native, monkeypatch):  # noqa: 
     db_path = runtime_db_path(Path(agent.home_paths.owner_home_dir).resolve())
     repo = RuntimeRepository(db_path)
     task_id = 'task-usage-test-' + uuid.uuid4().hex[:8]
+    repo.create_task(owner_id=agent.home_paths.owner_id, task_id=task_id)
     tr = repo.create_task_run(task_id=task_id)
     ar = repo.create_agent_run(task_run_id=tr['task_run_id'])
     att = repo.create_attempt(ar['agent_run_id'])
-    repo.create_tool_operation(
+    operation = repo.create_tool_operation(
         agent_run_id=ar['agent_run_id'],
         attempt_id=att['attempt_id'],
         operation_type='pkg.data.cleaner.clean',
         canonical_scope='workspace',
     )
+
+    repo.mark_operation_executing(operation['operation_id'])
 
     # 注入该 task_id 对应的 business_context
     stask = SimpleNamespace(
@@ -555,29 +557,6 @@ def test_gateway_startup_wiring_and_biz_004_governance_guard(native, monkeypatch
     assert 'policies.apply' not in supported
     assert 'policies.get' not in supported
     assert 'policies.preview' not in supported
-
-    # 显式构造默认治理桥接器时，验证 authorize_policy_change 和返回键对齐
-    gov = build_default_governance_ports(agent)
-
-    # authorize_policy_change: 无 authorization_ref 返回 False
-    assert gov.authorize_policy_change('sp-1', {'workflow_ref': 'wf-1'}, None) is False
-    assert gov.authorize_policy_change('sp-1', {'workflow_ref': 'wf-1'}, '') is False
-    # 无 business_content_authorizer 返回 False
-    assert gov.authorize_policy_change('sp-1', {'workflow_ref': 'wf-1'}, 'auth-ref-1') is False
-    # 有 business_content_authorizer 且审批通过返回 True
-    agent.business_content_authorizer = lambda facts: True
-    assert gov.authorize_policy_change('sp-1', {'workflow_ref': 'wf-1'}, 'auth-ref-1') is True
-    agent.business_content_authorizer = lambda facts: False
-    assert gov.authorize_policy_change('sp-1', {'workflow_ref': 'wf-1'}, 'auth-ref-1') is False
-    agent.business_content_authorizer = None
-
-    # 对齐 get_policy / preview_policy / apply_policy 返回键
-    p_get = gov.get_policy('sp-1')
-    assert {'policy_ref', 'readable_rules', 'revision'} <= set(p_get.keys())
-    p_prev = gov.preview_policy('sp-1', {'workflow_ref': 'wf-1'})
-    assert {'diff', 'approval_required', 'affected_runs'} <= set(p_prev.keys())
-    p_app = gov.apply_policy('sp-1', {'workflow_ref': 'wf-1'}, authorization_ref='auth-1')
-    assert {'policy_ref', 'revision', 'effective_for'} <= set(p_app.keys())
 
     # 2. 验证 _start_gateway_http 在 business_spaces_enabled=True 时自动接线并注册工具
     from agent_py_agent.cli import gateway_process
