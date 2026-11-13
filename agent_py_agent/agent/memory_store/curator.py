@@ -287,6 +287,26 @@ class _PrecollectedBatch:
     exclusions_revision: int
 
 
+_CONFIG_PROVIDER_ATTR_MAP: tuple[tuple[str, str], ...] = (
+    ("memory_curator_enabled", "enabled"),
+    ("memory_curator_model_profile", "model_profile"),
+    ("memory_curator_interval_seconds", "interval_seconds"),
+    ("memory_curator_turn_threshold", "turn_threshold"),
+    ("memory_curator_max_input_chars", "max_input_chars"),
+    ("memory_curator_timeout_seconds", "timeout_seconds"),
+    ("memory_curator_daily_finalize_hour", "daily_finalize_hour"),
+    ("memory_curator_auto_promotion_policy", "auto_promotion_policy"),
+    ("memory_lesson_min_occurrences", "lesson_min_occurrences"),
+    ("memory_hot_min_occurrences", "hot_min_occurrences"),
+    ("memory_curator_task_file_evidence_max_chars", "task_file_evidence_max_chars"),
+    ("memory_curator_cross_thread_dedupe_window_seconds", "cross_thread_dedupe_window_seconds"),
+    ("retention_scan_slice_entries", "retention_scan_slice_entries"),
+    ("retention_scan_slice_bytes", "retention_scan_slice_bytes"),
+    ("retention_scan_slice_ms", "retention_scan_slice_ms"),
+    ("memory_lesson_archive_days", "lesson_archive_days"),
+)
+
+
 # LLM: 触发/调度/失败结果与执行链分离:Lifecycle 只做持久化触发、lease 获取与结果构造,
 # 不直接读写 Daily/Candidate。
 # 类用途: 提供 Curator 触发登记、到期调度与失败结果构造。
@@ -307,42 +327,38 @@ class _CuratorLifecycleMixin:
     # LLM: 正MP只消费当前实际Agent/原claim准入，Count0纯内存早返；仅空短核而不持T等待模型，原分组/F4候选与用户确认合同不变。
     # 函数用途: 在原请求仍开放时调度策展；轮次采集只做一次，租约内复核后复用。
     def _effective_config(self) -> MemoryCuratorConfig:
+        base = self.config
         provider = getattr(self, "config_provider", None)
         if not callable(provider):
-            return self.config
+            return base
         try:
             raw = provider()
         except Exception:
             _LOGGER.warning("curator config_provider failed; using startup config")
-            return self.config
+            return base
         if raw is None:
-            return self.config
+            return base
         if isinstance(raw, MemoryCuratorConfig):
             return raw
         parsed = MemoryCuratorConfig.from_agent_config(raw)
-        overrides: dict[str, object] = {}
-        attr_map = (
-            ("memory_curator_enabled", "enabled"),
-            ("memory_curator_model_profile", "model_profile"),
-            ("memory_curator_interval_seconds", "interval_seconds"),
-            ("memory_curator_turn_threshold", "turn_threshold"),
-            ("memory_curator_max_input_chars", "max_input_chars"),
-            ("memory_curator_timeout_seconds", "timeout_seconds"),
-            ("memory_curator_daily_finalize_hour", "daily_finalize_hour"),
-            ("memory_curator_auto_promotion_policy", "auto_promotion_policy"),
-            ("memory_lesson_min_occurrences", "lesson_min_occurrences"),
-            ("memory_hot_min_occurrences", "hot_min_occurrences"),
-            ("memory_curator_task_file_evidence_max_chars", "task_file_evidence_max_chars"),
-            ("memory_curator_cross_thread_dedupe_window_seconds", "cross_thread_dedupe_window_seconds"),
-            ("retention_scan_slice_entries", "retention_scan_slice_entries"),
-            ("retention_scan_slice_bytes", "retention_scan_slice_bytes"),
-            ("retention_scan_slice_ms", "retention_scan_slice_ms"),
-            ("memory_lesson_archive_days", "lesson_archive_days"),
-        )
-        for src_attr, dst_attr in attr_map:
+        init_config = getattr(self, "_init_config", base)
+        init_provider_cfg = getattr(self, "_init_provider_config", None)
+        pinned_fields = getattr(self, "_pinned_init_fields", frozenset())
+        updates: dict[str, object] = {}
+        for src_attr, dst_attr in _CONFIG_PROVIDER_ATTR_MAP:
             if not hasattr(raw, src_attr):
-                overrides[dst_attr] = getattr(self.config, dst_attr)
-        return replace(parsed, **overrides) if overrides else parsed
+                continue
+            if getattr(base, dst_attr) != getattr(init_config, dst_attr):
+                continue
+            if dst_attr in pinned_fields and (
+                init_provider_cfg is None
+                or getattr(parsed, dst_attr) == getattr(init_provider_cfg, dst_attr)
+            ):
+                continue
+            val = getattr(parsed, dst_attr)
+            if val != getattr(base, dst_attr):
+                updates[dst_attr] = val
+        return replace(base, **updates) if updates else base
 
     def _maintenance_owner_home(self) -> Path | None:
         cand_path = getattr(getattr(self, "candidate_service", None), "path", None)
@@ -1793,6 +1809,24 @@ class MemoryCuratorService(
         self.learning_exclusions = dependencies.learning_exclusions
         self.learning_exclusions_revision = dependencies.learning_exclusions_revision
         self.config_provider = dependencies.config_provider
+        self._init_config = config
+        self._init_provider_config: MemoryCuratorConfig | None = None
+        self._pinned_init_fields: frozenset[str] = frozenset()
+        if callable(self.config_provider):
+            try:
+                raw_init = self.config_provider()
+            except Exception:
+                raw_init = None
+            if raw_init is not None and not isinstance(raw_init, MemoryCuratorConfig):
+                parsed_init = MemoryCuratorConfig.from_agent_config(raw_init)
+                self._init_provider_config = parsed_init
+                if hasattr(raw_init, "config_sources"):
+                    self._pinned_init_fields = frozenset(
+                        dst_attr
+                        for src_attr, dst_attr in _CONFIG_PROVIDER_ATTR_MAP
+                        if hasattr(raw_init, src_attr)
+                        and getattr(config, dst_attr) != getattr(parsed_init, dst_attr)
+                    )
         self.committer = CuratorBatchCommitter(
             candidate_service=self.candidate_service,
             daily_store=self.daily_store,

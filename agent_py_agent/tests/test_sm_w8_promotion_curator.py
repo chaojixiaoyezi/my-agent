@@ -1184,3 +1184,78 @@ def test_p1_lesson_remove_action_rejected_before_skill_delegation(tmp_path: Path
     assert batch_res[0].promoted is False
     assert batch_res[0].reason_code == "LESSON_ACTION_UNSUPPORTED"
     assert not list(req_dir.glob("*.json")) if req_dir.exists() else True
+
+
+def test_effective_config_honors_explicit_overrides_and_post_init_mutations(tmp_path: Path) -> None:
+    from agent_py_agent.agent.settings.config import AgentConfig
+
+    owner, service, conversations, _thread, candidates, long_term, lessons, hot = _setup_owner(tmp_path)
+    agent_cfg = AgentConfig()
+    # 构造与 AgentConfig 默认值不同的显式配置（manual_only + max_retries=0），同时挂真实 config_provider（含 config_sources）。
+    explicit_cfg = MemoryCuratorConfig(
+        interval_seconds=60,
+        turn_threshold=1,
+        timeout_seconds=2,
+        max_retries=0,
+        auto_promotion_policy="manual_only",
+    )
+    cand = None
+    for idx in (1, 2):
+        cand = _observe_tool_lesson(
+            candidates,
+            content="导出报告统一使用 UTF-8 编码。",
+            subject_key="export.encoding",
+            occurrence_index=idx,
+        )
+    assert cand is not None
+    assert cand.status == "pending_review"
+    curator = MemoryCuratorService(
+        config=explicit_cfg,
+        dependencies=MemoryCuratorDependencies(
+            backend=_FakeStructuredBackend({"daily": {}, "candidates": []}),
+            conversation_store=conversations,
+            audit_dir=owner / "audit",
+            state_store=MemoryCuratorStateStore(owner / "memory" / "curator" / "state.json"),
+            daily_store=DailyMemoryStore(owner / "memory" / "daily"),
+            candidate_service=candidates,
+            run_log=CuratorRunLog(owner / "memory" / "curator" / "runs.jsonl"),
+            identity=MemoryCuratorIdentity(provider="", model="", owner_id="owner-w8", timezone_name="UTC"),
+            formal_memory_source=FormalMemorySource(long_term=long_term, lessons=lessons, hot=hot),
+            promotion_callback=lambda cid: service.promote(cid, automatic=True),
+            config_provider=lambda: agent_cfg,
+        ),
+    )
+
+    # 1. 初始化覆盖字段保持 manual_only 与 max_retries=0；未固定字段仍可随 live agent_cfg 变更生效。
+    eff0 = curator._effective_config()
+    assert eff0.auto_promotion_policy == "manual_only"
+    assert eff0.max_retries == 0
+    assert curator._promote_eligible([cand.candidate_id]) == (0, (), ())
+    assert candidates.get(cand.candidate_id).status == "pending_review"
+
+    agent_cfg.memory_curator_enabled = False
+    assert curator._effective_config().enabled is False
+    agent_cfg.memory_curator_enabled = True
+    assert curator._effective_config().enabled is True
+
+    # 对已固定字段若运行期真实发生热变更（不同于初始化时的 provider 值），仍能生效。
+    agent_cfg.memory_curator_auto_promotion_policy = "auto"
+    assert curator._effective_config().auto_promotion_policy == "auto"
+
+    # 2. 构造后直接修改 curator.config 覆盖 config_provider，还原后恢复跟随 live provider。
+    agent_cfg.memory_curator_auto_promotion_policy = "conservative_v1"
+    curator2 = MemoryCuratorService(
+        config=MemoryCuratorConfig.from_agent_config(AgentConfig()),
+        dependencies=replace(curator.dependencies, config_provider=lambda: agent_cfg),
+    )
+    orig_cfg = curator2.config
+    curator2.config = replace(orig_cfg, auto_promotion_policy="manual_only")
+    assert curator2._effective_config().auto_promotion_policy == "manual_only"
+    assert curator2._promote_eligible([cand.candidate_id]) == (0, (), ())
+
+    curator2.config = orig_cfg
+    agent_cfg.memory_curator_auto_promotion_policy = "auto"
+    assert curator2._effective_config().auto_promotion_policy == "auto"
+    promoted, _warnings, _receipts = curator2._promote_eligible([cand.candidate_id])
+    assert promoted == 1
+    assert candidates.get(cand.candidate_id).status == "promoted"
