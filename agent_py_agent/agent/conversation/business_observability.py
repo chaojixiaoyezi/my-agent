@@ -478,6 +478,12 @@ class BusinessObservationService:
                 execution = _view('ExecutionView', rows[0].value)
                 result = {'execution': execution, 'actual_outcome': execution['effect_outcome'],
                           'retry_refs': execution['retry_refs'], 'allowed_actions': []}
+                if self.runtime is not None and 'executions' not in self.readers:
+                    from .business_execution_observation import execution_lifecycle
+                    result['lifecycle'], error, retries = execution_lifecycle(self, execution)
+                    if error is not None:
+                        execution['error'] = error
+                    result['retry_refs'] = execution['retry_refs'] = retries
             else:
                 raise BusinessError('HOST_NOT_READY')
         self.authorize_call(action, params, actor=actor)

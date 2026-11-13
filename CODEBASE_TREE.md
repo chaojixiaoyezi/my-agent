@@ -1,6 +1,11 @@
 ## 2026-11-12 连续交互复核返工
 
 ```text
+agent_py_agent/agent/conversation/business_execution_observation.py # 执行详情的原租约、来源与有界事件
+agent_py_agent/tests/test_business_execution_lifecycle.py # 执行详情真实往返、超时和旧租约隔离
+```
+
+```text
 agent_py_agent/agent/workflows/rework.py        # 冻结策略下的有界无状态重新规划
 agent_py_agent/tests/test_workflow_rework.py    # 返工预算、幂等、取消与原执行证据
 docs/design/WORKFLOW_REWORK.md                 # 重新规划元数据与恢复合同
