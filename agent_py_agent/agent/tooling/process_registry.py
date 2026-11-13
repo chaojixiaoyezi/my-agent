@@ -635,7 +635,8 @@ class ProcessRegistry:
     # LLM: 每轮观察原 Store 的阶段变化，单调时长退避且截断到剩余预算；取消仅释放等待，不能推断child已结束。
     # 函数用途: 在宿主取消和超时范围内等待同一个 session 的可信终态。
     def wait(self, session_id: str, timeout_seconds: float, access_scope: ProcessAccessScope | None = None,
-             store_root: str | Path | None = None) -> dict[str, Any] | None:
+             store_root: str | Path | None = None, *,
+             pending_input_probe: Callable[[], bool] | None = None) -> dict[str, Any] | None:
         started_monotonic = time.monotonic()
         deadline = started_monotonic + max(0.0, float(timeout_seconds or 0.0))
         token = current_cancellation_token()
@@ -648,6 +649,11 @@ class ProcessRegistry:
             if record.is_terminal() or remaining <= 0:
                 summary = record.to_summary(include_output=True)
                 summary["wait_timed_out"] = not record.is_terminal()
+                return summary
+            if pending_input_probe is not None and pending_input_probe():
+                # 让出的是当前工具等待，不是后台执行体；保留原句柄、出生身份和退出责任。
+                summary = record.to_summary(include_output=True)
+                summary.update(wait_timed_out=False, wait_yielded=True, wait_yield_reason="turn_input_pending")
                 return summary
             interval = min(_process_wait_interval(time.monotonic() - started_monotonic), remaining)
             token.wait(interval) if token is not None else time.sleep(interval)

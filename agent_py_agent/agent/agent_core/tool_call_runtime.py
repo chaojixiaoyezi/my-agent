@@ -209,6 +209,7 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
         required_action=_required_action_for_call(runtime_request),
         pre_handler_gate=pre_handler_gate,
         output_archiver=lambda call, outcome: _archive_runtime_tool_output(runtime_request, call, outcome),
+        **_pending_input_wait_context(runtime_request),
     )
     result = execution.result
     executable_payload = {
@@ -261,6 +262,20 @@ def execute_traced_tool_call(runtime_request: ToolCallRuntimeRequest):
     except Exception as exc:
         _LOGGER.warning("trace runner tool call finished failed: %s", exc, exc_info=True)
     return execution
+
+
+# LLM: 只给原进程等待装配当前回合探针，回调不进入模型参数或归档；调用者仍负责消费输入。
+# 函数用途: 让只读wait及时归还控制，不改变原进程的执行和取消责任。
+def _pending_input_wait_context(runtime_request: ToolCallRuntimeRequest) -> dict[str, object]:
+    """只给后台进程等待传递当前回合的只读探针；不消费输入或改变进程。"""
+    if (runtime_request.call.tool_name != "process_session"
+            or runtime_request.call.arguments.get("action") != "wait"
+            or getattr(runtime_request.request.params, "consume_pending_turn_input", True) is False):
+        return {}
+    from .runtime.guidance import has_pending_turn_input
+
+    return {"pending_input_probe": lambda: has_pending_turn_input(
+        runtime_request.agent, runtime_request.request.params)}
 
 
 # LLM: typed IM 回调只由宿主注入，stop 谓词经 keyword 交 writer，不进参数/JSON；0 禁用，不改工具范围或账本。

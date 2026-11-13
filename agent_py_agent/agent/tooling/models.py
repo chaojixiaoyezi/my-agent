@@ -1326,6 +1326,7 @@ class ToolInvocationContext:
     # 仅原执行器注入的只读内部派发器，不进入模型参数或共享handler。
     tool_dispatch: object | None = field(default=None, repr=False, compare=False)
     human_approval_check: Callable[[], None] | None = field(default=None, repr=False, compare=False)
+    pending_input_probe: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass

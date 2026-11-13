@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from copy import copy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -91,6 +91,7 @@ class RegistryToolInvokeRequest:
     on_handler_started: Callable[[], None] | None = None
     owner_id: str = ""
     registry_owner_id: str = ""
+    pending_input_probe: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
 
 
 # LLM: 只有通过 registry 路径和快照门的宿主请求才能到这里；观察回调不接收参数，也不是授权来源。
@@ -270,6 +271,7 @@ def _invocation_context(request: RegistryToolInvokeRequest) -> ToolInvocationCon
                                          agent_home_root=data_root_from_boundary(request.write_boundary))
     return ToolInvocationContext(
         runtime_snapshot=_invocation_snapshot(request), cancellation_token=request.cancellation_token,
+        pending_input_probe=request.pending_input_probe,
         execution_authority_check=request.execution_authority_check, tool_dispatch=request.tool_dispatch,
         human_approval_check=request.human_approval_check,
         execution_permission_context=_execution_permission_context(request),

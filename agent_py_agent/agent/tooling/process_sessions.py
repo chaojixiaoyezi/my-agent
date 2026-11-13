@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from typing import Any
 
 from .models import (
@@ -21,6 +22,7 @@ from .models import (
     TimeoutPolicy,
     ToolHandlerOutcome,
     ToolInputPolicy,
+    ToolInvocationContext,
     ToolModelHints,
     ToolModelSpec,
     ToolRuntimePolicy,
@@ -171,12 +173,15 @@ class ProcessSessionTool(BaseTool):
     #   stop 在读记录阶段就失败（ProcessSessionAuthorityError）同样没碰过进程树 → 也是 not_started；
     #   stop 在可能已发信号之后失败（ProcessSessionCleanupError，或 stop 回执未确认）→ 仍是 unknown。
     # 函数用途: 执行后台进程控制；未确认的停止结果明确 UNKNOWN，保留结果供核对。
-    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
+    def execute_scoped(self, params: dict[str, Any], context: ToolInvocationContext) -> ToolHandlerOutcome:
+        return self.execute(params, pending_input_probe=context.pending_input_probe)
+
+    def execute(self, params: dict[str, Any], *, pending_input_probe: Callable[[], bool] | None = None) -> ToolHandlerOutcome:
         # 动作只取结构化参数，不看错误文本。
         action = str(params.get("action") or "").strip().lower()
         read_only = action in _READ_ONLY_ACTIONS
         try:
-            return self._execute_action(params)
+            return self._execute_action(params, pending_input_probe=pending_input_probe)
         except (ProcessSessionAuthorityError, ProcessSessionCleanupError) as exc:
             cleanup_unresolved = isinstance(exc, ProcessSessionCleanupError)
             reported = ("PROCESS_SESSION_CLEANUP_UNCONFIRMED" if cleanup_unresolved
@@ -194,7 +199,7 @@ class ProcessSessionTool(BaseTool):
 
     # LLM: 查询与停止仍沿同一访问范围，起始和未知状态属于 pending，不将不可读状态当不存在。
     # 函数用途: 解析显式动作并返回当前会话事实。
-    def _execute_action(self, params: dict[str, Any]) -> ToolHandlerOutcome:
+    def _execute_action(self, params: dict[str, Any], *, pending_input_probe: Callable[[], bool] | None = None) -> ToolHandlerOutcome:
         scope = process_access_scope(params.get("__run_scope"), self.owner_scope_root)
         if not scope.is_bound():
             return self._error(
@@ -238,10 +243,12 @@ class ProcessSessionTool(BaseTool):
             timeout = self._wait_timeout(params.get("timeout_seconds"))
             slice_limit = self.max_wait_seconds or _MAX_WAIT_SECONDS
             effective_timeout = min(timeout, slice_limit)
-            result = process_registry.wait(session_id, effective_timeout, scope, store_root)
+            result = process_registry.wait(session_id, effective_timeout, scope, store_root,
+                **({"pending_input_probe": pending_input_probe} if pending_input_probe is not None else {}))
             if isinstance(result, dict):
                 result = {**result, 'wait_budget': {'requested_seconds':timeout,
-                    'effective_seconds':effective_timeout, 'control_returned':True}}
+                    'effective_seconds':effective_timeout, 'control_returned':True,
+                    **({'yield_reason': result['wait_yield_reason']} if result.get('wait_yielded') else {})}}
         if result is None:
             return self._error(
                 "PROCESS_NOT_FOUND",

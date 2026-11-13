@@ -126,6 +126,7 @@ class ToolExecutorRequest:
     call_origin: str = "model"
     plugin_gate_reviewer: Callable | None = None
     admin_full_access: bool = False
+    pending_input_probe: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
 
 
 # LLM: 同一授权裁决、输入来源和计时沿执行和前置失败出口共用；成组传递避免另建授权或多参数接口。
@@ -892,6 +893,7 @@ def _invoke_request(
         owner_type=request.owner_type,
         runtime=runtime,
         cancellation_token=request.cancellation_token,
+        pending_input_probe=request.pending_input_probe,
         execution_authority_check=_operation_authority_check(request, call),
         tool_dispatch=_nested_dispatch(request, call),
         human_approval_check=_human_approval_check(request, call),
