@@ -631,6 +631,9 @@ def _unpromoted_conversation_turn(params: object) -> bool:
     # Gateway-style plain chat turn.
     if str(getattr(params, "source", "") or "").strip().lower() == "cli_run":
         return False
+    # 宿主已核验的业务任务在首个工具之前就是耐久任务，不能因尚无会话晋升字段而跳过交付上下文。
+    if getattr(params, "business_context", None) is not None:
+        return False
     attrs = getattr(params, "task_attributes", None)
     return bool(
         isinstance(attrs, dict)

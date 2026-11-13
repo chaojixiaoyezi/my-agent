@@ -351,3 +351,20 @@ def test_execution_detail_requires_live_current_attempt(run_status, attempt_stat
     else:
         with pytest.raises(ValueError, match="EXECUTION_AUTHORITY_UNAVAILABLE"):
             service._validate_execution_context(thread, authority, ref, context, runtime=runtime)
+
+
+def test_business_delivery_directory_reaches_native_model_request(scoped_gateway, monkeypatch):
+    prompts = []
+    original = _BlockingModel.generate
+
+    def capture(self, prompt, *args, **kwargs):
+        prompts.append(str(prompt) + repr(kwargs.get('messages', [])))
+        return original(self, prompt, *args, **kwargs)
+
+    monkeypatch.setattr(_BlockingModel, 'generate', capture)
+    case = _running_scoped_task(scoped_gateway)
+    try:
+        assert prompts
+        assert '本任务已声明交付目录:' in prompts[0]
+    finally:
+        _finish(case)
