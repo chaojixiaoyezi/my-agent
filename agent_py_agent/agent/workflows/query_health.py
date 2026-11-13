@@ -8,6 +8,71 @@ from typing import Any
 from ..assets import safe_asset_id
 from ..assets.descriptor import access_target_requires_network
 from ..common.log_redaction import redact_sensitive_value
+from .models import redact_bearer_values
+
+
+def _duration(value):
+    """仅真实有限非负数可作耗时样本；bool/缺失不能补为零。"""
+    if type(value) not in (int, float):
+        return None
+    try:
+        return float(value) if math.isfinite(value) and value >= 0 else None
+    except OverflowError:
+        return None
+
+
+def _attempts(value):
+    return value if type(value) is int and value >= 1 else None
+
+
+def _field_counts(known, unknown):
+    return {'known': known, 'unknown': unknown,
+            'coverage': 'complete' if not unknown else 'partial' if known else 'unknown'}
+
+
+def _merge_coverage(*values):
+    return 'unknown' if 'unknown' in values else 'partial' if 'partial' in values else 'complete'
+
+
+def _health_runs(run_store, workflow_id, limit):
+    """只消费原读取端口；旧 list_runs 的返回条数不证明其实际 I/O 有界。"""
+    try:
+        sampler = getattr(run_store, 'sample_runs_readonly', None)
+        if callable(sampler):
+            sample = sampler(workflow_id=workflow_id, limit=limit)
+            runs, metadata = sample['runs'], sample
+        else:
+            runs = run_store.list_runs(workflow_id=workflow_id, limit=limit)
+            metadata = getattr(run_store, 'health_read_coverage', None)
+        if not isinstance(runs, (list, tuple)):
+            raise TypeError('runs 必须是原记录窗口')
+        has_metadata = isinstance(metadata, dict)
+        metadata = metadata if has_metadata else {}
+        coverage = metadata.get('coverage', 'unknown')
+        if coverage not in ('complete', 'partial', 'unknown'):
+            coverage = 'unknown'
+        if has_metadata and type(metadata.get('truncated')) is not bool:
+            coverage = 'unknown'
+        truncated = metadata.get('truncated') is True or len(runs) > limit
+        if not has_metadata and len(runs) >= limit:
+            truncated, coverage = True, 'partial'
+        if truncated and coverage == 'complete':
+            coverage = 'partial'
+        source = {'coverage': coverage, 'truncated': truncated}
+        if not has_metadata:
+            source['io_bounded'] = False
+        for key in ('scan_limit', 'scan_count', 'read_limit', 'read_count'):
+            value = metadata.get(key)
+            if type(value) is int and value >= 0:
+                source[key] = value
+        return runs[:limit], source
+    except PermissionError:
+        raise
+    except Exception as exc:
+        # 不输出可能含凭据的异常正文，也不把读失败伪装成完整零次。
+        return [], {'coverage': 'unknown', 'truncated': False, 'io_bounded': False,
+                    'error_type': type(exc).__name__, 'error_code': 'WORKFLOW_HEALTH_READ_FAILED',
+                    'effect_outcome': 'unknown', 'next_action': '检查原读取端口与覆盖元数据后重试'}
 
 
 # LLM: 来源ID只有结构校验，不解释正文或授予路径权限。
@@ -208,11 +273,8 @@ def summarize_run_step_health(run, *, redact=True):
         agent_task = escalation.get('agent_task', {}) or {}
         subwf_receipt = escalation.get('subworkflow_receipt', {}) or {}
 
-        operation_id = (
-            tool_receipt.get('operation_id')
-            or escalation.get('operation_id')
-            or getattr(step, 'effect_id', '')
-        )
+        # effect/子运行及其它领域operation引用不签发工具操作身份；缺原回执就保持未知。
+        operation_id = tool_receipt.get('operation_id') or ''
         subworkflow_run_id = (
             getattr(step, 'subworkflow_run_id', '')
             or subwf_receipt.get('child_run_id', '')
@@ -229,18 +291,24 @@ def summarize_run_step_health(run, *, redact=True):
             or escalation.get('effect_id', '')
         )
 
-        attempts = getattr(step, 'attempt_count', 1)
-        max_attempts = getattr(step, 'max_attempts', 1)
+        attempts = _attempts(getattr(step, 'attempt_count', None))
+        max_attempts = _attempts(getattr(step, 'max_attempts', None))
+        status = getattr(step, 'status', None)
+        status = status if isinstance(status, str) and status else None
+        error_code = getattr(step, 'error_code', None)
+        error_code = error_code if isinstance(error_code, str) else None
+        if redact and error_code:
+            error_code = redact_bearer_values(error_code)
         step_summaries.append({
             'step_id': step.step_id,
             'name': getattr(step, 'name', ''),
             'mode': getattr(step, 'mode', ''),
-            'status': getattr(step, 'status', ''),
-            'duration_ms': getattr(step, 'duration_ms', 0.0),
+            'status': status,
+            'duration_ms': _duration(getattr(step, 'duration_ms', None)),
             'attempt_count': attempts,
             'max_attempts': max_attempts,
-            'retried': attempts > 1,
-            'error_code': getattr(step, 'error_code', ''),
+            'retried': attempts > 1 if attempts is not None else None,
+            'error_code': error_code,
             'error_message': error_msg,
             'needs_repair': getattr(step, 'needs_repair', False),
             'effect_id': effect_id,
@@ -249,32 +317,27 @@ def summarize_run_step_health(run, *, redact=True):
             'task_id': task_id,
         })
 
-    return {
+    result = {
         'workflow_run_id': getattr(run, 'workflow_run_id', ''),
         'workflow_id': getattr(run, 'workflow_id', ''),
         'status': getattr(run, 'status', ''),
-        'duration_ms': getattr(run, 'duration_ms', 0.0),
+        'duration_ms': _duration(getattr(run, 'duration_ms', None)),
         'total_steps': getattr(run, 'total_steps', len(step_summaries)),
         'completed_steps': getattr(run, 'completed_steps', 0),
         'steps': step_summaries,
     }
+    return redact_bearer_values(result) if redact else result
 
 
 # LLM: 构造有界工作流及各步骤的健康视图，严禁全量扫描历史文件 (WF-11)。
 # 函数用途: 按 bounded_limit 读取有限运行并聚合耗时、故障分类、重试与规范引用。
 def build_workflow_health_view(run_store, *, workflow_id=None, limit=50, redact=True):
-    bounded_limit = max(1, min(100, int(limit))) if isinstance(limit, (int, float)) else 50
-    coverage = 'complete'
-    truncated = False
-    try:
-        runs = run_store.list_runs(workflow_id=workflow_id, limit=bounded_limit)
-        if len(runs) == bounded_limit:
-            coverage = 'partial'
-            truncated = True
-    except Exception:
-        runs = []
-        coverage = 'unknown'
-        truncated = False
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError('limit 必须是 1..100 的严格整数')
+    bounded_limit = limit
+    runs, source_coverage = _health_runs(run_store, workflow_id, bounded_limit)
+    coverage = source_coverage['coverage']
+    truncated = source_coverage['truncated']
 
     run_counts = {
         'succeeded': 0,
@@ -289,6 +352,9 @@ def build_workflow_health_view(run_store, *, workflow_id=None, limit=50, redact=
     overall_reason_classes: dict[str, int] = {}
     total_attempts_all = 0
     retried_steps_all = 0
+    fields = ('duration_ms', 'attempt_count', 'max_attempts', 'status', 'error_code')
+    field_counts = {key: [0, 0] for key in fields}
+    known_attempts_all = unknown_attempts_all = 0
     all_effect_ids: set[str] = set()
     all_operation_ids: set[str] = set()
     all_subworkflow_run_ids: set[str] = set()
@@ -331,6 +397,9 @@ def build_workflow_health_view(run_store, *, workflow_id=None, limit=50, redact=
                     'reason_classes': {},
                     'total_attempts': 0,
                     'retried_count': 0,
+                    'known_attempts': 0,
+                    'unknown_attempts': 0,
+                    'field_counts': {key: [0, 0] for key in fields},
                     'effect_ids': set(),
                     'operation_ids': set(),
                     'subworkflow_run_ids': set(),
@@ -338,10 +407,17 @@ def build_workflow_health_view(run_store, *, workflow_id=None, limit=50, redact=
                 }
             agg = step_aggregates[sid]
             agg['execution_count'] += 1
-            step_st = s['status']
+            step_st = s['status'] or 'unknown'
             agg['status_counts'][step_st] = agg['status_counts'].get(step_st, 0) + 1
-            if isinstance(s['duration_ms'], (int, float)) and s['duration_ms'] >= 0:
-                agg['durations'].append(float(s['duration_ms']))
+            if s['duration_ms'] is not None:
+                agg['durations'].append(s['duration_ms'])
+            for key in fields:
+                known = s[key] is not None
+                if key == 'error_code' and s['status'] == 'failed' and not s[key]:
+                    known = False
+                index = 0 if known else 1
+                agg['field_counts'][key][index] += 1
+                field_counts[key][index] += 1
 
             if s['status'] == 'failed' or s['error_code']:
                 agg['failure_count'] += 1
@@ -350,8 +426,14 @@ def build_workflow_health_view(run_store, *, workflow_id=None, limit=50, redact=
                 overall_reason_classes[err_code] = overall_reason_classes.get(err_code, 0) + 1
 
             attempts = s['attempt_count']
-            agg['total_attempts'] += attempts
-            total_attempts_all += attempts
+            if attempts is None:
+                agg['unknown_attempts'] += 1
+                unknown_attempts_all += 1
+            else:
+                agg['total_attempts'] += attempts
+                total_attempts_all += attempts
+                agg['known_attempts'] += 1
+                known_attempts_all += 1
             if s['retried']:
                 agg['retried_count'] += 1
                 retried_steps_all += 1
@@ -377,11 +459,11 @@ def build_workflow_health_view(run_store, *, workflow_id=None, limit=50, redact=
             sorted_d = sorted(durations)
             min_ms = round(sorted_d[0], 2)
             max_ms = round(sorted_d[-1], 2)
-            avg_ms = round(sum(sorted_d) / cnt, 2)
+            avg_ms = round(sum(value / cnt for value in sorted_d), 2)
             p95_idx = max(0, int(math.ceil(0.95 * cnt)) - 1)
             p95_ms = round(sorted_d[p95_idx], 2)
         else:
-            min_ms = avg_ms = max_ms = p95_ms = 0.0
+            min_ms = avg_ms = max_ms = p95_ms = None
 
         step_summaries_compiled[sid] = {
             'step_id': sid,
@@ -398,9 +480,13 @@ def build_workflow_health_view(run_store, *, workflow_id=None, limit=50, redact=
             },
             'failure_count': agg['failure_count'],
             'reason_classes': agg['reason_classes'],
+            'field_coverage': {key: _field_counts(*counts) for key, counts in agg['field_counts'].items()},
             'retry_stats': {
-                'total_attempts': agg['total_attempts'],
+                'total_attempts': agg['total_attempts'] if agg['known_attempts'] else None,
                 'retried_steps': agg['retried_count'],
+                'known_attempt_steps': agg['known_attempts'],
+                'unknown_attempt_steps': agg['unknown_attempts'],
+                'coverage': _field_counts(agg['known_attempts'], agg['unknown_attempts'])['coverage'],
             },
             'canonical_references': {
                 'effect_ids': sorted(agg['effect_ids']),
@@ -410,10 +496,14 @@ def build_workflow_health_view(run_store, *, workflow_id=None, limit=50, redact=
             },
         }
 
-    return {
+    field_coverage = {key: _field_counts(*counts) for key, counts in field_counts.items()}
+    field_status = 'partial' if any(counts[1] for counts in field_counts.values()) else 'complete'
+    result = {
         'schema_version': 'workflow_health.v1',
         'workflow_id': workflow_id,
-        'coverage': coverage,
+        'coverage': _merge_coverage(coverage, field_status),
+        'source_coverage': source_coverage,
+        'field_coverage': field_coverage,
         'truncated': truncated,
         'sampled_runs': len(runs),
         'bounded_limit': bounded_limit,
@@ -422,8 +512,11 @@ def build_workflow_health_view(run_store, *, workflow_id=None, limit=50, redact=
         'step_health': step_summaries_compiled,
         'reason_classes': overall_reason_classes,
         'retry_stats': {
-            'total_attempts': total_attempts_all,
+            'total_attempts': total_attempts_all if known_attempts_all or not unknown_attempts_all else None,
             'retried_steps': retried_steps_all,
+            'known_attempt_steps': known_attempts_all,
+            'unknown_attempt_steps': unknown_attempts_all,
+            'coverage': _field_counts(known_attempts_all, unknown_attempts_all)['coverage'],
         },
         'canonical_references': {
             'effect_ids': sorted(all_effect_ids),
@@ -432,6 +525,7 @@ def build_workflow_health_view(run_store, *, workflow_id=None, limit=50, redact=
             'task_ids': sorted(all_task_ids),
         },
     }
+    return redact_bearer_values(result) if redact else result
 
 
 # LLM: 便捷工作流状态健康报告；复用 build_workflow_health_view 的有界读取。

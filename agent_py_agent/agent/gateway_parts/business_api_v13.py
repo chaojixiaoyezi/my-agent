@@ -412,6 +412,7 @@ def _assignment_receipt(result):
 
 
 V13_SLICE_MODULES = (
+    'agent_py_agent.agent.gateway_parts.business_api_v13_workflow_health',
     'agent_py_agent.agent.gateway_parts.business_api_v13_w7',
     'agent_py_agent.agent.gateway_parts.business_api_v13_w8',
     'agent_py_agent.agent.gateway_parts.business_api_v13_w9',

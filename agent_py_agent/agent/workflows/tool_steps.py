@@ -403,7 +403,7 @@ def execute_tool_step(
             "schema": WORKFLOW_TOOL_RECEIPT_SCHEMA,
             "tool_name": tool_name,
             "effect_id": effect_id,
-            "operation_id": effect_id,
+            "operation_id": "",
             "effect_outcome": getattr(exc, "effect_outcome", "failed"),
             "status": "failed",
             "error_code": step.error_code,
@@ -412,7 +412,8 @@ def execute_tool_step(
         return
 
     # 8. 解析执行结果与持久化回执
-    operation_id = effect_id
+    # 幂等effect独立保留；canonical操作只消费原工具执行回执，不由工作流补造。
+    operation_id = ""
     effect_outcome = "succeeded"
     parsed_result: Any = raw_result
     is_success = True
@@ -422,7 +423,7 @@ def execute_tool_step(
     # (a) ToolHandlerOutcome 协议
     if hasattr(raw_result, "ok"):
         is_success = bool(raw_result.ok)
-        operation_id = str(getattr(raw_result, "operation_id", "") or effect_id)
+        operation_id = str(getattr(raw_result, "operation_id", "") or "")
         effect_outcome = str(getattr(raw_result, "effect_outcome", "") or ("succeeded" if is_success else "failed"))
         if hasattr(raw_result, "result"):
             parsed_result = raw_result.result
@@ -439,10 +440,10 @@ def execute_tool_step(
             err_code = str(raw_result.get("error_code") or "WORKFLOW_TOOL_EXECUTION_FAILED")
             err_msg = str(raw_result.get("error_message") or raw_result.get("message") or raw_result.get("error") or "Tool failed")
             effect_outcome = str(raw_result.get("effect_outcome") or "failed")
-            operation_id = str(raw_result.get("operation_id") or effect_id)
+            operation_id = str(raw_result.get("operation_id") or "")
         else:
             is_success = True
-            operation_id = str(raw_result.get("operation_id") or effect_id)
+            operation_id = str(raw_result.get("operation_id") or "")
             effect_outcome = str(raw_result.get("effect_outcome") or "succeeded")
 
     # 9. 状态与回执落地

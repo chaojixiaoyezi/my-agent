@@ -412,7 +412,7 @@ class _WorkflowToolDispatcher:
                         'attempt_id': attempt_id}},
                 cancellation_token=getattr(params, 'cancellation_token', None)).result
             return {**result.to_dict(), 'ok': result.ok,
-                'operation_id': result.operation.operation_id if result.operation is not None else call.operation_id,
+                'operation_id': result.operation.operation_id if result.operation is not None else '',
                 'effect_outcome': result.effect_outcome, 'error_message': result.output if not result.ok else ''}
 
         # 工具仍由原Executor在handler前实时核权并投影typed拒绝；前置裸异常会丢失未执行与稳定操作引用。

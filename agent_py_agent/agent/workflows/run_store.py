@@ -722,6 +722,85 @@ class WorkflowRunStore:
         with self._lock(workflow_run_id, execution=True):
             yield
 
+    def sample_runs_readonly(self, *, workflow_id, limit):
+        """原run.json的有界目录前缀窗口；不称最新N条，不锁写、不碰索引或步骤叶。
+
+        每次独立采样，目录顺序来自文件系统，缺叶/损坏/预算截止显式降覆盖。
+        run.json包含原步骤快照，但不是并发步骤发表的事务性全历史视图。
+        """
+        from ..common.nofollow_fs import open_directory_beneath, read_bytes_beneath
+
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError('limit必须为1到100的严格整数')
+        if not isinstance(workflow_id, str) or not workflow_id or len(workflow_id.encode()) > 128:
+            raise ValueError('workflow_id必须为非空有界引用')
+        result = {'runs': [], 'coverage': 'complete', 'truncated': False,
+            'scan_limit': max(16, limit * 4), 'scan_count': 0, 'read_limit': limit,
+            'read_count': 0, 'max_file_bytes': 256 * 1024, 'errors': [],
+            'sampling_mode': 'directory_prefix_run_snapshots', 'latest_guaranteed': False}
+
+        def incomplete(code, error=None):
+            result['coverage'] = 'partial'
+            result['errors'].append({'code': code, 'error_type': type(error).__name__ if error else ''})
+
+        try:
+            parent = open_directory_beneath(self.owner_home, ('data', 'workflow_runs'), require_dir_fd=True)
+        except FileNotFoundError:
+            return result
+        except PermissionError:
+            raise
+        except OSError as error:
+            incomplete('RUN_DIRECTORY_UNAVAILABLE', error)
+            result['coverage'] = 'unknown'
+            return result
+        try:
+            # 不list/scandir全载、不排序、不多读一项来声称全覆盖；触及上界保守partial。
+            with os.scandir(parent) as entries:
+                while (result['scan_count'] < result['scan_limit']
+                        and result['read_count'] < result['read_limit']):
+                    try:
+                        entry = next(entries)
+                    except StopIteration:
+                        break
+                    result['scan_count'] += 1
+                    try:
+                        if entry.is_symlink():
+                            incomplete('RUN_ENTRY_LINK_REFUSED')
+                            continue
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                        self._folder(entry.name)
+                        result['read_count'] += 1
+                        raw = read_bytes_beneath(self.owner_home,
+                            ('data', 'workflow_runs', entry.name, 'run.json'),
+                            max_bytes=result['max_file_bytes'], require_dir_fd=True)
+                        if raw is None:
+                            incomplete('RUN_SNAPSHOT_MISSING')
+                            continue
+                        data = json.loads(raw)
+                        if not isinstance(data, dict):
+                            raise TypeError('RUN_SNAPSHOT_MUST_BE_OBJECT')
+                        record = _decode_run(data)
+                        if record.workflow_run_id != entry.name:
+                            incomplete('RUN_IDENTITY_MISMATCH')
+                            continue
+                        if record.workflow_id == workflow_id:
+                            result['runs'].append(record)
+                    except PermissionError:
+                        # 拒绝不是一份成功的空健康；由公开边界如实分类。
+                        raise
+                    except (OSError, ValueError, TypeError, KeyError, UnicodeError) as error:
+                        incomplete('RUN_SNAPSHOT_UNREADABLE', error)
+                else:
+                    result.update(coverage='partial', truncated=True)
+        except PermissionError:
+            raise
+        except OSError as error:
+            incomplete('RUN_DIRECTORY_READ_FAILED', error)
+        finally:
+            os.close(parent)
+        return result
+
     # LLM: 索引只选候选，run.json验证事实；迁移每次只修一批，余集精确合并但不整批修复。
     # 函数用途: 按工作流、状态和条数查询有界运行页，不打开独立步骤叶。
     def list_runs(self, workflow_id=None, status=None, limit=50):

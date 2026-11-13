@@ -65,7 +65,10 @@ def test_default_tool_mapping_and_durable_replay(host):
     result, record = local_run(host, definition, inputs={'path': str(path)})
     assert record.status == 'succeeded', record.to_dict()
     receipt = record.steps[0].escalation_result['tool_receipt']
-    assert receipt['status'] == 'succeeded' and receipt['operation_id']
+    assert receipt['status'] == 'succeeded'
+    # 原read_file是只读；原ToolResult.operation为空，不把请求key当持久操作。
+    assert receipt['operation_id'] == '' and record.steps[0].output_snapshot['operation'] is None
+    assert record.steps[0].effect_id
     assert 'native input' in json.dumps(record.steps[0].output_snapshot)
     again = host.tools.tools['workflows'].execute({'action': 'workflows.run', 'workflow_ref': 'native-read',
         'idempotency_key': 'native-run-0000001', 'inputs': {'path': str(path)}})
@@ -134,7 +137,17 @@ def test_registered_fake_tool_schema_permission_error_and_replay(host, case, cod
     assert step.error_code == code, step.to_dict()
     assert len(counter.calls) == count
     receipt = step.escalation_result['tool_receipt']
-    assert receipt['error_code'] == code and receipt['operation_id']
+    assert receipt['error_code'] == code and receipt['status'] == step.status
+    assert receipt['operation_id'] == '' and step.effect_id
+    if case == 'permission':
+        # 未授权工具在调用Executor前拒绝；不存在原工具操作可投影。
+        assert receipt['effect_outcome'] == 'not_started'
+    else:
+        # schema预拒绝及只读Counter成功/失败都没有原ToolResult.operation。
+        assert receipt['output_summary']['operation'] is None
+        assert receipt['output_summary']['handler_executed'] is (count > 0)
+        if case == 'schema':
+            assert receipt['effect_outcome'] == 'not_started'
     host.tools.tools['workflows'].execute({'action': 'workflows.run', 'workflow_ref': 'native-counter',
         'idempotency_key': 'native-run-0000001'})
     assert len(counter.calls) == count
@@ -563,5 +576,6 @@ def test_authority_expires_after_admission_keeps_executor_receipt(host, monkeypa
     assert receipt['effect_outcome'] == 'not_started', receipt
     assert receipt['output_summary']['handler_executed'] is False, receipt
     logical = f'workflow-step:{record.workflow_run_id}:count'
-    assert receipt['operation_id'] == logical, receipt
+    # 请求身份仍透传给原Executor，但其核权拒绝没有签发canonical operation。
+    assert receipt['operation_id'] == '' and receipt['output_summary']['operation'] is None, receipt
     assert len(registry_calls) == 1 and registry_calls[0].operation_id == logical

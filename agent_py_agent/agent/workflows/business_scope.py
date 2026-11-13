@@ -408,6 +408,46 @@ class WorkflowScopeService:
         from .run_store import WorkflowRunStore
         return WorkflowRunStore(self.store.owner_home)
 
+    def health_get(self, request, *, actor):
+        """单工作流只读健康；授权在helper外完成，拒绝不能被聚合器吞成空成功。"""
+        from .query_health import build_workflow_health_view
+
+        if (type(request) is not dict or set(request) - {'workflow_ref', 'limit'}
+                or not isinstance(request.get('workflow_ref'), str)
+                or not 0 < len(request['workflow_ref'].encode()) <= 128
+                or type(request.get('limit', 50)) is not int or not 1 <= request.get('limit', 50) <= 100):
+            raise ValueError('INVALID_WORKFLOW_HEALTH_PARAMETERS')
+        ref, limit = request['workflow_ref'], request.get('limit', 50)
+
+        def check_workflow():
+            self._authorize(actor, 'workflows.get', ref)
+            try:
+                self._get(ref)
+            except KeyError:
+                raise BusinessError('RESOURCE_NOT_FOUND') from None
+
+        def check_run(record):
+            if record.owner_id != self.owner_id or record.workflow_id != ref:
+                raise PermissionError('WORKFLOW_OWNER_OR_REFERENCE_MISMATCH')
+            self._authorize(actor, 'workflow_runs.get', ref)
+            # 原服务的workflow ref检查之外，补核同一原actor的准确run可见性。
+            if actor.authorize('workflow_runs.get', {'owner_id': self.owner_id,
+                    'workflow_ref': ref, 'workflow_run_id': record.workflow_run_id}) is not True:
+                raise PermissionError('BUSINESS_WORKFLOW_RUN_ACCESS_DENIED')
+
+        check_workflow()
+        sampled = self._run_store().sample_runs_readonly(workflow_id=ref, limit=limit)
+        records = tuple(sampled['runs'])
+        for record in records:
+            check_run(record)
+        window = _HealthReadWindow(records, {k: v for k, v in sampled.items() if k != 'runs'})
+        result = build_workflow_health_view(window, workflow_id=ref, limit=limit, redact=True)
+        # 本次窗口不是永久授权；helper完成后再次查同一原workflow和每个原run。
+        check_workflow()
+        for record in records:
+            check_run(record)
+        return {'workflow_ref': ref, 'health': result, 'health_read_coverage': window.health_read_coverage}
+
     # LLM: 当前业务授权先于恢复分类；原生对账不替代新副作用审核，工厂依赖仍只由宿主提供。
     # 函数用途: 为公共运行入口绑定当前 actor、生命周期和原恢复准入门。
     def _engine(self, actor, *, resolution_ref=None):
@@ -714,3 +754,14 @@ class WorkflowScopeService:
             return {'operation_id': record.workflow_run_id, 'state': 'pending' if outstanding else 'completed',
                     'outstanding_refs': outstanding}
         raise ValueError('UNKNOWN_WORKFLOW_ACTION')
+
+
+class _HealthReadWindow:
+    """仅本次调用的已授权原对象；不是事实仓、索引或第二权限源。"""
+
+    def __init__(self, records, coverage):
+        self._records = records
+        self.health_read_coverage = coverage
+
+    def list_runs(self, workflow_id=None, limit=50):
+        return [record for record in self._records if record.workflow_id == workflow_id][:limit]
