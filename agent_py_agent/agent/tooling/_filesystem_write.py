@@ -9,6 +9,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Callable
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +18,7 @@ from typing import Any
 from ..common.cancellation import ToolCancelled
 from ..common.encoding_detect import encode_like_original
 from ..common.file_version import StaleFileVersionError, check_file_version, file_version
+from ..common.json_io import _locked_json_path
 from ..contracts.artifact_acceptance import ArtifactAcceptanceRequest, validate_artifact
 from ..contracts.recovery import RecoveryAction
 from ..contracts.tool_input_schema import EXCLUSIVE_ARGUMENT_GROUPS_KEY
@@ -27,7 +29,12 @@ from ._filesystem_display import (
     build_write_display,
     existing_utf8_text_for_display,
 )
-from ._filesystem_helpers import _MAX_WRITE_TEXT_CHARS, _required_path, _text_param
+from ._filesystem_helpers import (
+    _MAX_WRITE_TEXT_CHARS,
+    _readable_agent_final_report,
+    _required_path,
+    _text_param,
+)
 from ._filesystem_read import (
     FileSystemAccessOptions,
     FileSystemTool,
@@ -626,12 +633,14 @@ def _atomic_write_bytes(
         _validate_final_artifact_candidate(Path(tmp_name), target)
         if original_mode is not None:
             os.chmod(tmp_name, original_mode & 0o777)
-        check_file_version(target, expected_version)
-        if create_only:
-            os.link(tmp_name, target)
-            _unlink_temp_file(tmp_name)
-        else:
-            os.replace(tmp_name, target)
+        # 仅宿主管理的精确报告叶与closeout共用锁；普通用户文件不产生锁sidecar。
+        with _locked_json_path(target) if _readable_agent_final_report(target) else nullcontext():
+            check_file_version(target, expected_version)
+            if create_only:
+                os.link(tmp_name, target)
+                _unlink_temp_file(tmp_name)
+            else:
+                os.replace(tmp_name, target)
         return observation
     except Exception:
         _unlink_temp_file(tmp_name)

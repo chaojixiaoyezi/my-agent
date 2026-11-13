@@ -13,17 +13,21 @@ takeover surface for the run.
 """
 
 import json
+import os
+import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..common.json_io import (
+    _locked_json_path,
     append_private_jsonl_records,
     write_private_json_file_atomic,
     write_private_jsonl_records,
     write_private_text_file_atomic,
 )
-from ..common.nofollow_fs import ensure_private_dir
+from ..common.nofollow_fs import ensure_private_dir, read_bytes_beneath
 
 
 # LLM: 这里是 agent-run 工作区各文件路径的唯一声明；lessons_jsonl 只登记位置，由 record_lesson 工具经
@@ -294,19 +298,46 @@ def _summary_markdown(task: Any, task_id: str) -> str:
 
 def _write_final_report(path: Path, task: Any, task_id: str) -> None:
     result = str(getattr(task, "result", ""))
-    status = str(getattr(task, "status", ""))
-    if not result and path.exists():
-        return
-    body = result or "待完成后填写"
-    _write_markdown(
-        path,
+    # final_report 可由代理/用户发表；宿主仅拥有缺失文件与同身份旧模板占位。
+    # 正常write_file的同一宿主报告叶共用此发布锁；外部编辑不在此互斥合同内。
+    content = (
         "# Final Report\n\n"
         f"- task_id: {task_id}\n"
         f"- run_id: {getattr(task, 'id', '')}\n"
-        f"- status: {status}\n\n"
+        f"- status: {getattr(task, 'status', '')}\n\n"
         "## Result\n\n"
-        f"{body}\n",
+        f"{result or '待完成后填写'}\n"
     )
+    if not _host_report_can_publish(path, task, task_id, bool(result)):
+        return
+    descriptor, temporary = tempfile.mkstemp(prefix=".final-report-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        with _locked_json_path(path):
+            if _host_report_can_publish(path, task, task_id, bool(result)):
+                os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _host_report_can_publish(path: Path, task: Any, task_id: str, has_result: bool) -> bool:
+    """有界核对宿主旧模板；锁外只作跳过优化，发表前同锁重核。"""
+    try:
+        previous = read_bytes_beneath(path.parent, (path.name,), max_bytes=2048)
+    except ValueError:  # 超过旧模板上界的正文归用户/代理，不读全文。
+        return False
+    if previous is None:
+        return True
+    if not has_result:
+        return False
+    prefix = ("# Final Report\n\n" + f"- task_id: {task_id}\n"
+              + f"- run_id: {getattr(task, 'id', '')}\n" + "- status: ").encode()
+    return re.fullmatch(re.escape(prefix) + rb"[^\r\n]*\n\n## Result\n\n"
+                        + "待完成后填写\n".encode(), previous) is not None
 
 
 def _write_findings(path: Path, task: Any, now: float) -> None:
