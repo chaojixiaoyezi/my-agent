@@ -384,3 +384,36 @@ def test_leaf_review_write_transaction_blocks_competing_sql_rebind(leaf, monkeyp
     assert blocked == [True]
     assert leaf.repo.get_requirement(leaf.owner, 'R').task_id == leaf.business.task_id
     assert leaf.repo.list_independent_reviews(leaf.owner, requirement_id='R')[0].reviewer_principal_id == leaf.task.id
+
+
+def _bind_exact_reviewer_with_coordinator_template(case):
+    from agent_py_agent.agent.subagents.role_templates import role_template_snapshot_for_role
+
+    task = case.agent.subagents.load(case.task.id)
+    task.attributes['review_requirement_id'] = 'R'
+    # 真实持久角色能力与绑定一起读取；即使自定义模板声明同样协调能力也不能越过原候选门。
+    task.attributes['role_template'] = role_template_snapshot_for_role('coordinator')
+    case.agent.subagents.save(task)
+    before = case.repo.get_requirement(case.owner, 'R')
+    case.repo.bind_requirement(VerificationContext(case.owner, '', case.business.task_id),
+        replace(before, requirement_id='other-same-task'))
+
+
+@pytest.mark.parametrize('action', ['query_provenance', 'record_independent_review'])
+def test_bound_reviewer_cannot_read_or_sign_other_same_task_requirement_even_with_coordinator_template(leaf, action):
+    _bind_exact_reviewer_with_coordinator_template(leaf)
+    result = invoke(leaf, {**review_params(), 'action': action, 'requirement_id': 'other-same-task'})
+    assert not result.ok and result.effect_outcome == 'not_started'
+    assert 'REVIEW_REQUIREMENT_SCOPE_MISMATCH' in result.output
+    assert leaf.repo.list_independent_reviews(leaf.owner, requirement_id='other-same-task') == []
+
+
+def test_bound_reviewer_keeps_original_query_and_sign_but_cannot_bind_or_accept(leaf):
+    _bind_exact_reviewer_with_coordinator_template(leaf)
+    assert invoke(leaf, {'action': 'query_provenance', 'requirement_id': 'R'}).ok
+    assert invoke(leaf, review_params()).ok
+    for action in ('bind_requirement', 'record_acceptance'):
+        result = invoke(leaf, {'action': action, 'requirement_id': 'R'})
+        assert not result.ok and result.effect_outcome == 'not_started'
+        assert 'LEAF_PROVENANCE_ACTION_FORBIDDEN' in result.output
+    assert leaf.repo.get_requirement(leaf.owner, 'R').acceptance_status == 'unaccepted'

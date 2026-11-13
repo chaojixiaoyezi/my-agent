@@ -1,7 +1,6 @@
 """正规工作流RUN_OUT的精确公开读取；ID只定位，原运行与步骤清单才是来源。"""
 from __future__ import annotations
 
-import hashlib
 import json
 import mimetypes
 import os
@@ -18,13 +17,15 @@ from .business_access import BusinessError
 from .business_contracts import BusinessExecutionContext
 from .business_observability import ObservationRecord, _observation_task, _observation_thread
 from .task_artifact_observation import (
-    _CONTENT_BYTES,
     _error,
     _read_source,
     guard_artifact_content_budget,
+    verify_artifact_content,
 )
 
 _SOURCE_BYTES = 8 * 1024 * 1024
+# 与正式RUN_OUT生产上限一致；不改变普通任务产物或上传预算。
+_WORKFLOW_CONTENT_BYTES = 64 * 1024 * 1024
 
 
 def _source(owner, parts):
@@ -41,6 +42,26 @@ def _source(owner, parts):
     except (ValueError, TypeError, UnicodeError) as error:
         raise _error('HOST_NOT_READY', 'WORKFLOW_ARTIFACT_SOURCE_UNREADABLE', '原运行清单无法解析；恢复原记录后再查询。') from error
 
+
+
+def _attempt_candidates(steps, attempt_id):
+    """只消费登记的步骤/批attempt；跨步骤或跨批重号必须拒绝，绝不选第一项。"""
+    matches, batch_count = [], 0
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        if isinstance(step.get('escalation_result'), dict) and step['escalation_result'].get('attempt_id') == attempt_id:
+            matches.append((step, step))
+        batches = step.get('batches', [])
+        if not isinstance(batches, list):
+            raise _error('HOST_NOT_READY', 'WORKFLOW_ARTIFACT_BATCH_SOURCE_INVALID', '原逐批账本无效；不能推断产物不存在。')
+        batch_count += len(batches)
+        if batch_count > 4096:
+            raise _error('HOST_NOT_READY', 'WORKFLOW_ARTIFACT_BATCH_READ_BUDGET', '原逐批账本超出本次定位预算；未选择文件，不声称不存在。')
+        for batch in batches:
+            if isinstance(batch, dict) and batch.get('attempt_id') == attempt_id:
+                matches.append((step, {**batch, 'step_id': step.get('step_id'), 'ended_at': batch.get('finished_at')}))
+    return matches
 
 def workflow_artifact(source, artifact_id, version_ref=None, *, with_content=True, authority=None):
     """同一解析器供元数据与下载使用，不登记新账、不扫描workflow历史。"""
@@ -83,6 +104,8 @@ def workflow_artifact(source, artifact_id, version_ref=None, *, with_content=Tru
     run = _source(owner, run_parts)
     if run.get('workflow_run_id') != run_id or run.get('owner_id') != source.owner:
         raise _error('OBSERVATION_NOT_FOUND', 'WORKFLOW_ARTIFACT_OWNER_RUN_MISMATCH', '原运行不属于当前Owner或编号不匹配。')
+    if run.get('business_context') is None or run.get('business_context') == {}:
+        raise _error('OBSERVATION_NOT_FOUND', 'WORKFLOW_ARTIFACT_TASK_SCOPE_MISMATCH', '原运行没有业务订单归属；不可作为业务任务交付物。')
     try:
         context = BusinessExecutionContext.from_dict(run.get('business_context'))
     except (ValueError, TypeError) as error:
@@ -110,19 +133,18 @@ def workflow_artifact(source, artifact_id, version_ref=None, *, with_content=Tru
     steps = run.get('steps')
     if not isinstance(steps, list) or len(steps) > 1000:
         raise _error('HOST_NOT_READY', 'WORKFLOW_ARTIFACT_STEP_READ_BUDGET', '原步骤清单无效或超过合同上限；不能据此选择文件。')
-    candidates = [step for step in steps if isinstance(step, dict)
-        and isinstance(step.get('escalation_result'), dict) and step['escalation_result'].get('attempt_id') == attempt_id]
+    candidates = _attempt_candidates(steps, attempt_id)
     if len(candidates) != 1:
         raise _error('OBSERVATION_NOT_FOUND', 'WORKFLOW_ARTIFACT_ATTEMPT_NOT_FOUND', '该原attempt没有唯一正式步骤；不从磁盘剩余目录猜测文件。')
-    step = candidates[0]
+    parent_step, step = candidates[0]
     step_id = step.get('step_id')
     if not isinstance(step_id, str) or not step_id or step_id in {'.', '..'} or '/' in step_id or '\\' in step_id:
         raise _error('HOST_NOT_READY', 'WORKFLOW_ARTIFACT_STEP_INVALID', '原步骤身份无效；恢复原运行记录后重试。')
     snapshot = _source(owner, ('data', 'workflow_runs', run_id, 'steps', step_id + '.json'))
-    fields = ('step_id', 'status', 'escalation_result', 'output_dir', 'output_artifacts')
-    if any(snapshot.get(key) != step.get(key) for key in fields):
+    fields = ('step_id', 'status', 'error_code', 'escalation_result', 'output_dir', 'output_artifacts', 'batches')
+    if any(snapshot.get(key) != parent_step.get(key) for key in fields):
         raise _error('HOST_NOT_READY', 'WORKFLOW_ARTIFACT_PUBLICATION_PENDING', '步骤与运行清单尚未一致发表；稍后重读，不使用旧清单或新路径替代。')
-    if step.get('status') != 'succeeded' or step.get('error_code'):
+    if step.get('status') not in {'succeeded', 'escalated_recovered'} or step.get('error_code'):
         raise _error('OBSERVATION_NOT_FOUND', 'WORKFLOW_ARTIFACT_STEP_NOT_SUCCEEDED', '该attempt未成功提交正式归档；不能把残留文件当作交付。')
     manifest = step.get('output_artifacts')
     if not isinstance(manifest, list) or len(manifest) > 64:
@@ -130,14 +152,16 @@ def workflow_artifact(source, artifact_id, version_ref=None, *, with_content=Tru
     matches = []
     for item in manifest:
         if not isinstance(item, dict) or not isinstance(item.get('path'), str):
-            raise _error('HOST_NOT_READY', 'WORKFLOW_ARTIFACT_MANIFEST_INVALID', '原归档清单条目不完整，禁止猜测内容。')
+            continue
         relative = item['path']
+        # 清单中的坏旁项不能阻塞其它精确ID；仍只验证并打开本次匹配的原路径。
+        if workflow_artifact_id(run_id, attempt_id, relative) != artifact_id:
+            continue
         path = PurePosixPath(relative)
         if (not relative or len(relative.encode('utf-8', 'surrogatepass')) > 4096 or path.is_absolute() or '\\' in relative
                 or '\x00' in relative or '..' in path.parts or str(path) != relative or relative == '.'):
-            raise _error('HOST_NOT_READY', 'WORKFLOW_ARTIFACT_PATH_INVALID', '原归档相对路径不安全，未读取任何文件内容。')
-        if workflow_artifact_id(run_id, attempt_id, relative) == artifact_id:
-            matches.append(item)
+            raise _error('OBSERVATION_NOT_FOUND', 'WORKFLOW_ARTIFACT_PATH_INVALID', '此清单条目路径不安全；未读取内容，改用有效的原产物编号。')
+        matches.append(item)
     if len(matches) != 1:
         raise _error('OBSERVATION_NOT_FOUND', 'WORKFLOW_ARTIFACT_NOT_IN_MANIFEST', '该编号没有唯一原清单条目；不接受stdout路径或未登记文件。')
     item = matches[0]
@@ -153,17 +177,21 @@ def workflow_artifact(source, artifact_id, version_ref=None, *, with_content=Tru
         raise _error('STATE_CONFLICT', 'WORKFLOW_ARTIFACT_OUTPUT_ROOT_MISMATCH', '原步骤归档目录与正规run/step/attempt不一致；未读取外部路径。')
     path = root.joinpath(*PurePosixPath(item['path']).parts)
     content, present = None, False
+    if size > _WORKFLOW_CONTENT_BYTES:
+        raise _error('STATE_CONFLICT', 'WORKFLOW_ARTIFACT_SIZE_LIMIT', '正式归档超过64MiB上限；未返回内容，重新发布符合上限的产物，不得原样重试。')
     try:
-        guard_artifact_content_budget(owner, path, size, _CONTENT_BYTES if with_content else 16 * 1024 * 1024)
+        guard_artifact_content_budget(owner, path, size, _WORKFLOW_CONTENT_BYTES, exact_size=True)
     except BusinessError:
         raise
     except (OSError, ValueError) as error:
         raise _error('STATE_CONFLICT', 'WORKFLOW_ARTIFACT_CONTENT_PATH_REJECTED', '原归档路径无法安全打开；符号链接、目录或不安全文件不能替代原产物。') from error
     if with_content:
-        content = _read_source(owner, path.relative_to(owner).parts, _CONTENT_BYTES, 'WORKFLOW_ARTIFACT_CONTENT_UNREADABLE')
-        present = content is not None
-        if content is not None and (len(content) != size or hashlib.sha256(content).hexdigest() != digest):
-            raise _error('STATE_CONFLICT', 'ARTIFACT_CONTENT_DRIFTED', '归档字节与原步骤hash/尺寸不符，不把修改后内容当作原版本。')
+        try:
+            present = verify_artifact_content(owner, path, size, digest, _WORKFLOW_CONTENT_BYTES)
+        except BusinessError:
+            raise
+        except (OSError, ValueError) as error:
+            raise _error('STATE_CONFLICT', 'WORKFLOW_ARTIFACT_CONTENT_PATH_REJECTED', '原归档内容无法安全核验；未读取对外内容，核对原路径及版本。') from error
     else:
         try:
             fd = open_readonly_file_beneath(owner, path.relative_to(owner).parts)
@@ -178,12 +206,13 @@ def workflow_artifact(source, artifact_id, version_ref=None, *, with_content=Tru
                 os.close(fd)
     latest = _source(owner, run_parts)
     latest_steps = latest.get('steps')
-    latest_matches = [entry for entry in latest_steps if isinstance(entry, dict)
-        and isinstance(entry.get('escalation_result'), dict)
-        and entry['escalation_result'].get('attempt_id') == attempt_id] if isinstance(latest_steps, list) and len(latest_steps) <= 1000 else []
+    latest_matches = _attempt_candidates(latest_steps, attempt_id) if isinstance(latest_steps, list) and len(latest_steps) <= 1000 else []
     if (any(latest.get(key) != run.get(key) for key in ('workflow_run_id', 'owner_id', 'business_context', 'ephemeral_debug'))
-            or len(latest_matches) != 1 or any(latest_matches[0].get(key) != step.get(key) for key in fields)):
+            or len(latest_matches) != 1 or any(latest_matches[0][0].get(key) != parent_step.get(key) for key in fields)):
         raise _error('HOST_NOT_READY', 'WORKFLOW_ARTIFACT_PUBLICATION_PENDING', '原产物身份或清单在读取期间变更；丢弃本次快照后重试同一编号。')
+    # 完整hash后再核本次真实授权；读取期间撤权不能以旧准入发表元数据。
+    if not check_artifact_access(facts, authority=authority):
+        return None
     # 仅构造现有transport所需的原清单视图，不追加第二份registry。
     record = ArtifactRegistryRecord('artifact_registry.v1', artifact_id, run_id, task.task_id, source.owner,
         'file', mimetypes.guess_type(path.name)[0] or 'application/octet-stream', str(path), digest, size,

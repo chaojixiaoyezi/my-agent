@@ -31,6 +31,7 @@ from ..plugin_host.errors import HostAPIError
 from ..plugin_host.schemas import canonical_json, validate_object
 from ..user_space.owner_quota import OwnerQuotaChange, owner_quota_enforcer_from_policy
 from .business_api import BusinessCallContext, _native_source, native_business_context
+from .business_artifact_stream import VerifiedArtifactStream, verified_workflow_stream
 
 UPLOAD_MAX_BYTES = 16 * 1024 * 1024
 _ROOT = ('artifacts', 'business')
@@ -287,11 +288,17 @@ def _native_registry_content(artifact_id, version_ref, context, services, *, ran
         raise HostAPIError('RESOURCE_NOT_FOUND', 404)
     etag = '"' + record.sha256 + '"'
     status, start, end = select_range(range_header, if_range, etag, record.size_bytes)
-    guard_artifact_content_budget(services.owner_home, Path(record.path), record.size_bytes, UPLOAD_MAX_BYTES)
-    content = _verified_blob(services.owner_home, Path(record.path).relative_to(services.owner_home).parts,
-        record, start=start, end=end, max_bytes=UPLOAD_MAX_BYTES)
-    check_visible()
-    headers = {'Content-Type': record.mime_type or 'application/octet-stream', 'Content-Length': str(len(content)),
+    parts = Path(record.path).relative_to(services.owner_home).parts
+    if workflow_source:
+        content = verified_workflow_stream(services.owner_home, parts, record,
+            start=start, end=end, check_visible=check_visible)
+        content_length = content.length
+    else:
+        guard_artifact_content_budget(services.owner_home, Path(record.path), record.size_bytes, UPLOAD_MAX_BYTES)
+        content = _verified_blob(services.owner_home, parts, record, start=start, end=end, max_bytes=UPLOAD_MAX_BYTES)
+        check_visible()
+        content_length = len(content)
+    headers = {'Content-Type': record.mime_type or 'application/octet-stream', 'Content-Length': str(content_length),
         'ETag': etag, 'Accept-Ranges': 'bytes', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'attachment'}
     if status == 206:
         headers['Content-Range'] = f'bytes {start}-{end}/{record.size_bytes}'
@@ -413,6 +420,7 @@ def handle_business_artifact_upload(handler, server):
 
 
 def handle_business_artifact_content(handler, server):
+    content, response_started = None, False
     try:
         if not _native_source(handler):
             return
@@ -427,14 +435,41 @@ def handle_business_artifact_content(handler, server):
                 raise HostAPIError('RANGE_NOT_SATISFIABLE', 416)
         status, headers, content = artifact_content(match[1], query['version_ref'][0], context, services,
             range_header=handler.headers.get('Range'), if_range=handler.headers.get('If-Range', ''))
+        if isinstance(content, VerifiedArtifactStream):
+            # 返回解析器之后、发表HTTP头之前仍按原task/space/run逐项授权。
+            content.check_visible()
         handler.send_response(status)
         for key, value in headers.items():
             handler.send_header(key, value)
         handler.send_header('Cache-Control', 'private, no-store')
         handler.end_headers()
-        for offset in range(0, len(content), 65536):
-            handler.wfile.write(content[offset:offset + 65536])
+        response_started = True
+        if isinstance(content, VerifiedArtifactStream):
+            for chunk in content.chunks():
+                handler.wfile.write(chunk)
+        else:
+            for offset in range(0, len(content), 65536):
+                handler.wfile.write(content[offset:offset + 65536])
     except HostAPIError as error:
-        handler._send_json(error.status, {'error': error.to_payload()})
-    except (OSError, ValueError):
-        handler._send_json(404, {'error': {'code': 'RESOURCE_NOT_FOUND'}})
+        if response_started:
+            handler.close_connection = True
+        else:
+            handler._send_json(error.status, {'error': error.to_payload()})
+    except (FileNotFoundError, ValueError):
+        if response_started:
+            handler.close_connection = True
+        else:
+            handler._send_json(404, {'error': {'code': 'RESOURCE_NOT_FOUND'}})
+    except OSError as error:
+        if response_started:
+            handler.close_connection = True
+        else:
+            # EACCES/ENOSPC等不是不存在；不回显原异常正文、路径或私有参数。
+            diagnostic = f'{type(error).__name__}(errno={error.errno})'
+            failure = HostAPIError('HOST_NOT_READY', 503, message=(
+                'ARTIFACT_CONTENT_UNREADABLE；' + diagnostic +
+                '；未发送内容；检查原文件读权限或临时空间后重试同一版本。'))
+            handler._send_json(failure.status, {'error': failure.to_payload()})
+    finally:
+        if isinstance(content, VerifiedArtifactStream):
+            content.close()

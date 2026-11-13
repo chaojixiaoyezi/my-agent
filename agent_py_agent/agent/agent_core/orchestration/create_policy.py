@@ -38,6 +38,7 @@ from ...subagents.role_templates import (
     ROLE_BASE_TOOLS,
     SELF_DISCOVERY_TOOLS,
     role_template_snapshot_for_role,
+    template_for_role,
 )
 from ...subagents.services.base import CreateRunParams
 from ...tooling.registry_auth import CATALOG_ONLY_TOOL_GRANT, snapshot_tool_grants
@@ -297,18 +298,20 @@ def _role_policy(
     role = _role_from_create_intent(raw_params, goal, agent)
     if allowed_tools is not None and "list_tools" in allowed_tools and "tool_search" not in allowed_tools:
         allowed_tools = [*allowed_tools, CATALOG_ONLY_TOOL_GRANT]
-    if allowed_tools is None:
-        allowed_tools = list(ROLE_BASE_TOOLS)
-    elif raw_params.get("_exact_allowed_tools") is not True and str(raw_params.get("tool_preset") or "") != "read_only":
-        allowed_tools = list(dict.fromkeys([*allowed_tools, *SELF_DISCOVERY_TOOLS, *OWNER_TASK_TOOLS]))
     role_template_dirs = _role_template_dirs(agent)
+    template = template_for_role(role, role_template_dirs)
+    narrow_defaults = template is not None and not template.inherit_base_tools
+    if allowed_tools is None:
+        allowed_tools = list(template.default_tools if narrow_defaults else ROLE_BASE_TOOLS)
+    elif not narrow_defaults and raw_params.get("_exact_allowed_tools") is not True and str(raw_params.get("tool_preset") or "") != "read_only":
+        allowed_tools = list(dict.fromkeys([*allowed_tools, *SELF_DISCOVERY_TOOLS, *OWNER_TASK_TOOLS]))
     is_explicit_root = is_explicit_root_role(role, role_template_dirs)
     if is_explicit_root:
         allowed_tools = explicit_root_allowed_tools(allowed_tools)
     else:
         allowed_tools = leaf_allowed_tools(allowed_tools)
     # 联动只是候选，不改只读/宿主精确清单；缺少冻结快照时少授工具，后续仍取父级交集。
-    if raw_params.get("_exact_allowed_tools") is not True and str(raw_params.get("tool_preset") or "") != "read_only":
+    if not narrow_defaults and raw_params.get("_exact_allowed_tools") is not True and str(raw_params.get("tool_preset") or "") != "read_only":
         snapshot = getattr(agent, "current_skill_snapshot", None)
         if callable(snapshot):
             try:
@@ -334,7 +337,9 @@ def _role_policy(
                         raise ToolPermissionDeniedError(
                             f"TOOL_PERMISSION_DENIED: Permitted tool '{tool}' exceeds parent authority."
                         )
-            allowed_tools = [t for t in constraints.permitted_tools if parent_scope is None or t in parent_scope]
+            allowed_tools = [t for t in constraints.permitted_tools
+                             if (parent_scope is None or t in parent_scope)
+                             and (not narrow_defaults or t in allowed_tools)]
         if "spawn_children" in constraints.prohibited_actions:
             allowed_tools = [t for t in allowed_tools if t not in ("create_subagents", "spawn_children")]
         if "network_access" in constraints.prohibited_actions:
@@ -1068,7 +1073,7 @@ _BOOL_ATTRIBUTE_FIELDS = ("defer_start", "long_running")
 # service_window_seconds(A4 持续型委派语义):持续型任务的最短值守窗口(秒)。子代理收口
 #   层据此抑制"落一次产物即 DONE"的提前收工;父代理 wake 消费据此判断"窗口未走完就退了"。
 _POSITIVE_INT_ATTRIBUTE_FIELDS = ("service_window_seconds",)
-_SCALAR_ATTRIBUTE_FIELDS: tuple[str, ...] = ("persistent_goal",)
+_SCALAR_ATTRIBUTE_FIELDS: tuple[str, ...] = ("persistent_goal", "review_requirement_id")
 
 
 def _root_agent_name(raw_params: dict[str, object], role: str) -> str:

@@ -120,7 +120,7 @@ def _allowed_tools_for_role(
         controls = set(DIRECT_CHILD_CONTROL_TOOLS)
         return [tool for tool in active if tool not in controls]
     if template:
-        return _stable_tools([*template.default_tools, *ROLE_BASE_TOOLS])
+        return _stable_tools([*template.default_tools, *(ROLE_BASE_TOOLS if template.inherit_base_tools else [])])
     if role in {REPORTER_ROLE, CHECKER_ROLE}:
         return list(ROLE_BASE_TOOLS)
     return list(ROLE_BASE_TOOLS) if role else tools

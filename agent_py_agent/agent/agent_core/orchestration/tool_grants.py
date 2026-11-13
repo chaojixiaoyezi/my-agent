@@ -11,6 +11,7 @@ from ...subagents.role_templates import (
     SELF_DISCOVERY_TOOLS,
     SHELL_SESSION_TOOLS,
     active_model_subagent_tools,
+    template_for_role,
 )
 from ...tooling.registry_auth import canonical_discovery_grants
 from ...tooling.write_boundary import WRITE_TOOL_ORDER
@@ -68,6 +69,10 @@ def subagent_allowed_tools(params: dict[str, object]) -> list[str] | None:
 
         if exact_scope := audit_worker_tool_scope(attrs):
             return active_model_subagent_tools(exact_scope)
+    # 窄角色不经 coding 预设补入 shell/写入；显式空清单必须原样保持。
+    template = template_for_role(str(params.get("role") or ""))
+    if template is not None and not template.inherit_base_tools:
+        return allowed_tools if "allowed_tools" in params else list(template.default_tools)
     preset = str(params.get("tool_preset") or "").strip().lower()
     preset_tools = _preset_allowed_tools(preset) if preset else None
     if allowed_tools:

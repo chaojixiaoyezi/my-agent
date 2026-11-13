@@ -33,8 +33,9 @@ def workflow_review_author_scope(host, turn):
 
 
 class WorkflowReviewPending(WorkflowPolicyRefusal):
-    def __init__(self, binding, *, reason='WORKFLOW_REVIEW_REQUIRED'):
+    def __init__(self, binding, *, reason='WORKFLOW_REVIEW_REQUIRED', reviewers_needed=0):
         self.binding = binding
+        self.reviewers_needed = reviewers_needed
         super().__init__(reason, details={**binding,
             'recommended_action': '由另一受权执行者用 manage_requirement_provenance 对该 requirement_id 和 input_version 登记独立审核，再恢复原运行。'})
 
@@ -66,9 +67,12 @@ class NativeWorkflowGovernance(WorkflowOperationRecovery):
         policy = snapshot.get('descriptor', {}).get('metadata', {}).get('workflow_review_policy')
         if policy is None:
             return None
-        if (not isinstance(policy, dict) or set(policy) - {'steps', 'minimum_reviews', 'ttl_seconds'}
+        if (not isinstance(policy, dict) or set(policy) - {'steps', 'minimum_reviews', 'ttl_seconds', 'auto_dispatch', 'reviewer_model'}
                 or not isinstance(policy.get('steps'), list)
                 or not all(isinstance(item, str) and item for item in policy['steps'])
+                or type(policy.get('auto_dispatch', True)) is not bool
+                or ('reviewer_model' in policy and (not isinstance(policy['reviewer_model'], str)
+                    or not 1 <= len(policy['reviewer_model'].strip()) <= 128))
                 or type(policy.get('minimum_reviews', 1)) is not int or not 1 <= policy.get('minimum_reviews', 1) <= 32
                 or type(policy.get('ttl_seconds', 86400)) is not int or not 1 <= policy.get('ttl_seconds', 86400) <= 86400):
             raise WorkflowPolicyRefusal('WORKFLOW_REVIEW_POLICY_INVALID')
@@ -121,8 +125,9 @@ class NativeWorkflowGovernance(WorkflowOperationRecovery):
         if requirement.review_status == 'changes_requested':
             raise WorkflowReviewPending(binding, reason='WORKFLOW_REVIEW_CHANGES_REQUESTED')
         minimum = policy.get('minimum_reviews', 1)
-        if len({row['reviewer_id'] for row in receipts.values()}) < minimum:
-            raise WorkflowReviewPending(binding)
+        missing = minimum - len({row['reviewer_id'] for row in receipts.values()})
+        if missing > 0:
+            raise WorkflowReviewPending(binding, reviewers_needed=missing)
         gate = WorkflowReleaseGate(receipt_reader=lambda ref, _run, _step: receipts[ref],
             authorization_check=lambda receipt, _run: receipt.receipt_ref in receipts)
         refs = gate.require(record, step, candidate_hash=binding['candidate_hash'], policy={

@@ -1482,6 +1482,17 @@ def _close_out_session_task_turn(
 
     delegated = delegated_delivery_task(agent, request.thread_id, task_id=request.task_id)
     try:
+        # 受管业务单的模型回合结束不等于订单结束；复用原TaskLink的子代理/邮箱/目标收口门。
+        # 不提前发布同task/status幂等结果，否则后续真正交付会被旧的等待摘要永久遮蔽。
+        from .session_task_report import task_for_turn
+
+        session_task = task_for_turn(agent, resolved_turn_id)
+        metadata = getattr(session_task, "metadata", None) or {}
+        if (session_task is not None and isinstance(metadata.get("business_context"), dict)
+                and execution.runtime_status not in {"failed", "error"} and not getattr(execution, "error", None)):
+            link, link_error = agent.conversation_store.tasks.link_report(request.thread_id, session_task.task_id)
+            if link_error is not None or link is None or link.status != "completed":
+                return
         closed = close_out_turn(
             agent,
             resolved_turn_id,

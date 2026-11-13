@@ -434,6 +434,8 @@ class _WorkflowToolDispatcher:
 # LLM: main/user脚本、数据源与工作流统一动态读取当前经校验工作区与受限快照；治理仍只给可信管理员，目录开关不扩授权。
 # 函数用途: 登记Owner与项目工作区脚本/数据源/工作流、管理员治理与目录入口，不刷新或启动领域服务。
 def register_self_map(agent):
+    from .workflow_review_dispatch import dispatch_pending_review
+
     if str(getattr(agent.tools, "owner_type", "") or "") in {"main_agent", "user"}:
         owner_home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
         if owner_home is not None:
@@ -449,6 +451,7 @@ def register_self_map(agent):
                 analysis_handler=_workflow_analysis_handler(agent),
                 business_binding_provider=functools.partial(_workflow_business_binding, agent),
                 runtime_ports_provider=functools.partial(_workflow_runtime_ports, agent),
+                review_dispatch=functools.partial(dispatch_pending_review, agent),
                 execution_scope_provider=lambda params: functools.partial(_workflow_execution_scope, agent, params),
                 run_params_provider=lambda: getattr(agent, '_current_run_params', None),
                 im_notifier=im_notifier, runner_options_provider=runner_options))

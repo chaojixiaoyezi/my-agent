@@ -16,6 +16,7 @@ from ...role_templates import (
     RECORD_LESSON_TOOL,
     active_model_subagent_tools,
     role_template_snapshot_for_role,
+    template_for_role,
 )
 
 # LLM: Recursive leaf defaults share the canonical write-tool order with direct
@@ -84,10 +85,16 @@ def scheduled_child_tools(request: ToolPolicyRequest) -> list[str]:
         prohibited_actions = tuple(constraints_dict.get("prohibited_actions") or ())
 
     explicit_tools = _clean_tools(getattr(request.spec, "allowed_tools", None))
-    requested_tools = explicit_tools or parent_tools
+    template = template_for_role(request.role or str(getattr(request.spec, "role", "") or ""))
+    narrow_defaults = template is not None and not template.inherit_base_tools
+    # 窄角色的显式空清单也是上界，不能由默认候选重新补回。
+    requested_tools = (explicit_tools if getattr(request.spec, "allowed_tools", None) is not None
+                       else list(template.default_tools)) if narrow_defaults else (explicit_tools or parent_tools)
 
     if permitted_tools is not None:
-        candidates = list(permitted_tools)
+        candidates = [tool for tool in permitted_tools if not narrow_defaults or tool in requested_tools]
+    elif narrow_defaults:
+        candidates = requested_tools
     elif _can_spawn_children(request.role, request.spec):
         candidates = [*requested_tools, *_DEFAULT_LEAF_CODING_TOOLS, *COORDINATOR_TOOLS]
     else:

@@ -177,7 +177,7 @@ class WorkflowsTool(BaseTool):
                  runner_options_provider=None, business_service=None, business_actor_provider=None,
                  business_binding_provider=None,
                  run_params_provider=None, schedule_ids_provider=None, runtime_ports_provider=None,
-                 execution_scope_provider=None):
+                 execution_scope_provider=None, review_dispatch=None):
         self.owner_home = Path(owner_home).absolute()
         _owner(self.owner_home, store)
         _owner(self.owner_home, engine)
@@ -192,6 +192,7 @@ class WorkflowsTool(BaseTool):
         self.run_params_provider, self.schedule_ids_provider = run_params_provider, schedule_ids_provider
         self.runtime_ports_provider = runtime_ports_provider
         self.execution_scope_provider = execution_scope_provider
+        self.review_dispatch = review_dispatch
         _owner(self.owner_home, getattr(business_service, 'store', None))
 
     # LLM: 每次run/resume冻结当前宿主上下文到本次浅拷贝engine，整次调用只用它；缓存engine仅共享RunStore/回调/解析器，
@@ -451,9 +452,22 @@ class WorkflowsTool(BaseTool):
     # LLM: inspect失败是成功读取；运行失败保留断点机器码，CAS在Store原锁拒绝，不冒称写入已发生。
     # 函数用途: 统一工具结果与结构化错误，不吞中断。
     def execute(self, params):
+        return self.execute_scoped(params, None)
+
+    def execute_scoped(self, params, context):
         from .result_display import workflow_result_display
 
         outcome = self._execute(params)
+        if (self.review_dispatch and context is not None and not outcome.ok and isinstance(params, dict)
+                and params.get('action') in ('run', 'resume', 'workflows.run', 'workflow_runs.resume')
+                and outcome.result_envelope.get('workflow_run_id')
+                and (outcome.error_code == 'WORKFLOW_REVIEW_REQUIRED'
+                     or outcome.result_envelope.get('state') == 'failed')):
+            receipt = self.review_dispatch(outcome.result_envelope['workflow_run_id'], context)
+            if receipt is not None:
+                data = {**outcome.result_envelope, 'review_dispatch': receipt}
+                outcome = _outcome('workflows', data, False, 'WORKFLOW_REVIEW_REQUIRED',
+                                   effect_outcome=outcome.effect_outcome)
         outcome.result_envelope = {**outcome.result_envelope, 'display': workflow_result_display(
             params.get('action', '') if isinstance(params, dict) else '',
             outcome.result_envelope, ok=outcome.ok, error_code=outcome.error_code)}

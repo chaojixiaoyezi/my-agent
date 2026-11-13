@@ -172,7 +172,9 @@ def _artifact_locator_schema(conn, version):
         conn.execute('CREATE TABLE IF NOT EXISTS artifact_key_scan('
                      'singleton INTEGER PRIMARY KEY CHECK(singleton=1), '
                      'after_run_id TEXT NOT NULL, complete INTEGER NOT NULL)')
-        conn.execute("INSERT OR IGNORE INTO artifact_key_scan VALUES(1,'',0)")
+        # 旧版本可能重建了空keymap却留下v4完成游标；它不再是本次迁移的覆盖证明。
+        conn.execute("INSERT INTO artifact_key_scan VALUES(1,'',0) ON CONFLICT(singleton) "
+                     "DO UPDATE SET after_run_id='',complete=0")
         conn.execute('PRAGMA user_version=4')
 
 

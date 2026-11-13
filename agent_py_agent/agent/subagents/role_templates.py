@@ -129,6 +129,7 @@ class RoleTemplate:
     use_when_zh: list[str]
     do_not_use_when_zh: list[str] = field(default_factory=list)
     default_tools: list[str] = field(default_factory=list)
+    inherit_base_tools: bool = True
     can_write: bool = False
     can_accept: bool = False
     can_run_tests: bool = False
@@ -227,6 +228,7 @@ def role_template_snapshot(template: RoleTemplate | None) -> dict[str, object]:
         "name_zh": template.name_zh,
         "source": template.source,
         "source_path": template.source_path,
+        "inherit_base_tools": template.inherit_base_tools,
         "can_write": template.can_write,
         "can_accept": template.can_accept,
         "can_run_tests": template.can_run_tests,
@@ -530,6 +532,7 @@ def _template_from_payload(payload: dict[str, object], *, source: str, source_pa
         use_when_zh=_role_template_list(payload.get("use_when_zh")),
         do_not_use_when_zh=_role_template_list(payload.get("do_not_use_when_zh")),
         default_tools=_role_template_list(payload.get("default_tools")),
+        inherit_base_tools=payload.get("inherit_base_tools", True) is True,
         can_write=bool(payload.get("can_write", False)),
         can_accept=bool(payload.get("can_accept", False)),
         can_run_tests=bool(payload.get("can_run_tests", False)),

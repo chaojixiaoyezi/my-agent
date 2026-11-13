@@ -233,6 +233,25 @@ def test_old_long_run_keys_migrate_with_bounded_durable_keyset(tmp_path, monkeyp
     assert index.artifact_run_ids('~' + '0' * 63) == ()
 
 
+def test_v2_rebuilt_keymap_discards_stale_completed_v4_cursor(tmp_path, monkeypatch):
+    """旧版回退仅丢keymap时，保留的v4完成游标不能证明新空映射已覆盖。"""
+    from agent_py_agent.agent.workflows.run_artifacts import workflow_artifact_run_key
+
+    run_id = 'z' * 100
+    run_store.WorkflowRunStore(tmp_path).create_run(_record(run_id))
+    index = RunListIndex(tmp_path)
+    key = workflow_artifact_run_key(run_id)
+    assert index.artifact_run_ids(key) == (run_id,)
+    path = tmp_path / 'data/workflow_run_index.sqlite3'
+    with closing(sqlite3.connect(path)) as conn, conn:
+        assert conn.execute('SELECT complete FROM artifact_key_scan').fetchone() == (1,)
+        conn.execute('DROP TABLE artifact_run_keys')
+        conn.execute('PRAGMA user_version=2')
+    monkeypatch.setattr(run_list_index, 'list_names_beneath',
+        lambda *a, **k: pytest.fail('point locator scanned workflow directories'))
+    assert index.artifact_run_ids(key) == (run_id,)
+
+
 def test_missing_artifact_index_is_unknown_then_original_maintenance_recovers(tmp_path, monkeypatch):
     from agent_py_agent.agent.workflows.run_artifacts import workflow_artifact_run_key
     from agent_py_agent.agent.workflows.run_list_index import WorkflowArtifactLocatorIncomplete

@@ -2,6 +2,20 @@
 
 ```text
 agent_py_agent/agent/
+|-- agent_core/workflow_review_dispatch.py                        # 在原业务任务内按冻结候选派出独立审核者
+|-- agent_core/orchestration/tools/requirement_review_material.py # 按审核权限汇集原步骤、冻结脚本和输入
+|-- gateway_parts/business_artifact_stream.py                     # 分块校验正式工作流文件并发送选定范围
+`-- subagents/role_template_catalog/builtin/reviewer.json          # 独立审核子代理的默认职责和工具
+agent_py_agent/tests/
+|-- test_composed_business_release_smoke.py                       # 同单派工、独审、发布、原会话实际收件
+|-- test_reviewer_frozen_material.py                              # 冻结材料归属、版本、容量与读取边界
+|-- test_subagent_reviewer_contract.py                            # 原生审核角色的工具授权与派工
+|-- test_workflow_artifact_delivery_edges.py                      # 文件读取、响应码、范围和完整性
+`-- test_workflow_run_out_resume_batches.py                       # 恢复尝试、批次文件与业务客户端查询
+```
+
+```text
+agent_py_agent/agent/
 |-- artifacts/registry_locator.py                 # 由原登记构建可重建的产物位置索引
 `-- conversation/
     |-- artifact_access.py                        # 读取产物内容前核对本次观察和下载的授权

@@ -218,6 +218,40 @@ class WorkflowRunContextFactory:
             requested_space_id=request.get('space_id'), project_ref=request.get('project_ref'))
 
 
+def _public_output_artifacts(step):
+    """公开原成功attempt的有界文件引用；内容可用性仍由artifacts.get逐次核验。"""
+    rows, partial = [], False
+    sources = [(step.status, step.escalation_result.get('attempt_id'), step.output_artifacts, None)]
+    for batch in step.batches[:4096]:
+        if isinstance(batch, dict):
+            sources.append((batch.get('status'), batch.get('attempt_id'), batch.get('output_artifacts', ()), batch.get('index')))
+    partial = len(step.batches) > 4096
+    for status, attempt, manifest, index in sources:
+        if status not in {'succeeded', 'escalated_recovered'}:
+            continue
+        if not isinstance(manifest, (list, tuple)):
+            partial = True
+            continue
+        for item in manifest[:64]:
+            if len(rows) >= 64:
+                partial = True
+                break
+            if not isinstance(item, dict) or not isinstance(item.get('artifact_id'), str) or not isinstance(item.get('sha256'), str):
+                partial = True
+                continue
+            value = {'artifact_id': item['artifact_id'], 'sha256': item['sha256']}
+            if isinstance(attempt, str) and attempt:
+                value['attempt_id'] = attempt
+            if type(index) is int and index >= 0:
+                value['batch_index'] = index
+            rows.append(value)
+        partial |= len(manifest) > 64
+        if len(rows) >= 64:
+            partial = True
+            break
+    return {'output_artifacts': rows, 'output_artifacts_coverage': 'partial' if partial else 'complete'}
+
+
 class WorkflowScopeService:
     """原动作目录与 UI/plugin 共用的 Owner 领域入口；不从请求猜当前业务身份。"""
 
@@ -798,7 +832,7 @@ class WorkflowScopeService:
             raise PermissionError('WORKFLOW_OWNER_MISMATCH')
         self._authorize(actor, action, record.workflow_id)
         if action == 'workflow_runs.get':
-            return {'run': self._run_view(record), 'steps': [{'step_id': step.step_id, 'mode': step.mode,
+            return {'run': self._run_view(record), 'steps': [{**_public_output_artifacts(step), 'step_id': step.step_id, 'mode': step.mode,
                 'status': step.status, 'assignment_ref': step.escalation_result.get('assignment_ref'),
                 'run_id': step.escalation_result.get('run_id'), 'result_ref': step.escalation_result.get('result_ref'),
                 'error': {'code': step.error_code, 'message': step.error_message, 'retryable': False,

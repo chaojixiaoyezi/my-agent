@@ -299,10 +299,12 @@ class RequirementProvenanceTool(BaseTool):
                 warnings.append(f"{key} overridden by authoritative run_id '{actor}'")
             bound[key] = actor
         caller_context = self._resolve_context({"task_id": actor})
-        review_requirement = self._leaf_review_scope(bound, caller_context, context, actor)
+        review_material = {}
+        review_requirement = self._leaf_review_scope(bound, caller_context, context, actor, review_material)
         if isinstance(review_requirement, ToolHandlerOutcome):
             return review_requirement
-        outcome = self.execute(bound, _context=caller_context, _review_requirement=review_requirement)
+        outcome = self.execute(bound, _context=caller_context, _review_requirement=review_requirement,
+                               _review_material=review_material or None)
         if warnings:
             payload = json.loads(outcome.output)
             payload["scope_warnings"] = [*payload.get("scope_warnings", []), *warnings]
@@ -310,7 +312,7 @@ class RequirementProvenanceTool(BaseTool):
             outcome.result_envelope = {**outcome.result_envelope, "scope_warnings": warnings}
         return outcome
 
-    def _leaf_review_scope(self, params, owner_context, invocation, actor):
+    def _leaf_review_scope(self, params, owner_context, invocation, actor, review_material=None):
         """叶只登记自己的同工作独立审核；工具名不授予绑定、验收或跨任务权限。"""
         if not current_subagent_run_id(self.agent):
             return None
@@ -332,7 +334,14 @@ class RequirementProvenanceTool(BaseTool):
             task = manager.load(actor)
             if task.owner != owner_context.owner_ref:
                 return deny("REVIEW_OWNER_MISMATCH", "审核执行者不属于当前owner；未写入。")
-            if role_template_snapshot_for_task(task).get("can_spawn_children") is True:
+            # 显式审核派工是更窄的原任务边界；用户模板的协调能力不能覆盖它。
+            review_target = task.attributes.get("review_requirement_id")
+            review_bound = "review_requirement_id" in task.attributes
+            if review_bound and (not isinstance(review_target, str) or not review_target.strip()):
+                return deny("REVIEW_REQUIREMENT_BINDING_INVALID", "原派工审核对象无效；未读写。请由原任务核对绑定，不得改用其它候选。")
+            if review_bound and params.get("requirement_id") != review_target:
+                return deny("REVIEW_REQUIREMENT_SCOPE_MISMATCH", "本审核派工仅可查询或登记原指定候选；未读写其它条目。请使用原派工的requirement_id。")
+            if not review_bound and role_template_snapshot_for_task(task).get("can_spawn_children") is True:
                 return None
             if "manage_requirement_provenance" not in (task.allowed_tools or []):
                 return deny("REVIEW_TOOL_NOT_GRANTED", "原派工未授予需求溯源工具；请由原父按精确范围重新派工，未写入。")
@@ -376,6 +385,16 @@ class RequirementProvenanceTool(BaseTool):
                     bindings = [step.escalation_result.get("pending_review") for step in run.steps]
                     related = any(isinstance(binding, dict) and binding.get("requirement_id") == requirement_id
                         and binding.get("input_version") == requirement.input_version for binding in bindings)
+                    if related and params.get("action") == "query_provenance" and review_material is not None:
+                        from .requirement_review_material import (
+                            ReviewMaterialError,
+                            workflow_review_material,
+                        )
+                        try:
+                            review_material.update(workflow_review_material(runtime_owner_root(self.agent), run, requirement,
+                                WorkflowRunStore(runtime_owner_root(self.agent)).load_workflow_snapshot(run.workflow_run_id)))
+                        except ReviewMaterialError as error:
+                            return deny(str(error), "原工作流待审绑定已变化或未证明未执行；未返回材料。请核对原运行，不要据旧票审核或原样重试。")
                     if params.get("action") == "record_independent_review" and params.get("review_scope", params.get("scope")) != "workflow_effect.v1":
                         return deny("REVIEW_SCOPE_MISMATCH", "原工作流候选仅接受workflow_effect.v1审核；未写入。")
             if not related:
@@ -394,7 +413,8 @@ class RequirementProvenanceTool(BaseTool):
     # LLM: 分发并执行具体的溯源动作，捕获业务异常并输出精准结构化回执。
     # 函数用途: 处理具体动作分发与执行。
     def execute(self, params: dict[str, object], *, _context: VerificationContext | None = None,
-                _review_requirement: RequirementProvenanceRecord | None = None) -> ToolHandlerOutcome:
+                _review_requirement: RequirementProvenanceRecord | None = None,
+                _review_material: dict | None = None) -> ToolHandlerOutcome:
         action = str(params.get("action") or "").strip()
         if not action:
             return _provenance_failure("MISSING_ACTION", "必须指定操作动作 action 参数。")
@@ -414,7 +434,8 @@ class RequirementProvenanceTool(BaseTool):
             if action == "record_acceptance":
                 return self._handle_acceptance(params, context, repo, scope_warnings)
             if action == "query_provenance":
-                return self._handle_query(params, context, repo, expected_requirement=_review_requirement)
+                return self._handle_query(params, context, repo, expected_requirement=_review_requirement,
+                                          review_material=_review_material)
 
             return _provenance_failure("UNKNOWN_ACTION", f"不支持的溯源动作: '{action}'")
         except ProvenanceAuthorizationError as exc:
@@ -757,6 +778,7 @@ class RequirementProvenanceTool(BaseTool):
         context: VerificationContext,
         repo: VerificationEvidenceRepository,
         *, expected_requirement: RequirementProvenanceRecord | None = None,
+        review_material: dict | None = None,
     ) -> ToolHandlerOutcome:
         req_id = str(params.get("requirement_id") or "").strip()
         task_id = str(params.get("task_id") or "").strip() or None
@@ -783,6 +805,8 @@ class RequirementProvenanceTool(BaseTool):
             "acceptances": [acc.to_dict() for acc in acceptances],
             "summary": summary,
         }
+        if review_material is not None:
+            payload["workflow_review_material"] = review_material
         return ToolHandlerOutcome(
             "manage_requirement_provenance",
             True,

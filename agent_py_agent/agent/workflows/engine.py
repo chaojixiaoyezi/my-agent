@@ -1278,6 +1278,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             admission = self._authorize_run(run, WorkflowEffectPhase(record.step_id))
         except WorkflowReviewPending as error:
             record.escalation_result['pending_review'] = error.binding
+            record.escalation_result['reviewers_needed'] = error.reviewers_needed
             if (getattr(record, '_worker_effect_admitted', None) is False
                     or 'effect_started' not in record.escalation_result):
                 # DAG协调线程只证明派发；首个宿主审核拒绝证明业务尚未开始。
@@ -1337,7 +1338,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             _check_stop()
             row = record.batches[index]
             row.update(status='running', started_at=time.time(), finished_at=0, error_code='', analysis_blocked=False,
-                       attempt_id=uuid.uuid4().hex)
+                       attempt_id=uuid.uuid4().hex, output_dir='', output_artifacts=[])
             persist()
 
         # LLM: 只浅复制引用路径，避免每批复制完整候选列表；分析上下文随后复制本批投影。
@@ -1384,7 +1385,8 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             status = 'blocked' if blocked else 'succeeded' if child.status in ('succeeded', 'escalated_recovered') else 'skipped' if child.status == 'skipped' else 'failed'
             record.batches[index].update(status=status, finished_at=child.ended_at, error_code=child.error_code,
                 analysis_blocked=blocked, output=payload(child.output_snapshot),
-                query_health=payload(child.escalation_result.get('query_health')), error_message=child.error_message)
+                query_health=payload(child.escalation_result.get('query_health')), error_message=child.error_message,
+                output_dir=child.output_dir, output_artifacts=payload(child.output_artifacts))
             record.llm_involved = record.llm_involved or child.llm_involved
             if child.escalation_result.get('analysis_isolation_replaced') is True:
                 record.escalation_result['analysis_isolation_replaced'] = True

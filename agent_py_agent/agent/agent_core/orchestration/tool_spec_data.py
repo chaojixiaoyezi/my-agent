@@ -74,6 +74,7 @@ _CREATE_PARAMETER_DETAILS = {
         "同批多个 item 可以声明共同 task root；具体输出使用约定业务目录或工具返回的真实路径，不猜内部目录。"
     ),
     "replacement_for_run_ids": "用于结构化接管卡住或过时的旧 run。",
+    "review_requirement_id": "本次独立审核的候选编号。它是查询线索；审核时由宿主另核真实身份、原任务和版本。",
     "related_finding_id": (
         "仅当你决定为一个已收到的 Audit finding 创建调查、复核或补证子代理时填写。"
         "必须原样使用事件中的 finding_id；系统会验证 owner、会话、活跃 Audit 和真实 run，"

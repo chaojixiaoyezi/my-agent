@@ -26,12 +26,15 @@ def _error(code, reason, next_action):
 def _read_source(root, parts, budget, reason):
     try:
         return read_bytes_beneath(root, parts, max_bytes=budget + 1, snapshot_retries=1)
+    except FileNotFoundError:
+        # 中间目录和叶缺失同为本次精确路径不存在；权限/链接错误仍保留未知。
+        return None
     except (OSError, ValueError, UnicodeError) as error:
         raise _error('HOST_NOT_READY', reason, '原只读来源无法安全核验；检查文件及目录完整性后重试。') from error
 
 
 
-def guard_artifact_content_budget(owner, path, declared_size, budget):
+def guard_artifact_content_budget(owner, path, declared_size, budget, *, exact_size=False):
     """先核预算元数据，不把超大文件的截断/拒读误记为hash漂移。"""
     if declared_size > budget:
         raise _error('HOST_NOT_READY', 'ARTIFACT_CONTENT_READ_BUDGET', '原登记尺寸超过单次读取预算；未读取完整内容，不能声称hash已核验。')
@@ -40,8 +43,37 @@ def guard_artifact_content_budget(owner, path, declared_size, budget):
     except FileNotFoundError:
         return
     try:
-        if os.fstat(descriptor).st_size > budget:
+        actual_size = os.fstat(descriptor).st_size
+        if exact_size and actual_size != declared_size:
+            raise _error('STATE_CONFLICT', 'ARTIFACT_CONTENT_DRIFTED', '当前文件尺寸与冻结清单不符；未返回内容，核对原版本。')
+        if actual_size > budget:
             raise _error('HOST_NOT_READY', 'ARTIFACT_CONTENT_READ_BUDGET', '当前文件尺寸超过单次读取预算；未读取完整内容，不把预算拒绝记作漂移。')
+    finally:
+        os.close(descriptor)
+
+
+def verify_artifact_content(owner, path, declared_size, expected_sha256, budget):
+    """元数据只需完整hash；同一nofollow句柄分块核验，不在内存保留正文。"""
+    from ..plugin_host.artifacts import _fingerprint
+
+    guard_artifact_content_budget(owner, path, declared_size, budget, exact_size=True)
+    try:
+        descriptor = open_readonly_file_beneath(owner, Path(path).relative_to(owner).parts)
+    except FileNotFoundError:
+        return False
+    try:
+        before, digest, size = os.fstat(descriptor), hashlib.sha256(), 0
+        if before.st_size != declared_size:
+            raise _error('STATE_CONFLICT', 'ARTIFACT_CONTENT_DRIFTED', '当前归档尺寸与原清单不符；重新核对原版本，勿盲目重试。')
+        while chunk := os.read(descriptor, 65536):
+            size += len(chunk)
+            if size > declared_size:
+                raise _error('STATE_CONFLICT', 'ARTIFACT_CONTENT_DRIFTED', '归档在核验期间增长；未返回内容，核对原版本。')
+            digest.update(chunk)
+        if (size != declared_size or digest.hexdigest() != expected_sha256
+                or _fingerprint(before) != _fingerprint(os.fstat(descriptor))):
+            raise _error('STATE_CONFLICT', 'ARTIFACT_CONTENT_DRIFTED', '归档hash或身份在核验期间变更；未返回内容，核对原版本。')
+        return True
     finally:
         os.close(descriptor)
 

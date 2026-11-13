@@ -35,6 +35,7 @@ _CREATE_ITEM_PARAMETER_SCHEMA: dict[str, Any] = {
     "artifact_refs": {"type": "array", "items": {"type": "string"}},
     "replacement_for_run_ids": {"type": "array", "items": {"type": "string"}},
     "related_finding_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "review_requirement_id": {"type": "string", "minLength": 1, "maxLength": 128},
     "long_running": {"type": "boolean"},
     "service_window_seconds": {"type": "integer", "minimum": 1},
     "audit_source_id": {"type": "string", "minLength": 1, "maxLength": 128},

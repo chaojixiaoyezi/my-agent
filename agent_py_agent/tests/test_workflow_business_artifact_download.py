@@ -110,10 +110,10 @@ def test_workflow_artifact_scope_denial_precedes_content_symlink_and_manifest_fo
     conflict = client.call('artifacts.get', {'artifact_id': artifact_id})
     assert conflict['http_status'] == 503 and 'WORKFLOW_ARTIFACT_RUN_LOCATOR_CONFLICT' in str(conflict['error'])
     monkeypatch.setattr(run_artifacts, 'workflow_artifact_run_ids', original_locator)
-    monkeypatch.setattr(reader, '_CONTENT_BYTES', 8)
+    monkeypatch.setattr(reader, '_WORKFLOW_CONTENT_BYTES', 8)
     budget = client.call('artifacts.get', {'artifact_id': artifact_id})
-    assert budget['http_status'] == 503 and 'ARTIFACT_CONTENT_READ_BUDGET' in str(budget['error'])
-    monkeypatch.setattr(reader, '_CONTENT_BYTES', 8 * 1024 * 1024)
+    assert budget['http_status'] == 409 and 'WORKFLOW_ARTIFACT_SIZE_LIMIT' in str(budget['error'])
+    monkeypatch.setattr(reader, '_WORKFLOW_CONTENT_BYTES', 64 * 1024 * 1024)
     outside = services.owner_home / 'never-exported.txt'
     outside.write_text('not a workflow output')
     path.unlink()

@@ -143,6 +143,7 @@ class CapabilityConfig:
     subagent_takeover_hint_enabled: bool = False
     # 派子代理时允许按 media_ref 把本会话附件交给子代理（第 14 条）：会改变模型看到的工具说明与本轮附件清单，默认关闭。
     subagent_input_media_enabled: bool = False
+    workflow_auto_dispatch_reviewers: bool = True
     # 能力包宿主核验：宿主自动运行钉住包里声明的原版检查程序；执行包内代码属于安全边界，默认关闭。
     capability_pack_host_verification_enabled: bool = False
     # 能力包自动装（learnpack）：她自己打好的能力包不经确认直接装；关着时给用户一行确认。默认关，仅管理员 /settings 可改。
@@ -225,7 +226,8 @@ def _coerce_capability_value(field_name: str, value: object) -> object:
                       "background_user_action_notice_enabled", "im_group_shared_credentials_enabled",
                       "im_group_authorization_required", "feishu_bot_subscriptions_enabled",
                       "feishu_user_subscriptions_enabled", "feishu_chat_history_enabled",
-                      "orchestration_pending_inbox_enabled", "orchestration_git_progress_enabled"}:
+                      "orchestration_pending_inbox_enabled", "orchestration_git_progress_enabled",
+                      "workflow_auto_dispatch_reviewers"}:
         if not isinstance(value, bool):
             raise ValueError(f"{field_name} 必须为布尔值，不能以未知配置打开能力。")
         return value
