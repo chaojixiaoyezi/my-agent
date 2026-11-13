@@ -781,3 +781,89 @@ def test_skill_feedback_usage_binding_conflict_reheat_and_frozen_snapshot(tmp_pa
     assert ok_adopted.ok is True, ok_adopted.output
     cov = ok_adopted.result_envelope["skill_feedback"]["lifecycle"]["coverage"]
     assert isinstance(cov.get("as_of"), str) and datetime.fromisoformat(cov["as_of"]).tzinfo is not None
+
+
+def test_self_map_memory_unmocked_canonical_lesson_heat_fallback(tmp_path: Path):
+    """未绑定 agent.memory_lessons 时，回退路径须从规范 routing/lesson_heat.json 读取并校验 schema/symlink。"""
+    agent, _repo, _store = _make_real_agent(tmp_path, enable_self_learning=False)
+    hp = agent.home_paths
+    agent.memory_lessons = None
+
+    inv = ToolInvocationContext(agent.tools.runtime_snapshot(allowed_tools=["self_map", "remember"]))
+    ctx = SelfMapReadContext(agent, inv, "admin", False, "", "main", hp.owner_id, "admin")
+
+    # 1) 缺失状态
+    missing_proj = self_map_memory.memory_projection(ctx)
+    assert missing_proj.completeness == "partial"
+    assert missing_proj.errors == ()
+    assert missing_proj.counts["lessons_active_count"] is None
+
+    # 2) 规范路径 memory/routing/lesson_heat.json 完整有效文档
+    heat_path = Path(hp.owner_memory_routing_index_md).parent / "lesson_heat.json"
+    heat_path.parent.mkdir(parents=True, exist_ok=True)
+    heat_doc = {
+        "schema_version": "my-agent.lesson-heat.v1",
+        "generation": "gen-w9-test",
+        "updated_at": 1700000000.0,
+        "rows": {
+            "lesson-a": {
+                "path": "memory/lessons/lesson-a.md",
+                "subject_key": "s-a",
+                "scope_type": "user",
+                "scope_key": "main",
+                "status": "active",
+                "revision": 1,
+                "created_at": "2026-11-13T18:00:00+00:00",
+                "updated_at": "2026-11-13T18:00:00+00:00",
+                "last_hit_at": 1700000000.0,
+                "hits": 1,
+                "unrouted_at": 0.0,
+                "superseded_at": 0.0,
+            },
+            "lesson-b": {
+                "path": "memory/lessons/lesson-b.md",
+                "subject_key": "s-b",
+                "scope_type": "user",
+                "scope_key": "main",
+                "status": "superseded",
+                "revision": 1,
+                "created_at": "2026-11-13T17:00:00+00:00",
+                "updated_at": "2026-11-13T17:30:00+00:00",
+                "last_hit_at": 1699000000.0,
+                "hits": 0,
+                "unrouted_at": 0.0,
+                "superseded_at": 1700000000.0,
+            },
+        },
+        "routed_ids": ["lesson-a"],
+        "lessons_archived_count": 1,
+        "archive_count_coverage": {
+            "status": "complete",
+            "reason": "full_scan",
+            "as_of": "2026-11-13T18:00:00+00:00",
+        },
+    }
+    heat_path.write_text(json.dumps(heat_doc, ensure_ascii=False), encoding="utf-8")
+    ok_proj = self_map_memory.memory_projection(ctx)
+    assert ok_proj.completeness == "complete"
+    assert ok_proj.errors == ()
+    assert ok_proj.counts["lessons_active_count"] == 1
+    assert ok_proj.counts["lessons_routed_count"] == 1
+    assert ok_proj.counts["lessons_archived_count"] == 1
+
+    # 3) 损坏文档返回 partial + LESSON_HEAT_CORRUPT
+    heat_path.write_text('{"schema_version": "wrong"}', encoding="utf-8")
+    corrupt_proj = self_map_memory.memory_projection(ctx)
+    assert corrupt_proj.completeness == "partial"
+    assert corrupt_proj.errors == ("LESSON_HEAT_CORRUPT",)
+    assert corrupt_proj.counts["lessons_active_count"] is None
+
+    # 4) 软链接同样被拦截并返回 partial + LESSON_HEAT_CORRUPT
+    outside = tmp_path / "outside-heat.json"
+    outside.write_text(json.dumps(heat_doc, ensure_ascii=False), encoding="utf-8")
+    heat_path.unlink()
+    heat_path.symlink_to(outside)
+    symlink_proj = self_map_memory.memory_projection(ctx)
+    assert symlink_proj.completeness == "partial"
+    assert symlink_proj.errors == ("LESSON_HEAT_CORRUPT",)
+    assert symlink_proj.counts["lessons_active_count"] is None

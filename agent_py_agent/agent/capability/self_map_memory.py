@@ -74,21 +74,27 @@ def _read_lesson_heat_readonly(agent: object) -> tuple[str, dict[str, Any] | str
         except Exception as exc:  # noqa: BLE001 - 只读状态不可用时降级为未知。
             return "error", type(exc).__name__
 
-    from ..memory_store.lessons import _valid_heat_state
+    from ..memory_store.lessons import _is_valid_heat_doc
 
     home = getattr(agent, "home_paths", None)
+    routing_index = getattr(home, "owner_memory_routing_index_md", None)
     mem_dir = getattr(home, "owner_memory_dir", None)
-    if not mem_dir:
+    if routing_index:
+        routing_dir = Path(routing_index).parent
+    elif mem_dir:
+        routing_dir = Path(mem_dir) / "routing"
+    else:
         return "missing", "memory_dir_unavailable"
-    mem_root = Path(mem_dir)
-    heat_path = mem_root / "lessons" / "lesson_heat.json"
+    heat_path = routing_dir / "lesson_heat.json"
+    if (mem_dir and os.path.islink(mem_dir)) or os.path.islink(routing_dir) or os.path.islink(heat_path):
+        return "symlink", "heat_state_symlink"
     if not os.path.lexists(heat_path):
         return "missing", "heat_state_absent"
-    if os.path.islink(heat_path) or os.path.islink(mem_root / "lessons"):
-        return "corrupt", "heat_state_symlink"
     try:
-        raw = read_bytes_beneath(mem_root, ("lessons", "lesson_heat.json"))
-    except (NoFollowPathError, OSError) as exc:
+        raw = read_bytes_beneath(routing_dir, (heat_path.name,))
+    except NoFollowPathError:
+        return "symlink", "heat_state_symlink"
+    except OSError as exc:
         return "error", type(exc).__name__
     if raw is None:
         return "missing", "heat_state_absent"
@@ -96,7 +102,7 @@ def _read_lesson_heat_readonly(agent: object) -> tuple[str, dict[str, Any] | str
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return "corrupt", "heat_state_invalid_json"
-    if not _valid_heat_state(data):
+    if not _is_valid_heat_doc(data):
         return "corrupt", "heat_state_schema_invalid"
     return "ok", data
 
@@ -209,7 +215,7 @@ def memory_projection(context):
         completeness = "complete" if cov_status == "complete" else "partial"
         errors = (
             ("LESSON_HEAT_CORRUPT",)
-            if heat_status == "corrupt"
+            if heat_status in {"corrupt", "symlink"}
             else ("LESSON_HEAT_UNAVAILABLE",)
             if heat_status == "error"
             else ()
