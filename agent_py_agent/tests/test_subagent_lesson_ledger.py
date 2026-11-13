@@ -583,23 +583,43 @@ def test_self_learning_on_proposes_once_per_lesson_and_replay_adds_nothing(tmp_p
     ctx = _runtime(tmp_path, proposals=True)
     _record(ctx, LESSON_A)
     _record(ctx, LESSON_B)
+    structured = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        status="DONE",
+        summary="完成排查并沉淀可复用步骤",
+        lessons=["1. 读取当前版本。\n2. 用精确版本做比较交换。"],
+    )
+    seen_keys: set[str] = set()
+    delegated_batches: list[list[str]] = []
 
-    first = _natural_result(ctx)
-    proposals = ctx.service.list()
-    files = sorted(ctx.home.owner_skill_proposals_dir.glob("*.json"))
-    replay = _natural_result(ctx)
+    def _enqueue(candidates):
+        queued = []
+        batch_ids = []
+        for item in candidates:
+            batch_ids.append(item.candidate_id)
+            status = "duplicate" if item.candidate_id in seen_keys else "queued"
+            seen_keys.add(item.candidate_id)
+            queued.append({"candidate_id": item.candidate_id, "request_key": "0123456789abcdef", "status": status})
+        delegated_batches.append(batch_ids)
+        return {"queued": queued, "refused": [], "deferred": []}
+
+    ctx.manager.enqueue_lesson_candidates = _enqueue
+
+    first = _natural_result(ctx, structured)
+    replay = _natural_result(ctx, structured)
     candidates = ctx.candidates.list()
 
     assert first.ok and replay.ok
-    assert len(proposals) == 2 and {item.status for item in proposals} == {"pending_confirmation"}
+    assert ctx.service.list() == []
+    assert not ctx.home.owner_skill_proposals_dir.exists()
     assert not list((ctx.home.owner_home_dir / "skills").glob("*/SKILL.md"))
-    assert {item.source.run_ids for item in proposals} == {(ctx.task.id,)}
-    assert any(LESSON_A["when_to_use"] in item.draft.when_to_use for item in proposals)
-    assert sorted(ctx.home.owner_skill_proposals_dir.glob("*.json")) == files
-    assert len(candidates) == 2 and {item.occurrence_count for item in candidates} == {1}
+    assert len(candidates) == 3 and {item.occurrence_count for item in candidates} == {1}
+    assert len(delegated_batches) == 2 and all(len(batch) == 1 for batch in delegated_batches)
     log = _work_log(ctx)
-    assert "skill_proposals=2 skill_proposals_committed=0" in log
-    assert "skill_proposals=0 skill_proposals_committed=0" in log
+    assert "skill_proposals" not in log
+    assert "skill_carrier_queued=1 skill_carrier_duplicate=0" in log
+    assert "skill_carrier_queued=0 skill_carrier_duplicate=1" in log
 
 
 def test_self_learning_off_records_candidates_without_proposals(tmp_path: Path) -> None:
@@ -610,7 +630,9 @@ def test_self_learning_off_records_candidates_without_proposals(tmp_path: Path) 
 
     assert [item.origin for item in ctx.candidates.list()] == ["subagent_lesson"]
     assert not ctx.home.owner_skill_proposals_dir.exists()
-    assert "skill_proposals" not in _work_log(ctx)
+    log = _work_log(ctx)
+    assert "skill_proposals" not in log
+    assert "skill_carrier" not in log
 
 
 def test_candidate_failure_never_blocks_result_delivery(tmp_path: Path) -> None:
