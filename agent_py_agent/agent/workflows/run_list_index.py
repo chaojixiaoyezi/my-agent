@@ -158,6 +158,40 @@ def _invalidate_projection(owner_home, filename):
         pass
 
 
+class WorkflowArtifactLocatorIncomplete(ValueError):
+    """派生定位尚未覆盖，不能据此否认仍可能存在的规范归档。"""
+
+    error_code = 'WORKFLOW_ARTIFACT_RUN_LOCATOR_INCOMPLETE'
+
+
+def _artifact_locator_schema(conn, version):
+    if version < 3:
+        conn.execute('CREATE TABLE IF NOT EXISTS artifact_run_keys('
+                     'run_key TEXT NOT NULL, run_id TEXT NOT NULL, PRIMARY KEY(run_key,run_id))')
+    if version < 4:
+        conn.execute('CREATE TABLE IF NOT EXISTS artifact_key_scan('
+                     'singleton INTEGER PRIMARY KEY CHECK(singleton=1), '
+                     'after_run_id TEXT NOT NULL, complete INTEGER NOT NULL)')
+        conn.execute("INSERT OR IGNORE INTO artifact_key_scan VALUES(1,'',0)")
+        conn.execute('PRAGMA user_version=4')
+
+
+def _advance_artifact_keys(conn):
+    """仅在已有runs主键上推进32行，游标与映射同事务；不枚举运行目录或扫描全表。"""
+    from .run_artifacts import workflow_artifact_run_key
+
+    cursor, complete = conn.execute('SELECT after_run_id,complete FROM artifact_key_scan WHERE singleton=1').fetchone()
+    if complete:
+        return
+    rows = conn.execute('SELECT run_id FROM runs WHERE run_id>? ORDER BY run_id LIMIT 32', (cursor,)).fetchall()
+    for row in rows:
+        if len(row[0]) > 64:
+            conn.execute('INSERT OR IGNORE INTO artifact_run_keys VALUES(?,?)',
+                         (workflow_artifact_run_key(row[0]), row[0]))
+    conn.execute('UPDATE artifact_key_scan SET after_run_id=?,complete=? WHERE singleton=1',
+                 (rows[-1][0] if rows else cursor, int(len(rows) < 32)))
+
+
 # LLM: 四种过滤各用覆盖索引，负时间与 run_id 构成稳定 keyset；不持 SQLite 锁再等待运行锁。
 # 类用途: 维护运行候选页、未迁移目录游标与 canonical 提交的恢复入口。
 class RunListIndex:
@@ -187,10 +221,7 @@ class RunListIndex:
             if version < 2:
                 conn.execute('CREATE TABLE IF NOT EXISTS pending(run_id TEXT PRIMARY KEY)')
                 conn.execute('PRAGMA user_version=2')
-            if version < 3:
-                conn.execute('CREATE TABLE IF NOT EXISTS artifact_run_keys('
-                             'run_key TEXT NOT NULL, run_id TEXT NOT NULL, PRIMARY KEY(run_key,run_id))')
-                conn.execute('PRAGMA user_version=3')
+            _artifact_locator_schema(conn, version)
             yield conn
 
     # LLM: 待发表队列用主键索引，不把原子写临时文件当作未确认规范提交。
@@ -227,18 +258,29 @@ class RunListIndex:
                     from .run_artifacts import workflow_artifact_run_key
                     conn.execute('INSERT OR IGNORE INTO artifact_run_keys VALUES(?,?)',
                                  (workflow_artifact_run_key(run_id), run_id))
+            _advance_artifact_keys(conn)
 
     def artifact_run_ids(self, run_key):
-        """只读已有的长运行定位键，重复候选交由读取端拒绝，绝不扫描历史归档。"""
+        """已有库有界自愈；未覆盖与缺索引返回unknown，由公开读取端映射可恢复503。"""
         path = safe_path(self.owner_home, 'data', 'workflow_run_index.sqlite3')
         if not path.is_file():
-            return ()
-        # 初始化旧索引会枚举运行目录，陌生编号的只读点查不能触发初始化。
+            raise WorkflowArtifactLocatorIncomplete('原运行定位索引缺失；等待普通运行列表维护重建，不能据此断言归档不存在')
+        # 绝不调用会初始化旧目录的connection；GET只迁移已存在的私有runs索引。
         with index_connection(self.owner_home, path.name) as conn:
-            if conn.execute('PRAGMA user_version').fetchone()[0] < 3:
-                return ()
-            return tuple(row[0] for row in conn.execute(
+            version = conn.execute('PRAGMA user_version').fetchone()[0]
+            if version < 2:
+                raise WorkflowArtifactLocatorIncomplete('原定位索引尚未初始化；等待普通维护重建')
+            _artifact_locator_schema(conn, version)
+            _advance_artifact_keys(conn)
+            found = tuple(row[0] for row in conn.execute(
                 'SELECT run_id FROM artifact_run_keys WHERE run_key=? LIMIT 2', (run_key,)))
+            complete = conn.execute('SELECT complete FROM artifact_key_scan WHERE singleton=1').fetchone()[0]
+            pending = conn.execute('SELECT 1 FROM pending LIMIT 1').fetchone()
+            legacy = conn.execute('SELECT 1 FROM legacy LIMIT 1').fetchone()
+        # 在连接事务提交之后报告未覆盖，避免抛异常把刚推进的游标也回滚。
+        if not found and (not complete or pending is not None or legacy is not None):
+            raise WorkflowArtifactLocatorIncomplete('原长运行定位仍在有界迁移；重读同一编号或等待普通维护推进')
+        return found
 
     # LLM: SQL 选择有界窗口后关闭连接，运行锁与新发布可按原 run→index 顺序执行。
     # 函数用途: 读取尚未迁移的名称游标，limit=None 仅供迁移期精确合并余集。

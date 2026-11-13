@@ -133,3 +133,29 @@ def test_workflow_artifact_scope_denial_precedes_content_symlink_and_manifest_fo
     WorkflowRunStore(services.owner_home).save_run(record)
     refused = client.call('artifacts.get', {'artifact_id': artifact_id})
     assert refused['http_status'] == 409 and 'WORKFLOW_ARTIFACT_OUTPUT_ROOT_MISMATCH' in str(refused['error'])
+
+
+def test_locator_sqlite_failure_is_recoverable_unknown_not_not_found(background_http, monkeypatch):  # noqa: F811
+    import sqlite3
+
+    from agent_py_agent.agent.workflows import run_artifacts
+
+    _, _, _, artifact_id, _, _ = archived(background_http)
+    def unavailable(*args):
+        raise sqlite3.OperationalError('isolated unavailable locator')
+    monkeypatch.setattr(run_artifacts, 'workflow_artifact_run_ids', unavailable)
+    result = client_for(background_http).call('artifacts.get', {'artifact_id': artifact_id})
+    assert result['http_status'] == 503 and not result['ok'], result
+    assert 'WORKFLOW_ARTIFACT_RUN_LOCATOR_UNAVAILABLE' in str(result['error'])
+    assert result['data'] == {}
+
+
+def test_missing_long_run_index_reports_incomplete_on_detail_and_download(background_http):  # noqa: F811
+    services, _, _, artifact_id, _, raw = archived(background_http, run_id='long-order-' + 'a' * 86)
+    (services.owner_home / 'data' / 'workflow_run_index.sqlite3').unlink()
+    result = client_for(background_http).call('artifacts.get', {'artifact_id': artifact_id})
+    assert result['http_status'] == 503 and 'WORKFLOW_ARTIFACT_RUN_LOCATOR_INCOMPLETE' in str(result['error'])
+    version = hashlib.sha256(raw).hexdigest()
+    status, _, body = native_request(background_http, 'GET',
+        f'/client/business/artifacts/{artifact_id}/content?version_ref={version}')
+    assert status == 503 and b'WORKFLOW_ARTIFACT_RUN_LOCATOR_INCOMPLETE' in body

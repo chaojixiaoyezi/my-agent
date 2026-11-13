@@ -203,6 +203,7 @@ def test_leaf_workflow_review_uses_original_pending_candidate_and_business_root(
         reviewed_input_version=denied_binding['input_version'], review_scope='workflow_effect.v1'))
     assert not denied.ok and denied.effect_outcome == 'not_started'
     assert leaf.repo.list_independent_reviews(leaf.owner, requirement_id=denied_binding['requirement_id']) == []
+    assert json.loads(denied.output)['details']['recovery_code'] == 'request_original_task_independent_review_dispatch'
 
 
 def test_direct_and_scheduled_explicit_review_grants_share_parent_and_exact_intersection(leaf):
@@ -324,6 +325,10 @@ def test_outside_work_is_denied_before_private_version_or_author_comparison(leaf
     payload = json.loads(result.output)
     assert payload['reason'] == 'REVIEW_TASK_SCOPE_MISMATCH'
     assert 'outside-private' not in result.output
+    assert payload['details']['recovery_code'] == 'request_original_task_independent_review_dispatch'
+    assert '自己的原TaskRun' in payload['message'] and '不要原样重试' in payload['message']
+    assert '申请普通工具权限' in payload['message'] and '已有run继续' in payload['message']
+    assert leaf.repo.list_independent_reviews(leaf.owner, requirement_id='outside') == []
 
 
 def test_guarded_receipt_replay_is_immutable_but_main_updates_keep_original_contract(leaf):

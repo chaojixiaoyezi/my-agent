@@ -6,10 +6,12 @@ import json
 import mimetypes
 import os
 import re
+import sqlite3
 from pathlib import Path, PurePosixPath
 
 from ..artifacts.registry import ArtifactRegistryRecord
 from ..common.nofollow_fs import open_readonly_file_beneath
+from ..workflows.run_list_index import WorkflowArtifactLocatorIncomplete
 from ..workflows.run_store import WorkflowRunStore
 from .artifact_access import check_artifact_access
 from .business_access import BusinessError
@@ -56,7 +58,10 @@ def workflow_artifact(source, artifact_id, version_ref=None, *, with_content=Tru
     run_key, attempt_id, _ = located
     try:
         run_ids = workflow_artifact_run_ids(source.home, run_key)
-    except (OSError, ValueError, TypeError) as error:
+    except WorkflowArtifactLocatorIncomplete as error:
+        raise _error('HOST_NOT_READY', error.error_code,
+            '旧运行索引尚未覆盖此编号，文件状态未知；重查同一编号或等待运行列表维护推进。') from error
+    except (OSError, ValueError, TypeError, sqlite3.Error) as error:
         raise _error('HOST_NOT_READY', 'WORKFLOW_ARTIFACT_RUN_LOCATOR_UNAVAILABLE', '原运行定位无法核验；未扫描历史或读取内容，恢复原索引后重试。') from error
     if not isinstance(run_ids, tuple) or any(not isinstance(value, str) or not value for value in run_ids):
         raise _error('HOST_NOT_READY', 'WORKFLOW_ARTIFACT_RUN_LOCATOR_INVALID', '原运行定位形状无效；未读取文件内容。')

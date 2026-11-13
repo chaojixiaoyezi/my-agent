@@ -125,7 +125,7 @@ def test_corrupt_projection_never_blocks_save_and_next_list_rebuilds(tmp_path):
     assert [run.workflow_run_id for run in store.list_runs(status='running')] == ['corrupt-1']
     assert sorted(run.workflow_run_id for run in store.list_runs(status='queued')) == ['corrupt-0', 'corrupt-2']
     with closing(sqlite3.connect(projection)) as conn:
-        assert conn.execute('PRAGMA user_version').fetchone()[0] == 3
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == 4
     assert _fd_count() == before
 
 
@@ -191,3 +191,88 @@ def test_linked_projection_is_still_rejected(tmp_path, link):
         assert store.load_run('linked-run').revision == 1
         assert _fd_count() == before
     assert foreign_db.read_bytes() == foreign_bytes
+
+
+def _old_run_index(home, run_ids, *, version=2):
+    path = home / 'data/workflow_run_index.sqlite3'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        path.unlink()
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute('CREATE TABLE runs(run_id TEXT PRIMARY KEY,workflow_id TEXT NOT NULL,status TEXT NOT NULL,sort_time REAL NOT NULL,revision INTEGER NOT NULL)')
+        conn.execute('CREATE INDEX runs_time ON runs(sort_time,run_id)')
+        conn.execute('CREATE INDEX runs_workflow_time ON runs(workflow_id,sort_time,run_id)')
+        conn.execute('CREATE INDEX runs_status_time ON runs(status,sort_time,run_id)')
+        conn.execute('CREATE INDEX runs_workflow_status_time ON runs(workflow_id,status,sort_time,run_id)')
+        conn.execute('CREATE TABLE legacy(run_id TEXT PRIMARY KEY)')
+        conn.execute('CREATE TABLE pending(run_id TEXT PRIMARY KEY)')
+        conn.executemany('INSERT INTO runs VALUES(?,?,?,?,?)', [(name, 'flow', 'succeeded', -1, 1) for name in run_ids])
+        if version == 3:
+            conn.execute('CREATE TABLE artifact_run_keys(run_key TEXT NOT NULL,run_id TEXT NOT NULL,PRIMARY KEY(run_key,run_id))')
+        conn.execute(f'PRAGMA user_version={version}')
+    return path
+
+
+@pytest.mark.parametrize('version', [2, 3])
+def test_old_long_run_keys_migrate_with_bounded_durable_keyset(tmp_path, monkeypatch, version):
+    from agent_py_agent.agent.workflows.run_artifacts import workflow_artifact_run_key
+    from agent_py_agent.agent.workflows.run_list_index import WorkflowArtifactLocatorIncomplete
+
+    run_id = 'z' * 100
+    path = _old_run_index(tmp_path, [f'a{number:05d}' for number in range(70)] + [run_id], version=version)
+    index = RunListIndex(tmp_path)
+    monkeypatch.setattr(run_list_index, 'list_names_beneath', lambda *a, **k: pytest.fail('artifact GET scanned run directories'))
+    key = workflow_artifact_run_key(run_id)
+    for expected_cursor in ('a00031', 'a00063'):
+        with pytest.raises(WorkflowArtifactLocatorIncomplete):
+            index.artifact_run_ids(key)
+        with closing(sqlite3.connect(path)) as conn:
+            assert conn.execute('SELECT after_run_id,complete FROM artifact_key_scan').fetchone() == (expected_cursor, 0)
+    assert index.artifact_run_ids(key) == (run_id,)
+    # 覆盖已完成且无待发表/旧记录时，才允许报告这个原索引中的不存在。
+    assert index.artifact_run_ids('~' + '0' * 63) == ()
+
+
+def test_missing_artifact_index_is_unknown_then_original_maintenance_recovers(tmp_path, monkeypatch):
+    from agent_py_agent.agent.workflows.run_artifacts import workflow_artifact_run_key
+    from agent_py_agent.agent.workflows.run_list_index import WorkflowArtifactLocatorIncomplete
+
+    run_id = 'long-' + 'r' * 100
+    store = run_store.WorkflowRunStore(tmp_path)
+    store.create_run(_record(run_id))
+    path = tmp_path / 'data/workflow_run_index.sqlite3'
+    path.unlink()
+    index = RunListIndex(tmp_path)
+    with monkeypatch.context() as point:
+        point.setattr(run_list_index, 'list_names_beneath', lambda *a, **k: pytest.fail('artifact GET scanned archive'))
+        with pytest.raises(WorkflowArtifactLocatorIncomplete):
+            index.artifact_run_ids(workflow_artifact_run_key(run_id))
+    assert not path.exists()
+    assert [row.workflow_run_id for row in store.list_runs()] == [run_id]
+    assert index.artifact_run_ids(workflow_artifact_run_key(run_id)) == (run_id,)
+
+
+@pytest.mark.parametrize('queue', ['legacy', 'pending'])
+def test_unpublished_canonical_run_remains_unknown_until_original_maintenance(tmp_path, queue):
+    from agent_py_agent.agent.workflows.run_artifacts import workflow_artifact_run_key
+    from agent_py_agent.agent.workflows.run_list_index import WorkflowArtifactLocatorIncomplete
+
+    run_id = 'old-' + 'x' * 100
+    store = run_store.WorkflowRunStore(tmp_path)
+    store.create_run(_record(run_id))
+    path = _old_run_index(tmp_path, [])
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute('INSERT INTO ' + queue + ' VALUES(?)', (run_id,))
+    index = RunListIndex(tmp_path)
+    with pytest.raises(WorkflowArtifactLocatorIncomplete):
+        index.artifact_run_ids(workflow_artifact_run_key(run_id))
+    assert [row.workflow_run_id for row in store.list_runs()] == [run_id]
+    assert index.artifact_run_ids(workflow_artifact_run_key(run_id)) == (run_id,)
+
+
+def test_original_short_run_locator_never_opens_or_migrates_index(tmp_path, monkeypatch):
+    from agent_py_agent.agent.workflows.run_artifacts import workflow_artifact_run_ids
+
+    monkeypatch.setattr(RunListIndex, 'artifact_run_ids', lambda *a, **k: pytest.fail('short run opened locator'))
+    assert workflow_artifact_run_ids(tmp_path, 'custom-short-run') == ('custom-short-run',)
+    assert not (tmp_path/'data').exists()

@@ -435,6 +435,6 @@ def handle_business_artifact_content(handler, server):
         for offset in range(0, len(content), 65536):
             handler.wfile.write(content[offset:offset + 65536])
     except HostAPIError as error:
-        handler._send_json(error.status, {'error': {'code': error.code}})
+        handler._send_json(error.status, {'error': error.to_payload()})
     except (OSError, ValueError):
         handler._send_json(404, {'error': {'code': 'RESOURCE_NOT_FOUND'}})

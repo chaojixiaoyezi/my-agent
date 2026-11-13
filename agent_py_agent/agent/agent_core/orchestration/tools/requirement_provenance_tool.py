@@ -223,6 +223,7 @@ def _provenance_failure(
     error_code: str = "TOOL_INVALID_ARGUMENTS",
     effect_outcome: str = "not_started",
     scope_warnings: list[str] | tuple[str, ...] | None = None,
+    recovery_code: str = "",
 ) -> ToolHandlerOutcome:
     details: dict[str, object] = {
         "reason": reason,
@@ -237,6 +238,8 @@ def _provenance_failure(
     if scope_warnings:
         details["scope_warnings"] = list(scope_warnings)
         payload["scope_warnings"] = list(scope_warnings)
+    if recovery_code:
+        details["recovery_code"] = recovery_code
     return ToolHandlerOutcome(
         "manage_requirement_provenance",
         False,
@@ -244,6 +247,8 @@ def _provenance_failure(
         result_envelope={"details": details},
         error_code=error_code,
         effect_outcome=effect_outcome,
+        recommended_action=recovery_code,
+        recovery_hint=message if recovery_code else "",
     )
 
 
@@ -315,6 +320,13 @@ class RequirementProvenanceTool(BaseTool):
         def deny(reason, message):
             return _provenance_failure(reason, message, error_code="TOOL_PERMISSION_DENIED")
 
+        def deny_task_scope():
+            message = ("当前审核者不属于候选的原任务/TaskRun；未写入。请让创建候选的原任务执行者在自己的原TaskRun内派独立审核者，"
+                       "审核后由原任务沿已有run继续。重复提交参数、修改root或在同一错误root重新派工、申请普通工具权限，"
+                       "都不能改变已绑定的执行身份；请转交原任务处理，不要原样重试。")
+            return _provenance_failure("REVIEW_TASK_SCOPE_MISMATCH", message, error_code="TOOL_PERMISSION_DENIED",
+                                       recovery_code="request_original_task_independent_review_dispatch")
+
         try:
             manager = self.agent.subagents
             task = manager.load(actor)
@@ -357,7 +369,7 @@ class RequirementProvenanceTool(BaseTool):
                 try:
                     run = WorkflowRunStore(runtime_owner_root(self.agent)).load_run(requirement.task_id)
                 except FileNotFoundError:
-                    return deny("REVIEW_TASK_SCOPE_MISMATCH", "候选没有同一原工作关联；不能审核其它root或未授权候选，未写入。")
+                    return deny_task_scope()
                 related = (run.owner_id == owner_context.owner_ref and business is not None
                     and run.business_context == business.to_dict())
                 if related:
@@ -367,7 +379,7 @@ class RequirementProvenanceTool(BaseTool):
                     if params.get("action") == "record_independent_review" and params.get("review_scope", params.get("scope")) != "workflow_effect.v1":
                         return deny("REVIEW_SCOPE_MISMATCH", "原工作流候选仅接受workflow_effect.v1审核；未写入。")
             if not related:
-                return deny("REVIEW_TASK_SCOPE_MISMATCH", "候选不属于当前审核者的同一原工作/TaskRun；不能审核其它root，未写入。")
+                return deny_task_scope()
             # 先证明同工作，再比较版本/根；无权调用不能用拒绝差异探测其它root的候选内容。
             if params.get("action") == "record_independent_review" and (
                     params.get("reviewed_input_version") != requirement.input_version):
