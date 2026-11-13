@@ -208,12 +208,12 @@ def _create_locked(
         for _attempt in range(max(1, len(registry.skills) + 1)):
             try:
                 asset_updated = _registered_publication(store, registry, record, publish)
-                base_reg = replace(registry, assets=asset_updated.assets)
                 _, _, committed_candidate = store._transition_displace_publish_locked(
-                    base_reg,
+                    registry,
                     victim_name=victim_name,
                     candidate_record=record,
                     candidate_text=text,
+                    candidate_assets=asset_updated.assets,
                     now=ts,
                 )
                 _, dir_id, file_id = _read_skill_binding(store, committed_candidate.name, record=committed_candidate)
@@ -601,11 +601,18 @@ def _retire_third_strike_locked(
     reason_code: str = "third_strike_retire",
     now: float | None = None,
 ) -> SkillLearningRegistry:
-    path = store.canonical_skill_path(current.name, record=current)
-    root = store.directory if current.maintenance.get("state") == "archived" else store.skills_root
-    text = read_text_beneath(root, path.relative_to(root).parts)
-    if text is None:
-        text = store.read_version(current.name, current.version)
+    try:
+        path = store.canonical_skill_path(current.name, record=current)
+        root = store.directory if current.maintenance.get("state") == "archived" else store.skills_root
+        text = read_text_beneath(root, path.relative_to(root).parts)
+        if text is None:
+            text = store.read_version(current.name, current.version)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise SkillLearningStoreError(
+            CODE_EVIDENCE_INCOMPLETE,
+            f"unreadable managed skill file for {current.name}",
+            detail={"skill_name": current.name, "reason": type(exc).__name__},
+        ) from exc
     family = str(current.maintenance.get("task_family_fingerprint") or "")
     if not family and text is not None:
         family = skill_family_fingerprint(text)
