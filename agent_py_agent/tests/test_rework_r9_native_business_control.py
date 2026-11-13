@@ -372,3 +372,45 @@ def test_business_delivery_directory_reaches_native_model_request(scoped_gateway
     finally:
         _finish(case)
     assert case.store.session_tasks.require(case.task_id).status == 'done'
+
+
+def test_done_session_task_still_cancels_its_live_original_attempt(scoped_gateway):
+    from agent_py_agent.agent.conversation.session_tasks import SessionTaskUpdate
+
+    case = _running_scoped_task(scoped_gateway)
+    try:
+        case.store.session_tasks.advance(case.task_id, SessionTaskUpdate('done'))
+        status, pending = _call_control(scoped_gateway, case, 'tasks.cancel', 'done-task-active-attempt')
+        assert status == 200, pending
+        assert pending['data']['state'] == 'pending'
+        assert pending['data']['outstanding_refs']
+        assert case.store.session_tasks.require(case.task_id).status == 'done'
+        assert case.repo.get_agent_run(case.authority['agent_run_id'])['status'] == 'cancelled'
+        assert not case.model.returned.is_set()  # 控制受理不冒充原worker已退出。
+    finally:
+        _finish(case)
+
+
+def test_closed_task_ignores_verified_other_order_claim_and_keeps_unknown_pending():
+    from agent_py_agent.agent.conversation.business_contracts import BusinessExecutionContext
+    from agent_py_agent.agent.conversation.session_messaging import _unbound_task_run_proven_closed
+
+    context = BusinessExecutionContext('local/main', 'space-own', None, 'order-own', 1, None, (), (), 'business-execution-context.v1')
+    other = BusinessExecutionContext('local/main', 'space-other', None, 'order-other', 1, None, (), (), 'business-execution-context.v1')
+    task = SimpleNamespace(task_id='order-own', task_run_id='own-run', target_thread_id='shared-controller',
+        metadata={'business_context': context.to_dict()})
+    claim = {'schema_version': 'background_run_claim.v1', 'claim_scope_id': 'shared-controller',
+        'status': 'running', 'thread_id': 'shared-controller',
+        'runtime_authority': {'schema_version': 'conversation_claim_execution.v1', 'run_id': 'other', 'attempt_id': 'other-attempt', 'agent_run_id': 'other-agent'}}
+    ref = SimpleNamespace(task_run_id='other-run', run_id='other', observed_attempt_id='other-attempt', agent_run_id='other-agent')
+    repo = SimpleNamespace(get_task_run=lambda _: {'task_id': 'order-own', 'closed_at': 1.0, 'status': 'done'},
+        agent_runs_for_task_run=lambda _: [{'status': 'done'}], parent_execution_ref=lambda **_: ref,
+        business_context_for_execution=lambda **_: other)
+    host = SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo),
+        conversation_store=SimpleNamespace(claims=SimpleNamespace(load_report=lambda _: (claim, None))))
+    assert _unbound_task_run_proven_closed(host, task, allow_other_claim=True)
+    ref.task_run_id = 'own-run'
+    assert not _unbound_task_run_proven_closed(host, task, allow_other_claim=True)
+    ref.task_run_id = 'other-run'
+    host.conversation_store.claims.load_report = lambda _: (claim, {'category': 'data_corruption'})
+    assert not _unbound_task_run_proven_closed(host, task, allow_other_claim=True)

@@ -111,6 +111,7 @@ class BackgroundContextLoad:
     task_scope_ids: list[frozenset[str]] = field(default_factory=list, repr=False, compare=False)
     session_task_scope: list[bool] = field(default_factory=list, repr=False, compare=False)
     session_task_request_ids: list[frozenset[str]] = field(default_factory=list, repr=False, compare=False)
+    session_task_creation: list[dict] = field(default_factory=list, repr=False, compare=False)
 
 
 # LLM: 仅保存一次已读取的后台材料；不授予身份或执行权，不进入持久状态，候选渲染不能重新触发进度写账。
@@ -446,10 +447,18 @@ def load_context_bundle(state: BackgroundContextLoad) -> dict[str, Any]:
         messages_deferred = False
         if callable(getattr(state.store, "context_bundle_report", None)):
             messages_deferred = bool(str(state.task_id or "").strip())
+            required = _task_context_ids(state) if state.task_id else set()
+            if state.task_id and _managed_session_scope(state):
+                link, error = state.store.tasks.link_report(state.thread.thread_id, state.task_id)
+                if error:
+                    raise ValueError('SESSION_TASK_HISTORY_LINK_UNREADABLE')
+                if link is None:
+                    # 首次派活在prepare之后才bind执行TaskLink；canonical订单已足够限定历史。
+                    required.discard(state.task_id)
             bundle, load_errors = state.store.context_bundle_report(
                 state.thread.thread_id,
                 recent_limit=CONVERSATION_CONTEXT_RECENT_LIMIT_COUNT,
-                **({"required_task_ids": tuple(sorted(_task_context_ids(state)))} if state.task_id else {}),
+                **({"required_task_ids": tuple(sorted(required))} if state.task_id else {}),
                 **({"include_messages": False} if messages_deferred else {}),
             )
             state.load_errors.extend(load_errors)
@@ -495,6 +504,8 @@ def task_scope_decision(
         None,
     )
     managed = _managed_session_scope(state)
+    if managed and exact_link is None:
+        exact_link = state.session_task_creation[0]
     return TaskScopeDecision(
         task_id=task_id,
         task_ids=frozenset(_task_context_ids(state)),
@@ -519,6 +530,9 @@ def _managed_session_scope(state):
         if (task.target_thread_id != state.thread.thread_id or context.task_id != state.task_id
                 or context.owner_id != state.thread.owner_id):
             raise ValueError('SESSION_TASK_HISTORY_SCOPE_MISMATCH')
+    if managed:
+        state.session_task_creation.append({'task_id': task.task_id, 'created_at': task.created_at,
+            'status': task.status})
     state.session_task_request_ids.append(frozenset({str(getattr(task, "conversation_request_id", "") or "")} - {""}) if managed else frozenset())
     state.session_task_scope.append(managed)
     return managed

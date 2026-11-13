@@ -434,7 +434,7 @@ def _authorize_cancellation_task(task, authorize_task):
 #   AgentRun 已终态关闭、且目标线程此刻没有 running claim 时，才算"不在执行"。调用前任务已推进为终态，之后的领取会按终态退役，
 #   不会再启动；读不出任何一项都保守返回 False（保留未确认责任）。只读。
 # 函数用途: 判断一个未绑定回合的会话任务的唯一执行记录是否已被原运行库确认结束。
-def _unbound_task_run_proven_closed(host, task) -> bool:
+def _unbound_task_run_proven_closed(host, task, *, allow_other_claim=False) -> bool:
     import sqlite3
 
     from ..runtime_db.operations import AGENT_RUN_TERMINAL_STATUSES
@@ -452,7 +452,32 @@ def _unbound_task_run_proven_closed(host, task) -> bool:
         claim, error = host.conversation_store.claims.load_report(task.target_thread_id)
     except (OSError, ValueError, TypeError, KeyError, IndexError, sqlite3.Error):
         return False
-    return error is None and (not claim or claim.get("status") != "running")
+    if error is not None:
+        return False
+    if not claim or claim.get("status") != "running":
+        return True
+    if not allow_other_claim:
+        return False
+    # 同controller别单的活claim不能反向证明本单在跑，更不能成为本单停止目标。
+    try:
+        from .business_contracts import BusinessExecutionContext
+
+        context = BusinessExecutionContext.from_dict(task.metadata['business_context'])
+        authority = claim.get('runtime_authority') or {}
+        ref = repo.parent_execution_ref(owner_id=context.owner_id, run_id=authority.get('run_id', ''),
+            attempt_id=authority.get('attempt_id', ''))
+        other = repo.business_context_for_execution(owner_id=context.owner_id,
+            run_id=ref.run_id, attempt_id=ref.observed_attempt_id)
+        return (claim.get('schema_version') == 'background_run_claim.v1'
+            and claim.get('claim_scope_id') == task.target_thread_id
+            and authority.get('schema_version') == 'conversation_claim_execution.v1'
+            and ref.task_run_id != task.task_run_id and other is not None
+            and other.owner_id == context.owner_id and other.task_id != task.task_id
+            and authority.get('agent_run_id') == ref.agent_run_id
+            and authority.get('attempt_id') == ref.observed_attempt_id
+            and claim.get('thread_id') == task.target_thread_id)
+    except (OSError, ValueError, TypeError, KeyError, IndexError, sqlite3.Error):
+        return False
 
 
 def _cancel_selected_session_task(host, binding, root_context, *, root=False, authorize_task=None):
@@ -476,6 +501,12 @@ def _cancel_selected_session_task(host, binding, root_context, *, root=False, au
                 if task_run is not None:
                     link = store.tasks.load(task_run["task_id"])
                     link_closed = link is None or link.status in {"done", "failed", "cancelled", "completed"}
+            if current.metadata.get("business_context") is not None:
+                if current.task_run_id:
+                    link_closed = link_closed and _unbound_task_run_proven_closed(host, current, allow_other_claim=True)
+                else:
+                    claim, error = store.claims.load_report(current.target_thread_id)
+                    link_closed = link_closed and error is None and (not claim or claim.get('status') != 'running')
             if link_closed and _settle_cancelled_task_body(host, binding, root_context):
                 return held
     if not root:

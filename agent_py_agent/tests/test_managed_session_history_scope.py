@@ -52,7 +52,7 @@ def test_scope_uses_original_session_task_and_frozen_business_identity():
 
     context = BusinessExecutionContext("local/main", "space-new", None, "order-new", 1, None, (), (), "business-execution-context.v1")
     thread = SimpleNamespace(thread_id='shared-controller', owner_id=context.owner_id)
-    task = SimpleNamespace(task_id='order-new', target_thread_id=thread.thread_id,
+    task = SimpleNamespace(task_id='order-new', target_thread_id=thread.thread_id, created_at=5.0, status='accepted',
         metadata={'business_context': context.to_dict()})
     store = SimpleNamespace(session_tasks=SimpleNamespace(load=lambda identifier: task))
     state = BackgroundContextLoad(SimpleNamespace(), store, thread, 'order-new', None, None, [])
