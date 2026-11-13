@@ -859,12 +859,15 @@ def _gateway_message_matches_part(
         row_part = str(metadata.get("assistant_part_id") or "final").strip() or "final"
         if not same_request or row_part != assistant_part_id:
             return False
+        previous_reason = normalize_turn_end_reason(metadata.get("turn_end_reason"))
+        # 一个逻辑请求的成功终稿不可被迟到的旧尝试覆盖，补交与直接写入共用此门。
+        if assistant_part_id == "final" and previous_reason == "completed":
+            return True
         previous_attempt = str(metadata.get("gateway_execution_attempt_id") or "")
         if previous_attempt and execution_attempt_id and previous_attempt != execution_attempt_id:
             return False
         # 保留失败尝试的原生历史；同请求恢复完成必须追加，不能被旧 final 吞掉。
         # 缺少 attempt 的旧记录仍沿原幂等规则，只有明确的未完成 -> 完成允许前进。
-        previous_reason = normalize_turn_end_reason(metadata.get("turn_end_reason"))
         return not (assistant_part_id == "final"
                     and normalize_turn_end_reason(turn_end_reason) == "completed"
                     and previous_reason in {"error", "aborted", "interrupted", "max-tokens"})

@@ -58,3 +58,20 @@ def test_repair_keeps_both_attempts_and_completed_retry(runtime):
     rows = agent.conversation_store.messages.recent(conversation.thread_id, limit=10)
     assert [row.content for row in rows] == ["中断", "完成"]
     assert len({row.content for row in rows}) == len(rows)
+
+
+@pytest.mark.parametrize("late_reason", ["error", "interrupted", "completed", ""])
+def test_completed_final_survives_late_attempt_repair(runtime, late_reason):
+    agent, conversation = runtime
+    assert append(agent, conversation, "new", "completed", "成功终稿")
+    history._queue_gateway_conversation_repair(
+        agent, {"execution_attempt_id": "old"}, conversation,
+        request_id="request", role="assistant", content="迟到的旧稿",
+        assistant_turn=history.GatewayAssistantTurn(end_reason=late_reason),
+    )
+    errors = []
+    history.repair_gateway_conversation_messages(agent.conversation_store, conversation.thread_id, errors)
+    assert not errors
+    assert append(agent, conversation, "old", late_reason, "迟到的旧稿")
+    rows = agent.conversation_store.messages.recent(conversation.thread_id, limit=10)
+    assert [row.content for row in rows] == ["成功终稿"]

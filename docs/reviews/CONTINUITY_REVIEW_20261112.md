@@ -21,7 +21,7 @@ One request completed on its second attempt with a 2,060-character answer, but i
 
 The patch uses the existing execution attempt ID where available and permits an explicitly failed/interrupted final to coexist with a subsequent completed final. Legacy records without an attempt ID remain supported. Unknown legacy terminal reasons retain conservative old dedupe behavior. Repair filenames distinguish attempts/terminal states so queued repairs cannot overwrite one another.
 
-Review replay ordering carefully. For multiple completed attempts awaiting repair, hash ordering does not establish historical execution order. This limitation is disclosed; chronological multi-completion repair is not claimed. Old missing replies are not automatically replayed by this patch.
+Review replay ordering carefully. A follow-up identified that an older failed repair from another attempt could be appended after a completed final. The revised patch makes an existing completed final absorbing for that logical request, before comparing attempts. Four additional cases cover late failed, interrupted, completed and unclassified repairs and direct appends. Hash ordering of multiple uncommitted successful attempts still does not establish chronological order. Old missing replies are not automatically replayed by this patch.
 
 ### C. Up arrow intercepted by background agent navigation
 
