@@ -33,6 +33,7 @@ agent_py_agent/tests/test_workflow_native_operation_recovery.py # 原操作终�
 agent_py_agent/tests/test_scheduler_business_workflow_target.py # 定时工作流版本、撤权与原会话失败通知
 agent_py_agent/tests/test_business_project_reference_boundary.py # 项目引用的目录边界与重建
 agent_py_agent/tests/test_business_memory_scope_boundary.py # 冻结业务任务的项目记忆隔离
+agent_py_agent/tests/test_business_space_prompt_isolation.py # 两空间真实后台请求与授权摘要隔离
 docs/reviews/CONTINUITY_R3_REVIEW_20261112.md                # Opus v2 复核后的英文说明
 ```
 
