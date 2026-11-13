@@ -288,3 +288,47 @@ def test_real_registry_id_round_trips_to_public_ref_and_ids_are_not_version_pins
     assert drifted['result_refs'] == [record.artifact_id]
     assert drifted['result_ref_coverage'] == {'state': 'partial', 'unresolved_count': 0, 'omitted_count': 0}
     assert host.conversation_store.session_tasks.require(task_id).metadata['result_artifacts'][0]['sha256'] == record.sha256
+
+
+def test_external_delivery_checks_original_task_registry_not_nearest_owner_registry(native):  # noqa: F811
+    from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
+
+    _, host = native
+    owner = host.home_paths.owner_home_dir
+    archive = owner / 'runs' / 'test-date' / 'registry-origin'
+    archive.mkdir(parents=True)
+    output = owner / 'tasks' / 'test-date' / 'delivery' / 'result.json'
+    output.parent.mkdir(parents=True)
+    output.write_text('{"total":4200}')
+    unrelated = owner / 'unrelated.txt'
+    unrelated.write_text('unrelated')
+    register_artifact(ArtifactRegistration(workspace_root=owner, path=unrelated))
+    record = register_artifact(ArtifactRegistration(workspace_root=archive, path=output,
+                                                    task_id='registered-task', run_id='registered-run'))
+    task_id = _finish(native, 'external-delivery', [str(output)], [record.to_dict()])
+    task = host.conversation_store.session_tasks.require(task_id)
+    host.conversation_store.tasks.bind({'thread_id': task.target_thread_id, 'task_id': task_id,
+                                       'task_path': str(archive), 'status': 'completed'})
+    detail = ok(native, 'tasks.get', {'task_id': task_id})
+    assert detail['result_refs'] == [record.artifact_id]
+    assert detail['result_ref_coverage']['state'] == 'complete'
+    output.write_text('{"total":999}')
+    register_artifact(ArtifactRegistration(workspace_root=archive, path=output,
+                                           task_id='registered-task', run_id='registered-run'))
+    assert ok(native, 'tasks.get', {'task_id': task_id})['result_ref_coverage']['state'] == 'partial'
+
+
+def test_corrupt_task_link_cannot_borrow_matching_owner_registry(native, monkeypatch):  # noqa: F811
+    from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
+
+    _, host = native
+    owner = host.home_paths.owner_home_dir
+    output = owner / 'matching.json'
+    output.write_text('{"total":4200}')
+    record = register_artifact(ArtifactRegistration(workspace_root=owner, path=output))
+    tid = _finish(native, 'broken-registry-link', [str(output)], [record.to_dict()])
+    assert ok(native, 'tasks.get', {'task_id': tid})['result_ref_coverage']['state'] == 'complete'
+    monkeypatch.setattr(host.conversation_store.tasks, 'link_report', lambda *_: (None, {'code': 'CORRUPT'}))
+    result = ok(native, 'tasks.get', {'task_id': tid})
+    assert result['result_refs'] == [record.artifact_id]
+    assert result['result_ref_coverage']['state'] == 'partial'

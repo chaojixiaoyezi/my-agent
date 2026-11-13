@@ -124,14 +124,17 @@ def _valid_sha256_pin(value: object) -> str | None:
 
 # LLM: 按父目录有界回溯最近的工作区产物登记簿，复用请求级只读缓存避免重复IO；无登记簿时不报错，有可读登记簿且当前记录缺失、损坏或sha256已变时如实报告漂移。
 # 函数用途: 检测可读本地产物登记簿上当前记录是否已偏离任务终态冻结的sha256版本摘要。
-def _registry_pin_drifted(path: str, artifact_id: str, pinned_sha: str, dir_cache: dict[str, Path | None]) -> bool:
+def _registry_pin_drifted(path: str, artifact_id: str, pinned_sha: str, dir_cache: dict[str, Path | None],
+                          registry_root: Path | None = None) -> bool:
     from ..artifacts.registry import REGISTRY_RELATIVE_PATH, latest_artifact_records_report
 
     candidate = Path(path)
     if not candidate.is_absolute():
         return False
     parent = str(candidate.parent)
-    if parent in dir_cache:
+    if registry_root is not None:
+        workspace = registry_root
+    elif parent in dir_cache:
         workspace = dir_cache[parent]
     else:
         workspace = None
@@ -166,7 +169,26 @@ def _registry_pin_drifted(path: str, artifact_id: str, pinned_sha: str, dir_cach
 # LLM: 公开引用只给交付项自带的 owner 内产物登记 ID（最多前100个唯一ID，保持交付路径顺序），绝不回退为绝对路径、截断内部账本或补造 ID；
 #   unresolved_count与omitted_count均不设人为上限100，任一为正、版本摘要未知或可读登记簿已发生sha256漂移均记 partial，绝不把漂移/未知冒充 complete。
 # 函数用途: 把任务内部结果路径有界投影成公开 result_refs（<=100）与诚实覆盖说明；无结果时覆盖说明为 None。
-def public_result_refs(task):
+def _task_artifact_registry_root(task, store, owner_root) -> tuple[Path | None, bool]:
+    # 登记簿属于原运行工作区；合法旧记录无link可沿旧路径，坏link不得拿其他登记簿证明完整。
+    if store is None or owner_root is None:
+        return None, False
+    try:
+        link, error = store.tasks.link_report(task.target_thread_id, task.task_id)
+        if error:
+            return None, True
+        if link is None:
+            return None, False
+        if not link.task_path:
+            return None, True
+        root = Path(link.task_path).resolve(strict=False)
+        owner = Path(owner_root).resolve(strict=False)
+        return (root, False) if root != owner and root.is_relative_to(owner) else (None, True)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None, True
+
+
+def public_result_refs(task, *, store=None, owner_root=None):
     from .session_tasks import SESSION_TASK_RESULT_ARTIFACTS_KEY
 
     paths = [str(item) for item in task.result_refs]
@@ -188,6 +210,8 @@ def public_result_refs(task):
             pins.setdefault((item['path'], artifact), set()).add(_valid_sha256_pin(item.get('sha256')))
     refs, unresolved, pin_incomplete = [], 0, False
     dir_cache: dict[str, Path | None] = {}
+    registry_root, registry_unavailable = _task_artifact_registry_root(task, store, owner_root)
+    pin_incomplete = registry_unavailable
     for path in paths:
         # 同一路径对应多个不同登记ID即身份不明：如实记未解析，不按元数据顺序挑选（G7-R1）；完全相同的重复项已由集合去重。
         ids = known.get(path, set())
@@ -196,11 +220,11 @@ def public_result_refs(task):
             continue
         artifact = next(iter(ids))
         pin_set = pins.get((path, artifact), set())
-        if len(pin_set) != 1 or None in pin_set:
+        if registry_unavailable or len(pin_set) != 1 or None in pin_set:
             pin_incomplete = True
         else:
             pinned_sha = next(iter(pin_set))
-            if pinned_sha is None or _registry_pin_drifted(path, artifact, pinned_sha, dir_cache):
+            if pinned_sha is None or _registry_pin_drifted(path, artifact, pinned_sha, dir_cache, registry_root):
                 pin_incomplete = True
         if artifact not in refs:
             refs.append(artifact)
@@ -484,7 +508,7 @@ class BusinessObservationService:
             raise BusinessError('OBSERVATION_NOT_FOUND')
         workflow = task.metadata.get('workflow_ref')
         # 普通规范任务没有Workflow关联；保留null，不捏造引用或修改任务元数据。
-        refs, ref_coverage = public_result_refs(task)
+        refs, ref_coverage = public_result_refs(task, store=self.store, owner_root=self.owner_root)
         detail = {'task': _view('TaskView', rows[0].value), 'assignments': [{
             'assignment_ref': task.task_id, 'task_id': task.task_id, 'sender_thread_id': task.sender_thread_id,
             'target_thread_id': task.target_thread_id, 'status': task.status, 'result_refs': list(refs)}],
@@ -622,7 +646,7 @@ class BusinessObservationService:
             if context and (context.owner_id != self.owner_id or context.task_id != task.task_id):
                 errors.append({'code': 'CONTEXT_MISMATCH'})
                 continue
-            refs, ref_coverage = public_result_refs(task)
+            refs, ref_coverage = public_result_refs(task, store=self.store, owner_root=self.owner_root)
             value = {'task_id': task.task_id, 'thread_id': task.target_thread_id,
                 'space_id': context.space_id if context else None, 'project_ref': context.project_ref if context else None,
                 'status': task.status, 'current_run_id': None, 'result_refs': refs,

@@ -486,7 +486,7 @@ class BackgroundAgentService:
         raw = task.metadata.get("business_context")
         context = BusinessExecutionContext.from_dict(raw) if raw else None
         run_id = execution.get("run_id") if isinstance(execution, dict) and execution.get("task_id") == task.task_id else None
-        refs, _ = public_result_refs(task)
+        refs, _ = public_result_refs(task, store=self.store, owner_root=getattr(getattr(self.host, "home_paths", None), "owner_home_dir", None))
         return {"task_id": task.task_id, "thread_id": task.target_thread_id, "space_id": context.space_id if context else None,
                 "project_ref": context.project_ref if context else None, "status": task.status,
                 "current_run_id": run_id, "result_refs": refs, "revision": int(task.updated_at * 1000000)}
