@@ -737,3 +737,62 @@ def test_biz013_executor_managed_operation_persists_committed_and_replays_cleanl
     assert tool.calls == 1
     assert _result_payload(ToolHandlerOutcome("biz_mutate", True, "{}"))["effect_outcome"] == ""
     assert _result_payload(ToolHandlerOutcome("biz_mutate", True, "{}"), "committed")["effect_outcome"] == "committed"
+
+
+def test_native_background_message_projects_real_execution_and_child_tree(tmp_path, monkeypatch):
+    """原生消息无 SessionTask，但原租约和运行库已明确绑定 owner/thread/root/child。"""
+    from agent_py_agent.agent.conversation.background_agents import BackgroundAgentService
+    from agent_py_agent.agent.conversation.claim_execution_binding import (
+        ClaimExecutionBinding,
+        bind_claim_execution,
+        publish_claim_runtime_authority,
+    )
+
+    env = _make_observability_env(tmp_path)
+    root = env.repo.record_run_creation(owner_id=env.owner, run_id='native-message', thread_id='worker')
+    env.repo.record_run_creation(owner_id=env.owner, run_id='native-child', thread_id='worker',
+                                 parent_run_id='native-message')
+    claim = env.store.claims.acquire({'thread_id': 'worker', 'reason': 'session_message'})
+    binding = ClaimExecutionBinding(env.store.claims, 'worker', claim['claim_id'], 'worker')
+    with bind_claim_execution(binding):
+        publish_claim_runtime_authority({'invocation_run_id': 'native-message', 'run_id': 'native-message', **root})
+    host = SimpleNamespace(conversation_store=env.store, subagents=SimpleNamespace(runtime_db=env.repo))
+    background = BackgroundAgentService(host)
+    worker = env.store.threads.require('worker')
+    before = env.store.claims.load_report('worker')[0]
+    execution = background._execution_view(worker)
+    assert execution['run_id'] == 'native-message'
+    assert execution['space_id'] == 'space-a'
+    assert background._agent_view(worker)['work_state'] == 'running'
+    tree = env.service.query('agent_tree.get', {'space_id': 'space-a', 'root_agent_id': 'worker'}, actor=env.actor)
+    assert {'worker', 'native-message', 'native-child'} <= {node['id'] for node in tree['nodes']}
+    assert {'from_id': 'native-message', 'to_id': 'native-child', 'relation': 'child_of'} in tree['edges']
+    assert env.store.claims.load_report('worker')[0] == before
+    from agent_py_agent.agent.conversation import background_scheduling_view
+    monkeypatch.setattr(background, '_thread', lambda *_: worker)
+    monkeypatch.setattr(background_scheduling_view, 'model_readiness', lambda *_: (True, ''))
+    assert background.get('worker', actor=env.actor)['scheduling']['state'] == 'running'
+    with env.repo._runtime_connection() as conn:
+        conn.execute('UPDATE tasks SET thread_id=? WHERE task_id=?', ('controller', root['task_id']))
+        conn.commit()
+    rejected = background.get('worker', actor=env.actor)
+    assert rejected['scheduling']['state'] == 'unknown'
+    assert rejected['scheduling']['reason_code'] == 'EXECUTION_AUTHORITY_UNAVAILABLE'
+    # owner/thread 不匹配不借“同一个 run”展示成该后台会话正在执行。
+    other = env.store.threads.require('controller')
+    with pytest.raises(ValueError, match='EXECUTION_AUTHORITY_UNAVAILABLE'):
+        background._validate_execution_context(other, before['runtime_authority'],
+            env.repo.parent_execution_ref(owner_id=env.owner, run_id='native-message', attempt_id=root['attempt_id']),
+            None, runtime=env.repo)
+
+
+def test_native_execution_missing_thread_preserves_other_rows_and_partial(tmp_path):
+    """删除一个原生线程只隔离其执行，不让整页消失或失去 partial 事实。"""
+    env = _make_observability_env(tmp_path)
+    env.repo.record_run_creation(owner_id=env.owner, run_id='native-present', thread_id='worker')
+    env.repo.record_run_creation(owner_id=env.owner, run_id='native-missing', thread_id='controller')
+    env.store.storage.thread_path('controller').unlink()
+    for params in ({}, {'filter': {'space_id': 'space-a'}}):
+        result = env.service.query('executions.list', params, actor=env.actor)
+        assert {row['run_id'] for row in result['items']} == {'native-present'}
+        assert result['coverage'] == 'partial'

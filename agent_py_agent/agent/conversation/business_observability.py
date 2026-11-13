@@ -651,7 +651,7 @@ class BusinessObservationService:
                 else:
                     where += ' AND aa.attempt_id=ar.current_attempt_id'
                 raw = conn.execute('SELECT ar.run_id,ar.current_attempt_id,ar.parent_agent_run_id,pa.run_id AS parent_run_id,'
-                    't.thread_id,tr.metadata_json,aa.attempt_id,aa.status,aa.started_at,aa.ended_at,aa.metadata_json AS attempt_metadata '
+                    't.thread_id,t.task_id AS runtime_task_id,tr.metadata_json,aa.attempt_id,aa.status,aa.started_at,aa.ended_at,aa.metadata_json AS attempt_metadata '
                     'FROM agent_attempts aa JOIN agent_runs ar ON ar.agent_run_id=aa.agent_run_id '
                     'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id '
                     'LEFT JOIN agent_runs pa ON pa.agent_run_id=ar.parent_agent_run_id WHERE ' + where +
@@ -672,7 +672,7 @@ class BusinessObservationService:
                 where = 'aa.rowid IN (' + ','.join('?' for _ in positions) + ') AND t.owner_id=?'
                 values = [row[0] for row in positions] + [self.owner_id]
                 raw = conn.execute('SELECT ar.run_id,ar.current_attempt_id,ar.parent_agent_run_id,pa.run_id AS parent_run_id,'
-                    't.thread_id,tr.metadata_json,aa.attempt_id,aa.status,aa.started_at,aa.ended_at,aa.metadata_json AS attempt_metadata '
+                    't.thread_id,t.task_id AS runtime_task_id,tr.metadata_json,aa.attempt_id,aa.status,aa.started_at,aa.ended_at,aa.metadata_json AS attempt_metadata '
                     'FROM agent_attempts aa JOIN agent_runs ar ON ar.agent_run_id=aa.agent_run_id '
                     'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id '
                     'LEFT JOIN agent_runs pa ON pa.agent_run_id=ar.parent_agent_run_id WHERE ' + where +
@@ -682,6 +682,7 @@ class BusinessObservationService:
                 return self._execution_page(raw, more=more, revision=revision, source_paged=True, next_position=next_position)
 
             collected_records = []
+            source_incomplete = False
             max_scan = 1000
             total_scanned = 0
             hit_cap = False
@@ -705,12 +706,13 @@ class BusinessObservationService:
                 where = 'aa.rowid IN (' + ','.join('?' for _ in positions) + ') AND t.owner_id=?'
                 values = [row[0] for row in positions] + [self.owner_id]
                 raw = conn.execute('SELECT aa.rowid AS _rowid, ar.run_id,ar.current_attempt_id,ar.parent_agent_run_id,pa.run_id AS parent_run_id,'
-                    't.thread_id,tr.metadata_json,aa.attempt_id,aa.status,aa.started_at,aa.ended_at,aa.metadata_json AS attempt_metadata '
+                    't.thread_id,t.task_id AS runtime_task_id,tr.metadata_json,aa.attempt_id,aa.status,aa.started_at,aa.ended_at,aa.metadata_json AS attempt_metadata '
                     'FROM agent_attempts aa JOIN agent_runs ar ON ar.agent_run_id=aa.agent_run_id '
                     'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id '
                     'LEFT JOIN agent_runs pa ON pa.agent_run_id=ar.parent_agent_run_id WHERE ' + where +
                     ' ORDER BY aa.rowid LIMIT ?', [*values, batch_size]).fetchall()
                 batch_page = self._execution_page(raw)
+                source_incomplete = source_incomplete or batch_page.coverage != 'complete'
                 for rec in batch_page.records:
                     if rec.space_id != filter_space:
                         continue
@@ -733,7 +735,7 @@ class BusinessObservationService:
                     next_pos = None
         if runtime_source_revision(self.runtime.db_path) != revision:
             raise BusinessError('CURSOR_EXPIRED')
-        cov = 'partial' if hit_cap or (has_more and not collected_records) else 'complete'
+        cov = 'partial' if source_incomplete or hit_cap or (has_more and not collected_records) else 'complete'
         return ObservationPage(tuple(collected_records[:limit]), coverage=cov,
                                revision=revision, source_paged=True, next_position=next_pos if has_more else None)
 
@@ -746,7 +748,7 @@ class BusinessObservationService:
             return ObservationPage()
         marks = ','.join('?' for _ in identifiers)
         raw = conn.execute('SELECT ar.run_id,ar.current_attempt_id,ar.parent_agent_run_id,pa.run_id AS parent_run_id,'
-            't.thread_id,tr.metadata_json,aa.attempt_id,aa.status,aa.started_at,aa.ended_at,aa.metadata_json AS attempt_metadata '
+            't.thread_id,t.task_id AS runtime_task_id,tr.metadata_json,aa.attempt_id,aa.status,aa.started_at,aa.ended_at,aa.metadata_json AS attempt_metadata '
             'FROM agent_attempts aa JOIN agent_runs ar ON ar.agent_run_id=aa.agent_run_id '
             'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id '
             'LEFT JOIN agent_runs pa ON pa.agent_run_id=ar.parent_agent_run_id AND pa.task_run_id=ar.task_run_id '
@@ -782,13 +784,29 @@ class BusinessObservationService:
                 if not thread_id:
                     incomplete = True
                     continue
-            value = {'run_id': row['run_id'], 'attempt_id': row['attempt_id'], 'task_id': context.task_id if context else None,
-                'thread_id': thread_id, 'space_id': context.space_id if context else None, 'status': row['status'],
+            # 无 SessionTask 的原生后台消息仍有 canonical runtime task/thread；空间只从同 owner 的真实后台身份读取。
+            identity = None
+            if context is None and self.store is not None:
+                try:
+                    thread = _observation_thread(self.store, thread_id)
+                except (KeyError, OSError, ValueError, TypeError):
+                    # 缺失/损坏线程不授予空间归属，也不吞掉本页其他已核验执行。
+                    incomplete = True
+                    continue
+                if thread is None or thread.owner_id != self.owner_id:
+                    incomplete = True
+                    continue
+                identity = background_identity(thread)
+            space_id = context.space_id if context else identity.space_id if identity else None
+            project_ref = context.project_ref if context else identity.project_ref if identity else None
+            value = {'run_id': row['run_id'], 'attempt_id': row['attempt_id'],
+                'task_id': context.task_id if context else row['runtime_task_id'],
+                'thread_id': thread_id, 'space_id': space_id, 'status': row['status'],
                 'effect_outcome': outcome, 'started_at': _timestamp(row['started_at']), 'ended_at': _timestamp(row['ended_at']),
                 'error': None, 'retry_refs': [], '_is_current': row['current_attempt_id'] == row['attempt_id'],
                 '_parent_run_id': row['parent_run_id'] or None}
             rowid = row['_rowid'] if '_rowid' in row.keys() else 0
-            rows.append(ObservationRecord(value, self.owner_id, value['space_id'], context.project_ref if context else None,
+            rows.append(ObservationRecord(value, self.owner_id, value['space_id'], project_ref,
                 value['task_id'], value['thread_id'], value['run_id'], value['attempt_id'], source_cursor=rowid))
         return ObservationPage(tuple(rows), 'partial' if incomplete or more else 'complete',
                                revision, source_paged, next_position)
@@ -1045,7 +1063,8 @@ class BusinessObservationService:
                 raw = conn.execute('SELECT e.*,ar.run_id,ar.agent_run_id AS canonical_agent_run_id,'
                     'aa.agent_run_id AS attempt_agent_run_id,ar.task_run_id AS agent_task_run_id,ar.status AS agent_status,'
                     'pa.run_id AS parent_run_id,tr.task_run_id AS canonical_task_run_id,tr.task_id AS canonical_task_id,'
-                    'tr.metadata_json,tr.status AS task_run_status,tr.updated_at AS task_run_updated_at,t.owner_id,t.thread_id,'
+                    'tr.metadata_json,tr.status AS task_run_status,tr.closed_at AS task_run_closed_at,'
+                    'tr.updated_at AS task_run_updated_at,t.owner_id,t.thread_id,'
                     'agent_task.owner_id AS agent_owner_id,attempt_task.owner_id AS attempt_owner_id,'
                     'EXISTS(SELECT 1 FROM agent_runs child WHERE child.parent_agent_run_id=ar.agent_run_id '
                     'AND child.task_run_id=tr.task_run_id) AS has_children '
@@ -1088,8 +1107,24 @@ class BusinessObservationService:
                 row = (execution.get((source['run_id'], source['attempt_id'])) if source['attempt_id']
                     else self._event_without_attempt(source))
                 if row is None:
-                    # 真正缺失的非空引用保留重连机会；空attempt不会等待并不存在的后继attempt。
+                    # 已终结、从未绑定会话的内部运行没有可公开的业务身份；只推进有界游标，保留覆盖缺口。
+                    # 活跃、缺引用、业务绑定未知或SessionTask仍存在的记录继续等待，不按正文猜归属。
+                    metadata = json.loads(source['metadata_json'])
+                    settled_unbound = (
+                        not source['thread_id']
+                        and source['task_run_status'] in AGENT_RUN_TERMINAL_STATUSES
+                        and source['task_run_closed_at'] > 0
+                        and (not source['canonical_agent_run_id'] or source['agent_status'] in AGENT_RUN_TERMINAL_STATUSES)
+                        and isinstance(metadata, dict) and metadata.get('business_context') is None
+                        and metadata.get('session_task_ref') in (None, '')
+                        and self.store is not None
+                        and _observation_task(self.store, source['canonical_task_id']) is None
+                    )
                     coverage = 'partial'
+                    if settled_unbound:
+                        after = source['seq']
+                        continue
+                    # 真正缺失的非空引用保留重连机会；空attempt不会等待并不存在的后继attempt。
                     break
                 after = source['seq']
                 event_facts = ObservationRecord({**row.value, 'occurred_at': _timestamp(source['created_at'])},

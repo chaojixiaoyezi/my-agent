@@ -403,7 +403,7 @@ def credential_card(row):
         'name': '_credential_submit',
         'action_type': 'form_submit',
         'type': 'primary',
-        'text': {'tag': 'plain_text', 'content': '保存并供本群助手使用' if row.get('access_scope') == 'group' else '仅供此任务使用'},
+        'text': {'tag': 'plain_text', 'content': '保存并供本群助手使用' if row.get('access_scope') == 'group' else '提交'},
         'value': {'kind': 'my_agent_task_credential', 'reference': row['reference'], 'decision': 'submit'},
     }
     cancel = {

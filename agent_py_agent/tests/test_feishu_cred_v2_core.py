@@ -145,7 +145,7 @@ def test_personal_owner_without_url_falls_back_to_task_scope(tmp_path):
     assert "credential_note" in field_names
 
     submit_btn = next(elem for elem in form_elements if elem.get("action_type") == "form_submit")
-    assert submit_btn["text"]["content"] == "仅供此任务使用"
+    assert submit_btn["text"]["content"] == "提交"
 
 
 def test_explicit_owner_scope_without_url_raises_binding_error(tmp_path):

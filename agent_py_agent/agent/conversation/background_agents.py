@@ -392,10 +392,12 @@ class BackgroundAgentService:
         resolved_id = thread.thread_id
         page = self.store.session_tasks.list_page(target_thread_id=resolved_id, limit=100)
         open_tasks = [task for task in page["items"] if task.status not in SESSION_TASK_TERMINAL_STATUSES]
+        execution_error = ""
         try:
             execution = self._execution_view(thread)
-        except (OSError, ValueError, TypeError, KeyError, RuntimeError, sqlite3.Error):
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError, sqlite3.Error) as exc:
             execution = None
+            execution_error = str(exc) if str(exc) in {"CLAIM_UNREADABLE", "EXECUTION_AUTHORITY_UNAVAILABLE"} else "EXECUTION_AUTHORITY_UNAVAILABLE"
         guidance, pending_inputs = None, None
         if not open_tasks and not page["load_errors"]:
             try:
@@ -408,13 +410,16 @@ class BackgroundAgentService:
         scheduling = scheduling_view(self.store, thread_id=thread.thread_id, tasks=open_tasks,
             identity_state=background_identity(thread).identity_state, running=execution is not None,
             model_ready=ready, model_reason=reason, pending_inputs=pending_inputs, tasks_complete=complete)
+        if execution_error and scheduling["state"] not in {"paused", "retiring", "retired"}:
+            # 执行身份读失败不能冒充 no_work；保留失败码，不领取或消费任何工作。
+            scheduling.update(state="unknown", reason_code=execution_error, coverage="partial")
         return {"agent": self._agent_view(thread, guidance=guidance), "current_execution": execution,
                 "pending_tasks": [self._task_view(task, execution) for task in open_tasks],
                 "allowed_actions": ["background_agents.get", "background_agents.messages.send", "background_agents.suspend",
                                     "background_agents.resume", "background_agents.retire", "background_agents.model.set"],
                 "scheduling": scheduling}
 
-    # LLM: 供详情和工作态投影只读使用；running须同时通过有效claim、同Owner运行库和canonical任务绑定复核，缺证抛错，不用身份可用态推断执行。
+    # LLM: 详情和工作态只读核有效claim与同Owner运行库；SessionTask或原生runtime task均须回指准确thread，缺证不猜running。
     # 函数用途: 将真正仍在运行的精确run与attempt整理为执行详情；非运行claim返回None。
     def _execution_view(self, thread):
         claim, error = self.store.claims.load_report(thread.thread_id)
@@ -430,8 +435,8 @@ class BackgroundAgentService:
         ref = repo.parent_execution_ref(owner_id=thread.owner_id, run_id=authority["run_id"], attempt_id=authority["attempt_id"])
         context = repo.business_context_for_execution(owner_id=thread.owner_id, run_id=ref.run_id, attempt_id=ref.observed_attempt_id)
         self._validate_execution_context(thread, authority, ref, context, runtime=repo)
-        return {"run_id": ref.run_id, "attempt_id": ref.observed_attempt_id, "task_id": context.task_id if context else None,
-                "thread_id": thread.thread_id, "space_id": context.space_id if context else None, "status": "running",
+        return {"run_id": ref.run_id, "attempt_id": ref.observed_attempt_id, "task_id": context.task_id if context else authority["task_id"],
+                "thread_id": thread.thread_id, "space_id": context.space_id if context else background_identity(thread).space_id, "status": "running",
                 "effect_outcome": "running", "started_at": None, "ended_at": None, "error": None, "retry_refs": []}
 
     # LLM: 运行展示仍绑定准确claim/thread/run/attempt，不能把旧claim或相似ID配给新执行。
@@ -446,21 +451,28 @@ class BackgroundAgentService:
                 or any(not isinstance(authority.get(key), str) or not authority[key] for key in required)):
             raise ValueError("EXECUTION_AUTHORITY_UNAVAILABLE")
 
-    # LLM: context必须来自同owner原运行库且回指准确SessionTask，缺来源只能unknown不能猜running。
+    # LLM: 有business context则核canonical SessionTask；原生消息无该context时核原runtime task的owner/thread，不制造派工记录。
     # 函数用途: 核对当前执行与业务身份/任务的冻结绑定。
     def _validate_execution_context(self, thread, authority, ref, context, *, runtime):
         identity = background_identity(thread)
         run, attempt = runtime.get_agent_run(ref.agent_run_id), runtime.get_attempt(ref.observed_attempt_id)
         task_run = runtime.get_task_run(ref.task_run_id)
         if (ref.agent_run_id != authority["agent_run_id"] or ref.observed_attempt_id != authority["attempt_id"]
-                or context is None or context.owner_id != thread.owner_id
+                or (context is not None and context.owner_id != thread.owner_id)
                 or run is None or attempt is None or task_run is None
                 # 父 run 在 create_attempt 后可仍为 created；准确 current attempt 的 running 才是执行事实。
                 or run["status"] not in {"created", "running"} or attempt["status"] != "running"
                 or run["current_attempt_id"] != ref.observed_attempt_id
                 or task_run["task_id"] != authority["task_id"]
-                or (identity is not None and context.space_id != identity.space_id)):
+                or (context is not None and identity is not None and context.space_id != identity.space_id)):
             raise ValueError("EXECUTION_AUTHORITY_UNAVAILABLE")
+        if context is None:
+            # 原生会话消息也发布同一执行租约，但没有 SessionTask；只读原运行任务的 owner/thread 绑定。
+            task = runtime.get_task(authority["task_id"])
+            if (identity is None or task is None or task["owner_id"] != thread.owner_id
+                    or task["thread_id"] != thread.thread_id):
+                raise ValueError("EXECUTION_AUTHORITY_UNAVAILABLE")
+            return
         task = self.store.session_tasks.require(context.task_id)
         if (task.target_thread_id != thread.thread_id or task.status in SESSION_TASK_TERMINAL_STATUSES
                 or task.task_run_id != ref.task_run_id or task.conversation_request_id != authority["invocation_run_id"]

@@ -1,0 +1,55 @@
+"""BIZ-006 原错误动作经真实HTTP/生产客户端验证，不调用模型或正式Gateway。"""
+import json
+
+import pytest
+
+from agent_py_agent.tests.test_acceptance_business_error_transport import gateway as gateway
+
+
+def _write(client, action, params, **options):
+    return client.send(client.prepare(action, params, **options))
+
+
+def _setup(gateway):
+    agent, client = gateway
+    # 复用fixture提供的真实NetworkGatewayObserver；只为本隔离owner补认证主体。
+    original_headers = agent.gateway_network_headers
+    agent.gateway_network_headers = lambda: {**original_headers(), 'X-User-Id': 'business-alice', 'X-Channel': 'feishu'}
+    first = _write(client, 'spaces.create', {'name': 'space-a'}, idempotency_key='biz006-space-a-0001')
+    second = _write(client, 'spaces.create', {'name': 'space-b'}, idempotency_key='biz006-space-b-0001')
+    assert first['ok'] and second['ok']
+    created = _write(client, 'background_agents.create', {'space_id': first['data']['space_id'], 'name': 'agent-a'},
+                          idempotency_key='biz006-agent-a-0001')
+    assert created['ok'], created
+    return client, first['data']['space_id'], second['data']['space_id'], created['data']['agent']
+
+
+@pytest.mark.parametrize('scenario', ['wrong-space', 'missing-model'])
+def test_original_rejected_write_has_precise_error_and_no_state_change(gateway, scenario, tmp_path):
+    client, space_a, space_b, agent = _setup(gateway)
+    before = client.call('background_agents.model.get', {'agent_id': agent['agent_id']})
+    tasks_before = client.call('tasks.list', {'filter': {'agent_id': agent['agent_id']}})
+    assert before['ok'] and tasks_before['ok'], (before, tasks_before)
+    if scenario == 'wrong-space':
+        prepared = client.prepare('tasks.assign', {'agent_id': agent['agent_id'], 'space_id': space_b,
+                                                   'instruction': 'isolated rejected request'},
+                                  idempotency_key='biz006-wrong-space-0001')
+    else:
+        prepared = client.prepare('background_agents.model.set', {'agent_id': agent['agent_id'],
+                                    'model_profile_id': 'nonexistent-biz006-profile'},
+                                  expected_revision=before['data']['selection_revision'],
+                                  idempotency_key='biz006-missing-model-0001')
+    rejected = client.send(prepared)
+    after = client.call('background_agents.model.get', {'agent_id': agent['agent_id']})
+    tasks_after = client.call('tasks.list', {'filter': {'agent_id': agent['agent_id']}})
+    evidence = {'scenario': scenario, 'rejection': rejected, 'model_before': before['data'],
+                'model_after': after['data'], 'tasks_before': tasks_before['data'], 'tasks_after': tasks_after['data']}
+    destination = tmp_path / ('BIZ006-' + scenario + '.json')
+    destination.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + '\n')
+    assert not rejected['ok']
+    assert rejected['error']['code'] == ('SPACE_MISMATCH' if scenario == 'wrong-space' else 'MODEL_PROFILE_NOT_FOUND')
+    assert rejected['state'] == 'failed' and rejected['effect_outcome'] == 'not_started'
+    assert rejected['request_id'] == prepared.payload()['request_id']
+    assert rejected['error']['code'] != 'TOOL_OPERATION_OUTCOME_UNKNOWN'
+    assert before['data'] == after['data']
+    assert tasks_before['data'] == tasks_after['data']
