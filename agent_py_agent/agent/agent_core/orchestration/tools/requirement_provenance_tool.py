@@ -103,6 +103,7 @@ def build_manage_requirement_provenance_model_spec() -> ToolModelSpec:
                     "enum": ["pass", "changes_requested"],
                     "description": "独立评审结论：pass 或 changes_requested。",
                 },
+                "review_id": {"type": "string", "description": "本需求同输入版本的独立评审引用；省略时冻结最近匹配的通过记录。"},
                 "review_scope": {
                     "type": "string",
                     "description": "评审范围说明（如架构、代码、回归单测等）。",
@@ -624,6 +625,7 @@ class RequirementProvenanceTool(BaseTool):
             accepted_input_version=accepted_ver,
             verdict=verdict,  # type: ignore[arg-type]
             observation_scope=scope,
+            review_id=str(params.get("review_id") or "").strip(),
             evidence_refs=refs,
             owner_ref=context.owner_ref,
         )

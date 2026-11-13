@@ -61,6 +61,7 @@ class RequirementProvenanceRecord:
     author_principal_id: str = ""
     created_at: str = ""
     updated_at: str = ""
+    verification_invalidated_event_id: int = field(default=0, kw_only=True)
 
     # LLM: 转字典安全拷贝，便于序列化为 JSON。
     # 函数用途: 将需求溯源记录导出为基础数据字典。
@@ -68,6 +69,8 @@ class RequirementProvenanceRecord:
         data = asdict(self)
         data["watched_paths"] = list(self.watched_paths)
         data["verification_event_ids"] = list(self.verification_event_ids)
+        data["current_verification_event_ids"] = [identity for identity in self.verification_event_ids
+                                                  if identity > self.verification_invalidated_event_id]
         return data
 
     # LLM: 从持久化字典构造不可变对象。
@@ -90,6 +93,7 @@ class RequirementProvenanceRecord:
             input_version=str(data.get("input_version") or "").strip(),
             watched_paths=watched,
             verification_event_ids=tuple(event_ids),
+            verification_invalidated_event_id=int(data.get("verification_invalidated_event_id", 0)),
             observation_scope=data.get("observation_scope", "unverified"),  # type: ignore[arg-type]
             review_status=data.get("review_status", "missing"),  # type: ignore[arg-type]
             acceptance_status=data.get("acceptance_status", "unaccepted"),  # type: ignore[arg-type]

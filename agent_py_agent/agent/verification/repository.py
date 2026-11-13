@@ -30,7 +30,7 @@ from .requirement_provenance import (
     validate_scope_upgrade,
 )
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 # 证据文件最多接受的天数；超过视为过期证据，恢复时不再采用。
 _MAX_EVIDENCE_AGE_DAYS = 30
 _MAX_EVENTS_PER_TASK_ROOT = 100
@@ -64,6 +64,12 @@ class VerificationEvidence:
 
 # LLM: 验证事实只归一个 owner SQLite；元数据读回不建库、不新增事件，任何 passed/full 都不能提升为任务完成授权。
 # 类用途: 保存实际验证和文件修改事实，为上下文与 Goal 提供精确范围的证据引用。
+def _owner_verification_high_watermark(conn, owner_ref):
+    row = conn.execute('SELECT id FROM verification_events WHERE owner_ref=? ORDER BY id DESC LIMIT 1',
+                       (owner_ref,)).fetchone()
+    return int(row[0]) if row is not None else 0
+
+
 class VerificationEvidenceRepository:
     """Persist verification facts inside exactly one owner home."""
 
@@ -249,13 +255,17 @@ class VerificationEvidenceRepository:
     def _connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path, timeout=5.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("PRAGMA journal_size_limit = 67108864")
-        conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
-        self._ensure_schema(conn)
-        return conn
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA journal_size_limit = 67108864")
+            conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
+            self._ensure_schema(conn)
+            return conn
+        except BaseException:
+            conn.close()
+            raise
 
     # LLM: 每次操作独占一条连接：提交或回滚后立刻关闭，不交给 GC。3.11 起 sqlite3 连接要等循环回收才关，
     #   WAL checkpoint 和 -wal/-shm 删除会拖到任意时刻，操作返回后证据库文件仍在变。调用方仍须持 _DB_LOCK。
@@ -363,6 +373,17 @@ class VerificationEvidenceRepository:
             ON acceptance_records(owner_ref, requirement_id, created_at DESC);
             """
         )
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_verification_events_owner_id ON verification_events(owner_ref,id)')
+        # 写事务覆盖判列/ALTER/旧边界回填；跨进程首次打开也不能重复迁移或发表半迁移。
+        if not conn.in_transaction:
+            conn.execute('BEGIN IMMEDIATE')
+        columns = {row[1] for row in conn.execute('PRAGMA table_info(requirement_links)')}
+        if 'verification_invalidated_event_id' not in columns:
+            conn.execute('ALTER TABLE requirement_links ADD COLUMN verification_invalidated_event_id INTEGER NOT NULL DEFAULT 0')
+            # 旧失效记录不能在迁移后仅靠重review洗白原测试；有效旧绑定继续原样复用。
+            conn.execute("UPDATE requirement_links SET verification_invalidated_event_id=COALESCE("
+                "(SELECT MAX(id) FROM verification_events e WHERE e.owner_ref=requirement_links.owner_ref),0) "
+                "WHERE review_status='stale' OR acceptance_status='invalidated' OR invalidation_reason<>''")
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
             (str(_SCHEMA_VERSION),),
@@ -450,6 +471,7 @@ class VerificationEvidenceRepository:
             (owner_ref,),
         ).fetchall()
 
+        watermark = _owner_verification_high_watermark(conn, owner_ref)
         invalidated: list[str] = []
         for row in rows:
             req_id = row["requirement_id"]
@@ -469,10 +491,11 @@ class VerificationEvidenceRepository:
                     SET review_status = 'stale',
                         acceptance_status = 'invalidated',
                         invalidation_reason = 'WATCHED_PATH_MODIFIED',
+                        verification_invalidated_event_id = MAX(verification_invalidated_event_id, ?),
                         updated_at = ?
                     WHERE owner_ref = ? AND requirement_id = ?
                     """,
-                    (now_text, owner_ref, req_id),
+                    (watermark, now_text, owner_ref, req_id),
                 )
                 invalidated.append(req_id)
         return invalidated
@@ -502,6 +525,7 @@ class VerificationEvidenceRepository:
                     "SELECT requirement_id, input_version FROM requirement_links WHERE owner_ref = ?",
                     (context.owner_ref,),
                 ).fetchall()
+                watermark = _owner_verification_high_watermark(conn, context.owner_ref)
                 for r in rows:
                     if r["requirement_id"] in invalidated:
                         continue
@@ -512,10 +536,11 @@ class VerificationEvidenceRepository:
                             SET review_status = 'stale',
                                 acceptance_status = 'invalidated',
                                 invalidation_reason = 'INPUT_VERSION_CHANGED',
+                                verification_invalidated_event_id = MAX(verification_invalidated_event_id, ?),
                                 updated_at = ?
                             WHERE owner_ref = ? AND requirement_id = ?
                             """,
-                            (now_text, context.owner_ref, r["requirement_id"]),
+                            (watermark, now_text, context.owner_ref, r["requirement_id"]),
                         )
                         invalidated.append(r["requirement_id"])
             conn.commit()
@@ -587,6 +612,9 @@ class VerificationEvidenceRepository:
                         )
                 author = supplied_author or existing_author
                 if is_version_changed:
+                    conn.execute('UPDATE requirement_links SET verification_invalidated_event_id='
+                        'MAX(verification_invalidated_event_id,?) WHERE owner_ref=? AND requirement_id=?',
+                        (_owner_verification_high_watermark(conn, owner_ref), owner_ref, record.requirement_id))
                     review_status = "stale"
                     acceptance_status = "invalidated"
                     invalidation_reason = "INPUT_VERSION_CHANGED"
@@ -690,6 +718,8 @@ class VerificationEvidenceRepository:
                         "UNKNOWN_VERIFICATION_EVENT_ID: all linked verification_event_ids must exist for this owner"
                     )
                 _require_matching_verification_roots(event_rows, req_row["root"])
+                if any(er['id'] <= req_row['verification_invalidated_event_id'] for er in event_rows):
+                    raise StaleInputVersionError("STALE_VERIFICATION_EVENT: event predates the requirement invalidation boundary")
                 if not all(er["status"] == "passed" for er in event_rows):
                     raise ObservationScopeHonestyError(
                         "FAILED_VERIFICATION_EVENT_LINKED: cannot promote observation_scope using failed verification events"
@@ -893,14 +923,66 @@ class VerificationEvidenceRepository:
                         f"REQUIREMENT_INVALIDATED: requirement has been invalidated ({req_row['invalidation_reason']})"
                     )
 
+            scope = record.observation_scope or req_row["observation_scope"]
+            scopes = {"unverified": 0, "module_only": 1, "focused_integration": 2, "full_candidate": 3}
+            if scope not in scopes or req_row["observation_scope"] not in scopes:
+                raise ObservationScopeHonestyError("INVALID_OBSERVATION_SCOPE: unknown structured observation scope")
+            if scopes[scope] > scopes[req_row["observation_scope"]]:
+                raise ObservationScopeHonestyError(
+                    "ACCEPTANCE_SCOPE_EXCEEDS_VERIFIED_SCOPE: link the matching verification evidence before accepting this scope")
+            review_id = str(record.review_id or "").strip()
+            review = None
+            if review_id:
+                review = conn.execute(
+                    "SELECT * FROM independent_reviews WHERE owner_ref=? AND requirement_id=? AND review_id=?",
+                    (owner_ref, record.requirement_id, review_id)).fetchone()
+                if review is None:
+                    raise ValueError("REVIEW_REFERENCE_NOT_FOUND: review_id must identify this owner's exact requirement review")
+            elif effective_verdict == "accepted":
+                # 旧调用可省略引用，但必须冻结实际匹配的通过记录，不能再保存空review_id。
+                review = conn.execute(
+                    "SELECT * FROM independent_reviews WHERE owner_ref=? AND requirement_id=? "
+                    "AND reviewed_input_version=? AND verdict='pass' ORDER BY created_at DESC,review_id DESC LIMIT 1",
+                    (owner_ref, record.requirement_id, current_ver)).fetchone()
+                if review is None:
+                    raise ValueError("REVIEW_REFERENCE_NOT_FOUND: no passing review matches the accepted input version")
+                review_id = review["review_id"]
+            if review is not None:
+                if review["reviewed_input_version"] != current_ver:
+                    raise StaleInputVersionError("STALE_REVIEW_REFERENCE: review_id belongs to another input version")
+                if effective_verdict == "accepted" and review["verdict"] != "pass":
+                    raise ObservationScopeHonestyError("REVIEW_NOT_APPROVED: acceptance requires the referenced review to pass")
+                if review["author_principal_id"] != stored_author:
+                    raise ValueError("REVIEW_AUTHOR_MISMATCH: review does not match the requirement author")
+                validate_independent_review(review["reviewer_principal_id"], stored_author)
+            if effective_verdict == "accepted" and scope != "unverified":
+                event_ids = [identity for identity in _json_int_list(req_row["verification_event_ids_json"])
+                             if identity > req_row["verification_invalidated_event_id"]]
+                missing_code = "FULL_CANDIDATE_VERIFICATION_MISSING" if scope == "full_candidate" else "VERIFICATION_MISSING"
+                if not event_ids:
+                    raise ObservationScopeHonestyError(f"{missing_code}: no current linked verification events")
+                placeholders = ','.join('?' for _ in event_ids)
+                events = conn.execute(
+                    f"SELECT id,root,status,scope FROM verification_events WHERE owner_ref=? AND id IN ({placeholders})",
+                    (owner_ref, *event_ids)).fetchall()
+                if len(events) != len(set(event_ids)):
+                    raise ObservationScopeHonestyError(f"{missing_code}: linked verification event is unavailable")
+                _require_matching_verification_roots(events, req_row["root"])
+                if not all(event['status'] == 'passed' for event in events):
+                    raise ObservationScopeHonestyError("VERIFICATION_NOT_PASSED: current linked verification must have passed")
+                if scope == "full_candidate":
+                    validate_scope_upgrade(scope,
+                        has_integrated_evidence=any(event['scope'] == 'full' for event in events),
+                        has_matching_approved_review=review is not None and review['verdict'] == 'pass')
+
             effective_record = AcceptanceRecord(
                 acceptance_id=record.acceptance_id or f"acc-{now_text}",
                 requirement_id=record.requirement_id,
                 accepted_by_principal_id=record.accepted_by_principal_id.strip(),
                 accepted_input_version=record.accepted_input_version.strip(),
                 verdict=effective_verdict,
-                observation_scope=record.observation_scope or req_row["observation_scope"],
-                review_id=record.review_id or "",
+                observation_scope=scope,
+                review_id=review_id,
                 evidence_refs=record.evidence_refs,
                 created_at=created_at,
                 owner_ref=owner_ref,
@@ -1079,6 +1161,7 @@ def _row_to_requirement_record(row: sqlite3.Row) -> RequirementProvenanceRecord:
         input_version=row["input_version"],
         watched_paths=watched,
         verification_event_ids=event_ids,
+        verification_invalidated_event_id=int(row["verification_invalidated_event_id"]),
         observation_scope=row["observation_scope"],
         review_status=row["review_status"],
         acceptance_status=row["acceptance_status"],

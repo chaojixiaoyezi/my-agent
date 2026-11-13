@@ -1392,3 +1392,183 @@ def test_reacceptance_negative_changes_requested_does_not_clear_invalidation(tmp
             ),
         )
     assert "REQUIREMENT_NOT_APPROVED" in str(exc_info.value)
+
+
+def _reviewed_requirement(tmp_path, *, scope='targeted'):
+    root = tmp_path / 'project'
+    root.mkdir()
+    repo = VerificationEvidenceRepository(tmp_path / 'owner')
+    context = VerificationContext('owner', 'thread', 'task')
+    record = RequirementProvenanceRecord('REQ', 'owner', 'task', str(root), 'v1', ('src/a.py',),
+                                       author_principal_id='author')
+    repo.bind_requirement(context, record)
+    repo.record_independent_review(context, IndependentReviewRecord('review-1', 'REQ', 'reviewer',
+        'author', 'v1', 'pass', 'independent_review'))
+    event = repo.record(context, _make_evidence(root, scope=scope))
+    repo.link_verification(context, requirement_id='REQ', event_ids=[event['id']],
+        observation_scope='full_candidate' if scope == 'full' else 'module_only')
+    return repo, context, record, event
+
+
+def test_acceptance_validates_exact_review_and_observed_scope(tmp_path):
+    repo, context, _, _ = _reviewed_requirement(tmp_path)
+    base = dict(acceptance_id='accept', requirement_id='REQ', accepted_by_principal_id='acceptor',
+                accepted_input_version='v1')
+    with pytest.raises(ValueError, match='REVIEW_REFERENCE_NOT_FOUND'):
+        repo.record_acceptance(context, AcceptanceRecord(**base, review_id='nonexistent'))
+    with pytest.raises(ObservationScopeHonestyError, match='ACCEPTANCE_SCOPE_EXCEEDS_VERIFIED_SCOPE'):
+        repo.record_acceptance(context, AcceptanceRecord(**base, review_id='review-1',
+                                                        observation_scope='full_candidate'))
+    assert repo.get_requirement('owner', 'REQ').acceptance_status == 'unaccepted'
+    # 旧省略review_id的合法调用仍可用，但保存的验收必须明确回指真实review。
+    accepted = repo.record_acceptance(context, AcceptanceRecord(**base))
+    assert accepted.review_id == 'review-1' and accepted.observation_scope == 'module_only'
+
+
+@pytest.mark.parametrize('change', ['version', 'path'])
+@pytest.mark.parametrize('scope', ['module_only', 'focused_integration', 'full_candidate'])
+def test_acceptance_invalidates_old_events_then_recovers_with_fresh_tests_and_review(tmp_path, change, scope):
+    from dataclasses import replace
+
+    event_scope = 'full' if scope == 'full_candidate' else 'targeted'
+    repo, context, record, old = _reviewed_requirement(tmp_path, scope=event_scope)
+    repo.link_verification(context, requirement_id='REQ', event_ids=[old['id']], observation_scope=scope)
+    repo.record_acceptance(context, AcceptanceRecord('accepted-v1', 'REQ', 'acceptor', 'v1'))
+    # 无关路径不失效，未变版本保持原事件与review可复用。
+    assert repo.invalidate_edited_paths(context, root=record.root, paths=['docs/unrelated.md']) == []
+    assert repo.get_requirement('owner', 'REQ').to_dict()['current_verification_event_ids'] == [old['id']]
+    repo.bind_requirement(context, record)
+    assert repo.record_acceptance(context, AcceptanceRecord('reuse', 'REQ', 'acceptor', 'v1')).review_id == 'review-1'
+    version = 'v2' if change == 'version' else 'v1'
+    if change == 'version':
+        repo.bind_requirement(context, replace(record, input_version=version))
+    else:
+        assert repo.invalidate_edited_paths(context, root=record.root, paths=['src/a.py']) == ['REQ']
+    req = repo.get_requirement('owner', 'REQ')
+    assert req.verification_invalidated_event_id >= old['id']
+    assert req.verification_event_ids == (old['id'],)  # 历史引用保留，当前有效集合另由边界派生。
+    assert req.to_dict()['current_verification_event_ids'] == []
+    repo.record_independent_review(context, IndependentReviewRecord('review-2', 'REQ', 'reviewer',
+        'author', version, 'pass', 'independent_review'))
+    with pytest.raises(StaleInputVersionError, match='STALE_VERIFICATION_EVENT'):
+        repo.link_verification(context, requirement_id='REQ', event_ids=[old['id']],
+            observation_scope=scope, input_version=version)
+    with pytest.raises(ObservationScopeHonestyError, match='VERIFICATION_MISSING'):
+        repo.record_acceptance(context, AcceptanceRecord('too-early', 'REQ', 'acceptor', version,
+                                                        observation_scope=scope))
+    fresh = repo.record(context, _make_evidence(Path(record.root), scope=event_scope))
+    repo.link_verification(context, requirement_id='REQ', event_ids=[fresh['id']],
+        observation_scope=scope, input_version=version)
+    accepted = repo.record_acceptance(context, AcceptanceRecord('fresh', 'REQ', 'acceptor', version,
+        review_id='review-2', observation_scope=scope))
+    assert accepted.review_id == 'review-2'
+    req = repo.get_requirement('owner', 'REQ')
+    assert req.acceptance_status == 'accepted'
+    assert req.to_dict()['current_verification_event_ids'] == [fresh['id']]
+    assert set(req.verification_event_ids) == {old['id'], fresh['id']}
+
+
+def test_acceptance_rejects_full_claim_without_any_linked_events(tmp_path):
+    owner = tmp_path / 'owner'
+    project = tmp_path / 'project'
+    project.mkdir()
+    repo = VerificationEvidenceRepository(owner)
+    context = VerificationContext('owner', 'thread', 'task')
+    # 即使可信旧记录曾写入full标签，也不能只凭标签和review伪造实际测试事实。
+    repo.bind_requirement(context, RequirementProvenanceRecord('REQ', 'owner', 'task', str(project),
+        'v1', (), author_principal_id='author', observation_scope='full_candidate'))
+    repo.record_independent_review(context, IndependentReviewRecord('review-1', 'REQ', 'reviewer',
+        'author', 'v1', 'pass', 'independent_review'))
+    with pytest.raises(ObservationScopeHonestyError, match='FULL_CANDIDATE_VERIFICATION_MISSING'):
+        repo.record_acceptance(context, AcceptanceRecord('claim', 'REQ', 'acceptor', 'v1',
+            observation_scope='full_candidate', review_id='review-1'))
+    assert repo.get_requirement('owner', 'REQ').acceptance_status == 'unaccepted'
+
+
+
+def test_unverified_acceptance_preserves_explicit_unverified_scope_without_test_events(tmp_path):
+    project = tmp_path / 'project'
+    project.mkdir()
+    repo = VerificationEvidenceRepository(tmp_path / 'owner')
+    context = VerificationContext('owner', 'thread', 'task')
+    repo.bind_requirement(context, RequirementProvenanceRecord('REQ', 'owner', 'task', str(project),
+        'v1', (), author_principal_id='author'))
+    repo.record_independent_review(context, IndependentReviewRecord('review-1', 'REQ', 'reviewer',
+        'author', 'v1', 'pass', 'independent_review'))
+    accepted = repo.record_acceptance(context, AcceptanceRecord('unverified', 'REQ', 'acceptor', 'v1',
+        observation_scope='unverified', review_id='review-1'))
+    assert accepted.observation_scope == 'unverified'
+    assert repo.get_requirement('owner', 'REQ').to_dict()['current_verification_event_ids'] == []
+
+def test_old_database_migration_preserves_valid_refs_and_fences_preexisting_invalidation(tmp_path):
+    import re
+    import sqlite3
+    from dataclasses import replace
+
+    repo, context, record, old = _reviewed_requirement(tmp_path, scope='full')
+    repo.bind_requirement(context, replace(record, requirement_id='UNCHANGED', watched_paths=('docs/b.md',)))
+    repo.link_verification(context, requirement_id='UNCHANGED', event_ids=[old['id']], observation_scope='module_only')
+    repo.invalidate_edited_paths(context, root=record.root, paths=['src/a.py'])
+    # 创建真实旧列布局；只移除新列，所有原历史表/事件/关联内容不改。
+    with sqlite3.connect(repo.db_path) as conn:
+        columns = [row[1] for row in conn.execute('PRAGMA table_info(requirement_links)')
+                   if row[1] != 'verification_invalidated_event_id']
+        fields = ','.join(columns)
+        rows = conn.execute('SELECT '+fields+' FROM requirement_links').fetchall()
+        schema = conn.execute("SELECT sql FROM sqlite_master WHERE name='requirement_links'").fetchone()[0]
+        schema = re.sub(r',\s*verification_invalidated_event_id INTEGER NOT NULL DEFAULT 0', '', schema)
+        conn.execute('DROP TABLE requirement_links')
+        conn.execute(schema)
+        conn.executemany('INSERT INTO requirement_links('+fields+') VALUES('+','.join('?' for _ in columns)+')', rows)
+    migrated = VerificationEvidenceRepository(tmp_path / 'owner')
+    # 不经进程内_DB_LOCK，两个原SQLite连接同时升级，模拟其它进程首次访问。
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    barrier = Barrier(2)
+    def open_legacy():
+        barrier.wait(timeout=5)
+        connection = migrated._connect()
+        try:
+            with connection:
+                return connection.execute('SELECT verification_invalidated_event_id FROM requirement_links '
+                    "WHERE requirement_id='REQ'").fetchone()[0]
+        finally:
+            connection.close()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(open_legacy) for _ in range(2)]
+        assert all(future.result(timeout=8) >= old['id'] for future in futures)
+    stale = migrated.get_requirement('owner', 'REQ')
+    unchanged = migrated.get_requirement('owner', 'UNCHANGED')
+    assert stale.verification_invalidated_event_id >= old['id']
+    assert stale.verification_event_ids == (old['id'],)
+    assert unchanged.verification_invalidated_event_id == 0
+    assert unchanged.to_dict()['current_verification_event_ids'] == [old['id']]
+    migrated.record_independent_review(context, IndependentReviewRecord('review-2', 'REQ', 'reviewer',
+        'author', 'v1', 'pass', 'independent_review'))
+    with pytest.raises(StaleInputVersionError, match='STALE_VERIFICATION_EVENT'):
+        migrated.link_verification(context, requirement_id='REQ', event_ids=[old['id']],
+            observation_scope='full_candidate')
+
+
+
+def test_verification_initialization_failure_closes_original_sqlite_connection(tmp_path, monkeypatch):
+    import sqlite3
+
+    from agent_py_agent.agent.verification import repository as module
+
+    repo = VerificationEvidenceRepository(tmp_path / 'owner')
+    opened = []
+    connect = sqlite3.connect
+    def observed_connect(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        opened.append(connection)
+        return connection
+    monkeypatch.setattr(module.sqlite3, 'connect', observed_connect)
+    def failed_schema(connection):
+        raise OSError('injected initialization failure')
+    monkeypatch.setattr(repo, '_ensure_schema', failed_schema)
+    with pytest.raises(OSError, match='initialization failure'):
+        repo._connect()
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+        opened[0].execute('SELECT 1')
