@@ -8,6 +8,7 @@ import os
 import time
 from contextlib import contextmanager
 from dataclasses import asdict, replace
+from datetime import datetime
 
 from ..common.json_io import (
     append_private_jsonl_capped,
@@ -44,6 +45,10 @@ _OVERFLOW = 'proposals_overflow'
 _INTENT = ('.proposals-intent.json',)
 # 提案意图恢复记录允许读取的最大字节数。
 _INTENT_BYTES = 65536
+# 单次自动裁剪 S3 学习提案的默认最大条数。
+_S3_PRUNE_DEFAULT_BATCH_COUNT = 50
+# 单次 S3 裁剪事务写入意图日志的最大变更条数上限。
+_S3_PRUNE_MAX_INTENT_CHANGES_COUNT = 200
 _META = frozenset({'revision','status','created_at_ns','archived_at_ns','superseded_by'})
 
 
@@ -443,3 +448,167 @@ def resolve_learning_proposal(store, proposal_id, expected_revision, *, decision
         store.check_write(store.directory/folder/_proposal_name(proposal_id),text)
         write_text_atomic_beneath(store.directory,(folder,_proposal_name(proposal_id)),text)
     return row
+
+
+# LLM: 逐个读取两区提案并在损坏文件时跳过计数，让单条坏记录不会阻断合法过期/已裁决提案的裁剪收敛。
+# 函数用途: 安全收集 S3 主区与溢出区中可解析的提案列表及损坏计数。
+def _safe_physical_proposals(store):
+    rows = []
+    corrupt_skipped = 0
+    for folder in (_ACTIVE, _OVERFLOW):
+        for name in list_names_beneath(store.directory, (folder,)):
+            if not name.startswith('learning-proposal-') or not name.endswith('.json'):
+                continue
+            try:
+                row = _read_proposal(store, folder, name[:-5])
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                corrupt_skipped += 1
+                continue
+            if row is None:
+                corrupt_skipped += 1
+                continue
+            rows.append((folder, row))
+    return rows, corrupt_skipped
+
+
+def _normalize_now_ns(now) -> int:
+    if now is None:
+        return time.time_ns()
+    if isinstance(now, bool):
+        raise ValueError('now must be a numeric timestamp or datetime')
+    if isinstance(now, datetime):
+        return int(now.timestamp() * 1_000_000_000)
+    return int(float(now) * 1_000_000_000)
+
+
+# LLM: 严格遵循 owner配额 -> .state -> .proposals 锁序，先重放中断意图日志再经 _apply_plan 删除未排队提案；
+#   stale_seconds==0 仅禁用 pending 年龄过期，已裁决/替代记录仍可清理；绝不删除仍在排队/溢出区的请求及 trial/正式资产。
+# 函数用途: 按有界批次裁剪已过期未排队或已裁决的 S3 学习提案，并清理对应 candidate 资产登记。
+def prune_learning_proposals(store, *, now=None, stale_seconds=0, batch_count=0):
+    if isinstance(stale_seconds, bool):
+        raise ValueError('stale_seconds must be non-negative')
+    stale = float(stale_seconds)
+    if stale < 0:
+        raise ValueError('stale_seconds must be non-negative')
+    if isinstance(batch_count, bool):
+        raise ValueError('batch_count must be a non-negative integer')
+    requested_batch = int(batch_count)
+    if requested_batch < 0:
+        raise ValueError('batch_count must be a non-negative integer')
+    now_ns = _normalize_now_ns(now)
+    stale_ns = int(stale * 1_000_000_000)
+    limit = min(
+        requested_batch if requested_batch > 0 else _S3_PRUNE_DEFAULT_BATCH_COUNT,
+        _S3_PRUNE_MAX_INTENT_CHANGES_COUNT,
+    )
+    if not _has_proposals(store, include_overflow=True):
+        return {
+            'pruned': 0,
+            'expired': 0,
+            'resolved': 0,
+            'assets_removed': 0,
+            'remaining': 0,
+            'has_more': False,
+            'corrupt_skipped': 0,
+        }
+    from .skill_proposals import _prune_candidate_assets
+
+    with store.state_lock() as admission, locked_json_path(store.directory / '.proposals'):
+        valid_rows, corrupt_skipped = _safe_physical_proposals(store)
+        pending_intent = _read_intent(store)
+        recovered_deleted_ids = set()
+        if pending_intent is not None:
+            recovered_deleted_ids = {
+                entry[1] for entry in pending_intent['changes'] if entry[3] is None
+            }
+            projected = _intent_projection(valid_rows, pending_intent)
+            if len({row['proposal_id'] for _, row in projected}) != len(projected):
+                raise ValueError('学习候选重复或已损坏')
+            physical = {
+                (folder, _proposal_name(row['proposal_id'])): row
+                for folder, row in valid_rows
+            }
+            final = {
+                (folder, _proposal_name(row['proposal_id'])): row
+                for folder, row in projected
+            }
+            changes = {
+                parts: json.dumps(row, ensure_ascii=False)
+                for parts, row in final.items()
+                if physical.get(parts) != row
+            }
+            changes.update(dict.fromkeys(physical.keys() - final.keys()))
+            _check_changes(store, admission, changes)
+            _write_changes(store, changes)
+            unlink_file_beneath(store.directory, _INTENT)
+            rows = projected
+        else:
+            rows = _legacy_projection(valid_rows)
+        queued_keys = {
+            path.stem.partition('-')[2]
+            for path in (*store._request_paths('requests'), *store.overflow_requests())
+        }
+        eligible = []
+        for folder, row in rows:
+            request = row.get('request')
+            req_key = str(request.get('request_key') or '') if isinstance(request, dict) else ''
+            if req_key and req_key in queued_keys:
+                continue
+            status = row.get('status')
+            if status == 'pending':
+                if stale_ns <= 0:
+                    continue
+                try:
+                    created_ns = _proposal_time(store, folder, row)
+                except (OSError, ValueError, TypeError):
+                    corrupt_skipped += 1
+                    continue
+                if now_ns - created_ns < stale_ns:
+                    continue
+                eligible.append((created_ns, folder, row, 'expired'))
+            else:
+                try:
+                    sort_ns = _proposal_time(store, folder, row)
+                except (OSError, ValueError, TypeError):
+                    sort_ns = 0
+                eligible.append((sort_ns, folder, row, 'resolved'))
+        eligible.sort(key=lambda item: (item[0], item[2]['proposal_id']))
+        batch = eligible[:limit]
+        remaining = max(0, len(eligible) - len(batch))
+        if batch:
+            delete_keys = {(folder, row['proposal_id']) for _, folder, row, _ in batch}
+            after = [
+                (folder, row)
+                for folder, row in rows
+                if (folder, row['proposal_id']) not in delete_keys
+            ]
+            _apply_plan(store, rows, after, admission)
+        else:
+            after = rows
+        surviving_ids = {row['proposal_id'] for _, row in after}
+        deleted_ids = (
+            {row['proposal_id'] for _, _, row, _ in batch}
+            | (recovered_deleted_ids - surviving_ids)
+        )
+        assets_removed = 0
+        if deleted_ids and store.registry_path.exists():
+            registry = store.load_registry()
+            cleaned_assets = _prune_candidate_assets(
+                registry.assets,
+                origin='S3',
+                deleted_proposal_ids=deleted_ids,
+            )
+            if cleaned_assets != registry.assets:
+                assets_removed = max(0, len(registry.assets) - len(cleaned_assets))
+                store.save_registry(replace(registry, assets=cleaned_assets))
+    expired_count = sum(1 for _, _, _, reason in batch if reason == 'expired')
+    resolved_count = sum(1 for _, _, _, reason in batch if reason == 'resolved')
+    return {
+        'pruned': len(batch),
+        'expired': expired_count,
+        'resolved': resolved_count,
+        'assets_removed': assets_removed,
+        'remaining': remaining,
+        'has_more': remaining > 0,
+        'corrupt_skipped': corrupt_skipped,
+    }

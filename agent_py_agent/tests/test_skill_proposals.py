@@ -86,18 +86,21 @@ def _staging_left(ctx: SimpleNamespace) -> list[Path]:
     return list(ctx.home.owner_skill_proposals_dir.glob(".staging-*"))
 
 
-def test_self_learning_switch_defaults_off_in_yaml_dataclass_and_normalizer() -> None:
+def test_self_learning_switch_defaults_on_in_yaml_dataclass_and_normalizer() -> None:
     shipped = load_config(Path(__file__).parents[1] / "config" / "agent_config.yaml")
     normalized, warnings = normalize_agent_config({"enable_self_learning": "false"})
 
-    assert AgentConfig().enable_self_learning is False
-    assert shipped.enable_self_learning is False
+    assert AgentConfig().enable_self_learning is True
+    assert shipped.enable_self_learning is True
     assert normalized["enable_self_learning"] is False
     assert warnings == []
 
 
-def test_default_off_agent_has_no_service_and_creates_no_directory(tmp_path: Path) -> None:
-    agent = SimpleAgent(AgentConfig(my_agent_home=str(tmp_path / "home"), prompt_files=[]), tmp_path / "workspace")
+def test_explicit_off_agent_has_no_service_and_creates_no_directory(tmp_path: Path) -> None:
+    agent = SimpleAgent(
+        AgentConfig(my_agent_home=str(tmp_path / "home"), prompt_files=[], enable_self_learning=False),
+        tmp_path / "workspace",
+    )
 
     assert agent.subagents.skill_proposals is None
     assert agent.home_paths.owner_skill_proposals_dir == agent.home_paths.owner_data_dir / "skill_proposals"
@@ -408,15 +411,21 @@ def test_invalid_missing_and_corrupt_proposals_return_structured_codes(tmp_path:
     assert not _target(ctx).exists()
 
 
-class _ExplodingProposals:
-    def propose_from_candidates(self, candidates):
-        raise RuntimeError("proposal store unavailable")
+PROCEDURAL_LESSON = "1. 修改共享状态前先读取当前版本。\n2. 再用精确版本做比较交换写入。"
 
 
-def _run_with(ctx: SimpleNamespace, proposals: object) -> tuple:
+def _run_with(
+    ctx: SimpleNamespace,
+    proposals: object,
+    *,
+    lesson: str = LESSON,
+    enqueue_callback: object | None = None,
+) -> tuple:
     ctx.manager.skill_proposals = proposals
+    if enqueue_callback is not None:
+        ctx.manager.enqueue_lesson_candidates = enqueue_callback
     task = ctx.manager.create_run(goal=GOAL, thought="记录经验", plan=["整理"])
-    structured = SubAgentParsedOutput(found=True, ok=True, status="DONE", summary="已完成", lessons=[LESSON])
+    structured = SubAgentParsedOutput(found=True, ok=True, status="DONE", summary="已完成", lessons=[lesson])
     result = ctx.manager.runner_result.record_runner_result(
         RecordRunnerResultParams(
             run_id=task.id,
@@ -435,25 +444,53 @@ def _run_with(ctx: SimpleNamespace, proposals: object) -> tuple:
 def test_proposal_failure_never_affects_runner_result(tmp_path: Path) -> None:
     ctx = _runtime(tmp_path)
 
-    result, saved, work_log = _run_with(ctx, _ExplodingProposals())
+    def _exploding_enqueue(_candidates):
+        raise RuntimeError("carrier queue unavailable")
+
+    result, saved, work_log = _run_with(
+        ctx,
+        ctx.service,
+        lesson=PROCEDURAL_LESSON,
+        enqueue_callback=_exploding_enqueue,
+    )
 
     assert result.ok is True and saved.status == "DONE"
     assert [item.candidate_type for item in ctx.candidates.list()] == ["lesson"]
-    assert "skill_proposals_error=RuntimeError" in work_log
+    assert "skill_carrier_error=RuntimeError" in work_log
     assert not ctx.home.owner_skill_proposals_dir.exists()
 
 
 def test_runner_result_keeps_proposal_pending_until_user_confirmation(tmp_path: Path) -> None:
-    # 最新确认边界：runner只能生成候选，用户确认准确revision后才安装。
+    # 最新 R-7 / V2-4 边界：自主 runner 流程绝不生成 S1 待确认提案；程序型候选只走宿主自动入队回调，
+    # 而显式调用 S1 SkillProposalService 时仍须经用户按精确 revision 确认后才会安装。
     ctx = _runtime(tmp_path)
+    enqueued_ids: list[str] = []
 
-    result, saved, work_log = _run_with(ctx, ctx.service)
-    [proposal] = ctx.service.list()
+    def _enqueue(candidates):
+        queued = []
+        for item in candidates:
+            enqueued_ids.append(item.candidate_id)
+            queued.append({"candidate_id": item.candidate_id, "request_key": "deadbeef01234567", "status": "queued"})
+        return {"queued": queued, "refused": [], "deferred": []}
 
-    assert result.ok is True and "skill_proposals=1 skill_proposals_committed=0" in work_log
-    assert (proposal.status, proposal.source.run_ids) == ("pending_confirmation", (saved.id,))
+    result, saved, work_log = _run_with(
+        ctx,
+        ctx.service,
+        lesson=PROCEDURAL_LESSON,
+        enqueue_callback=_enqueue,
+    )
+
+    assert result.ok is True and saved.status == "DONE"
+    assert len(enqueued_ids) == 1
+    assert "skill_carrier_queued=1" in work_log
+    assert "skill_proposals" not in work_log
+    assert not ctx.home.owner_skill_proposals_dir.exists()
+
+    # 直接显式 S1 提案接口仍保持 pending_confirmation，直到用户按准确 revision 确认。
+    [proposal] = ctx.service.propose_from_candidates(_record_lesson(ctx))
+    assert proposal.status == "pending_confirmation"
     assert not proposal.receipt
-    assert ctx.service.confirm(proposal.proposal_id,proposal.revision).ok
+    assert ctx.service.confirm(proposal.proposal_id, proposal.revision).ok
     proposal = ctx.service.show(proposal.proposal_id)
     assert proposal.receipt["confirmed_by"] == "user" and proposal.receipt["guard_verdict"] == "safe"
     assert (ctx.home.owner_home_dir / "skills" / proposal.target.skill_name / "SKILL.md").is_file()
@@ -467,6 +504,7 @@ def test_runner_result_without_service_records_candidate_only(tmp_path: Path) ->
     assert result.ok is True
     assert [item.candidate_type for item in ctx.candidates.list()] == ["lesson"]
     assert "skill_proposals" not in work_log
+    assert "skill_carrier" not in work_log
     assert not ctx.home.owner_skill_proposals_dir.exists()
 
 
@@ -494,7 +532,7 @@ def test_cli_list_show_confirm_reject_round_trip(tmp_path: Path, capsys) -> None
     pending = _cli(capsys, config_path, "list", "--status", "pending_confirmation")
     again = _cli(capsys, config_path, "confirm", first.proposal_id, "--expected-revision", "2")
 
-    assert listed[0] == 0 and listed[1]["self_learning_enabled"] is False
+    assert listed[0] == 0 and listed[1]["self_learning_enabled"] is True
     assert {item["proposal_id"] for item in listed[1]["proposals"]} == {first.proposal_id, second.proposal_id}
     assert shown[0] == 0 and shown[1]["proposal"]["draft"]["sha256"] == first.draft.sha256
     assert confirmed[0] == 0 and confirmed[1]["code"] == "SKILL_PROPOSAL_COMMITTED"

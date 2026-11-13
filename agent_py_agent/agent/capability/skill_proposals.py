@@ -13,12 +13,13 @@ import os
 import re
 import shutil
 import tempfile
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from ..common.json_io import (
     locked_json_path,
@@ -26,7 +27,7 @@ from ..common.json_io import (
     write_json_file_atomic_unlocked,
 )
 from ..contracts.gates.skill_guard import SkillScanResult, install_decision, scan_skill
-from ..memory_store.candidate_models import MemoryCandidate
+from ..memory_store.candidate_models import _MAX_CONTENT_CHARS, MemoryCandidate
 from ..memory_store.candidates import CandidateService, CandidateStoreCorruptError
 from ..user_space.owner_quota import (
     OwnerQuotaChange,
@@ -79,6 +80,16 @@ _DESCRIPTION_PREFIX = "子代理经验："
 _DESCRIPTION_EXCERPT_CHARS = 160
 # 适用场景摘录字符数。
 _SCENARIO_EXCERPT_CHARS = 240
+# 单次自动裁剪 S1 失效待确认提案的默认最大条数。
+_S1_PRUNE_DEFAULT_BATCH_COUNT = 50
+# 单次 S1 裁剪扫描在启用游标断点续扫前的最大检查文件数。
+_S1_PRUNE_MAX_INSPECT_COUNT = 256
+_PRUNE_CURSOR_NAME = ".prune-cursor.json"
+_PRUNABLE_SOURCE_CODES = frozenset({
+    CODE_SOURCE_MISSING,
+    CODE_SOURCE_CHANGED,
+    CODE_SOURCE_REDACTED,
+})
 _BODY_TEMPLATE = """# 子代理经验 {skill_name}
 
 本 Skill 由宿主按固定模板从一条子代理经验候选生成，经用户确认后安装；宿主没有调用模型改写内容。
@@ -272,6 +283,90 @@ class SkillProposalService:
     def reject(self, proposal_id: str, expected_revision: int) -> SkillProposalOutcome:
         return self._resolve(proposal_id, expected_revision, _reject_locked)
 
+    # LLM: 仅清理仍处于待确认且来源明确缺失/变更/脱敏的 S1 提案；已确认/已拒绝标记与来源停用/不可读一律保留；
+    #   必须先完全释放 S1 目录/配额锁再进入 SkillLearningStore.state_lock() 清理关联 candidate 资产，严禁跨锁嵌套。
+    # 函数用途: 按有界批次清理来源已永久失效的待确认 S1 提案及对应 candidate 资产登记。
+    def prune_orphaned(self, *, batch_count: int = 0) -> int:
+        if isinstance(batch_count, bool):
+            raise ValueError("batch_count must be a non-negative integer")
+        requested = int(batch_count)
+        if requested < 0:
+            raise ValueError("batch_count must be a non-negative integer")
+        if not self.directory.is_dir():
+            return 0
+        limit = requested if requested > 0 else _S1_PRUNE_DEFAULT_BATCH_COUNT
+        inspect_budget = max(limit * 16, _S1_PRUNE_MAX_INSPECT_COUNT)
+        pruned_ids: list[str] = []
+        with self._locked():
+            names = sorted(
+                entry.name
+                for entry in os.scandir(self.directory)
+                if not entry.name.startswith(".")
+                and entry.name.endswith(".json")
+                and entry.is_file(follow_symlinks=False)
+            )
+            cursor_path = self.directory / _PRUNE_CURSOR_NAME
+            if not names:
+                cursor_path.unlink(missing_ok=True)
+                return 0
+            cursor_name = _read_prune_cursor(cursor_path)
+            ordered_names = (
+                [name for name in names if name > cursor_name]
+                + [name for name in names if name <= cursor_name]
+                if cursor_name
+                else names
+            )
+            candidates = CandidateService(self.candidates_path)
+            inspected = 0
+            last_inspected = ""
+            completed_full_pass = True
+            for name in ordered_names:
+                if len(pruned_ids) >= limit or inspected >= inspect_budget:
+                    completed_full_pass = False
+                    break
+                inspected += 1
+                last_inspected = name
+                path = self.directory / name
+                try:
+                    proposal = _read_proposal(path)
+                except (SkillProposalError, OSError):
+                    # 损坏或不可读提案文件不能阻塞其余待清理提案前进。
+                    continue
+                if proposal.status != PROPOSAL_PENDING:
+                    continue
+                try:
+                    _verify_source(candidates, proposal.source)
+                except SkillProposalError as exc:
+                    if exc.code not in _PRUNABLE_SOURCE_CODES:
+                        continue
+                else:
+                    continue
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    continue
+                pruned_ids.append(proposal.proposal_id)
+            if completed_full_pass:
+                cursor_path.unlink(missing_ok=True)
+            elif inspected >= inspect_budget and last_inspected:
+                _write_prune_cursor(cursor_path, last_inspected)
+        if pruned_ids:
+            from .skill_learning_store import SkillLearningStore
+
+            learning_store = SkillLearningStore.for_home(self.home_paths)
+            if learning_store.registry_path.exists():
+                deleted_ids = set(pruned_ids)
+                with learning_store.state_lock():
+                    registry = learning_store.load_registry()
+                    cleaned_assets = _prune_candidate_assets(
+                        registry.assets,
+                        origin="S1",
+                        deleted_proposal_ids=deleted_ids,
+                    )
+                    if cleaned_assets != registry.assets:
+                        learning_store.save_registry(replace(registry, assets=cleaned_assets))
+        return len(pruned_ids)
+
     # LLM: 确认/拒绝共用的锁内骨架：重读提案、要求 pending 与 revision 相等后才执行动作；任何拒绝都转成结构化结果。
     # 函数用途: 在 owner 锁内执行一次确认或拒绝，并把失败统一包装为结果码。
     def _resolve(
@@ -372,6 +467,102 @@ def lesson_candidate_eligible(candidate: object) -> bool:
         and bool(str(candidate.content or "").strip())
         and bool(_SHA256_RE.fullmatch(str(candidate.content_hash or "")))
     )
+
+
+# LLM: 纯有界分类器：直接校验原始 candidate.content 与真实来源 scope 元数据，绝不把 render_lesson_draft() 模板头
+#   与触发节计入判断，也不赋予入队或发布权限；格式异常、超长或缺少 scope 一律收口为普通 lesson。
+# 函数用途: 将一条 lesson 候选互斥判定为普通记忆 ('lesson') 或自动技能 ('skill')。
+def lesson_carrier(candidate: MemoryCandidate) -> Literal["lesson", "skill"]:
+    if not isinstance(candidate, MemoryCandidate):
+        return "lesson"
+    if candidate.candidate_type != "lesson":
+        return "lesson"
+    raw_content = candidate.content
+    scope = candidate.scope
+    if not isinstance(raw_content, str) or not isinstance(scope, Mapping):
+        return "lesson"
+    scope_type = scope.get("scope_type", "")
+    scope_key = scope.get("scope_key", "")
+    applies_when = scope.get("applies_when", "")
+    if not isinstance(scope_type, str) or not scope_type.strip():
+        return "lesson"
+    if not isinstance(scope_key, str) or not scope_key.strip():
+        return "lesson"
+    if applies_when is not None and not isinstance(applies_when, str):
+        return "lesson"
+    body = _normalized_newlines(raw_content).strip()
+    if not body or len(raw_content) > _MAX_CONTENT_CHARS or len(body) > _MAX_CONTENT_CHARS:
+        return "lesson"
+    when_text = _one_line(applies_when) if isinstance(applies_when, str) else ""
+    if when_text and len(when_text) > _MAX_CONTENT_CHARS:
+        return "lesson"
+    from .skill_learning_validation import _validate_skill_procedure
+
+    try:
+        _validate_skill_procedure({"body": body, "when_to_use": when_text})
+    except (TypeError, ValueError):
+        return "lesson"
+    return "skill"
+
+
+# LLM: S1 与 S3 共用此精确 candidate 资产清理函数；仅移除或裁剪 state=='candidate' 且 provenance 关联已删提案的行，
+#   trial / active / established 等已采纳资产及无关来源记录保持原样。
+# 函数用途: 过滤 registry.assets 中与指定已删提案精确绑定的 candidate 记录。
+def _prune_candidate_assets(
+    assets: Mapping[str, object],
+    *,
+    origin: str,
+    deleted_proposal_ids: set[str],
+) -> dict[str, object]:
+    if not deleted_proposal_ids or not assets:
+        return dict(assets)
+    updated: dict[str, object] = {}
+    for identity, raw_row in assets.items():
+        if not isinstance(raw_row, dict) or raw_row.get("state") != "candidate":
+            updated[identity] = raw_row
+            continue
+        provenance = raw_row.get("provenance")
+        if isinstance(provenance, list):
+            kept_refs = [
+                ref
+                for ref in provenance
+                if not (
+                    isinstance(ref, dict)
+                    and ref.get("origin") == origin
+                    and ref.get("proposal_id") in deleted_proposal_ids
+                )
+            ]
+            if len(kept_refs) == len(provenance):
+                updated[identity] = raw_row
+            elif kept_refs:
+                updated[identity] = {**raw_row, "provenance": kept_refs}
+            continue
+        if raw_row.get("origin") == origin and raw_row.get("proposal_id") in deleted_proposal_ids:
+            continue
+        updated[identity] = raw_row
+    return updated
+
+
+def _read_prune_cursor(path: Path) -> str:
+    if not path.is_file() or path.is_symlink():
+        return ""
+    report = read_json_object_report(path, context="skill_proposals.prune_cursor")
+    if report.load_error is not None or not isinstance(report.payload, dict):
+        return ""
+    value = report.payload.get("cursor")
+    return value if isinstance(value, str) else ""
+
+
+def _write_prune_cursor(path: Path, cursor_name: str) -> None:
+    payload = {"cursor": cursor_name}
+    try:
+        admission = _PROPOSAL_QUOTA.get()
+        if admission is not None:
+            encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+            admission.check([OwnerQuotaChange(path, len(encoded))])
+        write_json_file_atomic_unlocked(path, payload)
+    except (OSError, OwnerQuotaExceeded, OwnerQuotaUnavailable):
+        pass
 
 
 # LLM: proposal_id 由 candidate_id 与正文 hash 确定（候选身份或正文变化都得到新 ID），目标名只取正文 hash 前 12 位，
@@ -768,6 +959,7 @@ __all__ = [
     "SkillProposalTarget",
     "build_lesson_proposal",
     "lesson_candidate_eligible",
+    "lesson_carrier",
     "lesson_skill_name",
     "render_lesson_draft",
     "render_skill_markdown",

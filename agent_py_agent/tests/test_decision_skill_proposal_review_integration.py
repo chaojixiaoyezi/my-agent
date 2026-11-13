@@ -92,10 +92,12 @@ def cli(capsys, config_path: Path, extra: tuple[str, ...] = ()) -> tuple[int, st
 # 函数用途: 生成 S1 版本 list（全部待确认、开关关闭）的 --json 与中文输出。
 def s1_outputs(context) -> tuple[str, str]:
     proposals = context.service.list()
+    enabled = bool(getattr(context, "self_learning_enabled", False))
     payload = {"command": "skills proposals list", "ok": True, "owner_id": context.owner_id,
-               "proposal_dir": str(context.service.directory), "self_learning_enabled": False, "status_filter": "",
+               "proposal_dir": str(context.service.directory), "self_learning_enabled": enabled, "status_filter": "",
                "count": len(proposals), "proposals": [item.to_record() for item in proposals]}
-    human = [f"Skill 提案（owner {context.owner_id}，共 {len(proposals)} 条；自学习开关：关闭）"]
+    switch = "开启" if enabled else "关闭"
+    human = [f"Skill 提案（owner {context.owner_id}，共 {len(proposals)} 条；自学习开关：{switch}）"]
     for item in proposals:
         human.append(f"- {item.proposal_id} [待确认] 版本 {item.revision} 目标 {item.target.skill_name} "
                      f"来源任务 {'、'.join(item.source.task_ids)}")
