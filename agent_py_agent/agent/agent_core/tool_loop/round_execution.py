@@ -16,6 +16,9 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import ClassVar, Literal
 
+from .tool_wait_input import await_tool_futures, flush_resume_inputs, submit_wait_item
+from .tool_wait_input import enabled as wait_input_reply_enabled
+
 logger = logging.getLogger(__name__)
 
 _APPROVAL_REJECTION_MESSAGES: Mapping[str, str] = {
@@ -307,6 +310,7 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
         handled_count=progress.handled_count,
         reason=progress.deferred_reason,
     )
+    flush_resume_inputs(request.params)
     _enforce_turn_context_budget(request.params, before_context_count)
     refresh_fn = getattr(request.agent, "refresh_current_skill_snapshot_if_needed", None)
     if callable(refresh_fn):
@@ -969,13 +973,19 @@ def _execute_parallel_segment(
     callback = (lambda: cancel("interrupted")) if callable(cancel) else (lambda: None)
     with register_interrupt_callback(callback):
         if scheduler is not None:
+            if wait_input_reply_enabled(request):
+                futures = [_submit_round_item(request, scheduler, item) for item in items]
+                return await_tool_futures(request, futures)
             return execute_work_items(items, partial(_submit_round_item, request, scheduler))
+        if wait_input_reply_enabled(request):
+            return await_tool_futures(request, [submit_wait_item(item) for item in items])
         with ThreadPoolExecutor(
             max_workers=len(items),
             thread_name_prefix="my-agent-tool",
         ) as pool:
             futures = [pool.submit(item.captured_context.run, item.run) for item in items]
-            return [future.result() for future in futures]
+            return (await_tool_futures(request, futures) if wait_input_reply_enabled(request)
+                    else [future.result() for future in futures])
 
 
 # LLM: 优先读工具ConcurrencyPolicy声明（支持ToolRuntimeSnapshot.runtime及映射表），同时兼容内置轻量控制集；wait、退休名、畸形动作和模型priority不获额外槽。
@@ -1101,18 +1111,25 @@ def _execute_parallel_call(
 # 函数用途: 为一条原执行请求安装可选owner额度和始终复用的独立SQLite作用域。
 def _execute_owned_serial(request, work, *, emit_started=False):
     scheduler = scheduler_for_agent(request.agent)
-    context = _capture_parallel_thread_context(request.agent) if scheduler is not None else None
+    waiting = wait_input_reply_enabled(request)
+    context = _capture_parallel_thread_context(request.agent) if scheduler is not None or waiting else None
     promoted = []
-    invoke = partial(_owned_serial_call, request, work, context, emit_started, scheduler is not None, promoted)
+    invoke = partial(_owned_serial_call, request, work, context, emit_started, scheduler is not None or waiting, promoted)
     item = ToolWorkItem(work.call.call_id, invoke, getattr(request.params, "cancellation_token", None),
                        lambda: _synthetic_execution(work.call, _interrupted_result(work.call), "CANCELLED"), True,
                        priority='control' if _is_control_lane_call(work.call, _request_tool_snapshot(request)) else 'normal')
     if scheduler is None:
-        return item.run()
+        if not waiting:
+            return item.run()
+        execution = await_tool_futures(request, [submit_wait_item(item)])[0]
+        if promoted and promoted[-1] is not None:
+            request.agent._current_run_task_workspace = promoted[-1]
+        return execution
     token = getattr(request.params, "cancellation_token", None)
     cancel = getattr(token, "cancel", None)
     with register_interrupt_callback(lambda: cancel("interrupted") if callable(cancel) else None):
-        execution = _submit_round_item(request, scheduler, item).result()
+        future = _submit_round_item(request, scheduler, item)
+        execution = await_tool_futures(request, [future])[0] if waiting else future.result()
     if promoted and promoted[-1] is not None:
         request.agent._current_run_task_workspace = promoted[-1]
     return execution

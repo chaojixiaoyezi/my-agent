@@ -195,14 +195,17 @@ def _subagent_workspace_is_empty(manager):
 
 # LLM: 原opaque运输source在实际安全点drain；短锁忙在事务外同deadline重试，不重发模型，typed/unknown不吞；仅真实消费轮追加，随后仍原reserve/submit/ACK，递归父级不领取根邮箱。
 # 函数用途: 给下一模型轮带入新消息与孩子结果，避免孙代理完成时仍按旧快照收尾。
-def inject_pending_turn_input(agent: object, params: object, *, now: float | None = None) -> bool:
+def inject_pending_turn_input(agent: object, params: object, *, now: float | None = None, user_input_only: bool = False) -> bool:
     """Inject user steering and structured task events at one model safe point."""
     pending_source = getattr(params, "pending_turn_input_source", None)
     if pending_source is not None and getattr(params, "consume_pending_turn_input", True) is not False:
         from ...conversation.input_resource_retry import run_input_safe_point
 
         run_input_safe_point(pending_source, agent, 'drain', params)
-    guidance_injected = inject_pending_guidance(agent, params, now=now)
+    guidance_injected = (inject_pending_guidance(agent, params, now=now, user_input_only=True)
+        if user_input_only else inject_pending_guidance(agent, params, now=now))
+    if user_input_only:
+        return guidance_injected
     if _has_unseen_direct_child_result(agent, params):
         guidance_injected = refresh_runtime_direct_children_snapshot(agent, params) or guidance_injected
     events = _task_events_not_yet_injected(params, _pending_task_events(agent, params))
@@ -222,7 +225,7 @@ def inject_pending_turn_input(agent: object, params: object, *, now: float | Non
 
 # LLM: 先probe原运输再原guidance/直属结果，普通忙在门外有界等待；unknown不能被旧best-effort读口吞成False；无source原Count0零新增IO，不消费根或兄弟邮箱。
 # 函数用途: 孩子在模型响应期间结束时，让父级先吸收结果，避免旧响应漏掉交接。
-def has_pending_turn_input(agent: object, params: object) -> bool:
+def has_pending_turn_input(agent: object, params: object, *, user_input_only: bool = False) -> bool:
     """Return whether the active turn has newer user or runtime input."""
     pending_source = getattr(params, "pending_turn_input_source", None)
     transport_pending = False
@@ -230,6 +233,8 @@ def has_pending_turn_input(agent: object, params: object) -> bool:
         from ...conversation.input_resource_retry import run_input_safe_point
 
         transport_pending = run_input_safe_point(pending_source, agent, 'probe', params)
+    if user_input_only:
+        return transport_pending or has_pending_request_guidance(agent, params, user_input_only=True)
     return transport_pending or has_pending_request_guidance(agent, params) or _has_unseen_direct_child_result(agent, params) or bool(
         _task_events_not_yet_injected(params, _pending_task_events(agent, params))
     )
@@ -671,13 +676,16 @@ def _pending_guidance_for_current_agent(store, params, *, limit):
 
 # LLM: Reserve input only from the current agent's authorized mailboxes under its exact turn guard; pass trusted current owner for canonical plugin source refusal before prompt mutation.
 # 函数用途: 在模型安全点认领并注入本代理消息，不消费父级或兄弟消息。
-def inject_pending_guidance(agent: object, params: object, *, now: float | None = None) -> bool:
+def inject_pending_guidance(agent: object, params: object, *, now: float | None = None, user_input_only: bool = False) -> bool:
     store = getattr(agent, "conversation_store", None)
     if store is None:
         return False
     request_id = str(getattr(params, "request_id", "") or "").strip()
     entries, task_id, thread_lookup_error = _pending_guidance_for_current_agent(store, params, limit=20)
     entries = guidance_not_yet_injected(params, _dedupe_guidance(entries))
+    if user_input_only:
+        from ...conversation.guidance_reply_obligations import direct_user_input
+        entries = [entry for entry in entries if direct_user_input(entry)]
     warning = _render_guidance_lookup_error(thread_lookup_error)
     turn_id = request_id or task_id
     tool_context = getattr(params, "tool_context", None)
@@ -761,15 +769,18 @@ def _inject_guidance_user_turn(params, entry, tool_context):
 
 # LLM: 插话持久操作经 guidance 领域组件；Pending/claim共用精确邮箱、回合和插件来源拒绝；先过滤全体原候选，避免最新插件项掩盖更早native项。
 # 函数用途: 检查本代理的新消息；子代理插话也能阻止旧响应直接结束，父级插话不能打断子代理。
-def has_pending_request_guidance(agent: object, params: object) -> bool:
+def has_pending_request_guidance(agent: object, params: object, *, user_input_only: bool = False) -> bool:
     store = getattr(agent, "conversation_store", None)
     request_id = str(getattr(params, "request_id", "") or "").strip()
     task_id = durable_task_id(params)
     if store is None or not (request_id or task_id):
         return False
     try:
-        entries, task_id, _warning = _pending_guidance_for_current_agent(store, params, limit=0)
+        entries, task_id, _warning = _pending_guidance_for_current_agent(store, params, limit=20 if user_input_only else 0)
         candidates = guidance_not_yet_injected(params, _dedupe_guidance(entries))
+        if user_input_only:
+            from ...conversation.guidance_reply_obligations import direct_user_input
+            candidates = [entry for entry in candidates if direct_user_input(entry)]
         turn_id = request_id or task_id
         owning_task_id = session_task_id_for_params(params)
         return any(

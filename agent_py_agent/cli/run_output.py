@@ -54,7 +54,8 @@ class _LocalRunChunkWriter:
         for event in events:
             if event["kind"] == "assistant_commentary":
                 self.spinner.stop()
-                self._commentary.append(event["text"])
+                if not payload.get("canonical_message_id"):
+                    self._commentary.append(event["text"])
                 sys.stdout.write(event["text"] + "\n")
                 sys.stdout.flush()
 

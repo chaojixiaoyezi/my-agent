@@ -1,6 +1,13 @@
 ## 2026-11-12 连续交互复核返工
 
 ```text
+agent_py_agent/agent/agent_core/tool_loop/
+|-- tool_wait_input.py                       # 工具等待期间的本人输入与原通道答复
+agent_py_agent/tests/
+|-- test_tool_wait_input_reply.py            # 等待、输入确认、媒体、失败与显示去重
+```
+
+```text
 agent_py_agent/agent/conversation/
 |-- background_execution_view.py             # 会话与任务共用的准确活动执行证明
 agent_py_agent/tests/

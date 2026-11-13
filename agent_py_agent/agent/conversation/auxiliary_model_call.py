@@ -95,7 +95,9 @@ class AuxiliaryModelCallRequest:
     run_id: str = ""
     task_id: str = ""
     thread_id: str = ""
+    attempt_id: str = field(default="", kw_only=True)
     purpose: str = "auxiliary"
+    on_submitted: Callable[[str], None] | None = field(default=None, repr=False, compare=False, kw_only=True)
     response_schema: dict[str, Any] | None = None
     # 服务端压缩：True 时后端在历史末尾放压缩触发项而不是压缩指令（prompt 必须没有动态尾巴）；见 compact_remote。
     compaction_trigger: bool = False
@@ -252,6 +254,7 @@ def _start_auxiliary_call(
                 "logical_call_id": logical_call_id,
                 "physical_attempt": 1,
                 "task_id": str(request.task_id or ""),
+                "attempt_id": str(request.attempt_id or ""),
                 "thread_id": str(request.thread_id or ""),
                 "purpose": _purpose(request.purpose),
                 "auxiliary": True,
@@ -372,6 +375,8 @@ def _invoke_auxiliary_generate(
             require_managed_owner_generation("auxiliary_generation")
             llm_inflight(1)
             try:
+                if request.on_submitted is not None:
+                    request.on_submitted(call_id)
                 return _call_backend(generate, request, on_chunk, timeouts=call.timeouts,
                                      budget_state=call.token_budget_state)
             finally:

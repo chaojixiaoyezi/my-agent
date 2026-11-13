@@ -2484,7 +2484,7 @@ class TuiTurnEventAdapter:
             self._committed_model_calls.add(call_id)
             self._model_candidate_text = ""
             for event in events:
-                if event["kind"] == "assistant_commentary":
+                if event["kind"] == "assistant_commentary" and not payload.get("canonical_message_id"):
                     self._committed_commentary.append(event["text"])
                 self.on_gateway_event(event)
 
