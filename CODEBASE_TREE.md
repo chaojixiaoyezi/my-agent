@@ -40,6 +40,7 @@ agent_py_agent/agent/workflows/reference_index.py           # 反向引用派生
 agent_py_agent/tests/test_workflow_reference_index.py        # 逐页恢复、坏记录跳过及跨用户扫描并发
 agent_py_agent/tests/test_business_usage_bounded_paging.py   # 使用记录来源分页、跨页范围及游标失效
 agent_py_agent/tests/test_business_command_log_sources.py  # 原操作结果引用、命令双流和日志覆盖往返
+agent_py_agent/tests/test_business_unassigned_controller_input.py # 未定空间输入总控受理和明确空间冻结
 docs/reviews/CONTINUITY_R3_REVIEW_20261112.md                # Opus v2 复核后的英文说明
 ```
 
