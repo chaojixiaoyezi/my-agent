@@ -2478,6 +2478,8 @@ def _cursor_payload(cursors: dict[str, str], audit_event_id: str, relevant_threa
 # 不原地重试;新增错误码须同步 curator_models.curator_failure_retry_seconds 与 owner_wake_discovery。
 # 函数用途: 将 Curator 异常分类为恢复和运维使用的错误码。
 def _failure_code(exc: BaseException) -> str:
+    from .jsonl import MemoryAuthorityCorruptError
+
     if isinstance(exc, CuratorModelTimeoutError):
         return "CURATOR_MODEL_TIMEOUT"
     if isinstance(exc, CuratorModelCallError):
@@ -2495,6 +2497,10 @@ def _failure_code(exc: BaseException) -> str:
         return "CURATOR_LEASE_LOST"
     if isinstance(exc, CuratorStateCorruptError):
         return "CURATOR_STATE_CORRUPT"
+    if isinstance(exc, CandidateStoreCorruptError):
+        return "CURATOR_INPUT_CANDIDATES_CORRUPT"
+    if isinstance(exc, MemoryAuthorityCorruptError):
+        return "CURATOR_INPUT_AUTHORITY_CORRUPT"
     if isinstance(exc, (ValueError, TypeError, json.JSONDecodeError)):
         value = str(exc or "")
         return value if value.startswith("CURATOR_") else "CURATOR_SCHEMA_INVALID"

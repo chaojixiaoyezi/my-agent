@@ -1455,3 +1455,51 @@ def test_parse_curator_extraction_fills_omitted_nullable_scope_conditions() -> N
         parse_curator_extraction(json.dumps(payload))
     assert exc_info.value.violation_code == "missing_property"
     assert "$.candidates[0].scope" in exc_info.value.violation_path
+
+
+def test_curator_classifies_candidate_and_authority_corruption_without_blaming_model(tmp_path: Path) -> None:
+    from agent_py_agent.agent.memory_store.curator import _failure_code
+    from agent_py_agent.agent.memory_store.curator_models import curator_replay_deterministic
+    from agent_py_agent.agent.memory_store.jsonl import MemoryAuthorityCorruptError
+
+    owner, _service, conversations, thread, candidates, long_term, lessons, hot = _setup_owner(tmp_path)
+    msg = conversations.messages.append(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": "出现本地账本损坏时必须精确暴露真实故障码。",
+            "channel": "internal",
+            "metadata": {
+                "session_id": "session-m2-corrupt",
+                "request_id": "request-m2-corrupt",
+                "task_id": "task-m2-corrupt",
+                "run_id": "run-m2-corrupt",
+            },
+            "now": 30.0,
+        }
+    )
+    candidates.path.parent.mkdir(parents=True, exist_ok=True)
+    with candidates.path.open("a", encoding="utf-8") as fh:
+        fh.write("{corrupt jsonl line\n")
+
+    backend = _FakeStructuredBackend(_conversation_event_response(msg.message_id))
+    curator = _curator_service(
+        owner,
+        conversations,
+        candidates,
+        long_term,
+        lessons,
+        hot,
+        backend=backend,
+        config=MemoryCuratorConfig(interval_seconds=60, turn_threshold=1),
+    )
+    res = curator.run(reason="task_complete", force=True)
+    assert res.status == "failed"
+    assert res.failure_code == "CURATOR_INPUT_CANDIDATES_CORRUPT"
+    assert res.failure_code != "CURATOR_MODEL_FAILED"
+    assert backend.calls == 0
+    assert curator.state_store.load().per_thread_cursors == {}
+    assert curator_replay_deterministic(res.failure_code) is True
+
+    assert _failure_code(MemoryAuthorityCorruptError("corrupt index")) == "CURATOR_INPUT_AUTHORITY_CORRUPT"
+    assert curator_replay_deterministic("CURATOR_INPUT_AUTHORITY_CORRUPT") is True
