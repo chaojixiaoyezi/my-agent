@@ -749,6 +749,22 @@ def test_global_readonly_update_and_summary_do_not_write(api, tmp_path, kind):
     assert scoped_descriptor(returned)['runtime_summary']['run_count'] == 0
     assert scoped_descriptor(returned)['metadata']['asset_scope'] == 'global'
     assert getattr(user, f'list_{kind}s')()
+    if kind == 'workflow':
+        from types import SimpleNamespace
+
+        from agent_py_agent.agent.workflows.business_scope import (
+            WorkflowPolicyRefusal,
+            WorkflowScopeService,
+        )
+        from agent_py_agent.agent.workflows.orphan_maintenance import cleanup_status
+
+        service = WorkflowScopeService(user.owner_home, owner_id='test-owner', authorize=lambda *args: True)
+        service.store = user
+        assert any(row['reason_code'] == 'READ_ONLY' for row in cleanup_status(service, shared)['blockers'])
+        with pytest.raises(WorkflowPolicyRefusal, match='WORKFLOW_READ_ONLY'):
+            service.execute('workflows.recycle', {'workflow_ref': 'shared'},
+                actor=SimpleNamespace(owner_id='test-owner'), expected_revision=shared.descriptor.revision,
+                idempotency_key='shared-must-remain')
     assert collection_snapshot(collection) == before
     with pytest.raises(KeyError):
         user.record_run_summary('absent', 'failed', 1)

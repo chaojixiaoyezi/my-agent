@@ -382,9 +382,18 @@ def test_templates_use_installed_package_and_report_bad_definition(v13_host):
     template = page['items'][0]
     assert template['source'] == 'package' and template['package_id'] == entry.manifest.plugin_id
     assert template['definition']['descriptor']['id'] == 'template-recovery'
+    origin = template['definition']['descriptor']['metadata']['derived_from']
+    assert origin
+    original_summary = template['definition']['descriptor'].get('summary', '')
+    template['definition']['descriptor']['summary'] = '用户派生的模板说明'
     created = v13_call_frozen(call, 'workflows.create', {'definition': template['definition']},
                               idempotency_key='playbooks-install-template')
-    assert WorkflowStore(call.owner_home).get_workflow(created['workflow_ref']) is not None
+    saved = WorkflowStore(call.owner_home).get_workflow(created['workflow_ref'])
+    assert saved.descriptor.metadata['derived_from'] == origin
+    assert saved.descriptor.summary == '用户派生的模板说明'
+    original = playbooks.list_templates(call)['items'][0]
+    assert original['definition']['descriptor'].get('summary', '') == original_summary
+    assert original['definition']['descriptor']['metadata']['derived_from'] == origin
 
 
 # LLM: 目标由空间内原生 workflow 声明，额外 endpoint/url 不能跟着合法 ID 混入。
