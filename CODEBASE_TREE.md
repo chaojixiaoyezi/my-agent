@@ -29,6 +29,7 @@ agent_py_agent/tests/test_orch02_native_resume_chain.py      # 原生父子申�
 agent_py_agent/tests/test_scheduler_target_failure_delivery.py # 定时目标失败通知、原结果重投与取消
 agent_py_agent/tests/test_process_wait_pending_input.py       # 新输入使进程等待让出、同进程继续与取消顺序
 agent_py_agent/tests/test_workflow_native_operation_recovery.py # 原操作终态核验恢复、身份和参数失配拒绝
+agent_py_agent/tests/test_scheduler_business_workflow_target.py # 定时工作流版本、撤权与原会话失败通知
 docs/reviews/CONTINUITY_R3_REVIEW_20261112.md                # Opus v2 复核后的英文说明
 ```
 

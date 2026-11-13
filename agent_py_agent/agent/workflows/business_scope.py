@@ -506,7 +506,7 @@ class WorkflowScopeService:
 
     # LLM: 当前业务授权先于恢复分类；原生对账不替代新副作用审核，工厂依赖仍只由宿主提供。
     # 函数用途: 为公共运行入口绑定当前 actor、生命周期和原恢复准入门。
-    def _engine(self, actor, *, resolution_ref=None):
+    def execution_authorizer(self, actor, *, resolution_ref=None):
         from .engine import _requires_native_agent_resume, _requires_terminal_publication_resume
         from .governance import WorkflowEffectPhase
 
@@ -563,9 +563,13 @@ class WorkflowScopeService:
                 })
             return None
 
+        return authorize
+
+    def _engine(self, actor, *, resolution_ref=None):
         if not callable(self.engine_factory):
             raise PermissionError('WORKFLOW_BUSINESS_ENGINE_UNAVAILABLE')
-        return self.engine_factory(self.store.owner_home, run_authorizer=authorize, agent_steps=self.agent_steps)
+        return self.engine_factory(self.store.owner_home,
+            run_authorizer=self.execution_authorizer(actor, resolution_ref=resolution_ref), agent_steps=self.agent_steps)
 
     @staticmethod
     def _completion_children(record, snapshot):

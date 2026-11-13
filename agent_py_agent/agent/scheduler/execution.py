@@ -193,8 +193,7 @@ def _bind_pinned_tool(handler, target, definition):
         tool.store = SimpleNamespace(owner_home=tool.owner_home,
             get_workflow=lambda identifier: deepcopy(definition) if identifier == target['asset_id'] else None)
         if 'definition_version' in target:
-            tool.engine = copy(tool._execution_engine())
-            tool.engine.run_workflow = partial(tool.engine.run_workflow, definition_version=target['definition_version'])
+            tool._pinned_definition_version = target['definition_version']
     elif 'expected_script_pin' in target:
         tool._dispatch = partial(_pinned_script_dispatch, tool, target)
     return tool

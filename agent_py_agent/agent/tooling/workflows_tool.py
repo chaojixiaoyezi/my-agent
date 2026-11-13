@@ -302,6 +302,34 @@ class WorkflowsTool(BaseTool):
         return {key: value for key, value in params.items()
                 if key not in ('action', 'expected_revision', 'idempotency_key', 'concurrency_policy')}
 
+    def _authorized_execution_engine(self, *, definition=None, record=None):
+        """固定定义仍用原执行器，只从当前业务服务复用授权闭包，不重新挑选版本。"""
+        from ..assets.workflow_store import BUSINESS_WORKFLOW_METADATA
+        required = bool(record.scope_snapshot or record.business_context) if record is not None else bool(
+            definition.descriptor.metadata.get(BUSINESS_WORKFLOW_METADATA))
+        engine = self._execution_engine()
+        if not required:
+            return engine
+        if callable(self.business_binding_provider):
+            service, actor = self.business_binding_provider()
+        elif self.business_service is not None and callable(self.business_actor_provider):
+            service, actor = self.business_service, self.business_actor_provider()
+        else:
+            raise PermissionError('WORKFLOW_BUSINESS_AUTHORIZATION_UNAVAILABLE')
+        _owner(self.owner_home, service.store)
+        authorize = service.execution_authorizer(actor)
+        bound = copy.copy(engine)
+        previous = engine.run_authorizer
+
+        def check(current, phase):
+            prior = previous(current, phase) if callable(previous) else None
+            result = authorize(current, phase)
+            return prior if result is None else result
+
+        invoke = getattr(engine, 'invoke_host_context', None)
+        bound.run_authorizer = (lambda current, phase: invoke(lambda: check(current, phase))) if callable(invoke) else check
+        return bound
+
     def _business_engine(self, owner_home, *, run_authorizer, agent_steps):
         if Path(owner_home).absolute() != self.owner_home:
             raise PermissionError('WORKFLOW_OWNER_MISMATCH')
@@ -448,7 +476,8 @@ class WorkflowsTool(BaseTool):
             options = {'concurrency_policy': params.get('concurrency_policy', 'allow')}
             if 'allow_script_drift' in params:
                 options['allow_script_drift'] = params['allow_script_drift']
-            return _plain(self._execution_engine().resume_workflow_run(params['workflow_run_id'], params.get('from_step_id'),
+            record = self._engine().store.load_run(params['workflow_run_id'])
+            return _plain(self._authorized_execution_engine(record=record).resume_workflow_run(params['workflow_run_id'], params.get('from_step_id'),
                 patched_step_output=params.get('patched_step_output'), updated_data_sources=params.get('updated_data_sources'),
                 resolution_origin=params.get('resolution_origin'), **options))
         if action == 'inspect_run':
@@ -513,8 +542,9 @@ class WorkflowsTool(BaseTool):
         if action == 'preview':
             return self._preview(definition, params.get('inputs', {}))
         if action == 'run':
-            options = {'definition_version': params['version']} if params.get('version') is not None else {}
-            return _plain(self._execution_engine().run_workflow(_plain(definition), params.get('inputs', {}),
+            version = getattr(self, '_pinned_definition_version', params.get('version'))
+            options = {'definition_version': version} if version is not None else {}
+            return _plain(self._authorized_execution_engine(definition=definition).run_workflow(_plain(definition), params.get('inputs', {}),
                           concurrency_policy=params.get('concurrency_policy', 'allow'), **options))
         raise ValueError('未知工作流action')
 
