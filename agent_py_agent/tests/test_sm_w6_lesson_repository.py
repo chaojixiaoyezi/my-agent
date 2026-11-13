@@ -687,13 +687,14 @@ def test_hot_pin_protection_and_archive_before_hot_guard(tmp_path: Path) -> None
         _hot_cand("hot-pin-1", target_lesson_id=cold_pinned.lesson_id, subject_key="pinned.subj", rule="始终置顶保留"),
         lesson=cold_pinned,
     )
-    repo.maintain(now=t0, archive_days=15)
+    repo.maintain(now=t0, archive_days=15, batch_ms=5000)
 
     # 不完整 pin_loader 必须拒绝一切归档并标记 coverage=partial。
     res_partial = repo.maintain(
         now=t0 + timedelta(days=20),
         archive_days=15,
         pin_loader=lambda: ([], False),
+        batch_ms=5000,
     )
     assert res_partial["archived"] == 0
     assert res_partial["coverage"]["status"] == "partial"
@@ -704,6 +705,7 @@ def test_hot_pin_protection_and_archive_before_hot_guard(tmp_path: Path) -> None
         now=t0 + timedelta(days=20),
         archive_days=15,
         pin_loader=lambda: ([row.lesson_ref for row in hot.list()], True),
+        batch_ms=5000,
     )
     assert res_ok["coverage"]["status"] == "complete"
     assert (repo.lessons_dir / Path(cold_pinned.path).name).exists()
@@ -759,13 +761,13 @@ def test_maintain_15_day_boundaries_clocks_locks_permanent_archive_and_non_recur
     stale_lock.write_text('{"pid": 999999}', encoding="utf-8")
 
     # 首次 maintain 对缺失时间戳做保守重建：时钟自 t0 开始，当天两者均保留。
-    repo.maintain(now=t0, archive_days=15)
+    repo.maintain(now=t0, archive_days=15, batch_ms=5000)
     assert (repo.lessons_dir / cold_fname).exists()
     assert (repo.lessons_dir / sup_fname).exists()
 
     # 差 1 秒满 15 天仍保留。
     just_before = t0 + timedelta(days=15) - timedelta(seconds=1)
-    res_before = repo.maintain(now=just_before, archive_days=15)
+    res_before = repo.maintain(now=just_before, archive_days=15, batch_ms=5000)
     assert res_before["archived"] == 0
     assert (repo.lessons_dir / cold_fname).exists()
     assert (repo.lessons_dir / sup_fname).exists()
@@ -774,7 +776,7 @@ def test_maintain_15_day_boundaries_clocks_locks_permanent_archive_and_non_recur
     hit_time = t0 + timedelta(days=10)
     repo.note_hits([cold_rec.lesson_id], at=hit_time)
     at_15d = t0 + timedelta(days=15)
-    res_15d = repo.maintain(now=at_15d, archive_days=15)
+    res_15d = repo.maintain(now=at_15d, archive_days=15, batch_ms=5000)
     assert res_15d["archived"] == 27
     assert not (repo.lessons_dir / sup_fname).exists()
     sup_archive_path = repo.lessons_dir / "archive" / f"{at_15d.year:04d}-{at_15d.month:02d}" / sup_fname
@@ -786,20 +788,20 @@ def test_maintain_15_day_boundaries_clocks_locks_permanent_archive_and_non_recur
     # 令 cold_rec 多次命中回流 INDEX.md 后再冷却，时钟从重新出局时重新算，而非继承旧 unrouted_at。
     reenter_time = t0 + timedelta(days=16)
     repo.note_hits([cold_rec.lesson_id], at=reenter_time)
-    repo.maintain(now=reenter_time, archive_days=15)
+    repo.maintain(now=reenter_time, archive_days=15, batch_ms=5000)
     heat_reenter = json.loads(repo.heat_path.read_text(encoding="utf-8"))
     assert cold_rec.lesson_id in heat_reenter["routed_ids"]
     assert heat_reenter["rows"][cold_rec.lesson_id]["unrouted_at"] == 0.0
 
     # archive_days=0 仅关闭自动归档，仍同步 heat 与归档总数。
-    res_disabled = repo.maintain(now=t0 + timedelta(days=100), archive_days=0)
+    res_disabled = repo.maintain(now=t0 + timedelta(days=100), archive_days=0, batch_ms=5000)
     assert res_disabled["archived"] == 0
     assert (repo.lessons_dir / cold_fname).exists()
     assert res_disabled["lessons_archived_count"] == 27
 
     # 真正进入 +10 年后（期间不再命中），若前面未归档的冷教训超过窗口可被归档，但已有归档文件永久保留不删。
     far_future = t0 + timedelta(days=3650)
-    repo.maintain(now=far_future, archive_days=15)
+    repo.maintain(now=far_future, archive_days=15, batch_ms=5000)
     assert sup_archive_path.exists(), "永久归档文件十年后仍必须保留"
 
     # 活跃读接口（list/get/read_refs/rebuild_routing_index）严禁递归进 archive/。
