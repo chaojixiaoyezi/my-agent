@@ -100,15 +100,15 @@ def settle(storage, thread_id, task_id, input_ids):
                                      (identity, thread_id, task_id)).fetchone()
             if row is None:
                 continue
-            # 外发/权威交付已经完成，先记录单调事实，补原receipt失败也不能让该行阻塞下一页。
-            with connection:
-                connection.execute('UPDATE replies SET delivery_committed=1 WHERE input_id=? AND thread_id=? AND task_id=?',
-                                   (identity, thread_id, task_id))
             path = storage.guidance_dedupe_path(row[0])
             with locked_file_transition(path.with_name(f'.{path.name}.transition')):
                 receipt = ledger.read_receipt(path)
                 if receipt is None or receipt.entry.guidance_id != identity or receipt.status != 'consumed':
                     raise DataCorruptionError('USER_REPLY_RECEIPT_CONFLICT: delivery already committed; consumed input identity changed; repair only the original receipt, do not resend')
+                # 已核准原输入身份且真实交付已完成；先记单调事实，补receipt失败不能阻塞下一页。
+                with connection:
+                    connection.execute('UPDATE replies SET delivery_committed=1 WHERE input_id=? AND thread_id=? AND task_id=?',
+                                       (identity, thread_id, task_id))
                 ledger.write_receipt(path, replace(receipt, reply_delivered=True).to_dict(), writer=write_json_file_atomic)
             with connection:
                 connection.execute('DELETE FROM replies WHERE input_id=? AND thread_id=? AND task_id=?',

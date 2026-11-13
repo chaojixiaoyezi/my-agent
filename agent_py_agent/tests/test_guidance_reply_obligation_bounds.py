@@ -1,4 +1,5 @@
 """回复欠账只按固定FIFO页读取，故障页与其它任务不阻塞后续输入。"""
+import sqlite3
 from dataclasses import replace
 
 import pytest
@@ -23,6 +24,12 @@ def _accepted(store, number, *, task='task', thread='thread'):
 def test_pending_is_bounded_fifo_and_every_page_eventually_settles(tmp_path, monkeypatch):
     store = ConversationStore(tmp_path)
     expected = [_accepted(store, n) for n in range(obligations.PENDING_REPLY_PAGE_SIZE * 2 + 3)]
+    with sqlite3.connect(store.storage.guidance_reply_obligations_path) as connection:
+        plan = ' '.join(row[3] for row in connection.execute(
+            'EXPLAIN QUERY PLAN SELECT input_id, dedupe_key FROM replies '
+            'WHERE thread_id=? AND task_id=? AND delivery_committed=0 ORDER BY rowid LIMIT ?',
+            ('thread', 'task', obligations.PENDING_REPLY_PAGE_SIZE)))
+    assert 'SEARCH' in plan and 'INDEX' in plan and 'TEMP B-TREE' not in plan
     reads = []
     original = store.guidance.ledger.__class__.read_receipt
     def counted(self, path, **kwargs):
