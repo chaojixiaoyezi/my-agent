@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from functools import partial
 from importlib import import_module
 from inspect import signature
@@ -48,6 +49,7 @@ from .skill_learning_store import (
     SkillLearningStoreError,
 )
 from .skill_search_tool import _snapshot_for
+from .skill_usage_ledger import learning_usage_binding
 from .skill_usage_receipts import candidate_delivery_task_keys, read_usage_aggregate
 
 if TYPE_CHECKING:
@@ -207,10 +209,12 @@ def _config_non_neg_int(cfg: object, key: str, default: int) -> int:
     return parsed if parsed is not None else default
 
 
-def _build_coverage(status: str, reason: str, *, as_of: float | None = None) -> dict[str, Any]:
+def _build_coverage(status: str, reason: str, *, as_of: float | str | None = None) -> dict[str, Any]:
     out: dict[str, Any] = {"status": status, "reason": reason}
-    if as_of is not None:
-        out["as_of"] = float(as_of)
+    if isinstance(as_of, str) and as_of:
+        out["as_of"] = as_of
+    elif as_of is not None and not isinstance(as_of, bool):
+        out["as_of"] = datetime.fromtimestamp(float(as_of), timezone.utc).isoformat()
     return out
 
 
@@ -637,16 +641,76 @@ def _feedback_status(agent: object, store: SkillLearningStore, reference: str) -
     )
 
 
-def _record_adopted_usage(store: SkillLearningStore, entry: object, scope: object) -> None:
+def _resolve_verified_usage_binding(
+    agent: object,
+    entry: object | None,
+    record: Any,
+    *,
+    action: str,
+) -> tuple[dict[str, object], ToolHandlerOutcome | None]:
+    """核对运行快照绑定（incarnation/activation/strike_epoch）与当前登记记录一致。"""
+    maint = dict(getattr(record, "maintenance", {}) or {})
+    rec_inc = str(maint.get("incarnation_id") or "")
+    rec_act = str(maint.get("activation_id") or "")
+    raw_epoch = maint.get("strike_epoch")
+    epoch_val = raw_epoch if isinstance(raw_epoch, int) and not isinstance(raw_epoch, bool) and raw_epoch >= 0 else None
+
+    if entry is None:
+        binding: dict[str, object] = {}
+        if rec_inc and rec_act:
+            binding["incarnation_id"] = rec_inc
+            binding["activation_id"] = rec_act
+        if epoch_val is not None:
+            binding["strike_epoch"] = epoch_val
+        sha = str(getattr(record, "sha256", "") or "").strip().lower()
+        if sha:
+            binding["content_sha256"] = sha
+        return binding, None
+
+    binding = learning_usage_binding(agent, entry)
+    if rec_inc and rec_act:
+        bind_inc = str(binding.get("incarnation_id") or "")
+        bind_act = str(binding.get("activation_id") or "")
+        if bind_inc != rec_inc or bind_act != rec_act:
+            return {}, _error_outcome(
+                action=action,
+                error_code="SKILL_LEARNING_REVISION_CONFLICT",
+                response_code="SKILL_LEARNING_REVISION_CONFLICT",
+                reason=f"技能 owner:{record.name} 当前快照的激活绑定已过期或来自历史快照，未将反馈归因到当前版本。",
+                effect_outcome="not_started",
+                side_effect_status="not_started",
+                next_action="请调用 skill_search 重新加载当前版本正文后再试。",
+                skill_id=f"owner:{record.name}",
+            )
+    return dict(binding), None
+
+
+def _record_adopted_usage(
+    store: SkillLearningStore,
+    entry: object,
+    scope: object,
+    binding: dict[str, object] | None = None,
+) -> None:
     try:
         recorder = _usage_interface(store, "record_skill_usage", "record_skill_usage_event")
         if callable(recorder):
-            recorder(
-                event="adopted",
-                skill_id=entry.stable_id,
-                source=entry.source,
-                task_id=scope.root_task_id,
-            )
+            kwargs: dict[str, object] = {
+                "event": "adopted",
+                "skill_id": entry.stable_id,
+                "source": entry.source,
+                "task_id": scope.root_task_id,
+            }
+            for key in ("content_sha256", "incarnation_id", "activation_id", "strike_epoch"):
+                if key in (binding or {}) and binding[key] not in ("", None):
+                    kwargs[key] = binding[key]
+            try:
+                sig = signature(recorder)
+                accepts_var_kw = any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values())
+                if not accepts_var_kw:
+                    kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters}
+            except (TypeError, ValueError):
+                pass
+            recorder(**kwargs)
     except Exception:  # noqa: BLE001 - 辅助统计故障不能掩盖已落账的采用声明。
         logging.getLogger(__name__).warning("SKILL_USAGE_RECORD_UNAVAILABLE")
 
@@ -744,6 +808,15 @@ def _adopt_feedback(agent: object, store: SkillLearningStore, reference: str) ->
             next_action="请调用 skill_search 重新加载当前版本正文后再试。",
             skill_id=entry.stable_id,
         )
+    binding, binding_err = _resolve_verified_usage_binding(agent, entry, record, action="adopted")
+    if binding_err is not None:
+        return binding_err
+
+    maint = dict(record.maintenance)
+    raw_epoch = maint.get("strike_epoch")
+    fallback_epoch = raw_epoch if isinstance(raw_epoch, int) and not isinstance(raw_epoch, bool) and raw_epoch >= 0 else None
+    bind_epoch = binding.get("strike_epoch")
+    epoch_val = bind_epoch if isinstance(bind_epoch, int) and not isinstance(bind_epoch, bool) and bind_epoch >= 0 else fallback_epoch
 
     observe_learning(
         store,
@@ -754,9 +827,12 @@ def _adopt_feedback(agent: object, store: SkillLearningStore, reference: str) ->
         source=LearningObservationSource(
             run_id=scope.run_id,
             job_id=str(attributes.get("scheduler_job_id") or ""),
+            incarnation_id=str(binding.get("incarnation_id") or maint.get("incarnation_id") or ""),
+            activation_id=str(binding.get("activation_id") or maint.get("activation_id") or ""),
+            strike_epoch=epoch_val,
         ),
     )
-    _record_adopted_usage(store, entry, scope)
+    _record_adopted_usage(store, entry, scope, binding)
     updated_record = store.load_registry().skills.get(entry.name, record)
     lifecycle = _lifecycle_from_record(store, updated_record, cfg)
     envelope = _feedback_response(
@@ -1026,6 +1102,10 @@ def _ineffective_feedback(agent: object, store: SkillLearningStore, reference: s
                 skill_id=f"owner:{name}",
             )
 
+    binding, binding_err = _resolve_verified_usage_binding(agent, entry, record, action="ineffective")
+    if binding_err is not None:
+        return binding_err
+
     request_id = str(getattr(current, "request_id", "") or "").strip()
     task_id = str(getattr(current, "task_id", "") or "").strip()
     root_task_id = str(getattr(scope, "root_task_id", "") or "").strip()
@@ -1041,7 +1121,9 @@ def _ineffective_feedback(agent: object, store: SkillLearningStore, reference: s
     maint = dict(record.maintenance)
     prev_hurt = int(maint.get("hurt_count") or 0)
     raw_epoch = maint.get("strike_epoch")
-    epoch_val = raw_epoch if isinstance(raw_epoch, int) and not isinstance(raw_epoch, bool) and raw_epoch >= 0 else None
+    fallback_epoch = raw_epoch if isinstance(raw_epoch, int) and not isinstance(raw_epoch, bool) and raw_epoch >= 0 else None
+    bind_epoch = binding.get("strike_epoch")
+    epoch_val = bind_epoch if isinstance(bind_epoch, int) and not isinstance(bind_epoch, bool) and bind_epoch >= 0 else fallback_epoch
 
     token = _HOST_DELIVERY_KEYS_CTX.set(delivery_keys)
     try:
@@ -1056,8 +1138,8 @@ def _ineffective_feedback(agent: object, store: SkillLearningStore, reference: s
                 run_id=scope.run_id,
                 receipt_id=receipt_id,
                 job_id=str(attributes.get("scheduler_job_id") or ""),
-                incarnation_id=str(maint.get("incarnation_id") or ""),
-                activation_id=str(maint.get("activation_id") or ""),
+                incarnation_id=str(binding.get("incarnation_id") or maint.get("incarnation_id") or ""),
+                activation_id=str(binding.get("activation_id") or maint.get("activation_id") or ""),
                 strike_epoch=epoch_val,
             ),
         )

@@ -3,6 +3,7 @@
 import os
 import time
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Any
 
 from ..settings.live_switches import refresh_live_switches
@@ -262,7 +263,11 @@ def skill_telemetry(
         "recommended_explore_percent": rec_explore,
         "required_uses_formula": "3 + hurt_count",
         "retire_at_hurt_count": MAX_STRIKE_COUNT,
-        "coverage": {"status": cov_status, "reason": cov_reason, "as_of": ts},
+        "coverage": {
+            "status": cov_status,
+            "reason": cov_reason,
+            "as_of": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
+        },
         "count_reasons": count_reasons,
     }
 

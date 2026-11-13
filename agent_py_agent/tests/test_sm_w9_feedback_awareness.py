@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -362,6 +364,8 @@ def test_skill_feedback_status_v2_4_omits_pending_proposals_and_stays_readonly(t
     assert "pending_learning_proposals" not in single_fb
     assert single_fb["lifecycle"]["hurt_count"] == 0
     assert single_fb["lifecycle"]["retire_at_hurt_count"] == 3
+    cov = single_fb["lifecycle"]["coverage"]
+    assert isinstance(cov.get("as_of"), str) and datetime.fromisoformat(cov["as_of"]).tzinfo is not None
 
 
 def test_skill_feedback_remove_and_restore_explicit_human_flow_and_non_learned_refusal(
@@ -612,6 +616,9 @@ def test_v2_1_user_config_tool_live_policy_and_self_map_telemetry(tmp_path: Path
     ctx = SelfMapReadContext(main_agent, inv, "admin", False, "", "main", hp.owner_id, "admin")
 
     skills_proj = self_map_skills.skill_projection(ctx)
+    skills_tel = self_map_skills.skill_telemetry(ctx)
+    assert isinstance(skills_tel["coverage"].get("as_of"), str)
+    assert datetime.fromisoformat(skills_tel["coverage"]["as_of"]).tzinfo is not None
     assert skills_proj.counts["live_learned_count"] == 1
     assert skills_proj.counts["max_learned_skills"] == 12
     assert skills_proj.counts["user_owned_count"] >= 1
@@ -620,12 +627,28 @@ def test_v2_1_user_config_tool_live_policy_and_self_map_telemetry(tmp_path: Path
     assert "enable_self_learning=False" in skills_proj.summary
     assert "maintenance_mode=observe" in skills_proj.summary
 
-    # lesson_heat.json 缺失时 MemoryTelemetry 保持 None + 覆盖 unavailable，绝不编造 0。
+    # lesson_heat.json 缺失时 MemoryTelemetry 保持 None + 覆盖 unavailable 且顶层 completeness="partial"，绝不编造 0。
     mem_proj = self_map_memory.memory_projection(ctx)
+    mem_tel = self_map_memory.memory_telemetry(ctx)
+    assert mem_proj.completeness == "partial"
+    assert mem_proj.errors == ()
+    assert isinstance(mem_tel["coverage"].get("as_of"), str)
+    assert datetime.fromisoformat(mem_tel["coverage"]["as_of"]).tzinfo is not None
     assert mem_proj.counts["lessons_active_count"] is None
     assert mem_proj.counts["lessons_archived_count"] is None
     assert mem_proj.counts["lesson_archive_days"] == 30
     assert "lessons_active_count" in mem_proj.count_reasons
+
+    # lesson_heat.json 损坏或 I/O 异常时顶层 completeness="partial" 且返回安全错误码。
+    main_agent.memory_lessons = SimpleNamespace(_read_heat_state=lambda: ("corrupt", "heat_state_invalid_json"))
+    mem_corrupt = self_map_memory.memory_projection(ctx)
+    assert mem_corrupt.completeness == "partial"
+    assert mem_corrupt.errors == ("LESSON_HEAT_CORRUPT",)
+
+    main_agent.memory_lessons = SimpleNamespace(_read_heat_state=lambda: ("error", "OSError"))
+    mem_err = self_map_memory.memory_projection(ctx)
+    assert mem_err.completeness == "partial"
+    assert mem_err.errors == ("LESSON_HEAT_UNAVAILABLE",)
 
     # lesson_heat.json 存在但 archive_count_coverage 未完成时，仅 active/routed 精确计数，archived 仍保持 None。
     main_agent.memory_lessons = SimpleNamespace(
@@ -640,10 +663,32 @@ def test_v2_1_user_config_tool_live_policy_and_self_map_telemetry(tmp_path: Path
         )
     )
     mem_partial = self_map_memory.memory_projection(ctx)
+    assert mem_partial.completeness == "partial"
+    assert mem_partial.errors == ()
     assert mem_partial.counts["lessons_active_count"] == 1
     assert mem_partial.counts["lessons_routed_count"] == 1
     assert mem_partial.counts["lessons_archived_count"] is None
     assert "lessons_archived_count" in mem_partial.count_reasons
+
+    # 覆盖完整时顶层 completeness="complete" 且精确计数全部就绪。
+    main_agent.memory_lessons = SimpleNamespace(
+        _read_heat_state=lambda: (
+            "ok",
+            {
+                "rows": {"l1": {"status": "active"}, "l2": {"status": "archived"}},
+                "routed_ids": ["l1"],
+                "lessons_archived_count": 1,
+                "archive_count_coverage": {"status": "complete", "reason": "full_scan"},
+            },
+        )
+    )
+    mem_complete = self_map_memory.memory_projection(ctx)
+    assert mem_complete.completeness == "complete"
+    assert mem_complete.errors == ()
+    assert mem_complete.counts["lessons_archived_count"] == 1
+    mem_complete_tel = self_map_memory.memory_telemetry(ctx)
+    assert isinstance(mem_complete_tel["coverage"].get("as_of"), str)
+    assert datetime.fromisoformat(mem_complete_tel["coverage"]["as_of"]).tzinfo is not None
 
     # 子代理 / 非主拥有者严禁经 UserConfigTool 修改全局策略。
     non_main_home = SimpleNamespace(owner_provider="feishu", owner_kind="users", owner_id="ou_non_admin")
@@ -672,3 +717,67 @@ def test_self_map_and_skill_control_v2_4_and_host_contract(tmp_path: Path):
     restricted_ctx = SelfMapReadContext(agent, inv, "task", True, "run-child", "task_local", hp.owner_id, "admin")
     assert self_map_memory.memory_summary(restricted_ctx).completeness == "partial"
     assert self_map_memory.memory_projection(restricted_ctx).completeness == "partial"
+
+
+def test_skill_feedback_usage_binding_conflict_reheat_and_frozen_snapshot(tmp_path: Path):
+    """同体重新激活（activation_id 变更）与历史脱敏快照（frozen_path 剥离绑定）均须拒绝并报 REVISION_CONFLICT。"""
+    agent, _repo, store = _make_real_agent(tmp_path, enable_self_learning=True)
+    rec = _publish_skill(store, "binding-check")
+    _activate_main_turn(agent, tmp_path, run_id="run-bind-1", task_id="task-bind-1", request_id="req-bind-1")
+    _record_delivery(store, rec, task_id="task-bind-1")
+
+    live_snapshot = agent.skills_service.snapshot_for(force_reload=True)
+    live_entry = live_snapshot.resolve(f"owner:{rec.name}")
+    assert live_entry is not None
+    stale_act_entry = replace(
+        live_entry,
+        asset_fields={
+            **dict(live_entry.asset_fields),
+            "_learning_usage_binding": {
+                "incarnation_id": str(rec.maintenance["incarnation_id"]),
+                "activation_id": "old-activation-before-reheat",
+                "strike_epoch": int(rec.maintenance.get("strike_epoch") or 0),
+                "content_sha256": rec.sha256,
+            },
+        },
+    )
+    agent._current_skill_snapshot = replace(
+        live_snapshot,
+        entries=tuple(stale_act_entry if e.stable_id == live_entry.stable_id else e for e in live_snapshot.entries),
+    )
+
+    tool = skill_feedback_tool.SkillFeedbackTool(agent)
+    for act in ("adopted", "ineffective"):
+        res = tool.execute({"action": act, "skill_id": f"owner:{rec.name}"})
+        assert res.ok is False, (act, res.output)
+        assert res.error_code == "SKILL_LEARNING_REVISION_CONFLICT"
+        assert res.effect_outcome == "not_started"
+        assert res.result_envelope["skill_feedback"]["side_effect_status"] == "not_started"
+    assert int(store.load_registry().skills[rec.name].maintenance.get("hurt_count") or 0) == 0
+
+    # 历史版本恢复视图：resolve_learned_revision 设置 frozen_path 且剥离 _learning_usage_binding。
+    frozen_fields = dict(live_entry.asset_fields)
+    frozen_fields.pop("_learning_usage_binding", None)
+    frozen_entry = replace(
+        live_entry,
+        frozen_path="versions/v1/SKILL.md",
+        asset_fields=frozen_fields,
+    )
+    agent._current_skill_snapshot = replace(
+        live_snapshot,
+        entries=tuple(frozen_entry if e.stable_id == live_entry.stable_id else e for e in live_snapshot.entries),
+    )
+    for act in ("adopted", "ineffective"):
+        res = tool.execute({"action": act, "skill_id": f"owner:{rec.name}"})
+        assert res.ok is False, (act, res.output)
+        assert res.error_code == "SKILL_LEARNING_REVISION_CONFLICT"
+        assert res.effect_outcome == "not_started"
+        assert res.result_envelope["skill_feedback"]["side_effect_status"] == "not_started"
+    assert int(store.load_registry().skills[rec.name].maintenance.get("hurt_count") or 0) == 0
+
+    # 恢复精确绑定快照后，adopted 正常落账并携带有效生命周期 coverage ISO 字符串。
+    agent._current_skill_snapshot = live_snapshot
+    ok_adopted = tool.execute({"action": "adopted", "skill_id": f"owner:{rec.name}"})
+    assert ok_adopted.ok is True, ok_adopted.output
+    cov = ok_adopted.result_envelope["skill_feedback"]["lifecycle"]["coverage"]
+    assert isinstance(cov.get("as_of"), str) and datetime.fromisoformat(cov["as_of"]).tzinfo is not None

@@ -3,6 +3,7 @@
 import json
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -100,9 +101,10 @@ def _read_lesson_heat_readonly(agent: object) -> tuple[str, dict[str, Any] | str
     return "ok", data
 
 
-def memory_telemetry(context: object) -> dict[str, Any]:
-    """返回符合 MemoryTelemetry 契约的经验生命周期与归档真实计数（未知保持 None）。"""
+def _memory_telemetry_and_status(context: object) -> tuple[dict[str, Any], str]:
+    """构建 MemoryTelemetry 载荷与底层热态读取状态。"""
     ts = time.time()
+    as_of_iso = datetime.fromtimestamp(ts, timezone.utc).isoformat()
     archive_days = _live_lesson_archive_days(context.agent)
     status, payload = _read_lesson_heat_readonly(context.agent)
     count_reasons: dict[str, str] = {}
@@ -111,15 +113,18 @@ def memory_telemetry(context: object) -> dict[str, Any]:
         count_reasons["lessons_active_count"] = f"lesson_heat.json 状态为 {status}（{reason}），未读取活跃经验数量。"
         count_reasons["lessons_routed_count"] = f"lesson_heat.json 状态为 {status}（{reason}），未读取常驻注入数量。"
         count_reasons["lessons_archived_count"] = f"lesson_heat.json 状态为 {status}（{reason}），未确认归档数量。"
-        return {
-            "lessons_active_count": None,
-            "lessons_routed_count": None,
-            "lessons_archived_count": None,
-            "lesson_archive_days": archive_days,
-            "archive_auto_delete": False,
-            "coverage": {"status": "unavailable", "reason": reason, "as_of": ts},
-            "count_reasons": count_reasons,
-        }
+        return (
+            {
+                "lessons_active_count": None,
+                "lessons_routed_count": None,
+                "lessons_archived_count": None,
+                "lesson_archive_days": archive_days,
+                "archive_auto_delete": False,
+                "coverage": {"status": "unavailable", "reason": reason, "as_of": as_of_iso},
+                "count_reasons": count_reasons,
+            },
+            str(status or "error"),
+        )
 
     rows = payload.get("rows") or {}
     routed_ids = payload.get("routed_ids") or []
@@ -128,6 +133,11 @@ def memory_telemetry(context: object) -> dict[str, Any]:
     raw_archived = payload.get("lessons_archived_count")
     arch_cov = payload.get("archive_count_coverage")
     cov_dict = dict(arch_cov) if isinstance(arch_cov, dict) else {"status": "unavailable", "reason": "archive_coverage_missing"}
+    raw_as_of = cov_dict.get("as_of")
+    if isinstance(raw_as_of, (int, float)) and not isinstance(raw_as_of, bool):
+        cov_dict["as_of"] = datetime.fromtimestamp(float(raw_as_of), timezone.utc).isoformat()
+    elif not isinstance(raw_as_of, str) or not raw_as_of:
+        cov_dict["as_of"] = datetime.fromtimestamp(ts, timezone.utc).isoformat()
     cov_status = str(cov_dict.get("status") or "unavailable")
     if cov_status == "complete" and not isinstance(raw_archived, bool) and isinstance(raw_archived, int) and raw_archived >= 0:
         archived_count: int | None = raw_archived
@@ -135,15 +145,23 @@ def memory_telemetry(context: object) -> dict[str, Any]:
         archived_count = None
         count_reasons["lessons_archived_count"] = str(cov_dict.get("reason") or "归档统计尚未完成或覆盖不全。")
 
-    return {
-        "lessons_active_count": active_count,
-        "lessons_routed_count": routed_count,
-        "lessons_archived_count": archived_count,
-        "lesson_archive_days": archive_days,
-        "archive_auto_delete": False,
-        "coverage": cov_dict,
-        "count_reasons": count_reasons,
-    }
+    return (
+        {
+            "lessons_active_count": active_count,
+            "lessons_routed_count": routed_count,
+            "lessons_archived_count": archived_count,
+            "lesson_archive_days": archive_days,
+            "archive_auto_delete": False,
+            "coverage": cov_dict,
+            "count_reasons": count_reasons,
+        },
+        "ok",
+    )
+
+
+def memory_telemetry(context: object) -> dict[str, Any]:
+    """返回符合 MemoryTelemetry 契约的经验生命周期与归档真实计数（未知保持 None）。"""
+    return _memory_telemetry_and_status(context)[0]
 
 
 def memory_projection(context):
@@ -159,7 +177,7 @@ def memory_projection(context):
         items.append(map_item("archive", "历史与归档", fields={"count": None, "next_read": next_read("session_search", {"mode": "thread_browse"})}))
     items.extend(_source_rule_metadata(context))
     if context.admin:
-        tel = memory_telemetry(context)
+        tel, heat_status = _memory_telemetry_and_status(context)
         for name, attr in (
             ("candidates", "memory_candidates"),
             ("lessons", "memory_lessons"),
@@ -187,8 +205,19 @@ def memory_projection(context):
             + f"经验归档宽限={tel['lesson_archive_days']}天，永不自动删除归档文件（archive_auto_delete=False），"
             + f"覆盖={tel['coverage']['status']}（{tel['coverage'].get('reason', '')}）。"
         )
+        cov_status = str(tel["coverage"].get("status") or "")
+        completeness = "complete" if cov_status == "complete" else "partial"
+        errors = (
+            ("LESSON_HEAT_CORRUPT",)
+            if heat_status == "corrupt"
+            else ("LESSON_HEAT_UNAVAILABLE",)
+            if heat_status == "error"
+            else ()
+        )
         return SectionProjection(
             tuple(items),
+            completeness,
+            errors=errors,
             source="bound owner memory authorities / tool scope",
             counts=counts,
             count_reasons=reasons,
