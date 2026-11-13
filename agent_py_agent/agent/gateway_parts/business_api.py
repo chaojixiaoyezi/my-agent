@@ -830,6 +830,7 @@ def _error_code(error):
               404 if code.endswith('_NOT_FOUND') or code == 'SPACE_SCOPE_MISMATCH' else
               403 if code in {'ACTOR_REQUIRED', 'BUSINESS_ACCESS_DENIED', 'HUMAN_RESPONSE_REQUIRED',
                              'SOURCE_SCOPE_MISMATCH', 'POLICY_AUTHORIZATION_REQUIRED'} else
+              410 if code == 'CURSOR_EXPIRED' else
               400 if code == 'INVALID_SCHEMA' else 503)
     status = v13_error_status(code) or status
     effect = 'not_started'
@@ -844,6 +845,12 @@ def _error_details(error):
     from ..common.log_redaction import redact_sensitive_value
     from ..plugin_host.business_action_specs import business_defs
     details = getattr(error, 'details', None)
+    if getattr(error, 'code', None) == 'CURSOR_EXPIRED':
+        # 游标失效要求重建当前授权快照；不能把旧游标当临时服务故障盲目重试。
+        details = {**(details if isinstance(details, dict) else {}),
+            'reason': (details or {}).get('reason', 'source_changed_or_cursor_invalid') if isinstance(details, dict) else 'source_changed_or_cursor_invalid',
+            'reset_required': True, 'next_action': 'discard_cursor_and_request_fresh_snapshot',
+            'retry_same_cursor': False}
     if not details:
         return []
     if isinstance(details, dict):
@@ -1160,7 +1167,7 @@ def handle_client_business(handler, server):
     except (HostAPIError, BusinessError) as error:
         code, status, effect = _error_code(error)
         response = _response('invalid-request', error={'code': code, 'message': code,
-            'retryable': status == 503, 'details': []}, effect=effect)
+            'retryable': status == 503, 'details': _error_details(error)}, effect=effect)
     handler._send_json(status, response)
 
 

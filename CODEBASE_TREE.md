@@ -9,6 +9,9 @@ agent_py_agent/tests/test_active_turn_capability_event_projection.py # 活动父
 agent_py_agent/tests/test_subagent_tool_guard_observation_path.py    # 子代理重复读的真实提示路径
 agent_py_agent/tests/test_business_historical_rejection_wire.py     # 错误空间或模型请求的无副作用回执
 agent_py_agent/tests/test_business_event_unbound_prefix.py          # 无绑定历史后的事件游标和隔离
+agent_py_agent/tests/test_business_cursor_error_details.py          # 查询游标失效后的恢复提示与流重连
+agent_py_agent/tests/test_active_input_between_tool_segments.py     # 工具批次中的插话与已启动调用
+agent_py_agent/tests/test_capability_active_delivery_path.py        # 申请从子代理到父代理消费确认
 agent_py_agent/tests/test_business_subscription_wiring.py            # 业务订阅原生接口、授权和撤回
 agent_py_agent/tests/test_workflow_notification_delivery_truth.py    # 工作流本地记账与通道投递回执
 agent_py_agent/tests/test_workflow_reconciliation_public_diagnostic.py # 写后超时及可信核验恢复

@@ -181,6 +181,8 @@ class ToolCallRecordParams:
     # 归档/工具账照记，但不进原生 IR 配对（没有对应的 assistant tool_use），在模型上下文里以 [host-action-record] 块出现。
     actor: str = "model"
     decision_ref: str = ""
+    # 宿主明确延后且尚未进入handler，不作为执行失败或停滞观察。
+    deferred: bool = False
 
     @property
     def payload(self) -> dict[str, object]:
@@ -428,6 +430,16 @@ def _defer_unstarted_calls_if_needed(
         )
         progress.deferred_reason = "任务已被取消"
         return True
+    # 已执行段的结果先保留；新输入到达后，不再启动按旧模型上下文计划的下一段。
+    # 本段已启动的并行调用仍正常结清，下一模型安全点才消费输入。
+    if position > 0 and getattr(request.params, "consume_pending_turn_input", True):
+        from ..runtime.guidance import has_pending_turn_input
+
+        if has_pending_turn_input(request.agent, request.params):
+            _record_unstarted_calls(request, calls, start_idx=idx,
+                result_factory=_input_pending_deferred_result, phase="deferred", status="等待处理新输入")
+            progress.deferred_reason = "新输入等待模型消费，剩余调用未启动"
+            return True
     if not _should_defer_for_compact(request, call.tool_name):
         return False
     _record_unstarted_calls(
@@ -1550,6 +1562,7 @@ def _record_unstarted_calls(
                     "projected",
                 ),
                 model_call=_model_visible_call(request, idx, call),
+                deferred=phase == "deferred",
             )
         )
 
@@ -1722,6 +1735,15 @@ def _append_compact_deferred_notice(
         "当前上下文已达到 compact 阈值；"
         f"本轮第 {idx} 个 {tool_name or 'tool'} 调用已登记为 CONTEXT_COMPACT_DEFERRED，实际没有执行。\n"
         "系统会先走 compact/resume，再继续未执行的读取、搜索或命令；不要把这个工具调用当作已经完成。"
+    )
+
+
+def _input_pending_deferred_result(call: ToolCall) -> ToolResult:
+    return ToolResult.failed(
+        call,
+        "TURN_INPUT_PENDING: 新输入已到达；本调用未启动。请先结合新输入判断是否仍需该调用，勿原样盲目重试。",
+        error_code="TURN_INPUT_PENDING",
+        failure_stage="runtime_gate",
     )
 
 

@@ -326,11 +326,15 @@ class BusinessObservationService:
             if not hmac.compare_digest(signature, hmac.digest(self._cursor_key, raw, 'sha256')):
                 raise ValueError('cursor signature')
             state = json.loads(raw)
-            if state['scope'] != scope or state['expires'] <= time.time():
-                raise ValueError('cursor scope or expiry')
+            if state['scope'] != scope:
+                raise BusinessError('CURSOR_EXPIRED', details={'reason': 'scope_changed'})
+            if state['expires'] <= time.time():
+                raise BusinessError('CURSOR_EXPIRED', details={'reason': 'expired'})
             return state['position']
+        except BusinessError:
+            raise
         except (ValueError, TypeError, KeyError, UnicodeError):
-            raise BusinessError('CURSOR_EXPIRED') from None
+            raise BusinessError('CURSOR_EXPIRED', details={'reason': 'invalid_cursor'}) from None
 
     def _visible(self, record, action, params, actor):
         if not isinstance(record, ObservationRecord) or record.owner_id != self.owner_id:

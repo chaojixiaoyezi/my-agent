@@ -3049,6 +3049,13 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.RECOVER_FROM_CHECKPOINT.value,
         recovery_hint="当前上下文需要先 compact/resume；这个工具调用已经登记为未执行，恢复后再从同一目标继续。",
     ),
+    "TURN_INPUT_PENDING": ErrorContract(
+        code="TURN_INPUT_PENDING",
+        category="runtime",
+        retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_CALL.value,
+        recovery_hint="新输入等待消费；本调用未启动。先结合新输入判断是否仍需调用，再重新生成参数，不要原样盲目重试。",
+    ),
     "RUNTIME_TRANSITION_DEFERRED": ErrorContract(
         code="RUNTIME_TRANSITION_DEFERRED",
         category="runtime",

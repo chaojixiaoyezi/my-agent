@@ -204,7 +204,14 @@ class GuidanceAcknowledgements:
         message = str(entry.message or "").strip()
         if not guidance_id or not thread_id or not message:
             return False
+        from .session_messaging import SESSION_MESSAGE_ORIGIN_KIND
+
+        session_message = metadata.get("origin_kind") == SESSION_MESSAGE_ORIGIN_KIND
         attribution: dict[str, str] = {}
+        if session_message:
+            attribution.update(origin_kind=SESSION_MESSAGE_ORIGIN_KIND,
+                               origin_thread_id=str(metadata.get("origin_thread_id") or ""),
+                               input_kind=str(metadata.get("input_kind") or ""))
         if entry.target_type == "task" and entry.target_id:
             attribution["task_id"] = entry.target_id
         elif entry.target_type == "request" and entry.target_id:
@@ -215,12 +222,12 @@ class GuidanceAcknowledgements:
             self._append_message_once(
                 {
                     "thread_id": thread_id,
-                    "role": "user",
+                    "role": "host" if session_message else "user",
                     "content": message,
                     "channel": str(metadata.get("channel") or "internal"),
                     "channel_message_id": str(metadata.get("channel_message_id") or ""),
                     "metadata": {
-                        "kind": "active_turn_user_input",
+                        "kind": "session_message" if session_message else "active_turn_user_input",
                         "guidance_id": guidance_id,
                         **({"learning_source": dict(metadata["learning_source"])}
                            if metadata.get("kind") == "active_turn_user_input"

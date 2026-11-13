@@ -576,7 +576,7 @@ def cancel_owned_session_task(host, task, *, include_descendants=False, authoriz
 
 
 def queue_owned_background_message(host, *, actor, target, text, operation_key, input_kind):
-    """只追加原guidance，标宿主消息来源而非user；回执是耐久受理，不是模型已消费。"""
+    """追加原guidance，消费后以host来源投影历史；受理回执不表示模型已消费。"""
     from .background_team_lifecycle import background_identity_transition
 
     with background_identity_transition(host.conversation_store, target.thread_id):
@@ -606,6 +606,7 @@ def _queue_owned_background_message_locked(host, *, actor, target, text, operati
     store.guidance.append_once({"target_type": "thread", "target_id": target.thread_id, "message": text,
         "sender": actor.source_thread_id, "priority": "normal", "delivery": "next_turn",
         "metadata": {"origin_kind": SESSION_MESSAGE_ORIGIN_KIND, "origin_thread_id": actor.source_thread_id,
+                     "record_in_transcript": True, "thread_id": target.thread_id, "channel": actor.channel,
                      "input_kind": input_kind, SESSION_MESSAGE_KEY_FIELD: key}}, dedupe_key=key)
     if previous is None:
         record_pair_message(store, actor.source_thread_id, target.thread_id)

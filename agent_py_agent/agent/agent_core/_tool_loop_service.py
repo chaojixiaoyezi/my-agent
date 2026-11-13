@@ -2827,13 +2827,15 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
         record.call,
         record.result,
     )
-    guardrail_hint = record_tool_guard_observation(
+    deferred = record.deferred and not record.result.handler_executed
+    guardrail_hint = "" if deferred else record_tool_guard_observation(
         agent,
         record.params,
         record.call,
         record.result,
     )
-    _mark_tool_call_halts(agent, record)
+    if not deferred:
+        _mark_tool_call_halts(agent, record)
     if record.result.ok:
         _record_successful_tool(record.params, record.result)
     archive_record = archive_tool_call_record(agent, record)
@@ -2872,7 +2874,8 @@ def _record_tool_call(agent, record: ToolCallRecordParams) -> None:
     append_long_content_recovery_context(record)
     progress = record_runtime_subagent_tool_progress(agent, record)
     # 使用同次真实阶段产物投影，不能把读工具成功/心跳当作合同进展。
-    record_readonly_stall(agent, record, stage_progress=progress)
+    if not deferred:
+        record_readonly_stall(agent, record, stage_progress=progress)
     if progress:
         record.params.tool_context.append(_task_local_progress_context(progress))
 

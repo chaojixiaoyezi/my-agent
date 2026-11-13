@@ -205,7 +205,7 @@ def test_sessions_list_schema_and_cursor_errors(background_http):
     cursor = first['data']['next_cursor']
     for params, user in (({'cursor': '!'}, 'business-alice'), ({'cursor': cursor}, 'business-bob')):
         status, result = background_call(background_http, 'sessions.list', params, user=user)
-        assert status == 503 and result['error']['code'] == 'CURSOR_EXPIRED', result
+        assert status == 410 and result['error']['code'] == 'CURSOR_EXPIRED', result
         assert result['data'] == {}
     status, result = background_call(background_http, 'sessions.list', {'limit': 100})
     assert status == 200 and len(result['data']['items']) == 2, result

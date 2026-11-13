@@ -392,3 +392,40 @@ def test_retirement_drain_republishes_exact_accepted_task_without_reappending(qu
     with pytest.raises(ValueError, match="AGENT_NOT_AVAILABLE"):
         service.assign({"agent_id": task.target_thread_id, "space_id": "space-A", "instruction": "new work refused"},
             actor=actor, idempotency_key="r4-new-task-refused")
+
+
+def test_owned_background_input_survives_as_host_history_after_ack(queued_business_task):
+    from agent_py_agent.agent.conversation.session_messaging import queue_owned_background_message
+
+    service, host, actor, task, view = queued_business_task
+    store = host.conversation_store
+    target = store.threads.require(view["agent_id"])
+    queue_owned_background_message(host, actor=actor, target=target, text="follow-up body",
+                                   operation_key="history-once", input_kind="message")
+    entry = next(row for row in store.guidance.recent("thread", target.thread_id, limit=100)
+                 if row.message == "follow-up body")
+    assert not [row for row in store.messages.history_page_report(target.thread_id, limit=100).rows
+                if row.content == "follow-up body"]
+    assert store.guidance.claim_for_turn(entry, expected_turn_id="history-turn", attempt_id="history-attempt")
+    entry = store.guidance.receipt(entry.metadata["dedupe_key"]).entry
+    store.guidance.submissions.mark_submitted("history-turn", [entry], attempt_id="history-attempt",
+                                            provider_call_id="history-call")
+    for _ in range(2):
+        store.guidance.acknowledgements.consume_submitted("history-turn", [entry], provider_call_id="history-call")
+    rows = [row for row in store.messages.history_page_report(target.thread_id, limit=100).rows
+            if row.content == "follow-up body"]
+    assert len(rows) == 1
+    assert rows[0].role == "host"
+    assert rows[0].metadata["origin_kind"] == "session_message"
+    assert rows[0].metadata["origin_thread_id"] == actor.source_thread_id
+    assert rows[0].metadata["input_kind"] == "message"
+    assert rows[0].metadata["kind"] != "active_turn_user_input"
+    from agent_py_agent.agent.conversation.business_access import BusinessActor
+    from agent_py_agent.agent.conversation.business_observability import BusinessObservationService
+    observation = BusinessObservationService(store.storage.root.parent, owner_id=actor.owner_id,
+                                             store=store, cursor_key=b"h" * 32)
+    reader = BusinessActor(actor.owner_id, "history-reader", observation, lambda *_: True)
+    result = observation.query("messages.list", {"target": {"kind": "background_main", "id": target.thread_id}},
+                               actor=reader)
+    visible = [row for row in result["items"] if row["text"] == "follow-up body"]
+    assert len(visible) == 1 and visible[0]["role"] == "host"
