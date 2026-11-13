@@ -36,6 +36,40 @@ def pending_review(wire, tmp_path):  # noqa: F811
     return agent, client, store, run, binding, repo, requirement, target
 
 
+def test_pending_review_reports_actual_error_without_blind_retry(wire, tmp_path):  # noqa: F811
+    from agent_py_agent.agent.agent_core.host_turn_scope import host_turn_scope
+    from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
+
+    agent, client, _, run, _, _, _, target = pending_review(wire, tmp_path)
+    params = RunParams(run_id='review-wait', request_id='review-wait', save=False)
+    with host_turn_scope(agent, '', params, reason='workflow_pending_diagnostic', tool_rounds=1):
+        outcome = agent.tools.tools['workflows'].execute({'action': 'resume', 'workflow_run_id': run.workflow_run_id})
+    assert not outcome.ok and outcome.error_code == 'WORKFLOW_REVIEW_REQUIRED', outcome.output
+    assert not outcome.retryable and outcome.recommended_action == 'request_approval'
+    assert 'WORKFLOW_REVIEW_REQUIRED' in outcome.result_envelope['display']['summary']
+    assert not target.exists()
+    public = client.call('operations.get', {'operation_id': run.workflow_run_id})
+    assert public['ok'], public
+    error = public['data']['error']
+    assert error['code'] == outcome.error_code and error['retryable'] is False
+    assert '独立审核' in error['message']
+
+
+def test_historical_review_error_needs_exact_attempt_and_preserves_unknown_effects():
+    from agent_py_agent.agent.gateway_parts.business_api_v13_readers import _observed_tool_error
+
+    code = 'WORKFLOW_REVIEW_REQUIRED'
+    step = {'step_id': 'release', 'error_code': code, 'escalation_result': {
+        'attempt_id': 'original', 'pending_review': {'schema': 'workflow.pending-review.v1',
+            'workflow_run_id': 'run', 'step_id': 'release', 'attempt_id': 'obsolete'}}}
+    projection = _observed_tool_error('TOOL_EXECUTION_FAILED',
+        result={'effect_outcome': 'unknown', 'retryable': True},
+        workflow={'workflow_run_id': 'run', 'failed_step_id': 'release', 'status': 'failed', 'steps': [step]})
+    assert projection['code'] == 'TOOL_EXECUTION_FAILED' and projection['retryable'] is False
+    assert _observed_tool_error('TOOL_OPERATION_OUTCOME_UNKNOWN',
+        result={'reported_error_code': code, 'effect_outcome': 'unknown'})['code'] == 'TOOL_OPERATION_OUTCOME_UNKNOWN'
+
+
 @pytest.mark.parametrize('mismatch', ['', 'version', 'scope', 'owner'])
 def test_static_native_review_is_exact_and_resume_preserves_unstarted_attempt(wire, tmp_path, mismatch):  # noqa: F811
     agent, client, store, run, binding, repo, requirement, target = pending_review(wire, tmp_path)

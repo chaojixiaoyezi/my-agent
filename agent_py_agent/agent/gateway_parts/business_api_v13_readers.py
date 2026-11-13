@@ -26,6 +26,7 @@ from ..artifacts.registry_reader import latest_records_from_lines
 from ..common.log_redaction import redact_sensitive_value
 from ..common.nofollow_fs import read_bytes_beneath, read_text_beneath
 from ..conversation.background_team_lifecycle import background_identity
+from ..contracts.error_taxonomy import error_contract
 from ..conversation.business_access import BusinessError
 from ..conversation.business_contracts import BusinessExecutionContext
 from ..conversation.business_observability import (
@@ -310,6 +311,28 @@ class _StreamDecisionWindow:
                 close()
 
 
+def _observed_tool_error(control_code, *, result=None, workflow=None, fallback_message=''):
+    """公开已结算结构化原因和宿主恢复说明，旧的工作流回执沿同一失败步骤核验。"""
+    from ..workflows.review_receipts import pending_review_error
+
+    receipt = result if isinstance(result, dict) else {}
+    reason = pending_review_error(workflow)
+    if not reason and control_code == 'TOOL_EXECUTION_FAILED':
+        reported = receipt.get('reported_error_code')
+        if isinstance(reported, str) and re.fullmatch(r'[A-Z][A-Z0-9_]{0,127}', reported):
+            reason = reported
+    code = reason or control_code
+    if not isinstance(code, str) or not code:
+        return None
+    contract = error_contract(code)
+    retryable = receipt.get('retryable') is True and receipt.get('effect_outcome') in {'none', 'not_started'}
+    if contract.code == code and code != 'UNKNOWN_ERROR':
+        return {'code': code, 'message': contract.recovery_hint, 'retryable': retryable and contract.retryable,
+                'details': [{'key': 'recommended_action', 'value': contract.recommended_action}]}
+    return {'code': code, 'message': fallback_message or code, 'retryable': retryable,
+            'details': []}
+
+
 # LLM: 跨业务空间、工作流、后台助手及受管操作账本核验操作回执；仅本owner可见。
 # 函数用途: 跨多个持久事实源统一检索操作回执。
 def business_operation_receipt(home: Path, owner: str, store: Any, repo: Any, operation_id: str) -> dict[str, Any] | None:
@@ -346,15 +369,12 @@ def business_operation_receipt(home: Path, owner: str, store: Any, repo: Any, op
                             outcome = json.loads(row['outcome_json'])
                         except Exception:
                             outcome = {}
-                    err_code = outcome.get('error_code')
-                    error = {
-                        'code': str(err_code or status),
-                        'message': str(err_code or status),
-                        'retryable': False,
-                        'details': [],
-                    } if state == 'failed' else None
                     target_refs = [operation_id]
                     result_obj = outcome.get('result')
+                    workflow = (result_obj.get('result_envelope') if isinstance(result_obj, dict)
+                                and row['operation_type'] == 'workflows' else None)
+                    error = (_observed_tool_error(outcome.get('error_code') or status,
+                                                  result=result_obj, workflow=workflow) if state == 'failed' else None)
                     if isinstance(result_obj, dict) and isinstance(result_obj.get('result_ref'), str) and result_obj['result_ref']:
                         target_refs = [result_obj['result_ref']]
                     return {
@@ -438,12 +458,8 @@ def business_operation_receipt(home: Path, owner: str, store: Any, repo: Any, op
                         'pending' if st in ('queued', 'running', 'waiting_for_agent') else 'unknown'
                     )
                 )
-                err = {
-                    'code': 'WORKFLOW_FAILED',
-                    'message': str(run_data.get('failed_step_id') or 'WORKFLOW_FAILED'),
-                    'retryable': False,
-                    'details': [],
-                } if state == 'failed' else None
+                err = (_observed_tool_error('WORKFLOW_FAILED', workflow=run_data,
+                       fallback_message=str(run_data.get('failed_step_id') or 'WORKFLOW_FAILED')) if state == 'failed' else None)
                 target_refs = [operation_id]
                 bctx = run_data.get('business_context') or {}
                 if isinstance(bctx, dict) and bctx.get('space_id'):
@@ -468,12 +484,8 @@ def business_operation_receipt(home: Path, owner: str, store: Any, repo: Any, op
                         'pending' if st in ('queued', 'running', 'waiting_for_agent') else 'unknown'
                     )
                 )
-                err = {
-                    'code': 'WORKFLOW_FAILED',
-                    'message': str(run_data.get('failed_step_id') or 'WORKFLOW_FAILED'),
-                    'retryable': False,
-                    'details': [],
-                } if state == 'failed' else None
+                err = (_observed_tool_error('WORKFLOW_FAILED', workflow=run_data,
+                       fallback_message=str(run_data.get('failed_step_id') or 'WORKFLOW_FAILED')) if state == 'failed' else None)
                 target_refs = [operation_id]
                 bctx = run_data.get('business_context') or {}
                 if isinstance(bctx, dict) and bctx.get('space_id'):
@@ -661,6 +673,8 @@ class _OwnerReaders:
                 duration = result['duration_ms'] if has_receipt else None
                 ref = result['result_ref'] if has_receipt else row['operation_id']
             error_code = outcome.get('error_code')
+            workflow = (result.get('result_envelope') if isinstance(result, dict)
+                        and row['operation_type'] == 'workflows' else None)
             stored_input = result.get('redacted_input') if isinstance(result, dict) else None
             if stored_input is None and isinstance(result, dict) and isinstance(result.get('result_envelope'), dict):
                 stored_input = result['result_envelope'].get('redacted_input')
@@ -668,7 +682,7 @@ class _OwnerReaders:
             value = {'operation_id': row['operation_id'], 'run_id': row['run_id'], 'attempt_id': row['attempt_id'],
                 'task_id': None, 'tool_name': row['operation_type'], 'status': row['status'],
                 'executed': executed, 'effect_outcome': effect, 'duration_ms': duration,
-                'error': {'code': error_code, 'message': error_code, 'retryable': False, 'details': []} if error_code else None,
+                'error': _observed_tool_error(error_code, result=result, workflow=workflow) if error_code else None,
                 'result_ref': ref, '_input': redacted_input}
             record = self.record(value, row)
             value['task_id'] = record.task_id

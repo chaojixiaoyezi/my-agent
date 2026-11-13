@@ -4979,6 +4979,21 @@ ERROR_CONTRACTS.update({
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="工具运行时发生未预期错误；请先核对输入参数与目标资源状态，不要盲目原样重复调用。",
     ),
+    "WORKFLOW_REVIEW_REQUIRED": ErrorContract(
+        code="WORKFLOW_REVIEW_REQUIRED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_APPROVAL.value,
+        recovery_hint="该步骤需要独立审核。请有权的另一位执行者核对本次候选并登记审核，通过后恢复同一工作流运行。",
+    ),
+    "WORKFLOW_REVIEW_STALE": ErrorContract(
+        code="WORKFLOW_REVIEW_STALE", category="state", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_APPROVAL.value,
+        recovery_hint="已有审核与当前候选不符。请核对步骤、版本和尝试，取得对应候选的独立审核后恢复原运行。",
+    ),
+    "WORKFLOW_REVIEW_CHANGES_REQUESTED": ErrorContract(
+        code="WORKFLOW_REVIEW_CHANGES_REQUESTED", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPAIR_AGAINST_ACCEPTANCE_FINDINGS.value,
+        recovery_hint="审核要求修改。请处理该候选的评审意见，再对修订版本提交独立审核。",
+    ),
     "WORKFLOW_CONDITION_INVALID": ErrorContract(
         code="WORKFLOW_CONDITION_INVALID", category="contract", retryable=False,
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,

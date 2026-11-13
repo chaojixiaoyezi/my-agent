@@ -5,6 +5,28 @@ import math
 from dataclasses import dataclass
 
 
+def pending_review_error(run):
+    """只公开失败步骤与本次运行、尝试相符的审核报码，历史回执与新回执共用。"""
+    if not isinstance(run, dict) or run.get('status') != 'failed' or not run.get('failed_step_id'):
+        return ''
+    steps = run.get('steps')
+    if not isinstance(steps, list):
+        return ''
+    for step in steps:
+        if not isinstance(step, dict) or step.get('step_id') != run['failed_step_id']:
+            continue
+        escalation = step.get('escalation_result')
+        pending = escalation.get('pending_review') if isinstance(escalation, dict) else None
+        code = step.get('error_code')
+        if (isinstance(pending, dict) and pending.get('schema') == 'workflow.pending-review.v1'
+                and run.get('workflow_run_id') and pending.get('workflow_run_id') == run['workflow_run_id']
+                and pending.get('step_id') == step['step_id'] and pending.get('attempt_id')
+                and pending['attempt_id'] == escalation.get('attempt_id')
+                and code in ('WORKFLOW_REVIEW_REQUIRED', 'WORKFLOW_REVIEW_STALE', 'WORKFLOW_REVIEW_CHANGES_REQUESTED')):
+            return code
+    return ''
+
+
 @dataclass(frozen=True)
 class WorkflowReviewReceipt:
     receipt_ref: str

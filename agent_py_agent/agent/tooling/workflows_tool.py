@@ -41,6 +41,7 @@ from ..workflows.business_scope import (
     validate_business_request,
 )
 from ..workflows.models import redact_bearer_values
+from ..workflows.review_receipts import pending_review_error
 from ..workflows.run_store import WorkflowExecutionError
 from .models import BaseTool
 from .scripts_tool import (
@@ -471,7 +472,10 @@ class WorkflowsTool(BaseTool):
                 ok = data.get('state') not in ('failed', 'blocked')
             if params['action'] == 'publish' and data.get('publish_complete') is False:
                 ok = False
-            return _outcome('workflows', data, ok, 'TOOL_EXECUTION_FAILED' if not ok else '')
+            code = ''
+            if not ok:
+                code = pending_review_error(data) or 'TOOL_EXECUTION_FAILED'
+            return _outcome('workflows', data, ok, code)
         except AssetPostCommitReadbackError as exc:
             return _post_commit_failure('workflows', exc)
         except AssetActionError as exc:
