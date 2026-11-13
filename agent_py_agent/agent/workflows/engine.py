@@ -446,6 +446,13 @@ class _WorkflowRunLifecycle:
                     resolution_origin = 'system'
                 if admission.effect_not_started or admission.reconciled_output is not None:
                     record.effect_outcome = 'not_started' if admission.effect_not_started else 'confirmed'
+            if patched_step_output is not None and any(
+                    isinstance(step.escalation_result.get('pending_review'), dict)
+                    and step.escalation_result['pending_review'].get('schema') == 'workflow.pending-review.v1'
+                    and not step.escalation_result.get('effect_started') for step in record.steps):
+                from .business_scope import WorkflowPolicyRefusal
+                raise WorkflowPolicyRefusal('WORKFLOW_REVIEW_PATCH_FORBIDDEN', details={
+                    'recommended_action': '原待审步骤尚未执行，不能用修复输出替代审核；请完成原候选的独立审核后恢复。'})
             if _requires_native_agent_resume(record):
                 if from_step_id is not None or patched_step_output is not None or updated_data_sources is not None:
                     raise ValueError('WORKFLOW_AGENT_COMPLETION_HOST_ONLY')
@@ -476,7 +483,8 @@ class _WorkflowRunLifecycle:
                 return self.store.complete_control(workflow_run_id, operation_key) if operation_key else record
             suffix = [_pending(spec) for spec in definition['steps'][start + bool(repaired):]]
             pending_native_review = (not repaired and start < len(ids)
-                and record.steps[start].error_code in {'WORKFLOW_REVIEW_REQUIRED', 'WORKFLOW_REVIEW_STALE', 'WORKFLOW_REVIEW_CHANGES_REQUESTED'}
+                and record.steps[start].error_code in {'WORKFLOW_REVIEW_REQUIRED', 'WORKFLOW_REVIEW_STALE', 'WORKFLOW_REVIEW_CHANGES_REQUESTED',
+                    'WORKFLOW_REPLAN_READY', 'WORKFLOW_REPLAN_FAILED', 'WORKFLOW_REWORK_LIMIT_REACHED', 'WORKFLOW_REWORK_NO_PROGRESS'}
                 and isinstance(record.steps[start].escalation_result.get('pending_review'), dict)
                 and record.steps[start].escalation_result['pending_review'].get('schema') == 'workflow.pending-review.v1'
                 and not record.steps[start].escalation_result.get('effect_started'))
@@ -1234,7 +1242,8 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                 record.status = 'succeeded'
                 record.escalation_result['debug_logs'] = ['仅预览：未执行脚本、外部分析器、网络、工具或子工作流']
                 return
-        self._admit_effect(run, record)
+        if self._admit_effect(run, record) is False:
+            return
         if record.mode == 'agent_task':
             if run.ephemeral_debug or self.agent_steps is None:
                 raise ValueError('WORKFLOW_AGENT_EXECUTOR_UNAVAILABLE')
@@ -1269,6 +1278,10 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             admission = self._authorize_run(run, WorkflowEffectPhase(record.step_id))
         except WorkflowReviewPending as error:
             record.escalation_result['pending_review'] = error.binding
+            if error.error_code == 'WORKFLOW_REVIEW_CHANGES_REQUESTED':
+                from .rework import perform_replan
+                if perform_replan(self, run, record, error.binding):
+                    return False
             raise
         if isinstance(admission, WorkflowEffectAdmission):
             record.escalation_result['review_refs'] = list(admission.review_refs)

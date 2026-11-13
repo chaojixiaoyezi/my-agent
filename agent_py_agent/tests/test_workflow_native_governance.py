@@ -134,3 +134,51 @@ def test_author_context_dies_on_exit_and_cannot_cross_threads(wire):  # noqa: F8
                 assert pool.submit(copied.run, current_workflow_author, agent).result() == ''
         assert copied.run(current_workflow_author, agent) == ''
         turn.runtime_status = 'ok'
+
+
+def test_pending_review_cannot_be_bypassed_by_patch_output(wire, tmp_path):  # noqa: F811
+    from agent_py_agent.agent.workflows.engine import WorkflowEngine
+    from agent_py_agent.agent.workflows.native_governance import NativeWorkflowGovernance
+    agent, client, store, run, binding, repo, requirement, target = pending_review(wire, tmp_path)
+    governance = NativeWorkflowGovernance(agent.tools.operation_store, store, owner_home=agent.home_paths.owner_home_dir,
+        owner_id=run.owner_id, author_provider=lambda: '')
+    engine = WorkflowEngine(agent.home_paths.owner_home_dir, run_authorizer=governance.require_effect)
+    with pytest.raises(PermissionError, match='WORKFLOW_REVIEW_PATCH_FORBIDDEN'):
+        engine.resume_workflow_run(run.workflow_run_id, patched_step_output={'value': 7}, resolution_origin='agent')
+    current = store.load_run(run.workflow_run_id)
+    assert current.revision == run.revision and current.status == 'failed'
+    assert not target.exists()
+
+
+def test_current_definition_cannot_remove_frozen_review_policy(wire, tmp_path):  # noqa: F811
+    from dataclasses import replace
+
+    from agent_py_agent.agent.assets.workflow_store import WorkflowStore
+    agent, client, store, run, binding, repo, requirement, target = pending_review(wire, tmp_path)
+    assets = WorkflowStore(agent.home_paths.owner_home_dir)
+    current = assets.get_workflow('native-review')
+    metadata = {key: value for key, value in current.descriptor.metadata.items() if key != 'workflow_review_policy'}
+    assets.save_workflow(replace(current, descriptor=replace(current.descriptor, metadata=metadata)))
+    client.send(client.prepare('workflow_runs.resume', {'workflow_run_id': run.workflow_run_id}, expected_revision=run.revision))
+    saved = store.load_run(run.workflow_run_id)
+    assert saved.status == 'failed' and saved.steps[0].error_code == 'WORKFLOW_REVIEW_REQUIRED'
+    assert not target.exists()
+
+
+def test_explicit_changed_script_invalidates_static_old_review(wire, tmp_path):  # noqa: F811
+    from agent_py_agent.agent.assets.script_store import ScriptStore
+    from agent_py_agent.agent.workflows.engine import WorkflowEngine
+    from agent_py_agent.agent.workflows.native_governance import NativeWorkflowGovernance
+    agent, client, store, run, binding, repo, requirement, target = pending_review(wire, tmp_path)
+    repo.record_independent_review(VerificationContext(run.owner_id, '', run.workflow_run_id),
+        IndependentReviewRecord('old-pass', binding['requirement_id'], 'reviewer', requirement.author_principal_id,
+            binding['input_version'], 'pass', 'workflow_effect.v1', owner_ref=run.owner_id))
+    scripts = ScriptStore(agent.home_paths.owner_home_dir)
+    from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+    scripts.save_script(AssetDescriptor(id='reviewed', kind='script', name='审核脚本'), 'print(\'{"value":8}\')')
+    governance = NativeWorkflowGovernance(agent.tools.operation_store, store, owner_home=agent.home_paths.owner_home_dir,
+        owner_id=run.owner_id, author_provider=lambda: '')
+    engine = WorkflowEngine(agent.home_paths.owner_home_dir, run_authorizer=governance.require_effect)
+    changed = engine.resume_workflow_run(run.workflow_run_id, allow_script_drift=True)
+    assert changed.status == 'failed' and changed.steps[0].error_code == 'WORKFLOW_REVIEW_STALE'
+    assert not target.exists()

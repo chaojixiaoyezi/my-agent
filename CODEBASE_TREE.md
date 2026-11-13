@@ -1,6 +1,12 @@
 ## 2026-11-12 连续交互复核返工
 
 ```text
+agent_py_agent/agent/workflows/rework.py        # 冻结策略下的有界无状态重新规划
+agent_py_agent/tests/test_workflow_rework.py    # 返工预算、幂等、取消与原执行证据
+docs/design/WORKFLOW_REWORK.md                 # 重新规划元数据与恢复合同
+```
+
+```text
 agent_py_agent/tests/test_workflow_reference_structured_sources.py # 引用精确字段、取消责任与派生索引迁移
 ```
 

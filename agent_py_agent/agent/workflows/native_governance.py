@@ -152,7 +152,9 @@ def builtin_workflow_templates():
     """通用阶段草案由原模板目录投影；用户补真实工具步骤，不把研判当回归或发布成功。"""
     def definition(identifier, name, stages, *, governed):
         metadata = {'workflow_review_policy': {'steps': ['review', 'regression', 'release'],
-            'minimum_reviews': 1, 'ttl_seconds': 86400}} if governed else {}
+            'minimum_reviews': 1, 'ttl_seconds': 86400},
+            'workflow_rework_policy': {'replan_step_id': 'architecture', 'max_rounds': 3,
+                'max_no_progress_rounds': 2}} if governed else {}
         return {'descriptor': {'id': identifier, 'kind': 'workflow', 'name': name,
             'summary': ('保留架构、独立审核、回归和授权发布阶段；请将实际执行阶段配置为原生工具/脚本，研判不代表测试或发布成功。'
                 if governed else '仅做无状态分析，不强制开发审核流程。'),

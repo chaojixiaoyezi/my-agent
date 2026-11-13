@@ -247,6 +247,8 @@ class WorkflowDefinition(_Record):
                     raise ValueError('画布连线引用未知步骤')
         for value in (*self.schedule_ids, *self.datasource_ids):
             safe_asset_id(value)
+        from ..workflows.rework import validate_rework_policy
+        validate_rework_policy({'descriptor': self.descriptor.to_dict(), 'steps': [step.to_dict() for step in self.steps]})
 
     # LLM: 嵌套descriptor保留自身schema_version；外层enabled与描述符值一致，不创建第二份运行状态。
     # 函数用途: 提供完整工作流的JSON传输结构。
