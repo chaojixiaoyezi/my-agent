@@ -274,18 +274,29 @@ def learning_usage_binding(agent: object, entry: object) -> dict[str, object]:
     sha = str(getattr(entry, "content_sha256", "") or "").strip().lower()
     if _SHA256_RE.fullmatch(sha):
         result["content_sha256"] = sha
-    metadata = getattr(entry, "metadata", None)
-    binding = metadata.get("_learning_usage_binding") if isinstance(metadata, dict) else None
+    asset_fields = getattr(entry, "asset_fields", None)
+    binding = asset_fields.get("_learning_usage_binding") if isinstance(asset_fields, dict) else None
+    if not isinstance(binding, dict):
+        metadata = getattr(entry, "metadata", None)
+        binding = metadata.get("_learning_usage_binding") if isinstance(metadata, dict) else None
     if isinstance(binding, dict):
         inc = str(binding.get("incarnation_id") or "").strip()
         act = str(binding.get("activation_id") or "").strip()
         epoch = binding.get("strike_epoch")
-        if inc and act:
+        binding_sha = str(binding.get("content_sha256") or "").strip().lower()
+        if binding_sha and not _SHA256_RE.fullmatch(binding_sha):
+            binding_sha = ""
+        if inc and act and (not sha or not binding_sha or binding_sha == sha):
+            if not sha and binding_sha:
+                result["content_sha256"] = binding_sha
             result["incarnation_id"] = inc
             result["activation_id"] = act
             if type(epoch) is int and epoch >= 0:
                 result["strike_epoch"] = epoch
             return result
+    # 历史版本恢复会清空已冻结条目的私有绑定；缺失绑定时保持不可用，不重新绑定到当前激活态。
+    if getattr(entry, "frozen_path", "") and isinstance(asset_fields, dict):
+        return result
     source = str(getattr(entry, "source", "") or "")
     stable_id = str(getattr(entry, "stable_id", "") or "")
     name = str(getattr(entry, "name", "") or "").strip()
