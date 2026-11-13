@@ -14,6 +14,38 @@ def position(case, cursor, filters=None):
     return case.service.cursor_position(cursor, scope)['after']
 
 
+@pytest.mark.parametrize('thread_state', ['missing', 'corrupt', 'foreign'])
+def test_detached_thread_events_leave_a_bounded_private_gap(tmp_path, thread_state):
+    from dataclasses import replace
+
+    case = fixture(tmp_path)
+    baseline = case.service.query('events.list', {'filter': {}}, actor=case.actor)
+    thread_id = 'lost-thread'
+    path = case.store.storage.thread_path(thread_id)
+    if thread_state == 'corrupt':
+        path.write_text('{broken', encoding='utf-8')
+    elif thread_state == 'foreign':
+        case.store.threads.write(replace(case.store.threads.require('controller'), thread_id=thread_id,
+                                        owner_id='other-owner', canonical_user_id='other-owner'))
+    orphan = case.runtime.record_run_creation(owner_id=case.owner, run_id='lost-run', thread_id=thread_id)
+    case.runtime.append_event(event_type='agent_run.progress', task_run_id=orphan['task_run_id'],
+                              agent_run_id=orphan['agent_run_id'], attempt_id='')
+    target = case.runtime.append_event(event_type='attempt.progress', attempt_id=case.root['attempt_id'],
+        task_run_id=case.root['task_run_id'], agent_run_id=case.root['agent_run_id'])
+    cursor = baseline['next_cursor']
+    for _ in range(6):
+        page = case.service.query('events.list', {'filter': {}, 'limit': 1, 'cursor': cursor}, actor=case.actor)
+        assert position(case, page['next_cursor']) > position(case, cursor)
+        cursor = page['next_cursor']
+        assert thread_id not in str(page) and 'lost-run' not in str(page)
+        if page['events']:
+            assert [event['event_id'] for event in page['events']] == [target['event_id']]
+            break
+        assert page['coverage'] == 'partial'
+    else:
+        pytest.fail('后续同 owner 的有效事件未送达')
+
+
 @pytest.mark.parametrize('filter_space', [False, True])
 def test_settled_unbound_prefix_advances_in_bounded_pages_without_exposure(tmp_path, filter_space):
     case = fixture(tmp_path)

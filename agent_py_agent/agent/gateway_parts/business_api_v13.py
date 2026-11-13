@@ -764,6 +764,7 @@ def v13_conversation_messages(params, context, services):
     from ..business_spaces.v13_store import v13_store_for
     from ..common.log_redaction import redact_sensitive_value
     from ..conversation.background_team_lifecycle import background_identity
+    from ..conversation.subagent_message_observation import public_message_origin
     target = params['target']
     if target['kind'] != 'background_main':
         return None
@@ -812,7 +813,7 @@ def v13_conversation_messages(params, context, services):
             'task_id': message.metadata.get('task_id'), 'space_id': conversation.get('space_id'),
             'role': message.role, 'text': redact_sensitive_value(message.content),
             'occurred_at': datetime.fromtimestamp(message.created_at, timezone.utc).isoformat() if message.created_at else None,
-            'source': {'kind': 'canonical_message', 'source_ref': message.message_id, 'revision': None}, 'artifact_refs': []})
+            'source': public_message_origin(projection, message, actor), 'artifact_refs': []})
     offset += len(selected)
     next_position = ({'before': page.after, 'offset': offset, 'bound_limit': bound_limit} if offset < len(page.rows)
         else {'before': page.before, 'offset': 0, 'bound_limit': bound_limit} if page.before else None)

@@ -543,10 +543,24 @@ class BusinessObservationService:
         scope = self.scope_digest('messages.list', params, actor)
         position = self.cursor_position(params.get('cursor'), scope)
         target = params['target']
-        if self.store is None or target['kind'] == 'subagent':
-            # 子代理原文须经W4准确任务路径/attempt读口；不能拿根线程历史冒充。
+        from .subagent_message_observation import (
+            SubagentTranscriptUnavailable,
+            public_message_origin,
+            resolve_subagent_transcript,
+        )
+        if self.store is None:
             raise BusinessError('HOST_NOT_READY')
-        thread = _observation_thread(self.store, target['id'])
+        child = None
+        if target['kind'] == 'subagent':
+            try:
+                thread, child = resolve_subagent_transcript(self, target['id'], actor)
+            except SubagentTranscriptUnavailable as error:
+                if position is not None:
+                    raise BusinessError('CURSOR_EXPIRED') from error
+                return {'items': [], 'next_cursor': None, 'coverage': 'unknown', 'history_boundary': {
+                    'first_message_id': None, 'last_message_id': None, 'coverage': 'unknown', 'reason_code': str(error)}}
+        else:
+            thread = _observation_thread(self.store, target['id'])
         if thread.owner_id != self.owner_id:
             raise BusinessError('BUSINESS_ACCESS_DENIED')
         identity = background_identity(thread)
@@ -556,11 +570,12 @@ class BusinessObservationService:
             raise BusinessError('OBSERVATION_NOT_FOUND')
         path = self.store.storage.message_path(thread.thread_id)
         info = path.stat() if path.exists() else None
-        generation = _digest([info.st_dev, info.st_ino]) if info is not None else 'unavailable'
+        generation = _digest([info.st_dev, info.st_ino, child.attempt_id if child else None]) if info is not None else 'unavailable'
         if position is not None and position.get('generation') != generation:
             raise BusinessError('CURSOR_EXPIRED')
-        facts = ObservationRecord({}, self.owner_id, identity.space_id if identity else None,
-            identity.project_ref if identity else None, thread_id=thread.thread_id)
+        facts = ObservationRecord({}, self.owner_id, child.space_id if child else identity.space_id if identity else None,
+            child.project_ref if child else identity.project_ref if identity else None,
+            child.task_id if child else None, thread_id=thread.thread_id)
         require_access(actor, 'messages.list', service=self, owner_id=facts.owner_id,
             space_id=facts.space_id, project_ref=facts.project_ref, thread_id=facts.thread_id)
         before, offset, bound_limit = None, 0, params.get('limit', 50)
@@ -571,12 +586,22 @@ class BusinessObservationService:
                 raise BusinessError('CURSOR_EXPIRED')
         page = self.store.messages.history_page_report(thread.thread_id, before=before, limit=bound_limit)
         if page.errors:
+            if child and position is None:
+                return {'items': [], 'next_cursor': None, 'coverage': 'unknown', 'history_boundary': {
+                    'first_message_id': None, 'last_message_id': None, 'coverage': 'unknown',
+                    'reason_code': 'SUBAGENT_TRANSCRIPT_UNREADABLE'}}
             raise BusinessError('CURSOR_EXPIRED' if position else 'HOST_NOT_READY')
         if offset > len(page.rows):
             raise BusinessError('CURSOR_EXPIRED')
         selected = page.rows[offset:offset + params.get('limit', 50)]
         items = []
+        filtered = False
         for row in selected:
+            if child and row.metadata.get('agent_run_id') != child.run_id:
+                filtered = True
+                continue
+            if child and row.role not in {'user', 'assistant', 'host'}:
+                continue
             if row.role not in {'user', 'assistant', 'tool', 'host'}:
                 continue
             task_id, context = row.metadata.get('task_id'), None
@@ -586,7 +611,7 @@ class BusinessObservationService:
                 if context.owner_id != self.owner_id or context.task_id != task.task_id:
                     continue
             message_facts = ObservationRecord({}, self.owner_id, context.space_id if context else facts.space_id,
-                context.project_ref if context else facts.project_ref, task.task_id if task else None, thread.thread_id)
+                context.project_ref if context else facts.project_ref, task.task_id if task else facts.task_id, thread.thread_id)
             if not self._visible(message_facts, 'messages.list', params, actor):
                 continue
             _MAX_MESSAGE_VIEW_CHARS = 262144
@@ -605,18 +630,19 @@ class BusinessObservationService:
             items.append({'message_id': row.message_id, 'thread_id': thread.thread_id,
                 'task_id': message_facts.task_id, 'space_id': message_facts.space_id, 'role': row.role,
                 'text': text, 'occurred_at': _timestamp(row.created_at),
-                'source': {'kind': 'canonical_message', 'source_ref': row.message_id, 'revision': None}, 'artifact_refs': []})
+                'source': public_message_origin(self, row, actor), 'artifact_refs': []})
         offset += len(selected)
         next_position = ({'before': page.after, 'offset': offset, 'bound_limit': bound_limit} if offset < len(page.rows)
             else {'before': page.before, 'offset': 0, 'bound_limit': bound_limit} if page.before else None)
         if next_position is not None:
             next_position['generation'] = generation
-        coverage = 'partial' if next_position else 'complete'
+        coverage = 'unknown' if child and info is None else 'partial' if next_position or filtered else 'complete'
         return {'items': items, 'next_cursor': self.cursor(scope, next_position) if next_position else None,
             'coverage': coverage, 'history_boundary': {
                 'first_message_id': items[0]['message_id'] if items else None,
                 'last_message_id': items[-1]['message_id'] if items else None,
-                'coverage': coverage, 'reason_code': 'CANONICAL_PAGE'}}
+                'coverage': coverage, 'reason_code': ('SUBAGENT_TRANSCRIPT_NOT_RECORDED' if child and info is None
+                    else 'PUBLIC_ONLY_FILTERED' if filtered else 'CANONICAL_PAGE')}}
 
     def _subagents(self, action, params, actor):
         page = self._paged_source('executions', action, params, actor)
@@ -1141,6 +1167,13 @@ class BusinessObservationService:
                             for tid in (task.sender_thread_id, task.target_thread_id))):
                     return None
             space_id, project_ref = (context.space_id, context.project_ref) if context else (None, None)
+            if context is None and self.store is not None and thread_id:
+                thread = _observation_thread(self.store, thread_id)
+                if thread.owner_id != self.owner_id:
+                    return None
+                identity = background_identity(thread)
+                if identity is not None:
+                    space_id, project_ref = identity.space_id, identity.project_ref
             if source['run_id'] is not None:
                 value = {'kind': 'subagent' if source['parent_run_id'] else 'background_main',
                     'id': source['run_id'], 'thread_id': thread_id or None,
@@ -1165,6 +1198,29 @@ class BusinessObservationService:
                 thread_id, source['run_id'], None)
         except (OSError, ValueError, TypeError, KeyError):
             return None
+
+    def _event_has_detached_thread(self, thread_id):
+        """仅用于已核同 owner 的运行事件；临时读失败或尚待发表的线程留给重连。"""
+        def detached():
+            try:
+                path = self.store.storage.thread_path(thread_id)
+                thread, error = self.store.threads.load_report(thread_id)
+            except (ValueError, TypeError):
+                return True
+            if error:
+                return error.get('category') in {'data_corruption', 'data_parse', 'data_encoding'}
+            if thread is not None:
+                return thread.owner_id != self.owner_id
+            try:
+                path.stat()
+            except FileNotFoundError:
+                return True
+            return False
+
+        try:
+            return _observation_cached((self.store.threads, 'detached-event', thread_id), detached)
+        except OSError:
+            return False
 
     # LLM: 列表分页按自增seq游标扫描，非匹配空间行批次推进避免假空页；超上限如实保留partial。
     # 函数用途: 返回已授权的流式事件页并支持空间过滤分页。
@@ -1253,7 +1309,12 @@ class BusinessObservationService:
                         and _observation_task(self.store, source['canonical_task_id']) is None
                     )
                     coverage = 'partial'
-                    if settled_unbound:
+                    # 运行/尝试已确认属于本 owner，显式会话文件却已删除、损坏或属于他人。
+                    # 不暴露该行；跳过其序号，否则下一次订阅还会被相同的记录堵住。
+                    detached_thread = (native_execution and self.store is not None and source['thread_id']
+                        and isinstance(metadata, dict) and metadata.get('business_context') is None
+                        and not metadata.get('session_task_ref') and self._event_has_detached_thread(source['thread_id']))
+                    if settled_unbound or detached_thread:
                         after = source['seq']
                         continue
                     # 真正缺失的非空引用保留重连机会；空attempt不会等待并不存在的后继attempt。
