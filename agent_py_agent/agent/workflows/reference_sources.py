@@ -34,6 +34,8 @@ from .run_store import WorkflowRunStore
 _max_blockers_page = 100
 _active_run_statuses = ("running", "queued", "waiting_for_agent", "paused_for_resume")
 _open_session_task_statuses = ("queued", "pending", "running", "accepted")
+# 有界分页：达到上限仍未取尽时按覆盖未知处理，不静默当作完整。
+_max_reference_pages = 100
 
 
 def _extract_owner_home(host_or_owner_home: Any) -> Path | None:
@@ -189,8 +191,12 @@ class WorkflowReferenceReader:
         if self.scheduler_repo is None:
             return True
         try:
-            jobs, _ = self.scheduler_repo.list_jobs(include_deleted=False)
-            for job in jobs:
+            listed = self.scheduler_repo.list_jobs(include_deleted=False)
+            # 原repository合同为(jobs, errors)；形状不符或errors非空都属覆盖未知。
+            if not isinstance(listed, tuple) or len(listed) != 2:
+                return False
+            jobs, errors = listed
+            for job in jobs or []:
                 if not isinstance(job, dict) or job.get("status") == "deleted":
                     continue
                 job_id = str(job.get("job_id") or job.get("id") or "")
@@ -216,7 +222,7 @@ class WorkflowReferenceReader:
                             break
                 if referenced and job_id:
                     blockers.append({"ref": job_id, "kind": "schedule", "reason_code": "REFERENCED_BY_SCHEDULE"})
-            return True
+            return not errors
         except (OSError, ValueError, sqlite3.Error, KeyError):
             return False
         except Exception:
@@ -472,41 +478,64 @@ class WorkflowReferenceReader:
             return True
 
         try:
-            page = task_store.list_page(limit=100)
-            items = page.get("items", []) if isinstance(page, dict) else []
-            for task in items:
-                t_status = getattr(task, "status", "")
-                if t_status not in _open_session_task_statuses:
-                    continue
-                t_id = getattr(task, "task_id", "") or str(task)
-                dedupe_key = str(getattr(task, "dedupe_key", "") or "")
-                metadata = getattr(task, "metadata", {}) or {}
-                bc = metadata.get("business_context") if isinstance(metadata, dict) else {}
+            cursor = None
+            seen_cursors: set[str] = set()
+            pages = 0
+            while True:
+                # 原分页合同只在有游标时传cursor；保留旧测试替身只接收limit的调用形状。
+                if cursor is None:
+                    page = task_store.list_page(limit=100)
+                else:
+                    page = task_store.list_page(limit=100, cursor=cursor)
+                if not isinstance(page, dict):
+                    return False
+                items = page.get("items")
+                if not isinstance(items, list):
+                    return False
+                load_errors = page.get("load_errors") or []
+                for task in items:
+                    t_status = getattr(task, "status", "")
+                    if t_status not in _open_session_task_statuses:
+                        continue
+                    t_id = getattr(task, "task_id", "") or str(task)
+                    dedupe_key = str(getattr(task, "dedupe_key", "") or "")
+                    metadata = getattr(task, "metadata", {}) or {}
+                    bc = metadata.get("business_context") if isinstance(metadata, dict) else {}
 
-                is_ref = False
-                if target_id in dedupe_key:
-                    is_ref = True
-                elif isinstance(metadata, dict):
-                    meta_wf = normalize_workflow_asset_id(
-                        str(metadata.get("workflow_id") or metadata.get("workflow_ref") or "")
-                    )
-                    bc_wf = (
-                        normalize_workflow_asset_id(str(bc.get("workflow_id") or bc.get("workflow_ref") or ""))
-                        if isinstance(bc, dict)
-                        else ""
-                    )
-                    if target_id in (meta_wf, bc_wf):
+                    is_ref = False
+                    if target_id in dedupe_key:
                         is_ref = True
-                    else:
-                        try:
-                            meta_str = json.dumps(metadata)
-                            if target_id in meta_str:
-                                is_ref = True
-                        except Exception:
-                            pass
-                if is_ref and t_id:
-                    blockers.append({"ref": str(t_id), "kind": "session_task", "reason_code": "OPEN_SESSION_TASK"})
-            return True
+                    elif isinstance(metadata, dict):
+                        meta_wf = normalize_workflow_asset_id(
+                            str(metadata.get("workflow_id") or metadata.get("workflow_ref") or "")
+                        )
+                        bc_wf = (
+                            normalize_workflow_asset_id(str(bc.get("workflow_id") or bc.get("workflow_ref") or ""))
+                            if isinstance(bc, dict)
+                            else ""
+                        )
+                        if target_id in (meta_wf, bc_wf):
+                            is_ref = True
+                        else:
+                            try:
+                                meta_str = json.dumps(metadata)
+                                if target_id in meta_str:
+                                    is_ref = True
+                            except Exception:
+                                pass
+                    if is_ref and t_id:
+                        blockers.append({"ref": str(t_id), "kind": "session_task", "reason_code": "OPEN_SESSION_TASK"})
+                # 读错误、覆盖不明、游标循环/超页都属"未知"，不能当作"没有引用"放行。
+                if load_errors or page.get("coverage", "complete") != "complete":
+                    return False
+                following = page.get("next_cursor")
+                if not following:
+                    return True
+                pages += 1
+                if pages >= _max_reference_pages or following in seen_cursors:
+                    return False
+                seen_cursors.add(following)
+                cursor = following
         except (OSError, ValueError, sqlite3.Error, KeyError):
             return False
         except Exception:

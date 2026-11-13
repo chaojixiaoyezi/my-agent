@@ -171,6 +171,19 @@ def _availability(ref, state='available', reason=''):
     return {'ref': ref, 'state': state, 'reason_code': reason, 'required_capabilities': []}
 
 
+# 函数用途: 按工具操作的真实状态判定 usage 投影阶段，只有真的开始执行才算 executed。
+def usage_phase_for_operation(status: object, handler_started_at: object) -> tuple[str, list[str]]:
+    """CLAIMED 未启动、CANCELLED、UNKNOWN 都只是"选中过"，不能当作执行证据（V03-06）。"""
+    op_status = str(status or '')
+    try:
+        started = float(handler_started_at or 0)
+    except (TypeError, ValueError):
+        started = 0.0
+    if op_status in {'EXECUTING', 'SUCCEEDED', 'FAILED'} or (op_status == 'CLAIMED' and started > 0):
+        return 'executed', ['runtime_execution_receipt']
+    return 'selected', ['execution_unknown' if op_status == 'UNKNOWN' else 'not_executed']
+
+
 class BusinessCapabilityService:
     """三个冻结只读动作的领域入口；W13负责原ActionSpec/grant，actor只能由宿主注入。
 
@@ -264,6 +277,24 @@ class BusinessCapabilityService:
                                     op_id = op['operation_id'] if isinstance(op, dict) or hasattr(op, '__getitem__') else getattr(op, 'operation_id', None)
                                     op_type = op['operation_type'] if isinstance(op, dict) or hasattr(op, '__getitem__') else getattr(op, 'operation_type', None)
                                     if not op_id or not op_type:
+                                        continue
+                                    # 只有真的进入执行的操作才算 executed；CLAIMED 未启动、CANCELLED、UNKNOWN
+                                    # 都只是"选中过"，标成已执行就是拿计划冒充执行证据（V03-06）。
+                                    phase, phase_reasons = usage_phase_for_operation(
+                                        op['status'] if isinstance(op, dict) or hasattr(op, '__getitem__') else '',
+                                        op['handler_started_at'] if isinstance(op, dict) or hasattr(op, '__getitem__') else 0,
+                                    )
+                                    if phase != 'executed':
+                                        items.append({
+                                            'event_id': f"runtime-op:{op_id}",
+                                            'space_id': context.space_id,
+                                            'task_id': target_task_id,
+                                            'run_id': ar_id,
+                                            'method_ref': op_type,
+                                            'phase': 'selected',
+                                            'reason_codes': phase_reasons,
+                                            'receipt_ref': None
+                                        })
                                         continue
                                     r_codes = ['runtime_execution_receipt']
                                     try:

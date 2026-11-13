@@ -1,3 +1,27 @@
+## 2026-11-12 V08-04/V08-05 引用覆盖读不全时不得认证 complete
+
+来源：V07–V09 定向复核确认两个缺证是真实缺陷——`agent/workflows/reference_sources.py` 的 SessionTask 检查只调一次 `list_page(limit=100)`，第二页里的 running 引用看不见；同时 `load_errors`、`coverage`、`next_cursor` 与 `scheduler.list_jobs` 的 `errors` 都被丢弃，"读不全"被当成"没有阻断"，孤立物会被放行回收。
+
+做法：会话任务检查改为游标分页（首屏只传 `limit`，非空游标才传 `cursor`，兼容既有只接受 `limit` 的替身），并消费三字段；不足一页、`coverage` 非 complete、`load_errors` 非空、游标成环、超过 100 页上限，全部降为 `unknown` 并保留已收集 blockers。`list_jobs` 的 `(jobs, errors)` 非空错误与合同违约返回同样降为 `unknown`。没有把任何分支改成"一律 unknown"：空错误且命中 job 的正控仍然 `complete` 并给出 `REFERENCED_BY_SCHEDULE`。
+
+新测试：`agent_py_agent/tests/test_acceptance_reference_coverage_truth.py`（7 项）——调度错误→unknown、干净调度仍阻断、第二页 running 被发现且确实走过 `cursor`、partial→unknown、load_errors→unknown、游标环→unknown、后页读错仍保留 blocker 且覆盖 unknown。
+
+实际验证：集成树跑该测试 + `test_wf_g6_reference_sources_recycle.py` + `test_wf_05_06_notifications_and_locks.py`，**全部通过**（exit 0）；同一行为的独立探针 9/9 通过，补丁前是 3/9。
+
+复现：`PYTHONPATH=. TMPDIR=/tmp python3 -B -m pytest -q agent_py_agent/tests/test_acceptance_reference_coverage_truth.py agent_py_agent/tests/test_wf_g6_reference_sources_recycle.py`。真实 100+ 任务库、真实调度存储损坏与实际回收动作未验证。
+
+## 2026-11-12 V03-06 usage 投影不得把「选中过」算作执行
+
+来源：V00–V03 定向复核的内存反例显示，`agent/capability/business_capabilities.py` 把 runtime_db 里每个 tool_operation 都投影成 `phase=executed`，连 `CLAIMED` 且 handler 未启动、`CANCELLED`、`UNKNOWN` 也算执行收据——等于用计划或取消记录冒充执行证据。
+
+做法：抽出 `usage_phase_for_operation(status, handler_started_at)`：`EXECUTING/SUCCEEDED/FAILED`，或 `CLAIMED` 且 `handler_started_at>0`，才算 `executed` 并带 `runtime_execution_receipt`；其余投影为 `selected`，分别带 `not_executed` 或 `execution_unknown`，且不给 `receipt_ref`。没有放宽任何既有断言。
+
+新测试：`agent_py_agent/tests/test_acceptance_usage_phase_truth.py`（9 个参数化节点）——未启动/已取消不算执行、CLAIMED 但已启动算执行、UNKNOWN 只算选中、三种真实执行状态算执行、时间戳不可解析按未启动处理。
+
+实际验证：与 V08 两套回归一起跑，**25 个节点全部通过**（exit 0）。
+
+复现：`PYTHONPATH=. TMPDIR=/tmp python3 -B -m pytest -q agent_py_agent/tests/test_acceptance_usage_phase_truth.py`。真实 runtime_db 数据与 HTTP 入口未验证。
+
 ## 2026-11-12 V06-07 退休前人工审批义务必须真的被读到
 
 来源：128 项定向复核（V04–V06 组）在 `agent/conversation/background_team_lifecycle.py` 里发现三处叠加缺陷——审批读口 `list_pending_agent_tool_approvals` 只接受 `root_task_id`，调用处却多传 `thread_id`（必然 `TypeError`）；`deadline=0` 让预算扫描直接跳过整轮；外层 `except Exception: pass` 把异常吞成"没有审批"。三者合起来，待处理审批永远不会成为未结义务，`retiring` 会被错误释放成 `retired`。
