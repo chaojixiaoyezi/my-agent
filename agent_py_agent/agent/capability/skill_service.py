@@ -144,11 +144,13 @@ class SkillsService:
         policy_provider: Callable[[], EffectiveOwnerPolicy],
         plugin_roots: Callable[[], Iterable[tuple[Path, str]]] | None = None,
         package_provider: Callable[[], Iterable[CapabilityPackageSnapshot]] | None = None,
-        learning_recommended_limit_provider: Callable[[],int] | None = None,
+        learning_recommended_limit_provider: Callable[[], int] | None = None,
         cache_entries: int | None = None,
+        learning_explore_percent_provider: Callable[[], int] | None = None,
     ) -> None:
         self.home_paths = home_paths
-        self.learning_recommended_limit_provider = learning_recommended_limit_provider or (lambda:50)
+        self.learning_recommended_limit_provider = learning_recommended_limit_provider or (lambda: 50)
+        self.learning_explore_percent_provider = learning_explore_percent_provider or (lambda: 0)
         # 已启用插件自带的 Skill 目录（来源 plugin:<ID>）；每次快照都重新读取，停用后下一轮自然消失
         self.plugin_roots = plugin_roots
         self.package_provider = package_provider
@@ -177,6 +179,8 @@ class SkillsService:
         self._generation = 0
         self._force_manifest_reload = False
         self._learning_state: str | None = None
+        self._learning_policy: tuple[int, int] | None = None
+        self._learning_selection: str | None = None
         self._lock = threading.RLock()
 
     @property
@@ -200,9 +204,15 @@ class SkillsService:
     # LLM: 显式clear使下一次发现绕过公开进程结果，不影响其它Owner策略或主动扫描磁盘。
     # 函数用途: 清空当前服务缓存并安排下一次重新读取正文与guard。
     def clear_cache(self) -> None:
+        from .skill_learning_versions import invalidate_learning_state_cache
+
+        invalidate_learning_state_cache(self.home_paths)
         with self._lock:
             self._reset_locked()
             self._force_manifest_reload = True
+            self._learning_state = None
+            self._learning_policy = None
+            self._learning_selection = None
 
     # LLM: 调用方持服务锁；换代后在途构建只把结果交给已在等的调用，不再登记进缓存。
     # 函数用途: 清空全部发现、快照与目录状态缓存并换代。
@@ -232,20 +242,43 @@ class SkillsService:
         if not policy.skills_enabled:
             # 总闸关闭：空快照（来源名单是细粒度控制，总闸是 effective flag——对称 memory_policy）
             return _build_snapshot((), (), policy, workspace)
-        from .skill_learning_versions import freeze_learned_snapshot, learning_state_fingerprint
+        from .skill_learning_versions import (
+            freeze_learned_snapshot,
+            invalidate_learning_state_cache,
+            learning_recommendation_projection,
+            learning_state_fingerprint,
+        )
+        if force_reload:
+            invalidate_learning_state_cache(self.home_paths)
+        limit = int(self.learning_recommended_limit_provider())
+        explore = max(0, min(100, int(self.learning_explore_percent_provider())))
         learning_state = learning_state_fingerprint(self.home_paths)
+        selection_digest = learning_recommendation_projection(
+            self.home_paths,
+            recommended_limit=limit,
+            explore_percent=explore,
+        )
+        policy_pair = (limit, explore)
         with self._lock:
-            # 托管发布有明确版本事实，不能让新的 registry 搭配窗口内的旧正文。
-            if self._learning_state is not None and self._learning_state != learning_state:
+            # 托管发布/语义变更只失效当前 owner 私有状态；绝不联动驱逐跨 owner 的共享/builtin 进程缓存。
+            # 若仅动态策略(limit/explore)变化且基础学习状态未变，保留目录清单缓存，仅按新配额重冻快照。
+            disk_state_changed = (
+                self._learning_state is not None
+                and (
+                    self._learning_state != learning_state
+                    or (self._learning_policy == policy_pair and self._learning_selection != selection_digest)
+                )
+            )
+            if disk_state_changed:
                 self._reset_locked()
-                self._force_manifest_reload = True
             self._learning_state = learning_state
+            self._learning_policy = policy_pair
+            self._learning_selection = selection_digest
         roots = self._skill_roots(workspace, policy)
         manifest, discovery_errors, signature, content, generation = self._manifest_for(roots, force_reload=force_reload)
         packages, package_errors = self._packages()
         discovery_errors.extend(package_errors)
-        limit = self.learning_recommended_limit_provider()
-        learning = learning_state + str(limit)
+        learning = f"{learning_state}:{limit}:{explore}:{selection_digest}"
         fingerprint = _snapshot_fingerprint(manifest, discovery_errors, policy, workspace, packages) + learning
         shared_fingerprint = _snapshot_fingerprint(manifest, discovery_errors, policy, Path(), packages) + learning
         content_key = content + shared_fingerprint
@@ -264,7 +297,12 @@ class SkillsService:
             if ready is not None:  # 上一位领头者刚登记完：直接共用
                 return ready
             built = _build_snapshot(manifest, discovery_errors, policy, Path(), packages)
-            built = freeze_learned_snapshot(built, self.home_paths, recommended_limit=limit)
+            built = freeze_learned_snapshot(
+                built,
+                self.home_paths,
+                recommended_limit=limit,
+                explore_percent=explore,
+            )
             built = replace(built, fingerprint=shared_fingerprint)
             with self._lock:
                 if self._generation == generation:
