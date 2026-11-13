@@ -475,7 +475,12 @@ class _WorkflowRunLifecycle:
             if start == len(ids) and record.status == 'succeeded':
                 return self.store.complete_control(workflow_run_id, operation_key) if operation_key else record
             suffix = [_pending(spec) for spec in definition['steps'][start + bool(repaired):]]
-            if not repaired and start < len(ids) and definition['steps'][start].get('foreach') is not None:
+            pending_native_review = (not repaired and start < len(ids)
+                and record.steps[start].error_code in {'WORKFLOW_REVIEW_REQUIRED', 'WORKFLOW_REVIEW_STALE', 'WORKFLOW_REVIEW_CHANGES_REQUESTED'}
+                and isinstance(record.steps[start].escalation_result.get('pending_review'), dict)
+                and record.steps[start].escalation_result['pending_review'].get('schema') == 'workflow.pending-review.v1'
+                and not record.steps[start].escalation_result.get('effect_started'))
+            if not repaired and start < len(ids) and (definition['steps'][start].get('foreach') is not None or pending_native_review):
                 suffix[0] = replace(record.steps[start], status='pending', needs_repair=False, error_code='', error_message='')
             steps = record.steps[:start] + ((repaired,) if repaired else ()) + tuple(suffix)
             record = replace_run_record(record, dict(steps=steps, status='running', ended_at=0, failed_step_id='',
@@ -966,7 +971,11 @@ class WorkflowEngine(_WorkflowRunLifecycle):
         previous_steps = {step.step_id: step for step in record.steps}
         for spec in definition['steps'][start:]:
             previous = previous_steps.get(spec['step_id'])
-            template = StepExecutionRecord.from_dict(previous.to_dict()) if spec.get('foreach') is not None and previous is not None else _pending(spec)
+            pending_review = (previous is not None
+                and isinstance(previous.escalation_result.get('pending_review'), dict)
+                and previous.escalation_result['pending_review'].get('schema') == 'workflow.pending-review.v1'
+                and not previous.escalation_result.get('effect_started'))
+            template = StepExecutionRecord.from_dict(previous.to_dict()) if previous is not None and (spec.get('foreach') is not None or pending_review) else _pending(spec)
             step = replace(template, status='running', started_at=time.time(), input_snapshot=payload(record.inputs),
                            error_code='', error_message='', needs_repair=False)
             # 所有真实步骤先落准确 attempt；审核及异步完成都绑定此身份。
@@ -974,7 +983,8 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                 policy = spec['retry_policy']
                 if isinstance(policy, dict):
                     step.max_attempts = int(policy.get('max_attempts', 1))
-            step.escalation_result['attempt_id'] = uuid.uuid4().hex
+            if not pending_review:
+                step.escalation_result['attempt_id'] = uuid.uuid4().hex
             state.update(record=record, phase='step_publish')
             record = self.store.save_step_result(record.workflow_run_id, step)
             clock = time.monotonic()
@@ -1253,8 +1263,13 @@ class WorkflowEngine(_WorkflowRunLifecycle):
     # 函数用途: 记录真实步骤副作用准入，不允许worker独自覆盖父步骤或运行快照。
     def _admit_effect(self, run, record):
         from .governance import WorkflowEffectPhase
+        from .native_governance import WorkflowReviewPending
         from .release_gate import WorkflowEffectAdmission
-        admission = self._authorize_run(run, WorkflowEffectPhase(record.step_id))
+        try:
+            admission = self._authorize_run(run, WorkflowEffectPhase(record.step_id))
+        except WorkflowReviewPending as error:
+            record.escalation_result['pending_review'] = error.binding
+            raise
         if isinstance(admission, WorkflowEffectAdmission):
             record.escalation_result['review_refs'] = list(admission.review_refs)
         if not run.ephemeral_debug and not getattr(run, '_batch_worker', False):

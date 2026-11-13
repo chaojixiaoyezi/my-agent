@@ -369,7 +369,11 @@ def _workflow_execution_scope(agent, caller_params, engine, record):
             bound.analysis_handler = functools.wraps(handler)(lambda *args: invoke(lambda: handler(*args)))
         authorize = bound.run_authorizer
         if callable(authorize):
-            bound.run_authorizer = lambda record, phase: invoke(lambda: authorize(record, phase))
+            def native_authorize(record, phase):
+                from ..workflows.native_governance import workflow_review_author_scope
+                with workflow_review_author_scope(agent, turn):
+                    return invoke(lambda: authorize(record, phase))
+            bound.run_authorizer = native_authorize
         bound.runner = ScriptRunner(bound.owner_home, workspace_root=bound.workspace_root,
             **_script_runtime_options(agent))
         yield bound

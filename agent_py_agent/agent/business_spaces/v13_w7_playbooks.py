@@ -170,7 +170,9 @@ def list_templates(call):
     v13_require_access(call)
     if call.params.get('space_id'):
         _space(call)
-    candidates, partial = [], False
+    from ..workflows.native_governance import builtin_workflow_templates
+    candidates = [(item, 'builtin', None, item['descriptor']['id']) for item in builtin_workflow_templates()]
+    partial = False
     for package in _packages(call):
         for member in package.members:
             path = PurePosixPath(member.path)

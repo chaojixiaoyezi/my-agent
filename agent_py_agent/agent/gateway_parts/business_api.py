@@ -437,11 +437,8 @@ class BusinessServices:
                 agent_steps_port = build_default_workflow_agent_steps(host)
             governance = getattr(host, 'business_governance', None)
             if governance is None:
-                from ..runtime_db.managed_operation_store import ManagedOperationStore
-                from ..workflows.governance import WorkflowOperationRecovery
-                operation_store = getattr(host, 'business_operation_store', None) or getattr(getattr(host, 'tools', None), 'operation_store', None)
-                if isinstance(operation_store, ManagedOperationStore):
-                    governance = WorkflowOperationRecovery(operation_store)
+                from .business_host_ports import build_default_workflow_governance
+                governance = build_default_workflow_governance(host)
             workflows = WorkflowScopeService(self.owner_home, owner_id=self.owner_id,
                 authorize=lambda actor, action, ref: actor.authorize(action, {'workflow_ref': ref}),
                 reference_reader=wf_reader,
@@ -1008,6 +1005,8 @@ def native_business_context(handler, server):
     if base.home_paths.owner_id == home.owner_id:
         # 只携带同 owner 的原操作只读端口；不把基座工具注册表或执行权暴露到 HTTP 投影。
         host.business_operation_store = getattr(getattr(base, 'tools', None), 'operation_store', None)
+        from ..workflows.native_governance import current_workflow_author
+        host.business_review_author_provider = lambda: current_workflow_author(base)
         for key in ('business_projection', 'business_reference_reader', 'business_active_references',
                     'business_governance', 'business_background', 'business_capabilities', 'business_subscriptions',
                     'business_context_provider', 'workflow_engine_factory', 'workflow_agent_steps', 'subagents',

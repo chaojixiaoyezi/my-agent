@@ -2,6 +2,16 @@
 
 状态：2026-10-21 底座第一阶段落地中（`agent_py_agent/agent/assets/`、`workflows/`、`observability/`、`tooling/`、`gateway_parts/plugin_broker_api.py`）。
 
+## 原生独立审核接入（2026-11-12 源码候选）
+
+工作流可在 `descriptor.metadata.workflow_review_policy` 声明 `steps`、`minimum_reviews` 和 `ttl_seconds`。步骤进入副作用准入时，通过原 ORCH 证据库登记审核需求，版本绑定运行、步骤、尝试、候选定义和业务范围。作者身份来自活跃宿主调用，调用退出后失效。
+
+另一受权执行者通过 `manage_requirement_provenance` 登记精确 `requirement_id`、`input_version` 和 `workflow_effect.v1` 范围的独立审核。待审步骤保留原尝试身份，恢复时核验每个审核者的最新结论、有效期及当前执行权限。返工结论使该步骤继续待审，候选变更后重新绑定审核。
+
+原模板目录新增简单分析和开发阶段草案。开发草案提供架构、实现、审核、回归、发布五阶段，使用前需要配置真实工具或脚本步骤，并以其实际回执验证回归和发布结果。简单分析沿无状态分析流程执行。
+
+当前已通过原生 HTTP、实际工具登记、版本及 owner 失配、自审拒绝、审核返工和作者上下文回收的定向验证。隔离部署验收待进行。
+
 ## 研判隔离的当前可用边界（2026-11-12）
 
 `llm_skill_analysis` 的 `config.analysis_isolation="stateless_skill"` 可用：仅将步骤输入、前步输出和指定 Skill 材料交给无状态模型调用，不开放工具，不载入主会话或写记忆。

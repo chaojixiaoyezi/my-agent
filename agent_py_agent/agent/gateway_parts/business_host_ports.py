@@ -836,3 +836,22 @@ def wire_business_host_ports(target: Any) -> Any:
 
     receiver._business_host_ports_wired = True
     return receiver
+
+
+def build_default_workflow_governance(host: Any) -> Any:
+    """复用原ORCH证据库和操作库，只有显式工作流审核策略才创建待审需求。"""
+    from ..runtime_db.managed_operation_store import ManagedOperationStore
+    from ..workflows.native_governance import NativeWorkflowGovernance
+    from ..workflows.run_store import WorkflowRunStore
+
+    operation_store = getattr(host, 'business_operation_store', None) or getattr(getattr(host, 'tools', None), 'operation_store', None)
+    if not isinstance(operation_store, ManagedOperationStore):
+        return None
+    author_provider = getattr(host, 'business_review_author_provider', None)
+    if not callable(author_provider):
+        def author_provider():
+            from ..workflows.native_governance import current_workflow_author
+            return current_workflow_author(host)
+    home = host.home_paths.owner_home_dir
+    return NativeWorkflowGovernance(operation_store, WorkflowRunStore(home), owner_home=home,
+        owner_id=host.home_paths.owner_id, author_provider=author_provider)
