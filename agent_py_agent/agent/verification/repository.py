@@ -38,6 +38,28 @@ _MAX_TOTAL_UNREFERENCED_EVENTS = 10_000
 _DB_LOCK = threading.RLock()
 
 
+class ProvenanceAuthorizationError(PermissionError):
+    """此前获准的候选或回执绑定已变化；不披露新的私有绑定。"""
+
+    def __init__(self, reason, message):
+        self.reason = reason
+        super().__init__(message)
+
+
+def _require_expected_requirement(conn, context, expected):
+    row = conn.execute('SELECT * FROM requirement_links WHERE owner_ref=? AND requirement_id=?',
+        (context.owner_ref, expected.requirement_id)).fetchone()
+    actual = _row_to_requirement_record(row) if row is not None else None
+    # 审核/验收进展不是候选绑定；同候选并行审核可以继续，但换owner、工作、根、版本、作者或观察路径即撤权。
+    fields = ('owner_ref', 'requirement_id', 'task_id', 'root', 'input_version',
+              'watched_paths', 'author_principal_id', 'created_at')
+    if (expected.owner_ref != context.owner_ref or actual is None
+            or any(getattr(actual, name) != getattr(expected, name) for name in fields)):
+        raise ProvenanceAuthorizationError('REVIEW_CANDIDATE_CHANGED',
+            '原授权候选绑定已变化；本次未读取新绑定或写入审核，请在原工作范围重新核验，禁止沿旧授权盲目重试。')
+    return actual
+
+
 @dataclass(frozen=True)
 class VerificationContext:
     """Structured owner/thread/task identity for one evidence stream."""
@@ -795,12 +817,24 @@ class VerificationEvidenceRepository:
         self,
         context: VerificationContext,
         record: IndependentReviewRecord,
-    ) -> IndependentReviewRecord:
+        *,
+        expected_requirement: RequirementProvenanceRecord | None = None,
+        include_requirement: bool = False,
+    ) -> IndependentReviewRecord | tuple[IndependentReviewRecord, RequirementProvenanceRecord]:
         now_text = _utc_now()
         created_at = record.created_at or now_text
         owner_ref = record.owner_ref or context.owner_ref
 
         with _DB_LOCK, self._connection() as conn:
+            if expected_requirement is not None:
+                # 同一写事务内复核完整候选绑定；锁外门的旧快照不能授权后来换绑的任务。
+                if not conn.in_transaction:
+                    conn.execute('BEGIN IMMEDIATE')
+                if (owner_ref != context.owner_ref or record.requirement_id != expected_requirement.requirement_id
+                        or record.reviewer_principal_id.strip() != context.task_id):
+                    raise ProvenanceAuthorizationError('REVIEW_RECEIPT_IDENTITY_MISMATCH',
+                        '审核回执身份与原执行者/候选不符；未写入。')
+                _require_expected_requirement(conn, context, expected_requirement)
             req_row = conn.execute(
                 "SELECT * FROM requirement_links WHERE owner_ref = ? AND requirement_id = ?",
                 (owner_ref, record.requirement_id),
@@ -827,6 +861,19 @@ class VerificationEvidenceRepository:
                 created_at=created_at,
                 owner_ref=owner_ref,
             )
+
+            if expected_requirement is not None:
+                previous = conn.execute('SELECT * FROM independent_reviews WHERE owner_ref=? AND review_id=?',
+                    (owner_ref, effective_record.review_id)).fetchone()
+                if previous is not None:
+                    saved = _row_to_review_record(previous)
+                    fields = ('requirement_id', 'owner_ref', 'reviewer_principal_id', 'author_principal_id',
+                              'reviewed_input_version', 'verdict', 'scope', 'evidence_refs')
+                    if (any(getattr(saved, name) != getattr(effective_record, name) for name in fields)
+                            or record.created_at and record.created_at != saved.created_at):
+                        raise ProvenanceAuthorizationError('REVIEW_RECEIPT_CONFLICT',
+                            '审核回执编号已有不同身份或内容；旧回执不可篡改，本次未写入，不得借原编号重试覆盖。')
+                    return (saved, _row_to_requirement_record(req_row)) if include_requirement else saved
 
             conn.execute(
                 """
@@ -876,8 +923,10 @@ class VerificationEvidenceRepository:
                     """,
                     (new_review_status, new_review_status, author, now_text, owner_ref, effective_record.requirement_id),
                 )
+            current = (conn.execute('SELECT * FROM requirement_links WHERE owner_ref=? AND requirement_id=?',
+                (owner_ref, record.requirement_id)).fetchone() if include_requirement else None)
             conn.commit()
-            return effective_record
+            return (effective_record, _row_to_requirement_record(current)) if include_requirement else effective_record
 
     # LLM: 记录验收决定，校验输入版本与评审通过状态，防止基于过期或未审核事实验收。
     # 函数用途: 登记最终或阶段验收事实并切换需求验收状态为 accepted。
@@ -1039,6 +1088,21 @@ class VerificationEvidenceRepository:
                 (owner_ref, requirement_id),
             ).fetchone()
             return _row_to_requirement_record(row) if row is not None else None
+
+    def read_authorized_provenance(self, context, expected):
+        """同一只读快照复核原绑定并读取有界历史，不跨连接返回后来换绑的私有内容。"""
+        with _DB_LOCK, self._connection() as conn:
+            # 初始化仅含 schema/meta；先提交，再为候选与历史建立同一读快照。
+            conn.commit()
+            conn.execute('BEGIN')
+            requirement = _require_expected_requirement(conn, context, expected)
+            params = (context.owner_ref, expected.requirement_id)
+            reviews = conn.execute('SELECT * FROM independent_reviews WHERE owner_ref=? AND requirement_id=? '
+                'ORDER BY created_at DESC LIMIT 100', params).fetchall()
+            acceptances = conn.execute('SELECT * FROM acceptance_records WHERE owner_ref=? AND requirement_id=? '
+                'ORDER BY created_at DESC LIMIT 100', params).fetchall()
+            return ([requirement], [_row_to_review_record(row) for row in reviews],
+                [_row_to_acceptance_record(row) for row in acceptances])
 
     # LLM: 分页查询某 owner 下需求绑定列表（有界 limit 防深扫）。
     # 函数用途: 列出匹配任务或目录的所有需求溯源项。

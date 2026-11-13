@@ -87,10 +87,11 @@ DIRECT_CHILD_CONTROL_TOOLS = [
     "resolve_capability_requests",
     "list_pending_requests",
     "manage_handoff_board",
-    "manage_requirement_provenance",
 ]
 COORDINATOR_TOOLS = [
     *DIRECT_CHILD_CONTROL_TOOLS,
+    # 独立审核不是管理下级；叶可显式继承该工具，但实际动作仍由原handler按身份/同工作范围裁决。
+    "manage_requirement_provenance",
     *ROLE_BASE_TOOLS,
 ]
 

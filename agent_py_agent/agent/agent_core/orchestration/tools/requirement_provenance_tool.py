@@ -26,7 +26,11 @@ from ....tooling.models import (
     ToolModelSpec,
     ToolRuntimePolicy,
 )
-from ....verification.repository import VerificationContext, VerificationEvidenceRepository
+from ....verification.repository import (
+    ProvenanceAuthorizationError,
+    VerificationContext,
+    VerificationEvidenceRepository,
+)
 from ....verification.requirement_provenance import (
     AcceptanceRecord,
     IndependentReviewRecord,
@@ -290,7 +294,10 @@ class RequirementProvenanceTool(BaseTool):
                 warnings.append(f"{key} overridden by authoritative run_id '{actor}'")
             bound[key] = actor
         caller_context = self._resolve_context({"task_id": actor})
-        outcome = self.execute(bound, _context=caller_context)
+        review_requirement = self._leaf_review_scope(bound, caller_context, context, actor)
+        if isinstance(review_requirement, ToolHandlerOutcome):
+            return review_requirement
+        outcome = self.execute(bound, _context=caller_context, _review_requirement=review_requirement)
         if warnings:
             payload = json.loads(outcome.output)
             payload["scope_warnings"] = [*payload.get("scope_warnings", []), *warnings]
@@ -298,9 +305,84 @@ class RequirementProvenanceTool(BaseTool):
             outcome.result_envelope = {**outcome.result_envelope, "scope_warnings": warnings}
         return outcome
 
+    def _leaf_review_scope(self, params, owner_context, invocation, actor):
+        """叶只登记自己的同工作独立审核；工具名不授予绑定、验收或跨任务权限。"""
+        if not current_subagent_run_id(self.agent):
+            return None
+        from ....runtime_context import current_subagent_attempt_id
+        from ....subagents.role_templates import role_template_snapshot_for_task
+
+        def deny(reason, message):
+            return _provenance_failure(reason, message, error_code="TOOL_PERMISSION_DENIED")
+
+        try:
+            manager = self.agent.subagents
+            task = manager.load(actor)
+            if task.owner != owner_context.owner_ref:
+                return deny("REVIEW_OWNER_MISMATCH", "审核执行者不属于当前owner；未写入。")
+            if role_template_snapshot_for_task(task).get("can_spawn_children") is True:
+                return None
+            if "manage_requirement_provenance" not in (task.allowed_tools or []):
+                return deny("REVIEW_TOOL_NOT_GRANTED", "原派工未授予需求溯源工具；请由原父按精确范围重新派工，未写入。")
+            if invocation.runtime_snapshot.run_id != actor:
+                return deny("REVIEW_RUN_MISMATCH", "工具快照不属于当前审核执行者；未写入。")
+            if params.get("action") not in {"record_independent_review", "query_provenance"}:
+                return deny("LEAF_PROVENANCE_ACTION_FORBIDDEN", "叶只能查询指定候选或登记自己的独立审核；绑定、关联验证和验收仍由原协调者处理，未写入。")
+            requirement_id = str(params.get("requirement_id") or "").strip()
+            if not requirement_id:
+                return deny("REVIEW_REQUIREMENT_REQUIRED", "叶必须指定已绑定的requirement_id；不能枚举整个owner，未写入。")
+            repo = VerificationEvidenceRepository(runtime_owner_root(self.agent))
+            requirement = repo.get_requirement(owner_context.owner_ref, requirement_id)
+            if requirement is None:
+                return deny("REVIEW_REQUIREMENT_NOT_FOUND", "当前owner内没有该已绑定候选；先由原作者绑定，未写入。")
+            runtime = manager.runtime_db
+            attempt = current_subagent_attempt_id(self.agent)
+            if runtime is None or not attempt:
+                return deny("REVIEW_EXECUTION_UNPROVEN", "缺少当前审核者的原运行库或attempt；不能据工具名、角色或task_id代签，未写入。")
+            own = runtime.parent_execution_ref(owner_id=owner_context.owner_ref, run_id=actor, attempt_id=attempt)
+            business = runtime.business_context_for_execution(owner_id=owner_context.owner_ref,
+                run_id=actor, attempt_id=attempt)
+            own_task = runtime.get_task_run(own.task_run_id)["task_id"]
+            related = requirement.task_id in {actor, own_task, business.task_id if business else own_task}
+            if not related:
+                candidate = runtime.agent_run_for_run_id(requirement.task_id)
+                if candidate is not None:
+                    target = runtime.parent_execution_ref(owner_id=owner_context.owner_ref,
+                        run_id=requirement.task_id)
+                    related = target.task_run_id == own.task_run_id
+            if not related:
+                # 工作流候选的task_id仍是原workflow run；用其原冻结业务DTO核对同一工作，不另建授权映射。
+                from ....workflows.run_store import WorkflowRunStore
+
+                try:
+                    run = WorkflowRunStore(runtime_owner_root(self.agent)).load_run(requirement.task_id)
+                except FileNotFoundError:
+                    return deny("REVIEW_TASK_SCOPE_MISMATCH", "候选没有同一原工作关联；不能审核其它root或未授权候选，未写入。")
+                related = (run.owner_id == owner_context.owner_ref and business is not None
+                    and run.business_context == business.to_dict())
+                if related:
+                    bindings = [step.escalation_result.get("pending_review") for step in run.steps]
+                    related = any(isinstance(binding, dict) and binding.get("requirement_id") == requirement_id
+                        and binding.get("input_version") == requirement.input_version for binding in bindings)
+                    if params.get("action") == "record_independent_review" and params.get("review_scope", params.get("scope")) != "workflow_effect.v1":
+                        return deny("REVIEW_SCOPE_MISMATCH", "原工作流候选仅接受workflow_effect.v1审核；未写入。")
+            if not related:
+                return deny("REVIEW_TASK_SCOPE_MISMATCH", "候选不属于当前审核者的同一原工作/TaskRun；不能审核其它root，未写入。")
+            # 先证明同工作，再比较版本/根；无权调用不能用拒绝差异探测其它root的候选内容。
+            if params.get("action") == "record_independent_review" and (
+                    params.get("reviewed_input_version") != requirement.input_version):
+                return deny("REVIEW_INPUT_VERSION_MISMATCH", "审核输入版本与当前绑定候选不符；请读取准确候选后再审核，未写入。")
+            if params.get("root") and str(params["root"]) != requirement.root:
+                return deny("REVIEW_ROOT_MISMATCH", "请求的候选根与原绑定不符；未写入。")
+            return requirement
+        except (AttributeError, OSError, ValueError, TypeError, KeyError) as error:
+            return deny("REVIEW_EXECUTION_UNPROVEN",
+                f"原审核身份或候选关联无法核实（{type(error).__name__}）；先核对原派工与候选，未写入。")
+
     # LLM: 分发并执行具体的溯源动作，捕获业务异常并输出精准结构化回执。
     # 函数用途: 处理具体动作分发与执行。
-    def execute(self, params: dict[str, object], *, _context: VerificationContext | None = None) -> ToolHandlerOutcome:
+    def execute(self, params: dict[str, object], *, _context: VerificationContext | None = None,
+                _review_requirement: RequirementProvenanceRecord | None = None) -> ToolHandlerOutcome:
         action = str(params.get("action") or "").strip()
         if not action:
             return _provenance_failure("MISSING_ACTION", "必须指定操作动作 action 参数。")
@@ -315,13 +397,17 @@ class RequirementProvenanceTool(BaseTool):
             if action == "link_verification":
                 return self._handle_link(params, context, repo)
             if action == "record_independent_review":
-                return self._handle_review(params, context, repo, scope_warnings)
+                return self._handle_review(params, context, repo, scope_warnings,
+                    expected_requirement=_review_requirement)
             if action == "record_acceptance":
                 return self._handle_acceptance(params, context, repo, scope_warnings)
             if action == "query_provenance":
-                return self._handle_query(params, context, repo)
+                return self._handle_query(params, context, repo, expected_requirement=_review_requirement)
 
             return _provenance_failure("UNKNOWN_ACTION", f"不支持的溯源动作: '{action}'")
+        except ProvenanceAuthorizationError as exc:
+            return _provenance_failure(exc.reason, str(exc), error_code="TOOL_PERMISSION_DENIED",
+                effect_outcome="not_started", scope_warnings=scope_warnings)
         except SelfReviewForbiddenError as exc:
             return _provenance_failure(
                 "SELF_REVIEW_FORBIDDEN",
@@ -498,6 +584,7 @@ class RequirementProvenanceTool(BaseTool):
         context: VerificationContext,
         repo: VerificationEvidenceRepository,
         scope_warnings: list[str],
+        *, expected_requirement: RequirementProvenanceRecord | None = None,
     ) -> ToolHandlerOutcome:
         req_id = str(params.get("requirement_id") or "").strip()
         if not req_id:
@@ -552,8 +639,12 @@ class RequirementProvenanceTool(BaseTool):
             evidence_refs=refs,
             owner_ref=context.owner_ref,
         )
-        saved = repo.record_independent_review(context, record)
-        req = repo.get_requirement(context.owner_ref, req_id)
+        if expected_requirement is not None:
+            saved, req = repo.record_independent_review(context, record,
+                expected_requirement=expected_requirement, include_requirement=True)
+        else:
+            saved = repo.record_independent_review(context, record)
+            req = repo.get_requirement(context.owner_ref, req_id)
         payload: dict[str, Any] = {
             "ok": True,
             "action": "record_independent_review",
@@ -653,12 +744,15 @@ class RequirementProvenanceTool(BaseTool):
         params: dict[str, object],
         context: VerificationContext,
         repo: VerificationEvidenceRepository,
+        *, expected_requirement: RequirementProvenanceRecord | None = None,
     ) -> ToolHandlerOutcome:
         req_id = str(params.get("requirement_id") or "").strip()
         task_id = str(params.get("task_id") or "").strip() or None
         root = str(params.get("root") or "").strip() or None
 
-        if req_id:
+        if expected_requirement is not None:
+            records, reviews, acceptances = repo.read_authorized_provenance(context, expected_requirement)
+        elif req_id:
             req = repo.get_requirement(context.owner_ref, req_id)
             records = [req] if req is not None else []
             reviews = repo.list_independent_reviews(context.owner_ref, requirement_id=req_id)
