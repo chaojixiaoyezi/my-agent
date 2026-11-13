@@ -415,6 +415,9 @@ class _WorkflowToolDispatcher:
                     'run_scope': {'run_id': run_id, 'task_id': str(getattr(params, 'task_id', '') or ''),
                         'attempt_id': attempt_id}},
                 cancellation_token=getattr(params, 'cancellation_token', None)).result
+            from ..workflows.governance import bind_workflow_tool_operation
+            bind_workflow_tool_operation(self.agent.tools.operation_store, run, step, call,
+                result.operation, task_id=str(getattr(params, 'task_id', '') or ''))
             return {**result.to_dict(), 'ok': result.ok,
                 'operation_id': result.operation.operation_id if result.operation is not None else '',
                 'effect_outcome': result.effect_outcome, 'error_message': result.output if not result.ok else ''}

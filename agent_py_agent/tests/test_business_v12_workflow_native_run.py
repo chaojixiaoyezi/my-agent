@@ -107,3 +107,37 @@ def test_space_run_freezes_run_scoped_context_and_survives_restart_duplicate_and
         assert store.load_run(run_id).revision == record.revision
     finally:
         server2.stop()
+
+
+def test_non_primary_owner_executes_with_its_own_workflow_engine(native):  # noqa: F811
+    from agent_py_agent.tests.test_mega_business_api_actions import background_call
+
+    _, agent = native
+    owner_home = agent.home_paths.owner_home_dir.parents[1] / 'providers' / 'feishu' / 'users' / 'workflow-owner'
+    ScriptStore(owner_home).save_script(AssetDescriptor('calc', 'script', 'calc'),
+        'import json\nprint(json.dumps({"total": 3}))')
+    request = _flow('foreign-owner-condition')
+    status, created = background_call(native, 'workflows.create', request,
+        user='workflow-owner', idempotency_key='owner-create-00001')
+    assert status == 200, created
+    status, run = background_call(native, 'workflows.run', {'workflow_ref': 'foreign-owner-condition'},
+        user='workflow-owner', idempotency_key='owner-run-00000001')
+    assert status == 200, run
+    status, view = background_call(native, 'workflow_runs.get',
+        {'workflow_run_id': run['data']['workflow_run_id']}, user='workflow-owner')
+    assert status == 200 and view['data']['run']['status'] == 'succeeded', view
+    assert _runs(agent) == []
+    [record] = WorkflowRunStore(owner_home).list_runs(limit=10)
+    assert record.owner_id != agent.home_paths.owner_id
+    assert record.steps[0].output_snapshot == {'total': 3}
+    status, scope = background_call(native, 'workflows.scope.get',
+        {'workflow_ref': 'foreign-owner-condition'}, user='workflow-owner')
+    assert status == 200, scope
+    status, scoped = background_call(native, 'workflows.scope.set',
+        {'workflow_ref': 'foreign-owner-condition', 'scope': {'scope_mode': 'unassigned', 'space_ids': []}},
+        user='workflow-owner', idempotency_key='owner-unassign-0001', expected_revision=scope['data']['scope_revision'])
+    assert status == 200, scoped
+    status, denied = background_call(native, 'workflows.run', {'workflow_ref': 'foreign-owner-condition'},
+        user='workflow-owner', idempotency_key='owner-run-denied-0001')
+    assert status == 409 and denied['error']['code'] == 'WORKFLOW_UNASSIGNED', denied
+    assert len(WorkflowRunStore(owner_home).list_runs(limit=10)) == 1

@@ -47,7 +47,7 @@ def resolve_business_action_spec(action):
 _COMPLETE_HOST_ACTIONS = frozenset({
     'background_agents.suspend', 'background_agents.resume', 'background_agents.restore',
     'background_agents.retire', 'tasks.cancel', 'subagents.messages.send', 'subagents.cancel',
-    'executions.cancel',
+    'executions.cancel', 'workflows.run', 'workflow_runs.resume',
 })
 
 
@@ -435,12 +435,19 @@ class BusinessServices:
             if agent_steps_port is None and getattr(host, '_business_host_ports_wired', False):
                 from .business_host_ports import build_default_workflow_agent_steps
                 agent_steps_port = build_default_workflow_agent_steps(host)
+            governance = getattr(host, 'business_governance', None)
+            if governance is None:
+                from ..runtime_db.managed_operation_store import ManagedOperationStore
+                from ..workflows.governance import WorkflowOperationRecovery
+                operation_store = getattr(host, 'business_operation_store', None) or getattr(getattr(host, 'tools', None), 'operation_store', None)
+                if isinstance(operation_store, ManagedOperationStore):
+                    governance = WorkflowOperationRecovery(operation_store)
             workflows = WorkflowScopeService(self.owner_home, owner_id=self.owner_id,
                 authorize=lambda actor, action, ref: actor.authorize(action, {'workflow_ref': ref}),
                 reference_reader=wf_reader,
                 context_provider=context_provider,
                 agent_steps=agent_steps_port,
-                governance=getattr(host, 'business_governance', None),
+                governance=governance,
                 engine_factory=engine_factory)
         self.workflows = workflows
         self.background = background if background is not None else getattr(host, 'business_background', None)
@@ -601,7 +608,8 @@ class BusinessServices:
             return self.spaces.action_ready(action)
         if implementer == 'W3':
             if spec.metadata['effect'] == 'execute':
-                return callable(self.workflows.context_provider) and callable(self.workflows.engine_factory)
+                return (self.complete_host_wired or
+                    (callable(self.workflows.context_provider) and callable(self.workflows.engine_factory)))
             return self.workflows is not None
         if implementer == 'W2':
             if action in _COMPLETE_HOST_ACTIONS and not self.complete_host_wired:
@@ -695,6 +703,20 @@ class BusinessServices:
     # 函数用途: 在同一个请求局部数据作用域内按唯一Spec分派原生领域与扩展handler。
     @observation_request()
     def invoke(self, action, params, context, *, expected_revision=None, idempotency_key='', request_id=''):
+        if action in {'workflows.run', 'workflow_runs.resume'} and callable(context.host_provider):
+            # 执行才租用准确 owner 的宿主；租用覆盖引擎运行，读口不构造执行实例。
+            facts = {'owner_id': self.owner_id, **params}
+            context.check(action, facts)
+            with ExitStack() as stack:
+                host = _BackgroundPort(self)._complete_host(context, stack)
+                context.check(action, facts)
+                if host is not None:
+                    local = BusinessServices(host)
+                    local_context = replace(context, host_provider=None)
+                    _ISSUED.add(local_context)
+                    return local.invoke(action, params, local_context,
+                        expected_revision=expected_revision, idempotency_key=idempotency_key,
+                        request_id=request_id)
         spec = resolve_business_action_spec(action)
         if spec.metadata['implementer'].startswith('V13-'):
             from .business_api_v13 import v13_invoke
@@ -984,6 +1006,8 @@ def native_business_context(handler, server):
         host.conversation_store = owner_conversation_store(base, home, initialize=False)
     port_source = ('none',)
     if base.home_paths.owner_id == home.owner_id:
+        # 只携带同 owner 的原操作只读端口；不把基座工具注册表或执行权暴露到 HTTP 投影。
+        host.business_operation_store = getattr(getattr(base, 'tools', None), 'operation_store', None)
         for key in ('business_projection', 'business_reference_reader', 'business_active_references',
                     'business_governance', 'business_background', 'business_capabilities', 'business_subscriptions',
                     'business_context_provider', 'workflow_engine_factory', 'workflow_agent_steps', 'subagents',
@@ -1084,6 +1108,7 @@ def native_business_context(handler, server):
     key = (home.owner_id, str(home.owner_home_dir))
     if (key not in cache or cache[key].host.config is not base.config
             or cache[key].complete_host_wired != wired
+            or getattr(cache[key].host, 'business_operation_store', None) is not getattr(host, 'business_operation_store', None)
             or cache[key].spaces.enabled != bool(getattr(base.config, 'business_spaces_enabled', False))
             or getattr(getattr(getattr(cache[key].host, 'conversation_store', None), 'storage', None), 'root', None)
             != getattr(getattr(getattr(host, 'conversation_store', None), 'storage', None), 'root', None)
@@ -1316,7 +1341,7 @@ def _local_business_services(host):
                 'business_context_provider', 'workflow_engine_factory', 'workflow_agent_steps',
                 'business_approval_decider', 'business_v13_providers', 'business_v13_clock',
                 'business_space_reference_resolver', 'business_workflow_reference_reader',
-                'task_business_context')))
+                'task_business_context', 'business_operation_store')))
         cached = getattr(host, '_local_business_services_cache', None)
         if (cached is None or cached[0] != key or cached[2].host is not host
                 or any(previous is not current for previous, current in zip(cached[1], sources))):

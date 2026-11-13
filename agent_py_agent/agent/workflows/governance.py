@@ -13,9 +13,9 @@ class WorkflowReconciliationRequired(WorkflowPolicyRefusal):
     """核验缺失是未执行恢复的确定性拒绝，不是本次恢复结果未知。"""
     error_code = code = 'WORKFLOW_RECONCILIATION_REQUIRED'
 
-    def __init__(self, reason):
+    def __init__(self, reason, **details):
         super().__init__(self.error_code, details={'reason': reason,
-            'recommended_action': '核对原操作和目标结果，提供同运行、同步骤、同版本的可信核验。'})
+            'recommended_action': '核对原操作和目标结果，提供同运行、同步骤、同版本的可信核验。', **details})
 
 
 # LLM: 继承str保持外部run_authorizer(record, phase)字符串回调100%向后兼容，同时以显式类型与preflight/resume/cancel控制阶段严格分离。
@@ -108,3 +108,118 @@ class WorkflowGovernance:
     def require_resolution(self, record, reference):
         step = next((item for item in record.steps if item.step_id == record.current_step_id), None)
         return self._reconcile(record, step, reference)
+
+
+def bind_workflow_tool_operation(store, run, step, call, operation, *, task_id):
+    """只在原 dispatcher 中把真实操作归属固定到当前步骤，不接纳工具正文中的身份。"""
+    if operation is None:
+        return
+    from ..local_storage.tool_operations import ToolOperationStateError
+    try:
+        original = store.get_tool_operation(owner_id=run.owner_id, run_id=call.run_id,
+            task_id=task_id, attempt_id=call.attempt_id, operation_id=operation.operation_id,
+            tool_name=call.tool_name, args_hash=operation.args_hash)
+    except (ToolOperationStateError, OSError) as error:
+        # 业务体可能已经完成；绑定读取失败不能改签成可重试业务失败。旧结果保留且不授恢复权。
+        step.escalation_result['tool_operation_binding_error'] = type(error).__name__
+        return
+    if original is None:
+        return
+    if (original.idempotency_key != call.idempotency_key
+            or original.operation_id != operation.operation_id):
+        raise WorkflowReconciliationRequired('operation_binding_mismatch')
+    step.escalation_result['tool_operation_binding'] = {
+        'schema': 'workflow.tool-operation-binding.v1',
+        'workflow_run_id': run.workflow_run_id, 'step_id': step.step_id,
+        'effect_attempt_id': step.escalation_result.get('attempt_id', ''),
+        'execution_definition_ref': run.execution_definition_ref,
+        'owner_id': original.owner_id, 'run_id': original.run_id,
+        'task_id': original.task_id, 'attempt_id': original.attempt_id,
+        'operation_id': original.operation_id, 'tool_name': original.tool, 'call_id': call.call_id,
+        'args_hash': original.args_hash, 'idempotency_key': original.idempotency_key,
+    }
+
+
+class WorkflowOperationRecovery:
+    """默认宿主只读核对原工具终态；不签发审核、不授发布权、不主动重做未知操作。"""
+
+    def __init__(self, operation_store):
+        self.operation_store = operation_store
+
+    @staticmethod
+    def _required(record, reason, **details):
+        step = next((item for item in record.steps if item.step_id == record.current_step_id), None)
+        receipt = step.escalation_result.get('tool_receipt', {}) if step is not None else {}
+        return WorkflowReconciliationRequired(reason, workflow_run_id=record.workflow_run_id,
+            step_id=record.current_step_id, resolution_available=False,
+            prior_effect_outcome=receipt.get('effect_outcome', record.effect_outcome), **details)
+
+    def require_resolution(self, record, reference):
+        step = next((item for item in record.steps if item.step_id == record.current_step_id), None)
+        receipt = step.escalation_result.get('tool_receipt', {}) if step is not None else {}
+        raise WorkflowPolicyRefusal('WORKFLOW_RESOLUTION_UNAVAILABLE', details={
+            'resolution_available': False, 'prior_effect_outcome': receipt.get('effect_outcome', record.effect_outcome),
+            'recommended_action': '本宿主只自动核验原工具操作账本；外部核验引用须由可信宿主另行接入。'})
+
+    def require_effect(self, record, phase):
+        from .engine import _requires_native_agent_resume, _requires_terminal_publication_resume
+        if isinstance(phase, WorkflowEffectPhase) or phase != 'resume':
+            return None
+        if _requires_native_agent_resume(record) or _requires_terminal_publication_resume(record):
+            return None
+        unresolved = record.effect_outcome == 'unknown' or any(
+            item.escalation_result.get('effect_started') and (item.needs_repair or item.status == 'running')
+            for item in record.steps)
+        if not unresolved:
+            return None
+        step = next((item for item in record.steps if item.step_id == record.current_step_id), None)
+        if step is None:
+            raise self._required(record, 'operation_step_unavailable')
+        return self._verify(record, step)
+
+    def _verify(self, record, step):
+        from ..tooling.tool_operation_coordinator import replay_completed_tool_operation
+        binding = step.escalation_result.get('tool_operation_binding')
+        expected = {'schema': 'workflow.tool-operation-binding.v1',
+            'owner_id': record.owner_id, 'workflow_run_id': record.workflow_run_id,
+            'step_id': step.step_id, 'effect_attempt_id': step.escalation_result.get('attempt_id'),
+            'execution_definition_ref': record.execution_definition_ref,
+            'call_id': f'workflow-step:{record.workflow_run_id}:{step.step_id}',
+            'idempotency_key': f'workflow-step:{record.workflow_run_id}:{step.step_id}'}
+        receipt = step.escalation_result.get('tool_receipt', {})
+        if (step.mode != 'tool_call' or step.escalation_result.get('cleanup_error')
+                or not isinstance(binding, dict) or any(binding.get(key) != value for key, value in expected.items())
+                or not record.execution_definition_ref
+                or any(not isinstance(binding.get(key), str) or not binding[key]
+                       for key in ('run_id', 'task_id', 'attempt_id', 'operation_id', 'tool_name', 'args_hash', 'idempotency_key'))
+                or receipt.get('operation_id') != binding['operation_id']
+                or receipt.get('tool_name') != binding['tool_name']):
+            raise self._required(record, 'operation_binding_unavailable_or_mismatched')
+        from ..local_storage.tool_operations import ToolOperationStateError
+        from ..runtime_errors import compact_error_message
+        try:
+            original = self.operation_store.get_tool_operation(owner_id=record.owner_id,
+                **{key: binding[key] for key in ('run_id', 'task_id', 'attempt_id', 'operation_id', 'args_hash')},
+                tool_name=binding['tool_name'])
+        except (ToolOperationStateError, OSError) as error:
+            raise self._required(record, 'original_operation_read_rejected',
+                diagnostic=compact_error_message(error)) from error
+        if original is None or original.idempotency_key != binding['idempotency_key']:
+            raise self._required(record, 'operation_unavailable_or_mismatched')
+        result = replay_completed_tool_operation(original)
+        if result.ok and original.result.get('effect_outcome') in {'committed', 'none'}:
+            # 仍沿原公开工具输出脱敏；账本内容是数据，不成为模型指令或批准。
+            from ..tooling.output_projection import model_tool_output_body
+            from ..tooling.runtime_contracts import ToolContentBlock, ToolResult
+            output = model_tool_output_body(tool=original.tool, output=result.output,
+                result_envelope=result.result_envelope)
+            public = ToolResult(call_id=binding['call_id'], tool_name=original.tool,
+                status='succeeded', content_blocks=(ToolContentBlock('text', text=output),),
+                handler_executed=True, effect_outcome=original.result['effect_outcome']).to_dict()
+            public.update(ok=True, operation_id=original.operation_id)
+            return WorkflowEffectAdmission(reconciled_step_id=step.step_id, reconciled_output=public)
+        if (not result.ok and original.result.get('effect_outcome') == 'not_started'
+                and original.result.get('handler_executed') is False
+                and result.error_code != 'TOOL_OPERATION_OUTCOME_UNKNOWN'):
+            return WorkflowEffectAdmission(effect_not_started=True)
+        raise self._required(record, 'original_operation_not_confirmed')
