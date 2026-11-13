@@ -391,21 +391,82 @@ def execute_background_request(context):
         enabled = getattr(getattr(agent, "owner_policy", None), "memory_enabled", True)
         if not enabled:
             return {"source_kind": "curator", "source_id": ref["source_id"], "outcome": "handled", "status": "disabled"}
+        cfg = getattr(agent, "config", None)
+        _refresh_execution_live_config(cfg)
+        if _auxiliary_model_unavailable(cfg, service=getattr(agent, "memory_curator", None)):
+            run_maint = getattr(agent.memory_curator, "run_maintenance_if_due", None)
+            if callable(run_maint):
+                maint_result = run_maint()
+                status = str(
+                    (maint_result.get("status") if isinstance(maint_result, dict) else getattr(maint_result, "status", ""))
+                    or "maintenance_only"
+                )
+                return {
+                    "source_kind": "curator",
+                    "source_id": ref["source_id"],
+                    "status": status,
+                    "run_id": "",
+                    "outcome": "handled",
+                }
+            return {"source_kind": "curator", "source_id": ref["source_id"], "outcome": "handled", "status": "model_unavailable"}
         result = agent.memory_curator.run_if_due()
         return {"source_kind": "curator", "source_id": ref["source_id"], "status": result.status,
                 "run_id": result.run_id, "outcome": "pending" if result.status in {"busy", "not_due"} else "handled"}
 
 
+def _refresh_execution_live_config(cfg: object) -> None:
+    if cfg is None:
+        return
+    raw_path = getattr(cfg, "config_path", None)
+    if raw_path is not None and str(raw_path).strip():
+        try:
+            if Path(raw_path).expanduser().is_file():
+                from ..settings.live_switches import refresh_live_switches
+
+                refresh_live_switches(cfg)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _auxiliary_model_unavailable(cfg: object, *, service: object | None = None) -> bool:
+    if cfg is None or not hasattr(cfg, "memory_curator_model_profile"):
+        return False
+    from ..settings.curator_profile import (
+        auxiliary_profile_cooldown_remaining,
+        effective_auxiliary_model_profile,
+    )
+
+    aux_profile = effective_auxiliary_model_profile(cfg)
+    if aux_profile:
+        return auxiliary_profile_cooldown_remaining(aux_profile) > 0
+    explicit_backend = (
+        getattr(getattr(service, "runtime", None), "backend", None)
+        or getattr(getattr(service, "dependencies", None), "backend", None)
+    )
+    if explicit_backend is not None and getattr(explicit_backend, "name", "") != "unconfigured":
+        return False
+    return True
+
+
 # LLM: FIFO只能消费原精确路径；registry只运行原维护后返回，不消费后来FIFO/调模型/确认候选，memory开关不替代独立learning配置。
+#   辅助模型缺席或冷却时禁止消费FIFO，仅在自主维护到期时跑零模型确定性维护。
 # 函数用途: 将已认领学习运输接到原无工具候选生成，并保忙/配额顺延在同一P3。
 def _execute_learning(agent, ref):
+    cfg = getattr(agent, "config", None)
+    _refresh_execution_live_config(cfg)
     service = getattr(agent, "skill_learning", None)
-    if service is None or not getattr(agent.config, "enable_self_learning", False):
+    if service is None or not getattr(cfg, "enable_self_learning", False):
         return {"source_kind": "learning", "source_id": ref["source_id"], "outcome": "handled", "status": "disabled"}
+    live_mode = str(getattr(cfg, "self_learning_maintenance_mode", service.settings.maintenance_mode) or "observe")
     if ref["source_ref"] == "data/skill_learning/registry.json":
-        if service.settings.maintenance_mode != "autonomous":
+        if live_mode != "autonomous":
             return {"source_kind": "learning", "source_id": ref["source_id"], "outcome": "handled", "status": "disabled"}
         result = service.run_pending(maintenance_only=True)
+    elif _auxiliary_model_unavailable(cfg, service=service):
+        has_maint = getattr(service, "has_maintenance_work", None)
+        if live_mode == "autonomous" and callable(has_maint) and has_maint():
+            service.run_pending(maintenance_only=True)
+        return {"source_kind": "learning", "source_id": ref["source_id"], "status": "deferred", "outcome": "pending"}
     else:
         result = service.run_pending(expected_request_path=agent.home_paths.owner_home_dir / ref["source_ref"])
     notices = getattr(result, 'evolution_notices', ())

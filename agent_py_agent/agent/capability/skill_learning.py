@@ -7,16 +7,22 @@
 # 模块用途: 原作用域消费有界学习队列并轮转候选，未确认候选不阻断后续总结，正式发布仍需用户准确确认。
 from __future__ import annotations
 
+import json
+import logging
+import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..backends.provider_headers import provider_session_scope
 from ..backends.request_scope import foreground_model_active
+from ..common.log_redaction import redact_sensitive_value
+from ..common.nofollow_fs import read_text_beneath
 from ..common.request_execution_ports import (
     RequestExecutionContextUnavailable,
     RequestExecutionOutcomeUncertainError,
@@ -27,8 +33,15 @@ from ..memory_store.curator_backend import CuratorModelStillRunningError, call_b
 from ..user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
 from .skill_learning_host_feedback import builtin_machine_verifier
 from .skill_learning_prompt import (
+    DECISION_CREATE,
+    DECISION_INEFFECTIVE,
     DECISION_SKIP,
+    DECISION_UPDATE,
+    DESCRIPTION_MAX_CHARS,
     EXISTING_DESCRIPTION_CHARS,
+    TAGS_MAX_COUNT,
+    WHEN_TO_USE_MAX_CHARS,
+    SkillLearningDecision,
     SkillLearningMaterial,
     SkillLearningOutputError,
     parse_skill_learning_decision,
@@ -36,7 +49,12 @@ from .skill_learning_prompt import (
     skill_learning_response_schema,
 )
 from .skill_learning_publish import PublishRequest, SkillLearningGateError
-from .skill_learning_request import bounded_text, build_learning_request, recalled_memories
+from .skill_learning_request import (
+    TEXT_LIMIT_CHARS,
+    bounded_text,
+    build_learning_request,
+    recalled_memories,
+)
 from .skill_learning_store import (
     CODE_QUEUE_FULL,
     CODE_REQUEST_CORRUPT,
@@ -46,16 +64,21 @@ from .skill_learning_store import (
     EVENT_REJECTED,
     EVENT_SKIPPED,
     MAX_REQUEST_ATTEMPT_COUNT,
+    REQUEST_SCHEMA_VERSION,
     SkillLearningEvent,
     SkillLearningRegistry,
     SkillLearningStore,
     SkillLearningStoreError,
     request_key,
+    skill_family_fingerprint,
     utc_now,
 )
 from .skill_learning_validation import default_machine_promotion_verifier, verify_machine_candidate
 from .skill_snapshot import skill_content_sha256
 from .skills import parse_skill_file
+
+if TYPE_CHECKING:
+    from ..runtime_db.repository import RuntimeRepository
 
 STATUS_IDLE = "idle"
 STATUS_BUSY = "busy"
@@ -64,8 +87,29 @@ STATUS_RETRY = "retry"
 CODE_MODEL_TIMEOUT = "SKILL_LEARNING_MODEL_TIMEOUT"
 CODE_MODEL_FAILED = "SKILL_LEARNING_MODEL_FAILED"
 CODE_EVOLUTION_FAILED = "SKILL_LEARNING_EVOLUTION_FAILED"
+CODE_MERGE_DEFERRED = "SKILL_LEARNING_MERGE_DEFERRED"
+CODE_INEFFECTIVE_RECORDED = "SKILL_LEARNING_INEFFECTIVE_RECORDED"
+CODE_INEFFECTIVE_ROLLED_BACK = "SKILL_LEARNING_INEFFECTIVE_ROLLED_BACK"
+CODE_INEFFECTIVE_RETIRED = "SKILL_LEARNING_INEFFECTIVE_RETIRED"
+CODE_INEFFECTIVE_UNATTRIBUTED = "SKILL_LEARNING_INEFFECTIVE_UNATTRIBUTED"
 # 单轮最多更新几条已登记的自主学习 Skill。
 UPDATABLE_COUNT = 3
+# 中文说明: 同任务族或高相似已有技能触发合并优先重试的相似度百分比阈值（%）。
+DEFAULT_MERGE_SIMILARITY_PERCENT = 70
+# 中文说明: 触发合并优先提示后每轮最多额外调用一次模型进行合并收敛（次）。
+MAX_MERGE_RETRY_COUNT = 1
+# 中文说明: 提示词中附带的活跃经验规则摘要最多保留条数（条）。
+ACTIVE_LESSONS_PROMPT_COUNT = 12
+# 中文说明: 提示词中单条活跃经验规则摘要截断上限（字符）。
+ACTIVE_LESSON_SUMMARY_CHARS = 180
+# 中文说明: 相似已有技能候选列表中最多展示给模型的候选项条数（条）。
+MERGE_CANDIDATES_MAX_COUNT = 3
+# 中文说明: 陈旧学习提案定期清扫的超时阈值（秒，7 天）。
+DEFAULT_STALE_PROPOSAL_SECONDS = 7 * 86400
+# 中文说明: 每轮后台维护清扫 S1/S3 过期或孤儿提案的批量上限（条）。
+PROPOSAL_PRUNE_BATCH_COUNT = 64
+
+_LOGGER = logging.getLogger(__name__)
 
 
 # LLM: 数值来自 AgentConfig 的 self_learning_* 字段（已规范化）；0 的上限表示不限。
@@ -75,35 +119,76 @@ class SkillLearningSettings:
     min_tool_rounds: int = 6
     daily_limit: int = 20
     global_daily_limit: int = 2000
-    max_skills: int = 0
+    max_skills: int = 50
     timeout_seconds: int = 180
     recommended_limit: int = 50
-    maintenance_mode: str = "observe"
-    cool_seconds: int = 2592000
-    archive_seconds: int = 15552000
+    maintenance_mode: str = "autonomous"
+    cool_seconds: int = 604800
+    archive_seconds: int = 1296000
     include_background: bool = False
     keep_versions: int = 5
     autonomous_verified: bool = False
+    evict_seconds: int = 1296000
+    merge_similarity_percent: int = 70
+    recommended_explore_percent: int = 20
+    maintenance_interval_seconds: int = 10800
+    retention_scan_slice_entries: int = 128
+    retention_scan_slice_bytes: int = 8388608
+    retention_scan_slice_ms: int = 25
 
     # LLM: 读不到或类型不对时用默认值，不因配置损坏而关掉整条链。
     # 函数用途: 从 AgentConfig 读取自动总结设置。
     @classmethod
     def from_config(cls, config: object) -> SkillLearningSettings:
         defaults = cls()
+        raw_mode = getattr(config, "self_learning_maintenance_mode", defaults.maintenance_mode)
+        maintenance_mode = raw_mode if isinstance(raw_mode, str) and raw_mode in {"observe", "autonomous"} else defaults.maintenance_mode
+        interval = _config_int(
+            config,
+            "self_learning_maintenance_interval_seconds",
+            _config_int(config, "memory_curator_interval_seconds", defaults.maintenance_interval_seconds),
+        )
+        enabled = getattr(config, "enable_self_learning", False) is True
         return cls(
             min_tool_rounds=_config_int(config, "self_learning_min_tool_rounds", defaults.min_tool_rounds),
             daily_limit=_config_int(config, "self_learning_daily_limit", defaults.daily_limit),
-            global_daily_limit=_config_int(config,"self_learning_global_daily_limit",2000),
+            global_daily_limit=_config_int(config, "self_learning_global_daily_limit", defaults.global_daily_limit),
             max_skills=_config_int(config, "self_learning_max_skills", defaults.max_skills),
             timeout_seconds=_config_int(config, "self_learning_timeout_seconds", defaults.timeout_seconds),
-            recommended_limit=_config_int(config,"self_learning_recommended_limit",50),
-            maintenance_mode=str(getattr(config,"self_learning_maintenance_mode","observe")),
-            cool_seconds=_config_int(config,"self_learning_cool_seconds",2592000),
-            archive_seconds=_config_int(config,"self_learning_archive_seconds",15552000),
-            include_background=getattr(config,"self_learning_include_background",False) is True,
-            keep_versions=_config_int(config,"self_learning_keep_versions",5),
-            autonomous_verified=getattr(config, 'enable_self_learning', False) is True
-                or getattr(config, 'self_learning_promotion_mode', '') == 'autonomous_verified',
+            recommended_limit=_config_int(config, "self_learning_recommended_limit", defaults.recommended_limit),
+            maintenance_mode=maintenance_mode,
+            cool_seconds=_config_int(config, "self_learning_cool_seconds", defaults.cool_seconds),
+            archive_seconds=_config_int(config, "self_learning_archive_seconds", defaults.archive_seconds),
+            include_background=getattr(config, "self_learning_include_background", False) is True,
+            keep_versions=_config_int(config, "self_learning_keep_versions", defaults.keep_versions),
+            autonomous_verified=enabled or (
+                getattr(config, "self_learning_promotion_mode", "") == "autonomous_verified"
+                and getattr(config, "enable_self_learning", True) is True
+            ),
+            evict_seconds=_config_int(config, "self_learning_evict_seconds", defaults.evict_seconds),
+            merge_similarity_percent=_config_int(
+                config,
+                "self_learning_merge_similarity_percent",
+                defaults.merge_similarity_percent,
+            ),
+            recommended_explore_percent=_config_int(
+                config,
+                "self_learning_recommended_explore_percent",
+                defaults.recommended_explore_percent,
+            ),
+            maintenance_interval_seconds=max(0, interval),
+            retention_scan_slice_entries=max(
+                1,
+                _config_int(config, "self_learning_retention_scan_slice_entries", defaults.retention_scan_slice_entries),
+            ),
+            retention_scan_slice_bytes=max(
+                1,
+                _config_int(config, "self_learning_retention_scan_slice_bytes", defaults.retention_scan_slice_bytes),
+            ),
+            retention_scan_slice_ms=max(
+                1,
+                _config_int(config, "self_learning_retention_scan_slice_ms", defaults.retention_scan_slice_ms),
+            ),
         )
 
 
@@ -123,6 +208,8 @@ class SkillLearningRuntime:
     promotion_verifier: Callable | None = default_machine_promotion_verifier
     task_completion_host: object | None = field(default=None, repr=False, compare=False)
     backend_provider: Callable[[], object] | None = None
+    config_provider: Callable[[], object] | None = None
+    usage_runtime_provider: Callable[[], RuntimeRepository | None] | None = None
 
 
 # LLM: status 取 idle/busy/daily_limit/retry 或账本事件名（published/updated/skipped/rejected/failed/dropped）；
@@ -224,7 +311,31 @@ class SkillLearningService:
         self.store = store
         self.settings = settings
         self.runtime = runtime
+        usage_provider = getattr(runtime, "usage_runtime_provider", None)
+        if usage_provider is not None and getattr(store, "_usage_runtime_provider", None) is None:
+            store._usage_runtime_provider = usage_provider
         self._user = _UserRequests()
+
+    # LLM: 每次入口、维护、模型前后与提交前都通过 config_provider 读取最新有效开关与预算，不缓存旧配置。
+    # 函数用途: 读取当前是否启用自学习及最新有效配置。
+    def _live_state(self) -> tuple[bool, SkillLearningSettings]:
+        provider = getattr(self.runtime, "config_provider", None)
+        if not callable(provider):
+            return True, self.settings
+        cfg = provider()
+        if cfg is None:
+            return False, self.settings
+        raw_path = getattr(cfg, "config_path", None)
+        if raw_path is not None and str(raw_path).strip():
+            try:
+                if Path(raw_path).expanduser().is_file():
+                    from ..settings.live_switches import refresh_live_switches
+
+                    refresh_live_switches(cfg)
+            except Exception:  # noqa: BLE001 - 热开关刷新异常不阻断已有内存配置使用。
+                _LOGGER.debug("refresh_live_switches skipped during skill learning state read", exc_info=True)
+        enabled = getattr(cfg, "enable_self_learning", True) is True
+        return enabled, SkillLearningSettings.from_config(cfg)
 
     # LLM: 这一轮正在做活（已升格的会话任务）时由 skill_summarize 调用：按会话任务 id 记标记，这个任务收尾时取走。不写文件。
     # 函数用途: 记下"这个会话任务收尾时要按用户要求总结"。
@@ -238,6 +349,9 @@ class SkillLearningService:
     #   热队列满时由Store合并或保存溢出，仅总缓冲满才记dropped/QUEUE_FULL。副作用：写请求与账本、改两张内存表。
     # 函数用途: 收口时按结构化条件登记一次学习请求，返回 queued/duplicate/queue_full/ineligible。
     def enqueue_from_finalize(self, ctx: object) -> str:
+        enabled, live_settings = self._live_state()
+        if not enabled:
+            return "ineligible"
         evidence = getattr(ctx, 'tool_runtime_evidence', {}) or {}
         if evidence.get('asset_evolution_run_id'):
             request = build_learning_request(ctx, 1)
@@ -261,7 +375,11 @@ class SkillLearningService:
             if focus is not None:
                 outcome = self._enqueue_requested(ctx, material, focus)
             else:
-                request = build_learning_request(ctx, self.settings.min_tool_rounds,include_background=self.settings.include_background)
+                request = build_learning_request(
+                    ctx,
+                    live_settings.min_tool_rounds,
+                    include_background=live_settings.include_background,
+                )
                 outcome = "ineligible" if request is None else self._enqueue(request)
         finally:
             if material is not None and material.get("thread_id"):
@@ -284,6 +402,9 @@ class SkillLearningService:
     #   （复审 3 轮）。副作用：写 requests/ 与账本、改内存表。
     # 函数用途: 把这个会话刚做完的那次活交给自学习流水线，返回 (入队结果, 请求)。
     def summarize_recent(self, thread_id: str, focus: str) -> tuple[str, dict[str, object] | None]:
+        enabled, _live = self._live_state()
+        if not enabled:
+            return "nothing_recent", None
         prepared, already = self._user.claim_latest(str(thread_id or ""))
         if prepared is None:
             return "nothing_recent", None
@@ -297,6 +418,98 @@ class SkillLearningService:
                 self._user.release(str(thread_id or ""))
         return outcome, request
 
+    # LLM: V2-4 直通S3 FIFO收口：只收经lesson_candidate_eligible与lesson_carrier=='skill'判定的过程性候选；
+    #   绝不写入S1弹窗目录，开关关闭或队列/配额满返回结构化deferred等待重放。
+    # 函数用途: 接收子代理产出的过程性经验候选并直投S3学习队列，返回标准CarrierEnqueueResult字典。
+    def enqueue_lesson_candidates(self, candidates: Sequence[object]) -> dict[str, list[dict[str, str]]]:
+        from .skill_proposals import lesson_candidate_eligible, lesson_carrier
+
+        queued: list[dict[str, str]] = []
+        refused: list[dict[str, str]] = []
+        deferred: list[dict[str, str]] = []
+        items = list(candidates or ())
+        if not items:
+            return {"queued": queued, "refused": refused, "deferred": deferred}
+        enabled, _live = self._live_state()
+        for candidate in items:
+            cid = str(getattr(candidate, "candidate_id", "") or "").strip()
+            if not lesson_candidate_eligible(candidate):
+                refused.append({
+                    "candidate_id": cid,
+                    "code": "SKILL_CARRIER_INELIGIBLE",
+                    "reason": "候选缺少有效来源任务、内容摘要或处于非活跃状态，无法作为可复用技能入队。",
+                })
+                continue
+            if lesson_carrier(candidate) != "skill":
+                refused.append({
+                    "candidate_id": cid,
+                    "code": "SKILL_CARRIER_NOT_SKILL",
+                    "reason": "候选属于单句声明式经验而非多步操作流程，请保留在普通经验记忆载体。",
+                })
+                continue
+            if not enabled:
+                deferred.append({
+                    "candidate_id": cid,
+                    "code": "SKILL_LEARNING_DISABLED",
+                    "reason": "自学习已关闭，过程性技能候选已暂缓保留；重新启用后可安全重放。",
+                })
+                continue
+            rkey = request_key(json.dumps(["subagent_lesson", cid, str(candidate.content_hash)], ensure_ascii=False))
+            scope = dict(candidate.scope or {})
+            task_ids = [str(item) for item in (candidate.source_task_ids or ()) if str(item)]
+            run_ids = [str(item) for item in (candidate.source_run_ids or ()) if str(item)]
+            request: dict[str, object] = {
+                "schema_version": REQUEST_SCHEMA_VERSION,
+                "request_key": rkey,
+                "request_id": "",
+                "run_id": run_ids[0] if run_ids else "",
+                "task_id": task_ids[0] if task_ids else "",
+                "root_task_id": task_ids[0] if task_ids else "",
+                "trajectory_digest": "",
+                "thread_id": "",
+                "source": "subagent_lesson",
+                "tool_rounds": 1,
+                "created_at": utc_now(),
+                "attempts": 0,
+                "user_prompt": bounded_text(
+                    scope.get("applies_when") or candidate.subject_key or cid,
+                    TEXT_LIMIT_CHARS,
+                ),
+                "final_response": bounded_text(candidate.content, TEXT_LIMIT_CHARS),
+                "tool_calls_total": len(candidate.source_tool_refs or ()),
+                "trajectory_fingerprint": str(candidate.content_hash),
+                "tool_trace": [],
+                "used_skill_ids": [],
+                "candidate_id": cid,
+                "candidate_content_hash": str(candidate.content_hash),
+                "lesson_scope": redact_sensitive_value(scope),
+            }
+            try:
+                outcome = self._enqueue(request)
+            except (OwnerQuotaExceeded, OwnerQuotaUnavailable):
+                deferred.append({
+                    "candidate_id": cid,
+                    "code": "SKILL_LEARNING_STORAGE_LIMIT",
+                    "reason": "当前用户学习存储配额不足，过程性候选已保留等待空间释放后重放。",
+                })
+                continue
+            except SkillLearningStoreError as exc:
+                refused.append({
+                    "candidate_id": cid,
+                    "code": exc.code,
+                    "reason": str(exc),
+                })
+                continue
+            if outcome in _QUEUED:
+                queued.append({"candidate_id": cid, "request_key": rkey, "status": outcome})
+            else:
+                deferred.append({
+                    "candidate_id": cid,
+                    "code": CODE_QUEUE_FULL,
+                    "reason": "学习请求队列与溢出缓冲均已满，过程性候选已暂缓保留。",
+                })
+        return {"queued": queued, "refused": refused, "deferred": deferred}
+
     # LLM: 写原请求；热区合并/溢出由Store记事件，仅热区及缓冲都满时记dropped/QUEUE_FULL。
     # 函数用途: 入队并对最终容量拒绝留可追溯账本。
     def _enqueue(self, request: dict[str, object]) -> str:
@@ -305,14 +518,45 @@ class SkillLearningService:
             self.store.append_event(_request_event(EVENT_DROPPED, CODE_QUEUE_FULL, request))
         return outcome
 
-    # LLM: 只读FIFO和registry独立维护时钟；热技能写入mtime不影响冷技能维护，不写锁或触发模型。
+    # LLM: 只读O(1)文件名与registry独立维护时钟，不扫描历史明细、不创建目录、不写锁或触发模型。
     # 函数用途: 判断原队列或自主维护是否待处理，发现只作预筛不授执行权。
     def has_pending(self) -> bool:
-        from .skill_learning_maintenance import learning_maintenance_due
+        enabled, live_settings = self._live_state()
+        if not enabled:
+            return False
+        if self.store.has_requests():
+            return True
+        return self._has_maintenance_due(live_settings)
 
-        return bool(self.store.pending_requests(refill=False) or self.store.overflow_requests()) or (self.settings.maintenance_mode == "autonomous"
-            and self.store.registry_path.exists()
-            and learning_maintenance_due(self.store.load_registry().last_maintenance_at, self.settings.maintenance_mode, time.time()))
+    # LLM: 只在自学习开启且自主维护模式到期、游标未收口或存在待接管已确认提案时返回 True。
+    # 函数用途: 供后台调度检查是否存在零模型确定性维护工作。
+    def has_maintenance_work(self) -> bool:
+        enabled, live_settings = self._live_state()
+        if not enabled:
+            return False
+        return self._has_maintenance_due(live_settings)
+
+    def _has_maintenance_due(self, live_settings: SkillLearningSettings) -> bool:
+        from .skill_learning_maintenance import learning_reconcile_due
+
+        if live_settings.maintenance_mode != "autonomous":
+            return False
+        if self.store.registry_path.is_file():
+            try:
+                registry = self.store.load_registry()
+            except SkillLearningStoreError:
+                return True
+            if registry.maintenance_cursor:
+                return True
+            if learning_reconcile_due(
+                registry.last_maintenance_at,
+                time.time(),
+                interval_seconds=live_settings.maintenance_interval_seconds,
+            ):
+                return True
+        if _has_committed_lesson_proposals(getattr(self.runtime, "lesson_provider", None)):
+            return True
+        return False
 
     # LLM: 最早核准确Agent/原执行与同owner源目录，预筛只读FIFO；维护/候选/收尾写入重核短门，模型等待在门外。
     #   maintenance_only只由真实registry来源内部选择，完成原维护即返回，不消费后来FIFO或调用模型；默认False保原预算/人工proposals。
@@ -321,6 +565,9 @@ class SkillLearningService:
         from ..gateway_parts.request_entry_admission import require_request_execution
 
         require_request_execution(component=self, component_attribute="skill_learning")
+        enabled, live_settings = self._live_state()
+        if not enabled:
+            return SkillLearningRunResult(STATUS_IDLE)
         if expected_request_path is not None:
             try:
                 self.store._request_parts(expected_request_path)
@@ -331,32 +578,66 @@ class SkillLearningService:
                 return SkillLearningRunResult(STATUS_IDLE)
             if pending[0].name != expected_request_path.name:
                 return SkillLearningRunResult(STATUS_BUSY)
-        if self.runtime.lesson_provider:
-            from .skill_learning_migration import adopt_committed_lessons
-            with gateway_short_transaction("skill_learning_adopt_lessons"):
-                adopt_committed_lessons(self.store,self.runtime.lesson_provider())
-        if self.settings.maintenance_mode == "autonomous":
-            from .skill_learning_maintenance import maintain_learning
-            protection = self.runtime.protection_provider() if self.runtime.protection_provider else {'protection_complete':False}
-            with gateway_short_transaction("skill_learning_maintenance"):
-                maintain_learning(self.store,mode=self.settings.maintenance_mode,cool_seconds=self.settings.cool_seconds,archive_seconds=self.settings.archive_seconds,keep_versions=self.settings.keep_versions,**protection)
-        if maintenance_only or not self.store.pending_requests():
-            return SkillLearningRunResult(STATUS_IDLE)
-        if foreground_model_active(self.runtime.backend):
-            return SkillLearningRunResult(STATUS_BUSY)
         try:
+            if live_settings.maintenance_mode == "autonomous":
+                lesson_provider = getattr(self.runtime, "lesson_provider", None)
+                if lesson_provider:
+                    _adopt_committed_lessons_isolated(self.store, lesson_provider())
+                has_surface = (
+                    self.store.registry_path.is_file()
+                    or self.store.learned_root.is_dir()
+                    or (self.store.directory / "proposals").is_dir()
+                )
+                if maintenance_only or (
+                    has_surface and (not self.store.registry_path.is_file() or self._has_maintenance_due(live_settings))
+                ):
+                    from .skill_learning_maintenance import maintain_learning
+
+                    protection_provider = getattr(self.runtime, "protection_provider", None)
+                    protection = (
+                        protection_provider()
+                        if callable(protection_provider)
+                        else {"protection_complete": False}
+                    )
+                    with gateway_short_transaction("skill_learning_maintenance"):
+                        maintain_learning(
+                            self.store,
+                            mode=live_settings.maintenance_mode,
+                            cool_seconds=live_settings.cool_seconds,
+                            archive_seconds=live_settings.archive_seconds,
+                            keep_versions=live_settings.keep_versions,
+                            max_skills=live_settings.max_skills,
+                            evict_seconds=live_settings.evict_seconds,
+                            batch_count=live_settings.retention_scan_slice_entries,
+                            batch_bytes=live_settings.retention_scan_slice_bytes,
+                            batch_ms=live_settings.retention_scan_slice_ms,
+                            config_provider=getattr(self.runtime, "config_provider", None),
+                            **protection,
+                        )
+                    _prune_learning_proposals_isolated(
+                        self.store,
+                        lesson_provider,
+                        batch_count=live_settings.retention_scan_slice_entries,
+                    )
+            if maintenance_only or not self.store.has_requests() or not self.store.pending_requests():
+                return SkillLearningRunResult(STATUS_IDLE)
+            if foreground_model_active(getattr(self.runtime, "backend", None)):
+                return SkillLearningRunResult(STATUS_BUSY)
             with self.store.run_lock():
                 return self._run_first(expected_request_path=expected_request_path)
         except BlockingIOError:
             return SkillLearningRunResult(STATUS_BUSY)
         except SkillLearningStoreError as exc:
             return SkillLearningRunResult(EVENT_FAILED, exc.code)
-        except (OwnerQuotaExceeded,OwnerQuotaUnavailable):
-            return SkillLearningRunResult(EVENT_FAILED,"SKILL_LEARNING_STORAGE_LIMIT")
+        except (OwnerQuotaExceeded, OwnerQuotaUnavailable):
+            return SkillLearningRunResult(EVENT_FAILED, "SKILL_LEARNING_STORAGE_LIMIT")
 
     # LLM: 原.run锁内显式回填后按同owner文件名再核FIFO，旧overflow源移动不误判；预算与实际未知原对象传播保持。
     # 函数用途: 在运行锁内处理一条请求。
     def _run_first(self, *, expected_request_path: Path | None = None) -> SkillLearningRunResult:
+        enabled, live_settings = self._live_state()
+        if not enabled:
+            return SkillLearningRunResult(STATUS_IDLE)
         pending = self.store.pending_requests(refill=True)
         if not pending:
             return SkillLearningRunResult(STATUS_IDLE)
@@ -378,8 +659,11 @@ class SkillLearningService:
                     return operation()
 
             try:
-                result = AssetEvolutionService(self.store.skills_root.parent,
-                    maintenance_mode=self.settings.maintenance_mode, commit=evolution_commit).process(request['asset_evolution_run_id'])
+                result = AssetEvolutionService(
+                    self.store.skills_root.parent,
+                    maintenance_mode=live_settings.maintenance_mode,
+                    commit=evolution_commit,
+                ).process(request['asset_evolution_run_id'])
             except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
                     ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError,
                     OwnerQuotaExceeded, OwnerQuotaUnavailable, SkillLearningStoreError):
@@ -396,64 +680,122 @@ class SkillLearningService:
             deployment_learning_available,
             reserve_deployment_learning,
         )
-        if not deployment_learning_available(self.runtime.deployment_root,self.settings.global_daily_limit):
-            return SkillLearningRunResult("global_daily_limit",request_key=str(request.get("request_key") or ""))
+        if not deployment_learning_available(self.runtime.deployment_root, live_settings.global_daily_limit):
+            return SkillLearningRunResult("global_daily_limit", request_key=str(request.get("request_key") or ""))
         with gateway_short_transaction("skill_learning_reserve_call"):
-            if not self.store.consume_daily_call(self.settings.daily_limit):
+            if not self.store.consume_daily_call(live_settings.daily_limit):
                 return SkillLearningRunResult(STATUS_DAILY_LIMIT, request_key=str(request.get("request_key") or ""))
-            if not reserve_deployment_learning(self.runtime.deployment_root,self.settings.global_daily_limit):
-                return SkillLearningRunResult("global_daily_limit",request_key=str(request.get("request_key") or ""))
-        from ..settings.curator_profile import (
-            auxiliary_profile_cooldown_remaining,
-            clear_auxiliary_profile_cooldown,
-            record_auxiliary_profile_failure,
-        )
+            if not reserve_deployment_learning(self.runtime.deployment_root, live_settings.global_daily_limit):
+                return SkillLearningRunResult("global_daily_limit", request_key=str(request.get("request_key") or ""))
+        from ..settings.curator_profile import auxiliary_profile_cooldown_remaining
 
-        aux_profile = str(getattr(getattr(self.runtime, "guard_config", None), "memory_curator_model_profile", "") or "").strip()
+        aux_profile = self._auxiliary_profile()
         if aux_profile and auxiliary_profile_cooldown_remaining(aux_profile) > 0:
             return SkillLearningRunResult(STATUS_BUSY, request_key=str(request.get("request_key") or ""))
 
         material = _material(self.store, request, _snapshot_entries(self.runtime.snapshot_provider))
         try:
+            response = self._call_model_guarded(material, run_path=path, run_request=request)
+            event = self._decide(
+                material,
+                str(getattr(response, "text", "") or ""),
+                live_settings=live_settings,
+                run_path=path,
+                run_request=request,
+            )
+        except _RetryRunAbort as abort:
+            return abort.result
+        return self._finish(path, request, event)
+
+    # LLM: 同时读取 live_cfg 与 guard_config 解析辅助模型 profile，缺省 guard_config 时仍能对齐冷却计数。
+    # 函数用途: 获取当前生效的辅助模型 profile 名称。
+    def _auxiliary_profile(self) -> str:
+        config_provider = getattr(self.runtime, "config_provider", None)
+        live_cfg = config_provider() if callable(config_provider) else None
+        for cfg in (live_cfg, getattr(self.runtime, "guard_config", None)):
+            if cfg is not None and hasattr(cfg, "memory_curator_model_profile"):
+                return str(getattr(cfg, "memory_curator_model_profile", "") or "").strip()
+        return ""
+
+    # LLM: 统一保护首次与合并重试的受限模型调用：不确定执行异常原样上抛，正在运行返回忙等待，其余失败按 attempts 退避落盘。
+    # 函数用途: 执行一次带冷却计数和异常处理保护的自主学习模型调用。
+    def _call_model_guarded(
+        self,
+        material: SkillLearningMaterial,
+        *,
+        run_path: Path | None = None,
+        run_request: dict[str, object] | None = None,
+    ) -> object:
+        from ..settings.curator_profile import (
+            clear_auxiliary_profile_cooldown,
+            record_auxiliary_profile_failure,
+        )
+
+        aux_profile = self._auxiliary_profile()
+        try:
             response = self._call_model(material)
             if aux_profile:
                 clear_auxiliary_profile_cooldown(aux_profile)
-        except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
-                ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
+            return response
+        except (
+            RequestExecutionOutcomeUncertainError,
+            RequestExecutionContextUnavailable,
+            ToolWriteContextUnavailable,
+            BoundedCallExitUnconfirmedError,
+        ):
             raise
-        except CuratorModelStillRunningError:
-            return SkillLearningRunResult(STATUS_BUSY, request_key=str(request.get("request_key") or ""))
-        except Exception as exc:  # noqa: BLE001 - 供应商故障只影响这一条请求，按重试合同记账。
+        except CuratorModelStillRunningError as exc:
+            if run_path is not None:
+                req = run_request if run_request is not None else material.request
+                raise _RetryRunAbort(
+                    SkillLearningRunResult(STATUS_BUSY, request_key=str(req.get("request_key") or ""))
+                ) from exc
+            raise
+        except Exception as exc:  # noqa: BLE001 - 供应商故障只影响这一条请求，按重试合同记账并更新冷却时间。
             if aux_profile:
                 record_auxiliary_profile_failure(aux_profile, type(exc).__name__)
-            return self._retry_or_drop(path, request, exc)
-        event = self._decide(material, str(getattr(response, "text", "") or ""))
-        return self._finish(path, request, event)
+            if run_path is not None:
+                req = run_request if run_request is not None else material.request
+                raise _RetryRunAbort(self._retry_or_drop(run_path, req, exc)) from exc
+            raise
 
     # LLM: 后台线程没有前台的会话 ContextVar：按 owner_id + 请求键自绑宿主会话（同一请求的重试共用同一会话值、
     #   不冒用前台线程会话），bounded_call 的 copy_context 会把它带进供应商调用线程；退出即复位。
     # 函数用途: 发起无工具结构化总结；仅自主后台模式附带四载体指导，普通/显式总结保持原提示合同。
     def _call_model(self, material: SkillLearningMaterial) -> object:
+        _, active_settings = self._live_state()
         session = "skill-learning:" + str(material.request.get("request_key") or "")
+        backend_provider = getattr(self.runtime, "backend_provider", None)
+        explicit_backend = getattr(self.runtime, "backend", None)
         backend = (
-            self.runtime.backend_provider()
-            if callable(self.runtime.backend_provider)
-            else self.runtime.backend
-        ) or self.runtime.backend
+            backend_provider()
+            if callable(backend_provider)
+            else explicit_backend
+        ) or explicit_backend
         if backend is None or getattr(backend, "name", "") == "unconfigured":
             raise RuntimeError("SKILL_LEARNING_MODEL_NOT_CONFIGURED")
         with provider_session_scope((self.runtime.owner_id,), session):
             return call_backend_with_timeout(
                 backend,
                 prompt=skill_learning_prompt(material, include_carrier_guidance=(
-                    self.settings.autonomous_verified and material.request.get('requested_by') != 'user')),
+                    active_settings.autonomous_verified and material.request.get('requested_by') != 'user')),
                 response_schema=skill_learning_response_schema(),
-                timeout_seconds=self.settings.timeout_seconds,
+                timeout_seconds=active_settings.timeout_seconds,
             )
 
     # LLM: 显式总结或目录失败只提案；Verify不占原短门，写入重新核来源，归属/CAS/guard/配额始终保留。
-    # 函数用途: 解析精确候选并按机器验证发布owner learned方法，不冒充用户确认。
-    def _decide(self, material: SkillLearningMaterial, text: str) -> SkillLearningEvent:
+    #   对高相似新建触发至多1次合并优先重试；ineffective走宿主通道B负向记次；提交前重核最新开关。
+    # 函数用途: 解析精确候选并按机器验证发布owner learned方法、记录通道B负向或延迟重复新建。
+    def _decide(
+        self,
+        material: SkillLearningMaterial,
+        text: str,
+        *,
+        live_settings: SkillLearningSettings | None = None,
+        run_path: Path | None = None,
+        run_request: dict[str, object] | None = None,
+    ) -> SkillLearningEvent:
+        active_settings = live_settings or self.settings
         request = material.request
         updatable = frozenset(str(item.get("name") or "") for item in material.updatable_skills)
         try:
@@ -462,10 +804,50 @@ class SkillLearningService:
             return replace(_request_event(EVENT_REJECTED, exc.code, request), reason=exc.field)
         if decision.decision == DECISION_SKIP:
             return replace(_request_event(EVENT_SKIPPED, "", request), reason=decision.reason)
-        publish = PublishRequest(decision, request, material.taken_names, self.settings.max_skills,
-                                 self.runtime.guard_config,
-                                 expected_revision=next((item["revision"] for item in material.updatable_skills if item["name"] == decision.name), None),
-                                 expected_sha256=next((item["sha256"] for item in material.updatable_skills if item["name"] == decision.name), ""))
+        if (
+            decision.decision == DECISION_CREATE
+            and request.get("requested_by") != "user"
+            and active_settings.merge_similarity_percent > 0
+            and MAX_MERGE_RETRY_COUNT > 0
+        ):
+            similar = _similar_managed_skills(
+                self.store,
+                decision,
+                threshold_percent=active_settings.merge_similarity_percent,
+            )
+            if similar:
+                material, decision, retry_event = self._retry_merge_first(
+                    material,
+                    decision,
+                    similar,
+                    live_settings=active_settings,
+                    run_path=run_path,
+                    run_request=run_request,
+                )
+                if retry_event is not None:
+                    return retry_event
+                if decision.decision == DECISION_SKIP:
+                    return replace(_request_event(EVENT_SKIPPED, "", request), reason=decision.reason)
+        enabled_now, revalidated_settings = self._live_state()
+        if not enabled_now:
+            return replace(
+                _request_event(EVENT_REJECTED, "SKILL_LEARNING_DISABLED", request),
+                skill_name=decision.name,
+                reason="自学习开关已在后台校验阶段关闭，本次未写入技能。",
+            )
+        if decision.decision == DECISION_INEFFECTIVE:
+            return self._record_ineffective_decision(decision, request)
+        publish = PublishRequest(
+            decision,
+            request,
+            material.taken_names,
+            revalidated_settings.max_skills,
+            self.runtime.guard_config,
+            expected_revision=next((item["revision"] for item in material.updatable_skills if item["name"] == decision.name), None),
+            expected_sha256=next((item["sha256"] for item in material.updatable_skills if item["name"] == decision.name), ""),
+            protection_provider=getattr(self.runtime, "protection_provider", None),
+            config_provider=getattr(self.runtime, "config_provider", None),
+        )
         try:
             from .asset_promotion import propose_or_promote_skill
             verifier = getattr(self.runtime, 'promotion_verifier', None)
@@ -477,19 +859,223 @@ class SkillLearningService:
                 with gateway_short_transaction("skill_learning_propose"):
                     return operation()
 
-            event = propose_or_promote_skill(self.store, publish, verifier=verifier, commit=commit,
-                autonomous_verified=(self.settings.autonomous_verified and request.get('requested_by') != 'user'
-                                     and not request.get('_learning_catalog_unavailable')))
+            event = propose_or_promote_skill(
+                self.store,
+                publish,
+                verifier=verifier,
+                commit=commit,
+                autonomous_verified=(
+                    revalidated_settings.autonomous_verified
+                    and request.get('requested_by') != 'user'
+                    and not request.get('_learning_catalog_unavailable')
+                ),
+            )
             if event.event == 'proposed' and request.get('completion_ref'):
                 from .skill_learning_publish import retain_proposed_business_source
 
                 commit(lambda: retain_proposed_business_source(self.store, publish))
             return event
-        except (OwnerQuotaExceeded,OwnerQuotaUnavailable):
-            return _request_event(EVENT_REJECTED,"SKILL_LEARNING_STORAGE_LIMIT",request)
+        except (OwnerQuotaExceeded, OwnerQuotaUnavailable):
+            return _request_event(EVENT_REJECTED, "SKILL_LEARNING_STORAGE_LIMIT", request)
         except SkillLearningGateError as exc:
             rejected = _request_event(EVENT_REJECTED, exc.code, request)
             return replace(rejected, skill_name=decision.name, reason=decision.reason)
+
+    # LLM: 发现高相似已有自主学习 Skill 时，把候选详情和合并提示注入唯一 1 次同轮重试，仍未收敛则结构化延迟。
+    # 函数用途: 执行至多一次的合并优先重试，返回 (可能扩充updatable后的素材, 最终决定, 短路事件或None)。
+    def _retry_merge_first(
+        self,
+        material: SkillLearningMaterial,
+        initial_decision: SkillLearningDecision,
+        similar: list[dict[str, object]],
+        *,
+        live_settings: SkillLearningSettings,
+        run_path: Path | None = None,
+        run_request: dict[str, object] | None = None,
+    ) -> tuple[SkillLearningMaterial, SkillLearningDecision, SkillLearningEvent | None]:
+        request = material.request
+        registry = self.store.load_registry()
+        extra_updatables: list[dict[str, object]] = []
+        for match in similar:
+            item = _updatable_by_name(self.store, registry, str(match["name"]))
+            if item is not None:
+                extra_updatables.append(item)
+        if not extra_updatables:
+            return material, initial_decision, None
+        merged_map = {str(item["name"]): item for item in material.updatable_skills}
+        for item in extra_updatables:
+            merged_map[str(item["name"])] = item
+        retry_updatable_items = tuple(merged_map.values())
+        retry_updatable_names = frozenset(merged_map.keys())
+        retry_material = replace(
+            material,
+            updatable_skills=retry_updatable_items,
+            merge_hint={
+                "reason": "similar_skill_exists",
+                "threshold_percent": live_settings.merge_similarity_percent,
+                "proposed_name": initial_decision.name,
+                "candidates": similar,
+            },
+        )
+        enabled_now, latest_settings = self._live_state()
+        if not enabled_now:
+            return material, initial_decision, replace(
+                _request_event(EVENT_REJECTED, "SKILL_LEARNING_DISABLED", request),
+                skill_name=initial_decision.name,
+                reason="自学习已在合并重试前关闭，本次未写入技能。",
+            )
+        from ..settings.curator_profile import auxiliary_profile_cooldown_remaining
+        from .skill_learning_budget import (
+            deployment_learning_available,
+            reserve_deployment_learning,
+        )
+
+        aux_profile = self._auxiliary_profile()
+        if aux_profile and auxiliary_profile_cooldown_remaining(aux_profile) > 0:
+            if run_path is not None:
+                req = run_request if run_request is not None else request
+                raise _RetryRunAbort(
+                    SkillLearningRunResult(STATUS_BUSY, request_key=str(req.get("request_key") or ""))
+                )
+            return retry_material, initial_decision, replace(
+                _request_event(EVENT_REJECTED, CODE_MERGE_DEFERRED, request),
+                skill_name=initial_decision.name,
+                reason="辅助模型处于退避冷却期，本次合并优先重试已延迟，未写入重复技能。",
+            )
+        if not deployment_learning_available(self.runtime.deployment_root, latest_settings.global_daily_limit):
+            return retry_material, initial_decision, replace(
+                _request_event(EVENT_REJECTED, CODE_MERGE_DEFERRED, request),
+                skill_name=initial_decision.name,
+                reason="全局每日自主学习额度已用尽，本次合并优先重试已延迟，未写入重复技能。",
+            )
+        with gateway_short_transaction("skill_learning_reserve_call"):
+            if (
+                not self.store.consume_daily_call(latest_settings.daily_limit)
+                or not reserve_deployment_learning(self.runtime.deployment_root, latest_settings.global_daily_limit)
+            ):
+                return retry_material, initial_decision, replace(
+                    _request_event(EVENT_REJECTED, CODE_MERGE_DEFERRED, request),
+                    skill_name=initial_decision.name,
+                    reason="每日自主学习额度已用尽，本次合并优先重试已延迟，未写入重复技能。",
+                )
+        response = self._call_model_guarded(retry_material, run_path=run_path, run_request=run_request)
+        try:
+            retry_decision = parse_skill_learning_decision(
+                str(getattr(response, "text", "") or ""),
+                retry_updatable_names,
+            )
+        except SkillLearningOutputError as exc:
+            return retry_material, initial_decision, replace(
+                _request_event(EVENT_REJECTED, exc.code, request),
+                skill_name=initial_decision.name,
+                reason=exc.field,
+            )
+        if retry_decision.decision == DECISION_CREATE:
+            still_similar = _similar_managed_skills(
+                self.store,
+                retry_decision,
+                threshold_percent=latest_settings.merge_similarity_percent,
+            )
+            if still_similar:
+                top = still_similar[0]
+                return retry_material, retry_decision, replace(
+                    _request_event(EVENT_REJECTED, CODE_MERGE_DEFERRED, request),
+                    skill_name=retry_decision.name,
+                    reason=(
+                        f"候选技能与既有技能 {top['name']} 相似度达 {top['similarity_percent']}%，"
+                        "合并优先重试后仍请求新建，已延迟以避免重复。"
+                    ),
+                )
+        return retry_material, retry_decision, None
+
+    # LLM: V2-2 通道 B 自动低效记次：经正文送达回执或既有 adopted 证据归因，按同一任务去重键调用 observe_learning。
+    # 函数用途: 为模型在后台识别为 ineffective 的本轮已使用自学 Skill 登记宿主负向记次。
+    def _record_ineffective_decision(
+        self,
+        decision: SkillLearningDecision,
+        request: dict[str, object],
+    ) -> SkillLearningEvent:
+        from .skill_learning_maintenance import (
+            _HOST_DELIVERY_KEYS_CTX,
+            LearningObservationSource,
+            observe_learning,
+        )
+        from .skill_usage_receipts import candidate_delivery_task_keys
+
+        target_name = decision.target_skill_name
+        registry = self.store.load_registry()
+        record = registry.skills.get(target_name)
+        if record is None:
+            return replace(
+                _request_event(EVENT_REJECTED, CODE_INEFFECTIVE_UNATTRIBUTED, request),
+                skill_name=target_name,
+                reason=f"目标自学技能 {target_name} 已不在登记表中，未写入负向记次。",
+            )
+        req_root = str(request.get("root_task_id") or "").strip()
+        req_task = str(request.get("task_id") or "").strip()
+        req_id = str(request.get("request_id") or "").strip()
+        run_id = str(request.get("run_id") or "").strip()
+        rkey = str(request.get("request_key") or "").strip()
+        task_id_arg = req_root or req_task or (f"request:{req_id}" if req_id else f"learning:{rkey or target_name}")
+        receipt_id = f"learning:{rkey}" if rkey else f"learning:{target_name}:{task_id_arg}"
+        delivery_keys = tuple(
+            candidate_delivery_task_keys(
+                root_task_id=req_root,
+                task_id=req_task,
+                request_id=req_id,
+            )
+        )
+        maint = record.maintenance if isinstance(record.maintenance, dict) else {}
+        source = LearningObservationSource(
+            authority="host",
+            receipt_id=receipt_id,
+            run_id=run_id,
+            incarnation_id=str(maint.get("incarnation_id") or ""),
+            activation_id=str(maint.get("activation_id") or ""),
+        )
+        token = _HOST_DELIVERY_KEYS_CTX.set(delivery_keys) if delivery_keys else None
+        try:
+            with gateway_short_transaction("skill_learning_observe_ineffective"):
+                obs = observe_learning(
+                    self.store,
+                    target_name,
+                    sha256=record.sha256,
+                    task_id=task_id_arg,
+                    outcome="ineffective",
+                    source=source,
+                )
+        except SkillLearningGateError as exc:
+            return replace(
+                _request_event(EVENT_REJECTED, exc.code, request),
+                skill_name=target_name,
+                reason=decision.reason or str(exc),
+            )
+        except ValueError as exc:
+            return replace(
+                _request_event(EVENT_REJECTED, CODE_INEFFECTIVE_UNATTRIBUTED, request),
+                skill_name=target_name,
+                reason=str(exc),
+            )
+        finally:
+            if token is not None:
+                _HOST_DELIVERY_KEYS_CTX.reset(token)
+
+        action = str(obs.get("action") or "")
+        code = (
+            CODE_INEFFECTIVE_ROLLED_BACK if action == "rolled_back"
+            else CODE_INEFFECTIVE_RETIRED if action == "retired"
+            else CODE_INEFFECTIVE_RECORDED
+        )
+        return SkillLearningEvent(
+            event="ineffective",
+            code=code,
+            skill_name=target_name,
+            version=record.version,
+            sha256=str(obs.get("sha256") or record.sha256),
+            request_key=rkey,
+            run_id=run_id,
+            reason=decision.reason,
+        )
 
     # LLM: 模型或确定性演进失败沿原attempts有界重试；错误码保留载体，短T保护重写与终账，撤权不消费源。
     # 函数用途: 对失败请求持久化进度或可追溯终态，让后续FIFO继续。
@@ -532,34 +1118,58 @@ def _snapshot_entries(provider: Callable[[], object]) -> tuple[object, ...]:
     return tuple(getattr(snapshot, "entries", ()) or ())
 
 
-# LLM: existing 是全部来源的名字索引（描述截断）；updatable 只收本轮 skill_search get 读过、登记在册、
-#   或有跨任务结构化采用证据、registry/path/hash一致的自学Skill；S1原owner布局也由登记裁决，最多UPDATABLE_COUNT个。
-#   读取登记表；登记表损坏时抛 SkillLearningStoreError，由 run_pending 记 failed 且保留请求。
+# LLM: existing 是全部来源的名字索引（描述截断，全部受管自学 Skill 带 managed 标记以免被 200 条上限截断）；
+#   updatable 优先收本轮 skill_search get 读过、登记在册且未被用户改过的自学 Skill，再补跨任务采用证据，最多 UPDATABLE_COUNT 个；
+#   active_lessons 提供同主人活跃经验摘要避免与单句经验载体重复。登记表损坏时抛 SkillLearningStoreError。
 # 函数用途: 组装一次总结调用的材料。
 def _material(store: SkillLearningStore, request: dict[str, object], entries: tuple[object, ...]) -> SkillLearningMaterial:
     if isinstance(entries, _UnavailableSkillEntries):
         request = {**request, '_learning_catalog_unavailable': True}
     registry = store.load_registry()
-    existing = tuple(
-        {
-            "name": str(getattr(entry, "name", "") or ""),
-            "source": str(getattr(entry, "source", "") or ""),
+    managed_names = set(registry.skills)
+    existing_items: list[dict[str, object]] = []
+    for entry in entries:
+        name = str(getattr(entry, "name", "") or "")
+        source = str(getattr(entry, "source", "") or "")
+        row: dict[str, object] = {
+            "name": name,
+            "source": source,
             "description": str(getattr(entry, "description", "") or "")[:EXISTING_DESCRIPTION_CHARS],
         }
-        for entry in entries
-    )
-    used = {str(item) for item in (request.get("used_skill_ids") or [])}
+        if source == "owner" and name in managed_names:
+            row["managed"] = True
+        existing_items.append(row)
+    existing = tuple(existing_items)
+    turn_used = {str(item) for item in (request.get("used_skill_ids") or [])}
+    evidence_used: set[str] = set()
     for name, record in registry.skills.items():
-        evidence = [row for row in record.maintenance.get('observations',[]) if row.get('sha256')==record.sha256]
+        evidence = [row for row in record.maintenance.get('observations', []) if row.get('sha256') == record.sha256]
         if len({row.get('subject') for row in evidence}) >= 2:
-            used.add('owner:'+name)
-    candidates = (_updatable(store, registry, entry) for entry in entries
-                  if getattr(entry, "stable_id", "") in used
-                  or (getattr(entry, "source", "") == "owner" and getattr(entry, "name", "") in used)
-                  or f"owner:{getattr(entry, 'name', '')}" in used)
-    updatable = tuple(item for item in candidates if item is not None)[:UPDATABLE_COUNT]
-    taken = frozenset(item["name"] for item in existing if item["name"])
-    return SkillLearningMaterial(request, existing, updatable, taken)
+            evidence_used.add('owner:' + name)
+
+    def _entry_matches(entry: object, keys: set[str]) -> bool:
+        return (
+            getattr(entry, "stable_id", "") in keys
+            or (getattr(entry, "source", "") == "owner" and getattr(entry, "name", "") in keys)
+            or f"owner:{getattr(entry, 'name', '')}" in keys
+        )
+
+    ordered: dict[str, dict[str, object]] = {}
+    for bucket in (turn_used, evidence_used):
+        for entry in entries:
+            if not _entry_matches(entry, bucket):
+                continue
+            item = _updatable(store, registry, entry)
+            if item is not None:
+                ordered.setdefault(str(item["name"]), item)
+                if len(ordered) >= UPDATABLE_COUNT:
+                    break
+        if len(ordered) >= UPDATABLE_COUNT:
+            break
+    updatable = tuple(ordered.values())[:UPDATABLE_COUNT]
+    taken = frozenset(str(item["name"]) for item in existing if item["name"])
+    lessons = _active_lessons_context(store)
+    return SkillLearningMaterial(request, existing, updatable, taken, active_lessons=lessons)
 
 
 # LLM: 任何一项所有权条件不满足都返回 None；返回的是模型可整篇替换的字段（不含 frontmatter 原文）。
@@ -576,8 +1186,287 @@ def _updatable(store: SkillLearningStore, registry: SkillLearningRegistry, entry
     if skill_content_sha256(text) != record.sha256:
         return None
     card = parse_skill_file(path, source="owner", require_frontmatter=True)
-    return {"name": name, "version": record.version, "revision": record.revision, "sha256":record.sha256, "evidence":record.maintenance.get("observations",[])[-10:], "description": card.description,
+    return {"name": name, "version": record.version, "revision": record.revision, "sha256": record.sha256,
+            "evidence": record.maintenance.get("observations", [])[-10:], "description": card.description,
             "when_to_use": card.when_to_use, "tags": list(card.tags), "body": _body_of(text)}
+
+
+# LLM: 无快照条目时直接按受管登记与磁盘文件组装可更新详情，用于高相似合并优先重试。
+# 函数用途: 按技能名读取可更新的自学 Skill 材料。
+def _updatable_by_name(store: SkillLearningStore, registry: SkillLearningRegistry, name: str) -> dict[str, object] | None:
+    record = registry.skills.get(name)
+    if record is None or record.layout == "owner" or record.maintenance.get("state") == "archived":
+        return None
+    text = read_text_beneath(store.skills_root, ("learned", name, "SKILL.md"))
+    if text is None or skill_content_sha256(text) != record.sha256:
+        return None
+    path = store.skill_path(name)
+    if not path.is_file():
+        return None
+    card = parse_skill_file(path, source="owner", require_frontmatter=True)
+    return {
+        "name": name,
+        "version": record.version,
+        "revision": record.revision,
+        "sha256": record.sha256,
+        "evidence": record.maintenance.get("observations", [])[-10:],
+        "description": card.description,
+        "when_to_use": card.when_to_use,
+        "tags": list(card.tags),
+        "body": _body_of(text),
+    }
+
+
+# LLM: 仅在 owner lessons 目录已存在时只读读取活跃经验规则摘要，绝不创建目录或阻塞学习主链路。
+# 函数用途: 读取当前 owner 的活跃经验规则摘要以提示词去重。
+def _active_lessons_context(store: SkillLearningStore) -> tuple[dict[str, object], ...]:
+    owner_home = store.skills_root.parent
+    lessons_dir = owner_home / "memory" / "lessons"
+    if not lessons_dir.is_dir() or lessons_dir.is_symlink():
+        return ()
+    try:
+        from ..memory_store.lessons import LessonRepository
+
+        repo = LessonRepository(lessons_dir, owner_home / "memory" / "routing_index.md")
+        records = [item for item in repo.list() if getattr(item, "status", "active") == "active"]
+    except Exception:  # noqa: BLE001 - 经验索引损坏或不可读时不阻断技能总结。
+        return ()
+    records.sort(key=lambda item: (-int(getattr(item, "occurrence_count", 0) or 0), str(getattr(item, "lesson_id", ""))))
+    out: list[dict[str, object]] = []
+    for rec in records[:ACTIVE_LESSONS_PROMPT_COUNT]:
+        out.append({
+            "lesson_id": str(rec.lesson_id),
+            "subject_key": str(rec.subject_key),
+            "summary": bounded_text(rec.content, ACTIVE_LESSON_SUMMARY_CHARS),
+            "scope_type": str((rec.scope or {}).get("scope_type") or ""),
+        })
+    return tuple(out)
+
+
+class _RetryRunAbort(Exception):
+    """内部控制流异常：把合并重试阶段触发的忙等待/退避结果透传回 _run_first。"""
+
+    def __init__(self, result: SkillLearningRunResult) -> None:
+        super().__init__(result.status)
+        self.result = result
+
+
+# LLM: 与 skill_learning_store.skill_family_fingerprint 保持一致去 frontmatter 与标题行，防止纯标题空正文算出伪指纹。
+# 函数用途: 判断技能正文在去除 frontmatter 与标题行后是否包含至少一个词元。
+def _skill_family_has_tokens(body: str) -> bool:
+    stripped = re.sub(r"\A---\n.*?\n---\n", "", body or "", flags=re.S)
+    stripped = re.sub(r"^#{1,6}[^\n]*", "", stripped, flags=re.M)
+    return bool(re.findall(r"[\w]+", stripped.casefold()))
+
+
+# LLM: 严格遵循 frozen algorithms.merge / merge_tokenizer，只在有界规范化元数据（name/description/when_to_use/tags）上分词，绝不混入正文。
+# 函数用途: 计算用于合并相似度 Jaccard 比对的纯元数据词元集合。
+def _metadata_similarity_tokens(
+    name: str,
+    description: str,
+    when_to_use: str,
+    tags: object,
+    tokenize_fn: Callable[[str], list[str]],
+) -> set[str]:
+    norm_name = " ".join(str(name or "").split())[:64]
+    norm_desc = " ".join(str(description or "").split())[:DESCRIPTION_MAX_CHARS]
+    norm_when = " ".join(str(when_to_use or "").split())[:WHEN_TO_USE_MAX_CHARS]
+    raw_tags = tags if isinstance(tags, (list, tuple)) else ()
+    norm_tags = [" ".join(str(tag or "").split())[:64] for tag in list(raw_tags)[:TAGS_MAX_COUNT]]
+    joined = " ".join(part for part in (norm_name, norm_desc, norm_when, *norm_tags) if part)
+    return set(tokenize_fn(joined)) if joined else set()
+
+
+# LLM: 复用 router.tokenize 纯元数据 Jaccard（整数交叉乘法）与非空词元正文 task_family_fingerprint；仅比对未归档受管自学 Skill。
+# 函数用途: 检索与新建候选相似度达到阈值的既有自学 Skill，按相似度降序截断返回。
+def _similar_managed_skills(
+    store: SkillLearningStore,
+    decision: SkillLearningDecision,
+    *,
+    threshold_percent: int,
+) -> list[dict[str, object]]:
+    if threshold_percent <= 0:
+        return []
+    from .asset_promotion import task_family_fingerprint
+    from .router import tokenize
+
+    registry = store.load_registry()
+    try:
+        managed = store.managed_records(registry, include_archived=False)
+    except SkillLearningStoreError:
+        managed = {
+            name: rec
+            for name, rec in registry.skills.items()
+            if rec.layout != "owner" and rec.maintenance.get("state") != "archived"
+        }
+    if not managed:
+        return []
+    ca = decision.candidate_asset if isinstance(decision.candidate_asset, dict) else {}
+    cand_kind = str(ca.get("kind") or "skill")
+    if cand_kind in {"script", "workflow"}:
+        cand_fp = task_family_fingerprint(cand_kind, ca)
+    else:
+        cand_fp = skill_family_fingerprint(decision.body) if _skill_family_has_tokens(decision.body) else ""
+    cand_tokens = _metadata_similarity_tokens(
+        decision.name,
+        decision.description,
+        decision.when_to_use,
+        decision.tags,
+        tokenize,
+    )
+    matches: list[dict[str, object]] = []
+    for rec_name, rec in sorted(managed.items()):
+        if rec_name == decision.name:
+            continue
+        text = read_text_beneath(store.skills_root, ("learned", rec_name, "SKILL.md"))
+        if text is None:
+            continue
+        path = store.skill_path(rec_name)
+        if not path.is_file():
+            continue
+        try:
+            card = parse_skill_file(path, source="owner", require_frontmatter=True)
+        except Exception:  # noqa: BLE001 - 单条磁盘卡片解析失败跳过，不阻断其它相似比对。
+            continue
+        body_text = _body_of(text)
+        rec_fp = (
+            (str(rec.maintenance.get("task_family_fingerprint") or "") or skill_family_fingerprint(body_text))
+            if _skill_family_has_tokens(body_text)
+            else ""
+        )
+        if cand_fp and rec_fp and cand_fp == rec_fp and cand_kind == "skill":
+            matched = True
+            sim_pct = 100
+        else:
+            rec_tokens = _metadata_similarity_tokens(
+                rec_name,
+                card.description,
+                card.when_to_use,
+                card.tags,
+                tokenize,
+            )
+            union = cand_tokens | rec_tokens
+            if not union:
+                matched = False
+                sim_pct = 0
+            else:
+                inter_count = len(cand_tokens & rec_tokens)
+                union_count = len(union)
+                matched = (100 * inter_count) >= (int(threshold_percent) * union_count)
+                sim_pct = (100 * inter_count) // union_count
+        if matched:
+            matches.append({
+                "name": rec_name,
+                "similarity_percent": int(sim_pct),
+                "description": card.description[:EXISTING_DESCRIPTION_CHARS],
+                "when_to_use": card.when_to_use,
+            })
+    matches.sort(key=lambda item: (-int(item["similarity_percent"]), str(item["name"])))
+    return matches[:MERGE_CANDIDATES_MAX_COUNT]
+
+
+# LLM: 预筛阶段只检查是否存在已确认待接管的 S1 提案文件，避免空目录或无提案时创建 state 锁或 registry.json。
+# 函数用途: 检查 lesson_provider 是否存在 status=committed 的遗留已确认提案。
+def _has_committed_lesson_proposals(lesson_provider: Callable[[], object] | None) -> bool:
+    if not callable(lesson_provider):
+        return False
+    try:
+        svc = lesson_provider()
+        if svc is None:
+            return False
+        directory = getattr(svc, "directory", None)
+        if isinstance(directory, Path):
+            from .skill_proposals import SkillProposalError, _proposal_files, _read_proposal
+
+            if not directory.is_dir():
+                return False
+            for path in _proposal_files(directory):
+                try:
+                    if _read_proposal(path).status == "committed":
+                        return True
+                except SkillProposalError:
+                    continue
+            return False
+        return bool(svc.list(status="committed"))
+    except Exception:  # noqa: BLE001 - 预筛失败时不误报或阻断队列。
+        return False
+
+
+# LLM: 按条隔离 SkillProposalError：单条损坏提案仅记录告警并跳过，不阻碍同目录其它已确认提案采纳或后续维护。
+# 函数用途: 容错采纳已确认的遗留经验 Skill 提案。
+def _adopt_committed_lessons_isolated(store: SkillLearningStore, proposal_service: object) -> None:
+    from .skill_learning_migration import adopt_committed_lessons
+    from .skill_proposals import SkillProposalError, _proposal_files, _read_proposal
+
+    if proposal_service is None:
+        return
+    directory = getattr(proposal_service, "directory", None)
+    if isinstance(directory, Path):
+        if not directory.is_dir() or not _proposal_files(directory):
+            return
+    try:
+        committed = proposal_service.list(status="committed")
+    except SkillProposalError as exc:
+        _LOGGER.warning("SkillProposalError listing committed lessons, isolating corrupt files: %s", exc.code)
+        if not isinstance(directory, Path):
+            return
+        committed = []
+        for path in _proposal_files(directory):
+            try:
+                item = _read_proposal(path)
+                if item.status == "committed":
+                    committed.append(item)
+            except SkillProposalError as item_exc:
+                _LOGGER.warning("Skipped corrupt committed lesson proposal %s: %s", path.name, item_exc.code)
+    if not committed:
+        return
+
+    class _CommittedProposalProxy:
+        def __init__(self, target: object, items: list[object]) -> None:
+            self._target = target
+            self._items = items
+            self.candidates_path = getattr(target, "candidates_path", None)
+
+        def list(self, status: str | None = None) -> list[object]:
+            if status is None:
+                return list(self._items)
+            return [item for item in self._items if getattr(item, "status", None) == status]
+
+    with gateway_short_transaction("skill_learning_adopt_lessons"):
+        adopt_committed_lessons(store, _CommittedProposalProxy(proposal_service, committed))
+
+
+# LLM: 维护末尾有界清理 S3 陈旧提案与 S1 孤儿提案；单条损坏只记告警，绝不回滚或阻断主维护与 FIFO。
+# 函数用途: 有界清扫已归档或过期的 S1/S3 提案文件。
+def _prune_learning_proposals_isolated(
+    store: SkillLearningStore,
+    lesson_provider: Callable[[], object] | None,
+    *,
+    batch_count: int,
+) -> None:
+    from .skill_learning_proposals import prune_learning_proposals
+    from .skill_proposals import SkillProposalError
+
+    bounded = min(PROPOSAL_PRUNE_BATCH_COUNT, max(1, int(batch_count)))
+    if (store.directory / "proposals").is_dir():
+        try:
+            with gateway_short_transaction("skill_learning_prune_proposals"):
+                prune_learning_proposals(store, stale_seconds=DEFAULT_STALE_PROPOSAL_SECONDS, batch_count=bounded)
+        except Exception:  # noqa: BLE001 - 提案清理异常不得中断技能维护与请求队列。
+            _LOGGER.warning("Failed to prune stale S3 proposals", exc_info=True)
+    if callable(lesson_provider):
+        try:
+            svc = lesson_provider()
+        except Exception:  # noqa: BLE001
+            svc = None
+        if svc is not None and callable(getattr(svc, "prune_orphaned", None)):
+            directory = getattr(svc, "directory", None)
+            if not isinstance(directory, Path) or directory.is_dir():
+                try:
+                    with gateway_short_transaction("skill_learning_prune_s1_orphans"):
+                        svc.prune_orphaned(batch_count=bounded)
+                except SkillProposalError as exc:
+                    _LOGGER.warning("SkillProposalError during prune_orphaned: %s", exc.code)
 
 
 # LLM: 自学 Skill 由本模块的渲染器写出，frontmatter 形状固定（首行 ---，下一个 --- 行结束）。
@@ -610,6 +1499,11 @@ def _config_int(config: object, key: str, default: int) -> int:
 
 __all__ = [
     "CODE_EVOLUTION_FAILED",
+    "CODE_INEFFECTIVE_RECORDED",
+    "CODE_INEFFECTIVE_RETIRED",
+    "CODE_INEFFECTIVE_ROLLED_BACK",
+    "CODE_INEFFECTIVE_UNATTRIBUTED",
+    "CODE_MERGE_DEFERRED",
     "CODE_MODEL_FAILED",
     "CODE_MODEL_TIMEOUT",
     "FOCUS_LIMIT_CHARS",

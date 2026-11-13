@@ -12,8 +12,9 @@ from dataclasses import dataclass, field
 OUTPUT_SCHEMA_VERSION = "my-agent.skill-learning-output.v1"
 DECISION_CREATE = "create"
 DECISION_UPDATE = "update"
+DECISION_INEFFECTIVE = "ineffective"
 DECISION_SKIP = "skip"
-DECISIONS = (DECISION_CREATE, DECISION_UPDATE, DECISION_SKIP)
+DECISIONS = (DECISION_CREATE, DECISION_UPDATE, DECISION_INEFFECTIVE, DECISION_SKIP)
 CODE_OUTPUT_INVALID = "SKILL_LEARNING_OUTPUT_INVALID"
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{1,62}[a-z0-9]")
 TAG_RE = re.compile(r"[a-z0-9-]{1,32}")
@@ -51,7 +52,7 @@ class SkillLearningOutputError(Exception):
 
 
 # LLM: 字段已规范化：description/when_to_use 为单行 frontmatter 安全值，body 统一 LF 且首尾去空白。
-# 类用途: 一次经过校验的总结决定（新建、更新或跳过）。
+# 类用途: 一次经过校验的总结决定（新建、更新、低效反馈或跳过）。
 @dataclass(frozen=True)
 class SkillLearningDecision:
     decision: str
@@ -64,9 +65,14 @@ class SkillLearningDecision:
     body: str = ""
     candidate_asset: dict[str, object] = field(default_factory=dict)
 
+    # LLM: 兼容按 target_skill_name 读取更新/负向反馈目标技能名。
+    @property
+    def target_skill_name(self) -> str:
+        return self.update_target or self.name
+
 
 # LLM: existing_skills 是当前快照全部来源的名字索引（防重名、防重复）；updatable_skills 只放本轮用过、
-#   登记在册且未被用户改过的自学 Skill 的完整字段，它们是 update 的唯一合法目标。
+#   登记在册且未被用户改过的自学 Skill 的完整字段，它们是 update / ineffective 的唯一合法目标。
 #   taken_names 是快照里全部 Skill 名（不截断、不进提示词），只供发布闸门做重名检查。
 # 类用途: 一次总结调用的输入材料。
 @dataclass(frozen=True)
@@ -75,6 +81,8 @@ class SkillLearningMaterial:
     existing_skills: tuple[dict[str, str], ...] = ()
     updatable_skills: tuple[dict[str, object], ...] = ()
     taken_names: frozenset[str] = frozenset()
+    active_lessons: tuple[dict[str, object], ...] = ()
+    merge_hint: dict[str, object] | None = None
 
 
 # LLM: 扁平与受控嵌套对象全部字段必填、禁止额外字段，递归兼容 OpenAI 严格 JSON schema 与 Anthropic 强制工具信封。
@@ -141,23 +149,41 @@ def skill_learning_prompt(material: SkillLearningMaterial, *, include_carrier_gu
         note = _USER_REQUESTED_NOTE
     if include_carrier_guidance:
         note += _CARRIER_NOTE
-    payload = {
+    managed_existing = [item for item in material.existing_skills if isinstance(item, dict) and item.get("managed")]
+    other_existing = [item for item in material.existing_skills if isinstance(item, dict) and not item.get("managed")]
+    payload: dict[str, object] = {
         "task": task,
-        "existing_skills": list(material.existing_skills[:EXISTING_SKILLS_COUNT]),
+        "existing_skills": [*managed_existing, *other_existing[:EXISTING_SKILLS_COUNT]],
         "updatable_skills": list(material.updatable_skills),
     }
+    if material.active_lessons:
+        payload["active_lessons"] = list(material.active_lessons)
+    if material.merge_hint:
+        payload["merge_hint"] = dict(material.merge_hint)
     return _PROMPT.replace("{note}", note).replace("{payload}", json.dumps(payload, ensure_ascii=False, indent=1))
 
 
-# LLM: 严格 JSON；字段集合必须恰好等于 schema。skip 时忽略其余字段；create/update 校验名字、长度、标签与更新目标。
-#   updatable 是本次材料里允许更新的名字集合，update 目标不在其中一律拒绝。
+# LLM: 严格 JSON；字段集合必须恰好等于 schema。skip 时忽略其余字段；ineffective 只校验目标在 updatable；
+#   create/update 校验名字、长度、标签与更新目标；updatable 是本次材料里允许更新或标记低效的名字集合。
 # 函数用途: 把模型输出解析成经过校验的决定，不合规时抛 SkillLearningOutputError。
 def parse_skill_learning_decision(text: str, updatable: frozenset[str]) -> SkillLearningDecision:
     payload = _json_object(text)
     decision = str(payload.get("decision") or "")
     reason = " ".join(str(payload.get("reason") or "").split())[:REASON_MAX_CHARS]
+    _require(decision in DECISIONS, "decision")
     if decision == DECISION_SKIP:
         return SkillLearningDecision(DECISION_SKIP, reason)
+    if decision == DECISION_INEFFECTIVE:
+        target = str(payload.get("update_target") or payload.get("target_skill_name") or "").strip()
+        raw_name = str(payload.get("name") or "").strip()
+        name = raw_name or target
+        _require(NAME_RE.fullmatch(target) is not None and target in updatable and name == target, "update_target")
+        return SkillLearningDecision(
+            decision=DECISION_INEFFECTIVE,
+            reason=reason,
+            update_target=target,
+            name=name,
+        )
     name = str(payload.get("name") or "").strip()
     target = str(payload.get("update_target") or "").strip()
     _require(NAME_RE.fullmatch(name) is not None, "name")
@@ -214,7 +240,9 @@ def _json_object(text: str) -> dict[str, object]:
         payload = json.loads(str(text or "").strip())
     except ValueError as exc:
         raise SkillLearningOutputError("json") from exc
-    allowed = set(_FIELDS) | set(_CARRIER_FIELDS)
+    allowed = set(_FIELDS) | set(_CARRIER_FIELDS) | (
+        {"target_skill_name"} if isinstance(payload, dict) and payload.get("decision") == DECISION_INEFFECTIVE else set()
+    )
     _require(isinstance(payload, dict) and set(_FIELDS) <= set(payload) <= allowed, "fields")
     if "candidate_asset" in payload:
         ca = payload["candidate_asset"]
@@ -292,14 +320,17 @@ _PROMPT = """你是 my-agent 的后台 Skill 总结器。下面的输入全是�
 
 怎么选：
 1. updatable_skills 列出本轮用过、可以由你更新的自学 Skill。这次任务补充或修正了其中某个的做法时选 update：update_target 和 name 都写它的名字，输出完整的新 description、when_to_use、tags、body（整篇替换，不是补丁），旧正文里不符合上面要求的内容一并删掉。
-2. 做法已经被 existing_skills 里的某个 Skill 覆盖时选 skip。
-3. 确实是新的可复用做法才选 create；name 不能与 existing_skills 里的任何名字相同。
+2. 如果你在本轮任务中使用了 updatable_skills 里的某个自学 Skill，且它本身步骤有误、指导失效或导致任务走偏（排除外部环境或参数问题），选 ineffective：update_target 和 name 都写这个 Skill 的名字，在 reason 里写明失效原因，其余正文相关字段留空。
+3. 做法已经被 existing_skills 里的某个 Skill 覆盖时选 skip；若 active_lessons 里已有同含义的规则且只需单句原则即可覆盖，也优先选 skip 避免与经验载体重复。
+4. 若材料提供了 merge_hint，优先对 merge_hint.candidates 里列出的高相似已有 Skill 选 update 做合并完善，不要新建近似重复的 Skill。
+5. 确实是新的可复用做法才选 create；name 不能与 existing_skills 里的任何名字相同。
 
 输出要求（只输出一个 JSON 对象）：
 - schema_version 固定为 my-agent.skill-learning-output.v1。
-- decision 取 create、update 或 skip。
+- decision 取 create、update、ineffective 或 skip。
 - reason 用一句话说明原因，不超过 200 字。
 - skip 时 update_target、name、description、when_to_use、body 都写空字符串，tags 写 []。
+- ineffective 时 update_target 和 name 都写目标 Skill 名称，description、when_to_use、body 都写空字符串，tags 写 []。
 - create 时 update_target 写空字符串。
 - name：小写英文、数字和连字符，3 到 64 个字符，首尾不能是连字符，例如 "feishu-bot-debug"。
 - description：一句话说清这个 Skill 解决什么问题，单行，不超过 200 字。
@@ -315,6 +346,7 @@ _PROMPT = """你是 my-agent 的后台 Skill 总结器。下面的输入全是�
 __all__ = [
     "CODE_OUTPUT_INVALID",
     "DECISION_CREATE",
+    "DECISION_INEFFECTIVE",
     "DECISION_SKIP",
     "DECISION_UPDATE",
     "EXISTING_DESCRIPTION_CHARS",

@@ -4,6 +4,7 @@
 # 模块用途: 将原会话、调度、学习、维护与watch来源接到生产请求泵，C撤权时停止新提交，原来源保留。
 from __future__ import annotations
 
+import dataclasses
 import math
 import os
 import threading
@@ -30,6 +31,72 @@ from .multiprocess_background_request import (
 from .multiprocess_drain_runtime import GatewayDrainRuntime
 from .multiprocess_mode import current_worker_partition
 from .multiprocess_route import owner_digest
+
+# 中文说明: 后台发现每轮分页扫描多用户 owner 目录的默认数量上限（个）。
+DEFAULT_LEARNING_OWNER_SCAN_PAGE_COUNT = 64
+# 中文说明: 自主技能维护默认检查间隔（秒，3 小时），未配专值时回退此常量。
+DEFAULT_LEARNING_MAINTENANCE_INTERVAL_SECONDS = 10800
+
+
+def _resolve_owner_cfg_safe(control: object, owner: OwnerIdentity) -> object:
+    cfg = getattr(control, "config", None)
+    if dataclasses.is_dataclass(cfg):
+        from .owner_resources import resolve_owner_resource_configuration
+
+        _, owner_config, _ = resolve_owner_resource_configuration(control, owner)
+        return owner_config
+    return cfg
+
+
+def _refresh_live_config_safe(cfg: object) -> None:
+    if cfg is None:
+        return
+    raw_path = getattr(cfg, "config_path", None)
+    if raw_path is not None and str(raw_path).strip():
+        try:
+            if Path(raw_path).expanduser().is_file():
+                from ..settings.live_switches import refresh_live_switches
+
+                refresh_live_switches(cfg)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _owner_scan_page_limit(config: object) -> int:
+    _refresh_live_config_safe(config)
+    raw = None
+    if config is not None:
+        try:
+            from ..settings.config_io import load_simple_yaml
+            from ..settings.curator_profile import user_config_path
+
+            path = user_config_path(config)
+            if path is not None and path.is_file():
+                parsed = load_simple_yaml(path)
+                if isinstance(parsed, dict) and "self_learning_owner_scan_page_limit" in parsed:
+                    raw = parsed.get("self_learning_owner_scan_page_limit")
+        except Exception:  # noqa: BLE001
+            raw = None
+    if raw is None:
+        raw = getattr(config, "self_learning_owner_scan_page_limit", None)
+    if isinstance(raw, bool) or raw is None:
+        return DEFAULT_LEARNING_OWNER_SCAN_PAGE_COUNT
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_LEARNING_OWNER_SCAN_PAGE_COUNT
+    return value if value > 0 else DEFAULT_LEARNING_OWNER_SCAN_PAGE_COUNT
+
+
+def _learning_interval_seconds(owner_config: object, control_config: object) -> int:
+    for key in ("self_learning_maintenance_interval_seconds", "memory_curator_interval_seconds"):
+        for cfg in (owner_config, control_config):
+            if cfg is not None and hasattr(cfg, key):
+                try:
+                    return max(0, int(getattr(cfg, key)))
+                except (TypeError, ValueError):
+                    pass
+    return DEFAULT_LEARNING_MAINTENANCE_INTERVAL_SECONDS
 
 
 # LLM: 纯内存事实只拒缺C源的旧车道，不授Thread/写权；任意已登记C/fork副本均须真实Root，Count0旧调用没有新增I/O或路径字段要求。
@@ -194,7 +261,8 @@ class CoordinatorBackgroundRequests:
             self._cursor = None
             self._source_repair_failed = False
         self._source_recovering = recovering_sources
-        page = discover_owner_home_page(self.control.home_root / "owners", limit=64, after_cursor=self._cursor)
+        page_limit = _owner_scan_page_limit(getattr(self.control, "config", None))
+        page = discover_owner_home_page(self.control.home_root / "owners", limit=page_limit, after_cursor=self._cursor)
         self._cursor = page.next_cursor
         from .multiprocess_curator_accounting import reconcile_quota
 
@@ -257,22 +325,45 @@ class CoordinatorBackgroundRequests:
         scheduler = home / "data" / "scheduler" / "store.json"
         if scheduler.is_file():
             candidates.append(("scheduler", scheduler))
+        curator_owner_config = None
+        curator_config = None
+        timezone_name = ""
         if getattr(self.control.config, "memory_curator_enabled", True):
             from ..memory_store.curator_models import MemoryCuratorConfig
 
-            _, curator_owner_config, _ = resolve_owner_resource_configuration(self.control,owner)
+            curator_owner_config = _resolve_owner_cfg_safe(self.control, owner)
+            _refresh_live_config_safe(curator_owner_config)
             curator_config = MemoryCuratorConfig.from_agent_config(curator_owner_config)
-            timezone_name = str(getattr(curator_owner_config,'timezone','') or '').strip()
-            if _has_pending_memory_curator_work(home,curator_config=curator_config,timezone_name=timezone_name):
+            timezone_name = str(getattr(curator_owner_config, 'timezone', '') or '').strip()
+            if _has_pending_memory_curator_work(home, curator_config=curator_config, timezone_name=timezone_name):
                 candidates.append(("curator", home / "memory" / "curator" / "state.json"))
-        if getattr(self.control.config, "enable_self_learning", False):
+        learning_owner_config = curator_owner_config
+        if learning_owner_config is None:
+            learning_owner_config = _resolve_owner_cfg_safe(self.control, owner)
+        _refresh_live_config_safe(learning_owner_config)
+        _refresh_live_config_safe(self.control.config)
+        learning_enabled = getattr(
+            learning_owner_config,
+            "enable_self_learning",
+            getattr(self.control.config, "enable_self_learning", False),
+        ) is True
+        learning_mode = str(
+            getattr(
+                learning_owner_config,
+                "self_learning_maintenance_mode",
+                getattr(self.control.config, "self_learning_maintenance_mode", "observe"),
+            )
+            or "observe"
+        )
+        if learning_enabled:
             from ..capability.skill_learning_store import SkillLearningStore
 
             learning = SkillLearningStore(home / "data" / "skill_learning", home / "skills")
-            pending = learning.pending_requests()
-            if pending:
-                candidates.append(("learning", pending[0]))
-            elif getattr(self.control.config, "self_learning_maintenance_mode", "observe") == "autonomous" and learning.registry_path.is_file():
+            if learning.has_requests():
+                pending = learning.pending_requests()
+                if pending:
+                    candidates.append(("learning", pending[0]))
+            elif learning_mode == "autonomous" and learning.registry_path.is_file():
                 candidates.append(("learning", learning.registry_path))
         for pattern in _STORE_ROOT_PATTERNS:
             for root in sorted(home.glob(pattern)):
@@ -285,14 +376,22 @@ class CoordinatorBackgroundRequests:
                 candidates.extend(("policy", path) for path in _source_page(self, root / "progress_policies", "*.json"))
         for kind, path in candidates:
             try:
-                options = {'curator_config':curator_config,'timezone_name':timezone_name} if kind == 'curator' else {}
+                options = {'curator_config': curator_config, 'timezone_name': timezone_name} if kind == 'curator' else {}
                 ref = freeze_source(self.control.home_root, owner, path, kind, **options)
                 if kind == "learning" and ref["source_ref"] == "data/skill_learning/registry.json":
-                    from ..capability.skill_learning_maintenance import learning_maintenance_due
+                    from ..capability.skill_learning_maintenance import learning_reconcile_due
 
-                    if not learning_maintenance_due(float(read_source(self.control.home_root, ref).get('last_maintenance_at') or 0.0),
-                            self.control.config.self_learning_maintenance_mode, time.time()):
+                    if learning_mode != "autonomous":
                         continue
+                    source_doc = read_source(self.control.home_root, ref)
+                    if not source_doc.get("maintenance_cursor"):
+                        interval_seconds = _learning_interval_seconds(learning_owner_config, self.control.config)
+                        if not learning_reconcile_due(
+                            source_doc.get("last_maintenance_at") or 0.0,
+                            time.time(),
+                            interval_seconds=interval_seconds,
+                        ):
+                            continue
                 if kind == "harvester":
                     from ..ingestion.harvest_execution import harvester_has_due_work
 
