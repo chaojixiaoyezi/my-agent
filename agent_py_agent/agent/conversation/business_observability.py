@@ -32,6 +32,7 @@ from .business_access import (
     validate_result,
 )
 from .business_contracts import BusinessExecutionContext
+from .session_tasks import SESSION_TASK_TERMINAL_STATUSES
 
 OBSERVATION_ACTIONS = frozenset({
     'tasks.list', 'tasks.get', 'agent_tree.get', 'subagents.list', 'subagents.get', 'messages.list',
@@ -41,6 +42,10 @@ OBSERVATION_ACTIONS = frozenset({
 })
 
 _observation_request_data = ContextVar('business_observation_request_data', default=None)
+
+
+class ObservationSourceError(BusinessError):
+    """可信只读来源的脱敏固定错误；保留原因和恢复指引，不扩大授权。"""
 
 
 # LLM: 只复用当前调用栈的数据，不保存actor或授权裁决；异常退出也必须丢弃。
@@ -389,7 +394,7 @@ class BusinessObservationService:
                 page = (reader(_copy(params), source_page=source_page) if source_page is not None
                         and getattr(reader, 'observation_source_paging_version', None) == 1 else reader(_copy(params)))
             elif name == 'tasks':
-                page = self._tasks()
+                page = self._tasks(params, source_page=source_page)
             elif name == 'executions':
                 page = self._executions(params, source_page=source_page)
             else:
@@ -401,7 +406,7 @@ class BusinessObservationService:
                 raise BusinessError('OBSERVATION_SOURCE_INVALID')
             return page
         except BusinessError as error:
-            if error.code == 'CURSOR_EXPIRED':
+            if isinstance(error, ObservationSourceError) or error.code == 'CURSOR_EXPIRED':
                 raise
             return ObservationPage(coverage='unknown')
         except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, RuntimeDatabaseDeferred):
@@ -409,7 +414,7 @@ class BusinessObservationService:
             return ObservationPage(coverage='unknown')
 
     def _paged_source(self, name, action, params, actor):
-        native = name == 'executions' and name not in self.readers
+        native = name in {'tasks', 'executions'} and name not in self.readers
         reader = self.readers.get(name)
         if not native and getattr(reader, 'observation_source_paging_version', None) != 1:
             return self._source(name, params)
@@ -519,7 +524,11 @@ class BusinessObservationService:
             'assignment_ref': task.task_id, 'task_id': task.task_id, 'sender_thread_id': task.sender_thread_id,
             'target_thread_id': task.target_thread_id, 'status': task.status, 'result_refs': list(refs)}],
             'workflow_ref': workflow, 'result_refs': list(refs), 'allowed_actions': [],
-            'scheduling': task_scheduling_view(self.store, task)}
+            'scheduling': task_scheduling_view(self.store, task,
+                running=bool(rows[0].value.get('current_run_id')))}
+        if rows[0].value.get('_execution_error') and task.status not in SESSION_TASK_TERMINAL_STATUSES:
+            detail['scheduling'].update(state='unknown', coverage='partial',
+                                        reason_code=rows[0].value['_execution_error'])
         if ref_coverage is not None:
             detail['result_ref_coverage'] = ref_coverage
         result = task_result_view(self.store, task)
@@ -635,11 +644,25 @@ class BusinessObservationService:
 
     # LLM: 列表已经读取的任务用于本请求点读；线程身份按distinct ID读取，不缓存授权。
     # 函数用途: 投影规范任务并保留坏上下文的partial标志。
-    def _tasks(self):
+    def _tasks(self, params=None, *, source_page=None):
         if self.store is None:
             return ObservationPage(coverage='unknown')
-        tasks, errors = _observation_cached((self.store.session_tasks, 'list', None),
-            lambda: self.store.session_tasks.list_report(limit=0))
+        params = params or {}
+        selected = params.get('task_id') or params.get('filter', {}).get('task_id')
+        next_position, coverage = None, 'complete'
+        if selected:
+            task = _observation_task(self.store, selected)
+            tasks, errors = ([task] if task is not None else []), []
+        else:
+            request = source_page or ObservationSourcePage()
+            cursor = request.position.get('cursor') if request.position else None
+            page = self.store.session_tasks.list_page(limit=request.limit, cursor=cursor,
+                target_thread_id=params.get('filter', {}).get('agent_id'))
+            if page['coverage'] == 'expired':
+                raise BusinessError('CURSOR_EXPIRED')
+            tasks, errors, coverage = page['items'], list(page['load_errors']), page['coverage']
+            if page['next_cursor'] is not None:
+                next_position = {'cursor': page['next_cursor']}
         rows = []
         for task in tasks:
             _observation_cached((self.store.session_tasks, 'record', task.task_id), lambda: task)
@@ -653,14 +676,39 @@ class BusinessObservationService:
                 errors.append({'code': 'CONTEXT_MISMATCH'})
                 continue
             refs, ref_coverage = public_result_refs(task, store=self.store, owner_root=self.owner_root)
+            execution, execution_error = self._task_execution(task, target)
+            if execution_error:
+                errors.append({'code': execution_error})
             value = {'task_id': task.task_id, 'thread_id': task.target_thread_id,
                 'space_id': context.space_id if context else None, 'project_ref': context.project_ref if context else None,
-                'status': task.status, 'current_run_id': None, 'result_refs': refs,
+                'status': task.status, 'current_run_id': execution['run_id'] if execution else None,
+                '_execution_error': execution_error, 'result_refs': refs,
                 'revision': int(task.updated_at * 1000000)}
             if ref_coverage is not None:
                 value['result_ref_coverage'] = ref_coverage
             rows.append(ObservationRecord(value, self.owner_id, value['space_id'], value['project_ref'], task.task_id, task.target_thread_id))
-        return ObservationPage(tuple(rows), 'partial' if errors else 'complete')
+        return ObservationPage(tuple(rows), 'partial' if errors else coverage,
+                               next_position=next_position, source_paged=not bool(selected))
+
+    def _task_execution(self, task, thread):
+        """任务只引用准确活动执行；异常保留 unknown，绝不领取或修补原租约。"""
+        if task.status in SESSION_TASK_TERMINAL_STATUSES:
+            return None, ''
+        from .background_execution_view import thread_execution_view
+        from .run_claim import detached_task_claim_scope_id
+
+        try:
+            link, error = self.store.tasks.link_report(thread.thread_id, task.task_id)
+            if error:
+                return None, 'TASK_LINK_UNREADABLE'
+            scope = (detached_task_claim_scope_id(thread.thread_id, task.task_id)
+                     if link is not None and link.cancellation_scope == 'detached' else thread.thread_id)
+            execution = _observation_cached((self.store.claims, 'execution', scope),
+                lambda: thread_execution_view(self.store, self.runtime, thread, claim_scope_id=scope))
+            return (execution if execution and execution['task_id'] == task.task_id else None), ''
+        except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, RuntimeDatabaseDeferred):
+            return None, 'EXECUTION_AUTHORITY_UNAVAILABLE'
+
 
     # LLM: 列表分页按规范rowid有界批次扫描，过滤空间时跨批推进避免假空页；超出扫描预算如实保留partial。
     # 函数用途: 返回已授权规范执行页，支持空间过滤游标扫描。

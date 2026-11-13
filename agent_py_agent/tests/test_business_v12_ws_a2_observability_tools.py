@@ -742,6 +742,9 @@ def test_biz013_executor_managed_operation_persists_committed_and_replays_cleanl
 def test_native_background_message_projects_real_execution_and_child_tree(tmp_path, monkeypatch):
     """原生消息无 SessionTask，但原租约和运行库已明确绑定 owner/thread/root/child。"""
     from agent_py_agent.agent.conversation.background_agents import BackgroundAgentService
+    from agent_py_agent.agent.conversation.background_execution_view import (
+        validate_execution_context,
+    )
     from agent_py_agent.agent.conversation.claim_execution_binding import (
         ClaimExecutionBinding,
         bind_claim_execution,
@@ -781,7 +784,7 @@ def test_native_background_message_projects_real_execution_and_child_tree(tmp_pa
     # owner/thread 不匹配不借“同一个 run”展示成该后台会话正在执行。
     other = env.store.threads.require('controller')
     with pytest.raises(ValueError, match='EXECUTION_AUTHORITY_UNAVAILABLE'):
-        background._validate_execution_context(other, before['runtime_authority'],
+        validate_execution_context(env.store, other, before['runtime_authority'],
             env.repo.parent_execution_ref(owner_id=env.owner, run_id='native-message', attempt_id=root['attempt_id']),
             None, runtime=env.repo)
 

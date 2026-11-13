@@ -118,12 +118,13 @@ def scheduling_view(store: object, *, thread_id: str, tasks: list, identity_stat
 # LLM: tasks.get 用：终态任务只报终态与宿主原因码（如 SESSION_TASK_WAKE_QUARANTINED），非终态按同一投影读准确唤醒；
 #   本入口没有宿主模型目录，model_ready 留 None，不猜。支持准入饱和阻塞报告。
 # 函数用途: 为单个 canonical 会话任务生成调度视图。
-def task_scheduling_view(store: object, task: object, *, admission_limit_reached: bool = False) -> dict:
+def task_scheduling_view(store: object, task: object, *, running: bool = False,
+                         admission_limit_reached: bool = False) -> dict:
     if task.status in SESSION_TASK_TERMINAL_STATUSES:
         view = scheduling_view(store, thread_id=task.target_thread_id, tasks=[], pending_inputs=False)
         view.update(state="terminal", reason_code=str(task.failure_code or "")[:128], pending_task_count=0)
         return view
-    return scheduling_view(store, thread_id=task.target_thread_id, tasks=[task],
+    return scheduling_view(store, thread_id=task.target_thread_id, tasks=[task], running=running,
                            admission_limit_reached=admission_limit_reached)
 
 

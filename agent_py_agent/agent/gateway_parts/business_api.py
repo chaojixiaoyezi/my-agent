@@ -145,24 +145,12 @@ class _BusinessBackgroundService(BackgroundAgentService):
         runtime = getattr(self.services.observation, 'runtime', None)
         if self.complete_host is not None or runtime is None:
             return super()._execution_view(thread)
-        claim, error = self.store.claims.load_report(thread.thread_id)
-        if error:
-            raise ValueError('CLAIM_UNREADABLE')
-        authority = claim.get('runtime_authority')
-        if claim.get('status') != 'running':
-            return None
-        self._validate_execution_claim(thread, claim)
+        from ..conversation.background_execution_view import thread_execution_view
+
         try:
-            ref = runtime.parent_execution_ref(owner_id=thread.owner_id, run_id=authority['run_id'],
-                attempt_id=authority['attempt_id'])
-            context = runtime.business_context_for_execution(owner_id=thread.owner_id, run_id=ref.run_id,
-                attempt_id=ref.observed_attempt_id)
+            return thread_execution_view(self.store, runtime, thread)
         except sqlite3.Error:
             raise ValueError('EXECUTION_AUTHORITY_UNAVAILABLE') from None
-        self._validate_execution_context(thread, authority, ref, context, runtime=runtime)
-        return {'run_id': ref.run_id, 'attempt_id': ref.observed_attempt_id, 'task_id': context.task_id if context else None,
-                'thread_id': thread.thread_id, 'space_id': context.space_id if context else None, 'status': 'running',
-                'effect_outcome': 'running', 'started_at': None, 'ended_at': None, 'error': None, 'retry_refs': []}
 
     # LLM: R3只对新行调用；插件再次核原发行对象、两层创建范围和真实来源，原生元数据完全不变。
     # 函数用途: 为新建插件后台身份/总控附加原安装出处，不迁移、覆盖或重绑已有线程。

@@ -1,6 +1,13 @@
 ## 2026-11-12 连续交互复核返工
 
 ```text
+agent_py_agent/agent/conversation/
+|-- background_execution_view.py             # 会话与任务共用的准确活动执行证明
+agent_py_agent/tests/
+|-- test_business_task_execution_view.py       # 原生任务运行态与有界列表往返
+```
+
+```text
 agent_py_agent/tests/test_business_change_result_refs.py  # 变更详情的原产物身份、摘要与截断覆盖
 agent_py_agent/tests/test_business_provider_usage_wire.py # 供应商与估算用量的真实往返、部分字段覆盖
 ```

@@ -328,6 +328,9 @@ def test_native_child_guidance_and_plugin_async_exclusions_are_preserved(scoped_
 def test_execution_detail_requires_live_current_attempt(run_status, attempt_status, current_attempt, accepted):
     """纯验证边界；真实只读 HTTP 往返由本文件的 passive_running_detail 用例覆盖。"""
     from agent_py_agent.agent.conversation.background_agents import BackgroundAgentService
+    from agent_py_agent.agent.conversation.background_execution_view import (
+        validate_execution_context,
+    )
     from agent_py_agent.agent.conversation.business_contracts import BusinessExecutionContext
 
     context = BusinessExecutionContext(
@@ -347,10 +350,10 @@ def test_execution_detail_requires_live_current_attempt(run_status, attempt_stat
     service = BackgroundAgentService(SimpleNamespace(
         conversation_store=SimpleNamespace(session_tasks=SimpleNamespace(require=lambda _id: task))))
     if accepted:
-        service._validate_execution_context(thread, authority, ref, context, runtime=runtime)
+        validate_execution_context(service.store, thread, authority, ref, context, runtime=runtime)
     else:
         with pytest.raises(ValueError, match="EXECUTION_AUTHORITY_UNAVAILABLE"):
-            service._validate_execution_context(thread, authority, ref, context, runtime=runtime)
+            validate_execution_context(service.store, thread, authority, ref, context, runtime=runtime)
 
 
 def test_business_delivery_directory_reaches_native_model_request(scoped_gateway, monkeypatch):
