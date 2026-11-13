@@ -26,6 +26,7 @@ class TuiBackgroundAgents:
         self._expanded: set[str] = set()
         self._subagent_cache: dict[str, dict] = {}
         self._usage_cache: dict[str, dict] = {}
+        self._package_cache: dict[str, dict] = {}
         self._lock = threading.RLock()
 
     # LLM: 底栏只读一个有界页；Owner总量取完整配额事实，名册分页不影响它，运行数仍要求完整工作事实。
@@ -85,11 +86,31 @@ class TuiBackgroundAgents:
     # 函数用途: 只读取指定空间的一个Agent页。
     def load_space(self, space_id: str) -> None:
         self._read_page('space:' + space_id, 'background_agents.list', {'space_id': space_id})
+        try:
+            response = self.client.call('spaces.packages.list', {'space_id': space_id, 'limit': 50})
+        except (HostAPIError, OSError, ValueError, TypeError) as exc:
+            response = {'ok': False, 'error': {'code': type(exc).__name__, 'message': str(exc)}}
+        data = response.get('data') if response.get('ok') is True else None
+        package = dict(data) if isinstance(data, dict) and isinstance(data.get('items'), list) else {
+            'items': [], 'coverage': 'unknown', 'error': response.get('error') or {'code': 'PACKAGES_UNAVAILABLE'}}
+        package['denied'] = response.get('http_status') in (401, 403)
+        oversized = len(package['items']) > 50
+        package['items'] = package['items'][:50]
+        if package.get('next_cursor') or oversized:
+            package['coverage'] = 'partial'
+        with self._lock:
+            if len(self._package_cache) >= 32 and space_id not in self._package_cache:
+                self._package_cache.pop(next(iter(self._package_cache)))
+            self._package_cache[space_id] = package
 
     # LLM: 读页与投影分开，重复游标只报告partial，不发自动重试。
     # 函数用途: 更新一个有界空间或名册窗口并校验准确归属。
     def _read_page(self, key: str, action: str, params: dict, *, append: bool = False) -> None:
         with self._lock:
+            if key not in self._pages and len(self._pages) >= 34:
+                victim = next((value for value in self._pages if value not in {'spaces', 'unassigned'}), None)
+                if victim is not None:
+                    self._pages.pop(victim)
             previous = self._pages.get(key, {}) if append else {}
             cursor = previous.get('next_cursor')
             if append and not cursor:
@@ -134,6 +155,11 @@ class TuiBackgroundAgents:
                 coverage, next_cursor = 'partial', None
             if next_cursor in seen_cursors:
                 coverage, next_cursor = 'partial', None
+            while len(items) > 200:
+                items.pop(next(iter(items)))
+                coverage = 'partial'
+            while len(seen_cursors) > 32:
+                seen_cursors.pop()
             self._pages[key] = {'items': tuple(items.values()), 'coverage': coverage,
                                 'next_cursor': next_cursor, 'cursors': seen_cursors}
 
@@ -182,6 +208,23 @@ class TuiBackgroundAgents:
         coverage = self.list_coverage(space_id)
         result = [f'后台团队 · 覆盖 {coverage} · 费用未知',
                   'Enter 完整会话 · /tree 按需展开子树 · /log <引用> 按需读日志 · Ctrl+G 返回']
+        if space_id is not None:
+            packages = self._package_cache.get(space_id, {})
+            result.append('挂载能力包 · ' + ('无权读取' if packages.get('denied') else
+                '覆盖 ' + str(packages.get('coverage', 'unknown'))))
+            for mount in packages.get('items', ()):
+                title = str(mount.get('name') or mount.get('package_ref') or '未知包')
+                if mount.get('name') and mount.get('package_ref'):
+                    title += ' [' + str(mount['package_ref']) + ']'
+                result.append('  ' + title
+                    + ' · 版本 ' + str(mount.get('version_ref') or '未知')
+                    + ' · ' + ('启用' if mount.get('enabled') is True else '停用')
+                    + ' · ' + str((mount.get('availability') or {}).get('state', 'unknown')))
+            if not packages.get('items') and packages.get('coverage') == 'complete':
+                result.append('  未挂载能力包')
+            error = packages.get('error')
+            if isinstance(error, dict):
+                result.append('  ' + str(error.get('code', 'UNKNOWN')) + ' · ' + str(error.get('message', '')))
         rows = self.navigation_rows(space_id)
         for row in rows:
             marker = '› ' if selected == row['navigation_id'] else '  '
@@ -289,18 +332,117 @@ class TuiBackgroundAgents:
     # LLM: 遵循 AGENTS.md Rule 13 有界窗口与分页游标，按需分页读取子代理列表，防止大列表无限占内存（V13-02）。
     # 函数用途: 为指定后台助手读取一页子代理执行记录。
     def load_subagents(self, agent_id: str, *, limit: int = 10, cursor: str | None = None) -> dict:
-        bounded_limit = max(1, min(int(limit or 10), 50))
-        params: dict[str, object] = {'parent_run_id': agent_id, 'limit': bounded_limit}
-        if cursor:
-            params['cursor'] = cursor
-        result = self.client.call('subagents.list', params)
-        if result.get('ok') is True:
-            data = result.get('data', {})
-            with self._lock:
-                if len(self._subagent_cache) >= 100:
-                    self._subagent_cache.pop(next(iter(self._subagent_cache)))
-                self._subagent_cache[agent_id] = data
+        row = next((row for row in self.rows if row['agent_id'] == agent_id), {})
+        activity = self.execution_activity(agent_id, thread_id=row.get('thread_id', agent_id),
+                                           space_id=row.get('space_id'), include_tools=False)
+        data = {'items': activity['children'][:max(1, min(int(limit or 10), 50))],
+                'coverage': activity['coverage'], 'next_cursor': None}
+        if cursor or len(activity['children']) > len(data['items']):
+            data['coverage'] = 'partial'
+        with self._lock:
+            if len(self._subagent_cache) >= 100:
+                self._subagent_cache.pop(next(iter(self._subagent_cache)))
+            self._subagent_cache[agent_id] = data
+        return {'ok': True, 'data': data}
+
+    def execution_activity(self, agent_id: str, *, thread_id: str, space_id: str | None,
+                           include_tools: bool = True) -> dict:
+        """只为已打开页面读取准确执行树与有限工具尾页，不把后台身份当执行父编号。"""
+        result = {'tools': [], 'children': [], 'coverage': 'partial', 'errors': []}
+        if self.stop_event is not None and self.stop_event.is_set():
+            return result
+        detail = self._activity_read('background_agents.get', {'agent_id': agent_id})
+        facts = detail.get('data') if detail.get('ok') is True else None
+        current = facts.get('current_execution') if isinstance(facts, dict) else None
+        if isinstance(current, dict):
+            if (current.get('thread_id') != thread_id or current.get('space_id') != space_id
+                    or not current.get('run_id') or not current.get('attempt_id')):
+                result['errors'].append({'code': 'CURRENT_EXECUTION_SCOPE_MISMATCH', 'message': '当前执行与选中会话/空间不符。'})
+                return result
+            result['current_execution'] = dict(current)
+            page = self._activity_read('subagents.list', {'parent_run_id': current['run_id'],
+                'include_completed': True, 'limit': 50})
+            child_page = page.get('data') if page.get('ok') is True else None
+            result['coverage'] = 'complete'
+            if not isinstance(child_page, dict) or not isinstance(child_page.get('items'), list):
+                result['coverage'] = 'partial'
+                result['errors'].append(page.get('error') or {'code': 'CHILDREN_UNAVAILABLE'})
+            else:
+                if child_page.get('coverage') != 'complete' or child_page.get('next_cursor') or len(child_page['items']) > 50:
+                    result['coverage'] = 'partial'
+                for child in child_page['items'][:50]:
+                    if (isinstance(child, dict) and child.get('parent_run_id') == current['run_id']
+                            and child.get('space_id') == space_id and child.get('run_id')):
+                        result['children'].append({**child, 'id': child['run_id']})
+                    else:
+                        result['coverage'] = 'partial'
+            selected = [current] + result['children']
+            return self._activity_tools(result, selected, include_tools=include_tools)
+        if detail.get('http_status') in (401, 403):
+            result['errors'].append(detail.get('error') or {'code': 'CURRENT_EXECUTION_DENIED'})
+            return result
+        tree = self._activity_read('agent_tree.get', {'space_id': space_id, 'root_agent_id': agent_id,
+            'include_completed': True, 'max_depth': 2, 'limit': 100})
+        data = tree.get('data') if tree.get('ok') is True else None
+        if not isinstance(data, dict) or not isinstance(data.get('nodes'), list) or not isinstance(data.get('edges'), list):
+            result['errors'].append(tree.get('error') or {'code': 'TREE_UNAVAILABLE'})
+            return result
+        nodes = {row['id']: row for row in data['nodes'][:100] if isinstance(row, dict) and row.get('id')
+                 and row.get('space_id') == space_id}
+        if agent_id not in nodes and thread_id not in nodes:
+            result['errors'].append({'code': 'TREE_ROOT_NOT_OBSERVED', 'message': '当前有界页未证实后台会话根，不能推断无执行。'})
+            return result
+        roots = [edge['to_id'] for edge in data['edges'][:200] if isinstance(edge, dict)
+                 and edge.get('relation') == 'executes' and edge.get('from_id') in {agent_id, thread_id}
+                 and edge.get('to_id') in nodes and nodes[edge['to_id']].get('thread_id') == thread_id
+                 and nodes[edge['to_id']].get('run_id') == edge['to_id']]
+        roots = list(dict.fromkeys(roots))
+        children = [nodes[edge['to_id']] for edge in data['edges'][:200] if isinstance(edge, dict)
+                    and edge.get('relation') == 'child_of' and edge.get('from_id') in roots
+                    and edge.get('to_id') in nodes and nodes[edge['to_id']].get('parent_run_id') == edge['from_id']
+                    and nodes[edge['to_id']].get('run_id') == edge['to_id']]
+        result['children'] = list({row['id']: row for row in children}.values())[:50]
+        coverage = data.get('coverage', 'partial')
+        result['coverage'] = ('complete' if coverage == 'complete' and not data.get('next_cursor')
+                              and len(data['nodes']) <= 100 and len(data['edges']) <= 200
+                              and len(nodes) == len(data['nodes']) else 'partial')
+        if not isinstance(facts, dict) or 'current_execution' not in facts:
+            result['coverage'] = 'partial'
+            result['errors'].append(detail.get('error') or {'code': 'CURRENT_EXECUTION_UNKNOWN'})
+        selected = [nodes[key] for key in roots] + result['children']
+        selected.sort(key=lambda row: row.get('status') not in {'running', 'queued', 'waiting'})
+        return self._activity_tools(result, selected, include_tools=include_tools)
+
+    def _activity_tools(self, result: dict, selected: list, *, include_tools: bool) -> dict:
+        if len(selected) > 8:
+            result['coverage'] = 'partial'
+        if include_tools:
+            for node in selected[:8]:
+                filters = {'run_id': node['run_id']}
+                if node.get('attempt_id'):
+                    filters['attempt_id'] = node['attempt_id']
+                response = self._activity_read('tool_calls.list', {'filter': filters, 'limit': 20})
+                page = response.get('data') if response.get('ok') is True else None
+                if not isinstance(page, dict) or not isinstance(page.get('items'), list):
+                    result['coverage'] = 'partial'
+                    result['errors'].append(response.get('error') or {'code': 'TOOLS_UNAVAILABLE'})
+                    continue
+                if page.get('coverage') != 'complete' or page.get('next_cursor') or len(page['items']) > 20:
+                    result['coverage'] = 'partial'
+                for tool in page['items'][:20]:
+                    if (not isinstance(tool, dict) or tool.get('run_id') != node['run_id']
+                            or not tool.get('operation_id') or not tool.get('attempt_id')
+                            or node.get('attempt_id') and tool['attempt_id'] != node['attempt_id']):
+                        result['coverage'] = 'partial'
+                        continue
+                    result['tools'].append(dict(tool))
         return result
+
+    def _activity_read(self, action: str, params: dict) -> dict:
+        try:
+            return self.client.call(action, params)
+        except (HostAPIError, OSError, ValueError, TypeError) as exc:
+            return {'ok': False, 'error': {'code': type(exc).__name__, 'message': str(exc)}}
 
     # LLM: 按需读取指定后台助手的用量统计事实，防止不必要的后台轮询（V13-02）。
     # 函数用途: 读取并缓存助手的资源或 token 用量数据。

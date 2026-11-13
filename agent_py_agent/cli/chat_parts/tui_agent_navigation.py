@@ -149,9 +149,10 @@ class TuiAgentNavigationState:
         self._lock = threading.RLock()
         self.business_agents = None
         self._business_loading: set[str] = set()
-        self._business_messages: dict[str, set[str]] = {}
+        self._business_messages: dict[str, dict[str, None]] = {}
         self._business_targets: dict[str, dict] = {}
         self._business_history: dict[str, dict] = {}
+        self._business_tools: dict[str, dict[str, str]] = {}
         self._business_visible: tuple | None = None
         self.route_enabled: bool | None = None
 
@@ -183,6 +184,7 @@ class TuiAgentNavigationState:
                     self._runtimes[key].publish_conversation_reset(target['thread_id'])
                 self._business_messages.clear()
                 self._business_history.clear()
+                self._business_tools.clear()
             listing = self._business_listing_locked()
             if listing:
                 self._publish_business_locked()
@@ -289,8 +291,9 @@ class TuiAgentNavigationState:
                 runtime.publish_conversation_reset(thread_id)
                 self._business_messages.pop(thread_id, None)
                 self._business_history.pop(thread_id, None)
+                self._business_tools.pop(thread_id, None)
                 return
-            seen = self._business_messages.setdefault(thread_id, set())
+            seen = self._business_messages.setdefault(thread_id, {})
             # 只核本页至多100个ID；整页与已见消息不衔接时，保留跨页新增产生的未读缺口。
             history_gap = (not more and bool(result.get('next_cursor') and result['items'])
                            and not any(row['message_id'] in seen for row in result['items']))
@@ -327,7 +330,9 @@ class TuiAgentNavigationState:
             for row in result.get('items', []):
                 if row.get('message_id') and row['message_id'] not in seen:
                     page_events.append(_row_to_event(row))
-                    seen.add(row['message_id'])
+                    seen[row['message_id']] = None
+                    while len(seen) > 2048:
+                        seen.pop(next(iter(seen)))
 
             if page_events:
                 previous_ids = {b.block_id for b in runtime.store.snapshot().stable_blocks}
@@ -362,8 +367,12 @@ class TuiAgentNavigationState:
         def load():
             try:
                 result = projection.conversation(target['agent_id'], thread_id=thread_id, cursor=cursor)
+                activity = (projection.execution_activity(target['agent_id'], thread_id=thread_id,
+                    space_id=target.get('space_id')) if not more and hasattr(projection, 'execution_activity') else None)
                 with self._lock:
-                    runtime.apply_conversation_snapshot(generation, lambda: publish_page(result))
+                    runtime.apply_conversation_snapshot(generation, lambda: (publish_page(result),
+                        self._publish_business_activity(thread_id, runtime, activity) if activity is not None
+                        and not projection.read_denied and not result.get('read_denied') else None))
             except Exception as exc:
                 err_code = type(exc).__name__
                 with self._lock:
@@ -376,6 +385,51 @@ class TuiAgentNavigationState:
                 runtime.store.invalidate()
 
         threading.Thread(target=load, name='tui-business-history', daemon=True).start()
+
+    def _publish_business_activity(self, thread_id: str, runtime: TuiRuntime, activity: dict) -> None:
+        """同原聊天runtime发表真实operation状态块；只保留有界去重窗口，不派活。"""
+        import json
+
+        seen = self._business_tools.setdefault(thread_id, {})
+        for row in activity.get('tools', ())[:160]:
+            key = ':'.join(str(row.get(field) or '') for field in ('run_id', 'attempt_id', 'operation_id'))
+            fingerprint = json.dumps(row, ensure_ascii=False, sort_keys=True)
+            if seen.get(key) == fingerprint:
+                continue
+            status = row.get('status')
+            if status == 'SUCCEEDED':
+                kind, phase, ok = 'tool_completed', 'completed', True
+            elif status in {'FAILED', 'CANCELLED'}:
+                kind, phase, ok = 'tool_failed', 'failed', False
+            else:
+                kind, phase, ok = 'tool_started', 'started', None
+            error = row.get('error') if isinstance(row.get('error'), dict) else {}
+            detail = ' · '.join(str(value) for value in (row['run_id'], status,
+                row.get('effect_outcome'), error.get('code'), error.get('message')) if value)
+            runtime._publish(kind, phase, 'business-operation:' + key,
+                {'tool': row['tool_name'], 'title': row['tool_name'], 'detail': detail,
+                 'ok': ok, 'operation_id': row['operation_id'], 'run_id': row['run_id'],
+                 'attempt_id': row['attempt_id'], 'error_code': error.get('code')},
+                request_id='business-execution:' + row['run_id'])
+            seen[key] = fingerprint
+            while len(seen) > 256:
+                seen.pop(next(iter(seen)))
+        children = activity.get('children', ())[:50]
+        lines = ['执行过程 · 覆盖 ' + str(activity.get('coverage', 'partial'))]
+        current = activity.get('current_execution')
+        if isinstance(current, dict):
+            lines.append('当前执行 ' + str(current.get('run_id')) + ' · 尝试 ' + str(current.get('attempt_id')))
+        lines.extend('直属子代理 ' + str(row.get('run_id')) + ' · ' + str(row.get('status', 'unknown'))
+                     for row in children)
+        if not children:
+            lines.append('无直属子代理' if activity.get('coverage') == 'complete' else '直属子代理资料不完整')
+        lines.extend(str(error.get('code', 'UNKNOWN')) + ' · ' + str(error.get('message', ''))
+                     for error in activity.get('errors', ()) if isinstance(error, dict))
+        block = 'business-execution-coverage:' + thread_id
+        exists = any(row.block_id == block for row in runtime.store.snapshot().active_blocks)
+        runtime._publish('background_activity_updated' if exists else 'background_activity_started',
+                         'updated' if exists else 'started', block,
+                         {'display': {'lines': tuple(lines)}, 'source_kind': 'business_execution'})
 
     # LLM: 此入口仅推进可见会话，不后台展开其它Agent历史。
     # 函数用途: 让/history显式读取下一页原生完整消息。
@@ -811,13 +865,19 @@ class TuiAgentNavigationState:
     def _evict_runtimes_locked(self, *, keep: str) -> None:
         if len(self._runtimes) <= self._max_cached_runtimes:
             return
-        pinned = set(self._path) | set(self._business_targets) | {keep}
+        pinned = set(self._path) | {keep}
         for run_id in list(self._runtimes):
             if len(self._runtimes) <= self._max_cached_runtimes:
                 break
             if run_id in pinned:
                 continue
             self._runtimes.pop(run_id, None)
+            target = self._business_targets.pop(run_id, None)
+            if target is not None:
+                thread_id = target['thread_id']
+                self._business_messages.pop(thread_id, None)
+                self._business_history.pop(thread_id, None)
+                self._business_tools.pop(thread_id, None)
             self._event_cursors.pop(run_id, None)
             self._final_response_keys.pop(run_id, None)
             self._goal_published.discard(run_id)

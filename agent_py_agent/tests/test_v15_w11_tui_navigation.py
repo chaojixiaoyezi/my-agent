@@ -57,9 +57,13 @@ class NavigationClient:
             return {'ok': False, 'http_status': 403}
         if action == 'spaces.list':
             data = {'items': self.spaces, 'coverage': 'complete', 'next_cursor': None}
+        elif action == 'spaces.packages.list':
+            data = {'items': [], 'coverage': 'complete', 'next_cursor': None}
         elif action == 'background_agents.list':
             rows = self.agents if 'space_id' not in params else [r for r in self.agents if r['space_id'] == params['space_id']]
             data = {'items': rows, 'coverage': self.roster_coverage, 'next_cursor': self.roster_cursor}
+        elif action == 'background_agents.get':
+            data = {'current_execution': None}
         elif action == 'messages.list':
             thread = params['target']['id']
             data = {'items': [{'message_id': 'm2' if params.get('cursor') else 'm1', 'thread_id': thread,
@@ -127,7 +131,7 @@ def test_mixed_root_space_and_unassigned_navigation_preserves_exact_target(monke
     assert nav.snapshot().active_thread_id == 'thread-in'
     assert nav.snapshot().active_agent_id == 'ag_in'
     assert nav.snapshot().active_run_id == ''
-    assert client.calls[-1][1]['target'] == {'kind': 'background_main', 'id': 'ag_in'}
+    assert [params for action, params in client.calls if action == 'messages.list'][-1]['target'] == {'kind': 'background_main', 'id': 'ag_in'}
     assert nav.back() and nav.snapshot().selected_run_id == 'business:ag_in'
     assert nav.back() and nav.snapshot().selected_run_id == 'business:space:sp_A'
     assert nav.move_selection(1) and nav.enter_selected()

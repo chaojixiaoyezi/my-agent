@@ -416,11 +416,13 @@ def test_g3_v1301_v1302_tui_footer_and_blockers():
     assert projection.is_expanded("ag_audit") is True
 
     # 载入子代理与用量检查
-    projection.load_subagents("ag_audit", limit=5)
+    children_result = projection.load_subagents("ag_audit", limit=5)
     projection.load_usage("ag_audit")
     expanded_lines = projection.lines()
     exp_text = "\n".join(expanded_lines)
-    assert "子代理 [sub-1] 状态：running" in exp_text
+    # 缺少准确execution树不能将后台agent_id冒充parent_run_id取子代理。
+    assert children_result["data"]["coverage"] == "partial"
+    assert "子代理 [sub-1]" not in exp_text
     assert "用量：12800 tokens" in exp_text
 
     # 验证滑动窗口有界性（不超过 100 项）
