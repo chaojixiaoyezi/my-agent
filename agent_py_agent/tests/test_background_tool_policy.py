@@ -67,3 +67,27 @@ def test_configured_leaf_without_search_presents_all_allowed_tools():
     request = policy.BackgroundToolPolicyRequest(config=SimpleNamespace(
         background_main_agent_allowed_tools=["read_file", "package_build"]))
     assert initial(request) == frozenset({"read_file", "package_build"})
+
+
+def test_session_task_native_work_and_delegation_are_available_but_still_narrowed(tmp_path):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    request = policy.BackgroundToolPolicyRequest(reason='session_task')
+    required = {'scripts', 'workflows', 'manage_requirement_provenance', 'create_subagents'}
+    decision = policy.background_tool_policy_decision(request=request)
+    assert required <= set(decision.allowed_tools)
+    assert required <= initial(request)
+    agent = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path/'home'),
+                                   execution_mode='local_unmanaged'), tmp_path/'workspace')
+    snapshot = agent.tools.runtime_snapshot(allowed_tools=decision.allowed_tools)
+    assert required <= set(snapshot.available_tool_names)
+
+    narrowed = policy.BackgroundToolPolicyRequest(reason='session_task',
+        owner_policy=SimpleNamespace(disabled_tools=['workflows']),
+        policy_snapshot={'allowed_tools': ['tool_search', 'workflows', 'scripts']})
+    assert set(policy.background_allowed_tools(request=narrowed)) == {'tool_search', 'scripts'}
+    assert initial(narrowed) == frozenset({'tool_search', 'scripts'})
+    configured = policy.BackgroundToolPolicyRequest(reason='session_task',
+        config=SimpleNamespace(background_main_agent_allowed_tools=['read_file']))
+    assert initial(configured) == frozenset({'read_file'})

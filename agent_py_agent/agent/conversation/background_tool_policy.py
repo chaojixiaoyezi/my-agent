@@ -33,6 +33,10 @@ _BACKGROUND_WORK_TOOLS = (
     *SHELL_SESSION_TOOLS,
     "watch_stream",
     "task_progress",
+    # 原生资产执行与独立审核仍由各工具的 owner/scope/effect 门授权；后台目录不能漏掉它们。
+    "scripts",
+    "workflows",
+    "manage_requirement_provenance",
     "resolve_capability_requests",
     "list_pending_requests",
     "cancel_subagents",
@@ -220,7 +224,7 @@ def background_initially_presented_tools(request: BackgroundToolPolicyRequest) -
     deferred = heavy | controls | {"get_goal", "update_goal"}
     if request.active_goal:
         targets.update({"get_goal", "update_goal"})
-    if _is_subagent_lifecycle_wake(request) or request.goal_subagent_phase in {"subagents_active", "subagents_terminal"}:
+    if reason == SESSION_TASK_WAKE_REASON or _is_subagent_lifecycle_wake(request) or request.goal_subagent_phase in {"subagents_active", "subagents_terminal"}:
         targets.update(controls)
     return (allowed - deferred) | (allowed & targets)
 
