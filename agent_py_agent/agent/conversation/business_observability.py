@@ -694,7 +694,7 @@ class BusinessObservationService:
         """任务只引用准确活动执行；异常保留 unknown，绝不领取或修补原租约。"""
         if task.status in SESSION_TASK_TERMINAL_STATUSES:
             return None, ''
-        from .background_execution_view import thread_execution_view
+        from .background_execution_view import ExecutionViewError, thread_execution_view
         from .run_claim import detached_task_claim_scope_id
 
         try:
@@ -706,6 +706,8 @@ class BusinessObservationService:
             execution = _observation_cached((self.store.claims, 'execution', scope),
                 lambda: thread_execution_view(self.store, self.runtime, thread, claim_scope_id=scope))
             return (execution if execution and execution['task_id'] == task.task_id else None), ''
+        except ExecutionViewError as error:
+            return None, error.code
         except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, RuntimeDatabaseDeferred):
             return None, 'EXECUTION_AUTHORITY_UNAVAILABLE'
 

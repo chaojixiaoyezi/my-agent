@@ -5,17 +5,28 @@ import time
 
 from .background_team_lifecycle import background_identity
 from .session_tasks import SESSION_TASK_TERMINAL_STATUSES
+from .store_claims import _FINISH_STATUSES
+
+
+class ExecutionViewError(ValueError):
+    """公开只读状态的固定原因码；原运行库异常继续由调用方隔离。"""
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
 
 
 def thread_execution_view(store, runtime, thread, *, claim_scope_id=""):
     claim, error = store.claims.load_report(thread.thread_id, claim_scope_id=claim_scope_id)
     if error:
-        raise ValueError("CLAIM_UNREADABLE")
-    if claim.get("status") != "running":
+        raise ExecutionViewError("CLAIM_UNREADABLE")
+    status = claim.get("status")
+    if not claim or (isinstance(status, str) and status in _FINISH_STATUSES):
         return None
+    if status != "running":
+        raise ExecutionViewError("CLAIM_UNREADABLE")
     validate_execution_claim(thread, claim)
     if runtime is None:
-        raise ValueError("EXECUTION_AUTHORITY_UNAVAILABLE")
+        raise ExecutionViewError("EXECUTION_AUTHORITY_UNAVAILABLE")
     authority = claim["runtime_authority"]
     ref = runtime.parent_execution_ref(owner_id=thread.owner_id, run_id=authority["run_id"],
                                        attempt_id=authority["attempt_id"])
@@ -38,7 +49,7 @@ def validate_execution_claim(thread, claim):
             or authority.get("claim_id") != claim.get("claim_id")
             or float(claim.get("expires_at") or 0) <= time.time()
             or any(not isinstance(authority.get(key), str) or not authority[key] for key in required)):
-        raise ValueError("EXECUTION_AUTHORITY_UNAVAILABLE")
+        raise ExecutionViewError("EXECUTION_AUTHORITY_UNAVAILABLE")
 
 # LLM: 有business context则核canonical SessionTask；原生消息无该context时核原runtime task的owner/thread，不制造派工记录。
 # 函数用途: 核对当前执行与业务身份/任务的冻结绑定。
@@ -54,16 +65,16 @@ def validate_execution_context(store, thread, authority, ref, context, *, runtim
             or run["current_attempt_id"] != ref.observed_attempt_id
             or task_run["task_id"] != authority["task_id"]
             or (context is not None and identity is not None and context.space_id != identity.space_id)):
-        raise ValueError("EXECUTION_AUTHORITY_UNAVAILABLE")
+        raise ExecutionViewError("EXECUTION_AUTHORITY_UNAVAILABLE")
     if context is None:
         # 原生会话消息也发布同一执行租约，但没有 SessionTask；只读原运行任务的 owner/thread 绑定。
         task = runtime.get_task(authority["task_id"])
         if (identity is None or task is None or task["owner_id"] != thread.owner_id
                 or task["thread_id"] != thread.thread_id):
-            raise ValueError("EXECUTION_AUTHORITY_UNAVAILABLE")
+            raise ExecutionViewError("EXECUTION_AUTHORITY_UNAVAILABLE")
         return
     task = store.session_tasks.require(context.task_id)
     if (task.target_thread_id != thread.thread_id or task.status in SESSION_TASK_TERMINAL_STATUSES
             or task.task_run_id != ref.task_run_id or task.conversation_request_id != authority["invocation_run_id"]
             or task.metadata.get("business_context") != context.to_dict()):
-        raise ValueError("EXECUTION_AUTHORITY_UNAVAILABLE")
+        raise ExecutionViewError("EXECUTION_AUTHORITY_UNAVAILABLE")

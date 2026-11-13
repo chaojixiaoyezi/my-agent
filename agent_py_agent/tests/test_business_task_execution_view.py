@@ -121,3 +121,24 @@ def test_detached_task_uses_its_exact_claim_scope(background_http):
     assert reply['data']['task']['current_run_id'] == request_id
     assert reply['data']['scheduling']['state'] == 'running'
     assert not store.claims.load_report(task.target_thread_id)[0]
+
+
+def test_malformed_claim_status_stays_unknown_in_native_task_detail(background_http):
+    client, services, task, _, _ = active_task(background_http)
+    store = services.host.conversation_store
+    path = store.storage.background_claim_path(task.target_thread_id)
+    original = json.loads(path.read_text())
+    for status in (None, 'corrupt-state', []):
+        payload = dict(original)
+        if status is None:
+            payload.pop('status')
+        else:
+            payload['status'] = status
+        path.write_text(json.dumps(payload))
+        before = path.read_bytes()
+        reply = client.call('tasks.get', {'task_id': task.task_id})
+        assert reply['ok'], reply
+        assert reply['data']['task']['current_run_id'] is None
+        assert reply['data']['scheduling']['state'] == 'unknown'
+        assert reply['data']['scheduling']['reason_code'] == 'CLAIM_UNREADABLE'
+        assert path.read_bytes() == before
