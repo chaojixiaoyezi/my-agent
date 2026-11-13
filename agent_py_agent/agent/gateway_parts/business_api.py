@@ -1353,7 +1353,7 @@ def _local_business_services(host):
 def _model_business_actor(host):
     """本地业务身份取当前规范线程；外部来源仍沿原冻结发起人校验。"""
     from ..conversation.channels import LOCAL_PRIVATE_CHANNELS
-    from ..conversation.execution_threads import execution_origin_thread
+    from ..conversation.execution_threads import EXECUTION_ORIGIN_KEY, execution_origin_thread
     from ..conversation.host_actor import HostChannelActor, current_actor_for_child
 
     actor = current_actor_for_child(host)
@@ -1372,11 +1372,20 @@ def _model_business_actor(host):
            for row in (thread, source)):
         raise HostAPIError('RESOURCE_NOT_FOUND', 404)
     binding = next((row for row in source.channel_bindings if row.channel in LOCAL_PRIVATE_CHANNELS), None)
+    reference = thread.metadata.get(EXECUTION_ORIGIN_KEY)
+    if reference is not None:
+        frozen = reference['binding']
+        binding = next((row for row in source.channel_bindings
+            if row.channel in LOCAL_PRIVATE_CHANNELS and
+            (row.channel, row.channel_conversation_id, row.channel_user_id) ==
+            (frozen['channel'], frozen['conversation_id'], frozen['actor_id'])), None)
     if binding is None and getattr(current, 'business_context', None) is not None:
         binding = _business_task_sender_binding(host, thread, current.business_context)
     request_id = str(getattr(current, 'request_id', '') or getattr(current, 'run_id', '') or '')
     if binding is None or not request_id:
-        raise HostAPIError('CAPABILITY_DENIED', 403)
+        raise HostAPIError('CAPABILITY_DENIED', 403, message=(
+            'BUSINESS_ACTOR_SOURCE_MISSING。当前执行缺少原本地会话绑定或请求标识。'
+            '操作尚未开始，请核对原执行来源后重试。'))
     return HostChannelActor(home.owner_id, source.thread_id, request_id, binding.channel,
         binding.channel_conversation_id, binding.channel_user_id or home.owner_id)
 
@@ -1426,8 +1435,14 @@ def local_business_context(host, *, model=False):
     if model:
         try:
             actor = _model_business_actor(host)
-        except (HostActorError, ValueError, KeyError, OSError):
-            raise HostAPIError('CAPABILITY_DENIED', 403) from None
+        except HostAPIError:
+            raise
+        except HostActorError as error:
+            raise HostAPIError(error.error_code, 403, message=str(error)) from error
+        except (ValueError, KeyError, OSError) as error:
+            raise HostAPIError('CAPABILITY_DENIED', 403, message=(
+                f'BUSINESS_ACTOR_SOURCE_UNREADABLE。原执行来源读取失败（{type(error).__name__}）。'
+                '操作尚未开始，请检查原线程及任务记录。')) from error
     local_actor = actor is not None and actor.channel in LOCAL_PRIVATE_CHANNELS
     local_binding = _model_request_binding(host) if local_actor else None
     from .request_space import REQUEST_SPACE_KEY, request_space_for_execution
@@ -1443,8 +1458,10 @@ def local_business_context(host, *, model=False):
 
     try:
         selected_space = accepted_space()
-    except (ValueError, TypeError, KeyError):
-        raise HostAPIError('CAPABILITY_DENIED', 403) from None
+    except (ValueError, TypeError, KeyError) as error:
+        raise HostAPIError('CAPABILITY_DENIED', 403, message=(
+            f'SESSION_SPACE_SOURCE_MISMATCH。受理空间与当前用户、发起人或原会话不一致（{type(error).__name__}）。'
+            '操作尚未开始，请在原会话重新发起。')) from error
 
     def check(action, facts):
         spec = resolve_business_action_spec(action)

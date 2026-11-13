@@ -454,7 +454,9 @@ class WorkflowsTool(BaseTool):
                             effect_outcome=exc.receipt['effect_outcome'], failure_stage=(
                                 'effect_reconciliation' if exc.failure_stage == 'completion_clock' else 'execution'))
         except HostAPIError as exc:
-            return _outcome('workflows', {'error_code': exc.code}, False, exc.code,
+            return _outcome('workflows', {'error_code': exc.code, 'error': exc.message,
+                            'host_error': exc.to_payload()}, False,
+                            'TOOL_PERMISSION_DENIED' if exc.status == 403 else 'TOOL_EXECUTION_FAILED',
                             effect_outcome='not_started' if exc.outcome == 'not_started' else 'unknown')
         except PermissionError as exc:
             return _outcome('workflows', {'error': str(exc)}, False, 'TOOL_PERMISSION_DENIED', effect_outcome='not_started')

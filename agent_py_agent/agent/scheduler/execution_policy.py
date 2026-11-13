@@ -382,10 +382,35 @@ def scheduled_run_actor(service, run):
         "entry_request_id": entry, "channel": channel, "conversation_id": conversation, "actor_id": actor_id})
 
 
-# LLM: 隔离线程复用原 execution_origin schema，binding 只来自已冻结的 run 与准确 creator；不把 source 最新绑定抄成身份。
-# 函数用途: 给新 isolated IM 线程固定原来源，后续模型、孩子和审批复用原身份解析，不产生第二份身份账。
+# 隔离线程固定原来源；本地聊天仍不签发 IM actor，业务工具沿原来源核验本地身份。
 def scheduled_execution_metadata(service, run):
     actor = scheduled_run_actor(service, run)
+    if actor is None and run.get('creator') == {'local': True}:
+        from ..conversation.channels import LOCAL_PRIVATE_CHANNELS
+
+        context = run.get('execution_context') or {}
+        source = service.conversation_store.threads.require(run['origin_thread_id'])
+        if (run.get('owner') != service.repository.owner
+                or run['owner'].get('provider') != 'local' or run['owner'].get('kind') not in {'main', 'user'}
+                or source.owner_id != run['owner']['id']
+                or source.owner_home != str(service.repository.quota_enforcer.owner_root)
+                or context.get('origin_thread_id') != source.thread_id
+                or EXECUTION_ORIGIN_KEY in source.metadata):
+            raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')
+        bindings = context.get('origin_bindings')
+        if not isinstance(bindings, list):
+            raise HostActorError('CHANNEL_ACTOR_IDENTITY_INVALID')
+        # 顺序沿用受理时冻结的绑定；不能用此后更活跃的聊天替换原来源。
+        binding = next((row for row in bindings if isinstance(row, dict)
+                        and row.get('channel') in LOCAL_PRIVATE_CHANNELS), None)
+        if binding is None or not any(
+                (row.channel, row.channel_conversation_id, row.channel_user_id)
+                == (binding.get('channel'), binding.get('channel_conversation_id'), binding.get('channel_user_id'))
+                for row in source.channel_bindings):
+            raise HostActorError('CHANNEL_ACTOR_IDENTITY_CONFLICT')
+        return {EXECUTION_ORIGIN_KEY: {'source_thread_id': source.thread_id, 'kind': 'scheduled',
+            'operation_key': str(run['run_id']), 'binding': {'channel': binding['channel'],
+                'conversation_id': binding['channel_conversation_id'], 'actor_id': binding['channel_user_id']}}}
     return ({EXECUTION_ORIGIN_KEY: {"source_thread_id": actor.source_thread_id, "kind": "scheduled",
         "operation_key": actor.entry_request_id, "binding": actor.binding()}} if actor is not None else {})
 
