@@ -81,6 +81,9 @@ def cleanup_status(service, definition):
     if (not isinstance(references, dict) or references.get('coverage') != 'complete'
             or not isinstance(references.get('blockers'), list)):
         blockers.append({'ref': definition.descriptor.id, 'kind': 'coverage', 'reason_code': 'REFERENCE_COVERAGE_UNKNOWN'})
+        if isinstance(references, dict) and isinstance(references.get('blockers'), list):
+            blockers.extend(dict(row) for row in references['blockers'][:100]
+                if isinstance(row, dict) and set(row) == {'ref', 'kind', 'reason_code'} and row['kind'] == 'coverage')
     else:
         for row in references['blockers']:
             if not isinstance(row, dict) or set(row) != {'ref', 'kind', 'reason_code'}:
@@ -171,6 +174,9 @@ def cleanup_action(service, action, request, *, actor, expected_revision, idempo
 # 函数用途: 用原操作键续跑最多128条持久化清理，手动调用仍须提供自己的原幂等键。
 def maintain_owner_workflows(service, *, actor, idempotency_key, resume_inflight: bool = False):
     """现有 Owner 节拍和手动动作调用同一片；无自己的线程或轮询器。"""
+    from .reference_index import discover
+
+    discover(service.store, limit=BUSINESS_MAINTENANCE_MAX_ROWS)
     identity, fingerprint = _operation_identity('workflows.cleanup.run', {}, idempotency_key)
     with service.store._locked():
         record = _record(service.store)

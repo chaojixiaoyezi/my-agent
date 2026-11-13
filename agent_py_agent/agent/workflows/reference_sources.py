@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Callable
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -230,51 +231,23 @@ class WorkflowReferenceReader:
 
     def _check_subworkflows(self, target_id: str, blockers: list[dict[str, str]]) -> bool:
         try:
-            wf_dir = self.owner_home / "workflows" if self.owner_home is not None else None
-            if wf_dir and wf_dir.is_dir():
-                for entry in wf_dir.iterdir():
-                    if not entry.is_dir() or entry.name.startswith("."):
-                        continue
-                    parent_id = entry.name
-                    if normalize_workflow_asset_id(parent_id) == target_id:
-                        continue
-                    raw = read_text_beneath(self.owner_home, ("workflows", parent_id, "workflow.json"))
-                    if raw is None:
-                        continue
-                    data = json.loads(raw)
-                    metadata = data.get("metadata") or data.get("descriptor", {}).get("metadata", {}) or {}
-                    state = metadata.get(BUSINESS_WORKFLOW_METADATA, {}) or metadata.get("business_scope_state", {})
-                    if state.get("lifecycle") == "recycled":
-                        continue
-                    is_ref = False
-                    for step in data.get("steps", []):
-                        if not isinstance(step, dict):
-                            continue
-                        mode = step.get("mode", "")
-                        sub_ref = normalize_workflow_asset_id(step.get("subworkflow_ref", ""))
-                        wf_ref = normalize_workflow_asset_id(step.get("workflow_id", ""))
-                        cfg = step.get("config", {}) or {}
-                        cfg_wf = normalize_workflow_asset_id(cfg.get("workflow_id", ""))
-                        cfg_sub = normalize_workflow_asset_id(cfg.get("subworkflow_id", ""))
-                        if (
-                            sub_ref == target_id
-                            or wf_ref == target_id
-                            or cfg_wf == target_id
-                            or cfg_sub == target_id
-                            or (
-                                mode == "subworkflow"
-                                and step.get("subworkflow_ref") in (target_id, f"workflow:{target_id}")
-                            )
-                        ):
-                            is_ref = True
-                            break
-                    if is_ref:
-                        blockers.append({"ref": parent_id, "kind": "workflow", "reason_code": "REFERENCED_BY_SUBWORKFLOW"})
+            if self.owner_home is not None:
+                from .reference_index import read_parents
+
+                diagnostics = {}
+                complete, parents = read_parents(self.workflow_store, target_id,
+                    limit=_max_blockers_page, diagnostics=diagnostics)
+                if not complete:
+                    blockers.append({'ref': target_id, 'kind': 'coverage',
+                        'reason_code': diagnostics.get('reason_code', 'WORKFLOW_REFERENCE_INDEX_STALE')})
+                blockers.extend({"ref": parent, "kind": "workflow", "reason_code": "REFERENCED_BY_SUBWORKFLOW"}
+                                for parent in parents)
+                return complete
             elif self.workflow_store is not None:
                 # Fallback for custom mocks without owner_home
                 records = getattr(self.workflow_store, "workflows", None) or getattr(self.workflow_store, "_records", None)
                 if isinstance(records, dict):
-                    for parent_id, wf in records.items():
+                    for parent_id, wf in islice(records.items(), _max_blockers_page):
                         if normalize_workflow_asset_id(parent_id) == target_id:
                             continue
                         steps = getattr(wf, "steps", []) if not isinstance(wf, dict) else wf.get("steps", [])
@@ -288,8 +261,9 @@ class WorkflowReferenceReader:
                                 break
                         if is_ref:
                             blockers.append({"ref": parent_id, "kind": "workflow", "reason_code": "REFERENCED_BY_SUBWORKFLOW"})
+                    return len(records) <= _max_blockers_page
             return True
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, sqlite3.Error):
             return False
         except Exception:
             return False

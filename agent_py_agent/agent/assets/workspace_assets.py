@@ -643,6 +643,14 @@ def _commit_staged(root, entries, journal, *, admission=None):
     from .script_store_support import apply_scheduler_batch
 
     _decode_journal(_json(journal))
+    from ..workflows.reference_index import mark_pending
+
+    # 批量正文也可能给既有定义增加依赖；必须在第一份canonical发表前留下待确认凭据。
+    for entry in entries:
+        parts = entry['parts']
+        if len(parts) == 3 and parts[0] == 'workflows' and parts[2] == 'workflow.json':
+            _verify_directory_beneath(root, ('workflows',), create=True)
+            mark_pending(_store_view(root, 'workflow'), parts[1])
     write_text_atomic_beneath(root, (_BATCH_FILE,), _json(journal))
     try:
         for entry in entries:
@@ -691,6 +699,13 @@ def _finish_batch(root, journal, *, admission=None):
         receipt = view._history_notify('save', payload=item['payload'], previous=item['previous'], updates=item['updates'])
         if receipt is None or (receipt.get('recorded') is not True and receipt.get('retryable', True)):
             return False
+    from ..workflows.reference_index import publish_committed
+
+    for entry in journal['entries']:
+        parts = entry['parts']
+        if len(parts) == 3 and parts[0] == 'workflows' and parts[2] == 'workflow.json':
+            view = _store_view(root, 'workflow')
+            publish_committed(view, parts[1], view._get(parts[1]))
     _clean_stages(root, journal['entries'])
     unlink_file_beneath(root, (_BATCH_FILE,))
     return True

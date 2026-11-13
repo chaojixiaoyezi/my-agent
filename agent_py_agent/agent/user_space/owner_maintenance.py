@@ -368,7 +368,13 @@ def run_owner_workflow_maintenance(home, previous, *, now, safe_to_delete, servi
         previous.get('last_attempt_at', 0)], sort_keys=True).encode()).hexdigest()[:40]
     try:
         result = maintain_owner_workflows(service, actor=actor, idempotency_key=key, resume_inflight=True)
-        return {'executed': True, **result}
+        from ..workflows.reference_index import discovery_status
+
+        discovery = discovery_status(service.store)
+        if discovery['complete']:
+            return {'executed': True, **result}
+        return {'executed': True, **result, 'reference_discovery': discovery,
+                'partial': discovery['partial']}
     except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
             ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
         raise
@@ -499,7 +505,7 @@ def _write_maintenance_result(state_path, retention, previous, current, effects)
         payload['maintenance_partial'] = storage.get('continuation_pending', storage['partial'])
         payload['storage_maintenance'] = {**storage, 'maintenance_epoch': expected[1] + 1}
     if any(effects.get(key, {}).get('partial') is True for key in
-           ('derived_records_pruned', 'local_store_events_maintenance')):
+           ('derived_records_pruned', 'local_store_events_maintenance', 'workflow_maintenance')):
         payload['maintenance_partial'] = True
     if getattr(retention, 'scan_partial', False) is True:
         payload['maintenance_partial'] = True
@@ -992,6 +998,8 @@ def _quota_only_continuation_due(owner_home: Path, previous: dict[str, Any], cur
         return False
     # 源扫描未完必须重新进入保留服务，不能只续配额后清掉它的partial责任。
     if previous.get('retention_scan_partial') is True:
+        return False
+    if previous.get('workflow_maintenance', {}).get('partial') is True:
         return False
     # 跨拍领域欠账只能复用同一策略的安全结论；缺少来源指纹或策略变化须重新运行保留服务。
     storage = previous.get('storage_maintenance', {})

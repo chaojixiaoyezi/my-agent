@@ -369,8 +369,11 @@ class WorkflowStore(_AssetStore):
                                                     "body_markdown": definition.body_markdown}
         payload.update({key: value for key, value in definition.to_dict().items()
                         if key in ('edges', 'schedule_ids', 'datasource_ids')})
+        from ..workflows.reference_index import mark_pending, publish_committed
+        mark_pending(self, definition.descriptor.id)
         self._write(payload, {"WORKFLOW.md": definition.body_markdown or None})
         saved = self._readback_after_commit(definition.descriptor.id)
+        publish_committed(self, definition.descriptor.id, saved)
         if business is not None:
             update_due_index(self, saved, committed=True)
         return saved
@@ -485,6 +488,14 @@ class WorkflowStore(_AssetStore):
             if BUSINESS_WORKFLOW_METADATA in definition.descriptor.metadata:
                 raise PermissionError('WORKFLOW_BUSINESS_RECYCLE_REQUIRED')
             return self._delete(workflow_id)
+
+    def _delete(self, workflow_id):
+        from ..workflows.reference_index import mark_pending, publish_committed
+
+        mark_pending(self, workflow_id)
+        deleted = super()._delete(workflow_id)
+        publish_committed(self, workflow_id, None)
+        return deleted
 
     # LLM: 仅本Owner原根锁/集合锁内改变运行闸；两层enabled同步，不修改步骤、凭据或运行快照。
     # 函数用途: 显式开启或停用已存在工作流，返回正式存储读回值。
