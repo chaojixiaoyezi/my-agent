@@ -619,20 +619,33 @@ def host_promotion_mode(candidate: object) -> str:
             else "manual_required"
         )
     if target == "lesson":
-        return (
-            "auto_eligible"
-            if action == "add"
-            and candidate_type == "lesson"
-            and origin
-            in {
-                "user_explicit",
-                "tool_verified",
-                "model_inferred",
-                "subagent_lesson",
-                "reviewed",
-            }
-            else "manual_required"
+        target_id = str(
+            (values.get("target_entry_id") if values is not None else getattr(candidate, "target_entry_id", ""))
+            or ""
+        ).strip()
+        target_version = (
+            values.get("target_entry_version")
+            if values is not None
+            else getattr(candidate, "target_entry_version", None)
         )
+        allowed_origin = origin in {
+            "user_explicit",
+            "tool_verified",
+            "model_inferred",
+            "subagent_lesson",
+            "reviewed",
+        }
+        if candidate_type != "lesson" or not allowed_origin:
+            return "manual_required"
+        if action == "add":
+            return "auto_eligible"
+        if action in {"replace", "merge"}:
+            return (
+                "auto_eligible"
+                if target_id and type(target_version) is int and target_version > 0
+                else "manual_required"
+            )
+        return "manual_required"
     if target == "hot":
         return (
             "auto_eligible"

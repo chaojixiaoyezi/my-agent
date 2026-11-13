@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 
 from .candidate_models import (
     MemoryScope,
+    effective_promotion_target,
     normalize_iso_time,
     normalize_reference_list,
     normalize_string_list,
@@ -177,8 +178,20 @@ def _rejected_target_bindings(observation, batch: CuratorInputBatch, owner: str)
 def _observed_target_version(observation: object, batch: CuratorInputBatch) -> int | None:
     if observation.proposed_action not in {"replace", "remove", "merge"}:
         return None
-    matches = [item for item in batch.formal_memories
-               if item.authority_type == "long_term" and item.authority_id == observation.target_entry_id]
+    target_id = str(getattr(observation, "target_entry_id", "") or "").strip()
+    if not target_id:
+        return None
+    target = effective_promotion_target(
+        str(getattr(observation, "promotion_target", "") or ""),
+        str(getattr(observation, "origin", "") or ""),
+        str(getattr(observation, "candidate_type", "") or ""),
+    )
+    if target not in {"long_term", "lesson"}:
+        return None
+    matches = [
+        item for item in batch.formal_memories
+        if item.authority_type == target and item.authority_id == target_id
+    ]
     if len(matches) != 1:
         return None
     version = matches[0].authority_version

@@ -120,6 +120,7 @@ def _lesson_items(repository: object) -> list[CuratorFormalMemoryInput]:
             scope_type=str(item.scope.get("scope_type") or ""),
             scope_key=str(item.scope.get("scope_key") or ""),
             updated_at=str(item.updated_at),
+            authority_version=getattr(item, "revision", None),
         )
         for item in reader()
         if str(getattr(item, "status", "active")) == "active"
@@ -167,6 +168,7 @@ def _formal_item(
     scope_type: str,
     scope_key: str,
     updated_at: str,
+    authority_version: int | None = None,
 ) -> CuratorFormalMemoryInput:
     body = " ".join(str(content or "").split())
     return CuratorFormalMemoryInput(
@@ -179,6 +181,7 @@ def _formal_item(
         scope_type=scope_type,
         scope_key=scope_key,
         updated_at=updated_at,
+        authority_version=authority_version,
         content_chars=len(body),
     )
 

@@ -31,9 +31,12 @@ from ..common.json_io import (
     write_private_text_file_atomic_unlocked,
 )
 from ..common.nofollow_fs import (
+    NoFollowPathError,
     ensure_private_dir,
+    list_names_beneath,
     open_directory_beneath,
     open_readonly_file_beneath,
+    read_text_beneath,
     write_text_atomic_beneath,
 )
 from ..common.text_norm import fold_key
@@ -87,12 +90,90 @@ RETENTION_ELIGIBLE_CANDIDATE_STATUSES = CANDIDATE_STATUSES - {"promoted"}
 PROMOTION_BATCH_MAX_COUNT = 32
 
 
-# LLM: 扫描、执行及锁内仓库末门共用；approved及任何提交义务不受年龄覆盖。
+# LLM: 扫描、执行及锁内仓库末门共用；仅非 user_explicit 且因 lesson/HOT 重复门槛受阻的陈旧 approved 允许按龄清理，其余 approved 与义务仍受保护。
 # 函数用途: 唯一裁定一个候选是否可按龄清理。
 def candidate_retention_eligible(candidate):
-    return (candidate.status in RETENTION_ELIGIBLE_CANDIDATE_STATUSES
-            and candidate.status != "approved" and not candidate.commit_obligation
-            and not _is_binding_tombstone(candidate))
+    if candidate.status not in RETENTION_ELIGIBLE_CANDIDATE_STATUSES:
+        return False
+    if _is_binding_tombstone(candidate):
+        return False
+    if candidate.status == "approved":
+        from .candidate_models import effective_promotion_target
+
+        target = effective_promotion_target(
+            candidate.promotion_target, candidate.origin, candidate.candidate_type
+        )
+        return (
+            candidate.origin != "user_explicit"
+            and target in {"lesson", "hot"}
+            and candidate.obligation_blocked_reason == "PROMOTION_THRESHOLD_NOT_MET"
+        )
+    return not candidate.commit_obligation
+
+
+# LLM: 不获取 SkillLearningStore.state_lock（防止 candidate→quota 锁序倒置），仅用 nofollow_fs 有界只读队列中仍引用的 source_candidate_id；
+#   真实不存在返回空集合，遇到 symlink/不可读/损坏队列文件或超出文件上限则 fail-closed 拒删。
+# 函数用途: 返回尚未被消费的 Skill 学习 FIFO 请求所引用的候选 ID 集合。
+def _skill_learning_pinned_candidate_ids(candidates_path: Path) -> set[str]:
+    import stat
+
+    owner_home = candidates_path.parent.parent if candidates_path.parent.name == "memory" else candidates_path.parent
+    data_dir = owner_home / "data"
+    skill_dir = data_dir / "skill_learning"
+    pinned: set[str] = set()
+    for ancestor in (owner_home, data_dir, skill_dir):
+        try:
+            st = ancestor.lstat()
+        except FileNotFoundError as exc:
+            if ancestor == owner_home:
+                raise CandidateTransitionError("SKILL_LEARNING_PINS_UNREADABLE:OWNER_HOME_MISSING") from exc
+            return pinned
+        except OSError as exc:
+            raise CandidateTransitionError(
+                f"SKILL_LEARNING_PINS_UNREADABLE:STAT_FAILED:{type(exc).__name__}"
+            ) from exc
+        if stat.S_ISLNK(st.st_mode):
+            raise CandidateTransitionError("SKILL_LEARNING_PINS_UNREADABLE:SYMLINK")
+        if not stat.S_ISDIR(st.st_mode):
+            raise CandidateTransitionError("SKILL_LEARNING_PINS_UNREADABLE:NOT_DIR")
+
+    max_files = 512
+    for folder in ("requests", "requests_overflow"):
+        try:
+            names = list_names_beneath(skill_dir, (folder,))
+        except NoFollowPathError as exc:
+            raise CandidateTransitionError("SKILL_LEARNING_PINS_UNREADABLE:SYMLINK") from exc
+        except OSError as exc:
+            raise CandidateTransitionError(
+                f"SKILL_LEARNING_PINS_UNREADABLE:LIST_FAILED:{type(exc).__name__}"
+            ) from exc
+        if len(names) > max_files:
+            raise CandidateTransitionError("SKILL_LEARNING_PINS_UNREADABLE:QUEUE_FILE_LIMIT_EXCEEDED")
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            try:
+                raw = read_text_beneath(skill_dir, (folder, name))
+            except NoFollowPathError as exc:
+                raise CandidateTransitionError("SKILL_LEARNING_PINS_UNREADABLE:SYMLINK") from exc
+            except (OSError, UnicodeDecodeError) as exc:
+                raise CandidateTransitionError(
+                    f"SKILL_LEARNING_PINS_UNREADABLE:READ_FAILED:{type(exc).__name__}"
+                ) from exc
+            if raw is None:
+                # 队列文件恰好在列举与读取之间被消费删除。
+                continue
+            try:
+                data = json.loads(raw)
+            except ValueError as exc:
+                raise CandidateTransitionError("SKILL_LEARNING_PINS_UNREADABLE:CORRUPT_JSON") from exc
+            if not isinstance(data, dict):
+                raise CandidateTransitionError("SKILL_LEARNING_PINS_UNREADABLE:CORRUPT_ENTRY")
+            for key in ("source_candidate_id", "candidate_id"):
+                cid = str(data.get(key) or "").strip()
+                if cid:
+                    pinned.add(cid)
+    return pinned
 
 # 记忆候选列表缓存最多跟踪的文件路径数。
 _CANDIDATE_LOAD_CACHE_MAX_PATHS = 8
@@ -743,9 +824,10 @@ class CandidateService:
     # 函数用途: 规划真正陈旧候选ID，保护最近再次观察到的候选。
     def retention_candidates(self, *, before: datetime) -> list[str]:
         cutoff = before.astimezone(timezone.utc)
+        pinned = _skill_learning_pinned_candidate_ids(self.path)
         result: list[str] = []
         for item in self.readonly_rows(statuses=RETENTION_ELIGIBLE_CANDIDATE_STATUSES):
-            if not candidate_retention_eligible(item):
+            if item.candidate_id in pinned or not candidate_retention_eligible(item):
                 continue
             if datetime.fromisoformat(candidate_retention_time(item)) < cutoff:
                 result.append(item.candidate_id)
@@ -775,6 +857,7 @@ class CandidateService:
             return 0
         with _quota_admission(self.quota_enforcer) as admission, self._locked_candidates():
             candidates = self._load_unlocked()
+            pinned = _skill_learning_pinned_candidate_ids(self.path)
             if expected_snapshots is not None:
                 current_by_id = {item.candidate_id: item for item in candidates}
                 for cid in list(ids):
@@ -782,7 +865,7 @@ class CandidateService:
                     expected = expected_snapshots.get(cid)
                     if expected is None:
                         continue
-                    if (current is not None and _candidate_snapshot_matches(self.path, current, expected)
+                    if (current is not None and cid not in pinned and _candidate_snapshot_matches(self.path, current, expected)
                             and candidate_retention_eligible(current)):
                         continue
                     ids.remove(cid)
@@ -791,7 +874,9 @@ class CandidateService:
             if not ids:
                 return 0
             for item in candidates:
-                if item.candidate_id in ids and not _is_binding_tombstone(item) and not candidate_retention_eligible(item):
+                if item.candidate_id in ids and not _is_binding_tombstone(item) and (
+                    item.candidate_id in pinned or not candidate_retention_eligible(item)
+                ):
                     raise CandidateTransitionError(
                         f"candidate {item.candidate_id} is not retention-eligible"
                     )
@@ -1715,6 +1800,7 @@ def _retention_records(candidates: list[MemoryCandidate], ids: set[str]) -> tupl
         now = utc_now_iso()
         status = item.status if item.status in TERMINAL_CANDIDATE_STATUSES else "superseded"
         retained.append(replace(item, status=status, content="", content_redacted_at=now, updated_at=now, cold_detail_ref="",
+            commit_obligation=False, obligation_blocked_reason="", obligation_retry_after="",
             evidence_refs=[], source_message_refs=[], source_tool_refs=[], source_artifact_refs=[],
             source_task_ids=[], source_run_ids=[], learning_source={}, learning_source_coverage={},
             target_evidence_bindings=history, reviewer="retention", review_note="retained_version_bindings",

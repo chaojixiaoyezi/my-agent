@@ -36,7 +36,14 @@ from .candidate_models import (
     host_promotion_mode,
     utc_now_iso,
 )
-from .candidates import PROMOTION_BATCH_MAX_COUNT, CandidateService, split_identity_conflicts
+from .candidates import (
+    PROMOTION_BATCH_MAX_COUNT,
+    CandidateService,
+    CandidateStateChangedError,
+    CandidateStoreCorruptError,
+    CandidateTransitionError,
+    split_identity_conflicts,
+)
 from .curator_backend import (
     CuratorModelAttempt,
     CuratorModelCallError,
@@ -141,8 +148,61 @@ _REASON_PRIORITY = (
 # 函数用途: 判断本策展实例距上次成功终态归档是否已满一个策展周期。
 def _terminal_compaction_due(curator: object) -> bool:
     last = getattr(curator, "_terminal_compaction_at", None)
-    interval = max(1, int(getattr(getattr(curator, "config", None), "interval_seconds", 1) or 1))
+    eff = getattr(curator, "_effective_config", None)
+    cfg = eff() if callable(eff) else getattr(curator, "config", None)
+    interval = max(1, int(getattr(cfg, "interval_seconds", 1) or 1))
     return last is None or time.monotonic() - last >= interval
+
+
+# LLM: 运行中优先复用租约开始时冻结的 live 配置，避免配置热更新在一次运行中途裂脑。
+# 函数用途: 解析当前运行上下文应使用的 MemoryCuratorConfig 快照。
+def _context_config(curator: object, context: object | None = None) -> MemoryCuratorConfig:
+    if context is not None:
+        route = getattr(context, "route", None)
+        if isinstance(route, dict):
+            frozen = route.get("_effective_config")
+            if isinstance(frozen, MemoryCuratorConfig):
+                return frozen
+    eff = getattr(curator, "_effective_config", None)
+    return eff() if callable(eff) else curator.config
+
+
+# LLM: 维护失败必须保留具体领域错误码而不泄漏路径或敏感正文；用于 run_maintenance_if_due 诊断字段。
+# 函数用途: 将维护步骤确定性异常映射为稳定错误码。
+def _maintenance_error_code(exc: BaseException) -> str:
+    from ..common.nofollow_fs import NoFollowPathError
+    from ..user_space.owner_quota import (
+        OwnerQuotaExceeded,
+        OwnerQuotaLockContention,
+        OwnerQuotaUnavailable,
+    )
+    from .jsonl import MemoryAuthorityCorruptError
+    from .lessons import LessonHeatUnavailableError, LessonRoutingPendingError
+
+    if isinstance(exc, NoFollowPathError):
+        return "CURATOR_MAINTENANCE_SYMLINK_FORBIDDEN"
+    if isinstance(exc, OwnerQuotaLockContention):
+        return "CURATOR_MAINTENANCE_QUOTA_LOCK_CONTENTION"
+    if isinstance(exc, OwnerQuotaExceeded):
+        return "CURATOR_MAINTENANCE_QUOTA_EXCEEDED"
+    if isinstance(exc, OwnerQuotaUnavailable):
+        return "CURATOR_MAINTENANCE_QUOTA_UNAVAILABLE"
+    if isinstance(exc, MemoryAuthorityCorruptError):
+        return "CURATOR_MAINTENANCE_AUTHORITY_CORRUPT"
+    if isinstance(exc, LessonHeatUnavailableError):
+        return "CURATOR_MAINTENANCE_LESSON_HEAT_UNAVAILABLE"
+    if isinstance(exc, LessonRoutingPendingError):
+        return "CURATOR_MAINTENANCE_LESSON_ROUTING_PENDING"
+    if isinstance(exc, CandidateStoreCorruptError):
+        return "CURATOR_MAINTENANCE_CANDIDATES_CORRUPT"
+    if isinstance(exc, OSError):
+        return "CURATOR_MAINTENANCE_IO_ERROR"
+    if isinstance(exc, (ValueError, TypeError, json.JSONDecodeError)):
+        msg = str(exc or "").strip().split(":", 1)[0].strip()
+        if msg and msg.isascii() and all(ch.isalnum() or ch == "_" for ch in msg):
+            return msg[:64]
+        return "CURATOR_MAINTENANCE_INVALID_STATE"
+    return f"CURATOR_MAINTENANCE_{type(exc).__name__.upper()}"
 
 
 # LLM: 输入权威损坏与供应商或 Schema 失败须分开分类；输入无法安全读取时始终阻止游标推进。
@@ -196,6 +256,8 @@ class MemoryCuratorDependencies:
     learning_exclusions: Callable[[], tuple[frozenset[str], bool]] | None = None
     # 名单修订号读取：提交前记录「判定基于哪一版名单」并进入运行警告；None 或读取失败按 0。
     learning_exclusions_revision: Callable[[], int] | None = None
+    # 动态配置读取器：按运行期热更新后的 AgentConfig 读取维护周期与 lesson 归档天数。
+    config_provider: Callable[[], object] | None = None
 
 
 # LLM: 运行上下文把已领取的租约与运行前游标快照绑定，避免辅助函数误用后续可变状态。
@@ -244,12 +306,297 @@ class _CuratorLifecycleMixin:
     # 函数用途: 按原pending、输入和时间事实调度到期批次，不以候选来源资格替代当前工作或用户确认。
     # LLM: 正MP只消费当前实际Agent/原claim准入，Count0纯内存早返；仅空短核而不持T等待模型，原分组/F4候选与用户确认合同不变。
     # 函数用途: 在原请求仍开放时调度策展；轮次采集只做一次，租约内复核后复用。
+    def _effective_config(self) -> MemoryCuratorConfig:
+        provider = getattr(self, "config_provider", None)
+        if not callable(provider):
+            return self.config
+        try:
+            raw = provider()
+        except Exception:
+            _LOGGER.warning("curator config_provider failed; using startup config")
+            return self.config
+        if raw is None:
+            return self.config
+        if isinstance(raw, MemoryCuratorConfig):
+            return raw
+        parsed = MemoryCuratorConfig.from_agent_config(raw)
+        overrides: dict[str, object] = {}
+        attr_map = (
+            ("memory_curator_enabled", "enabled"),
+            ("memory_curator_model_profile", "model_profile"),
+            ("memory_curator_interval_seconds", "interval_seconds"),
+            ("memory_curator_turn_threshold", "turn_threshold"),
+            ("memory_curator_max_input_chars", "max_input_chars"),
+            ("memory_curator_timeout_seconds", "timeout_seconds"),
+            ("memory_curator_daily_finalize_hour", "daily_finalize_hour"),
+            ("memory_curator_auto_promotion_policy", "auto_promotion_policy"),
+            ("memory_lesson_min_occurrences", "lesson_min_occurrences"),
+            ("memory_hot_min_occurrences", "hot_min_occurrences"),
+            ("memory_curator_task_file_evidence_max_chars", "task_file_evidence_max_chars"),
+            ("memory_curator_cross_thread_dedupe_window_seconds", "cross_thread_dedupe_window_seconds"),
+            ("retention_scan_slice_entries", "retention_scan_slice_entries"),
+            ("retention_scan_slice_bytes", "retention_scan_slice_bytes"),
+            ("retention_scan_slice_ms", "retention_scan_slice_ms"),
+            ("memory_lesson_archive_days", "lesson_archive_days"),
+        )
+        for src_attr, dst_attr in attr_map:
+            if not hasattr(raw, src_attr):
+                overrides[dst_attr] = getattr(self.config, dst_attr)
+        return replace(parsed, **overrides) if overrides else parsed
+
+    def _maintenance_owner_home(self) -> Path | None:
+        cand_path = getattr(getattr(self, "candidate_service", None), "path", None)
+        if isinstance(cand_path, Path):
+            return cand_path.parent.parent if cand_path.parent.name == "memory" else cand_path.parent
+        return None
+
+    # LLM: 不依赖模型配置或 turn_threshold 的纯本地周期维护（lesson 归档、长期访问刷盘、终态候选冷归档）；
+    #   严禁读取或消费 SkillLearning FIFO 请求，且 HOT 置顶读取失败时 fail-closed 不跳过置顶做归档。
+    # 函数用途: 按 live 配置与 owner 策略执行一次无模型维护节拍。
+    def run_maintenance_if_due(self, *, now: datetime | None = None) -> dict[str, object]:
+        from ..backends.request_scope import foreground_model_active
+        from ..gateway_parts.request_entry_admission import require_request_execution
+        from ..user_space.owner_policy import effective_memory_enabled
+
+        require_request_execution(component=self, component_attribute="memory_curator")
+        live_cfg = self._effective_config()
+        if not live_cfg.enabled:
+            return {
+                "status": "disabled",
+                "reason": "disabled",
+                "lessons_maintained": False,
+                "candidates_compacted": False,
+                "access_flushed": False,
+                "archive_days": live_cfg.lesson_archive_days,
+                "lesson_report": {},
+            }
+        owner_home = self._maintenance_owner_home()
+        if owner_home is not None:
+            policy_path = owner_home / "memory_policy.json"
+            if policy_path.is_symlink() or policy_path.exists():
+                policy_report = read_json_object_report(
+                    policy_path, context="curator.memory_policy"
+                )
+                if policy_report.load_error is not None:
+                    return {
+                        "status": "blocked",
+                        "reason": "memory_policy_unreadable",
+                        "lessons_maintained": False,
+                        "candidates_compacted": False,
+                        "access_flushed": False,
+                        "archive_days": live_cfg.lesson_archive_days,
+                        "lesson_report": {},
+                    }
+                if not effective_memory_enabled(policy_report.payload):
+                    return {
+                        "status": "disabled",
+                        "reason": "memory_policy_disabled",
+                        "lessons_maintained": False,
+                        "candidates_compacted": False,
+                        "access_flushed": False,
+                        "archive_days": live_cfg.lesson_archive_days,
+                        "lesson_report": {},
+                    }
+                if policy_report.payload.get("memory_curator_enabled") is False:
+                    return {
+                        "status": "disabled",
+                        "reason": "memory_curator_disabled",
+                        "lessons_maintained": False,
+                        "candidates_compacted": False,
+                        "access_flushed": False,
+                        "archive_days": live_cfg.lesson_archive_days,
+                        "lesson_report": {},
+                    }
+        if self.backend is not None and foreground_model_active(self.backend):
+            return {
+                "status": "busy",
+                "reason": "foreground_model_active",
+                "lessons_maintained": False,
+                "candidates_compacted": False,
+                "access_flushed": False,
+                "archive_days": live_cfg.lesson_archive_days,
+                "lesson_report": {},
+            }
+        current = _localized_now(now, self.timezone_name)
+        interval = max(1, int(live_cfg.interval_seconds or 1))
+        mono_now = time.monotonic()
+        last_mono = getattr(self, "_maintenance_at", None)
+        last_now_ts = getattr(self, "_maintenance_now_ts", None)
+        if now is not None:
+            now_ts = current.timestamp()
+            if last_now_ts is not None and 0.0 <= (now_ts - last_now_ts) < interval:
+                return {
+                    "status": "not_due",
+                    "reason": "interval",
+                    "lessons_maintained": False,
+                    "candidates_compacted": False,
+                    "access_flushed": False,
+                    "archive_days": live_cfg.lesson_archive_days,
+                    "lesson_report": {},
+                }
+        elif last_mono is not None and (mono_now - last_mono) < interval:
+            return {
+                "status": "not_due",
+                "reason": "interval",
+                "lessons_maintained": False,
+                "candidates_compacted": False,
+                "access_flushed": False,
+                "archive_days": live_cfg.lesson_archive_days,
+                "lesson_report": {},
+            }
+
+        partial = False
+        lessons_maintained = False
+        candidates_compacted = False
+        access_flushed = False
+        lesson_report: dict[str, object] = {}
+        step_errors: dict[str, str] = {}
+        lessons = getattr(self.formal_memory_source, "lessons", None)
+        hot = getattr(self.formal_memory_source, "hot", None)
+        long_term = getattr(self.formal_memory_source, "long_term", None)
+        maintain_fn = getattr(lessons, "maintain", None)
+
+        from ..common.nofollow_fs import NoFollowPathError
+        from ..user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
+        from .jsonl import MemoryAuthorityCorruptError
+        from .lessons import LessonHeatUnavailableError, LessonRoutingPendingError
+        from .promotion import _UNCERTAIN_PROMOTION_ERRORS
+
+        uncertain_errors = (
+            *_UNCERTAIN_PROMOTION_ERRORS,
+            RequestExecutionContextUnavailable,
+            RequestExecutionOutcomeUncertainError,
+            BoundedCallExitUnconfirmedError,
+            CuratorLeaseLostError,
+        )
+        deterministic_errors = (
+            OSError,
+            NoFollowPathError,
+            OwnerQuotaExceeded,
+            OwnerQuotaUnavailable,
+            MemoryAuthorityCorruptError,
+            LessonHeatUnavailableError,
+            LessonRoutingPendingError,
+            CandidateStoreCorruptError,
+            CandidateTransitionError,
+            CandidateStateChangedError,
+            ValueError,
+            TypeError,
+            json.JSONDecodeError,
+        )
+
+        def _load_hot_pins() -> tuple[tuple[str, ...], bool]:
+            if hot is None:
+                return (), False
+            hot_path = getattr(hot, "path", None)
+            if hot_path is not None:
+                try:
+                    if Path(hot_path).is_symlink():
+                        return (), False
+                except OSError:
+                    return (), False
+            try:
+                records = hot.list()
+            except uncertain_errors:
+                raise
+            except Exception:
+                return (), False
+            pins: list[str] = []
+            for rec in records:
+                lid = str(getattr(rec, "lesson_id", "") or "").strip()
+                if lid:
+                    pins.append(lid)
+                lref = str(getattr(rec, "lesson_ref", "") or "").strip()
+                if lref:
+                    pins.append(lref)
+            return tuple(dict.fromkeys(pins)), True
+
+        with gateway_short_transaction("memory_curator_maintenance"):
+            if callable(maintain_fn):
+                try:
+                    raw_report = maintain_fn(
+                        now=current,
+                        archive_days=live_cfg.lesson_archive_days,
+                        batch_count=live_cfg.retention_scan_slice_entries,
+                        batch_bytes=live_cfg.retention_scan_slice_bytes,
+                        batch_ms=live_cfg.retention_scan_slice_ms,
+                        pin_loader=_load_hot_pins,
+                    )
+                except uncertain_errors:
+                    raise
+                except deterministic_errors as exc:
+                    partial = True
+                    step_errors["lessons"] = _maintenance_error_code(exc)
+                else:
+                    lessons_maintained = True
+                    if isinstance(raw_report, dict):
+                        lesson_report = raw_report
+                        cov = raw_report.get("coverage")
+                        cov_partial = cov == "partial" or (
+                            isinstance(cov, dict)
+                            and cov.get("status") not in (None, "complete")
+                        )
+                        if (
+                            cov_partial
+                            or raw_report.get("status") == "partial"
+                            or raw_report.get("pins_complete") is False
+                            or bool(raw_report.get("incomplete"))
+                        ):
+                            partial = True
+            flush_fn = getattr(long_term, "flush_access_events", None)
+            if callable(flush_fn):
+                try:
+                    flush_fn()
+                except uncertain_errors:
+                    raise
+                except deterministic_errors as exc:
+                    partial = True
+                    step_errors["access_flush"] = _maintenance_error_code(exc)
+                else:
+                    access_flushed = True
+            if _terminal_compaction_due(self):
+                try:
+                    self.candidate_service.compact_terminal_candidates(now=current)
+                except uncertain_errors:
+                    raise
+                except deterministic_errors as exc:
+                    partial = True
+                    step_errors["candidate_compaction"] = _maintenance_error_code(exc)
+                else:
+                    self._terminal_compaction_at = time.monotonic()
+                    candidates_compacted = True
+
+        if not partial and not step_errors:
+            self._maintenance_at = time.monotonic()
+            if now is not None or getattr(self, "_maintenance_now_ts", None) is None:
+                self._maintenance_now_ts = current.timestamp()
+
+        any_progress = lessons_maintained or access_flushed or candidates_compacted
+        if step_errors and not any_progress:
+            status = "failed"
+        elif partial or step_errors:
+            status = "partial"
+        else:
+            status = "succeeded"
+        reason = next(iter(step_errors.values())) if step_errors else "maintenance"
+        return {
+            "status": status,
+            "reason": reason,
+            "lessons_maintained": lessons_maintained,
+            "candidates_compacted": candidates_compacted,
+            "access_flushed": access_flushed,
+            "archive_days": live_cfg.lesson_archive_days,
+            "lesson_report": lesson_report,
+            **({"errors": step_errors} if step_errors else {}),
+        }
+
     def run_if_due(self, *, now: datetime | None = None) -> CuratorRunResult:
 
         from ..gateway_parts.request_entry_admission import require_request_execution
 
         require_request_execution(component=self, component_attribute="memory_curator")
-        if not self.config.enabled:
+        live_cfg = self._effective_config()
+        if not live_cfg.enabled:
             return self._result(status="disabled", reason="interval")
         try:
             state = self.state_store.load()
@@ -273,16 +620,38 @@ class _CuratorLifecycleMixin:
             except Exception as exc:
                 raise CuratorInputError("CURATOR_CANDIDATE_ARCHIVE_FAILED") from exc
             self._terminal_compaction_at = time.monotonic()
+        try:
+            self.run_maintenance_if_due(now=current)
+        except Exception as exc:
+            from .promotion import _UNCERTAIN_PROMOTION_ERRORS
+
+            if isinstance(
+                exc,
+                (
+                    *_UNCERTAIN_PROMOTION_ERRORS,
+                    RequestExecutionContextUnavailable,
+                    RequestExecutionOutcomeUncertainError,
+                    BoundedCallExitUnconfirmedError,
+                    CuratorLeaseLostError,
+                ),
+            ):
+                raise
+            _LOGGER.warning(
+                "memory_curator_maintenance_skipped:%s",
+                _maintenance_error_code(exc),
+            )
         if pending:
-            return self._run_pending_when_due(state, pending, current)
-        if _daily_finalize_due(state, current, self.config.daily_finalize_hour):
+            return self._run_pending_when_due(
+                state, pending, current, effective_config=live_cfg
+            )
+        if _daily_finalize_due(state, current, live_cfg.daily_finalize_hour):
             return self.run(reason="daily_finalize", now=current)
         from .curator_due import candidate_scan_deadline, candidate_source_present
-        scan_deadline = candidate_scan_deadline(state, self.config.interval_seconds,
+        scan_deadline = candidate_scan_deadline(state, live_cfg.interval_seconds,
             source_present=not state.candidate_scan_cursor and candidate_source_present(self.candidate_service.path)
-        ) if self._promotion_backlog_enabled() else None
+        ) if self._promotion_backlog_enabled(effective_config=live_cfg) else None
         if scan_deadline is not None and current.timestamp() >= scan_deadline:
-            return self._resume_candidate_promotions(current)
+            return self._resume_candidate_promotions(current, effective_config=live_cfg)
         # due 判定也遵守学习排除名单：名单不可读时按 fail-closed 不收集任何消息（不会因名单
         # 会话的旧消息误触发一次运行）；快照进入 _execute 后复核再复用。不可读的诊断要随
         # not_due 一起返回，不能显示成没有原因的普通 not_due（mc4-3106）。
@@ -291,39 +660,59 @@ class _CuratorLifecycleMixin:
             return self._result(
                 status="not_due", reason="interval", warnings=exclusion_warnings
             )
-        config_revision = self.config.revision()
+        config_revision = live_cfg.revision()
         exclusions_revision = self._read_exclusions_revision()
-        batch = self._collect(state, include_formal=False, excluded_conversation_ids=excluded_ids)
+        batch = self._collect(
+            state,
+            include_formal=False,
+            excluded_conversation_ids=excluded_ids,
+            effective_config=live_cfg,
+        )
         precollected = _PrecollectedBatch(batch, state, config_revision, excluded_ids, exclusions_revision)
         if batch.load_errors:
             return self.run(reason="interval", now=current, precollected_batch=precollected)
         if batch.message_scan_partial and not _has_committable_input(batch):
             return self._result(status="busy", reason="interval", warnings=_message_scan_warnings(batch))
-        if batch.user_turns() >= self.config.turn_threshold:
+        if batch.user_turns() >= live_cfg.turn_threshold:
             return self.run(reason="turn_threshold", now=current, precollected_batch=precollected)
-        if _interval_due(batch, state, current, self.config.interval_seconds):
+        if _interval_due(batch, state, current, live_cfg.interval_seconds):
             return self.run(reason="interval", now=current, precollected_batch=precollected)
         return self._result(status="busy" if batch.message_scan_partial else "not_due", reason="interval",
                             warnings=_message_scan_warnings(batch) if batch.message_scan_partial else ())
 
-    def _resume_candidate_promotions(self, current):
+    def _resume_candidate_promotions(
+        self,
+        current,
+        *,
+        effective_config: MemoryCuratorConfig | None = None,
+    ):
         """原维护节拍的纯晋升续办：不收集输入、不调用提取模型、不推进日报或消息游标。"""
         from .curator_lease import (
             curator_lease_heartbeat,
             curator_lease_interruption_guard,
             release_curator_lease,
         )
+        live_cfg = effective_config or self._effective_config()
         acquired = self.committer.recover_and_acquire(CuratorLeaseRequest(
-            "interval", self.config.revision(), _lease_seconds(self.config), current, purpose="candidate_scan"))
+            "interval", live_cfg.revision(), _lease_seconds(live_cfg), current, purpose="candidate_scan"))
         if acquired is None:
             return self._result(status="busy", reason="interval")
         context = _run_context("interval", *acquired)
+        context.route["_effective_config"] = live_cfg
         with curator_lease_interruption_guard(self.state_store, context.lease_id):
             try:
-                with curator_lease_heartbeat(self.state_store, context.lease_id, _lease_seconds(self.config)):
+                with curator_lease_heartbeat(self.state_store, context.lease_id, _lease_seconds(live_cfg)):
                     next_cursor = {}
-                    identifiers = self._pending_promotable_candidate_ids(limit=32, lease_id=context.lease_id, scanned_at=context.started_at, cursor_out=next_cursor)
-                    promoted, warnings, receipts = self._promote_eligible(identifiers)
+                    identifiers = self._pending_promotable_candidate_ids(
+                        limit=32,
+                        lease_id=context.lease_id,
+                        scanned_at=context.started_at,
+                        cursor_out=next_cursor,
+                        effective_config=live_cfg,
+                    )
+                    promoted, warnings, receipts = self._promote_eligible(
+                        identifiers, effective_config=live_cfg
+                    )
                     self.state_store.advance_candidate_scan(context.lease_id, next_cursor)
                 release_curator_lease(self.state_store, context.lease_id)
                 from .curator_promotion_receipts import promotion_counts
@@ -343,11 +732,14 @@ class _CuratorLifecycleMixin:
         state: MemoryCuratorState,
         pending: str,
         current: datetime,
+        *,
+        effective_config: MemoryCuratorConfig | None = None,
     ) -> CuratorRunResult:
+        live_cfg = effective_config or self._effective_config()
         last_failure = _parse_time(state.last_failure_at)
         retry_after = curator_failure_retry_seconds(
             state.last_failure_code,
-            max(30, min(300, self.config.interval_seconds)),
+            max(30, min(300, live_cfg.interval_seconds)),
             consecutive_failures=max(0, int(getattr(state, "consecutive_failures", 0) or 0)),
         )
         if (
@@ -411,7 +803,8 @@ class _CuratorLifecycleMixin:
                     now=finished_at,
                 )
                 from ..settings.curator_profile import record_auxiliary_profile_failure
-                profile_to_cool = str(context.route.get("group_key") or getattr(self.config, "model_profile", "") or "").strip()
+                live_cfg = _context_config(self, context)
+                profile_to_cool = str(context.route.get("group_key") or getattr(live_cfg, "model_profile", "") or "").strip()
                 if profile_to_cool:
                     record_auxiliary_profile_failure(profile_to_cool, failure_code)
             except CuratorStateCorruptError as exc:
@@ -604,11 +997,12 @@ class _CuratorExecutionMixin:
         batch = attach_candidate_anchors(batch, self.candidate_service)
         context.route["batch_thread_ids"] = tuple(dict.fromkeys(item.thread_id for item in batch.messages))
         # 先按最终提示实测长度裁进预算：超预算的积压只截尾部、留给下一轮重放，不能让同一批反复失败卡住游标。
-        batch, fit_warnings = fit_batch_to_input_budget(batch, max_chars=self.config.max_input_chars)
+        live_cfg = _context_config(self, context)
+        batch, fit_warnings = fit_batch_to_input_budget(batch, max_chars=live_cfg.max_input_chars)
         preflight_warnings = (*preflight_warnings, *fit_warnings)
         annotate = self.dependencies.annotate_batch
         if annotate is not None:
-            batch, decision_warnings = annotate(batch, context.run_id, _annotation_deadline(context, self.config))
+            batch, decision_warnings = annotate(batch, context.run_id, _annotation_deadline(context, live_cfg))
             preflight_warnings = (*preflight_warnings, *decision_warnings)
         attempt, validated = self._extract_for_route(context, batch)
         if attempt.shrink_attempts:
@@ -624,15 +1018,21 @@ class _CuratorExecutionMixin:
     # 函数用途: 给已领取的运行选择安全输入；正式快照只读一次，最终fit会连正式内容一起重裁预算。
     def _execution_batch(self, context, precollected, excluded_ids) -> CuratorInputBatch:
         state = context.state_before
+        live_cfg = _context_config(self, context)
         if (precollected is not None
                 and precollected.state.per_thread_cursors == state.per_thread_cursors
                 and precollected.state.last_processed_audit_event_id == state.last_processed_audit_event_id
-                and precollected.config_revision == self.config.revision()
+                and precollected.config_revision == live_cfg.revision()
                 and precollected.exclusions == excluded_ids
                 and precollected.exclusions_revision == self._read_exclusions_revision()):
-            formal, errors = self._formal_snapshot()
+            formal, errors = self._formal_snapshot(effective_config=live_cfg)
             return replace(precollected.batch, formal_memories=formal, formal_memory_errors=errors)
-        return self._collect(state, include_formal=True, excluded_conversation_ids=excluded_ids)
+        return self._collect(
+            state,
+            include_formal=True,
+            excluded_conversation_ids=excluded_ids,
+            effective_config=live_cfg,
+        )
 
     # LLM: 升级自愈:每次持 lease 提炼前幂等应用 Memory v2 迁移,失败只记 warning 不阻断。
     # 函数用途: 每次执行前应用 Memory v2 迁移,返回可展示的迁移 warning。
@@ -664,21 +1064,25 @@ class _CuratorExecutionMixin:
         *,
         include_formal: bool,
         excluded_conversation_ids: frozenset[str] | None = frozenset(),
+        effective_config: MemoryCuratorConfig | None = None,
     ) -> CuratorInputBatch:
-        formal, formal_memory_errors = self._formal_snapshot() if include_formal else ((), ())
+        live_cfg = effective_config or self._effective_config()
+        formal, formal_memory_errors = (
+            self._formal_snapshot(effective_config=live_cfg) if include_formal else ((), ())
+        )
         formal_chars = len(
             json.dumps([item.to_model() for item in formal], ensure_ascii=False)
         )
         input_config = replace(
-            self.config,
+            live_cfg,
             max_input_chars=max(
                 2_000,
-                self.config.max_input_chars - 7_000 - formal_chars,
+                live_cfg.max_input_chars - 7_000 - formal_chars,
             ),
         )
         from .retention_scan_budget import RetentionScanBudget
 
-        scan_budget = RetentionScanBudget.default(self.config)
+        scan_budget = RetentionScanBudget.default(live_cfg)
         batch = collect_curator_inputs(
             message_source=CuratorMessageSource(
                 conversation_store=self.conversation_store,
@@ -700,12 +1104,17 @@ class _CuratorExecutionMixin:
 
     # LLM: 正式记忆只作为预算内增强输入，普通读错保持原降级诊断；执行未结不得被降级吞掉。
     # 函数用途: 为实际执行补一次正式记忆快照，不重新读取会话或审计材料。
-    def _formal_snapshot(self) -> tuple[tuple, tuple[dict, ...]]:
+    def _formal_snapshot(
+        self,
+        *,
+        effective_config: MemoryCuratorConfig | None = None,
+    ) -> tuple[tuple, tuple[dict, ...]]:
         if self.formal_memory_source is None:
             return (), ()
+        live_cfg = effective_config or self._effective_config()
         try:
             formal = self.formal_memory_source.read(
-                max_items=32, max_chars=min(6_000, max(1_000, self.config.max_input_chars // 4)),
+                max_items=32, max_chars=min(6_000, max(1_000, live_cfg.max_input_chars // 4)),
             )
             return tuple(formal), ()
         except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
@@ -734,7 +1143,8 @@ class _CuratorExecutionMixin:
         prepared = _without_identity_conflicts(self.candidate_service, outputs)
         finished_at = utc_now_iso()
         from ..settings.curator_profile import clear_auxiliary_profile_cooldown
-        profile_to_clear = str(context.route.get("group_key") or getattr(self.config, "model_profile", "") or "").strip()
+        live_cfg = _context_config(self, context)
+        profile_to_clear = str(context.route.get("group_key") or getattr(live_cfg, "model_profile", "") or "").strip()
         if profile_to_clear:
             clear_auxiliary_profile_cooldown(profile_to_clear)
         run_record = _successful_run_record(
@@ -795,6 +1205,7 @@ class _CuratorExecutionMixin:
     ) -> CuratorRunResult:
         # 提交后的自动晋升只消费宿主按结构化字段标出的 auto_eligible 候选；SOUL、agents 目标
         # 和无正式权威的候选不会进入回调（v2：可晋升判定与最终提交入口的硬拦同步）。
+        live_cfg = _context_config(self, context)
         promotable = [
             item.candidate_id
             for item in committed.candidates
@@ -806,11 +1217,23 @@ class _CuratorExecutionMixin:
             != "agents"
         ]
         next_cursor = {}
-        backlog = self._pending_promotable_candidate_ids(limit=32, lease_id=context.lease_id, scanned_at=context.started_at, cursor_out=next_cursor) if self._promotion_backlog_enabled() else ()
+        backlog = (
+            self._pending_promotable_candidate_ids(
+                limit=32,
+                lease_id=context.lease_id,
+                scanned_at=context.started_at,
+                cursor_out=next_cursor,
+                effective_config=live_cfg,
+            )
+            if self._promotion_backlog_enabled(effective_config=live_cfg)
+            else ()
+        )
         promotable = list(dict.fromkeys((*promotable, *backlog)))
         from .curator_promotion_receipts import promotion_counts
 
-        promoted, promotion_warnings, receipts = self._promote_eligible(promotable)
+        promoted, promotion_warnings, receipts = self._promote_eligible(
+            promotable, effective_config=live_cfg
+        )
         if next_cursor:
             self.state_store.advance_candidate_scan(context.lease_id, next_cursor)
         warnings = (
@@ -940,6 +1363,10 @@ def _candidate_repetition_ready(row, *, lesson_min_occurrences: int = 2, hot_min
         return False
     target = str(getattr(row, "promotion_target", "") or "").strip().lower()
     if target == "lesson":
+        from ..capability.skill_proposals import lesson_carrier
+
+        if lesson_carrier(row) == "skill":
+            return True
         explicit = str(getattr(row, "origin", "") or "") == "user_explicit" and bool(getattr(row, "source_message_refs", None))
         return explicit or (int(getattr(row, "occurrence_count", 0) or 0) >= max(2, int(lesson_min_occurrences or 2))
                             and len(_evidence_groups(row)) >= 2)
@@ -974,11 +1401,20 @@ class _CuratorPromotionMixin:
 
     # LLM: 读取失败必须以稳定诊断阻止成功收尾，未结执行原样透传；筛选与正式写入的权限边界保持不变。
     # 函数用途: 为积压晋升排序，不把候选账本损坏伪装成没有待办。
-    def _pending_promotable_candidate_ids(self, *, limit: int = 32, lease_id: str = "", scanned_at: str = "", cursor_out: dict | None = None) -> list[str]:
+    def _pending_promotable_candidate_ids(
+        self,
+        *,
+        limit: int = 32,
+        lease_id: str = "",
+        scanned_at: str = "",
+        cursor_out: dict | None = None,
+        effective_config: MemoryCuratorConfig | None = None,
+    ) -> list[str]:
         """已落库、待自主晋升或待门槛重试的候选 ID；读取失败显式报错。
 
         这里只筛结构与排队次序；真实来源、证据、目标版本和最终提交仍由PromotionService复核。
         """
+        live_cfg = effective_config or self._effective_config()
         try:
             scan = self.state_store.load().candidate_scan_cursor if lease_id else getattr(self, "_candidate_scan_cursor", {})
             pending = scan.get("pending", [])
@@ -990,8 +1426,8 @@ class _CuratorPromotionMixin:
                 rows = self.candidate_service.readonly_rows(statuses={"pending_review", "approved"}, limit=0)
                 references, next_scan, wrapped = {}, {}, True
             promo = getattr(self, "promotion_service", None) or getattr(self.promotion_callback, "__self__", None)
-            lesson_min = int(getattr(promo, "lesson_min_occurrences", getattr(self.config, "lesson_min_occurrences", 2)) or 2)
-            hot_min = int(getattr(promo, "hot_min_occurrences", getattr(self.config, "hot_min_occurrences", 3)) or 3)
+            lesson_min = int(getattr(promo, "lesson_min_occurrences", getattr(live_cfg, "lesson_min_occurrences", 2)) or 2)
+            hot_min = int(getattr(promo, "hot_min_occurrences", getattr(live_cfg, "hot_min_occurrences", 3)) or 3)
             eligible = [
                 row
                 for row in rows
@@ -1014,7 +1450,7 @@ class _CuratorPromotionMixin:
             eligible.sort(key=lambda row: (_queue_priority_tier(row), row.created_at, row.candidate_id))
             if limit > 0:
                 remaining = [references[row.candidate_id] for row in eligible[limit:]]
-                cursor = {"scan": next_scan, "pending": remaining, "active": self._promotion_backlog_enabled() and (bool(remaining) or not wrapped),
+                cursor = {"scan": next_scan, "pending": remaining, "active": self._promotion_backlog_enabled(effective_config=live_cfg) and (bool(remaining) or not wrapped),
                           "last_at": scanned_at or utc_now_iso()}
                 # 生产调用先尝试原晋升再发布；异常/退出时保留旧页，正式 CAS 负责幂等重验。
                 if cursor_out is not None:
@@ -1030,18 +1466,25 @@ class _CuratorPromotionMixin:
         except Exception as exc:
             raise CuratorInputError("CURATOR_CANDIDATE_READ_FAILED") from exc
 
-    def _promotion_backlog_enabled(self):
-        return self.config.auto_promotion_policy != "manual_only" and (
+    def _promotion_backlog_enabled(self, *, effective_config: MemoryCuratorConfig | None = None):
+        live_cfg = effective_config or self._effective_config()
+        return live_cfg.auto_promotion_policy != "manual_only" and (
             self.promotion_callback is not None or self._promotion_batch_callback is not None)
 
     # LLM: 晋升在同一租约内逐条重查排除；注入批量回调时按原序去重、以完整快照至多32条一批提交，绝不回退逐条执行；
     #   原短提交门的typed未知必须透传保欠账，不能变普通晋升警告。
     # 函数用途: 在显式批次上下文内晋升（批量优先，旧逐条回调兼容），成功后一次治理；未知执行原样透传并保留治理欠账。
-    def _promote_eligible(self, candidate_ids: list[str]) -> tuple[int, tuple[str, ...], tuple[dict, ...]]:
+    def _promote_eligible(
+        self,
+        candidate_ids: list[str],
+        *,
+        effective_config: MemoryCuratorConfig | None = None,
+    ) -> tuple[int, tuple[str, ...], tuple[dict, ...]]:
         from .promotion import promotion_batch
 
+        live_cfg = effective_config or self._effective_config()
         batch_callback = self._promotion_batch_callback
-        if self.config.auto_promotion_policy == "manual_only" or (
+        if live_cfg.auto_promotion_policy == "manual_only" or (
                 self.promotion_callback is None and batch_callback is None):
             return 0, (), ()
         promoted = 0
@@ -1190,12 +1633,13 @@ class _CuratorRunMixin:
         now: datetime | None = None,
         precollected_batch: _PrecollectedBatch | None = None,
     ) -> tuple[CuratorRunResult, int]:
-        if not self.config.enabled and not force:
+        live_cfg = self._effective_config()
+        if not live_cfg.enabled and not force:
             return self._result(status="disabled", reason=reason), 0
-        config_revision = self.config.revision()
+        config_revision = live_cfg.revision()
         try:
             acquired = self.committer.recover_and_acquire(CuratorLeaseRequest(
-                reason, config_revision, _lease_seconds(self.config), now,
+                reason, config_revision, _lease_seconds(live_cfg), now,
             ))
         except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
             raise
@@ -1207,11 +1651,12 @@ class _CuratorRunMixin:
         if acquired is None:
             return self._result(status="busy", reason=reason), 0
         context = _run_context(reason, *acquired)
-        if config_revision != self.config.revision():
+        if config_revision != self._effective_config().revision():
             from .curator_lease import release_curator_lease
 
             release_curator_lease(self.state_store, context.lease_id)
             return self._result(status="not_due", reason=reason), 0
+        context.route["_effective_config"] = live_cfg
         from .curator_lease import curator_lease_interruption_guard
 
         with curator_lease_interruption_guard(self.state_store, context.lease_id):
@@ -1227,8 +1672,9 @@ class _CuratorRunMixin:
             release_curator_lease,
         )
 
+        live_cfg = _context_config(self, context)
         try:
-            with curator_lease_heartbeat(self.state_store, context.lease_id, _lease_seconds(self.config)):
+            with curator_lease_heartbeat(self.state_store, context.lease_id, _lease_seconds(live_cfg)):
                 options = {"precollected_batch": precollected_batch} if precollected_batch is not None else {}
                 result = self._execute(context, **options)
             release_curator_lease(self.state_store, context.lease_id)
@@ -1298,8 +1744,9 @@ class _CuratorRunMixin:
     #   都必须按同一快照计算。会话头绑定必须包住整次提取（后台线程没有前台 ContextVar，bounded_call 会复制这里的值）。
     # 函数用途: 用指定后端提取一次并按同一输入快照校验。
     def _extract_with(self, backend: object, context: _RunContext, batch: CuratorInputBatch):
+        live_cfg = _context_config(self, context)
         with provider_session_scope((self.owner_id,), context.run_id):
-            attempt = extract_with_retries(backend, self.config, batch)
+            attempt = extract_with_retries(backend, live_cfg, batch)
         return attempt, validate_extraction(attempt.extraction, attempt.batch, owner_id=self.owner_id,
             tool_verifier=self.dependencies.tool_evidence_verifier)
 
@@ -1345,6 +1792,7 @@ class MemoryCuratorService(
         self.migration_service = dependencies.migration_service
         self.learning_exclusions = dependencies.learning_exclusions
         self.learning_exclusions_revision = dependencies.learning_exclusions_revision
+        self.config_provider = dependencies.config_provider
         self.committer = CuratorBatchCommitter(
             candidate_service=self.candidate_service,
             daily_store=self.daily_store,
@@ -1495,20 +1943,21 @@ class MemoryCuratorService(
     # LLM: 状态入口只暴露配置和持久健康，不返回提示词、模型响应、正式记忆、候选或用户正文。
     # 函数用途: 为 CLI/doctor 读取 Curator 当前配置与 state。
     def status(self) -> dict[str, object]:
+        live_cfg = self._effective_config()
         state = self.state_store.load()
         return {
-            "enabled": self.config.enabled,
+            "enabled": live_cfg.enabled,
             "provider": self.provider_name,
             "model": self.model_name,
             "config": {
-                "interval_seconds": self.config.interval_seconds,
-                "turn_threshold": self.config.turn_threshold,
-                "batch_message_limit": self.config.batch_message_limit,
-                "max_input_chars": self.config.max_input_chars,
-                "timeout_seconds": self.config.timeout_seconds,
-                "max_retries": self.config.max_retries,
-                "daily_finalize_hour": self.config.daily_finalize_hour,
-                "auto_promotion_policy": self.config.auto_promotion_policy,
+                "interval_seconds": live_cfg.interval_seconds,
+                "turn_threshold": live_cfg.turn_threshold,
+                "batch_message_limit": live_cfg.batch_message_limit,
+                "max_input_chars": live_cfg.max_input_chars,
+                "timeout_seconds": live_cfg.timeout_seconds,
+                "max_retries": live_cfg.max_retries,
+                "daily_finalize_hour": live_cfg.daily_finalize_hour,
+                "auto_promotion_policy": live_cfg.auto_promotion_policy,
             },
             "state": state.to_dict(),
         }
