@@ -264,7 +264,7 @@ def execute_subworkflow_step(
         configured_inputs = {}
     child_inputs = {**configured_inputs, **step.input_snapshot}
 
-    attempt_id = step.escalation_result.get('attempt_id') or getattr(step, 'attempt_count', 1)
+    attempt_id = step.escalation_result.get('attempt_id') or (getattr(step, 'attempt_count', None) or 1)
     idempotency_key = f"subworkflow:{run.workflow_run_id}:{step.step_id}:{attempt_id}"
     child_run_id = uuid.uuid5(uuid.NAMESPACE_URL, idempotency_key).hex
 

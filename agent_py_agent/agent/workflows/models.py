@@ -174,6 +174,14 @@ class StepDebugResult:
         return result
 
 
+# LLM: 只接受严格正整数；缺失、bool、float、字符串或非正值一律返回None，不替历史猜默认次数。
+# 函数用途: 从JSON恢复尝试次数时保留"未知"，避免把坏数据算成已知的一次。
+def _strict_positive_int(value):
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
+
+
 # LLM: 状态仅接受StepStatus；归档字段keyword-only且空时省略，旧账本与新步骤共用序列化。
 # 类用途: 记录一步的输入、输出、模型参与情况和恢复草案。
 @dataclass
@@ -200,8 +208,8 @@ class StepExecutionRecord:
     next_step_ids: tuple[str, ...] = field(default=(), kw_only=True)
     output_dir: str = field(default='', kw_only=True)
     output_artifacts: tuple[dict[str, Any], ...] = field(default=(), kw_only=True)
-    attempt_count: int = field(default=1, kw_only=True)
-    max_attempts: int = field(default=1, kw_only=True)
+    attempt_count: int | None = field(default=1, kw_only=True)
+    max_attempts: int | None = field(default=1, kw_only=True)
     subworkflow_run_id: str = field(default='', kw_only=True)
     watermark: dict[str, Any] | None = field(default=None, kw_only=True)
     effect_id: str = field(default='', kw_only=True)
@@ -221,8 +229,8 @@ class StepExecutionRecord:
         return cls(**{**raw, 'resolved_skill_ids': tuple(value.get('resolved_skill_ids', ())),
                       'next_step_ids': tuple(value.get('next_step_ids', ())),
                       'output_artifacts': tuple(value.get('output_artifacts', ())),
-                      'attempt_count': int(raw.get('attempt_count', 1)),
-                      'max_attempts': int(raw.get('max_attempts', 1)),
+                      'attempt_count': _strict_positive_int(raw.get('attempt_count')),
+                      'max_attempts': _strict_positive_int(raw.get('max_attempts')),
                       'subworkflow_run_id': str(raw.get('subworkflow_run_id', '')),
                       'watermark': raw.get('watermark'),
                       'effect_id': str(raw.get('effect_id', ''))})

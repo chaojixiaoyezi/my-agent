@@ -308,7 +308,7 @@ def execute_tool_step(
             return
 
     # 6. 生成确定性幂等身份
-    attempt_token = step.escalation_result.get("attempt_id") or str(getattr(step, "attempt_count", 1))
+    attempt_token = step.escalation_result.get("attempt_id") or str(getattr(step, "attempt_count", None) or 1)
     effect_id = f"workflow:{run.workflow_run_id}:{step.step_id}:{attempt_token}"
     logical_step_key = f"workflow-step:{run.workflow_run_id}:{step.step_id}"
 
