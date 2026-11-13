@@ -1,3 +1,15 @@
+## 2026-11-13 Skill 与记忆闭环 W10 Stage A（集成候选，W3/W9 待合入）
+
+基于集成提交 `4ba014210`（已含 W0/W1/W2/W4/W5/W6/W7/W8），隔离 `HOME`/`MY_AGENT_HOME`，逐文件独立进程运行：
+
+- 新增 `test_sm_w10_closed_loop.py` 5 项通过（约 17 秒）：275 条自学 Skill 在有界多轮维护中收敛到 50 条在役，已知使用、固定、活跃引用、用户改过、owner 手写与工作区 Skill 均保留，换出为最旧的 224 条确证从未使用条目，每轮状态变更不超过 128 条，换出不加黑名单并获得完整宽限起点，收敛后再完整跑一遍无新变更；容量收敛中途子进程在归档搬迁后硬退出，重启后有界轮次内前向收敛、无丢失无重复；5,000 个 owner 的语义指纹 memo 驻留不超过 `resident_owners` 配额，单个 owner 变化不影响其它 owner，同名同正文在两个 owner 下身份与回执键独立；零引用零 lesson 打开、按 ID 刷新不走 `all()`、`scope_pairs` 命中不重扫；互斥载体分类与 lesson 替代后旧 HOT 退役、旧正文保留。
+- 三份旧测试替身按 W7 合同补齐 `scope_pairs`/`read_ids`：`test_business_memory_scope_boundary.py` 4 项、`test_decision_recall.py` 47 项、`test_param_w1_memory_and_compact.py` 67 项通过。
+- 删除经全仓扫描无外部引用的 `test_skill_learning_confirmation.py`；`test_opt_cli_contracts.py` 220 项、`test_decision_cooldown_persistence.py` 5 项通过，CLI 144 条解析路径不变。
+- 改动的 Python 文件 Ruff、导入边界与 `git diff --check` 通过。
+- `scripts/verify_optimization_removal.py` 在 `4ba014210` 上因 `skill_usage_receipts.py` 顶层导入 `RuntimeRepository` 形成循环导入而无法装配 CLI（已由集成分支 `849e08778` 改为 `TYPE_CHECKING` 导入修复）；修复后剩余 5 项失败（`SURF-DEL-109/111/124/150/151`）在基线 `f6fea71a5` 上同样存在，不是本次回归。
+
+未运行全仓 pytest、真实模型、5,000 owner 真实流量或 365 天连续运行；W3/W9 的组合根全链路验收待其合入后由 Stage B 补充。
+
 ## 2026-11-12 验证证据失效与损坏租约
 
 需求输入版本或监控路径变更后，原测试事件保留为历史，并按失效时的事件编号边界排除旧证据。三个已验证范围均需当前同项目的通过记录，验收保存准确独立评审引用。28 项定向测试通过，覆盖旧库迁移、并发首次访问、重新验证恢复和显式未验证记录。

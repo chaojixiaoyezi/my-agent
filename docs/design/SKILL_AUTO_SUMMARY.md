@@ -1,6 +1,6 @@
 # 自学习 S3：自动总结 Skill
 
-状态：已合入 main 并双机部署（2026-09-26），隔离真实验收通过（过程与发现见 TESTS.md 顶部“自学习 S3”节）；`enable_self_learning` 仓库默认仍为 false。本文是自动总结 Skill 的唯一模块设计；`DESIGN_LEDGER.md` 只保留摘要和链接。
+状态：已合入 main 并双机部署（2026-09-26），隔离真实验收通过（过程与发现见 TESTS.md 顶部“自学习 S3”节）。2026-11-13 起 `enable_self_learning` 出厂默认 `true`、维护模式默认 `autonomous`，生命周期、上限、质量阶梯与载体规则以 [Skill 与记忆闭环](SKILL_MEMORY_CLOSED_LOOP.md) 为准（见第 20 节）。本文是自动总结 Skill 的模块设计；`DESIGN_LEDGER.md` 只保留摘要和链接。
 
 ## 1. 背景和用户决定
 
@@ -160,11 +160,13 @@ skip 时其余字段可为空。宿主只按 `decision` 这个枚举分流；`re
 
 | 键 | 默认 | 说明 |
 |----|------|------|
-| `enable_self_learning` | false | 总开关（原有），同时管 S1 自动确认和 S3 自动总结 |
+| `enable_self_learning` | true（2026-11-13 起；原为 false） | 总开关（原有），同时管自动总结与自治维护；关闭后自动写入停止，人工显式操作仍可用 |
 | `self_learning_min_tool_rounds` | 6 | 本轮工具轮数达到它才入队 |
 | `self_learning_daily_limit` | 20 | 每 owner 每日模型调用上限，0 不限 |
-| `self_learning_max_skills` | 50 | 自学 Skill 数量上限（只限新建），0 不限 |
+| `self_learning_max_skills` | 50 | 每 owner 在役机器托管 Skill 上限，满额按第 20 节换出，0 不限 |
 | `self_learning_timeout_seconds` | 180 | 单次总结调用超时 |
+
+维护、推荐、合并与生命周期相关键（`self_learning_maintenance_mode`、`self_learning_recommended_*`、`self_learning_merge_similarity_percent`、`self_learning_cool/archive/evict_seconds`、`self_learning_keep_versions`）见 [Skill 与记忆闭环](SKILL_MEMORY_CLOSED_LOOP.md#2-出厂默认值与配置)。
 
 YAML 写中文注释，AgentConfig 写默认值，整数走 `_TIMEOUT_INT_FIELDS` 规范化。
 
@@ -331,3 +333,15 @@ SkillsService只为准确registry归属、canonical路径和hash一致的自学�
 模型等待不持Gateway T；维护、额度保留、候选保存、失败重写及终账/删源在原短事务重核。实际来源未知保持同一异常对象，普通同码异常仍按原规则重试/降级。只给真实后台service入口加门，不能给原store/publisher加无条件request-only门而破坏当前C人工确认路径。单独C/writer来源不等于用户确认，不自动发布正式Skill。
 
 当前学习/F4相邻128项通过，非作者复核另记。正多进程无FIFO时自主维护来源发现仍在接线，不能把此组件验证说成该功能已完成；完整W/native/停止接手另验。
+
+
+## 20. 2026-11-13 闭环改造（集成候选）
+
+本节记录 [Skill 与记忆闭环](SKILL_MEMORY_CLOSED_LOOP.md) 对本文前述各节的覆盖关系，细节以该文为准：
+
+- 第 19 节“S3 只生成待确认候选、维护默认 observe、`self_learning_max_skills` 新默认 0、默认阈值 30/180 天”被用户锁定决定取代：出厂 `enable_self_learning=true`、`self_learning_maintenance_mode=autonomous`，自动总结经第 8 节闸门与来源/证据核验后直接发布，自动流程不再生成待确认提案；用户显式的确认/拒绝/回滚/删除命令保持兼容。
+- 上限改为每 owner 50 条在役机器托管 Skill，只计 `layout=learned`、hash 与登记一致、未交给用户的条目；满额时在同一配额/state 事务内按“确证从未使用 → 已冷藏 → 其它”换出最冷条目，被换出的进入归档并获得完整 15 天宽限。新条目与已有托管条目相似度 ≥70%（token Jaccard）时先给模型一次合并提示重试，仍为同族重复就拒绝。
+- 第 16 节的“试用 → 确立 → 降级”落地为 3/4/5 阶梯：使用按版本与任务精确去重（owner `runtime.db` metadata 回执），负面由主会话反馈、后台总结复核、包检查三通道自动归因且同一任务最多 1 击；第三击回滚到已证明有效的旧版本，没有就退役并阻止同名同族。
+- 闲置生命周期为 7 天冷藏、累计 15 天归档、归档后 15 天清除，各阶段 `0` 关闭；宽限期内可恢复。所有搬目录的转换先持久化 `pending_operation`，单点进程退出后前向恢复。
+- 第 11 节的 S1 子代理提案自动确认改为互斥载体：过程性候选进入本服务的学习队列，陈述性候选留在 lesson 路径，同一条经验不会两边各发一份。
+- 第 13 节“不做使用统计、自动合并或按闲置时长归档”的边界已解除，以上能力均沿原 registry、原后台车道与原 owner 配额实现，不新建并行学习库或常驻线程。

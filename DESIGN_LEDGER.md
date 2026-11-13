@@ -1,3 +1,9 @@
+## 2026-11-13 Skill 与记忆闭环（集成候选，W3/W9 待合入）
+
+按用户锁定决定（R-1..R-7 与 V2-1..V2-5）把自学习改为出厂开启、自治维护：`enable_self_learning=true`、`self_learning_maintenance_mode=autonomous`，用户可随时改回 `false`/`observe`，下一次操作生效。每 owner 最多 50 条在役机器托管 Skill，内置、共享、插件、工作区、owner 手写与用户改过的条目不计入、不被自动动；相似度 ≥70% 先合并且最多重试一次。负面反馈由主会话反馈、后台总结复核与包检查三通道自动归因，同一任务最多记 1 击；质量阶梯 3/4/5，第三击回滚到已证明版本或退役。闲置 7 天冷藏、15 天归档、归档后 15 天清除，宽限期内可恢复；lesson 归档永久保留。同一经验只走一个载体，反馈只在主会话可用，自动流程不弹人工确认，`AGENTS.md`/`SOUL.md` 仍须用户当场确认。
+
+精确去重回执写入 owner 既有 `runtime.db` 的 metadata 命名空间，登记表与读索引只是投影；所有搬目录的转换先持久化 `pending_operation` 再执行，单点进程退出后前向恢复。召回改为按引用读 lesson、按 ID 刷新长期记忆，不再整库读取。W0/W1/W2/W4/W5/W6/W7/W8 已在集成分支合入，W3（组合根 live 接线、后台总结通道）与 W9（`skill_feedback` 四动作、`self_map` 遥测）合入后补组合根全链路验收。详见 [Skill 与记忆闭环](docs/design/SKILL_MEMORY_CLOSED_LOOP.md)；本次新增的缺陷模式记入仓库根 `DEFECT_PATTERNS.md` 第四节。
+
 ## 2026-11-13 正式工作流文件的业务下载（测试候选）
 
 业务任务沿成功步骤的原归档清单取得稳定产物编号。读取端按原运行、尝试、任务、空间和版本核验后，复用业务产物的下载接口。自定义超长运行编号由原运行索引定位。见[工作流文件交付](docs/design/COMPOSABLE_WORKFLOW_SCRIPT_PLUGIN_BROKER.md#将脚本文件交付给业务任务)。
@@ -8577,7 +8583,7 @@ Compact补充片已获协作方归属确认，本地537项及独立审阅通过�
     - **待观察**：诊断上线后，下次再出现 "not strict JSON" 时先看 `truncated`、`stop_reason`，以及 `cause_pos` 和 `response_chars` 的关系。如果是截断，再考虑把截断当成模型调用失败，走现有缩批路径重试，用更小的批次换更短的输出。如果是空内容，考虑同输入重试一次。数据确认之前不改重试语义。
 
 - **自学习 S3：完成任务后自动总结 Skill，不要用户逐条审批**（2026-09-26，已合入 main 并双机部署，隔离真实验收通过：真实模型新建并更新了一个 Skill，验收中修了宿主会话绑定和“不记绕过拦截做法”两处；详见[自动总结 Skill 设计](docs/design/SKILL_AUTO_SUMMARY.md)与 TESTS 顶部）：
-  - **用户决定**：要有“完成任务后自动总结 Skill”的能力，且“别让用户审批，这个用户没时间审批”。所以用确定性的自动闸门代替人工确认，`AGENTS.md` 自学习约束同步改写；`enable_self_learning` 仍默认关闭。
+  - **用户决定**：要有“完成任务后自动总结 Skill”的能力，且“别让用户审批，这个用户没时间审批”。所以用确定性的自动闸门代替人工确认，`AGENTS.md` 自学习约束同步改写；`enable_self_learning` 当时仍默认关闭（2026-11-13 起默认开启并自治维护，见[Skill 与记忆闭环](docs/design/SKILL_MEMORY_CLOSED_LOOP.md)）。
   - **主链**：主代理任务按结构化判据完成（`conversation_task_completed`、非 task_local、非后台回合、`tool_rounds ≥ self_learning_min_tool_rounds`）时，收口写一条有界、脱敏请求到 `<owner_home>/data/skill_learning/requests/`。Gateway 后台记忆整理车道逐条处理：非阻塞运行锁、前台同端点让路、每日上限，复用 Curator 的 backend 做无工具结构化调用，输出 `create/update/skip`，经闸门后发布到 `<owner_home>/skills/learned/<name>/SKILL.md`，下一轮快照可见。
   - **闸门与所有权**：输出合同、与任何来源的 Skill 重名、删过的名字、数量上限、只更新本轮 `skill_search get` 读过且登记表 hash 与磁盘一致（用户没改过）的自学 Skill、发布前脱敏、frontmatter 往返、`agent_generated` guard。`registry.json` 是自学归属唯一权威，`ledger.jsonl` 只记结构化字段，版本全文可回滚；`my-agent skills learned list/show/revert/remove`，删过的名字不再自动新建。
   - **S1 调整**：自学习开启时，子代理 lesson 提案立即以 `confirmed_by=auto` 走原确认链安装，复核失败的保持待确认；S2 只对遗留待确认提案生效。
