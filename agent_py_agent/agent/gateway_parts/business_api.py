@@ -1328,7 +1328,7 @@ def _local_business_services(host):
                 'business_context_provider', 'workflow_engine_factory', 'workflow_agent_steps',
                 'business_approval_decider', 'business_v13_providers', 'business_v13_clock',
                 'business_space_reference_resolver', 'business_workflow_reference_reader',
-                'task_business_context', 'business_operation_store')))
+                'task_business_context', 'business_operation_store')), *workflow_port_source(host))
         cached = getattr(host, '_local_business_services_cache', None)
         if (cached is None or cached[0] != key or cached[2].host is not host
                 or any(previous is not current for previous, current in zip(cached[1], sources))):

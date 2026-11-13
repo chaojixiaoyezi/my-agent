@@ -302,20 +302,22 @@ class WorkflowsTool(BaseTool):
         return {key: value for key, value in params.items()
                 if key not in ('action', 'expected_revision', 'idempotency_key', 'concurrency_policy')}
 
-    def _authorized_execution_engine(self, *, definition=None, record=None):
+    def _execution_business_binding(self):
+        if callable(self.business_binding_provider):
+            return self.business_binding_provider()
+        if self.business_service is not None and callable(self.business_actor_provider):
+            return self.business_service, self.business_actor_provider()
+        raise PermissionError('WORKFLOW_BUSINESS_AUTHORIZATION_UNAVAILABLE')
+
+    def _authorized_execution_engine(self, *, definition=None, record=None, business_binding=None):
         """固定定义仍用原执行器，只从当前业务服务复用授权闭包，不重新挑选版本。"""
         from ..assets.workflow_store import BUSINESS_WORKFLOW_METADATA
-        required = bool(record.scope_snapshot or record.business_context) if record is not None else bool(
-            definition.descriptor.metadata.get(BUSINESS_WORKFLOW_METADATA))
+        required = business_binding is not None or (bool(record.scope_snapshot or record.business_context)
+            if record is not None else bool(definition.descriptor.metadata.get(BUSINESS_WORKFLOW_METADATA)))
         engine = self._execution_engine()
         if not required:
             return engine
-        if callable(self.business_binding_provider):
-            service, actor = self.business_binding_provider()
-        elif self.business_service is not None and callable(self.business_actor_provider):
-            service, actor = self.business_service, self.business_actor_provider()
-        else:
-            raise PermissionError('WORKFLOW_BUSINESS_AUTHORIZATION_UNAVAILABLE')
+        service, actor = business_binding if business_binding is not None else self._execution_business_binding()
         _owner(self.owner_home, service.store)
         authorize = service.execution_authorizer(actor)
         bound = copy.copy(engine)
@@ -329,6 +331,26 @@ class WorkflowsTool(BaseTool):
         invoke = getattr(engine, 'invoke_host_context', None)
         bound.run_authorizer = (lambda current, phase: invoke(lambda: check(current, phase))) if callable(invoke) else check
         return bound
+
+    def _raw_run_business_options(self, params, definition):
+        """已有任务只沿宿主冻结DTO；无DTO的显式选择复用业务服务原解析器。"""
+        from ..workflows.business_scope import workflow_state
+
+        current = self.run_params_provider() if callable(self.run_params_provider) else None
+        context = getattr(current, 'business_context', None)
+        requested = {key: params[key] for key in ('space_id', 'project_ref') if key in params}
+        if context is None and not requested:
+            return {}, None
+        binding = self._execution_business_binding()
+        service, actor = binding
+        import uuid
+        identity = uuid.uuid4().hex
+        context, origin = service.resolve_run_context(actor, requested, workflow_run_id=identity,
+            scope=workflow_state(definition)['scope'], inherited_context=context)
+        options = {'workflow_run_id': identity, 'business_context': context, 'owner_id': service.owner_id}
+        if origin is not None:
+            options['business_context_origin'] = origin
+        return options, binding
 
     def _business_engine(self, owner_home, *, run_authorizer, agent_steps):
         if Path(owner_home).absolute() != self.owner_home:
@@ -358,6 +380,11 @@ class WorkflowsTool(BaseTool):
             service, actor = self.business_service, self.business_actor_provider()
         _owner(self.owner_home, service.store)
         backend = copy.copy(service)
+        current = self.run_params_provider() if callable(self.run_params_provider) else None
+        frozen_context = getattr(current, 'business_context', None)
+        if params['action'] == 'workflows.run' and frozen_context is not None:
+            # qualified模型入口也继承原任务；仅本次服务副本绑定DTO，原HTTP调用方/provider不受影响。
+            backend._inherited_run_context = frozen_context
         factory = backend.engine_factory or self._business_engine
         admissions = []
 
@@ -545,8 +572,10 @@ class WorkflowsTool(BaseTool):
             return self._preview(definition, params.get('inputs', {}))
         if action == 'run':
             version = getattr(self, '_pinned_definition_version', params.get('version'))
-            options = {'definition_version': version} if version is not None else {}
-            return _plain(self._authorized_execution_engine(definition=definition).run_workflow(_plain(definition), params.get('inputs', {}),
+            options, binding = self._raw_run_business_options(params, definition)
+            if version is not None:
+                options['definition_version'] = version
+            return _plain(self._authorized_execution_engine(definition=definition, business_binding=binding).run_workflow(_plain(definition), params.get('inputs', {}),
                           concurrency_policy=params.get('concurrency_policy', 'allow'), **options))
         raise ValueError('未知工作流action')
 

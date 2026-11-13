@@ -679,6 +679,30 @@ class WorkflowScopeService:
     # LLM: 运行身份由Owner+幂等键派生，同键重放非阻塞读取原运行快照与持久准入回执，不争抢执行锁或再次准入；
     #   仍在排队的原运行按admission.json如实返回202 accepted，进入执行或终态后按原运行真实状态返回。
     # 函数用途: 以冻结上下文和范围启动一次原生工作流运行，或如实回放同键原运行回执。
+    def resolve_run_context(self, actor, request, *, workflow_run_id, scope, inherited_context=None):
+        """原入口共用的宿主上下文解析；继承已有任务时绝不重新选择或签发任务身份。"""
+        context, origin = inherited_context, None
+        if context is None:
+            if isinstance(self.context_provider, WorkflowRunContextFactory):
+                context = self.context_provider(actor, request, workflow_run_id=workflow_run_id, scope=scope)
+                if context is not None:
+                    origin = 'workflow_run'
+                    if not isinstance(context, BusinessExecutionContext) or context.task_id != workflow_run_id:
+                        raise PermissionError('WORKFLOW_CONTEXT_MISMATCH')
+            elif self.context_provider is not None:
+                context = self.context_provider(actor, request)
+                if not isinstance(context, BusinessExecutionContext):
+                    raise PermissionError('WORKFLOW_CONTEXT_MISMATCH')
+        if context is not None:
+            if not isinstance(context, BusinessExecutionContext) or context.owner_id != self.owner_id:
+                raise PermissionError('WORKFLOW_CONTEXT_MISMATCH')
+            if any(getattr(context, key) != request[key] for key in ('space_id', 'project_ref') if key in request):
+                raise PermissionError('WORKFLOW_CONTEXT_MISMATCH')
+        if scope.get('scope_mode') == 'spaces' and context is None:
+            raise PermissionError('BUSINESS_CONTEXT_UNAVAILABLE')
+        self._check_scope(scope, context.space_id if context else request.get('space_id'))
+        return context, origin
+
     def _run(self, request, actor, key):
         if not isinstance(key, str) or not 0 < len(key.encode()) <= 256:
             raise ValueError('IDEMPOTENCY_KEY_REQUIRED')
@@ -700,6 +724,10 @@ class WorkflowScopeService:
             saved = _decode_run(raw_run)
             if saved.owner_id != self.owner_id:
                 raise PermissionError('WORKFLOW_OWNER_MISMATCH')
+            inherited = getattr(self, '_inherited_run_context', None)
+            if inherited is not None and (not isinstance(inherited, BusinessExecutionContext)
+                    or saved.business_context != inherited.to_dict()):
+                raise PermissionError('WORKFLOW_CONTEXT_MISMATCH')
             if (raw_run.get('workflow_snapshot') or {}).get('_operation_intent') != intent:
                 raise BusinessError('IDEMPOTENCY_CONFLICT')
             # 原终态已发表而计时写回失败时，同键命令只补发计时，不重跑已确认步骤。
@@ -713,24 +741,8 @@ class WorkflowScopeService:
                     from ..plugin_host.contracts import DomainResult
                     return DomainResult(202, {'workflow_run_id': identity, 'operation_id': identity, 'state': 'accepted'})
             return {'workflow_run_id': identity, 'operation_id': identity, 'state': self._receipt_state(saved)}
-        context, origin = None, None
-        if isinstance(self.context_provider, WorkflowRunContextFactory):
-            # 显式签名：工厂拿准确运行身份与冻结范围；Owner级运行未请求空间/项目时不冻结业务上下文。
-            context = self.context_provider(actor, request, workflow_run_id=identity, scope=state['scope'])
-            if context is not None:
-                origin = 'workflow_run'
-                if not isinstance(context, BusinessExecutionContext) or context.task_id != identity:
-                    raise PermissionError('WORKFLOW_CONTEXT_MISMATCH')
-        elif self.context_provider is not None:
-            context = self.context_provider(actor, request)
-            if not isinstance(context, BusinessExecutionContext):
-                raise PermissionError('WORKFLOW_CONTEXT_MISMATCH')
-        if context is not None and (context.owner_id != self.owner_id
-                                    or request.get('space_id') and context.space_id != request['space_id']):
-            raise PermissionError('WORKFLOW_CONTEXT_MISMATCH')
-        if state['scope']['scope_mode'] == 'spaces' and context is None:
-            raise PermissionError('BUSINESS_CONTEXT_UNAVAILABLE')
-        self._check_scope(state['scope'], context.space_id if context else request.get('space_id'))
+        context, origin = self.resolve_run_context(actor, request, workflow_run_id=identity, scope=state['scope'],
+            inherited_context=getattr(self, '_inherited_run_context', None))
         record = engine.run_workflow(definition.to_dict(), request.get('inputs', {}), owner_id=self.owner_id,
             business_context=context, scope_snapshot=state['scope'], workflow_run_id=identity, operation_intent=intent,
             **({'business_context_origin': origin} if origin else {}))
