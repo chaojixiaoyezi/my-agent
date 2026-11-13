@@ -479,6 +479,8 @@ def test_manage_handoff_board_tool_scoped_gate_and_actions(
     assert pub_res.ok
     assert pub_res.result_envelope["item"]["state"] == "published"
 
+    # 收件人本人确认和提交，协调者不代签。
+    agent._current_run_params = SimpleNamespace(run_id="worker-tool")
     # 3. 动作：record_ack
     ack_res = tool.execute_scoped({
         "action": "record_ack",
@@ -496,10 +498,12 @@ def test_manage_handoff_board_tool_scoped_gate_and_actions(
         "case_id": case_id,
         "item_id": "item-tool-1",
         "evidence_ids": ["ev-tool-100"],
+        "frozen_input_version": "v4.0.0",
     }, proven_ctx)
     assert sub_res.ok
     assert sub_res.result_envelope["item"]["state"] == "submitted"
 
+    agent._current_run_params = SimpleNamespace(run_id="run-proven-001")
     # 5. 动作：decide_acceptance
     dec_res = tool.execute_scoped({
         "action": "decide_acceptance",
@@ -630,6 +634,7 @@ def test_tool_error_handling_and_input_validation(
     assert res_overlap.reported_error_code == "HANDOFF_WRITESET_OVERLAP"
     assert res_overlap.effect_outcome == "not_started"
 
+    agent._current_run_params = SimpleNamespace(run_id="act1")
     # 5. record_ack 版本不匹配
     res_ack_mismatch = tool.execute_scoped({
         "action": "record_ack",
@@ -646,6 +651,7 @@ def test_tool_error_handling_and_input_validation(
         "case_id": case_id,
         "item_id": "item-overlap-1",
         "evidence_ids": ["ev-1"],
+        "frozen_input_version": "v1",
     }, ctx)
     assert not res_early_sub.ok
     assert res_early_sub.reported_error_code == "INVALID_STATE_TRANSITION"

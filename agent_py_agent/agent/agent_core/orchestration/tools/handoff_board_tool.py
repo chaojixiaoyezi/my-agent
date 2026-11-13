@@ -26,6 +26,7 @@ from ....collaboration.handoff_board import (
     HandoffWriteSetOverlapError,
     IdempotencyConflictError,
     InvalidStateTransitionError,
+    compute_payload_digest,
 )
 from ....collaboration.store import CollaborationStore
 from ....runtime_context import current_subagent_run_id
@@ -94,7 +95,7 @@ def build_manage_handoff_board_model_spec() -> ToolModelSpec:
                     "enum": ["internal_run", "external_assistant"],
                     "description": "代理类型",
                 },
-                "frozen_input_version": {"type": "string", "description": "冻结输入版本"},
+                "frozen_input_version": {"type": "string", "description": "冻结输入版本；确认接收与提交均须显式携带已读取的原版本"},
                 "exclusive_write_set": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -223,7 +224,57 @@ class ManageHandoffBoardTool(BaseTool):
     ) -> ToolHandlerOutcome:
         if not _scoped_requester_proven(self.agent, context):
             return _unproven_requester_failure()
-        return self.execute(params)
+        action = str(params.get("action") or "").strip().lower()
+        principal, _ = authoritative_self_principal(self.agent)
+        actor = str(principal.run_id or "").strip()
+        scope_warnings: list[str] = []
+        if action in {"decide_acceptance", "release", "block", "open_case"}:
+            # 协调者也只能代表自己的裁决；不能用模型给出的名字绕过独立审查。
+            field = "created_by" if action == "open_case" else "reviewer_principal"
+            if params.get(field) and params[field] != actor:
+                scope_warnings.append(f"{field} '{params[field]}' overridden by authoritative run_id '{actor}'")
+            params = {**params, field: actor}
+        if (action in {"claim", "record_ack", "complete", "submit_handoff"}
+                and params.get("case_id") and params.get("item_id")):
+            service = self._resolve_service()
+            if service is not None:
+                item = service.store.load_handoff_item(
+                    str(params.get("case_id") or "").strip(), str(params.get("item_id") or "").strip())
+                if item is not None:
+                    if item.actor_kind != "internal_run" or actor != item.responsible_actor:
+                        return self._failure(
+                            "只有交接项的原生责任人可确认接收或提交；管理者可派发和观察，外部助手须走原邮箱回执。",
+                            "TOOL_PERMISSION_DENIED",
+                            details={"reason": "HANDOFF_RECIPIENT_MISMATCH", "requester": actor,
+                                     "responsible_actor": item.responsible_actor})
+                    version = str(params.get("frozen_input_version") or "").strip()
+                    if not version or version != item.frozen_input_version:
+                        return self._failure(
+                            "确认和提交必须显式携带收件人实际读取的原冻结版本，不可自动采用当前版本。",
+                            "FROZEN_INPUT_VERSION_MISMATCH", details={"reason": "FROZEN_INPUT_VERSION_MISMATCH"})
+                    # 回执身份只来自宿主；模型提供的任意嵌套字段不能代表另一个执行者。
+                    params = dict(params)
+                    key = "recipient_ack" if action in {"claim", "record_ack"} else "submission_payload"
+                    payload = params.get(key)
+                    if isinstance(payload, dict) and payload.get("actor_id") and payload["actor_id"] != actor:
+                        scope_warnings.append(f"{key}.actor_id overridden by authoritative run_id '{actor}'")
+                    raw = payload if isinstance(payload, dict) else ({"status": "claimed"} if key == "recipient_ack" else {})
+                    digest_key = "ack_digest" if key == "recipient_ack" else "submission_digest"
+                    digest_payload = raw if key == "recipient_ack" else {
+                        "evidence_ids": sorted(str(value) for value in params.get("evidence_ids") or ()), "payload": raw}
+                    if item.metadata.get(digest_key) == compute_payload_digest(digest_payload):
+                        # 旧回执按原载荷去重，不补造历史身份或因新增身份字段重复提交。
+                        params[key] = raw
+                        scope_warnings.append("existing_receipt_reused_without_historical_identity_claim")
+                    else:
+                        params[key] = {**raw, "actor_id": actor, "frozen_input_version": version}
+        outcome = self.execute(params)
+        if scope_warnings:
+            payload = json.loads(outcome.output)
+            payload["scope_warnings"] = scope_warnings
+            outcome.output = json.dumps(payload, ensure_ascii=False, indent=2)
+            outcome.result_envelope = {**outcome.result_envelope, "scope_warnings": scope_warnings}
+        return outcome
 
     # LLM: 解析操作并分发至各具体动作，统一包装结构化结果或失败原因。
     # 函数用途: 执行交接板具体动作指令。

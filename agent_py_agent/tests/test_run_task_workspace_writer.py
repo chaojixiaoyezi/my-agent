@@ -754,6 +754,9 @@ def test_runtime_cwd_prompt_does_not_scan_old_child_outputs(tmp_path, monkeypatc
 
 @pytest.mark.parametrize('business_task', [False, True])
 def test_only_bound_business_task_exposes_existing_delivery_directory(tmp_path, business_task):
+    import json
+    from pathlib import Path
+
     from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
         attach_run_task_workspace_context,
     )
@@ -765,18 +768,35 @@ def test_only_bound_business_task_exposes_existing_delivery_directory(tmp_path, 
     agent = SimpleAgent(AgentConfig(model_backend='echo', my_agent_home=str(tmp_path / 'home')), tmp_path / 'work')
     owner = agent.home_paths.owner_id
     params = RunParams(request_id='delivery-guidance', run_id='delivery-guidance', task_id='delivery-guidance',
-        source='gateway', business_context=(BusinessExecutionContext(owner, 'space-a', None,
+        source='gateway', delivery_contract=({'artifacts': [], 'reply': {'format': 'plain'}} if business_task else None),
+        business_context=(BusinessExecutionContext(owner, 'space-a', None,
             'delivery-guidance', 1, None, (), (), 'business-context.v1') if business_task else None),
         task_attributes={'conversation_thread_id': 'thread-a', 'conversation_task_id': 'delivery-guidance',
                          'conversation_execution_cwd': str(tmp_path / 'work')})
     updated = attach_run_task_workspace_context(agent, params, '创建交付文件')
     prompt = '\n'.join(updated.inject)
-    output = updated.task_attributes['run_workspace']['output_dir']
+    output = (updated.delivery_contract['task_workspace']['output_dir']
+              if updated.delivery_contract else None)
     assert (f'本任务已声明交付目录: {output}' in prompt) is business_task
     assert f'cwd: {tmp_path / "work"}' in prompt
     assert updated.task_attributes['conversation_execution_cwd'] == str(tmp_path / 'work')
     if business_task:
         assert '不会自动成为已登记交付物' in prompt
+        assert '/tasks/' in output and '/runs/' not in output
+        assert updated.delivery_contract['artifacts'] == []
+        assert updated.delivery_contract['reply'] == {'format': 'plain'}
+        from agent_py_agent.tests.test_tool_gateway_contract import _execute, _registry
+        registry = _registry(agent.home_paths.owner_home_dir)
+        written = _execute(registry, 'write_file', {'path': str(Path(output) / 'result.json'), 'content': '{"total":4200}'},
+            write_boundary={'allowed_write_roots': [str(agent.home_paths.owner_home_dir)],
+                            'forbidden_write_roots': [str(agent.home_paths.owner_home_dir / 'runs')]})
+        assert written.ok, written.output
+        agent.config.workspace_task_path_template = 'tasks/changed/{task_slug}'
+        retried = attach_run_task_workspace_context(agent, params, '创建交付文件')
+        assert retried.delivery_contract['task_workspace']['output_dir'] == output
+        frozen = json.loads((Path(
+            updated.task_attributes['run_workspace']['task_root']) / 'work/run_workspace.json').read_text())
+        assert frozen['delivery_contract']['task_workspace']['output_dir'] == output
 
 
 def test_delivery_collection_keeps_unregistered_and_working_files_out(tmp_path):
@@ -795,8 +815,26 @@ def test_delivery_collection_keeps_unregistered_and_working_files_out(tmp_path):
         run_id='run-a', task_id='task-a', created_by_tool='write_file')).to_dict()
     other = register_artifact(ArtifactRegistration(workspace_root=tmp_path, path=working,
         run_id='run-a', task_id='task-a', created_by_tool='write_file')).to_dict()
-    ctx = SimpleNamespace(task_attributes={'run_workspace': {'output_dir': str(output)}},
+    ctx = SimpleNamespace(task_attributes={'run_workspace': {'output_dir': str(tmp_path / 'runs/output'),
+                                                               }},
+                          delivery_contract={'task_workspace': {'output_dir': str(output)}},
                           archive_tool_calls=[{'artifact_registry_refs': [ready, other]}])
     assert [row['path'] for row in _structured_delivery_artifacts(ctx)] == [str(deliverable)]
     ctx.archive_tool_calls = [{'tool': 'run_command', 'output': str(deliverable)}]
     assert _structured_delivery_artifacts(ctx) == []
+
+
+@pytest.mark.parametrize('bad', [None, False, 7, {}, [], [''], ''])
+def test_delivery_contract_bad_optional_paths_do_not_crash_finalization(bad):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core._finalization_service import _declared_delivery_targets
+    from agent_py_agent.agent.agent_core.run_task_workspace_writer import (
+        _business_delivery_output_dir,
+    )
+
+    contract = {'task_workspace': {'output_dir': bad},
+                'artifacts': [{'allowed_output_roots': bad, 'path': bad}]}
+    assert _business_delivery_output_dir(SimpleNamespace(business_context=object()), contract) is None
+    assert _declared_delivery_targets({}, contract) == ((), frozenset())
+    assert _declared_delivery_targets({}, {'artifacts': bad}) == ((), frozenset())

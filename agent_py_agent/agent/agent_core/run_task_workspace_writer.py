@@ -590,23 +590,59 @@ def attach_run_task_workspace_context(agent, params, user_prompt: str):
         return params
     result = _ensure_workspace_for_run(agent, params, user_prompt)
     primary_workspace_root = _primary_workspace_root(agent, params)
+    frozen_contract = result.delivery_contract or getattr(params, "delivery_contract", None)
+    delivery_output_dir = _business_delivery_output_dir(params, frozen_contract)
     injection = _workspace_prompt_section(
         primary_workspace_root=primary_workspace_root,
         # R7c 实锤(单次 run"请示退出"形态):cli_run 是一次性非交互运行,中途请示
         # 无人应答——这个环境事实必须告知模型;gateway 有 guidance 补发渠道、chat
         # 可多轮,不注入。
         single_shot=str(getattr(params, "source", "") or "").strip() == "cli_run",
-        delivery_output_dir=(result.output_dir if getattr(params, "business_context", None) is not None else None),
+        delivery_output_dir=delivery_output_dir,
     )
     next_inject = _append_once(list(getattr(params, "inject", None) or []), injection)
     next_attrs = _task_attributes_with_workspace(getattr(params, "task_attributes", None), result)
     next_contract = _delivery_contract_with_workspace(
-        getattr(params, "delivery_contract", None),
+        frozen_contract,
         result,
         primary_workspace_root=primary_workspace_root,
     )
     agent._current_run_task_workspace = str(result.root)
     return replace(params, inject=next_inject, task_attributes=next_attrs, delivery_contract=next_contract)
+
+
+def _business_delivery_output_dir(params, contract) -> Path | None:
+    if getattr(params, "business_context", None) is None or not isinstance(contract, dict):
+        return None
+    workspace = contract.get("task_workspace")
+    output = workspace.get("output_dir") if isinstance(workspace, dict) else None
+    if isinstance(output, str) and output.strip():
+        return Path(output.strip())
+    artifacts = contract.get("artifacts")
+    for artifact in artifacts if isinstance(artifacts, (list, tuple)) else ():
+        roots = artifact.get("allowed_output_roots") if isinstance(artifact, dict) else None
+        for root in roots if isinstance(roots, (list, tuple)) else ():
+            if isinstance(root, str) and root.strip():
+                return Path(root.strip())
+    return None
+
+
+def _business_delivery_contract(agent, params):
+    context = getattr(params, "business_context", None)
+    if context is None:
+        return None
+    contract = getattr(params, "delivery_contract", None)
+    if isinstance(contract, dict) and contract.get("artifacts"):
+        return dict(contract)
+    from ..user_space.home_layout import task_workspace_path
+
+    output = task_workspace_path(agent.home_paths.owner_home_dir, agent.config.workspace_task_path_template,
+        date=_now_iso()[:10], task_name=context.task_id).resolve(strict=False) / "output"
+    result = dict(contract) if isinstance(contract, dict) else {"schema_version": "delivery_contract.v1"}
+    workspace = dict(result.get("task_workspace") or {})
+    workspace.setdefault("output_dir", str(output))
+    result["task_workspace"] = workspace
+    return result
 
 
 def _should_create_workspace(agent, params) -> bool:
@@ -698,6 +734,7 @@ def _run_workspace_request(agent, params, user_prompt: str) -> EnsureRunWorkspac
         owner_id=str(getattr(home_paths, "owner_id", "") or ""),
         owner_home=str(owner_home or ""),
         source=str(getattr(params, "source", "") or "run"),
+        delivery_contract=_business_delivery_contract(agent, params),
     )
 
 
@@ -849,7 +886,7 @@ def _workspace_prompt_section(
         # 业务任务已有宿主交付目录；告知位置但不把运行归档改成 cwd，也不把工作文件自动当作交付。
         lines.extend([
             f"- 本任务已声明交付目录: {delivery_output_dir}（不改变 cwd 或写入权限）",
-            "- 新的最终交付文件放在该目录，并使用能返回结构化文件回执的文件工具写入。"
+            "- 若任务需要新的最终交付文件，放在该目录，并使用能返回结构化文件回执的文件工具写入。"
             "仅由 shell 写出的普通工作文件、或在答复中提到的路径，不会自动成为已登记交付物。",
         ])
     if single_shot:
@@ -892,11 +929,13 @@ def _delivery_contract_with_workspace(contract: object, paths, *, primary_worksp
     if not isinstance(contract, dict):
         return contract
     result = dict(contract)
-    task_workspace = {
+    existing = result.get("task_workspace")
+    task_workspace = dict(existing) if isinstance(existing, dict) else {}
+    task_workspace.update({
         "task_root": str(paths.root),
-        "output_dir": str(paths.output_dir),
+        "output_dir": str(task_workspace.get("output_dir") or paths.output_dir),
         "work_dir": str(paths.work_dir),
-    }
+    })
     if primary_workspace_root is not None:
         task_workspace["source_workspace_root"] = str(primary_workspace_root)
         task_workspace["relative_input_root"] = str(primary_workspace_root)

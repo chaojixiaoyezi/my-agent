@@ -22,6 +22,62 @@ from ..assets.workflow_store import (
 from ..conversation.business_access import BusinessError
 from ..conversation.business_contracts import BusinessExecutionContext, WorkflowScope
 
+
+def _public_step_effect(step):
+    facts = step.escalation_result
+    receipt = facts.get('tool_receipt')
+    if isinstance(receipt, dict):
+        effect = receipt.get('effect_outcome')
+        if effect in {'none', 'not_started', 'committed', 'unknown', 'running'}:
+            return effect
+        if effect == 'confirmed' and receipt.get('status') == 'succeeded':
+            result = receipt.get('output_summary', {})
+            metadata = result.get('metadata', {}) if isinstance(result, dict) else {}
+            decision = metadata.get('action_decision', {}) if isinstance(metadata, dict) else {}
+            resolved = decision.get('resolved_effect') if isinstance(decision, dict) else None
+            if resolved == 'read_only':
+                return 'none'
+            if resolved in {'mutating', 'dangerous'}:
+                return 'committed'
+        return 'unknown'
+    isolation = facts.get('analysis_isolation')
+    if (isinstance(isolation, dict) and isolation.get('effect_outcome') == 'not_started'
+            and step.error_code == 'WORKFLOW_ISOLATION_UNAVAILABLE'
+            and step.mode == 'llm_skill_analysis' and not step.llm_involved
+            and not step.output_artifacts):
+        return 'not_started'
+    if facts.get('effect_started'):
+        return 'unknown'
+    if step.status in {'pending', 'skipped'}:
+        return 'not_started'
+    if step.mode == 'condition' and step.status == 'succeeded':
+        return 'none'
+    return 'unknown'
+
+
+def _public_run_effect(record):
+    """失败只描述状态；副作用汇总全部步骤的原回执，未知写优先，不能被末步拒绝擦除。"""
+    if record.effect_outcome != 'failed':
+        return {'confirmed': 'committed'}.get(record.effect_outcome, record.effect_outcome)
+    effects = [_public_step_effect(step) for step in record.steps]
+    if not effects or any(effect in {'unknown', 'running'} for effect in effects):
+        return 'unknown'
+    if 'committed' in effects:
+        return 'committed'
+    return 'none' if 'none' in effects else 'not_started'
+
+
+def _public_step_error_details(step):
+    from ..common.log_redaction import redact_sensitive_value
+    # 此诊断由原preflight构造；不把任意输出正文当成权限、原因或副作用事实。
+    facts = step.escalation_result.get('analysis_isolation')
+    if not isinstance(facts, dict):
+        return []
+    keys = ('requested', 'available_mode', 'reason', 'effect_outcome', 'next_action', 'retry_same_configuration')
+    return [{'key': key, 'value': redact_sensitive_value(facts[key])} for key in keys
+            if key in facts and (facts[key] is None or type(facts[key]) in (str, bool, int, float))]
+
+
 # 原领域入口的参数边界；原生工具只适配此入口，W13 目录仍负责完整公开 schema。
 WORKFLOW_ACTION_FIELDS = {
     'workflows.create': (('definition',), ('scope',)),
@@ -698,7 +754,7 @@ class WorkflowScopeService:
             'space_id': record.business_context.get('space_id'),
             'status': record.status, 'execution_definition_ref': record.execution_definition_ref,
             'scope_revision': record.scope_revision, 'phase': record.phase,
-            'effect_outcome': {'confirmed': 'committed', 'failed': 'unknown'}.get(record.effect_outcome, record.effect_outcome),
+            'effect_outcome': _public_run_effect(record),
             'confirmed_step_refs': list(record.confirmed_step_refs), 'revision': record.revision}
 
     # LLM: 运行读写都先核原Owner与当前授权；续跑/取消前置只读快照不争抢活回调的执行锁，同键不同意图与已取消续跑
@@ -729,7 +785,8 @@ class WorkflowScopeService:
             return {'run': self._run_view(record), 'steps': [{'step_id': step.step_id, 'mode': step.mode,
                 'status': step.status, 'assignment_ref': step.escalation_result.get('assignment_ref'),
                 'run_id': step.escalation_result.get('run_id'), 'result_ref': step.escalation_result.get('result_ref'),
-                'error': {'code': step.error_code, 'message': step.error_message, 'retryable': False, 'details': []}
+                'error': {'code': step.error_code, 'message': step.error_message, 'retryable': False,
+                          'details': _public_step_error_details(step)}
                          if step.error_code else None} for step in record.steps],
                 'assignments': [], 'review_refs': list(dict.fromkeys(ref for step in record.steps
                     for ref in step.escalation_result.get('review_refs', ()))),

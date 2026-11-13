@@ -368,3 +368,4 @@ def test_business_delivery_directory_reaches_native_model_request(scoped_gateway
         assert '本任务已声明交付目录:' in prompts[0]
     finally:
         _finish(case)
+    assert case.store.session_tasks.require(case.task_id).status == 'done'

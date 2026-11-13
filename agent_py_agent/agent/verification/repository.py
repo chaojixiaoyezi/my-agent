@@ -682,13 +682,14 @@ class VerificationEvidenceRepository:
                 unique_ids = list(set(int_event_ids))
                 placeholders = ",".join("?" for _ in unique_ids)
                 event_rows = conn.execute(
-                    f"SELECT id, scope, status FROM verification_events WHERE owner_ref = ? AND id IN ({placeholders})",
+                    f"SELECT id, root, scope, status FROM verification_events WHERE owner_ref = ? AND id IN ({placeholders})",
                     (context.owner_ref, *unique_ids),
                 ).fetchall()
                 if len(event_rows) != len(unique_ids):
                     raise ObservationScopeHonestyError(
                         "UNKNOWN_VERIFICATION_EVENT_ID: all linked verification_event_ids must exist for this owner"
                     )
+                _require_matching_verification_roots(event_rows, req_row["root"])
                 if not all(er["status"] == "passed" for er in event_rows):
                     raise ObservationScopeHonestyError(
                         "FAILED_VERIFICATION_EVENT_LINKED: cannot promote observation_scope using failed verification events"
@@ -702,9 +703,10 @@ class VerificationEvidenceRepository:
                     unique_ids = list(set(int_event_ids))
                     placeholders = ",".join("?" for _ in unique_ids)
                     event_rows = conn.execute(
-                        f"SELECT id, scope, status FROM verification_events WHERE owner_ref = ? AND id IN ({placeholders})",
+                        f"SELECT id, root, scope, status FROM verification_events WHERE owner_ref = ? AND id IN ({placeholders})",
                         (context.owner_ref, *unique_ids),
                     ).fetchall()
+                    _require_matching_verification_roots(event_rows, req_row["root"])
                     for er in event_rows:
                         if er["scope"] == "full" and er["status"] == "passed":
                             has_integrated = True
@@ -1121,6 +1123,16 @@ def _row_to_acceptance_record(row: sqlite3.Row) -> AcceptanceRecord:
         created_at=row["created_at"],
         owner_ref=row["owner_ref"],
     )
+
+
+def _require_matching_verification_roots(rows, requirement_root: str) -> None:
+    """同 owner 不等于同项目；测试回执必须属于需求所绑定的规范根。"""
+    expected = Path(requirement_root).expanduser().resolve(strict=False)
+    for row in rows:
+        if not row["root"] or Path(row["root"]).expanduser().resolve(strict=False) != expected:
+            raise ObservationScopeHonestyError(
+                f"VERIFICATION_ROOT_MISMATCH: evidence {row['id']} belongs to another project root"
+            )
 
 
 __all__ = ["VerificationContext", "VerificationEvidence", "VerificationEvidenceRepository"]

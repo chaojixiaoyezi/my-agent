@@ -146,13 +146,14 @@ def test_requirement_provenance_tool_lifecycle(tmp_path: Path) -> None:
     assert link_res.error_code == ""
     assert link_res.result_envelope == {}
 
+    agent._current_run_params = SimpleNamespace(run_id="reviewer-alice")
     # 2.3 record_independent_review
     rev_res = tool.execute_scoped(
         {
             "action": "record_independent_review",
             "requirement_id": "REQ-W1-001",
             "reviewer_principal_id": "reviewer-alice",
-            "author_principal_id": "author-bob",
+            "author_principal_id": "run-prov-001",
             "reviewed_input_version": "v1.0.0",
             "review_verdict": "pass",
             "review_scope": "integration_verification",
@@ -168,7 +169,7 @@ def test_requirement_provenance_tool_lifecycle(tmp_path: Path) -> None:
         {
             "action": "record_acceptance",
             "requirement_id": "REQ-W1-001",
-            "accepted_by_principal_id": "run-prov-001",
+            "accepted_by_principal_id": "reviewer-alice",
             "accepted_input_version": "v1.0.0",
             "acceptance_verdict": "accepted",
         },
@@ -351,11 +352,13 @@ def test_handoff_board_tool_lifecycle_and_zero_lock_files(tmp_path: Path) -> Non
     assert pub_res.ok is True
     assert pub_res.result_envelope["item"]["state"] == "published"
 
+    agent._current_run_params = SimpleNamespace(run_id="worker-w1")
     claim_res = tool.execute_scoped(
         {
             "action": "claim",
             "case_id": case_id,
             "item_id": "item-pipe-1",
+            "frozen_input_version": "v1.0.0",
             "recipient_ack": {"status": "claimed"},
         },
         proven_ctx,
@@ -368,6 +371,7 @@ def test_handoff_board_tool_lifecycle_and_zero_lock_files(tmp_path: Path) -> Non
             "action": "complete",
             "case_id": case_id,
             "item_id": "item-pipe-1",
+            "frozen_input_version": "v1.0.0",
             "evidence_ids": ["ev-pipe-100"],
         },
         proven_ctx,

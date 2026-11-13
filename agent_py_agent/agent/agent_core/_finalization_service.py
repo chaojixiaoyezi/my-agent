@@ -684,7 +684,7 @@ def _pack_verification_facts(agent: object, ctx: FinalizeContext) -> dict[str, o
 # LLM: Channel attachments come only from ready artifact-registry records for declared output targets.
 # 函数用途: 从本轮结构化工具记录提取可发送产物，不遍历 output/，也不从模型正文猜路径。
 def _structured_delivery_artifacts(ctx: FinalizeContext) -> list[dict[str, object]]:
-    roots, exact_paths = _declared_delivery_targets(ctx.task_attributes)
+    roots, exact_paths = _declared_delivery_targets(ctx.task_attributes, getattr(ctx, "delivery_contract", None))
     if not roots and not exact_paths:
         return []
     selected: list[dict[str, object]] = []
@@ -774,7 +774,7 @@ def _verified_reply_binding(agent, ctx, record, evidence):
     return {**binding, 'operation_id': operation_id}
 
 
-def _declared_delivery_targets(task_attributes: object) -> tuple[tuple[Path, ...], frozenset[Path]]:
+def _declared_delivery_targets(task_attributes: object, contract: object = None) -> tuple[tuple[Path, ...], frozenset[Path]]:
     attrs = task_attributes if isinstance(task_attributes, dict) else {}
     workspace = attrs.get("run_workspace") if isinstance(attrs.get("run_workspace"), dict) else {}
     roots: list[Path] = []
@@ -783,6 +783,22 @@ def _declared_delivery_targets(task_attributes: object) -> tuple[tuple[Path, ...
         if text:
             roots.append(Path(text).expanduser().resolve(strict=False))
     exact: set[Path] = set()
+    if isinstance(contract, dict):
+        delivery_workspace = contract.get("task_workspace")
+        output = delivery_workspace.get("output_dir") if isinstance(delivery_workspace, dict) else None
+        if isinstance(output, str) and output.strip():
+            roots.append(Path(output.strip()).expanduser().resolve(strict=False))
+        artifacts = contract.get("artifacts")
+        for artifact in artifacts if isinstance(artifacts, (list, tuple)) else ():
+            if isinstance(artifact, dict):
+                allowed = artifact.get("allowed_output_roots")
+                for root in allowed if isinstance(allowed, (list, tuple)) else ():
+                    if isinstance(root, str) and root.strip():
+                        roots.append(Path(root).expanduser().resolve(strict=False))
+                for key in ("path", "preferred_path", "target_path", "output_path"):
+                    path = artifact.get(key)
+                    if isinstance(path, str) and path.strip():
+                        exact.add(Path(path).expanduser().resolve(strict=False))
     text = str(workspace.get("user_requested_output_path") or "").strip()
     if text:
         exact.add(Path(text).expanduser().resolve(strict=False))

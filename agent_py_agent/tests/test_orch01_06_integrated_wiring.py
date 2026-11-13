@@ -395,6 +395,8 @@ def test_orch01_06_composed_pipeline_smoke(integrated_agent: SimpleAgent, tmp_pa
     item_id = pub_payload.get("result", {}).get("item", {}).get("item_id")
     assert item_id
 
+    coordinator_params = agent._current_run_params
+    agent._current_run_params = SimpleNamespace(run_id="worker-1", task_id="worker-1")
     # 4.2 record_ack
     ack_res = board_tool.execute_scoped({
         "action": "record_ack",
@@ -410,9 +412,11 @@ def test_orch01_06_composed_pipeline_smoke(integrated_agent: SimpleAgent, tmp_pa
         "case_id": case_id,
         "item_id": item_id,
         "evidence_ids": ["ev-int-1"],
+        "frozen_input_version": "git-sha-1234",
     }, proven_ctx)
     assert sub_res.ok is True, sub_res.output
 
+    agent._current_run_params = coordinator_params
     # 4.4 decide_acceptance (accepted)
     dec_res = board_tool.execute_scoped({
         "action": "decide_acceptance",
@@ -448,8 +452,8 @@ def test_orch01_06_composed_pipeline_smoke(integrated_agent: SimpleAgent, tmp_pa
             scope="targeted",
             status="passed",
             exit_code=0,
-            cwd=str(tmp_path),
-            root=str(tmp_path),
+            cwd=str(agent.root),
+            root=str(agent.root),
             output_summary="1 passed",
         ),
     )
@@ -461,12 +465,14 @@ def test_orch01_06_composed_pipeline_smoke(integrated_agent: SimpleAgent, tmp_pa
     }, proven_ctx)
     assert link_res.ok is True, link_res.output
 
+    # 独立评审必须真的切换执行主体，不能只修改模型参数。
+    agent._current_run_params = SimpleNamespace(run_id="principal-reviewer-charlie", task_id="principal-reviewer-charlie")
     # 5.3 record_independent_review
     rev_res = prov_tool.execute_scoped({
         "action": "record_independent_review",
         "requirement_id": "ORCH-E2E-PIPE",
         "reviewer_principal_id": "principal-reviewer-charlie",
-        "author_principal_id": "principal-author-alice",
+        "author_principal_id": "main-run-coord",
         "reviewed_input_version": "git-sha-1234",
         "review_verdict": "pass",
         "review_scope": "integration_verification",
@@ -482,6 +488,7 @@ def test_orch01_06_composed_pipeline_smoke(integrated_agent: SimpleAgent, tmp_pa
     }, proven_ctx)
     assert acc_res.ok is True, acc_res.output
 
+    agent._current_run_params = coordinator_params
     # 5.5 query_provenance
     query_res = prov_tool.execute_scoped({
         "action": "query_provenance",

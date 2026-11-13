@@ -272,11 +272,34 @@ class RequirementProvenanceTool(BaseTool):
     ) -> ToolHandlerOutcome:
         if not _scoped_requester_proven(self.agent, context):
             return _unproven_requester_provenance_failure()
-        return self.execute(params)
+        principal, warning = authoritative_self_principal(self.agent)
+        actor = str(principal.run_id or "").strip()
+        bound = dict(params)
+        warnings = [warning] if warning else []
+        action = str(params.get("action") or "").strip()
+        # 查询 task_id 是原授权读范围内的筛选条件，不是调用者身份。
+        fields = [] if action == "query_provenance" else ["task_id"]
+        identity_field = {"bind_requirement": "author_principal_id",
+                          "record_independent_review": "reviewer_principal_id",
+                          "record_acceptance": "accepted_by_principal_id"}.get(action)
+        if identity_field:
+            fields.append(identity_field)
+        for key in fields:
+            if params.get(key) and params[key] != actor:
+                warnings.append(f"{key} overridden by authoritative run_id '{actor}'")
+            bound[key] = actor
+        caller_context = self._resolve_context({"task_id": actor})
+        outcome = self.execute(bound, _context=caller_context)
+        if warnings:
+            payload = json.loads(outcome.output)
+            payload["scope_warnings"] = [*payload.get("scope_warnings", []), *warnings]
+            outcome.output = json.dumps(payload, ensure_ascii=False, indent=2)
+            outcome.result_envelope = {**outcome.result_envelope, "scope_warnings": warnings}
+        return outcome
 
     # LLM: 分发并执行具体的溯源动作，捕获业务异常并输出精准结构化回执。
     # 函数用途: 处理具体动作分发与执行。
-    def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
+    def execute(self, params: dict[str, object], *, _context: VerificationContext | None = None) -> ToolHandlerOutcome:
         action = str(params.get("action") or "").strip()
         if not action:
             return _provenance_failure("MISSING_ACTION", "必须指定操作动作 action 参数。")
@@ -284,7 +307,7 @@ class RequirementProvenanceTool(BaseTool):
         scope_warnings: list[str] = []
         try:
             repo = VerificationEvidenceRepository(runtime_owner_root(self.agent))
-            context = self._resolve_context(params)
+            context = _context or self._resolve_context(params)
 
             if action == "bind_requirement":
                 return self._handle_bind(params, context, repo, scope_warnings)

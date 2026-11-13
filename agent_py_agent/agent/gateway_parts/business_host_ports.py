@@ -147,6 +147,7 @@ def build_default_business_space_reference_resolver(host: Any) -> Callable[[str,
                             'owner_id': owner_id,
                             'ref': str(ref_id),
                             'state': 'retired' if is_retired else 'available',
+                            'space_id': bg.get('space_id') if isinstance(bg, dict) else None,
                             'kind': 'agent'
                         }
                     threads = []
@@ -178,6 +179,7 @@ def build_default_business_space_reference_resolver(host: Any) -> Callable[[str,
                                 'owner_id': owner_id,
                                 'ref': str(ref_id),
                                 'state': 'retired' if is_retired else 'available',
+                                'space_id': th_bg.get('space_id') if isinstance(th_bg, dict) else None,
                                 'kind': 'agent'
                             }
                 except (OSError, ValueError, RuntimeError):

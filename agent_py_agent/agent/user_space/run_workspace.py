@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -50,6 +50,7 @@ class RunWorkspacePaths:
     workspace_json: Path
     state_json: Path
     timeline_jsonl: Path
+    delivery_contract: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,7 @@ class EnsureRunWorkspaceRequest:
     owner_home: str = ""
     source: str = "run"
     created_at: str | None = None
+    delivery_contract: dict | None = None
 
 
 # LLM: 该请求只携带 host 已裁决的结构化终态与精确 workspace 身份，不能放入模型正文或推断字段。
@@ -282,10 +284,21 @@ def activate_run_workspace(
         ensure_private_dir(directory)
     _write_task_yaml(paths.task_yaml, request)
     # work/ 下的运行投影走私有写（0600/0700），存量宽权限文件下次写入即收紧；内容逐字节不变。
-    write_private_json_file_atomic(
-        paths.workspace_json,
-        _workspace_identity_payload(request, paths),
-    )
+    # 同一任务的交付合同首写冻结；重试不得因配置或日期变化改交付落点。
+    with locked_json_path(paths.workspace_json):
+        current = _read_json_object(paths.workspace_json)
+        payload = _workspace_identity_payload(request, paths)
+        frozen = current.get("delivery_contract") if (
+            current.get("task_id") == request.task_id and current.get("owner_id") == request.owner_id
+        ) else None
+        if frozen is not None:
+            if not isinstance(frozen, dict):
+                raise ValueError("invalid frozen delivery contract")
+            payload["delivery_contract"] = frozen
+        elif request.delivery_contract is not None:
+            payload["delivery_contract"] = request.delivery_contract
+        write_private_json_file_atomic_unlocked(paths.workspace_json, payload)
+    paths = replace(paths, delivery_contract=payload.get("delivery_contract"))
     _write_seed_file(paths.collab_blackboard_md, "# Blackboard\n\n")
     _write_seed_file(paths.collab_messages_jsonl, "")
     _write_seed_file(paths.collab_findings_jsonl, "")
@@ -345,6 +358,7 @@ def _write_task_yaml(path: Path, request: EnsureRunWorkspaceRequest) -> None:
 def _workspace_identity_payload(request: EnsureRunWorkspaceRequest, paths: RunWorkspacePaths) -> dict[str, object]:
     return {
         "schema_version": "run_workspace.v1",
+        **({"delivery_contract": request.delivery_contract} if request.delivery_contract is not None else {}),
         "request_id": request.request_id,
         "run_id": request.run_id,
         "task_id": request.task_id,

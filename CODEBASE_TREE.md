@@ -21,6 +21,11 @@ agent_py_agent/tests/test_workflow_reconciliation_public_diagnostic.py # 写后�
 agent_py_agent/tests/test_technical_cutoff_continuation.py  # 技术截断、原调度器执行与恢复
 agent_py_agent/tests/test_guidance_reply_obligation_bounds.py # 回复义务按页结清及故障恢复
 agent_py_agent/tests/test_workflow_scope_error_details.py    # 工作流范围的约束与可执行错误说明
+agent_py_agent/tests/test_workflow_public_effect_projection.py # 工作流公共回执保留前序副作用与失败原因
+agent_py_agent/tests/test_business_surface_controller_scope.py # 真实界面绑定读取后台控制器空间归属
+agent_py_agent/tests/test_orch04_recipient_identity.py       # 交接责任人、冻结版本与原回执去重
+agent_py_agent/tests/test_orch_receipt_chain.py               # 定时管理、交接确认及同项目测试证据短链
+agent_py_agent/tests/test_orch02_native_resume_chain.py      # 原生父子申请、裁决和实际恢复读取
 docs/reviews/CONTINUITY_R3_REVIEW_20261112.md                # Opus v2 复核后的英文说明
 ```
 
