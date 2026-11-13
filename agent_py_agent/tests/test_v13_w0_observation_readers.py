@@ -101,11 +101,11 @@ def test_default_wiring_installs_only_sources_that_exist(tmp_path):
     owner = tmp_path / 'owner'
     store = ConversationStore(owner / 'conversations')
     runtime = RuntimeRepository(owner / 'runtime.db', read_only=True)
-    assert default_observation_readers(owner, 'local/test', store, runtime) == {}
+    assert set(default_observation_readers(owner, 'local/test', store, runtime)) == {'artifacts.get', 'changes.get'}
     assert not runtime.db_path.exists()
     assert default_observation_readers(tmp_path / 'other', 'local/test', store, runtime) == {}
     runtime.db_path.write_bytes(b'broken database')
-    assert default_observation_readers(owner, 'local/test', store, runtime) == {}
+    assert set(default_observation_readers(owner, 'local/test', store, runtime)) == {'artifacts.get', 'changes.get'}
 
 
 # LLM: 真实HTTP发现列表必须与已安装端口一致，缺来源的合法请求不是伪造空成功。
@@ -118,7 +118,8 @@ def test_capabilities_match_actual_readable_ports_and_missing_usage_is_unknown(b
     actions = found['data']['supported_actions']
     assert 'tool_calls.list' in actions and 'tool_calls.get' in actions
     assert 'artifacts.list' in actions and 'artifacts.get' in actions
-    assert 'logs.read' not in actions and 'usage.get' not in actions
+    assert ('logs.read' in actions) == ('logs.read' in readers)
+    assert 'usage.get' not in actions
     assert ('approvals.list' in actions) == ('approvals' in services.observation.readers)
     assert {'tool_calls', 'tool_calls.get', 'artifacts', 'artifacts.get'} <= set(readers)
     status, listed = background_call(background_http, 'tool_calls.list')
@@ -342,7 +343,8 @@ def test_business_media_registry_version_and_content(background_http):
     services, task = observed_task(background_http)
     runtime = services.observation.runtime
     initial = default_observation_readers(services.owner_home, services.owner_id, services.host.conversation_store, runtime)
-    assert 'artifacts' not in initial and 'artifacts.get' not in initial
+    assert 'artifacts' not in initial and 'artifacts.get' in initial
+    assert 'changes.get' in initial
     root = services.owner_home / 'artifacts' / 'business'
     root.mkdir(parents=True, exist_ok=True)
     content = b'canonical media bytes'
@@ -367,7 +369,11 @@ def test_business_media_registry_version_and_content(background_http):
     bob, bob_task = observed_task(background_http, user='business-bob')
     seed_observed_runtime(bob, bob_task)
     status, denied = background_call(background_http, 'artifacts.get', {'artifact_id': 'media-record'}, user='business-bob')
-    assert status == 404 and denied['data'] == {}, denied
+    # Bob原媒体来源未就绪，不能用Alice来源证明不存在；明确unknown且零内容。
+    assert status == 503 and denied['data'] == {}, denied
+    reasons = {item['key']: item['value'] for item in denied['error']['details']}
+    assert reasons['reason'] == 'ARTIFACT_REGISTRY_UNREADABLE'
+    assert 'canonical media bytes' not in json.dumps(denied)
     status, old = background_call(background_http, 'artifacts.get', {'artifact_id': 'media-record', 'version_ref': 'stale-version'})
     assert status == 404 and old['data'] == {}, old
 

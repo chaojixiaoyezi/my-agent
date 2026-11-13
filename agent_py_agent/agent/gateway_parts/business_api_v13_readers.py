@@ -1099,6 +1099,11 @@ class _OwnerReaders:
                 record = self.record(value, row)
                 value.update(task_id=record.task_id, space_id=record.space_id)
                 selected.append(record)
+        if selected:
+            # 精确runtime登记已命中；无关媒体目录缺失不能抹掉原版本元数据。
+            return ObservationPage(tuple(self.wrap({'artifact': row.value, 'version_ref': row.value['version_ref'],
+                'read_ref': row.value['artifact_id'], 'available': row.value['available']}, row)
+                for row in selected if params.get('version_ref', row.value['version_ref']) == row.value['version_ref']))
         parts = ('artifacts', 'business', *REGISTRY_RELATIVE_PATH.parts)
         raw = _read_source(self.home, parts, 2 * 1024 * 1024, 'ARTIFACT_REGISTRY_UNREADABLE')
         if raw is not None:
