@@ -81,6 +81,8 @@ class BackgroundExecutionResult:
     internal_response: str = ""
     public_receipt: dict[str, object] | None = None
     execution_identity: dict[str, str] | None = None
+    # 来自本片实际消费的用户输入；普通后台事件不创建公开回复义务。
+    user_reply_accepted: bool = False
 
 
 # LLM: 仅在同片八次 Compact 都推进 canonical 代次后让出；调度器必须单独处理，不将其记为失败。
@@ -556,4 +558,8 @@ def collect_background_execution_result(
         internal_response=str(getattr(result, "internal_response", "") or ""),
         public_receipt=getattr(result, "public_receipt", None),
         execution_identity=dict(execution_identity or {}),
+        user_reply_accepted=any(
+            isinstance(packet, dict) and packet.get("user_reply_accepted") is True
+            for packet in (getattr(result, "active_turn_user_inputs", None) or ())
+        ),
     )

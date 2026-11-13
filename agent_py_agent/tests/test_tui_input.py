@@ -2622,3 +2622,55 @@ def test_auth_rejected_without_reason_code_is_not_requeued(tmp_path):
     assert auth_calls == [(entry, "")], auth_calls
     assert rejected_calls == [], "不能走'排下一轮'那条路"
     assert reconciler._read_entries() == {}
+
+
+@pytest.mark.parametrize("background", ["process", "business", "both"])
+@pytest.mark.parametrize("queued", [False, True])
+def test_up_keeps_composer_navigation_when_background_work_exists(monkeypatch, background, queued):
+    runtime = TuiRuntime("up-background")
+    jobs = Queue()
+    pending = [int(queued)]
+    if queued:
+        runtime.enqueue_prompt("queued-up", "editable", queued=True)
+        jobs.put(_job("queued-up", "editable"))
+    input_area = TextArea(multiline=True)
+    move_selection = MagicMock(return_value=True)
+    history_up = MagicMock()
+    monkeypatch.setattr(input_area.buffer, "auto_up", history_up)
+    params = SimpleNamespace(
+        input_area=input_area, jobs=jobs, tui_runtime=runtime,
+        exit_armed_at_ref=[0.0], eof_armed_at_ref=[0.0],
+        escape_armed_at_ref=[0.0], escape_armed_text_ref=[""],
+        state_lock=threading.Lock(), pending_jobs_ref_for_enqueue=pending,
+        interaction_state=TuiInteractionState(),
+        agent_navigation=SimpleNamespace(
+            snapshot=lambda: SimpleNamespace(selected_run_id="",
+                background_process_count=int(background in {"process", "both"}),
+                business_agents_enabled=background in {"business", "both"}),
+            move_selection=move_selection),
+    )
+    event = SimpleNamespace(arg=1, app=SimpleNamespace(invalidate=MagicMock()))
+    tui_keybindings._handle_up_keybinding(event, params)
+    move_selection.assert_not_called()
+    if queued:
+        assert input_area.text == "editable"
+        assert pending == [0] and jobs.empty()
+        assert runtime.store.snapshot().queued_inputs == ()
+        history_up.assert_not_called()
+    else:
+        history_up.assert_called_once_with(count=1, go_to_start_of_line_if_history_changes=True)
+
+
+def test_up_preserves_explicit_agent_selection():
+    move_selection = MagicMock(return_value=True)
+    params = SimpleNamespace(
+        input_area=TextArea(multiline=True),
+        exit_armed_at_ref=[0.0], eof_armed_at_ref=[0.0],
+        escape_armed_at_ref=[0.0], escape_armed_text_ref=[""],
+        agent_navigation=SimpleNamespace(
+            snapshot=lambda: SimpleNamespace(selected_run_id="child-selected"),
+            move_selection=move_selection),
+    )
+    event = SimpleNamespace(arg=1, app=SimpleNamespace(invalidate=MagicMock()))
+    tui_keybindings._handle_up_keybinding(event, params)
+    move_selection.assert_called_once_with(-1)

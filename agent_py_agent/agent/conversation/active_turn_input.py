@@ -67,8 +67,14 @@ def merge_active_turn_user_inputs(
                 continue
             key = tuple(packet["input_ids"])
             if key in seen:
-                if seen[key] != packet:
+                previous = seen[key]
+                # 消费确认单调保留；正文、媒体和身份仍必须逐项相同。
+                comparable = {name: value for name, value in packet.items() if name != "user_reply_accepted"}
+                prior = {name: value for name, value in previous.items() if name != "user_reply_accepted"}
+                if prior != comparable:
                     raise ValueError("插话输入身份与媒体或正文冲突")
+                if packet.get("user_reply_accepted") is True:
+                    previous["user_reply_accepted"] = True
                 continue
             seen[key] = packet
             merged.append(packet)
@@ -128,6 +134,7 @@ def _normalized_packet(raw: object) -> dict[str, object] | None:
         "input_ids": input_ids,
         "text": text,
         **_packet_media(raw),
+        **({"user_reply_accepted": True} if raw.get("user_reply_accepted") is True else {}),
     }
 
 

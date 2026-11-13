@@ -329,6 +329,11 @@ def acknowledge_injected_turn_input(
                 for entry in acknowledged_entries
                 if str(getattr(entry, "guidance_id", "") or "") in delivered_ids
             ]
+            # 只用宿主已确认的本人输入建立公开回复义务，跨会话事件保持内部来源。
+            user_ids = {entry.guidance_id for entry in consumed_entries if not _guidance_origin_kind(entry)}
+            for packet in getattr(params, "active_turn_user_inputs", ()) or ():
+                if user_ids and set(packet.get("input_ids", ())).issubset(user_ids) and packet.get("input_ids"):
+                    packet["user_reply_accepted"] = True
             for entry in consumed_entries:
                 _persist_guidance_transcript(store, entry)
             _complete_active_turn_user_reply_segment(

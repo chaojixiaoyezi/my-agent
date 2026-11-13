@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
 import math
@@ -607,6 +608,8 @@ def append_gateway_conversation_message(
                 request_id=request_id,
                 channel_message_id=channel_message_id,
                 assistant_part_id=normalized_part_id,
+                execution_attempt_id=str(request.get("execution_attempt_id") or ""),
+                turn_end_reason=assistant_turn.end_reason if assistant_turn else "",
             )
             for fact in facts
         ):
@@ -624,6 +627,8 @@ def append_gateway_conversation_message(
             entry_metadata[LEARNING_SOURCE_KEY] = frozen or user_dialogue_projection()
         if role == "assistant":
             entry_metadata["assistant_part_id"] = normalized_part_id
+            if request.get("execution_attempt_id"):
+                entry_metadata["gateway_execution_attempt_id"] = str(request["execution_attempt_id"])
         if role == "assistant" and operation_verification is not None:
             entry_metadata["operation_verification"] = public_operation_verification(
                 operation_verification
@@ -704,6 +709,8 @@ def _queue_gateway_conversation_repair(
     normalized_part_id = str(assistant_part_id or "final").strip() or "final"
     if role == "assistant":
         repair_metadata["assistant_part_id"] = normalized_part_id
+        if request.get("execution_attempt_id"):
+            repair_metadata["gateway_execution_attempt_id"] = str(request["execution_attempt_id"])
     if role == "assistant" and operation_verification is not None:
         repair_metadata["operation_verification"] = public_operation_verification(
             operation_verification
@@ -728,6 +735,14 @@ def _queue_gateway_conversation_repair(
         filename = f"{request_id}-{role}-{normalized_part_id.replace(':', '-')}.json"
     else:
         filename = f"{request_id}-{role}.json"
+    # 同一请求不同执行尝试或终态的待补交消息不能互相覆盖；旧文件仍可原样消费。
+    if role == "assistant":
+        identity = [repair_metadata.get("gateway_execution_attempt_id", ""),
+                    repair_metadata.get("turn_end_reason", "")]
+        if any(identity):
+            suffix = hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:24]
+            priority = "1" if repair_metadata.get("turn_end_reason") == "completed" else "0"
+            filename = f"{filename[:-5]}-{priority}-{suffix}.json"
     path = Path(root) / "message_repairs" / filename
     try:
         from .io import write_json_file_atomic
@@ -790,6 +805,8 @@ def repair_gateway_conversation_messages(
                     request_id=request_id,
                     channel_message_id=str(payload.get("channel_message_id") or ""),
                     assistant_part_id=part_id,
+                    execution_attempt_id=str(metadata.get("gateway_execution_attempt_id") or ""),
+                    turn_end_reason=str(metadata.get("turn_end_reason") or ""),
                 )
                 for fact in facts
             )
@@ -819,7 +836,7 @@ def _dedupe_facts(row: object) -> _DedupeFacts:
     metadata = metadata if isinstance(metadata, dict) else {}
     return _DedupeFacts(
         getattr(row, "role", ""), getattr(row, "channel_message_id", ""),
-        {key: metadata[key] for key in ("gateway_request_id", "assistant_part_id") if key in metadata},
+        {key: metadata[key] for key in ("gateway_request_id", "assistant_part_id", "gateway_execution_attempt_id", "turn_end_reason") if key in metadata},
     )
 
 
@@ -830,6 +847,8 @@ def _gateway_message_matches_part(
     request_id: str,
     channel_message_id: str,
     assistant_part_id: str,
+    execution_attempt_id: str = "",
+    turn_end_reason: str = "",
 ) -> bool:
     if str(getattr(row, "role", "") or "") != role:
         return False
@@ -838,7 +857,17 @@ def _gateway_message_matches_part(
     same_request = str(metadata.get("gateway_request_id") or "") == request_id
     if role == "assistant":
         row_part = str(metadata.get("assistant_part_id") or "final").strip() or "final"
-        return same_request and row_part == assistant_part_id
+        if not same_request or row_part != assistant_part_id:
+            return False
+        previous_attempt = str(metadata.get("gateway_execution_attempt_id") or "")
+        if previous_attempt and execution_attempt_id and previous_attempt != execution_attempt_id:
+            return False
+        # 保留失败尝试的原生历史；同请求恢复完成必须追加，不能被旧 final 吞掉。
+        # 缺少 attempt 的旧记录仍沿原幂等规则，只有明确的未完成 -> 完成允许前进。
+        previous_reason = normalize_turn_end_reason(metadata.get("turn_end_reason"))
+        return not (assistant_part_id == "final"
+                    and normalize_turn_end_reason(turn_end_reason) == "completed"
+                    and previous_reason in {"error", "aborted", "interrupted", "max-tokens"})
     return bool(
         same_request
         or (

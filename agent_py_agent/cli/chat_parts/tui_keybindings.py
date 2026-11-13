@@ -1407,7 +1407,7 @@ def _handle_escape_keybinding(event, params: TuiCreateKeybindingsParams) -> None
 
 
 # LLM: Up 必须先按当前渲染宽度走软折视觉行；只有到视觉顶边才允许恢复 queue，再由 Buffer 处理逻辑行/history。
-# 函数用途: 空输入时后台入口优先，否则保持原折行、队列和历史导航顺序。
+# 函数用途: 空输入且显式选中代理时导航代理，其余保持折行、队列和历史导航顺序。
 def _handle_up_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     buffer = params.input_area.buffer
     if buffer.complete_state is not None:
@@ -1417,8 +1417,7 @@ def _handle_up_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     navigation = _agent_navigation_snapshot(params)
     if (
         not str(buffer.text or "")
-        and (str(getattr(navigation, "selected_run_id", "") or "") or getattr(navigation, "background_process_count", 0) > 0
-             or getattr(navigation, 'business_agents_enabled', False))
+        and str(getattr(navigation, "selected_run_id", "") or "")
     ):
         mover = getattr(
             getattr(params, "agent_navigation", None),

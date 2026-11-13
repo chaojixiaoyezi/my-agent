@@ -1,3 +1,14 @@
+## 2026-11-12 连续交互修复与独审入口
+
+```text
+agent_py_agent/tests/
+|-- test_gateway_history_retry_final.py    # 失败终稿与重试成功、补交幂等
+`-- test_background_user_reply_delivery.py # 本人输入消费、压缩携带和后台投递
+
+docs/reviews/
+|-- CONTINUITY_REVIEW_20261112.md           # 本轮候选边界与待审设计
+`-- CONTINUITY_REVIEW_PROMPT_20261112.md    # 交给 Opus 的英文独审任务
+```
 ## 2026-11-12 原生端口与客户端回执回归
 
 ```text

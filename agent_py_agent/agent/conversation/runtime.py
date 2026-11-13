@@ -723,6 +723,8 @@ def _background_goal_delivery_mode(
     delivery_reason: str,
     route_ownership: str,
 ) -> tuple[bool, str, bool]:
+    if getattr(execution_result, "user_reply_accepted", False):
+        return deliver, delivery_reason, False
     idle_slice = _background_goal_idle_slice(
         goal, request, execution_result, agent=agent, store=store
     )
@@ -1119,6 +1121,7 @@ class BackgroundMainAgentRuntime:
             resolved_channel=channel,
             resolved_route_supports_proactive=route_supports_proactive,
             resolved_route_supports_transcript=route_supports_transcript,
+            user_reply_accepted=execution_result.user_reply_accepted,
         )
         deliver, delivery_reason, local_transcript_only = _background_goal_delivery_mode(
             goal_context.goal, request, execution_result, agent=self.agent,
@@ -1643,6 +1646,7 @@ def _background_delivery_decision(
     resolved_channel: str | None = None,
     resolved_route_supports_proactive: bool | None = None,
     resolved_route_supports_transcript: bool | None = None,
+    user_reply_accepted: bool = False,
 ) -> tuple[bool, str]:
     """Keep partial child integration internal and publish one fresh terminal turn."""
     task_status = _background_task_link_status(agent, request, store=store)
@@ -1662,6 +1666,10 @@ def _background_delivery_decision(
         return True, f"thread_goal_{goal_status}"
     if task_status in {"abandoned", "cancelled", "interrupted", "superseded"}:
         return False, f"task_{task_status}"
+    # 用户问题在本轮被实际接收后，最初的后台唤醒原因不能吞掉模型答复。
+    # 取消、目标终态和窄范围审计限制仍由上面的原合同处理。
+    if user_reply_accepted:
+        return True, "active_turn_user_reply"
     task_completed = task_status == "completed"
     if reason == "thread_goal_continue":
         if task_completed:
