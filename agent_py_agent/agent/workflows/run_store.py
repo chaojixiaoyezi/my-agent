@@ -709,11 +709,16 @@ class WorkflowRunStore:
     def load_step_records(self, workflow_run_id):
         return self.load_run(workflow_run_id).steps
 
-    # LLM: 只能读取创建该运行时冻结的工作流，缺快照明确拒绝，不回退到最新资产定义。
-    # 函数用途: 给断点恢复提供同一次工作流的原始定义。
+    # 单个run.json经原子替换发表，读取只会得到完整的旧/新冻结版本；不读多文件步骤恢复视图。
+    # DAG父线程持执行锁等worker，worker核验此定义时不能反向等待父锁；写入/CAS/执行互斥仍走原锁。
     def load_workflow_snapshot(self, workflow_run_id):
-        with self._lock(workflow_run_id):
-            return self._read(workflow_run_id, 'run.json')['workflow_snapshot']
+        data = self._read(workflow_run_id, 'run.json')
+        if data['workflow_run_id'] != workflow_run_id:
+            raise ValueError('运行身份与目录不匹配')
+        snapshot = data['workflow_snapshot']
+        if snapshot['descriptor']['id'] != data['workflow_id']:
+            raise ValueError('冻结定义身份与运行不匹配')
+        return snapshot
 
     # LLM: 使用共用JSON锁而非直接fcntl；非阻塞失败抛RuntimeError，内部读写复用本线程已经持有的锁。
     # 函数用途: 防止多个执行者重复续跑同一个工作流运行。
