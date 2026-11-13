@@ -1346,3 +1346,38 @@ publish_learned_skill(
         with pytest.raises(SkillLearningStoreError) as exc_sym:
             _retire_third_strike_locked(store, store.load_registry(), store.load_registry().skills["symlink-retire"])
         assert exc_sym.value.code == CODE_EVIDENCE_INCOMPLETE
+
+
+def test_resolve_live_policy_keeps_agent_config_over_runtime_guard_policy(tmp_path: Path):
+    """Real AgentConfig carries RuntimeGuardPolicy on .runtime_guard_policy; never overwrite guard_config with it."""
+    from agent_py_agent.agent.settings.config import AgentConfig
+    from agent_py_agent.agent.settings.runtime_guard_config import RuntimeGuardPolicy
+
+    _, store = _home_and_store(tmp_path)
+    real_cfg = AgentConfig(
+        enable_self_learning=True,
+        self_learning_maintenance_mode="autonomous",
+        self_learning_max_skills=10,
+        skill_guard_max_files=50,
+        skill_guard_max_size_kb=256,
+        runtime_guard_policy=RuntimeGuardPolicy(),
+    )
+    ev1 = publish_learned_skill(
+        store,
+        PublishRequest(
+            replace(decision("real-cfg-pub"), body=f"{BODY}\n\n# real-cfg-pub"),
+            guard_config=real_cfg,
+            config_provider=lambda: real_cfg,
+        ),
+    )
+    assert ev1.event == "published"
+
+    ev2 = promote_verified_skill(
+        store,
+        PublishRequest(
+            replace(decision("real-cfg-prom"), body=f"{BODY}\n\n# real-cfg-prom"),
+            guard_config=real_cfg,
+            config_provider=lambda: real_cfg,
+        ),
+    )
+    assert ev2 is not None and ev2.event == "published"

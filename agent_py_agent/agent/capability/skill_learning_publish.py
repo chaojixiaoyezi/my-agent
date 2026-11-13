@@ -897,7 +897,21 @@ def _resolve_live_policy(publish: PublishRequest) -> tuple[bool, str, int, objec
     effective_max = publish.max_skills if raw_max is _MISSING_SENTINEL or raw_max is None else int(raw_max)
     raw_guard = _cfg_lookup(cfg, "guard_config")
     if raw_guard is _MISSING_SENTINEL:
-        raw_guard = _cfg_lookup(cfg, "runtime_guard_policy")
+        if (
+            _cfg_lookup(cfg, "skill_guard_max_files") is not _MISSING_SENTINEL
+            or _cfg_lookup(cfg, "skill_guard_max_size_kb") is not _MISSING_SENTINEL
+        ):
+            raw_guard = cfg
+        else:
+            candidate_policy = _cfg_lookup(cfg, "runtime_guard_policy")
+            if candidate_policy is None or (
+                candidate_policy is not _MISSING_SENTINEL
+                and (
+                    _cfg_lookup(candidate_policy, "skill_guard_max_files") is not _MISSING_SENTINEL
+                    or _cfg_lookup(candidate_policy, "skill_guard_max_size_kb") is not _MISSING_SENTINEL
+                )
+            ):
+                raw_guard = candidate_policy
     effective_guard = publish.guard_config if raw_guard is _MISSING_SENTINEL else raw_guard
     return enabled, mode, effective_max, effective_guard
 
