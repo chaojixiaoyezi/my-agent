@@ -782,6 +782,20 @@ def test_gateway_goal_command_serialization_preserves_operation_and_value() -> N
     assert _command_text(_command("/audit 安全巡检 clear")) == "/audit 安全巡检 clear"
 
 
+@pytest.mark.parametrize("raw", [
+    "/schedule run job-test",
+    "/schedule history job-test",
+    "/group status",
+    "/sessions control thread-test /status",
+    "/help schedule",
+])
+def test_gateway_catalog_command_keeps_original_arguments(raw) -> None:
+    command = _command(raw)
+    encoded = _command_text(command)
+    assert encoded == raw
+    assert _command(encoded) == command
+
+
 def test_direct_chat_goal_fails_explicitly_instead_of_stopping_current_run(tmp_path) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo"), tmp_path)
     agent._current_run_params = SimpleNamespace(request_id="chat-goal")
