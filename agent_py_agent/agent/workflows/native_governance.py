@@ -91,10 +91,12 @@ class NativeWorkflowGovernance(WorkflowOperationRecovery):
                 RequirementProvenanceRecord(binding['requirement_id'], self.owner_id,
                     record.workflow_run_id, self.owner_home, binding['input_version'], (), author_principal_id=author))
         if (requirement.task_id != record.workflow_run_id or requirement.input_version != binding['input_version']
+                or requirement.root != self.owner_home
                 or not requirement.author_principal_id):
             raise WorkflowReviewPending(binding, reason='WORKFLOW_REVIEW_STALE')
         # 原库查询有200条上限；只接受同规范版本/机器scope的有效记录，不把任意pass升级为执行批准。
-        reviews = self.repository.list_independent_reviews(self.owner_id, requirement_id=binding['requirement_id'], limit=200)
+        reviews = self.repository.list_independent_reviews(
+            self.owner_id, requirement_id=binding['requirement_id'], limit=200, candidate=requirement)
         receipts = {}
         now = time.time()
         seen_reviewers = set()

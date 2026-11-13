@@ -7,6 +7,7 @@ final response, or upgrades targeted evidence to full.
 模块用途: 保存每个用户自己实际跑过的测试，并在后续改文件时把旧结果标为过期。
 """
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -30,12 +31,22 @@ from .requirement_provenance import (
     validate_scope_upgrade,
 )
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 # 证据文件最多接受的天数；超过视为过期证据，恢复时不再采用。
 _MAX_EVIDENCE_AGE_DAYS = 30
 _MAX_EVENTS_PER_TASK_ROOT = 100
 _MAX_TOTAL_UNREFERENCED_EVENTS = 10_000
 _DB_LOCK = threading.RLock()
+
+
+_CANDIDATE_BINDING_FIELDS = ('owner_ref', 'requirement_id', 'task_id', 'root', 'input_version',
+                             'watched_paths', 'author_principal_id', 'created_at')
+
+
+def _candidate_binding_ref(requirement: RequirementProvenanceRecord) -> str:
+    """把当次授权范围随回执冻结；旧回执无法从今天的同名需求反推原任务。"""
+    identity = [getattr(requirement, field) for field in _CANDIDATE_BINDING_FIELDS]
+    return hashlib.sha256(json.dumps(identity, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
 
 
 class ProvenanceAuthorizationError(PermissionError):
@@ -51,10 +62,8 @@ def _require_expected_requirement(conn, context, expected):
         (context.owner_ref, expected.requirement_id)).fetchone()
     actual = _row_to_requirement_record(row) if row is not None else None
     # 审核/验收进展不是候选绑定；同候选并行审核可以继续，但换owner、工作、根、版本、作者或观察路径即撤权。
-    fields = ('owner_ref', 'requirement_id', 'task_id', 'root', 'input_version',
-              'watched_paths', 'author_principal_id', 'created_at')
     if (expected.owner_ref != context.owner_ref or actual is None
-            or any(getattr(actual, name) != getattr(expected, name) for name in fields)):
+            or any(getattr(actual, name) != getattr(expected, name) for name in _CANDIDATE_BINDING_FIELDS)):
         raise ProvenanceAuthorizationError('REVIEW_CANDIDATE_CHANGED',
             '原授权候选绑定已变化；本次未读取新绑定或写入审核，请在原工作范围重新核验，禁止沿旧授权盲目重试。')
     return actual
@@ -406,10 +415,14 @@ class VerificationEvidenceRepository:
             conn.execute("UPDATE requirement_links SET verification_invalidated_event_id=COALESCE("
                 "(SELECT MAX(id) FROM verification_events e WHERE e.owner_ref=requirement_links.owner_ref),0) "
                 "WHERE review_status='stale' OR acceptance_status='invalidated' OR invalidation_reason<>''")
-        conn.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
-            (str(_SCHEMA_VERSION),),
-        )
+        version = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        if version is None or version[0] != str(_SCHEMA_VERSION):
+            for table in ('independent_reviews', 'acceptance_records'):
+                if 'candidate_ref' not in {column[1] for column in conn.execute(f'PRAGMA table_info({table})')}:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN candidate_ref TEXT NOT NULL DEFAULT ''")
+                conn.execute(f'CREATE INDEX IF NOT EXISTS idx_{table}_candidate ON '
+                             f'{table}(owner_ref,requirement_id,candidate_ref,created_at DESC)')
+            conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('schema_version',?)", (str(_SCHEMA_VERSION),))
 
     # LLM: 仅保留各任务最近事件并淘汰超期与孤立记录。
     # 函数用途: 清理过期和超出数量限制的验证历史事件。
@@ -627,19 +640,22 @@ class VerificationEvidenceRepository:
                 existing_author = str(existing["author_principal_id"] or "").strip()
                 supplied_author = str(record.author_principal_id or "").strip()
                 is_version_changed = bool(record.input_version and record.input_version != existing["input_version"])
+                is_scope_changed = (task_id != existing['task_id']
+                                    or (record.root or existing['root']) != existing['root']
+                                    or tuple(record.watched_paths) != tuple(json.loads(existing['watched_paths_json'])))
                 if not is_version_changed:
                     if existing_author and supplied_author and existing_author != supplied_author:
                         raise ValueError(
                             "AUTHOR_PRINCIPAL_MISMATCH: cannot overwrite bound author without changing input_version"
                         )
                 author = supplied_author or existing_author
-                if is_version_changed:
+                if is_version_changed or is_scope_changed:
                     conn.execute('UPDATE requirement_links SET verification_invalidated_event_id='
                         'MAX(verification_invalidated_event_id,?) WHERE owner_ref=? AND requirement_id=?',
                         (_owner_verification_high_watermark(conn, owner_ref), owner_ref, record.requirement_id))
                     review_status = "stale"
                     acceptance_status = "invalidated"
-                    invalidation_reason = "INPUT_VERSION_CHANGED"
+                    invalidation_reason = "INPUT_VERSION_CHANGED" if is_version_changed else "CANDIDATE_SCOPE_CHANGED"
                     observation_scope = existing["observation_scope"]
                     events_json = existing["verification_event_ids_json"]
                 else:
@@ -849,6 +865,9 @@ class VerificationEvidenceRepository:
             author = stored_author or supplied_author
             validate_independent_review(record.reviewer_principal_id, author)
 
+            candidate_ref = (_candidate_binding_ref(_row_to_requirement_record(req_row))
+                             if req_row is not None and record.reviewed_input_version.strip() == req_row['input_version']
+                             else '')
             effective_record = IndependentReviewRecord(
                 review_id=record.review_id or f"rev-{now_text}",
                 requirement_id=record.requirement_id,
@@ -869,7 +888,8 @@ class VerificationEvidenceRepository:
                     saved = _row_to_review_record(previous)
                     fields = ('requirement_id', 'owner_ref', 'reviewer_principal_id', 'author_principal_id',
                               'reviewed_input_version', 'verdict', 'scope', 'evidence_refs')
-                    if (any(getattr(saved, name) != getattr(effective_record, name) for name in fields)
+                    if (previous['candidate_ref'] != candidate_ref
+                            or any(getattr(saved, name) != getattr(effective_record, name) for name in fields)
                             or record.created_at and record.created_at != saved.created_at):
                         raise ProvenanceAuthorizationError('REVIEW_RECEIPT_CONFLICT',
                             '审核回执编号已有不同身份或内容；旧回执不可篡改，本次未写入，不得借原编号重试覆盖。')
@@ -880,8 +900,8 @@ class VerificationEvidenceRepository:
                 INSERT INTO independent_reviews(
                     review_id, requirement_id, owner_ref, reviewer_principal_id,
                     author_principal_id, reviewed_input_version, verdict, scope,
-                    evidence_refs_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    evidence_refs_json, created_at, candidate_ref
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(owner_ref, review_id) DO UPDATE SET
                     verdict = excluded.verdict,
                     scope = excluded.scope,
@@ -899,6 +919,7 @@ class VerificationEvidenceRepository:
                     effective_record.scope,
                     json.dumps(list(effective_record.evidence_refs), ensure_ascii=False),
                     effective_record.created_at,
+                    candidate_ref,
                 ),
             )
 
@@ -991,12 +1012,15 @@ class VerificationEvidenceRepository:
                 # 旧调用可省略引用，但必须冻结实际匹配的通过记录，不能再保存空review_id。
                 review = conn.execute(
                     "SELECT * FROM independent_reviews WHERE owner_ref=? AND requirement_id=? "
-                    "AND reviewed_input_version=? AND verdict='pass' ORDER BY created_at DESC,review_id DESC LIMIT 1",
-                    (owner_ref, record.requirement_id, current_ver)).fetchone()
+                    "AND reviewed_input_version=? AND verdict='pass' AND (candidate_ref=? OR candidate_ref='') "
+                    "ORDER BY created_at DESC,review_id DESC LIMIT 1",
+                    (owner_ref, record.requirement_id, current_ver, _candidate_binding_ref(_row_to_requirement_record(req_row)))).fetchone()
                 if review is None:
                     raise ValueError("REVIEW_REFERENCE_NOT_FOUND: no passing review matches the accepted input version")
                 review_id = review["review_id"]
             if review is not None:
+                if review['candidate_ref'] and review['candidate_ref'] != _candidate_binding_ref(_row_to_requirement_record(req_row)):
+                    raise StaleInputVersionError("STALE_REVIEW_REFERENCE: review belongs to a different candidate binding")
                 if review["reviewed_input_version"] != current_ver:
                     raise StaleInputVersionError("STALE_REVIEW_REFERENCE: review_id belongs to another input version")
                 if effective_verdict == "accepted" and review["verdict"] != "pass":
@@ -1042,8 +1066,8 @@ class VerificationEvidenceRepository:
                 INSERT INTO acceptance_records(
                     acceptance_id, requirement_id, owner_ref, accepted_by_principal_id,
                     accepted_input_version, verdict, observation_scope, review_id,
-                    evidence_refs_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    evidence_refs_json, created_at, candidate_ref
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(owner_ref, acceptance_id) DO UPDATE SET
                     verdict = excluded.verdict,
                     observation_scope = excluded.observation_scope,
@@ -1062,6 +1086,7 @@ class VerificationEvidenceRepository:
                     effective_record.review_id,
                     json.dumps(list(effective_record.evidence_refs), ensure_ascii=False),
                     effective_record.created_at,
+                    _candidate_binding_ref(_row_to_requirement_record(req_row)),
                 ),
             )
 
@@ -1096,10 +1121,10 @@ class VerificationEvidenceRepository:
             conn.commit()
             conn.execute('BEGIN')
             requirement = _require_expected_requirement(conn, context, expected)
-            params = (context.owner_ref, expected.requirement_id)
-            reviews = conn.execute('SELECT * FROM independent_reviews WHERE owner_ref=? AND requirement_id=? '
+            params = (context.owner_ref, expected.requirement_id, _candidate_binding_ref(requirement))
+            reviews = conn.execute('SELECT * FROM independent_reviews WHERE owner_ref=? AND requirement_id=? AND candidate_ref=? '
                 'ORDER BY created_at DESC LIMIT 100', params).fetchall()
-            acceptances = conn.execute('SELECT * FROM acceptance_records WHERE owner_ref=? AND requirement_id=? '
+            acceptances = conn.execute('SELECT * FROM acceptance_records WHERE owner_ref=? AND requirement_id=? AND candidate_ref=? '
                 'ORDER BY created_at DESC LIMIT 100', params).fetchall()
             return ([requirement], [_row_to_review_record(row) for row in reviews],
                 [_row_to_acceptance_record(row) for row in acceptances])
@@ -1139,6 +1164,7 @@ class VerificationEvidenceRepository:
         *,
         requirement_id: str | None = None,
         limit: int = 100,
+        candidate: RequirementProvenanceRecord | None = None,
     ) -> list[IndependentReviewRecord]:
         limit_bounded = min(max(1, int(limit or 100)), 200)
         query = "SELECT * FROM independent_reviews WHERE owner_ref = ?"
@@ -1146,6 +1172,12 @@ class VerificationEvidenceRepository:
         if requirement_id:
             query += " AND requirement_id = ?"
             params.append(requirement_id)
+        if candidate is not None:
+            if owner_ref != candidate.owner_ref or requirement_id != candidate.requirement_id:
+                raise ValueError("REVIEW_CANDIDATE_SCOPE_MISMATCH")
+            # 旧工作流回执通过调用方原运行/步骤/尝试哈希核验，已带归属的回执须精确匹配。
+            query += " AND (candidate_ref = ? OR candidate_ref = '')"
+            params.append(_candidate_binding_ref(candidate))
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit_bounded)
 

@@ -90,6 +90,42 @@ def test_same_work_review_records_only_real_leaf_identity_and_exact_candidate(le
     assert queried.ok and json.loads(queried.output)['records'][0]['requirement_id'] == 'R'
 
 
+def test_leaf_never_reads_old_other_work_receipts_after_same_id_is_rebound(leaf):
+    import sqlite3
+
+    from agent_py_agent.agent.verification.requirement_provenance import (
+        AcceptanceRecord,
+        IndependentReviewRecord,
+        StaleInputVersionError,
+    )
+
+    origin = leaf.repo.get_requirement(leaf.owner, 'R')
+    current = VerificationContext(leaf.owner, '', origin.task_id)
+    foreign = VerificationContext(leaf.owner, '', 'other-work')
+    other = replace(origin, task_id=foreign.task_id, root='/other-work')
+    leaf.repo.bind_requirement(foreign, other)
+    old_review = IndependentReviewRecord('other-review', 'R', 'other-reviewer', origin.author_principal_id,
+        origin.input_version, 'pass', 'workflow_effect.v1', evidence_refs=('private-other-evidence',), owner_ref=leaf.owner)
+    leaf.repo.record_independent_review(foreign, old_review)
+    old_acceptance = AcceptanceRecord('other-acceptance', 'R', 'other-reviewer', origin.input_version, 'accepted',
+        'unverified', review_id=old_review.review_id, evidence_refs=('private-other-acceptance',), owner_ref=leaf.owner)
+    leaf.repo.record_acceptance(foreign, old_acceptance)
+    restored = leaf.repo.bind_requirement(current, origin)
+    assert restored.review_status == 'stale' and restored.acceptance_status == 'invalidated'
+    assert invoke(leaf, review_params()).ok
+    with pytest.raises(StaleInputVersionError, match='STALE_REVIEW_REFERENCE'):
+        leaf.repo.record_acceptance(current, replace(old_acceptance, acceptance_id='current-acceptance'))
+    query = invoke(leaf, {'action': 'query_provenance', 'requirement_id': 'R'})
+    assert query.ok, query.output
+    detail = json.loads(query.output)
+    assert [row['reviewer_principal_id'] for row in detail['reviews']] == [leaf.task.id]
+    assert detail['acceptances'] == [] and 'private-other' not in query.output
+    with sqlite3.connect(leaf.repo.db_path) as db:
+        db.execute("UPDATE independent_reviews SET candidate_ref='' WHERE review_id=?", (old_review.review_id,))
+    assert 'private-other' not in invoke(leaf, {'action': 'query_provenance', 'requirement_id': 'R'}).output
+    assert old_review.review_id in {row.review_id for row in leaf.repo.list_independent_reviews(leaf.owner)}
+
+
 @pytest.mark.parametrize('action', ['bind_requirement', 'link_verification', 'record_acceptance', 'query_provenance'])
 def test_leaf_tool_name_never_grants_coordinator_actions_or_owner_enumeration(leaf, action):
     result = invoke(leaf, {'action': action})
