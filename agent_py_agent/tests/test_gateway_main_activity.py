@@ -281,3 +281,27 @@ def test_command_summary_remains_scoped_to_enabled_feishu_progress(tmp_path, cha
         'input': {'command': 'demo-cli inspect'}}, '执行命令')
     events = [json.loads(line) for line in writer.chunk_path.read_text().splitlines()]
     assert all('label' not in event.get('progress', {}) for event in events)
+
+
+def test_interim_commentary_preserves_actual_active_tool_until_its_terminal_event():
+    from agent_py_agent.agent.gateway_parts.main_activity import GatewayMainActivitySink
+
+    agent = SimpleNamespace()
+    sink = GatewayMainActivitySink(agent, thread_id='thread-wait', request_id='request-wait',
+                                   request={}, task_id='task-wait')
+    sink({'kind': 'tool_progress', 'progress': {'round': 1, 'call_index': 0,
+         'tool': 'run_command', 'phase': 'started'}})
+    sink({'kind': 'tool_progress', 'progress': {'round': 1, 'call_index': 1,
+         'tool': 'read_file', 'phase': 'started'}})
+    sink({'kind': 'tool_progress', 'progress': {'round': 1, 'call_index': 1,
+         'tool': 'read_file', 'phase': 'completed'}})
+    sink({'kind': 'assistant_commentary', 'text': '命令已经结束的文字不构成终态证明'})
+    row = background_main_activity(agent, 'thread-wait', {'task-wait'})
+    assert row['phase'] == 'tool' and row['activity'] == '正在使用 run_command'
+    sink({'kind': 'tool_progress', 'progress': {'round': 1, 'call_index': 0,
+         'tool': 'run_command', 'phase': 'completed'}})
+    sink({'kind': 'assistant_commentary', 'text': '现在生成新的回复'})
+    assert background_main_activity(agent, 'thread-wait', {'task-wait'})['phase'] == 'responding'
+    sink.close()
+    sink({'kind': 'assistant_commentary', 'text': '迟到回调'})
+    assert background_main_activity(agent, 'thread-wait', {'task-wait'})['phase'] == 'waiting'

@@ -552,21 +552,25 @@ class BackgroundTranscriptSink(AgentToolApprovalSinkMixin, ToolInputProgressSink
     # LLM: Only a real tool-start boundary promotes tentative model text to a
     # complete gray process block; this mirrors Gateway rich commentary and avoids final duplication.
     # 函数用途: 把工具调用前的模型说明冻结成完整灰色过程消息并登记为正式 commentary。
-    def _flush_model_commentary(self, *, canonical_persisted: bool = False) -> None:
+    def _flush_model_commentary(self, *, canonical_message_id: str = "") -> None:
         content = public_background_transcript_text(
             self._model_text, limit=0, channel=self.channel
         )
         self._model_text = ""
         if not content:
             return
-        if not canonical_persisted:
+        if not canonical_message_id:
             self._committed_commentary.append(content)
         self._assistant_index += 1
         self._event(
             "assistant_completed",
             "completed",
             f"{self.request_id}:assistant:{self._assistant_index}",
-            {"text": content, "process": True},
+            {
+                "text": content,
+                "process": True,
+                **({"canonical_message_id": canonical_message_id} if canonical_message_id else {}),
+            },
         )
 
     # LLM: canonical结果仍是终答权威；typed提交按原call身份去重，不因不同消息同文吞final；旧无来源路径保持原展示合同。
@@ -1123,7 +1127,7 @@ def _commit_model_response(sink: BackgroundTranscriptSink, payload: dict) -> Non
     for event in events:
         if event["kind"] == "assistant_commentary":
             sink._model_text = event["text"]
-            sink._flush_model_commentary(canonical_persisted=bool(payload.get("canonical_message_id")))
+            sink._flush_model_commentary(canonical_message_id=str(payload.get("canonical_message_id") or ""))
         else:
             sink._terminal_model_call = call_id
 

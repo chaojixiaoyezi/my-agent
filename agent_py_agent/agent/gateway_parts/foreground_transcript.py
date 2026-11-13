@@ -87,7 +87,7 @@ class GatewayForegroundTranscriptSink(BackgroundTranscriptSink):
             return
         if kind == "assistant_commentary":
             self._model_text = str(event.get("text") or "")
-            self._flush_model_commentary()
+            self._flush_model_commentary(canonical_message_id=str(event.get("canonical_message_id") or ""))
             return
         if kind == "assistant_final" and isinstance(event.get("model_source"), dict):
             if not self._candidate_id:
@@ -149,14 +149,24 @@ class GatewayForegroundTranscriptSink(BackgroundTranscriptSink):
 
     # LLM: 全量 commentary 接替同一候选 ID；丢增量时也能终态恢复，不以文字相等判重。
     # 函数用途: 在工具边界把候选文字固定为过程说明，下一段回复使用新编号。
-    def _flush_model_commentary(self) -> None:
+    def _flush_model_commentary(self, *, canonical_message_id: str = "") -> None:
         content = public_background_transcript_text(self._model_text, limit=0)
         if content:
             if not self._candidate_id:
                 self._assistant_index += 1
                 self._candidate_id = f"{self.request_id}:assistant:{self._assistant_index}"
-            self._event("assistant_completed", "completed", self._candidate_id, {"text": content, "process": True})
-            self._committed_commentary.append(content)
+            self._event(
+                "assistant_completed",
+                "completed",
+                self._candidate_id,
+                {
+                    "text": content,
+                    "process": True,
+                    **({"canonical_message_id": canonical_message_id} if canonical_message_id else {}),
+                },
+            )
+            if not canonical_message_id:
+                self._committed_commentary.append(content)
         elif self._candidate_id:
             self._event("assistant_discarded", "interrupted", self._candidate_id, {})
         self._candidate_id = ""

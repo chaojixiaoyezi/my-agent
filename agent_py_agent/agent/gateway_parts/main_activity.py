@@ -29,6 +29,7 @@ class GatewayMainActivitySink:
         self._progress_writer = progress_writer
         self._progress_value: tuple | None = None
         self._tool_rounds = 0
+        self._active_tools: dict[tuple[int, int], str] = {}
         self._pending_permissions: set[str] = set()
         self._publish("running", "整理任务上下文", begin=True)
 
@@ -58,7 +59,10 @@ class GatewayMainActivitySink:
             self._publish("thinking", "思考中" if kind != "tool_input_progress" else "正在准备工具参数")
             return
         if kind in {"model_delta", "assistant_commentary"}:
-            self._publish("responding", "正在生成回复")
+            if kind == "assistant_commentary" and self._active_tools:
+                self._publish("tool", f"正在使用 {next(reversed(self._active_tools.values()))}")
+            else:
+                self._publish("responding", "正在生成回复")
             return
         if kind == "tool_progress" and isinstance(event.get("progress"), dict):
             progress = event["progress"]
@@ -66,8 +70,17 @@ class GatewayMainActivitySink:
                 self._tool_rounds = max(self._tool_rounds, progress["round"])
             tool = str(progress.get("tool") or "工具")[:80]
             phase = str(progress.get("phase") or "")
-            terminal = phase in {"finished", "completed", "succeeded", "failed"}
-            self._publish("tool", f"{'已完成' if terminal else '正在使用'} {tool}")
+            terminal = phase in {"finished", "completed", "succeeded", "failed", "interrupted"}
+            if type(progress.get("round")) is int and type(progress.get("call_index")) is int:
+                key = progress["round"], progress["call_index"]
+                if terminal:
+                    self._active_tools.pop(key, None)
+                elif phase == "started":
+                    self._active_tools[key] = tool
+            if self._active_tools:
+                self._publish("tool", f"正在使用 {next(reversed(self._active_tools.values()))}")
+            else:
+                self._publish("tool", f"{'已完成' if terminal else '正在使用'} {tool}")
             return
         if kind == "runtime_progress" and isinstance(event.get("retry"), dict):
             self._publish("retrying", _retry_activity(event["retry"]))
@@ -93,6 +106,7 @@ class GatewayMainActivitySink:
     def close(self) -> None:
         if not self.closed:
             self._pending_permissions.clear()
+            self._active_tools.clear()
             self._publish("waiting", "等待后续事件")
             self.closed = True
 

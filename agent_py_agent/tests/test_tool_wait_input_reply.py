@@ -204,3 +204,58 @@ def test_already_persisted_input_reply_is_displayed_without_second_commentary_pe
     assert sink.assistant_commentary_messages() == ()
     if kind == 'cli':
         assert '已经持久保存的临时答复' in capsys.readouterr().out
+
+
+def test_original_gateway_closeout_does_not_copy_already_canonical_interim(tmp_path):
+    from agent_py_agent.agent.backends import ModelResponse
+    from agent_py_agent.agent.conversation.background_transcript import (
+        read_background_transcript_events,
+    )
+    from agent_py_agent.agent.gateway_parts import request_history
+    from agent_py_agent.agent.gateway_parts.request_context import (
+        GatewayAskRunContext,
+        GatewayConversationContext,
+    )
+    from agent_py_agent.agent.gateway_parts.request_execution import (
+        _configure_gateway_main_activity,
+    )
+    from agent_py_agent.agent.gateway_parts.stream_writer import BufferedChunkStreamWriter
+    from agent_py_agent.tests.test_cli_run_conversation import _agent, _StaticBackend
+    from agent_py_agent.tests.test_committed_model_messages import _payload
+
+    agent = _agent(tmp_path)
+    store = agent.conversation_store
+    thread = store.threads.get_or_create({'canonical_user_id': 'local-agent', 'channel': 'chat'})
+    request = {'metadata': {'channel': 'chat'}, 'conversation_runtime': {
+        'request_id': 'gwreq-interim', 'thread_id': thread.thread_id, 'task_id': 'task-interim'}}
+    writer = BufferedChunkStreamWriter(tmp_path / 'chunks.jsonl', rich_transcript=True)
+    context = GatewayAskRunContext(agent=agent, request=request, request_id='gwreq-interim',
+        request_path=tmp_path / 'req.json', response_path=tmp_path / 'res.json', on_chunk=writer)
+    _configure_gateway_main_activity(context, SimpleNamespace(thread_id=thread.thread_id, workspace_task=None))
+    interim = store.messages.append_once({'thread_id': thread.thread_id, 'role': 'assistant',
+        'content': '命令还在执行，进度答复已保存。', 'metadata': {'reply_is_interim': True}},
+        dedupe_key='original-input-reply')
+    payload = _payload([{'text': interim.content}], call_id='actual-interim-source', boundary='tools')
+    payload['canonical_message_id'] = interim.message_id
+    writer.commit_model_response(payload)
+    assert writer.assistant_commentary_messages() == ()
+    assert writer.transcript_sink.assistant_commentary_messages() == ()
+    events = read_background_transcript_events(agent, thread_id=thread.thread_id, after=0)['events']
+    copies = [event for event in events if event['kind'] == 'assistant_completed'
+              and event.get('payload', {}).get('text') == interim.content]
+    assert copies and copies[0]['payload']['canonical_message_id'] == interim.message_id
+
+    class Final(_StaticBackend):
+        def generate(self, prompt, **kwargs):
+            return ModelResponse(backend=self.name, text='原命令已结束，这是正常终稿。')
+
+    agent.backend = Final()
+    result = agent.run('继续原工作', source='gateway', request_id=context.request_id,
+        task_attributes={'conversation_thread_id': thread.thread_id}, on_chunk=writer, save=False)
+    for _ in range(2):
+        request_history.persist_gateway_assistant_result(context,
+            GatewayConversationContext(thread_id=thread.thread_id), result)
+    rows = store.messages.recent(thread.thread_id, limit=50)
+    assert [row.message_id for row in rows if row.content == interim.content] == [interim.message_id]
+    assert len([row for row in rows if row.metadata.get('assistant_part_id') == 'final']) == 1
+    writer.close()

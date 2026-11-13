@@ -165,6 +165,9 @@ def committed_model_events(payload: dict, *, delivery_channel: str = "", identif
                 events.append({"kind": "assistant_final", "text": final, "model_source": source})
     for index, event in enumerate(events):
         event["replace_candidate"] = index == 0
+        canonical = payload.get("canonical_message_id")
+        if isinstance(canonical, str) and canonical:
+            event["canonical_message_id"] = canonical
     return events
 
 

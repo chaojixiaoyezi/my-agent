@@ -795,7 +795,8 @@ def _commit_model_response(writer: BufferedChunkStreamWriter, payload: dict) -> 
                 writer._write_text_events(writer._text_delta.finish(call_id, text=str(payload.get("final_text") or "")))
         for event in events:
             if event["kind"] == "assistant_commentary":
-                writer._committed_commentary.append(event["text"])
+                if not event.get("canonical_message_id"):
+                    writer._committed_commentary.append(event["text"])
                 if writer._commentary_emitted and not writer.rich_transcript and writer._verbose_level != "stream":
                     continue
                 writer._commentary_emitted = True
