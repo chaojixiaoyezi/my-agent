@@ -245,7 +245,7 @@ def lesson_resources(tmp_path):
 
 
 @pytest.mark.parametrize("error_type", ERRORS)
-@pytest.mark.parametrize("offset", [1, 2, 3, 4])
+@pytest.mark.parametrize("offset", [1, 2, 3, 4, 5])
 def test_lesson_body_then_routing_each_source_failure_preserves_exact_partial(tmp_path, error_type, offset):
     repo, door = lesson_resources(tmp_path)
     door.error = error_type("actual lesson source rejected")
@@ -253,14 +253,15 @@ def test_lesson_body_then_routing_each_source_failure_preserves_exact_partial(tm
     with commits.global_write_commit_scope(door), pytest.raises(error_type) as caught:
         repo.promote_with_receipt(lesson_candidate())
     assert caught.value is door.error and door.calls == door.reject_at
-    assert bool(list(repo.lessons_dir.glob("*.md"))) is (offset >= 3)
+    assert bool(list(repo.lessons_dir.glob("*.md"))) is (offset >= 4)
+    assert repo.heat_path.exists() is (offset >= 5)
     assert not repo.routing_index_path.exists()
-    if offset >= 3:
+    if offset >= 4:
         prior = next(repo.lessons_dir.glob("*.md")).read_bytes()
         door.reject_at = None
         with commits.global_write_commit_scope(door):
             _record, changed = repo.promote_with_receipt(lesson_candidate())
-        assert changed is False and repo.routing_index_path.exists()
+        assert changed is False and repo.routing_index_path.exists() and repo.heat_path.exists()
         assert next(repo.lessons_dir.glob("*.md")).read_bytes() == prior
 
 

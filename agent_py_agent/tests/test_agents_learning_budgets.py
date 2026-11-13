@@ -331,3 +331,54 @@ def test_rebuild_routing_index_end_to_end_applies_caps(tmp_path):
     assert "已省略" in text
     # 正文不受索引省略影响：被省略的 lesson 文件仍在。
     assert (repo.lessons_dir / "lesson-0000-00000000.md").exists()
+
+
+def test_routing_index_heat_ordering_keeps_more_than_24_short_entries(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from datetime import datetime, timezone
+
+    from agent_py_agent.agent.memory_store import lessons as lesson_module
+
+    repo = LessonRepository(
+        tmp_path / "memory" / "lessons",
+        tmp_path / "memory" / "routing" / "INDEX.md",
+    )
+    coldest_older = replace(
+        _lesson(0, updated_at="2026-01-01T00:00:00+00:00"),
+        path="memory/lessons/lesson-0000-00000000.md",
+    )
+    records = [coldest_older]
+    for index in range(1, 50):
+        records.append(
+            replace(
+                _lesson(index, updated_at=f"2026-02-01T00:00:{index:02d}+00:00"),
+                path=f"memory/lessons/lesson-{index:04d}-{index:08x}.md",
+            )
+        )
+    for index, record in enumerate(records):
+        (repo.lessons_dir / f"{record.lesson_id}-{index:08x}.md").write_text(
+            _render_lesson(record), encoding="utf-8"
+        )
+
+    repo.maintain(now=datetime(2026, 2, 2, tzinfo=timezone.utc))
+    repo.note_hits([coldest_older.lesson_id], at=datetime(2026, 2, 2, 1, 0, tzinfo=timezone.utc))
+    repo.maintain(now=datetime(2026, 2, 2, 1, 0, tzinfo=timezone.utc))
+
+    text = repo.routing_index_path.read_text(encoding="utf-8")
+    heat = json.loads(repo.heat_path.read_text(encoding="utf-8"))
+    # 默认 7 行卡片在 200 行上限下可装满 24 条；同时校验最热（曾被命中）的最旧教训排在首位。
+    assert len(heat["routed_ids"]) == 24
+    assert text.count("\n") <= _ROUTING_INDEX_MAX_LINE_COUNT
+    assert len(text.encode("utf-8")) <= _ROUTING_INDEX_MAX_BYTES
+    assert heat["routed_ids"][0] == coldest_older.lesson_id
+    assert coldest_older.lesson_id in text
+
+    # 验证渲染按 200 行/25KB 真实拟合最长前缀，无任何人为 24 条上限（短卡片应能容纳 > 24 条）。
+    monkeypatch.setattr(
+        lesson_module,
+        "_routing_section",
+        lambda rec: f"## {rec.lesson_id}\nauthority_path: {rec.path}",
+    )
+    repo.maintain(now=datetime(2026, 2, 2, 2, 0, tzinfo=timezone.utc))
+    heat_short = json.loads(repo.heat_path.read_text(encoding="utf-8"))
+    assert len(heat_short["routed_ids"]) > 24
