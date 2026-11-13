@@ -504,8 +504,9 @@ def task_scope_decision(
         None,
     )
     managed = _managed_session_scope(state)
-    if managed and exact_link is None:
-        exact_link = state.session_task_creation[0]
+    if managed:
+        # 首次prepare与后续bind共用canonical订单创建时刻，执行链接晚建不能换Compact身份。
+        exact_link = {**(exact_link or {}), **state.session_task_creation[0]}
     return TaskScopeDecision(
         task_id=task_id,
         task_ids=frozenset(_task_context_ids(state)),

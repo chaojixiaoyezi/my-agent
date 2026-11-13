@@ -58,6 +58,9 @@ def test_scope_uses_original_session_task_and_frozen_business_identity():
     state = BackgroundContextLoad(SimpleNamespace(), store, thread, 'order-new', None, None, [])
     decision = task_scope_decision(state, {'tasks': [{'task_id': 'order-new', 'created_at': 5.0}]})
     assert decision.managed_session and not decision.detached
+    # 执行TaskLink晚建/恢复不会改变订单Compact身份。
+    later = task_scope_decision(state, {'tasks': [{'task_id': 'order-new', 'created_at': 10.0}]})
+    assert later.exact_link['created_at'] == decision.exact_link['created_at'] == 5.0
     task.target_thread_id = 'different-thread'
     # 同次裁决冻结；新一次对冲突的真实关系拒绝，不能退回全会话。
     assert task_scope_decision(state, {'tasks': []}).managed_session
