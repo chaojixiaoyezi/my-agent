@@ -21,6 +21,7 @@ agent_py_agent/tests/
 |-- test_business_task_execution_view.py       # 原生任务运行态与有界列表往返
 |-- test_business_native_tree.py               # 总控直接执行、空间筛选和有界业务树
 |-- test_background_detached_execution_consistency.py # 独立任务执行、多个运行和长历史下的后台观察
+|-- test_claim_nonfinite_ttl.py                # 损坏租约时间、原子领取续租与终态兼容
 ```
 
 ```text

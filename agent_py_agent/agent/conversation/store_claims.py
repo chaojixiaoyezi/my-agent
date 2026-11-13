@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,6 +35,18 @@ _FINISH_STATUSES = {"finished", "failed", "cancelled"}
 _INVALID_FINISH_STATUS = "invalid_status"
 
 
+def running_claim_expiry(claim: dict[str, Any]) -> float:
+    """原running租约时钟校验；坏值不是到期或空claim，旧缺省TTL仍沿零值兼容。"""
+    raw = claim.get('expires_at', 0.0)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise DataCorruptionError('BACKGROUND_CLAIM_TTL_INVALID: running expires_at is not numeric') from error
+    if not math.isfinite(value):
+        raise DataCorruptionError('BACKGROUND_CLAIM_TTL_NONFINITE: running expires_at must be finite')
+    return value
+
+
 # LLM: Host-owned claim inputs; recovery affinity adds no permissions or new lease identity.
 # 类用途: 表达执行租约及原请求恢复归属，由同一 claim 文件持久保存。
 @dataclass(frozen=True)
@@ -51,7 +64,7 @@ class BackgroundClaimPayload:
 # LLM: Emit one canonical claim; omit disabled recovery affinity for ordinary background callers.
 # 函数用途: 构造待落盘的租约；恢复专属标记只对宿主明确绑定的请求生效。
 def _new_claim(payload: BackgroundClaimPayload) -> dict[str, Any]:
-    return {
+    claim = {
         "schema_version": "background_run_claim.v1",
         "claim_id": new_id("bgclaim"),
         "thread_id": payload.thread_id,
@@ -68,6 +81,8 @@ def _new_claim(payload: BackgroundClaimPayload) -> dict[str, Any]:
         "takeover": {"allowed": False, "reason": "claim_running"},
         **({"recover_same_task_only": True} if payload.recover_same_task_only else {}),
     }
+    running_claim_expiry(claim)
+    return claim
 
 
 # LLM: 缺省 TTL 仍读既有配置；显式值按原正整数边界归一。
@@ -164,6 +179,11 @@ def _read_claim_report(path: Path) -> tuple[dict[str, Any], dict[str, Any] | Non
         return {}, _claim_load_error(
             DataCorruptionError(f"background claim must be a JSON object: {path}"), path
         )
+    if payload.get('status') == 'running':
+        try:
+            running_claim_expiry(payload)
+        except DataCorruptionError as error:
+            return {}, _claim_load_error(error, path)
     return payload, None
 
 
@@ -235,6 +255,8 @@ class ClaimStore:
         # 函数用途: 原子核对旧租约归属，再按真实租约和宿主状态决定是否替换。
         def updater(data: dict[str, Any]) -> dict[str, Any]:
             nonlocal claimed
+            if data.get('status') == 'running':
+                running_claim_expiry(data)
             if (
                 data.get("status") == "running"
                 and data.get("recover_same_task_only") is True
@@ -319,6 +341,8 @@ class ClaimStore:
         # 函数用途: 只更新仍归本执行者的心跳和过期时间。
         def updater(data: dict[str, Any]) -> dict[str, Any]:
             nonlocal renewed
+            if data.get('status') == 'running':
+                running_claim_expiry(data)
             if (
                 str(data.get("claim_id") or "") != str(claim_id or "")
                 or str(data.get("status") or "") != "running"
@@ -326,7 +350,9 @@ class ClaimStore:
                 renewed = False
                 return data
             renewed = True
-            return {**data, "heartbeat_at": current, "expires_at": current + lease}
+            updated = {**data, "heartbeat_at": current, "expires_at": current + lease}
+            running_claim_expiry(updated)
+            return updated
 
         updated = update_json_file_atomic(
             self.storage.background_claim_path(claim_scope_id),

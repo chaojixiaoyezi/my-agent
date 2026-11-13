@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import time
 
+from ..runtime_errors import DataCorruptionError
 from .background_team_lifecycle import background_identity
 from .session_tasks import SESSION_TASK_TERMINAL_STATUSES
-from .store_claims import _FINISH_STATUSES
+from .store_claims import _FINISH_STATUSES, running_claim_expiry
 
 
 class ExecutionViewError(ValueError):
@@ -42,12 +43,16 @@ def thread_execution_view(store, runtime, thread, *, claim_scope_id=""):
 
 
 def validate_execution_claim(thread, claim):
+    try:
+        expires_at = running_claim_expiry(claim)
+    except DataCorruptionError as error:
+        raise ExecutionViewError('CLAIM_UNREADABLE') from error
     authority = claim.get("runtime_authority")
     required = ("invocation_run_id", "task_id", "run_id", "agent_run_id", "attempt_id")
     if (claim.get("thread_id") != thread.thread_id or not isinstance(authority, dict)
             or authority.get("schema_version") != "conversation_claim_execution.v1"
             or authority.get("claim_id") != claim.get("claim_id")
-            or float(claim.get("expires_at") or 0) <= time.time()
+            or expires_at <= time.time()
             or any(not isinstance(authority.get(key), str) or not authority[key] for key in required)):
         raise ExecutionViewError("EXECUTION_AUTHORITY_UNAVAILABLE")
 
