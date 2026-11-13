@@ -171,15 +171,21 @@ def identity_outstanding(host, thread) -> tuple[list[str], list]:
                         refs.append(f"subscription:{sub_id}")
         except Exception:
             refs.append("subscriptions:unreadable")
-    # 待处理人工审批核验
+    # 待处理人工审批核验：读口只接受 root_task_id（没有 thread_id 参数），预算零会直接跳过整轮扫描；
+    # 未扫完或读失败都必须留成"未结义务"，不能当作"没有审批"而放行退休。
     try:
         from .agent_tool_approval import list_pending_agent_tool_approvals
-        pending_appr = list_pending_agent_tool_approvals(host, thread_id=thread.thread_id, root_task_id=thread.thread_id, deadline=0)
+        approval_progress: dict = {}
+        pending_appr = list_pending_agent_tool_approvals(
+            host, root_task_id=thread.thread_id, deadline=time.monotonic() + 0.05,
+            scan_progress=approval_progress)
         for appr in pending_appr:
             appr_id = getattr(appr, "id", None) or (appr.get("approval_id") if isinstance(appr, dict) else str(appr))
             refs.append(f"approval:{appr_id}")
+        if not approval_progress.get("complete", False):
+            refs.append("approvals:incomplete")
     except Exception:
-        pass
+        refs.append("approvals:unreadable")
     # 委派任务未投递的结果回报与未结唤醒核验
     from .execution_threads import IM_TASK_EXECUTION_KEY
     if IM_TASK_EXECUTION_KEY in (thread.metadata or {}):

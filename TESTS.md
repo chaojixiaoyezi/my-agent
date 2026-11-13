@@ -1,3 +1,15 @@
+## 2026-11-12 V06-07 退休前人工审批义务必须真的被读到
+
+来源：128 项定向复核（V04–V06 组）在 `agent/conversation/background_team_lifecycle.py` 里发现三处叠加缺陷——审批读口 `list_pending_agent_tool_approvals` 只接受 `root_task_id`，调用处却多传 `thread_id`（必然 `TypeError`）；`deadline=0` 让预算扫描直接跳过整轮；外层 `except Exception: pass` 把异常吞成"没有审批"。三者合起来，待处理审批永远不会成为未结义务，`retiring` 会被错误释放成 `retired`。
+
+做法：调用只传 `root_task_id`；预算给 `time.monotonic() + 0.05`（与同文件 retire 路径同量级）以真正扫描一轮；把 `scan_progress` 取回来，未扫完记 `approvals:incomplete`，读失败记 `approvals:unreadable`，两者都保留为未结义务，不再静默放行。没有放宽任何既有断言，也没有为取绿改测试预期。
+
+新测试：`agent_py_agent/tests/test_acceptance_background_approval_obligation.py`（5 项）——读口签名不含 `thread_id`；扫描完成且为空才释放；有 pending 记 `approval:<id>` 并保持 `retiring`；读失败与扫描不完整分别记不同标记且都保持 `retiring`。
+
+实际验证：集成树跑该新测试 + `test_rework_r4_background_retirement.py`，**29 个节点全部通过**（exit 0）。隔离 HOME/`TMPDIR`、`PYTHONDONTWRITEBYTECODE=1`、`-p no:cacheprovider`。
+
+复现：`cd src/integration && PYTHONPATH=. TMPDIR=/tmp python3 -B -m pytest -q agent_py_agent/tests/test_acceptance_background_approval_obligation.py agent_py_agent/tests/test_rework_r4_background_retirement.py`。仅覆盖模块行为，真实 Gateway 的退休链路与并发写仍未验证。
+
 ## 2026-11-12 W13 健康动作的生产客户端解析与回执校验
 
 来源：WF-11 公开入口验收中，服务端新动作已能返回合法健康投影，但生产 BusinessClient 仍报 `UNSUPPORTED_ACTION`；进一步排查发现即便动作目录认出，冻结响应信封的 `data` 是静态联合类型清单，新动作 data 不在其中，合法 200 会被整条降级为不可信。
