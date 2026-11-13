@@ -328,8 +328,14 @@ def _observed_tool_error(control_code, *, result=None, workflow=None, fallback_m
     contract = error_contract(code)
     retryable = receipt.get('retryable') is True and receipt.get('effect_outcome') in {'none', 'not_started'}
     if contract.code == code and code != 'UNKNOWN_ERROR':
+        details = [{'key': 'recommended_action', 'value': contract.recommended_action}]
+        if isinstance(workflow, dict) and workflow.get('error_code') == code:
+            facts = workflow.get('details')
+            cause = facts.get('reason') if isinstance(facts, dict) else None
+            if isinstance(cause, str) and re.fullmatch(r'[a-z][a-z0-9_]{0,95}', cause):
+                details.append({'key': 'reason', 'value': cause})
         return {'code': code, 'message': contract.recovery_hint, 'retryable': retryable and contract.retryable,
-                'details': [{'key': 'recommended_action', 'value': contract.recommended_action}]}
+                'details': details}
     return {'code': code, 'message': fallback_message or code, 'retryable': retryable,
             'details': []}
 

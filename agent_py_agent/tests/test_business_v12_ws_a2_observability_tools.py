@@ -291,6 +291,28 @@ def test_tool_list_argument_summary_requires_detail_access_and_keeps_secrets_pri
     assert restricted['operation_id'] == op['operation_id'] and 'invocation' not in restricted
 
 
+def test_reconciliation_receipts_publish_the_original_scoped_reason(tmp_path):
+    env = _make_observability_env(tmp_path)
+    record = env.repo.record_run_creation(owner_id=env.owner, run_id='reconciliation-receipt', thread_id='worker',
+        task_run_metadata={'business_context': env.task.metadata['business_context'], 'session_task_ref': env.task.task_id})
+    operation = env.repo.create_tool_operation(agent_run_id=record['agent_run_id'], attempt_id=record['attempt_id'],
+                                               operation_type='workflows')['operation_id']
+    code = 'WORKFLOW_RECONCILIATION_REQUIRED'
+    outcome = {'error_code': code, 'result': {'schema_version': 'tool_execution_result.v1', 'tool': 'workflows',
+        'ok': False, 'duration_ms': 0, 'effect_outcome': 'not_started', 'handler_executed': True,
+        'result_ref': operation, 'result_envelope': {'error_code': code, 'details': {'reason': 'reader_unavailable',
+            'internal_path': '/private/internal'}}}}
+    with env.repo._runtime_connection() as conn:
+        conn.execute("UPDATE tool_operations SET status='FAILED', outcome_json=?, settled_at=100 WHERE operation_id=?",
+                     (json.dumps(outcome), operation))
+        conn.commit()
+    row = env.service.query('tool_calls.get', {'operation_id': operation}, actor=env.actor)['tool_call']
+    assert row['effect_outcome'] == 'not_started' and row['error']['code'] == code
+    assert {f['key']: f['value'] for f in row['error']['details']} == {
+        'recommended_action': 'change_strategy', 'reason': 'reader_unavailable'}
+    assert not row['error']['retryable'] and '/private/internal' not in str(row)
+
+
 def test_biz013_business_spaces_tool_effect_outcome_canonical():
     class FakeService:
         owner_id = 'local/test'
