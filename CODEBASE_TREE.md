@@ -4946,7 +4946,18 @@ agent_py_agent/agent/capability/
 |   |   |-- skill_learning_migration.py # 按原committed来源与hash纳管S1，保原路径和身份
 |   |   |-- skill_feedback_tool.py # 当前任务结构化采用声明，不能冒充人类结果或自批
 |   |   |-- skill_learning_versions.py # 自学单调修订与不可变正文快照固定，撤销后禁止读历史
-|   |-- test_sm_w10_closed_loop.py # 闭环跨切片组合：275→50 收敛保留豁免层、容量收敛崩溃恢复、5,000 owner 隔离、召回工作计数、互斥载体与 lesson 纠正
+|   |-- test_sm_w0_live_policy.py # 闭环 W0：出厂默认、可调键、主会话可调/子代理拒绝与 live 重载
+|   |-- test_sm_w1_store_transitions.py # 闭环 W1：托管判据、容量准入与换出、六类转换子进程崩溃恢复、显式动作
+|   |-- test_sm_w2_usage_strikes.py # 闭环 W2：版本/任务精确回执、3/4/5 阶梯与多通道同任务去重
+|   |-- test_sm_w2_bounded_maintenance.py # 闭环 W2：活跃索引保护、80/20 推荐、7/15/15 生命周期、游标维护与回执清理
+|   |-- test_sm_w3_intake_runtime.py # 闭环 W3：组合根 live 接线、合并优先、后台总结通道、载体入队与多 owner 分页发现
+|   |-- test_sm_w4_catalog_projection.py # 闭环 W4：语义指纹、推荐边界、owner 局部失效与有界 memo
+|   |-- test_sm_w5_carrier_hygiene.py # 闭环 W5：互斥载体分类与提案有界清理
+|   |-- test_sm_w6_lesson_repository.py # 闭环 W6：lesson 身份、替代与 HOT 退役、热度与永久归档
+|   |-- test_sm_w7_recall_bounds.py # 闭环 W7：有界 lesson/HOT 读取、read_ids/scope_pairs 与缺损自愈
+|   |-- test_sm_w8_promotion_curator.py # 闭环 W8：lesson CAS 晋升、载体委派与整理器维护
+|   |-- test_sm_w9_feedback_awareness.py # 闭环 W9：skill_feedback 五动作、UserConfigTool live 策略与 self_map 遥测
+|   |-- test_sm_w10_closed_loop.py # 闭环跨切片组合：275→50 收敛、崩溃恢复、5,000 owner 隔离、工作计数；真实组合根上的 V2-1..V2-5 全链路
 |   |-- test_wave7_autonomous_learning_closure.py # W2自包含F01–F17及R2六项修复回归；CAS/冻结/输出合同限W2自身入口
 |   |-- test_wave7_w1_integration_contracts.py # W1三项原普通断言原样保留，正常收集、不skip/xfail，跨线集成须另验
 |   |-- test_skill_learning_maintenance.py # 采用与质量分离、引用保护/归档回滚、52条真实库与缓存失效

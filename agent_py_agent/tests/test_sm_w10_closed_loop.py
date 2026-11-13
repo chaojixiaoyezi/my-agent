@@ -25,27 +25,50 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.capability import self_map_memory, self_map_skills, skill_feedback_tool
 from agent_py_agent.agent.capability import skill_learning_versions as versions_module
+from agent_py_agent.agent.capability.skill_learning import (
+    SkillLearningRuntime,
+    SkillLearningService,
+    SkillLearningSettings,
+)
 from agent_py_agent.agent.capability.skill_learning_maintenance import (
+    LearningObservationSource,
     control_learning,
     maintain_learning,
+    observe_learning,
 )
+from agent_py_agent.agent.capability.skill_learning_prompt import OUTPUT_SCHEMA_VERSION
 from agent_py_agent.agent.capability.skill_learning_publish import (
     PublishRequest,
     publish_learned_skill,
 )
 from agent_py_agent.agent.capability.skill_learning_store import SkillLearningStore
 from agent_py_agent.agent.capability.skill_proposals import lesson_carrier
-from agent_py_agent.agent.capability.skill_usage_receipts import aggregate_key
+from agent_py_agent.agent.capability.skill_usage_receipts import aggregate_key, read_usage_aggregate
+from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_store import _jsonl_indexing as indexing_module
 from agent_py_agent.agent.memory_store import lessons as lessons_module
 from agent_py_agent.agent.memory_store.candidate_models import MemoryCandidate
 from agent_py_agent.agent.memory_store.jsonl import JsonlMemory, MemoryRecord
 from agent_py_agent.agent.memory_store.lessons import HotRuleRepository, LessonRepository
+from agent_py_agent.agent.owner_wake_discovery import discover_owner_home_page
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 from agent_py_agent.agent.runtime_db.schema import runtime_db_path
+from agent_py_agent.agent.settings.config import load_config
+from agent_py_agent.agent.settings.live_switches import register_live_config
+from agent_py_agent.agent.tooling.models import ToolInvocationContext
+from agent_py_agent.agent.tooling.self_map_registry import SelfMapReadContext
+from agent_py_agent.agent.tooling.user_config_tool import UserConfigTool
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
-from agent_py_agent.tests.test_skill_learning import BODY
+from agent_py_agent.tests.test_skill_learning import BODY, _FakeBackend
+from agent_py_agent.tests.test_sm_w3_intake_runtime import _finalize_ctx, _skill_candidate
+from agent_py_agent.tests.test_sm_w9_feedback_awareness import (
+    _activate_main_turn,
+    _make_real_agent,
+    _publish_skill,
+    _record_delivery,
+)
 from agent_py_agent.tests.test_wave7_autonomous_learning_closure import decision
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -439,12 +462,240 @@ def test_exclusive_carrier_and_lesson_correction_retire_obsolete_hot(tmp_path: P
 
 
 # ---------------------------------------------------------------------------
-# Stage B live composition（W3 + W9 合入后补充）
+# Stage B：W0..W9 全部合入后的真实组合根全链路（SimpleAgent + 真实工具 + 真实存储）
 # ---------------------------------------------------------------------------
-# 待 W3（SkillLearningService live config_provider / usage_runtime_provider / 载体回调的组合根接线）
-# 与 W9（skill_feedback 四动作、self_map SkillTelemetry/MemoryTelemetry）合入后，在此区块追加：
-#   - 真实 SimpleAgent 组合根：enable_self_learning false -> true -> false 与 maintenance_mode 切换即时生效；
-#   - 主会话 skill_feedback(ineffective) + 后台总结 + 包检查三通道同任务只记 1 击，3/4/5 阶梯与第三击回滚/退役；
-#   - 子代理调用 skill_feedback 被拒（effect_outcome="not_started"），restore/remove 的副作用回执真实；
-#   - self_map 遥测报告 live 规则与部分覆盖（unknown 为 null + reason，不当作 0）。
-# 这些用例必须走真实 provider，不以替身实现代替尚未合入的切片。
+
+
+def _self_map_ctx(agent: object) -> SelfMapReadContext:
+    inv = ToolInvocationContext(agent.tools.runtime_snapshot(allowed_tools=["self_map", "skill_search", "remember"]))
+    return SelfMapReadContext(agent, inv, "admin", False, "", "main", agent.home_paths.owner_id, "admin")
+
+
+def _ineffective_output(name: str) -> str:
+    return json.dumps(
+        {
+            "schema_version": OUTPUT_SCHEMA_VERSION,
+            "decision": "ineffective",
+            "reason": "已交付的方法误导了本轮执行",
+            "update_target": name,
+            "name": name,
+            "description": "",
+            "when_to_use": "",
+            "tags": [],
+            "body": "",
+        },
+        ensure_ascii=False,
+    )
+
+
+def test_stage_b_v2_1_live_user_config_reaches_service_and_self_map(tmp_path: Path) -> None:
+    """V2-1：主会话 UserConfigTool 写入后，同一 Agent 的学习服务与 self_map 在下一次读取即反映，无需重启。"""
+    cfg_path = tmp_path / "user_config.yaml"
+    cfg_path.write_text('agent_name: "w10-stage-b"\n', encoding="utf-8")
+    before = cfg_path.stat()
+    os.utime(cfg_path, ns=(before.st_atime_ns, before.st_mtime_ns - 5_000_000_000))
+    config = load_config(cfg_path)
+    config.model_backend = "echo"
+    config.my_agent_home = str(tmp_path / "home")
+    config.my_agent_owner_provider = "local"
+    config.my_agent_owner_kind = "main"
+    config.my_agent_owner_id = "local/main"
+    config.execution_mode = "managed"
+    register_live_config(config)
+    agent, _repo, store = _make_real_agent(tmp_path, config=config)
+    _publish_skill(store, "live-policy-skill")
+    tool = UserConfigTool(agent)
+
+    assert isinstance(agent.skill_learning, SkillLearningService)  # 出厂即开启
+    assert agent.skill_learning._live_state()[1].maintenance_mode == "autonomous"
+
+    def _set(key: str, value: str) -> None:
+        out = tool.execute({"action": "set", "key": key, "value": value, "reason": "w10 stage b"})
+        assert out.ok, (key, out.output)
+
+    _set("enable_self_learning", "false")
+    assert agent.skill_learning is None
+    assert "enable_self_learning=False" in self_map_skills.skill_projection(_self_map_ctx(agent)).summary
+
+    _set("enable_self_learning", "true")
+    _set("self_learning_maintenance_mode", "observe")
+    _set("self_learning_max_skills", "12")
+    service = agent.skill_learning
+    assert isinstance(service, SkillLearningService)
+    settings = service._live_state()[1]
+    assert (settings.maintenance_mode, settings.max_skills) == ("observe", 12)
+    projection = self_map_skills.skill_projection(_self_map_ctx(agent))
+    assert projection.counts["max_learned_skills"] == 12
+    assert projection.counts["live_learned_count"] == 1
+    assert "maintenance_mode=observe" in projection.summary
+
+    reset = tool.execute({"action": "reset", "key": "self_learning_maintenance_mode", "reason": "w10 stage b"})
+    assert reset.ok, reset.output
+    assert agent.skill_learning._live_state()[1].maintenance_mode == "autonomous"
+
+
+def test_stage_b_v2_2_three_channels_one_strike_per_task_and_third_strike_rollback(tmp_path: Path) -> None:
+    """V2-2：同一任务上主会话反馈、包检查归因、后台总结复核三通道只记 1 击；三个不同任务后回滚到已证明版本。"""
+    from agent_py_agent.agent.capability.skill_learning_host_feedback import (
+        observe_command_verification,
+    )
+
+    agent, repo, store = _make_real_agent(tmp_path, enable_self_learning=True)
+    name = "three-channel"
+    v1 = _publish_skill(store, name)
+    for idx in (1, 2):
+        _record_delivery(store, v1, task_id=f"establish-{idx}")
+        observe_learning(
+            store, name, sha256=v1.sha256, task_id=f"establish-{idx}", outcome="effective",
+            source=LearningObservationSource(authority="host", receipt_id=f"rcpt-est-{idx}"),
+        )
+    v2 = _publish_skill(store, name, update_from=store.load_registry().skills[name])
+    identity = {
+        "incarnation_id": str(v2.maintenance["incarnation_id"]),
+        "activation_id": str(v2.maintenance["activation_id"]),
+        "content_sha256": v2.sha256,
+    }
+
+    def hurt() -> int:
+        agg = read_usage_aggregate(repo, **identity)
+        return int(agg["hurt_count"]) if agg else 0
+
+    backend = _FakeBackend(_ineffective_output(name))
+    summarizer = SkillLearningService(
+        store,
+        SkillLearningSettings(min_tool_rounds=3, max_skills=50),
+        SkillLearningRuntime(
+            owner_id="local:main",
+            deployment_root=tmp_path / "dep",
+            backend=backend,
+            snapshot_provider=lambda: SimpleNamespace(entries=(SimpleNamespace(
+                name=name, source="owner", description="three channel", path=store.skill_path(name),
+                stable_id=f"owner:{name}",
+            ),)),
+            guard_config=None,
+            usage_runtime_provider=lambda: repo,
+        ),
+    )
+
+    # 任务 1：通道 A（主会话 skill_feedback）+ 通道 C（包检查失败）+ 通道 B（后台总结）同任务只记 1 击。
+    claim = _activate_main_turn(agent, tmp_path, run_id="run-1", task_id="task-1", request_id="req-1")
+    _record_delivery(store, v2, task_id="task-1")
+    agent._current_skill_snapshot = agent.skills_service.snapshot_for(force_reload=True)
+    tool = skill_feedback_tool.SkillFeedbackTool(agent)
+    first = tool.execute({"action": "ineffective", "skill_id": f"owner:{name}"})
+    assert first.ok and first.effect_outcome == "", first.output
+    assert first.result_envelope["skill_feedback"]["lifecycle"]["hurt_count"] == 1
+    observe_command_verification(
+        agent, agent._current_run_params,
+        {"ok": False, "command": "pytest", "exit_code": 1, "target_skill": f"owner:{name}"},
+    )
+    assert summarizer.enqueue_from_finalize(_finalize_ctx("run-1-bg", root_task_id="task-1", used_skill_ids=(name,))) == "queued"
+    summarizer.run_pending()
+    assert hurt() == 1
+
+    # 任务 2：仅后台总结通道，独立任务记第 2 击（计数清零、要求 5 次）。
+    _record_delivery(store, v2, task_id="task-2")
+    backend.responses.append(_ineffective_output(name))
+    assert summarizer.enqueue_from_finalize(_finalize_ctx("run-2-bg", root_task_id="task-2", used_skill_ids=(name,))) == "queued"
+    summarizer.run_pending()
+    assert hurt() == 2
+    assert store.load_registry().skills[name].maintenance.get("uses_since_hurt", 0) == 0
+
+    # 任务 3：主会话反馈记第 3 击，立即回滚到已证明有效的 v1，不再记第 4 击。
+    _activate_main_turn(agent, tmp_path, run_id="run-3", task_id="task-3", request_id="req-3", prev_claim=claim)
+    _record_delivery(store, v2, task_id="task-3")
+    agent._current_skill_snapshot = agent.skills_service.snapshot_for(force_reload=True)
+    third = tool.execute({"action": "ineffective", "skill_id": f"owner:{name}"})
+    assert third.ok, third.output
+    assert third.result_envelope["skill_feedback"]["code"] == "ROLLED_BACK"
+    assert hurt() == 3
+    current = store.load_registry().skills[name]
+    assert current.version == 1 and current.sha256 == v1.sha256
+    assert current.maintenance["activation_id"] != identity["activation_id"]  # 回滚产生新的激活身份
+    assert name not in store.load_registry().blocked_names
+
+
+def test_stage_b_v2_3_multi_owner_paged_discovery_is_bounded_and_complete(tmp_path: Path, monkeypatch) -> None:
+    """V2-3：多 owner 分页发现每页不超过上限、游标走完全集且不重复，发现过程不构造任何 Agent。"""
+    home_root = tmp_path / "home"
+    users = [f"u{index:02d}" for index in range(25)]
+    for uid in users:
+        (home_root / "owners" / "providers" / "feishu" / "users" / uid / "data" / "skill_learning").mkdir(parents=True)
+    ensure_my_agent_home(home_root)
+
+    def forbidden_agent(*_args, **_kwargs):
+        raise AssertionError("cold owner discovery must not construct an Agent")
+
+    monkeypatch.setattr(SimpleAgent, "__init__", forbidden_agent)
+    page_limit = 4
+    seen: list[str] = []
+    cursor = None
+    pages = 0
+    while True:
+        page = discover_owner_home_page(home_root / "owners", limit=page_limit, after_cursor=cursor)
+        pages += 1
+        assert len(page.targets) <= page_limit
+        seen.extend(f"{t.identity.provider}:{t.identity.owner_kind}:{t.identity.owner_id}" for t in page.targets)
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+        assert pages <= 20, "paged discovery did not terminate"
+    assert len(seen) == len(set(seen))
+    assert {f"feishu:user:{uid}" for uid in users} <= set(seen)
+    assert pages >= -(-len(users) // page_limit)
+
+
+def test_stage_b_v2_4_exclusive_carrier_publishes_without_confirmation_popup(tmp_path: Path) -> None:
+    """V2-4：过程性子代理经验只进 Skill 学习队列，记忆侧委派撤回；后台总结直接经闸门发布，不产生待确认提案。"""
+    agent, repo, store = _make_real_agent(tmp_path, enable_self_learning=True)
+    procedural = _skill_candidate(
+        agent.memory_candidates,
+        "run-carrier-1",
+        body=(
+            "# 共享登记表更新规范\n\n## 触发条件\n写共享登记表时触发。\n\n"
+            "## 步骤\n1. 先读取当前版本记录。\n2. 用精确版本比较交换落盘。\n"
+        ),
+    )
+    assert lesson_carrier(procedural) == "skill"
+    queued = agent.subagents.enqueue_lesson_candidates([procedural])
+    assert [row["status"] for row in queued["queued"]] == ["queued"]
+    assert queued["refused"] == [] and queued["deferred"] == []
+    assert len(store.pending_requests()) == 1
+
+    # 记忆侧自动晋升对同一过程性候选不写 lesson/HOT、不重复入队（已批准候选的委派撤回见 W8 用例）。
+    result = agent.memory_promotion.promote(procedural.candidate_id, automatic=True)
+    assert result.promoted is False and result.formal_memory_changed is False
+    assert agent.memory_lessons.list() == []
+    assert len(store.pending_requests()) == 1
+
+    owner = Path(agent.home_paths.owner_home_dir)
+    assert not (owner / "data" / "skill_proposals").exists()
+    assert not (store.directory / "proposals").exists() or not any((store.directory / "proposals").iterdir())
+
+
+def test_stage_b_v2_5_real_lesson_heat_telemetry_and_missing_memory_self_heal(tmp_path: Path) -> None:
+    """V2-5：真实 lesson 维护写出的热度投影驱动 self_map 遥测（ISO-8601 as_of）；整个 memory 目录被删后读路径静默降级。"""
+    import shutil
+    from datetime import datetime
+
+    agent, _repo, _store = _make_real_agent(tmp_path, enable_self_learning=True)
+    lessons = agent.memory_lessons
+    for index in range(2):
+        lessons.promote(_candidate(f"heat-{index}", f"第 {index} 条陈述经验。", subject_key=f"heat.subject.{index}"))
+    report = lessons.maintain(archive_days=15, pin_loader=lambda: ((), True), batch_ms=5000)
+    assert report["coverage"]["status"] in {"complete", "partial"}
+
+    ctx = _self_map_ctx(agent)
+    projection = self_map_memory.memory_projection(ctx)
+    telemetry = self_map_memory.memory_telemetry(ctx)
+    assert projection.errors == ()
+    assert projection.counts["lessons_active_count"] == 2
+    assert projection.counts["lesson_archive_days"] == 15
+    assert datetime.fromisoformat(telemetry["coverage"]["as_of"]).tzinfo is not None
+
+    shutil.rmtree(Path(agent.home_paths.owner_home_dir) / "memory")
+    degraded = self_map_memory.memory_projection(_self_map_ctx(agent))
+    assert degraded.completeness == "partial"
+    assert degraded.counts["lessons_active_count"] is None  # 未知不当作 0
+    assert agent.memory.read_ids(["missing-entry"]) == []
+    assert agent.memory.scope_pairs("project") == ()

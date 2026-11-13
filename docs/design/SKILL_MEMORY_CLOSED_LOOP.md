@@ -1,6 +1,6 @@
 # Skill 与记忆闭环（skill-memory-closed-loop）
 
-状态：W0/W1/W2/W4/W5/W6/W7/W8 已在集成分支 `sm/integration-20261113` 合入并各自通过切片门；W3（组合根 live 接线、后台总结第二通道）与 W9（`skill_feedback` 四动作、`self_map` 遥测）仍在开发，合入后由 W10 Stage B 补齐组合根全链路测试与本文对应小节的验收结论。本文是这次闭环改造的唯一模块设计；`DESIGN_LEDGER.md` 只保留摘要和链接，S3 自动总结的原始设计见 [自动总结 Skill](SKILL_AUTO_SUMMARY.md)。
+状态：W0–W9 已全部合入集成分支 `sm/integration-20261113`（`3e2bcb625`），十个切片的合并门 1595 项全部通过；W10 在其上补齐跨切片与真实组合根全链路测试、常数目录与文档（集成候选，尚待双路独立审核，未部署）。本文是这次闭环改造的唯一模块设计；`DESIGN_LEDGER.md` 只保留摘要和链接，S3 自动总结的原始设计见 [自动总结 Skill](SKILL_AUTO_SUMMARY.md)。
 
 ## 1. 背景与用户决定
 
@@ -109,7 +109,7 @@
 - `JsonlMemory.read_ids` 复用读索引按 ID 取回，代替决策召回后的 `memory.all()` 刷新；`scope_pairs` 是按权威 generation、墓碑和最近过期时间失效的有界 LRU 投影。目录或分段被手动删除时静默降级，不抛致命错误。
 - 记忆整理器的 `run_maintenance_if_due` 不依赖辅助模型是否可用、也不依赖对话轮数阈值，按既有间隔运行 lesson 维护；`partial` 覆盖不推进节流时间戳。整理器校验把 lesson revision 绑定到候选，仅在宿主核验的精确版本下自动执行 lesson 替代/合并。
 
-## 10. 遥测（W9，待合入）
+## 10. 遥测（W9）
 
 `self_map` 通过既有 `SectionProjection.counts` 与条目元数据报告 `SkillTelemetry`/`MemoryTelemetry`：当前生效规则、在役/冷藏/归档计数、`user_owned_exempt_from_cap=true`、`shared_exempt_from_cap=true`、`required_uses_formula="3 + hurt_count"`、`retire_at_hurt_count=3`、`archive_auto_delete=false`。计数未知时为 `null` 并附原因与覆盖，不当作 0；遥测不递归扫描归档、不构造 owner、不读正文。
 
@@ -136,12 +136,15 @@
 | `test_sm_w6_lesson_repository.py` | lesson 身份、替代与 HOT 退役、热度与永久归档、协调写入重放 |
 | `test_sm_w7_recall_bounds.py` | 有界 lesson/HOT 读取、`read_ids`/`scope_pairs`、缺损自愈、命中去重 |
 | `test_sm_w8_promotion_curator.py` | lesson CAS 晋升、载体委派、整理器维护与版本绑定 |
-| `test_sm_w10_closed_loop.py` | 跨切片组合：275→50 收敛、容量收敛崩溃恢复、5,000 owner 隔离、工作计数、载体与纠正；W3/W9 合入后补组合根全链路 |
+| `test_sm_w3_intake_runtime.py` | 组合根 live 开关与 provider、合并优先单次重试、275 条防截断、后台总结通道、载体入队、多 owner 分页发现与无辅助模型维护 |
+| `test_sm_w9_feedback_awareness.py` | `skill_feedback` 五动作与子代理拒绝、主会话通道去重与三击、`UserConfigTool` live 策略、`self_map` 遥测真实性 |
+| `test_sm_w10_closed_loop.py` | 跨切片组合：275→50 收敛、容量收敛崩溃恢复、5,000 owner 隔离、工作计数、载体与纠正；真实组合根上的 V2-1 live 配置、V2-2 三通道同任务一击与第三击回滚、V2-3 分页发现、V2-4 零确认载体、V2-5 真实热度遥测与 memory 目录缺失自愈 |
 
 旧策略断言按锁定决定有意更新：默认 false/observe/上限 0、两正两负质量规则、未证明的回滚目标、子代理结果自动生成待确认提案。来源、操作者、revision、nofollow、权限、错误副作用、FIFO 与显式覆盖合同全部保留。`test_skill_learning_confirmation.py` 经全仓扫描无外部引用后删除，候选存储与迁移覆盖在 `test_sm_w1_store_transitions.py` 与 `test_sm_w3_intake_runtime.py`；`skill_proposal_commands.py`、`skill_learning_commands.py`、`decision_skill_proposal_review.py` 及其测试保留，CLI 144 条解析路径不变。
 
 ## 13. 已知限制与后续
 
-- W3/W9 合入前，组合根 live 接线、后台总结的 `ineffective` 通道与 `skill_feedback` 四动作只在各自切片内验证，尚未有集成提交上的全链路证据。
+- 组合根全链路证据来自假模型与真实存储/工具的组合测试；真实模型端到端验收与 Linux 测试机实测尚未执行。
+- 冻结合同中的 `SkillLearningService._effective_settings()` 在实现中名为 `_live_state()`（返回启用状态与设置二元组），语义一致，属私有接口命名漂移。
 - 合并判定用 token Jaccard，属于确定性近似，不做语义改写；语义相近但措辞差异大的条目仍可能并存。
 - 旧版明细缺少身份字段，迁移只保留 `ever_used` 与保守的最近活动上界，独立使用次数标为下界或未知，不伪造历史唯一性。

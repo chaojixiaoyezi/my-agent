@@ -1,4 +1,11 @@
-## 2026-11-13 Skill 与记忆闭环 W10 Stage A（集成候选，W3/W9 待合入）
+## 2026-11-13 Skill 与记忆闭环 W10 Stage B（集成候选）
+
+`sm/w10` 合入集成提交 `3e2bcb625`（W0–W9 全部合入，十切片合并门 1595 项全过）后，隔离 `HOME`/`MY_AGENT_HOME` 逐文件运行：
+
+- `test_sm_w10_closed_loop.py` 10 项通过：Stage A 5 项之外，新增 5 项真实组合根用例——`UserConfigTool` 关闭/开启总开关、切换 `observe`、调整上限后同一 Agent 的学习服务与 `self_map` 立即反映，`reset` 回到 `autonomous`；同一任务上主会话 `skill_feedback`、包检查失败、后台总结 `ineffective` 三通道只记 1 击，第二个任务记第 2 击并清零，第三个任务触发回滚到已证明的 v1（新激活身份、不加黑名单）；25 个远程 owner 按每页 4 个分页发现，游标走完全集、无重复，全程不构造 Agent；过程性子代理经验只进 Skill 学习队列，记忆侧自动晋升不写 lesson/HOT，不产生任何待确认提案；真实 lesson 维护写出的热度投影驱动 `self_map` 遥测（`as_of` 带时区），删除整个 `memory/` 目录后遥测降级为未知、`read_ids`/`scope_pairs` 静默返回空。
+- `scripts/build_constants_catalog.py --write` 后 `--check` 一致（1513 项）；`test_constants_catalog.py` 10 项通过、1 项失败：12 个不合规常数（`BUSINESS_CAPABILITY_QUERY_MAX_CHARS`、`WORKFLOW_DOWNLOAD_MAX_BYTES` 等，位于业务、工作流与产物模块）在基线 `f6fea71a5` 上同样失败，均不属于本次闭环改造文件，待对应模块整改。
+
+## 2026-11-13 Skill 与记忆闭环 W10 Stage A（集成候选）
 
 基于集成提交 `4ba014210`（已含 W0/W1/W2/W4/W5/W6/W7/W8），隔离 `HOME`/`MY_AGENT_HOME`，逐文件独立进程运行：
 
@@ -8,7 +15,7 @@
 - 改动的 Python 文件 Ruff、导入边界与 `git diff --check` 通过。
 - `scripts/verify_optimization_removal.py` 在 `4ba014210` 上因 `skill_usage_receipts.py` 顶层导入 `RuntimeRepository` 形成循环导入而无法装配 CLI（已由集成分支 `849e08778` 改为 `TYPE_CHECKING` 导入修复）；修复后剩余 5 项失败（`SURF-DEL-109/111/124/150/151`）在基线 `f6fea71a5` 上同样存在，不是本次回归。
 
-未运行全仓 pytest、真实模型、5,000 owner 真实流量或 365 天连续运行；W3/W9 的组合根全链路验收待其合入后由 Stage B 补充。
+未运行全仓 pytest、真实模型、5,000 owner 真实流量或 365 天连续运行。
 
 ## 2026-11-12 验证证据失效与损坏租约
 

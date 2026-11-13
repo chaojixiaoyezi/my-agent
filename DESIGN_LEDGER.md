@@ -1,8 +1,8 @@
-## 2026-11-13 Skill 与记忆闭环（集成候选，W3/W9 待合入）
+## 2026-11-13 Skill 与记忆闭环（集成候选）
 
 按用户锁定决定（R-1..R-7 与 V2-1..V2-5）把自学习改为出厂开启、自治维护：`enable_self_learning=true`、`self_learning_maintenance_mode=autonomous`，用户可随时改回 `false`/`observe`，下一次操作生效。每 owner 最多 50 条在役机器托管 Skill，内置、共享、插件、工作区、owner 手写与用户改过的条目不计入、不被自动动；相似度 ≥70% 先合并且最多重试一次。负面反馈由主会话反馈、后台总结复核与包检查三通道自动归因，同一任务最多记 1 击；质量阶梯 3/4/5，第三击回滚到已证明版本或退役。闲置 7 天冷藏、15 天归档、归档后 15 天清除，宽限期内可恢复；lesson 归档永久保留。同一经验只走一个载体，反馈只在主会话可用，自动流程不弹人工确认，`AGENTS.md`/`SOUL.md` 仍须用户当场确认。
 
-精确去重回执写入 owner 既有 `runtime.db` 的 metadata 命名空间，登记表与读索引只是投影；所有搬目录的转换先持久化 `pending_operation` 再执行，单点进程退出后前向恢复。召回改为按引用读 lesson、按 ID 刷新长期记忆，不再整库读取。W0/W1/W2/W4/W5/W6/W7/W8 已在集成分支合入，W3（组合根 live 接线、后台总结通道）与 W9（`skill_feedback` 四动作、`self_map` 遥测）合入后补组合根全链路验收。详见 [Skill 与记忆闭环](docs/design/SKILL_MEMORY_CLOSED_LOOP.md)；本次新增的缺陷模式记入仓库根 `DEFECT_PATTERNS.md` 第四节。
+精确去重回执写入 owner 既有 `runtime.db` 的 metadata 命名空间，登记表与读索引只是投影；所有搬目录的转换先持久化 `pending_operation` 再执行，单点进程退出后前向恢复。召回改为按引用读 lesson、按 ID 刷新长期记忆，不再整库读取。W0–W9 已全部合入集成分支并通过十切片合并门，W10 在真实组合根上补齐跨切片全链路测试；双路独立审核与部署尚未进行。详见 [Skill 与记忆闭环](docs/design/SKILL_MEMORY_CLOSED_LOOP.md)；本次新增的缺陷模式记入仓库根 `DEFECT_PATTERNS.md` 第四节。
 
 ## 2026-11-13 正式工作流文件的业务下载（测试候选）
 
