@@ -10,6 +10,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from inspect import signature
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..runtime_db.repository import RuntimeRepository
 
 from ..capability.decision_skill_proposal_review import skill_proposal_review_order
 from ..capability.skill_learning_proposals import list_learning_proposals
@@ -67,6 +72,78 @@ class SkillControlHost:
     config: object
     capability_config_path: str = ""
     actor_id: str = ""
+    usage_runtime_provider: Callable[[], RuntimeRepository | None] | None = None
+
+
+def _store(host: SkillControlHost) -> SkillLearningStore:
+    return SkillLearningStore.for_home(
+        host.home_paths,
+        usage_runtime_provider=host.usage_runtime_provider,
+    )
+
+
+def _live_config(host: SkillControlHost) -> object:
+    from ..settings.live_switches import refresh_live_switches
+
+    if host.config is not None:
+        try:
+            refresh_live_switches(host.config)
+        except OSError:
+            pass
+    return host.config
+
+
+def _owner_usage_runtime_provider(
+    base_agent: object,
+    home: object,
+    *,
+    same_owner: bool,
+) -> Callable[[], object | None]:
+    import os
+    from pathlib import Path
+
+    from ..capability.skill_learning_store import CODE_EVIDENCE_INCOMPLETE, SkillLearningStoreError
+    from ..runtime_db.execution_mode import ExecutionMode, resolve_execution_mode
+    from ..runtime_db.repository import RuntimeRepository
+    from ..runtime_db.schema import runtime_db_path
+
+    subagents = getattr(base_agent, "subagents", None)
+    explicit = getattr(subagents, "execution_mode", None) if subagents is not None else None
+    if explicit in (None, ""):
+        explicit = getattr(getattr(base_agent, "config", None), "execution_mode", None)
+    owner_home_str = str(getattr(home, "owner_home_dir", "") or "").strip()
+    mode = resolve_execution_mode(explicit, has_home_dir=bool(owner_home_str))
+    if mode == ExecutionMode.LOCAL_UNMANAGED:
+        return lambda: None
+
+    expected = runtime_db_path(Path(owner_home_str)).expanduser().resolve(strict=False)
+    cached: list[RuntimeRepository] = []
+
+    def _provider() -> RuntimeRepository | None:
+        if same_owner:
+            base_repo = getattr(base_agent, "runtime_db", None) or getattr(subagents, "runtime_db", None)
+            if base_repo is not None:
+                actual_raw = getattr(base_repo, "db_path", None)
+                if not actual_raw:
+                    raise SkillLearningStoreError(CODE_EVIDENCE_INCOMPLETE, "runtime repository missing db_path")
+                actual = Path(actual_raw).expanduser().resolve(strict=False)
+                if actual != expected:
+                    raise SkillLearningStoreError(
+                        CODE_EVIDENCE_INCOMPLETE,
+                        f"runtime repository path mismatch: expected {expected}, got {actual}",
+                    )
+                return base_repo
+        if cached:
+            return cached[0]
+        if os.path.islink(expected):
+            raise SkillLearningStoreError(CODE_EVIDENCE_INCOMPLETE, "runtime repository path is symlink")
+        if not expected.is_file():
+            return None
+        repo = RuntimeRepository(expected, existing_only=True)
+        cached.append(repo)
+        return repo
+
+    return _provider
 
 
 # LLM: 只表示可预期的用户输入问题（编号找不到或不唯一），消息直接给用户看，不含路径。
@@ -136,7 +213,13 @@ def _scoped_host(base_agent: object, scope: object) -> SkillControlHost:
     home = home_paths_with_owner(base_home, resolve_owner_home(base_home.root, owner))
     same_owner = all(getattr(base_home, key) == getattr(home, key) for key in ("owner_provider", "owner_kind", "owner_id"))
     path = capability_config_path_for(base_agent) if same_owner else default_capability_config_path(home.owner_home_dir)
-    return SkillControlHost(home, base_agent.config, str(path),str(scope.user_id))
+    return SkillControlHost(
+        home,
+        base_agent.config,
+        str(path),
+        str(scope.user_id),
+        usage_runtime_provider=_owner_usage_runtime_provider(base_agent, home, same_owner=same_owner),
+    )
 
 
 # LLM: 按解析器给出的 operation 分派；tokens 是解析器规范化后的参数（含子命令本身）；help 与未知子命令回用法。
@@ -171,7 +254,7 @@ def _proposal_by_ref(service: SkillProposalService, ref: str) -> SkillProposal:
 # 函数用途: 取得当前owner完整待确认或全部自动学习候选，兼容原列表接口。
 def _automatic_proposals(host, *, include_all=False):
     options = {'include_overflow': True} if 'include_overflow' in signature(list_learning_proposals).parameters else {}
-    rows = list_learning_proposals(SkillLearningStore.for_home(host.home_paths), **options)
+    rows = list_learning_proposals(_store(host), **options)
     return [row for row in rows if include_all or row['status'] == 'pending']
 
 
@@ -195,12 +278,22 @@ def _automatic_proposal_lines(rows):
 # LLM: 原子代理提案格式保持；自动候选存在时直接列名称/修订/摘要和命令，候选为空时原输出逐字保持。
 # 函数用途: /skills展示两类待审提案，再汇总已发布数量，不会自动确认。
 def _overview(host: SkillControlHost, tokens: list[str]) -> str:
-    drafts = _automatic_proposals(host)
-    lines = _proposal_list_lines(host, status=PROPOSAL_PENDING, include_empty_notice=not drafts)
-    lines += _automatic_proposal_lines(drafts)
-    report = learned_skills_report(SkillLearningStore.for_home(host.home_paths), host.config)
+    cfg = _live_config(host)
+    lines = _proposal_list_lines(host, status=PROPOSAL_PENDING, include_empty_notice=True)
+    report = learned_skills_report(_store(host), cfg)
+    mode = str(getattr(cfg, "self_learning_maintenance_mode", "autonomous") or "autonomous").strip().lower()
+    skills = report.get("skills") or []
+    cooled = sum(1 for row in skills if row.get("state") == "cooled")
+    archived = sum(1 for row in skills if row.get("state") == "archived")
+    live = sum(
+        1
+        for row in skills
+        if row.get("state") not in {"archived", "disabled", "retired", "user_modified", "missing"}
+    )
     lines += ["", f"自动总结的 Skill：{report['count']} 个（发 /skills learned 查看）。"]
-    lines.append(f"待确认学习候选：{len(drafts)}份（/skills learned proposals 查看，确认前不写正式Skill）。")
+    lines.append(
+        f"自主学习维护：mode={mode}（在役 {live} / 冷藏 {cooled} / 归档 {archived}；无需人工确认候选）。"
+    )
     return "\n".join(lines)
 
 
@@ -300,7 +393,7 @@ def _outcome_text(outcome: SkillProposalOutcome, proposal: SkillProposal) -> str
 # LLM: 事实来自 skill_learning_report（与 CLI 同一推导）；只读展示含溢出请求与有效使用次数。
 # 函数用途: /skills learned —— 列出自动总结的 Skill，每个附上查看、回滚、删除命令。
 def _learned(host: SkillControlHost, tokens: list[str]) -> str:
-    report = learned_skills_report(SkillLearningStore.for_home(host.home_paths), host.config)
+    report = learned_skills_report(_store(host), _live_config(host))
     switch = "开启" if report["self_learning_enabled"] else "关闭"
     limit = report["daily_limit"] or "不限"
     overflow = int(report.get("overflow_requests") or 0)
@@ -321,7 +414,7 @@ def _learned(host: SkillControlHost, tokens: list[str]) -> str:
 # LLM: 名字先在登记表里精确查找（不在表里拒绝，不用它拼路径）；只显示最近 _EVENT_ROWS 条事件。只读。
 # 函数用途: /skills learned show <名称> —— 查看一个自动总结 Skill 的登记信息与最近事件。
 def _learned_show(host: SkillControlHost, tokens: list[str]) -> str:
-    detail = learned_skill_detail(SkillLearningStore.for_home(host.home_paths), tokens[2], limit=_EVENT_ROWS)
+    detail = learned_skill_detail(_store(host), tokens[2], limit=_EVENT_ROWS)
     item = detail["skill"]
     lines = [
         f"{item['name']}：第 {item['version']} 版，{_STATE_LABELS.get(item['state'], item['state'])}",
@@ -342,9 +435,21 @@ def _learned_show(host: SkillControlHost, tokens: list[str]) -> str:
 # LLM: 回滚与删除走发布闸门（找不到或被用户改过时拒绝），成功后写账本（写文件副作用）。
 # 函数用途: /skills learned revert|remove <名称> —— 回滚或删除一个自动总结的 Skill。
 def _learned_action(host: SkillControlHost, tokens: list[str]) -> str:
-    result = apply_learned_skill_action(SkillLearningStore.for_home(host.home_paths), tokens[2], tokens[1])
+    result = apply_learned_skill_action(_store(host), tokens[2], tokens[1])
+    ledger_ok = result.get("ledger_appended", True)
     if result["code"] == EVENT_REMOVED:
+        if ledger_ok is False:
+            return (
+                f"已删除 {result['skill_name']}（已归档），以后不再自动生成同名 Skill；"
+                "但事件台账追加失败，可用 /skills learned show "
+                f"{result['skill_name']} 核对状态。"
+            )
         return f"已删除 {result['skill_name']}（已归档），以后不再自动生成同名 Skill。"
+    if ledger_ok is False:
+        return (
+            f"已把 {result['skill_name']} 退回到第 {result['version']} 版；"
+            f"但事件台账追加失败，可用 /skills learned show {result['skill_name']} 核对状态。"
+        )
     return f"已把 {result['skill_name']} 退回到第 {result['version']} 版。"
 
 
@@ -357,7 +462,7 @@ def _learning_proposal(host, tokens):
         list_learning_proposals,
         resolve_learning_proposal,
     )
-    store = SkillLearningStore.for_home(host.home_paths)
+    store = _store(host)
     action = tokens[1]
     if action == 'proposals':
         rows = [row for row in list_learning_proposals(store,include_overflow=True) if row['status']=='pending']
@@ -371,18 +476,54 @@ def _learning_proposal(host, tokens):
 
 # LLM: 固定/停用/恢复/反馈属于用户显式control；不解析聊天成功失败，不把模型采用声明变成人类确认。
 # 函数用途: 执行原owner的维护动作，反馈绑定用户给出的准确正文hash与任务编号。
-def _learning_maintenance(host,tokens):
+def _learning_maintenance(host, tokens):
     from ..capability.skill_learning_maintenance import (
         LearningObservationSource,
         control_learning,
         observe_learning,
     )
-    store = SkillLearningStore.for_home(host.home_paths)
-    if tokens[1]=='feedback':
-        result = observe_learning(store,tokens[2],sha256=tokens[3],outcome=tokens[4],task_id=tokens[5],source=LearningObservationSource(authority='human',actor_id=host.actor_id,receipt_id='user-control:'+tokens[5]+':'+tokens[3]))
+
+    store = _store(host)
+    if tokens[1] == "feedback":
+        result = observe_learning(
+            store,
+            tokens[2],
+            sha256=tokens[3],
+            outcome=tokens[4],
+            task_id=tokens[5],
+            source=LearningObservationSource(
+                authority="human",
+                actor_id=host.actor_id,
+                receipt_id="user-control:" + tokens[5] + ":" + tokens[3],
+            ),
+        )
         return f"已登记该版本反馈：{result['quality']}。"
-    control_learning(store,tokens[2],operation=tokens[1])
-    return '已更新该Skill维护状态。'
+
+    if tokens[1] == "restore":
+        from ..capability.skill_learning_protection import learning_protection_for_agent
+
+        cfg = _live_config(host)
+        runtime_db = host.usage_runtime_provider() if host.usage_runtime_provider is not None else None
+        protection = learning_protection_for_agent(
+            SimpleNamespace(home_paths=host.home_paths, config=cfg, runtime_db=runtime_db)
+        )
+        control_learning(
+            store,
+            tokens[2],
+            operation=tokens[1],
+            protected_ids=protection.get("protected_ids", ()),
+            protection_complete=bool(protection.get("protection_complete", False)),
+            config_provider=lambda: _live_config(host),
+        )
+        return "已恢复该归档Skill。"
+
+    control_learning(
+        store,
+        tokens[2],
+        operation=tokens[1],
+        config_provider=lambda: _live_config(host),
+    )
+    return "已更新该Skill维护状态。"
 
 _HANDLERS: dict[str, Callable[[SkillControlHost, list[str]], str]] = {
     "learning_proposal": _learning_proposal,
