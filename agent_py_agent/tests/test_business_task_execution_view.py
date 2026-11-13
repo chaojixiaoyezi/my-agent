@@ -97,3 +97,27 @@ def test_tasks_list_continues_original_index_cursor(background_http):
         seen.add(item['task_id'])
         cursor = reply['data']['next_cursor']
     assert cursor is None and len(seen) == 4
+
+
+def test_detached_task_uses_its_exact_claim_scope(background_http):
+    from agent_py_agent.agent.conversation.run_claim import detached_task_claim_scope_id
+
+    services, task = observed_native_task(background_http)
+    runtime, run = seed_observed_runtime(services, task)
+    store = services.host.conversation_store
+    request_id = 'observed-' + task.task_id
+    store.session_tasks.bind_turn(task.task_id, turn_id=request_id)
+    store.session_tasks.bind_execution(task.task_id, task_run_id=run['task_run_id'],
+                                       target_thread_id=task.target_thread_id)
+    store.tasks.bind({'thread_id': task.target_thread_id, 'task_id': task.task_id,
+                      'cancellation_scope': 'detached'})
+    scope = detached_task_claim_scope_id(task.target_thread_id, task.task_id)
+    claim = store.claims.acquire({'thread_id': task.target_thread_id, 'reason': 'session_task',
+                                  'claim_scope_id': scope})
+    with bind_claim_execution(ClaimExecutionBinding(store.claims, task.target_thread_id, claim['claim_id'], scope)):
+        publish_claim_runtime_authority({'invocation_run_id': request_id, 'run_id': request_id, **run})
+    status, reply = background_call(background_http, 'tasks.get', {'task_id': task.task_id})
+    assert status == 200, reply
+    assert reply['data']['task']['current_run_id'] == request_id
+    assert reply['data']['scheduling']['state'] == 'running'
+    assert not store.claims.load_report(task.target_thread_id)[0]
