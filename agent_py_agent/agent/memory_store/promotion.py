@@ -12,8 +12,8 @@ import json
 import logging
 import re
 import uuid
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
@@ -75,13 +75,19 @@ from .jsonl import (
     JsonlMemory,
     MemoryLibraryWriteCapExceeded,
     MemoryRecord,
+    MemorySubjectConflict,
     MemoryVersionConflict,
     _managed_learning_policy_block,
     _managed_policy_scope,
 )
 from .learning_exclusions import excluded_candidate_ids
-from .lessons import HotRuleRepository, LessonRepository, LessonRoutingPendingError
-from .operations import normalized_memory_content
+from .lessons import (
+    HotRuleRepository,
+    LessonHeatUnavailableError,
+    LessonRepository,
+    LessonRoutingPendingError,
+)
+from .operations import memory_content_hash, normalized_memory_content
 
 # LLM: working_agreement 第 1 期起与事实/事件/项目同走唯一长期库（JSONL），不再写 AGENTS。
 _LONG_TERM_TARGET_TYPES = frozenset({"long_term_fact", "event", "project", "working_agreement"})
@@ -166,6 +172,8 @@ class MemoryPromotionDependencies:
     # LLM: 学习排除复核的会话绑定来源（conversation_store）；None 时提交路径不做名单复核，
     #   保持既有调用方行为，接线后提交在 policy 锁内复核（mc4-3103）。
     exclusion_store: object | None = None
+    # LLM: 程序性 Skill 候选入队委托；None 时使用同 owner 下的 SkillLearningStore FIFO 队列。
+    skill_carrier_enqueue: Callable[[Iterable[MemoryCandidate]], Mapping[str, object]] | None = None
 
 
 # LLM: 重复门槛策略不可变且独立于仓库，避免配置或测试把 lesson 门槛误用于 HOT。
@@ -489,18 +497,41 @@ class _PromotionCommitMixin:
                 context,
             )
         if target == "lesson":
-            lesson, changed = self.lessons.promote_with_receipt(
-                candidate,
-                min_occurrences=self.lesson_min_occurrences,
-            )
+            if _is_skill_carrier_candidate(candidate):
+                raise _PromotionBlocked(candidate.status, "SKILL_CARRIER_REQUIRED")
+            _ensure_lesson_not_tombstoned(self, candidate)
+            if candidate.proposed_action in {"replace", "merge"}:
+                lesson, changed = self.lessons.supersede_with_receipt(
+                    candidate,
+                    target_lesson_id=candidate.target_entry_id,
+                    hot=self.hot,
+                    expected_revision=candidate.target_entry_version,
+                    min_occurrences=self.lesson_min_occurrences,
+                )
+            elif candidate.proposed_action == "remove":
+                raise ValueError("LESSON_ACTION_UNSUPPORTED")
+            else:
+                lesson, changed = self.lessons.promote_with_receipt(
+                    candidate,
+                    min_occurrences=self.lesson_min_occurrences,
+                )
             return _TargetCommit(lesson.path + "#" + lesson.lesson_id, changed)
         if target == "hot":
-            lesson = self.lessons.get(candidate.target_entry_id)
-            hot, changed = self.hot.promote_with_receipt(
-                candidate,
-                lesson=lesson,
-                min_occurrences=self.hot_min_occurrences,
+            _ensure_lesson_not_tombstoned(self, candidate)
+            lock_cm = (
+                self.lessons.lifecycle_lock()
+                if hasattr(self.lessons, "lifecycle_lock")
+                else nullcontext()
             )
+            with lock_cm:
+                lesson = self.lessons.get(candidate.target_entry_id)
+                if getattr(lesson, "status", "active") != "active":
+                    raise ValueError("HOT_TARGET_ARCHIVED_OR_MISSING")
+                hot, changed = self.hot.promote_with_receipt(
+                    candidate,
+                    lesson=lesson,
+                    min_occurrences=self.hot_min_occurrences,
+                )
             return _TargetCommit("memory-hot.md#" + hot.hot_id, changed)
         raise ValueError(f"candidate promotion_target {target!r} is not promotable")
 
@@ -827,25 +858,390 @@ def _learning_exclusion_block(
     return "LEARNING_SOURCE_EXCLUDED" if hits else ""
 
 
-# LLM: 提交失败已落状态迁移的载体；只把冲突/门槛失败转稳定码，其他异常照常外抛。
-# LLM: C的原OwnerManagementIngressUnavailable也是ValueError，须先同对象穿出；普通lesson/HOT门槛错误仍原包装。
-# 函数用途: 提交目标并把失败转 _PromotionBlocked 供主流程返回。
+# LLM: 提交失败已落状态迁移的载体；只把冲突/门槛/版本/热点/墓碑失败转稳定码，未知异常照常外抛。
+# LLM: C的原OwnerManagementIngressUnavailable也是ValueError，须先同对象穿出；HOT缺失target_entry_id仍保持KeyError。
+# 函数用途: 提交目标并把失败转 _PromotionBlocked 或 _PromotionConflict 供主流程返回。
 def _commit_target_blocked(
     service: MemoryPromotionService,
     candidate: MemoryCandidate,
     context: _PromotionWriteContext,
 ) -> _TargetCommit:
+    target = _promotion_target(candidate)
+    target_id = str(candidate.target_entry_id or "").strip()
+    conflicts = (target_id,) if target_id else ()
     try:
         return service._commit_target(candidate, context)
+    except KeyError:
+        if target == "lesson":
+            raise _PromotionConflict("TARGET_LESSON_NOT_FOUND", conflicts) from None
+        raise
+    except MemorySubjectConflict as exc:
+        if target in {"lesson", "hot"}:
+            existing_id = str(getattr(exc, "existing_entry_id", "") or "").strip()
+            conflict_ids = (existing_id,) if existing_id else conflicts
+            raise _PromotionConflict("SUBJECT_SCOPE_CONFLICT_REQUIRES_REPLACE", conflict_ids) from None
+        raise
+    except LessonHeatUnavailableError:
+        if target in {"lesson", "hot"}:
+            raise _PromotionBlocked(candidate.status, "LESSON_HEAT_UNAVAILABLE") from None
+        raise
     except ValueError as exc:
         if service.coordinator_io and isinstance(exc, OwnerManagementIngressUnavailable):
             raise
-        # lesson/HOT 重复证据门槛不满足(lessons.py:_validate_lesson_candidate):
-        # 自动路径保持原状态干净失败,不崩溃——候选留在 approved,证据凑齐后下次再晋升;
-        # 稳定原因码供 curator 兜底与 CLI 显示。其他 target 的 ValueError 照常外抛。
-        if str(candidate.promotion_target or "").strip().lower() in {"lesson", "hot"}:
+        if target not in {"lesson", "hot"}:
+            raise
+        msg = str(exc)
+        if msg in _PER_ITEM_BARRIER_CODES:
+            raise
+        if msg.startswith(("MEMORY_TOMBSTONES_UNREADABLE", "MEMORY_TOMBSTONES_MIGRATING")):
+            raise _PromotionBlocked(candidate.status, msg.split(":", 1)[0]) from None
+        if "LESSON_REVISION_CONFLICT" in msg:
+            raise _PromotionConflict("LESSON_REVISION_CONFLICT", conflicts) from None
+        if msg.startswith("SUPERSESSION_EXPECTED_REVISION_REQUIRED"):
+            raise _PromotionConflict("TARGET_ENTRY_OBSERVATION_VERSION_MISSING", conflicts) from None
+        if msg.startswith(("SUPERSESSION_TARGET_REQUIRED", "HOT candidate must target an exact formal lesson_id")):
+            raise _PromotionConflict("AUTO_POLICY_EXACT_TARGET_REQUIRED", ()) from None
+        if msg.startswith("SUPERSESSION_SCOPE_OR_SUBJECT_MISMATCH"):
+            raise _PromotionConflict("SUPERSESSION_SCOPE_OR_SUBJECT_MISMATCH", conflicts) from None
+        if msg.startswith("HOT_TARGET_ARCHIVED_OR_MISSING") or "HOT target lesson is not active" in msg:
+            raise _PromotionBlocked(candidate.status, "HOT_TARGET_ARCHIVED_OR_MISSING") from None
+        if "HOT rule is too long" in msg:
+            raise _PromotionConflict("HOT_RULE_TOO_LONG", conflicts) from None
+        if "failed memory threat scan" in msg:
+            raise _PromotionBlocked(candidate.status, "MEMORY_CONTENT_THREAT_BLOCKED") from None
+        if msg.startswith("LESSON_ACTION_UNSUPPORTED"):
+            raise _PromotionBlocked(candidate.status, "LESSON_ACTION_UNSUPPORTED") from None
+        if "requires repeated" in msg:
             raise _PromotionBlocked(candidate.status, "PROMOTION_THRESHOLD_NOT_MET") from None
         raise
+
+
+# LLM: 晋升门先统一用 W5 lesson_carrier 判定载体，程序性规则在正式 lesson/S1 之前转入 Skill FIFO。
+# 函数用途: 判断候选是否属于应由 Skill 载体接管的程序性 lesson。
+def _is_skill_carrier_candidate(candidate: MemoryCandidate) -> bool:
+    if _promotion_target(candidate) != "lesson":
+        return False
+    from ..capability.skill_proposals import lesson_carrier
+
+    return lesson_carrier(candidate) == "skill"
+
+
+# LLM: 永久遗忘墓碑同时阻断匹配 ID 与内容摘要的新建或改写 lesson，防止删除后借候选重写复活。
+# 函数用途: 核对 lesson/HOT 与程序性候选是否命中长期存储永久墓碑，命中或墓碑异常即抛 ValueError。
+def _ensure_lesson_not_tombstoned(
+    service: MemoryPromotionService,
+    candidate: MemoryCandidate,
+) -> None:
+    path = getattr(getattr(service, "long_term", None), "path", None)
+    if path is None:
+        return
+    content = str(candidate.content or "").strip()
+    digest = memory_content_hash(content) if content else ""
+    target_id = str(candidate.target_entry_id or "").strip()
+    if not target_id and not digest:
+        return
+    from .generation_manifest import StorageTombstones
+
+    barrier = StorageTombstones(path)
+    barrier.blocked([(target_id, digest)])
+    excluded = barrier.excludes(target_id, digest)
+    if excluded:
+        if isinstance(excluded, str):
+            raise ValueError(excluded)
+        if target_id and barrier.excludes(target_id, ""):
+            raise ValueError("MEMORY_TOMBSTONED_ID")
+        raise ValueError("MEMORY_TOMBSTONED_CONTENT")
+
+
+# LLM: 无外部 W3 注入时走本仓库有界 SkillLearningStore FIFO；只在锁外按确定性 request_key 入队且二次复核可学来源。
+# 函数用途: 为程序性 lesson 候选写入 Skill 学习队列并返回每条结构化入队结果。
+def _standalone_skill_carrier_enqueue(
+    service: MemoryPromotionService,
+    candidates: Iterable[MemoryCandidate],
+) -> dict[str, dict[str, object]]:
+    from ..capability.skill_learning_request import TEXT_LIMIT_CHARS, bounded_text
+    from ..capability.skill_learning_store import (
+        REQUEST_SCHEMA_VERSION,
+        SkillLearningStore,
+        SkillLearningStoreError,
+        request_key,
+        utc_now,
+    )
+
+    owner_home = service.persona.owner_home
+    store = SkillLearningStore(owner_home / "data" / "skill_learning", owner_home / "skills")
+    outcomes: dict[str, dict[str, object]] = {}
+    for candidate in candidates:
+        source = candidate.learning_source if isinstance(candidate.learning_source, dict) else {}
+        if not projection_is_learnable(source):
+            outcomes[candidate.candidate_id] = {
+                "status": "refused",
+                "reason_code": "AUTO_POLICY_LEARNING_SOURCE_UNVERIFIED",
+            }
+            continue
+        rkey = request_key(f"candidate:{candidate.candidate_id}:{memory_content_hash(candidate.content)}")
+        run_id = str((candidate.source_run_ids or ("",))[0] or candidate.candidate_id)[:120]
+        task_id = str((candidate.source_task_ids or ("",))[0] or "")[:120]
+        tool_parts = [
+            str(ref.get("tool") or ref.get("operation_id") or "").strip()
+            for ref in candidate.source_tool_refs
+            if isinstance(ref, dict)
+        ]
+        tool_summary = bounded_text(
+            ", ".join(part for part in tool_parts if part) or "lesson_candidate",
+            TEXT_LIMIT_CHARS,
+        )
+        payload: dict[str, object] = {
+            "schema_version": REQUEST_SCHEMA_VERSION,
+            "request_key": rkey,
+            "created_at": utc_now(),
+            "run_id": run_id,
+            "task_id": task_id,
+            "source_candidate_id": candidate.candidate_id,
+            "task": bounded_text(f"{candidate.subject_key}: {candidate.content}", TEXT_LIMIT_CHARS),
+            "result": bounded_text(candidate.content, TEXT_LIMIT_CHARS),
+            "tool_summary": tool_summary,
+            "recalled_memory_ids": [],
+            "learning_source": dict(source),
+        }
+        try:
+            enqueue_status = store.enqueue(payload)
+        except _UNCERTAIN_PROMOTION_ERRORS:
+            raise
+        except (OSError, OwnerQuotaExceeded, OwnerQuotaLockContention) as exc:
+            outcomes[candidate.candidate_id] = {
+                "status": "deferred",
+                "reason_code": _recoverable_promotion_reason(exc),
+                "request_key": rkey,
+            }
+        except SkillLearningStoreError as exc:
+            outcomes[candidate.candidate_id] = {
+                "status": "deferred",
+                "reason_code": str(exc.code or "SKILL_LEARNING_QUEUE_ERROR"),
+                "request_key": rkey,
+            }
+        else:
+            if enqueue_status in {"queued", "duplicate"}:
+                outcomes[candidate.candidate_id] = {
+                    "status": enqueue_status,
+                    "reason_code": "DELEGATED_TO_SKILL_CARRIER",
+                    "request_key": rkey,
+                }
+            elif enqueue_status == "queue_full":
+                outcomes[candidate.candidate_id] = {
+                    "status": "deferred",
+                    "reason_code": "SKILL_LEARNING_QUEUE_FULL",
+                    "request_key": rkey,
+                }
+            elif enqueue_status == "conflict":
+                outcomes[candidate.candidate_id] = {
+                    "status": "deferred",
+                    "reason_code": "SKILL_LEARNING_QUEUE_CONFLICT",
+                    "request_key": rkey,
+                }
+            else:
+                outcomes[candidate.candidate_id] = {
+                    "status": "deferred",
+                    "reason_code": "SKILL_CARRIER_DEFERRED",
+                    "request_key": rkey,
+                }
+    return outcomes
+
+
+# LLM: Skill 队列接收后候选转为 withdrawn（清除旧义务）；deferred/refused 保持未委托状态且绝不触发 lesson/HOT 或弹窗。
+# 函数用途: 将 Skill 载体入队结果收口为统一 MemoryPromotionResult 映射。
+def _process_carrier_outcomes(
+    service: MemoryPromotionService,
+    candidates: tuple[MemoryCandidate, ...],
+    raw_outcomes: object,
+    *,
+    reviewer: str,
+) -> dict[str, MemoryPromotionResult]:
+    outcome_map: dict[str, object] = {}
+    if isinstance(raw_outcomes, Mapping):
+        outcome_map = {str(key): value for key, value in raw_outcomes.items()}
+    elif isinstance(raw_outcomes, Iterable) and not isinstance(raw_outcomes, (str, bytes)):
+        for item in raw_outcomes:
+            cid = str(
+                (item.get("candidate_id") if isinstance(item, Mapping) else getattr(item, "candidate_id", ""))
+                or ""
+            ).strip()
+            if cid:
+                outcome_map[cid] = item
+    results: dict[str, MemoryPromotionResult] = {}
+    accepted: list[MemoryCandidate] = []
+    deferred_items: list[tuple[MemoryCandidate, str]] = []
+    for candidate in candidates:
+        cid = candidate.candidate_id
+        item = outcome_map.get(cid)
+        if item is None:
+            deferred_items.append((candidate, "SKILL_CARRIER_RESULT_MISSING"))
+            continue
+        if isinstance(item, str):
+            status = item.strip().lower()
+            reason_code = ""
+        elif isinstance(item, Mapping):
+            status = str(item.get("status") or "").strip().lower()
+            reason_code = str(item.get("reason_code") or item.get("code") or "").strip()
+        else:
+            status = str(getattr(item, "status", "") or "").strip().lower()
+            reason_code = str(getattr(item, "reason_code", "") or getattr(item, "code", "") or "").strip()
+        if status in {"queued", "duplicate", "accepted"}:
+            accepted.append(candidate)
+        elif status == "refused":
+            results[cid] = MemoryPromotionResult(
+                cid, False, candidate.status, reason_code or "SKILL_CARRIER_REFUSED"
+            )
+        else:
+            deferred_items.append((candidate, reason_code or "SKILL_CARRIER_DEFERRED"))
+
+    if len(accepted) == 1:
+        cand = accepted[0]
+        cid = cand.candidate_id
+        try:
+            updated = service.candidates.transition(
+                cand,
+                "withdrawn",
+                reviewer=reviewer,
+                review_note="DELEGATED_TO_SKILL_CARRIER",
+            )
+            results[cid] = MemoryPromotionResult(
+                cid,
+                False,
+                updated.status,
+                "DELEGATED_TO_SKILL_CARRIER",
+                "",
+                formal_memory_changed=False,
+            )
+        except _UNCERTAIN_PROMOTION_ERRORS:
+            raise
+        except CandidateStateChangedError as exc:
+            results[cid] = MemoryPromotionResult(
+                cid, False, exc.status, "CANDIDATE_CHANGED_AFTER_VERIFICATION"
+            )
+        except (OSError, OwnerQuotaExceeded, OwnerQuotaLockContention) as exc:
+            deferred_items.append((cand, _recoverable_promotion_reason(exc)))
+    elif accepted:
+        changes = [
+            (cand, "withdrawn", {"review_note": "DELEGATED_TO_SKILL_CARRIER"})
+            for cand in accepted
+        ]
+        try:
+            saved = service.candidates.transition_batch(changes, reviewer=reviewer)
+        except _UNCERTAIN_PROMOTION_ERRORS:
+            raise
+        except (OSError, OwnerQuotaExceeded, OwnerQuotaLockContention) as exc:
+            reason = _recoverable_promotion_reason(exc)
+            deferred_items.extend((cand, reason) for cand in accepted)
+        else:
+            for cand, updated in zip(accepted, saved, strict=True):
+                cid = cand.candidate_id
+                if isinstance(updated, Exception):
+                    results[cid] = MemoryPromotionResult(
+                        cid,
+                        False,
+                        getattr(updated, "status", "missing"),
+                        "CANDIDATE_CHANGED_AFTER_VERIFICATION",
+                    )
+                else:
+                    results[cid] = MemoryPromotionResult(
+                        cid,
+                        False,
+                        updated.status,
+                        "DELEGATED_TO_SKILL_CARRIER",
+                        "",
+                        formal_memory_changed=False,
+                    )
+
+    for cand, code in deferred_items:
+        cid = cand.candidate_id
+        if cand.status == "approved":
+            try:
+                results[cid] = _defer_promotion_failure(service, cand, code)
+            except _UNCERTAIN_PROMOTION_ERRORS:
+                raise
+            except (OSError, OwnerQuotaExceeded, OwnerQuotaLockContention) as exc:
+                results[cid] = MemoryPromotionResult(
+                    cid, False, cand.status, _recoverable_promotion_reason(exc)
+                )
+        else:
+            results[cid] = MemoryPromotionResult(cid, False, cand.status, code)
+    return results
+
+
+# LLM: 委托入队必须在释放 policy/exclusion 锁之后执行（enqueue 内持有 quota→state 锁，避免锁序倒置），
+#   且入队前先完成排除名单、受管治理、来源可学性与墓碑门控。
+# 函数用途: 对一批已通过前置审核的程序性 lesson 候选执行安全检查并委托给 Skill 学习队列。
+def _delegate_procedural_candidates(
+    service: MemoryPromotionService,
+    candidates: tuple[MemoryCandidate, ...],
+    *,
+    reviewer: str,
+    automatic: bool,
+) -> dict[str, MemoryPromotionResult]:
+    results: dict[str, MemoryPromotionResult] = {}
+    eligible: list[MemoryCandidate] = []
+    for candidate in candidates:
+        cid = candidate.candidate_id
+        if service.exclusion_store is not None:
+            with _learning_exclusion_scope(service):
+                excl_code = _learning_exclusion_block(service, candidate)
+            if excl_code:
+                results[cid] = MemoryPromotionResult(cid, False, candidate.status, excl_code)
+                continue
+        with _managed_policy_scope(service.persona.owner_home) as governance:
+            gov_code = _managed_learning_policy_block(governance, "lesson")
+        if gov_code:
+            if automatic:
+                _register_automatic_governance_review(service, candidate, gov_code)
+            results[cid] = MemoryPromotionResult(cid, False, candidate.status, gov_code)
+            continue
+        if not automatic:
+            source = candidate.learning_source if isinstance(candidate.learning_source, dict) else {}
+            if not projection_is_learnable(source):
+                results[cid] = MemoryPromotionResult(
+                    cid, False, candidate.status, "AUTO_POLICY_LEARNING_SOURCE_UNVERIFIED"
+                )
+                continue
+        try:
+            _ensure_lesson_not_tombstoned(service, candidate)
+        except ValueError as exc:
+            msg = str(exc)
+            prefix = msg.split(":", 1)[0]
+            if msg in _PER_ITEM_BARRIER_CODES or prefix in {
+                "MEMORY_TOMBSTONES_UNREADABLE",
+                "MEMORY_TOMBSTONES_MIGRATING",
+            }:
+                results[cid] = MemoryPromotionResult(
+                    cid,
+                    False,
+                    candidate.status,
+                    msg if msg in _PER_ITEM_BARRIER_CODES else prefix,
+                )
+                continue
+            raise
+        eligible.append(candidate)
+
+    if not eligible:
+        return results
+    eligible_tuple = tuple(eligible)
+    enqueue_fn = service.skill_carrier_enqueue
+    try:
+        raw_outcomes = (
+            _standalone_skill_carrier_enqueue(service, eligible_tuple)
+            if enqueue_fn is None
+            else enqueue_fn(eligible_tuple)
+        )
+    except _UNCERTAIN_PROMOTION_ERRORS:
+        raise
+    except (OSError, OwnerQuotaExceeded, OwnerQuotaLockContention) as exc:
+        reason = _recoverable_promotion_reason(exc)
+        raw_outcomes = {
+            row.candidate_id: {"status": "deferred", "reason_code": reason}
+            for row in eligible_tuple
+        }
+    results.update(_process_carrier_outcomes(service, eligible_tuple, raw_outcomes, reviewer=reviewer))
+    return results
 
 
 # LLM: 复用人格写入只信规范核验器输出与精确结构化参数；候选正文、模型状态词和语义相似都不能授权复用。
@@ -918,6 +1314,7 @@ class MemoryPromotionService(_PromotionCommitMixin):
         )
         self.tool_verifier = dependencies.tool_verifier or RejectingToolEvidenceVerifier()
         self.exclusion_store = dependencies.exclusion_store
+        self.skill_carrier_enqueue = dependencies.skill_carrier_enqueue
         self.lesson_min_occurrences = max(2, int(thresholds.lesson_min_occurrences))
         self.hot_min_occurrences = max(3, int(thresholds.hot_min_occurrences))
 
@@ -1077,6 +1474,10 @@ class MemoryPromotionService(_PromotionCommitMixin):
             if policy_code:
                 _register_automatic_governance_review(self, candidate, policy_code)
                 return MemoryPromotionResult(candidate_id, False, candidate.status, policy_code)
+            if _is_skill_carrier_candidate(effective):
+                return _delegate_procedural_candidates(
+                    self, (candidate,), reviewer=reviewer, automatic=True
+                )[candidate_id]
             try:
                 candidate = self._apply_automatic_policy(candidate, reviewer)
             except _UNCERTAIN_PROMOTION_ERRORS:
@@ -1087,6 +1488,10 @@ class MemoryPromotionService(_PromotionCommitMixin):
                 return _defer_promotion_failure(self, candidate, _recoverable_promotion_reason(exc))
         if candidate.status != "approved":
             return MemoryPromotionResult(candidate_id, False, candidate.status, "REVIEW_REQUIRED")
+        if _is_skill_carrier_candidate(effective):
+            return _delegate_procedural_candidates(
+                self, (candidate,), reviewer=reviewer, automatic=automatic
+            )[candidate_id]
         return _commit_promotion_result(self, candidate, reviewer, confirmed)
 
     # LLM: 默认同次CAS补落点并批准；显式旧fill覆盖先消费其真实结果，不替它改写none，仍须完整快照CAS。
@@ -1195,7 +1600,7 @@ class MemoryPromotionService(_PromotionCommitMixin):
 def _prepare_promotion_batch(service, rows, reviewer, automatic):
     from .promotion_remove_recovery import recover_committed_update, recover_promotion_result
 
-    changes, ready, results = [], {}, {}
+    changes, ready, procedural, results = [], {}, [], {}
     for expected in rows:
         cid = expected.candidate_id
         try:
@@ -1236,6 +1641,12 @@ def _prepare_promotion_batch(service, rows, reviewer, automatic):
                 _register_automatic_governance_review(service, candidate, code)
             results[cid] = MemoryPromotionResult(cid, False, candidate.status, code)
             continue
+        if _is_skill_carrier_candidate(effective):
+            if not automatic and candidate.status != "approved":
+                results[cid] = MemoryPromotionResult(cid, False, candidate.status, "REVIEW_REQUIRED")
+                continue
+            procedural.append(candidate)
+            continue
         if candidate.status == "pending_review" and automatic:
             changes.append((candidate, "approved", {"promotion_target": effective.promotion_target,
                 "review_note": "owner_autonomous_v1：结构化权威与安全门通过。"}))
@@ -1265,6 +1676,12 @@ def _prepare_promotion_batch(service, rows, reviewer, automatic):
                     # 未通过证据门的候选不能新增提交责任，也不能把未落盘的blocked当已保存事实。
                     current = service.candidates.get(candidate.candidate_id)
                     results[candidate.candidate_id] = MemoryPromotionResult(candidate.candidate_id, False, current.status, reason)
+            if procedural:
+                results.update(
+                    _delegate_procedural_candidates(
+                        service, tuple(procedural), reviewer=reviewer, automatic=automatic
+                    )
+                )
             return (), results
         for (candidate, _status, _options), updated in zip(changes, saved, strict=True):
             cid = candidate.candidate_id
@@ -1274,6 +1691,12 @@ def _prepare_promotion_batch(service, rows, reviewer, automatic):
                 ready.pop(cid, None)
             elif cid in ready:
                 ready[cid] = updated
+    if procedural:
+        results.update(
+            _delegate_procedural_candidates(
+                service, tuple(procedural), reviewer=reviewer, automatic=automatic
+            )
+        )
     return tuple(ready.values()), results
 
 
@@ -1657,6 +2080,10 @@ def _commit_promotion_result(service, candidate, reviewer, confirmed):
         return _defer_promotion_failure(service, candidate, "CANDIDATE_CHANGED_AFTER_VERIFICATION")
     except (OSError, OwnerQuotaExceeded, OwnerQuotaLockContention) as exc:
         return _defer_promotion_failure(service, candidate, _recoverable_promotion_reason(exc))
+    except ValueError as exc:
+        if str(exc) in _PER_ITEM_BARRIER_CODES:
+            return MemoryPromotionResult(candidate_id, False, candidate.status, str(exc))
+        raise
     return service._finalize_promotion(promoted, reviewer, outcome)
 
 

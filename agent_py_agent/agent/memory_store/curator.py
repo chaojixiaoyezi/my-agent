@@ -141,7 +141,9 @@ _REASON_PRIORITY = (
 # 函数用途: 判断本策展实例距上次成功终态归档是否已满一个策展周期。
 def _terminal_compaction_due(curator: object) -> bool:
     last = getattr(curator, "_terminal_compaction_at", None)
-    interval = max(1, int(getattr(getattr(curator, "config", None), "interval_seconds", 1) or 1))
+    eff = getattr(curator, "_effective_config", None)
+    cfg = eff() if callable(eff) else getattr(curator, "config", None)
+    interval = max(1, int(getattr(cfg, "interval_seconds", 1) or 1))
     return last is None or time.monotonic() - last >= interval
 
 
@@ -196,6 +198,8 @@ class MemoryCuratorDependencies:
     learning_exclusions: Callable[[], tuple[frozenset[str], bool]] | None = None
     # 名单修订号读取：提交前记录「判定基于哪一版名单」并进入运行警告；None 或读取失败按 0。
     learning_exclusions_revision: Callable[[], int] | None = None
+    # 动态配置读取器：按运行期热更新后的 AgentConfig 读取维护周期与 lesson 归档天数。
+    config_provider: Callable[[], object] | None = None
 
 
 # LLM: 运行上下文把已领取的租约与运行前游标快照绑定，避免辅助函数误用后续可变状态。
@@ -244,12 +248,235 @@ class _CuratorLifecycleMixin:
     # 函数用途: 按原pending、输入和时间事实调度到期批次，不以候选来源资格替代当前工作或用户确认。
     # LLM: 正MP只消费当前实际Agent/原claim准入，Count0纯内存早返；仅空短核而不持T等待模型，原分组/F4候选与用户确认合同不变。
     # 函数用途: 在原请求仍开放时调度策展；轮次采集只做一次，租约内复核后复用。
+    def _effective_config(self) -> MemoryCuratorConfig:
+        provider = getattr(self, "config_provider", None)
+        if not callable(provider):
+            return self.config
+        try:
+            raw = provider()
+        except Exception:
+            _LOGGER.warning("curator config_provider failed; using startup config")
+            return self.config
+        if raw is None:
+            return self.config
+        if isinstance(raw, MemoryCuratorConfig):
+            return raw
+        parsed = MemoryCuratorConfig.from_agent_config(raw)
+        overrides: dict[str, object] = {}
+        attr_map = (
+            ("memory_curator_enabled", "enabled"),
+            ("memory_curator_model_profile", "model_profile"),
+            ("memory_curator_interval_seconds", "interval_seconds"),
+            ("memory_curator_turn_threshold", "turn_threshold"),
+            ("memory_curator_max_input_chars", "max_input_chars"),
+            ("memory_curator_timeout_seconds", "timeout_seconds"),
+            ("memory_curator_daily_finalize_hour", "daily_finalize_hour"),
+            ("memory_curator_auto_promotion_policy", "auto_promotion_policy"),
+            ("memory_lesson_min_occurrences", "lesson_min_occurrences"),
+            ("memory_hot_min_occurrences", "hot_min_occurrences"),
+            ("memory_curator_task_file_evidence_max_chars", "task_file_evidence_max_chars"),
+            ("memory_curator_cross_thread_dedupe_window_seconds", "cross_thread_dedupe_window_seconds"),
+            ("retention_scan_slice_entries", "retention_scan_slice_entries"),
+            ("retention_scan_slice_bytes", "retention_scan_slice_bytes"),
+            ("retention_scan_slice_ms", "retention_scan_slice_ms"),
+            ("memory_lesson_archive_days", "lesson_archive_days"),
+        )
+        for src_attr, dst_attr in attr_map:
+            if not hasattr(raw, src_attr):
+                overrides[dst_attr] = getattr(self.config, dst_attr)
+        return replace(parsed, **overrides) if overrides else parsed
+
+    def _maintenance_owner_home(self) -> Path | None:
+        cand_path = getattr(getattr(self, "candidate_service", None), "path", None)
+        if isinstance(cand_path, Path):
+            return cand_path.parent.parent if cand_path.parent.name == "memory" else cand_path.parent
+        return None
+
+    # LLM: 不依赖模型配置或 turn_threshold 的纯本地周期维护（lesson 归档、长期访问刷盘、终态候选冷归档）；
+    #   严禁读取或消费 SkillLearning FIFO 请求，且 HOT 置顶读取失败时 fail-closed 不跳过置顶做归档。
+    # 函数用途: 按 live 配置与 owner 策略执行一次无模型维护节拍。
+    def run_maintenance_if_due(self, *, now: datetime | None = None) -> dict[str, object]:
+        from ..backends.request_scope import foreground_model_active
+        from ..gateway_parts.request_entry_admission import require_request_execution
+        from ..user_space.owner_policy import effective_memory_enabled
+
+        require_request_execution(component=self, component_attribute="memory_curator")
+        live_cfg = self._effective_config()
+        if not live_cfg.enabled:
+            return {
+                "status": "disabled",
+                "reason": "disabled",
+                "lessons_maintained": False,
+                "candidates_compacted": False,
+                "access_flushed": False,
+                "archive_days": live_cfg.lesson_archive_days,
+                "lesson_report": {},
+            }
+        owner_home = self._maintenance_owner_home()
+        if owner_home is not None:
+            policy_path = owner_home / "memory_policy.json"
+            if policy_path.is_symlink() or policy_path.exists():
+                policy_report = read_json_object_report(
+                    policy_path, context="curator.memory_policy"
+                )
+                if policy_report.load_error is not None:
+                    return {
+                        "status": "blocked",
+                        "reason": "memory_policy_unreadable",
+                        "lessons_maintained": False,
+                        "candidates_compacted": False,
+                        "access_flushed": False,
+                        "archive_days": live_cfg.lesson_archive_days,
+                        "lesson_report": {},
+                    }
+                if not effective_memory_enabled(policy_report.payload):
+                    return {
+                        "status": "disabled",
+                        "reason": "memory_policy_disabled",
+                        "lessons_maintained": False,
+                        "candidates_compacted": False,
+                        "access_flushed": False,
+                        "archive_days": live_cfg.lesson_archive_days,
+                        "lesson_report": {},
+                    }
+                if policy_report.payload.get("memory_curator_enabled") is False:
+                    return {
+                        "status": "disabled",
+                        "reason": "memory_curator_disabled",
+                        "lessons_maintained": False,
+                        "candidates_compacted": False,
+                        "access_flushed": False,
+                        "archive_days": live_cfg.lesson_archive_days,
+                        "lesson_report": {},
+                    }
+        if self.backend is not None and foreground_model_active(self.backend):
+            return {
+                "status": "busy",
+                "reason": "foreground_model_active",
+                "lessons_maintained": False,
+                "candidates_compacted": False,
+                "access_flushed": False,
+                "archive_days": live_cfg.lesson_archive_days,
+                "lesson_report": {},
+            }
+        current = _localized_now(now, self.timezone_name)
+        interval = max(1, int(live_cfg.interval_seconds or 1))
+        mono_now = time.monotonic()
+        last_mono = getattr(self, "_maintenance_at", None)
+        last_now_ts = getattr(self, "_maintenance_now_ts", None)
+        if now is not None:
+            now_ts = current.timestamp()
+            if last_now_ts is not None and 0.0 <= (now_ts - last_now_ts) < interval:
+                return {
+                    "status": "not_due",
+                    "reason": "interval",
+                    "lessons_maintained": False,
+                    "candidates_compacted": False,
+                    "access_flushed": False,
+                    "archive_days": live_cfg.lesson_archive_days,
+                    "lesson_report": {},
+                }
+        elif last_mono is not None and (mono_now - last_mono) < interval:
+            return {
+                "status": "not_due",
+                "reason": "interval",
+                "lessons_maintained": False,
+                "candidates_compacted": False,
+                "access_flushed": False,
+                "archive_days": live_cfg.lesson_archive_days,
+                "lesson_report": {},
+            }
+
+        partial = False
+        lessons_maintained = False
+        candidates_compacted = False
+        access_flushed = False
+        lesson_report: dict[str, object] = {}
+        lessons = getattr(self.formal_memory_source, "lessons", None)
+        hot = getattr(self.formal_memory_source, "hot", None)
+        long_term = getattr(self.formal_memory_source, "long_term", None)
+        maintain_fn = getattr(lessons, "maintain", None)
+
+        def _load_hot_pins() -> tuple[tuple[str, ...], bool]:
+            if hot is None:
+                return (), False
+            hot_path = getattr(hot, "path", None)
+            if hot_path is not None:
+                try:
+                    if Path(hot_path).is_symlink():
+                        return (), False
+                except OSError:
+                    return (), False
+            try:
+                records = hot.list()
+            except Exception:
+                return (), False
+            pins: list[str] = []
+            for rec in records:
+                lid = str(getattr(rec, "lesson_id", "") or "").strip()
+                if lid:
+                    pins.append(lid)
+                lref = str(getattr(rec, "lesson_ref", "") or "").strip()
+                if lref:
+                    pins.append(lref)
+            return tuple(dict.fromkeys(pins)), True
+
+        with gateway_short_transaction("memory_curator_maintenance"):
+            if callable(maintain_fn):
+                raw_report = maintain_fn(
+                    now=current,
+                    archive_days=live_cfg.lesson_archive_days,
+                    batch_count=live_cfg.retention_scan_slice_entries,
+                    batch_bytes=live_cfg.retention_scan_slice_bytes,
+                    batch_ms=live_cfg.retention_scan_slice_ms,
+                    pin_loader=_load_hot_pins,
+                )
+                lessons_maintained = True
+                if isinstance(raw_report, dict):
+                    lesson_report = raw_report
+                    cov = raw_report.get("coverage")
+                    cov_partial = cov == "partial" or (
+                        isinstance(cov, dict)
+                        and cov.get("status") not in (None, "complete")
+                    )
+                    if (
+                        cov_partial
+                        or raw_report.get("status") == "partial"
+                        or raw_report.get("pins_complete") is False
+                        or bool(raw_report.get("incomplete"))
+                    ):
+                        partial = True
+            flush_fn = getattr(long_term, "flush_access_events", None)
+            if callable(flush_fn):
+                flush_fn()
+                access_flushed = True
+            if _terminal_compaction_due(self):
+                self.candidate_service.compact_terminal_candidates(now=current)
+                self._terminal_compaction_at = time.monotonic()
+                candidates_compacted = True
+
+        if not partial:
+            self._maintenance_at = time.monotonic()
+            if now is not None or getattr(self, "_maintenance_now_ts", None) is None:
+                self._maintenance_now_ts = current.timestamp()
+
+        return {
+            "status": "partial" if partial else "succeeded",
+            "reason": "maintenance",
+            "lessons_maintained": lessons_maintained,
+            "candidates_compacted": candidates_compacted,
+            "access_flushed": access_flushed,
+            "archive_days": live_cfg.lesson_archive_days,
+            "lesson_report": lesson_report,
+        }
+
     def run_if_due(self, *, now: datetime | None = None) -> CuratorRunResult:
 
         from ..gateway_parts.request_entry_admission import require_request_execution
 
         require_request_execution(component=self, component_attribute="memory_curator")
-        if not self.config.enabled:
+        live_cfg = self._effective_config()
+        if not live_cfg.enabled:
             return self._result(status="disabled", reason="interval")
         try:
             state = self.state_store.load()
@@ -273,12 +500,13 @@ class _CuratorLifecycleMixin:
             except Exception as exc:
                 raise CuratorInputError("CURATOR_CANDIDATE_ARCHIVE_FAILED") from exc
             self._terminal_compaction_at = time.monotonic()
+        self.run_maintenance_if_due(now=current)
         if pending:
             return self._run_pending_when_due(state, pending, current)
-        if _daily_finalize_due(state, current, self.config.daily_finalize_hour):
+        if _daily_finalize_due(state, current, live_cfg.daily_finalize_hour):
             return self.run(reason="daily_finalize", now=current)
         from .curator_due import candidate_scan_deadline, candidate_source_present
-        scan_deadline = candidate_scan_deadline(state, self.config.interval_seconds,
+        scan_deadline = candidate_scan_deadline(state, live_cfg.interval_seconds,
             source_present=not state.candidate_scan_cursor and candidate_source_present(self.candidate_service.path)
         ) if self._promotion_backlog_enabled() else None
         if scan_deadline is not None and current.timestamp() >= scan_deadline:
@@ -291,7 +519,7 @@ class _CuratorLifecycleMixin:
             return self._result(
                 status="not_due", reason="interval", warnings=exclusion_warnings
             )
-        config_revision = self.config.revision()
+        config_revision = live_cfg.revision()
         exclusions_revision = self._read_exclusions_revision()
         batch = self._collect(state, include_formal=False, excluded_conversation_ids=excluded_ids)
         precollected = _PrecollectedBatch(batch, state, config_revision, excluded_ids, exclusions_revision)
@@ -299,9 +527,9 @@ class _CuratorLifecycleMixin:
             return self.run(reason="interval", now=current, precollected_batch=precollected)
         if batch.message_scan_partial and not _has_committable_input(batch):
             return self._result(status="busy", reason="interval", warnings=_message_scan_warnings(batch))
-        if batch.user_turns() >= self.config.turn_threshold:
+        if batch.user_turns() >= live_cfg.turn_threshold:
             return self.run(reason="turn_threshold", now=current, precollected_batch=precollected)
-        if _interval_due(batch, state, current, self.config.interval_seconds):
+        if _interval_due(batch, state, current, live_cfg.interval_seconds):
             return self.run(reason="interval", now=current, precollected_batch=precollected)
         return self._result(status="busy" if batch.message_scan_partial else "not_due", reason="interval",
                             warnings=_message_scan_warnings(batch) if batch.message_scan_partial else ())
@@ -940,6 +1168,10 @@ def _candidate_repetition_ready(row, *, lesson_min_occurrences: int = 2, hot_min
         return False
     target = str(getattr(row, "promotion_target", "") or "").strip().lower()
     if target == "lesson":
+        from ..capability.skill_proposals import lesson_carrier
+
+        if lesson_carrier(row) == "skill":
+            return True
         explicit = str(getattr(row, "origin", "") or "") == "user_explicit" and bool(getattr(row, "source_message_refs", None))
         return explicit or (int(getattr(row, "occurrence_count", 0) or 0) >= max(2, int(lesson_min_occurrences or 2))
                             and len(_evidence_groups(row)) >= 2)
@@ -1345,6 +1577,7 @@ class MemoryCuratorService(
         self.migration_service = dependencies.migration_service
         self.learning_exclusions = dependencies.learning_exclusions
         self.learning_exclusions_revision = dependencies.learning_exclusions_revision
+        self.config_provider = dependencies.config_provider
         self.committer = CuratorBatchCommitter(
             candidate_service=self.candidate_service,
             daily_store=self.daily_store,
