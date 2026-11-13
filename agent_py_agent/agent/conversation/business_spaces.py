@@ -305,7 +305,13 @@ class BusinessSpaceService:
                 'purpose': params.get('purpose', ''), 'revision': 0, 'state': 'active',
                 'mounts': self._mounts(params.get('mounts', []), actor=actor), 'default_project_ref': project}
             state['spaces'][row['space_id']] = row
-            return {key: row[key] for key in ('space_id', 'name', 'purpose', 'revision', 'state', 'mounts')}, True
+            result = {key: row[key] for key in ('space_id', 'name', 'purpose', 'revision', 'state', 'mounts')}
+            # V02-05：只补真实存在的事实。新空间此刻没有任何界面绑定，controller 只来自
+            # binding.controller（interfaces.resolve 的 controller_ref）；这里显式返回 null 并标明未绑定，
+            # 不编造 Owner 控制线程引用。allowed_actions 与 spaces.get 同一实现，只公布当前真能调用的动作。
+            result.update(controller_ref=None, controller_state='not_bound',
+                          allowed_actions=self.allowed_actions(actor, space_id=row['space_id']))
+            return result, True
         return self._transaction('spaces.create', request, actor=actor, idempotency_key=idempotency_key, mutate=mutate)
 
     def update(self, space_id: str, changes: dict, *, actor: object, expected_revision: int, idempotency_key: str) -> dict:

@@ -767,10 +767,10 @@ class BusinessServices:
         return self.projection.query(action, params, actor=self.observation_actor(context))
 
 
-def _response(request_id, *, data=None, error=None, accepted=False, effect='none'):
+def _response(request_id, *, data=None, error=None, accepted=False, effect='none', allowed_actions=()):
     return {'request_id': request_id, 'operation_id': data.get('operation_id') if data else None,
         'state': 'failed' if error else ('accepted' if accepted else 'completed'),
-        'data': data or {}, 'error': error, 'allowed_actions': [], 'warnings': [], 'effect_outcome': effect}
+        'data': data or {}, 'error': error, 'allowed_actions': list(allowed_actions), 'warnings': [], 'effect_outcome': effect}
 
 
 # LLM: 只读取结构化错误；派发原对象保留私有身份，公开响应不新增字段或虚报未执行。
@@ -865,7 +865,10 @@ def execute_business(request, context, services):
         completed_effect = 'none' if spec.metadata['effect'] == 'read' else ('running' if accepted else 'committed')
         data = spec.validate_result(thaw(raw.data) if isinstance(raw, DomainResult) else raw, accepted=accepted)
         context.check(spec.action, facts)
-        return (202 if accepted else 200), _response(request_id, data=data, accepted=accepted, effect=completed_effect)
+        # 领域显式给出的 allowed_actions 才是可调用动作；没有该字段的动作保持空，不从目录推断。
+        allowed = data.get('allowed_actions') if isinstance(data, dict) else None
+        return (202 if accepted else 200), _response(request_id, data=data, accepted=accepted,
+            effect=completed_effect, allowed_actions=allowed if isinstance(allowed, list) else ())
     except (HostAPIError, BusinessError, SessionTaskDispatchError) as error:
         code, status, effect = _error_code(error)
         details = _error_details(error)

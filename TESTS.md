@@ -1,3 +1,15 @@
+## 2026-11-12 V02-02/V02-05 `/space use` 不再谎报切换、创建回执补齐后续动作
+
+来源：V00–V03 定向复核确认两处合同缺失——`cli/space_commands.py` 把 `/space use` 直接映射成 `spaces.get`，返回 `ok=True` 却没有改变会话当前空间；创建回执与封闭 schema 只有 `mounts/name/purpose/revision/space_id/state` 六个字段，缺主控引用与真正可调用的后续动作。
+
+做法：`/space use` 仍只做只读详情查询（产品没有可复用的"切空间"写入口，不能编造），但结果统一投影成 `ok=False / state=blocked / error.code=SPACES_SWITCH_UNSUPPORTED / data.switch=not_performed`，并保留 space、mounts、interface_refs 供展示；CLI 退出码随之变为 1，TUI 也会显示"未切换"而不是假成功。创建回执补齐主控引用与后续动作字段，schema 同步放宽到对应 9 个键，旧 6 字段回执仍通过校验。
+
+关键取舍：没有会话空间写入口时，宁可在界面上明确报"未切换"，也不保留一个看着成功、实则什么都没做的命令。
+
+实际验证：集成树跑 `test_business_v12_f2_spaces.py`（23 项）、`test_business_v12_f5_tui.py` + `test_business_v12_ws_a4_cli_tui_build.py` + `test_acceptance_business_error_transport.py`（60 项），**全部通过**（exit 0）。子代理侧的独立探针在改前得到 `ok=True actions=['spaces.get']`、改后得到 `ok=False/SPACES_SWITCH_UNSUPPORTED`，并核对旧 6 字段回执仍过 schema。
+
+复现：`PYTHONPATH=. TMPDIR=/tmp python3 -B -m pytest -q agent_py_agent/tests/test_business_v12_f2_spaces.py agent_py_agent/tests/test_business_v12_f5_tui.py`。真实 Gateway HTTP、真实 TUI 渲染、并发 `/space use` 与磁盘 catalog 恢复未验证。
+
 ## 2026-11-12 V08-04/V08-05 引用覆盖读不全时不得认证 complete
 
 来源：V07–V09 定向复核确认两个缺证是真实缺陷——`agent/workflows/reference_sources.py` 的 SessionTask 检查只调一次 `list_page(limit=100)`，第二页里的 running 引用看不见；同时 `load_errors`、`coverage`、`next_cursor` 与 `scheduler.list_jobs` 的 `errors` 都被丢弃，"读不全"被当成"没有阻断"，孤立物会被放行回收。
