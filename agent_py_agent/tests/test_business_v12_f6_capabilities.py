@@ -188,3 +188,29 @@ def test_fresh_model_visibility_cannot_be_reauthorized_by_old_frozen_view(regist
     monkeypatch.setattr(registry, 'runtime_snapshot', hidden_snapshot)
     after = resolve_business_capabilities(context=context, request=request, host=host)
     assert 'tool:audit_group_query' not in {item['method_ref'] for item in after.candidates}
+
+
+def test_internal_long_recommendation_preserves_business_scope_and_external_limit(registry, tmp_path):
+    host, _context, _packages = _host(tmp_path, registry)
+    query = 'batch ' + '长运行器上下文' * 2000
+    rendered = host.capability_router.render_package_recommendations(query, limit=5)
+    assert 'mounted' in rendered
+    with pytest.raises(ValueError, match='CAPABILITY_QUERY_TOO_LONG'):
+        host.capability_router.search(query, limit=5, kinds={'capability_package'})
+    with pytest.raises(ValueError, match='CAPABILITY_QUERY_TOO_LONG'):
+        BusinessCapabilityRequest('x' * 8001)
+    host.business_spaces.revoked = True
+    with pytest.raises(PermissionError, match='scope revoked'):
+        host.capability_router.render_package_recommendations(query, limit=5)
+
+
+@pytest.mark.parametrize(('query', 'limit', 'code'), [
+    (None, 1, 'CAPABILITY_QUERY_TYPE_INVALID'),
+    ('x' * 8001, 1, 'CAPABILITY_QUERY_TOO_LONG'),
+    ('batch', True, 'CAPABILITY_LIMIT_TYPE_INVALID'),
+    ('batch', -1, 'CAPABILITY_LIMIT_NEGATIVE'),
+])
+def test_capability_request_explains_invalid_input(query, limit, code):
+    with pytest.raises(ValueError, match=code) as caught:
+        BusinessCapabilityRequest(query, limit)
+    assert '尚未执行' in str(caught.value)

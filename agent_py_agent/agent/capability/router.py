@@ -449,6 +449,11 @@ class CapabilityRouter:
         context_window_tokens: int | None = None,
         selected_skill_ids: tuple[str, ...] | None = None,
     ) -> str:
+        # 自动推荐只消费有界语义查询；runner 信封可能很长，不能让可选发现阻断模型启动。
+        # 主动 search 与业务请求仍沿原严格输入校验，不在这些公共入口静默裁剪。
+        from .business_capabilities import BUSINESS_CAPABILITY_QUERY_MAX_CHARS
+
+        query = query[:BUSINESS_CAPABILITY_QUERY_MAX_CHARS]
         hits = self.search(query, limit=0, kinds={"capability_package"})
         if selected_skill_ids is not None:
             cards = [hit.card for hit in hits if hit.card.id in selected_skill_ids]

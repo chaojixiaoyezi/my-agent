@@ -12,6 +12,8 @@ from .package_provider import list_installed_capability_packages
 from .skill_learning_store import SkillLearningStore
 from .skill_usage_ledger import MAX_USAGE_LEDGER_EVENTS, _usage_read_index
 
+BUSINESS_CAPABILITY_QUERY_MAX_CHARS = 8000
+
 
 @dataclass(frozen=True)
 class BusinessCapabilityRequest:
@@ -20,8 +22,15 @@ class BusinessCapabilityRequest:
     candidates: tuple | None = None
 
     def __post_init__(self):
-        if type(self.query) is not str or len(self.query) > 8000 or type(self.limit) is not int or self.limit < 0:
-            raise ValueError('无效能力查询')
+        if type(self.query) is not str:
+            raise ValueError('CAPABILITY_QUERY_TYPE_INVALID: query 必须是字符串；查询尚未执行，请修正参数')
+        if len(self.query) > BUSINESS_CAPABILITY_QUERY_MAX_CHARS:
+            raise ValueError(f'CAPABILITY_QUERY_TOO_LONG: query 共 {len(self.query)} 字符，超过 '
+                             f'{BUSINESS_CAPABILITY_QUERY_MAX_CHARS} 字符上限；查询尚未执行，请缩小查询')
+        if type(self.limit) is not int:
+            raise ValueError('CAPABILITY_LIMIT_TYPE_INVALID: limit 必须是整数；查询尚未执行，请修正参数')
+        if self.limit < 0:
+            raise ValueError('CAPABILITY_LIMIT_NEGATIVE: limit 不得为负数（0 表示不限制）；查询尚未执行，请修正参数')
 
 
 @dataclass(frozen=True)

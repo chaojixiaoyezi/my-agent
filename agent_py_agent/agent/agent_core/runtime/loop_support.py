@@ -251,8 +251,10 @@ def _package_recommendations(request: ToolSectionsRequest) -> str:
     config = capability_config_for_agent(request.agent) or CapabilityConfig()
     if not config.enable_capability_package_recommendations:
         return ""
+    params = getattr(request.agent, "_current_run_params", None)
+    semantic_query = getattr(params, "root_user_prompt", "") or request.user_prompt
     return router.render_package_recommendations(
-        request.user_prompt, limit=config.capability_candidate_limit,
+        semantic_query, limit=config.capability_candidate_limit,
         context_window_tokens=context_window_or_default(request.agent.config),
         selected_skill_ids=request.selected_skill_ids,
     )

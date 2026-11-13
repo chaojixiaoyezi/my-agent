@@ -392,3 +392,23 @@ def test_actual_anthropic_http_serialization_carries_bounded_recommendations(tmp
     if protocol == "native":
         assert _TITLE not in json.dumps(captured[0].get("system", []), ensure_ascii=False)
         assert _TITLE in json.dumps(captured[0]["messages"], ensure_ascii=False)
+
+
+def test_automatic_recommendation_uses_original_semantic_request_not_runner_envelope(tmp_path, monkeypatch):
+    agent, _store, _entries = _agent(tmp_path)
+    _configure(agent)
+    agent._current_run_params = SimpleNamespace(root_user_prompt=_QUERY)
+    seen = []
+    original = agent.capability_router.render_package_recommendations
+
+    def spy(query, **kwargs):
+        seen.append(query)
+        return original(query, **kwargs)
+
+    monkeypatch.setattr(agent.capability_router, 'render_package_recommendations', spy)
+    names = ['skill_search']
+    _resolve_tool_sections(ToolSectionsRequest(
+        agent, 'runner metadata ' * 1000, names,
+        agent.tools.runtime_snapshot(allowed_tools=names), SimpleNamespace(source_protocol='native'),
+    ))
+    assert seen == [_QUERY]
