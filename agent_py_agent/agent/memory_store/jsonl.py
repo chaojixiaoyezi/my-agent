@@ -13,6 +13,7 @@ import os
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -378,6 +379,10 @@ class _JsonlMemoryIdentityMixin:
         self.quota_enforcer = quota_enforcer
         # 访问信号缓冲:命中先累积内存,随下一次写原子落盘,避免每次召回都写一次文件。
         self._pending_access: dict[str, float] = {}
+        self._projection_cache_lock = threading.Lock()
+        self._scope_pairs_cache: OrderedDict[
+            str, tuple[tuple[object, ...], float, tuple[tuple[str, str], ...]]
+        ] = OrderedDict()
 
 
     # LLM: 仅实际JsonlMemory的明确依赖factory；不借此绕自定义子类初始化，不制造Agent/source或后置改策略。
@@ -918,6 +923,123 @@ class _JsonlMemorySearchMixin:
             self._note_access(active.entry_id)
         return list(confirmed.values())
 
+    def _scope_pairs_state(
+        self,
+    ) -> tuple[
+        threading.Lock,
+        OrderedDict[str, tuple[tuple[object, ...], float, tuple[tuple[str, str], ...]]],
+    ]:
+        lock = getattr(self, "_projection_cache_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._projection_cache_lock = lock
+        cache = getattr(self, "_scope_pairs_cache", None)
+        if cache is None:
+            cache = OrderedDict()
+            self._scope_pairs_cache = cache
+        return lock, cache
+
+    # LLM: 只读按 ID 核验当前权威记录，严禁扫描 all() 或写入访问计数；索引不可用时沿有界扫描且显式区分未全覆盖。
+    # 函数用途: 按请求顺序返回当前未墓碑/未过期的唯一匹配记录。
+    def read_ids(self, entry_ids: Iterable[str]) -> list[MemoryRecord]:
+        from ._jsonl_indexing import bounded_authority_records
+        from .read_index import MemoryReadIndex, MemoryReadIndexGenerationConflict
+
+        ordered_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for raw_id in entry_ids:
+            entry_id = str(raw_id or "").strip()
+            if entry_id and entry_id not in seen_ids:
+                seen_ids.add(entry_id)
+                ordered_ids.append(entry_id)
+        if not ordered_ids:
+            return []
+
+        now = time.time()
+        try:
+            resolved = MemoryReadIndex(self.path).resolve_ids(ordered_ids)
+        except MemoryReadIndexGenerationConflict:
+            resolved = None
+        if resolved is None:
+            resolved, coverage = bounded_authority_records(
+                self,
+                max_records=_AUTHORITY_SCAN_MAX_RECORDS,
+                max_bytes=_AUTHORITY_SCAN_MAX_BYTES,
+            )
+            if bool(coverage.get("partial")):
+                raise ValueError("MEMORY_AUTHORITY_INCOMPLETE")
+
+        current_by_id: dict[str, MemoryRecord] = {}
+        for record in resolved:
+            entry_id = str(getattr(record, "entry_id", "") or "").strip()
+            if not entry_id or entry_id not in seen_ids or entry_id in current_by_id:
+                continue
+            expires_at = float(getattr(record, "expires_at", 0.0) or 0.0)
+            if expires_at and expires_at <= now:
+                continue
+            current_by_id[entry_id] = record
+
+        return [current_by_id[entry_id] for entry_id in ordered_ids if entry_id in current_by_id]
+
+    # LLM: 仅凭固定 5 个权威控制源与最近过期时间做有界 LRU 投影缓存，热命中禁 stat 分片/deepcopy/all()；部分扫描禁缓存空元组。
+    # 函数用途: 返回当前未过期 active+cold 权威下指定 scope_type 的唯一不可变 (scope_type, scope_key) 元组。
+    def scope_pairs(self, scope_type: str) -> tuple[tuple[str, str], ...]:
+        from ._jsonl_indexing import bounded_authority_records
+
+        normalized_type = str(scope_type or "").strip().lower()
+        if not normalized_type:
+            return ()
+
+        now = time.time()
+        stamp = _search_authority_revision(self.path)
+        cache_lock, cache = self._scope_pairs_state()
+        with cache_lock:
+            cached = cache.get(normalized_type)
+            if cached is not None:
+                cached_stamp, nearest_expiry, cached_pairs = cached
+                if cached_stamp == stamp and (nearest_expiry <= 0.0 or now < nearest_expiry):
+                    cache.move_to_end(normalized_type)
+                    return cached_pairs
+                cache.pop(normalized_type, None)
+
+        try:
+            records, coverage = bounded_authority_records(
+                self,
+                max_records=_AUTHORITY_SCAN_MAX_RECORDS,
+                max_bytes=_AUTHORITY_SCAN_MAX_BYTES,
+            )
+        except Exception:
+            with cache_lock:
+                cache.pop(normalized_type, None)
+            raise
+        if bool(coverage.get("partial")):
+            with cache_lock:
+                cache.pop(normalized_type, None)
+            raise ValueError("MEMORY_SCOPE_PROJECTION_UNAVAILABLE")
+
+        pairs_set: set[tuple[str, str]] = set()
+        nearest_expiry = 0.0
+        for record in records:
+            expires_at = float(getattr(record, "expires_at", 0.0) or 0.0)
+            if expires_at and expires_at <= now:
+                continue
+            attrs = record.attributes if isinstance(record.attributes, dict) else {}
+            rec_type = str(attrs.get("scope_type") or "").strip().lower()
+            rec_key = str(attrs.get("scope_key") or "").strip()
+            if rec_type == normalized_type and rec_key:
+                pairs_set.add((normalized_type, rec_key))
+                if expires_at and (nearest_expiry <= 0.0 or expires_at < nearest_expiry):
+                    nearest_expiry = expires_at
+
+        result = tuple(sorted(pairs_set))
+        if stamp == _search_authority_revision(self.path):
+            with cache_lock:
+                cache[normalized_type] = (stamp, nearest_expiry, result)
+                cache.move_to_end(normalized_type)
+                while len(cache) > _SCOPE_PAIRS_CACHE_MAX_ENTRIES:
+                    cache.popitem(last=False)
+        return result
+
     # LLM: 正式与候选检索只能在访问确认时分叉；索引、scope 与排序必须完全相同。检索事实（第二个返回值）只是观察，
     #   取自 HybridRetriever 的 last_retrieval_mode/last_fallback_reason，不参与排序。
     #   这里发出的嵌入请求（查询与缺向量的条目）按“召回”计入进程用量（S7，embedding_usage）。
@@ -1140,6 +1262,8 @@ class _JsonlMemorySearchMixin:
 _AUTHORITY_SCAN_MAX_RECORDS = 1000
 # 正式记忆权威记录一次有界核验最多读取的字节数。
 _AUTHORITY_SCAN_MAX_BYTES = 2 * 1024 * 1024
+# 作用域对有界 LRU 投影缓存最多保留的域类型条目数。
+_SCOPE_PAIRS_CACHE_MAX_ENTRIES = 32
 
 
 # LLM: 调用方持formal锁；仅stat固定四个控制源，不读无界manifest/分片，协议写者须原子更新根或legacy。
