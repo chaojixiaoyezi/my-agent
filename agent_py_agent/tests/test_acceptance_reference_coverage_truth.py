@@ -30,7 +30,8 @@ def test_scheduler_clean_record_still_blocks():
 
 def test_second_page_running_reference_is_found():
     first_page = [N(status='done', task_id=f'done-{i}', dedupe_key='', metadata={}) for i in range(100)]
-    running = N(status='running', task_id='target-task', dedupe_key='workflow:target:step', metadata={})
+    running = N(status='running', task_id='target-task', dedupe_key='workflow:target:step',
+                metadata={'workflow_ref': 'workflow:target'})
     calls = []
 
     def page(**kw):
@@ -65,7 +66,8 @@ def test_cursor_cycle_is_unknown():
 
 
 def test_later_page_load_error_keeps_blocker_and_unknown():
-    running = N(status='running', task_id='target-task', dedupe_key='workflow:target:step', metadata={})
+    running = N(status='running', task_id='target-task', dedupe_key='workflow:target:step',
+                metadata={'workflow_ref': 'workflow:target'})
 
     def page(**kw):
         if not kw.get('cursor'):

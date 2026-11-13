@@ -98,9 +98,12 @@ def _targets(definition):
     from ..assets.workflow_store import BUSINESS_WORKFLOW_METADATA, normalize_workflow_asset_id
 
     state = definition.descriptor.metadata.get(BUSINESS_WORKFLOW_METADATA, {})
-    if state.get('lifecycle') == 'recycled':
-        return set()
     targets = set()
+    derived = definition.descriptor.metadata.get('derived_from')
+    if isinstance(derived, str) and derived.startswith('workflow:'):
+        targets.add(normalize_workflow_asset_id(derived))
+    if state.get('lifecycle') == 'recycled':
+        return targets  # 派生定义仍被保留，可恢复；来源关系不会因暂停/回收标记消失。
     for step in definition.steps:
         # 保留原引用检查的字段，并包括执行器实际支持的 config.subworkflow_ref。
         for value in (step.subworkflow_ref, step.config.get('workflow_id'),
@@ -126,10 +129,15 @@ def _connection(store, *, initialize=False):
                 CREATE INDEX refs_target ON refs(target,parent);
                 CREATE TABLE parents(parent TEXT PRIMARY KEY, epoch INTEGER NOT NULL);
                 CREATE INDEX parents_epoch ON parents(epoch,parent);
-                PRAGMA user_version=1;
+                PRAGMA user_version=2;
             ''')
             conn.execute('INSERT INTO state VALUES(1,?,?,0)', (int(_initial_coverage(store)), _directory_stamp(store)))
-        elif version != 1:
+        elif version == 1:
+            # 旧complete未索引derived_from；保留旧边但强制沿原有界维护重建，不能读成无引用。
+            conn.execute('UPDATE state SET complete=0,epoch=epoch+1')
+            conn.execute('DELETE FROM discovery')
+            conn.execute('PRAGMA user_version=2')
+        elif version != 2:
             raise ValueError('WORKFLOW_REFERENCE_INDEX_SCHEMA_INVALID')
         yield conn
 

@@ -1,6 +1,10 @@
 ## 2026-11-12 连续交互复核返工
 
 ```text
+agent_py_agent/tests/test_workflow_reference_structured_sources.py # 引用精确字段、取消责任与派生索引迁移
+```
+
+```text
 agent_py_agent/agent/
 |-- conversation/guidance_reply_obligations.py  # 已消费本人插话与真实交付的待办身份
 |-- conversation/technical_continuation.py      # 有界技术截断、原任务受理、领取和失效

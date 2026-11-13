@@ -24,7 +24,7 @@ from ..assets.workflow_store import (
     WorkflowStore,
     normalize_workflow_asset_id,
 )
-from ..common.nofollow_fs import read_text_beneath
+from ..common.nofollow_fs import read_bytes_beneath, read_text_beneath
 from .business_scope import (
     WorkflowPolicyRefusal,
     WorkflowScopeService,
@@ -37,6 +37,35 @@ _active_run_statuses = ("running", "queued", "waiting_for_agent", "paused_for_re
 _open_session_task_statuses = ("queued", "pending", "running", "accepted")
 # 有界分页：达到上限仍未取尽时按覆盖未知处理，不静默当作完整。
 _max_reference_pages = 100
+
+
+def _workflow_reference(value, target, *, typed=False):
+    # 通用metadata/package来源不能被当成工作流；显式workflow字段可接原裸ID。
+    return (isinstance(value, str) and (typed or value.startswith('workflow:'))
+            and normalize_workflow_asset_id(value) == target)
+
+
+def _explicit_workflow_reference(value, target):
+    if not isinstance(value, dict):
+        return False
+    if any(_workflow_reference(value.get(key), target, typed=True) for key in ('workflow_id', 'workflow_ref')):
+        return True
+    execution = value.get('execution_target')
+    if isinstance(execution, dict) and execution.get('kind') == 'workflow':
+        if _workflow_reference(execution.get('asset_id'), target, typed=True):
+            return True
+    context = value.get('business_context')
+    if isinstance(context, dict):
+        if any(_workflow_reference(context.get(key), target, typed=True) for key in ('workflow_id', 'workflow_ref')):
+            return True
+        refs = context.get('selected_method_refs', ())
+        if isinstance(refs, (list, tuple)) and any(_workflow_reference(ref, target) for ref in refs):
+            return True
+    return False
+
+
+def _coverage_blocker(blockers, target, reason):
+    blockers.append({'ref': target, 'kind': 'coverage', 'reason_code': reason})
 
 
 def _extract_owner_home(host_or_owner_home: Any) -> Path | None:
@@ -156,6 +185,7 @@ class WorkflowReferenceReader:
         ok_sched = self._check_scheduler(target_id, blockers)
         if not ok_sched:
             coverage = "unknown"
+            _coverage_blocker(blockers, target_id, "SCHEDULER_REFERENCE_SOURCE_INCOMPLETE")
 
         # 2. Nested subworkflow steps
         ok_sub = self._check_subworkflows(target_id, blockers)
@@ -166,16 +196,19 @@ class WorkflowReferenceReader:
         ok_space = self._check_spaces(target_id, blockers)
         if not ok_space:
             coverage = "unknown"
+            _coverage_blocker(blockers, target_id, "BUSINESS_REFERENCE_SOURCE_INCOMPLETE")
 
         # 4. Non-settled WorkflowRunStore runs
         ok_runs = self._check_runs(target_id, blockers)
         if not ok_runs:
             coverage = "unknown"
+            _coverage_blocker(blockers, target_id, "WORKFLOW_RUN_REFERENCE_SOURCE_INCOMPLETE")
 
         # 5. Open SessionTask records
         ok_tasks = self._check_session_tasks(target_id, blockers)
         if not ok_tasks:
             coverage = "unknown"
+            _coverage_blocker(blockers, target_id, "SESSION_TASK_REFERENCE_SOURCE_INCOMPLETE")
 
         # Deduplicate blockers preserving order
         unique_blockers: list[dict[str, str]] = []
@@ -186,6 +219,10 @@ class WorkflowReferenceReader:
                 seen.add(key)
                 unique_blockers.append({"ref": b["ref"], "kind": b["kind"], "reason_code": b["reason_code"]})
 
+        if len(unique_blockers) > _max_blockers_page:
+            coverage = 'unknown'
+            unique_blockers.insert(0, {'ref': target_id, 'kind': 'coverage',
+                'reason_code': 'WORKFLOW_REFERENCE_BLOCKERS_TRUNCATED'})
         return {"coverage": coverage, "blockers": unique_blockers[:_max_blockers_page]}
 
     def _check_scheduler(self, target_id: str, blockers: list[dict[str, str]]) -> bool:
@@ -197,7 +234,7 @@ class WorkflowReferenceReader:
             if not isinstance(listed, tuple) or len(listed) != 2:
                 return False
             jobs, errors = listed
-            for job in jobs or []:
+            for job in islice(jobs or [], _max_blockers_page):
                 if not isinstance(job, dict) or job.get("status") == "deleted":
                     continue
                 job_id = str(job.get("job_id") or job.get("id") or "")
@@ -214,16 +251,16 @@ class WorkflowReferenceReader:
                             str(t.get("asset_id") or t.get("workflow_id") or t.get("workflow_ref") or "")
                         )
                         kind = str(t.get("kind") or "")
-                        if asset_id == target_id and (kind in ("workflow", "") or not kind):
+                        if asset_id == target_id and kind == "workflow":
                             referenced = True
                             break
                     elif isinstance(t, str):
-                        if normalize_workflow_asset_id(t) == target_id:
+                        if _workflow_reference(t, target_id):
                             referenced = True
                             break
                 if referenced and job_id:
                     blockers.append({"ref": job_id, "kind": "schedule", "reason_code": "REFERENCED_BY_SCHEDULE"})
-            return not errors
+            return not errors and len(jobs or []) <= _max_blockers_page
         except (OSError, ValueError, sqlite3.Error, KeyError):
             return False
         except Exception:
@@ -285,7 +322,7 @@ class WorkflowReferenceReader:
                 for parts in (("data", "business", "catalog.json"), ("business", "catalog.json")):
                     cat_file = self.owner_home.joinpath(*parts)
                     if cat_file.exists():
-                        raw = cat_file.read_text(encoding="utf-8")
+                        raw = read_bytes_beneath(self.owner_home, parts, max_bytes=8 * 1024 * 1024)
                         catalog = json.loads(raw)
                         break
 
@@ -299,7 +336,8 @@ class WorkflowReferenceReader:
             if not isinstance(spaces, dict):
                 return False
 
-            for space_id, space in spaces.items():
+            complete = len(spaces) <= _max_blockers_page
+            for space_id, space in islice(spaces.items(), _max_blockers_page):
                 if not isinstance(space, dict):
                     space = getattr(space, "to_dict", lambda: dict(space))() if hasattr(space, "to_dict") else vars(space)
                 if not isinstance(space, dict):
@@ -313,11 +351,11 @@ class WorkflowReferenceReader:
                     if isinstance(mount, dict):
                         if any(
                             normalize_workflow_asset_id(mount.get(k, "")) == target_id
-                            for k in ("package_ref", "asset_id", "workflow_id", "ref")
-                        ):
+                            for k in ("workflow_id", "workflow_ref")
+                        ) or any(_workflow_reference(mount.get(k), target_id) for k in ("package_ref", "ref", "asset_id")):
                             is_ref = True
                             break
-                    elif isinstance(mount, str) and normalize_workflow_asset_id(mount) == target_id:
+                    elif _workflow_reference(mount, target_id):
                         is_ref = True
                         break
                 # bound workflows
@@ -336,8 +374,8 @@ class WorkflowReferenceReader:
                 if not is_ref:
                     gov = space.get("governance_policies") or space.get("governance") or space.get("policies")
                     if gov:
-                        gov_str = json.dumps(gov) if not isinstance(gov, str) else gov
-                        if target_id in gov_str:
+                        if (_explicit_workflow_reference(gov, target_id)
+                                or _workflow_reference(gov, target_id)):
                             is_ref = True
                 if is_ref:
                     blockers.append({"ref": str(space_id), "kind": "space", "reason_code": "REFERENCED_BY_SPACE"})
@@ -345,7 +383,8 @@ class WorkflowReferenceReader:
             # bindings
             bindings = catalog.get("bindings", {})
             if isinstance(bindings, dict):
-                for binding_id, binding in bindings.items():
+                complete = complete and len(bindings) <= _max_blockers_page
+                for binding_id, binding in islice(bindings.items(), _max_blockers_page):
                     if not isinstance(binding, dict):
                         continue
                     if binding.get("state") == "unbound":
@@ -364,18 +403,33 @@ class WorkflowReferenceReader:
                                 blockers.append(
                                     {"ref": str(sid), "kind": "space", "reason_code": "REFERENCED_BY_SPACE"}
                                 )
-            return True
+            subscriptions = catalog.get('subscriptions', {})
+            if not isinstance(subscriptions, dict):
+                return False
+            complete = complete and len(subscriptions) <= _max_blockers_page
+            for identifier, row in islice(subscriptions.items(), _max_blockers_page):
+                if not isinstance(row, dict):
+                    complete = False
+                    continue
+                if row.get('state') not in ('active', 'paused', 'removed'):
+                    complete = False
+                if row.get('state') in ('active', 'paused') and _workflow_reference(row.get('policy_ref'), target_id):
+                    blockers.append({'ref': str(identifier), 'kind': 'space',
+                                     'reason_code': 'REFERENCED_BY_SPACE'})
+            return complete
         except (OSError, ValueError, KeyError):
             return False
         except Exception:
             return False
 
     def _check_runs(self, target_id: str, blockers: list[dict[str, str]]) -> bool:
+        complete = True
         try:
             if self.owner_home is not None:
                 runs_root = self.owner_home / "data" / "workflow_runs"
                 index_path = self.owner_home / "data" / "workflow_run_index.sqlite3"
                 found_run_ids = set()
+                complete = True
                 index_queried_ok = False
                 if index_path.exists():
                     try:
@@ -384,7 +438,9 @@ class WorkflowReferenceReader:
                         idx = RunListIndex(self.owner_home)
                         for st in _active_run_statuses:
                             for q_id in (target_id, f"workflow:{target_id}"):
-                                for r_id, _ in idx.page(q_id, st, limit=10):
+                                page = idx.page(q_id, st, limit=_max_blockers_page + 1)
+                                complete = complete and len(page) <= _max_blockers_page
+                                for r_id, _ in page[:_max_blockers_page]:
                                     found_run_ids.add(str(r_id))
                         index_queried_ok = True
                     except Exception:
@@ -394,10 +450,11 @@ class WorkflowReferenceReader:
                     max_scan = 100
                     for entry in runs_root.iterdir():
                         if scanned >= max_scan:
+                            complete = False
                             break
+                        scanned += 1
                         if not entry.is_dir() or entry.name.startswith("."):
                             continue
-                        scanned += 1
                         if entry.name in found_run_ids:
                             continue
                         raw = read_text_beneath(self.owner_home, ("data", "workflow_runs", entry.name, "run.json"))
@@ -414,14 +471,15 @@ class WorkflowReferenceReader:
                 # Fallback for mock run_store
                 for st in _active_run_statuses:
                     for q_id in (target_id, f"workflow:{target_id}"):
-                        runs = self.run_store.list_runs(workflow_id=q_id, status=st, limit=10)
-                        for r in runs:
+                        runs = self.run_store.list_runs(workflow_id=q_id, status=st, limit=_max_blockers_page + 1)
+                        complete = complete and len(runs) <= _max_blockers_page
+                        for r in runs[:_max_blockers_page]:
                             run_id = getattr(r, "workflow_run_id", None) or getattr(r, "run_id", None) or str(r)
                             if run_id:
                                 blockers.append(
                                     {"ref": str(run_id), "kind": "workflow_run", "reason_code": "ACTIVE_WORKFLOW_RUN"}
                                 )
-            return True
+            return complete
         except (OSError, ValueError, sqlite3.Error, KeyError):
             return False
         except Exception:
@@ -469,34 +527,14 @@ class WorkflowReferenceReader:
                 load_errors = page.get("load_errors") or []
                 for task in items:
                     t_status = getattr(task, "status", "")
-                    if t_status not in _open_session_task_statuses:
+                    task_metadata = getattr(task, 'metadata', {}) or {}
+                    control = task_metadata.get('cancellation_control', {}) if isinstance(task_metadata, dict) else {}
+                    unsettled = isinstance(control, dict) and bool(control.get('outstanding_refs'))
+                    if t_status not in _open_session_task_statuses and not unsettled:
                         continue
                     t_id = getattr(task, "task_id", "") or str(task)
-                    dedupe_key = str(getattr(task, "dedupe_key", "") or "")
                     metadata = getattr(task, "metadata", {}) or {}
-                    bc = metadata.get("business_context") if isinstance(metadata, dict) else {}
-
-                    is_ref = False
-                    if target_id in dedupe_key:
-                        is_ref = True
-                    elif isinstance(metadata, dict):
-                        meta_wf = normalize_workflow_asset_id(
-                            str(metadata.get("workflow_id") or metadata.get("workflow_ref") or "")
-                        )
-                        bc_wf = (
-                            normalize_workflow_asset_id(str(bc.get("workflow_id") or bc.get("workflow_ref") or ""))
-                            if isinstance(bc, dict)
-                            else ""
-                        )
-                        if target_id in (meta_wf, bc_wf):
-                            is_ref = True
-                        else:
-                            try:
-                                meta_str = json.dumps(metadata)
-                                if target_id in meta_str:
-                                    is_ref = True
-                            except Exception:
-                                pass
+                    is_ref = _explicit_workflow_reference(metadata, target_id)
                     if is_ref and t_id:
                         blockers.append({"ref": str(t_id), "kind": "session_task", "reason_code": "OPEN_SESSION_TASK"})
                 # 读错误、覆盖不明、游标循环/超页都属"未知"，不能当作"没有引用"放行。

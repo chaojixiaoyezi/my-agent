@@ -306,7 +306,7 @@ def test_source_5_open_session_tasks(tmp_path: Path):
     storage = ConversationStorage(conv_dir)
     task_store = SessionTaskStore(storage)
 
-    # 1. Open task with dedupe_key
+    # 1. 任务的显式工作流引用；去重文本只作幂等键。
     t1 = task_store.create(
         SessionTaskDraft(
             sender_thread_id="t1",
@@ -315,6 +315,10 @@ def test_source_5_open_session_tasks(tmp_path: Path):
             dedupe_key="workflow:run_555:step_1:flow_task_target",
         )
     )
+    task_file = storage.session_tasks_dir / f"{t1.task_id}.json"
+    data = json.loads(task_file.read_text(encoding="utf-8"))
+    data["metadata"] = {"workflow_ref": "workflow:flow_task_target"}
+    task_file.write_text(json.dumps(data), encoding="utf-8")
 
     # 2. Open task with metadata business_context
     t2 = task_store.create(
