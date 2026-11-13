@@ -38,6 +38,7 @@ from ..conversation.business_observability import (
     _observation_thread,
     bounded_observation_reader,
     observation_request,
+    public_result_refs,
     runtime_source_revision,
     source_after,
 )
@@ -124,6 +125,76 @@ class _DecisionWindow:
     # 函数用途: 返回当前窗口原事件对象。
     def events_report(self, thread_id):
         return self.events[thread_id], []
+
+
+class _ModelUsageWindow:
+    """在原decision遍历中同时聚合完整调用账，流式来源只消费一次。"""
+    def __init__(self, original):
+        self.model_usage, self.original = self, original
+        self.total = {}
+        self.has_decision_purpose = self.has_other_purpose = False
+
+    def revision(self, thread_id):
+        return self.original.revision(thread_id)
+
+    def events_report(self, thread_id):
+        events, errors = self.original.events_report(thread_id)
+        return self._events(events), errors
+
+    def _events(self, events):
+        from ..conversation.store_usage import _sum_model_call_summaries
+
+        iterator = iter(events)
+        try:
+            for event in iterator:
+                # 原落盘账已把累计快照转换为delta；不得再叠加purpose分区到根总量。
+                self.total = _sum_model_call_summaries([self.total, event.model_calls],
+                    include_purposes=False, count_unknown=False)
+                purposes = event.model_calls.get('purpose_breakdown', {})
+                if isinstance(purposes, dict):
+                    for key, value in purposes.items():
+                        if key != 'schema' and isinstance(value, dict) and value.get('physical_model_attempt_count'):
+                            if key == 'decision':
+                                self.has_decision_purpose = True
+                            else:
+                                self.has_other_purpose = True
+                yield event
+        finally:
+            close = getattr(iterator, 'close', None)
+            if close is not None:
+                close()
+
+
+def _model_usage_measures(total, report):
+    """沿原provider/estimated分区及逐字段reported计数，缺字段不补零。"""
+    fields = dict.fromkeys(('input_tokens', 'cached_input_tokens', 'uncached_input_tokens',
+                           'output_tokens', 'cost', 'currency'))
+    actual, estimated = dict(fields, coverage='partial'), dict(fields, coverage='unknown')
+    usage = total.get('usage_breakdown', {})
+    provider, local = usage.get('provider', {}), usage.get('estimated', {})
+    input_calls = provider.get('input_tokens_reported_call_count', 0)
+    cache_calls = provider.get('cache_read_input_tokens_reported_call_count', 0)
+    if input_calls:
+        actual['input_tokens'] = provider['input_tokens']
+    elif report['input_reported_calls']:
+        # 旧账只有decision分区时保留原已知输入，不将它另加到根摘要。
+        actual['input_tokens'] = report['input_tokens_reported']
+    if provider.get('output_tokens_reported_call_count'):
+        actual['output_tokens'] = provider['output_tokens']
+    if cache_calls:
+        actual['cached_input_tokens'] = provider['cache_read_input_tokens']
+    if input_calls and input_calls == cache_calls == provider.get('call_count'):
+        uncached = provider['input_tokens'] - provider['cache_read_input_tokens']
+        if uncached >= 0:
+            actual['uncached_input_tokens'] = uncached
+    if local.get('call_count') or local.get('unfinished_call_count'):
+        estimated.update(input_tokens=local.get('input_tokens', 0) + local.get('unfinished_input_tokens', 0),
+                         coverage='partial')
+        if local.get('call_count'):
+            estimated['output_tokens'] = local.get('output_tokens', 0)
+    elif report['estimated_unfinished_calls']:
+        estimated.update(input_tokens=report['input_tokens_estimated_unfinished'], coverage='partial')
+    return actual, estimated
 
 
 class _UsageEventSources:
@@ -444,6 +515,7 @@ def default_observation_readers(owner_home, owner_id, store, runtime, *, resourc
     if source.runtime_artifacts or media.is_file():
         readers.update({'artifacts': source.artifacts, 'artifacts.get': source.artifact_detail})
     if store is not None:
+        readers['changes.get'] = source.changes
         archive = Path(store.storage.root) / 'display_archives'
         if archive.is_dir() and not archive.is_symlink():
             try:
@@ -618,107 +690,130 @@ class _OwnerReaders:
     # LLM: 变更详情按task读取代码与媒体变更；非本owner任务拒绝披露。
     # 函数用途: 返回任务的代码或产物变更事实及证据引用。
     def changes(self, params):
+        from ..conversation.session_tasks import SESSION_TASK_RESULT_ARTIFACTS_KEY
+        from ..plugin_host.business_action_specs import business_action_spec, validate_object
+
         task_id = params['task_id']
         candidate_ref = params.get('candidate_ref')
-        records = []
         task_row = None
         space_id, project_ref, thread_id = None, None, None
         meta = {}
-        if self.repo is not None:
+        complete = True
+        if self.repo is not None and self.repo.db_path.is_file():
             with self.repo._runtime_connection() as conn:
                 task_row = conn.execute(
                     "SELECT t.*, tr.metadata_json FROM tasks t "
                     "LEFT JOIN task_runs tr ON tr.task_id=t.task_id "
-                    "WHERE t.task_id=? AND t.owner_id=?",
+                    "WHERE t.task_id=? AND t.owner_id=? ORDER BY tr.rowid DESC LIMIT 1",
                     (task_id, self.owner),
                 ).fetchone()
                 if task_row is not None:
                     thread_id = task_row['thread_id'] or None
                     if task_row['metadata_json']:
-                        try:
-                            meta = json.loads(task_row['metadata_json'])
-                        except Exception:
-                            meta = {}
+                        meta = json.loads(task_row['metadata_json'])
         task_obj = None
         if self.store is not None:
-            try:
-                task_obj = _observation_task(self.store, task_id)
-                if task_obj is not None:
-                    target_thread = _observation_thread(self.store, task_obj.target_thread_id)
-                    if target_thread.owner_id != self.owner:
-                        task_obj = None
-                    else:
-                        thread_id = thread_id or task_obj.target_thread_id
-                        meta.update(task_obj.metadata)
-            except Exception:
-                task_obj = None
+            task_obj = _observation_task(self.store, task_id)
+            if task_obj is not None:
+                target_thread = _observation_thread(self.store, task_obj.target_thread_id)
+                if target_thread.owner_id != self.owner:
+                    return ObservationPage()
+                thread_id = task_obj.target_thread_id
+                meta.update(task_obj.metadata)
         if task_row is None and task_obj is None:
             return ObservationPage()
 
         ctx_raw = meta.get('business_context')
         context = BusinessExecutionContext.from_dict(ctx_raw) if ctx_raw else None
         if context:
+            expected_task = task_obj.task_id if task_obj is not None else meta.get('session_task_ref')
+            if context.owner_id != self.owner or context.task_id != expected_task:
+                raise ValueError('change source business context mismatch')
             space_id = context.space_id
             project_ref = context.project_ref
 
+        schema = business_action_spec('changes.get').result_schema
         raw_changes = meta.get('changes', [])
         changes_list = []
         if isinstance(raw_changes, list):
+            complete = complete and len(raw_changes) <= 100
             for ch in raw_changes[:100]:
-                if isinstance(ch, dict) and 'target_ref' in ch and 'field' in ch and 'before' in ch and 'after' in ch:
-                    target_ref = str(ch['target_ref']).strip()
-                    field_name = str(ch['field']).strip()[:128]
-                    if target_ref and field_name:
-                        changes_list.append({
-                            'target_ref': target_ref,
-                            'field': field_name,
-                            'before': ch['before'],
-                            'after': ch['after'],
-                        })
+                try:
+                    validate_object({'changes': [ch], 'evidence_refs': [], 'coverage': 'complete'}, schema)
+                except (ValueError, BusinessError):
+                    complete = False
+                    continue
+                changes_list.append(ch)
+        else:
+            complete = False
 
         evidence_refs = []
         raw_refs = meta.get('evidence_refs') or meta.get('result_refs') or []
         if isinstance(raw_refs, list):
+            complete = complete and len(raw_refs) <= 100
             for ref in raw_refs[:100]:
-                if isinstance(ref, str) and ref.strip():
-                    evidence_refs.append(ref.strip()[:128])
-        if task_obj is not None and hasattr(task_obj, 'result_refs'):
-            for ref in task_obj.result_refs[:100]:
-                if isinstance(ref, str) and ref.strip() and ref.strip() not in evidence_refs:
-                    evidence_refs.append(ref.strip()[:128])
-        if self.repo is not None:
-            try:
-                with self.repo._runtime_connection() as conn:
-                    art_rows = conn.execute(
-                        "SELECT ar.artifact_record_id, ar.rel_path, ar.content_digest FROM artifact_records ar "
-                        "JOIN agent_runs agr ON agr.agent_run_id=ar.agent_run_id "
-                        "JOIN task_runs tr ON tr.task_run_id=agr.task_run_id "
-                        "WHERE tr.task_id=? LIMIT 100",
-                        (task_id,),
-                    ).fetchall()
-                    for arow in art_rows:
-                        aid = arow['artifact_record_id']
-                        if aid not in evidence_refs:
-                            evidence_refs.append(aid)
-                        if not any(c['target_ref'] == aid for c in changes_list):
-                            changes_list.append({
-                                'target_ref': aid,
-                                'field': 'content_digest',
-                                'before': None,
-                                'after': arow['content_digest'],
-                            })
-            except Exception:
-                pass
-        if candidate_ref and candidate_ref not in evidence_refs:
-            evidence_refs.append(str(candidate_ref)[:128])
+                try:
+                    validate_object({'changes': [], 'evidence_refs': [ref], 'coverage': 'complete'}, schema)
+                except (ValueError, BusinessError):
+                    complete = False
+                    continue
+                if Path(ref).is_absolute():
+                    complete = False
+                    continue
+                evidence_refs.append(ref)
+        else:
+            complete = False
+        if task_obj is not None:
+            # 公开结果复用任务详情的登记映射，绝不截断本机路径冒充产物ID。
+            refs, coverage = public_result_refs(task_obj, store=self.store, owner_root=self.home)
+            evidence_refs.extend(refs)
+            complete = complete and (coverage is None or coverage['state'] == 'complete')
+            pins = task_obj.metadata.get(SESSION_TASK_RESULT_ARTIFACTS_KEY, [])
+            digests = {}
+            ref_set = set(refs)
+            for item in pins if isinstance(pins, list) else ():
+                if isinstance(item, dict) and item.get('artifact_id') in ref_set:
+                    digest = item.get('sha256')
+                    if isinstance(digest, str) and re.fullmatch(r'[0-9a-f]{64}', digest):
+                        digests.setdefault(item['artifact_id'], set()).add(digest)
+            for ref, values in digests.items():
+                if len(values) == 1:
+                    changes_list.append({'target_ref': ref, 'field': 'content_digest',
+                                         'before': None, 'after': next(iter(values))})
+                else:
+                    complete = False
+        if self.runtime_artifacts and task_row is not None:
+            with self.repo._runtime_connection() as conn:
+                art_rows = conn.execute(
+                    "SELECT ar.artifact_record_id, ar.content_digest FROM artifact_records ar "
+                    "JOIN agent_runs agr ON agr.agent_run_id=ar.agent_run_id "
+                    "JOIN agent_attempts aa ON aa.attempt_id=ar.attempt_id AND aa.agent_run_id=agr.agent_run_id "
+                    "JOIN task_runs tr ON tr.task_run_id=agr.task_run_id "
+                    "JOIN tasks t ON t.task_id=tr.task_id "
+                    "WHERE t.task_id=? AND t.owner_id=? ORDER BY ar.rowid LIMIT 101",
+                    (task_id, self.owner),
+                ).fetchall()
+            complete = complete and len(art_rows) <= 100
+            targets = {change['target_ref'] for change in changes_list}
+            for row in art_rows[:100]:
+                ref = row['artifact_record_id']
+                evidence_refs.append(ref)
+                if ref not in targets:
+                    changes_list.append({'target_ref': ref, 'field': 'content_digest',
+                                         'before': None, 'after': row['content_digest']})
+                    targets.add(ref)
+        evidence_refs = list(dict.fromkeys(evidence_refs))
+        if candidate_ref and candidate_ref not in evidence_refs and not any(
+                change['target_ref'] == candidate_ref for change in changes_list):
+            return ObservationPage(coverage='complete' if complete else 'partial')
+        complete = complete and len(changes_list) <= 100 and len(evidence_refs) <= 100
 
         value = {
-            'changes': changes_list,
+            'changes': changes_list[:100],
             'evidence_refs': evidence_refs[:100],
-            'coverage': 'complete',
+            'coverage': 'complete' if complete else 'partial',
         }
-        records.append(ObservationRecord(value, self.owner, space_id, project_ref, task_id, thread_id))
-        return ObservationPage(tuple(records))
+        return ObservationPage((ObservationRecord(value, self.owner, space_id, project_ref, task_id, thread_id),))
 
     # LLM: 有效权限摘要按目标节点计算生效范围及来源；只读展示，不提升或赋予权限。
     # 函数用途: 返回目标节点的有效资源范围及来源。
@@ -1241,15 +1336,11 @@ class _OwnerReaders:
     def usage_page(self, params, window, members, revision, resources):
         filters = params.get('filter', {})
         # 时间窗已按原created_at筛完。since=0避免原mtime快路径误跳过带未来事件的合法账本。
-        report = decision_usage_summary(window, window.events, since=0)
+        counted = _ModelUsageWindow(window)
+        report = decision_usage_summary(counted, window.events, since=0)
         if report['unreadable_threads']:
             raise ValueError('usage ledger unreadable')
-        unknown = dict.fromkeys(('input_tokens', 'cached_input_tokens', 'uncached_input_tokens', 'output_tokens', 'cost', 'currency'))
-        actual, estimated = dict(unknown, coverage='partial'), dict(unknown, coverage='unknown')
-        if report['input_reported_calls']:
-            actual['input_tokens'] = report['input_tokens_reported']
-        if report['estimated_unfinished_calls']:
-            estimated.update(input_tokens=report['input_tokens_estimated_unfinished'], coverage='partial')
+        actual, estimated = _model_usage_measures(counted.total, report)
         common = dict(window.common) if isinstance(window, _StreamDecisionWindow) else {}
         if not isinstance(window, _StreamDecisionWindow):
             for key in ('space_id', 'project_ref', 'task_id', 'thread_id', 'run_id', 'attempt_id'):
@@ -1258,10 +1349,15 @@ class _OwnerReaders:
         # 空窗口不伪造发生时间或0 token；准确身份来自规范源，不能直接复制filter。
         if not members:
             common.update(self.empty_usage_scope(filters))
-        value = {'actual': actual, 'estimated': estimated,
-            'unknown': ['decision_usage_only', 'cost_unavailable', 'output_tokens_unavailable', 'cache_breakdown_unavailable',
-                'resource_usage_owner_current'],
-            'resource_usage': resources}
+        unknown = ['cost_unavailable', 'resource_usage_owner_current']
+        if not counted.has_other_purpose:
+            unknown.append('decision_usage_only' if counted.has_decision_purpose else 'call_purpose_unavailable')
+        if actual['output_tokens'] is None:
+            unknown.append('output_tokens_unavailable')
+        if actual['cached_input_tokens'] is None or actual['uncached_input_tokens'] is None:
+            unknown.append('cache_breakdown_unavailable')
+        value = {'actual': actual, 'estimated': estimated, 'unknown': unknown,
+                 'resource_usage': resources}
         record = _ScopedUsageRecord(value, self.owner, **common, members=members, filter_digest=_digest(filters))
         return ObservationPage((record,), coverage='partial', revision=revision)
 

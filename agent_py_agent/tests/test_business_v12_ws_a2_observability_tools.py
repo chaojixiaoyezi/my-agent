@@ -359,7 +359,7 @@ def test_changes_get_reader_conforms_to_schema(tmp_path: Path):
 
     changes_res = env.service.query('changes.get', {'task_id': run['task_id']}, actor=env.actor)
     spec = business_action_spec('changes.get')
-    validate_object(spec.result_schema, changes_res)
+    validate_object(changes_res, spec.result_schema)
 
     assert changes_res['coverage'] == 'complete'
     assert 'art-ws-a2-1' in changes_res['evidence_refs']

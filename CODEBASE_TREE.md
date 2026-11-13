@@ -1,6 +1,11 @@
 ## 2026-11-12 连续交互复核返工
 
 ```text
+agent_py_agent/tests/test_business_change_result_refs.py  # 变更详情的原产物身份、摘要与截断覆盖
+agent_py_agent/tests/test_business_provider_usage_wire.py # 供应商与估算用量的真实往返、部分字段覆盖
+```
+
+```text
 agent_py_agent/agent/conversation/business_execution_observation.py # 执行详情的原租约、来源与有界事件
 agent_py_agent/tests/test_business_execution_lifecycle.py # 执行详情真实往返、超时和旧租约隔离
 ```
