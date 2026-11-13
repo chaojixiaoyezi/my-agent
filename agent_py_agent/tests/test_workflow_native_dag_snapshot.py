@@ -1,5 +1,6 @@
 """原生DAG治理读取原子冻结定义，不反向等待父执行锁；执行权仍互斥。"""
 import multiprocessing
+import os
 from threading import Event, Thread
 
 import pytest
@@ -7,6 +8,33 @@ import pytest
 from agent_py_agent.agent.workflows.engine import WorkflowEngine
 from agent_py_agent.agent.workflows.run_store import WorkflowRunStore
 from agent_py_agent.tests.test_wf_07_08_foreach_and_dag import _flow
+
+
+def test_definition_reader_survives_concurrent_atomic_save(tmp_path, monkeypatch):
+    from agent_py_agent.agent.common import nofollow_fs
+
+    supports_dir_fd = nofollow_fs._supports_dir_fd()
+    if not supports_dir_fd:
+        pytest.skip('此交错针对支持 dir_fd 的文件系统')
+    engine = WorkflowEngine(tmp_path, analysis_handler=lambda *args: {'value': 1})
+    run = engine.run_workflow(_flow([{'step_id': 'one', 'mode': 'llm_skill_analysis'}]))
+    original = engine.store.load_workflow_snapshot(run.workflow_run_id)
+    original_open = os.open
+    published = False
+
+    def open_during_save(name, flags, *args, **kwargs):
+        nonlocal published
+        if (not published and name == 'run.json' and kwargs.get('dir_fd') is not None
+                and flags & os.O_ACCMODE == os.O_RDONLY):
+            published = True
+            engine.store.save_run(run)
+        return original_open(name, flags, *args, **kwargs)
+
+    # os.supports_dir_fd 按函数对象识别能力；插入调度点后仍须走本机实际的 no-follow 读链。
+    monkeypatch.setattr(os, 'supports_dir_fd', os.supports_dir_fd | {open_during_save})
+    monkeypatch.setattr(os, 'open', open_during_save)
+    assert engine.store.load_workflow_snapshot(run.workflow_run_id) == original
+    assert published
 
 
 def test_atomic_definition_reader_does_not_wait_for_execution_lock(tmp_path):

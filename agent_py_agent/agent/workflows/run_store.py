@@ -15,7 +15,13 @@ from threading import Lock, local
 
 from ..common.cancellation import raise_if_cancelled
 from ..common.json_io import locked_json_path
-from ..common.nofollow_fs import ensure_private_dir, read_text_beneath, write_text_atomic_beneath
+from ..common.nofollow_fs import (
+    _supports_dir_fd,
+    ensure_private_dir,
+    read_bytes_beneath,
+    read_text_beneath,
+    write_text_atomic_beneath,
+)
 from ..concurrency.interrupt import is_interrupted
 from .models import (
     WorkflowRunRecord,
@@ -323,12 +329,13 @@ class WorkflowRunStore:
 
     # LLM: name只由固定文件名与安全单段编号组成；缺失记录不能冒充空JSON。
     # 函数用途: 从Owner根读取一个工作流运行账本对象。
-    def _read(self, workflow_run_id, name):
+    def _read(self, workflow_run_id, name, *, concurrent_publication=False):
         self._folder(workflow_run_id)
-        raw = read_text_beneath(self.owner_home, ('data', 'workflow_runs', workflow_run_id, name))
+        raw = read_bytes_beneath(self.owner_home, ('data', 'workflow_runs', workflow_run_id, name),
+                                 snapshot_retries=2 if concurrent_publication and _supports_dir_fd() else 0)
         if raw is None:
             raise FileNotFoundError('工作流运行记录不存在')
-        return json.loads(raw)
+        return json.loads(raw.decode('utf-8'))
 
     # LLM: 文件名要校验加上.json后的长度，避免先创建残缺运行；所有写都复用本次运行锁。
     # 函数用途: 原子保存一个步骤的脱敏副本。
@@ -709,10 +716,10 @@ class WorkflowRunStore:
     def load_step_records(self, workflow_run_id):
         return self.load_run(workflow_run_id).steps
 
-    # 单个run.json经原子替换发表，读取只会得到完整的旧/新冻结版本；不读多文件步骤恢复视图。
+    # 写方可能同时发表run.json；在同一可信目录内有限重读正常的原子替换，路径或身份错误仍须暴露。
     # DAG父线程持执行锁等worker，worker核验此定义时不能反向等待父锁；写入/CAS/执行互斥仍走原锁。
     def load_workflow_snapshot(self, workflow_run_id):
-        data = self._read(workflow_run_id, 'run.json')
+        data = self._read(workflow_run_id, 'run.json', concurrent_publication=True)
         if data['workflow_run_id'] != workflow_run_id:
             raise ValueError('运行身份与目录不匹配')
         snapshot = data['workflow_snapshot']
