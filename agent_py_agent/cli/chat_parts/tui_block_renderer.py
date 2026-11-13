@@ -958,7 +958,7 @@ def _render_background_activity(
     block: TuiBlock,
     context: TuiRenderContext,
 ) -> tuple[FormattedLine, ...]:
-    if block.metadata.get('source_kind') == 'business_agents':
+    if block.metadata.get('source_kind') in {'business_agents', 'business_execution'}:
         display = block.metadata.get('display') or {}
         return tuple(line for text in display.get('lines', ())
                      for line in wrap_fragments((('class:tui-muted', sanitize_terminal_text(str(text))),), width=context.width))
@@ -2398,7 +2398,7 @@ def _tool_title(block: TuiBlock, display: dict[str, Any], width: int) -> str:
             argument = str(files[0].get("path") or "")
         elif files or hidden_files:
             argument = f"{len(files) + hidden_files} files"
-    elif display_kind == "command":
+    elif display_kind == "command" or block.metadata.get("source_kind") == "business_operation":
         argument = str(block.metadata.get("invocation") or "")
     argument = argument.splitlines()[0].strip() if argument else ""
     title = f"{base}({argument})" if argument else base

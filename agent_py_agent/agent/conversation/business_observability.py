@@ -475,7 +475,19 @@ class BusinessObservationService:
                 page = self._paged_source(source, action, params, actor)
                 records = [row for row in page.records if self._visible(row, action, params, actor)]
                 chosen, cursor = self._paginate(records, page, action, params, actor)
-                result = {'items': [_view(kind, row.value) for row in chosen], 'next_cursor': cursor,
+                items = [_view(kind, row.value) for row in chosen]
+                if action == 'tool_calls.list':
+                    from ..tooling.result_display import tool_invocation_summary
+
+                    for target, row in zip(items, chosen):
+                        operation = target['operation_id']
+                        detail_params = {'operation_id': operation}
+                        if (actor.authorize('tool_calls.get', {'owner_id': self.owner_id, **detail_params}) is True
+                                and self._visible(row, 'tool_calls.get', detail_params, actor)):
+                            label = tool_invocation_summary(target['tool_name'], row.value.get('_input'))
+                            if label:
+                                target['invocation'] = label
+                result = {'items': items, 'next_cursor': cursor,
                     'coverage': 'partial' if cursor and page.coverage == 'complete' else page.coverage}
             elif action == 'executions.get':
                 page = self._paged_source('executions', action, params, actor)
@@ -596,7 +608,7 @@ class BusinessObservationService:
         if offset > len(page.rows):
             raise BusinessError('CURSOR_EXPIRED')
         selected = page.rows[offset:offset + params.get('limit', 50)]
-        items = []
+        items, display_events = [], []
         filtered = False
         for row in selected:
             if child and row.metadata.get('agent_run_id') != child.run_id:
@@ -604,7 +616,7 @@ class BusinessObservationService:
                 continue
             if child and row.role not in {'user', 'assistant', 'host'}:
                 continue
-            if row.role not in {'user', 'assistant', 'tool', 'host'}:
+            if row.role not in {'user', 'assistant', 'tool', 'host', 'display'}:
                 continue
             task_id, context = row.metadata.get('task_id'), None
             task = _observation_task(self.store, task_id) if task_id else None
@@ -615,6 +627,24 @@ class BusinessObservationService:
             message_facts = ObservationRecord({}, self.owner_id, context.space_id if context else facts.space_id,
                 context.project_ref if context else facts.project_ref, task.task_id if task else facts.task_id, thread.thread_id)
             if not self._visible(message_facts, 'messages.list', params, actor):
+                continue
+            if row.role == 'display':
+                if params.get('include_display') is True:
+                    from .display_checkpoint import display_checkpoint_event
+
+                    event = display_checkpoint_event(row)
+                    if event and event['kind'] == 'assistant_completed' and event['phase'] == 'completed':
+                        payload = event['payload']
+                        text = str(redact_sensitive_value(payload.get('text') or ''))
+                        if len(text) > 262144:
+                            raise ObservationSourceError('HOST_NOT_READY', details={
+                                'reason': 'PUBLIC_DISPLAY_TEXT_READ_BUDGET', 'side_effect_state': 'none',
+                                'next_action': '公开过程块超过本次读取预算；保留原记录，使用原文分页读取。'})
+                        public = {'text': text}
+                        canonical = payload.get('canonical_message_id')
+                        if isinstance(canonical, str) and canonical:
+                            public['canonical_message_id'] = canonical
+                        display_events.append({key: event[key] for key in ('schema', 'kind', 'phase', 'request_id', 'block_id')} | {'payload': public})
                 continue
             _MAX_MESSAGE_VIEW_CHARS = 262144
             original_len = len(row.content)
@@ -639,7 +669,8 @@ class BusinessObservationService:
         if next_position is not None:
             next_position['generation'] = generation
         coverage = 'unknown' if child and info is None else 'partial' if next_position or filtered else 'complete'
-        return {'items': items, 'next_cursor': self.cursor(scope, next_position) if next_position else None,
+        return {**({'display_events': display_events} if params.get('include_display') is True else {}),
+            'items': items, 'next_cursor': self.cursor(scope, next_position) if next_position else None,
             'coverage': coverage, 'history_boundary': {
                 'first_message_id': items[0]['message_id'] if items else None,
                 'last_message_id': items[-1]['message_id'] if items else None,

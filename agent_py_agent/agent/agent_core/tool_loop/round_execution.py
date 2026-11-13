@@ -2118,7 +2118,9 @@ def _structured_tool_progress(
     if call_id:
         payload["call_id"] = call_id
     if detail:
-        payload["detail"] = _shorten(_public_progress_text(event, detail, max_chars=None), limit=100)
+        from ...tooling.result_display import short_tool_invocation
+
+        payload["detail"] = short_tool_invocation(_public_progress_text(event, detail, max_chars=None), limit=100)
     inputs, truncated = _tool_progress_input(event, max_input_chars=max_input_chars)
     if inputs:
         payload["input"] = inputs
@@ -2381,30 +2383,10 @@ def _finished_status(result: ToolResult) -> str:
 # LLM: 工具卡首选模型原始公共参数做摘要，不能从输出正文或宿主补全字段反推；新增工具只加无敏感值的显式参数。
 # 函数用途: 从常见工具参数中挑一个短描述，让执行中和完成后的卡片都说明正在操作什么。
 def _payload_progress_detail(call: ToolCall) -> str:
-    from ...common.log_redaction import redact_sensitive_value
+    from ...tooling.result_display import tool_invocation_summary
 
-    payload = getattr(call, "arguments", None)
-    if not isinstance(payload, Mapping):
-        return ""
-    tool_name = getattr(call, "tool_name", None) or getattr(call, "name", None)
-    if tool_name == 'read_artifact':
-        return '读取归档内容' + (f"，偏移 {payload['offset']}" if type(payload.get('offset')) is int else '')
-    if tool_name == 'workflows':
-        return _shorten(str(payload.get('action') or '工作流'))
-    for key in ("path", "url", "query", "artifact_ref", "root_id", "run_id", "status", "scope"):
-        value = str(payload.get(key) or "").strip()
-        if value:
-            return _shorten(redact_sensitive_value(value))
-    command = str(payload.get("command") or "").strip()
-    if command:
-        return _shorten(redact_sensitive_value(command))
-    items = payload.get("items")
-    if isinstance(items, list):
-        return f"items={len(items)}"
-    urls = payload.get("urls")
-    if isinstance(urls, list):
-        return f"urls={len(urls)}"
-    return ""
+    return tool_invocation_summary(getattr(call, "tool_name", None) or getattr(call, "name", None),
+                                   getattr(call, "arguments", None))
 
 
 def _tool_call_payload(call: ToolCall) -> dict[str, object]:
@@ -2413,13 +2395,6 @@ def _tool_call_payload(call: ToolCall) -> dict[str, object]:
         "call_id": call.call_id,
         **call.arguments,
     }
-
-
-def _shorten(value: str, limit: int = 100) -> str:
-    text = " ".join(value.split())
-    if len(text) <= limit:
-        return text
-    return f"{text[: limit - 3]}..."
 
 
 def _deferred_orchestration_result(call: ToolCall) -> ToolResult:

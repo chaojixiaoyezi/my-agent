@@ -268,6 +268,29 @@ def test_biz013_tool_calls_get_canonical_projection(tmp_path: Path):
 
 # LLM: 验证BusinessSpacesTool对只读动作标none、变更动作标committed、业务错误标failed、校验拒绝标not_started。
 # 函数用途: 验证业务空间工具对effect_outcome的规范回填。
+def test_tool_list_argument_summary_requires_detail_access_and_keeps_secrets_private(tmp_path):
+    env = _make_observability_env(tmp_path)
+    run = env.repo.record_run_creation(owner_id=env.owner, run_id='public-preview', thread_id='worker',
+        task_run_metadata={'business_context': env.task.metadata['business_context'], 'session_task_ref': env.task.task_id})
+    op = env.repo.create_tool_operation(agent_run_id=run['agent_run_id'], attempt_id=run['attempt_id'],
+                                        operation_type='run_command')
+    native = {'result': {'schema_version': 'tool_execution_result.v1', 'tool': 'run_command', 'ok': True,
+        'handler_executed': True, 'effect_outcome': 'committed', 'duration_ms': 24, 'result_ref': 'reference',
+        'redacted_input': {'command': 'curl -H "Authorization: Bearer testing123456789" https://example.test',
+                           'content': 'private-body'}}}
+    with env.repo._runtime_connection() as conn:
+        conn.execute("UPDATE tool_operations SET status='SUCCEEDED', outcome_json=?, settled_at=100 WHERE operation_id=?",
+                     (json.dumps(native), op['operation_id']))
+        conn.commit()
+    scope = {'filter': {'run_id': 'public-preview'}}
+    authorized = env.service.query('tool_calls.list', scope, actor=env.actor)['items'][0]
+    preview = authorized['invocation']
+    assert 'curl' in preview and 'testing123456789' not in preview and 'private-body' not in preview
+    limited = BusinessActor(env.owner, 'list-only', env.service, lambda action, scope: action == 'tool_calls.list')
+    restricted = env.service.query('tool_calls.list', scope, actor=limited)['items'][0]
+    assert restricted['operation_id'] == op['operation_id'] and 'invocation' not in restricted
+
+
 def test_biz013_business_spaces_tool_effect_outcome_canonical():
     class FakeService:
         owner_id = 'local/test'

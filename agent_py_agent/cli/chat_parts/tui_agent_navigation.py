@@ -424,7 +424,8 @@ class TuiAgentNavigationState:
             if kind:
                 runtime._publish(kind, phase, block_id,
                     {'tool': row['tool_name'], 'title': row['tool_name'], 'detail': detail,
-                     'ok': ok, 'operation_id': row['operation_id'], 'run_id': row['run_id'],
+                     'ok': ok, 'source_kind': 'business_operation', 'invocation': row.get('invocation') or '',
+                     'operation_id': row['operation_id'], 'run_id': row['run_id'],
                      'attempt_id': row['attempt_id'], 'error_code': error.get('code')}, request_id=request_id)
             seen[key] = fingerprint
             while len(seen) > 256:

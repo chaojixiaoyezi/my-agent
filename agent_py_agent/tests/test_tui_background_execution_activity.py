@@ -172,3 +172,24 @@ def test_unknown_and_unstarted_claimed_are_host_status_not_running_tools():
     assert not any(block.role == 'tool' for block in snapshot.active_blocks)
     assert not any(block.role == 'tool' for block in snapshot.stable_blocks)
     assert any('结果待核' in str(block) and 'UNKNOWN' in str(block) for block in snapshot.stable_blocks)
+
+
+def test_actual_render_shows_selected_execution_child_and_tool_target():
+    from agent_py_agent.cli.chat_parts.tui_block_renderer import (
+        TuiRenderContext,
+        render_tui_snapshot,
+    )
+
+    runtime = TuiRuntime('selected-panel')
+    navigation = TuiAgentNavigationState(runtime)
+    navigation._publish_business_activity('seat', runtime, {
+        'coverage': 'complete', 'current_execution': {'run_id': 'parent-one', 'attempt_id': 'current-attempt'},
+        'children': [{'run_id': 'child-one', 'status': 'done'}],
+        'tools': [{'run_id': 'parent-one', 'attempt_id': 'current-attempt', 'operation_id': 'op-one',
+                   'tool_name': 'write_file', 'invocation': 'levels/arena.js', 'status': 'SUCCEEDED',
+                   'executed': True, 'effect_outcome': 'committed'}]})
+    frame = render_tui_snapshot(runtime.store.snapshot(), TuiRenderContext(width=120))
+    screen = '\n'.join(''.join(text for _, text in line) for line in frame.transcript_lines)
+    assert '当前执行 parent-one · 尝试 current-attempt' in screen
+    assert '直属子代理 child-one · done' in screen
+    assert 'Write(levels/arena.js)' in screen

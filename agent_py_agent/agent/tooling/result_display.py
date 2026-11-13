@@ -1,6 +1,43 @@
 """结构化结果的简短展示投影；原结果、逻辑引用与归档正文保持完整。"""
 
 
+from collections.abc import Mapping
+
+from ..common.log_redaction import redact_sensitive_value
+
+
+def short_tool_invocation(value: str, limit: int = 100) -> str:
+    text = " ".join(value.split())
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 3]}..."
+
+
+
+def tool_invocation_summary(tool_name, payload):
+    """为前台实时卡和授权后台回放提取同一份有界、脱敏的调用摘要。"""
+    if not isinstance(payload, Mapping):
+        return ""
+    if tool_name == 'read_artifact':
+        return '读取归档内容' + (f"，偏移 {payload['offset']}" if type(payload.get('offset')) is int else '')
+    if tool_name == 'workflows':
+        return short_tool_invocation(redact_sensitive_value(str(payload.get('action') or '工作流')))
+    for key in ("path", "url", "query", "artifact_ref", "root_id", "run_id", "status", "scope"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return short_tool_invocation(redact_sensitive_value(value))
+    command = str(payload.get("command") or "").strip()
+    if command:
+        return short_tool_invocation(redact_sensitive_value(command))
+    items = payload.get("items")
+    if isinstance(items, list):
+        return f"items={len(items)}"
+    urls = payload.get("urls")
+    if isinstance(urls, list):
+        return f"urls={len(urls)}"
+    return ""
+
+
 def _text(value):
     return ' '.join(str(value or '').split())[:160]
 
