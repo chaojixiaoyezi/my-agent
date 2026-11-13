@@ -903,3 +903,143 @@ def test_maintain_bounded_slices_scale_and_rule6_self_healing(tmp_path: Path) ->
     assert healed["lessons_active_count"] == 259
     assert healed["lessons_archived_count"] == 120
     assert repo.heat_path.exists() and repo.routing_index_path.exists()
+
+
+def test_maintain_invalidates_stale_archive_count_when_archive_move_stops_mid_slice(
+    tmp_path: Path,
+) -> None:
+    repo, _ = _repo(tmp_path)
+    t0 = datetime(2026, 10, 1, 0, 0, tzinfo=timezone.utc)
+    bucket = repo.lessons_dir / "archive" / "2026-08"
+    bucket.mkdir(parents=True, exist_ok=True)
+    for j in range(3):
+        rec, fname = _make_record(2000 + j)
+        (bucket / fname).write_text(_render_lesson(rec), encoding="utf-8")
+
+    # 在 lessons/ 中放置 6 条已替代待归档教训，并先记录完整归档计数 3。
+    for i in range(6):
+        rec, _ = _make_record(
+            i,
+            status="superseded",
+            superseded_by="lesson-successor",
+            superseded_at=t0.isoformat(timespec="seconds"),
+        )
+        _seed_raw_lesson(repo, rec)
+
+    initial = repo.maintain(now=t0, archive_days=15)
+    assert initial["lessons_archived_count"] == 3
+    assert initial["coverage"]["status"] == "complete"
+
+    # 分片执行 archive_move（6 条 active 扫描消耗 6 次后余 2 次预算），在搬走 2 条后耗尽并作废旧归档计数。
+    mid = repo.maintain(now=t0 + timedelta(days=20), archive_days=15, batch_count=8)
+    assert mid["cursor"]["phase"] == "archive_move"
+    assert mid["archived"] == 2
+    assert mid["backlog"] is True
+    assert mid["lessons_archived_count"] is None
+    heat_mid = json.loads(repo.heat_path.read_text(encoding="utf-8"))
+    assert heat_mid["lessons_archived_count"] is None
+    assert heat_mid["archive_count_coverage"]["status"] == "partial"
+    assert heat_mid["archive_count_coverage"]["reason"] == "archive_moved_pending_recount"
+
+    # 验证 batch_bytes=1 在 archive_move 阶段也会真实计字节并仅推进 1 条。
+    byte_slice = repo.maintain(
+        now=t0 + timedelta(days=20),
+        archive_days=15,
+        batch_count=100,
+        batch_bytes=1,
+    )
+    assert byte_slice["archived"] == 1
+    assert byte_slice["backlog"] is True
+    assert byte_slice["lessons_archived_count"] is None
+
+    final: dict[str, object] = {}
+    for _ in range(10):
+        final = repo.maintain(now=t0 + timedelta(days=20), archive_days=15, batch_count=2)
+        if not final["backlog"]:
+            break
+    assert final["backlog"] is False
+    assert final["coverage"]["status"] == "complete"
+    assert final["lessons_archived_count"] == 9
+
+
+def test_maintain_preserves_note_hits_for_unscanned_tail_lessons_during_sliced_active_scan(
+    tmp_path: Path,
+) -> None:
+    repo, _ = _repo(tmp_path)
+    records = []
+    for i in range(10):
+        rec, _ = _make_record(i, updated_at=f"2026-10-01T00:00:{i:02d}+00:00")
+        _seed_raw_lesson(repo, rec)
+        records.append(rec)
+
+    tail_rec = records[-1]
+    hit_dt = datetime(2026, 10, 5, 8, 30, tzinfo=timezone.utc)
+    repo.note_hits([tail_rec.lesson_id], at=hit_dt)
+
+    # 第一片仅扫描前 4 条即停止在 phase='active'，尾部命中的信号必须回填并保留到扫全之后。
+    t0 = datetime(2026, 10, 6, 0, 0, tzinfo=timezone.utc)
+    first = repo.maintain(now=t0, archive_days=0, batch_count=4)
+    assert first["cursor"]["phase"] == "active"
+    assert first["backlog"] is True
+
+    last: dict[str, object] = {}
+    for _ in range(10):
+        last = repo.maintain(now=t0, archive_days=0, batch_count=4)
+        if not last["backlog"]:
+            break
+    assert last["backlog"] is False
+    assert last["coverage"]["status"] == "complete"
+    heat = json.loads(repo.heat_path.read_text(encoding="utf-8"))
+    assert heat["rows"][tail_rec.lesson_id]["hits"] == 1
+    assert heat["rows"][tail_rec.lesson_id]["last_hit_at"] == pytest.approx(hit_dt.timestamp())
+
+
+def test_supersede_wraps_hot_projection_failure_in_lesson_routing_pending_error(
+    tmp_path: Path, monkeypatch
+) -> None:
+    repo, hot = _repo(tmp_path)
+    old = repo.promote(_cand("hotfail-old", subject_key="hotfail.subj", content="旧正文"))
+    hot.promote_with_receipt(
+        _hot_cand("hotfail-rule", target_lesson_id=old.lesson_id, subject_key="hotfail.subj", rule="待退役 HOT 规则"),
+        lesson=old,
+    )
+    cand_new = _cand("hotfail-new", subject_key="hotfail.subj", content="新正文")
+    expected_sid = (
+        "lesson-"
+        + hashlib.sha256(
+            f"{cand_new.candidate_id}\0supersede\0{old.lesson_id}\0{old.revision}".encode()
+        ).hexdigest()[:20]
+    )
+
+    real_write = lesson_module.write_private_text_file_atomic_unlocked
+
+    def fail_hot(path, *args, **kwargs):
+        if Path(path) == hot.path:
+            raise OSError("simulated hot file write failure")
+        return real_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(lesson_module, "write_private_text_file_atomic_unlocked", fail_hot)
+    with pytest.raises(LessonRoutingPendingError) as caught:
+        repo.supersede_with_receipt(
+            cand_new,
+            target_lesson_id=old.lesson_id,
+            hot=hot,
+            expected_revision=old.revision,
+        )
+    assert caught.value.formal_memory_changed is True
+    assert caught.value.promotion_ref.endswith("#" + expected_sid)
+    assert isinstance(caught.value.__cause__, OSError)
+    assert repo.get(old.lesson_id).status == "superseded"
+    assert repo.get(expected_sid).status == "active"
+
+    # 恢复写能力后重放幂等完成 HOT 退役与 heat/routing 对账。
+    monkeypatch.undo()
+    replayed, changed = repo.supersede_with_receipt(
+        cand_new,
+        target_lesson_id=old.lesson_id,
+        hot=hot,
+        expected_revision=old.revision,
+    )
+    assert changed is False and replayed.lesson_id == expected_sid
+    assert hot.list() == []
+    assert repo.active_for_subject("hotfail.subj", old.scope) == replayed

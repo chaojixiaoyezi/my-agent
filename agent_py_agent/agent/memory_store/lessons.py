@@ -637,8 +637,21 @@ class LessonRepository:
                     "side=not_started; next=inspect active_for_subject() before superseding"
                 )
 
-            _retire_hot_rules_for_lesson(hot, target_lesson_id=target.lesson_id)
             formal_changed = wrote_successor or wrote_target
+            try:
+                _retire_hot_rules_for_lesson(hot, target_lesson_id=target.lesson_id)
+            except Exception as exc:
+                if bool(getattr(hot, "coordinator_io", False)) and isinstance(
+                    exc,
+                    (
+                        GlobalWriteCommitUnavailable,
+                        GlobalWriteInWorkerError,
+                        LocalControlCoordinatorUnavailable,
+                        OwnerManagementIngressUnavailable,
+                    ),
+                ):
+                    raise
+                raise LessonRoutingPendingError(successor_record, formal_changed) from exc
             hints = [successor_record] + ([updated_target] if updated_target is not None else [])
             _rebuild_committed_lesson_routing(self, successor_record, formal_changed, hint_records=hints)
         return successor_record, formal_changed
@@ -758,6 +771,7 @@ class LessonRepository:
                     sweep_gen = uuid.uuid4().hex
 
                 newly_discovered: set[str] = set()
+                active_exhausted = False
                 tolerate_legacy = not (self.lessons_dir.parent / "migration.json").exists()
 
                 # 阶段 1: 有界扫描 lessons/ 顶层规范文件（永不递归 archive/）。
@@ -768,7 +782,6 @@ class LessonRepository:
                         if Path(str(rows[lid].get("path") or "")).name not in present_set:
                             rows.pop(lid, None)
                     pending_names = [name for name in canonical_names if name > after_name]
-                    active_exhausted = False
                     for name in pending_names:
                         if not budget_available():
                             active_exhausted = True
@@ -874,7 +887,7 @@ class LessonRepository:
                                 break
                             scanned += 1
                             after_name = fname
-                            moved = _archive_lesson_file(
+                            moved, move_bytes = _archive_lesson_file(
                                 self.lessons_dir,
                                 fname,
                                 lid=lid,
@@ -884,6 +897,7 @@ class LessonRepository:
                                 cutoff_seconds=cutoff_seconds,
                                 coordinator_io=self.coordinator_io,
                             )
+                            bytes_read += move_bytes
                             if moved:
                                 rows.pop(lid, None)
                                 archived_delta += 1
@@ -899,6 +913,14 @@ class LessonRepository:
                 # 阶段 3: 有界统计 lessons/archive/YYYY-MM/ 中的永久归档条目总数。
                 archive_coverage = dict(heat.get("archive_count_coverage") or {})
                 archived_total = heat.get("lessons_archived_count")
+                if archived_delta > 0 and phase != "archive_count":
+                    # 已搬运新归档但未能进入重新计数阶段时，立即作废旧归档计数避免报告伪 complete。
+                    archived_total = None
+                    archive_coverage = {
+                        "status": "partial",
+                        "reason": "archive_moved_pending_recount",
+                        "as_of": now_iso,
+                    }
                 if phase == "archive_count":
                     archive_root = self.lessons_dir / "archive"
                     if not archive_root.exists():
@@ -982,6 +1004,8 @@ class LessonRepository:
                     **({} if not self.coordinator_io else {"coordinator_io": True}),
                 )
                 drained_hits = {}
+                if active_exhausted and unmatched_hits:
+                    self._restore_pending_hits(unmatched_hits)
                 if routing_text is not None:
                     existing_routing = (
                         self.routing_index_path.read_text(encoding="utf-8")
@@ -2237,31 +2261,33 @@ def _archive_lesson_file(
     now_epoch: float,
     cutoff_seconds: float,
     coordinator_io: bool,
-) -> bool:
+) -> tuple[bool, int]:
     src_path = lessons_dir / filename
     if not _is_canonical_lesson_filename(filename) or src_path.is_symlink() or not src_path.exists():
-        return False
+        return False, 0
     path_options = {} if not coordinator_io else {"birth_commit": _coordinator_lesson_write}
     archive_root = lessons_dir / "archive"
     bucket_dir = archive_root / bucket_name
     if archive_root.is_symlink() or bucket_dir.is_symlink():
         raise NoFollowPathError(f"LESSON_ARCHIVE_SYMLINK_REJECTED: {bucket_dir}")
+    bytes_loaded = 0
     with locked_json_path(src_path, **path_options):
         if not src_path.exists() or src_path.is_symlink():
-            return False
+            return False, 0
         try:
             raw = read_text_beneath(lessons_dir, (filename,))
             if raw is None:
-                return False
+                return False, 0
+            bytes_loaded = len(raw.encode())
             record = _parse_lesson_text(raw, filename)
         except (FileNotFoundError, OSError, ValueError, NoFollowPathError):
-            return False
+            return False, bytes_loaded
         if record.lesson_id != lid or record.status != expected_status:
-            return False
+            return False, bytes_loaded
         if record.status == "superseded" and record.superseded_at:
             sup_at = _parse_iso_epoch(record.superseded_at)
             if sup_at > 0.0 and (now_epoch - sup_at) < cutoff_seconds:
-                return False
+                return False, bytes_loaded
         _ensure_dir_if_missing(archive_root, coordinator_io=coordinator_io)
         _ensure_dir_if_missing(bucket_dir, coordinator_io=coordinator_io)
         dest_path = bucket_dir / filename
@@ -2288,7 +2314,7 @@ def _archive_lesson_file(
             _coordinator_lesson_write(_move_op)
         else:
             _move_op()
-    return True
+    return True, bytes_loaded
 
 
 def _count_archive_slice(
