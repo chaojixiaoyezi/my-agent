@@ -497,6 +497,8 @@ class _PromotionCommitMixin:
                 context,
             )
         if target == "lesson":
+            if str(candidate.proposed_action or "").strip().lower() == "remove":
+                raise ValueError("LESSON_ACTION_UNSUPPORTED")
             if _is_skill_carrier_candidate(candidate):
                 raise _PromotionBlocked(candidate.status, "SKILL_CARRIER_REQUIRED")
             _ensure_lesson_not_tombstoned(self, candidate)
@@ -508,8 +510,6 @@ class _PromotionCommitMixin:
                     expected_revision=candidate.target_entry_version,
                     min_occurrences=self.lesson_min_occurrences,
                 )
-            elif candidate.proposed_action == "remove":
-                raise ValueError("LESSON_ACTION_UNSUPPORTED")
             else:
                 lesson, changed = self.lessons.promote_with_receipt(
                     candidate,
@@ -916,10 +916,13 @@ def _commit_target_blocked(
         raise
 
 
-# LLM: 晋升门先统一用 W5 lesson_carrier 判定载体，程序性规则在正式 lesson/S1 之前转入 Skill FIFO。
+# LLM: 晋升门先统一用 W5 lesson_carrier 判定载体，程序性规则在正式 lesson/S1 之前转入 Skill FIFO；
+#   lesson 的 remove 操作不被任何载体支持，必须交回 LESSON_ACTION_UNSUPPORTED。
 # 函数用途: 判断候选是否属于应由 Skill 载体接管的程序性 lesson。
 def _is_skill_carrier_candidate(candidate: MemoryCandidate) -> bool:
     if _promotion_target(candidate) != "lesson":
+        return False
+    if str(getattr(candidate, "proposed_action", "") or "").strip().lower() == "remove":
         return False
     from ..capability.skill_proposals import lesson_carrier
 
@@ -991,7 +994,7 @@ def _standalone_skill_carrier_enqueue(
             ", ".join(part for part in tool_parts if part) or "lesson_candidate",
             TEXT_LIMIT_CHARS,
         )
-        payload: dict[str, object] = {
+        request_record: dict[str, object] = {
             "schema_version": REQUEST_SCHEMA_VERSION,
             "request_key": rkey,
             "created_at": utc_now(),
@@ -1005,7 +1008,7 @@ def _standalone_skill_carrier_enqueue(
             "learning_source": dict(source),
         }
         try:
-            enqueue_status = store.enqueue(payload)
+            enqueue_status = store.enqueue(request_record)
         except _UNCERTAIN_PROMOTION_ERRORS:
             raise
         except (OSError, OwnerQuotaExceeded, OwnerQuotaLockContention) as exc:
@@ -1474,7 +1477,7 @@ class MemoryPromotionService(_PromotionCommitMixin):
             if policy_code:
                 _register_automatic_governance_review(self, candidate, policy_code)
                 return MemoryPromotionResult(candidate_id, False, candidate.status, policy_code)
-            if _is_skill_carrier_candidate(effective):
+            if effective.proposed_action != "remove" and _is_skill_carrier_candidate(effective):
                 return _delegate_procedural_candidates(
                     self, (candidate,), reviewer=reviewer, automatic=True
                 )[candidate_id]
@@ -1488,6 +1491,8 @@ class MemoryPromotionService(_PromotionCommitMixin):
                 return _defer_promotion_failure(self, candidate, _recoverable_promotion_reason(exc))
         if candidate.status != "approved":
             return MemoryPromotionResult(candidate_id, False, candidate.status, "REVIEW_REQUIRED")
+        if effective.promotion_target == "lesson" and effective.proposed_action == "remove":
+            return _commit_promotion_result(self, candidate, reviewer, confirmed)
         if _is_skill_carrier_candidate(effective):
             return _delegate_procedural_candidates(
                 self, (candidate,), reviewer=reviewer, automatic=automatic
@@ -1641,7 +1646,7 @@ def _prepare_promotion_batch(service, rows, reviewer, automatic):
                 _register_automatic_governance_review(service, candidate, code)
             results[cid] = MemoryPromotionResult(cid, False, candidate.status, code)
             continue
-        if _is_skill_carrier_candidate(effective):
+        if effective.proposed_action != "remove" and _is_skill_carrier_candidate(effective):
             if not automatic and candidate.status != "approved":
                 results[cid] = MemoryPromotionResult(cid, False, candidate.status, "REVIEW_REQUIRED")
                 continue

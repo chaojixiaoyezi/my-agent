@@ -111,34 +111,66 @@ def candidate_retention_eligible(candidate):
     return not candidate.commit_obligation
 
 
-# LLM: 不获取 SkillLearningStore.state_lock（防止 candidate→quota 锁序倒置），仅用 nofollow_fs 有界只读队列中仍引用的 source_candidate_id。
+# LLM: 不获取 SkillLearningStore.state_lock（防止 candidate→quota 锁序倒置），仅用 nofollow_fs 有界只读队列中仍引用的 source_candidate_id；
+#   真实不存在返回空集合，遇到 symlink/不可读/损坏队列文件或超出文件上限则 fail-closed 拒删。
 # 函数用途: 返回尚未被消费的 Skill 学习 FIFO 请求所引用的候选 ID 集合。
 def _skill_learning_pinned_candidate_ids(candidates_path: Path) -> set[str]:
+    import stat
+
     owner_home = candidates_path.parent.parent if candidates_path.parent.name == "memory" else candidates_path.parent
-    skill_dir = owner_home / "data" / "skill_learning"
+    data_dir = owner_home / "data"
+    skill_dir = data_dir / "skill_learning"
     pinned: set[str] = set()
-    if not skill_dir.exists() or skill_dir.is_symlink():
-        return pinned
+    for ancestor in (owner_home, data_dir, skill_dir):
+        try:
+            st = ancestor.lstat()
+        except FileNotFoundError as exc:
+            if ancestor == owner_home:
+                raise CandidateTransitionError("SKILL_LEARNING_PINS_UNREADABLE:OWNER_HOME_MISSING") from exc
+            return pinned
+        except OSError as exc:
+            raise CandidateTransitionError(
+                f"SKILL_LEARNING_PINS_UNREADABLE:STAT_FAILED:{type(exc).__name__}"
+            ) from exc
+        if stat.S_ISLNK(st.st_mode):
+            raise CandidateTransitionError("SKILL_LEARNING_PINS_UNREADABLE:SYMLINK")
+        if not stat.S_ISDIR(st.st_mode):
+            raise CandidateTransitionError("SKILL_LEARNING_PINS_UNREADABLE:NOT_DIR")
+
     max_files = 512
     for folder in ("requests", "requests_overflow"):
         try:
             names = list_names_beneath(skill_dir, (folder,))
-        except (NoFollowPathError, OSError):
-            continue
-        for name in names[:max_files]:
+        except NoFollowPathError as exc:
+            raise CandidateTransitionError("SKILL_LEARNING_PINS_UNREADABLE:SYMLINK") from exc
+        except OSError as exc:
+            raise CandidateTransitionError(
+                f"SKILL_LEARNING_PINS_UNREADABLE:LIST_FAILED:{type(exc).__name__}"
+            ) from exc
+        if len(names) > max_files:
+            raise CandidateTransitionError("SKILL_LEARNING_PINS_UNREADABLE:QUEUE_FILE_LIMIT_EXCEEDED")
+        for name in names:
             if not name.endswith(".json"):
                 continue
             try:
                 raw = read_text_beneath(skill_dir, (folder, name))
-                if raw is None:
-                    continue
-                payload = json.loads(raw)
-            except (NoFollowPathError, OSError, UnicodeDecodeError, ValueError):
+            except NoFollowPathError as exc:
+                raise CandidateTransitionError("SKILL_LEARNING_PINS_UNREADABLE:SYMLINK") from exc
+            except (OSError, UnicodeDecodeError) as exc:
+                raise CandidateTransitionError(
+                    f"SKILL_LEARNING_PINS_UNREADABLE:READ_FAILED:{type(exc).__name__}"
+                ) from exc
+            if raw is None:
+                # 队列文件恰好在列举与读取之间被消费删除。
                 continue
-            if not isinstance(payload, dict):
-                continue
+            try:
+                data = json.loads(raw)
+            except ValueError as exc:
+                raise CandidateTransitionError("SKILL_LEARNING_PINS_UNREADABLE:CORRUPT_JSON") from exc
+            if not isinstance(data, dict):
+                raise CandidateTransitionError("SKILL_LEARNING_PINS_UNREADABLE:CORRUPT_ENTRY")
             for key in ("source_candidate_id", "candidate_id"):
-                cid = str(payload.get(key) or "").strip()
+                cid = str(data.get(key) or "").strip()
                 if cid:
                     pinned.add(cid)
     return pinned

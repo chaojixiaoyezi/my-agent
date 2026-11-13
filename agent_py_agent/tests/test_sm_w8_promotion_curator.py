@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.capability.persona_repository import PersonaRepository
 from agent_py_agent.agent.capability.skill_learning_store import (
     REQUEST_SCHEMA_VERSION,
@@ -23,6 +24,9 @@ from agent_py_agent.agent.capability.skill_learning_store import (
     request_key,
 )
 from agent_py_agent.agent.capability.skill_proposals import lesson_carrier
+from agent_py_agent.agent.common.request_execution_ports import (
+    RequestExecutionOutcomeUncertainError,
+)
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.conversation import learning_source as ls
 from agent_py_agent.agent.memory_store.candidate_models import (
@@ -47,6 +51,7 @@ from agent_py_agent.agent.memory_store.curator_inputs import (
     CuratorMessageSource,
 )
 from agent_py_agent.agent.memory_store.curator_models import (
+    CURATOR_OUTPUT_SCHEMA_VERSION,
     CuratorExtraction,
     MemoryCuratorConfig,
 )
@@ -204,7 +209,7 @@ def _curator_service(
         config=config or MemoryCuratorConfig(interval_seconds=60, turn_threshold=10),
         dependencies=MemoryCuratorDependencies(
             backend=backend,
-            conversation_store=CuratorMessageSource(conversations),
+            conversation_store=conversations,
             audit_dir=owner / "audit",
             state_store=MemoryCuratorStateStore(owner / "memory" / "curator" / "state.json"),
             daily_store=DailyMemoryStore(owner / "memory" / "daily"),
@@ -849,3 +854,333 @@ def test_candidate_retention_threshold_expiration_and_fifo_pin_protection(tmp_pa
     assert tombstone.obligation_retry_after == ""
     # 不使 _assert 误用 time
     assert time.time() > 0
+
+
+class _FakeStructuredBackend:
+    name = "fake-structured-w8"
+
+    def __init__(self, response_data: dict[str, object]) -> None:
+        self.response_data = response_data
+        self.calls = 0
+
+    def generate_structured(self, prompt: str, *, response_schema: dict[str, object]):
+        assert "待提炼经历 JSON" in prompt
+        assert "tools" not in response_schema
+        self.calls += 1
+        return ModelResponse(
+            text=json.dumps(self.response_data, ensure_ascii=False),
+            backend=self.name,
+        )
+
+
+def _conversation_event_response(message_id: str) -> dict[str, object]:
+    return {
+        "schema_version": CURATOR_OUTPUT_SCHEMA_VERSION,
+        "daily_events": [
+            {
+                "event_type": "conversation",
+                "summary": "用户要求检查运行期配置热生效。",
+                "actor": "user",
+                "origin": "user_explicit",
+                "message_refs": [{"message_id": message_id}],
+                "tool_refs": [],
+                "artifact_refs": [],
+                "decisions": [],
+                "lessons": [],
+                "next_actions": [],
+            }
+        ],
+        "candidates": [],
+    }
+
+
+def test_p1_live_effective_config_honored_across_run_backlog_and_status(tmp_path: Path) -> None:
+    owner, service, conversations, thread, candidates, long_term, lessons, hot = _setup_owner(tmp_path)
+    msg = conversations.messages.append(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": "每次切换动态配置后必须立即按新值生效。",
+            "channel": "internal",
+            "metadata": {
+                "session_id": "session-p1-cfg",
+                "request_id": "request-p1-cfg",
+                "task_id": "task-p1-cfg",
+                "run_id": "run-p1-cfg",
+            },
+            "now": 15.0,
+        }
+    )
+    cand = None
+    for idx in (1, 2):
+        cand = _observe_tool_lesson(
+            candidates,
+            content="配置切换后必须立刻在 Curator 运行链路上读取最新参数。",
+            subject_key="curator.config.live",
+            occurrence_index=idx,
+        )
+    assert cand is not None
+    assert lesson_carrier(cand) == "lesson"
+
+    seen_archive_days: list[int] = []
+    orig_maintain = lessons.maintain
+
+    def _wrapped_maintain(*args, **kwargs):
+        seen_archive_days.append(int(kwargs.get("archive_days", -1)))
+        return orig_maintain(*args, **kwargs)
+
+    lessons.maintain = _wrapped_maintain  # type: ignore[method-assign]
+
+    live_ns = SimpleNamespace(
+        memory_curator_enabled=False,
+        memory_curator_interval_seconds=9999,
+        memory_curator_turn_threshold=99,
+        memory_curator_auto_promotion_policy="manual_only",
+        memory_lesson_archive_days=15,
+    )
+    backend = _FakeStructuredBackend(_conversation_event_response(msg.message_id))
+    stale_config = MemoryCuratorConfig(
+        enabled=False,
+        interval_seconds=9999,
+        turn_threshold=99,
+        auto_promotion_policy="manual_only",
+        lesson_archive_days=15,
+    )
+    curator = MemoryCuratorService(
+        config=stale_config,
+        dependencies=MemoryCuratorDependencies(
+            backend=backend,
+            conversation_store=conversations,
+            audit_dir=owner / "audit",
+            state_store=MemoryCuratorStateStore(owner / "memory" / "curator" / "state.json"),
+            daily_store=DailyMemoryStore(owner / "memory" / "daily"),
+            candidate_service=candidates,
+            run_log=CuratorRunLog(owner / "memory" / "curator" / "runs.jsonl"),
+            identity=MemoryCuratorIdentity(provider="", model="", owner_id="owner-w8", timezone_name="UTC"),
+            formal_memory_source=FormalMemorySource(long_term=long_term, lessons=lessons, hot=hot),
+            promotion_callback=lambda cid: service.promote(cid, automatic=True),
+            config_provider=lambda: live_ns,
+        ),
+    )
+
+    now = datetime.now(timezone.utc)
+    assert curator.status()["enabled"] is False
+    assert curator.run_if_due(now=now).status == "disabled"
+    assert backend.calls == 0
+
+    live_ns.memory_curator_enabled = True
+    live_ns.memory_curator_interval_seconds = 60
+    live_ns.memory_curator_turn_threshold = 1
+    live_ns.memory_curator_auto_promotion_policy = "auto"
+    live_ns.memory_lesson_archive_days = 0
+
+    status_after = curator.status()
+    assert status_after["enabled"] is True
+    assert status_after["config"]["interval_seconds"] == 60
+    assert status_after["config"]["turn_threshold"] == 1
+    assert status_after["config"]["auto_promotion_policy"] == "auto"
+
+    run_res = curator.run_if_due(now=now)
+    assert run_res.status == "succeeded"
+    assert candidates.get(cand.candidate_id).status == "promoted"
+    assert seen_archive_days == [0]
+
+    # backlog cursor 收口后，下一拍立刻按热生效的 turn_threshold=1 走提取与落盘。
+    extract_res = curator.run_if_due(now=now + timedelta(seconds=1))
+    assert extract_res.status == "succeeded"
+    assert backend.calls == 1
+
+
+def test_p1_maintenance_deterministic_failure_partial_progress_and_uncertain_propagation(
+    tmp_path: Path,
+) -> None:
+    owner, _service, conversations, thread, candidates, long_term, lessons, hot = _setup_owner(tmp_path)
+    msg = conversations.messages.append(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": "维护步骤部分失败时不得阻塞后续增量策展。",
+            "channel": "internal",
+            "metadata": {
+                "session_id": "session-p1-maint",
+                "request_id": "request-p1-maint",
+                "task_id": "task-p1-maint",
+                "run_id": "run-p1-maint",
+            },
+            "now": 16.0,
+        }
+    )
+    backend = _FakeStructuredBackend(_conversation_event_response(msg.message_id))
+    curator = _curator_service(
+        owner,
+        conversations,
+        candidates,
+        long_term,
+        lessons,
+        hot,
+        backend=backend,
+        config=MemoryCuratorConfig(interval_seconds=60, turn_threshold=1, lesson_archive_days=15),
+    )
+
+    orig_flush = long_term.flush_access_events
+    orig_maintain = lessons.maintain
+
+    def _failing_flush(*args, **kwargs):
+        raise OSError("simulated I/O error during access flush")
+
+    long_term.flush_access_events = _failing_flush  # type: ignore[method-assign]
+    t0 = datetime.now(timezone.utc)
+    partial_report = curator.run_maintenance_if_due(now=t0)
+    assert partial_report["status"] == "partial"
+    assert partial_report["lessons_maintained"] is True
+    assert partial_report["access_flushed"] is False
+    assert partial_report["candidates_compacted"] is True
+    assert partial_report["errors"] == {"access_flush": "CURATOR_MAINTENANCE_IO_ERROR"}
+    assert getattr(curator, "_maintenance_at", 0.0) == 0.0
+
+    # 修复 flush 后，因为未推进节流时间戳，下一次立刻允许重试并全量成功。
+    long_term.flush_access_events = orig_flush  # type: ignore[method-assign]
+    ok_report = curator.run_maintenance_if_due(now=t0)
+    assert ok_report["status"] == "succeeded"
+    assert ok_report["access_flushed"] is True
+    assert getattr(curator, "_maintenance_at", 0.0) > 0.0
+
+    # 确定性维护失败不阻塞 run_if_due() 主提取流程。
+    curator._maintenance_at = 0.0
+    curator._maintenance_now_ts = 0.0
+
+    def _failing_maintain(*args, **kwargs):
+        raise OSError("simulated I/O error during lesson maintenance")
+
+    lessons.maintain = _failing_maintain  # type: ignore[method-assign]
+    res = curator.run_if_due(now=t0 + timedelta(seconds=5))
+    assert res.status == "succeeded"
+    assert backend.calls == 1
+
+    # 未决异常必须原样透传，不允许吞掉。
+    curator._maintenance_at = 0.0
+    curator._maintenance_now_ts = 0.0
+
+    def _uncertain_maintain(*args, **kwargs):
+        raise RequestExecutionOutcomeUncertainError(
+            {
+                "id": "req-uncertain",
+                "execution_attempt_id": "attempt-uncertain",
+                "lease_epoch": 1,
+                "lease_owner": "owner-w8",
+            },
+            "lesson_maintain",
+        )
+
+    lessons.maintain = _uncertain_maintain  # type: ignore[method-assign]
+    with pytest.raises(RequestExecutionOutcomeUncertainError):
+        curator.run_maintenance_if_due(now=t0 + timedelta(seconds=10))
+    with pytest.raises(RequestExecutionOutcomeUncertainError):
+        curator.run_if_due(now=t0 + timedelta(seconds=10))
+    lessons.maintain = orig_maintain  # type: ignore[method-assign]
+
+
+def test_p1_skill_learning_pins_fail_closed_on_corrupt_symlink_and_overflow(tmp_path: Path) -> None:
+    owner, _service, _conversations, _thread, candidates, _long_term, _lessons, _hot = _setup_owner(tmp_path)
+    stuck = _observe_tool_lesson(
+        candidates,
+        content="等待验证阈值且用于测试 pin 失败闭合的候选。",
+        subject_key="ret.pin.guard",
+        occurrence_index=1,
+    )
+    stuck = candidates.transition(stuck, "approved", reviewer="admin")
+    stuck = candidates.defer_commit(stuck, "PROMOTION_THRESHOLD_NOT_MET")
+    future_cutoff = datetime.now(timezone.utc) + timedelta(days=365)
+
+    # 1. skill_learning 目录自然不存在时正常返回候选列表。
+    assert stuck.candidate_id in candidates.retention_candidates(before=future_cutoff)
+
+    # 2. 队列内出现损坏 JSON 时 fail-closed，不得退化为空 pin 误删。
+    req_dir = owner / "data" / "skill_learning" / "requests"
+    req_dir.mkdir(parents=True, exist_ok=True)
+    bad_file = req_dir / "corrupt.json"
+    bad_file.write_text("{corrupt", encoding="utf-8")
+    with pytest.raises(CandidateTransitionError, match="SKILL_LEARNING_PINS_UNREADABLE:CORRUPT_JSON"):
+        candidates.retention_candidates(before=future_cutoff)
+    with pytest.raises(CandidateTransitionError, match="SKILL_LEARNING_PINS_UNREADABLE:CORRUPT_JSON"):
+        candidates.delete_terminal([stuck.candidate_id])
+
+    # 3. 请求文件数超过 512 上限时 fail-closed。
+    bad_file.unlink()
+    for idx in range(513):
+        (req_dir / f"req-{idx:03d}.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(
+        CandidateTransitionError,
+        match="SKILL_LEARNING_PINS_UNREADABLE:QUEUE_FILE_LIMIT_EXCEEDED",
+    ):
+        candidates.retention_candidates(before=future_cutoff)
+
+    # 4. skill_learning 或子请求为符号链接时 fail-closed。
+    for item in req_dir.iterdir():
+        item.unlink()
+    outside_target = tmp_path / "outside-target.json"
+    outside_target.write_text(json.dumps({"candidate_id": stuck.candidate_id}), encoding="utf-8")
+    (req_dir / "linked.json").symlink_to(outside_target)
+    with pytest.raises(CandidateTransitionError, match="SKILL_LEARNING_PINS_UNREADABLE:SYMLINK"):
+        candidates.delete_terminal([stuck.candidate_id])
+
+    (req_dir / "linked.json").unlink()
+    req_dir.rmdir()
+    skill_dir = owner / "data" / "skill_learning"
+    skill_dir.rmdir()
+    outside_dir = tmp_path / "outside-skill-learning"
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    skill_dir.symlink_to(outside_dir)
+    with pytest.raises(CandidateTransitionError, match="SKILL_LEARNING_PINS_UNREADABLE:SYMLINK"):
+        candidates.retention_candidates(before=future_cutoff)
+
+
+def test_p1_lesson_remove_action_rejected_before_skill_delegation(tmp_path: Path) -> None:
+    owner, service, _conversations, _thread, candidates, _long_term, _lessons, _hot = _setup_owner(tmp_path)
+    procedural_remove = _observe_tool_lesson(
+        candidates,
+        content=(
+            "# 拟删除流程\n"
+            "## 适用场景\n"
+            "验证 remove 动作不会在 lesson 路径分流成 Skill。\n"
+            "## 操作步骤\n"
+            "1. 检查动作字段；\n"
+            "2. 拒绝非法 remove。"
+        ),
+        subject_key="workflow.remove.guard",
+        proposed_action="remove",
+        target_entry_id="lesson-target-1",
+        target_entry_version=1,
+        occurrence_index=1,
+    )
+    procedural_remove = candidates.transition(procedural_remove, "approved", reviewer="admin")
+
+    single_res = service.promote(procedural_remove.candidate_id, reviewer="admin", automatic=False)
+    assert single_res.promoted is False
+    assert single_res.reason_code == "LESSON_ACTION_UNSUPPORTED"
+    req_dir = owner / "data" / "skill_learning" / "requests"
+    assert not list(req_dir.glob("*.json")) if req_dir.exists() else True
+
+    procedural_remove_batch = _observe_tool_lesson(
+        candidates,
+        content=(
+            "# 拟批量删除流程\n"
+            "## 适用场景\n"
+            "验证批量 promote_batch 的 remove 动作也不会在 lesson 路径分流成 Skill。\n"
+            "## 操作步骤\n"
+            "1. 检查批量动作字段；\n"
+            "2. 拒绝非法 remove。"
+        ),
+        subject_key="workflow.remove.batch.guard",
+        proposed_action="remove",
+        target_entry_id="lesson-target-2",
+        target_entry_version=1,
+        occurrence_index=2,
+    )
+    procedural_remove_batch = candidates.transition(procedural_remove_batch, "approved", reviewer="admin")
+
+    batch_res = service.promote_batch([procedural_remove_batch], reviewer="admin", automatic=False)
+    assert len(batch_res) == 1
+    assert batch_res[0].promoted is False
+    assert batch_res[0].reason_code == "LESSON_ACTION_UNSUPPORTED"
+    assert not list(req_dir.glob("*.json")) if req_dir.exists() else True
