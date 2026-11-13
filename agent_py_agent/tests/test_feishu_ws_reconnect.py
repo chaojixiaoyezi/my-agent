@@ -104,7 +104,12 @@ def test_sdk_patch_preserves_proxy_selection_without_connecting(monkeypatch, pro
     package, ws, sdk = (ModuleType(name) for name in ("lark_oapi", "lark_oapi.ws", "lark_oapi.ws.client"))
     package.ws, ws.client = ws, sdk
     original = {"proxy": None}
-    sdk._ws_connect_kwargs = lambda: original
+    def sdk_kwargs(connection_headers=None):
+        if connection_headers is None:
+            return original
+        return {**original, "additional_headers": connection_headers}
+
+    sdk._ws_connect_kwargs = sdk_kwargs
     for module in (package, ws, sdk):
         monkeypatch.setitem(sys.modules, module.__name__, module)
 
@@ -116,6 +121,9 @@ def test_sdk_patch_preserves_proxy_selection_without_connecting(monkeypatch, pro
     feishu_ws._patch_ws_connect(proxy)
     assert feishu_ws._ws_connect_patched is True
     assert sdk._ws_connect_kwargs() == ({"open_timeout": 45.0, "proxy": proxy} if proxy else {"open_timeout": 45.0})
+    headers = {"X-Test-Transport": "synthetic"}
+    assert sdk._ws_connect_kwargs(headers)["additional_headers"] == headers
+    assert sdk._ws_connect_kwargs(connection_headers=headers)["additional_headers"] == headers
     assert original == {"proxy": None}
     feishu_ws._patch_ws_connect("http://different.invalid:8080")
     assert sdk._ws_connect_kwargs().get("proxy", "") == proxy

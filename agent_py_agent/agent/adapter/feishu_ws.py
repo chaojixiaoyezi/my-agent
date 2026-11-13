@@ -69,8 +69,13 @@ def _patch_ws_connect(proxy: str = "") -> None:
         import lark_oapi.ws.client as _lwc
         import websockets
         has = "open_timeout" in inspect.signature(websockets.connect).parameters
-        _orig = _lwc._ws_connect_kwargs
-        _lwc._ws_connect_kwargs = lambda: _fixed_ws_kwargs(_orig(), has, proxy)
+        sdk_kwargs = _lwc._ws_connect_kwargs
+
+        def connect_kwargs(*args, **kwargs):
+            # SDK 决定握手请求头的格式；旧版无参数，新版会传 connection_headers。
+            return _fixed_ws_kwargs(sdk_kwargs(*args, **kwargs), has, proxy)
+
+        _lwc._ws_connect_kwargs = connect_kwargs
         _ws_connect_patched = True
     except Exception:
         pass
