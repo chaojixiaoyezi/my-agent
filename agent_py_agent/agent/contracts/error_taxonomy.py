@@ -1841,6 +1841,58 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint="当前方法版本、任务来源或学习存储无法核验；停止登记，按当前授权与任务状态核对，不自动确认内容。",
     ),
+    "CANNOT_REMOVE_NON_LEARNED_SKILL": ErrorContract(
+        code="CANNOT_REMOVE_NON_LEARNED_SKILL",
+        category="capability",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint=(
+            "该技能不是当前身份由自主学习发布的托管 Skill，不能通过 skill_feedback 归档移除；"
+            "若回执中提供了本用户可访问的 manual_path，请提示用户按需手动处理，不要自行猜测或删除。"
+        ),
+    ),
+    "SKILL_LEARNING_EVIDENCE_INCOMPLETE": ErrorContract(
+        code="SKILL_LEARNING_EVIDENCE_INCOMPLETE",
+        category="capability",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="学习所有权、使用回执、版本内容或活跃保护证据不完整；安全停止本次变更并提示核对存储状态，绝不按不完整证据猜零或强制执行。",
+    ),
+    "SKILL_LEARNING_NOT_LEARNED": ErrorContract(
+        code="SKILL_LEARNING_NOT_LEARNED",
+        category="capability",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="目标技能不在本身份已登记的自学记录中（或已被移除）；先调用 skill_feedback(action='status') 查看可用列表。",
+    ),
+    "SKILL_LEARNING_USER_MODIFIED": ErrorContract(
+        code="SKILL_LEARNING_USER_MODIFIED",
+        category="capability",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="该技能已被用户手动修改或包含额外目录文件，所有权已交还用户；工具不再自动覆盖或恢复，请按用户文件路径手工处理。",
+    ),
+    "SKILL_LEARNING_ARCHIVE_EXPIRED": ErrorContract(
+        code="SKILL_LEARNING_ARCHIVE_EXPIRED",
+        category="capability",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="已归档技能已超过可恢复保留期限（self_learning_evict_seconds）；停止重复调用 restore，向用户说明已过宽限期。",
+    ),
+    "SKILL_LEARNING_LIMIT_REACHED": ErrorContract(
+        code="SKILL_LEARNING_LIMIT_REACHED",
+        category="capability",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前在役自学 Skill 数量已达上限（self_learning_max_skills）且其余条目均受活跃任务或置顶保护；请先人工移除或取消置顶其他条目后再恢复。",
+    ),
+    "SKILL_LEARNING_REVISION_CONFLICT": ErrorContract(
+        code="SKILL_LEARNING_REVISION_CONFLICT",
+        category="capability",
+        retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="技能内容版本或生命周期绑定与当前运行记录不一致；停止用旧版本继续写入，调用 skill_feedback(action='status') 获取当前版本状态。",
+    ),
     "SKILL_SNAPSHOT_UNAVAILABLE": ErrorContract(
         code="SKILL_SNAPSHOT_UNAVAILABLE",
         category="capability",
