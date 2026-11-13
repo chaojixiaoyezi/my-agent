@@ -42,7 +42,6 @@ from .candidates import (
     CandidateStateChangedError,
     CandidateStoreCorruptError,
     CandidateTransitionError,
-    split_identity_conflicts,
 )
 from .curator_backend import (
     CuratorModelAttempt,
@@ -94,7 +93,6 @@ from .curator_models import (
     curator_replay_deterministic,
     validate_curator_state,
 )
-from .curator_rejected_bindings import retain_rejected_target_bindings
 from .curator_routing import (
     CURATOR_DEFAULT_FALLBACK_CODES,
     CURATOR_MODEL_GROUP_MAX_COUNT,

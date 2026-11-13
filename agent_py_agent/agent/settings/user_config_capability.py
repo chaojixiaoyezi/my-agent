@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from ._memory_coercion import COMPACT_RECOVERY_PERCENT_RANGE, COMPACT_TRIGGER_PERCENT_RANGE
+from ._memory_coercion import COMPACT_RECOVERY_PERCENT_RANGE
 from .config_io import load_simple_yaml
 
 # 生效时机（如实报告，不夸大）

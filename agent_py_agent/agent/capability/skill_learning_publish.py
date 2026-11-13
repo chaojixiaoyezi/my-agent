@@ -25,11 +25,9 @@ from .skill_learning_store import (
     CODE_EVIDENCE_INCOMPLETE,
     CODE_MAINTENANCE_OBSERVE_ONLY,
     EVENT_PUBLISHED,
-    EVENT_REMOVED,
     EVENT_REVERTED,
     EVENT_SKIPPED,
     EVENT_UPDATED,
-    LEARNED_DIR_NAME,
     MAX_SOURCE_RUN_COUNT,
     LearnedSkill,
     SkillLearningEvent,
@@ -655,12 +653,6 @@ def _require_new_name_locked(store: SkillLearningStore, registry: SkillLearningR
     taken = name in publish.taken_names or name in registry.skills
     if taken or (store.learned_root / name).exists() or (store.learned_root / name).is_symlink():
         raise SkillLearningGateError(CODE_NAME_TAKEN, {"skill_name": name})
-
-
-# LLM: 兼容旧单测别名；不传完整保护信息时维持保守不置换容量上限检查。
-def _require_new_name(store: SkillLearningStore, registry: SkillLearningRegistry, publish: PublishRequest) -> None:
-    _require_new_name_locked(store, registry, publish)
-    _admit_capacity_or_select_victim_locked(store, registry, publish)
 
 
 # LLM: 最终容量准入（在 state_lock 内执行）：经 store.managed_records + live_count 验证真实在役机器槽位；

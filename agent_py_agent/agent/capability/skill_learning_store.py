@@ -32,7 +32,6 @@ from ..common.json_io import (
 )
 from ..common.nofollow_fs import (
     NoFollowPathError,
-    _openat_directory,
     _openat_file,
     _validate_relative_parts,
     list_names_beneath,
@@ -582,11 +581,6 @@ class SkillLearningStore:
             if path.parent.name != "requests":
                 self._transfer_request_locked(path, "requests")
 
-    # LLM: 兼容保留的内部入口，直接委托给全局FIFO收敛与回填实现。
-    # 函数用途: 恢复溢出请求并保持热区不超过20条。
-    def _refill_requests_locked(self) -> None:
-        self._recover_requests_locked()
-
     # LLM: 请求路径必须是本owner两个固定目录的单个宿主文件名，拒绝外部路径、遍历段及任意目录。
     # 函数用途: 将可信队列路径转换为nofollow读写使用的相对分量。
     def _request_parts(self, path: Path) -> tuple[str, str]:
@@ -810,52 +804,6 @@ class SkillLearningStore:
     # 函数用途: 读取某个版本的 SKILL.md 全文。
     def read_version(self, name: str, version: int) -> str | None:
         return read_text_beneath(self.directory, ("versions", name, f"v{version}.md"))
-
-    # LLM: 从已校验位置安全移至 removed/<name>-<时间戳>/，不跟随符号链接；目录不存在时什么都不做。
-    # 函数用途: 把一个自学 Skill 目录移出扫描范围并返回归档位置。
-    def archive_removed(
-        self,
-        name: str,
-        *,
-        record: LearnedSkill | None = None,
-        stamp: str = "",
-    ) -> Path | None:
-        if record is None:
-            record = self.load_registry().skills.get(name)
-        src_root, src_parts = self._skill_dir_location(name, record=record)
-        try:
-            src_parent_fd = open_directory_beneath(src_root, src_parts[:-1], require_dir_fd=True)
-        except FileNotFoundError:
-            return None
-        try:
-            try:
-                os.stat(src_parts[-1], dir_fd=src_parent_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                return None
-            base_stamp = stamp or f"{int(time.time() * 1000):013d}"
-            target_name = f"{name}-{base_stamp}"
-            dst_parent_fd = open_directory_beneath(self.directory, ("removed",), create=True, require_dir_fd=True)
-            try:
-                try:
-                    os.stat(target_name, dir_fd=dst_parent_fd, follow_symlinks=False)
-                    target_name = f"{name}-{base_stamp}-{uuid.uuid4().hex[:8]}"
-                except FileNotFoundError:
-                    pass
-                _rename_entry_with_exdev_fallback(
-                    src_parent_fd,
-                    src_parts[-1],
-                    dst_parent_fd,
-                    target_name,
-                    src_root=src_root,
-                    src_parts=src_parts,
-                    dst_root=self.directory,
-                    dst_parts=("removed", target_name),
-                )
-            finally:
-                os.close(dst_parent_fd)
-            return self.removed_dir / target_name
-        finally:
-            os.close(src_parent_fd)
 
     # LLM: 始终返回在役路径（skills/<name>/SKILL.md 或 skills/learned/<name>/SKILL.md）；批量调用应传入已加载的 record 避免重读登记表。
     # 函数用途: 返回某个自学 Skill 的在役 SKILL.md 路径。
@@ -2879,12 +2827,6 @@ def _text(payload: dict, key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"learned skill field {key} must be a non-empty string")
     return value
-
-
-# LLM: 版本文件名固定 v<N>.md；按数字而不是字典序排序，v10 排在 v9 之后。
-# 函数用途: 取版本文件的版本号。
-def _version_number(path: Path) -> int:
-    return _version_name_number(path.name)
 
 
 def _version_name_number(name: str) -> int:

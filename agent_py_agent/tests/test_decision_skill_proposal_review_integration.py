@@ -203,7 +203,7 @@ def test_proposal_rejected_during_request_keeps_original_output(tmp_path, monkey
 
 @pytest.mark.parametrize("value", ["need_data", "not_needed", "abstain", "bogus"])
 def test_non_selection_or_invalid_real_answer_keeps_original(tmp_path, monkeypatch, capsys, value):
-    ctx = seeded(tmp_path, 3)
+    seeded(tmp_path, 3)
     config_path = config_at(tmp_path)
     configure(config_path, "apply")
     sent = install_http(monkeypatch, {"proposal_1": value, "proposal_3": "review_first"})

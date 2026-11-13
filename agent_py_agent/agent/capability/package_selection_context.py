@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import CancelledError
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from ..common.cancellation import ToolCancelled
 from ..memory_archive import estimate_tokens

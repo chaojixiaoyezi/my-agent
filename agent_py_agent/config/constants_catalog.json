@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1513,
+  "count": 1509,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -2700,14 +2700,6 @@
       "description": "中文说明: 提示词中单条活跃经验规则摘要截断上限（字符）。"
     },
     {
-      "name": "DEFAULT_MERGE_SIMILARITY_PERCENT",
-      "file": "agent_py_agent/agent/capability/skill_learning.py",
-      "value": 70,
-      "unit": "%",
-      "category": "比例阈值",
-      "description": "中文说明: 同任务族或高相似已有技能触发合并优先重试的相似度百分比阈值（%）。"
-    },
-    {
       "name": "DEFAULT_STALE_PROPOSAL_SECONDS",
       "file": "agent_py_agent/agent/capability/skill_learning.py",
       "value": 604800,
@@ -2770,30 +2762,6 @@
       "unit": "个",
       "category": "其它",
       "description": "中文说明: 试用或活跃Skill触发第1次负反馈前需达到的基础有效独立任务数。"
-    },
-    {
-      "name": "DEFAULT_MAINT_SLICE_BYTES",
-      "file": "agent_py_agent/agent/capability/skill_learning_maintenance.py",
-      "value": 8388608,
-      "unit": "字节",
-      "category": "其它",
-      "description": "中文说明: 维护游标单批默认字节处理上限。"
-    },
-    {
-      "name": "DEFAULT_MAINT_SLICE_COUNT",
-      "file": "agent_py_agent/agent/capability/skill_learning_maintenance.py",
-      "value": 128,
-      "unit": "个",
-      "category": "其它",
-      "description": "中文说明: 维护游标单批默认最多扫描或处理的条目数。"
-    },
-    {
-      "name": "DEFAULT_MAINT_SLICE_MS",
-      "file": "agent_py_agent/agent/capability/skill_learning_maintenance.py",
-      "value": 25,
-      "unit": "毫秒",
-      "category": "其它",
-      "description": "中文说明: 维护游标单批默认执行耗时上限（毫秒）。"
     },
     {
       "name": "DEFAULT_TIMESTAMP_CACHE_COUNT",

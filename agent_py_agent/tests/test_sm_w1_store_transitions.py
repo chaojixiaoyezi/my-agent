@@ -6,7 +6,6 @@ import os
 import subprocess
 import sys
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -31,7 +30,6 @@ from agent_py_agent.agent.capability.skill_learning_publish import (
     publish_learned_skill,
     remove_learned_skill,
     render_learned_skill,
-    revert_learned_skill,
 )
 from agent_py_agent.agent.capability.skill_learning_report import (
     apply_learned_skill_action,
@@ -52,7 +50,7 @@ from agent_py_agent.agent.capability.skill_snapshot import skill_content_sha256
 from agent_py_agent.agent.runtime_db.schema import runtime_db_path
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 from agent_py_agent.agent.user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaProjection
-from agent_py_agent.tests.test_skill_learning import BODY, _ctx
+from agent_py_agent.tests.test_skill_learning import BODY
 from agent_py_agent.tests.test_wave7_autonomous_learning_closure import decision
 
 

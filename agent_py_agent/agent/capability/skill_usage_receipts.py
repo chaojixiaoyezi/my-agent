@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 
 # 中文说明：SQLite metadata 命名空间与序列化版本号，固定按契约 sm-*:v1 前缀隔离。
-RECEIPT_SCHEMA_VERSION_STR = "v1"
 SEQUENCE_METADATA_KEY = "sm-seq:v1"
 USE_RECEIPT_PREFIX = "sm-use:v1:"
 USE_RECEIPT_PREFIX_END = "sm-use:v1;"
@@ -606,67 +605,6 @@ def read_usage_aggregate(
         content_sha256=sha,
         fallback_at=0.0,
     )
-
-
-def read_all_usage_aggregates(
-    runtime: RuntimeRepository | None,
-    *,
-    max_entries: int = 0,
-) -> tuple[list[dict[str, Any]], bool]:
-    """按 PK 范围扫描读取 UsageAggregate 列表，返回 `(aggregates, complete)`。"""
-    if runtime is None:
-        return [], False
-    results: list[dict[str, Any]] = []
-    after_key = USE_AGGREGATE_PREFIX
-    complete = True
-    page_size = DEFAULT_RECEIPT_CLEANUP_BATCH_ENTRIES
-    with runtime.transaction() as conn:
-        while True:
-            limit = page_size
-            if max_entries > 0:
-                remaining = max_entries - len(results)
-                if remaining <= 0:
-                    # 再探测是否存在下一条未读记录，避免误判完整性
-                    probe = conn.execute(
-                        "SELECT 1 FROM metadata WHERE key >= ? AND key < ? LIMIT 1",
-                        (after_key, USE_AGGREGATE_PREFIX_END),
-                    ).fetchone()
-                    complete = probe is None
-                    break
-                limit = min(page_size, remaining)
-            rows = conn.execute(
-                "SELECT key, value FROM metadata "
-                "WHERE key >= ? AND key < ? ORDER BY key LIMIT ?",
-                (after_key, USE_AGGREGATE_PREFIX_END, limit),
-            ).fetchall()
-            if not rows:
-                break
-            for row in rows:
-                key_str = str(row["key"] if hasattr(row, "keys") else row[0])
-                val_str = str(row["value"] if hasattr(row, "keys") else row[1])
-                after_key = key_str + "\x00"
-                try:
-                    loaded = json.loads(val_str)
-                except (TypeError, ValueError):
-                    complete = False
-                    continue
-                if isinstance(loaded, dict):
-                    inc = _clean_text(loaded.get("incarnation_id"))
-                    act = _clean_text(loaded.get("activation_id"))
-                    sha = _normalize_sha256(loaded.get("content_sha256"))
-                    if inc and act and sha:
-                        results.append(
-                            _normalized_aggregate(
-                                loaded,
-                                incarnation_id=inc,
-                                activation_id=act,
-                                content_sha256=sha,
-                                fallback_at=0.0,
-                            )
-                        )
-            if len(rows) < limit:
-                break
-    return results, complete
 
 
 def _pair_from_receipt_key(key: str, prefix: str, expected_tail_parts: int) -> tuple[str, str] | None:

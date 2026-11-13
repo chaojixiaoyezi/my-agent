@@ -163,20 +163,6 @@ def _quota_admission(
         yield admission
 
 
-# LLM: 配额按整个下一版权威文件字节数检查，不按单条 delta 猜最终占用。
-# 函数用途: 在原子替换前校验长期记忆文件的最终容量。
-def _check_memory_quota(
-    admission: OwnerQuotaAdmission | None,
-    memory: JsonlMemory,
-    records: list[MemoryRecord],
-    next_text: str,
-) -> None:
-    if admission is None:
-        return
-    changes = [OwnerQuotaChange(memory.path, len(next_text.encode("utf-8")))]
-    admission.check(changes)
-
-
 # LLM: 仅保留旧调用方导入名；20k现在是默认热工作集预算，不再作为正式写入拒绝条件。
 MEMORY_LIBRARY_WRITE_CAP_CHARS = MemoryPolicyV2().active_library_max_chars
 
@@ -1139,7 +1125,7 @@ class _JsonlMemorySearchMixin:
             cache = self._text_vector_cache()
             if cache is None:
                 return
-            from ..retrieval.text_vector_cache import embedder_fingerprint, index_text
+            from ..retrieval.text_vector_cache import embedder_fingerprint
 
             fingerprint = embedder_fingerprint(self._embedder)
             texts = dict(docs)
@@ -1692,13 +1678,6 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
             self._record_semantic_health("index", exc)
 
     # LLM: 网络embedding不占权威锁；真正落盘时持锁复核至写完，删除或替换先提交则拒绝旧正文。
-    # 函数用途: 原子核对并写入仍然属于当前事实的向量投影。
-    # LLM: C仅formal锁FD出生进门，原版本核对和等待在外，73实际向量writer再末核同source。
-    # 函数用途: 在原删除互斥锁内保存仍然有效的向量。
-    def _write_current_vector(self, store, record, embedded) -> bool:
-        vector, text = embedded
-        return bool(self._write_current_vectors(store, [(record, vector, text)]))
-
     # LLM: 同一formal锁下只读一次当前逻辑库，逐项核对ID/版本/正文/范围后调用upsert_many；删除先行拒绝旧投影。
     # 函数用途: 将仍然有效的一批向量作为同一快照发表，返回实际入选条数。
     def _write_current_vectors(self, store, embedded) -> int:
@@ -1712,17 +1691,6 @@ class _JsonlMemoryRecallMixin(_JsonlMemorySearchMixin, _JsonlMemoryLifecycleMixi
                     rows.append((_record_vec_id(record), vector, text, _record_payload(record)))
             store.upsert_many(rows)
             return len(rows)
-
-    # LLM: 删除只针对精确 entry ID 的派生向量，失败不能使索引获得事实权威。
-    # 函数用途: 尽力清除一条已删除记忆的向量项。
-    def _remove_vector(self, entry_id: str) -> None:
-        store = self._vector_store()
-        if store is None or not entry_id:
-            return
-        try:
-            store.remove(entry_id)
-        except Exception:
-            pass
 
     # LLM: 显式维护只操作owner内读索引，先严格预检再迁移/重建；一次至多1000条，完整性另见coverage。
     # 函数用途: 推进正式记忆派生索引并返回实际已覆盖条数，不再清空或重写workspace。
@@ -2042,24 +2010,6 @@ def _with_legacy_identity(record: MemoryRecord) -> MemoryRecord:
     if not record.updated_at:
         record.updated_at = float(record.created_at or 0.0)
     return record
-
-
-# LLM: touch 是访问信号事件,不携带正文/不改版本;last_accessed_at 是唯一有效载荷。
-# 函数用途: 把累积访问缓冲转成 touch 事件列表。
-def _touch_events(pending: dict[str, float]) -> list[MemoryRecord]:
-    return [
-        MemoryRecord(
-            role="system",
-            content="",
-            kind="touch",
-            action="touch",
-            entry_id=entry_id,
-            created_at=timestamp,
-            updated_at=timestamp,
-            last_accessed_at=timestamp,
-        )
-        for entry_id, timestamp in sorted(pending.items())
-    ]
 
 
 # LLM: 新增记录只补唯一 ID、时间、版本与 tags，证据/scope 仍必须由上游结构化提供。
@@ -2550,7 +2500,6 @@ def _select_diverse_memory_records(
     for record in records:
         if record.entry_id and record.entry_id in seen_entries:
             continue
-        attributes = record.attributes if isinstance(record.attributes, dict) else {}
         subject_identity = _memory_subject_identity(record)
         subject_key = subject_identity[0]
         subject_marker = "\x1f".join(subject_identity)
@@ -2570,12 +2519,6 @@ def _select_diverse_memory_records(
 # 函数用途: 为C原JSONL固定本地叶逐次核对来源，网络/扫描/锁等待不入Root。
 def _coordinator_memory_write(operation):
     return execute_global_write(operation, require_scope=True)
-
-
-# LLM: 仅由本实例formal/archive调用方传原目标和现成raw，调用方已持原领域锁；默认writer不走这里。
-# 函数用途: 将C原正式或归档JSONL做一次准确原子末写，不补重试。
-def _write_coordinator_memory_raw(path, raw):
-    return _coordinator_memory_write(lambda: write_private_text_file_atomic_unlocked(path, raw, replace_once=True))
 
 
 # LLM: 仅原writer已成功后比较删除本次旧快照；新时间戳和任何失败保留原pending，不建第二账。

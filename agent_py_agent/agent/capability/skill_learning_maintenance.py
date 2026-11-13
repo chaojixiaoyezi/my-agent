@@ -62,12 +62,6 @@ MAX_OBSERVATIONS_COUNT = 200
 MAX_PROMOTION_HISTORY_COUNT = 100
 # 中文说明: 维护到期时间字符串解析有界LRU缓存条目上限。
 DEFAULT_TIMESTAMP_CACHE_COUNT = 256
-# 中文说明: 维护游标单批默认最多扫描或处理的条目数。
-DEFAULT_MAINT_SLICE_COUNT = 128
-# 中文说明: 维护游标单批默认字节处理上限。
-DEFAULT_MAINT_SLICE_BYTES = 8_388_608
-# 中文说明: 维护游标单批默认执行耗时上限（毫秒）。
-DEFAULT_MAINT_SLICE_MS = 25
 
 _HOST_DELIVERY_KEYS_CTX: ContextVar[tuple[str, ...]] = ContextVar(
     "_sm_w2_host_delivery_keys",

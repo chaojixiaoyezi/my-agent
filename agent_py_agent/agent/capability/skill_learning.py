@@ -36,7 +36,6 @@ from .skill_learning_prompt import (
     DECISION_CREATE,
     DECISION_INEFFECTIVE,
     DECISION_SKIP,
-    DECISION_UPDATE,
     DESCRIPTION_MAX_CHARS,
     EXISTING_DESCRIPTION_CHARS,
     TAGS_MAX_COUNT,
@@ -94,8 +93,6 @@ CODE_INEFFECTIVE_RETIRED = "SKILL_LEARNING_INEFFECTIVE_RETIRED"
 CODE_INEFFECTIVE_UNATTRIBUTED = "SKILL_LEARNING_INEFFECTIVE_UNATTRIBUTED"
 # 单轮最多更新几条已登记的自主学习 Skill。
 UPDATABLE_COUNT = 3
-# 中文说明: 同任务族或高相似已有技能触发合并优先重试的相似度百分比阈值（%）。
-DEFAULT_MERGE_SIMILARITY_PERCENT = 70
 # 中文说明: 触发合并优先提示后每轮最多额外调用一次模型进行合并收敛（次）。
 MAX_MERGE_RETRY_COUNT = 1
 # 中文说明: 提示词中附带的活跃经验规则摘要最多保留条数（条）。

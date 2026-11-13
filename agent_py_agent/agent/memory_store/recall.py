@@ -8,7 +8,6 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 
 from .jsonl import MemoryRecord
 from .lessons import (

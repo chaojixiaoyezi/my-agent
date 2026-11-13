@@ -24,7 +24,6 @@ from agent_py_agent.agent.capability.skill_usage_receipts import (
     aggregate_key,
     cleanup_retired_aggregates,
     has_body_delivery_receipt,
-    negative_receipt_key,
     read_usage_aggregate,
     receipt_key,
     record_exact_negative,

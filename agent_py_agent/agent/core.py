@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -96,7 +95,6 @@ from .conversation.session_messaging import (
 )
 from .conversation.task_follow_up import task_follow_up_facts
 from .delivery import (
-    DeliveryContext,
     DeliveryService,
     RuntimeHealthProvider,
     build_default_channel_registry,
@@ -262,19 +260,6 @@ def _curator_model_router(agent: object, config: AgentConfig, curator_config: Me
 
     return route
 
-
-
-# LLM: 只在用到 owner 默认模型时记来源（留空、或指定档案退回）；指定档案能用时什么都不记。都是结构化短词，
-#   成功和失败的运行记录都会带上（model-less owner 失败时能看出是“部署默认没配模型”，不是档案问题）。
-# 函数用途: 生成整批共用的路由警告：指定档案退回的原因、owner 默认模型的来源。
-def _curator_route_warnings(agent: object, fixed: str, fallback: str) -> tuple[str, ...]:
-    from .settings.curator_profile import curator_default_model_source
-
-    warnings = [f"curator_profile_unavailable_fallback:{fallback}"] if fallback else []
-    source = curator_default_model_source(agent) if fallback or not fixed else ""
-    if source:
-        warnings.append(f"curator_default_model_source:{source}")
-    return tuple(warnings)
 
 
 # LLM: 只读校验固定Curator模型档案在当前owner（含管理员共享目录）下是否可解析且含有效凭据，不实例化后端。
@@ -1336,42 +1321,6 @@ def _build_owner_quota_enforcer(
     from .memory_store.owner_resources import build_owner_memory_quota
 
     return build_owner_memory_quota(agent.home_paths, agent.owner_policy)
-
-
-# LLM: 当前绑定只从 owner-scoped ConversationStore 的结构化 thread binding 读取；不得从 prompt 或配置猜目标。
-# 函数用途: 为能力自述提供本轮真实通道类型，目标只留在可信上下文且不会被清单输出。
-def _current_delivery_context(agent: SimpleAgent) -> DeliveryContext | None:
-    current = getattr(agent, "_current_run_params", None)
-    attrs = getattr(current, "task_attributes", None) if current is not None else None
-    thread_id = (
-        str(attrs.get("conversation_thread_id") or "").strip()
-        if isinstance(attrs, dict)
-        else ""
-    )
-    if not thread_id:
-        return None
-    try:
-        thread, load_error = agent.conversation_store.threads.load_report(thread_id)
-    except Exception:
-        return None
-    if load_error is not None or thread is None:
-        return None
-    bindings = list(getattr(thread, "channel_bindings", ()) or ())
-    if not bindings:
-        return None
-    binding = max(
-        bindings,
-        key=lambda item: float(getattr(item, "last_active_at", 0.0) or 0.0),
-    )
-    channel = str(getattr(binding, "channel", "") or "").strip()
-    target = str(
-        getattr(binding, "channel_user_id", "")
-        or getattr(binding, "channel_conversation_id", "")
-        or ""
-    ).strip()
-    if not channel or not target:
-        return None
-    return DeliveryContext(channel=channel, target=target, mode="proactive", thread_id=thread_id)
 
 
 # LLM: 始终返回当前owner的home目录作为受保护人格根，不随临时admin文件访问豁免而解除SOUL/AGENTS写保护。

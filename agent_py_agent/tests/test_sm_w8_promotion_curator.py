@@ -48,7 +48,6 @@ from agent_py_agent.agent.memory_store.curator_formal import FormalMemorySource
 from agent_py_agent.agent.memory_store.curator_inputs import (
     CuratorInputBatch,
     CuratorMessageInput,
-    CuratorMessageSource,
 )
 from agent_py_agent.agent.memory_store.curator_models import (
     CURATOR_OUTPUT_SCHEMA_VERSION,

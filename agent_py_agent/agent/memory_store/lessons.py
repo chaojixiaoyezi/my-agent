@@ -28,7 +28,6 @@ from ..common.global_write_guard import GlobalWriteInWorkerError
 from ..common.json_io import (
     jsonl_lines,
     locked_json_path,
-    read_json_object_report,
     write_private_text_file_atomic_unlocked,
 )
 from ..common.nofollow_fs import NoFollowPathError, ensure_private_dir, read_text_beneath

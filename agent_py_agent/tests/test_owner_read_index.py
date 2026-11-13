@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from agent_py_agent.agent.local_storage.owner_read_index import OwnerReadIndex
 from agent_py_agent.agent.observability.telemetry_ledger import ToolCallRecord
