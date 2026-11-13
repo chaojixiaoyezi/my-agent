@@ -26,6 +26,7 @@ from ..user_space.owner_policy import resolve_effective_owner_policy
 from .run_task_workspace_writer import (
     current_run_artifact_registry_root,
     current_run_tool_output_archive_root,
+    managed_business_default_workspace,
 )
 from .runtime_write_guards import attach_running_install_guard
 from .tool_guard.call_guardrail import tool_guardrail_policy, tool_guardrail_records
@@ -189,6 +190,7 @@ def write_boundary_with_runtime_ledger(agent: object, params: object, *, for_att
     _attach_owner_task_write_scope(merged, agent, params)
     _attach_transient_named_work_write_scope(merged, agent, params)
     _attach_granted_execution_workspace_roots(merged, agent, params)
+    _attach_managed_business_write_scope(merged, agent, params)
     attach_running_install_guard(merged, getattr(agent, "config", None))
     guardrail_rows = tool_guardrail_records(agent)
     if guardrail_rows:
@@ -509,8 +511,32 @@ def _granted_external_roots(
     return [root for root in granted if not _is_relative_to(Path(root), owner_home)]
 
 
-# LLM: 普通 main/child 的文件墙是同一 owner home；保留正式业务写根和宿主绑定的孩子自身窄根，使祖先保护不吞授权；Audit 精确授权和 control_plane 不扩大。
-# 函数用途: 放开自己家里的普通文件操作，继续保护其他用户与宿主权威文件；不看 tasks 命名或模型文字。
+# LLM: 受管业务订单仅使用宿主当前任务目录和原子代理授权；不会从模型文字新增范围。
+def _attach_managed_business_write_scope(boundary, agent, params):
+    """受管业务单/子执行仅沿原结构化根，不因同owner自动获得其它订单写权。"""
+    context = getattr(params, "business_context", None)
+    if context is None or not getattr(context, "task_id", ""):
+        return
+    scope = _text(getattr(params, "context_scope", "default")).lower()
+    managed = managed_business_default_workspace(agent, params)
+    if managed is not None and scope not in {"task_local", "control_plane"}:
+        roots = [str(root) for root in managed]
+        roots.extend(_string_list(getattr(getattr(agent, "config", None), "additional_write_roots", ())))
+        boundary["execution_cwd"] = str(managed[0])
+    elif scope == "task_local":
+        # 子代理已由创建门冻结真实父授权与自身目录；不能再补owner home。
+        original = getattr(params, "write_boundary", None)
+        roots = _string_list(original.get("allowed_write_roots")) if isinstance(original, dict) else []
+        cwd = _resolved_path(boundary.get("execution_cwd"))
+        if roots and (cwd is None or not any(_is_relative_to(cwd, Path(root)) for root in roots)):
+            boundary["execution_cwd"] = roots[0]
+    else:
+        return
+    boundary["allowed_write_roots"] = list(dict.fromkeys(roots))
+    boundary["execution_workspace_roots"] = list(boundary["allowed_write_roots"])
+
+
+# 普通会话继续沿原owner文件墙；受管业务单由后置精确边界单独收窄。
 def _attach_owner_task_write_scope(
     boundary: dict[str, object],
     agent: object,

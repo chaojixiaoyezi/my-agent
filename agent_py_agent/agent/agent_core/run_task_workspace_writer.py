@@ -12,6 +12,7 @@ import secrets
 import stat
 from contextlib import ExitStack, suppress
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ..common.json_io import append_private_jsonl_records
@@ -20,9 +21,12 @@ from ..common.nofollow_fs import (
     _openat_directory,
     _openat_file,
     _reject_unsafe_existing_leaf,
+    ensure_private_dir,
     open_directory_beneath,
 )
 from ..conversation.authority import (
+    CONVERSATION_EXECUTION_WORKSPACE_EXPLICIT_ATTR,
+    CONVERSATION_SESSION_TASK_ID_ATTR,
     CONVERSATION_TASK_TURN_ACTIVE_ATTR,
     CONVERSATION_TRANSIENT_WORKSPACE_ATTR,
     conversation_execution_cwd,
@@ -585,7 +589,49 @@ def _authoritative_task_title(agent: object, params: object, task_id: str) -> st
     )[:160]
 
 
+def managed_business_default_workspace(agent, params):
+    """仅宿主受管后台业务单的默认目录；显式线程/共享目录保持原授权。"""
+    attrs = getattr(params, "task_attributes", None)
+    context = getattr(params, "business_context", None)
+    if (getattr(params, "source", "") != "background_main_agent" or context is None
+            or not isinstance(attrs, dict)
+            or attrs.get(CONVERSATION_EXECUTION_WORKSPACE_EXPLICIT_ATTR) is not False
+            or not getattr(context, "task_id", "")
+            or attrs.get(CONVERSATION_SESSION_TASK_ID_ATTR) != context.task_id):
+        return None
+    # 不沿用线程上次订单的run_workspace；默认目录只绑定本次原业务task_id。
+    output = _business_task_output_dir(agent, context, params)
+    work = output.parent / "work"
+    owner = Path(agent.home_paths.owner_home_dir).resolve(strict=False)
+    for directory in (work, output):
+        if directory.is_relative_to(owner):
+            try:
+                descriptor = open_directory_beneath(owner, directory.relative_to(owner).parts, create=False)
+            except FileNotFoundError:
+                continue
+            else:
+                os.close(descriptor)
+    return work, output
+
+
 def attach_run_task_workspace_context(agent, params, user_prompt: str):
+    workspace = managed_business_default_workspace(agent, params)
+    if workspace is not None:
+        # 默认执行位置和委派继承共用同一原业务任务目录；运行归档仍由原run workspace管理。
+        work, output = workspace
+        owner = Path(agent.home_paths.owner_home_dir).resolve(strict=False)
+        for directory in (work, output):
+            anchor = owner if directory.is_relative_to(owner) else None
+            ensure_private_dir(directory, canonical_root=anchor)
+        attrs = dict(params.task_attributes)
+        from ..conversation.authority import (
+            CONVERSATION_EXECUTION_CWD_ATTR,
+            CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
+        )
+
+        attrs[CONVERSATION_EXECUTION_CWD_ATTR] = str(work)
+        attrs[CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR] = [str(work), str(output)]
+        params = replace(params, task_attributes=attrs)
     if not _should_create_workspace(agent, params):
         return params
     result = _ensure_workspace_for_run(agent, params, user_prompt)
@@ -627,6 +673,31 @@ def _business_delivery_output_dir(params, contract) -> Path | None:
     return None
 
 
+def _business_task_output_dir(agent, context, params):
+    from ..user_space.home_layout import task_workspace_path
+
+    attrs = getattr(params, "task_attributes", None) or {}
+    day = _now_iso()[:10]
+    if (getattr(params, "source", "") == "background_main_agent"
+            and attrs.get(CONVERSATION_SESSION_TASK_ID_ATTR) == context.task_id):
+        store = getattr(agent, "conversation_store", None)
+        if store is not None:
+            task = store.session_tasks.load(context.task_id)
+            thread = store.threads.load(task.target_thread_id) if task is not None else None
+            if (task is None or thread is None or thread.owner_id != context.owner_id
+                    or task.target_thread_id != attrs.get("conversation_thread_id")
+                    or task.metadata.get("business_context") != context.to_dict()
+                    or not task.created_at or task.created_at <= 0):
+                raise PermissionError("BUSINESS_TASK_WORKSPACE_IDENTITY_MISMATCH: 原任务、目标线程或owner绑定不可核实")
+            day = datetime.fromtimestamp(task.created_at, timezone.utc).date().isoformat()
+        # 无ConversationStore仅支持独立库/纯fixture，不猜找历史任务或扫描路径。
+    result = task_workspace_path(agent.home_paths.owner_home_dir,
+        getattr(agent.config, "workspace_task_path_template", "tasks/{date}/{task_slug}"),
+        date=day, task_name=context.task_id)
+    # 保留词法路径，后续no-follow创建不能因预先resolve而丢掉恶意链接组件。
+    return Path(os.path.abspath(result)) / "output"
+
+
 def _business_delivery_contract(agent, params):
     context = getattr(params, "business_context", None)
     if context is None:
@@ -634,10 +705,7 @@ def _business_delivery_contract(agent, params):
     contract = getattr(params, "delivery_contract", None)
     if isinstance(contract, dict) and contract.get("artifacts"):
         return dict(contract)
-    from ..user_space.home_layout import task_workspace_path
-
-    output = task_workspace_path(agent.home_paths.owner_home_dir, agent.config.workspace_task_path_template,
-        date=_now_iso()[:10], task_name=context.task_id).resolve(strict=False) / "output"
+    output = _business_task_output_dir(agent, context, params)
     result = dict(contract) if isinstance(contract, dict) else {"schema_version": "delivery_contract.v1"}
     workspace = dict(result.get("task_workspace") or {})
     workspace.setdefault("output_dir", str(output))
@@ -913,6 +981,9 @@ def _task_attributes_with_workspace(attrs: object, paths) -> dict:
 # 函数用途: 返回实际执行位置，保证提示的相对路径解释与工具一致。
 def _primary_workspace_root(agent, params: object | None = None) -> Path:
     current = params if params is not None else getattr(agent, "_current_run_params", None)
+    managed = managed_business_default_workspace(agent, current) if current is not None else None
+    if managed is not None:
+        return managed[0]
     root = conversation_execution_cwd(getattr(current, "task_attributes", None))
     if not root:
         root = getattr(getattr(agent, "tools", None), "workspace_root", None) or getattr(

@@ -66,6 +66,8 @@ CONVERSATION_WORKSPACE_EXECUTION_STATE_AVAILABLE_ATTR = (
 # validated client cwd; once a sticky task exists it is that canonical owner/task root. Model
 # prose and tool arguments never choose or override it.
 CONVERSATION_EXECUTION_CWD_ATTR = "conversation_execution_cwd"
+# 宿主保留目录来源；默认owner根不能冒充用户显式共享授权。
+CONVERSATION_EXECUTION_WORKSPACE_EXPLICIT_ATTR = "conversation_execution_workspace_explicit"
 CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR = "conversation_runtime_workspace_roots"
 
 
@@ -139,6 +141,7 @@ __all__ = [
     "CONVERSATION_WORKSPACE_TASK_ID_ATTR",
     "CONVERSATION_WORKSPACE_TASK_STATUS_ATTR",
     "CONVERSATION_EXECUTION_CWD_ATTR",
+    "CONVERSATION_EXECUTION_WORKSPACE_EXPLICIT_ATTR",
     "CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR",
     "current_conversation_task_attributes",
     "conversation_execution_cwd",

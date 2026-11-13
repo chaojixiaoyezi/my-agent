@@ -45,6 +45,7 @@ from .authority import (
     CONVERSATION_BACKGROUND_WAKE_SIGNAL_IDS_ATTR,
     CONVERSATION_BACKGROUND_WAKE_SNAPSHOT_IDS_ATTR,
     CONVERSATION_EXECUTION_CWD_ATTR,
+    CONVERSATION_EXECUTION_WORKSPACE_EXPLICIT_ATTR,
     CONVERSATION_REQUEST_ID_ATTR,
     CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR,
     CONVERSATION_SESSION_TASK_ID_ATTR,
@@ -2927,6 +2928,8 @@ def _apply_background_thread_workspace_attributes(
     if not str(attributes.get("conversation_thread_id") or "").strip():
         return
     cwd = str(getattr(thread, "cwd", "") or "").strip()
+    attributes[CONVERSATION_EXECUTION_WORKSPACE_EXPLICIT_ATTR] = bool(
+        cwd or getattr(thread, "runtime_workspace_roots", ()))
     if not cwd and agent is not None and getattr(agent, "root", None) is not None:
         from ..user_space.runtime_paths import runtime_owner_root
 
