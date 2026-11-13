@@ -59,7 +59,11 @@ def execution_lifecycle(service, execution):
         if event['payload_bytes'] > 16384:
             unavailable.append('EVENT_PAYLOAD_TOO_LARGE')
             continue
-        payload = json.loads(event['payload_json'])
+        try:
+            payload = json.loads(event['payload_json'])
+        except (ValueError, TypeError):
+            unavailable.append('EVENT_PAYLOAD_INVALID')
+            continue
         if not isinstance(payload, dict):
             unavailable.append('EVENT_PAYLOAD_INVALID')
             continue

@@ -90,3 +90,21 @@ def test_old_execution_cannot_borrow_new_claim_and_events_are_bounded(background
     assert set(lifecycle['unavailable']) == {'EXACT_CLAIM_UNAVAILABLE', 'HISTORY_WINDOW_TRUNCATED'}
     assert len(lifecycle['events']) == 100
     assert len(lifecycle['attempts']) == 2
+
+
+def test_damaged_or_large_event_keeps_other_lifecycle_evidence(background_http):
+    client, _, task, repo, run = lifecycle_source(background_http)
+    large = repo.append_event(event_type='diagnostic', agent_run_id=run['agent_run_id'],
+        attempt_id=run['attempt_id'], task_run_id=run['task_run_id'], payload={'reason': 'x' * 18000})
+    bad = repo.append_event(event_type='diagnostic', agent_run_id=run['agent_run_id'],
+        attempt_id=run['attempt_id'], task_run_id=run['task_run_id'], payload={})
+    with repo._runtime_connection() as conn:
+        conn.execute('UPDATE runtime_events SET payload_json=? WHERE event_id=?', ('{broken', bad['event_id']))
+        conn.commit()
+    result = client.call('executions.get', {'run_id': 'observed-' + task.task_id,
+                                          'attempt_id': run['attempt_id']})
+    assert result['ok'], result
+    lifecycle = result['data']['lifecycle']
+    assert lifecycle['coverage'] == 'partial' and lifecycle['claim'] is not None
+    assert {'EVENT_PAYLOAD_TOO_LARGE', 'EVENT_PAYLOAD_INVALID'} <= set(lifecycle['unavailable'])
+    assert {large['event_id'], bad['event_id']}.isdisjoint(row['event_id'] for row in lifecycle['events'])
