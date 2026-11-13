@@ -7,17 +7,23 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+from agent_py_agent.agent.capability.router import tokenize
 from agent_py_agent.agent.capability.skill_learning import (
     CODE_INEFFECTIVE_RECORDED,
     CODE_INEFFECTIVE_RETIRED,
     CODE_INEFFECTIVE_ROLLED_BACK,
     CODE_INEFFECTIVE_UNATTRIBUTED,
     CODE_MERGE_DEFERRED,
+    CODE_MODEL_TIMEOUT,
+    STATUS_BUSY,
+    STATUS_RETRY,
     SkillLearningRuntime,
     SkillLearningService,
     SkillLearningSettings,
     _adopt_committed_lessons_isolated,
+    _metadata_similarity_tokens,
     _prune_learning_proposals_isolated,
+    _similar_managed_skills,
 )
 from agent_py_agent.agent.capability.skill_learning_prompt import (
     OUTPUT_SCHEMA_VERSION,
@@ -42,10 +48,15 @@ from agent_py_agent.agent.memory_store.candidate_models import (
     MemoryScope,
 )
 from agent_py_agent.agent.memory_store.candidates import CandidateService
+from agent_py_agent.agent.memory_store.curator_backend import CuratorModelStillRunningError
 from agent_py_agent.agent.owner_wake_discovery import discover_owner_home_page
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 from agent_py_agent.agent.runtime_db.schema import runtime_db_path
 from agent_py_agent.agent.settings.config import AgentConfig, load_config
+from agent_py_agent.agent.settings.curator_profile import (
+    auxiliary_profile_cooldown_remaining,
+    clear_auxiliary_profile_cooldown,
+)
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
 from agent_py_agent.cli.gateway_loops import (
@@ -649,3 +660,294 @@ def test_multiuser_paged_discovery_and_missing_aux_model_run_maintenance_only(tm
     assert exec_res["status"] == "deferred" and exec_res["outcome"] == "pending"
     assert len(store.pending_requests()) == 1
     assert store.registry_path.is_file()
+
+
+def test_similar_managed_skills_metadata_only_integer_boundary_and_empty_family(tmp_path: Path) -> None:
+    home = ensure_my_agent_home(tmp_path / "home")
+    store = SkillLearningStore.for_home(home)
+
+    def _seed(
+        name: str,
+        *,
+        description: str,
+        when_to_use: str,
+        tags: tuple[str, ...],
+        body: str,
+    ) -> None:
+        publish_learned_skill(
+            store,
+            PublishRequest(
+                SkillLearningDecision(
+                    decision="create",
+                    reason="沉淀相似判定样例",
+                    update_target="",
+                    name=name,
+                    description=description,
+                    when_to_use=when_to_use,
+                    tags=tags,
+                    body=body,
+                ),
+                {"request_key": f"seed-{name}", "run_id": f"seed-{name}"},
+                frozenset(),
+                max_skills=50,
+                guard_config=None,
+            ),
+        )
+
+    base_body = (
+        "# 账务流水对账步骤\n"
+        "## 触发条件\n收到日终结算账单时触发。\n"
+        "## 步骤\n"
+        "1. 拉取当天全部回执并按交易序号排序。\n"
+        "2. 核对借贷余额合计数并导出差异报告。"
+    )
+    _seed(
+        "alpha-tool",
+        description="核对 CSV 日终流水账本差异的固定步骤",
+        when_to_use="需要对账日终 CSV 流水并输出核查清单时",
+        tags=("csv", "ledger"),
+        body=base_body,
+    )
+
+    # 1) 相同元数据 + 截然不同长正文 -> 仍命中（正文不稀释元数据 Jaccard）；
+    distinct_long_body = (
+        "# 完全不同的文档渲染流程\n"
+        "## 步骤\n"
+        + "\n".join(f"{i}. 执行独立的排版校验子步骤 {i} 并输出摘要。" for i in range(1, 25))
+    )
+    same_meta_diff_body = SkillLearningDecision(
+        decision="create",
+        reason="新建",
+        update_target="",
+        name="alpha-tool-v2",
+        description="核对 CSV 日终流水账本差异的固定步骤",
+        when_to_use="需要对账日终 CSV 流水并输出核查清单时",
+        tags=("csv", "ledger"),
+        body=distinct_long_body,
+    )
+    hits_same_meta = _similar_managed_skills(store, same_meta_diff_body, threshold_percent=70)
+    assert [m["name"] for m in hits_same_meta] == ["alpha-tool"]
+
+    # 2) 不相交元数据 + 部分共享正文（非完全同指纹） -> 不得命中；
+    disjoint_shared_body = SkillLearningDecision(
+        decision="create",
+        reason="新建",
+        update_target="",
+        name="zenith-pdf-ocr",
+        description="extract tabular raster layout from scanned invoices",
+        when_to_use="processing multi page image pdf archives",
+        tags=("ocr", "pdf"),
+        body=base_body + "\n3. 追加一处独立字段校对标记。",
+    )
+    assert _similar_managed_skills(store, disjoint_shared_body, threshold_percent=70) == []
+
+    # 3) 整数交叉乘法精确边界：139/200 (69.5%) 在 70% 下不命中，140/200 (70%) 命中；
+    pool = [f"q{i:02x}" for i in range(210)]
+    shared_140 = pool[:140]
+    cand_only_60 = pool[140:200]
+
+    def _pack(tokens: list[str]) -> tuple[str, str, tuple[str, ...]]:
+        desc = " ".join(tokens[:50])
+        when = " ".join(tokens[50:125])
+        rest = tokens[125:]
+        tags = tuple(" ".join(rest[i:i + 15]) for i in range(0, len(rest), 15))
+        return desc, when, tags
+
+    r_desc, r_when, r_tags = _pack(shared_140)
+    # 改用纯停用词 "and" / "the" 命名以便精确控制 union == 200；
+    _seed(
+        "and",
+        description=r_desc,
+        when_to_use=r_when,
+        tags=r_tags,
+        body=f"{BODY}\n\nSeed record boundary body variant alpha.",
+    )
+    # 设 candidate 拥有 shared_140[:139] + cand_only_60，union = 200, inter = 139 -> 13900 < 14000；
+    c139 = shared_140[:139] + cand_only_60[:60]
+    c_desc, c_when, c_tags = _pack(c139)
+    cand_139 = SkillLearningDecision(
+        decision="create",
+        reason="边界测试",
+        update_target="",
+        name="the",
+        description=c_desc,
+        when_to_use=c_when,
+        tags=c_tags,
+        body=f"{BODY}\n\nCandidate boundary body variant omega.",
+    )
+    rec_140_set = _metadata_similarity_tokens("and", r_desc, r_when, r_tags, tokenize)
+    cand_139_set = _metadata_similarity_tokens("the", c_desc, c_when, c_tags, tokenize)
+    assert len(cand_139_set & rec_140_set) == 139
+    assert len(cand_139_set | rec_140_set) == 200
+    assert _similar_managed_skills(store, cand_139, threshold_percent=70) == []
+
+    # 140/200 命中；
+    c140 = shared_140 + cand_only_60[:60]
+    c140_desc, c140_when, c140_tags = _pack(c140)
+    cand_140 = replace(cand_139, description=c140_desc, when_to_use=c140_when, tags=c140_tags)
+    hits_140 = _similar_managed_skills(store, cand_140, threshold_percent=70)
+    assert [m["name"] for m in hits_140] == ["and"]
+    assert hits_140[0]["similarity_percent"] == 70
+
+    # 4) 空元数据返回空集（union 为空 => 0），且纯标题无词元正文不触发 family 短路；
+    assert _metadata_similarity_tokens("", "   ", "---", (), tokenize) == set()
+    _seed(
+        "for",
+        description="---",
+        when_to_use="---",
+        tags=(),
+        body="# Headings Only Section One\n## Headings Only Section Two\n" + "#" * 80,
+    )
+    headings_only = SkillLearningDecision(
+        decision="create",
+        reason="空元数据与纯标题检查",
+        update_target="",
+        name="in",
+        description="---",
+        when_to_use="---",
+        tags=(),
+        body="# Headings Only Section One\n## Headings Only Section Two\n" + "#" * 80,
+    )
+    assert _similar_managed_skills(store, headings_only, threshold_percent=1) == []
+
+
+def test_retry_merge_first_timeout_and_busy_follow_retry_contract(tmp_path: Path) -> None:
+    profile = "w3-merge-retry-test-profile"
+    clear_auxiliary_profile_cooldown(profile)
+    try:
+        home = ensure_my_agent_home(tmp_path / "home")
+        store = SkillLearningStore.for_home(home)
+        publish_learned_skill(
+            store,
+            PublishRequest(
+                SkillLearningDecision(
+                    decision="create",
+                    reason="先置既有技能",
+                    update_target="",
+                    name="csv-merge-by-date",
+                    description="合并多个日期 CSV 账单并校验列",
+                    when_to_use="需要合并多个 CSV 文件时",
+                    tags=("csv",),
+                    body=f"{BODY}\n\n# seed-existing",
+                ),
+                {"request_key": "seed-1", "run_id": "seed-1"},
+                frozenset(),
+                max_skills=50,
+                guard_config=None,
+            ),
+        )
+        cfg = AgentConfig(
+            my_agent_home=str(tmp_path / "home"),
+            prompt_files=[],
+            enable_self_learning=True,
+            memory_curator_model_profile=profile,
+        )
+        first_dup = json.loads(_output(name="csv-merge-copy"))
+        calls = {"n": 0}
+
+        class _RetryFailingBackend:
+            name = "test-retry-backend"
+
+            def generate_structured(self, prompt: str, *, response_schema: dict, messages=None):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return SimpleNamespace(text=json.dumps(first_dup, ensure_ascii=False))
+                if calls["n"] == 2:
+                    raise TimeoutError("merge retry timed out")
+                if calls["n"] == 3:
+                    return SimpleNamespace(text=json.dumps(first_dup, ensure_ascii=False))
+                raise CuratorModelStillRunningError("in_flight")
+
+        service = SkillLearningService(
+            store,
+            SkillLearningSettings(min_tool_rounds=3, max_skills=50, merge_similarity_percent=70),
+            SkillLearningRuntime(
+                owner_id="local:main",
+                deployment_root=tmp_path / "dep",
+                backend=_RetryFailingBackend(),
+                snapshot_provider=lambda: SimpleNamespace(
+                    entries=(
+                        SimpleNamespace(
+                            name="csv-merge-by-date",
+                            source="owner",
+                            description="合并多个日期 CSV 账单并校验列",
+                            path=store.skill_path("csv-merge-by-date"),
+                            stable_id="owner:csv-merge-by-date",
+                        ),
+                    )
+                ),
+                guard_config=None,
+                config_provider=lambda: cfg,
+            ),
+        )
+        assert service.enqueue_from_finalize(_finalize_ctx("r-timeout")) == "queued"
+
+        # 合并重试第 2 次调用超时 -> 必须递增 attempts 并进入冷却，不得 attempts=0 卡死 FIFO；
+        timeout_res = service.run_pending()
+        assert timeout_res.status == STATUS_RETRY
+        assert timeout_res.code == CODE_MODEL_TIMEOUT
+        [pending_path] = store.pending_requests()
+        persisted = store.read_request(pending_path)
+        assert persisted is not None and persisted.get("attempts") == 1
+        assert auxiliary_profile_cooldown_remaining(profile) > 0
+
+        # 清零冷却后，第 2 次调用返回 CuratorModelStillRunningError -> 返回 STATUS_BUSY 且不丢请求；
+        clear_auxiliary_profile_cooldown(profile)
+        busy_res = service.run_pending()
+        assert busy_res.status == STATUS_BUSY
+        assert len(store.pending_requests()) == 1
+    finally:
+        clear_auxiliary_profile_cooldown(profile)
+
+
+def test_retry_merge_first_respects_daily_limit_budget(tmp_path: Path) -> None:
+    home = ensure_my_agent_home(tmp_path / "home")
+    store = SkillLearningStore.for_home(home)
+    publish_learned_skill(
+        store,
+        PublishRequest(
+            SkillLearningDecision(
+                decision="create",
+                reason="先置既有技能",
+                update_target="",
+                name="csv-merge-by-date",
+                description="合并多个日期 CSV 账单并校验列",
+                when_to_use="需要合并多个 CSV 文件时",
+                tags=("csv",),
+                body=f"{BODY}\n\n# seed-budget",
+            ),
+            {"request_key": "seed-budget", "run_id": "seed-budget"},
+            frozenset(),
+            max_skills=50,
+            guard_config=None,
+        ),
+    )
+    backend = _FakeBackend(_output(name="csv-merge-copy"), _output(name="should-not-call"))
+    service = SkillLearningService(
+        store,
+        SkillLearningSettings(min_tool_rounds=3, max_skills=50, daily_limit=1, merge_similarity_percent=70),
+        SkillLearningRuntime(
+            owner_id="local:main",
+            deployment_root=tmp_path / "dep",
+            backend=backend,
+            snapshot_provider=lambda: SimpleNamespace(
+                entries=(
+                    SimpleNamespace(
+                        name="csv-merge-by-date",
+                        source="owner",
+                        description="合并多个日期 CSV 账单并校验列",
+                        path=store.skill_path("csv-merge-by-date"),
+                        stable_id="owner:csv-merge-by-date",
+                    ),
+                )
+            ),
+            guard_config=None,
+        ),
+    )
+    assert service.enqueue_from_finalize(_finalize_ctx("r-budget")) == "queued"
+    result = service.run_pending()
+
+    assert result.status == "rejected"
+    assert result.code == CODE_MERGE_DEFERRED
+    assert len(backend.prompts) == 1
+    assert list(store.load_registry().skills) == ["csv-merge-by-date"]

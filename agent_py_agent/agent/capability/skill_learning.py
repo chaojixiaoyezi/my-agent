@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -36,7 +37,10 @@ from .skill_learning_prompt import (
     DECISION_INEFFECTIVE,
     DECISION_SKIP,
     DECISION_UPDATE,
+    DESCRIPTION_MAX_CHARS,
     EXISTING_DESCRIPTION_CHARS,
+    TAGS_MAX_COUNT,
+    WHEN_TO_USE_MAX_CHARS,
     SkillLearningDecision,
     SkillLearningMaterial,
     SkillLearningOutputError,
@@ -683,32 +687,77 @@ class SkillLearningService:
                 return SkillLearningRunResult(STATUS_DAILY_LIMIT, request_key=str(request.get("request_key") or ""))
             if not reserve_deployment_learning(self.runtime.deployment_root, live_settings.global_daily_limit):
                 return SkillLearningRunResult("global_daily_limit", request_key=str(request.get("request_key") or ""))
-        from ..settings.curator_profile import (
-            auxiliary_profile_cooldown_remaining,
-            clear_auxiliary_profile_cooldown,
-            record_auxiliary_profile_failure,
-        )
+        from ..settings.curator_profile import auxiliary_profile_cooldown_remaining
 
-        aux_profile = str(getattr(getattr(self.runtime, "guard_config", None), "memory_curator_model_profile", "") or "").strip()
+        aux_profile = self._auxiliary_profile()
         if aux_profile and auxiliary_profile_cooldown_remaining(aux_profile) > 0:
             return SkillLearningRunResult(STATUS_BUSY, request_key=str(request.get("request_key") or ""))
 
         material = _material(self.store, request, _snapshot_entries(self.runtime.snapshot_provider))
         try:
+            response = self._call_model_guarded(material, run_path=path, run_request=request)
+            event = self._decide(
+                material,
+                str(getattr(response, "text", "") or ""),
+                live_settings=live_settings,
+                run_path=path,
+                run_request=request,
+            )
+        except _RetryRunAbort as abort:
+            return abort.result
+        return self._finish(path, request, event)
+
+    # LLM: 同时读取 live_cfg 与 guard_config 解析辅助模型 profile，缺省 guard_config 时仍能对齐冷却计数。
+    # 函数用途: 获取当前生效的辅助模型 profile 名称。
+    def _auxiliary_profile(self) -> str:
+        config_provider = getattr(self.runtime, "config_provider", None)
+        live_cfg = config_provider() if callable(config_provider) else None
+        for cfg in (live_cfg, getattr(self.runtime, "guard_config", None)):
+            if cfg is not None and hasattr(cfg, "memory_curator_model_profile"):
+                return str(getattr(cfg, "memory_curator_model_profile", "") or "").strip()
+        return ""
+
+    # LLM: 统一保护首次与合并重试的受限模型调用：不确定执行异常原样上抛，正在运行返回忙等待，其余失败按 attempts 退避落盘。
+    # 函数用途: 执行一次带冷却计数和异常处理保护的自主学习模型调用。
+    def _call_model_guarded(
+        self,
+        material: SkillLearningMaterial,
+        *,
+        run_path: Path | None = None,
+        run_request: dict[str, object] | None = None,
+    ) -> object:
+        from ..settings.curator_profile import (
+            clear_auxiliary_profile_cooldown,
+            record_auxiliary_profile_failure,
+        )
+
+        aux_profile = self._auxiliary_profile()
+        try:
             response = self._call_model(material)
             if aux_profile:
                 clear_auxiliary_profile_cooldown(aux_profile)
-        except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
-                ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
+            return response
+        except (
+            RequestExecutionOutcomeUncertainError,
+            RequestExecutionContextUnavailable,
+            ToolWriteContextUnavailable,
+            BoundedCallExitUnconfirmedError,
+        ):
             raise
-        except CuratorModelStillRunningError:
-            return SkillLearningRunResult(STATUS_BUSY, request_key=str(request.get("request_key") or ""))
-        except Exception as exc:  # noqa: BLE001 - 供应商故障只影响这一条请求，按重试合同记账。
+        except CuratorModelStillRunningError as exc:
+            if run_path is not None:
+                req = run_request if run_request is not None else material.request
+                raise _RetryRunAbort(
+                    SkillLearningRunResult(STATUS_BUSY, request_key=str(req.get("request_key") or ""))
+                ) from exc
+            raise
+        except Exception as exc:  # noqa: BLE001 - 供应商故障只影响这一条请求，按重试合同记账并更新冷却时间。
             if aux_profile:
                 record_auxiliary_profile_failure(aux_profile, type(exc).__name__)
-            return self._retry_or_drop(path, request, exc)
-        event = self._decide(material, str(getattr(response, "text", "") or ""), live_settings=live_settings)
-        return self._finish(path, request, event)
+            if run_path is not None:
+                req = run_request if run_request is not None else material.request
+                raise _RetryRunAbort(self._retry_or_drop(run_path, req, exc)) from exc
+            raise
 
     # LLM: 后台线程没有前台的会话 ContextVar：按 owner_id + 请求键自绑宿主会话（同一请求的重试共用同一会话值、
     #   不冒用前台线程会话），bounded_call 的 copy_context 会把它带进供应商调用线程；退出即复位。
@@ -737,7 +786,15 @@ class SkillLearningService:
     # LLM: 显式总结或目录失败只提案；Verify不占原短门，写入重新核来源，归属/CAS/guard/配额始终保留。
     #   对高相似新建触发至多1次合并优先重试；ineffective走宿主通道B负向记次；提交前重核最新开关。
     # 函数用途: 解析精确候选并按机器验证发布owner learned方法、记录通道B负向或延迟重复新建。
-    def _decide(self, material: SkillLearningMaterial, text: str, *, live_settings: SkillLearningSettings | None = None) -> SkillLearningEvent:
+    def _decide(
+        self,
+        material: SkillLearningMaterial,
+        text: str,
+        *,
+        live_settings: SkillLearningSettings | None = None,
+        run_path: Path | None = None,
+        run_request: dict[str, object] | None = None,
+    ) -> SkillLearningEvent:
         active_settings = live_settings or self.settings
         request = material.request
         updatable = frozenset(str(item.get("name") or "") for item in material.updatable_skills)
@@ -764,6 +821,8 @@ class SkillLearningService:
                     decision,
                     similar,
                     live_settings=active_settings,
+                    run_path=run_path,
+                    run_request=run_request,
                 )
                 if retry_event is not None:
                     return retry_event
@@ -831,6 +890,8 @@ class SkillLearningService:
         similar: list[dict[str, object]],
         *,
         live_settings: SkillLearningSettings,
+        run_path: Path | None = None,
+        run_request: dict[str, object] | None = None,
     ) -> tuple[SkillLearningMaterial, SkillLearningDecision, SkillLearningEvent | None]:
         request = material.request
         registry = self.store.load_registry()
@@ -863,7 +924,41 @@ class SkillLearningService:
                 skill_name=initial_decision.name,
                 reason="自学习已在合并重试前关闭，本次未写入技能。",
             )
-        response = self._call_model(retry_material)
+        from ..settings.curator_profile import auxiliary_profile_cooldown_remaining
+        from .skill_learning_budget import (
+            deployment_learning_available,
+            reserve_deployment_learning,
+        )
+
+        aux_profile = self._auxiliary_profile()
+        if aux_profile and auxiliary_profile_cooldown_remaining(aux_profile) > 0:
+            if run_path is not None:
+                req = run_request if run_request is not None else request
+                raise _RetryRunAbort(
+                    SkillLearningRunResult(STATUS_BUSY, request_key=str(req.get("request_key") or ""))
+                )
+            return retry_material, initial_decision, replace(
+                _request_event(EVENT_REJECTED, CODE_MERGE_DEFERRED, request),
+                skill_name=initial_decision.name,
+                reason="辅助模型处于退避冷却期，本次合并优先重试已延迟，未写入重复技能。",
+            )
+        if not deployment_learning_available(self.runtime.deployment_root, latest_settings.global_daily_limit):
+            return retry_material, initial_decision, replace(
+                _request_event(EVENT_REJECTED, CODE_MERGE_DEFERRED, request),
+                skill_name=initial_decision.name,
+                reason="全局每日自主学习额度已用尽，本次合并优先重试已延迟，未写入重复技能。",
+            )
+        with gateway_short_transaction("skill_learning_reserve_call"):
+            if (
+                not self.store.consume_daily_call(latest_settings.daily_limit)
+                or not reserve_deployment_learning(self.runtime.deployment_root, latest_settings.global_daily_limit)
+            ):
+                return retry_material, initial_decision, replace(
+                    _request_event(EVENT_REJECTED, CODE_MERGE_DEFERRED, request),
+                    skill_name=initial_decision.name,
+                    reason="每日自主学习额度已用尽，本次合并优先重试已延迟，未写入重复技能。",
+                )
+        response = self._call_model_guarded(retry_material, run_path=run_path, run_request=run_request)
         try:
             retry_decision = parse_skill_learning_decision(
                 str(getattr(response, "text", "") or ""),
@@ -1148,7 +1243,41 @@ def _active_lessons_context(store: SkillLearningStore) -> tuple[dict[str, object
     return tuple(out)
 
 
-# LLM: 复用 router.tokenize Jaccard 与 canonical task_family_fingerprint，无额外向量依赖；仅与未归档受管自学 Skill 比较。
+class _RetryRunAbort(Exception):
+    """内部控制流异常：把合并重试阶段触发的忙等待/退避结果透传回 _run_first。"""
+
+    def __init__(self, result: SkillLearningRunResult) -> None:
+        super().__init__(result.status)
+        self.result = result
+
+
+# LLM: 与 skill_learning_store.skill_family_fingerprint 保持一致去 frontmatter 与标题行，防止纯标题空正文算出伪指纹。
+# 函数用途: 判断技能正文在去除 frontmatter 与标题行后是否包含至少一个词元。
+def _skill_family_has_tokens(body: str) -> bool:
+    stripped = re.sub(r"\A---\n.*?\n---\n", "", body or "", flags=re.S)
+    stripped = re.sub(r"^#{1,6}[^\n]*", "", stripped, flags=re.M)
+    return bool(re.findall(r"[\w]+", stripped.casefold()))
+
+
+# LLM: 严格遵循 frozen algorithms.merge / merge_tokenizer，只在有界规范化元数据（name/description/when_to_use/tags）上分词，绝不混入正文。
+# 函数用途: 计算用于合并相似度 Jaccard 比对的纯元数据词元集合。
+def _metadata_similarity_tokens(
+    name: str,
+    description: str,
+    when_to_use: str,
+    tags: object,
+    tokenize_fn: Callable[[str], list[str]],
+) -> set[str]:
+    norm_name = " ".join(str(name or "").split())[:64]
+    norm_desc = " ".join(str(description or "").split())[:DESCRIPTION_MAX_CHARS]
+    norm_when = " ".join(str(when_to_use or "").split())[:WHEN_TO_USE_MAX_CHARS]
+    raw_tags = tags if isinstance(tags, (list, tuple)) else ()
+    norm_tags = [" ".join(str(tag or "").split())[:64] for tag in list(raw_tags)[:TAGS_MAX_COUNT]]
+    joined = " ".join(part for part in (norm_name, norm_desc, norm_when, *norm_tags) if part)
+    return set(tokenize_fn(joined)) if joined else set()
+
+
+# LLM: 复用 router.tokenize 纯元数据 Jaccard（整数交叉乘法）与非空词元正文 task_family_fingerprint；仅比对未归档受管自学 Skill。
 # 函数用途: 检索与新建候选相似度达到阈值的既有自学 Skill，按相似度降序截断返回。
 def _similar_managed_skills(
     store: SkillLearningStore,
@@ -1174,13 +1303,17 @@ def _similar_managed_skills(
         return []
     ca = decision.candidate_asset if isinstance(decision.candidate_asset, dict) else {}
     cand_kind = str(ca.get("kind") or "skill")
-    cand_fp = (
-        task_family_fingerprint(cand_kind, ca)
-        if cand_kind in {"script", "workflow"}
-        else skill_family_fingerprint(decision.body)
+    if cand_kind in {"script", "workflow"}:
+        cand_fp = task_family_fingerprint(cand_kind, ca)
+    else:
+        cand_fp = skill_family_fingerprint(decision.body) if _skill_family_has_tokens(decision.body) else ""
+    cand_tokens = _metadata_similarity_tokens(
+        decision.name,
+        decision.description,
+        decision.when_to_use,
+        decision.tags,
+        tokenize,
     )
-    cand_text = " ".join([decision.name, decision.description, decision.when_to_use, *decision.tags, decision.body])
-    cand_tokens = set(tokenize(cand_text))
     matches: list[dict[str, object]] = []
     for rec_name, rec in sorted(managed.items()):
         if rec_name == decision.name:
@@ -1196,15 +1329,32 @@ def _similar_managed_skills(
         except Exception:  # noqa: BLE001 - 单条磁盘卡片解析失败跳过，不阻断其它相似比对。
             continue
         body_text = _body_of(text)
-        rec_fp = str(rec.maintenance.get("task_family_fingerprint") or "") or skill_family_fingerprint(body_text)
+        rec_fp = (
+            (str(rec.maintenance.get("task_family_fingerprint") or "") or skill_family_fingerprint(body_text))
+            if _skill_family_has_tokens(body_text)
+            else ""
+        )
         if cand_fp and rec_fp and cand_fp == rec_fp and cand_kind == "skill":
+            matched = True
             sim_pct = 100
         else:
-            rec_text = " ".join([rec_name, card.description, card.when_to_use, *card.tags, body_text])
-            rec_tokens = set(tokenize(rec_text))
+            rec_tokens = _metadata_similarity_tokens(
+                rec_name,
+                card.description,
+                card.when_to_use,
+                card.tags,
+                tokenize,
+            )
             union = cand_tokens | rec_tokens
-            sim_pct = round(100.0 * len(cand_tokens & rec_tokens) / len(union)) if union else 0
-        if sim_pct >= threshold_percent:
+            if not union:
+                matched = False
+                sim_pct = 0
+            else:
+                inter_count = len(cand_tokens & rec_tokens)
+                union_count = len(union)
+                matched = (100 * inter_count) >= (int(threshold_percent) * union_count)
+                sim_pct = (100 * inter_count) // union_count
+        if matched:
             matches.append({
                 "name": rec_name,
                 "similarity_percent": int(sim_pct),
