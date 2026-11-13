@@ -311,9 +311,9 @@ def _observe_generation_lines(lines, observer):
 #   （官方根代理两者相同），其它服务商保持原摘要。改动须同步 test_responses_cache_key。
 # 函数用途: 返回要并进 Responses 请求体的缓存键字段；没有绑定会话时返回空字典。
 def _session_cache_key(subscription: bool = False) -> dict:
-    from .provider_headers import chatgpt_session_uuid, current_provider_session
+    from .provider_headers import chatgpt_session_uuid, current_provider_affinity
 
-    session = chatgpt_session_uuid() if subscription else current_provider_session()
+    session = chatgpt_session_uuid() if subscription else current_provider_affinity()
     return {"prompt_cache_key": session} if session else {}
 
 

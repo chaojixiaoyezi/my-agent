@@ -238,3 +238,37 @@ def test_no_authority_db_or_no_failure_keeps_node_without_failure_summary(tmp_pa
     assert "recent_tool_failure" not in node
     # 没有权威次数时只写工具和错误码，不猜次数，也不再报成功。
     assert node["last_progress_summary"] == "最近一次工具调用失败：read_file（PATH_OWNER_SCOPE_BLOCKED）"
+
+
+def test_turn_input_deferrals_are_transparent_but_real_same_code_failure_counts():
+    from agent_py_agent.agent.subagents.tool_failure_ledger import (
+        archive_tool_call_facts,
+        event_tool_call_facts,
+    )
+
+    deferred = {'tool': 'write_file', 'ok': False, 'error_code': 'TURN_INPUT_PENDING',
+                'failure_stage': 'runtime_gate', 'handler_executed': False}
+    for facts in [archive_tool_call_facts([deferred, deferred]),
+                  event_tool_call_facts([{'payload': deferred}, {'payload': deferred}])]:
+        assert tool_failure_streak(facts) == {}
+        original = [_fail('read_file'), facts[0], _fail('read_file'), facts[1]]
+        streak = tool_failure_streak(original)
+        assert streak['consecutive_failures'] == 2 and streak['ongoing'] is True
+    executed = ToolCallFact('write_file', False, 'TURN_INPUT_PENDING', 'runtime_gate', True)
+    wrong_stage = ToolCallFact('write_file', False, 'TURN_INPUT_PENDING', 'execution', False)
+    assert tool_failure_streak([executed])['consecutive_failures'] == 1
+    assert tool_failure_streak([wrong_stage])['consecutive_failures'] == 1
+
+
+def test_runtime_ledger_keeps_deferral_audit_but_not_parent_failure_streak(tmp_path):
+    from agent_py_agent.agent.subagents.tool_failure_ledger import recent_tool_failure
+
+    manager, child = _managed_child(tmp_path)
+    for index in range(2):
+        _child_tool_call(manager, child, index, {'tool': 'write_file', 'ok': False,
+            'error_code': 'TURN_INPUT_PENDING', 'failure_stage': 'runtime_gate', 'handler_executed': False})
+    assert recent_tool_failure(manager.runtime_db, child.id) == {}
+    run = manager.runtime_db.agent_run_for_run_id(child.id)
+    events = manager.runtime_db.events_for_agent_run(run['agent_run_id'], event_type='tool_completed', limit=10)
+    assert len(events) == 2
+    assert all(row['payload']['error_code'] == 'TURN_INPUT_PENDING' for row in events)

@@ -27,7 +27,7 @@ from ..agent_core.model.call_runtime import (
 from ..agent_core.model.llm_metrics import record_llm_call
 from ..backends import ModelResponse, ProviderRequestOptions
 from ..backends.gateway_helpers import provider_attempt_observer
-from ..backends.provider_headers import provider_runtime_scope
+from ..backends.provider_headers import provider_runtime_scope, provider_transport_scope
 from ..backends.request_budget import RequestBudgetExceeded, RequestTokenBudget
 from ..backends.response_completion import has_reasoning_content
 from ..common.cancellation import raise_if_cancelled
@@ -365,7 +365,9 @@ def _invoke_auxiliary_generate(
 
     # 压缩类调用也算请求前缀诊断（backends/cache_diagnostics）：和上一次主请求比 system/工具/历史链，账本里留变化码，
     # 用来回答"压缩请求有没有复用主请求前缀"；不记正文，不改请求。
-    with provider_runtime_scope(request.agent, request), provider_attempt_observer(
+    # 普通进度插话不带主工具上下文，独立其传输锚点/缓存亲和；账本、权限和真实线程保持原身份。
+    transport_purpose = 'active_turn_input_reply' if request.purpose == 'active_turn_input_reply' else ''
+    with provider_runtime_scope(request.agent, request), provider_transport_scope(transport_purpose), provider_attempt_observer(
         _observe_provider_attempt, cache_diagnostics=_is_compact_purpose(request.purpose),
     ):
         with global_llm_admission_slot(), owner_model_activity_scope(request.agent):

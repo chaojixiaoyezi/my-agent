@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 _SESSION: ContextVar[str] = ContextVar("provider_session", default="")
+# 仅区分传输链/缓存亲和，不作为owner、线程、账本或授权身份。
+_TRANSPORT_PURPOSE: ContextVar[str] = ContextVar("provider_transport_purpose", default="")
 # ChatGPT 订阅接口按这个请求头决定提示缓存亲和（官方 Codex codex-rs/core/src/client.rs 的 responses_session_id；
 #   codex-api build_session_headers 的头名）。不带它时同一会话的请求会落到不同缓存分片，命中率低。
 CHATGPT_SESSION_HEADER_PROTOCOL = "session-id"
@@ -80,13 +82,31 @@ def current_provider_session() -> str:
     return _SESSION.get()
 
 
+def current_provider_affinity() -> str:
+    """按真实会话与宿主用途派生稳定亲和键；普通/compact调用保持原会话键。"""
+    session, purpose = _SESSION.get(), _TRANSPORT_PURPOSE.get()
+    if not session or not purpose:
+        return session
+    return hashlib.sha256(json.dumps([session, "transport-purpose.v1", purpose], ensure_ascii=True).encode()).hexdigest()
+
+
+@contextmanager
+def provider_transport_scope(purpose: str = ""):
+    """临时回复独立传输链；退出复位，当前真实线程及公平owner始终不变。"""
+    token = _TRANSPORT_PURPOSE.set(purpose)
+    try:
+        yield
+    finally:
+        _TRANSPORT_PURPOSE.reset(token)
+
+
 # LLM: 订阅登录（auth mode=chatgpt）专用的会话编号形态：官方 Codex 根代理的 session-id 头与 prompt_cache_key 是同一个 UUID，
 #   服务端按 session-id 把同一会话路由到同一份提示缓存。这里把宿主会话编号（owner+thread 的 sha256）前 128 位排成 UUID：
 #   同线程稳定、跨线程不同、不含凭据；未绑定会话返回空串（缓存亲和是优化，不是协议必需），绝不生成随机值。
 #   改动同步 test_responses_cache_key 与 test_model_oauth 的订阅用例。
 # 函数用途: 返回订阅接口用的会话 UUID；没有绑定宿主会话时返回空串。
 def chatgpt_session_uuid() -> str:
-    session = _SESSION.get()
+    session = current_provider_affinity()
     return str(UUID(hex=session[:32])) if session else ""
 
 
@@ -182,7 +202,7 @@ def request_headers(headers: dict[str, str], custom: dict[str, str], session_hea
         if not _SESSION.get():
             raise ValueError("此服务商需要会话编号，但当前请求没有绑定宿主会话。")
         merged = {key: text for key, text in merged.items() if key.lower() != session_header.lower()}
-        merged[session_header] = _SESSION.get()
+        merged[session_header] = current_provider_affinity()
     return merged
 
 

@@ -174,3 +174,49 @@ def test_human_prompt_shows_exact_targets_and_only_one_time_choice(agent, tmp_pa
     assert [item['decision'] for item in request.options] == ['approved', 'denied']
     with pytest.raises(ValueError, match='one-time'):
         request.approved_binding(ToolApprovalDecision(request.permission_id, 'approved_session'))
+
+
+@pytest.mark.parametrize('evidence', ['[RUN_STATUS] 证据', '[SUBAGENT_DONE] 证据'])
+def test_human_approval_target_survives_marker_and_long_free_text(agent, tmp_path, evidence):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.tool_loop.round_execution import _approval_description
+
+    _, _, params, tool = setup_adoption(agent, tmp_path)
+    params['params']['evidence_ref'] = evidence
+    pending = execute(agent, tool, params)
+    assert pending.decision.status == 'ask'
+    description = _approval_description(SimpleNamespace(agent=agent), 0, pending.call, require_human=True)
+    for key in ('space_id', 'asset_id', 'version_ref'):
+        assert params['params'][key] in description[:1600]
+    assert 'expected_revision' in description[:1600]
+    assert pending.call.args_hash in description
+    assert '（内部运行状态已省略）' in description
+
+
+@pytest.mark.parametrize('secret_field', ['password', 'api_key', 'database_password', 'authorization', 'client_secret'])
+def test_human_approval_redacts_opaque_nested_fields_without_changing_binding(secret_field):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.tool_loop.round_execution import _approval_description
+    from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
+
+    secret = 'ordinary opaque credential value without recognizable prefix'
+    arguments = {'action': 'approve-material', 'expected_revision': 17,
+        'params': {'asset_id': 'asset-public-target', 'version_ref': 'version-public-target',
+            'space_id': 'space-public-target', 'evidence_ref': '[RUN_STATUS] private runtime text',
+            'nested': [{secret_field: secret}, {secret_field: {'opaque': secret}}],
+            'public_note': 'public description ' * 700}}
+    call = ToolCall(call_id='key-aware-approval', tool_name='human_mcp_tool', arguments=arguments,
+        source_protocol='native', schema_hash='sha256:display-test', run_id='display-run',
+        turn_id='display-turn', attempt_id='display-attempt')
+    before, binding_hash = json.dumps(call.arguments, sort_keys=True), call.args_hash
+    description = _approval_description(SimpleNamespace(agent=SimpleNamespace()), 1, call, require_human=True)
+    assert secret not in description
+    assert '<redacted>' in description
+    assert '（内部运行状态已省略）' in description
+    for target in ('asset-public-target', 'version-public-target', 'space-public-target', '17'):
+        assert target in description[:700]
+    assert binding_hash in description
+    assert json.dumps(call.arguments, sort_keys=True) == before and call.args_hash == binding_hash
+    assert 'public description ' * 700 in description.split('完整参数（已净化）：', 1)[1]

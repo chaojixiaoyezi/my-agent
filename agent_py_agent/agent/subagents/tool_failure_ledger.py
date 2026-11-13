@@ -212,7 +212,10 @@ def tool_failure_streak(
     members: list[ToolCallFact] = []
     ongoing = True
     for fact in reversed(facts):
-        if _is_guardrail_self_block(fact):
+        if _is_guardrail_self_block(fact) or (
+            fact.error_code == "TURN_INPUT_PENDING"
+            and fact.failure_stage == "runtime_gate" and not fact.handler_executed
+        ):
             continue
         if not members and fact.ok:
             ongoing = False

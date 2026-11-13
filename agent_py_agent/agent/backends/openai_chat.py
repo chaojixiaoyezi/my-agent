@@ -124,10 +124,10 @@ class OpenAICompatibleBackend(HttpBackend):
     # LLM: 仅官方 HTTPS Chat 端点使用宿主 owner+thread 摘要；无绑定或其它服务商不发扩展字段。
     # 函数用途: 为同会话生成稳定且不含原始身份的缓存路由键，不改 backend 状态。
     def _session_cache_key(self) -> str:
-        from .provider_headers import current_provider_session
+        from .provider_headers import current_provider_affinity
 
         endpoint = urlsplit(self.api_base)
-        session = current_provider_session()
+        session = current_provider_affinity()
         return f"my-agent:{session[:48]}" if session and endpoint.scheme == "https" and endpoint.hostname == "api.openai.com" else ""
 
     # LLM: OpenAI-compatible 传输必须保持 system -> 规范会话/当前 user -> 原生工具历史的追加顺序；

@@ -11,7 +11,7 @@ from threading import Lock, Timer
 from urllib.parse import urlsplit, urlunsplit
 
 from .gateway_helpers import gateway_request_body
-from .provider_headers import current_provider_session
+from .provider_headers import current_provider_affinity, current_provider_session
 
 
 # LLM: 宿主ContextVar决定owner/thread隔离，所有认证/自定义头参与指纹；规范化模型名隔离socket与sticky状态。
@@ -31,7 +31,10 @@ def session_pool_key(request, provider_id: str = "") -> tuple | None:
     headers = sorted((name.lower(), value) for name, value in request.headers.items() if name.lower() != "x-codex-turn-state")
     fingerprint = hashlib.sha256(json.dumps([request.api_key, headers], ensure_ascii=True).encode()).hexdigest()
     model = str((request.payload or {}).get("model") or "").strip()
-    return provider_id, endpoint, fingerprint, model, session
+    # 空用途维持原键形状；派生用途独立socket/锚点，但原session末项保证reset连带撤销所有用途。
+    affinity = current_provider_affinity()
+    return (provider_id, endpoint, fingerprint, model, affinity, session) if affinity != session else (
+        provider_id, endpoint, fingerprint, model, session)
 
 
 # LLM: Values are opaque printable ASCII from provider response headers, not custom configuration or logs.

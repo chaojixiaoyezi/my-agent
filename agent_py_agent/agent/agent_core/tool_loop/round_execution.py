@@ -439,7 +439,15 @@ def _defer_unstarted_calls_if_needed(
     if position > 0 and getattr(request.params, "consume_pending_turn_input", True):
         from ..runtime.guidance import has_pending_turn_input
 
-        if has_pending_turn_input(request.agent, request.params):
+        try:
+            pending = has_pending_turn_input(request.agent, request.params)
+        except BaseException as error:
+            # 输入失源/取消仍交原宿主处理；先配对已获准但尚未启动的后缀，绝不重做已完成前缀。
+            _record_unstarted_calls(request, calls, start_idx=idx,
+                result_factory=partial(_input_probe_failed_result, error=error),
+                phase="interrupted", status="输入核验中断", primary_error=error)
+            raise
+        if pending:
             _record_unstarted_calls(request, calls, start_idx=idx,
                 result_factory=_input_pending_deferred_result, phase="deferred", status="等待处理新输入")
             progress.deferred_reason = "新输入等待模型消费，剩余调用未启动"
@@ -644,7 +652,7 @@ def _build_runtime_approval_request(
             require_human=execution.decision.evidence.get("human_confirmation_required") is True),
         grant_key=_owner_grant_key(request, execution.call),
         require_human=execution.decision.evidence.get("human_confirmation_required") is True,
-        owner_id=request.agent.home_paths.owner_id,
+        owner_id=getattr(getattr(request.agent, "home_paths", None), "owner_id", ""),
     )
     from ...user_space.approval_mode import deployment_approval_config
     valid = True
@@ -828,14 +836,49 @@ def _approval_description(
     call: ToolCall,
     *, require_human: bool = False,
 ) -> str:
-    # 强制真人确认必须能看到完整目标、版本及参数；正文仍走同一隐私净化，不走进度摘要截断。
-    detail = (json.dumps(call.arguments, ensure_ascii=False, sort_keys=True)
-              if require_human else _payload_progress_detail(call))
-    public_detail = _public_progress_text(
-        ToolProgressEvent(request, idx, call, "started", "等待审批"),
-        detail,
-        max_chars=None if require_human else 240,
-    )
+    event = ToolProgressEvent(request, idx, call, "started", "等待审批")
+    if require_human:
+        import hashlib
+
+        from ...common.log_redaction import redact_sensitive_value
+
+        # 目标身份独立置顶；不让某个自由文本值的内部标记或长正文遮住实际批准对象。
+        identities = []
+
+        def project(value, path="", *, preview=False):
+            if isinstance(value, dict):
+                result = {}
+                for key, item in value.items():
+                    field = str(key)
+                    current = f"{path}.{field}" if path else field
+                    identity = field.endswith(("_id", "_ref")) or field in {"action", "revision", "expected_revision"}
+                    rendered = project(item, current, preview=preview)
+                    if preview and identity and not isinstance(item, (dict, list)):
+                        identities.append(f"{current}: {rendered}")
+                    result[field] = rendered
+                return result
+            if isinstance(value, list):
+                return [project(item, f"{path}[{index}]", preview=preview) for index, item in enumerate(value)]
+            if not isinstance(value, str):
+                return value
+            text = _public_progress_text(event, value, max_chars=None)
+            if preview and len(text) > 512:
+                digest = hashlib.sha256(value.encode()).hexdigest()
+                return text[:512] + f"…（原值 {len(value)} 字符，sha256={digest}）"
+            return text
+
+        # 先按原结构键名遮蔽opaque凭据，再逐值净化内部标记；展示副本不改变批准绑定或实际参数。
+        safe_arguments = redact_sensitive_value(call.arguments)
+        projected = project(safe_arguments, preview=True)
+        details = json.dumps(projected, ensure_ascii=False, sort_keys=True)
+        if len(details) > 6000:
+            details = details[:6000] + "…（参数预览已省略；完整参数见下方）"
+        binding_hash = call.args_hash
+        full = json.dumps(project(safe_arguments), ensure_ascii=False, sort_keys=True)
+        public_detail = ("批准目标：\n" + "\n".join(identities)
+            + f"\n完整参数哈希：{binding_hash}\n参数预览：{details}\n完整参数（已净化）：{full}")
+    else:
+        public_detail = _public_progress_text(event, _payload_progress_detail(call), max_chars=240)
     return f"{call.tool_name}({public_detail})" if public_detail else call.tool_name
 
 
@@ -975,16 +1018,19 @@ def _execute_parallel_segment(
         if scheduler is not None:
             if wait_input_reply_enabled(request):
                 futures = [_submit_round_item(request, scheduler, item) for item in items]
-                return await_tool_futures(request, futures)
+                return await_tool_futures(request, futures,
+                    before_input_error=partial(_record_completed_before_input_error, request))
             return execute_work_items(items, partial(_submit_round_item, request, scheduler))
         if wait_input_reply_enabled(request):
-            return await_tool_futures(request, [submit_wait_item(item) for item in items])
+            return await_tool_futures(request, [submit_wait_item(item) for item in items],
+                before_input_error=partial(_record_completed_before_input_error, request))
         with ThreadPoolExecutor(
             max_workers=len(items),
             thread_name_prefix="my-agent-tool",
         ) as pool:
             futures = [pool.submit(item.captured_context.run, item.run) for item in items]
-            return (await_tool_futures(request, futures) if wait_input_reply_enabled(request)
+            return (await_tool_futures(request, futures,
+                        before_input_error=partial(_record_completed_before_input_error, request)) if wait_input_reply_enabled(request)
                     else [future.result() for future in futures])
 
 
@@ -1110,6 +1156,12 @@ def _execute_parallel_call(
 # LLM: 串行与批准重试共用单项边界及控制通道；启用等待答复时使用工作线程，并同步工作区晋升。
 # 函数用途: 为一条原执行请求安装可选owner额度和始终复用的独立SQLite作用域。
 def _execute_owned_serial(request, work, *, emit_started=False):
+    started_at = time.monotonic()
+
+    def record_before_input_error(results, error):
+        _record_completed_before_input_error(request,
+            [(work.idx, work.call, started_at, results[0])], error)
+
     scheduler = scheduler_for_agent(request.agent)
     waiting = wait_input_reply_enabled(request)
     context = _capture_parallel_thread_context(request.agent) if scheduler is not None or waiting else None
@@ -1121,7 +1173,8 @@ def _execute_owned_serial(request, work, *, emit_started=False):
     if scheduler is None:
         if not waiting:
             return item.run()
-        execution = await_tool_futures(request, [submit_wait_item(item)])[0]
+        execution = await_tool_futures(request, [submit_wait_item(item)],
+            before_input_error=record_before_input_error)[0]
         if promoted and promoted[-1] is not None:
             request.agent._current_run_task_workspace = promoted[-1]
         return execution
@@ -1129,7 +1182,8 @@ def _execute_owned_serial(request, work, *, emit_started=False):
     cancel = getattr(token, "cancel", None)
     with register_interrupt_callback(lambda: cancel("interrupted") if callable(cancel) else None):
         future = _submit_round_item(request, scheduler, item)
-        execution = await_tool_futures(request, [future])[0] if waiting else future.result()
+        execution = await_tool_futures(request, [future],
+            before_input_error=record_before_input_error)[0] if waiting else future.result()
     if promoted and promoted[-1] is not None:
         request.agent._current_run_task_workspace = promoted[-1]
     return execution
@@ -1555,6 +1609,30 @@ def _runtime_transition_after_tool(
 
 
 
+def _record_completed_before_input_error(request, outcomes, error):
+    """输入失源只打断后续执行；已退出worker的原结果仍按provider顺序配对，不触发新host动作。"""
+    last_idx = 0
+    for idx, call, started_at, execution in outcomes:
+        last_idx = idx
+        result = execution.result
+        try:
+            _emit_tool_progress(ToolProgressEvent(request, idx, call, "finished",
+                _finished_status(result), started_at, result))
+            request.record_one(ToolCallRecordParams(request.params, request.tool_rounds, idx, call,
+                result, execution.states, model_call=_model_visible_call(request, idx, call),
+                actor=request.actor, decision_ref=request.decision_ref))
+        except BaseException as recording_error:
+            error.add_note(f"completed call receipt {idx}: {type(recording_error).__name__}")
+            try:
+                _ensure_minimal_tool_context_pairing(request, idx, call, result)
+            except BaseException as pairing_error:
+                error.add_note(f"completed call pairing {idx}: {type(pairing_error).__name__}")
+    if last_idx:
+        _record_unstarted_calls(request, list(request.calls), start_idx=last_idx + 1,
+            result_factory=partial(_input_probe_failed_result, error=error), phase="interrupted",
+            status="输入核验中断", primary_error=error)
+
+
 def _record_unstarted_calls(
     request: ToolRoundExecutionRequest,
     calls: list[ToolCall],
@@ -1563,6 +1641,7 @@ def _record_unstarted_calls(
     result_factory: Callable[[ToolCall], ToolResult],
     phase: Literal["deferred", "interrupted"],
     status: str,
+    primary_error: BaseException | None = None,
 ) -> None:
     """Pair every admitted but unstarted call with one host-owned terminal result."""
 
@@ -1570,9 +1649,9 @@ def _record_unstarted_calls(
         return
     for idx, call in enumerate(calls[start_idx - 1 :], start=start_idx):
         result = result_factory(call)
-        _emit_tool_progress(ToolProgressEvent(request, idx, call, phase, status, result=result))
-        request.record_one(
-            ToolCallRecordParams(
+        try:
+            _emit_tool_progress(ToolProgressEvent(request, idx, call, phase, status, result=result))
+            request.record_one(ToolCallRecordParams(
                 request.params,
                 request.tool_rounds,
                 idx,
@@ -1586,8 +1665,16 @@ def _record_unstarted_calls(
                 ),
                 model_call=_model_visible_call(request, idx, call),
                 deferred=phase == "deferred",
-            )
-        )
+            ))
+        except BaseException as bookkeeping_error:
+            if primary_error is None:
+                raise
+            # 原输入异常仍为首因；一次记账失败不能使后面的未启动调用全丢失。
+            primary_error.add_note(f"unstarted call receipt {idx}: {type(bookkeeping_error).__name__}")
+            try:
+                _ensure_minimal_tool_context_pairing(request, idx, call, result)
+            except BaseException as pairing_error:
+                primary_error.add_note(f"unstarted call pairing {idx}: {type(pairing_error).__name__}")
 
 
 # LLM: Provider history must replay the exact admitted model arguments, while execution may carry
@@ -1759,6 +1846,23 @@ def _append_compact_deferred_notice(
         f"本轮第 {idx} 个 {tool_name or 'tool'} 调用已登记为 CONTEXT_COMPACT_DEFERRED，实际没有执行。\n"
         "系统会先走 compact/resume，再继续未执行的读取、搜索或命令；不要把这个工具调用当作已经完成。"
     )
+
+
+def _input_probe_failed_result(call: ToolCall, *, error: BaseException) -> ToolResult:
+    from ...common.cancellation import ToolCancelled
+    from ...tooling.mcp_client import sanitize_credentials
+
+    cancelled = isinstance(error, (ToolCancelled, InterruptedError, KeyboardInterrupt))
+    cause_code = str(getattr(error, "error_code", "") or "TURN_INPUT_PROBE_FAILED")
+    payload = {"error_code": cause_code, "error_type": type(error).__name__,
+        "cause": sanitize_credentials(str(error))[:500], "effect_outcome": "not_started",
+        "error": "输入安全点核验中断，本工具尚未启动；已完成工具的原结果保持不变。",
+        "next_action": "先按原输入异常核验执行上下文，再判断是否需要未启动调用；禁止重做已完成前缀。"}
+    return ToolResult.failed(call, json.dumps(payload, ensure_ascii=False),
+        error_code="CANCELLED" if cancelled else "TOOL_ERROR", failure_stage="runtime_gate",
+        facts=ToolFailureFacts(status="cancelled" if cancelled else "failed",
+            effect_outcome="not_started", handler_executed=False,
+            metadata={"reported_error_code": cause_code, "input_probe_error_type": type(error).__name__}))
 
 
 def _input_pending_deferred_result(call: ToolCall) -> ToolResult:

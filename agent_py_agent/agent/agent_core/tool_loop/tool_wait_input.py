@@ -40,7 +40,7 @@ def enabled(request):
             and getattr(request.params, 'consume_pending_turn_input', True) is not False)
 
 
-def await_tool_futures(request, futures, *, input_reply=None):
+def await_tool_futures(request, futures, *, input_reply=None, before_input_error=None):
     """不取消/替换Future，不造ToolResult；输入处理失败也等原物理工作完成并保留结果。"""
     reply = input_reply or reply_to_pending_input
     failed = False
@@ -70,6 +70,12 @@ def await_tool_futures(request, futures, *, input_reply=None):
                     break
         results = [future.result() for future in futures]
         if input_error is not None:
+            # 已启动工具的真实结果先交原轮次按序记账；输入失源不能把物理成功变成未执行或丢掉回执。
+            if before_input_error is not None:
+                try:
+                    before_input_error(results, input_error)
+                except BaseException as recording_error:
+                    input_error.add_note('completed tool receipt: ' + type(recording_error).__name__)
             raise input_error
         return results
     except BaseException as error:
@@ -238,7 +244,11 @@ def reply_to_pending_input(request):
     bindings = {binding.channel for binding in thread.channel_bindings}
     local_transport = source_channels == {'chat'} or (source_channels == {''} and bindings == {'chat'})
     local_delivery = delivered and local_transport
-    original.runtime_injections.append(('[工具等待时已向用户回复]' if local_delivery
+    from ..native_tool_protocol import native_tool_use_active
+
+    # native注入会投影成IR尾部事实；文本路径的注入区在旧工具历史之前，必须改沿原tool_context尾部追加。
+    context = original.runtime_injections if native_tool_use_active(original) else original.tool_context
+    context.append(('[工具等待时已向用户回复]' if local_delivery
         else '[临时回复已生成，原通道交付仍待确认]') + '\n' + message.content)
     if local_delivery:
         settle(store.storage, thread_id, reply_task_id, reply_ids)

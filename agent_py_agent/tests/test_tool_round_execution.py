@@ -2015,3 +2015,179 @@ def test_task_progress_items_attached_to_structured_progress() -> None:
     ]
     assert _task_progress_items_from_output("not json") is None
     assert _task_progress_items_from_output("") is None
+
+
+@pytest.mark.parametrize('require_human', [False, True])
+def test_missing_owner_runtime_approval_never_invents_human_authority(require_human):
+    call = _canonical_calls([{'tool': 'run_command', 'command': 'echo fixture'}])[0]
+    execution = _approval_pending(SimpleNamespace(call=call))
+    execution = replace(execution, decision=replace(execution.decision,
+        evidence={'human_confirmation_required': require_human}))
+    request = SimpleNamespace(agent=SimpleNamespace(), params=SimpleNamespace(request_id='missing-owner'),
+                              tool_rounds=1, actor='model')
+    if require_human:
+        with pytest.raises(ValueError, match='requires canonical owner'):
+            round_module._build_runtime_approval_request(request, 0, execution)
+    else:
+        approval, valid = round_module._build_runtime_approval_request(request, 0, execution)
+        assert valid and 'owner_id' not in approval.binding
+
+
+def test_human_long_arguments_keep_exact_target_above_bounded_preview():
+    import hashlib
+
+    text = 'long free text ' * 2000
+    call = _canonical_calls([{'tool': 'run_command', 'evidence': text,
+        'params': {'space_id': 'space-exact', 'asset_id': 'asset-exact', 'version_ref': 'version-exact'},
+        'expected_revision': 17}])[0]
+    request = SimpleNamespace(agent=SimpleNamespace())
+    description = round_module._approval_description(request, 0, call, require_human=True)
+    for value in ['space-exact', 'asset-exact', 'version-exact', '17']:
+        assert value in description[:700]
+    assert call.args_hash in description
+    assert hashlib.sha256(text.encode()).hexdigest() in description
+    preview, full = description.split('完整参数（已净化）：', 1)
+    assert len(preview) < 2000
+    assert text in full
+
+
+@pytest.mark.parametrize('prefix_count', [1, 2])
+@pytest.mark.parametrize('cause_kind', ['ordinary', 'source_unavailable', 'cancelled'])
+def test_input_probe_error_pairs_only_unstarted_suffix_and_preserves_original_exception(monkeypatch, prefix_count, cause_kind):
+    from agent_py_agent.agent.common.cancellation import ToolCancelled
+    from agent_py_agent.agent.common.request_execution_ports import (
+        RequestExecutionContextUnavailable,
+    )
+
+    causes = {'ordinary': RuntimeError('probe failed password=opaque-secret'),
+        'source_unavailable': RequestExecutionContextUnavailable('original input source unavailable'),
+        'cancelled': ToolCancelled('original cancellation during probe')}
+    original = causes[cause_kind]
+    executed, records, probes = [], [], []
+
+    def probe(agent, params, *, deadline=None):
+        probes.append(deadline)
+        raise original
+
+    source = SimpleNamespace(require_original=lambda agent: None, probe=probe)
+    params = SimpleNamespace(tool_context=[], pending_turn_input_source=source,
+                             consume_pending_turn_input=True)
+    calls = [{'tool': 'read_file', 'path': f'input-{i}'} for i in range(prefix_count + 2)]
+    monkeypatch.setattr(round_module, 'parallel_segment_end',
+        lambda batch, position, **kwargs: min(position + prefix_count, len(batch)))
+    monkeypatch.setattr(round_module, '_should_defer_for_compact', lambda *args: False)
+    # 原执行体仍调用一次；这里只固定分段，不模拟工具结果的配对或输入安全点。
+    def execute(request):
+        executed.append(request.call.call_id)
+        return _success(request, 'confirmed prefix effect')
+
+    request = _round_request(agent=SimpleNamespace(), params=params, tool_rounds=1,
+        response=ModelResponse(text='', backend='test'), calls=calls,
+        execute_one=execute, record_one=records.append)
+    with pytest.raises(type(original)) as raised:
+        execute_tool_round(request)
+    assert raised.value is original
+    assert len(probes) == 1 and len(executed) == prefix_count
+    assert len(records) == len(calls)
+    assert [r.call.call_id for r in records] == [c.call_id for c in request.calls]
+    for record in records[:prefix_count]:
+        assert record.result.ok and record.result.effect_outcome == 'confirmed'
+        assert record.result.handler_executed is True
+    for record in records[prefix_count:]:
+        assert record.result.effect_outcome == 'not_started'
+        assert record.result.handler_executed is False
+        assert record.result.failure_stage == 'runtime_gate'
+        assert record.result.status == ('cancelled' if cause_kind == 'cancelled' else 'failed')
+        assert 'opaque-secret' not in repr(record.result)
+        assert type(original).__name__ in record.result.output
+        assert record.result.metadata['reported_error_code'] == getattr(original, 'error_code', 'TURN_INPUT_PROBE_FAILED')
+
+
+def test_input_probe_error_preserves_unknown_prefix_when_receipt_writer_fails(monkeypatch):
+    original = RuntimeError('original probe failure')
+    completed, recorded = [], []
+
+    def probe(agent, params, *, deadline=None):
+        raise original
+
+    params = SimpleNamespace(tool_context=[], pending_turn_input_source=SimpleNamespace(
+        require_original=lambda agent: None, probe=probe))
+    monkeypatch.setattr(round_module, 'parallel_segment_end', lambda calls, position, **kwargs: position + 1)
+    monkeypatch.setattr(round_module, '_should_defer_for_compact', lambda *args: False)
+
+    def execute(request):
+        completed.append(request.call.call_id)
+        execution = _success(request, 'placeholder')
+        uncertain = ToolResult.failed(request.call, 'original effect remains unknown',
+            error_code='OUTCOME_UNKNOWN', failure_stage='execution',
+            facts=ToolFailureFacts(effect_outcome='unknown', handler_executed=True))
+        return replace(execution, result=uncertain)
+
+    def record(row):
+        if row.idx == 2:
+            raise OSError('receipt writer unavailable')
+        recorded.append(row)
+
+    request = _round_request(agent=SimpleNamespace(), params=params, tool_rounds=1,
+        response=ModelResponse(text='', backend='test'),
+        calls=[{'tool': 'read_file', 'path': str(i)} for i in range(3)],
+        execute_one=execute, record_one=record)
+    with pytest.raises(RuntimeError) as raised:
+        execute_tool_round(request)
+    assert raised.value is original and len(completed) == 1
+    assert [row.call.call_id for row in recorded] == [request.calls[0].call_id, request.calls[2].call_id]
+    assert recorded[0].result.effect_outcome == 'unknown' and recorded[0].result.handler_executed is True
+    assert recorded[-1].result.effect_outcome == 'not_started' and not recorded[-1].result.handler_executed
+    assert 'unstarted call receipt 2: OSError' in original.__notes__
+
+
+@pytest.mark.parametrize('started_count', [1, 2])
+@pytest.mark.parametrize('outcome', ['confirmed', 'unknown', 'cancelled'])
+def test_running_tool_input_error_records_actual_results_before_same_error(monkeypatch, started_count, outcome):
+    from agent_py_agent.agent.agent_core.tool_loop import tool_wait_input
+    from agent_py_agent.agent.common.request_execution_ports import (
+        RequestExecutionContextUnavailable,
+    )
+
+    release = threading.Event()
+    original = RequestExecutionContextUnavailable('original source lost while tools run')
+    executed, records = [], []
+
+    def reply(_request):
+        release.set()
+        raise original
+
+    monkeypatch.setattr(tool_wait_input, 'reply_to_pending_input', reply)
+    monkeypatch.setattr(round_module, 'parallel_segment_end',
+        lambda calls, position, **kwargs: min(position + started_count, len(calls)))
+    monkeypatch.setattr(round_module, '_should_defer_for_compact', lambda *args: False)
+
+    def execute(request):
+        executed.append(request.call.call_id)
+        assert release.wait(3)
+        execution = _success(request, 'actual completed result')
+        if outcome != 'confirmed':
+            result = ToolResult.failed(request.call, 'actual completed result',
+                error_code='CANCELLED' if outcome == 'cancelled' else 'OUTCOME_UNKNOWN',
+                failure_stage='execution', facts=ToolFailureFacts(handler_executed=True,
+                    effect_outcome='unknown', status='cancelled' if outcome == 'cancelled' else 'failed'))
+            execution = replace(execution, result=result)
+        return execution
+
+    request = _round_request(agent=SimpleNamespace(), params=SimpleNamespace(tool_context=[]),
+        tool_rounds=1, response=ModelResponse(text='', backend='test'),
+        calls=[{'tool': 'read_file', 'path': str(i)} for i in range(started_count + 1)],
+        execute_one=execute, record_one=records.append)
+    with pytest.raises(type(original)) as raised:
+        execute_tool_round(request)
+    assert raised.value is original
+    assert len(executed) == started_count
+    assert len(records) == len(request.calls)
+    assert [row.call.call_id for row in records] == [call.call_id for call in request.calls]
+    for row in records[:started_count]:
+        assert row.result.handler_executed is True
+        assert row.result.effect_outcome == ('confirmed' if outcome == 'confirmed' else 'unknown')
+        assert row.result.status == {'confirmed': 'succeeded', 'unknown': 'failed', 'cancelled': 'cancelled'}[outcome]
+        assert row.result.output == 'actual completed result'
+    assert records[-1].result.handler_executed is False
+    assert records[-1].result.effect_outcome == 'not_started'

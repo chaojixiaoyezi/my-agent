@@ -764,3 +764,94 @@ def test_reused_incremental_send_reports_full_prefix_diagnostics(monkeypatch, fr
     result = compare_request_surfaces(first, second)
     assert result["changes"] == ["history_appended"]
     assert result["shared_message_prefix"] == 32 and result["comparable"] is True
+
+
+def test_main_tool_chain_survives_interim_auxiliary_reply_and_reset_closes_both(monkeypatch, fresh_pool, tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.backends.base import ModelResponse
+    from agent_py_agent.agent.backends.provider_headers import (
+        current_provider_session,
+        provider_runtime_scope,
+    )
+    from agent_py_agent.agent.backends.request_scope import _OWNER
+    from agent_py_agent.agent.conversation.auxiliary_model_call import (
+        AuxiliaryModelCallRequest,
+        generate_auxiliary_model_response,
+    )
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    agent = SimpleAgent(AgentConfig(model_backend='echo'), tmp_path)
+    main = ScriptedSocket(completed_with_id('main-r1', [CALL]), completed_with_id('main-r2', []))
+    interim = ScriptedSocket(completed_with_id('interim-r1', []))
+    sockets, opened = iter([main, interim]), []
+    def connect(req):
+        connection = next(sockets)
+        opened.append(connection)
+        return connection
+    monkeypatch.setattr(ws, '_connect', connect)
+    observed = []
+    class Backend:
+        name = 'wire-test'
+        def generate(self, prompt, **kwargs):
+            observed.append((current_provider_session(), _OWNER.get()))
+            list(ws.iter_responses_websocket(replace(session_request([{'role': 'user', 'content': prompt}]),
+                payload={'model': 'm', 'stream': True, 'input': [{'role': 'user', 'content': prompt}], 'tools': []})))
+            return ModelResponse(text='临时回复', backend=self.name)
+    agent.backend = Backend()
+    user = {'role': 'user', 'content': 'main original input'}
+    tools = [{'type': 'function', 'name': 'read_file', 'parameters': {'type': 'object'}}]
+    def main_request(items):
+        return replace(session_request(items), payload={'model': 'm', 'stream': True, 'input': items, 'tools': tools})
+    with provider_runtime_scope(agent, SimpleNamespace(thread_id='real-thread')):
+        session, owner = current_provider_session(), _OWNER.get()
+        list(ws.iter_responses_websocket(main_request([user])))
+        response = generate_auxiliary_model_response(AuxiliaryModelCallRequest(agent=agent,
+            prompt='当前进度', thread_id='real-thread', request_id='original-request', run_id='original-run',
+            task_id='original-task', attempt_id='original-attempt', purpose='active_turn_input_reply', tools=[]))
+        assert response.text == '临时回复'
+        list(ws.iter_responses_websocket(main_request([user, CALL, RESULT])))
+        assert opened == [main, interim]
+        assert main.sent[1]['previous_response_id'] == 'main-r1'
+        assert main.sent[1]['input'] == [RESULT]
+        assert main.sent[1]['tools'] == tools
+        assert 'previous_response_id' not in interim.sent[0]
+        assert observed == [(session, owner)]
+        ws.reset_responses_session()
+        assert main.closed and interim.closed
+        assert not fresh_pool._states and not fresh_pool._idle
+    record = agent._model_call_ledger.records()[0]
+    assert record.request_id == 'original-request' and record.run_id == 'original-run'
+    assert record.metadata['thread_id'] == 'real-thread' and record.metadata['attempt_id'] == 'original-attempt'
+
+
+def test_transport_purpose_affinity_is_stable_scoped_and_not_owner_identity():
+    from agent_py_agent.agent.backends.provider_headers import (
+        chatgpt_session_uuid,
+        current_provider_affinity,
+        current_provider_session,
+        provider_transport_scope,
+        request_headers,
+    )
+    from agent_py_agent.agent.backends.request_scope import _OWNER
+    from agent_py_agent.agent.backends.responses import _session_cache_key
+
+    seen = []
+    for thread in ('one', 'one', 'two'):
+        with provider_session_scope(('local', 'main', 'owner'), thread):
+            base, owner = current_provider_session(), _OWNER.get()
+            assert current_provider_affinity() == base
+            with pytest.raises(RuntimeError), provider_transport_scope('active_turn_input_reply'):
+                affinity = current_provider_affinity()
+                seen.append(affinity)
+                assert current_provider_session() == base and _OWNER.get() == owner
+                assert affinity != base
+                assert _session_cache_key()['prompt_cache_key'] == affinity
+                assert request_headers({}, {}, 'x-session') == {'User-Agent': 'my-agent/1.0', 'x-session': affinity}
+                assert _session_cache_key(subscription=True)['prompt_cache_key'] == chatgpt_session_uuid()
+                raise RuntimeError('cancelled example')
+            assert current_provider_affinity() == base
+            assert _session_cache_key()['prompt_cache_key'] == base
+    assert seen[0] == seen[1] and seen[0] != seen[2]
+    assert current_provider_session() == '' and current_provider_affinity() == ''

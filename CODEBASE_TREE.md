@@ -2,6 +2,16 @@
 
 ```text
 agent_py_agent/agent/conversation/
+|-- subagent_message_observation.py          # 从原执行和任务链接定位获准访问的子线程及消息来源
+agent_py_agent/tests/
+|-- test_exact_read_owner_intersection.py    # 真实系统沙箱中的所有者隔离、默认工作目录和旧进程输出
+|-- test_subagent_message_observation.py     # 子线程公开历史、游标和跨空间来源隔离
+|-- test_workflows_raw_business_context.py   # 两种模型调用入口的原任务、空间授权和冻结版本
+`-- test_workflow_native_dag_snapshot.py     # 工作流并行步骤读取冻结定义时的互斥与进展
+```
+
+```text
+agent_py_agent/agent/conversation/
 |-- task_artifact_observation.py              # 原任务索引、登记簿与交付文件的准确产物读取
 agent_py_agent/tests/
 |-- test_task_artifact_native_lookup.py       # 产物ID点查、版本漂移、范围与旧索引回填

@@ -103,7 +103,7 @@ def test_zero_scheduler_serial_uses_original_worker_once(monkeypatch):
     assert seen == [True]
 
 
-@pytest.mark.parametrize('failure', ['', 'display', 'append_after_commit', 'media', 'external'])
+@pytest.mark.parametrize('failure', ['', 'display', 'append_after_commit', 'media', 'external', 'text_order'])
 def test_original_guidance_ack_reply_once_and_ir_unchanged(tmp_path, monkeypatch, failure):
     from agent_py_agent.agent.backends import ModelResponse
     from agent_py_agent.agent.conversation.guidance_reply_obligations import pending
@@ -132,6 +132,11 @@ def test_original_guidance_ack_reply_once_and_ir_unchanged(tmp_path, monkeypatch
     sink = SimpleNamespace(commit_model_response=display)
     params = _tool_loop_params(task_attributes={'conversation_thread_id': thread.thread_id},
                                tool_ir_history=[marker], effective_on_chunk=sink)
+    if failure == 'text_order':
+        from dataclasses import replace
+
+        params = replace(params, tool_protocol_snapshot=replace(params.tool_protocol_snapshot, source_protocol='text'),
+            tool_context=['ORIGINAL_TOOL_HISTORY'], runtime_injections=['ORIGINAL_RUNTIME_PREFIX'])
     entry = agent.conversation_store.guidance.append_once({'target_type': 'agent_run', 'target_id': params.run_id,
         'message': '现在进展如何？结束后请按新的要求整理。', 'metadata': {
             'kind': 'active_turn_user_input', 'thread_id': thread.thread_id, 'channel_message_id': 'client-wait-1',
@@ -175,9 +180,16 @@ def test_original_guidance_ack_reply_once_and_ir_unchanged(tmp_path, monkeypatch
     replies = [row for row in rows if row.role == 'assistant' and row.metadata.get('reply_is_interim')]
     assert len(replies) == 1 and replies[0].metadata['user_reply_input_ids'] == [entry.guidance_id]
     outstanding = pending(agent.conversation_store.storage, thread.thread_id, params.task_id)
-    assert outstanding == ((entry.guidance_id,) if failure else ())
+    assert outstanding == ((entry.guidance_id,) if failure in {'display', 'append_after_commit', 'external'} else ())
     if failure in {'display', 'external'}:
         assert not any('[工具等待时已向用户回复]' in value for value in params.runtime_injections)
+    if failure == 'text_order':
+        assert params.runtime_injections == ['ORIGINAL_RUNTIME_PREFIX']
+        assert params.tool_context[0] == 'ORIGINAL_TOOL_HISTORY'
+        assert entry.message in params.tool_context[1]
+        assert '[工具等待时已向用户回复]' in params.tool_context[2]
+        assert sum(entry.message in value for value in params.tool_context) == 1
+
 
 
 def test_input_probe_skips_child_and_event_snapshot(monkeypatch):
