@@ -268,7 +268,7 @@ class TuiBackgroundAgents:
     # LLM: 每次只读一个有界消息页；业务target是agent_id，内容归属按独立thread_id校验。
     # 函数用途: 保留完整消息正文及原message_id，续页由用户显式请求。
     def conversation(self, agent_id: str, *, thread_id: str = '', cursor: str | None = None) -> dict:
-        params = {'target': {'kind': 'background_main', 'id': agent_id}, 'limit': 100}
+        params = {'target': {'kind': 'background_main', 'id': agent_id}, 'limit': 100, 'include_display': True}
         if cursor:
             params['cursor'] = cursor
         if self.stop_event is not None and self.stop_event.is_set():
@@ -304,7 +304,8 @@ class TuiBackgroundAgents:
             coverage = 'partial'
         if cursor and cursor == next_cursor:
             next_cursor = None
-        return {'items': items, 'coverage': coverage, 'next_cursor': next_cursor}
+        return {'items': items, 'coverage': coverage, 'next_cursor': next_cursor,
+                'display_events': data.get('display_events', [])}
 
     # LLM: 仅在用户显式请求树时由TUI输入处理调用；通过原客户端读取指定空间/无归属中的准确根Agent，不派活或控制子代理生命周期。
     # 函数用途: 按需读取一个后台助手的组织树。

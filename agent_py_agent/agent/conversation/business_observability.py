@@ -614,9 +614,11 @@ class BusinessObservationService:
             if child and row.metadata.get('agent_run_id') != child.run_id:
                 filtered = True
                 continue
-            if child and row.role not in {'user', 'assistant', 'host'}:
+            if child and row.role not in {'user', 'assistant', 'host', 'display'}:
                 continue
             if row.role not in {'user', 'assistant', 'tool', 'host', 'display'}:
+                continue
+            if row.role == 'display' and params.get('include_display') is not True:
                 continue
             task_id, context = row.metadata.get('task_id'), None
             task = _observation_task(self.store, task_id) if task_id else None
@@ -642,9 +644,10 @@ class BusinessObservationService:
                                 'next_action': '公开过程块超过本次读取预算；保留原记录，使用原文分页读取。'})
                         public = {'text': text}
                         canonical = payload.get('canonical_message_id')
-                        if isinstance(canonical, str) and canonical:
+                        if isinstance(canonical, str) and 0 < len(canonical.encode('utf-8')) <= 128:
                             public['canonical_message_id'] = canonical
-                        display_events.append({key: event[key] for key in ('schema', 'kind', 'phase', 'request_id', 'block_id')} | {'payload': public})
+                        display_events.append({key: event[key] for key in ('schema', 'kind', 'phase', 'request_id', 'block_id')}
+                            | {'payload': public, 'source_message_id': row.message_id, 'occurred_at': _timestamp(row.created_at)})
                 continue
             _MAX_MESSAGE_VIEW_CHARS = 262144
             original_len = len(row.content)

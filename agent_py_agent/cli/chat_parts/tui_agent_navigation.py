@@ -324,6 +324,7 @@ class TuiAgentNavigationState:
                     'request_id': req_id,
                     'block_id': block_id,
                     'payload': payload,
+                    'occurred_at': row.get('occurred_at'),
                 }
 
             page_events = []
@@ -334,7 +335,24 @@ class TuiAgentNavigationState:
                     while len(seen) > 2048:
                         seen.pop(next(iter(seen)))
 
+            # 原checkpoint事件沿同一renderer/block ID恢复；工具继续由唯一操作账显示。
+            for event in result.get('display_events', [])[:100]:
+                if not isinstance(event, dict) or event.get('kind') != 'assistant_completed':
+                    continue
+                payload = event.get('payload')
+                if not isinstance(payload, dict):
+                    continue
+                canonical = payload.get('canonical_message_id')
+                if canonical and canonical in seen:
+                    continue
+                page_events.append(event)
+                if canonical:
+                    seen[canonical] = None
+                    while len(seen) > 2048:
+                        seen.pop(next(iter(seen)))
+
             if page_events:
+                page_events.sort(key=lambda event: str(event.get('occurred_at') or ''))
                 previous_ids = {b.block_id for b in runtime.store.snapshot().stable_blocks}
                 runtime._publish_recovered_display_events(tuple(page_events))
                 if more:
