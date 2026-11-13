@@ -8,9 +8,10 @@ from pathlib import Path
 
 from ..artifacts.registry import REGISTRY_RELATIVE_PATH, _record_from_payload
 from ..artifacts.registry_reader import latest_records_from_lines
-from ..common.nofollow_fs import read_bytes_beneath
+from ..common.nofollow_fs import open_readonly_file_beneath, read_bytes_beneath
+from .artifact_access import check_artifact_access
 from .business_contracts import BusinessExecutionContext
-from .business_observability import ObservationSourceError
+from .business_observability import ObservationRecord, ObservationSourceError
 from .session_tasks import SessionTask
 
 _REGISTRY_BYTES = 2 * 1024 * 1024
@@ -29,7 +30,22 @@ def _read_source(root, parts, budget, reason):
         raise _error('HOST_NOT_READY', reason, '原只读来源无法安全核验；检查文件及目录完整性后重试。') from error
 
 
-def task_artifact(store, owner_home, owner_id, artifact_id, version_ref=None):
+
+def guard_artifact_content_budget(owner, path, declared_size, budget):
+    """先核预算元数据，不把超大文件的截断/拒读误记为hash漂移。"""
+    if declared_size > budget:
+        raise _error('HOST_NOT_READY', 'ARTIFACT_CONTENT_READ_BUDGET', '原登记尺寸超过单次读取预算；未读取完整内容，不能声称hash已核验。')
+    try:
+        descriptor = open_readonly_file_beneath(owner, Path(path).relative_to(owner).parts)
+    except FileNotFoundError:
+        return
+    try:
+        if os.fstat(descriptor).st_size > budget:
+            raise _error('HOST_NOT_READY', 'ARTIFACT_CONTENT_READ_BUDGET', '当前文件尺寸超过单次读取预算；未读取完整内容，不把预算拒绝记作漂移。')
+    finally:
+        os.close(descriptor)
+
+def task_artifact(store, owner_home, owner_id, artifact_id, version_ref=None, *, authority=None):
     """返回(found, artifact, task, context)；未追平不是不存在，冲突不选第一条。"""
     if store is None or not hasattr(store, 'session_tasks'):
         return False, None, None, None
@@ -48,6 +64,10 @@ def task_artifact(store, owner_home, owner_id, artifact_id, version_ref=None):
         if (target.owner_id != owner_id or sender.owner_id != owner_id
                 or context is not None and (context.owner_id != owner_id or context.task_id != task.task_id)):
             raise _error('SPACE_SCOPE_MISMATCH', 'ARTIFACT_TASK_OWNER_MISMATCH', '核对原任务和线程的Owner归属。')
+        facts = ObservationRecord({}, owner_id, context.space_id if context else None,
+            context.project_ref if context else None, task.task_id, task.target_thread_id)
+        if not check_artifact_access(facts, authority=authority):
+            continue
         candidates.append((task, context))
     if len(candidates) > 1 or page.get('truncated'):
         raise _error('STATE_CONFLICT', 'ARTIFACT_TASK_ID_CONFLICT', '同一产物ID关联多个任务；核对原登记，禁止猜测归属。')
@@ -94,6 +114,7 @@ def task_artifact(store, owner_home, owner_id, artifact_id, version_ref=None):
     path = record_path
     if not path.is_absolute() or not path.is_relative_to(owner):
         raise _error('SPACE_SCOPE_MISMATCH', 'ARTIFACT_CONTENT_OUTSIDE_OWNER', '准确登记的任务交付物必须位于当前Owner目录内。')
+    guard_artifact_content_budget(owner, path, record.size_bytes, _CONTENT_BYTES)
     content = _read_source(owner, tuple(path.relative_to(owner).parts), _CONTENT_BYTES, 'ARTIFACT_CONTENT_UNREADABLE')
     if content is not None and len(content) > _CONTENT_BYTES:
         raise _error('HOST_NOT_READY', 'ARTIFACT_CONTENT_READ_BUDGET', '内容超过单次核验预算；当前接口不能声称已核验完整内容。')

@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import sqlite3
 import time
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -451,16 +453,25 @@ def _append_record(
     workspace_root: Path, record: ArtifactRegistryRecord, *, atomic_publish: bool = False,
 ) -> None:
     line = json.dumps(record.to_dict(), ensure_ascii=False, sort_keys=True) + "\n"
+    try:
+        from .registry_locator import prepare_record
+
+        prepare_record(workspace_root, record)
+    except (OSError, ValueError, sqlite3.Error) as error:
+        logging.getLogger(__name__).warning('ARTIFACT_LOCATOR_PREPARE_FAILED error_type=%s next_action=bounded_locator_recovery', type(error).__name__)
     if atomic_publish:
         parts = tuple(REGISTRY_RELATIVE_PATH.parts)
         previous = read_bytes_beneath(workspace_root, parts) or b""
         write_bytes_atomic_beneath(workspace_root, parts, previous + line.encode("utf-8"))
-        return
-    append_text_beneath(
-        workspace_root,
-        tuple(REGISTRY_RELATIVE_PATH.parts),
-        line,
-    )
+    else:
+        append_text_beneath(workspace_root, tuple(REGISTRY_RELATIVE_PATH.parts), line)
+    # 索引失败不把已成功原登记谎报成未执行；正式查询沿原run索引有界自愈，miss始终不作确定不存在。
+    try:
+        from .registry_locator import publish_record
+
+        publish_record(workspace_root, record)
+    except (OSError, ValueError, sqlite3.Error) as error:
+        logging.getLogger(__name__).warning('ARTIFACT_LOCATOR_UPDATE_FAILED canonical_registry_committed=true error_type=%s next_action=bounded_locator_recovery', type(error).__name__)
 
 
 # LLM: The workspace path is host-owned but its leaf may be replaced by shell. Normalize only

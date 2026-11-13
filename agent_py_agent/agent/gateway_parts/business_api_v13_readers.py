@@ -25,14 +25,15 @@ from ..artifacts.registry import REGISTRY_RELATIVE_PATH, _record_from_payload
 from ..artifacts.registry_reader import latest_records_from_lines
 from ..common.log_redaction import redact_sensitive_value
 from ..common.nofollow_fs import read_bytes_beneath, read_text_beneath
-from ..conversation.background_team_lifecycle import background_identity
 from ..contracts.error_taxonomy import error_contract
+from ..conversation.background_team_lifecycle import background_identity
 from ..conversation.business_access import BusinessError
 from ..conversation.business_contracts import BusinessExecutionContext
 from ..conversation.business_observability import (
     BusinessObservationService,
     ObservationPage,
     ObservationRecord,
+    ObservationSourceError,
     ObservationSourcePage,
     _observation_cached,
     _observation_task,
@@ -966,42 +967,114 @@ class _OwnerReaders:
 
     # LLM: runtime产物引用内容寻址快照；媒体账沿原nofollow及解析器，不读取live workspace。
     # 函数用途: 合并规范产物来源，保持各自版本与owner身份。
-    def artifacts(self, params):
-        records = []
-        if self.runtime_artifacts:
-            for row in self.joined('artifact_records'):
-                value = {'artifact_id': row['artifact_record_id'], 'version_ref': row['content_digest'],
-                    'name': Path(row['rel_path']).name, 'mime_type': 'application/octet-stream',
-                    'size_bytes': row['size'], 'content_sha256': row['content_digest'],
-                    'task_id': None, 'space_id': None, 'available': False}
-                record = self.record(value, row)
-                value.update(task_id=record.task_id, space_id=record.space_id)
-                records.append(record)
+    @bounded_observation_reader
+    def artifacts(self, params, *, source_page=None):
+        from ..artifacts import registry_locator
+        from ..conversation.registered_artifact_observation import (
+            discover_registered,
+            registered_artifact,
+        )
+
+        request = source_page or ObservationSourcePage(limit=params.get('limit', 50))
+        position = request.position or {'phase': 'registered', 'after': ''}
+        phase, after = position.get('phase'), position.get('after')
+        if phase not in {'discovery', 'registered', 'runtime', 'media'} or not isinstance(after, (str, int)):
+            raise BusinessError('CURSOR_EXPIRED')
+        records, next_position = [], None
+        revision = registry_locator.revision(self.home)
+        if position.get('revision') is not None and position['revision'] != revision:
+            raise BusinessError('CURSOR_EXPIRED')
+        if phase in {'discovery', 'registered'}:
+            if phase == 'discovery' or request.position is None:
+                discovery = discover_registered(self)
+                if discovery['coverage'] == 'partial':
+                    return ObservationPage((), 'partial', source_paged=True,
+                        next_position={'phase': 'discovery', 'after': discovery.get('after', 0)})
+                revision = registry_locator.revision(self.home)
+                after = ''
+            rows, next_after = registry_locator.page(self.home, after=str(after),
+                task_id=params.get('filter', {}).get('task_id'), limit=request.limit)
+            incomplete = False
+            for artifact_id, _, _, _ in rows:
+                try:
+                    found = registered_artifact(self, artifact_id, discover=False, with_content=False)
+                except ObservationSourceError:
+                    incomplete = True
+                    continue
+                if found is not None:
+                    records.append(found[0])
+            if rows or next_after:
+                next_position = ({'phase': 'registered', 'after': next_after} if next_after
+                    else {'phase': 'runtime', 'after': 0})
+                return ObservationPage(tuple(records), 'unknown' if incomplete else 'partial', source_paged=True,
+                    next_position={**next_position, 'revision': revision})
+            phase, after = 'runtime', 0
+        if phase == 'runtime':
+            if self.runtime_artifacts:
+                with self.repo._runtime_connection() as db:
+                    ids = [row[0] for row in db.execute('SELECT rowid FROM artifact_records WHERE rowid>? ORDER BY rowid LIMIT ?',
+                        (int(after), request.limit + 1)).fetchall()]
+                for row in self.joined('artifact_records', rowids=ids[:request.limit]):
+                    value = {'artifact_id': row['artifact_record_id'], 'version_ref': row['content_digest'],
+                        'name': Path(row['rel_path']).name, 'mime_type': 'application/octet-stream',
+                        'size_bytes': row['size'], 'content_sha256': row['content_digest'],
+                        'task_id': None, 'space_id': None, 'available': False}
+                    record = self.record(value, row)
+                    value.update(task_id=record.task_id, space_id=record.space_id)
+                    records.append(record)
+                if records or len(ids) > request.limit:
+                    next_position = ({'phase': 'runtime', 'after': ids[request.limit - 1]} if len(ids) > request.limit
+                        else {'phase': 'media', 'after': ''})
+                    return ObservationPage(tuple(records), 'partial', source_paged=True, next_position={**next_position, 'revision': revision})
+            phase, after = 'media', ''
+        from ..conversation.task_artifact_observation import _read_source
+
         parts = ('artifacts', 'business', *REGISTRY_RELATIVE_PATH.parts)
-        raw = read_bytes_beneath(self.home, parts)
+        raw = _read_source(self.home, parts, 2 * 1024 * 1024, 'ARTIFACT_REGISTRY_UNREADABLE')
         if raw is not None:
+            if len(raw) > 2 * 1024 * 1024:
+                raise ObservationSourceError('HOST_NOT_READY', details={'reason': 'ARTIFACT_MEDIA_REGISTRY_READ_BUDGET',
+                    'side_effect_state': 'none', 'next_action': '原媒体登记簿超过有界读取预算，不能把截断内容当完整列表。'})
             media, errors = latest_records_from_lines(self.home.joinpath(*parts), raw.decode('utf-8').splitlines(), _record_from_payload)
             if errors:
-                raise ValueError('artifact registry unreadable')
-            for item in media.values():
+                raise ObservationSourceError('HOST_NOT_READY', details={'reason': 'ARTIFACT_MEDIA_REGISTRY_UNREADABLE',
+                    'side_effect_state': 'none', 'next_action': '原媒体登记簿无法解析，修复来源后重试。'})
+            selected = sorted((item for item in media.values() if item.artifact_id > str(after)
+                and item.metadata.get('owner_id') == self.owner and item.source == 'business_upload'), key=lambda item: item.artifact_id)
+            for item in selected[:request.limit]:
                 meta = item.metadata
-                if meta.get('owner_id') != self.owner or item.source != 'business_upload':
-                    continue
                 value = {'artifact_id': item.artifact_id, 'version_ref': meta['version_ref'], 'name': meta['display_name'],
                     'mime_type': item.mime_type, 'size_bytes': item.size_bytes, 'content_sha256': item.sha256,
                     'task_id': item.task_id or None, 'space_id': meta['space_id'], 'available': item.status == 'ready'}
                 records.append(ObservationRecord(value, self.owner, meta['space_id'], task_id=item.task_id or None))
-        elif not self.runtime_artifacts:
-            raise FileNotFoundError('artifact source missing')
-        return ObservationPage(tuple(records))
+            if len(selected) > request.limit:
+                next_position = {'phase': 'media', 'after': selected[request.limit - 1].artifact_id}
+        # 原run发现是渐进的；没有覆盖证明不能把旧registry的漏项宣称为完整空集。
+        return ObservationPage(tuple(records), 'unknown', source_paged=True,
+            next_position={**next_position, 'revision': revision} if next_position else None)
 
     # LLM: 指定旧版本不回退latest，无安全内容运输口的runtime快照不暴露路径。
     # 函数用途: 返回精确产物版本和原业务媒体读取引用。
     def artifact_detail(self, params):
-        from ..conversation.task_artifact_observation import _read_source, task_artifact
+        from ..conversation.registered_artifact_observation import (
+            discover_registered,
+            registered_artifact,
+        )
+        from ..conversation.task_artifact_observation import _error, _read_source, task_artifact
 
-        found, artifact, task, context = task_artifact(self.store, self.home, self.owner,
-            params['artifact_id'], params.get('version_ref'))
+        registered = registered_artifact(self, params['artifact_id'], params.get('version_ref'), discover=False)
+        if registered is not None:
+            facts, _, _ = registered
+            artifact = facts.value
+            return ObservationPage((self.wrap({'artifact': artifact, 'version_ref': artifact['version_ref'],
+                'read_ref': artifact['artifact_id'], 'available': artifact['available']}, facts),))
+        try:
+            found, artifact, task, context = task_artifact(self.store, self.home, self.owner,
+                params['artifact_id'], params.get('version_ref'))
+        except BusinessError as error:
+            if error.details.get('reason') not in {'ARTIFACT_TASK_INDEX_INCOMPLETE', 'ARTIFACT_TASK_INDEX_UNAVAILABLE'}:
+                raise
+            found = False
         if found:
             if artifact is None:
                 return ObservationPage()
@@ -1053,7 +1126,19 @@ class _OwnerReaders:
             if params.get('version_ref', value['version_ref']) == value['version_ref']:
                 records.append(self.wrap({'artifact': value, 'version_ref': value['version_ref'],
                     'read_ref': value['artifact_id'], 'available': value['available']}, row))
-        return ObservationPage(tuple(records))
+        if records or selected:
+            return ObservationPage(tuple(records))
+        discovery = discover_registered(self)
+        registered = registered_artifact(self, params['artifact_id'], params.get('version_ref'), discover=False)
+        if registered is not None:
+            facts, _, _ = registered
+            artifact = facts.value
+            return ObservationPage((self.wrap({'artifact': artifact, 'version_ref': artifact['version_ref'],
+                'read_ref': artifact['artifact_id'], 'available': artifact['available']}, facts),))
+        if discovery['coverage'] == 'complete':
+            return ObservationPage()
+        raise _error('HOST_NOT_READY', 'ARTIFACT_REGISTRY_DISCOVERY_INCOMPLETE',
+            '未在当前已核验登记定位中找到该ID；旧run定位正沿有界页自动发现，不能据此判定不存在。')
 
     # LLM: 游标绑定owner、原归档、页、字节位置及期限，不改变原分页身份。
     # 函数用途: 生成日志分页位置的不透明签名。

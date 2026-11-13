@@ -8,6 +8,7 @@ import re
 from email import policy
 from email.parser import BytesFeedParser
 from io import BytesIO
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from ..artifacts.registry import (
@@ -23,6 +24,7 @@ from ..common.nofollow_fs import (
     read_bytes_beneath,
     write_bytes_atomic_beneath,
 )
+from ..conversation.business_access import BusinessError, require_access
 from ..plugin_host.artifacts import _fingerprint
 from ..plugin_host.business_action_specs import business_api, standalone_schema
 from ..plugin_host.errors import HostAPIError
@@ -218,11 +220,93 @@ def upload_artifact(source, fields, filename, context, services):
             return _view(record)
 
 
+def _native_registry_content(artifact_id, version_ref, context, services, *, range_header, if_range):
+    from ..artifacts import registry_locator
+    from ..conversation.registered_artifact_observation import registered_artifact
+    from ..conversation.task_artifact_observation import (
+        guard_artifact_content_budget,
+        task_artifact,
+    )
+    from .business_api_v13_readers import _OwnerReaders
+
+    store = getattr(services.host, 'conversation_store', None)
+    if store is None:
+        return None
+    observation = services.observation
+    source = _OwnerReaders(services.owner_home, services.owner_id, store, observation.runtime)
+    authority = (observation, services.observation_actor(context), 'artifacts.get')
+    found = registered_artifact(source, artifact_id, version_ref, with_content=False, authority=authority)
+    record = content = None
+    if found is not None:
+        facts, record, content = found
+        space_id, task_id = facts.space_id, facts.task_id
+    elif registry_locator.lookup(services.owner_home, artifact_id) is not None:
+        raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+    else:
+        present, artifact, task, scope = task_artifact(store, services.owner_home, services.owner_id, artifact_id, version_ref, authority=authority)
+        if not present:
+            return None
+        if artifact is None or not artifact['available']:
+            raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+        link, error = store.tasks.link_report(task.target_thread_id, task.task_id)
+        if error or link is None:
+            raise HostAPIError('STORE_UNAVAILABLE', 503)
+        records, errors = _registry_at(services.owner_home, Path(link.task_path).relative_to(services.owner_home).parts)
+        record = records.get(artifact_id)
+        if errors or record is None:
+            raise HostAPIError('STORE_UNAVAILABLE', 503)
+        space_id, task_id = scope.space_id if scope else None, task.task_id
+        from ..conversation.business_observability import ObservationRecord
+
+        facts = ObservationRecord({}, services.owner_id, space_id, scope.project_ref if scope else None,
+            task_id, task.target_thread_id)
+    # 共用原观察逐记录裁决；不为授权重新打开内容，运输FD才完整核验一次hash。
+    actor = services.observation_actor(context)
+    params = {'artifact_id': artifact_id, 'version_ref': version_ref}
+    def check_visible():
+        observation.authorize_call('artifacts.get', params, actor=actor)
+        require_access(actor, 'artifacts.get', service=observation, owner_id=facts.owner_id,
+            space_id=facts.space_id, project_ref=facts.project_ref, task_id=facts.task_id,
+            thread_id=facts.thread_id, run_id=facts.run_id, attempt_id=facts.attempt_id)
+        _check(context, services, space_id, task_id)
+    check_visible()
+    if record.status != 'ready':
+        raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+    etag = '"' + record.sha256 + '"'
+    status, start, end = select_range(range_header, if_range, etag, record.size_bytes)
+    guard_artifact_content_budget(services.owner_home, Path(record.path), record.size_bytes, UPLOAD_MAX_BYTES)
+    content = _verified_blob(services.owner_home, Path(record.path).relative_to(services.owner_home).parts,
+        record, start=start, end=end, max_bytes=UPLOAD_MAX_BYTES)
+    check_visible()
+    headers = {'Content-Type': record.mime_type or 'application/octet-stream', 'Content-Length': str(len(content)),
+        'ETag': etag, 'Accept-Ranges': 'bytes', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'attachment'}
+    if status == 206:
+        headers['Content-Range'] = f'bytes {start}-{end}/{record.size_bytes}'
+    return status, headers, content
+
+
 def artifact_content(artifact_id, version_ref, context, services, *, range_header=None, if_range=''):
     validate_object({'artifact_id': artifact_id}, standalone_schema(business_api()['media_routes'][1]['request_path']))
     validate_object({'version_ref': version_ref}, standalone_schema(business_api()['media_routes'][1]['request_query']))
+    try:
+        native = _native_registry_content(artifact_id, version_ref, context, services,
+            range_header=range_header, if_range=if_range)
+    except BusinessError as error:
+        status = 404 if error.code in {'OBSERVATION_NOT_FOUND', 'BUSINESS_ACCESS_DENIED', 'SPACE_SCOPE_MISMATCH'} else 409 if error.code == 'STATE_CONFLICT' else 503
+        reason = str(error.details.get('reason') or error.code)
+        raise HostAPIError(error.code, status, message=(reason + '；未读取对外内容，请核验原登记或授权后重试。')[:256]) from error
+    if native is not None:
+        return native
     records, _ = _registry(services)
     record = records.get(artifact_id)
+    if record is None and getattr(services.host, 'conversation_store', None) is not None:
+        # 正式详情读口决定未发现是否确已完整；旧来源未覆盖时不能伪装确定404。
+        try:
+            services.observation.query('artifacts.get', {'artifact_id': artifact_id, 'version_ref': version_ref},
+                actor=services.observation_actor(context))
+        except BusinessError as error:
+            status = 404 if error.code in {'OBSERVATION_NOT_FOUND', 'BUSINESS_ACCESS_DENIED', 'SPACE_SCOPE_MISMATCH'} else 409 if error.code == 'STATE_CONFLICT' else 503
+            raise HostAPIError(error.code, status, message=str(error.details.get('reason') or error.code)[:256]) from error
     if (record is None or record.status != 'ready' or record.metadata.get('owner_id') != services.owner_id
             or record.metadata.get('version_ref') != version_ref or record.source != 'business_upload'):
         raise HostAPIError('RESOURCE_NOT_FOUND', 404)

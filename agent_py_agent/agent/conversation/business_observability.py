@@ -23,6 +23,7 @@ from ..common.log_redaction import redact_sensitive_value
 from ..plugin_host.business_action_specs import business_defs
 from ..runtime_db.recovery_guard import RuntimeDatabaseDeferred
 from ..runtime_db.repository import AGENT_RUN_TERMINAL_STATUSES, RuntimeRepository
+from .artifact_access import artifact_query_access
 from .background_scheduling_view import task_result_view, task_scheduling_view
 from .background_team_lifecycle import background_identity
 from .business_access import (
@@ -445,6 +446,7 @@ class BusinessObservationService:
     # LLM: 直接观察调用也有独立作用域；已在业务调用内时共享数据但仍逐次活授权。
     # 函数用途: 验证并分派一次原观察查询。
     @observation_request()
+    @artifact_query_access
     def query(self, action: str, params: dict, *, actor: object) -> dict:
         if action not in OBSERVATION_ACTIONS:
             raise BusinessError('UNSUPPORTED_ACTION')
