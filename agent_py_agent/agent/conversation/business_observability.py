@@ -747,12 +747,31 @@ class BusinessObservationService:
         params = params or {}
         request = source_page or ObservationSourcePage(limit=100)
         revision = runtime_source_revision(self.runtime.db_path)
+        if params.get('parent_run_id'):
+            revision = _digest(['parent_run_children.v1', revision])
         after = source_after(request, revision)
         limit = min(100, request.limit)
         selected_run = params.get('run_id')
         selected_attempt = params.get('attempt_id')
         filter_space = (params.get('filter') or {}).get('space_id')
         with self.runtime._runtime_connection() as conn:
+            if params.get('parent_run_id'):
+                # 父执行是原run_id，不是后台线程ID；从该父的子索引翻页，不消耗陌生任务的首页。
+                raw = conn.execute('SELECT ar.rowid AS _rowid,ar.run_id,ar.current_attempt_id,ar.parent_agent_run_id,'
+                    'pa.run_id AS parent_run_id,t.thread_id,t.task_id AS runtime_task_id,tr.metadata_json,'
+                    'aa.attempt_id,aa.status,aa.started_at,aa.ended_at,aa.metadata_json AS attempt_metadata '
+                    'FROM agent_runs pa JOIN task_runs ptr ON ptr.task_run_id=pa.task_run_id '
+                    'JOIN tasks pt ON pt.task_id=ptr.task_id JOIN agent_runs ar ON ar.parent_agent_run_id=pa.agent_run_id '
+                    'JOIN agent_attempts aa ON aa.attempt_id=ar.current_attempt_id AND aa.agent_run_id=ar.agent_run_id '
+                    'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id '
+                    'WHERE pa.run_id=? AND pt.owner_id=? AND t.owner_id=? AND ar.rowid>? ORDER BY ar.rowid LIMIT ?',
+                    (params['parent_run_id'], self.owner_id, self.owner_id, after, limit + 1)).fetchall()
+                if _digest(['parent_run_children.v1', runtime_source_revision(self.runtime.db_path)]) != revision:
+                    raise BusinessError('CURSOR_EXPIRED')
+                more = len(raw) > limit
+                position = {'revision': revision, 'after': raw[limit - 1]['_rowid']} if more else None
+                return self._execution_page(raw[:limit], more=more, revision=revision,
+                                            source_paged=True, next_position=position)
             if selected_run is not None:
                 where = 'ar.run_id=? AND t.owner_id=?'
                 values = [selected_run, self.owner_id]

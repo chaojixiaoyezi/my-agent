@@ -44,6 +44,10 @@ def test_native_tree_includes_controller_without_persistent_background_seat(back
     assert nodes['tree-child']['parent_run_id'] == run_id
     assert {'from_id': task.target_thread_id, 'to_id': run_id, 'relation': 'executes'} in tree['data']['edges']
     assert {'from_id': run_id, 'to_id': 'tree-child', 'relation': 'child_of'} in tree['data']['edges']
+    status, children = background_call(background_http, 'subagents.list', {
+        'parent_run_id': run_id, 'include_completed': True, 'limit': 1})
+    assert status == 200 and [row['run_id'] for row in children['data']['items']] == ['tree-child'], children
+    assert not children['data']['next_cursor']
 
 
 def test_unassigned_tree_only_returns_unassigned_executions(background_http):
