@@ -10,7 +10,7 @@ from pathlib import Path
 from ..conversation.business_contracts import BusinessExecutionContext
 from .package_provider import list_installed_capability_packages
 from .skill_learning_store import SkillLearningStore
-from .skill_usage_ledger import _ledger_rows
+from .skill_usage_ledger import MAX_USAGE_LEDGER_EVENTS, _usage_read_index
 
 
 @dataclass(frozen=True)
@@ -224,100 +224,164 @@ class BusinessCapabilityService:
         if action == 'spaces.capabilities.resolve':
             return resolve_business_capabilities(context=context, request=BusinessCapabilityRequest(request.get('query', '')),
                                                    host=self.host).to_dict()
-        _space_for_context(self.host, context)
-        loader = getattr(self.host, 'task_business_context', None)
-        if not callable(loader):
-            _page([], request, (owner, action, context.space_id, request.get('task_id')))
-            return {'items': [], 'next_cursor': None, 'coverage': 'unknown'}
-        rows = _ledger_rows(SkillLearningStore.for_home(self.host.home_paths))
-        items = []
-        phases = {'manual_get': 'read', 'adopted': 'selected', 'host_injected': 'visible', 'manual_search': 'considered', 'executed': 'executed'}
-        for row in rows:
-            if not row.get('task_id') or type(row.get('sequence')) is not int:
-                continue
-            business = loader(row['task_id'])
-            if not isinstance(business, BusinessExecutionContext) or business.owner_id != owner or business.space_id != context.space_id:
-                continue
-            if request.get('task_id') is not None and business.task_id != request['task_id']:
-                continue
-            reason_codes = ['original_skill_usage_ledger']
-            if row.get('mounted_first'):
-                reason_codes.append('mounted_first')
-            items.append({'event_id': f"skill-usage:{row['sequence']}", 'space_id': business.space_id,
-                          'task_id': business.task_id, 'run_id': None, 'method_ref': row['skill_id'],
-                          'phase': phases.get(row.get('event'), 'read'), 'reason_codes': reason_codes, 'receipt_ref': None})
+        return _usage_page(self.host, owner, action, request, context)
 
-        # LLM: 从 runtime_db 读取真实工具执行记录并投影为 executed 阶段收据 (V03-06)。
-        # 函数用途: 补充执行阶段收据并保留 mounted_first 出处 (V03-04)。
+
+def _usage_page(host, owner, action, request, context):
+    """原来源行有界推进；过滤空页也保留游标，不为一页结果全扫历史。"""
+    import sqlite3
+
+    from ..conversation.business_access import BusinessError
+    from ..conversation.business_observability import (
+        ObservationSourcePage,
+        runtime_source_revision,
+        source_after,
+    )
+    from ..local_storage.owner_read_index import require_complete
+    from ..runtime_db.repository import RuntimeRepository
+    from ..runtime_db.schema import runtime_db_path
+
+    space = _space_for_context(host, context)
+    loader = getattr(host, 'task_business_context', None)
+    if not callable(loader):
+        _page([], request, (owner, action, context.space_id, request.get('task_id')))
+        return {'items': [], 'next_cursor': None, 'coverage': 'unknown'}
+    limit = request.get('limit', 50)
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise BusinessError('INVALID_SCHEMA', details={'reason': 'USAGE_LIMIT_OUT_OF_RANGE'})
+    try:
+        skill_store = SkillLearningStore.for_home(host.home_paths)
+        index = _usage_read_index(skill_store)
+        parts = skill_store.directory.relative_to(skill_store.skills_root.parent).parts
+        view = index.advance('usage', (*parts, 'usage_ledger.jsonl'), max_rows=MAX_USAGE_LEDGER_EVENTS)
+        header = require_complete(index.query(view, limit=0))
+        skill_count = header['total_count']
+        if skill_count > MAX_USAGE_LEDGER_EVENTS:
+            raise ValueError('skill usage source exceeds writer retention bound')
+    except (OSError, ValueError, TypeError) as error:
+        raise BusinessError('STORE_UNAVAILABLE', details={
+            'reason': 'SKILL_USAGE_SOURCE_UNREADABLE', 'exception_type': type(error).__name__,
+            'source_coverage': getattr(error, 'coverage', {}),
+            'next_action': '检查原技能使用账本后从首页重新读取。'}) from error
+    path = runtime_db_path(Path(host.home_paths.owner_home_dir).resolve())
+    revision = runtime_source_revision(path) if path.exists() else None
+    identity = hashlib.sha256(json.dumps([owner, action, context.space_id, request.get('task_id'),
+        context.task_id, revision, {key: view.get(key) for key in ('generation', 'through', 'source_size', 'captured_status')}], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    position = {'skill_offset': 0, 'runtime_after': 0}
+    cursor = request.get('cursor')
+    if cursor is not None:
         try:
-            from ..runtime_db.repository import RuntimeRepository
-            from ..runtime_db.schema import runtime_db_path
-            r_path = runtime_db_path(Path(self.host.home_paths.owner_home_dir).resolve())
-            if r_path.exists():
-                repo = RuntimeRepository(r_path, read_only=True)
-                target_task_id = request.get('task_id') or context.task_id
-                if target_task_id:
-                    task_runs = repo.task_runs_for_task(str(target_task_id))
-                    for tr in task_runs:
-                        tr_id = tr['task_run_id'] if isinstance(tr, dict) or hasattr(tr, '__getitem__') else getattr(tr, 'task_run_id', None)
-                        if not tr_id:
-                            continue
-                        agent_runs = repo.agent_runs_for_task_run(tr_id)
-                        for ar in agent_runs:
-                            ar_id = ar['agent_run_id'] if isinstance(ar, dict) or hasattr(ar, '__getitem__') else getattr(ar, 'agent_run_id', None)
-                            if not ar_id:
-                                continue
-                            attempts = repo.attempts_for_run(ar_id)
-                            for att in attempts:
-                                att_id = att['attempt_id'] if isinstance(att, dict) or hasattr(att, '__getitem__') else getattr(att, 'attempt_id', None)
-                                if not att_id:
-                                    continue
-                                ops = repo.operations_for_attempt(att_id)
-                                for op in ops:
-                                    op_id = op['operation_id'] if isinstance(op, dict) or hasattr(op, '__getitem__') else getattr(op, 'operation_id', None)
-                                    op_type = op['operation_type'] if isinstance(op, dict) or hasattr(op, '__getitem__') else getattr(op, 'operation_type', None)
-                                    if not op_id or not op_type:
-                                        continue
-                                    # 只有真的进入执行的操作才算 executed；CLAIMED 未启动、CANCELLED、UNKNOWN
-                                    # 都只是"选中过"，标成已执行就是拿计划冒充执行证据（V03-06）。
-                                    phase, phase_reasons = usage_phase_for_operation(
-                                        op['status'] if isinstance(op, dict) or hasattr(op, '__getitem__') else '',
-                                        op['handler_started_at'] if isinstance(op, dict) or hasattr(op, '__getitem__') else 0,
-                                    )
-                                    if phase != 'executed':
-                                        items.append({
-                                            'event_id': f"runtime-op:{op_id}",
-                                            'space_id': context.space_id,
-                                            'task_id': target_task_id,
-                                            'run_id': ar_id,
-                                            'method_ref': op_type,
-                                            'phase': 'selected',
-                                            'reason_codes': phase_reasons,
-                                            'receipt_ref': None
-                                        })
-                                        continue
-                                    r_codes = ['runtime_execution_receipt']
-                                    try:
-                                        space_obj = _space_for_context(self.host, context)
-                                        mounts = space_obj.get('mounts', []) if isinstance(space_obj, dict) else []
-                                    except Exception:
-                                        mounts = []
-                                    if any(m.get('package_ref') in op_type for m in mounts if isinstance(m, dict)):
-                                        r_codes.append('mounted_first')
-                                    items.append({
-                                        'event_id': f"runtime-exec:{op_id}",
-                                        'space_id': context.space_id,
-                                        'task_id': target_task_id,
-                                        'run_id': ar_id,
-                                        'method_ref': op_type,
-                                        'phase': 'executed',
-                                        'reason_codes': r_codes,
-                                        'receipt_ref': f"receipt:{op_id}"
-                                    })
-        except Exception:
-            pass
-        page, cursor = _page(items, request, (owner, action, context.space_id, request.get('task_id')))
-        return {'items': page, 'next_cursor': cursor, 'coverage': 'partial' if (rows or items) else 'unknown'}
+            if type(cursor) is not str or not 1 <= len(cursor) <= 2048:
+                raise ValueError('invalid cursor')
+            decoded = json.loads(base64.b64decode(cursor + '=' * (-len(cursor) % 4), altchars=b'-_', validate=True))
+            if (type(decoded) is not dict or set(decoded) != {'version', 'identity', 'position'}
+                    or decoded['version'] != 2 or decoded['identity'] != identity):
+                raise ValueError('expired cursor')
+            position = decoded['position']
+            if (type(position) is not dict or set(position) != {'skill_offset', 'runtime_after'}
+                    or any(type(v) is not int or v < 0 for v in position.values())
+                    or position['skill_offset'] > skill_count):
+                raise ValueError('invalid position')
+        except (ValueError, TypeError, KeyError) as error:
+            raise BusinessError('CURSOR_EXPIRED', details={
+                'reason': 'USAGE_CURSOR_VERSION_OR_SOURCE_CHANGED',
+                'next_action': '移除旧 cursor，从首页重新读取使用记录。'}) from error
+    items, contexts = [], {}
+    def business_for(task_id):
+        if task_id not in contexts:
+            try:
+                contexts[task_id] = loader(task_id)
+            except (OSError, ValueError, RuntimeError) as error:
+                raise BusinessError('STORE_UNAVAILABLE', details={
+                    'reason': 'USAGE_TASK_CONTEXT_UNREADABLE', 'exception_type': type(error).__name__,
+                    'next_action': '检查原任务归属记录后重新读取。'}) from error
+        business = contexts[task_id]
+        if (not isinstance(business, BusinessExecutionContext) or business.owner_id != owner
+                or business.space_id != context.space_id
+                or request.get('task_id') is not None and business.task_id != request['task_id']):
+            return None
+        return business
+    offset = position['skill_offset']
+    try:
+        selected = require_complete(index.query(view, limit=limit, offset=offset))['rows']
+    except (OSError, ValueError) as error:
+        raise BusinessError('STORE_UNAVAILABLE', details={'reason': 'SKILL_USAGE_PAGE_UNREADABLE',
+            'source_coverage': getattr(error, 'coverage', {}),
+            'next_action': '检查原技能使用来源后从首页重新读取。'}) from error
+    phases = {'manual_get': 'read', 'adopted': 'selected', 'host_injected': 'visible', 'manual_search': 'considered'}
+    for row in selected:
+        if not row.get('task_id') or type(row.get('sequence')) is not int:
+            continue
+        business = business_for(row['task_id'])
+        if business is None:
+            continue
+        reasons = ['original_skill_usage_ledger'] + (['mounted_first'] if row.get('mounted_first') else [])
+        items.append({'event_id': f"skill-usage:{row['sequence']}", 'space_id': business.space_id,
+            'task_id': business.task_id, 'run_id': None, 'method_ref': row['skill_id'],
+            'phase': phases.get(row.get('event'), 'read'), 'reason_codes': reasons, 'receipt_ref': None})
+    position['skill_offset'] += len(selected)
+    more = position['skill_offset'] < skill_count
+    if not selected and not more and revision is not None:
+        # 与原 tool_calls reader 同一 rowid/revision 来源页；先取位置再做有界授权 join。
+        page = ObservationSourcePage(position={'revision': revision, 'after': position['runtime_after']}, limit=limit)
+        after = source_after(page, revision)
+        try:
+            repo = RuntimeRepository(path, read_only=True)
+            with repo._runtime_connection() as conn:
+                positions = conn.execute('SELECT rowid FROM tool_operations WHERE rowid>? ORDER BY rowid LIMIT ?',
+                    (after, limit + 1)).fetchall()
+                ids = [row[0] for row in positions[:limit]]
+                operations = conn.execute(
+                    'SELECT x.operation_id,x.operation_type,x.status,x.handler_started_at,ar.run_id,t.task_id, '
+                    't.conversation_task_id,tr.metadata_json '
+                    'FROM tool_operations x JOIN agent_runs ar ON ar.agent_run_id=x.agent_run_id '
+                    'JOIN agent_attempts aa ON aa.attempt_id=x.attempt_id AND aa.agent_run_id=ar.agent_run_id '
+                    'JOIN task_runs tr ON tr.task_run_id=ar.task_run_id JOIN tasks t ON t.task_id=tr.task_id '
+                    'WHERE t.owner_id=? AND x.rowid IN (' + ','.join('?' for _ in ids) + ') ORDER BY x.rowid',
+                    [owner, *ids]).fetchall() if ids else []
+            for op in operations:
+                # 原usage只列当前准确任务的runtime操作；空间页不会扩大为同owner所有运行。
+                metadata = json.loads(op['metadata_json'])
+                raw_context = metadata.get('business_context')
+                if raw_context:
+                    frozen = BusinessExecutionContext.from_dict(raw_context)
+                    if frozen.owner_id != owner or frozen.task_id != metadata.get('session_task_ref'):
+                        raise ValueError('runtime usage context mismatch')
+                    if frozen.space_id != context.space_id:
+                        continue
+                    source_task = frozen.task_id
+                else:
+                    source_task = op['conversation_task_id'] or op['task_id']
+                if source_task != (request.get('task_id') or context.task_id):
+                    continue
+                business = business_for(source_task)
+                if business is None:
+                    continue
+                phase, reasons = usage_phase_for_operation(op['status'], op['handler_started_at'])
+                if phase == 'executed' and any(m.get('package_ref') in op['operation_type']
+                        for m in space['mounts'] if isinstance(m, dict) and m.get('package_ref')):
+                    reasons.append('mounted_first')
+                items.append({'event_id': ('runtime-exec:' if phase == 'executed' else 'runtime-op:') + op['operation_id'],
+                    'space_id': business.space_id, 'task_id': business.task_id, 'run_id': op['run_id'] or None,
+                    'method_ref': op['operation_type'], 'phase': phase, 'reason_codes': reasons,
+                    'receipt_ref': 'receipt:' + op['operation_id'] if phase == 'executed' else None})
+            if runtime_source_revision(path) != revision:
+                raise BusinessError('CURSOR_EXPIRED', details={'reason': 'RUNTIME_USAGE_SOURCE_CHANGED',
+                    'next_action': '从首页重新读取当前版本使用记录。'})
+            if ids:
+                position['runtime_after'] = ids[-1]
+            more = len(positions) > limit
+        except BusinessError:
+            raise
+        except (OSError, ValueError, TypeError, RuntimeError, sqlite3.Error) as error:
+            raise BusinessError('STORE_UNAVAILABLE', details={
+                'reason': 'RUNTIME_USAGE_SOURCE_UNREADABLE', 'exception_type': type(error).__name__,
+                'next_action': '检查原 runtime 工具账本；修复后从首页重新读取。'}) from error
+    elif selected and not more:
+        more = revision is not None
+    next_cursor = (base64.urlsafe_b64encode(json.dumps({'version': 2, 'identity': identity,
+        'position': position}).encode()).decode().rstrip('=') if more else None)
+    return {'items': items, 'next_cursor': next_cursor, 'coverage': 'partial' if skill_count or items or more else 'unknown'}
 
 
 def _page(rows, request, scope):
