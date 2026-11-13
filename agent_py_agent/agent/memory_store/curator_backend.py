@@ -474,10 +474,16 @@ def call_backend_with_timeout(
 # LLM: 只在原 bounded worker 实际发送前复核原后台 T/P5；检查结束即释放短门，不持门等网络。无实际后台 scope 的 Count0 沿原零 I/O 检查，不构造或补执行权。
 # 函数用途: 在原运输仍可提交时调用一次既有结构化后端，所有拒绝与后端异常原样返回。
 def _generate_with_original_transport(generate, prompt, response_schema):
+    from ..backends.request_scope import provider_request_timeout
     from ..gateway_parts.multiprocess_background_execution import require_background_model_admission
+    from ..llm_scale.hot_path import global_llm_admission_slot
 
     require_background_model_admission()
-    return generate(prompt, response_schema=response_schema)
+    # 名额随实际运输释放，外层超时不能提前释放仍在运行的请求；等候也受原预算约束。
+    with global_llm_admission_slot(wait_timeout=provider_request_timeout(30)):
+        provider_request_timeout(30)
+        require_background_model_admission()
+        return generate(prompt, response_schema=response_schema)
 
 
 # LLM: 历史材料与可选注释均非权威；仅将匹配锚点的candidate_id映射为输出link_candidate_id，完整字段须同schema一致，不改变证据、晋升或游标。

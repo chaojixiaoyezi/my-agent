@@ -19,6 +19,18 @@ def _reset(monkeypatch):
     hot_path.reset_hot_path_admission_for_test()
 
 
+def test_caller_wait_budget_bounds_global_admission(monkeypatch):
+    monkeypatch.setenv('LLM_MAX_INFLIGHT', '1')
+    monkeypatch.setenv('LLM_ADMISSION_WAIT_SECONDS', '30')
+    hot_path.reset_hot_path_admission_for_test()
+    try:
+        with hot_path.global_llm_admission_slot():
+            with pytest.raises(ProviderTransientError), hot_path.global_llm_admission_slot(wait_timeout=0):
+                pytest.fail('当前预算耗尽时不得继续等待名额')
+    finally:
+        hot_path.reset_hot_path_admission_for_test()
+
+
 def test_default_off_is_nullcontext_no_limit(monkeypatch):
     # 未配 LLM_MAX_INFLIGHT → 任意并发都放行(默认路径零变化)。
     entered = []

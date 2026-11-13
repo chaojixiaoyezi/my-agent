@@ -51,7 +51,7 @@ def _limiter() -> ConcurrencyLimiter | None:
 # LLM: optional 必须在实际 worker 内持有，不能随外层超时释放；只改领取策略，不改主模型等待或异常类型。
 # 函数用途: 领取原全局模型名额，可选调用立即尝试并给普通调用留一个名额，避免短判断排队阻塞主流程。
 @contextmanager
-def global_llm_admission_slot(*, optional: bool = False) -> Iterator[None]:
+def global_llm_admission_slot(*, optional: bool = False, wait_timeout: float | None = None) -> Iterator[None]:
     """全局在飞 LLM 并发槽;未配上限时是零成本 nullcontext(默认路径不变)。
 
     槽满等 LLM_ADMISSION_WAIT_SECONDS 拿不到 → 抛 ProviderTransientError(过载/限流类,
@@ -64,6 +64,8 @@ def global_llm_admission_slot(*, optional: bool = False) -> Iterator[None]:
         return
     try:
         timeout = 0.0 if optional else float(_env_int("LLM_ADMISSION_WAIT_SECONDS", 30))
+        if wait_timeout is not None:
+            timeout = min(timeout, max(0.0, wait_timeout))
         with limiter.slot(timeout=timeout, reserve=1 if optional else 0):
             yield
     except ConcurrencyTimeout as exc:

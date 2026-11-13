@@ -37,6 +37,67 @@ from agent_py_agent.tests.test_gateway_claim_transition_scope import (
 )
 
 
+@pytest.fixture
+def global_model_limit(monkeypatch):
+    from agent_py_agent.agent.llm_scale import hot_path
+
+    monkeypatch.setenv('LLM_MAX_INFLIGHT', '1')
+    monkeypatch.setenv('LLM_ADMISSION_WAIT_SECONDS', '0')
+    hot_path.reset_hot_path_admission_for_test()
+    yield hot_path
+    hot_path.reset_hot_path_admission_for_test()
+
+
+def test_curator_and_foreground_share_one_model_slot(global_model_limit):
+    from agent_py_agent.agent.backends.errors import ProviderTransientError
+
+    calls = []
+    backend = SimpleNamespace(generate_structured=lambda *args, **kwargs: calls.append('sent') or 'response')
+    with global_model_limit.global_llm_admission_slot():
+        with pytest.raises(ProviderTransientError):
+            curator_backend.call_backend_with_timeout(backend, prompt='材料', response_schema={}, timeout_seconds=2)
+    assert calls == []
+    assert curator_backend.call_backend_with_timeout(
+        backend, prompt='材料', response_schema={}, timeout_seconds=2) == 'response'
+    assert calls == ['sent']
+    assert global_model_limit._limiter().in_flight() == 0
+
+
+def test_curator_timeout_retains_model_slot_until_transport_exits(global_model_limit):
+    from agent_py_agent.agent.backends.errors import ProviderTransientError
+
+    entered, release = threading.Event(), threading.Event()
+    workers = []
+
+    def generate(*args, **kwargs):
+        workers.append(threading.current_thread())
+        entered.set()
+        assert release.wait(3)
+        return 'response'
+
+    try:
+        with pytest.raises(curator_backend.CuratorModelTimeoutError):
+            curator_backend.call_backend_with_timeout(SimpleNamespace(generate_structured=generate),
+                prompt='材料', response_schema={}, timeout_seconds=0.1)
+        assert entered.is_set()
+        assert global_model_limit._limiter().in_flight() == 1
+        with pytest.raises(ProviderTransientError), global_model_limit.global_llm_admission_slot():
+            pytest.fail('未退出的原运输应继续占用名额')
+    finally:
+        release.set()
+        for worker in workers:
+            worker.join(timeout=2)
+    assert all(not worker.is_alive() for worker in workers)
+    assert global_model_limit._limiter().in_flight() == 0
+
+
+def test_curator_provider_error_releases_model_slot(global_model_limit):
+    backend = _FailureBackend(RuntimeError('synthetic-provider-failure'))
+    with pytest.raises(RuntimeError, match='synthetic-provider-failure'):
+        curator_backend.call_backend_with_timeout(backend, prompt='材料', response_schema={}, timeout_seconds=2)
+    assert global_model_limit._limiter().in_flight() == 0
+
+
 # LLM: 输入保持正式 Curator 类型和来源字段；只用合成材料，不从正文建立执行身份。
 # 函数用途: 构造可完整进入提取循环的最小批次，避免空输入或伪对象掩盖重试。
 def _batch() -> CuratorInputBatch:
