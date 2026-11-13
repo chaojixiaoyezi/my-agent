@@ -10,6 +10,10 @@ agent_py_agent/tests/
 |-- test_agent_run_final_report_ownership.py       # 收尾与文件发布交错时保留已交付报告
 |-- test_leaf_provenance_review.py                 # 叶审核的来源、候选、并发换绑和历史回执权限
 |-- test_native_session_task_child_continuation.py # 原任务完成通知、合并输入与恢复的冻结上下文
+|-- test_managed_session_history_scope.py          # 同一控制器上不同业务订单的历史与压缩隔离
+|-- test_managed_business_workspace_scope.py       # 默认订单写范围、委派继承和跨日恢复
+|-- test_business_public_display_messages.py       # 原公开过程消息的授权、分页与终端去重
+|-- test_workflow_dag_review_resume.py             # 并行步骤审核暂停、同尝试恢复和未知副作用对账
 |-- test_registered_run_artifact_routes.py         # 授权读取原运行产物、定位恢复与内容漂移
 `-- test_tui_background_execution_activity.py      # 业务空间挂载及选中后台代理的工具与孩子
 ```
