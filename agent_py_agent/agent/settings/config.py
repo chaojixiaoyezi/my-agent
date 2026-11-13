@@ -461,6 +461,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_curator_auto_promotion_policy: str = "conservative_v1"
     memory_lesson_min_occurrences: int = 2
     memory_hot_min_occurrences: int = 3
+    # 已接受的教训连续未被活跃或待审方法引用多少天后可归档；0 表示关闭自动归档（范围 0-3650）。
+    memory_lesson_archive_days: int = field(default=15, kw_only=True)
     # 用户明确引用且本轮成功读取的文件摘录上限；0关闭关联，不改变消息学习资格。
     memory_curator_task_file_evidence_max_chars: int = 4000
     # 相同指令跨线程广播的去重窗口秒数；0关闭，不折叠单线程重复。
@@ -499,8 +501,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     subagent_hierarchy_max_children_per_tool_call: int = 0
     subagent_takeover_chain_max_depth: int = 0
     subagent_debug_trace_level: int = 0
-    # 自学习默认关闭；开启后只生成待确认候选，主代理与子代理正式内容都须用户显式确认。
-    enable_self_learning: bool = False
+    # 自学习默认开启；关闭后暂停后台总结与自动维护，人工显式确认、删除和恢复仍可用。
+    enable_self_learning: bool = True
     # 只读自我目录沿原owner/run与公开模块读口聚合，关闭时不注册工具或注入使用指引。
     enable_self_map: bool = True
     # 自动总结 Skill 的触发与预算：工具轮数门槛、每 owner 每日模型调用上限（0 不限）、自学 Skill 数量上限（0 不限，只限新建）、单次调用超时秒数。
@@ -508,16 +510,19 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     self_learning_daily_limit: int = 20
     # 同一部署全部owner自学模型调用的UTC日总上限，0不限。
     self_learning_global_daily_limit: int = 2000
-    self_learning_max_skills: int = 0
-    # 常用推荐数量不限制保存；维护默认只观察，显式autonomous才冷藏/归档。
-    self_learning_recommended_limit: int = 50
-    self_learning_maintenance_mode: str = "observe"
-    self_learning_cool_seconds: int = 2592000
-    self_learning_archive_seconds: int = 15552000
+    self_learning_max_skills: int = field(default=50, metadata={"unit": "个", "range": "≥0"})
+    # 常用推荐数量与探索/去重策略；维护默认autonomous执行可恢复合并、3+hurt_count退场及冷藏/归档/清理。
+    self_learning_recommended_limit: int = field(default=50, metadata={"unit": "个", "range": "≥0"})
+    self_learning_recommended_explore_percent: int = field(default=20, kw_only=True, metadata={"range": "0-100"})
+    self_learning_merge_similarity_percent: int = field(default=70, kw_only=True, metadata={"range": "0-100"})
+    self_learning_maintenance_mode: str = field(default="autonomous", metadata={"range": "observe|autonomous"})
+    self_learning_cool_seconds: int = field(default=604800, metadata={"range": "≥0"})
+    self_learning_archive_seconds: int = field(default=1296000, metadata={"range": "≥0"})
+    self_learning_evict_seconds: int = field(default=1296000, kw_only=True, metadata={"range": "≥0"})
     # 后台/定时任务完成也可贡献学习请求；默认关闭，开启仍受同owner日预算。
     self_learning_include_background: bool = False
     # 只清理无固定/在途/监控引用的旧修订；0不限，当前激活版永保留。
-    self_learning_keep_versions: int = 5
+    self_learning_keep_versions: int = field(default=5, metadata={"unit": "个版本", "range": "≥0"})
     self_learning_timeout_seconds: int = 180
     # 主会话代理可用 manage_models 工具直接增删改切 owner 模型目录；关闭后只能用 TUI /model 手动配置。
     enable_model_profile_tool: bool = True
@@ -832,13 +837,12 @@ def load_config(config_path: str | Path) -> AgentConfig:
 
     normalize_agent_memory_config(config)
     apply_log_level(config)
-    from .live_switches import LIVE_SWITCH_KEYS, _ConfigSources
+    from .live_switches import _ConfigSources, live_switch_snapshot
 
     # 只冻结本次加载值，不登记或重读文件；守卫策略基线仍在宿主装配后的首次注册取得。
     provenance = _ConfigSources(config.config_sources)
     provenance.path = Path(resolved_path)
-    provenance.applied = tuple((key, getattr(config, key)) for key in LIVE_SWITCH_KEYS
-                               if type(getattr(config, key, None)) is bool)
+    provenance.applied = tuple(live_switch_snapshot(config).items())
     provenance.guard_applied = ()
     config.config_sources = provenance
     return config

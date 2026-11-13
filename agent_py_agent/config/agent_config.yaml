@@ -189,6 +189,9 @@ memory_curator_auto_promotion_policy: "conservative_v1"
 memory_lesson_min_occurrences: 2
 # 已接受的教训晋升为 HOT 热点教训所需的最少独立观察次数。
 memory_hot_min_occurrences: 3
+# 已接受的教训连续未被活跃或待审方法引用多少天后可静默归档；0 表示不自动归档（范围 0-3650）。
+# 正式归档后仍保留可审计与恢复链路，不影响永久长期记忆，保存后立即生效。
+memory_lesson_archive_days: 15
 # 用户明确引用且同轮成功read_file的任务/规则文件，最多附多少字符摘录给记忆整理模型；0关闭关联。
 # 只使用已经核验的工具归档，不重新读取源文件；摘录仍受单批总字符预算限制。
 memory_curator_task_file_evidence_max_chars: 4000
@@ -392,18 +395,18 @@ subagent_takeover_chain_max_depth: 0
 # - 3-5: 逐步增加 prompt/tool/response 预览或完整细节，建议只在真实 E2E 排障时开启
 subagent_debug_trace_level: 0
 
-# 自学习（默认关闭）：开启后后台总结主任务、子代理lesson生成待确认候选。
-# 正式Skill的新建或更新必须经用户确认；开关、模型理由及自动维护都不代替确认。
+# 自学习（默认开启）：开启后后台总结主任务、子代理lesson，并按策略执行生命周期维护与候选审核。
+# 开关、模型理由及自动维护都不能代替用户审批边界；已固定或明确在用技能不占活跃上限且受保护。
 # 用户可通过 /skills learned proposals 查看，按候选编号和修订确认/拒绝；子代理候选沿 /skills proposals。
-# 会额外消耗受每日预算限制的模型调用，候选保存前脱敏并经过原解析和guard。
-enable_self_learning: false
+# 会额外消耗受每日预算限制的模型调用，候选保存前脱敏并经过原解析和guard；保存后立即生效。
+enable_self_learning: true
 # 按当前owner/run只读聚合已有能力与边界目录；不读取正文、不授权限、不发网络，关闭后不注册工具及指引。
 enable_self_map: true
 
 # 自动总结 Skill 的触发与预算（只在 enable_self_learning 为 true 时生效）：
 # - self_learning_min_tool_rounds：本轮工具轮数达到它才登记学习请求，最小 1。
 # - self_learning_daily_limit：每个 owner 每天最多发几次总结调用；0 表示不限。
-# - self_learning_max_skills：自动总结最多保留几个 Skill（只限制新建，更新不受限）；0 表示不限。
+# - self_learning_max_skills：活跃自学技能槽位上限（默认 50；0 表示不限，已固定/待审/在途/显式引用豁免）。
 # - self_learning_timeout_seconds：单次总结调用的超时秒数，最小 10。
 self_learning_min_tool_rounds: 6
 # 每天最多自动把任务总结成技能的模型调用次数。
@@ -412,18 +415,24 @@ self_learning_min_tool_rounds: 6
 self_learning_daily_limit: 20
 # 同一部署全部owner每日自学模型调用总上限（UTC），失败调用也计数；0不限，避免大量owner各自绕过总成本预算。
 self_learning_global_daily_limit: 2000
-# 兼容显式配置的新建硬上限，默认0由owner存储配额控制；旧配置的非零值仍按原硬上限，不偷换成推荐数。
-# 只有当你希望给自学技能的总数设个天花板、不让它无限增长时才需要改。
-# 填 `0` 表示不限；它只管新建、不算更新，已有技能的更新不受这个数影响。
-self_learning_max_skills: 0
+# 活跃自学技能新建与恢复槽位上限（默认 50）；已固定、待确认、在途及明确引用技能豁免不计入占位。
+# 只有当你希望调大或放开自学技能总数上限时才需要改。
+# 填 `0` 表示不限；它只管新建/恢复上限，已有技能的更新不受这个数影响。
+self_learning_max_skills: 50
 # 默认常用目录最多展示的自学Skill数；不影响完整搜索、显式读取或持久保存。0表示不限制。
 self_learning_recommended_limit: 50
-# observe只观察；autonomous在引用完整、未固定且仍属托管时允许可恢复冷藏/归档，不发布新内容。
-self_learning_maintenance_mode: observe
-# 冷藏与归档的空闲秒数，0关闭对应动作；默认30天/180天仅在autonomous显式开启时生效。
-self_learning_cool_seconds: 2592000
-# 自学技能连续闲置多少秒后可归档；0关闭，仅显式autonomous且引用完整时生效，默认180天。
-self_learning_archive_seconds: 15552000
+# 常用推荐目录预留给探索/未稳定自学技能的比例（0-100 百分比，默认 20）；0 表示不预留探索名额。
+self_learning_recommended_explore_percent: 20
+# 候选技能或同源方法自动去重合并的相似度阈值（0-100 百分比，默认 70）；0 表示关闭相似度自动合并。
+self_learning_merge_similarity_percent: 70
+# observe只观察不自动写盘；autonomous在引用完整且仍属托管时允许可恢复合并、3+hurt_count质量退场与冷藏/归档/清理。
+self_learning_maintenance_mode: autonomous
+# 冷藏空闲秒数，0关闭对应动作；默认7天（604800秒），仅在autonomous且引用完整时生效，保存后立即生效。
+self_learning_cool_seconds: 604800
+# 自学技能连续闲置多少秒后可归档；0关闭闲置归档（不影响质量退场），默认15天（1296000秒），保存后立即生效。
+self_learning_archive_seconds: 1296000
+# 已归档自学技能从 archived_at 起算的保留宽限与清理秒数；0表示永久保留（不过期不删除），默认15天（1296000秒）。
+self_learning_evict_seconds: 1296000
 # 是否让已完成的后台/定时任务也提交学习请求；默认关闭，开启仍受同一日预算与候选确认。
 self_learning_include_background: false
 # 自主维护且引用完整时，未被引用方法保留最近修订数；当前激活版另保留，固定/在途/监控方法历史不裁剪。0不限。

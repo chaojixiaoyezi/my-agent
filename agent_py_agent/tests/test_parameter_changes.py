@@ -36,9 +36,10 @@ def _set(path, key, value):
 
 def test_values_are_written_by_type_and_really_take_effect(tmp_path):
     path = _user(tmp_path)
-    assert _set(path, "max_tokens", "32768")["ok"]
+    max_report = _set(path, "max_tokens", "32768")
+    assert max_report["ok"] and max_report["effect_when"] == "restart_gateway" and "/restart" in max_report["effect_text"]
     report = _set(path, "enable_self_learning", "关闭")
-    assert report["ok"] and report["effect_when"] == "restart_gateway" and "/restart" in report["effect_text"]
+    assert report["ok"] and report["effect_when"] == "immediate" and "马上生效" in report["effect_text"]
     assert _set(path, "agent_name", "小助手")["ok"]
     text = path.read_text(encoding="utf-8")
     assert "max_tokens: 32768" in text and "enable_self_learning: false" in text and 'agent_name: "小助手"' in text
