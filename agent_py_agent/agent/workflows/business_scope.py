@@ -482,13 +482,29 @@ class WorkflowScopeService:
                 if is_resume_control and resolution_ref is not None:
                     return self.governance.require_resolution(record, resolution_ref)
                 return self.governance.require_effect(record, phase)
+            if is_resume_control or resolution_ref is not None:
+                step = next((item for item in record.steps if item.step_id == record.current_step_id), None)
+                receipt = step.escalation_result.get('tool_receipt', {}) if step is not None else {}
+                prior_effect = receipt.get('effect_outcome', record.effect_outcome) if isinstance(receipt, dict) else record.effect_outcome
             if resolution_ref is not None:
-                raise PermissionError('WORKFLOW_RESOLUTION_UNAVAILABLE')
+                raise WorkflowPolicyRefusal('WORKFLOW_RESOLUTION_UNAVAILABLE', details={
+                    'workflow_run_id': record.workflow_run_id,
+                    'prior_effect_outcome': prior_effect,
+                    'resolution_available': False,
+                    'recommended_action': '当前宿主未配置可信核验入口；保留原操作并核对目标结果，禁止用新幂等键重做。',
+                })
             if (is_resume_control and not _requires_native_agent_resume(record)
                     and not _requires_terminal_publication_resume(record) and (record.effect_outcome == 'unknown'
                     or any(step.escalation_result.get('effect_started') and
                            (step.needs_repair or step.status == 'running') for step in record.steps))):
-                raise PermissionError('WORKFLOW_RECONCILIATION_REQUIRED')
+                raise WorkflowPolicyRefusal('WORKFLOW_RECONCILIATION_REQUIRED', details={
+                    'workflow_run_id': record.workflow_run_id,
+                    'step_id': record.current_step_id,
+                    'operation_id': receipt.get('operation_id', '') if isinstance(receipt, dict) else '',
+                    'prior_effect_outcome': prior_effect,
+                    'resolution_available': False,
+                    'recommended_action': '原步骤副作用尚未核实；先核对原操作和目标结果，由可信宿主提交核验，禁止原样盲目重试。',
+                })
             return None
 
         if not callable(self.engine_factory):

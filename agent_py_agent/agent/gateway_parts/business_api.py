@@ -412,12 +412,14 @@ class BusinessServices:
     """静态选择原服务。可选端口由组合根注入，绝不从payload或任意函数名加载。"""
     # LLM: 只绑定当前owner原Store与规范只读库；功能关闭不探测观察来源，显式端口不替换，不缓存actor。
     # 函数用途: 按canonical owner-home装配同一owner的业务查询和事件来源。
-    def __init__(self, host, *, spaces=None, workflows=None, background=None, capabilities=None, projection=None):
+    def __init__(self, host, *, spaces=None, workflows=None, background=None, capabilities=None, projection=None, subscriptions=None):
         self.host = host
         self.owner_id = host.home_paths.owner_id
         self.owner_home = Path(host.home_paths.owner_home_dir).resolve()
         self._spaces = spaces
         self._default_spaces = spaces is None
+        self._subscriptions = subscriptions
+        self._default_subscriptions = None
         if workflows is None:
             from ..workflows.business_scope import WorkflowScopeService
             engine_factory, context_provider = workflow_run_ports(host)
@@ -481,6 +483,27 @@ class BusinessServices:
     @spaces.setter
     def spaces(self, value):
         self._spaces, self._default_spaces = value, False
+
+    @property
+    def subscriptions(self):
+        """复用原订阅catalog；未绑定来源时只开放列表，不制造连接或授予来源权限。"""
+        from ..conversation.managed_subscriptions import ManagedSubscriptionService
+
+        service = self._subscriptions
+        if service is None:
+            factory = getattr(self.host, 'business_subscriptions', None)
+            if factory is None:
+                catalog = self.spaces
+                if self._default_subscriptions is None or self._default_subscriptions.catalog is not catalog:
+                    self._default_subscriptions = ManagedSubscriptionService(catalog)
+                service = self._default_subscriptions
+            elif callable(factory):
+                service = factory(self.owner_id)
+        if (not isinstance(service, ManagedSubscriptionService) or service.owner_id != self.owner_id
+                or service.catalog.owner_id != self.owner_id
+                or service.catalog.owner_root.resolve() != self.owner_home):
+            return None
+        return service
 
     # LLM: 关闭时不探测来源；首次启用只装配原缺失端口，保留显式注入和已有投影身份。
     # 函数用途: 让冷启动时关闭的服务在下一次启用请求中补齐默认只读端口。
@@ -568,6 +591,9 @@ class BusinessServices:
         if implementer.startswith('V13-'):
             from .business_api_v13 import v13_ready
             return v13_ready(action, self)
+        if spec.action.startswith('subscriptions.'):
+            service = self.subscriptions
+            return service is not None and (action == 'subscriptions.list' or callable(service.source_resolver))
         if implementer == 'W1':
             if action == 'approvals.decide':
                 return callable(self.approvals) and self._observation_ready('approvals.get')
@@ -674,6 +700,16 @@ class BusinessServices:
             return v13_invoke(action, params, context, self, request_id=request_id,
                 idempotency_key=idempotency_key, expected_revision=expected_revision)
         actor = self.actor(context)
+        if spec.action.startswith('subscriptions.'):
+            service = self.subscriptions
+            if service is None:
+                raise BusinessError('HOST_NOT_READY', details={
+                    'dependency': 'owner_subscription_service',
+                    'next_action': '绑定同一owner的原订阅服务后重试；未执行订阅操作。',
+                })
+            # 只更换同owner同根catalog对象绑定；当前subject及逐调用授权函数原样保留。
+            return service.execute(action, params, actor=replace(actor, service=service.catalog),
+                expected_revision=expected_revision, idempotency_key=idempotency_key)
         kwargs = {'expected_revision': expected_revision, 'idempotency_key': idempotency_key}
         if action == 'approvals.decide' and callable(self.approvals):
             return self.approvals(params, context, **kwargs)
@@ -789,9 +825,11 @@ def _error_code(error):
                               'MODEL_PROFILE_UNAVAILABLE', 'WORKFLOW_ALREADY_EXISTS', 'WORKFLOW_READ_ONLY',
                               'WORKFLOW_REFERENCE_MISMATCH', 'WORKFLOW_RECYCLED', 'WORKFLOW_NOT_ACTIVE',
                               'WORKFLOW_REFERENCED_OR_COVERAGE_UNKNOWN', 'WORKFLOW_UNASSIGNED',
-                              'WORKFLOW_SPACE_MISMATCH'} else
+                              'WORKFLOW_RECONCILIATION_REQUIRED', 'WORKFLOW_RESOLUTION_UNAVAILABLE',
+                              'WORKFLOW_SPACE_MISMATCH', 'SUBSCRIPTION_REMOVED'} else
               404 if code.endswith('_NOT_FOUND') or code == 'SPACE_SCOPE_MISMATCH' else
-              403 if code in {'ACTOR_REQUIRED', 'BUSINESS_ACCESS_DENIED', 'HUMAN_RESPONSE_REQUIRED'} else
+              403 if code in {'ACTOR_REQUIRED', 'BUSINESS_ACCESS_DENIED', 'HUMAN_RESPONSE_REQUIRED',
+                             'SOURCE_SCOPE_MISMATCH', 'POLICY_AUTHORIZATION_REQUIRED'} else
               400 if code == 'INVALID_SCHEMA' else 503)
     status = v13_error_status(code) or status
     effect = 'not_started'
@@ -939,7 +977,7 @@ def native_business_context(handler, server):
     port_source = ('none',)
     if base.home_paths.owner_id == home.owner_id:
         for key in ('business_projection', 'business_reference_reader', 'business_active_references',
-                    'business_governance', 'business_background', 'business_capabilities',
+                    'business_governance', 'business_background', 'business_capabilities', 'business_subscriptions',
                     'business_context_provider', 'workflow_engine_factory', 'workflow_agent_steps', 'subagents',
                     'business_v13_providers', 'business_v13_clock',
                     'business_space_reference_resolver', 'business_workflow_reference_reader',
@@ -1266,7 +1304,7 @@ def _local_business_services(host):
         sources = (host.config, store, storage, getattr(store, 'session_tasks', None),
             getattr(store, 'threads', None), *(getattr(host, name, None) for name in (
                 'business_projection', 'business_reference_reader', 'business_active_references',
-                'business_governance', 'business_background', 'business_capabilities',
+                'business_governance', 'business_background', 'business_capabilities', 'business_subscriptions',
                 'business_context_provider', 'workflow_engine_factory', 'workflow_agent_steps',
                 'business_approval_decider', 'business_v13_providers', 'business_v13_clock',
                 'business_space_reference_resolver', 'business_workflow_reference_reader',

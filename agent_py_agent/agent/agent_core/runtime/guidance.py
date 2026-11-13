@@ -1073,11 +1073,20 @@ def _render_task_events(events: list[WakeSignal]) -> str:
 # 函数用途: 生成活动回合可见事件，窗口提示与收口事实都不改写生命周期或触发额外模型轮。
 def _task_event_payload(event: WakeSignal) -> dict[str, object]:
     metadata = event.metadata if isinstance(event.metadata, dict) else {}
+    capability = {}
+    if event.reason == "subagent_capability_request_open":
+        capability = {key: metadata[key] for key in (
+            "request_id", "capability_request", "parent_tool_authority",
+        ) if key in metadata}
     return {
         "wake_signal_id": event.wake_signal_id,
         "reason": event.reason,
         "root_task_id": event.root_task_id,
         "source_agent_id": event.source_agent_id,
+        "parent_agent_id": event.parent_agent_id,
+        "urgency": event.urgency,
+        # 活动回合与初始后台片共用原申请/父级权限快照；只投影，不授予执行权。
+        **({"metadata": capability} if capability else {}),
         "status": str(metadata.get("status") or ""),
         "task_id": str(metadata.get("task_id") or ""),
         "created_at": event.created_at,

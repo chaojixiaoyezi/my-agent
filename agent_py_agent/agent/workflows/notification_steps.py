@@ -158,12 +158,19 @@ def execute_notification_step(
     key_hash = hashlib.sha256(dedupe_key.encode("utf-8")).hexdigest()[:24]
     rel_path = ("data", "workflow_notifications", date_str, f"{key_hash}.json")
 
+    # 原步骤输出也是框架恢复依据；本地辅助收据失败不能抹掉已经入队的事实。
+    previous = getattr(step, "output_snapshot", None)
+    if (isinstance(previous, dict) and previous.get("dedupe_key") == dedupe_key
+            and previous.get("status") in {"delivered", "queued"}):
+        step.status = "succeeded"
+        step.effect_id = dedupe_key
+        return
     # Check for existing delivery
     try:
         existing_text = read_text_beneath(owner_home, rel_path)
         if existing_text:
             existing_receipt = json.loads(existing_text)
-            if existing_receipt.get("dedupe_key") == dedupe_key and existing_receipt.get("status") == "delivered":
+            if existing_receipt.get("dedupe_key") == dedupe_key and existing_receipt.get("status") in {"delivered", "queued"}:
                 step.status = "succeeded"
                 step.output_snapshot = existing_receipt
                 step.effect_id = dedupe_key
@@ -191,13 +198,16 @@ def execute_notification_step(
     if callable(sender):
         try:
             send_res = sender(channel=channel, target=target, title=clean_title, message=clean_message, payload=receipt)
-            if isinstance(send_res, dict) and send_res.get("status") in ("failed", "error"):
+            if isinstance(send_res, dict) and send_res.get("status") in ("failed", "error", "no_channel", "unavailable", "unknown"):
                 delivery_ok = False
                 delivery_error = send_res.get("error") or "SENDER_RETURNED_FAILURE"
             else:
                 delivery_ok = True
                 if isinstance(send_res, dict):
                     receipt["delivery_result"] = send_res
+                    if send_res.get("status") == "queued":
+                        receipt["status"] = "queued"
+                        receipt["queued_at"] = receipt.pop("delivered_at")
         except Exception as exc:
             delivery_ok = False
             delivery_error = str(exc)
@@ -211,21 +221,32 @@ def execute_notification_step(
                 message=clean_message,
                 payload=receipt,
             )
-            if im_res.get("recorded") is False:
+            if im_res.get("delivery_status") == "queued":
+                # 原宿主可能已入队而本地日志失败；队列事实优先，保留原record_error供修复。
+                delivery_ok = True
+                receipt["status"] = "queued"
+                receipt["queued_at"] = receipt.pop("delivered_at")
+                receipt["delivery_result"] = im_res
+            elif im_res.get("recorded") is False:
                 delivery_ok = False
                 delivery_error = im_res.get("record_error", "NOTIFICATION_RECORD_FAILED")
-            else:
-                delivery_ok = True
+                receipt["delivery_result"] = im_res
+            elif im_res.get("delivery_status") != "queued":
+                # 本地记账不是发出通知；没有渠道或渠道拒绝必须保留明确失败。
+                delivery_error = "WORKFLOW_NOTIFICATION_NO_CHANNEL" if im_res.get("delivery_status") == "no_channel" else "WORKFLOW_NOTIFICATION_CHANNEL_UNAVAILABLE"
                 receipt["delivery_result"] = im_res
         except Exception as exc:
             delivery_ok = False
             delivery_error = str(exc)
 
     if not delivery_ok:
+        receipt["status"] = "failed"
+        receipt.pop("delivered_at", None)
         step.status = "failed"
         step.error_code = "WORKFLOW_NOTIFICATION_DELIVERY_FAILED"
         step.error_message = f"notification delivery failed: {delivery_error}"
         step.needs_repair = True
+        step.output_snapshot = receipt
         return
 
     # Persist date-bucketed receipt atomically
@@ -235,8 +256,10 @@ def execute_notification_step(
             rel_path,
             json.dumps(receipt, ensure_ascii=False, indent=2),
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        receipt["receipt_persistence_error"] = {
+            "code": "WORKFLOW_NOTIFICATION_RECEIPT_STORE_UNAVAILABLE", "error_type": type(exc).__name__,
+            "recommended_action": "保留原步骤投递回执修复存储；通知已受理，禁止重新发送。"}
 
     step.status = "succeeded"
     step.output_snapshot = receipt
@@ -249,6 +272,9 @@ def notify_unattended_run_failure(*, engine: Any, run: Any) -> dict[str, Any]:
     if getattr(run, "_suppress_failure_notification", False):
         return {"status": "skipped", "reason": "anti_recursion"}
     if getattr(run, "failure_notification", None) is not None:
+        previous = run.failure_notification
+        if isinstance(previous, dict) and previous.get("status") in {"notified", "queued"}:
+            return previous
         return {"status": "skipped", "reason": "anti_recursion"}
 
     steps = getattr(run, "steps", None) or {}
@@ -316,17 +342,30 @@ def notify_unattended_run_failure(*, engine: Any, run: Any) -> dict[str, Any]:
                 message=clean_message,
                 payload=receipt,
             )
-            if isinstance(send_res, dict) and send_res.get("status") in ("failed", "error"):
+            if isinstance(send_res, dict) and send_res.get("status") in ("failed", "error", "no_channel", "unavailable", "unknown"):
                 raise RuntimeError(send_res.get("error") or "SENDER_RETURNED_FAILURE")
+            if isinstance(send_res, dict) and send_res.get("status") == "queued":
+                receipt["status"] = "queued"
+                receipt["queued_at"] = receipt.pop("notified_at")
+                receipt["delivery_result"] = send_res
         else:
             from .datasource_runtime import emit_asset_im_notification
-            emit_asset_im_notification(
+            delivery = emit_asset_im_notification(
                 owner_home,
                 event_type="workflow_run_failure",
                 title=clean_title,
                 message=clean_message,
                 payload=receipt,
             )
+            if delivery.get("delivery_status") != "queued":
+                return {"status": "notification_failed", "dedupe_key": dedupe_key,
+                    "error_code": (delivery.get("record_error") or "NOTIFICATION_RECORD_FAILED")
+                        if delivery.get("recorded") is False else
+                        "WORKFLOW_NOTIFICATION_NO_CHANNEL" if delivery.get("delivery_status") == "no_channel" else "WORKFLOW_NOTIFICATION_CHANNEL_UNAVAILABLE",
+                    "delivery_result": delivery}
+            receipt["status"] = "queued"
+            receipt["queued_at"] = receipt.pop("notified_at")
+            receipt["delivery_result"] = delivery
     except Exception as exc:
         return {
             "status": "notification_failed",
@@ -337,7 +376,10 @@ def notify_unattended_run_failure(*, engine: Any, run: Any) -> dict[str, Any]:
 
     try:
         write_text_atomic_beneath(owner_home, rel_path, json.dumps(receipt, ensure_ascii=False, indent=2))
-    except Exception:
-        pass
+    except Exception as exc:
+        receipt["receipt_persistence_error"] = {
+            "code": "WORKFLOW_NOTIFICATION_RECEIPT_STORE_UNAVAILABLE", "error_type": type(exc).__name__,
+            "recommended_action": "保留原运行投递回执修复存储；通知已受理，禁止重新发送。"}
 
+    run.failure_notification = receipt
     return receipt

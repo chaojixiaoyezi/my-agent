@@ -5,6 +5,11 @@ agent_py_agent/agent/
 |-- conversation/guidance_reply_obligations.py  # 已消费本人插话与真实交付的待办身份
 |-- conversation/technical_continuation.py      # 有界技术截断、原任务受理、领取和失效
 `-- gateway_parts/history_ledger.py             # 历史精确索引和待重放的持久队列
+agent_py_agent/tests/test_active_turn_capability_event_projection.py # 活动父代理收到原审批快照
+agent_py_agent/tests/test_subagent_tool_guard_observation_path.py    # 子代理重复读的真实提示路径
+agent_py_agent/tests/test_business_subscription_wiring.py            # 业务订阅原生接口、授权和撤回
+agent_py_agent/tests/test_workflow_notification_delivery_truth.py    # 工作流本地记账与通道投递回执
+agent_py_agent/tests/test_workflow_reconciliation_public_diagnostic.py # 写后超时及可信核验恢复
 agent_py_agent/tests/test_technical_cutoff_continuation.py  # 技术截断、原调度器执行与恢复
 agent_py_agent/tests/test_guidance_reply_obligation_bounds.py # 回复义务按页结清及故障恢复
 agent_py_agent/tests/test_workflow_scope_error_details.py    # 工作流范围的约束与可执行错误说明

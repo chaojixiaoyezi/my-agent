@@ -5,7 +5,17 @@ import hashlib
 import json
 
 from ..assets.descriptor import execution_definition_ref
+from .business_scope import WorkflowPolicyRefusal
 from .release_gate import WorkflowEffectAdmission, WorkflowReleaseGate
+
+
+class WorkflowReconciliationRequired(WorkflowPolicyRefusal):
+    """核验缺失是未执行恢复的确定性拒绝，不是本次恢复结果未知。"""
+    error_code = code = 'WORKFLOW_RECONCILIATION_REQUIRED'
+
+    def __init__(self, reason):
+        super().__init__(self.error_code, details={'reason': reason,
+            'recommended_action': '核对原操作和目标结果，提供同运行、同步骤、同版本的可信核验。'})
 
 
 # LLM: 继承str保持外部run_authorizer(record, phase)字符串回调100%向后兼容，同时以显式类型与preflight/resume/cancel控制阶段严格分离。
@@ -74,7 +84,7 @@ class WorkflowGovernance:
     def _reconcile(self, record, step, resolution_ref=None):
         reader = self.resolution_reader if resolution_ref else self.effect_reader
         if step is None or not callable(reader):
-            raise PermissionError('WORKFLOW_RECONCILIATION_REQUIRED')
+            raise WorkflowReconciliationRequired('reader_unavailable')
         result = reader(resolution_ref, record, step) if resolution_ref else reader(record, step)
         expected = {'owner_id': record.owner_id, 'workflow_run_id': record.workflow_run_id,
                     'task_id': record.business_context.get('task_id', ''), 'step_id': step.step_id,
@@ -86,14 +96,14 @@ class WorkflowGovernance:
                 or not result.get('resolution_ref')
                 or self.authorization_check(result, record) is not True
                 or step.escalation_result.get('cleanup_error') and result.get('cleanup_verified') is not True):
-            raise PermissionError('WORKFLOW_RECONCILIATION_REQUIRED')
+            raise WorkflowReconciliationRequired('evidence_mismatch')
         refs = self.gate.require(record, step, candidate_hash=expected['candidate_hash'],
                                  policy=self.policy_provider(record, step.step_id))
         if result.get('state') == 'not_started':
             return WorkflowEffectAdmission(review_refs=refs, effect_not_started=True)
         if result.get('state') == 'committed' and isinstance(result.get('output'), dict):
             return WorkflowEffectAdmission(review_refs=refs, reconciled_step_id=step.step_id, reconciled_output=result['output'])
-        raise PermissionError('WORKFLOW_RECONCILIATION_REQUIRED')
+        raise WorkflowReconciliationRequired('state_unconfirmed')
 
     def require_resolution(self, record, reference):
         step = next((item for item in record.steps if item.step_id == record.current_step_id), None)

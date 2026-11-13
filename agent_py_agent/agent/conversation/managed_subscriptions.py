@@ -65,7 +65,10 @@ class ManagedSubscriptionService:
 
     def _source(self, ref, actor):
         if not callable(self.source_resolver):
-            raise BusinessError('HOST_NOT_READY')
+            raise BusinessError('HOST_NOT_READY', details={
+                'dependency': 'subscription_source_resolver',
+                'next_action': '绑定可信来源解析器后重试；没有读取来源正文或执行订阅工作。',
+            })
         source = self.source_resolver(ref, actor)
         if (type(source) is not dict or source.get('owner_id') != self.owner_id or source.get('source_ref') != ref
                 or source.get('connection_state') not in {'connected', 'not_connected', 'degraded', 'unknown'}):

@@ -108,7 +108,7 @@ class GatewayBusinessDomain:
         # 共享服务必须另行按owner绑定；绝不把main的Agent/执行器或跨owner业务实例复制进来。
         if getattr(getattr(base, 'home_paths', None), 'owner_id', None) == scoped_home.owner_id:
             for name in ('business_reference_reader', 'business_active_references', 'business_governance',
-                         'business_background', 'business_capabilities', 'business_projection',
+                         'business_background', 'business_capabilities', 'business_projection', 'business_subscriptions',
                          'business_context_provider', 'workflow_engine_factory', 'workflow_agent_steps',
                          'business_space_reference_resolver', 'business_workflow_reference_reader',
                          'task_business_context', '_business_host_ports_wired'):
@@ -124,6 +124,7 @@ class GatewayBusinessDomain:
         services = self._services.get(key)
         if (services is None or services.host.config is not base.config
                 or services.complete_host_wired != wired
+                or getattr(services.host, 'business_subscriptions', None) != getattr(host, 'business_subscriptions', None)
                 or services.spaces.enabled != bool(getattr(base.config, 'business_spaces_enabled', False))):
             services = BusinessServices(host)
             if len(self._services) >= 64:
