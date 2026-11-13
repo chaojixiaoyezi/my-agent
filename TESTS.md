@@ -1,3 +1,13 @@
+## 2026-11-12 W13 健康动作的生产客户端解析与回执校验
+
+来源：WF-11 公开入口验收中，服务端新动作已能返回合法健康投影，但生产 BusinessClient 仍报 `UNSUPPORTED_ACTION`；进一步排查发现即便动作目录认出，冻结响应信封的 `data` 是静态联合类型清单，新动作 data 不在其中，合法 200 会被整条降级为不可信。
+
+做法：`cli/space_commands.py` 增加动作解析优先级——冻结目录优先，未收录的原生扩展动作沿同一 `business_api_v13.v13_action_spec` 注册表解析，不新建第二份客户端动作目录、不复制 schema。回执校验对冻结动作保持原完整 `data` 联合校验；对 v13 扩展动作只把封套里的 `data` 交给该动作自身结果 schema（仍由 `_contradicts` 严格校验），封套其余结构、state/effect 一致性与失败语义不变。`prepare` 与 `_contradicts` 两处都改，只改 `prepare` 会在成功响应校验处再次降级。
+
+实际验证：集成树隔离环境跑 `test_acceptance_workflow_health_public_entry.py`、`test_acceptance_business_error_transport.py`、`test_wf_09_11_subworkflows_and_health.py`、`test_v15_w6_query_health.py`，**102 个唯一节点全部通过，零失败/错误/跳过**；此前同一入口为 3 个 `UNSUPPORTED_ACTION` 失败。原健康覆盖断言未改，转绿来自合入只读采样端口而非放宽断言。JUnit SHA256 `8f5c667f857fc81772db888083624cd948cabf3369f54a25a307f4e59fa11d66`。
+
+复现：源码根建隔离 HOME/MY_AGENT_HOME/TMPDIR，`PYTHONSAFEPATH=1`、`PYTHONDONTWRITEBYTECODE=1`、`PYTHONPATH="$PWD:$PWD/agent_py_agent"`、显式本树 `agent_py_agent/config/agent_config.yaml`，清空 runtime config/layers/addopts，`python3 -B -m pytest -q -p no:cacheprovider` 跑上述四文件。本机回环通过不证明外部可达；真实 provider、完整 TUI 与 128 项全量仍未验证。
+
 ## 2026-11-12 默认 Agent 端口旧预期迁移（仅测试）
 
 来源：冻结 `81fc5b062` 后追加的24文件组合为508个唯一节点、507通过和1失败。唯一失败固定要求默认 WorkflowAgentSteps 缺席；非作者独审回查原 G5b 合同，确认缺席是尚未接通期间的状态，不是永久需求。只更新 `test_business_v12_ws_a1_host_ports.py` 中该函数的两条旧预期，不改变产品实现。

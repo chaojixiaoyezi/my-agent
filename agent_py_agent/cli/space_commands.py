@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import copy
 from dataclasses import dataclass, field
 from functools import lru_cache, partial
 from uuid import uuid4
@@ -18,9 +19,37 @@ from agent_py_agent.agent.plugin_host.schemas import validate_object
 _CONFIRMED_STATES = {200: 'completed', 202: 'accepted'}
 
 
+def _action_spec(action: str):
+    """冻结目录优先；未收录的原生扩展动作沿同一 v13 注册表解析，不建第二客户端目录。"""
+    try:
+        return business_action_spec(action)
+    except HostAPIError:
+        from agent_py_agent.agent.gateway_parts.business_api_v13 import v13_action_spec
+
+        return v13_action_spec(action)
+
+
 @lru_cache(maxsize=1)
 def _response_envelope_schema() -> dict:
     return standalone_schema(business_schema_bundle()['response_envelope_schema'])
+
+
+@lru_cache(maxsize=1)
+def _permissive_envelope_schema() -> dict:
+    """v13扩展动作的封套仍按原结构校验，data单独交给该动作自身结果schema。"""
+    schema = copy.deepcopy(_response_envelope_schema())
+    schema['properties']['data'] = {}
+    return schema
+
+
+def _envelope_schema(action) -> dict:
+    """冻结动作保留完整data联合；未收录的扩展动作只放宽封套里的data，不放宽动作结果。"""
+    if isinstance(action, str):
+        try:
+            business_action_spec(action)
+        except HostAPIError:
+            return _permissive_envelope_schema()
+    return _response_envelope_schema()
 
 
 def _unconfirmed(request: dict, status: int, code: str, body: object) -> dict:
@@ -44,7 +73,7 @@ def _contradicts(request: dict, status: int, envelope: dict) -> bool:
     if _CONFIRMED_STATES.get(status) != envelope['state']:
         return True
     try:
-        business_action_spec(request['action']).validate_result(envelope['data'], accepted=status == 202)
+        _action_spec(request['action']).validate_result(envelope['data'], accepted=status == 202)
     except HostAPIError:
         return True
     return False
@@ -53,7 +82,7 @@ def _contradicts(request: dict, status: int, envelope: dict) -> bool:
 def _receipt(request: dict, status: int, body: object) -> dict:
     """消费冻结回执封套；本地 ok 只表示得到 200/completed 或 202/accepted 且 error=null。"""
     try:
-        envelope = validate_object(body, _response_envelope_schema())
+        envelope = validate_object(body, _envelope_schema(request.get('action')))
     except HostAPIError:
         envelope = None
     if envelope is None or _contradicts(request, status, envelope):
@@ -79,7 +108,7 @@ class BusinessClient:
 
     def prepare(self, action: str, params: dict, *, idempotency_key: str | None = None,
                 expected_revision: int | None = None, authorization_ticket: str | None = None) -> PreparedBusinessCall:
-        spec = business_action_spec(action)
+        spec = _action_spec(action)
         request = {'action': action, 'params': params, 'request_id': uuid4().hex}
         if spec.requires_idempotency:
             request['idempotency_key'] = idempotency_key if idempotency_key is not None else uuid4().hex
