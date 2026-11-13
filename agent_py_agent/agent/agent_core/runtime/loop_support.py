@@ -676,6 +676,33 @@ def _formal_memories_for_request(
 # LLM: 调用方已完成全部预算与去重；固定源ID必须随成功refresh更新，不能凭初始来源或kind豁免回落JSONL。
 #   失效或渲染隔离项只丢弃不补位；JSONL重核active安全门，不再裁剪确认集合，补充来源只观察最终入选ID。
 # 函数用途: 只为最终真正可渲染的合法长期记录登记访问，保留固定源、既有pending和预算遗漏数。
+def _final_hit_lesson_ids(selected: BudgetedMemoryRecords, fixed_ids: set[str]) -> list[str]:
+    lesson_ids: list[str] = []
+    seen: set[str] = set()
+    for record in selected:
+        entry_id = str(getattr(record, "entry_id", "") or "").strip()
+        if not entry_id or entry_id not in fixed_ids:
+            continue
+        kind = str(getattr(record, "kind", "") or "").strip()
+        lesson_id = ""
+        if kind == "lesson":
+            lesson_id = entry_id
+        elif kind == "hot":
+            source = str(getattr(record, "source", "") or "").strip()
+            if source.startswith("lesson:"):
+                lesson_id = source.removeprefix("lesson:").strip()
+            if not lesson_id:
+                attrs = getattr(record, "attributes", None)
+                if isinstance(attrs, dict):
+                    auth_ref = str(attrs.get("authority_ref") or "").strip()
+                    if "#" in auth_ref:
+                        lesson_id = auth_ref.split("#", 1)[1].strip()
+        if lesson_id and lesson_id not in seen:
+            seen.add(lesson_id)
+            lesson_ids.append(lesson_id)
+    return lesson_ids
+
+
 def _confirm_final_memory_access(agent, memories, recall_scope, fixed_ids, routed_context):
     candidates = [record for record in memories
                   if record.entry_id not in fixed_ids and is_memory_context_admissible(record)]
@@ -688,13 +715,20 @@ def _confirm_final_memory_access(agent, memories, recall_scope, fixed_ids, route
     current = {record.entry_id: record for record in confirmed}
     selected = BudgetedMemoryRecords(
         (record if record.entry_id in fixed_ids else current[record.entry_id] for record in memories
-         if record.entry_id in fixed_ids or record.entry_id in current),
+         if (record.entry_id in fixed_ids and is_memory_context_admissible(record))
+         or record.entry_id in current),
         omitted_count=memories.omitted_count,
     )
     if isinstance(getattr(routed_context, "supplement_entry_ids", None), list):
         admitted = {record.entry_id for record in selected}
         routed_context.supplement_entry_ids = [entry_id for entry_id in routed_context.supplement_entry_ids
                                                if entry_id in admitted]
+    hit_lesson_ids = _final_hit_lesson_ids(selected, fixed_ids)
+    if hit_lesson_ids and getattr(agent, "memory_lessons", None) is not None:
+        _optional_memory_read(
+            lambda: agent.memory_lessons.note_hits(hit_lesson_ids),
+            routed_context,
+        )
     return selected
 
 
@@ -708,9 +742,19 @@ def _refresh_recall_candidates(agent: object, records: list, read_paths: list[st
         *routed_lesson_records(agent.memory_lessons, read_paths=read_paths, scope=scope,
                                stale_days=float(getattr(agent.config, "home_lesson_stale_caveat_days", 7.0) or 0.0)),
     ]
+    fixed_ids = {record.entry_id for record in fixed}
+    target_ids: list[str] = []
+    seen_target_ids: set[str] = set()
+    for record in records:
+        entry_id = str(getattr(record, "entry_id", "") or "").strip()
+        if not entry_id or entry_id in fixed_ids or entry_id in seen_target_ids:
+            continue
+        seen_target_ids.add(entry_id)
+        target_ids.append(entry_id)
+    refreshed_long_term = agent.memory.read_ids(target_ids) if target_ids else []
     available = [
         *fixed,
-        *(record for record in agent.memory.all() if long_term_record_matches_scope(record, scope)),
+        *(record for record in refreshed_long_term if long_term_record_matches_scope(record, scope)),
     ]
     current = {record.entry_id: record for record in _dedupe_formal_memories(available)}
     selected = [current[record.entry_id] for record in records if record.entry_id in current]

@@ -11,7 +11,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .jsonl import MemoryRecord
-from .lessons import HotRuleRepository, LessonRecord, LessonRepository, hot_records_within_budget
+from .lessons import (
+    HotRuleRepository,
+    LessonRecord,
+    LessonRepository,
+    _parse_canonical_lesson_ref,
+    hot_records_within_budget,
+)
 
 
 # LLM: 活跃范围只来自 host 的 typed IDs，不解析用户自然语言或 applies_when 文本。
@@ -107,21 +113,14 @@ def runtime_long_term_scope(
     return MemoryRecallScope(tuple(dict.fromkeys([*scope.keys, *project_pairs])))
 
 
-# LLM: 只读 active 记录的结构化 scope 字段；不看正文。异常由调用方按“保持原范围”处理。
+# LLM: 只通过 JsonlMemory 有界 generation-aware scope_pairs 读取项目作用域，禁止退回全库扫描。
 # 函数用途: 列出记忆库里实际出现过的 project 范围键。
 def _existing_project_pairs(memory: object) -> list[tuple[str, str]]:
-    pairs: list[tuple[str, str]] = []
-    for record in memory.all():
-        attrs = record.attributes if isinstance(record.attributes, dict) else {}
-        scope_type = str(attrs.get("scope_type") or "").strip().lower()
-        scope_key = str(attrs.get("scope_key") or "").strip()
-        if scope_type == "project" and scope_key:
-            pairs.append(("project", scope_key))
-    return pairs
+    return list(memory.scope_pairs("project"))
 
 
-# LLM: Routing 的文件读取票据只决定“哪些 lesson 被读过”；正文仍只从 LessonRepository 的正式文件恢复。
-# 函数用途: 将本轮已成功路由读取且 scope 匹配的 lesson 转成 Prompt MemoryRecord。
+# LLM: Routing 的文件读取票据只决定“哪些 lesson 被读过”；仅通过规范 ref 批量直读且保持活跃、同 scope 与稳定顺序。
+# 函数用途: 将本轮已成功路由读取且 scope 匹配的活跃 lesson 转成 Prompt MemoryRecord。
 def routed_lesson_records(
     repository: LessonRepository,
     *,
@@ -130,20 +129,42 @@ def routed_lesson_records(
     stale_days: float = 7.0,
     now: datetime | None = None,
 ) -> list[MemoryRecord]:
-    selected = {str(path or "").strip() for path in read_paths if str(path or "").strip()}
-    if not selected:
-        return []
-    current = now or datetime.now(timezone.utc)
-    records: list[MemoryRecord] = []
-    for lesson in repository.list():
-        if lesson.path not in selected or not _lesson_scope_allowed(lesson, scope):
+    canonical_paths: list[str] = []
+    seen_paths: set[str] = set()
+    for raw_path in read_paths:
+        text = str(raw_path or "").strip()
+        if not text:
             continue
+        try:
+            rel_path, _filename, fragment_id = _parse_canonical_lesson_ref(text)
+        except ValueError:
+            continue
+        normalized = text if fragment_id is None else rel_path
+        if normalized not in seen_paths:
+            seen_paths.add(normalized)
+            canonical_paths.append(normalized)
+    if not canonical_paths:
+        return []
+    loaded = repository.read_refs(canonical_paths)
+    current = now or datetime.now(timezone.utc)
+    seen_lessons: set[str] = set()
+    selected_lessons: list[LessonRecord] = []
+    for lesson in loaded.values():
+        if lesson.lesson_id in seen_lessons:
+            continue
+        if lesson.status != "active" or not _lesson_scope_allowed(lesson, scope):
+            continue
+        seen_lessons.add(lesson.lesson_id)
+        selected_lessons.append(lesson)
+    selected_lessons.sort(key=lambda item: (item.subject_key, item.lesson_id))
+    records: list[MemoryRecord] = []
+    for lesson in selected_lessons:
         content = lesson.content.strip() + _lesson_age_caveat(lesson, current, stale_days)
         records.append(_lesson_memory_record(lesson, content))
     return records
 
 
-# LLM: HOT 每轮可读，但必须解析 marker、绑定现有 lesson 并继承其 scope；自由 Markdown 不具正式权威。
+# LLM: HOT 每轮可读，但必须经预算裁剪后按规范 lesson_ref 批量直读核验活跃状态、精确 ID 与 scope；非规范引用禁止进 Prompt。
 # 函数用途: 将适用的正式 HOT 短规则转成 Prompt MemoryRecord。
 def hot_memory_records(
     hot: HotRuleRepository,
@@ -151,12 +172,37 @@ def hot_memory_records(
     *,
     scope: MemoryRecallScope,
 ) -> list[MemoryRecord]:
-    lesson_by_id = {lesson.lesson_id: lesson for lesson in lessons.list()}
-    records: list[MemoryRecord] = []
     # 注入预算硬顶：全量注入但只带最近活跃的规则（活跃度排序，超出截断是正常行为）。
-    for rule in hot_records_within_budget(hot.list()):
-        lesson = lesson_by_id.get(rule.lesson_id)
-        if lesson is None or not _lesson_scope_allowed(lesson, scope):
+    selected_rules = hot_records_within_budget(hot.list())
+    if not selected_rules:
+        return []
+    candidate_rules = []
+    refs_to_read: list[str] = []
+    seen_refs: set[str] = set()
+    for rule in selected_rules:
+        raw_ref = str(getattr(rule, "lesson_ref", "") or "").strip()
+        try:
+            _rel_path, _filename, fragment_id = _parse_canonical_lesson_ref(raw_ref)
+        except ValueError:
+            continue
+        if fragment_id is not None and fragment_id != rule.lesson_id:
+            continue
+        candidate_rules.append((rule, raw_ref))
+        if raw_ref not in seen_refs:
+            seen_refs.add(raw_ref)
+            refs_to_read.append(raw_ref)
+    if not refs_to_read:
+        return []
+    lessons_by_ref = lessons.read_refs(refs_to_read)
+    records: list[MemoryRecord] = []
+    for rule, raw_ref in candidate_rules:
+        lesson = lessons_by_ref.get(raw_ref)
+        if (
+            lesson is None
+            or lesson.lesson_id != rule.lesson_id
+            or lesson.status != "active"
+            or not _lesson_scope_allowed(lesson, scope)
+        ):
             continue
         records.append(
             MemoryRecord(
