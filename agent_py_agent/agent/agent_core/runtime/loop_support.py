@@ -298,7 +298,10 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
     recall_scope = (
         MemoryRecallScope.from_runtime(task_id=request.task_id, task_attributes=request.task_attributes)
         if recall_suppressed
-        else runtime_long_term_scope(agent.memory, task_id=request.task_id, task_attributes=request.task_attributes)
+        else runtime_long_term_scope(
+            agent.memory, task_id=request.task_id, task_attributes=request.task_attributes,
+            business_context=getattr(getattr(agent, "_current_run_params", None), "business_context", None),
+        )
     )
 
     long_term_memories = [] if recall_suppressed else _optional_memory_read(

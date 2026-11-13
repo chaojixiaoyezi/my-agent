@@ -138,6 +138,7 @@ def _scope_predicate(agent: object, memory: object, kind: str):
         memory,
         task_id=str(getattr(current, "task_id", "") or ""),
         task_attributes=attributes if isinstance(attributes, dict) else {},
+        business_context=getattr(current, "business_context", None),
     )
     return lambda record: long_term_record_matches_scope(record, scope) and (not kind or record.kind == kind)
 

@@ -87,7 +87,16 @@ def runtime_long_term_scope(
     *,
     task_id: str = "",
     task_attributes: Mapping[str, object] | None = None,
+    business_context: object | None = None,
 ) -> MemoryRecallScope:
+    from ..conversation.business_contracts import BusinessExecutionContext
+
+    if isinstance(business_context, BusinessExecutionContext):
+        # 冻结业务范围不继承普通聊天的全项目兼容召回，也不信模型传来的 scope 列表。
+        pairs = [("global", "global"), ("personal", "personal")]
+        _append_runtime_identity(pairs, "project", business_context.task_id)
+        _append_runtime_identity(pairs, "project", business_context.project_ref)
+        return MemoryRecallScope(tuple(dict.fromkeys(pairs)))
     scope = MemoryRecallScope.from_runtime(task_id=task_id, task_attributes=task_attributes)
     try:
         project_pairs = _existing_project_pairs(memory)

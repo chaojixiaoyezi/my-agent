@@ -215,19 +215,40 @@ def build_default_business_space_reference_resolver(host: Any) -> Callable[[str,
                     return None
             return None
 
-        # 6. project: 项目引用
+        # 6. project: 只认原 owner/projects 下的单段真实目录，不把路径当项目身份。
         if kind == 'project':
-            if owner_home_path is not None:
-                proj_dir = owner_home_path / 'projects' / str(ref_id)
-                if proj_dir.exists():
-                    return {
-                        'owner_id': owner_id,
-                        'ref': str(ref_id),
-                        'project_ref': str(ref_id),
-                        'state': 'available',
-                        'kind': 'project'
-                    }
-            return None
+            from ..common.nofollow_fs import NoFollowPathError, open_directory_beneath
+            from ..conversation.business_access import BusinessError
+
+            if (ref_id in {'.', '..'} or '/' in ref_id or '\\' in ref_id
+                    or '\x00' in ref_id or Path(ref_id).is_absolute()):
+                raise BusinessError('INVALID_SCHEMA', details={
+                    'reason': 'PROJECT_REF_MUST_BE_SINGLE_COMPONENT',
+                    'side_effect_state': 'not_started',
+                    'next_action': '使用原 owner/projects 下的单段项目标识。',
+                })
+            if owner_home_path is None:
+                return None
+            try:
+                descriptor = open_directory_beneath(owner_home_path, ('projects', ref_id))
+            except FileNotFoundError:
+                return None
+            except NoFollowPathError as error:
+                raise BusinessError('SPACE_SCOPE_MISMATCH', details={
+                    'reason': 'PROJECT_DIRECTORY_UNSAFE',
+                    'side_effect_state': 'not_started',
+                    'next_action': '检查原 projects 目录及项目目录，禁止符号链接或非目录组件。',
+                }) from error
+            except OSError as error:
+                raise BusinessError('STORE_UNAVAILABLE', details={
+                    'reason': 'PROJECT_DIRECTORY_UNREADABLE', 'exception_type': type(error).__name__,
+                    'side_effect_state': 'not_started',
+                    'next_action': '检查原项目目录访问权限，修复后再试。',
+                }) from error
+            else:
+                os.close(descriptor)
+            return {'owner_id': owner_id, 'ref': ref_id, 'project_ref': ref_id,
+                    'state': 'available', 'kind': 'project'}
 
         # 7. method: 工具或能力方法
         if kind == 'method':

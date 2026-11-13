@@ -25,11 +25,14 @@ agent_py_agent/tests/test_workflow_public_effect_projection.py # 工作流公共
 agent_py_agent/tests/test_business_surface_controller_scope.py # 真实界面绑定读取后台控制器空间归属
 agent_py_agent/tests/test_orch04_recipient_identity.py       # 交接责任人、冻结版本与原回执去重
 agent_py_agent/tests/test_orch_receipt_chain.py               # 定时管理、交接确认及同项目测试证据短链
+agent_py_agent/tests/test_orch_remaining_process_evidence.py # 跨进程父级管理、累计配额与责任人交接
 agent_py_agent/tests/test_orch02_native_resume_chain.py      # 原生父子申请、裁决和实际恢复读取
 agent_py_agent/tests/test_scheduler_target_failure_delivery.py # 定时目标失败通知、原结果重投与取消
 agent_py_agent/tests/test_process_wait_pending_input.py       # 新输入使进程等待让出、同进程继续与取消顺序
 agent_py_agent/tests/test_workflow_native_operation_recovery.py # 原操作终态核验恢复、身份和参数失配拒绝
 agent_py_agent/tests/test_scheduler_business_workflow_target.py # 定时工作流版本、撤权与原会话失败通知
+agent_py_agent/tests/test_business_project_reference_boundary.py # 项目引用的目录边界与重建
+agent_py_agent/tests/test_business_memory_scope_boundary.py # 冻结业务任务的项目记忆隔离
 docs/reviews/CONTINUITY_R3_REVIEW_20261112.md                # Opus v2 复核后的英文说明
 ```
 
