@@ -906,6 +906,8 @@ class VerificationEvidenceRepository:
                     verdict = excluded.verdict,
                     scope = excluded.scope,
                     evidence_refs_json = excluded.evidence_refs_json,
+                    candidate_ref = CASE WHEN independent_reviews.candidate_ref=excluded.candidate_ref
+                        THEN independent_reviews.candidate_ref ELSE 'conflict' END,
                     created_at = excluded.created_at
                 """,
                 (
@@ -1073,6 +1075,8 @@ class VerificationEvidenceRepository:
                     observation_scope = excluded.observation_scope,
                     review_id = excluded.review_id,
                     evidence_refs_json = excluded.evidence_refs_json,
+                    candidate_ref = CASE WHEN acceptance_records.candidate_ref=excluded.candidate_ref
+                        THEN acceptance_records.candidate_ref ELSE 'conflict' END,
                     created_at = excluded.created_at
                 """,
                 (

@@ -120,6 +120,12 @@ def test_leaf_never_reads_old_other_work_receipts_after_same_id_is_rebound(leaf)
     detail = json.loads(query.output)
     assert [row['reviewer_principal_id'] for row in detail['reviews']] == [leaf.task.id]
     assert detail['acceptances'] == [] and 'private-other' not in query.output
+    own_review = next(row for row in leaf.repo.list_independent_reviews(leaf.owner)
+                      if row.reviewer_principal_id == leaf.task.id)
+    leaf.repo.bind_requirement(foreign, other)
+    leaf.repo.record_independent_review(foreign, replace(own_review, evidence_refs=('private-overwrite',)))
+    leaf.repo.bind_requirement(current, origin)
+    assert 'private-overwrite' not in invoke(leaf, {'action': 'query_provenance', 'requirement_id': 'R'}).output
     with sqlite3.connect(leaf.repo.db_path) as db:
         db.execute("UPDATE independent_reviews SET candidate_ref='' WHERE review_id=?", (old_review.review_id,))
     assert 'private-other' not in invoke(leaf, {'action': 'query_provenance', 'requirement_id': 'R'}).output
