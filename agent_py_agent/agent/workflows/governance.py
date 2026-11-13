@@ -39,6 +39,41 @@ def workflow_candidate_hash(definition):
                                       separators=(',', ':'), allow_nan=False).encode()).hexdigest()
 
 
+def pending_review_not_started(record, step):
+    """只消费原运行/步骤/尝试的未启动审核门事实，不把旧派发未知推成未执行。"""
+    pending = step.escalation_result.get('pending_review')
+    return (isinstance(pending, dict) and pending.get('schema') == 'workflow.pending-review.v1'
+        and step.escalation_result.get('effect_started') is False
+        and pending.get('owner_id') == record.owner_id
+        and pending.get('workflow_run_id') == record.workflow_run_id
+        and pending.get('step_id') == step.step_id and bool(pending.get('attempt_id'))
+        and pending['attempt_id'] == step.escalation_result.get('attempt_id')
+        and pending.get('scope_snapshot') == record.scope_snapshot
+        and pending.get('business_context') == record.business_context
+        and bool(pending.get('candidate_hash')) and bool(pending.get('requirement_id'))
+        and bool(pending.get('input_version')))
+
+
+def _pending_review_resume(record):
+    step = next((item for item in record.steps if item.step_id == record.current_step_id), None)
+    if step is None or not pending_review_not_started(record, step):
+        return False
+    # 已确认前缀可保留，任一其它未结业务/清理/未知工具回执仍必须先对账。
+    for item in record.steps:
+        result = item.escalation_result
+        if result.get('cleanup_error'):
+            return False
+        if item is step:
+            continue
+        if item.status == 'pending' and not result:
+            continue
+        receipt = result.get('tool_receipt', {})
+        if (item.status not in ('succeeded', 'escalated_recovered', 'skipped') or item.needs_repair
+                or not isinstance(receipt, dict) or receipt.get('effect_outcome') == 'unknown'):
+            return False
+    return True
+
+
 class WorkflowGovernance:
     def __init__(self, store, *, policy_provider, receipt_reader, authorization_check, effect_reader=None,
                  resolution_reader=None, clock=None):
@@ -60,9 +95,12 @@ class WorkflowGovernance:
                 # 原步骤已全部确认、只差原 run 终态发表：不选择或伪造当前步骤，也不进入通用对账。
                 return None
             # 创建头记录/取消本身不启动业务；等待恢复只读原完成链，尾部新副作用仍逐步审核。
-            unresolved = any(item.escalation_result.get('effect_started') and
-                             (item.needs_repair or item.status == 'running') for item in record.steps)
-            if phase == 'resume' and not _requires_native_agent_resume(record) and (record.effect_outcome == 'unknown' or unresolved):
+            unresolved = any((item.escalation_result.get('effect_started') and
+                             (item.needs_repair or item.status == 'running')) or
+                             ('pending_review' in item.escalation_result and not pending_review_not_started(record, item))
+                             for item in record.steps)
+            if (phase == 'resume' and not _requires_native_agent_resume(record)
+                    and not _pending_review_resume(record) and (record.effect_outcome == 'unknown' or unresolved)):
                 step = next((item for item in record.steps if item.step_id == record.current_step_id), None)
                 if step is None:
                     step = next((item for item in record.steps if item.status not in
@@ -168,9 +206,10 @@ class WorkflowOperationRecovery:
         if _requires_native_agent_resume(record) or _requires_terminal_publication_resume(record):
             return None
         unresolved = record.effect_outcome == 'unknown' or any(
-            item.escalation_result.get('effect_started') and (item.needs_repair or item.status == 'running')
+            (item.escalation_result.get('effect_started') and (item.needs_repair or item.status == 'running'))
+            or ('pending_review' in item.escalation_result and not pending_review_not_started(record, item))
             for item in record.steps)
-        if not unresolved:
+        if not unresolved or _pending_review_resume(record):
             return None
         step = next((item for item in record.steps if item.step_id == record.current_step_id), None)
         if step is None:

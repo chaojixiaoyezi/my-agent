@@ -1278,6 +1278,11 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             admission = self._authorize_run(run, WorkflowEffectPhase(record.step_id))
         except WorkflowReviewPending as error:
             record.escalation_result['pending_review'] = error.binding
+            if (getattr(record, '_worker_effect_admitted', None) is False
+                    or 'effect_started' not in record.escalation_result):
+                # DAG协调线程只证明派发；首个宿主审核拒绝证明业务尚未开始。
+                # 后续准入拒绝可能已发生真实效果，绝不能清掉其未知义务。
+                record.escalation_result['effect_started'] = False
             if error.error_code == 'WORKFLOW_REVIEW_CHANGES_REQUESTED':
                 from .rework import perform_replan
                 if perform_replan(self, run, record, error.binding):
@@ -1285,6 +1290,8 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             raise
         if isinstance(admission, WorkflowEffectAdmission):
             record.escalation_result['review_refs'] = list(admission.review_refs)
+        if hasattr(record, '_worker_effect_admitted'):
+            record._worker_effect_admitted = True
         if not run.ephemeral_debug and not getattr(run, '_batch_worker', False):
             # 真正启动前先记未知义务；崩溃后不能把“还没发表输出”解释成未执行。
             record.escalation_result['effect_started'] = True

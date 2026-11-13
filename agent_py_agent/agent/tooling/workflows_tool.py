@@ -38,6 +38,7 @@ from ..plugin_host.errors import HostAPIError
 from ..workflows.business_scope import (
     WORKFLOW_ACTION_FIELDS,
     WORKFLOW_READ_ACTIONS,
+    WorkflowPolicyRefusal,
     validate_business_request,
 )
 from ..workflows.models import redact_bearer_values
@@ -489,6 +490,9 @@ class WorkflowsTool(BaseTool):
                             'host_error': exc.to_payload()}, False,
                             'TOOL_PERMISSION_DENIED' if exc.status == 403 else 'TOOL_EXECUTION_FAILED',
                             effect_outcome='not_started' if exc.outcome == 'not_started' else 'unknown')
+        except WorkflowPolicyRefusal as exc:
+            return _outcome('workflows', {'error_code': exc.code, 'error': str(exc),
+                'details': exc.details}, False, exc.code, effect_outcome='not_started')
         except PermissionError as exc:
             return _outcome('workflows', {'error': str(exc)}, False, 'TOOL_PERMISSION_DENIED', effect_outcome='not_started')
         except (ValueError, KeyError, TypeError) as exc:

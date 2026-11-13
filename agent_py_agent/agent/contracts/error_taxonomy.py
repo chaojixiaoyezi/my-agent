@@ -4979,6 +4979,11 @@ ERROR_CONTRACTS.update({
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="工具运行时发生未预期错误；请先核对输入参数与目标资源状态，不要盲目原样重复调用。",
     ),
+    "WORKFLOW_RECONCILIATION_REQUIRED": ErrorContract(
+        code="WORKFLOW_RECONCILIATION_REQUIRED", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="原步骤执行结果尚未得到可信核验。请核对原操作与目标结果，取得同运行、步骤、版本和尝试的核验；不要原样重试或重做副作用。",
+    ),
     "WORKFLOW_REVIEW_REQUIRED": ErrorContract(
         code="WORKFLOW_REVIEW_REQUIRED", category="permission", retryable=False,
         recommended_action=RecoveryAction.REQUEST_APPROVAL.value,

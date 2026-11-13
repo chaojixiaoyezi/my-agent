@@ -198,6 +198,7 @@ def _is_blocked_by_skipped_upstream(
 # 函数用途: 在线程池内执行单步实际业务逻辑并返回结果。
 def _run_step_worker(engine, step, spec, local_outputs, definition, local_record):
     clock = time.monotonic()
+    step._worker_effect_admitted = False
     try:
         _check_stop()
         engine._execute_step_with_retry_and_watermarks(
@@ -395,9 +396,11 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
                 # 协调线程在派发前发表 running 状态
                 unstarted_step_ids.remove(sid)
                 prev = previous_steps.get(sid)
+                from .governance import pending_review_not_started
+                pending_review = prev is not None and pending_review_not_started(record, prev)
                 template = (
                     StepExecutionRecord.from_dict(prev.to_dict())
-                    if spec.get('foreach') is not None and prev is not None
+                    if prev is not None and (spec.get('foreach') is not None or pending_review)
                     else _pending_step(spec)
                 )
                 step = replace(
@@ -413,7 +416,8 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
                     pol = spec['retry_policy']
                     if isinstance(pol, dict):
                         step.max_attempts = int(pol.get('max_attempts', 1))
-                step.escalation_result['attempt_id'] = uuid.uuid4().hex
+                if not pending_review:
+                    step.escalation_result['attempt_id'] = uuid.uuid4().hex
                 step.next_step_ids = tuple(sorted(reverse_deps.get(sid, ())))
                 # Coordinator thread marks effect_started before dispatching worker
                 step.escalation_result['effect_started'] = True
