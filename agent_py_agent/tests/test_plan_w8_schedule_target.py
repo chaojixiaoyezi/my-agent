@@ -31,7 +31,7 @@ from agent_py_agent.tests.test_schedule_control import _agent
 from agent_py_agent.tests.test_scheduler_runtime import _Backend, _RetryDelivery
 
 
-def asset_case(tmp_path, kind="script", *, analysis=False):
+def asset_case(tmp_path, kind="script", *, analysis=False, origin_channel="local", delivery=None, script_code=None):
     agent = _agent(tmp_path)
     # 旧用例观察未错峰的精确周期身份；抖动单独由v15的真实派发测试验证。
     agent.scheduler_service.monitor_jitter_window_seconds = 0
@@ -39,22 +39,29 @@ def asset_case(tmp_path, kind="script", *, analysis=False):
     home = agent.home_paths.owner_home_dir
     scripts = ScriptStore(home, workspace_root=tmp_path)
     scripts.save_script(AssetDescriptor(id="scheduled_script", kind="script", name="合成脚本"),
-        'import json,sys\nx=json.load(sys.stdin)\nprint(json.dumps({"ok":True,"value":x.get("value")}))')
+        script_code or 'import json,sys\nx=json.load(sys.stdin)\nprint(json.dumps({"ok":True,"value":x.get("value")}))')
     workflows = WorkflowStore(home, workspace_root=tmp_path)
     workflows.save_workflow(WorkflowDefinition(AssetDescriptor(id="scheduled_workflow", kind="workflow", name="合成工作流"),
         steps=(WorkflowStepSpec(step_id="one", name="分析" if analysis else "执行", mode="llm_skill_analysis" if analysis else "deterministic_script",
             script_id="" if analysis else "scheduled_script"),)))
-    thread = agent.conversation_store.threads.get_or_create({"channel": "local", "channel_user_id": "synthetic",
+    thread = agent.conversation_store.threads.get_or_create({"channel": origin_channel, "channel_conversation_id": "oc_synthetic", "channel_user_id": "synthetic",
         "canonical_user_id": "synthetic", "owner_id": agent.home_paths.owner_id, "owner_home": str(home), "cwd": str(tmp_path), "now": 900})
     agent._current_run_params = SimpleNamespace(request_id="schedule-target", task_id="", task_attributes={"conversation_thread_id": thread.thread_id})
+    if origin_channel == 'feishu':
+        from agent_py_agent.agent.conversation.host_actor import actor_from_scope
+        agent._current_run_params.host_channel_actor = actor_from_scope(agent,
+            SimpleNamespace(channel='feishu', channel_conversation_id='oc_synthetic', channel_user_id='synthetic'),
+            thread.thread_id, 'schedule-target')
     tool = ScheduleTool(agent)
     with patch('agent_py_agent.agent.scheduler.tool.time.time', return_value=900):
         result = tool.execute({"action": "create", "name": "资产定时", "schedule_kind": "every", "every_seconds": 600,
             "anchor_at": 1000, "timezone": "UTC", "execution_target": {"kind": kind, "asset_id": "scheduled_" + kind,
-            "input_ref": {"inputs": {"value": 7}}}, "delivery": {"mode": "none"}})
+            "input_ref": {"inputs": {"value": 7}}}, "delivery": delivery or {"mode": "none"}})
     assert result.ok, result.output
     job = agent.scheduler_repository.list_jobs()[0][0]
-    runtime = BackgroundMainAgentRuntime(agent=agent, store=agent.conversation_store, channels=_RetryDelivery())
+    channels = _RetryDelivery()
+    agent.delivery_service = channels
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=agent.conversation_store, channels=channels)
     scheduler = BackgroundMainAgentScheduler({"runtime": runtime, "store": agent.conversation_store, "scheduler_service": agent.scheduler_service})
     return SimpleNamespace(agent=agent, job=job, tool=tool, scheduler=scheduler, scripts=scripts, workflows=workflows)
 
@@ -149,7 +156,7 @@ def test_changed_asset_with_missing_pinned_history_is_structured_stale(tmp_path,
         assert row["status"] == "failed" and row["error_code"] == "SCHEDULER_EXECUTION_DEFINITION_STALE", row
         assert row["execution_definition_ref"] == case.job["execution_target"]["execution_definition_ref"]
         assert row["model_call_count"] == 0 and not case.agent.backend.prompts
-        assert row.get("structured_result") is None
+        assert row["target_outcome"]["error_code"] == row["error_code"]
         assert "must not execute replacement" in case.scripts.get_script("scheduled_script")["code"]
     finally:
         case.agent.scheduler_service.monitor_pool.shutdown()

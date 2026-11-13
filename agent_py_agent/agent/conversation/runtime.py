@@ -4735,7 +4735,12 @@ def _execute_wake_signal(
     redelivery = _redeliver_frozen_wake(scheduler, signal, now=now)
     if redelivery is not None:
         return redelivery
-    if _wake_signal_should_skip(
+    from ..scheduler.execution import scheduled_target_outcome
+    saved_target = scheduled_target_outcome(scheduler.runtime.agent, BackgroundRunRequest(
+        thread_id=signal.thread_id, reason=signal.reason,
+        task_id=signal.root_task_id, wake_signal=signal.to_dict(),
+    )) if claim is not None else None
+    if saved_target is None and _wake_signal_should_skip(
         scheduler.runtime.agent,
         scheduler.store,
         signal,
@@ -4899,8 +4904,13 @@ def _handle_nonquota_wake_error(
         return
     pending = scheduler.store.wakes.pending_one(signal.wake_signal_id)
     cached = cached_owner_delivery(pending) if pending is not None else None
-    if cached is not None:
-        # 外发已发生、canonical未提交时保原wake；下一片只补账，不把业务失败关闭吞掉冻结回执。
+    from ..scheduler.execution import scheduled_target_outcome
+    saved_target = scheduled_target_outcome(scheduler.runtime.agent, BackgroundRunRequest(
+        thread_id=signal.thread_id, reason=signal.reason,
+        task_id=signal.root_task_id, wake_signal=signal.to_dict(),
+    )) if claim is not None else None
+    if cached is not None or saved_target is not None:
+        # 已保存目标结果或冻结通知只释放原 claim；异常仍由原 attempt 记录并退避，禁止重执行。
         if claim is not None:
             scheduler.scheduler_service.release(claim, now=observed_at)
         return
@@ -4967,14 +4977,21 @@ def _finish_scheduler_wake_claim(
         scheduler.scheduler_service.release(claim, now=time.time())
         scheduler._wake_retry_after[signal.wake_signal_id] = now + 30.0
         return None
+    from ..scheduler.execution import scheduled_target_failure
+    failure = scheduled_target_failure(scheduler.runtime.agent, BackgroundRunRequest(
+        thread_id=signal.thread_id, task_id=signal.root_task_id, reason=signal.reason, wake_signal=signal.to_dict()))
+    error_code = error_message = ''
+    if terminal_status != 'done':
+        error_code = failure['error_code'] if failure else f'SCHEDULED_TASK_{task_status.upper()}'
+        error_message = failure.get('error_message', '') if failure else f'scheduled task ended as {task_status}'
     terminal = scheduler.scheduler_service.finish(
         claim,
         status=terminal_status,
         response=report.response,
         delivery_status=report.delivery_status,
         delivery_reason=report.delivery_reason,
-        error_code="" if terminal_status == "done" else f"SCHEDULED_TASK_{task_status.upper()}",
-        error_message="" if terminal_status == "done" else f"scheduled task ended as {task_status}",
+        error_code=error_code,
+        error_message=error_message,
         now=time.time(),
     )
     return report if terminal is not None else None

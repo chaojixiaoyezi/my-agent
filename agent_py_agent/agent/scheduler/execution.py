@@ -63,7 +63,14 @@ def with_scheduled_work(dependencies, agent, service, claim, signal, *, now: flo
         _queue_completed_delivery(agent, claim.run, kwargs.get('wake_signal'), report)
         return report
 
-    return replace(dependencies, run_once=run_once)
+    def terminal_task(kwargs):
+        from ..conversation.runtime import _run_request
+        # 已保存结果仍有原投递义务；只进入同一收口器，取消仍由 sender 抑制。
+        if scheduled_target_outcome(agent, _run_request(kwargs)) is not None:
+            return False
+        return dependencies.terminal_task(kwargs)
+
+    return replace(dependencies, run_once=run_once, terminal_task=terminal_task)
 
 
 def _queue_completed_delivery(agent, run, signal, receipt):
@@ -256,9 +263,13 @@ def execute_scheduled_target(agent, service, claim, signal, kwargs, *, notify=No
     from ..concurrency.interrupt import is_interrupted, register_interrupt_callback
     from ..conversation.background_execution import _BackgroundRunControl
     from ..conversation.runtime import _background_task_attributes, _run_request
-    from ..conversation.task_run_closeout import settle_terminal_task_run
     from .schedule import ScheduleValidationError
 
+    prior = scheduled_target_outcome(agent, _run_request(kwargs))
+    if prior is not None:
+        return _finish_target_execution(agent, service, claim, signal, kwargs, prior['response'],
+            ok=prior['status'] == 'succeeded', code=prior['error_code'], count=claim.run.get('model_call_count', 0),
+            error_message=prior.get('error_message', ''))
     thread = service.conversation_store.threads.require(claim.run['thread_id'])
     params = RunParams(request_id=claim.run_id, run_id=claim.run_id, task_id=claim.run_id,
         source='scheduler_tool', root_user_prompt=claim.run['name'],
@@ -305,22 +316,100 @@ def execute_scheduled_target(agent, service, claim, signal, kwargs, *, notify=No
     usage = model_call_ledger(agent).cumulative_summary(run_id=claim.run_id)
     count = int(usage['physical_model_attempt_count']) if usage is not None else 0
     service.repository.record_target_usage(claim.run_id, claim.claim_id, count)
-    if ok:
-        service.repository.record_rule_result(claim.run_id, claim.claim_id, json.loads(output))
+    try:
+        parsed = json.loads(output)
+    except (ValueError, TypeError):
+        if ok:
+            raise
+        parsed = output
+    message = str(parsed.get('error_message') or parsed.get('stderr_preview') or '') if isinstance(parsed, dict) else str(output or '')
+    outcome = {'schema': 'scheduler.target-outcome.v1', 'run_id': claim.run_id,
+        'status': 'succeeded' if ok else 'failed', 'response': output,
+        'error_code': '' if ok else code or 'SCHEDULER_EXECUTION_TARGET_FAILED', 'error_message': message if not ok else ''}
+    service.repository.record_rule_result(claim.run_id, claim.claim_id, parsed, target_outcome=outcome)
+    return _finish_target_execution(agent, service, claim, signal, kwargs, output, ok=ok, code=outcome['error_code'], count=count,
+        error_message=outcome['error_message'])
+
+
+def _finish_target_execution(agent, service, claim, signal, kwargs, output, *, ok, code, count, error_message=''):
+    from ..conversation.task_run_closeout import settle_terminal_task_run
     now = time.time()
     service.conversation_store.tasks.update_status({'task_id': claim.run_id, 'status': 'completed' if ok else 'abandoned',
         'expected_status': 'active', 'now': now})
-    commit = _commit_target_result(agent, service, claim, kwargs, output) if ok else None
+    try:
+        commit = _commit_target_result(agent, service, claim, kwargs, output)
+    except Exception as error:
+        # 保存执行事实后仍抛出投递异常，沿原 wake attempt 记录、退避和有界重试。
+        from ..runtime_errors import compact_error_message
+        current = service.repository.get_active_run(claim.run_id)
+        if current is None:
+            raise
+        outcome = {**current['target_outcome'], 'delivery_error_type': type(error).__name__,
+            'delivery_error_message': compact_error_message(error),
+            'delivery_next_action': 'retry_saved_result_delivery_without_execution'}
+        service.repository.record_rule_result(claim.run_id, claim.claim_id,
+            current.get('structured_result'), target_outcome=outcome)
+        raise
     if commit is not None and commit.outbox_frozen:
-        # TaskLink 已 completed；waiting 对账排除定时触发自身，会在欠发尚未确认时提前记 done。
+        # TaskLink已终结；只保留同一冻结通知待重投，不重新执行原资产。
         # 与原后台交付一致回到 queued；真实冻结 wake 保留，下一片先重投，不再进入业务工具。
         service.release(claim, now=now)
         return
-    service.finish(claim, status='done' if ok else 'failed', response=output,
+    from .service import scheduler_terminal_status_for_task
+    current_status = service.conversation_store.tasks.load(claim.run_id).status
+    terminal_status = scheduler_terminal_status_for_task(current_status) or ('done' if ok else 'failed')
+    if terminal_status == 'cancelled':
+        code, error_message = 'SCHEDULED_TASK_CANCELLED', 'scheduled task cancelled before delivery'
+    service.finish(claim, status=terminal_status, response=output,
         delivery_status=commit.delivery_status if commit is not None else 'suppressed',
-        delivery_reason='execution_target_result', error_code=code, model_call_count=count, now=now)
+        delivery_reason='execution_target_result', error_code=code,
+        error_message=error_message, model_call_count=count, now=now)
     service.conversation_store.wakes.mark_handled(signal.wake_signal_id, now=now)
     settle_terminal_task_run(getattr(getattr(agent, 'subagents', None), 'runtime_db', None), service.conversation_store, task_id=claim.run_id)
+
+
+def scheduled_target_outcome(agent, request):
+    """只读取原run中由目标执行器写出的失败事实，不能由聊天或通知正文授权终态投递。"""
+    if getattr(request, 'reason', '') != 'scheduled_job_due':
+        return None
+    run_id = str(getattr(request, 'task_id', '') or '')
+    wake = getattr(request, 'wake_signal', None) or {}
+    if not run_id or not isinstance(wake, dict) or wake.get('root_task_id') != run_id:
+        return None
+    repository = getattr(agent, 'scheduler_repository', None)
+    run = repository.get_active_run(run_id) if repository is not None else None
+    if not isinstance(run, dict) or not run.get('execution_target'):
+        return None
+    thread_id = str(getattr(request, 'thread_id', '') or '')
+    wake_id = str(wake.get('wake_signal_id') or '')
+    if (not thread_id or thread_id != run.get('thread_id') or wake.get('thread_id') != thread_id
+            or not wake_id or wake_id != run.get('wake_signal_id')):
+        return None
+    metadata = wake.get('metadata', {})
+    if (wake.get('reason') != request.reason or not isinstance(metadata, dict)
+            or metadata.get('scheduler_run_id') != run_id or metadata.get('scheduler_job_id') != run.get('job_id')):
+        return None
+    current = agent.conversation_store.wakes.pending_one(wake_id)
+    if (current is None or current.thread_id != thread_id or current.root_task_id != run_id
+            or current.reason != request.reason or current.metadata.get('scheduler_run_id') != run_id
+            or current.metadata.get('scheduler_job_id') != run.get('job_id')):
+        return None
+    return target_outcome_for_run(run)
+
+
+def target_outcome_for_run(run):
+    facts = run.get('target_outcome')
+    run_id = run.get('run_id')
+    if (not isinstance(facts, dict) or facts.get('schema') != 'scheduler.target-outcome.v1'
+            or facts.get('run_id') != run_id or facts.get('status') not in {'failed', 'succeeded'}
+            or not isinstance(facts.get('response'), str) or not isinstance(facts.get('error_code'), str)):
+        return None
+    return facts
+
+
+def scheduled_target_failure(agent, request):
+    outcome = scheduled_target_outcome(agent, request)
+    return outcome if outcome is not None and outcome['status'] == 'failed' else None
 
 
 # LLM: 仅装配原sender依赖；与redeliver_cached_wake共用上下文/幂等键函数，权限、冻结及canonical仍由原链裁决。

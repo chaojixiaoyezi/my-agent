@@ -26,6 +26,7 @@ agent_py_agent/tests/test_business_surface_controller_scope.py # 真实界面绑
 agent_py_agent/tests/test_orch04_recipient_identity.py       # 交接责任人、冻结版本与原回执去重
 agent_py_agent/tests/test_orch_receipt_chain.py               # 定时管理、交接确认及同项目测试证据短链
 agent_py_agent/tests/test_orch02_native_resume_chain.py      # 原生父子申请、裁决和实际恢复读取
+agent_py_agent/tests/test_scheduler_target_failure_delivery.py # 定时目标失败通知、原结果重投与取消
 docs/reviews/CONTINUITY_R3_REVIEW_20261112.md                # Opus v2 复核后的英文说明
 ```
 

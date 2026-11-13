@@ -26,13 +26,14 @@ class SchedulerRunPreparation:
 
     # LLM: 结果由持有准确 claim 的 NO 工具产生；存入原 run，只有 done 收口才成为依赖确认结果。
     # 函数用途: 保存 JSON 工具结果；原 owner 配额检查继续约束输出大小。
-    def record_rule_result(self, run_id: str, claim_id: str, value: object) -> None:
+    def record_rule_result(self, run_id: str, claim_id: str, value: object, *, target_outcome: dict | None = None) -> None:
         import json
 
-        json.dumps(value, allow_nan=False)
+        json.dumps([value, target_outcome], allow_nan=False)
         with self._mutation_scope() as (store, admission):
             run = self._require_claim(store, run_id, claim_id)
-            store["runs"][run_id] = {**run, "structured_result": deepcopy(value)}
+            store["runs"][run_id] = {**run, "structured_result": deepcopy(value),
+                **({"target_outcome": deepcopy(target_outcome)} if target_outcome is not None else {})}
             self._write_store_unlocked(store, admission)
 
     # LLM: 只读原快照并调用同一 epoch/claim 校验；不是续租，执行写入仍须各自 CAS。

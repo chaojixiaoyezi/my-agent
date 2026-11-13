@@ -269,7 +269,8 @@ class SchedulerService:
             or str(metadata.get("scheduler_job_id") or "") != str(run["job_id"])
         ):
             return None
-        return cached_owner_delivery(current) is not None
+        from .execution import target_outcome_for_run
+        return cached_owner_delivery(current) is not None or (bool(run.get("execution_target")) and target_outcome_for_run(run) is not None)
 
     # LLM: 原任务锁内读/建准确 link；started_at 由原 repository 在首次运行时写入，不能从 queued 状态猜首次。
     # 仅从未开始且没有 link 的新 run 可创建；已有记录原样保留，绑定失败由 claim_wake 收口，禁止补全局包或选择资格。

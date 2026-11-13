@@ -514,6 +514,8 @@ def _background_reply_suppressed(
     if not deliver and not local_transcript_only:
         return True
     terminal_status = delivery.task_status(request)
+    from ..scheduler.execution import scheduled_target_failure
+    scheduler_failure = terminal_status == 'abandoned' and scheduled_target_failure(delivery.agent, request) is not None
     goal_terminal_delivery = delivery_reason in {
         "thread_goal_blocked",
         "thread_goal_budget_limited",
@@ -521,7 +523,7 @@ def _background_reply_suppressed(
     }
     if (
         terminal_status in {"abandoned", "cancelled", "interrupted", "superseded"}
-        and not goal_terminal_delivery
+        and not goal_terminal_delivery and not scheduler_failure
     ):
         return True
     return not str(projection_content or "").strip() and not has_attachments
