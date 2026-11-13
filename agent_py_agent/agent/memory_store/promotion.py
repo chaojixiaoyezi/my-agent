@@ -88,6 +88,7 @@ from .lessons import (
     LessonRoutingPendingError,
 )
 from .operations import memory_content_hash, normalized_memory_content
+from .security import redact_memory_quote
 
 # LLM: working_agreement 第 1 期起与事实/事件/项目同走唯一长期库（JSONL），不再写 AGENTS。
 _LONG_TERM_TARGET_TYPES = frozenset({"long_term_fact", "event", "project", "working_agreement"})
@@ -393,9 +394,15 @@ class ConversationMessageEvidenceVerifier:
                 or str(getattr(message, "message_id", "")) != message_id):
             return None
         content = str(message.content or "")
+        redacted_content = redact_memory_quote(content)
         content_hash = "sha256:" + hashlib.sha256(content.encode("utf-8", "replace")).hexdigest()
         claimed_hash = str(ref.get("content_hash") or "")
-        if claimed_hash != content_hash or not quote or len(quote) > 300 or quote not in content:
+        if (
+            claimed_hash != content_hash
+            or not quote
+            or len(quote) > 300
+            or (quote not in content and quote not in redacted_content)
+        ):
             return None
         claimed_role = str(ref.get("role") or message.role)
         if claimed_role != str(message.role):
@@ -874,6 +881,9 @@ def _commit_target_blocked(
     except KeyError:
         if target == "lesson":
             raise _PromotionConflict("TARGET_LESSON_NOT_FOUND", conflicts) from None
+        if target == "hot" and _AUTOMATIC_PROMOTION.get() is not None:
+            code = "TARGET_LESSON_NOT_FOUND" if target_id else "AUTO_POLICY_EXACT_TARGET_REQUIRED"
+            raise _PromotionConflict(code, conflicts) from None
         raise
     except MemorySubjectConflict as exc:
         if target in {"lesson", "hot"}:

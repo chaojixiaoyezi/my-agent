@@ -52,10 +52,13 @@ from agent_py_agent.agent.memory_store.curator_inputs import (
 )
 from agent_py_agent.agent.memory_store.curator_models import (
     CURATOR_OUTPUT_SCHEMA_VERSION,
+    CuratorDailyDraft,
     CuratorExtraction,
     MemoryCuratorConfig,
+    parse_curator_extraction,
 )
 from agent_py_agent.agent.memory_store.curator_run_log import CuratorRunLog
+from agent_py_agent.agent.memory_store.curator_schema import CuratorOutputViolation
 from agent_py_agent.agent.memory_store.curator_state import MemoryCuratorStateStore
 from agent_py_agent.agent.memory_store.curator_validation import validate_extraction
 from agent_py_agent.agent.memory_store.daily import DailyMemoryStore
@@ -70,6 +73,7 @@ from agent_py_agent.agent.memory_store.promotion import (
     ToolEvidenceVerifier,
     VerifiedToolEvidence,
 )
+from agent_py_agent.agent.memory_store.security import redact_memory_quote, scan_memory_content
 
 
 class _PassingToolVerifier(ToolEvidenceVerifier):
@@ -1259,3 +1263,195 @@ def test_effective_config_honors_explicit_overrides_and_post_init_mutations(tmp_
     promoted, _warnings, _receipts = curator2._promote_eligible([cand.candidate_id])
     assert promoted == 1
     assert candidates.get(cand.candidate_id).status == "promoted"
+
+
+def test_auto_promotion_blocks_unlinked_hot_rule_without_keyerror(tmp_path: Path) -> None:
+    _owner, service, conversations, thread, candidates, _long_term, _lessons, hot = _setup_owner(tmp_path)
+    msg_ref = _user_message_ref(conversations, thread, "必须先跑验证再合并代码。")
+    unlinked = candidates.observe(
+        CandidateObservation(
+            candidate_type="hot_rule",
+            content="必须先跑验证再合并代码。",
+            subject_key="hot.unlinked",
+            scope=MemoryScope("personal", "personal"),
+            origin="user_explicit",
+            source_message_refs=(msg_ref,),
+            learning_source=ls.user_dialogue_projection(),
+            proposed_action="add",
+            target_entry_id="",
+            promotion_target="hot",
+            confidence=0.95,
+        )
+    )
+    batch_unlinked = service.promote_batch([unlinked], reviewer="memory-promotion-service", automatic=True)
+    assert len(batch_unlinked) == 1
+    assert batch_unlinked[0].promoted is False
+    assert batch_unlinked[0].reason_code == "AUTO_POLICY_EXACT_TARGET_REQUIRED"
+
+    # 即使携带非空但不存在的 lesson_id 走自动晋升，也不得在 promote_batch 内触发 KeyError / PROMOTION_ITEM_FAILED。
+    missing_obs = CandidateObservation(
+        candidate_type="hot_rule",
+        content="必须先校验目标条目是否存在。",
+        subject_key="hot.missing.target",
+        scope=MemoryScope("personal", "personal"),
+        origin="user_explicit",
+        source_message_refs=(msg_ref,),
+        source_task_ids=("ht-m-1",),
+        source_run_ids=("hr-m-1",),
+        learning_source=ls.user_dialogue_projection(),
+        proposed_action="add",
+        target_entry_id="lesson-nonexistent",
+        promotion_target="hot",
+        confidence=0.95,
+    )
+    missing_cand = candidates.observe(missing_obs)
+    for idx in (2, 3):
+        missing_cand = candidates.observe(
+            replace(
+                missing_obs,
+                source_task_ids=(f"ht-m-{idx}",),
+                source_run_ids=(f"hr-m-{idx}",),
+                observation_id=f"obs-m-{idx}",
+            )
+        )
+    batch_missing = service.promote_batch([missing_cand], reviewer="memory-promotion-service", automatic=True)
+    assert len(batch_missing) == 1
+    assert batch_missing[0].promoted is False
+    assert batch_missing[0].reason_code == "TARGET_LESSON_NOT_FOUND"
+    assert hot.list() == []
+
+
+def test_curator_and_remember_redact_credentials_in_message_quotes_and_verify(tmp_path: Path) -> None:
+    from agent_py_agent.agent.capability.memory_tool import _current_user_message_ref
+
+    synthetic_sk = "sk-test-synthetic00000000000000000000"
+    synthetic_bearer = "Bearer eyJsyntheticTokenValue0000123456"
+    assert not scan_memory_content(f"key={synthetic_sk}").safe
+    assert not scan_memory_content(f"auth={synthetic_bearer}").safe
+
+    owner, service, conversations, thread, candidates, long_term, _lessons, _hot = _setup_owner(tmp_path)
+    secret_prose = f"每周三执行灰度发布；凭证 {synthetic_sk} 与 {synthetic_bearer} 不可落盘。"
+    msg = conversations.messages.append(
+        {
+            "thread_id": thread.thread_id,
+            "role": "user",
+            "content": secret_prose,
+            "now": 25.0,
+            "metadata": {"gateway_request_id": "req-redaction-1"},
+        }
+    )
+    digest = "sha256:" + hashlib.sha256(secret_prose.encode("utf-8")).hexdigest()
+    msg_input = CuratorMessageInput(
+        message_id=msg.message_id,
+        thread_id=thread.thread_id,
+        role="user",
+        channel="internal",
+        created_at=25.0,
+        full_content=secret_prose,
+        content_preview=redact_memory_quote(secret_prose),
+        content_hash=digest,
+        metadata={"gateway_request_id": "req-redaction-1"},
+        thread_source=ls.user_dialogue_projection(),
+    )
+    batch_in = CuratorInputBatch(messages=(msg_input,), audit_events=(), formal_memories=())
+    extraction = CuratorExtraction(
+        daily_events=(
+            CuratorDailyDraft(
+                event_type="preference",
+                summary=f"记录发布窗口，忽略 {synthetic_sk}",
+                actor="user",
+                origin="user_explicit",
+                message_refs=({"thread_id": thread.thread_id, "message_id": msg.message_id},),
+                decisions=(f"清理 {synthetic_bearer}",),
+            ),
+        ),
+        candidates=(
+            CandidateObservation(
+                candidate_type="long_term_fact",
+                content="每周三执行灰度发布。",
+                subject_key="release.cadence",
+                scope=MemoryScope("personal", "personal"),
+                origin="user_explicit",
+                source_message_refs=({"thread_id": thread.thread_id, "message_id": msg.message_id},),
+                learning_source=ls.user_dialogue_projection(),
+                proposed_action="add",
+                promotion_target="long_term",
+                confidence=0.95,
+            ),
+        ),
+        processed_message_refs=({"thread_id": thread.thread_id, "message_id": msg.message_id},),
+        processed_audit_refs=(),
+        unresolved_refs=(),
+        warnings=(),
+        next_cursor={},
+    )
+    validated = validate_extraction(extraction, batch_in, owner_id="owner-w8")
+    assert synthetic_sk not in validated.daily_events[0].summary
+    assert synthetic_bearer not in validated.daily_events[0].decisions[0]
+    assert "[REDACTED_CREDENTIAL]" in validated.candidates[0].source_message_refs[0]["quote"]
+
+    cand = candidates.observe(replace(validated.candidates[0], learning_source=ls.user_dialogue_projection()))
+    res = service.promote_batch([cand], reviewer="memory-promotion-service", automatic=True)
+    assert res[0].promoted is True
+    assert len(long_term.all()) == 1
+
+    # Remember 工具回填当前消息引用同样脱敏，且通过 ConversationMessageEvidenceVerifier 校验。
+    mock_agent = SimpleNamespace(
+        conversation_store=conversations,
+        _current_run_params=SimpleNamespace(
+            request_id="req-redaction-1",
+            task_attributes={"conversation_thread_id": thread.thread_id},
+        ),
+    )
+    tool_ref = _current_user_message_ref(mock_agent, "非原文子串触发截取")
+    assert tool_ref is not None
+    assert "[REDACTED_CREDENTIAL]" in str(tool_ref["quote"])
+    assert synthetic_sk not in str(tool_ref["quote"])
+    assert "eyJsyntheticTokenValue0000123456" not in str(tool_ref["quote"])
+    assert service.message_verifier.verify(tool_ref) is not None
+
+    # 扫描 owner/memory 下全部持久文件，绝不能落盘任何原始凭据。
+    for path in (owner / "memory").rglob("*"):
+        if path.is_file():
+            raw = path.read_text(encoding="utf-8", errors="replace")
+            assert synthetic_sk not in raw, f"raw secret leaked in {path}"
+            assert "eyJsyntheticTokenValue0000123456" not in raw, f"raw bearer token leaked in {path}"
+
+
+def test_parse_curator_extraction_fills_omitted_nullable_scope_conditions() -> None:
+    payload = {
+        "schema_version": CURATOR_OUTPUT_SCHEMA_VERSION,
+        "daily_events": [],
+        "candidates": [
+            {
+                "candidate_type": "long_term_fact",
+                "content": "Project Alpha deploys after 20:00 UTC.",
+                "subject_key": "alpha.release.window",
+                "scope": {"scope_type": "project", "scope_key": "project:alpha"},
+                "origin": "user_explicit",
+                "source_message_refs": [{"message_id": "msg-1"}],
+                "source_tool_refs": [],
+                "source_artifact_refs": [],
+                "confidence": 0.9,
+                "proposed_action": "add",
+                "conflicts_with": [],
+                "promotion_target": "long_term",
+            }
+        ],
+        "processed_message_refs": [{"message_id": "msg-1"}],
+        "processed_audit_refs": [],
+        "unresolved_refs": [],
+        "warnings": [],
+        "next_cursor": {"per_thread_cursors": [{"thread_id": "t-1", "message_id": "msg-1"}], "last_audit_event_id": None},
+    }
+    parsed = parse_curator_extraction(json.dumps(payload))
+    assert len(parsed.candidates) == 1
+    assert parsed.candidates[0].scope.scope_type == "project"
+    assert parsed.candidates[0].scope.applies_when == ""
+    assert parsed.candidates[0].scope.excludes_when == ""
+
+    del payload["candidates"][0]["scope"]
+    with pytest.raises(CuratorOutputViolation) as exc_info:
+        parse_curator_extraction(json.dumps(payload))
+    assert exc_info.value.violation_code == "missing_property"
+    assert "$.candidates[0].scope" in exc_info.value.violation_path

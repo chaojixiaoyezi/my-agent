@@ -447,14 +447,29 @@ def parse_curator_extraction(text: str) -> CuratorExtraction:
     # 结构化生成仍强制主字段;缺失补全是纯宿主侧确定性修复,不引入新权威。
     if missing:
         payload = {**payload, **{key: _EMPTY_FIELD_DEFAULT[key] for key in missing}}
-    # 宿主容错: 仅补齐候选条目偶发省略的 link_candidate_id, 不绕过其余必填属性的严格 Schema 校验。
+    # 宿主容错: 仅补齐候选条目及 scope 中偶发省略的可空标量字段，不填补 scope 本身、daily_events 或数组字段。
     if isinstance(payload.get("candidates"), list):
-        payload["candidates"] = [
-            dict(item, link_candidate_id=item.get("link_candidate_id"))
-            if isinstance(item, dict)
-            else item
-            for item in payload["candidates"]
-        ]
+        normalized_candidates: list[object] = []
+        for item in payload["candidates"]:
+            if not isinstance(item, dict):
+                normalized_candidates.append(item)
+                continue
+            normalized_item: dict[str, object] = {
+                "observed_at": None,
+                "valid_from": None,
+                "valid_until": None,
+                "target_entry_id": None,
+                "link_candidate_id": None,
+                **item,
+            }
+            if isinstance(normalized_item.get("scope"), dict):
+                normalized_item["scope"] = {
+                    "applies_when": None,
+                    "excludes_when": None,
+                    **normalized_item["scope"],
+                }
+            normalized_candidates.append(normalized_item)
+        payload["candidates"] = normalized_candidates
     validate_curator_response_payload(payload, curator_response_schema())
     return CuratorExtraction(
         daily_events=tuple(_parse_daily_draft(item) for item in _object_array(payload, "daily_events")),

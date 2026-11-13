@@ -21,6 +21,7 @@ from .curator_models import CURATOR_MODEL_ORIGINS, CuratorExtraction
 from .evidence_admission import tool_evidence_failure
 from .operations import memory_content_hash
 from .scope_contract import canonical_scope_key
+from .security import redact_memory_quote
 
 
 # LLM: 模型证据失败对外只暴露稳定持久化错误码；进程内另留不含正文的明细码供诊断与测试使用。
@@ -262,6 +263,10 @@ def _validated_daily(
     references = [*message_refs, *tool_refs, *artifact_refs]
     return replace(
         draft,
+        summary=redact_memory_quote(draft.summary),
+        decisions=tuple(redact_memory_quote(item) for item in draft.decisions),
+        lessons=tuple(redact_memory_quote(item) for item in draft.lessons),
+        next_actions=tuple(redact_memory_quote(item) for item in draft.next_actions),
         session_id=_single_reference_value(references, "session_id"),
         thread_id=_single_reference_value(references, "thread_id"),
         request_id=_single_reference_value(references, "request_id"),
@@ -519,7 +524,7 @@ def _canonical_message_refs(
         source = messages.get(message_id)
         if source is None or str(ref.get("thread_id") or source.thread_id) != source.thread_id:
             continue  # 引用不在本批 owner 消息 → 剔除(不阻断)
-        quote = source.full_content[:300]
+        quote = redact_memory_quote(source.full_content)[:300]
         canonical.append({**source.ref(), "quote": quote})
     return canonical
 
