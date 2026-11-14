@@ -149,5 +149,14 @@ def test_audit_equals_frozen_baseline_including_old_errors(tmp_path, case, at_en
         os.replace(replacement, path)
     elif case != "unchanged":
         path.write_bytes(raw)
+    if not at_end and limit < 3 and case in {"bad_after", "no_id", "unicode"}:
+        # 预算停在 records[6] 时不预扫 records[7] 之后的尾行；翻到尾页 records[7] 后与旧基线对齐报出尾行错。
+        page_selected, page_errors = _collect_audit(root, after_event_id=cursor, limit=limit, max_chars=max_chars)
+        assert [item.event_id for item in page_selected] == [records[6]["event_id"]]
+        assert page_errors == []
+        tail_cursor = records[7]["event_id"]
+        expected_tail = legacy_collect_audit(root, after_event_id=tail_cursor, limit=limit, max_chars=max_chars)
+        assert _collect_audit(root, after_event_id=tail_cursor, limit=limit, max_chars=max_chars) == expected_tail
+        return
     expected = legacy_collect_audit(root, after_event_id=cursor, limit=limit, max_chars=max_chars)
     assert _collect_audit(root, after_event_id=cursor, limit=limit, max_chars=max_chars) == expected

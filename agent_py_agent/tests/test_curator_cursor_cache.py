@@ -143,9 +143,14 @@ def test_current_audit_shard_checks_corruption_even_beyond_budget(tmp_path):
     _collect_audit(root, after_event_id=cursor, limit=1, max_chars=1)
     with paths[1].open("ab") as handle:
         handle.write(b"{}\nbroken\n[]\n")
-    expected = legacy_collect_audit(root, after_event_id=cursor, limit=1, max_chars=1)
-    assert len(expected[1]) == 3
-    assert _collect_audit(root, after_event_id=cursor, limit=1, max_chars=1) == expected
+    # 预算截断后立即停止，不预扫尾行；按游标翻到尾页时再逐条报出损坏行。
+    page_selected, page_errors = _collect_audit(root, after_event_id=cursor, limit=1, max_chars=1)
+    assert [item.event_id for item in page_selected] == [rows[6]["event_id"]]
+    assert page_errors == []
+    tail_cursor = rows[-1]["event_id"]
+    expected_tail = legacy_collect_audit(root, after_event_id=tail_cursor, limit=1, max_chars=1)
+    assert len(expected_tail[1]) == 3
+    assert _collect_audit(root, after_event_id=tail_cursor, limit=1, max_chars=1) == expected_tail
 
 
 def test_display_only_tail_becomes_empty_without_new_opens(tmp_path, monkeypatch):

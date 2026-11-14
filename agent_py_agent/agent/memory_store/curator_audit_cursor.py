@@ -166,8 +166,8 @@ def _read_slice(path: Path, cursor: AuditCursor | None, window: AuditWindow | No
         return AuditSlice(errors=[_read_error(path, exc, 0)], fatal=True)
 
 
-# LLM: 预算达到后不再构造AuditRow或业务投影，仍流式校验全分片，保错误顺序、物理行号及FD核验。
-# 函数用途: 有界构造审计输入并收齐尾部损坏，读取中改写则不缓存。
+# LLM: 命中行数或字符预算后立即停止读取当前分片，保留精确末消费游标；尾部行留待后续页到达时再校验。
+# 函数用途: 有界扫描已打开分片记录和前缀错误，读取中改写则不缓存。
 def _read_open(handle, path: Path, cursor: AuditCursor | None, window: AuditWindow | None = None) -> AuditSlice:
     stamp = file_stamp(os.fstat(handle.fileno()))
     if cursor is not None and cursor.stamp != stamp:
@@ -178,14 +178,15 @@ def _read_open(handle, path: Path, cursor: AuditCursor | None, window: AuditWind
     line_number = cursor.line if cursor else 0
     for start, raw, end in _raw_lines(handle):
         line_number += 1
-        payload = _parse_row(result, missing_errors, raw.decode("utf-8"), line_number)
-        if payload is None or result.stopped:
+        parsed_row = _parse_row(result, missing_errors, raw.decode("utf-8"), line_number)
+        if parsed_row is None:
             continue
-        row = AuditRow(payload, start, end, line_number)
+        row = AuditRow(parsed_row, start, end, line_number)
         if window is None:
             result.rows.append(row)
-        else:
-            result.stopped = _consume_row(window, row, (path.name, stamp))
+        elif _consume_row(window, row, (path.name, stamp)):
+            result.stopped = True
+            break
     result.errors.extend(missing_errors)
     if file_stamp(os.fstat(handle.fileno())) != stamp:
         result.stamp = None

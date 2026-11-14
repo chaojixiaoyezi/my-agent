@@ -293,8 +293,16 @@ def test_m2_audit_budget_bounds_row_objects_but_still_validates_tail(tmp_path, m
 
     monkeypatch.setattr(audit, "AuditRow", row)
     selected, errors = _collect_audit(tmp_path / "audit", after_event_id="", limit=1, max_chars=1000)
-    assert len(selected) == 1 and len(errors) == 3
+    assert len(selected) == 1 and errors == []
     assert len(constructions) <= 1
+    # 翻到末尾有效行之后才触及尾部损坏行：首轮预算页保持有界不预扫全尾，尾页准确报出 3 条损坏错。
+    tail_selected, tail_errors = _collect_audit(
+        tmp_path / "audit",
+        after_event_id=_rows[-1]["event_id"],
+        limit=1,
+        max_chars=1000,
+    )
+    assert tail_selected == [] and len(tail_errors) == 3
 
 
 # LLM: 仅在测试state放入真实大游标字典，冷线程无需伪造消息；产品实际处理活动线程并写运行审计。
