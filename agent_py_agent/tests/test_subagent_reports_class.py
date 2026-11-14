@@ -26,10 +26,6 @@ from agent_py_agent.agent.subagents.reports import (
     ParentPlannerParsedOutput,
     ParentPlannerRecord,
     ParentPlannerReport,
-    PatchApplyRecord,
-    PatchApplyReport,
-    PatchReviewRecord,
-    PatchReviewReport,
     SubAgentBoard,
     SubAgentBoardItem,
 )

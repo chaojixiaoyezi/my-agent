@@ -38,7 +38,6 @@ class TestSubagentsSubcommandRegistration:
             "subagents-apply-actions",
             "subagents-route-capabilities",
             "subagents-tests",
-            "subagents-patches",
             "subagents-dispatch",
             "subagent-context",
             "subagent-run",
@@ -236,22 +235,3 @@ class TestSubagentsReviewCommandRegistration:
         assert args.run_id == "run-123"
         assert args.re_run is True
         assert args.timeout == 9
-
-    def test_subagents_patches_has_patch_action_group(self):
-        """测试 subagents-patches 命令有 patch 操作组。
-
-        验证 mutually exclusive group 正确工作。
-        """
-        from agent_py_agent.cli.subagents import add_subagents_subcommands
-
-        parser = argparse.ArgumentParser()
-        sub = parser.add_subparsers(dest="subcommand")
-        add_subagents_subcommands(sub)
-
-        # 默认值
-        args = parser.parse_args(["subagents-patches"])
-        assert args.patch_action == "review_dry_run"
-
-        # --apply
-        args = parser.parse_args(["subagents-patches", "--apply"])
-        assert args.patch_action == "apply"

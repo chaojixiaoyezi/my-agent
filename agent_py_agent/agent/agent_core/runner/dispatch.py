@@ -9,9 +9,7 @@ dispatch 阶段不应该把"谁能跑、能不能重试、并发 worker 怎么�
 这个文件专门处理 runner 相关的规则和小工具。
 """
 
-import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ...settings.defaults import default_config_int
@@ -174,28 +172,6 @@ def _runner_retry_reason(
     if retries >= effective_max:
         return ""
     return f"failure_type={failure_type}; retry={retries + 1}/+{effective_max}"
-
-
-# LLM: 只检查已完成任务的输出补丁，按输入顺序返回 ID；可能读取输出 JSON，但不审阅、应用补丁或改状态。
-# 函数用途: 为派工补丁审阅阶段收集有非空补丁列表的已完成子代理。
-def _dispatch_patch_review_run_ids(tasks: list[SubAgentTask]) -> list[str]:
-    run_ids: list[str] = []
-    for task in tasks:
-        if not task_has_status(task, TaskStatus.DONE):
-            continue
-        if _task_has_runner_patches(task):
-            run_ids.append(task.id)
-    return run_ids
-
-
-# LLM: 读取任务输出 JSON 并检查 patches 是否为非空列表；文件、解码或路径类型错误返回假，其他结构错误不在此兜底。
-# 函数用途: 为审阅候选筛选判断任务输出是否声明了 runner 补丁。
-def _task_has_runner_patches(task: SubAgentTask) -> bool:
-    try:
-        payload = json.loads(Path(task.output_json).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError):
-        return False
-    return isinstance(payload.get("patches"), list) and bool(payload.get("patches"))
 
 
 # LLM: runner_concurrency 是唯一并发旋钮（原 runner_auto_concurrency 已并入）：auto/空 = 默认 8，正整数 = 上限，

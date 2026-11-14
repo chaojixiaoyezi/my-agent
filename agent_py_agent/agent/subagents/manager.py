@@ -27,7 +27,6 @@ from .models import (
     WorkOrderValidation,
     task_replacement_successor,
 )
-from .patch.patch_service import SubAgentPatchService
 from .services.actions import SubAgentActionService
 from .services.base import CreateRunParams, PreparedSubagentRun, SubAgentBaseService
 from .services.board.service import SubAgentBoardService
@@ -515,7 +514,6 @@ def _attach_services(manager: SubAgentManager) -> None:
     manager.hierarchy = SubAgentHierarchyService(manager)
     manager.indexing = SubAgentIndexingService(manager)
     manager.memory_candidates = SubAgentMemoryCandidateService(manager)
-    manager.patch = SubAgentPatchService(manager)
     manager.parent_planner = SubAgentParentPlannerService(manager)
     manager.runner_context = SubAgentRunnerContextService(manager)
     manager.runner_result = SubAgentRunnerResultService(manager)

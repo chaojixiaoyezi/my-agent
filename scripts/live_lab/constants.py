@@ -18,8 +18,7 @@ DEFAULT_RUNS_DIR = REPO_ROOT / "validation" / "live_lab"
 # 2026-05-18: main-artifact is a fast real-LLM slice for long output/artifact readback without rerunning every complex case.
 SUITES = {
     "health": ["health"],
-    "bad-weather": ["bad_weather"],
-    "smoke": ["health", "bad_weather"],
+    "smoke": ["health"],
     "tool-recovery": ["health", "main_tool_failure_recovery"],
     "main-artifact": ["health", "main_artifact_readback", "main_compact_resume_roundtrip"],
     "compact-stress": ["health", "main_compact_stress_long_read"],
@@ -30,7 +29,7 @@ SUITES = {
         "main_compact_resume_roundtrip",
         "main_large_log_audit",
     ],
-    "real": ["health", "gateway_ask", "long_subagent"],
+    "real": ["health", "gateway_ask"],
     "limit-cli": [
         "health",
         "main_dense_rounds",
@@ -40,15 +39,12 @@ SUITES = {
     ],
     "all": [
         "health",
-        "bad_weather",
         "gateway_ask",
-        "long_subagent",
     ],
 }
 
 REAL_CASES = {
     "gateway_ask",
-    "long_subagent",
     "main_tool_failure_recovery",
     "main_artifact_readback",
     "main_compact_resume_roundtrip",

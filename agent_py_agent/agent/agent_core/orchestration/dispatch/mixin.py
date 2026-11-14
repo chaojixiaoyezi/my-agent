@@ -16,9 +16,6 @@ from ....subagents import DispatchReport, DispatchWatchReport
 from ....subagents.models import TaskStatus
 from ...failure_analysis_service import FailureIntrospector
 from ...planner_service import combine_runner_instruction
-from ...runner.dispatch import (
-    _dispatch_patch_review_run_ids,
-)
 from ...services.watch_service import watch_subagents as _watch_subagents
 from .capability_followup import (
     run_post_runner_capability_followup,
@@ -35,7 +32,6 @@ from .params import (
 from .runner_batches import run_dispatch_runner_stage
 from .runner_selection import scoped_runner_tasks
 from .service import (
-    make_patch_review_records,
     update_pending_work_state,
 )
 
@@ -268,15 +264,7 @@ class _DispatchCollectionBase:
         return collect_dispatch_records(self, ctx)
 
     def _finalize_dispatch(self, params: DispatchParams, records: list):
-        records = list(records)
-        patch_run_ids = _dispatch_patch_review_run_ids(_finalize_scoped_tasks(self, params))
-        patch_records = make_patch_review_records(
-            self,
-            patch_run_ids,
-            params,
-        )
-        records.extend(patch_records)
-        return records
+        return list(records)
 
 
 class _DispatchReportMixin:

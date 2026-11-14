@@ -95,20 +95,18 @@ def test_argv_form_is_not_length_gated() -> None:
     assert evaluate_command_policy(["echo", "x" * 100_000]).allowed is True
 
 
-# 函数用途: 子代理文本解析点（命令名提取、patch 测试命令校验）超限时不解析、按保守结果返回。
+# 函数用途: 子代理文本解析点（命令名提取）超限时不解析、按保守结果返回。
 def test_subagent_text_helpers_skip_oversized_without_parse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from agent_py_agent.agent.subagents.capability_request_identity import _command_name
     from agent_py_agent.agent.subagents.capability_scope import _requested_command_name
-    from agent_py_agent.agent.subagents.patch.patch_apply_helpers import validate_patch_test_command
 
     monkeypatch.setattr(shlex, "shlex", _fail_if_called)
     monkeypatch.setattr(shlex, "split", _fail_if_called)
     oversized = "x" * (LIMIT + 1)
     assert _command_name(oversized) == ""
     assert _requested_command_name(oversized) == ""
-    assert "过长" in validate_patch_test_command(oversized)
 
 
 # 函数用途: 新错误码已登记、不可重试，恢复提示指向 write_file 写文件。
