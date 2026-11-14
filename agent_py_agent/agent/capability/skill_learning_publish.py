@@ -1086,12 +1086,16 @@ def _rollback_created_skill(store, target, identity):
         raise
 
 
-# LLM: 原state/配额锁内只经本次固定stage FD写读扫描，退出精确清理；不创建第二份持久状态或复制整库。
+# LLM: 原state/配额锁内只经本次固定stage FD写读扫描，退出精确清理；write或清理报OSError转为结构化安装错误并保留cleanup_pending。
 # 函数用途: 在隔离对象内检查更新正文，不重新解析可变stage路径。
 def _stage_and_check(store: SkillLearningStore, publish: PublishRequest, text: str) -> None:
     from .asset_promotion import _stage_dir
-    with _stage_dir(store.skills_root.parent, with_fd=True) as (stage, stage_fd):
-        _staged_skill(store, stage, publish, text, stage_fd=stage_fd)
+    try:
+        with _stage_dir(store.skills_root.parent, with_fd=True) as (stage, stage_fd):
+            _staged_skill(store, stage, publish, text, stage_fd=stage_fd)
+    except OSError as exc:
+        # 预检暂存未移动任何正文；写入或清理失败统一给结构化安装错误，清理回执由 _stage_dir 保留。
+        raise SkillLearningGateError(CODE_INSTALL_FAILED, {"error": type(exc).__name__, "phase": "stage_check"}) from exc
 
 
 # LLM: 只经固定stage FD创建/读取单文件Skill；共用frontmatter codec并显式保留description必填门，以agent_generated扫描，返回名字与inode。
