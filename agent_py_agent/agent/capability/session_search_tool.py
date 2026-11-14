@@ -105,7 +105,11 @@ def build_session_search_model_spec() -> ToolModelSpec:
         input_schema={
             "type": "object",
             "properties": {
-                "mode": {"type": "string", "enum": list(SESSION_SEARCH_MODES)},
+                "mode": {
+                    "type": "string",
+                    "enum": list(SESSION_SEARCH_MODES),
+                    "description": "检索模式枚举：search（跨会话全文检索，必填 query）、recent（最近记录列表）、around（按 around_id 取上下文窗口）、message（按 message_id 分段读原文）、thread_search（当前会话检索，必填 query）、thread_browse（当前会话按 older_cursor 翻页）。",
+                },
                 "query": {"type": "string", "description": "search/thread_search必填非空检索词，其它模式不接受。"},
                 "around_id": {"type": "string", "description": "around必填记录ID，其它模式不接受。"},
                 "window": {"type": "integer", "minimum": 1, "maximum": _MAX_WINDOW_COUNT, "description": "锚点两侧各取几条，默认 5。"},

@@ -158,6 +158,12 @@ def build_update_persona_model_spec() -> ToolModelSpec:
     for name, description in _PERSONA_PARAMETERS.items():
         properties[name]["description"] = description
     operations = properties["operations"]["items"]
+    operation_properties = operations["properties"]
+    operation_properties["action"]["description"] = (
+        "单项 USER 画像变更动作：add、replace 或 remove（replace/remove 必须传 list 返回的精确 entry_id）。"
+    )
+    for shared_field in ("content", "entry_id", "source_quote"):
+        operation_properties[shared_field]["description"] = _PERSONA_PARAMETERS[shared_field]
     operations["additionalProperties"] = False
     return ToolModelSpec(
         name="update_persona",

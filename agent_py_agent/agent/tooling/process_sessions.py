@@ -357,14 +357,21 @@ class ProcessSessionTool(BaseTool):
             result_envelope=envelope,
         )
 
-    # LLM: 错误码是机器判断依据，中文 message 只供模型和用户理解。
+    # LLM: 错误码是机器判断依据，中文 message 只供模型和用户理解；仅已证明未发出信号的预检/查找失败默认标 not_started。
     # 函数用途: 构造统一的后台进程工具失败返回。
-    def _error(self, code: str, message: str) -> ToolHandlerOutcome:
+    def _error(
+        self,
+        code: str,
+        message: str,
+        *,
+        effect_outcome: str = "not_started",
+    ) -> ToolHandlerOutcome:
         return ToolHandlerOutcome(
             self.model_spec.name,
             False,
             message,
             error_code=code,
+            effect_outcome=effect_outcome,
         )
 
 

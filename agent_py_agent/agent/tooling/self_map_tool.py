@@ -62,10 +62,43 @@ class SelfMapTool(BaseTool):
     _base_spec = ToolModelSpec(
         name="self_map", description="查询自己的目录、工具、能力、模型、权限和工作状态；business 分块介绍业务空间与后台代理内置工具。无参数总览，section 分块，cursor 翻页。",
         input_schema={"type": "object", "properties": {
-            "section": {"type": "string"}, "item": {"type": "string"}, "cursor": {"type": "string"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            "section": {
+                "type": "string",
+                "description": "可选。目录分块编号（枚举见当前注册声明，如 tools、skills 等；省略时返回全部分块总览）。",
+            },
+            "item": {
+                "type": "string",
+                "description": "可选。指定分块内条目的精确稳定 ID（来自列表页返回行），读取单条完整详情；须同时传 section，且不可与 cursor/limit 同传。",
+            },
+            "cursor": {
+                "type": "string",
+                "description": "可选。上一页返回的 base64url 分页游标 next_cursor（绑定来源快照指纹，快照变化返回 SELF_MAP_CURSOR_STALE）；须同时传原 section。",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100,
+                "description": "可选。单页最大返回条数（1-100 整数）；显式传入时返回展开详情页，省略时按默认紧凑列式页返回。",
+            },
         }, "additionalProperties": False},
-        hints=ToolModelHints(category="introspection", keywords=("自己", "装了什么", "权限", "目录")),
+        hints=ToolModelHints(
+            category="introspection",
+            use_cases=(
+                "先无参数查看当前代理已挂载的工具族、Skill、模型档位、权限与工作区总览",
+                "按 section 与 cursor/item 分页或精读某个能力分块的公开目录元数据",
+            ),
+            avoid_when=(
+                "需要检索或读取某个 Skill 的 SKILL.md 完整步骤正文时改用 skill_search",
+                "需要查看当前任务下级子代理实时运行树与报告引用时改用 list_agents",
+                "需要新增或修改长期记忆、人格设定或运行配置时改用 remember、update_persona 或 user_config（self_map 仅只读）",
+            ),
+            keywords=("自己", "装了什么", "权限", "目录", "能力清单", "self_map"),
+            examples=(
+                "{}",
+                '{"section":"tools"}',
+                '{"section":"tools","limit":20}',
+            ),
+        ),
     )
     runtime_policy = ToolRuntimePolicy(effect_resolver=EffectResolverPolicy("read_only"), concurrency_policy=ConcurrencyPolicy("parallel_safe"))
 
@@ -388,7 +421,10 @@ def _outcome(ok: bool, payload: dict[str, Any], code: str = "") -> ToolHandlerOu
 # 函数用途: 从唯一登记表生成合法编号枚举和逐编号用途；空目录仍可合法查询总览。
 def _registered_spec(base, registry):
     descriptors = registry.descriptors()
-    selector = {"type": "string", **({"enum": [row.id for row in descriptors]} if descriptors else {})}
+    selector = {
+        **base.input_schema["properties"]["section"],
+        **({"enum": [row.id for row in descriptors]} if descriptors else {}),
+    }
     properties = base.input_schema["properties"] | {"section": selector}
     description = base.description + "\n" + "\n".join(row.id + "：" + (row.purpose or row.title) + "。" for row in descriptors)
     description += "\n默认列表用item_columns声明短行；省略列沿item_defaults，item_name_from明确同ID名称来源。首列next_read是完整item参数，合并detail_next_read.arguments后调详情；显式limit给详细页。"
