@@ -470,12 +470,3 @@ def troubleshoot(call):
     instruction = '依据结构化连接观察诊断，输出约定 JSON；缺少证据时明确标注未知。\n' + json.dumps(facts, ensure_ascii=False)
     return v13_start_model_job(call, 'datasource_troubleshoot', instruction,
                                space_id=w9_require_space(call))
-
-
-# LLM: 正文只按 JSON 解析，W0 负责按 job result_schema 验证。
-# 函数用途: 解析诊断模型结果。
-def finalize_troubleshoot(text):
-    result = json.loads(text)
-    if not isinstance(result, dict):
-        raise ValueError('JOB_RESULT_INVALID')
-    return result

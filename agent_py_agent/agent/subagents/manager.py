@@ -112,32 +112,6 @@ class SubAgentManager(SubagentKernelMixin):
     def creation_guard(self):
         return subagent_creation_guard(self.workspace)
 
-    @property
-    def _indexing_service(self):
-        return self.indexing
-
-
-    def _log_local_record(
-        self,
-        *,
-        params: LocalRecordParams | None = None,
-        source_type: str = "",
-        source_id: str = "",
-        title: str = "",
-        content: str = "",
-        event_type: str = "",
-        metadata: dict[str, object] | None = None,
-    ):
-        params = params or LocalRecordParams(
-            source_type=source_type,
-            source_id=source_id,
-            title=title,
-            content=content,
-            event_type=event_type,
-            metadata=metadata,
-        )
-        return self.indexing.log_local_record(params=params)
-
     def log_local_record(
         self,
         *,

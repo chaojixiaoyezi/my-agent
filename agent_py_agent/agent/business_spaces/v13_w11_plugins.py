@@ -279,14 +279,6 @@ def _view_from_command(manager, plugin):
     }
 
 
-# LLM: 同片包模块需要同一安装记录投影；这里只适配形状，不授予读取配置正文的能力。
-# 函数用途: 供兄弟模块把原生安装记录投影为 V13PluginView。
-def plugin_view(raw):
-    if hasattr(raw, "manifest"):
-        return _view_from_installation(raw)
-    return None
-
-
 # LLM: 兄弟模块复用同一原生管理服务，避免各自复制策略、审批或安装表。
 # 函数用途: 返回当前调用身份下的原生 PluginManagement。
 def management(call):

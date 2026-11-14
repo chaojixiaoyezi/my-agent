@@ -24,10 +24,6 @@ def normalize_capability_request_status(status: object) -> str:
     return normalized or CAPABILITY_REQUEST_OPEN_STATUS
 
 
-def capability_request_status_is_current(status: object) -> bool:
-    return normalize_capability_request_status(status) in CAPABILITY_REQUEST_CURRENT_STATUSES
-
-
 def capability_request_counts_as_open(status: object) -> bool:
     normalized = normalize_capability_request_status(status)
     return normalized == CAPABILITY_REQUEST_OPEN_STATUS

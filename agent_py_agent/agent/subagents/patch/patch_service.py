@@ -22,9 +22,7 @@ from ..reports import PatchReviewRecord, PatchReviewReport
 from ..services.indexing.records import IndexReportParams
 from ..utils import _new_id
 from .patch_apply import PatchApplyOptions, PatchApplyService
-from .patch_apply_helpers import validate_patch_test_command
 from .patch_apply_task import ApplyPatchTaskParams
-from .patch_renderer import build_unified_diff
 from .patch_review_records import (
     PatchReviewStatusUpdate,
     append_patch_review_log,
@@ -340,14 +338,6 @@ class SubAgentPatchService:
     def _resolve_patch_target(self, raw_path):
         return self.resolve_patch_target(raw_path)
 
-    @staticmethod
-    def _build_unified_diff(path: str, before_text: str, after_text: str) -> str:
-        return build_unified_diff(path, before_text, after_text)
-
-    @staticmethod
-    def _validate_patch_test_command(command: str) -> str:
-        return validate_patch_test_command(command)
-
     def _review_patch_task(
         self,
         task,
@@ -404,12 +394,6 @@ class SubAgentPatchService:
 
     def _normalize_patch_apply_spec(self, task, patch):
         return self.apply_service._normalize_patch_apply_spec(task, patch)
-
-    @staticmethod
-    def _rollback_patch_apply(touched_files):
-        from .patch_file_ops import rollback_patch_apply
-
-        rollback_patch_apply(touched_files)
 
 
 def _collect_patch_review_records(service: PatchReviewService, run_ids, opts: PatchReviewOptions):

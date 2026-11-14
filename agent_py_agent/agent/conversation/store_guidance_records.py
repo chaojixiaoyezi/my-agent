@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from ..runtime_errors import DataCorruptionError, runtime_error_report
+from ..runtime_errors import DataCorruptionError
 from .models import GuidanceEntry, new_id, normalize_guidance_target_type
 from .store_io import now
 
@@ -132,29 +132,6 @@ class GuidanceOnceReceipt:
             raise DataCorruptionError("conversation guidance receipt identity is invalid")
         _validate_guidance_once_receipt(receipt, legacy=bool(migration))
         return receipt
-
-
-# LLM: 只投影送达时间，不修改原队列记录或回执状态；与 pending 读取分开维护。
-# 函数用途: 为队列条目附加送达索引中的时间。
-def _with_guidance_delivered_at(entry: GuidanceEntry, delivered: dict[str, float]) -> GuidanceEntry:
-    return replace(entry, delivered_at=float(delivered.get(entry.guidance_id) or 0.0))
-
-# LLM: 逐条保留解析错误与行号，不以损坏行阻塞其它有效消息；调用方决定错误展示。
-# 函数用途: 把队列对象解析成消息和错误列表。
-def _guidance_entries(
-    rows: list[dict[str, Any]],
-    delivered: dict[str, float],
-) -> tuple[list[GuidanceEntry], list[dict[str, Any]]]:
-    entries: list[GuidanceEntry] = []
-    errors: list[dict[str, Any]] = []
-    for index, row in enumerate(rows, start=1):
-        try:
-            entries.append(_with_guidance_delivered_at(GuidanceEntry.from_dict(row), delivered))
-        except Exception as exc:
-            report = runtime_error_report(exc, context="conversation.guidance.parse")
-            report["row_index"] = index
-            errors.append(report)
-    return entries, errors
 
 # LLM: Guidance construction is shared by ordinary append and idempotent ingress. Retry-only
 # fields such as ``now`` never alter an already prepared entry.

@@ -80,15 +80,6 @@ def capability_candidates(snapshot, skills, *, categories: list[str], skills_dis
     return rows
 
 
-# LLM: 只从传入宿主Owner/workspace根经原只读覆盖列元数据；不加载代码、不创建锁、不改变工具权限。
-# 函数用途: 为统一候选池投影实际保存的脚本/流程，停用项不推荐。
-def asset_candidate_rows(owner_home, workspace_root=None):
-    if owner_home is None:
-        return []
-    return [_asset_candidate_row(row) for row in _stored_method_descriptors(owner_home, workspace_root)
-            if _visible_method(row)]
-
-
 # LLM: 唯一来源是已授权 Store 列表的只读覆盖；不构造可写 Store、不调用 get、不读取代码或 WORKFLOW.md。
 # 函数用途: 按 workspace 优先列出脚本和工作流描述符，保留隐藏 composition 给纯树处理。
 def _stored_method_descriptors(owner_home, workspace_root=None) -> list[dict]:

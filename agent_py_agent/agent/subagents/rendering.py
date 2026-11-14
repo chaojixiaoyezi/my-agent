@@ -493,12 +493,6 @@ def render_capability_route_markdown(report: CapabilityRouteReport) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _list_or_none(items: list[str]) -> list[str]:
-    if not items:
-        return ["- none"]
-    return [f"- {item}" for item in items]
-
-
 def _render_board_line(item: SubAgentBoardItem) -> str:
     flags = ",".join(item.risk_flags) if item.risk_flags else "ok"
     children = ",".join(f"{key}:{value}" for key, value in sorted(item.child_status_counts.items())) or "none"

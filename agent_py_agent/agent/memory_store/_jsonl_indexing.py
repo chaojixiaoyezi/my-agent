@@ -113,13 +113,6 @@ class JsonlMemoryIndexMixin:
                 raise
             return None, {"status": "unavailable", "reason_code": type(exc).__name__}
 
-    # LLM: 调用方持正式锁直到派生向量发布；版本/正文/scope任一变化就拒绝旧快照。
-    # 函数用途: 核对向量快照仍属于当前冷热事实。
-    def _projection_is_current(self, record: MemoryRecord) -> bool:
-        return any(row.entry_id == record.entry_id and row.version == record.version
-                   and row.content == record.content and row.attributes == record.attributes
-                   for row in self._maintenance_records())
-
     # LLM: 路径键只给后台向量任务隔离owner，不作为旧LocalStore memory命中转换依据。
     # 函数用途: 返回本库向量补齐任务的稳定身份键。
     def _memory_path_key(self) -> str:
@@ -161,28 +154,10 @@ class JsonlMemoryIndexMixin:
                     raise
                 # 可重建投影失败不撤销已提交事实，下次正常写入继续按水位推进。
 
-    # LLM: 仅本轮正式删除后的入口，历史恢复不得虚增formal_memory_changed；已有活准入必须透传。
-    # 函数用途: 保留删除已提交但隐私清理未完成的回执。
-    def _purge_committed_indexes(self, entry_id: str, *, _admission=None) -> None:
-        try:
-            self.purge_removed_indexes(entry_id, _admission=_admission)
-        except RemovalCleanupError as exc:
-            raise RemovalCleanupError("REMOVE_CLEANUP_PENDING", formal_memory_changed=True) from exc
-
     # LLM: 删除与恢复共用，外层quota活准入显式复用；禁用embedding仍须清理，失败可重试。
     # 函数用途: 严格清理当前owner精确记忆身份的派生正文。
     def purge_removed_indexes(self, entry_id: str, *, _admission=None) -> None:
         _purge_removed_indexes(self, entry_id, admission=_admission)
-
-    # LLM: 旧workspace依赖仅保删除职责，不能借此新增或重建旧投影。
-    # 函数用途: 尽力删除一个精确记忆ID的旧文本副本。
-    def _remove_local_index(self, entry_id: str) -> None:
-        if not self.local_store or not entry_id:
-            return
-        try:
-            self.local_store.delete_record(self.local_store.make_record_id("memory", entry_id))
-        except Exception:
-            pass
 
     # LLM: 正文删除前沿原remember工具账本脱敏，保留操作身份，失败时不修改正式库。
     # 函数用途: 精确清除当前owner审计及幂等账本中的被删正文。

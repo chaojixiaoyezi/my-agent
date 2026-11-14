@@ -181,13 +181,6 @@ def task_role(task: Any) -> str:
     return task_text(task, "role")
 
 
-def task_int(task: Any, name: str) -> int:
-    try:
-        return max(0, int(getattr(task, name, 0) or 0))
-    except (TypeError, ValueError):
-        return 0
-
-
 def task_list(task: Any, name: str) -> list[str]:
     value = getattr(task, name, [])
     if not isinstance(value, list | tuple | set):

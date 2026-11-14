@@ -16,10 +16,6 @@ class FailSafeCheckpointReport:
     load_errors: list[dict[str, Any]] = field(default_factory=list)
 
 
-def collect_fail_safe_checkpoints(restore_refs: dict[str, Any]) -> list[dict[str, Any]]:
-    return collect_fail_safe_checkpoint_report(restore_refs).checkpoints
-
-
 def collect_fail_safe_checkpoint_report(restore_refs: dict[str, Any]) -> FailSafeCheckpointReport:
     checkpoints: list[dict[str, Any]] = []
     load_errors: list[dict[str, Any]] = []

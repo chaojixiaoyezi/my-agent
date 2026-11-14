@@ -356,10 +356,6 @@ def task_has_failure_status(task: object) -> bool:
     return task_status_in(getattr(task, "status", ""), SUBAGENT_FAILURE_STATUSES)
 
 
-def task_has_failed_result_status(task: object) -> bool:
-    return task_status_in(getattr(task, "status", ""), SUBAGENT_FAILED_RESULT_STATUSES)
-
-
 def task_has_ended_status(task: object) -> bool:
     return task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES)
 

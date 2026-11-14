@@ -34,9 +34,3 @@ def resolve_analysis_isolation(run_params: Any, *, step_config: dict[str, Any] |
         # 不因对象可调用或名字恰好不在黑名单就授予执行、记忆隔离或deadline保证。
         raise WorkflowIsolationUnavailable()
     return {'requested': 'stateless_skill', 'mode': 'stateless_skill', 'note': ''}
-
-
-def run_isolated_analysis(spec: dict[str, Any], context: Any, *, isolation_executor: Any,
-                          allowed_tools: tuple[str, ...] | list[str] | None = None) -> dict[str, Any]:
-    """旧实验入口同样显式拒绝，不能绕开生产能力边界调用任意对象。"""
-    raise WorkflowIsolationUnavailable()

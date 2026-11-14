@@ -131,18 +131,6 @@ def compaction_gate_snapshot(state: dict[str, object] | None = None) -> dict[str
     }
 
 
-def _action_set(state: dict[str, object]) -> frozenset[str]:
-    actions: set[str] = set()
-    for key in ("pending_actions", "failed_actions"):
-        val = state.get(key) if isinstance(state, dict) else None
-        if isinstance(val, list):
-            actions.update(str(item) for item in val if str(item).strip())
-            continue
-        if isinstance(val, dict):
-            actions.update(str(k) for k in val.keys())
-    return frozenset(actions)
-
-
 def _ref_snapshot(value: object) -> object:
     if value is None:
         return None

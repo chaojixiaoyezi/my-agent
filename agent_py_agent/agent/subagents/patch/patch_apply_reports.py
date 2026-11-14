@@ -41,14 +41,3 @@ def patch_apply_record_to_dict(record: PatchApplyRecord) -> dict:
         "failure_recovery": record.failure_recovery,
         "created_at": record.created_at,
     }
-
-
-def patch_apply_report_to_dict(report) -> dict:
-    """Convert PatchApplyReport to dict for JSON serialization."""
-
-    return {
-        "generated_at": report.generated_at,
-        "dry_run": report.dry_run,
-        "summary": report.summary,
-        "records": [patch_apply_record_to_dict(r) for r in report.records],
-    }

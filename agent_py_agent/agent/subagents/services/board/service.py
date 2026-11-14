@@ -59,14 +59,8 @@ class SubAgentBoardService:
     def _manager(self):
         return getattr(self, "manager", self)
 
-    def _to_board_item(self, task):
-        return self.to_board_item(task)
-
     def to_board_item(self, task):
         return to_board_item(self._manager, task)
-
-    def _risk_flags(self, task, open_request_count=0, open_gap_count=0):
-        return self.risk_flags(task, open_request_count, open_gap_count)
 
     def risk_flags(self, task, open_request_count=0, open_gap_count=0):
         return build_risk_flags(task, open_request_count, open_gap_count)

@@ -29,12 +29,6 @@ def artifact_candidate_roots(task: Any, *, include_workspace_roots: bool = True)
     return roots
 
 
-def declared_workspace_roots(task: Any) -> list[Path]:
-    roots: list[Path] = []
-    _append_declared_workspace_roots(roots, task)
-    return roots
-
-
 def artifact_suffix_roots(task: Any) -> list[Path]:
     return artifact_candidate_roots(task, include_workspace_roots=False)
 

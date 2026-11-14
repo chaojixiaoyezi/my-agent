@@ -16,10 +16,6 @@ def qa_roles_required_by_task(task) -> list[str]:
     return qa_roles_from_attributes(_task_attributes(task))
 
 
-def qa_role_contract_text(task) -> str:
-    roles = qa_roles_from_attributes(_task_attributes(task))
-    return "required_qa_roles: " + ", ".join(roles) if roles else ""
-
 def qa_roles_from_attributes(attributes: dict[str, object]) -> list[str]:
     requested: set[str] = set()
     for field in _QA_ROLE_FIELDS:

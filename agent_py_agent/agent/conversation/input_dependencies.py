@@ -202,14 +202,6 @@ def task_has_waiting_input(agent, task_id):
     return False
 
 
-# LLM: 凭据记录只桥接通用输入 ID，不把密文/表单放入依赖；原人核验在私交互入口。
-# 函数用途: 私卡提交时接受原任务持久绑定；直接存储调用也沿同一依赖。
-# LLM: 保原pending/current判据，不为C添加第二输入schema或改变既有card期限。
-# 函数用途: 核对原卡的待填输入仍可提交。
-def credential_submission_current(agent, row):
-    return credential_submission_current_from_access(input_dependency_access(agent), row)
-
-
 # LLM: 凭据成功 refs 只是 opaque cref，取消不会给模型任何认证值；原 Wake 是唯一续跑出口。
 # 函数用途: 把私卡结果提交给通用任务输入恢复。
 def publish_credential_resolution(agent, row):

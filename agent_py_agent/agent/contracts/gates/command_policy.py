@@ -804,10 +804,6 @@ def _is_raw_device_path(value: str) -> bool:
     )
 
 
-def _has_short_flag(arg: str, flag: str) -> bool:
-    return arg.startswith("-") and not arg.startswith("--") and flag in arg.lstrip("-")
-
-
 def _download_piped_to_shell(argv: tuple[str, ...], command_positions: list[int]) -> bool:
     for left, right in zip(command_positions, command_positions[1:]):
         if "|" not in argv[left + 1 : right]:

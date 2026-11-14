@@ -85,11 +85,6 @@ def _scoped_tasks(request: SubagentRunBudgetRequest) -> list[Any]:
     return [task for task in tasks if (str(getattr(task, "root_id", "") or getattr(task, "id", ""))) == root_id]
 
 
-def _budget_record(task: Any) -> SubagentRunBudgetRecord | None:
-    record, _load_error = _budget_record_report(task)
-    return record
-
-
 def _budget_record_report(task: Any) -> tuple[SubagentRunBudgetRecord | None, dict[str, object] | None]:
     result_path = Path(str(getattr(task, "runner_result_json", "") or ""))
     if not result_path.is_file():

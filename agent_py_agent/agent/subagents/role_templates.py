@@ -320,14 +320,6 @@ def role_template_detail_text(
     return "\n".join(_detail_lines(item) for item in templates)
 
 
-def role_template_guide_text(
-    user_template_dir: str | Path | Iterable[str | Path] | None = None,
-    *,
-    limit: int = 12,
-) -> str:
-    return role_template_index_text(user_template_dir=user_template_dir, limit=limit)
-
-
 def _selected_templates(
     store: RoleTemplateStore,
     *,

@@ -526,9 +526,3 @@ def build_workflow_health_view(run_store, *, workflow_id=None, limit=50, redact=
         },
     }
     return redact_bearer_values(result) if redact else result
-
-
-# LLM: 便捷工作流状态健康报告；复用 build_workflow_health_view 的有界读取。
-# 函数用途: 向外提供与既有契约对齐的健康报告。
-def workflow_state_report(run_store, workflow_id=None, *, limit=50, redact=True):
-    return build_workflow_health_view(run_store, workflow_id=workflow_id, limit=limit, redact=redact)

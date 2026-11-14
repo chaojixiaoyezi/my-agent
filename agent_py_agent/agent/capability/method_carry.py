@@ -592,12 +592,6 @@ def fit_skill_prefix_result(prefix: str, body: str, allowance: int) -> SkillPref
     return SkillPrefixResult(result, included, len(body), complete, not complete)
 
 
-# LLM: estimate_tokens 的同源估算包含头和正文；二分截取 Unicode 字符，不截身份或结构化参数。
-# 函数用途: 在剩余预算里取 skill 的非空正文开头。
-def _fit_skill_prefix(prefix: str, body: str, allowance: int) -> str:
-    return fit_skill_prefix_result(prefix, body, allowance).text
-
-
 # LLM: 文本只来自宿主准备的片段；排序已在读取前确定，不显示时间或解析正文决定状态。
 # 函数用途: 为预算和 RuntimeFacts 共用同一完整方法参考文本。
 def _carry_text(pieces: list) -> str:

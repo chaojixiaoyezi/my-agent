@@ -23,12 +23,6 @@ class AnalysisInputBudgetError(ValueError):
         self.facts = facts
 
 
-# LLM: 无预算完全短路；截断只保留原值前缀，不生成摘要或切片请求；标记本身也占预算。
-# 函数用途: 校验步骤预算并返回不超额的分析材料，不修改任何调用方对象。
-def apply_input_budget(material: dict[str, Any], budget: object) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    return apply_prompt_input_budget(material, budget)
-
-
 # LLM: 前缀为宿主计算的不可裁剪正文，不来自预算额外键；完整序列化投影参与同一估算，默认空前缀保留原合同。
 # 函数用途: 为正式后端的user提示前缀预留预算，仍只裁四个材料数据域。
 def apply_prompt_input_budget(material, budget, *, prompt_prefix=''):

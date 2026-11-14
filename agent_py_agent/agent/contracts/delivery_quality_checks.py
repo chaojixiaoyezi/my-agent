@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..common.value_parsing import sequence_strings
 from ..common.value_parsing import text_value as _text
 from .evidence_contract import EvidenceClaim, EvidenceSourceRef
 from .gates.models import GateFinding
@@ -153,96 +152,3 @@ def _claim_metric_finding(
     if actual_kind:
         evidence["actual_kind"] = actual_kind
     return GateFinding(code, severity="advisory", evidence=evidence)
-
-
-def delivery_quality_language_findings(
-    payload: dict[str, Any],
-    language_contract: object,
-    claim_records: list[EvidenceClaim],
-) -> list[GateFinding]:
-    if not isinstance(language_contract, dict):
-        return []
-    target = _text(language_contract.get("target_language"))
-    fields = sequence_strings(language_contract.get("fields"))
-    if target != "zh" or not fields:
-        return []
-    min_cjk = _int_value(language_contract.get("min_cjk_chars"), default=4)
-    max_latin_ratio = _float_value(language_contract.get("max_latin_ratio"), default=0.45)
-    return [
-        _language_finding(field, value, location, target)
-        for field, value, location in _language_candidates(payload, claim_records, fields)
-        if not _looks_like_zh(value, min_cjk=min_cjk, max_latin_ratio=max_latin_ratio)
-    ]
-
-
-def _language_candidates(
-    payload: dict[str, Any],
-    claim_records: list[EvidenceClaim],
-    fields: list[str],
-) -> list[tuple[str, str, str]]:
-    rows = _row_records(payload)
-    if rows:
-        return [(field, str(row.get(field) or ""), f"items[{index}].{field}") for index, row in enumerate(rows) for field in fields if field in row]
-    return [(claim.field, str(claim.value or ""), f"claims.{claim.claim_id}") for claim in claim_records if claim.field in fields]
-
-
-def _row_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    if rows := _list_of_dicts(payload.get("items")):
-        return rows
-    if rows := _list_of_dicts(payload.get("rows")):
-        return rows
-    data = payload.get("data")
-    if isinstance(data, dict) and (rows := _list_of_dicts(data.get("rows"))):
-        return rows
-    return _sheet_rows(payload.get("sheets"))
-
-
-def _sheet_rows(value: object) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    if not isinstance(value, list):
-        return rows
-    for sheet in value:
-        if isinstance(sheet, dict):
-            rows.extend(_list_of_dicts(sheet.get("rows")))
-    return rows
-
-
-def _list_of_dicts(value: object) -> list[dict[str, Any]]:
-    return [dict(item) for item in value if isinstance(value, list) and isinstance(item, dict)]
-
-
-def _language_finding(field: str, value: str, location: str, target: str) -> GateFinding:
-    return GateFinding(
-        "LANGUAGE_FIELD_TARGET_MISMATCH",
-        evidence={"field": field, "location": location, "target_language": target, "cjk_chars": _cjk_count(value), "latin_ratio": _latin_ratio(value)},
-    )
-
-
-def _looks_like_zh(value: str, *, min_cjk: int, max_latin_ratio: float) -> bool:
-    text = value.strip()
-    return bool(text) and _cjk_count(text) >= min_cjk and _latin_ratio(text) <= max_latin_ratio
-
-
-def _cjk_count(value: str) -> int:
-    return sum(1 for char in value if "\u4e00" <= char <= "\u9fff")
-
-
-def _latin_ratio(value: str) -> float:
-    letters = [char for char in value if char.isalpha()]
-    if not letters:
-        return 0.0
-    return len([char for char in letters if "a" <= char.lower() <= "z"]) / len(letters)
-
-
-def _float_value(value: object, *, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _int_value(value: object, *, default: int = 0) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default

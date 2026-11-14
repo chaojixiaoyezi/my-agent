@@ -69,14 +69,6 @@ def bot_tool_allowed(bot_mode, tool_name, arguments=None, *, allowed_tools, in_a
     return isinstance(operation, str) and operation in values
 
 
-# LLM: 这是执行前硬门；调用者必须在handler前使用，不能用目录过滤替代操作级验证。
-# 函数用途: 对禁止的Bot工具调用返回稳定403。
-def require_bot_tool(bot_mode, tool_name, arguments, *, allowed_tools, in_audit_group=False):
-    if not bot_tool_allowed(bot_mode, tool_name, arguments, allowed_tools=allowed_tools,
-                            in_audit_group=in_audit_group):
-        raise HostAPIError("BOT_TOOL_DENIED", 403)
-
-
 # LLM: 混合读写工具仍另有逐操作硬门；离线工具须正向认证，过滤只收窄同一快照且保留原handler。
 # 函数用途: 返回只含当前成员和owner许可交集的工具快照。
 def build_bot_snapshot(snapshot, bot_mode, *, allowed_tools, in_audit_group=False, network=None):

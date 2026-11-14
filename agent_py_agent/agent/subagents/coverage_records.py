@@ -2,9 +2,6 @@ from __future__ import annotations
 
 """Subagent coverage and requirement tracking records."""
 
-from collections.abc import Callable
-from typing import Any
-
 from ..common.value_parsing import text_or_sequence_strings
 
 
@@ -57,28 +54,6 @@ def task_coverage_records(task: object) -> list[dict[str, object]]:
     return normalize_coverage_records(attrs.get("coverage_records"))
 
 
-# LLM: 批量获取多个任务的覆盖记录并全局去重。
-# 函数用途: 汇总多个任务的覆盖记录。
-def all_task_coverage_records(tasks: list[object]) -> list[dict[str, object]]:
-    records: list[dict[str, object]] = []
-    for task in tasks:
-        records.extend(task_coverage_records(task))
-    return _dedupe_records(records)
-
-
-# LLM: 判断目标 run_id 是否已被已验证的代理有效覆盖。
-# 函数用途: 校验某子代理是否由验证通过的代理接替。
-def coverage_records_resolve_run(
-    run_id: str,
-    records: list[dict[str, object]],
-    is_verified: Callable[[str], bool],
-) -> bool:
-    target = _clean_id(run_id)
-    if not target:
-        return False
-    return any(_record_resolves_run(target, record, is_verified) for record in records)
-
-
 # LLM: 从单个字典结构提取覆盖记录，兼容 requirement_id 字段。
 # 函数用途: 解析单条覆盖记录。
 def _coverage_record_from_item(item: dict[str, object]) -> dict[str, object]:
@@ -121,14 +96,6 @@ def _records_from_covered_ids(value: object, coverer: str) -> list[dict[str, obj
     ]
 
 
-# LLM: 检查单条覆盖记录是否能解决目标 run 的覆盖需求。
-# 函数用途: 判定单条覆盖记录有效性。
-def _record_resolves_run(target: str, record: dict[str, object], is_verified: Callable[[str], bool]) -> bool:
-    if _clean_id(record.get("covered_run_id")) != target:
-        return False
-    return is_verified(_clean_id(record.get("covered_by_run_id")))
-
-
 # LLM: 提取任务对象字典属性，兼容 dict 和类对象。
 # 函数用途: 安全读取任务 attributes。
 def _attributes_dict(task: object) -> dict[str, object]:
@@ -166,17 +133,3 @@ def task_requirement_ids(task: object) -> list[str]:
     attrs = _attributes_dict(task)
     raw = attrs.get("requirement_ids") or attrs.get("requirement_id")
     return text_or_sequence_strings(raw)
-
-
-# LLM: 将需求标识列表合并并去重写入任务属性。
-# 函数用途: 更新任务关联的需求 ID。
-def merge_task_requirement_ids(task: object, requirement_ids: list[str]) -> list[str]:
-    current = task_requirement_ids(task)
-    new_ids = text_or_sequence_strings(requirement_ids)
-    merged = sorted(set(current) | set(new_ids))
-    attrs = getattr(task, "attributes", None)
-    if not isinstance(attrs, dict):
-        attrs = {}
-        task.attributes = attrs
-    attrs["requirement_ids"] = merged
-    return merged

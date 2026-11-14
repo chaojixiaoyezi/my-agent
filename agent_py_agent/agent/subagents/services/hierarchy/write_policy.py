@@ -107,19 +107,3 @@ def _non_task_allowed_roots(parent: SubAgentTask, parent_task_dir: str) -> list[
         if text and text != parent_task_dir and text not in roots:
             roots.append(text)
     return roots
-
-
-# LLM: 判定待测试候选路径是否已被某一个已授权根包含。
-# 函数用途: 检查路径是否落在已有授权写根下。
-def _covered_by_authorized_root(candidate: str, roots: list[str]) -> bool:
-    if not candidate:
-        return False
-    candidate_path = Path(candidate).expanduser().resolve(strict=False)
-    for raw in roots:
-        root = Path(str(raw)).expanduser().resolve(strict=False)
-        try:
-            candidate_path.relative_to(root)
-            return True
-        except ValueError:
-            continue
-    return False

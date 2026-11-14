@@ -133,19 +133,6 @@ class PreparedBackgroundContext:
         object.__setattr__(self, "control_policy", deepcopy(self.control_policy))
 
 
-# LLM: 原一次性调用保持准备与渲染的顺序；需要重复投影的宿主应持有prepare返回值，不能重复调用本入口。
-# 函数用途: 为普通后台调用生成完整上下文，实际读取和可能的进度写入只在prepare阶段发生。
-def context_markdown(
-    *, agent: object, store: ConversationStore, thread: ConversationThread,
-    request: BackgroundContextRequest, proactive_delivery_available: bool | None = None,
-    include_recent_messages: bool = True,
-) -> str:
-    return render_background_context(prepare_background_context(
-        agent=agent, store=store, thread=thread, request=request,
-        proactive_delivery_available=proactive_delivery_available, include_recent_messages=include_recent_messages,
-    ))
-
-
 # LLM: 原wake净化和task_runtime_state对账仅执行一次；宿主可交同次历史已读bundle避免重读范围，返回预算/策略不在候选间刷新。
 # 函数用途: 收集后台请求所需事实；可能更新原进度账，后续render无副作用。
 def prepare_background_context(

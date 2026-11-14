@@ -2213,12 +2213,6 @@ def _bump_projection_stat(name: str) -> None:
         _WAITING_PROJECTION_STATS[name] = int(_WAITING_PROJECTION_STATS.get(name, 0)) + 1
 
 
-def _cached_waiting_projection(cache_key: tuple[str, str, str, str]) -> _WaitingRunsProjection | None:
-    """读投影缓存条目(只读快照,不改变 LRU 顺序;命中判定请走 _lookup_waiting_projection)。"""
-    with _WAITING_PROJECTION_LOCK:
-        return _WAITING_PROJECTION_CACHE.get(cache_key)
-
-
 # LLM: 命中判定与 LRU 更新必须**同锁原子**完成。投影缓存是多 owner 共享的(每个 owner 的
 # store.json 文件锁互不互斥),旧实现"先 lookup 释放锁、再单独 move_to_end"中间会被其它 owner
 # 的写入淘汰掉这条 key(上限只有 _WAITING_PROJECTION_MAX_ENTRIES_COUNT 条),随后 move_to_end 直接
@@ -2258,14 +2252,6 @@ def _bump_store_projection_stat(name: str) -> None:
     """投影缓存结构化计数(命中/回退/守卫/跳过);缺键容忍,计数永不影响主链路。"""
     with _STORE_PROJECTION_LOCK:
         _STORE_PROJECTION_STATS[name] = int(_STORE_PROJECTION_STATS.get(name, 0)) + 1
-
-
-# LLM: 仅供只读观测取得不可变投影；不代表当前身份或可执行状态，不更新校验时钟。
-# 函数用途: 取得现存投影供测试和诊断查看。
-def _cached_store_projection(cache_key: tuple[str, str, str, str]) -> _StoreProjection | None:
-    """读投影缓存条目(只读快照,不改变 LRU 顺序;命中判定请走 _lookup_store_projection)。"""
-    with _STORE_PROJECTION_LOCK:
-        return _STORE_PROJECTION_CACHE.get(cache_key)
 
 
 # LLM: 命中判定与 LRU 更新必须**同锁原子**完成。投影缓存是多 owner 共享的(每个 owner 的
@@ -3106,10 +3092,6 @@ def _normalize_skill_refs(raw: object) -> list[dict[str, str]]:
         elif reference not in normalized:
             raise ScheduleValidationError("skill_refs contains conflicting versions")
     return normalized
-
-
-def re_full_sha256(value: str) -> bool:
-    return len(value) == 64 and all(char in "0123456789abcdef" for char in value)
 
 
 def _now(value: float | None) -> float:

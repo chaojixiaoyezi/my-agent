@@ -115,37 +115,6 @@ class RequiredActionAssessment:
     requires_action: bool | None = None
 
 
-# LLM: 按 会话运行时 语义：普通请求不做
-# 模型语义义务评估——真机铁证 2026-08-08：评估误判 requires_action=false 会把正常任务整轮
-# 工具硬拦成假失败，且评估从不硬禁工具、失败也不禁，预评估只有延迟成本。显式结构化合同
-# （协作/派工/delivery contract）路径保持不变。
-# 函数用途: 只消费显式结构化合同构造必需动作；无合同时视为有执行义务（不触发 no-action 闸），
-# 工具执行由 ActionPolicy/审批门逐次把关。
-def structured_required_action_assessment(
-    structured_sources: Iterable[object],
-    *,
-    runtime_snapshot: object | None,
-    run_id: str,
-    source_turn_id: str,
-) -> RequiredActionAssessment:
-    explicit = _actions_from_structured_sources(
-        structured_sources,
-        runtime_snapshot=runtime_snapshot,
-        run_id=run_id,
-        source_turn_id=source_turn_id,
-    )
-    if explicit:
-        return RequiredActionAssessment(
-            explicit,
-            "structured_contract",
-            requires_action=True,
-        )
-    return RequiredActionAssessment(
-        source="no_model_pre_assessment",
-        requires_action=True,
-    )
-
-
 def _validated_action_rows(
     rows: Iterable[object],
     *,
@@ -456,28 +425,6 @@ def _action_for_call(snapshot: object | None, call: ToolCall) -> RequiredAction 
     # 真实调用次数足够则每个 open action 都被真实执行证据销账,杜绝"调用全成功
     # 却因归属模糊整体漏销"的误杀;调用次数不足时剩余 open action 收口照拦。
     return candidates[0]
-
-
-def _actions_from_structured_sources(
-    sources: Iterable[object],
-    *,
-    runtime_snapshot: object,
-    run_id: str,
-    source_turn_id: str,
-) -> tuple[RequiredAction, ...]:
-    rows: list[object] = []
-    for source in sources:
-        if not isinstance(source, dict):
-            continue
-        value = source.get("required_actions")
-        if isinstance(value, list):
-            rows.extend(value)
-    return _validated_action_rows(
-        rows,
-        runtime_snapshot=runtime_snapshot,
-        run_id=run_id,
-        source_turn_id=source_turn_id,
-    )
 
 
 def _action_id(

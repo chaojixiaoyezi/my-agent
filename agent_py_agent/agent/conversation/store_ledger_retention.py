@@ -8,7 +8,6 @@ import math
 import os
 import stat
 from collections import Counter
-from collections.abc import Callable
 from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import replace
@@ -483,29 +482,6 @@ class _LedgerPass:
             return "busy"
 
         return self.run_write(operation)
-
-
-# LLM: 独立helper保留冻结字符串结果；lane与helper共用同一个实际实现，不复制删除决策。
-# 函数用途: 退休一份到期handled回执。
-def _retire_handled(storage, name, *, now, run_write: Callable) -> str:
-    scope = _LedgerPass(storage, now, run_write)
-    return scope.attempt(scope.handled, name)
-
-
-# LLM: 只接受约定的两种移动归档目录，不用任意kind拼出删除路径。
-# 函数用途: 清理一个无读者的到期策略或claim归档。
-def _purge_ledger_archive(root, kind, name, *, now, run_write):
-    if kind not in {"policies", "claims"}:
-        raise ValueError("invalid_ledger_archive_kind")
-    scope = _LedgerPass(ConversationStorage(root, initialize=False), now, run_write)
-    return scope.attempt(scope.archive, Path(root) / ".ledger_archive" / kind / name)
-
-
-# LLM: 保持原quarantine转换锁及dedupe保护，未授权归档只读保留。
-# 函数用途: 清理一份到期且没有发布回执引用的quarantine归档。
-def _purge_quarantine_archive(storage, name, *, now, run_write):
-    scope = _LedgerPass(storage, now, run_write)
-    return scope.attempt(scope.quarantine, name)
 
 
 # LLM: 目录逐级no-follow复核，窗口只保留有限名称；不递归、不建立第二份索引。

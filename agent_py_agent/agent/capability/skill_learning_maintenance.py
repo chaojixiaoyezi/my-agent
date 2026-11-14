@@ -49,8 +49,6 @@ from .skill_usage_receipts import (
     record_exact_negative,
 )
 
-# 中文说明: 传统自动维护每日触发检查间隔（秒）。
-LEGACY_DAILY_DUE_SECONDS = 86400
 # 中文说明: 试用或活跃Skill触发第1次负反馈前需达到的基础有效独立任务数。
 BASE_ESTABLISH_USES_COUNT = 3
 # 中文说明: 触发版本回滚或退场封禁的累计负反馈阈值。
@@ -79,12 +77,6 @@ def _parse_iso_epoch_cached(raw: str) -> float:
         return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return 0.0
-
-
-# LLM: 参数为registry独立last_maintenance_at而非文件mtime；纯到期预筛不授执行权。
-# 函数用途: 保留原有一日间隔检查契约，供外部与既有单测直接调用。
-def learning_maintenance_due(modified_at, mode, now):
-    return mode == "autonomous" and now - modified_at >= LEGACY_DAILY_DUE_SECONDS
 
 
 def learning_reconcile_due(

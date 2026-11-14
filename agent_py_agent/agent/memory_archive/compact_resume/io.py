@@ -88,10 +88,6 @@ def _read_jsonl_dicts(path: Path) -> list[dict[str, Any]]:
     return read_jsonl_objects(path)
 
 
-def _read_json_path(value: object) -> dict[str, Any]:
-    return read_json_object(Path(str(value))) if value else {}
-
-
 def _read_json_artifact(value: object, artifact_name: str) -> tuple[dict[str, Any], dict[str, object] | None]:
     if not value:
         return {}, None
@@ -101,15 +97,6 @@ def _read_json_artifact(value: object, artifact_name: str) -> tuple[dict[str, An
     report = read_json_object_report(path, context=f"compact_resume.artifact.{artifact_name}")
     error = _with_artifact(artifact_name, report.load_error) if report.load_error else None
     return report.payload, error
-
-
-def _read_text_path(value: object) -> str:
-    if not value:
-        return ""
-    try:
-        return Path(str(value)).read_text(encoding="utf-8")
-    except OSError:
-        return ""
 
 
 def _read_text_artifact(value: object, artifact_name: str) -> tuple[str, dict[str, object] | None]:
