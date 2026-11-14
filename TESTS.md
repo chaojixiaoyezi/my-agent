@@ -1,3 +1,14 @@
+## 2026-11-13 Skill 与记忆闭环 R2 返工收敛
+
+在 `sm/integration-20261113` 合入 R2 终审返工切片（`P1-01`–`P1-05`）并补充 `skill_learning_store._encode_rel` 显式序列参数收口与 `MemoryCuratorService._call_promote_eligible` 兼容性适配后，隔离 `HOME`/`MY_AGENT_HOME` 完成以下收敛验证：
+
+- `test_sm_r2_channel_ab_delivery.py`（7 项）：验证 `P1-01` 宿主反馈 A/B 通道均严格核验精确正文投递回执与（通道 B）归一化 `used_skill_ids` 成员关系；缺失正文投递或未在 `used_skill_ids` 命中时在通道门结构化拒绝（`PRECONDITION_NOT_MET` / `CODE_INEFFECTIVE_UNATTRIBUTED`），禁止直接落入启发式 `observe_learning`；同线程历史人工读取回执补全宿主钥匙与负样本归因闭环保持完整。
+- `test_sm_r2_lifecycle_rollback_legacy.py`（8 项）：验证 `P1-02` 回滚与崩溃恢复重置 `observations=[]` 前保留 `_historical_adoptions(...)` 至 `historical_adoptions`（含 `275 -> 50` 收敛验证）；`P1-03` `maintain_learning` `ownership` 阶段为经确认为 `machine` 托管的遗留记录补齐缺失 `incarnation_id`/`activation_id` 与计数边界而保持只读快照/`observe` 零写入；`P1-04` 回滚新激活显式重置 `strike_epoch=0` 且 `record_exact_use` 强制 `effective_epoch == current_epoch` 精确隔离错代投递。
+- `test_sm_r2_scope_projection_paging.py`（5 项）：验证 `P1-05` JSONL 有界权能扫描支持 `continuation` 游标续扫，在 `JsonlMemory.scope_pairs` 中借 32 项有界 LRU 保留局部进展且未收敛前持续抛出 `MEMORY_SCOPE_PROJECTION_UNAVAILABLE`，跨页收敛后命中热缓存零文件读取，并在删除/过期/换代后精准失效。
+- 合入树自检与兼容门禁：
+  - 合入 R2-W1..W3 后运行 `/private/tmp/sm-active-bundle/run_review.py --phase post` 共 **1658 项全部通过**，`test_sm_r2_*.py` **20 项通过**，`test_sm_rework_*.py` **80 项通过**，补充跨模块回归（`test_opt_learning_identity.py` 等 4 份）**204 项通过**，死代码扫描零新增死定义。
+  - 修复 `_encode_rel` 变长位置参数与 `_call_promote_eligible` 签名兼容后，复验 `test_agents_cleanup_critical_section.py` + `test_r9_candidate_promotion_windows.py` + `test_sm_r2_*.py` + `test_sm_rework_lifecycle_sync.py` + `test_memory_curator_v2.py` **192 项全部通过**，`test_skill_learning*.py` **241 项全部通过**；`test_architecture_guardrails.py -k "test_product_code_has_no_var_positional_service_interfaces"` 确认 `skill_learning_store.py` 已移出违例列表；`ruff check agent_py_agent scripts`、`check_import_boundaries.py --json`、`build_constants_catalog.py --check`（1509 项）、`check_clean_package.py --mode worktree` 及 `git diff --check` 全过。
+
 ## 2026-11-13 Skill 与记忆闭环 R1 返工收敛
 
 在 `sm/integration-20261113` 合入 R1 返工切片（U1–U7）后，隔离 `HOME`/`MY_AGENT_HOME` 完成以下收敛验证：

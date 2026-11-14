@@ -358,7 +358,7 @@ def record_exact_use(
             agg["sequence"] = seq
 
             can_credit_post_epoch = (
-                effective_epoch >= current_epoch
+                effective_epoch == current_epoch
                 and int(agg["hurt_count"]) < MAX_STRIKE_HURT_COUNT
             )
             if can_credit_post_epoch:
@@ -390,7 +390,7 @@ def record_exact_use(
         # 同任务重复触发：绝不再次增加 independent_uses；仅当进入更新轮次且尚未在该轮记过时才增加 uses_since_hurt
         last_counted_epoch = int(existing_receipt["last_counted_epoch"])
         can_credit_new_epoch = (
-            effective_epoch >= current_epoch
+            effective_epoch == current_epoch
             and last_counted_epoch < current_epoch
             and int(agg["hurt_count"]) < MAX_STRIKE_HURT_COUNT
         )

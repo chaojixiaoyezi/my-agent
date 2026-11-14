@@ -367,7 +367,9 @@ class _JsonlMemoryIdentityMixin:
         self._pending_access: dict[str, float] = {}
         self._projection_cache_lock = threading.Lock()
         self._scope_pairs_cache: OrderedDict[
-            str, tuple[tuple[object, ...], float, tuple[tuple[str, str], ...]]
+            str,
+            tuple[tuple[object, ...], float, tuple[tuple[str, str], ...]]
+            | tuple[tuple[object, ...], float, tuple[tuple[str, str], ...], dict[str, object]],
         ] = OrderedDict()
 
 
@@ -913,7 +915,11 @@ class _JsonlMemorySearchMixin:
         self,
     ) -> tuple[
         threading.Lock,
-        OrderedDict[str, tuple[tuple[object, ...], float, tuple[tuple[str, str], ...]]],
+        OrderedDict[
+            str,
+            tuple[tuple[object, ...], float, tuple[tuple[str, str], ...]]
+            | tuple[tuple[object, ...], float, tuple[tuple[str, str], ...], dict[str, object]],
+        ],
     ]:
         lock = getattr(self, "_projection_cache_lock", None)
         if lock is None:
@@ -967,10 +973,11 @@ class _JsonlMemorySearchMixin:
 
         return [current_by_id[entry_id] for entry_id in ordered_ids if entry_id in current_by_id]
 
-    # LLM: 仅凭固定 5 个权威控制源与最近过期时间做有界 LRU 投影缓存，热命中禁 stat 分片/deepcopy/all()；部分扫描禁缓存空元组。
+    # LLM: 仅凭固定 5 个权威控制源与最近过期时间做有界 LRU 投影缓存，热命中禁 stat 分片/deepcopy/all()；
+    #   多页库只缓存同代前向续扫中间态并继续抛不可用，直到完整扫完才返回全集，绝不对外返回部分 scope 列表。
     # 函数用途: 返回当前未过期 active+cold 权威下指定 scope_type 的唯一不可变 (scope_type, scope_key) 元组。
     def scope_pairs(self, scope_type: str) -> tuple[tuple[str, str], ...]:
-        from ._jsonl_indexing import bounded_authority_records
+        from ._jsonl_indexing import _parse_scan_continuation, bounded_authority_records
 
         normalized_type = str(scope_type or "").strip().lower()
         if not normalized_type:
@@ -979,32 +986,36 @@ class _JsonlMemorySearchMixin:
         now = time.time()
         stamp = _search_authority_revision(self.path)
         cache_lock, cache = self._scope_pairs_state()
+        resume_pairs: tuple[tuple[str, str], ...] = ()
+        resume_expiry = 0.0
+        resume_cont: dict[str, object] | None = None
         with cache_lock:
             cached = cache.get(normalized_type)
             if cached is not None:
-                cached_stamp, nearest_expiry, cached_pairs = cached
-                if cached_stamp == stamp and (nearest_expiry <= 0.0 or now < nearest_expiry):
-                    cache.move_to_end(normalized_type)
-                    return cached_pairs
-                cache.pop(normalized_type, None)
+                cached_stamp, prev_expiry, prev_pairs = cached[:3]
+                prev_cont = cached[3] if len(cached) == 4 else None
+                if cached_stamp == stamp and (prev_expiry <= 0.0 or now < prev_expiry):
+                    if prev_cont is None:
+                        cache.move_to_end(normalized_type)
+                        return prev_pairs
+                    resume_pairs, resume_expiry, resume_cont = prev_pairs, prev_expiry, prev_cont
+                else:
+                    cache.pop(normalized_type, None)
 
         try:
             records, coverage = bounded_authority_records(
                 self,
                 max_records=_AUTHORITY_SCAN_MAX_RECORDS,
                 max_bytes=_AUTHORITY_SCAN_MAX_BYTES,
+                continuation=resume_cont,
             )
         except Exception:
             with cache_lock:
                 cache.pop(normalized_type, None)
             raise
-        if bool(coverage.get("partial")):
-            with cache_lock:
-                cache.pop(normalized_type, None)
-            raise ValueError("MEMORY_SCOPE_PROJECTION_UNAVAILABLE")
 
-        pairs_set: set[tuple[str, str]] = set()
-        nearest_expiry = 0.0
+        pairs_set: set[tuple[str, str]] = set(resume_pairs)
+        nearest_expiry = resume_expiry
         for record in records:
             expires_at = float(getattr(record, "expires_at", 0.0) or 0.0)
             if expires_at and expires_at <= now:
@@ -1017,13 +1028,51 @@ class _JsonlMemorySearchMixin:
                 if expires_at and (nearest_expiry <= 0.0 or expires_at < nearest_expiry):
                     nearest_expiry = expires_at
 
-        result = tuple(sorted(pairs_set))
-        if stamp == _search_authority_revision(self.path):
+        if bool(coverage.get("partial")):
+            next_cont = coverage.get("continuation")
+            parsed_next = _parse_scan_continuation(next_cont)
+            parsed_prev = _parse_scan_continuation(resume_cont)
+            valid_next = (
+                parsed_next is not None
+                and (
+                    parsed_prev is None
+                    or (parsed_next[0] == parsed_prev[0] and parsed_next[1:] > parsed_prev[1:])
+                )
+                and stamp == _search_authority_revision(self.path)
+            )
             with cache_lock:
-                cache[normalized_type] = (stamp, nearest_expiry, result)
-                cache.move_to_end(normalized_type)
-                while len(cache) > _SCOPE_PAIRS_CACHE_MAX_ENTRIES:
-                    cache.popitem(last=False)
+                existing = cache.get(normalized_type)
+                if valid_next:
+                    existing_cont = _parse_scan_continuation(existing[3]) if existing and len(existing) == 4 else None
+                    keep_existing = (
+                        existing is not None
+                        and existing[0] == stamp
+                        and (
+                            (len(existing) == 3 and (existing[1] <= 0.0 or now < existing[1]))
+                            or (
+                                existing_cont is not None
+                                and existing_cont[0] == parsed_next[0]
+                                and existing_cont[1:] >= parsed_next[1:]
+                            )
+                        )
+                    )
+                    if not keep_existing:
+                        _store_scope_pairs_lru(
+                            cache, normalized_type, (stamp, nearest_expiry, tuple(sorted(pairs_set)), next_cont)
+                        )
+                elif existing is None or existing[0] == stamp or len(existing) == 4:
+                    cache.pop(normalized_type, None)
+            raise ValueError("MEMORY_SCOPE_PROJECTION_UNAVAILABLE")
+
+        result = tuple(sorted(pairs_set))
+        if _search_authority_revision(self.path) == stamp:
+            with cache_lock:
+                _store_scope_pairs_lru(cache, normalized_type, (stamp, nearest_expiry, result))
+            return result
+        with cache_lock:
+            cache.pop(normalized_type, None)
+        if resume_cont is not None:
+            raise ValueError("MEMORY_SCOPE_PROJECTION_UNAVAILABLE")
         return result
 
     # LLM: 正式与候选检索只能在访问确认时分叉；索引、scope 与排序必须完全相同。检索事实（第二个返回值）只是观察，
@@ -1250,6 +1299,14 @@ _AUTHORITY_SCAN_MAX_RECORDS = 1000
 _AUTHORITY_SCAN_MAX_BYTES = 2 * 1024 * 1024
 # 作用域对有界 LRU 投影缓存最多保留的域类型条目数。
 _SCOPE_PAIRS_CACHE_MAX_ENTRIES = 32
+
+
+# 函数用途: 写入 scope_pairs LRU 投影缓存并将最近使用的条目置尾淘汰超限旧项。
+def _store_scope_pairs_lru(cache: OrderedDict[str, tuple[object, ...]], key: str, entry: tuple[object, ...]) -> None:
+    cache[key] = entry
+    cache.move_to_end(key)
+    while len(cache) > _SCOPE_PAIRS_CACHE_MAX_ENTRIES:
+        cache.popitem(last=False)
 
 
 # LLM: 调用方持formal锁；仅stat固定四个控制源，不读无界manifest/分片，协议写者须原子更新根或legacy。
