@@ -6,12 +6,13 @@ deploy/cell-router/internal/feishu/
 agent_py_agent/tests/
 |-- test_nw_w1_ingestion_watch_isolation_and_epoch.py    # W1 监听注册表按 owner 隔离、原子状态落盘与审计 epoch 三态复核
 |-- test_nw_w2_workflow_dag_resume_and_scheduler_ctx.py  # W2 DAG 级联跳过与 fallback、保兄弟分支恢复、并发槽释放与调度业务上下文
-|-- test_nw_w3_thread_succession_and_pack_gate.py        # W3 线程后继 4096 跳解析、/new 保留路由与空间元数据、能力包晋升门禁
-|-- test_nw_w4_business_v13_quota_watch_and_readers.py   # W4 v13 锁外暂存写、归档前全量活跃扫描、监听回执淘汰与流式注册表读取
-|-- test_nw_w5_sanitizer_inline_claim_and_quota.py       # W5 JSON 数值/布尔敏感键脱敏、内联队列认领、正式记忆预算与宿主配额准入
+|-- test_nw_w3_thread_succession_and_pack_gate.py        # W3 线程后继无上限链解析、/new 保留路由与空间元数据、能力包晋升门禁
+|-- test_nw_w4_business_v13_quota_watch_and_readers.py   # W4 v13 锁外暂存写、归档前全量活跃扫描、监听回执淘汰与有界偏移注册表读取
+|-- test_nw_w5_sanitizer_inline_claim_and_quota.py       # W5 JSON 嵌套数值/布尔敏感键脱敏、内联队列认领、正式记忆预算与宿主配额准入
 |-- test_nw_w6_curator_recovery_hot_scope_and_loops.py   # W6 审计游标预算止损、Curator 启动恢复、HOT 作用域校验、租约活性与双池轮询
-|-- test_nw_w7_claims_runtimedb_and_wake_goal.py         # W7 认领心跳竞态防护、task_runs 重开与独立收口、批次去重及目标唤醒重试
-`-- test_nw_w8_config_pty_compact_and_tool_loop.py       # W8 五项可调/部署配置贯通、PTY 会话配额、运行事实增量游标与截断续写
+|-- test_nw_w7_claims_runtimedb_and_wake_goal.py         # W7 认领心跳竞态防护、task_runs 重开与独立收口、批次去重及目标唤醒有界重试
+|-- test_nw_w8_config_pty_compact_and_tool_loop.py       # W8 五项可调/部署配置贯通、PTY 会话配额、运行事实增量游标与截断续写
+`-- test_nw37_r3_v13_compensation_and_archive.py         # R3 v13 日志提交后补偿防护、会话任务不完整扫描拒绝与终态跳过工作流归档
 ```
 
 ## 2026-11-14 工具表面收敛与副作用错误契约（Workstream B：W0–W6）
