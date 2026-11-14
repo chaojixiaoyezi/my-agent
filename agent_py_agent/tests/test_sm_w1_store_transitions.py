@@ -283,13 +283,11 @@ def test_managed_records_and_live_count_classification_and_fail_closed_evidence(
         big_store.managed_records(big_store.load_registry())
     assert exc_big.value.code == CODE_EVIDENCE_INCOMPLETE
 
-    # 3) 托管技能 live 文件缺失
+    # 3) 无未决操作时，手动删除的 live 正文不再占用托管槽位。
     _, missing_store = _home_and_store(tmp_path / "missing")
     _publish(missing_store, "s1")
     missing_store.skill_path("s1").unlink()
-    with pytest.raises(SkillLearningStoreError) as exc3:
-        missing_store.managed_records(missing_store.load_registry())
-    assert exc3.value.code == CODE_EVIDENCE_INCOMPLETE
+    assert "s1" not in missing_store.managed_records(missing_store.load_registry())
 
     # 4) 托管技能 live 文件为符号链接
     _, sym_store = _home_and_store(tmp_path / "symlink")
@@ -704,6 +702,12 @@ def test_explicit_actions_report_and_s1_migration_isolation(tmp_path: Path, monk
     assert ok_report["managed_count"] == 1
     assert ok_report["coverage"]["status"] == "complete"
     store.skill_path("rep-skill").unlink()
+    missing_report = learned_skills_report(store, SimpleNamespace(enable_self_learning=True))
+    assert missing_report["managed_count"] == 0
+    assert missing_report["coverage"]["status"] == "complete"
+    # 正文缺失只释放计数，不改登记；损坏正文仍须保持原证据不全断言。
+    assert "rep-skill" in store.load_registry().skills
+    store.skill_path("rep-skill").write_bytes(b"\xff\xfe\xfd")
     bad_report = learned_skills_report(store, SimpleNamespace(enable_self_learning=True))
     assert bad_report["managed_count"] is None
     assert bad_report["coverage"]["status"] == "unavailable"
