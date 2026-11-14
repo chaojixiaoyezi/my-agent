@@ -68,6 +68,7 @@ from .watch_payloads import (
 from .watch_state import (
     WatchState,
     audit_append,
+    is_valid_watch_id,
     list_states,
     new_state,
     persist_state,
@@ -1049,7 +1050,7 @@ def _prepare_open_watch(
 
 def _drop_new_open_watch(state: WatchState, resumed: bool) -> None:
     if not resumed:
-        registry.drop(state.watch_id)
+        registry.drop(state.watch_id, state.owner_home)
 
 
 def _commit_open_watch(
@@ -1619,11 +1620,21 @@ def _state_for(
                 )
     if not watch_id:
         return _err("缺 watch_id(或给 url);先 action=open 打开盯守", "TOOL_PARAMETER_REQUIRED")
+    if not is_valid_watch_id(watch_id):
+        return _err(
+            f"watch_id 格式无效（必须是合法的单段标识）: {watch_id}",
+            "TOOL_INVALID_ARGUMENTS",
+            effect_outcome="not_started",
+            next_action="先调用 action=list 获取当前可见的合法 watch_id，或调用 action=open 打开对应来源。",
+        )
     state = registry.get_or_load(owner_home, watch_id)
     if state is None:
         known = [row["watch_id"] for row in _visible_state_rows(tool, owner_home)]
         return _err(
-            f"watch_id 不存在: {watch_id};已有: {known}(先 action=open)", "TOOL_INVALID_ARGUMENTS"
+            f"watch_id 不存在: {watch_id};已有: {known}(先 action=open)",
+            "TOOL_INVALID_ARGUMENTS",
+            effect_outcome="not_started",
+            next_action="先调用 action=list 查看已有 watch_id，或调用 action=open 打开对应来源。",
         )
     current_audit = _current_visible_audit_task_id(tool.agent)
     state_audit_scope = str(state.audit_root_task_id or state.prepare_root_task_id or "").strip()
@@ -1817,6 +1828,8 @@ def _source_worker_authority(
             str(result.get("error") or "来源工作者授权失败"),
             control_code,
             reported_code=reported_code,
+            effect_outcome=str(result.get("effect_outcome") or ""),
+            next_action=str(result.get("next_action") or ""),
         ),
     )
 
@@ -3269,6 +3282,8 @@ def _spool_authorization_error(error: dict[str, Any]) -> ToolHandlerOutcome:
             else "TOOL_PERMISSION_DENIED"
         ),
         reported_code=reported_code,
+        effect_outcome=str(error.get("effect_outcome") or ""),
+        next_action=str(error.get("next_action") or ""),
     )
 
 
@@ -4155,11 +4170,18 @@ def _err(
     code: str,
     *,
     reported_code: str = "",
+    effect_outcome: str = "",
+    next_action: str = "",
 ) -> ToolHandlerOutcome:
+    body: dict[str, Any] = {"ok": False, "error": message}
+    if effect_outcome:
+        body["effect_outcome"] = effect_outcome
+    if next_action:
+        body["next_action"] = next_action
     return ToolHandlerOutcome(
         _TOOL_NAME,
         False,
-        json.dumps({"ok": False, "error": message}, ensure_ascii=False),
+        json.dumps(body, ensure_ascii=False),
         error_code=code,
         reported_error_code=reported_code,
     )
