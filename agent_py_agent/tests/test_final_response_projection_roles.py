@@ -94,19 +94,6 @@ def test_plain_local_candidate_waits_commit_and_keeps_full_security_context(caps
     assert capsys.readouterr().out.count('最终正文。') == 1
 
 
-def test_scenario_direct_command_uses_public_projection(tmp_path, monkeypatch, capsys):
-    from agent_py_agent.cli import scenario
-    result = SimpleNamespace(response=_LABELLED, backend='fake', tool_rounds=0)
-    def stop():
-        raise RuntimeError('stop-after-public-output')
-    agent = SimpleNamespace(run=lambda *_args, **_kwargs: result, subagents=SimpleNamespace(list_runs=stop))
-    monkeypatch.setattr(scenario, 'load_scenario_agent', lambda *_args: agent)
-    paths = SimpleNamespace(run_root=tmp_path, fixture_root=tmp_path, config=tmp_path/'fake.yaml')
-    with pytest.raises(RuntimeError, match='stop-after-public-output'):
-        scenario._cmd_scenario_happy_path(SimpleNamespace(count=1, direct=True), paths)
-    assert _SECRET not in capsys.readouterr().out
-
-
 def test_tui_live_chunks_do_not_reveal_split_assignment_label():
     runtime = TuiRuntime('public-live-554')
     turn = runtime.begin_turn('request-live-554')

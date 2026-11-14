@@ -165,7 +165,7 @@
     "timestamp": 2,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "a4da5ddf21f97271daee7444ea5b4f00e35633ac7daf9b70959f4fcc1026ef92",
+    "body_hash": "71334a4121eb829384dddbfa678a3a6b6d66a8ed8a761b90a3b1367baaf7b126",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -1206,18 +1206,24 @@
           "type": "function",
           "function": {
             "name": "skill_feedback",
-            "description": "确实采用本轮已授权的自学Skill时登记adopted；此声明不会增加有效性评分。status查看本owner状态。用户结果反馈通过/skills learned feedback，正式内容确认不能由此工具执行。",
+            "description": "主会话专用自学 Skill 反馈与维护工具（子代理/隔离上下文禁止调用）。action=status 查看本身份已登记自学 Skill 的当前状态、打击计数与淘汰倒计时（或传 skill_id 查看单个技能）；action=adopted 登记当前主会话任务实际采用了快照中的自学 Skill（不直接算作有效性加分）；action=ineffective（通道 A）在主会话中当已加载的自学 Skill 步骤失败、无效或误导当前任务时，由主模型静默调用以记录本任务去重负向打击（无需向用户弹窗确认，不接受未在当前任务送达/采用的技能）；action=remove 归档移除本身份自学 Skill（对非自学习技能拒绝并返回 CANNOT_REMOVE_NON_LEARNED_SKILL）；action=restore 在宽限与容量允许时恢复已归档的自学 Skill。",
             "parameters": {
               "additionalProperties": false,
               "properties": {
                 "action": {
+                  "default": "status",
+                  "description": "status 只读查看状态；adopted 标记采用本任务已授权自学 Skill；ineffective 通道 A 静默记录当前任务已送达自学 Skill 失效/误导（不询问用户）；remove 归档移除自学 Skill；restore 恢复已归档自学 Skill。",
                   "enum": [
+                    "status",
                     "adopted",
-                    "status"
+                    "remove",
+                    "restore",
+                    "ineffective"
                   ],
                   "type": "string"
                 },
                 "skill_id": {
+                  "description": "目标技能编号（例如 owner:foo 或 foo）。除 status 外均必填且非空。",
                   "type": "string"
                 }
               },
@@ -1874,6 +1880,12 @@
                         "minLength": 1,
                         "type": "string"
                       },
+                      "review_requirement_id": {
+                        "description": "本次独立审核的候选编号。它是查询线索；审核时由宿主另核真实身份、原任务和版本。",
+                        "maxLength": 128,
+                        "minLength": 1,
+                        "type": "string"
+                      },
                       "long_running": {
                         "description": "true 声明这是故意长期运行的守望/常驻任务(持续监控数小时~数天)；系统放开其上下文压缩续跑深度上限(无进展仍会熔断)。只在任务本质是持续盯守/常驻服务时声明",
                         "type": "boolean"
@@ -1911,9 +1923,9 @@
                             "type": "boolean"
                           },
                           "max_descendant_depth": {
+                            "description": "交给该子代理的剩余后代代数（非根树绝对深度）：0 禁止它再派子代，1 允许再派一代；每次派工继承时减1，子代显式值必须小于父级原剩余值。省略表示继承父级剩余值减1；无父级限制时省略表示不加此限。",
                             "minimum": 0,
-                            "type": "integer",
-                            "description": "交给该子代理的剩余后代代数（非根树绝对深度）：0 禁止它再派子代，1 允许再派一代；每次派工继承时减1，子代显式值必须小于父级原剩余值。省略表示继承父级剩余值减1；无父级限制时省略表示不加此限。"
+                            "type": "integer"
                           },
                           "exact_write_set": {
                             "items": {
@@ -1934,11 +1946,11 @@
                             "type": "array"
                           },
                           "permitted_tools": {
+                            "description": "创建时的精确工具清单，覆盖 allowed_tools 的默认补齐，不能超过父级当前权限。后续缺失能力须走原 capability_request 和父级裁决。审批不能绕过宿主禁用项、路径围栏或不可扩大的授权上界。",
                             "items": {
                               "type": "string"
                             },
-                            "type": "array",
-                            "description": "创建时的精确工具清单，覆盖 allowed_tools 的默认补齐，不能超过父级当前权限。后续缺失能力须走原 capability_request 和父级裁决。审批不能绕过宿主禁用项、路径围栏或不可扩大的授权上界。"
+                            "type": "array"
                           },
                           "prohibited_actions": {
                             "items": {
@@ -1948,12 +1960,6 @@
                           }
                         },
                         "type": "object"
-                      },
-                      "review_requirement_id": {
-                        "description": "本次独立审核的候选编号。它是查询线索；审核时由宿主另核真实身份、原任务和版本。",
-                        "maxLength": 128,
-                        "minLength": 1,
-                        "type": "string"
                       }
                     },
                     "required": [
@@ -2165,7 +2171,7 @@
     "timestamp": 3,
     "method": "POST",
     "path": "/v1/chat/completions",
-    "body_hash": "8379ce6c4e74368a6cefd39826c504000ffb6dcf2317c769d58c6a869e706ace",
+    "body_hash": "ad8082410d57995d28df4d9f193cdae306ce14d1d61babc8768d919f2d19565e",
     "body_hash_basis": "canonical_json_sha256",
     "body": {
       "model": "fixture",
@@ -3210,18 +3216,24 @@
           "type": "function",
           "function": {
             "name": "skill_feedback",
-            "description": "确实采用本轮已授权的自学Skill时登记adopted；此声明不会增加有效性评分。status查看本owner状态。用户结果反馈通过/skills learned feedback，正式内容确认不能由此工具执行。",
+            "description": "主会话专用自学 Skill 反馈与维护工具（子代理/隔离上下文禁止调用）。action=status 查看本身份已登记自学 Skill 的当前状态、打击计数与淘汰倒计时（或传 skill_id 查看单个技能）；action=adopted 登记当前主会话任务实际采用了快照中的自学 Skill（不直接算作有效性加分）；action=ineffective（通道 A）在主会话中当已加载的自学 Skill 步骤失败、无效或误导当前任务时，由主模型静默调用以记录本任务去重负向打击（无需向用户弹窗确认，不接受未在当前任务送达/采用的技能）；action=remove 归档移除本身份自学 Skill（对非自学习技能拒绝并返回 CANNOT_REMOVE_NON_LEARNED_SKILL）；action=restore 在宽限与容量允许时恢复已归档的自学 Skill。",
             "parameters": {
               "additionalProperties": false,
               "properties": {
                 "action": {
+                  "default": "status",
+                  "description": "status 只读查看状态；adopted 标记采用本任务已授权自学 Skill；ineffective 通道 A 静默记录当前任务已送达自学 Skill 失效/误导（不询问用户）；remove 归档移除自学 Skill；restore 恢复已归档自学 Skill。",
                   "enum": [
+                    "status",
                     "adopted",
-                    "status"
+                    "remove",
+                    "restore",
+                    "ineffective"
                   ],
                   "type": "string"
                 },
                 "skill_id": {
+                  "description": "目标技能编号（例如 owner:foo 或 foo）。除 status 外均必填且非空。",
                   "type": "string"
                 }
               },
@@ -3878,6 +3890,12 @@
                         "minLength": 1,
                         "type": "string"
                       },
+                      "review_requirement_id": {
+                        "description": "本次独立审核的候选编号。它是查询线索；审核时由宿主另核真实身份、原任务和版本。",
+                        "maxLength": 128,
+                        "minLength": 1,
+                        "type": "string"
+                      },
                       "long_running": {
                         "description": "true 声明这是故意长期运行的守望/常驻任务(持续监控数小时~数天)；系统放开其上下文压缩续跑深度上限(无进展仍会熔断)。只在任务本质是持续盯守/常驻服务时声明",
                         "type": "boolean"
@@ -3915,9 +3933,9 @@
                             "type": "boolean"
                           },
                           "max_descendant_depth": {
+                            "description": "交给该子代理的剩余后代代数（非根树绝对深度）：0 禁止它再派子代，1 允许再派一代；每次派工继承时减1，子代显式值必须小于父级原剩余值。省略表示继承父级剩余值减1；无父级限制时省略表示不加此限。",
                             "minimum": 0,
-                            "type": "integer",
-                            "description": "交给该子代理的剩余后代代数（非根树绝对深度）：0 禁止它再派子代，1 允许再派一代；每次派工继承时减1，子代显式值必须小于父级原剩余值。省略表示继承父级剩余值减1；无父级限制时省略表示不加此限。"
+                            "type": "integer"
                           },
                           "exact_write_set": {
                             "items": {
@@ -3938,11 +3956,11 @@
                             "type": "array"
                           },
                           "permitted_tools": {
+                            "description": "创建时的精确工具清单，覆盖 allowed_tools 的默认补齐，不能超过父级当前权限。后续缺失能力须走原 capability_request 和父级裁决。审批不能绕过宿主禁用项、路径围栏或不可扩大的授权上界。",
                             "items": {
                               "type": "string"
                             },
-                            "type": "array",
-                            "description": "创建时的精确工具清单，覆盖 allowed_tools 的默认补齐，不能超过父级当前权限。后续缺失能力须走原 capability_request 和父级裁决。审批不能绕过宿主禁用项、路径围栏或不可扩大的授权上界。"
+                            "type": "array"
                           },
                           "prohibited_actions": {
                             "items": {
@@ -3952,12 +3970,6 @@
                           }
                         },
                         "type": "object"
-                      },
-                      "review_requirement_id": {
-                        "description": "本次独立审核的候选编号。它是查询线索；审核时由宿主另核真实身份、原任务和版本。",
-                        "maxLength": 128,
-                        "minLength": 1,
-                        "type": "string"
                       }
                     },
                     "required": [

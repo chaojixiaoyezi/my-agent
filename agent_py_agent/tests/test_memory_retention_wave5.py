@@ -1169,9 +1169,13 @@ def test_permission_failure_in_pin_store_is_not_zero_pins(tmp_path, monkeypatch,
 # LLM: 控制单调时钟和LRU容量，验证准确入口不依赖展示缓存。
 # 函数用途: 验证缓存有界、过期和exact模式。
 def test_display_usage_cache_ttl_eviction_and_exact_mode(tmp_path, monkeypatch):
+    from collections import OrderedDict
+
     from agent_py_agent.agent.user_space import owner_quota as quota
 
+    monkeypatch.setattr(quota, "_DISPLAY_USAGE_CACHE", OrderedDict())
     monkeypatch.setattr(quota, "_DISPLAY_USAGE_CACHE_MAX_ENTRIES", 2)
+    monkeypatch.setattr(quota.cache_capacity, "_SLOTS", {**quota.cache_capacity._SLOTS, "owners": 0})
     monkeypatch.setattr(quota.time, "monotonic", lambda: 10.0)
     root = tmp_path / "owner"
     paths = [old_file(root / "display_archives" / str(index) / "file", "x") for index in range(3)]
