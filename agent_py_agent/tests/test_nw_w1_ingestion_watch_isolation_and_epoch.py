@@ -534,15 +534,32 @@ def test_harvester_commit_cas_conflict_preserves_cause_after_inline_drain_rewind
         assert inline_state.cursor == rotated_size
 
         state.cursor += 16
+        spool_file = harvester_module.spool_path(state)
+        spool_file.parent.mkdir(parents=True, exist_ok=True)
+        with spool_file.open("ab") as fh:
+            fh.write(b'{"uncommitted": true}\n')
+        assert spool_file.stat().st_size > int(tx["start"]["spool_bytes"])
+
         with pytest.raises(harvester_module._HarvestTransactionUnavailable) as exc_info:
             harvester_module._commit_harvest_transaction(state, tx)
         assert isinstance(exc_info.value.__cause__, OSError)
         assert "conflict" in str(exc_info.value.__cause__)
 
+        assert not harvester_module._harvest_transaction_path(state).exists()
+        assert spool_file.stat().st_size == int(tx["start"]["spool_bytes"])
+        assert state.harvest_commit_id == inline_state.harvest_commit_id
+        assert state.cursor == rotated_size
+
         persisted = watch_state_module.load_state(owner_home, state.watch_id)
         assert persisted.harvest_commit_id == inline_state.harvest_commit_id
         assert persisted.file_identity == inline_state.file_identity
         assert persisted.cursor == rotated_size
+
+        next_tx = harvester_module._begin_harvest_transaction(persisted)
+        assert next_tx["start"]["cursor"] == rotated_size
+        assert next_tx["start"]["file_identity"] == inline_state.file_identity
+        harvester_module._commit_harvest_transaction(persisted, next_tx)
+        assert not harvester_module._harvest_transaction_path(persisted).exists()
     finally:
         _cleanup_owner_watch(owner_home, state.watch_id)
 
@@ -575,8 +592,23 @@ def test_harvester_recover_pending_detects_file_identity_drift(tmp_path) -> None
         drifted.file_identity = "dev1:ino2"
         watch_state_module.persist_state(drifted, expected_source_position=prior_pos)
 
-        with pytest.raises(harvester_module._HarvestTransactionUnavailable, match="moved outside harvest transaction"):
-            harvester_module._begin_harvest_transaction(state)
+        with pytest.raises(
+            harvester_module._HarvestTransactionUnavailable,
+            match="moved outside harvest transaction",
+        ):
+            harvester_module._recover_pending_harvest(state)
+
+        with pytest.raises(harvester_module._HarvestTransactionUnavailable) as exc_info:
+            harvester_module._commit_harvest_transaction(state, tx)
+        assert isinstance(exc_info.value.__cause__, OSError)
+        assert not harvester_module._harvest_transaction_path(state).exists()
+        assert state.file_identity == "dev1:ino2"
+
+        reloaded = watch_state_module.load_state(owner_home, state.watch_id)
+        next_tx = harvester_module._begin_harvest_transaction(reloaded)
+        assert next_tx["start"]["file_identity"] == "dev1:ino2"
+        harvester_module._commit_harvest_transaction(reloaded, next_tx)
+        assert not harvester_module._harvest_transaction_path(reloaded).exists()
     finally:
         _cleanup_owner_watch(owner_home, state.watch_id)
 
@@ -613,16 +645,26 @@ def test_drain_and_digest_cas_conflict_and_error_path_preserve_commit_continuity
             fh.write('{"seq": 3}\n')
         with pytest.raises(OSError, match="conflict"):
             _drain_and_digest(tool, stale, aggregate)
+        assert stale.harvest_commit_id == commit_2
+        assert stale.cursor == fresh.cursor
 
         persisted = watch_state_module.load_state(owner_home, state.watch_id)
         assert persisted.harvest_commit_id == commit_2
         assert persisted.cursor == fresh.cursor
 
+        # Second inline drain on the same handle must move forward from winner's cursor.
+        with src.open("a", encoding="utf-8") as fh:
+            fh.write('{"seq": 4}\n')
+        _drain_and_digest(tool, stale, aggregate)
+        commit_3 = stale.harvest_commit_id
+        assert commit_3 != commit_2
+        assert stale.cursor == src.stat().st_size > fresh.cursor
+
         src.unlink()
-        error_digest = _drain_and_digest(tool, fresh, aggregate)
+        error_digest = _drain_and_digest(tool, stale, aggregate)
         assert error_digest is None
         after_err = watch_state_module.load_state(owner_home, state.watch_id)
-        assert after_err.harvest_commit_id == commit_2
+        assert after_err.harvest_commit_id == commit_3
         assert after_err.totals["http_errors"] >= 1
         assert after_err.last_error
     finally:

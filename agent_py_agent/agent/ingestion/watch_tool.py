@@ -592,11 +592,15 @@ def _drain_and_digest(
         page_limit=state.tuning.page_limit,
         deadline=time.time() + SOURCE_FETCH_TIMEOUT_SECONDS,
     )
+    prior_commit_id = state.harvest_commit_id
+    prior_file_identity = state.file_identity
+    prior_cursor = state.cursor
+    prior_line_cursor = state.line_cursor
     prior_source_position = (
-        state.harvest_commit_id,
-        state.file_identity,
-        state.cursor,
-        state.line_cursor,
+        prior_commit_id,
+        prior_file_identity,
+        prior_cursor,
+        prior_line_cursor,
     )
     drain = drain_watch_source(state, tool._fetch_json, budget)
     apply_cursor_page_feedback(state, drain)
@@ -617,7 +621,15 @@ def _drain_and_digest(
         cold_start=state.source_spec is None,
     )
     state.harvest_commit_id = uuid4().hex
-    persist_state(state, expected_source_position=prior_source_position)
+    try:
+        persist_state(state, expected_source_position=prior_source_position)
+    except OSError:
+        state.harvest_commit_id = prior_commit_id
+        state.file_identity = prior_file_identity
+        state.cursor = prior_cursor
+        state.line_cursor = prior_line_cursor
+        refresh_scalars_from_disk(state)
+        raise
     audit_append(state, build_audit_record(drain, digest))
     return digest
 

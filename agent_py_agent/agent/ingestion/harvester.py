@@ -60,6 +60,7 @@ from .watch_state import (
     audit_append,
     load_state,
     persist_state,
+    refresh_scalars_from_disk,
     state_dir,
 )
 
@@ -382,20 +383,39 @@ def _commit_harvest_transaction(
             "spool_generation": state.spool_generation,
         }
         prev_commit_id = state.harvest_commit_id
-        state.harvest_commit_id = str(transaction["transaction_id"])
+        tx_id = str(transaction["transaction_id"])
+        state.harvest_commit_id = tx_id
         _write_harvest_transaction(marker, transaction)
         try:
             persist_state(state, expected_source_position=expected_pos)
-        except _HarvestTransactionUnavailable:
-            state.harvest_commit_id = prev_commit_id
-            raise
         except OSError as exc:
             state.harvest_commit_id = prev_commit_id
+            state.file_identity = str(start_info.get("file_identity") or "")
+            state.cursor = int(start_info.get("cursor") or 0)
+            state.line_cursor = int(start_info.get("line_cursor") or 0)
+            _truncate_to_committed_offset(
+                spool_path(state),
+                int(start_info.get("spool_bytes") or 0),
+            )
+            _truncate_to_committed_offset(
+                _audit_ledger_path(state),
+                int(start_info.get("audit_bytes") or 0),
+            )
+            fragment_facts = start_info.get("fragment")
+            if isinstance(fragment_facts, dict):
+                _restore_fragment_after_failed_harvest(state, fragment_facts)
+            _clear_harvest_transaction_unlocked(
+                state,
+                expected_transaction_id=tx_id,
+            )
+            refresh_scalars_from_disk(state)
+            if isinstance(exc, _HarvestTransactionUnavailable):
+                raise
             raise _HarvestTransactionUnavailable(str(exc)) from exc
         _commit_transaction_source_record_keys(state, transaction)
         _clear_harvest_transaction_unlocked(
             state,
-            expected_transaction_id=str(transaction["transaction_id"]),
+            expected_transaction_id=tx_id,
         )
 
 
