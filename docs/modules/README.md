@@ -47,21 +47,7 @@ docs/modules/<module>/
 - class / def 有装饰器时，注释放在装饰器上方；不能夹在装饰器和定义中间。
 - 旧格式里的 `新手说明:`、`参数说明:`、`返回说明:` 可以继续保留，但不能替代 `LLM:` 和 `模块用途:` / `函数用途:` / `类用途:`。
 - 新增、删除或改名用户可配置字段时，必须同步 `AgentConfig`、归一化规则、`agent_py_agent/config/agent_config.yaml` 中文说明和配置覆盖测试；配置样例里不能留下会被加载器忽略的假字段。
-- 如果只是修 typo 或纯测试数据，可以在提交说明里写明为什么没有代码文档同步；默认仍先跑检查脚本。
-
-提交前运行：
-
-```powershell
-python scripts\check_doc_sync.py
-```
-
-如果只想检查已暂存内容：
-
-```powershell
-python scripts\check_doc_sync.py --staged
-```
-
-当前脚本先覆盖 `subagent`、`memory`、`gateway`、`live-lab` 这几个活跃模块。新模块进入开发时，要先建四件套，再把模块路径加入 `scripts/check_doc_sync.py` 的 `MODULE_RULES`。
+- 如果只是修 typo 或纯测试数据，可以在提交说明里写明为什么没有代码文档同步。
 
 ## 测试记录怎么写
 

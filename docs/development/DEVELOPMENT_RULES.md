@@ -530,9 +530,8 @@ do_write()
 2. `python -m pytest agent_py_agent/tests/ -q` — all tests pass.
 3. `ruff check agent_py_agent` — no lint errors.
 4. `python scripts/check_import_boundaries.py --json` — 导入分层与生产边界。
-5. `python scripts/check_doc_sync.py --base <本轮实际基线提交>` — 文档与实现同步。
-6. `git diff --check` — no whitespace errors.
-7. `python scripts/check_clean_package.py .` — 打包与工作树洁净度。
+5. `git diff --check` — no whitespace errors.
+6. `python scripts/check_clean_package.py .` — 打包与工作树洁净度。
 
 ## 11.1 Subagent Token / Model-Call Budget
 

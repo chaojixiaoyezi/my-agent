@@ -21,7 +21,9 @@ from .session_history_read import (
     visible_conversation_row,
 )
 
+# 单次冻结历史检索最多扫描的来源条数上限。
 _MAX_SOURCES = 256
+# 单条冻结历史来源允许读取的最大字节数（2 MiB）。
 _MAX_SOURCE_BYTES = 2 * 1024 * 1024
 
 

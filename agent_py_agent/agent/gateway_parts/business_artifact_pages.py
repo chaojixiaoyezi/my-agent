@@ -10,7 +10,9 @@ from ..common.nofollow_fs import open_readonly_file_beneath
 from ..plugin_host.artifacts import _fingerprint
 from ..plugin_host.errors import HostAPIError
 
+# 业务资产分页哈希校验的固定分块字节大小（64 KiB）。
 BLOCK_BYTES = 65536
+# 单版业务资产允许核验并按页读取的最大总字节数（64 MiB）。
 MAX_CONTENT_BYTES = 64 * 1024 * 1024
 _PROOF_SEAL = object()
 

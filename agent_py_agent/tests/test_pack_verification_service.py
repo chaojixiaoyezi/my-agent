@@ -515,7 +515,7 @@ def test_tool_execution_seam_calls_both_hooks(monkeypatch, tmp_path):
     monkeypatch.setattr(tool_call_runtime, "_record_passive_verification", lambda agent, call, result: result)
     monkeypatch.setattr(tool_call_runtime, "audit_privileged_tool_call", lambda *args: None)
     monkeypatch.setattr(tool_call_runtime, "trace_runner_tool_call_finished", lambda *args: None)
-    monkeypatch.setattr(tool_call_runtime, "write_boundary_with_runtime_ledger", lambda agent, params, *, for_attachment_lookup=False: {})
+    monkeypatch.setattr(tool_call_runtime, "write_boundary_with_runtime_ledger", lambda agent, params, *, for_artifact_reconciliation=False, for_attachment_lookup=False: {})
     monkeypatch.setattr("agent_py_agent.agent.conversation.process_events.process_completion_target", lambda *a: None)
     monkeypatch.setattr("agent_py_agent.agent.agent_core.tool_loop.recovery.runtime_run_scope",
                         lambda *a: types.SimpleNamespace(to_dict=dict))

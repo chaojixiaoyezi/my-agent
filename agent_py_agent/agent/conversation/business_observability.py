@@ -52,16 +52,19 @@ _RESULT_REGISTRY_MAX_BYTES = 256 * 1024
 _RESULT_REGISTRY_TOTAL_MAX_BYTES = 4 * 1024 * 1024
 # 解析对象与坏行诊断也限额，不能只限制raw字节后再生成成千上万错误对象。
 _RESULT_REGISTRY_MAX_ROWS = 1024
+# 同一观察请求跨所有任务共享的登记行读取总上限。
 _RESULT_REGISTRY_TOTAL_MAX_ROWS = 16384
-_RESULT_REGISTRY_MAX_DIAGNOSTICS = 8
-_RESULT_REGISTRY_TOTAL_MAX_DIAGNOSTICS = 32
+# 单个登记簿读取单次最多收集的坏行诊断条数。
+_RESULT_REGISTRY_MAX_DIAGNOSTICS_COUNT = 8
+# 同一观察请求跨所有任务共享的坏行诊断总条数上限。
+_RESULT_REGISTRY_TOTAL_MAX_DIAGNOSTICS_COUNT = 32
 
 
 @dataclass
 class _ResultRegistryBudget:
     remaining: int = _RESULT_REGISTRY_TOTAL_MAX_BYTES
     remaining_rows: int = _RESULT_REGISTRY_TOTAL_MAX_ROWS
-    remaining_diagnostics: int = _RESULT_REGISTRY_TOTAL_MAX_DIAGNOSTICS
+    remaining_diagnostics: int = _RESULT_REGISTRY_TOTAL_MAX_DIAGNOSTICS_COUNT
     exhausted_reason: str = ''
 
     def limits(self, max_bytes, max_rows, max_diagnostics):
@@ -82,7 +85,7 @@ class _ResultRegistryBudget:
     def read(self, workspace):
         from ..artifacts.registry import latest_artifact_records_report
 
-        limits = self.limits(_RESULT_REGISTRY_MAX_BYTES, _RESULT_REGISTRY_MAX_ROWS, _RESULT_REGISTRY_MAX_DIAGNOSTICS)
+        limits = self.limits(_RESULT_REGISTRY_MAX_BYTES, _RESULT_REGISTRY_MAX_ROWS, _RESULT_REGISTRY_MAX_DIAGNOSTICS_COUNT)
         if limits is None:
             return None
         limit, rows, diagnostics = limits

@@ -28,8 +28,11 @@ _SOURCE = (*_ROOT, *REGISTRY_RELATIVE_PATH.parts)
 _INDEX = (*_ROOT, 'data', 'artifacts', '.business-upload-progress.sqlite3')
 _KEY = secrets.token_bytes(32)
 _SEAL = object()
-_STEPS = 4
-_PROGRESS_LIMIT = 8
+# 单次上传登记核验请求默认向前推进读取的分步上限次数。
+_UPLOAD_REGISTRY_STEPS_COUNT = 4
+# SQLite 上传续作进度表最多保留的近期 artifact 记录条数。
+_UPLOAD_PROGRESS_LIMIT_COUNT = 8
+# 单条上传登记 JSONL 记录允许读取并解析的最大字节数（2 MiB）。
 _MAX_RECORD_BYTES = 2 * 1024 * 1024
 
 
@@ -129,7 +132,7 @@ def _save(db, artifact_id, state):
                'state=excluded.state,signature=excluded.signature,touched=excluded.touched',
                (artifact_id, raw, signature, time.time()))
     db.execute('DELETE FROM progress WHERE artifact_id NOT IN '
-               '(SELECT artifact_id FROM progress ORDER BY touched DESC LIMIT ?)', (_PROGRESS_LIMIT,))
+               '(SELECT artifact_id FROM progress ORDER BY touched DESC LIMIT ?)', (_UPLOAD_PROGRESS_LIMIT_COUNT,))
 
 
 def _consume(state, chunk, *, eof):
@@ -186,7 +189,7 @@ def lookup_business_upload(owner_home, artifact_id, *, max_bytes=2 * 1024 * 1024
             with _connection(owner) as db:
                 state = _load(db, owner, artifact_id, stamp, max_bytes)
                 progressed = 0
-                for _step in range(_STEPS):
+                for _step in range(_UPLOAD_REGISTRY_STEPS_COUNT):
                     if _stamp(fd) != stamp:
                         raise HostAPIError('HOST_NOT_READY', 503, message='原上传登记在核验期间换代；未读取内容，请对同一ID重新核验，不得换ID重传。')
                     chunk = _read(fd, state['offset'], min(max_bytes, stamp[2] - state['offset']))

@@ -187,7 +187,6 @@ the risk of the change:
 ```bash
 python -m compileall -q agent_py_agent scripts          # Syntax check
 python -m pytest agent_py_agent/tests/test_memory_routing_matcher.py -q -v  # Focused example
-python scripts/check_doc_sync.py                         # Docs sync when docs/modules changed
 python scripts/check_import_boundaries.py --json         # Import boundaries
 git diff --check                                         # Whitespace errors
 ```
@@ -208,7 +207,6 @@ add insertions and deletions together to satisfy this threshold.
 python3 -m pytest -q --tb=short                          # Full test suite
 ruff check agent_py_agent scripts setup.py package_boundary_policy.py  # Lint
 python3 scripts/check_import_boundaries.py               # Production/layer import boundaries
-python3 scripts/check_doc_sync.py --base <本轮实际基线提交> # Docs sync
 git diff --check                                         # Whitespace errors
 python3 scripts/check_clean_package.py --mode worktree . # tracked/untracked + runtime data visibility
 # 构建 wheel/tar 后另跑:python3 scripts/check_clean_package.py --mode artifact <artifact>

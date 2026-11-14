@@ -27,9 +27,13 @@ from ..tooling.models import (
 )
 from .business_artifact_pages import BLOCK_BYTES, prepare_content_pages
 
-_MAX_PAGE = 65536
-_REGISTRY_READ_BUDGET = 2 * 1024 * 1024
-_PROOF_LIMIT = 16
+# 单次资产正文分页读取接口允许请求的最大页字节数（64 KiB）。
+_ASSET_READ_MAX_PAGE_BYTES = 65536
+# 资产分页首次定位登记记录时允许扫描的最大字节预算（2 MiB）。
+_ASSET_REGISTRY_READ_BYTE_BUDGET = 2 * 1024 * 1024
+# 进程内分块完整性证明 LRU 缓存最多保留的条目数。
+_ASSET_PROOF_LIMIT_COUNT = 16
+# 进程内分块完整性证明 LRU 缓存占用的最大内存字节上限（2 MiB）。
 _PROOF_BYTES = 2 * 1024 * 1024
 _PROOFS = OrderedDict()
 _PROOF_LOCK = threading.Lock()
@@ -48,7 +52,7 @@ def _remember(key, proof):
     cost = len(proof.blocks) * 80 + len(key.encode()) + 512
     with _PROOF_LOCK:
         _PROOFS.pop(key, None)
-        while _PROOFS and (len(_PROOFS) >= _PROOF_LIMIT or sum(v[1] for v in _PROOFS.values()) + cost > _PROOF_BYTES):
+        while _PROOFS and (len(_PROOFS) >= _ASSET_PROOF_LIMIT_COUNT or sum(v[1] for v in _PROOFS.values()) + cost > _PROOF_BYTES):
             _PROOFS.popitem(last=False)
         if cost <= _PROOF_BYTES:
             _PROOFS[key] = (proof, cost)
@@ -80,7 +84,7 @@ class ReadBusinessAssetTool(BaseTool):
             'project_ref': {'type': ['string', 'null'], 'minLength': 1, 'maxLength': 128},
             'selection': {'type': 'string', 'enum': ['accepted', 'review'], 'default': 'accepted'},
             'cursor': {'type': 'string', 'minLength': 1, 'maxLength': 4096},
-            'max_bytes': {'type': 'integer', 'minimum': 4, 'maximum': _MAX_PAGE, 'default': 8192}},
+            'max_bytes': {'type': 'integer', 'minimum': 4, 'maximum': _ASSET_READ_MAX_PAGE_BYTES, 'default': 8192}},
             'required': ['space_id', 'asset_id', 'version_ref'], 'additionalProperties': False},
         hints=ToolModelHints(category='business', keywords=('资产', '正式素材', '版本正文', 'asset', 'version', 'read_business_asset'),
             use_cases=('业务资料已上传/采纳，需要按准确版本读正文',), default_deferred=True,
@@ -184,7 +188,7 @@ class ReadBusinessAssetTool(BaseTool):
             _reject('CURSOR_EXPIRED', '$.cursor', '游标字节位置超过原版本。', '对同一精确版本从首读重取。', 409)
         status, headers, content = artifact_content(ref['artifact_id'], ref['version_ref'], context, services,
             range_header=f'bytes={offset}-{offset + maximum - 1}' if proof and proof.size_bytes else None,
-            page_proof=proof, expected_space_id=params['space_id'], registry_max_bytes=_REGISTRY_READ_BUDGET)
+            page_proof=proof, expected_space_id=params['space_id'], registry_max_bytes=_ASSET_REGISTRY_READ_BYTE_BUDGET)
         mime = headers.get('Content-Type', 'application/octet-stream').split(';', 1)[0].lower()
         if (mime.startswith(('image/', 'audio/', 'video/')) or mime in {'application/pdf', 'application/zip', 'application/gzip'}):
             if not isinstance(content, bytes):

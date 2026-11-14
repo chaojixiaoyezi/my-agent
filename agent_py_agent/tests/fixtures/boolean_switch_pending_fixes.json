@@ -2,7 +2,7 @@
  "schema": "boolean_switch_pending_fixes.v1",
  "rule": "shrink-only: entries may only be removed (--prune-baseline); frozen_count never grows",
  "anchor": "09114315c",
- "frozen_count": 32,
+ "frozen_count": 14,
  "entries": [
   "A-DEPLOY-CLI|agent_py_agent/agent/settings/parameter_changes.py|CLI_DEPLOYMENT_WRITABLE_KEYS|admin_channel_identity_enabled",
   "A-DEPLOY-CLI|agent_py_agent/agent/settings/parameter_changes.py|CLI_DEPLOYMENT_WRITABLE_KEYS|audit_enabled",
@@ -17,24 +17,6 @@
   "A-HOOK|agent_py_agent/agent/settings/parameter_changes.py|reset_parameter|refresh_live_switches",
   "A-HOOK|agent_py_agent/agent/settings/parameter_changes.py|revert_change|refresh_live_switches",
   "A-HOOK|agent_py_agent/agent/settings/parameter_changes.py|set_parameter|refresh_live_switches",
-  "A-REGISTRY-EFFECT|agent_py_agent/agent/settings/parameter_registry.py|parameter_registry|LIVE_SWITCH_KEYS",
-  "B-CFG|agent_py_agent/agent/settings/config.py|AgentConfig|background_tick_cheap_checks",
-  "B-CFG|agent_py_agent/agent/settings/config.py|AgentConfig|local_store_fts_enabled",
-  "B-CFG|agent_py_agent/agent/settings/config.py|AgentConfig|sqlite_connection_reuse",
-  "B-CFG|agent_py_agent/agent/settings/config.py|_HomeProviderConfigFields|thread_prompt_prefix_freeze_enabled",
-  "B-CFG|agent_py_agent/agent/settings/config.py|_ToolConfigFields|tool_default_deferral_enabled",
-  "B-READ|agent_py_agent/agent/settings/parameter_registry.py|<file>|background_tick_cheap_checks",
-  "B-READ|agent_py_agent/agent/settings/parameter_registry.py|<file>|local_store_fts_enabled",
-  "B-READ|agent_py_agent/agent/settings/parameter_registry.py|<file>|sqlite_connection_reuse",
-  "B-READ|agent_py_agent/agent/settings/services/_normalize.py|<file>|background_tick_cheap_checks",
-  "B-READ|agent_py_agent/agent/settings/services/_normalize.py|<file>|local_store_fts_enabled",
-  "B-READ|agent_py_agent/agent/settings/services/_normalize.py|<file>|sqlite_connection_reuse",
-  "B-READ|agent_py_agent/agent/settings/services/_normalize.py|<file>|thread_prompt_prefix_freeze_enabled",
-  "B-READ|agent_py_agent/agent/settings/services/_normalize.py|<file>|tool_default_deferral_enabled",
-  "B-YAML|agent_py_agent/config/agent_config.yaml|<yaml>|background_tick_cheap_checks",
-  "B-YAML|agent_py_agent/config/agent_config.yaml|<yaml>|local_store_fts_enabled",
-  "B-YAML|agent_py_agent/config/agent_config.yaml|<yaml>|sqlite_connection_reuse",
-  "B-YAML|agent_py_agent/config/agent_config.yaml|<yaml>|thread_prompt_prefix_freeze_enabled",
-  "B-YAML|agent_py_agent/config/agent_config.yaml|<yaml>|tool_default_deferral_enabled"
+  "A-REGISTRY-EFFECT|agent_py_agent/agent/settings/parameter_registry.py|parameter_registry|LIVE_SWITCH_KEYS"
  ]
 }
