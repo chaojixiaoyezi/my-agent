@@ -842,6 +842,7 @@ class RuntimeRepository(
         agent_run_id = new_id("agent_run_id")
         now = time.time()
         with self._runtime_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """
                 INSERT INTO agent_runs(agent_run_id, task_run_id, parent_agent_run_id,
@@ -851,6 +852,13 @@ class RuntimeRepository(
                 VALUES(?, ?, ?, '', ?, ?, '', '', 0, 1, ?, ?)
                 """,
                 (agent_run_id, task_run_id, parent_agent_run_id, run_id, role, now, now),
+            )
+            self._reopen_task_run_for_attempt_conn(
+                conn,
+                {"task_run_id": task_run_id},
+                agent_run_id,
+                "",
+                now,
             )
             conn.commit()
         row = self.get_agent_run(agent_run_id)
@@ -2073,6 +2081,7 @@ class RuntimeRepository(
                     "source": source,
                 },
             )
+        self._reopen_task_run_for_attempt_conn(conn, run, agent_run_id, attempt_id, now)
         row = conn.execute(
             "SELECT * FROM agent_attempts WHERE attempt_id = ?",
             (attempt_id,),
@@ -2137,6 +2146,7 @@ class RuntimeRepository(
             if expected_pending_attempt_id is not None:
                 if not expected_pending_attempt_id or not reuse_pending:
                     raise ValueError("精确激活必须提供非空 pending 身份并启用 reuse_pending")
+            if expected_pending_attempt_id is not None or reuse_pending:
                 conn.execute("BEGIN IMMEDIATE")
             run = conn.execute(
                 "SELECT current_attempt_generation, current_attempt_id, "
@@ -2178,6 +2188,13 @@ class RuntimeRepository(
                     attempt=latest_attempt,
                     now=now,
                     scope=scope,
+                )
+                self._reopen_task_run_for_attempt_conn(
+                    conn,
+                    run,
+                    agent_run_id,
+                    str(activated["attempt_id"] or ""),
+                    now,
                 )
                 conn.commit()
                 return activated
@@ -3060,6 +3077,7 @@ class RuntimeRepository(
             return {"settled": False, "reason": "invalid_status"}
         now = time.time() if now is None else now
         with self.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             cur = conn.execute(
                 "UPDATE task_runs SET status = ?, closed_at = ?, updated_at = ? "
                 "WHERE task_run_id = ? AND closed_at = 0",
@@ -3104,6 +3122,7 @@ class RuntimeRepository(
             return {"settled": False, "reason": "missing_task_run"}
         now = time.time() if now is None else now
         with self.transaction() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             task_run = conn.execute(
                 "SELECT task_id, closed_at FROM task_runs WHERE task_run_id = ?",
                 (selected_run,),

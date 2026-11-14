@@ -91,6 +91,39 @@ def stop_goal_after_error(
 
 # LLM: 精确 Goal 和任务状态决定续跑；子树仍活动或未知时由原生命周期事件接续，不另建轮询。
 # 函数用途: 一轮报告确认后同步受阻任务状态，或经原去重发布能力安排下一轮；失败仍只记原警告。
+def _raise_goal_wake_with_retry(
+    dependencies: GoalContinuationDependencies,
+    goal: object,
+    *,
+    channel: str,
+    conversation_id: str,
+    now: float,
+) -> None:
+    try:
+        dependencies.raise_wake(
+            goal,
+            channel=channel,
+            conversation_id=conversation_id,
+            now=now,
+        )
+    except Exception as first_exc:
+        _LOGGER.warning(
+            "thread goal continuation wake attempt failed; retrying once code=%s goal_id=%s "
+            "effect_outcome=%s next_action=%s error=%s",
+            "GOAL_CONTINUATION_WAKE_RETRYING",
+            getattr(goal, "goal_id", ""),
+            "not_yet_raised",
+            "retrying idempotent thread-goal wake once",
+            first_exc,
+        )
+        dependencies.raise_wake(
+            goal,
+            channel=channel,
+            conversation_id=conversation_id,
+            now=now,
+        )
+
+
 def continue_goal_after_report(
     dependencies: GoalContinuationDependencies,
     signal: WakeSignal,
@@ -104,22 +137,42 @@ def continue_goal_after_report(
         loaded = _active_goal_for_signal(dependencies, signal)
         if loaded is None:
             return
-        # 子代理还在跑时父级不续跑，这一片也不计入空转（父级在等子代理，不是在空烧）。
-        subagent_phase, state_error = dependencies.subagent_phase(loaded[0].task_id)
-        if subagent_phase == "subagents_active" or state_error:
+        # 仅在确认有子代理仍在跑时跳过本片；子代理状态读报错时继续受 idle_limit 约束推进，不静默丢唤醒。
+        try:
+            subagent_phase, _state_error = dependencies.subagent_phase(loaded[0].task_id)
+        except Exception as phase_exc:
+            _LOGGER.warning(
+                "goal subagent phase check failed; continuing with idle fuse code=%s task_id=%s "
+                "effect_outcome=%s next_action=%s error=%s",
+                "SUBAGENT_STATE_UNKNOWN_CONTINUE",
+                loaded[0].task_id,
+                "continuing_goal_slice",
+                "verify subagent store readability on next scheduler tick",
+                phase_exc,
+            )
+            subagent_phase = "subagent_state_unknown"
+        if subagent_phase == "subagents_active":
             return
         goal = _record_continuation_slice(dependencies, signal, report, _GoalSlice(*loaded, now))
         if goal is None or goal.status != "active":
             return
         metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
-        dependencies.raise_wake(
+        _raise_goal_wake_with_retry(
+            dependencies,
             goal,
             channel=str(metadata.get("channel") or ""),
             conversation_id=str(metadata.get("conversation_id") or ""),
             now=now,
         )
-    except Exception:
-        _LOGGER.warning("thread goal continuation failed", exc_info=True)
+    except Exception as exc:
+        _LOGGER.warning(
+            "thread goal continuation failed code=%s effect_outcome=%s next_action=%s error=%s",
+            "GOAL_CONTINUATION_WAKE_FAILED",
+            "goal_continuation_wake_not_raised",
+            "inspect conversation store health or retry continuation wake on next tick",
+            exc,
+            exc_info=True,
+        )
 
 
 # LLM: 本片续跑判定需要的三项事实：wake 精确匹配的 active 目标、它的任务状态、本次结算时刻。

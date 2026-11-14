@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from functools import partial
 
 from ..concurrency import daemon_executor
-from ..concurrency.interrupt import register_interruptible
+from ..concurrency.interrupt import interrupt_by_name, register_interruptible
 from ..runtime_errors import runtime_error_report
 
 _LOGGER = logging.getLogger("agent.conversation.background_claim_heartbeat")
@@ -104,7 +104,7 @@ class ConversationRunClaimHeartbeat:
     def __init__(self, config: dict):
         thread_id = str(config.get("thread_id") or "")
         self.name = f"conversation-claim-heartbeat-{thread_id}"
-        self._gate, self._done, self._pending = threading.Lock(), threading.Event(), None
+        self._gate, self._done, self._pending = threading.RLock(), threading.Event(), None
         self.store = config["store"]
         self.thread_id = thread_id
         self.claim_scope_id = str(config.get("claim_scope_id") or "").strip()
@@ -112,10 +112,24 @@ class ConversationRunClaimHeartbeat:
         self.lease_seconds = max(1, int(config.get("lease_seconds") or 1))
         self.interval_seconds = max(0.05, float(config.get("interval_seconds") or 0.05))
         self.stop_event = threading.Event()
+        self._lease_deadline: float | None = None
 
     def start(self) -> None:
-        self._pending = daemon_executor.DeferredCall(lambda: _CLAIM_RENEWS.submit(copy_context().run, self._tick))
-        _CLAIM_TICKS.start(self._pending, self.interval_seconds)
+        with self._gate:
+            if self._pending is not None:
+                self._pending.cancel()
+                self._pending = None
+            if self.stop_event.is_set():
+                self._done.set()
+                return
+            if self._lease_deadline is None:
+                self._lease_deadline = time.monotonic() + self.lease_seconds
+            self._done.clear()
+            pending = daemon_executor.DeferredCall(
+                lambda: _CLAIM_RENEWS.submit(copy_context().run, self._tick)
+            )
+            self._pending = pending
+            _CLAIM_TICKS.start(pending, self.interval_seconds)
 
     def is_alive(self) -> bool:
         return self._pending is not None and not self._done.is_set()
@@ -126,38 +140,66 @@ class ConversationRunClaimHeartbeat:
     def stop(self) -> None:
         self.stop_event.set()
         if self._gate.acquire(timeout=self.interval_seconds + 5.0):
-            self._pending.cancel()
-            self._done.set()
-            self._gate.release()
+            try:
+                if self._pending is not None:
+                    self._pending.cancel()
+                    self._pending = None
+                self._lease_deadline = None
+                self._done.set()
+            finally:
+                self._gate.release()
 
     def _tick(self) -> None:
         with self._gate:
             self.run()
 
     def run(self) -> None:
-        while not self.stop_event.is_set():
-            try:
-                renewed = self.store.claims.renew(
-                    {
-                        "thread_id": self.thread_id,
-                        "claim_scope_id": self.claim_scope_id,
-                        "claim_id": self.claim_id,
-                        "lease_seconds": self.lease_seconds,
-                        "now": time.time(),
-                    }
-                )
-            except BaseException as exc:  # noqa: BLE001 - daemon heartbeat must not crash raw
-                _LOGGER.warning(
-                    "conversation claim heartbeat stopped early thread=%s claim=%s: %s",
-                    self.thread_id,
-                    self.claim_id,
-                    runtime_error_report(exc, context="conversation_claim_heartbeat.renew"),
-                )
-                break
-            if renewed is None:
-                break
-            return self.start()
-        self._done.set()
+        with self._gate:
+            while not self.stop_event.is_set():
+                try:
+                    renewed = self.store.claims.renew(
+                        {
+                            "thread_id": self.thread_id,
+                            "claim_scope_id": self.claim_scope_id,
+                            "claim_id": self.claim_id,
+                            "lease_seconds": self.lease_seconds,
+                            "now": time.time(),
+                        }
+                    )
+                except OSError as exc:
+                    _LOGGER.warning(
+                        "conversation claim heartbeat transient renew error thread=%s claim=%s: %s",
+                        self.thread_id,
+                        self.claim_id,
+                        runtime_error_report(exc, context="conversation_claim_heartbeat.renew"),
+                    )
+                    if not self.stop_event.is_set() and (
+                        self._lease_deadline is None or time.monotonic() < self._lease_deadline
+                    ):
+                        return self.start()
+                    if not self.stop_event.is_set() and self.claim_id:
+                        interrupt_by_name(conversation_claim_interrupt_name(self.claim_id))
+                    break
+                except BaseException as exc:  # noqa: BLE001 - daemon heartbeat must not crash raw
+                    _LOGGER.warning(
+                        "conversation claim heartbeat stopped early thread=%s claim=%s: %s",
+                        self.thread_id,
+                        self.claim_id,
+                        runtime_error_report(exc, context="conversation_claim_heartbeat.renew"),
+                    )
+                    break
+                if renewed is None:
+                    if not self.stop_event.is_set() and self.claim_id:
+                        interrupt_by_name(conversation_claim_interrupt_name(self.claim_id))
+                    break
+                self._lease_deadline = time.monotonic() + self.lease_seconds
+                if self.stop_event.is_set():
+                    break
+                return self.start()
+            if self._pending is not None:
+                self._pending.cancel()
+                self._pending = None
+            self._done.set()
 
 
 # LLM: Acquisition retains cancellation/cadence; a host transition serializes each attempt with

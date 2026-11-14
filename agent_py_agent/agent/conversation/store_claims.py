@@ -26,9 +26,10 @@ _STORE_LOGGER = logging.getLogger("agent.conversation.store")
 # 函数用途: 将持久时间数字转换为浮点数，无效值沿用原零值处理。
 def float_value(value: object) -> float:
     try:
-        return float(value or 0.0)
-    except (TypeError, ValueError):
+        parsed = float(value or 0.0)
+    except (TypeError, ValueError, OverflowError):
         return 0.0
+    return parsed if math.isfinite(parsed) else 0.0
 
 
 _FINISH_STATUSES = {"finished", "failed", "cancelled"}
@@ -200,8 +201,28 @@ def _claim_load_error(exc: BaseException, path: Path) -> dict[str, Any]:
 def _stale_finished_claim(claim: dict[str, Any], current: float, retention_seconds: float) -> bool:
     if not claim or str(claim.get("status") or "") not in _FINISH_STATUSES:
         return False
-    finished_at = float(claim.get("finished_at") or 0.0)
+    finished_at = float_value(claim.get("finished_at"))
     return finished_at > 0 and current - finished_at > retention_seconds
+
+
+def _safe_process_identity_is_live(identity: object) -> bool | None:
+    if identity is None or identity == {} or not isinstance(identity, dict):
+        return None
+    try:
+        return process_identity_is_live(identity)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _is_current_process_identity(identity: object) -> bool:
+    if not isinstance(identity, dict) or not identity:
+        return False
+    current_identity = build_process_identity()
+    return (
+        str(identity.get("host_id") or "") == str(current_identity.get("host_id") or "")
+        and identity.get("pid") == current_identity.get("pid")
+        and identity.get("start_time") == current_identity.get("start_time")
+    )
 
 
 # LLM: Serialize each claim in the owner store; death/TTL cannot transfer recoverable foreground
@@ -221,6 +242,55 @@ class ClaimStore:
         self._require_thread = require_thread
         self._load_thread = load_thread
 
+
+    def _runtime_authority_settled(self, authority: object) -> bool:
+        """核验 RuntimeDB 中绑定的 attempt 是否已终态收尾且释放执行锁。"""
+        if not isinstance(authority, dict):
+            return False
+        agent_run_id = str(authority.get("agent_run_id") or "").strip()
+        attempt_id = str(authority.get("attempt_id") or "").strip()
+        if not agent_run_id or not attempt_id:
+            return False
+        import sqlite3
+
+        from ..runtime_db.operations import ATTEMPT_STATUS_UNKNOWN, attempt_status_is_terminal
+        from ..runtime_db.repository import RuntimeRepository
+        from ..runtime_db.schema import runtime_db_path
+
+        db_path = runtime_db_path(self.storage.root.parent)
+        if not db_path.is_file():
+            return False
+        try:
+            repo = RuntimeRepository(db_path, read_only=True, existing_only=True)
+            attempt = repo.get_attempt(attempt_id)
+            if attempt is None or str(attempt["agent_run_id"] or "") != agent_run_id:
+                return False
+            status = str(attempt["status"] or "")
+            return (
+                attempt_status_is_terminal(status)
+                and status != ATTEMPT_STATUS_UNKNOWN
+                and float_value(attempt["ended_at"]) > 0
+                and repo.get_agent_run_exec_lock(agent_run_id) is None
+            )
+        except (OSError, sqlite3.Error):
+            return False
+
+    def _expired_running_claim_holder_live(
+        self, data: dict[str, Any], owner_live: bool | None
+    ) -> bool:
+        """判断 TTL 已过期但仍为 running 的租约是否由存活执行体持有。"""
+        if owner_live is False or owner_live is None:
+            return False
+        old_claim_id = str(data.get("claim_id") or "").strip()
+        if _is_current_process_identity(data.get("owner_process")):
+            from ..concurrency.interrupt import is_interruptible_registered
+            from .run_claim import conversation_claim_interrupt_name
+
+            return bool(
+                old_claim_id
+                and is_interruptible_registered(conversation_claim_interrupt_name(old_claim_id))
+            )
+        return not self._runtime_authority_settled(data.get("runtime_authority"))
 
     # LLM: Atomically acquire a claim; only the original host-bound task can resume a pinned claim.
     #   替换前在同一claim锁内把旧终态claim仍被原取消需要的证明存回原SessionTask（claim→task锁序）；失败则不替换。
@@ -267,8 +337,19 @@ class ClaimStore:
                 str(data.get("status") or "") == "running"
                 and float_value(data.get("expires_at")) > current
             )
-            owner_stale = active and process_identity_is_live(data.get("owner_process")) is False
-            if active and not owner_stale:
+            running = str(data.get("status") or "") == "running"
+            owner_live = (
+                _safe_process_identity_is_live(data.get("owner_process"))
+                if running
+                else None
+            )
+            owner_stale = active and owner_live is False
+            expired_live_holder = (
+                running
+                and not active
+                and self._expired_running_claim_holder_live(data, owner_live)
+            )
+            if (active and not owner_stale) or expired_live_holder:
                 claimed = False
                 return data
             # 只交实际旧记录；检查点读写/身份失败上抛，旧终态claim原样保留供下次健康领取重试。
