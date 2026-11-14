@@ -74,14 +74,16 @@ def test_post_commit_tool_outcome_is_unknown(tmp_path, monkeypatch, kind):
         assert result.reported_error_code == "TOOL_POST_COMMIT_READBACK_FAILED"
         assert result.failure_stage == "effect_reconciliation"
     else:
-        assert result.error_code == "UNKNOWN_ERROR"
+        assert result.error_code == "TOOL_POST_COMMIT_READBACK_FAILED"
         assert result.reported_error_code == "TOOL_POST_COMMIT_READBACK_FAILED"
         assert result.failure_stage == "execution"
     assert result.effect_outcome == "unknown"
     assert result.retryable is False
+    assert result.next_action
     data = json.loads(result.output)
     assert data["failure_stage"] == "post_commit_readback"
     assert data["committed"] is True
+    assert data["target_asset_id"] == "demo"
     if kind == "workflow":
         assert data["reported_error_code"] == "TOOL_POST_COMMIT_READBACK_FAILED"
 

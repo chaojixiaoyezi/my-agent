@@ -60,7 +60,8 @@ def _model_spec() -> ToolModelSpec:
         '群不能借个人保护范围编辑权；未知保护信息会拒绝代写。'
         '表格写入回执区分已接受与读回 verified/mismatch/unverifiable/disabled；未核验不代表未写入，不能直接重复追加。'),
         input_schema={'type': 'object', 'properties': {
-            'action': {'type': 'string', 'enum': list(_TYPES)}, 'resource_token': {'type': 'string'},
+            'action': {'type': 'string', 'enum': list(_TYPES), 'description': '云资源操作动作：表格用 sheet_meta/sheet_read/sheet_append/sheet_update/sheet_add/sheet_rename，文档用 document_read/document_append，知识库节点解析用 wiki_resolve。'},
+            'resource_token': {'type': 'string', 'description': '飞书云文档、电子表格或知识库节点的准确编号（token），不传完整网页 URL。'},
             'identity': {'type': 'string', 'enum': ['bot', 'user'], 'description': '默认bot使用应用身份；user须当前私人用户已通过feishu_auth本人授权。群资源使用bot。'},
             'resource_type': {'type': 'string', 'description': '可选：wiki 表示传入知识库节点编号；否则与动作对应的 sheet/docx 一致。'},
             'title': {'type': 'string', 'minLength': 1, 'maxLength': 100, 'description': 'sheet_add/sheet_rename必填，子表标题，最长100字符，不含 / \\ ? * [ ] :。'},
@@ -72,7 +73,21 @@ def _model_spec() -> ToolModelSpec:
             'children': {'type': 'array', 'items': {'type': 'object'}, 'description': 'document_append 必填，飞书文档块对象。'},
             'page_token': {'type': 'string', 'description': 'document_read 分页游标。'},
         }, 'required': ['action', 'resource_token'], 'additionalProperties': False},
-        hints=ToolModelHints(category='network', keywords=('飞书', '云文档', '表格', 'wiki'),
+        hints=ToolModelHints(category='network',
+            use_cases=(
+                '查询或批量读写本人已授权、当前群已共享或管理员授权的飞书电子表格与云文档',
+                '先用 wiki_resolve 解析知识库节点编号，或先用 sheet_meta 查询准确 sheet_id 再读写表格范围',
+            ),
+            avoid_when=(
+                '查询飞书应用权限清单或发起本人 OAuth 登录时用 feishu_auth',
+                '读取飞书群聊或私聊消息历史时用 channel_messages；对外发送消息用 send_message',
+            ),
+            keywords=('飞书', '云文档', '表格', 'wiki'),
+            examples=(
+                '{"action":"sheet_meta","resource_token":"shtcn_example_token"}',
+                '{"action":"sheet_read","resource_token":"shtcn_example_token","range":"SheetId1!A1:D20"}',
+                '{"action":"document_read","resource_token":"doxcn_example_token"}',
+            ),
             default_deferred=True, deferred_summary='使用宿主凭据读写本人或当前群已共享的飞书表格和云文档'))
 
 

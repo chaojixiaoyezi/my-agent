@@ -33,9 +33,25 @@ class ToolProgramTool(BaseTool):
         '失败不会因筛选消失。先tool_search加载底层工具；写入/删除/发消息继续原工具。'
         '长命令用run_command(run_in_background=true)取得句柄，勿在此循环等待。'),
         input_schema={'type':'object', 'properties':{
-            'steps':{'type':'array','minItems':1,'maxItems':16,'items':{'type':'object'}},
-            'return_step':{'type':'string'}},'required':['steps'],'additionalProperties':False},
-        hints=ToolModelHints(category='orchestration',default_deferred=True,
+            'steps':{'type':'array','minItems':1,'maxItems':16,'items':{'type':'object'},
+                'description':'按序执行的有界只读步骤数组（1..16步，总工具调用上限32次）；每步须含唯一 id，可为单次/foreach 工具调用、calls 批量只读调用，或基于 "$ref" 的 data+project 筛选去重统计。'},
+            'return_step':{'type':'string',
+                'description':'可选指定作为最终 result 返回的步骤 id；省略时返回最后一个步骤的结果。'}},'required':['steps'],'additionalProperties':False},
+        hints=ToolModelHints(category='orchestration',
+            use_cases=(
+                '单回合对已加载的只读工具做有界批量查询、foreach 遍历（最多32次调用）及内存筛选/去重/计数整理',
+                '减少多轮重复只读取数往返，同时完整保留每次底层工具调用的状态与证据引用',
+            ),
+            avoid_when=(
+                '需要编写或沉淀可复用的 Python/Shell 代码资产与数据源绑定时用 scripts（tool_program 不执行任意代码）',
+                '需要多步骤持久化编排、含写入副作用或支持断点暂停恢复（resume）时用 workflows',
+                '需要注册未来到点执行、周期性 cron 或群消息事件触发任务时用 schedule',
+                '单次简单读取一个文件或网页时直接调用对应只读工具，无需套用 tool_program',
+            ),
+            examples=(
+                '{"steps":[{"id":"files","tool":"list_files","arguments":{"path":"."}},{"id":"top","data":{"$ref":"files#/json/entries"},"project":{"limit":10}}],"return_step":"top"}',
+            ),
+            default_deferred=True,
             deferred_summary='确定的只读取数、有限遍历、筛选去重统计；保持原工具权限。',
             keywords=('batch','pipeline','批量','筛选','去重','统计')))
     runtime_policy = ToolRuntimePolicy(effect_resolver=EffectResolverPolicy('read_only'),
