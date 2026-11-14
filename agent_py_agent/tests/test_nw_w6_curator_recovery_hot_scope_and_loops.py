@@ -365,10 +365,22 @@ def test_w6_24_expired_executing_lease_reclaimed_on_identity_mismatch_or_missing
     past_iso = (now - timedelta(minutes=10)).isoformat()
 
     # 1. PID 碰巧与当前存活进程一致，但 process_identity 启动时间不匹配（同号 PID 重用）。
+    #    必须保持与当前平台运行时一致的 start_time 类型（Linux 为 int ticks，macOS 为 str）。
     host = _local_hostname()
     live_identity = build_process_identity(os.getpid())
     reused_identity = dict(live_identity)
-    reused_identity["start_time"] = "Thu Jan  1 00:00:00 1970"
+    original_start = reused_identity.get("start_time")
+    if type(original_start) is int:
+        reused_identity["start_time"] = original_start + 1
+    elif isinstance(original_start, str) and ":" in original_start and original_start.split(":", 1)[0].isdigit():
+        sec, rest = original_start.split(":", 1)
+        reused_identity["start_time"] = f"{int(sec) + 1}:{rest}"
+    else:
+        reused_identity["start_time"] = (
+            "Thu Jan  1 00:00:01 1970"
+            if original_start != "Thu Jan  1 00:00:01 1970"
+            else "Thu Jan  1 00:00:02 1970"
+        )
     stale_reused_lease = {
         "lease_id": "lease-reused-pid",
         "run_id": "run-reused-pid",
@@ -417,6 +429,99 @@ def test_w6_24_expired_executing_lease_reclaimed_on_identity_mismatch_or_missing
     store._write_unlocked(replace(store.load(), active_lease=genuine_live_lease))
     assert stale_lease_reclaimable(genuine_live_lease) is False
     assert execution_lease_protected(genuine_live_lease) is True
+    assert store.acquire(reason="admin", config_revision="rev1", lease_seconds=60, now=now) is None
+
+
+def test_w6_24_process_identity_int_and_type_mismatch_cross_platform(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """跨平台确定性验证 Linux int 型 start_time 匹配、同类型失配与跨类型不确定降级分支。"""
+    from agent_py_agent.agent.common import executor_registration, heartbeat
+    from agent_py_agent.agent.gateway_parts import daemon_metadata
+
+    monkeypatch.setattr(executor_registration, "managed_request_execution_required", lambda: False)
+    monkeypatch.setattr(daemon_metadata, "_get_process_start_time", lambda _pid: 123456)
+    if os.name == "nt":
+        monkeypatch.setattr(heartbeat, "windows_process_alive", lambda _pid: True)
+
+    store = MemoryCuratorStateStore(tmp_path / "curator_state_int.json")
+    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    past_iso = (now - timedelta(minutes=10)).isoformat()
+    future_iso = (now + timedelta(minutes=10)).isoformat()
+    host = _local_hostname()
+
+    live_int_identity = daemon_metadata.build_process_identity(os.getpid())
+    assert type(live_int_identity["start_time"]) is int
+    assert live_int_identity["start_time"] == 123456
+
+    # 1. 同为 int 且数值失配（如 Linux /proc/<pid>/stat clock ticks 不同）：确认旧代已死，可立即提前接管。
+    mismatched_int_identity = dict(live_int_identity)
+    mismatched_int_identity["start_time"] = 123457
+    assert daemon_metadata.process_identity_is_live(mismatched_int_identity) is False
+    reused_int_lease = {
+        "lease_id": "lease-int-mismatch",
+        "run_id": "run-int-mismatch",
+        "host": host,
+        "pid": os.getpid(),
+        "phase": "executing",
+        "acquired_at": (now - timedelta(minutes=20)).isoformat(),
+        "expires_at": future_iso,
+        "process_identity": mismatched_int_identity,
+    }
+    store._write_unlocked(replace(store.load(), active_lease=reused_int_lease))
+    assert stale_lease_reclaimable(reused_int_lease) is True
+    assert execution_lease_protected(reused_int_lease) is False
+    reclaimed_int = store.acquire(reason="admin", config_revision="rev1", lease_seconds=60, now=now)
+    assert reclaimed_int is not None
+    assert reclaimed_int[1]["lease_id"] != "lease-int-mismatch"
+
+    # 2. 跨类型（当前 int vs 记录 str）：process_identity_is_live 必须返回 None（不可比），
+    #    同 PID 未过期时禁止提前抢占，已过期时交由 expires_at 兜底。
+    cross_type_identity = dict(live_int_identity)
+    cross_type_identity["start_time"] = "123457"
+    assert daemon_metadata.process_identity_is_live(cross_type_identity) is None
+    cross_type_unexpired_lease = {
+        "lease_id": "lease-cross-type-unexpired",
+        "run_id": "run-cross-type",
+        "host": host,
+        "pid": os.getpid(),
+        "phase": "executing",
+        "acquired_at": (now - timedelta(minutes=1)).isoformat(),
+        "expires_at": future_iso,
+        "process_identity": cross_type_identity,
+    }
+    store._write_unlocked(replace(store.load(), active_lease=cross_type_unexpired_lease))
+    assert stale_lease_reclaimable(cross_type_unexpired_lease) is False
+    assert execution_lease_protected(cross_type_unexpired_lease) is False
+    assert store.acquire(reason="admin", config_revision="rev1", lease_seconds=60, now=now) is None
+
+    cross_type_expired_lease = {
+        **cross_type_unexpired_lease,
+        "lease_id": "lease-cross-type-expired",
+        "expires_at": past_iso,
+    }
+    store._write_unlocked(replace(store.load(), active_lease=cross_type_expired_lease))
+    assert stale_lease_reclaimable(cross_type_expired_lease) is False
+    reclaimed_expired = store.acquire(reason="admin", config_revision="rev1", lease_seconds=60, now=now)
+    assert reclaimed_expired is not None
+    assert reclaimed_expired[1]["lease_id"] != "lease-cross-type-expired"
+
+    # 3. 同为 int 且数值完全匹配（123456 == 123456）：即使租约已过期仍受 executing 保护。
+    assert daemon_metadata.process_identity_is_live(live_int_identity) is True
+    live_int_lease = {
+        "lease_id": "lease-int-live",
+        "run_id": "run-int-live",
+        "host": host,
+        "pid": os.getpid(),
+        "phase": "executing",
+        "acquired_at": (now - timedelta(minutes=20)).isoformat(),
+        "expires_at": past_iso,
+        "process_identity": live_int_identity,
+    }
+    store._write_unlocked(replace(store.load(), active_lease=live_int_lease))
+    assert stale_lease_reclaimable(live_int_lease) is False
+    assert execution_lease_protected(live_int_lease) is True
     assert store.acquire(reason="admin", config_revision="rev1", lease_seconds=60, now=now) is None
 
 

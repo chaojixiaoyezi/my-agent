@@ -76,15 +76,21 @@ def crashed_case(tmp_path, crash_after):
     ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     stdout, stderr = child.communicate(timeout=20)
     assert child.returncode == 73, (child.returncode, stdout, stderr)
-    service = fixtures._service(tmp_path, fixtures._StaticStructuredBackend(output), store)
-    active = service.state_store.load().active_lease
+    # 启动 MemoryCuratorService.__init__ 前先核对子进程崩溃现场与孤儿事务 manifest 存在。
+    pre_state = cs.MemoryCuratorStateStore(tmp_path / "memory/curator/state.json").load()
+    active = pre_state.active_lease
     assert active["pid"] == child.pid
     assert datetime.fromisoformat(active["expires_at"]) > datetime.now(timezone.utc)
     with pytest.raises(ProcessLookupError):
         os.kill(child.pid, 0)
-    manifests = list(service.committer.transactions_dir.glob("*/manifest.json"))
-    assert len(manifests) == 1
-    return service, thread, message, manifests[0]
+    pre_manifests = list((tmp_path / "memory/curator/transactions").glob("*/manifest.json"))
+    assert len(pre_manifests) == 1
+    # #21 Option A: 构造 MemoryCuratorService 时必须自动执行启动未完成事务恢复与回滚。
+    service = fixtures._service(tmp_path, fixtures._StaticStructuredBackend(output), store)
+    assert list(service.committer.transactions_dir.glob("*/manifest.json")) == []
+    assert not pre_manifests[0].exists()
+    assert any(r.status == "recovered_rollback" for r in service.run_log.list())
+    return service, thread, message, pre_manifests[0]
 
 
 @pytest.mark.parametrize("crash_after", [1, 2, 3])
@@ -95,10 +101,6 @@ def test_restart_never_executes_over_unrecovered_partial_transaction(tmp_path, c
     facts = {"status": result.status, "failure_code": result.failure_code,
              "orphan_manifest": manifest.exists(), "audit": [r.status for r in records]}
     print("FIRST_RESTART", json.dumps(facts, sort_keys=True))
-    # Legacy code may wait for TTL; early recovery must clean the old transaction first.
-    if result.status == "busy":
-        assert manifest.exists() and service.backend.calls == 0
-        return
     assert result.status == "succeeded", facts
     assert not manifest.exists(), facts
     assert any(r.status == "recovered_rollback" for r in records), facts
@@ -112,11 +114,13 @@ def test_restart_still_recovers_after_next_tick_and_expiry(tmp_path, crash_after
     facts = {"first": first.status, "second": second.status, "failure_code": second.failure_code,
              "manifests": len(list(service.committer.transactions_dir.glob("*/manifest.json")))}
     print("NEXT_RESTART", json.dumps(facts, sort_keys=True))
+    assert first.status == "succeeded", facts
     assert second.status == "succeeded", facts
     assert not list(service.committer.transactions_dir.glob("*/manifest.json")), facts
     state = service.state_store.load()
     assert state.per_thread_cursors[thread.thread_id] == message.message_id
     assert len(service.candidate_service.list()) == 1
+    assert any(r.status == "recovered_rollback" for r in service.run_log.list())
 
 
 @pytest.mark.parametrize("model_fails", [False, True])

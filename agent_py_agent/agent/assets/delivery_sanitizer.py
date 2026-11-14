@@ -419,7 +419,7 @@ def _shared_scan(text):
 
 
 # LLM: 仅接受已确认合法的JSON；平坦词法栈保留容器敏感关联及重复键，解码判占位后只替换完整token，不重建字段。
-# 函数用途: 递归关联敏感键与其dict/list内字符串值；短值和转义值同样拒绝，显式替换使用固定字面值。
+# 函数用途: 递归关联敏感键与其dict/list内字符串和数字值；短值和转义值同样拒绝，显式替换使用固定字面值。
 def _json_structure_scan(text, *, replace=False):
     matches, pieces, cursor = [], [], 0
     # 每层保存继承敏感性和当前键敏感性；列表及根标量不凭空产生键关联。
@@ -437,10 +437,10 @@ def _json_structure_scan(text, *, replace=False):
             stack[-1][1] = False
             continue
         if not raw.startswith('"'):
-            # 仅检查JSON对象{}内部直接归属敏感键的未加引号数字标量；布尔/null作为非秘密保留，容器外文本交YAML扫描器处理。
-            direct_sensitive = len(stack) > 1 and stack[-1][1]
+            # 检查JSON对象{}或数组[]内继承自敏感键的未加引号数字标量；布尔/null作为非秘密保留，容器外文本交YAML扫描器处理。
+            inherited_sensitive = len(stack) > 1 and any(stack[-1])
             stack[-1][1] = False
-            if direct_sensitive and not _placeholder(raw, unquoted=True):
+            if inherited_sensitive and not _placeholder(raw, unquoted=True):
                 matches.append((*token.span(), 'json_sensitive_key'))
                 if not replace:
                     return matches, text
