@@ -74,12 +74,12 @@ LIVE_SWITCH_KEYS = frozenset({
     "tool_discovery_cache_pin_enabled",
     "tool_output_externalize_on_low_headroom", "tool_program_enabled", "tool_vector_search_enabled",
     "tui_follow_gateway_upgrade", "tui_mouse_capture_default", "web_terminal_enabled",
-}) | DEPLOY_LIVE_SWITCH_KEYS | SELF_LEARNING_LIVE_POLICY_KEYS
+}) | DEPLOY_LIVE_SWITCH_KEYS
 
 _AUTH_KEYS = frozenset({"auth_enabled", "gateway_per_user_owner_scoping", "admin_channel_identity_enabled",
                         "gateway_edge_identity_required"})
 _GUARD_KEYS = frozenset({"terminal_block_enabled", "hard_failure_halt_enabled"})
-_MEMORY_KEYS = LIVE_SWITCH_KEYS & frozenset(item.name for item in fields(MemorySettings))
+_MEMORY_KEYS = (LIVE_SWITCH_KEYS | SELF_LEARNING_LIVE_POLICY_KEYS) & frozenset(item.name for item in fields(MemorySettings))
 _LOCK = threading.RLock()
 _AUTH_PIPELINE_PRESENT = threading.Event()
 
@@ -91,7 +91,7 @@ def _same_live_value(left: object, right: object) -> bool:
 def live_switch_snapshot(config: object) -> dict[str, bool | int | str]:
     """提取配置对象上属于热刷新开关或自学习闭环策略的标量字段快照。"""
     snapshot: dict[str, bool | int | str] = {}
-    for key in sorted(LIVE_SWITCH_KEYS):
+    for key in sorted(LIVE_SWITCH_KEYS | SELF_LEARNING_LIVE_POLICY_KEYS):
         value = getattr(config, key, _MISSING)
         if value is not _MISSING and type(value) in (bool, int, str):
             snapshot[key] = value

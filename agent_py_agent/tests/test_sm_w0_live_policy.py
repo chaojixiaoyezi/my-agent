@@ -176,7 +176,7 @@ def test_v2_1_tunable_contracts_parameter_registry_and_applied_rules():
     for key, default_value in _EXPECTED_DEFAULTS.items():
         assert key in TUNABLE_KEYS, key
         assert TUNABLE_KEYS[key].effect == EFFECT_IMMEDIATE, key
-        assert key in LIVE_SWITCH_KEYS, key
+        assert (key in LIVE_SWITCH_KEYS) == isinstance(default_value, bool), key
         assert key in SELF_LEARNING_LIVE_POLICY_KEYS, key
 
         spec = registry[key]
