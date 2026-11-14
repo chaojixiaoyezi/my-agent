@@ -10116,12 +10116,12 @@
       "description": "tool_search(action=catalog) 实时摘要输出最大字节数上限；完整 manifest 不受此展示预算影响。"
     },
     {
-      "name": "_NARROWED_MODEL_SPEC_MAX",
+      "name": "_NARROWED_MODEL_SPEC_MAX_ENTRIES",
       "file": "agent_py_agent/agent/tooling/registry.py",
       "value": 128,
-      "unit": "",
+      "unit": "条",
       "category": "上限预算",
-      "description": ""
+      "description": "进程内按动作收窄的工具模型规格 LRU 缓存最大保留条数（满额时按最旧优先淘汰）。"
     },
     {
       "name": "_TOOL_PROJECTION_MAX_SNAPSHOTS",

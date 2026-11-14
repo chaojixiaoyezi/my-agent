@@ -5393,4 +5393,8 @@ ERROR_CONTRACTS.update({
         code="TOOL_PARTIAL_COMMIT", category="tool", retryable=False,
         recommended_action=RecoveryAction.MANUAL_REVIEW.value,
         recovery_hint="多文件或分步写入已发生部分落盘；请读取 files_modified 与 failed_path 核实实际变更，基于最新版本仅修复剩余部分，禁止原样整体重发。"),
+    "MCP_REMOTE_ERROR": ErrorContract(
+        code="MCP_REMOTE_ERROR", category="tool", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="远端 MCP 工具返回错误，请先阅读远端错误文本定位原因；若为变更类远端工具，发起新调用前须先核实目标当前状态，禁止原样重复提交同一调用。"),
 })
