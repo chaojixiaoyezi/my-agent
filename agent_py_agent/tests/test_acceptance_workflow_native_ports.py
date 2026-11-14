@@ -119,8 +119,8 @@ class CounterTool(BaseTool):
 
 @pytest.mark.parametrize('case,code,count', [
     ('schema', 'TOOL_PARAMETER_TYPE_INVALID', 0), ('permission', 'TOOL_NOT_ALLOWED', 0),
-    # 原ToolExecutor对retryable的只读handler失败本来重试一次；不改变该策略。
-    ('failure', 'TOOL_ERROR', 2), ('ok', '', 1)])
+    # W0 规则：只读 handler 失败仅在宿主判定的瞬态条件下自动重试（tooling/executor.py:931-953），TOOL_RUNTIME_ERROR 不可重试（contracts/error_taxonomy.py:5232-5236）。
+    ('failure', 'TOOL_RUNTIME_ERROR', 1), ('ok', '', 1)])
 def test_registered_fake_tool_schema_permission_error_and_replay(host, case, code, count):
     counter = CounterTool()
     host.tools.register(counter)

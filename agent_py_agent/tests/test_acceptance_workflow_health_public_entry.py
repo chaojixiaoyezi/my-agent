@@ -123,7 +123,7 @@ def test_public_health_wire_normal_failure_attempt_and_old_get(wire):
     assert client.call('workflows.run', {'workflow_ref': 'health-wire'})['ok']
     store = WorkflowRunStore(agent.home_paths.owner_home_dir)
     [run] = store.list_runs(limit=10)
-    assert run.status == 'failed' and run.steps[0].error_code == 'TOOL_ERROR'
+    assert run.status == 'failed' and run.steps[0].error_code == 'TOOL_RUNTIME_ERROR'
     old = client.call('workflow_runs.get', {'workflow_run_id': run.workflow_run_id})
     before = snapshot(store.root)
     result = client.call('workflows.health.get', {'workflow_ref': 'health-wire'})
@@ -132,7 +132,8 @@ def test_public_health_wire_normal_failure_attempt_and_old_get(wire):
     assert data['workflow_ref'] == 'health-wire'
     assert data['health']['sampled_runs'] == 1
     assert data['health']['bounded_limit'] == 50
-    assert data['health']['reason_classes']['TOOL_ERROR'] == 1
+    assert data['health']['reason_classes']['TOOL_RUNTIME_ERROR'] == 1
+    assert 'TOOL_ERROR' not in data['health']['reason_classes']
     assert data['health']['retry_stats']['total_attempts'] == run.steps[0].attempt_count
     assert data['health']['step_health']['count']['duration_ms']['count'] == 1
     assert data['health_read_coverage']['read_count'] == 1
@@ -326,7 +327,8 @@ def test_server_wire_observation_does_not_hide_client_gap(wire):
         v13_action_spec('workflows.health.get').native_request_schema)
     status, body = client.transport('/client/business', request, timeout=10)
     assert status == 200 and body['state'] == 'completed' and body['error'] is None, body
-    assert body['data']['health']['reason_classes']['TOOL_ERROR'] == 1
+    assert body['data']['health']['reason_classes']['TOOL_RUNTIME_ERROR'] == 1
+    assert 'TOOL_ERROR' not in body['data']['health']['reason_classes']
     assert body['data']['health']['retry_stats']['total_attempts'] == run.steps[0].attempt_count
     assert body['data']['health']['sampled_runs'] == 1
     assert snapshot(root) == before

@@ -214,7 +214,7 @@ def test_execute_authorized_tool_non_outcome_and_facts_guard() -> None:
 
     outcome = execute_authorized_tool(req)
     assert outcome.ok is False
-    assert outcome.error_code == "INTERNAL_ERROR"
+    assert outcome.error_code == "TOOL_RUNTIME_ERROR"
     assert outcome.effect_outcome == "unknown"
     assert "invalid handler return type" in outcome.output
 
@@ -242,7 +242,7 @@ def test_execute_authorized_tool_non_outcome_and_facts_guard() -> None:
     ):
         fact_fail_outcome = execute_authorized_tool(ok_req)
         assert fact_fail_outcome.ok is False
-        assert fact_fail_outcome.error_code == "INTERNAL_ERROR"
+        assert fact_fail_outcome.error_code == "TOOL_RUNTIME_ERROR"
         assert fact_fail_outcome.effect_outcome == "unknown"
 
 

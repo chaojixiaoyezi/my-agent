@@ -63,7 +63,7 @@ def test_yaml_switch_reaches_runtime_and_cannot_be_self_reenabled(make_agent, tm
     before = path.read_bytes()
     denied = execute_registry_test_call(agent.tools, 'user_config',
         {'action': 'set', 'key': 'enable_self_map', 'value': str(not enabled).lower()})
-    assert not denied.ok and 'PARAMETER_BOUNDARY' in denied.output
+    assert not denied.ok and denied.effect_outcome == 'not_started' and denied.metadata.get('reported_error_code') == 'PARAMETER_BOUNDARY'
     assert path.read_bytes() == before and agent.config.enable_self_map is enabled
 
 

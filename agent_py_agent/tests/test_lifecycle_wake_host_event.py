@@ -285,7 +285,17 @@ def test_wake_recommendations_are_a_fixed_shortlist_led_by_list_agents(tmp_path)
     assert names == ["list_agents", "read_file", "resolve_capability_requests", "send_guidance", "cancel_subagents"]
     without_list = [tool for tool in params.allowed_tools if tool != "list_agents"]
     assert recommendations(without_list, _trigger()).splitlines()[1].startswith("- read_file：")
-    assert "create_subagents" in recommendations(params.allowed_tools, None)
+    normal = recommendations(params.allowed_tools, None)
+    normal_names = [line[2:].split("：", 1)[0] for line in normal.splitlines() if line.startswith("- ")]
+    assert normal_names != ["list_agents", "read_file", "resolve_capability_requests", "send_guidance", "cancel_subagents"]
+    assert "create_subagents" not in normal_names
+    assert "create_subagents" in {
+        spec.name
+        for spec in agent.tools.model_visible_specs(
+            allowed_tools=params.allowed_tools,
+            runtime_snapshot=agent.tools.runtime_snapshot(allowed_tools=params.allowed_tools, run_id=params.run_id),
+        )
+    }
 
 
 def test_wake_slice_history_keeps_the_event_but_not_the_slice_injection() -> None:

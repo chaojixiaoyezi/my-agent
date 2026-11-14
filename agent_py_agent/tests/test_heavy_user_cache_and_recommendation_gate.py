@@ -368,6 +368,25 @@ def _tier2_sections(call):
     return sections
 
 
+def _full_recommendation_blocks(messages):
+    blocks = []
+    for message in messages or []:
+        content = message.get("content")
+        texts = (
+            [content]
+            if isinstance(content, str)
+            else [
+                part.get("text", "")
+                for part in content or []
+                if isinstance(part, dict) and part.get("type") == "text"
+            ]
+        )
+        for text in texts:
+            if "## 本轮推荐的固定方法" in text:
+                blocks.append(text)
+    return blocks
+
+
 # LLM: 必须核对确切父子、IO字段、别名及两条侧文件经验；标题存在不等于I6通过。
 # 函数用途: 对真实Tier-2完整JSON条目执行I6断言。
 def _assert_job48_tier2(section):
@@ -483,7 +502,13 @@ def test_heavy_user_cache_recommendation_and_compaction_gate(tmp_path, profile, 
         if source == "prompt.tool_recommendations"
     ]
     assert len(sections) == 1 and "fixed-script-000" in sections[0]
-    assert sections[0] == latest[-1], "压缩面必须保留第二轮的当前推荐"
+    tier2_pos = sections[0].find("## 本轮推荐的固定方法")
+    assert tier2_pos >= 0
+    tier2_section = sections[0][tier2_pos:]
+    assert tier2_section == latest[-1], "压缩面必须保留第二轮的当前推荐"
+    live_full_blocks = _full_recommendation_blocks(second[-1]["messages"])
+    assert live_full_blocks and live_full_blocks[-1] == sections[0]
+    assert live_full_blocks[-1].encode("utf-8") == sections[0].encode("utf-8")
     assert "## 本轮推荐的固定方法" not in prepared.stable_prompt_prefix
     provider.phase, provider.compacting = "compact", True
     before = len(provider.calls)
@@ -501,7 +526,10 @@ def test_heavy_user_cache_recommendation_and_compaction_gate(tmp_path, profile, 
         compacted.compacted and compacted.thread.compact_generation == stored.compact_generation + 1
     )
     assert len(compact_calls) == 1 and compact_calls[0]["compact"]
-    assert _tier2_sections(compact_calls[0])[-1] == sections[0]
+    assert _tier2_sections(compact_calls[0])[-1] == tier2_section
+    compact_full_blocks = _full_recommendation_blocks(compact_calls[0]["messages"])
+    assert compact_full_blocks and compact_full_blocks[-1] == sections[0]
+    assert compact_full_blocks[-1].encode("utf-8") == sections[0].encode("utf-8")
     # 摘要输入仍含待压缩的旧消息；在压缩后的当前展示面核对唯一、最新的推荐。
     post_compact_surface = prepare_conversation_compact_provider_surface(
         agent, surface, run_id="gate1-post-compact"
