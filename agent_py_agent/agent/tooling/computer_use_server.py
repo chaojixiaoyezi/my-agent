@@ -21,6 +21,56 @@ from .computer_use_observation_tools import build_adapter_server, observe_only_e
 
 mcp = FastMCP("my-agent Computer Use")
 
+# 上游 computer-control-mcp 工具的精简中文说明静态覆盖表；仅覆盖说明文本，保留原函数签名、Schema 与未知工具默认说明。
+_UPSTREAM_TOOL_DESCRIPTIONS: dict[str, str] = {
+    "click_screen": (
+        "在屏幕绝对坐标 (x, y) 执行单次鼠标左键点击。"
+        "若已启用 observe_window，优先用 click_candidate 按复核候选点击；点击后请观察目标窗口确认状态。"
+    ),
+    "get_screen_size": "只读获取当前主屏幕像素分辨率（宽与高），供核对屏幕坐标范围。",
+    "take_screenshot": (
+        "截取整屏或匹配标题窗口的图像：title_pattern 留空截整屏，填写时默认按模糊匹配（threshold 默认 10）或"
+        "设 use_regex=true 按正则匹配；save_to_downloads 默认保持 false；use_wgc 仅用于 Windows 捕获。"
+        "常规窗口只读采样优先用 observe_window。"
+    ),
+    "take_screenshot_with_ocr": (
+        "截屏并返回带屏幕绝对坐标的 OCR 识别框列表 JSON（四点坐标、文本与置信度）；"
+        "title_pattern、use_regex、threshold、scale_percent_for_ocr、save_to_downloads 语义同 take_screenshot。"
+        "若已启用 observe_window，优先用 observe_window 获取可复核候选。"
+    ),
+    "move_mouse": "将鼠标指针移动到屏幕绝对坐标 (x, y)，不触发按下或点击。",
+    "mouse_down": (
+        "按住指定鼠标按键不放（button 可选 'left'、'right'、'middle'，默认 'left'）。"
+        "注意：系统不会自动松开按键，必须在同一操作序列中配对调用相同 button 的 mouse_up 释放；"
+        "普通单次点击请用 click_screen，拖拽请用 drag_mouse。"
+    ),
+    "mouse_up": (
+        "释放先前由 mouse_down 按住的鼠标按键（button 可选 'left'、'right'、'middle'，默认 'left'，"
+        "须与同序列中的 mouse_down 配对一致）。"
+    ),
+    "drag_mouse": (
+        "从屏幕坐标 (from_x, from_y) 按住拖拽至 (to_x, to_y)，duration 为拖拽秒数（默认 0.5），"
+        "内部自动完成按下与释放；拖拽后请观察目标窗口确认结果。"
+    ),
+    "key_down": (
+        "按住单个键盘按键不放（key 如 'shift'、'ctrl'、'alt'）。"
+        "注意：系统不会自动松开按键，必须在同一操作序列中配对调用相同 key 的 key_up 释放，"
+        "防止修饰键残留影响后续桌面输入；普通按键或组合键请优先用 press_keys。"
+    ),
+    "key_up": "释放先前由 key_down 按住的键盘按键（key 须与同序列中的 key_down 配对一致）。",
+    "press_keys": (
+        "发送自动按下并释放的键盘按键：keys 支持单键字符串（如 'enter'）、顺序按键列表（如 ['a', 'b']）"
+        "或组合键嵌套列表（如 [['ctrl', 'c']]）。输入普通文本请用 type_text 或 type_into_candidate；"
+        "提交后请观察目标窗口确认效果。"
+    ),
+    "list_windows": "只读列出当前系统打开的窗口列表，供核对窗口标题后再调用 observe_window 或 activate_window。",
+    "wait_milliseconds": "等待指定毫秒数（milliseconds，整数），供界面动画或加载过渡后再重新观察。",
+    "activate_window": (
+        "按标题匹配将窗口激活至前台：title_pattern 默认模糊匹配（threshold 范围 0-100，默认 60），"
+        "use_regex=true 时按正则匹配。只读采样无需先激活窗口，可直接调用 observe_window。"
+    ),
+}
+
 
 # LLM: 只在完整档调用；上游 import 与 pyautogui 都在函数体里，避免只看档进程加载执行器依赖。
 # 函数用途: 装载上游依赖，注册除 type_text 外的原函数。
@@ -34,11 +84,12 @@ def _load_upstream():
 
 
 # LLM: 只在 server 启动时读取上游公开目录并注册原函数；未知函数缺失时失败，不猜工具或降级。
-# 函数用途: 保留上游工具目录及说明，文本输入由本适配器的唯一实现接管。
+# 函数用途: 保留上游工具目录及签名，已知工具覆盖精简中文说明，文本输入由本适配器的唯一实现接管。
 async def register_upstream_tools(pyautogui, upstream, type_desktop_text) -> None:
     for tool in await upstream.mcp.list_tools():
         if tool.name != "type_text":
-            mcp.add_tool(getattr(upstream, tool.name), name=tool.name, description=tool.description)
+            description = _UPSTREAM_TOOL_DESCRIPTIONS.get(tool.name, tool.description)
+            mcp.add_tool(getattr(upstream, tool.name), name=tool.name, description=description)
     _register_local_inputs(pyautogui, type_desktop_text)
 
 
@@ -56,6 +107,7 @@ def _register_local_inputs(pyautogui, type_desktop_text) -> None:
     # 函数用途: 在指定屏幕坐标执行竖向滚轮；不填坐标时在当前鼠标位置滚动。
     @mcp.tool()
     def scroll_screen(clicks: int, x: Optional[int] = None, y: Optional[int] = None) -> dict[str, object]:
+        """在屏幕坐标 (x, y) 执行竖向滚轮（clicks 正数向上滚、负数向下滚；x、y 留空时在当前鼠标位置滚动）。滚动后请观察窗口确认可见内容变化。"""
         pyautogui.scroll(int(clicks), x=x, y=y)
         return {"ok": True, "clicks": int(clicks), "x": x, "y": y}
 

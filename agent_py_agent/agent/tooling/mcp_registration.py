@@ -35,6 +35,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ..common.log_redaction import redact_sensitive_value
+from ..plugin_observation import OBSERVATION_CANDIDATE_UNKNOWN, OBSERVATION_STALE
 from .input_schema import canonicalize_tool_input_schema
 from .mcp_client import (
     MCPError,
@@ -123,8 +124,8 @@ class MCPProxyTool(BaseTool):
 
     ``execute`` 把模型传来的 dict 参数（去掉内部 ``tool`` 字段）转发给 server，
     再把结果归一化成 ``ToolHandlerOutcome``。server 自报的工具错（isError=true）
-    映射成 ``error_code=TOOL_EXECUTION_FAILED`` 与确定失败事实；客户端层异常按其
-    ``MCPError.code`` 映射成 my-agent 错误码。
+    映射成非自动重试的 ``error_code=TOOL_RUNTIME_ERROR``（保留 ``reported_error_code=MCP_REMOTE_ERROR``）
+    与确定失败事实；客户端层异常按其 ``MCPError.code`` 保留具体 ``reported_error_code``。
     """
 
     # LLM: 可选 transport 是发现时的原实例，不能执行时重取新连接；本次调用权限不能保存在共享 proxy 上。
@@ -192,11 +193,74 @@ class MCPProxyTool(BaseTool):
     def _execute(self, params: dict[str, Any], context: ToolInvocationContext | None) -> ToolHandlerOutcome:
         if self.observation_binding is None:
             return self._execute_with_meta(params, context, None)
-        return self.observation_binding.execute(params, context, self._execute_with_meta)
+        outcome = self.observation_binding.execute(params, context, self._execute_with_meta)
+        return self._finalize_observation_outcome(outcome)
+
+    # 函数用途: 读取宿主策略解析出的副作用等级（仅取宿主配置/安装声明，绝不读取远端返回文本）。
+    def _resolved_effect(self) -> str:
+        resolver = getattr(self.runtime_policy, "effect_resolver", None)
+        effect = str(getattr(resolver, "default_effect", "") or "").strip()
+        if effect in {"read_only", "mutating", "dangerous"}:
+            return effect
+        declared = getattr(self, "_declared_effect", None)
+        if callable(declared):
+            candidate = str(declared() or "").strip()
+            if candidate in {"read_only", "mutating", "dangerous"}:
+                return candidate
+        return "dangerous"
+
+    # 函数用途: 为候选过期或不存在（发送前拦截或提供方按代次拒绝）补齐统一的零副作用说明与重新观察建议。
+    def _finalize_observation_outcome(self, outcome: ToolHandlerOutcome) -> ToolHandlerOutcome:
+        if outcome.ok or outcome.reported_error_code not in {OBSERVATION_STALE, OBSERVATION_CANDIDATE_UNKNOWN}:
+            return outcome
+        envelope = dict(outcome.result_envelope)
+        envelope["error_details"] = {
+            "stage": "observation_recheck",
+            "reported_cause": outcome.reported_error_code,
+            "resolved_effect": self._resolved_effect(),
+            "side_effect_state": "not_started",
+        }
+        return replace(
+            outcome,
+            result_envelope=envelope,
+            next_action=(
+                "候选快照已过期或不存在（effect_outcome=not_started，未触发点击或输入副作用）；"
+                "请先调用观察工具（如 observe_window）重新采样当前窗口并改用新生成的 candidate_id，禁止原样重试旧候选。"
+            ),
+        )
+
+    # 函数用途: 按宿主确认的副作用等级为远端 isError=true 生成下一步建议（远端返回正文仅作外部数据，不作无副作用证明）。
+    def _remote_error_next_action(self, resolved_effect: str) -> str:
+        if resolved_effect == "read_only":
+            return (
+                "远端只读 MCP 工具返回错误（MCP_REMOTE_ERROR，effect_outcome=failed）；"
+                "请根据错误回执核对查询参数与目标窗口/资源状态后再调整调用，不要原样盲目重复请求。"
+            )
+        return (
+            "远端 MCP 工具返回错误（MCP_REMOTE_ERROR，effect_outcome=failed；远端错误文本不证明外部或桌面状态未改变）。"
+            "禁止原样盲目重试；请先调用观察或只读工具（如 observe_window、list_windows 或对应查询接口）核对当前状态并修正参数后再决定下一步。"
+        )
+
+    # 函数用途: 按传输层结构化 effect_outcome 区分“未发送拒绝”与“已发送/结果未知”，给出明确的下一步核实动作。
+    def _mcp_exception_next_action(self, code: str, effect_outcome: str, resolved_effect: str) -> str:
+        if effect_outcome == "not_started":
+            return (
+                f"本次 MCP 调用在发送前未执行（{code}，effect_outcome=not_started，未产生远端副作用）；"
+                "请先核对参数、连接就绪或授权状态并修正后再操作，不要原样盲目重试。"
+            )
+        if effect_outcome == "unknown" or resolved_effect in {"mutating", "dangerous"}:
+            return (
+                f"MCP 通信或协议结果未确认（{code}，副作用状态未知）；请求可能已发出，"
+                "请先通过观察工具或只读查询核实当前外部/桌面状态与原操作回执，禁止原样盲目重发副作用调用。"
+            )
+        return (
+            f"只读 MCP 调用因通信或协议异常失败（{code}）；"
+            "请检查服务连接状态或参数边界后再决定是否重新查询，不要无上限循环重试。"
+        )
 
     # LLM: 唯一的发送主体：过滤 "__" 宿主参数、合并子类逐次 _meta（extra_meta 只能来自宿主复核过的结构化事实，不能来自 arguments），
-    #   再走原客户端调用；错误映射与结果脱敏保持不变。子类需要按本次参数附 _meta 时调用它，而不是缓存到实例上（代理跨请求共享）。
-    # 函数用途: 发出一次 MCP 工具调用并把结果转成结构化工具输出。
+    #   再走原客户端调用；远端返回文本与 structuredContent 始终视为外部数据，绝不覆盖宿主 effect_outcome 或授予权限。
+    # 函数用途: 发出一次 MCP 工具调用并把结果转成结构化三段式工具输出。
     def _execute_with_meta(self, params: dict[str, Any], context: ToolInvocationContext | None,
                            extra_meta: dict[str, object] | None) -> ToolHandlerOutcome:
         arguments = {
@@ -204,6 +268,7 @@ class MCPProxyTool(BaseTool):
             for key, value in (params or {}).items()
             if key != "tool" and not key.startswith("__")
         }
+        resolved_effect = self._resolved_effect()
         try:
             options = {}
             if self.transport is not None:
@@ -217,49 +282,128 @@ class MCPProxyTool(BaseTool):
                 options["request_meta"] = request_meta
             result = self.client.call_tool(self.remote_tool, arguments, **options)
         except ProcessSessionCleanupError as exc:
-            return self._error_result("插件原进程清理尚未确认", "TOOL_EXECUTION_FAILED",
-                                      details={"process_cleanup": exc.report})
+            return self._error_result(
+                "插件原进程清理尚未确认",
+                "PROCESS_SESSION_CLEANUP_UNCONFIRMED",
+                reported_error_code="PROCESS_SESSION_CLEANUP_UNCONFIRMED",
+                effect_outcome="unknown",
+                details={"process_cleanup": exc.report},
+                error_details={
+                    "stage": "cleanup",
+                    "reported_cause": "PROCESS_SESSION_CLEANUP_UNCONFIRMED",
+                    "resolved_effect": resolved_effect,
+                    "side_effect_state": "unknown",
+                },
+                next_action=(
+                    "MCP 关联进程清理尚未确认（effect_outcome=unknown，可能已产生外部副作用）；"
+                    "请先核对原操作回执与目标状态，禁止原样重放或重复启动。"
+                ),
+            )
         except MCPError as exc:
-            return self._error_result(str(exc), _ERROR_CODE_MAP.get(exc.code, "TOOL_EXECUTION_FAILED"),
-                                      effect_outcome=exc.effect_outcome, details=exc.diagnostic_projection())
+            side_effect_state = exc.effect_outcome or (
+                "not_started" if resolved_effect == "read_only" else "unknown"
+            )
+            stage = "pre_call" if exc.effect_outcome == "not_started" else "transport"
+            return self._error_result(
+                str(exc),
+                _ERROR_CODE_MAP.get(exc.code, "TOOL_EXECUTION_FAILED"),
+                reported_error_code=exc.code,
+                effect_outcome=exc.effect_outcome,
+                details=exc.diagnostic_projection(),
+                error_details={
+                    "stage": stage,
+                    "reported_cause": exc.code,
+                    "resolved_effect": resolved_effect,
+                    "side_effect_state": side_effect_state,
+                },
+                next_action=self._mcp_exception_next_action(
+                    exc.code, exc.effect_outcome, resolved_effect
+                ),
+            )
         except Exception as exc:  # 兜底：任何意外异常都转结构化错误，绝不向上崩主循环。
             logger.exception("MCP 工具 %s 调用出现未预期异常", self.model_spec.name)
+            summary = sanitize_credentials(f"{type(exc).__name__}: {str(exc)[:240]}")
             return self._error_result(
-                sanitize_credentials(f"MCP 工具调用异常：{type(exc).__name__}: {exc}"),
-                "TOOL_EXECUTION_FAILED",
+                f"MCP 工具调用异常：{summary}",
+                "TOOL_RUNTIME_ERROR",
+                reported_error_code="TOOL_RUNTIME_ERROR",
+                effect_outcome="unknown",
+                error_details={
+                    "stage": "execution",
+                    "exception_type": type(exc).__name__,
+                    "resolved_effect": resolved_effect,
+                    "side_effect_state": "unknown",
+                },
+                next_action=(
+                    f"MCP 代理调用出现未预期异常（{type(exc).__name__}，effect_outcome=unknown，无法排除已产生副作用）；"
+                    "请先通过观察或只读工具核实当前目标状态，禁止原样盲目重试。"
+                ),
             )
 
         content = sanitize_credentials(str(result.get("content") or ""))
-        payload: dict[str, Any] = {"result": content}
+        response_data: dict[str, Any] = {"result": content}
         failed = bool(result.get("isError"))
         if failed:
-            payload["error"] = content or "MCP 工具返回错误"
+            response_data["error"] = content or "MCP 工具返回错误"
         if isinstance(result.get("content_blocks"), list):
-            payload["content"] = redact_sensitive_value(result["content_blocks"])
+            response_data["content"] = redact_sensitive_value(result["content_blocks"])
         if result.get("structuredContent") is not None:
-            payload["structuredContent"] = redact_sensitive_value(
+            response_data["structuredContent"] = redact_sensitive_value(
                 result["structuredContent"]
+            )
+        if not failed:
+            return ToolHandlerOutcome(
+                self.model_spec.name,
+                True,
+                json.dumps(response_data, ensure_ascii=False),
             )
         return ToolHandlerOutcome(
             self.model_spec.name,
-            not failed,
-            json.dumps(payload, ensure_ascii=False),
-            error_code="TOOL_EXECUTION_FAILED" if failed else "",
-            effect_outcome="failed" if failed else "",
+            False,
+            json.dumps(response_data, ensure_ascii=False),
+            error_code="TOOL_RUNTIME_ERROR",
+            reported_error_code="MCP_REMOTE_ERROR",
+            effect_outcome="failed",
+            result_envelope={
+                "error_details": {
+                    "stage": "remote_is_error",
+                    "reported_cause": "MCP_REMOTE_ERROR",
+                    "resolved_effect": resolved_effect,
+                    "side_effect_state": "failed",
+                }
+            },
+            next_action=self._remote_error_next_action(resolved_effect),
         )
 
     # LLM: 发送事实只接受 transport 的结构化结论；未发送拒绝不得记 UNKNOWN，已启动 writer 和清理异常不能改成未发生。
     # 函数用途: 返回 MCP 失败、精确清理信息与原操作账所需的执行边界，不暴露配置或完整进程记录。
-    def _error_result(self, message: str, error_code: str, *, details: dict | None = None,
-                      effect_outcome: str = "") -> ToolHandlerOutcome:
+    def _error_result(
+        self,
+        message: str,
+        error_code: str,
+        *,
+        details: dict | None = None,
+        effect_outcome: str = "",
+        reported_error_code: str = "",
+        error_details: dict[str, Any] | None = None,
+        next_action: str = "",
+    ) -> ToolHandlerOutcome:
+        envelope: dict[str, Any] = {
+            key: details[key]
+            for key in ("diagnostic", "mcp_error", "details_truncated")
+            if details is not None and key in details
+        }
+        if error_details:
+            envelope["error_details"] = dict(error_details)
         return ToolHandlerOutcome(
             self.model_spec.name,
             False,
             json.dumps({"error": message, **(details or {})}, ensure_ascii=False),
             error_code=error_code,
+            reported_error_code=reported_error_code,
             effect_outcome=effect_outcome,
-            result_envelope={key: details[key] for key in ('diagnostic', 'mcp_error', 'details_truncated')
-                             if details is not None and key in details},
+            result_envelope=envelope,
+            next_action=next_action,
         )
 
 
