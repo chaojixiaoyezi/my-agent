@@ -64,10 +64,20 @@ def _decision_change_properties() -> dict:
     return properties
 
 
-# LLM: 身份只来自 Agent 的已解析 home；缺失上下文绝不能因空 provider/kind 被当作本机管理员。规则统一在
+# LLM: 全局配置要求主会话上下文与完整管理员身份；共享 home 不授予子任务全局配置权限。身份规则统一在
 #   owner_access.is_complete_local_admin_owner（与 /settings、插件管理、记忆向量重建同一条），这里不另写一份。
-# 函数用途: 决定 legacy view/set 是否能展示和执行，普通 user 始终只能操作自己的决策设置。
+# 函数用途: 决定全局配置是否能展示和执行，其余上下文只保留自己的决策设置。
 def _is_main_owner(agent: object | None) -> bool:
+    from ..runtime_context import current_subagent_run_id
+
+    if current_subagent_run_id(agent):
+        return False
+    current = getattr(agent, "_current_run_params", None)
+    if str(getattr(current, "context_scope", "") or "") in {"task_local", "control_plane", "isolated"}:
+        return False
+    attrs = getattr(current, "task_attributes", None)
+    if isinstance(attrs, dict) and attrs.get("agent_run_id"):
+        return False
     return is_complete_local_admin_owner(getattr(agent, "home_paths", None))
 
 
