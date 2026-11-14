@@ -852,7 +852,7 @@ class SkillLearningService:
             config_provider=getattr(self.runtime, "config_provider", None),
         )
         try:
-            from .asset_promotion import propose_or_promote_skill
+            from .asset_promotion import bind_promotion_host, propose_or_promote_skill
             verifier = getattr(self.runtime, 'promotion_verifier', None)
             if verifier is None or verifier in (builtin_machine_verifier, default_machine_promotion_verifier):
                 verifier = partial(verify_machine_candidate, store=self.store)
@@ -863,17 +863,18 @@ class SkillLearningService:
                     self._validate_lesson_source(request)
                     return operation()
 
-            event = propose_or_promote_skill(
-                self.store,
-                publish,
-                verifier=verifier,
-                commit=commit,
-                autonomous_verified=(
-                    revalidated_settings.autonomous_verified
-                    and request.get('requested_by') != 'user'
-                    and not request.get('_learning_catalog_unavailable')
-                ),
-            )
+            with bind_promotion_host(getattr(self.runtime, "task_completion_host", None)):
+                event = propose_or_promote_skill(
+                    self.store,
+                    publish,
+                    verifier=verifier,
+                    commit=commit,
+                    autonomous_verified=(
+                        revalidated_settings.autonomous_verified
+                        and request.get('requested_by') != 'user'
+                        and not request.get('_learning_catalog_unavailable')
+                    ),
+                )
             if event.event == 'proposed' and request.get('completion_ref'):
                 from .skill_learning_publish import retain_proposed_business_source
 
@@ -883,7 +884,8 @@ class SkillLearningService:
             return _request_event(EVENT_REJECTED, "SKILL_LEARNING_STORAGE_LIMIT", request)
         except SkillLearningGateError as exc:
             rejected = _request_event(EVENT_REJECTED, exc.code, request)
-            return replace(rejected, skill_name=decision.name, reason=decision.reason)
+            detail_reason = str(exc.detail.get("next_action") or "").strip() if isinstance(exc.detail, dict) else ""
+            return replace(rejected, skill_name=decision.name, reason=detail_reason or decision.reason)
 
     # LLM: 发现高相似已有自主学习 Skill 时，把候选详情和合并提示注入唯一 1 次同轮重试，仍未收敛则结构化延迟。
     # 函数用途: 执行至多一次的合并优先重试，返回 (可能扩充updatable后的素材, 最终决定, 短路事件或None)。

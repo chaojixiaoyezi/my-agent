@@ -2060,16 +2060,17 @@ def test_new_rejects_foreground_claim_but_keeps_background_claim(conversations, 
     assert conversations.claims.load(old.thread_id)["status"] == "running"
 
 
-# LLM: 完整生成16及17跳边界，超过上限不得返回截断目标。
-# 函数用途: 验证继任链硬上限。
+# LLM: 显式传入max_hops=16时仍守精确16跳硬边界；默认解析可穿透17跳，不返回截断目标。
+# 函数用途: 验证显式跳数上限边界与默认继任链穿透能力。
 def test_successor_chain_has_exact_sixteen_hop_boundary(conversations):
     old = current = thread(conversations)
     for _ in range(16):
         current = successor(conversations, current)
-    assert resolve(conversations, old.thread_id) == current.thread_id
-    successor(conversations, current)
+    assert resolve(conversations, old.thread_id, max_hops=16) == current.thread_id
+    last = successor(conversations, current)
+    assert resolve(conversations, old.thread_id) == last.thread_id
     with pytest.raises(ValueError, match="HOP_LIMIT"):
-        resolve(conversations, old.thread_id)
+        resolve(conversations, old.thread_id, max_hops=16)
 
 
 # LLM: 仅注入canonical写失败，真实outbox、冻结信封和渠道回执仍按原顺序运行。

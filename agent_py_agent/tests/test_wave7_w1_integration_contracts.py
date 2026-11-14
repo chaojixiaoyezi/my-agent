@@ -320,6 +320,12 @@ def test_holistic_im_outbox_wiring_and_four_carrier_autonomous_promotion(asset_r
         'steps': [{'step_id': 'step1', 'name': '步骤1', 'mode': 'deterministic_script', 'script_id': 'auto-script-1'}],
         'io_contract': {'outputs': ['rows']},
     })
+    cfg_dir = home.root / 'config'
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    (cfg_dir / 'capability_config.yaml').write_text(
+        'capability_pack_self_install_enabled: true\n',
+        encoding='utf-8',
+    )
     r_pkg = promote_verified_asset(owner_home, {
         'kind': 'capability_package', 'name': 'auto-pkg-1', 'description': '自动能力包',
         'entry_document': 'CAPABILITY.md', 'body': '# 自动能力包\n包含自动提炼的方法。',

@@ -133,6 +133,22 @@ func signatureHeader(k string) bool {
 
 type ownerIdentity struct{ tenant, kind, id string }
 
+func isPrivatePasswordCardAction(ev map[string]any, openID string) bool {
+	if openID == "" {
+		return false
+	}
+	val := object(object(ev, "action"), "value")
+	if val == nil {
+		return false
+	}
+	switch text(val, "session_lock_action") {
+	case "pwd_set", "pwd_unlock", "pwd_change", "pwd_cancel":
+	default:
+		return false
+	}
+	return text(val, "user_id") == openID && text(val, "reference") != ""
+}
+
 func ownerOf(p map[string]any, card bool) ownerIdentity {
 	o := ownerIdentity{tenant: text(object(p, "header"), "tenant_key"), kind: "unknown"}
 	ev := object(p, "event")
@@ -140,19 +156,55 @@ func ownerOf(p map[string]any, card bool) ownerIdentity {
 		ev = p
 	}
 	if card {
-		if id := text(object(ev, "context"), "open_chat_id"); id != "" {
-			o.kind = "group"
-			o.id = id
+		ctx := object(ev, "context")
+		msg := object(ev, "message")
+		openChatID := text(ctx, "open_chat_id")
+		if openChatID == "" {
+			openChatID = text(ev, "open_chat_id")
+		}
+		chatType := ""
+		for _, candidate := range []string{
+			text(msg, "chat_type"),
+			text(ctx, "chat_type"),
+			text(ev, "chat_type"),
+		} {
+			if normalized := strings.ToLower(strings.TrimSpace(candidate)); normalized != "" {
+				chatType = normalized
+				break
+			}
+		}
+		chatMode := strings.ToLower(strings.TrimSpace(text(ctx, "chat_mode")))
+		op := object(ev, "operator")
+		openID := text(op, "open_id")
+		if openID == "" {
+			openID = text(object(op, "operator_id"), "open_id")
+		}
+		if openID == "" {
+			openID = text(ev, "open_id")
+		}
+		// 显式单聊卡片或通过校验的四类私人密码卡回调优先路由到个人 user:<open_id>，不因 open_chat_id 误归群聊。
+		if chatType == "p2p" || chatType == "private" || chatMode == "p2p" || chatMode == "private" {
+			if openID != "" {
+				o.kind = "user"
+				o.id = openID
+			}
 			return o
 		}
-		op := object(ev, "operator")
-		o.id = text(op, "open_id")
-		if o.id == "" {
-			o.id = text(object(op, "operator_id"), "open_id")
+		if chatType != "group" && chatMode != "group" && isPrivatePasswordCardAction(ev, openID) {
+			o.kind = "user"
+			o.id = openID
+			return o
 		}
-		if o.id == "" {
-			o.id = text(ev, "open_id")
+		if openChatID != "" {
+			o.kind = "group"
+			o.id = openChatID
+			return o
 		}
+		if openID != "" {
+			o.kind = "user"
+			o.id = openID
+		}
+		return o
 	} else if msg := object(ev, "message"); msg != nil {
 		switch text(msg, "chat_type") {
 		case "p2p", "private":
