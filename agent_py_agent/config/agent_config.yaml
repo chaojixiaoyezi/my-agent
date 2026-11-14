@@ -41,6 +41,8 @@ system_prompt: "你是 my-agent，一个使用当前授权工具完成真实任�
 assistant_progress_updates_enabled: true
 # 宿主技术截断后按原任务最多续跑三片；新输入、取消、无实际进展会停止。
 technical_cutoff_continuation_enabled: true
+# 宿主技术截断后单次任务最多续跑多少片（0 = 不限制；默认 3）。立即生效。
+technical_cutoff_continuation_max_count: 3
 
 # Todo 收尾只做 终端交互 风格的模型软提醒：最终回复前核对当前 exact id。
 # false 时不注入该额外上下文；宿主不猜测打勾、阻断最终回复或增加隐藏调用，显式 covers 仍按子代理 DONE 事件更新。
@@ -230,6 +232,8 @@ memory_semantic_recall: false
 # 3 = 只存最小恢复快照（最省磁盘，一般就用它）；2 = 摘要加关键事件；1 = 去掉大块工具展示数据；0 = 尽量全量。
 # 只有排查问题需要更完整的历史时才调小；乱填会退回 3。
 memory_archive_level: 3
+# 运行中每轮工具归档实时事实时最多扫描多少条近期测试调用（默认 20；0 = 跳过实时测试提取以降低长任务开销）。立即生效。
+memory_runtime_fact_recent_tests: 20
 # 子代理运行失败时是否自动留一份恢复快照。
 # 它用于事后排查和恢复任务上下文。
 # 如果你不希望这类快照占用磁盘，可以关掉；但关掉后子代理失败时就少了一份可回查的现场记录，后台归档与对话记录不受这个开关影响。
@@ -297,7 +301,8 @@ memory_compact_remote_enabled: true
 # 会话档位已不高于目标或已关闭思考时保持原样；仅 thinking.enabled 不是降低预算的证据。
 # 不改会话原来的档位；后端/档案重建清除能力 memo，修改压缩档位按参数中心标注的重载时机生效。
 memory_compact_reasoning_level: "low"
-# compact 自动续跑深度硬顶已降为代码常量（finalization_compact_auto._DEFAULT_MAX_COMPACT_AUTO_CONTINUE_DEPTH，2026-09-28 参数减量）。
+# 单次 run 内自动 compact 后允许续跑的最大深度硬顶（默认 50；0 = 不限制）。立即生效。
+memory_compact_auto_continue_max_depth: 50
 # compact 续跑时对卸掉的“中段历史”做一次 LLM 语义摘要：
 # - 续跑靠 carried archive 记录逐条重建工具历史；默认会对中段记录调一次摘要模型，用一条语义摘要
 #   折叠中段、原样保留首尾，把机械截断换成“这段做了什么/学到什么”的叙述，长任务续跑少丢上下文。
@@ -1143,6 +1148,10 @@ tool_shell_timeout: 240
 # PTY 交互终端会话空闲多久后由宿主自动收回（分钟；0 表示不限制）
 # 分页器（less 等）看到终端会等按键、命令永远不退出，超时后宿主会杀掉整个进程组回收
 pty_session_idle_timeout_minutes: 30
+# 进程级活跃 PTY 会话全局上限（默认 32；0 = 不限制）。部署边界项，修改后重启 Gateway 生效。
+pty_max_sessions: 32
+# 每个 owner 允许同时活跃的 PTY 会话上限（默认 8；0 = 不限制，仍受全局上限约束）。部署边界项，修改后重启 Gateway 生效。
+pty_max_sessions_per_owner: 8
 # 浏览器终端入口；默认关闭，不改变原PTY会话及空闲回收策略。
 web_terminal_enabled: false
 

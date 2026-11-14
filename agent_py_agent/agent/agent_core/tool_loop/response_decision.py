@@ -122,7 +122,7 @@ _TRUNCATED_OUTPUT_RESUME = (
     "[output-limit-resume]\n"
     "上一条回复被供应商输出上限截断了，不能当作完成。请直接从被截断处接着写："
     "不要道歉、不要复述已经写过的内容、不要总结。"
-    "把剩余工作拆成更小的块，每块做完立刻落盘或执行，再继续下一块；"
+    "把剩余工作拆成更小的块（较长的工具参数也请拆成小块给出），每块做完立刻落盘或执行，再继续下一块；"
     "需要调用工具就直接调用。本条指令不指定任何具体工具，也不假定上一轮调用了哪个工具。"
     "如果上一轮还没有产出正文或工具调用（只有推理先顶到了上限），不要再展开长推理，直接产出第一块。"
 )
@@ -781,6 +781,23 @@ def _is_provider_length_truncated(response: object) -> bool:
     )
 
 
+def _is_length_truncated_response(response: object) -> bool:
+    if _is_provider_length_truncated(response):
+        return True
+    runtime_status = str(getattr(response, "runtime_status", "") or "").strip().lower()
+    runtime_reason = str(getattr(response, "runtime_reason", "") or "").strip().upper()
+    if runtime_status and runtime_status not in {"ok", "unfinished"}:
+        return False
+    if runtime_reason and runtime_reason != "MODEL_RESPONSE_TRUNCATED":
+        return False
+    if bool(getattr(response, "truncated", False)):
+        return True
+    stop_reason = str(
+        getattr(response, "stop_reason", "") or getattr(response, "finish_reason", "") or ""
+    ).strip().lower()
+    return stop_reason in {"length", "max_tokens", "max_output_tokens"}
+
+
 def _truncated_tool_names_from_response(response: object) -> list[str]:
     raw = getattr(response, "truncated_tool_names", None) or ()
     if not isinstance(raw, (list, tuple)):
@@ -1089,7 +1106,10 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         truncated_resume = _truncated_output_resume_decision(request)
         if truncated_resume is not None:
             return truncated_resume
-        return ToolLoopResponseDecision("break", request.response, [], request.counters)
+        final_status_response = request.response
+        if _is_provider_length_truncated(final_status_response):
+            final_status_response = replace(final_status_response, runtime_source="tool_loop")
+        return ToolLoopResponseDecision("break", final_status_response, [], request.counters)
     unresolved_issue_decision = unresolved_runtime_issue_no_tool_call_decision(
         _unresolved_runtime_issue_request(request)
     )
@@ -1104,6 +1124,7 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         if timeout_resume is not None:
             return timeout_resume
         # 空正文预算先按"自上次空正文以来是否有真实进展"恢复；下面两处 nudge 消费同一份计数。
+        length_truncated = _is_length_truncated_response(request.response)
         counters = _empty_text_budget_after_progress(request.params, request.counters)
         reply_required = active_turn_user_reply_required(request.params)
         from .background_public_receipt import (
@@ -1116,6 +1137,7 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         elif (
             reply_required
             and not response_text
+            and not length_truncated
             and counters.empty_text_repairs < _MAX_EMPTY_TEXT_REPAIR_COUNT
         ):
             # This branch is controlled by exact consumed guidance ids. Thinking
@@ -1134,6 +1156,7 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         # 所以这里不需要再买两枪 nudge；这不读正文内容，只看登记是否存在。
         if (
             not response_text
+            and not length_truncated
             and request.probe_rollback is None
             and (list(getattr(request.params, "executed_tools", None) or [])
                  or has_reasoning_content(list(getattr(request.response, "assistant_content_blocks", None) or [])))
@@ -1158,7 +1181,7 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         if deliverable_block:
             request.params.tool_context.append(deliverable_block)
             return ToolLoopResponseDecision("continue", None, [], request.counters)
-        if bool(getattr(final_response, "truncated", False)):
+        if length_truncated:
             # EXEC-05 长任务真机: 最终答复被供应商输出上限截断(max_tokens/length)不能当作完成交付。
             # R248(2026-09-11 真机): 原来只标记 unfinished 就收口，恢复靠**管理器重启整个 runner 轮次**，
             #   于是同一策略原地打转——两个子代理各被截断 3/4 次、重启 4/5 个 attempt、耗掉 35 分钟才
@@ -1196,7 +1219,7 @@ def _no_tool_calls_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDec
         # 交付出口（唯一）：若上一枪还有"已产生但没交付"的合法正文，按到达顺序无损并进这次交付；
         # 交付对象仍取自本轮，因此 final_prompt/final_response/usage 的来源同一。没有前导段落时
         # 原样返回 final_response（对象同一，零开销）。
-        is_truncated = bool(getattr(final_response, "truncated", False)) or _is_provider_length_truncated(final_response)
+        is_truncated = _is_length_truncated_response(final_response) or _is_provider_length_truncated(final_response)
         if not is_truncated:
             reset_fields = {
                 k: 0

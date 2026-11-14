@@ -176,6 +176,8 @@ def _register_network_tools(registry: Any, params: Any) -> None:
             host_credential_env_names=params.host_credential_env_names,
             sandbox_boundary_facts=registry.shell_sandbox_boundary_facts,
             pty_session_idle_timeout_minutes=getattr(params, "pty_session_idle_timeout_minutes", 30),
+            pty_max_sessions=getattr(params, "pty_max_sessions", 32),
+            pty_max_sessions_per_owner=getattr(params, "pty_max_sessions_per_owner", 8),
             host_exclusive_paths=tuple(getattr(params, "host_exclusive_paths", ()) or ()),
         ),
     )

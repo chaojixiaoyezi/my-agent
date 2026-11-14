@@ -3043,7 +3043,24 @@ def _observe_turn_asset_mutations(agent, record, archive_record):
         if states is None:
             states = agent._asset_mutation_states = {}
         if key not in states and len(states) >= 32:
-            return
+            # 超过 32 个并发/历史 (run_id, attempt_id) 键时优先淘汰最早一条无真实写入记录的键；
+            # 若 32 条均记录过变更，再按插入顺序淘汰最老一条，避免静默丢弃第 33+ 条变更追踪。
+            evict_key = next(
+                (
+                    candidate_key
+                    for candidate_key, candidate_state in states.items()
+                    if not (
+                        isinstance(candidate_state, dict)
+                        and isinstance(candidate_state.get('asset_mutations'), dict)
+                        and (
+                            candidate_state['asset_mutations'].get('targets')
+                            or candidate_state['asset_mutations'].get('executions')
+                        )
+                    )
+                ),
+                next(iter(states)),
+            )
+            states.pop(evict_key, None)
         states[key] = state
         from ..assets.asset_metadata import normalize_member_of
 

@@ -83,7 +83,8 @@ DEPLOYMENT_ONLY_KEYS = _HOST_CAPACITY_KEYS | frozenset({
     "daemon_start_runners", "daemon_runner_instruction", "lease_stale_without_heartbeat_seconds", "log_level",
     "extension_plugins", "provider_max_concurrent_requests", "gateway_llm_inflight_limit", "responses_ws_idle_ttl_seconds",
     "responses_ws_max_idle_connections", "plugin_process_sandbox", "plugin_tool_gate_timeout_ms",
-    "max_parallel_tool_calls_per_owner", "pty_session_idle_timeout_minutes", "owner_default_permission_mode",
+    "max_parallel_tool_calls_per_owner", "pty_session_idle_timeout_minutes",
+    "pty_max_sessions", "pty_max_sessions_per_owner", "owner_default_permission_mode",
     "tool_shell_demote_after_seconds", "tool_shell_demoted_nice",
     "tool_approval_timeout_seconds", "feishu_cli_backend_enabled", "feishu_user_oauth_enabled", "feishu_oauth_redirect_uri",
     "feishu_oauth_scopes", "im_model_cards_enabled", "im_group_authorization_required", "feishu_bot_subscriptions_enabled",
@@ -128,8 +129,8 @@ _BOUNDARY_NAMES = _HOST_CAPACITY_KEYS | frozenset({
     "daemon_mutate_state", "daemon_start_runners",
     "config_layers", "config_sources", "config_warnings", "memory_config_warnings", "protect_running_runtime",
     "plugin_tool_gate_timeout_ms",
-    # ptyleak：PTY 空闲兜底阈值是资源保护，模型不能把它调大或关掉（0=不限制），只能用户改配置文件。
-    "pty_session_idle_timeout_minutes",
+    # ptyleak：PTY 空闲兜底阈值及活跃容量上限属于资源保护边界，模型不可调整，只能由部署者修改配置。
+    "pty_session_idle_timeout_minutes", "pty_max_sessions", "pty_max_sessions_per_owner",
     # B7：M 线事件插件总开关是安全边界，只能用户经 /settings 改；显式列名，不靠键名记号猜。
     "plugin_events_enabled",
     # 包内 MCP 可执行服务只由用户开启，不能让模型扩大执行边界。

@@ -228,6 +228,24 @@ TUNABLE_KEYS: dict[str, TunableSpec] = {
         validate=_int_within(0, 3650, message="必须是 0~3650 之间的整数（天，0 表示关闭教训自动归档）"),
         effect=EFFECT_IMMEDIATE,
     ),
+    "memory_runtime_fact_recent_tests": TunableSpec(
+        key="memory_runtime_fact_recent_tests",
+        describe="运行中每轮实时事实进度最多扫描的近期测试调用条数（默认 20；0 = 跳过实时测试提取）",
+        validate=_non_negative_int,
+        effect=EFFECT_IMMEDIATE,
+    ),
+    "memory_compact_auto_continue_max_depth": TunableSpec(
+        key="memory_compact_auto_continue_max_depth",
+        describe="单次 run 内自动 compact 后允许续跑的最大深度硬顶（默认 50；0 = 不限制）",
+        validate=_non_negative_int,
+        effect=EFFECT_IMMEDIATE,
+    ),
+    "technical_cutoff_continuation_max_count": TunableSpec(
+        key="technical_cutoff_continuation_max_count",
+        describe="宿主技术截断后单次任务最多允许的续跑片数（默认 3；0 = 不限制）",
+        validate=_non_negative_int,
+        effect=EFFECT_IMMEDIATE,
+    ),
     "tool_discovery_cache_pin_enabled": TunableSpec(
         key="tool_discovery_cache_pin_enabled",
         describe="工具发现时保持本缓存段的原生工具表不变，新定义随结果给出并在下次压缩并入；默认关闭",
