@@ -8,12 +8,76 @@ import pytest
 
 from agent_py_agent.agent.business_spaces import v13_w9_ai_assets as assets
 from agent_py_agent.agent.plugin_host.errors import HostAPIError
-from agent_py_agent.tests import test_v13_w9_intel as intel_tests
+from agent_py_agent.tests import test_rework_r8_business_wire_contract as wire_harness
 
-gateway = intel_tests.gateway
-seed_rows = intel_tests.seed_rows
-unit_call = intel_tests.unit_call
-wire_call = intel_tests.wire_call
+gateway = wire_harness.gateway
+thin_client = wire_harness.thin_client
+
+
+# LLM: 仅提供调用 DTO；单元测试显式替换 I/O 叶，不把替身当成真实事务验收。
+# 函数用途: 组装隔离 home 下的领域调用。
+@pytest.fixture
+def unit_call(tmp_path, monkeypatch):
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+    from agent_py_agent.agent.user_space.owner_resolver import (
+        home_paths_with_owner,
+        resolve_owner_home,
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / "home"))
+    home = home_paths(tmp_path / "home")
+    home = home_paths_with_owner(home, resolve_owner_home(home.root))
+    host = SimpleNamespace(home_paths=home, config=AgentConfig(business_spaces_enabled=True), business_v13_providers={})
+    return SimpleNamespace(action="ai_assets.list", params={}, owner_id=home.owner_id,
+        subject_id="local", context=SimpleNamespace(host=host, check=lambda action, facts: None),
+        owner_home=home.owner_home_dir, clock=lambda: 1793664000.0,
+        idempotency_key="unit-ai-assets-0001", expected_revision=None)
+
+
+# LLM: 生产客户端原样发送并解析真实信封；不替换HTTP运输，不手造返回 JSON。
+# 函数用途: 通过真实 Gateway 调用一个扩展业务动作。
+def wire_call(gateway, action, params=None, identity=None, key=None, revision=None):
+    from agent_py_agent.agent.gateway_parts import business_api_v13
+    from agent_py_agent.agent.plugin_host.business_action_specs import (
+        business_schema_bundle,
+        standalone_schema,
+    )
+    from agent_py_agent.agent.plugin_host.schemas import validate_object
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+    from agent_py_agent.cli.chat_client_context import post_gateway_json
+
+    identity = identity or OwnerIdentity.provider_user("feishu", "business-alice")
+    payload = {"action": action, "request_id": "w9-" + action, "params": params or {}}
+    if key is not None:
+        payload["idempotency_key"] = key
+    if revision is not None:
+        payload["expected_revision"] = revision
+    status, body = post_gateway_json(thin_client(gateway, identity), "/client/business", payload, timeout=10.0)
+    assert "state" in body, (status, body)
+    schema = standalone_schema(business_schema_bundle()["response_envelope_schema"])
+    result_schema = business_api_v13.v13_action_spec(action).result_schema
+    schema["$defs"].update(result_schema.pop("$defs", {}))
+    schema["properties"]["data"] = {"anyOf": [{"$ref": "#/$defs/EmptyData"}, result_schema]}
+    envelope = validate_object(body, schema)
+    if body["error"] is None:
+        business_api_v13.v13_action_spec(action).validate_result(body["data"])
+    assert (envelope["error"] is None and status == 200 and envelope["state"] == "completed") or (
+        envelope["error"] is not None and status >= 400 and envelope["state"] == "failed"), (status, envelope)
+    return {**envelope, "http_status": status, "ok": envelope["error"] is None}
+
+
+# LLM: 只按可信 owner 解析目录，用 W0 官方种子函数写原集合。
+# 函数用途: 将真实测试记录送入指定 owner 的原 v13 存储。
+def seed_rows(gateway, collection, rows, identity=None):
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, resolve_owner_home
+    from agent_py_agent.tests import test_v13_w0_harness
+
+    identity = identity or OwnerIdentity.provider_user("feishu", "business-alice")
+    owner = resolve_owner_home(gateway.agent.home_paths.root, identity)
+    test_v13_w0_harness.v13_seed(owner.home_dir, collection, [{**row, "owner_id": owner.owner_id} for row in rows])
+    return owner
 
 
 # LLM: 模型写入原目录保存入口，测试秘密仅为人工合成字符串。

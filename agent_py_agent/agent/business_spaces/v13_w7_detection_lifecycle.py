@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from ..common.directory_lock import locked_private_directory
 from ..conversation.business_access import BusinessError, require_revision
 from ..plugin_host.contracts import DomainResult
-from ..plugin_host.errors import HostAPIError
 from ..plugin_host.schemas import thaw, validate_object
 from .v13_store import v13_store_for
 
@@ -825,99 +824,3 @@ def auto_tune(call):
             raise BusinessError('LIMIT_EXCEEDED')
         return {'applied': [_suggestion_view(row) for row in selected], 'dry_run': True, 'rule': None}
     return _apply_suggestions(call, automatic=True)
-
-
-# LLM: provider 由 operator 绑定；元数据只取已声明字段，额外私有内容不返回。
-# 函数用途: 校验社区条目的闭合元数据。
-def _community_view(raw):
-    if type(raw) is not dict:
-        raise HostAPIError('HOST_NOT_READY', 503)
-    metadata = raw.get('item', raw.get('metadata', raw))
-    if type(metadata) is not dict:
-        raise HostAPIError('HOST_NOT_READY', 503)
-    try:
-        item = {key: metadata.get(key) for key in
-            ('item_id', 'kind', 'title', 'summary', 'author', 'tags', 'format', 'version', 'updated_at')}
-        item = validate_object(item, _api().v13_schema({'$ref': '#/$defs/V13CommunityItem'}))
-        if item['kind'] != 'detection' or item['format'] != 'sigma':
-            raise ValueError('community_kind')
-        return item
-    except (HostAPIError, ValueError, TypeError, KeyError) as error:
-        raise HostAPIError('HOST_NOT_READY', 503) from error
-
-
-# LLM: 网络访问只发生在宿主提供者中；来源错误不能伪装成空目录。
-# 函数用途: 读取并校验真实社区分页。
-def list_community(call):
-    provider = _api().v13_provider(call, 'community_catalog')
-    try:
-        result = provider.list('detection', query=call.params.get('query', ''),
-            tag=call.params.get('tag', ''), cursor=call.params.get('cursor'), limit=call.params.get('limit', 50))
-        items = [_community_view(row) for row in result['items']]
-        data = {'items': items, 'next_cursor': result['next_cursor'],
-                'coverage': 'partial' if result['next_cursor'] is not None else 'complete'}
-        return validate_object(data, _api().v13_schema({'type': 'object', 'properties': {
-            'items': {'type': 'array', 'maxItems': call.params.get('limit', 50),
-                      'items': {'$ref': '#/$defs/V13CommunityItem'}},
-            'next_cursor': {'anyOf': [{'$ref': '#/$defs/Cursor'}, {'type': 'null'}]},
-            'coverage': {'$ref': '#/$defs/Coverage'}},
-            'required': ['items', 'next_cursor', 'coverage'], 'additionalProperties': False}))
-    except HostAPIError as error:
-        if error.code in {'HOST_NOT_READY', 'CURSOR_EXPIRED'}:
-            raise
-        raise HostAPIError('HOST_NOT_READY', 503) from error
-    except (OSError, TypeError, KeyError, RuntimeError) as error:
-        raise HostAPIError('HOST_NOT_READY', 503) from error
-
-
-# LLM: Sigma 正文作为不透明查询保存，不在 handler 执行或用不完整 YAML 解析器改写内容。
-# 函数用途: 获取目录元数据与可安装的规则草案。
-def _community_document(call):
-    provider = _api().v13_provider(call, 'community_catalog')
-    try:
-        raw = provider.get('detection', call.params['detection_id'])
-        if raw is None:
-            raise BusinessError('RESOURCE_NOT_FOUND')
-        item = _community_view(raw)
-        if item['item_id'] != call.params['detection_id']:
-            raise HostAPIError('HOST_NOT_READY', 503)
-        text = raw.get('document', raw.get('sigma'))
-        if type(text) is not str or not text.strip():
-            raise HostAPIError('HOST_NOT_READY', 503)
-        metadata = raw.get('metadata', raw.get('item', raw))
-        draft = {'name': item['title'], 'severity': metadata.get('severity', 'medium'),
-                 'query': {'language': 'sigma', 'text': text}}
-        draft = validate_object(draft, _api().v13_schema({'$ref': '#/$defs/V13RuleDraft'}))
-        return {'item': item, 'rule': draft}
-    except HostAPIError as error:
-        if error.code in {'HOST_NOT_READY', 'RESOURCE_NOT_FOUND'}:
-            raise
-        raise HostAPIError('HOST_NOT_READY', 503) from error
-    except (OSError, TypeError, KeyError, RuntimeError) as error:
-        raise HostAPIError('HOST_NOT_READY', 503) from error
-
-
-# LLM: 缺社区记录保持 404，未绑定 provider 保持 503。
-# 函数用途: 读取一条社区规则与 Sigma 草案。
-def get_community(call):
-    return _community_document(call)
-
-
-# LLM: 文档快照和子幂等键固定第一次安装，提供者后续变更不会导致同键重复安装。
-# 函数用途: 经原生规则创建路径安装默认禁用的社区规则。
-def install_community(call):
-    from .v13_w7_monitors import create_rule
-    space_id = _space(call)
-
-    # LLM: 提供者读取在首次回调内，回执重放不再访问可能变更或移除的条目。
-    # 函数用途: 保存本次安装使用的完整规则参数。
-    def prepare(records):
-        document = _community_document(call)
-        return {'params': {**document['rule'], 'space_id': space_id,
-                           'enabled': call.params.get('enabled', False),
-                           'tags': document['item']['tags']}}
-
-    with _lifecycle_lock(call):
-        prepared = _transaction(call, 'monitor_rules', prepare, step='community-document', space_ids=(space_id,))
-        return create_rule(replace(call, params=prepared['params'], expected_revision=None,
-            idempotency_key=_step_key(call, 'community-native')), origin='community')

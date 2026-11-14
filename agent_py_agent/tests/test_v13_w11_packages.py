@@ -11,6 +11,10 @@ from agent_py_agent.agent.business_spaces.v13_store import V13Store
 from agent_py_agent.agent.capability.package_build import build_capability_pack
 from agent_py_agent.agent.gateway_parts.business_api_v13 import v13_action_specs
 from agent_py_agent.agent.plugin_host.business_action_specs import business_action_specs
+from agent_py_agent.agent.plugin_management import PluginManagement, plugin_management_context
+from agent_py_agent.agent.user_space.owner_access import is_complete_local_admin_owner
+from agent_py_agent.agent.user_space.owner_resolver import resolve_owner_home
+from agent_py_agent.cli.chat_client_context import owner_identity_from_config
 from agent_py_agent.tests.test_mega_business_api_actions import native_request
 
 pytest_plugins = ('agent_py_agent.tests.test_business_v12_f9_e2e',)
@@ -39,48 +43,31 @@ def _package(package_id, version, *, controls=None):
     return build_capability_pack(declaration, contents).payload
 
 
-# LLM: 包源只是宿主绑定的端口替身，返回字节仍由产品读包器校验；不模拟安装表或合规结论。
-# 函数用途: 提供可检索、可取包字节的合成 package_source。
-class _Source:
-    # LLM: 只保存调用方给的已构建字节；语言无关。
-    # 函数用途: 记录包目录与字节。
-    def __init__(self, packages):
-        self.packages = dict(packages)
-        self.fetches = []
-
-    # LLM: 只按 package_id 精确过滤，同一包的多个版本合并成一条目录项。
-    # 函数用途: 返回一页包目录条目。
-    def index(self, *, query, kind, cursor, limit):
-        grouped = {}
-        for (package_id, version) in sorted(self.packages):
-            if query and query != package_id:
-                continue
-            grouped.setdefault(package_id, []).append(version)
-        rows = [{'package_id': package_id, 'title': package_id, 'summary': 'synthetic',
-                 'kind': 'capability_pack', 'versions': versions,
-                 'latest_version': versions[-1], 'compliance_frameworks': ['soc2']}
-                for package_id, versions in sorted(grouped.items())]
-        return {'items': rows[:limit], 'next_cursor': None}
-
-    # LLM: 缺失组合按来源缺记录的稳定事实报 LookupError，不返回空字节冒充包。
-    # 函数用途: 取指定版本包字节。
-    def fetch(self, package_id, version):
-        self.fetches.append((package_id, version))
-        try:
-            return self.packages[(package_id, version)]
-        except KeyError:
-            raise LookupError('package absent') from None
+# LLM: 本地安装直接走 PluginManagement.install_package_bytes，沿用真实 owner 安装表。
+# 函数用途: 通过宿主本地包安装端口安装合成能力包。
+def _install_local(agent, raw, *, operation_id, expected_revision=0):
+    owner = resolve_owner_home(agent.home_paths.root, owner_identity_from_config(agent.config))
+    context = plugin_management_context(
+        owner,
+        agent.home_paths,
+        agent.config,
+        agent.conversation_store.threads,
+        actor_id='w11-test',
+        channel='http',
+        conversation_id=operation_id,
+        is_admin=is_complete_local_admin_owner(agent.home_paths),
+    )
+    return PluginManagement(context).install_package_bytes(
+        raw, operation_id=operation_id, expected_revision=expected_revision
+    )
 
 
-# LLM: provider 只挂到宿主可信属性；真实 HTTP 走 base owner 通道，provider 才会随上下文复制。
-# 函数用途: 在真实 Gateway 上绑定合成包源。
+# LLM: 使用隔离真实 Gateway，不绑定远程包源，仅测试本地已安装包查验、卸载与合规。
+# 函数用途: 提供启用本地业务网关的测试夹具。
 @pytest.fixture
 def packages(native_http):
     server, agent = native_http
-    source = _Source({(_PACKAGE_ID, '1.0.0'): _package(_PACKAGE_ID, '1.0.0'),
-                      (_PACKAGE_ID, '1.1.0'): _package(_PACKAGE_ID, '1.1.0')})
-    agent.business_v13_providers = {'package_source': source}
-    return server, agent, source
+    return server, agent
 
 
 # LLM: 调用只经原 HTTP 与宿主凭据，身份不从 JSON 携带；base 通道用于本机管理员宿主。
@@ -171,32 +158,14 @@ def _seed_rule(agent, rule_id, *, enabled):
         idempotency_key='seed-rule-' + rule_id, params_digest='seed')
 
 
-# LLM: 宿主在原业务服务首次装配时固化 provider 视图，因此缺源与有源用两个独立真实服务断言。
-# 函数用途: 验证 packages.index 在缺 package_source 时给出 HOST_NOT_READY 且不返回空目录。
-def test_index_requires_package_source_provider(native_http):
-    server, _agent = native_http
-    _failed(server, 'packages.index', {}, 'HOST_NOT_READY', 503)
-
-
-# LLM: 目录条目只来自宿主包源与安装表；未安装包的 installed_version 必须为空。
-# 函数用途: 验证 packages.index 投影包源条目与覆盖率。
-def test_index_lists_source_packages(packages):
-    server, _agent, source = packages
-    data = _completed(server, 'packages.index', {})
-    assert [row['package_id'] for row in data['items']] == [_PACKAGE_ID]
-    assert data['items'][0]['installed_version'] is None
-    assert data['items'][0]['latest_version'] == '1.1.0'
-    assert data['coverage'] == 'complete' and data['next_cursor'] is None
-    assert source.fetches == []
-
-
-# LLM: 未安装包的内容清单来自包源字节的静态检查，不安装也不执行任何随包文件。
+# LLM: 已安装包的内容清单来自原安装表字节的静态检查，不执行任何随包文件；未安装包返回 404。
 # 函数用途: 验证 packages.inspect 返回规则/流程/脚本/技能与合规映射。
 def test_inspect_lists_rules_workflows_scripts_skills(packages):
-    server, _agent, _source = packages
+    server, agent = packages
+    _install_local(agent, _package(_PACKAGE_ID, '1.0.0'), operation_id='w11-inspect-install')
     data = _completed(server, 'packages.inspect', {'package_id': _PACKAGE_ID,
                                                    'version': '1.0.0'})
-    assert data['installed'] is False and data['version'] == '1.0.0'
+    assert data['installed'] is True and data['version'] == '1.0.0'
     assert data['manifest']['plugin_id'] == _PACKAGE_ID
     contents = data['contents']
     assert [row['ref'] for row in contents['detection_rules']] == ['rules/ssh-brute.json']
@@ -207,45 +176,15 @@ def test_inspect_lists_rules_workflows_scripts_skills(packages):
         'asset_kind': 'rule', 'asset_ref': 'rule-1'}]
     _failed(server, 'packages.inspect', {'package_id': 'unknown-pack', 'version': '1.0.0'},
             'RESOURCE_NOT_FOUND', 404)
-
-
-# LLM: 例子的 params 必须真的写入原安装表；同键重放不再写第二份，版本不符按状态冲突拒绝。
-# 函数用途: 验证 packages.install 的安装事实、修订与幂等。
-def test_install_example_params_installs_and_mounts(packages):
-    server, agent, _source = packages
-    key = 'w11-install-example-key'
-    first = _completed(server, 'packages.install', {'package_id': _PACKAGE_ID,
-        'version': '1.0.0'}, key=key)
-    assert first['mounted_space_id'] is None
-    assert first['installation_revision'] >= 0
-    assert first['contents']['detection_rules'][0]['ref'] == 'rules/ssh-brute.json'
-    replay = _completed(server, 'packages.install', {'package_id': _PACKAGE_ID,
-        'version': '1.0.0'}, key=key)
-    assert replay == first
-    assert _PACKAGE_ID in _installations_text(agent)
-    _failed(server, 'packages.install', {'package_id': _PACKAGE_ID,
-        'version': '9.9.9'}, 'STATE_CONFLICT', 409, key='w11-install-other-version')
-
-
-# LLM: 挂载要真的落到原空间mounts，不能用缺解析器的条件跳过成功链路。
-# 函数用途: 验证 packages.install 带 space_id 时的一键挂载。
-def test_install_example_params_mounts_into_space(packages):
-    server, agent, _source = packages
-    space_id, _revision = _space(server, 'w11-mount-space-key')
-    installed = _completed(server, 'packages.install', {'package_id': _PACKAGE_ID,
-        'version': '1.0.0', 'space_id': space_id}, key='w11-mount-install-key')
-    assert installed['mounted_space_id'] == space_id
-    assert _PACKAGE_ID in _installations_text(agent)
-    mounts = _completed(server, 'spaces.get', {'space_id': space_id})['space']['mounts']
-    assert [row['package_ref'] for row in mounts] == [_PACKAGE_ID]
+    _failed(server, 'packages.inspect', {'package_id': _PACKAGE_ID, 'version': '9.9.9'},
+            'RESOURCE_NOT_FOUND', 404)
 
 
 # LLM: 卸载顺序必须是先摘挂载再走原卸载命令，卸载后同包再请求要 404。
 # 函数用途: 验证 packages.uninstall 的摘除与删除事实。
 def test_uninstall_detaches_then_removes(packages):
-    server, agent, _source = packages
-    _completed(server, 'packages.install', {'package_id': _PACKAGE_ID,
-        'version': '1.0.0'}, key='w11-uninstall-install')
+    server, agent = packages
+    _install_local(agent, _package(_PACKAGE_ID, '1.0.0'), operation_id='w11-uninstall-install')
     data = _completed(server, 'packages.uninstall', {'package_id': _PACKAGE_ID},
                       key='w11-uninstall-remove')
     assert data['uninstalled'] is True and data['detached_spaces'] == []
@@ -254,32 +193,11 @@ def test_uninstall_detaches_then_removes(packages):
             'RESOURCE_NOT_FOUND', 404, key='w11-uninstall-again')
 
 
-# LLM: 升级要求安装版本 CAS；旧 revision 必须 409，同版本不重复写安装表。
-# 函数用途: 验证 packages.upgrade 的版本与修订约束。
-def test_upgrade_requires_installed_revision_cas(packages):
-    server, agent, _source = packages
-    installed = _completed(server, 'packages.install', {'package_id': _PACKAGE_ID,
-        'version': '1.0.0'}, key='w11-upgrade-install')
-    revision = installed['installation_revision']
-    _failed(server, 'packages.upgrade', {'package_id': _PACKAGE_ID,
-        'version': '1.1.0'}, 'REVISION_CONFLICT', 409, key='w11-upgrade-stale',
-        revision=revision + 7)
-    upgraded = _completed(server, 'packages.upgrade', {'package_id': _PACKAGE_ID,
-        'version': '1.1.0'}, key='w11-upgrade-run-01', revision=revision)
-    assert upgraded['from_version'] == '1.0.0' and upgraded['version'] == '1.1.0'
-    assert upgraded['installation_revision'] == revision + 1
-    same = _completed(server, 'packages.upgrade', {'package_id': _PACKAGE_ID,
-        'version': '1.1.0'}, key='w11-upgrade-same', revision=upgraded['installation_revision'])
-    assert same['installation_revision'] == upgraded['installation_revision']
-    assert '"1.1.0"' in _installations_text(agent)
-
-
-# LLM: 控制项只来自已安装包的声明，状态与证据计数来自证据集合，不返回猜测状态。
+# LLM: 控制项目录只来自已安装包声明，状态与证据计数来自证据集合，不返回猜测状态。
 # 函数用途: 验证 compliance.status 的控制项、证据计数与未知框架 404。
 def test_compliance_status_from_installed_mappings_and_evidence(packages):
-    server, agent, _source = packages
-    _completed(server, 'packages.install', {'package_id': _PACKAGE_ID,
-        'version': '1.0.0'}, key='w11-status-install')
+    server, agent = packages
+    _install_local(agent, _package(_PACKAGE_ID, '1.0.0'), operation_id='w11-status-install')
     _seed_rule(agent, 'rule-1', enabled=True)
     _completed(server, 'compliance.collect', {'framework': 'soc2'}, key='w11-status-collect')
     _seed_evidence(agent, {'evidence-seeded': {'evidence_id': 'evidence-seeded',
@@ -300,14 +218,11 @@ def test_compliance_status_from_installed_mappings_and_evidence(packages):
 # LLM: 采集是同一框架全部控制项的一次有界快照；同状态再采集不产生新版本，重放返回原回执。
 # 函数用途: 验证 compliance.collect 的状态判定、证据落盘与确定性。
 def test_compliance_collect_records_evidence_deterministically(packages):
-    server, agent, _source = packages
+    server, agent = packages
     source_package = _package(_PACKAGE_ID, '1.0.0',
         controls={'CC6.1': [('rule', 'rule-1')], 'CC6.2': [('rule', 'rule-2')],
                   'CC6.3': [('script', 'collect-evidence.sh')]})
-    agent.business_v13_providers = {'package_source': _Source(
-        {(_PACKAGE_ID, '1.0.0'): source_package})}
-    _completed(server, 'packages.install', {'package_id': _PACKAGE_ID,
-        'version': '1.0.0'}, key='w11-collect-install')
+    _install_local(agent, source_package, operation_id='w11-collect-install')
     _seed_rule(agent, 'rule-1', enabled=True)
     _seed_rule(agent, 'rule-2', enabled=False)
     first = _completed(server, 'compliance.collect', {'framework': 'soc2'},
@@ -330,10 +245,9 @@ def test_compliance_collect_records_evidence_deterministically(packages):
 # LLM: 导出必须真的登记到原产物账本并通过摘要核对；三种格式互不冒充。
 # 函数用途: 验证 compliance.export 的产物登记与内容摘要。
 def test_compliance_export_artifact(packages):
-    server, agent, _source = packages
+    server, agent = packages
     space_id, _revision = _space(server, 'w11-export-space-key')
-    _completed(server, 'packages.install', {'package_id': _PACKAGE_ID,
-        'version': '1.0.0'}, key='w11-export-install')
+    _install_local(agent, _package(_PACKAGE_ID, '1.0.0'), operation_id='w11-export-install')
     _seed_rule(agent, 'rule-1', enabled=True)
     _completed(server, 'compliance.collect', {'framework': 'soc2'}, key='w11-export-collect')
     data = _completed(server, 'compliance.export', {'framework': 'soc2', 'format': 'json',
@@ -358,16 +272,20 @@ def test_frozen_package_names_exist():
     for name in ('spaces.packages.catalog', 'spaces.packages.list', 'spaces.packages.attach',
                  'spaces.packages.detach', 'spaces.packages.set', 'spaces.packages.reorder'):
         assert name in specs, name
-    assert not [name for name in v13_action_specs() if name.startswith('spaces.packages.')]
+    v13_specs = v13_action_specs()
+    assert not [name for name in v13_specs if name.startswith('spaces.packages.')]
+    for retired in ('packages.index', 'packages.install', 'packages.upgrade'):
+        assert retired not in v13_specs
+    for kept in ('packages.inspect', 'packages.uninstall'):
+        assert kept in v13_specs
 
 
 # LLM: 200/202 只用于完成或受理，error 必须为空；信封字段集合固定，不许夹带私有路径。
 # 函数用途: 验证能力包与合规动作的标准信封形状。
 def test_envelopes(packages):
-    server, _agent, _source = packages
-    _completed(server, 'packages.install', {'package_id': _PACKAGE_ID,
-        'version': '1.0.0'}, key='w11-envelope-install')
-    for action, params in (('packages.index', {}),
+    server, agent = packages
+    _install_local(agent, _package(_PACKAGE_ID, '1.0.0'), operation_id='w11-envelope-install')
+    for action, params in (('packages.inspect', {'package_id': _PACKAGE_ID}),
                            ('compliance.status', {'framework': 'soc2'})):
         status, body = _call(server, action, params)
         assert status == 200, json.dumps(body, ensure_ascii=False)
@@ -377,44 +295,12 @@ def test_envelopes(packages):
         assert isinstance(body['allowed_actions'], list)
 
 
-# LLM: 合法但身份错误的归档仍属来源故障；既不能安装另一包，也不能假称检查了请求包。
-# 函数用途: 验证归档manifest与请求包身份及版本的强绑定。
-@pytest.mark.parametrize('wrong_id,wrong_version', [('other-pack', '1.0.0'),
-                                                  (_PACKAGE_ID, '8.8.8')])
-def test_manifest_identity_mismatch_has_no_install_effect(packages, wrong_id, wrong_version):
-    server, agent, source = packages
-    source.packages[(_PACKAGE_ID, '1.0.0')] = _package(wrong_id, wrong_version)
-    for action in ('packages.inspect', 'packages.install'):
-        _failed(server, action, {'package_id': _PACKAGE_ID, 'version': '1.0.0'},
-                'HOST_NOT_READY', 503, key='w11-wrong-manifest-' + action.replace('.', '-'))
-    status = _completed(server, 'packages.index', {})['items'][0]
-    assert status['installed_version'] is None
-    path = Path(agent.home_paths.owner_home_dir) / 'data' / 'plugins' / 'installations.json'
-    assert not path.exists() or wrong_id not in path.read_text()
-
-
-# LLM: 重放必须先消费耐久回执，不可在升级后CAS或卸载后404处分叉。
-# 函数用途: 验证升级和卸载的原键原参数成功重放。
-def test_package_upgrade_uninstall_replay_original_receipts(packages):
-    server, _agent, _source = packages
-    installed = _completed(server, 'packages.install', {'package_id': _PACKAGE_ID,
-        'version': '1.0.0'}, key='w11-replay-install')
-    params = {'package_id': _PACKAGE_ID, 'version': '1.1.0'}
-    upgraded = _completed(server, 'packages.upgrade', params,
-                          key='w11-replay-upgrade', revision=installed['installation_revision'])
-    assert _completed(server, 'packages.upgrade', params, key='w11-replay-upgrade',
-                      revision=installed['installation_revision']) == upgraded
+# LLM: 重放必须先消费耐久回执，不可在卸载后 404 处分叉。
+# 函数用途: 验证卸载的原键原参数成功重放。
+def test_package_uninstall_replay_original_receipts(packages):
+    server, agent = packages
+    _install_local(agent, _package(_PACKAGE_ID, '1.0.0'), operation_id='w11-replay-install')
     removed = _completed(server, 'packages.uninstall', {'package_id': _PACKAGE_ID},
                          key='w11-replay-uninstall')
     assert _completed(server, 'packages.uninstall', {'package_id': _PACKAGE_ID},
                       key='w11-replay-uninstall') == removed
-
-
-# LLM: 空间授权在任何安装副作用前完成，不能安装完成后才发现输入空间不可见。
-# 函数用途: 验证坏空间不会产生安装表副作用。
-def test_package_bad_space_does_not_install(packages):
-    server, agent, _source = packages
-    _failed(server, 'packages.install', {'package_id': _PACKAGE_ID, 'version': '1.0.0',
-            'space_id': 'missing-space'}, 'SPACE_NOT_FOUND', 404, key='w11-bad-space-install')
-    path = Path(agent.home_paths.owner_home_dir) / 'data' / 'plugins' / 'installations.json'
-    assert not path.exists() or _PACKAGE_ID not in path.read_text()

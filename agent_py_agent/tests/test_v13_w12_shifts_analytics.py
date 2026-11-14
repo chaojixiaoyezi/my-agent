@@ -2,6 +2,8 @@
 import json
 from copy import deepcopy
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -12,17 +14,67 @@ from agent_py_agent.agent.gateway_parts import business_api_v13 as foundation
 from agent_py_agent.agent.plugin_host.contracts import DomainResult
 from agent_py_agent.agent.plugin_host.errors import HostAPIError
 from agent_py_agent.agent.plugin_host.schemas import validate_object
+from agent_py_agent.agent.settings import AgentConfig
+from agent_py_agent.agent.user_space.home_layout import home_paths
+from agent_py_agent.agent.user_space.owner_resolver import (
+    home_paths_with_owner,
+    resolve_owner_home,
+)
 from agent_py_agent.tests import test_v13_w0_harness as harness
-from agent_py_agent.tests import test_v13_w12_asset_discovery as asset_tests
 
-host = asset_tests.host
-failed = asset_tests.failed
-idem = asset_tests.idem
-invoke = asset_tests.invoke
-ok = asset_tests.ok
 v13_native = harness.v13_native
 v13_call = harness.v13_call
 v13_space = harness.v13_space
+
+
+# LLM: 夹具只创建任务临时目录，不触碰真实 home。
+# 函数用途: 创建可控制时钟与原生权限的真实宿主。
+@pytest.fixture
+def host(tmp_path, monkeypatch):
+    root = tmp_path / 'host'
+    monkeypatch.setenv('MY_AGENT_HOME', str(root))
+    monkeypatch.setenv('HOME', str(tmp_path / 'os-home'))
+    clock = [1793664000.0]
+    return SimpleNamespace(home_paths=home_paths_with_owner(home_paths(root), resolve_owner_home(root)),
+        config=AgentConfig(business_spaces_enabled=True),
+        business_v13_clock=lambda: clock[0], clock=clock, business_v13_providers={}, business_native_admin=lambda: True)
+
+
+# LLM: 幂等键全部为合成值，满足真实运输校验。
+# 函数用途: 生成测试写入键。
+def idem():
+    return 'w12-assets-' + uuid4().hex
+
+
+# LLM: 身份来自宿主 bind_context，不能从请求 JSON 注入 owner。
+# 函数用途: 通过真实统一 dispatcher 执行业务动作。
+def invoke(host, action, params=None, *, key=None, revision=None, subject='alice', authorize=None):
+    context = api.bind_business_context(host, subject_id=subject,
+        authorize=authorize if authorize is not None else lambda action, facts: True)
+    request = {'action': action, 'request_id': uuid4().hex, 'params': {} if params is None else params}
+    if key is not None:
+        request['idempotency_key'] = key
+    if revision is not None:
+        request['expected_revision'] = revision
+    return api.execute_business(request, context, api.BusinessServices(host))
+
+
+# LLM: 成功断言校验实际信封，不手写预期响应代替产品调用。
+# 函数用途: 取得 200 completed 数据。
+def ok(host, action, params=None, *, key=None, revision=None, subject='alice'):
+    status, body = invoke(host, action, params, key=key, revision=revision, subject=subject)
+    assert status == 200, body
+    assert body['state'] == 'completed' and body['error'] is None, body
+    return body['data']
+
+
+# LLM: 失败必须保留精确状态码与失败信封。
+# 函数用途: 核对真实错误输出。
+def failed(result, status, code):
+    actual, body = result
+    assert actual == status, body
+    assert body['state'] == 'failed' and body['data'] == {}, body
+    assert body['error']['code'] == code, body
 
 
 # LLM: 测试日期明确指定 UTC，不依赖运行机器本地时区。

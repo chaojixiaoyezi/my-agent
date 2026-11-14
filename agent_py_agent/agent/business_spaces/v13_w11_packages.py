@@ -21,9 +21,7 @@ from pathlib import Path
 from ..conversation.business_access import BusinessError
 from ..gateway_parts.business_api_v13 import (
     v13_call_frozen,
-    v13_provider,
     v13_require_access,
-    v13_resolve_space,
 )
 from ..gateway_parts.business_artifacts_http import upload_artifact
 from ..plugin_host.errors import HostAPIError
@@ -138,24 +136,6 @@ def _mount_call(call, manager):
     return replace(call, services=local)
 
 
-# LLM: 来源字节必须通过原静态校验并绑定请求ID/版本，合法的另一包同样拒绝。
-# 函数用途: 从包源取一份包字节。
-def _fetch_package(call, package_id, version):
-    provider = v13_provider(call, 'package_source')
-    try:
-        raw = provider.fetch(package_id, version)
-    except (LookupError, KeyError) as error:
-        raise HostAPIError('RESOURCE_NOT_FOUND', 404) from error
-    except (OSError, ValueError) as error:
-        raise HostAPIError('HOST_NOT_READY', 503) from error
-    if not isinstance(raw, bytes):
-        raise HostAPIError('HOST_NOT_READY', 503)
-    snapshot = _snapshot(raw)
-    if snapshot.manifest.plugin_id != package_id or snapshot.manifest.version != version:
-        raise HostAPIError('HOST_NOT_READY', 503)
-    return raw
-
-
 # LLM: 只存结果回执，不复制安装权威；原Store绑定主体/输入，并在副作用前后实时复核。
 # 函数用途: 幂等执行一次包生命周期编排。
 def _package_receipted(call, mutate):
@@ -185,56 +165,6 @@ def _snapshot(raw):
         return inspect_plugin_package(raw, limits=HOST_PACKAGE_LIMITS)
     except PluginPackageError as error:
         raise HostAPIError('HOST_NOT_READY', 503) from error
-
-
-# LLM: 只按结构化包源协议读取目录；缺规范字段属于来源故障，不用默认值伪造条目。
-# 函数用途: 读取并规范化一页包目录。
-def _index_page(call, *, query, kind, cursor, limit):
-    provider = v13_provider(call, 'package_source')
-    try:
-        page = provider.index(query=query, kind=kind, cursor=cursor, limit=limit)
-    except (OSError, ValueError, TypeError) as error:
-        raise HostAPIError('HOST_NOT_READY', 503) from error
-    if not isinstance(page, dict) or not isinstance(page.get('items'), list):
-        raise HostAPIError('HOST_NOT_READY', 503)
-    next_cursor = page.get('next_cursor')
-    if next_cursor is not None and not isinstance(next_cursor, str):
-        raise HostAPIError('HOST_NOT_READY', 503)
-    return page['items'], next_cursor
-
-
-# LLM: 目录条目只投影冻结字段；kind/框架按合同枚举过滤，缺 package_id 即来源故障。
-# 函数用途: 把包源条目投影为 V13PackageIndexItem 形状。
-def _index_item(row, installed_versions):
-    if not isinstance(row, dict) or not isinstance(row.get('package_id'), str) or not row['package_id']:
-        raise HostAPIError('HOST_NOT_READY', 503)
-    package_id = row['package_id']
-    versions = [item for item in row.get('versions') or [] if isinstance(item, str) and item]
-    latest = row.get('latest_version')
-    if not isinstance(latest, str) or not latest:
-        latest = versions[-1] if versions else ''
-    if not latest:
-        raise HostAPIError('HOST_NOT_READY', 503)
-    kind = row.get('kind') if row.get('kind') in ('capability_pack', 'plugin') else 'capability_pack'
-    frameworks = [item for item in row.get('compliance_frameworks') or []
-                  if isinstance(item, str) and item and item[0].islower()
-                  and item.replace('_', '').isalnum()][:20]
-    summary = row.get('summary')
-    title = row.get('title')
-    return {'package_id': package_id, 'title': title if isinstance(title, str) and title else package_id,
-            'summary': summary if isinstance(summary, str) else '', 'kind': kind,
-            'versions': versions[:100] if versions else [latest], 'latest_version': latest,
-            'compliance_frameworks': frameworks,
-            'installed_version': installed_versions.get(package_id)}
-
-
-# LLM: 已安装版本只来自安装表，不把目录条目自报的版本当安装事实。
-# 函数用途: 汇总本 owner 已安装包到版本映射。
-def _installed_versions(manager):
-    result = {}
-    for row in manager.installations.snapshot():
-        result.setdefault(row.manifest.plugin_id, row.manifest.version)
-    return result
 
 
 # LLM: 包内条目名只取自路径本身，摘要留空而不是从文件正文猜用途。
@@ -414,78 +344,19 @@ def _status_data(call, framework, space_id):
     return {'framework': framework, 'controls': controls, 'summary': summary, 'coverage': coverage}
 
 
-# LLM: 包目录只投影宿主包源与本 owner 安装表，缺包源时 ready 已拒；游标契约沿用原冻结 Cursor。
-# 函数用途: 返回 GET /marketplace/index.json 的能力包目录。
-def index(call):
-    limit = call.params.get('limit', 50)
-    rows, next_cursor = _index_page(call, query=call.params.get('query', ''),
-        kind=call.params.get('kind'), cursor=call.params.get('cursor'), limit=limit)
-    installed = _installed_versions(_management(call))
-    return {'items': [_index_item(row, installed) for row in rows][:limit],
-            'next_cursor': next_cursor, 'coverage': 'partial' if next_cursor else 'complete'}
-
-
-# LLM: 已安装优先读原安装表字节，未安装才向包源取同一版本；两者都走宿主静态校验器，不执行包内容。
+# LLM: 只读已安装表的静态快照，未安装或版本不匹配时返回 404，不执行包内容。
 # 函数用途: 返回一个包的结构化内容清单。
 def inspect(call):
     package_id, version = call.params['package_id'], call.params.get('version')
     manager = _management(call)
     entry = _installed_entry(manager, package_id)
-    if entry is not None and (version is None or version == entry.manifest.version):
-        snapshot = _snapshot(manager.installations.package_bytes(entry))
-    else:
-        if version is None:
-            rows, _next = _index_page(call, query=package_id, kind=None, cursor=None, limit=100)
-            match = next((row for row in rows if isinstance(row, dict)
-                          and row.get('package_id') == package_id), None)
-            if match is None:
-                raise HostAPIError('RESOURCE_NOT_FOUND', 404)
-            version = _index_item(match, {})['latest_version']
-        snapshot = _snapshot(_fetch_package(call, package_id, version))
+    if entry is None or (version is not None and version != entry.manifest.version):
+        raise HostAPIError('RESOURCE_NOT_FOUND', 404)
+    snapshot = _snapshot(manager.installations.package_bytes(entry))
     contents, _complete = _contents(snapshot)
-    installed = entry is not None and entry.manifest.version == snapshot.manifest.version
+    installed = entry.manifest.version == snapshot.manifest.version
     return {'package_id': package_id, 'version': snapshot.manifest.version, 'installed': installed,
             'manifest': snapshot.manifest.to_payload(), 'contents': contents}
-
-
-# LLM: 安装仍由原安装表按 operation_id 幂等；同版本重放复读原事实，不重复写安装表或再挂载。
-# 函数用途: 安装一个包并按需一键挂载到当前业务空间。
-def install(call):
-    return _package_receipted(call, _install_once)
-
-
-# LLM: 空间先授权后安装，字节身份由fetch复核，调用局部原安装引用接入原生挂载端口。
-# 函数用途: 执行一次尚未完成的安装和挂载。
-def _install_once(call):
-    package_id, version = call.params['package_id'], call.params['version']
-    space_id, mount = call.params.get('space_id'), call.params.get('mount', True)
-    manager = _management(call)
-    if space_id and mount:
-        call = _mount_call(call, manager)
-    space = v13_resolve_space(call, space_id) if space_id else None
-    entry = _installed_entry(manager, package_id)
-    if entry is not None:
-        if entry.manifest.version != version:
-            raise HostAPIError('STATE_CONFLICT', 409)
-        snapshot = _snapshot(manager.installations.package_bytes(entry))
-        revision = entry.revision
-    else:
-        raw = _fetch_package(call, package_id, version)
-        snapshot = _snapshot(raw)
-        v13_require_access(call)
-        revision = manager.install_package_bytes(raw, operation_id=_operation_id(call),
-                                                 expected_revision=0).installation.revision
-    mounted = None
-    if space_id and mount:
-        space = v13_resolve_space(call, space_id)
-        v13_call_frozen(call, 'spaces.packages.attach',
-                        {'space_id': space['space_id'], 'package_refs': [package_id]},
-                        expected_revision=space['revision'],
-                        idempotency_key=_operation_id(call) + '-attach')
-        mounted = space['space_id']
-    contents, _complete = _contents(snapshot)
-    return {'package_id': package_id, 'version': snapshot.manifest.version,
-            'installation_revision': revision, 'mounted_space_id': mounted, 'contents': contents}
 
 
 # LLM: 先摘除所有真实挂载再走原卸载命令，命令不确认就不声称已卸载；全部空间来自冻结 spaces 视图。
@@ -528,35 +399,6 @@ def _uninstall_once(call):
     if current is not None or not isinstance(result, dict) or result.get('state') != 'succeeded':
         raise HostAPIError('STATE_CONFLICT', 409)
     return {'package_id': package_id, 'uninstalled': True, 'detached_spaces': detached}
-
-
-# LLM: 升级必须携带当前安装版本，原生安装表再做同一 CAS；版本相同不重复写安装表。
-# 函数用途: 把一个已安装包升级到目标版本。
-def upgrade(call):
-    return _package_receipted(call, _upgrade_once)
-
-
-# LLM: 先重放原键回执，再对新操作按原安装服务CAS与manifest身份裁决。
-# 函数用途: 执行一次尚未完成的包升级。
-def _upgrade_once(call):
-    package_id, version = call.params['package_id'], call.params['version']
-    manager = _management(call)
-    entry = _installed_entry(manager, package_id)
-    if entry is None:
-        raise HostAPIError('RESOURCE_NOT_FOUND', 404)
-    if call.expected_revision != entry.revision:
-        raise BusinessError('REVISION_CONFLICT')
-    if entry.manifest.version == version:
-        return {'package_id': package_id, 'from_version': version, 'version': version,
-                'installation_revision': entry.revision}
-    raw = _fetch_package(call, package_id, version)
-    _snapshot(raw)
-    v13_require_access(call)
-    updated = manager.install_package_bytes(raw, operation_id=_operation_id(call),
-                                            expected_revision=call.expected_revision)
-    return {'package_id': package_id, 'from_version': entry.manifest.version,
-            'version': updated.installation.manifest.version,
-            'installation_revision': updated.installation.revision}
 
 
 # LLM: 控制项目录只来自已安装包声明；框架无人声明时 404，不返回空热图冒充已覆盖。

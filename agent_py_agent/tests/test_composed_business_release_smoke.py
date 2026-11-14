@@ -16,10 +16,14 @@ import pytest
 from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.backends.base import EchoBackend, _utc_now_iso
+from agent_py_agent.agent.capability.package_build import build_capability_pack
 from agent_py_agent.agent.conversation import FakeDeliveryService
 from agent_py_agent.agent.conversation.business_contracts import BusinessExecutionContext
+from agent_py_agent.agent.plugin_management import PluginManagement, plugin_management_context
 from agent_py_agent.agent.runtime_context import current_subagent_run_id
 from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
+from agent_py_agent.agent.user_space.owner_access import is_complete_local_admin_owner
+from agent_py_agent.agent.user_space.owner_resolver import resolve_owner_home
 from agent_py_agent.agent.workflows.run_store import WorkflowRunStore
 from agent_py_agent.cli.chat_client_context import (
     _gateway_request_identity,
@@ -28,11 +32,42 @@ from agent_py_agent.cli.chat_client_context import (
 from agent_py_agent.cli.space_commands import BusinessClient
 from agent_py_agent.tests.test_business_v12_background_scheduling import native
 from agent_py_agent.tests.test_mega_business_api_actions import native_request
-from agent_py_agent.tests.test_v13_w11_packages import _PACKAGE_ID, _package, _Source
 
 _FIXTURES = (native,)
+_PACKAGE_ID = 'soc-core-detections-pack'
 _ROWS = [[159, 7], [270, 3], [40, 11]]
 _ORACLE = {'grand_total_cents': 2363, 'row_count': 3}
+
+
+def _package(package_id, version, *, controls=None):
+    contents = {
+        'README.md': b'# synthetic pack\n',
+        'rules/ssh-brute.json': b'{"rule": "ssh-brute"}\n',
+        'workflows/contain-host.json': b'{"workflow": "contain"}\n',
+        'scripts/collect-evidence.sh': b'#!/bin/sh\nexit 0\n',
+        'skills/triage/SKILL.md': b'# triage\n',
+    }
+    for control_id, assets in (controls or {'CC6.1': [('rule', 'rule-1')]}).items():
+        contents['compliance/soc2/' + control_id + '.json'] = json.dumps(
+            {
+                'title': 'control ' + control_id,
+                'family': 'CC6',
+                'assets': [{'asset_kind': kind, 'asset_ref': ref} for kind, ref in assets],
+            }
+        ).encode()
+    declaration = {
+        'plugin_id': package_id,
+        'version': version,
+        'summary': 'synthetic package',
+        'capability': {
+            'description': 'synthetic detection pack',
+            'keywords': ['soc'],
+            'entry_document': 'README.md',
+        },
+        'files': [{'path': path} for path in contents],
+        'settings_schema': {},
+    }
+    return build_capability_pack(declaration, contents).payload
 
 
 class _Wire:
@@ -64,13 +99,25 @@ def _business_entry(native):
     from agent_py_agent.agent.gateway_parts.business_host_ports import wire_business_host_ports
 
     wire_business_host_ports(agent)
-    source = _Source({(_PACKAGE_ID, '1.0.0'): _package(_PACKAGE_ID, '1.0.0')})
-    agent.business_v13_providers = {'package_source': source}
     wire = _Wire(native)
+    owner = resolve_owner_home(agent.home_paths.root, owner_identity_from_config(agent.config))
+    pm_context = plugin_management_context(
+        owner,
+        agent.home_paths,
+        agent.config,
+        agent.conversation_store.threads,
+        actor_id=wire.identity['user_id'],
+        channel=wire.identity['channel'],
+        conversation_id='composed-offline-release-install',
+        is_admin=is_complete_local_admin_owner(agent.home_paths),
+    )
+    installed = PluginManagement(pm_context).install_package_bytes(
+        _package(_PACKAGE_ID, '1.0.0'),
+        operation_id='composed-offline-release-install-' + _PACKAGE_ID,
+    )
     space = wire.call('spaces.create', {'name': 'composed-offline-release'})
     sid = space['space_id']
-    installed = wire.call('packages.install', {'package_id': _PACKAGE_ID, 'version': '1.0.0', 'space_id': sid})
-    assert installed['mounted_space_id'] == sid
+    wire.call('spaces.packages.attach', {'space_id': sid, 'package_refs': [_PACKAGE_ID]}, expected_revision=space['revision'])
     detail = wire.call('spaces.get', {'space_id': sid})
     assert any(row['package_ref'] == _PACKAGE_ID and row['enabled'] for row in detail['space']['mounts'])
     bound = wire.call('interfaces.bind', {'surface_ref': 'terminal', 'name': 'composed-offline-release',

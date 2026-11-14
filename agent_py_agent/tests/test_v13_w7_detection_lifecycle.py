@@ -1,7 +1,6 @@
 """检测生命周期的真实 HTTP 往返、耐久事务、回放与异步回写回归。"""
 from __future__ import annotations
 
-import copy
 import json
 import uuid
 from dataclasses import replace
@@ -387,92 +386,6 @@ def test_baselines_list_and_create(v13_native):
     bad = _send(v13_native, 'detection_proposals.baselines.create',
         {**params, 'window': {'since': window['until'], 'until': window['since']}}, key='baseline-bad-window', status=400)
     assert bad['error']['code'] == 'INVALID_SCHEMA'
-
-
-class _Catalog:
-    """宿主协议替身只提供合成来源，不替业务 handler 或 HTTP 编造结果。"""
-
-    # LLM: 数据仅为 provider 输入，不是网关响应。
-    # 函数用途: 初始化有限合成目录与调用计数。
-    def __init__(self):
-        self.calls = []
-        self.items = [{'item_id': 'community-' + str(index), 'kind': 'detection', 'title': '社区规则 ' + str(index),
-            'summary': '固定 Sigma 规则', 'author': None, 'tags': ['endpoint'], 'format': 'sigma',
-            'version': '1', 'updated_at': '2026-10-01T00:00:00+00:00'} for index in range(2)]
-
-    # LLM: 仅实现本任务约定的来源 list 协议，不访问网络。
-    # 函数用途: 返回一页合成目录输入。
-    def list(self, kind, *, query, tag, cursor, limit):
-        self.calls.append(('list', kind, query, tag, cursor, limit))
-        offset = 0 if cursor is None else int(cursor)
-        rows = self.items[offset:offset + limit]
-        return {'items': copy.deepcopy(rows),
-                'next_cursor': str(offset + limit) if offset + limit < len(self.items) else None}
-
-    # LLM: 正文由 provider 保持原字节语义，安装 handler 不解析部分 YAML。
-    # 函数用途: 按规范 ID 返回元数据和 Sigma 文本。
-    def get(self, kind, item_id):
-        self.calls.append(('get', kind, item_id))
-        row = next((row for row in self.items if row['item_id'] == item_id), None)
-        if row is None:
-            return None
-        return {'item': copy.deepcopy(row), 'document': 'title: Fixed\ndetection:\n  condition: selection\n',
-                'metadata': {'severity': 'high'}}
-
-
-# LLM: 所有读取都经过 operator 显式绑定的 provider，未绑定不得返回空列表。
-# 函数用途: 验证目录依赖、分页和准确查询条件。
-def test_community_list_requires_provider_and_pages(domain):
-    make, _sid = domain
-    call = make('community_detections.list', {'limit': 1, 'query': '终端', 'tag': 'endpoint'})
-    with pytest.raises(HostAPIError) as caught:
-        lifecycle.list_community(call)
-    assert caught.value.code == 'HOST_NOT_READY'
-    provider = _Catalog()
-    call.context.host.business_v13_providers = {'community_catalog': provider}
-    first = lifecycle.list_community(call)
-    second = lifecycle.list_community(replace(call, params={**call.params, 'cursor': first['next_cursor']}))
-    assert first['next_cursor'] == '1' and second['next_cursor'] is None
-    assert first['items'] != second['items']
-    assert provider.calls[0] == ('list', 'detection', '终端', 'endpoint', None, 1)
-
-
-# LLM: Sigma 文本作为查询原样传递，缺 ID 保持 404。
-# 函数用途: 验证社区条目到闭合 RuleDraft 的转换。
-def test_community_get_converts_sigma_to_rule_draft(domain):
-    make, _sid = domain
-    call = make('community_detections.get', {'detection_id': 'community-0'})
-    call.context.host.business_v13_providers = {'community_catalog': _Catalog()}
-    result = lifecycle.get_community(call)
-    assert result['rule']['query'] == {'language': 'sigma', 'text': 'title: Fixed\ndetection:\n  condition: selection\n'}
-    assert result['rule']['severity'] == 'high'
-    with pytest.raises(BusinessError) as caught:
-        lifecycle.get_community(replace(call, params={'detection_id': 'absent'}))
-    assert caught.value.code == 'RESOURCE_NOT_FOUND'
-
-
-# LLM: 重放不再次读取可能已被移除的 provider 文档，也不重复创建原生规则。
-# 函数用途: 验证社区安装默认禁用、origin 和文档快照幂等。
-def test_install_creates_disabled_by_default_rule_once(domain):
-    make, sid = domain
-    call = make('community_detections.install', {'space_id': sid, 'detection_id': 'community-0'})
-    provider = _Catalog()
-    call.context.host.business_v13_providers = {'community_catalog': provider}
-    first = lifecycle.install_community(call)
-    assert first['rule']['enabled'] is False and first['rule']['origin'] == 'community'
-    provider.items = []
-    assert lifecycle.install_community(call) == first
-    assert len(provider.calls) == 1
-    assert len(V13Store(call.owner_home).list('monitor_rules')) == 1
-
-
-# LLM: 无 provider 的动作既不能执行，也不能通过扩展目录声称已就绪。
-# 函数用途: 经真实 HTTP 验证社区依赖拒绝与发现行为。
-def test_unbound_community_absent_from_discovery(v13_native):
-    data = _send(v13_native, 'system.capabilities.extensions', {})['data']
-    assert not any(name.startswith('community_detections.') for name in data['supported_actions'])
-    body = _send(v13_native, 'community_detections.list', {}, status=503)
-    assert body['error']['code'] == 'HOST_NOT_READY'
 
 
 # LLM: 单元边界只替换异步派发端口；目标预留、状态转换与回写都使用真实 Store。
