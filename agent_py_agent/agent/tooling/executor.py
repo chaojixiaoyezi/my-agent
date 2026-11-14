@@ -75,6 +75,7 @@ from .tool_input_completion import (
 )
 from .tool_operation_coordinator import (
     ToolOperationExecutionRequest,
+    _is_deterministic_pre_handler_failure,
     execute_tool_operation,
 )
 
@@ -1635,6 +1636,7 @@ def _operation_from_outcome(
         handler_executed=outcome.handler_executed,
         effect_outcome=str(
             outcome.effect_outcome
+            or ("not_started" if status == "failed" and _is_deterministic_pre_handler_failure(outcome) else "")
             or _effect_from_operation_status(value, handler_executed=outcome.handler_executed)
         ),
         effect_source_ref=source_ref,
