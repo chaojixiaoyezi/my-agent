@@ -64,13 +64,56 @@ _QUOTA_CONTROL_NAMES = (_QUOTA_LEDGER, _QUOTA_LOCK_BASENAME + '.lock')
 _QUOTA_RUNTIME_DIRS = frozenset({('workspace', 'runtime', 'services'), ('data', 'telemetry')})
 # 宿主可丢弃读索引（local_storage.owner_read_index的cache库）及SQLite伴随文件，同样在准入外写入。
 _QUOTA_RUNTIME_FILES = frozenset(('cache', 'owner_read_index.sqlite3' + suffix) for suffix in ('', '-wal', '-shm', '-journal'))
-# 宿主在准入外维护的owner状态文件（运行库及SQLite伴随文件、审计日志、维护状态）：照常计费，但不进目录摘要，
+# 宿主在准入外维护的owner状态/治理/隔离元数据文件：照常计费，但不进目录摘要，
 #   宿主自己的写入不被前台核验当成准入外篡改；准入外的字节变化由后台对账计入。
-_QUOTA_HOST_FILES = frozenset({*(('runtime.db' + suffix,) for suffix in ('', '-wal', '-shm', '-journal')),
-                               ('audit_log.jsonl',), ('data', 'maintenance.json'),
-                               ('memory', 'curator', 'pending_condense.json')})
+_QUOTA_HOST_FILES = frozenset({
+    *(('runtime.db' + suffix,) for suffix in ('', '-wal', '-shm', '-journal')),
+    ('audit_log.jsonl',),
+    ('data', 'maintenance.json'),
+    ('owner_status.json',),
+    ('permissions.json',),
+    ('quota.json',),
+    ('retention.json',),
+    ('memory_policy.json',),
+    ('skill_policy.json',),
+    ('tool_policy.json',),
+    ('config', 'governance_policy.json'),
+    ('memory', 'SOUL_ADMIN_BASE.md'),
+    ('memory', 'AGENTS_ADMIN_BASE.md'),
+    ('memory', 'curator', 'state.json'),
+    ('memory', 'curator', 'state.corrupt'),
+    ('memory', 'curator', 'state.quarantine-backoff'),
+    ('memory', 'curator', 'run_log.jsonl'),
+    ('memory', 'curator', 'pending_condense.json'),
+})
 # 宿主在准入外维护的整棵owner子树（对话压缩归档）：同样照常计费、不进目录摘要。
 _QUOTA_HOST_TREES = frozenset({'compact'})
+# 宿主在准入外写入的治理复核与隔离归档子目录：永不包含workspace/assets/media/skills。
+_QUOTA_HOST_SUBTREES = frozenset({
+    ('data', 'governance_reviews'),
+    ('memory', 'curator', 'quarantine'),
+    ('conversations', 'wakes', 'quarantine'),
+    ('sessions', 'conversations', 'wakes', 'quarantine'),
+})
+_QUOTA_CONTROL_EXEMPT_FILES = frozenset({
+    ('audit_log.jsonl',),
+    ('data', 'maintenance.json'),
+    ('owner_status.json',),
+    ('permissions.json',),
+    ('quota.json',),
+    ('retention.json',),
+    ('memory_policy.json',),
+    ('skill_policy.json',),
+    ('tool_policy.json',),
+    ('config', 'governance_policy.json'),
+    ('memory', 'SOUL_ADMIN_BASE.md'),
+    ('memory', 'AGENTS_ADMIN_BASE.md'),
+    ('memory', 'curator', 'state.json'),
+    ('memory', 'curator', 'state.corrupt'),
+    ('memory', 'curator', 'state.quarantine-backoff'),
+    ('memory', 'curator', 'run_log.jsonl'),
+    ('memory', 'curator', 'pending_condense.json'),
+})
 _QUOTA_SCANS: OrderedDict = OrderedDict()
 _QUOTA_SCANS_LOCK = RLock()
 # 进程内配额续扫缓存最多保留的活跃 owner 扫描器数量。
@@ -282,6 +325,7 @@ class OwnerQuotaAdmission:
         if not self.enabled:
             return None
         relevant = _normalized_owner_changes(self._enforcer.owner_root, changes)
+        bounded_host_control = _is_bounded_host_control_admission(self._enforcer.owner_root, relevant)
         permanent_only = _permanent_only_changes(self._enforcer.owner_root, relevant)
         headroom = self._enforcer.max_bytes * self._enforcer.permanent_headroom_percent // 100 if permanent_only else 0
         if not relevant:
@@ -373,10 +417,12 @@ class OwnerQuotaAdmission:
                 self.commit_delta(final=False)
             ledger = _read_quota_ledger(root)
         # 有界控制写只消费上次完整权威计数，未知初始账、孤儿预留、根身份变化与扫描失效绝不放行。
-        bounded = (not complete and not authoritative and not snapshot_invalidated
-                   and type(bounded_control_growth_bytes) is int
-                   and 0 < final - replaced <= bounded_control_growth_bytes
-                   and _quota_control_baseline(root, ledger, reservation=self._reservation))
+        bounded = bounded_host_control or (
+            not complete and not authoritative and not snapshot_invalidated
+            and type(bounded_control_growth_bytes) is int
+            and 0 < final - replaced <= bounded_control_growth_bytes
+            and _quota_control_baseline(root, ledger, reservation=self._reservation)
+        )
         permanent_pending = False
         if not complete and not authoritative and not bounded and final > replaced:
             spent = ledger.get('permanent_pending_growth_bytes', 0)
@@ -398,7 +444,7 @@ class OwnerQuotaAdmission:
             projected_bytes=max(0, used - replaced + final),
             max_bytes=self._enforcer.max_bytes,
         )
-        if projection.projected_bytes > projection.max_bytes + headroom and projection.projected_bytes > used:
+        if not bounded_host_control and projection.projected_bytes > projection.max_bytes + headroom and projection.projected_bytes > used:
             raise OwnerQuotaExceeded(projection)
         rebased = None
         if complete:
@@ -1064,11 +1110,54 @@ def _quota_excluded(parts, name, info):
 # LLM: 只看路径、不stat：宿主固定状态文件、宿主只读子目录内的原子写临时名（如data/.maintenance.json.<随机>.tmp），
 #   以及宿主子树（含子树根本身）内的一切目录项；根目录等模型可写位置的临时名不豁免，保持失败关闭。
 # 函数用途: 判断一个目录项是否为宿主在准入外维护、不进目录摘要的状态。
+def _is_bounded_host_control_admission(
+    owner_root: Path,
+    relevant: dict[Path, OwnerQuotaChange],
+) -> bool:
+    """判定整批变更是否全部为有界的宿主治理、隔离或控制元数据写入。"""
+    if not relevant:
+        return False
+    per_target_cap = 1024 * 1024
+    batch_cap = 4 * 1024 * 1024
+    total_requested = 0
+    for path, change in relevant.items():
+        try:
+            relative = path.relative_to(owner_root).parts
+        except ValueError:
+            return False
+        if not relative or relative[0] in {'workspace', 'assets', 'media', 'skills'}:
+            return False
+        if change.final_size is not None:
+            if isinstance(change.final_size, bool) or not isinstance(change.final_size, int) or change.final_size < 0:
+                return False
+            if change.final_size > per_target_cap:
+                return False
+            total_requested += change.final_size
+            if total_requested > batch_cap:
+                return False
+        is_exact = relative in _QUOTA_CONTROL_EXEMPT_FILES
+        is_subtree = any(relative[:len(prefix)] == prefix for prefix in _QUOTA_HOST_SUBTREES)
+        is_scoped_tmp = (
+            len(relative) > 1
+            and relative[-1].startswith('.')
+            and relative[-1].endswith('.tmp')
+            and (*relative[:-1], relative[-1][1:].rpartition('.')[0].rpartition('.')[0]) in _QUOTA_CONTROL_EXEMPT_FILES
+        )
+        if not (is_exact or is_subtree or is_scoped_tmp):
+            return False
+    return True
+
+
 def _quota_host_managed(parts, name):
-    if (parts[0] if parts else name) in _QUOTA_HOST_TREES or (*parts, name) in _QUOTA_HOST_FILES:
+    full = (*parts, name)
+    if (parts[0] if parts else name) in _QUOTA_HOST_TREES or full in _QUOTA_HOST_FILES:
+        return True
+    if any(full[:len(prefix)] == prefix for prefix in _QUOTA_HOST_SUBTREES):
         return True
     if not (parts and name.startswith('.') and name.endswith('.tmp')):
         return False
+    if any(parts[:len(prefix)] == prefix for prefix in _QUOTA_HOST_SUBTREES):
+        return True
     return (*parts, name[1:].rpartition('.')[0].rpartition('.')[0]) in _QUOTA_HOST_FILES
 
 
