@@ -1,3 +1,14 @@
+## 2026-11-13 Skill 与记忆闭环 R1 返工收敛
+
+在 `sm/integration-20261113` 合入 R1 返工切片（U1–U7）后，隔离 `HOME`/`MY_AGENT_HOME` 完成以下收敛验证：
+
+- `test_sm_rework_config_scope.py`：验证主会话保留全局配置完整 schema、参数账本与热刷新；子代理及受限作用域（`runtime`/`legacy`/`task_local`/`control_plane`/`isolated`/`agent_run_id`/`combined`）裁剪为决策设置分流并在执行阶段拒绝全局配置修改，配置与账本字节保持不变。
+- `test_sm_rework_carrier_source.py`：验证 `lesson_candidate_request` 统一共享格式与去重键，并在入队、模型调用前与提交前重读规范 `candidates.jsonl`；已脱敏/排除/撤回/哈希不符或源丢失按确定性失效拒绝清理，暂时不可读保留请求等待恢复。
+- `test_sm_rework_lifecycle_sync.py`：验证归档、恢复、换出发布（Phase 1/2）、驱逐、删除与回滚在物理替换后遇目录 `fsync` `OSError` 时保留 `pending_operation` 并经 `recover_lifecycle()` 前向收敛；替换前错误清除意图且保持原文件完整。
+- `test_sm_rework_quality.py` 与 `test_sm_w2_bounded_maintenance.py::test_w2_manual_learned_dir_deletion_converges_and_unblocks_publish`：验证移除 `observe_learning` 2 次正向观察捷径后仅认 `3 + hurt_count` 版本绑定真实送达确立质量；手动删除 `learned`/`archived` 目录或删空 `SKILL.md`（含 `read_text_beneath` 返回 `None` 竞态）统一收敛为 `ownership="user_modified"` 并释放容量槽位放行新发布，读取异常与符号链接继续保底 `unknown`。
+- 3 次独立真实送达对齐：`test_sm_w9_feedback_awareness.py`、`test_sm_w10_closed_loop.py`（同时为 `test_275_to_50_convergence_preserves_exempt_layers_and_displaces_coldest_unadopted` 增加 `@pytest.mark.timeout(180)`）及 `test_wave7_autonomous_learning_closure.py::test_r2_trial_to_active_records_one_promotion_transition` 均对齐为 3 次真实送达确立，并额外验证第 4 次任务不再重复追加 `active`。
+- 实际门禁：隔离运行 `test_sm_w10_closed_loop.py`、`test_sm_w9_feedback_awareness.py`、`test_wave7_autonomous_learning_closure.py`、`test_sm_w2_bounded_maintenance.py`、`test_sm_rework_config_scope.py`、`test_sm_rework_carrier_source.py`、`test_sm_rework_lifecycle_sync.py`、`test_sm_rework_quality.py`（`-o addopts= -q --tb=short`）共 **253 项全部通过**（`exit 0`）；改动 Python 文件 Ruff、`scripts/check_import_boundaries.py --json`、`scripts/build_constants_catalog.py --check`（1509 项）及 `git diff --check` 全部通过。本次未跑全仓 pytest。
+
 ## 2026-11-13 Skill 与记忆闭环 W10 Stage B（集成候选）
 
 `sm/w10` 合入集成提交 `3e2bcb625`（W0–W9 全部合入，十切片合并门 1595 项全过）后，隔离 `HOME`/`MY_AGENT_HOME` 逐文件运行：

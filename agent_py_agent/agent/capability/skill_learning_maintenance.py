@@ -951,7 +951,7 @@ def _verify_single_ownership(store: SkillLearningStore, current: LearnedSkill) -
     except (NoFollowPathError, OSError, UnicodeDecodeError, ValueError):
         return "unknown"
     if text is None:
-        return "unknown"
+        return "user_modified"
     if skill_content_sha256(text) != current.sha256:
         return "user_modified"
     return "machine"
