@@ -408,6 +408,22 @@ def _write_skill(call, skill_id, body, *, creating=False):
     return result
 
 
+# 函数用途: 核查指定技能操作的耐久幂等回执是否已写入日志或历史行，状态未知返回 None 以防误删原生资产。
+def _has_durable_skill_receipt(store, receipt_key, fingerprint):
+    try:
+        receipt = (store._read('skill_operations').get('receipts') or {}).get(receipt_key)
+        if receipt is None:
+            receipt = store._rows('skill_operations').get('receipts', receipt_key)
+    except Exception:
+        # 存储或日志不可读时不能确认提交未落盘，宁可保留原生技能资产也不误补偿。
+        return None
+    if receipt is None:
+        return False
+    if not isinstance(receipt, dict):
+        return None
+    return receipt.get('fingerprint') == fingerprint
+
+
 # LLM: 这里只留原生资产变更的耐久结果回执，不复制技能权威状态；原Store绑定owner/subject/key。
 # 函数用途: 执行一次技能写入并支持完整参数冲突和无副作用重放。
 def _skill_receipted(call, mutate, *, staged=None):
@@ -447,7 +463,8 @@ def _skill_receipted(call, mutate, *, staged=None):
         return store.transaction('skill_operations', apply,
             idempotency_key=key, params_digest=digest)
     except Exception:
-        if rollback is not None:
+        # 先查耐久日志/回执；仅当确认未落盘(False)时才允许补偿回滚原生技能写入。
+        if rollback is not None and _has_durable_skill_receipt(store, receipt_key, fingerprint) is False:
             rollback()
         raise
 
