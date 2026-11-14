@@ -992,7 +992,7 @@ class SkillLearningService:
                 )
         return retry_material, retry_decision, None
 
-    # LLM: V2-2 通道 B 自动低效记次：经正文送达回执或既有 adopted 证据归因，按同一任务去重键调用 observe_learning。
+    # LLM: V2-2 通道 B 自动低效记次：须先核验本轮 used_skill_ids 与本版本 SQLite 正文送达回执，拒绝仅 adopted 归因。
     # 函数用途: 为模型在后台识别为 ineffective 的本轮已使用自学 Skill 登记宿主负向记次。
     def _record_ineffective_decision(
         self,
@@ -1004,7 +1004,11 @@ class SkillLearningService:
             LearningObservationSource,
             observe_learning,
         )
-        from .skill_usage_receipts import candidate_delivery_task_keys
+        from .skill_usage_ledger import _learned_skill_name
+        from .skill_usage_receipts import (
+            candidate_delivery_task_keys,
+            has_body_delivery_receipt,
+        )
 
         target_name = decision.target_skill_name
         registry = self.store.load_registry()
@@ -1020,6 +1024,32 @@ class SkillLearningService:
         req_id = str(request.get("request_id") or "").strip()
         run_id = str(request.get("run_id") or "").strip()
         rkey = str(request.get("request_key") or "").strip()
+        raw_used = request.get("used_skill_ids") or ()
+        used_names = (
+            {
+                _learned_skill_name("skill", str(item or "").strip())
+                for item in raw_used
+                if str(item or "").strip()
+            }
+            if isinstance(raw_used, (list, tuple, set))
+            else set()
+        )
+        used_names.discard("")
+        maint = record.maintenance if isinstance(record.maintenance, dict) else {}
+        if target_name not in used_names or not has_body_delivery_receipt(
+            self.store._runtime_repository(),
+            incarnation_id=str(maint.get("incarnation_id") or ""),
+            activation_id=str(maint.get("activation_id") or ""),
+            content_sha256=record.sha256,
+            root_task_id=req_root,
+            task_id=req_task,
+            request_id=req_id,
+        ):
+            return replace(
+                _request_event(EVENT_REJECTED, CODE_INEFFECTIVE_UNATTRIBUTED, request),
+                skill_name=target_name,
+                reason=f"当前任务缺少自学技能 {target_name} 本版本的真实正文读取记录或送达回执，未写入负向记次。",
+            )
         task_id_arg = req_root or req_task or (f"request:{req_id}" if req_id else f"learning:{rkey or target_name}")
         receipt_id = f"learning:{rkey}" if rkey else f"learning:{target_name}:{task_id_arg}"
         delivery_keys = tuple(
@@ -1029,7 +1059,6 @@ class SkillLearningService:
                 request_id=req_id,
             )
         )
-        maint = record.maintenance if isinstance(record.maintenance, dict) else {}
         source = LearningObservationSource(
             authority="host",
             receipt_id=receipt_id,

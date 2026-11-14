@@ -49,8 +49,12 @@ from .skill_learning_store import (
     SkillLearningStoreError,
 )
 from .skill_search_tool import _snapshot_for
-from .skill_usage_ledger import learning_usage_binding
-from .skill_usage_receipts import candidate_delivery_task_keys, read_usage_aggregate
+from .skill_usage_ledger import learning_usage_binding, load_usage_evidence
+from .skill_usage_receipts import (
+    candidate_delivery_task_keys,
+    has_body_delivery_receipt,
+    read_usage_aggregate,
+)
 
 if TYPE_CHECKING:
     from ..runtime_db.repository import RuntimeRepository
@@ -1112,21 +1116,92 @@ def _ineffective_feedback(agent: object, store: SkillLearningStore, reference: s
     root_task_id = str(getattr(scope, "root_task_id", "") or "").strip()
     canonical_task = root_task_id or task_id or (f"request:{request_id}" if request_id else str(scope.run_id or ""))
     receipt_id = f"channel-a:{canonical_task}:{record.sha256[:16]}"
-    delivery_keys = tuple(
+    maint = dict(record.maintenance)
+    cur_inc = str(binding.get("incarnation_id") or maint.get("incarnation_id") or "").strip()
+    cur_act = str(binding.get("activation_id") or maint.get("activation_id") or "").strip()
+    runtime_repo = store._runtime_repository()
+    delivery_keys = list(
         candidate_delivery_task_keys(
+            task_key=canonical_task,
             root_task_id=root_task_id,
             task_id=task_id,
             request_id=request_id,
         )
     )
-    maint = dict(record.maintenance)
+    has_delivery = has_body_delivery_receipt(
+        runtime_repo,
+        incarnation_id=cur_inc,
+        activation_id=cur_act,
+        content_sha256=record.sha256,
+        task_key=canonical_task,
+        root_task_id=root_task_id,
+        task_id=task_id,
+        request_id=request_id,
+    )
+    auth_thread_id = str(getattr(scope, "thread_id", "") or "").strip()
+    if not has_delivery and auth_thread_id and runtime_repo is not None and cur_inc and cur_act:
+        evidence = load_usage_evidence(store)
+        skill_ev = (evidence.get("by_skill") or {}).get(record.name)
+        rows = skill_ev.get("rows") if isinstance(skill_ev, dict) else ()
+        for row in reversed(list(rows or ())):
+            if not isinstance(row, dict) or row.get("kind") == "capability_package":
+                continue
+            if row.get("event") not in {"manual_get", "host_injected"}:
+                continue
+            has_body = (
+                (type(row["body_chars"]) is int and row["body_chars"] > 0)
+                if "body_chars" in row
+                else (type(row.get("chars")) is int and row["chars"] > 0)
+            )
+            if not has_body or str(row.get("thread_id") or "").strip() != auth_thread_id:
+                continue
+            if (
+                str(row.get("incarnation_id") or "").strip() not in {"", cur_inc}
+                or str(row.get("activation_id") or "").strip() not in {"", cur_act}
+                or str(row.get("content_sha256") or "").strip().lower() not in {"", record.sha256.lower()}
+            ):
+                continue
+            row_keys = candidate_delivery_task_keys(
+                task_key=str(row.get("task_key") or "").strip(),
+                task_id=str(row.get("task_id") or "").strip(),
+                request_id=str(row.get("request_id") or "").strip(),
+            )
+            if row_keys and has_body_delivery_receipt(
+                runtime_repo,
+                incarnation_id=cur_inc,
+                activation_id=cur_act,
+                content_sha256=record.sha256,
+                task_key=str(row.get("task_key") or "").strip(),
+                task_id=str(row.get("task_id") or "").strip(),
+                request_id=str(row.get("request_id") or "").strip(),
+            ):
+                for key in row_keys:
+                    if key not in delivery_keys:
+                        delivery_keys.append(key)
+                has_delivery = True
+                break
+    if not has_delivery:
+        return _error_outcome(
+            action="ineffective",
+            error_code="SKILL_FEEDBACK_UNAVAILABLE",
+            response_code="PRECONDITION_NOT_MET",
+            reason=(
+                f"当前主会话未检测到技能 owner:{record.name} 本版本的结构化正文送达回执"
+                "（skill_search get 或宿主注入），未记录负向打击。"
+            ),
+            effect_outcome="not_started",
+            side_effect_status="not_started",
+            next_action="仅对本会话已加载过正文的当前版本自学技能调用 ineffective；仅声明 adopted 但未读取正文不可计入负反馈。",
+            skill_id=f"owner:{record.name}",
+        )
+
     prev_hurt = int(maint.get("hurt_count") or 0)
     raw_epoch = maint.get("strike_epoch")
     fallback_epoch = raw_epoch if isinstance(raw_epoch, int) and not isinstance(raw_epoch, bool) and raw_epoch >= 0 else None
     bind_epoch = binding.get("strike_epoch")
     epoch_val = bind_epoch if isinstance(bind_epoch, int) and not isinstance(bind_epoch, bool) and bind_epoch >= 0 else fallback_epoch
 
-    token = _HOST_DELIVERY_KEYS_CTX.set(delivery_keys)
+    token = _HOST_DELIVERY_KEYS_CTX.set(tuple(delivery_keys))
     try:
         obs_result = observe_learning(
             store,
