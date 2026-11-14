@@ -972,13 +972,10 @@ def _standalone_skill_carrier_enqueue(
     service: MemoryPromotionService,
     candidates: Iterable[MemoryCandidate],
 ) -> dict[str, dict[str, object]]:
-    from ..capability.skill_learning_request import TEXT_LIMIT_CHARS, bounded_text
+    from ..capability.skill_learning_request import lesson_candidate_request
     from ..capability.skill_learning_store import (
-        REQUEST_SCHEMA_VERSION,
         SkillLearningStore,
         SkillLearningStoreError,
-        request_key,
-        utc_now,
     )
 
     owner_home = service.persona.owner_home
@@ -992,31 +989,8 @@ def _standalone_skill_carrier_enqueue(
                 "reason_code": "AUTO_POLICY_LEARNING_SOURCE_UNVERIFIED",
             }
             continue
-        rkey = request_key(f"candidate:{candidate.candidate_id}:{memory_content_hash(candidate.content)}")
-        run_id = str((candidate.source_run_ids or ("",))[0] or candidate.candidate_id)[:120]
-        task_id = str((candidate.source_task_ids or ("",))[0] or "")[:120]
-        tool_parts = [
-            str(ref.get("tool") or ref.get("operation_id") or "").strip()
-            for ref in candidate.source_tool_refs
-            if isinstance(ref, dict)
-        ]
-        tool_summary = bounded_text(
-            ", ".join(part for part in tool_parts if part) or "lesson_candidate",
-            TEXT_LIMIT_CHARS,
-        )
-        request_record: dict[str, object] = {
-            "schema_version": REQUEST_SCHEMA_VERSION,
-            "request_key": rkey,
-            "created_at": utc_now(),
-            "run_id": run_id,
-            "task_id": task_id,
-            "source_candidate_id": candidate.candidate_id,
-            "task": bounded_text(f"{candidate.subject_key}: {candidate.content}", TEXT_LIMIT_CHARS),
-            "result": bounded_text(candidate.content, TEXT_LIMIT_CHARS),
-            "tool_summary": tool_summary,
-            "recalled_memory_ids": [],
-            "learning_source": dict(source),
-        }
+        request_record = lesson_candidate_request(candidate)
+        rkey = str(request_record["request_key"])
         try:
             enqueue_status = store.enqueue(request_record)
         except _UNCERTAIN_PROMOTION_ERRORS:

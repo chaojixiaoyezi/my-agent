@@ -7,7 +7,6 @@
 # 模块用途: 原作用域消费有界学习队列并轮转候选，未确认候选不阻断后续总结，正式发布仍需用户准确确认。
 from __future__ import annotations
 
-import json
 import logging
 import re
 import threading
@@ -21,7 +20,6 @@ from typing import TYPE_CHECKING
 from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..backends.provider_headers import provider_session_scope
 from ..backends.request_scope import foreground_model_active
-from ..common.log_redaction import redact_sensitive_value
 from ..common.nofollow_fs import read_text_beneath
 from ..common.request_execution_ports import (
     RequestExecutionContextUnavailable,
@@ -49,9 +47,9 @@ from .skill_learning_prompt import (
 )
 from .skill_learning_publish import PublishRequest, SkillLearningGateError
 from .skill_learning_request import (
-    TEXT_LIMIT_CHARS,
     bounded_text,
     build_learning_request,
+    lesson_candidate_request,
     recalled_memories,
 )
 from .skill_learning_store import (
@@ -63,7 +61,6 @@ from .skill_learning_store import (
     EVENT_REJECTED,
     EVENT_SKIPPED,
     MAX_REQUEST_ATTEMPT_COUNT,
-    REQUEST_SCHEMA_VERSION,
     SkillLearningEvent,
     SkillLearningRegistry,
     SkillLearningStore,
@@ -313,6 +310,34 @@ class SkillLearningService:
             store._usage_runtime_provider = usage_provider
         self._user = _UserRequests()
 
+    def _validate_lesson_source(self, request: dict[str, object]) -> None:
+        """重读同一候选权威记录；确定性失效拒绝，暂时不可读保留请求等待重试。"""
+        cid = request.get("candidate_id") or request.get("source_candidate_id")
+        if not cid:
+            return
+        from ..conversation.learning_source import projection_is_learnable
+        from ..memory_store.candidates import CandidateService, CandidateStoreCorruptError
+        from .skill_proposals import _ACTIVE_SOURCE_STATUSES, CODE_SOURCE_UNREADABLE
+
+        try:
+            current = CandidateService(self.store.skills_root.parent / "memory" / "candidates.jsonl").get(str(cid))
+        except KeyError as exc:
+            raise SkillLearningGateError("SKILL_PROPOSAL_SOURCE_MISSING") from exc
+        except (OSError, CandidateStoreCorruptError) as exc:
+            raise SkillLearningStoreError(CODE_SOURCE_UNREADABLE) from exc
+        if (
+            current.content_redacted_at
+            or not current.content
+            or current.content_hash != request.get("candidate_content_hash")
+            or current.promotion_exclusion
+            or not projection_is_learnable(current.learning_source)
+            or (
+                current.status not in _ACTIVE_SOURCE_STATUSES
+                and (current.status, current.review_note) != ("withdrawn", "DELEGATED_TO_SKILL_CARRIER")
+            )
+        ):
+            raise SkillLearningGateError("SKILL_CARRIER_INELIGIBLE")
+
     # LLM: 每次入口、维护、模型前后与提交前都通过 config_provider 读取最新有效开关与预算，不缓存旧配置。
     # 函数用途: 读取当前是否启用自学习及最新有效配置。
     def _live_state(self) -> tuple[bool, SkillLearningSettings]:
@@ -419,7 +444,11 @@ class SkillLearningService:
     #   绝不写入S1弹窗目录，开关关闭或队列/配额满返回结构化deferred等待重放。
     # 函数用途: 接收子代理产出的过程性经验候选并直投S3学习队列，返回标准CarrierEnqueueResult字典。
     def enqueue_lesson_candidates(self, candidates: Sequence[object]) -> dict[str, list[dict[str, str]]]:
-        from .skill_proposals import lesson_candidate_eligible, lesson_carrier
+        from .skill_proposals import (
+            CODE_SOURCE_UNREADABLE,
+            lesson_candidate_eligible,
+            lesson_carrier,
+        )
 
         queued: list[dict[str, str]] = []
         refused: list[dict[str, str]] = []
@@ -451,36 +480,8 @@ class SkillLearningService:
                     "reason": "自学习已关闭，过程性技能候选已暂缓保留；重新启用后可安全重放。",
                 })
                 continue
-            rkey = request_key(json.dumps(["subagent_lesson", cid, str(candidate.content_hash)], ensure_ascii=False))
-            scope = dict(candidate.scope or {})
-            task_ids = [str(item) for item in (candidate.source_task_ids or ()) if str(item)]
-            run_ids = [str(item) for item in (candidate.source_run_ids or ()) if str(item)]
-            request: dict[str, object] = {
-                "schema_version": REQUEST_SCHEMA_VERSION,
-                "request_key": rkey,
-                "request_id": "",
-                "run_id": run_ids[0] if run_ids else "",
-                "task_id": task_ids[0] if task_ids else "",
-                "root_task_id": task_ids[0] if task_ids else "",
-                "trajectory_digest": "",
-                "thread_id": "",
-                "source": "subagent_lesson",
-                "tool_rounds": 1,
-                "created_at": utc_now(),
-                "attempts": 0,
-                "user_prompt": bounded_text(
-                    scope.get("applies_when") or candidate.subject_key or cid,
-                    TEXT_LIMIT_CHARS,
-                ),
-                "final_response": bounded_text(candidate.content, TEXT_LIMIT_CHARS),
-                "tool_calls_total": len(candidate.source_tool_refs or ()),
-                "trajectory_fingerprint": str(candidate.content_hash),
-                "tool_trace": [],
-                "used_skill_ids": [],
-                "candidate_id": cid,
-                "candidate_content_hash": str(candidate.content_hash),
-                "lesson_scope": redact_sensitive_value(scope),
-            }
+            request = lesson_candidate_request(candidate)
+            rkey = str(request["request_key"])
             try:
                 outcome = self._enqueue(request)
             except (OwnerQuotaExceeded, OwnerQuotaUnavailable):
@@ -491,7 +492,7 @@ class SkillLearningService:
                 })
                 continue
             except SkillLearningStoreError as exc:
-                refused.append({
+                (deferred if exc.code == CODE_SOURCE_UNREADABLE else refused).append({
                     "candidate_id": cid,
                     "code": exc.code,
                     "reason": str(exc),
@@ -510,6 +511,7 @@ class SkillLearningService:
     # LLM: 写原请求；热区合并/溢出由Store记事件，仅热区及缓冲都满时记dropped/QUEUE_FULL。
     # 函数用途: 入队并对最终容量拒绝留可追溯账本。
     def _enqueue(self, request: dict[str, object]) -> str:
+        self._validate_lesson_source(request)
         outcome = self.store.enqueue(request)
         if outcome == "queue_full":
             self.store.append_event(_request_event(EVENT_DROPPED, CODE_QUEUE_FULL, request))
@@ -646,6 +648,10 @@ class SkillLearningService:
             with gateway_short_transaction("skill_learning_drop_corrupt"):
                 self.store.discard_request(path)
                 return self._finish(path, {}, SkillLearningEvent(EVENT_DROPPED, CODE_REQUEST_CORRUPT))
+        try:
+            self._validate_lesson_source(request)
+        except SkillLearningGateError as exc:
+            return self._finish(path, request, _request_event(EVENT_REJECTED, exc.code, request))
         if request.get('asset_evolution_run_id'):
             from .asset_evolution import AssetEvolutionService
 
@@ -854,6 +860,7 @@ class SkillLearningService:
             # 函数用途: 在准备完成后执行准确来源的短写入。
             def commit(operation):
                 with gateway_short_transaction("skill_learning_propose"):
+                    self._validate_lesson_source(request)
                     return operation()
 
             event = propose_or_promote_skill(

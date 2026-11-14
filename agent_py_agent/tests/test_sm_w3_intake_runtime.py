@@ -37,6 +37,10 @@ from agent_py_agent.agent.capability.skill_learning_store import SkillLearningSt
 from agent_py_agent.agent.capability.skill_proposals import SkillProposalService
 from agent_py_agent.agent.capability.skill_usage_receipts import record_exact_use
 from agent_py_agent.agent.common.request_execution_ports import gateway_short_transaction
+from agent_py_agent.agent.conversation.learning_source import (
+    TRIGGER_USER_DIALOGUE,
+    subagent_projection,
+)
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts.multiprocess_background_discovery import (
     CoordinatorBackgroundRequests,
@@ -109,6 +113,9 @@ def _skill_candidate(
             source_task_ids=("task-sub-1",),
             source_run_ids=(run_id,),
             evidence_refs=({"kind": "tool_run", "ref_id": run_id},),
+            learning_source=subagent_projection(
+                trigger_kind=TRIGGER_USER_DIALOGUE, run_ids=(run_id,), task_ids=("task-sub-1",)
+            ),
         )
     )
 

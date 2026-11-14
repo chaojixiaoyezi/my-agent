@@ -53,6 +53,49 @@ def build_learning_request(ctx: object, min_tool_rounds: int, *, include_backgro
     return _learning_request_material(ctx)
 
 
+def lesson_candidate_request(candidate: object) -> dict[str, object]:
+    """纯组装有界脱敏的候选请求；不读取存储、配置或授予入队资格。"""
+    cid = str(getattr(candidate, "candidate_id", "") or "").strip()
+    content_hash = str(getattr(candidate, "content_hash", "") or "")
+    rkey = request_key(json.dumps(["subagent_lesson", cid, content_hash], ensure_ascii=False))
+    scope = dict(getattr(candidate, "scope", None) or {})
+    task_ids = [str(item) for item in (getattr(candidate, "source_task_ids", None) or ()) if str(item)]
+    run_ids = [str(item) for item in (getattr(candidate, "source_run_ids", None) or ()) if str(item)]
+    tool_refs = [ref for ref in (getattr(candidate, "source_tool_refs", None) or ()) if isinstance(ref, dict)]
+    tool_parts = [str(ref.get("tool") or ref.get("operation_id") or "").strip() for ref in tool_refs]
+    tool_summary = bounded_text(
+        ", ".join(part for part in tool_parts if part) or "lesson_candidate", TEXT_LIMIT_CHARS
+    )
+    subject = str(getattr(candidate, "subject_key", "") or "").strip()
+    content = str(getattr(candidate, "content", "") or "")
+    prompt_seed = scope.get("applies_when") or (f"{subject}: {content}" if subject else cid)
+    raw_source = getattr(candidate, "learning_source", None)
+    return {
+        "schema_version": REQUEST_SCHEMA_VERSION,
+        "request_key": rkey,
+        "request_id": "",
+        "run_id": run_ids[0] if run_ids else "",
+        "task_id": task_ids[0] if task_ids else "",
+        "root_task_id": task_ids[0] if task_ids else "",
+        "trajectory_digest": "",
+        "thread_id": "",
+        "source": "subagent_lesson",
+        "tool_rounds": None,
+        "created_at": utc_now(),
+        "attempts": 0,
+        "user_prompt": bounded_text(prompt_seed, TEXT_LIMIT_CHARS),
+        "final_response": bounded_text(content, TEXT_LIMIT_CHARS),
+        "tool_calls_total": len(tool_refs),
+        "trajectory_fingerprint": content_hash,
+        "tool_trace": [{"evidence_summary": tool_summary}] if tool_refs else [],
+        "used_skill_ids": [],
+        "candidate_id": cid,
+        "candidate_content_hash": content_hash,
+        "lesson_scope": redact_sensitive_value(scope),
+        "learning_source": redact_sensitive_value(dict(raw_source)) if isinstance(raw_source, dict) else {},
+    }
+
+
 def _learning_request_material(ctx: object) -> dict[str, object] | None:
     """组装原有界脱敏材料；调用方须已完成普通收口或canonical完成准入，不授予来源权限。"""
     attrs = getattr(ctx, "task_attributes", None)
@@ -176,6 +219,7 @@ __all__ = [
     "TEXT_LIMIT_CHARS",
     "bounded_text",
     "build_learning_request",
+    "lesson_candidate_request",
     "learning_request_eligible",
     "recalled_memories",
     "used_skill_ids",
