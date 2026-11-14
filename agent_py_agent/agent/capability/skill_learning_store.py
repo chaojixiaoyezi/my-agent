@@ -949,9 +949,9 @@ class SkillLearningStore:
             )
         ts = time.time() if now is None else float(now)
         op_id = uuid.uuid4().hex
-        src_rel = self._encode_rel("skills", LEARNED_DIR_NAME, name)
-        dst_rel = self._encode_rel("store", "archived", name)
-        ver_rel = self._encode_rel("store", "versions", name)
+        src_rel = self._encode_rel("skills", (LEARNED_DIR_NAME, name))
+        dst_rel = self._encode_rel("store", ("archived", name))
+        ver_rel = self._encode_rel("store", ("versions", name))
         op: dict[str, object] = {
             "operation_id": op_id,
             "kind": "archive",
@@ -1035,9 +1035,9 @@ class SkillLearningStore:
             )
         ts = time.time() if now is None else float(now)
         op_id = uuid.uuid4().hex
-        src_rel = self._encode_rel("store", "archived", name)
-        dst_rel = self._encode_rel("skills", LEARNED_DIR_NAME, name)
-        ver_rel = self._encode_rel("store", "versions", name)
+        src_rel = self._encode_rel("store", ("archived", name))
+        dst_rel = self._encode_rel("skills", (LEARNED_DIR_NAME, name))
+        ver_rel = self._encode_rel("store", ("versions", name))
         op: dict[str, object] = {
             "operation_id": op_id,
             "kind": "restore",
@@ -1113,10 +1113,10 @@ class SkillLearningStore:
             )
         ts = time.time() if now is None else float(now)
         op_id = uuid.uuid4().hex
-        src_rel = self._encode_rel("skills", LEARNED_DIR_NAME, victim_name)
-        dst_rel = self._encode_rel("store", "archived", victim_name)
-        stage_rel = self._encode_rel("store", "tx_stage", op_id)
-        ver_rel = self._encode_rel("store", "versions", candidate_record.name)
+        src_rel = self._encode_rel("skills", (LEARNED_DIR_NAME, victim_name))
+        dst_rel = self._encode_rel("store", ("archived", victim_name))
+        stage_rel = self._encode_rel("store", ("tx_stage", op_id))
+        ver_rel = self._encode_rel("store", ("versions", candidate_record.name))
         cand_live_path = self.learned_root / candidate_record.name / "SKILL.md"
         cand_ver_path = self.versions_dir / candidate_record.name / f"v{candidate_record.revision}.md"
         admission = self._quota_admission.get()
@@ -1259,13 +1259,13 @@ class SkillLearningStore:
         op_id = uuid.uuid4().hex
         src_root, src_parts = self._skill_dir_location(name, record=current)
         src_rel = (
-            self._encode_rel("store", *src_parts)
+            self._encode_rel("store", src_parts)
             if src_root == self.directory
-            else self._encode_rel("skills", *src_parts)
+            else self._encode_rel("skills", src_parts)
         )
         tomb_name = f"{name}-{op_id[:12]}"
-        tomb_rel = self._encode_rel("store", "removed", tomb_name)
-        ver_rel = self._encode_rel("store", "versions", name)
+        tomb_rel = self._encode_rel("store", ("removed", tomb_name))
+        ver_rel = self._encode_rel("store", ("versions", name))
         status, observed_sha = self._dir_skill_sha256_nofollow(src_root, src_parts)
         extra_status = self._dir_extra_entries_status_nofollow(src_root, src_parts)
         if extra_status == "extra" or (status == "ok" and observed_sha != current.sha256):
@@ -1348,14 +1348,14 @@ class SkillLearningStore:
         op_id = uuid.uuid4().hex
         src_root, src_parts = self._skill_dir_location(name, record=current)
         src_rel = (
-            self._encode_rel("store", *src_parts)
+            self._encode_rel("store", src_parts)
             if src_root == self.directory
-            else self._encode_rel("skills", *src_parts)
+            else self._encode_rel("skills", src_parts)
         )
         stamp = f"{int(ts * 1000):013d}-{op_id[:8]}"
         dst_name = f"{name}-{stamp}"
-        dst_rel = self._encode_rel("store", "removed", dst_name)
-        ver_rel = self._encode_rel("store", "versions", name)
+        dst_rel = self._encode_rel("store", ("removed", dst_name))
+        ver_rel = self._encode_rel("store", ("versions", name))
         ver_exists = self._dir_exists_nofollow(self.directory, ("versions", name))
         op: dict[str, object] = {
             "operation_id": op_id,
@@ -1431,9 +1431,9 @@ class SkillLearningStore:
         src_root, src_parts = self._skill_dir_location(current.name, record=current)
         if src_root != self.skills_root:
             raise SkillLearningStoreError(CODE_EVIDENCE_INCOMPLETE, f"cannot rollback non-live skill {current.name}")
-        live_rel = self._encode_rel("skills", *src_parts)
-        ver_rel = self._encode_rel("store", "versions", current.name)
-        cand_ver_rel = self._encode_rel("store", "versions", current.name, f"v{target_version}.md")
+        live_rel = self._encode_rel("skills", src_parts)
+        ver_rel = self._encode_rel("store", ("versions", current.name))
+        cand_ver_rel = self._encode_rel("store", ("versions", current.name, f"v{target_version}.md"))
         live_path = self.skill_path(current.name, record=current)
         next_ver_path = self.versions_dir / current.name / f"v{next_record.revision}.md"
         admission = self._quota_admission.get()
@@ -2133,11 +2133,12 @@ class SkillLearningStore:
         except ValueError:
             return ("__store__",)
 
-    def _encode_rel(self, root_kind: str, *subparts: str) -> str:
-        _validate_relative_parts(subparts)
+    def _encode_rel(self, root_kind: str, subparts: tuple[str, ...] | list[str]) -> str:
+        parts = tuple(subparts)
+        _validate_relative_parts(parts)
         if root_kind == "skills":
-            return "/".join((self.skills_root.name, *subparts))
-        return "/".join((*self._store_rel_prefix_parts(), *subparts))
+            return "/".join((self.skills_root.name, *parts))
+        return "/".join((*self._store_rel_prefix_parts(), *parts))
 
     def _resolve_op_rel(self, rel: str) -> tuple[Path, tuple[str, ...]]:
         parts = tuple(rel.split("/")) if rel else ()

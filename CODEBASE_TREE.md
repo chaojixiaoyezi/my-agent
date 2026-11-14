@@ -4962,6 +4962,9 @@ agent_py_agent/agent/capability/
 |   |-- test_sm_rework_carrier_source.py # R1 返工：lesson 载体请求共享 schema 与去重键，入队/执行/提交重验规范候选源
 |   |-- test_sm_rework_lifecycle_sync.py # R1 返工：生命周期替换发布后目录 fsync 异常保留 pending_operation 并冷启收敛
 |   |-- test_sm_rework_quality.py # R1 返工：质量确立唯一认 3+hurt_count 版本绑定真实使用，以及删除托管目录交还 user_modified
+|   |-- test_sm_r2_lifecycle_rollback_legacy.py # R2 终审返工：回滚保留 historical_adoptions、维护补齐遗留绑定与 strike_epoch 严格相等隔离
+|   |-- test_sm_r2_scope_projection_paging.py # R2 终审返工：JSONL 有界权能投影多页 continuation 增量续扫与有界 LRU 缓存收敛
+|   |-- test_sm_r2_channel_ab_delivery.py # R2 终审返工：宿主反馈 A/B 通道严格核验同线程正文投递与归一化 used_skill_ids 成员校验
 |   |-- test_wave7_autonomous_learning_closure.py # W2自包含F01–F17及R2六项修复回归；CAS/冻结/输出合同限W2自身入口
 |   |-- test_wave7_w1_integration_contracts.py # W1三项原普通断言原样保留，正常收集、不skip/xfail，跨线集成须另验
 |   |-- test_skill_learning_maintenance.py # 采用与质量分离、引用保护/归档回滚、52条真实库与缓存失效

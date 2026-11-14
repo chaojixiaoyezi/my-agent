@@ -9,6 +9,7 @@ from __future__ import annotations
 # 模块用途: 调度增量策展及整批提交，保留用户确认、分组游标和未结执行责任。
 # 恢复和领取使用 committer 的同一规范临界区，模型只在解锁且获得租约后执行。
 
+import inspect
 import json
 import logging
 import time
@@ -724,7 +725,7 @@ class _CuratorLifecycleMixin:
                         cursor_out=next_cursor,
                         effective_config=live_cfg,
                     )
-                    promoted, warnings, receipts = self._promote_eligible(
+                    promoted, warnings, receipts = self._call_promote_eligible(
                         identifiers, effective_config=live_cfg
                     )
                     self.state_store.advance_candidate_scan(context.lease_id, next_cursor)
@@ -1245,7 +1246,7 @@ class _CuratorExecutionMixin:
         promotable = list(dict.fromkeys((*promotable, *backlog)))
         from .curator_promotion_receipts import promotion_counts
 
-        promoted, promotion_warnings, receipts = self._promote_eligible(
+        promoted, promotion_warnings, receipts = self._call_promote_eligible(
             promotable, effective_config=live_cfg
         )
         if next_cursor:
@@ -1484,6 +1485,22 @@ class _CuratorPromotionMixin:
         live_cfg = effective_config or self._effective_config()
         return live_cfg.auto_promotion_policy != "manual_only" and (
             self.promotion_callback is not None or self._promotion_batch_callback is not None)
+
+    # LLM: 调用 _promote_eligible 前检查签名，兼容测试替身仅接收单参数 candidate_ids 的旧签名；避免吞掉真实参数异常。
+    # 函数用途: 兼容带或不带 effective_config 关键字参数的 _promote_eligible 实现或测试替身。
+    def _call_promote_eligible(
+        self,
+        candidate_ids: list[str],
+        *,
+        effective_config: MemoryCuratorConfig | None = None,
+    ) -> tuple[int, tuple[str, ...], tuple[dict, ...]]:
+        """兼容测试 monkeypatch 只接收 candidate_ids 的 _promote_eligible 签名。"""
+        params = inspect.signature(self._promote_eligible).parameters
+        if "effective_config" in params or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        ):
+            return self._promote_eligible(candidate_ids, effective_config=effective_config)
+        return self._promote_eligible(candidate_ids)
 
     # LLM: 晋升在同一租约内逐条重查排除；注入批量回调时按原序去重、以完整快照至多32条一批提交，绝不回退逐条执行；
     #   原短提交门的typed未知必须透传保欠账，不能变普通晋升警告。
