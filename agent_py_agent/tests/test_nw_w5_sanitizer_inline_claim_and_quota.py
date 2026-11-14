@@ -126,12 +126,21 @@ def test_delivery_sanitizer_extracts_numeric_vault_secrets_without_corrupting_nu
             sanitize_bundle_files(files, owner_home=owner_home, extra_secrets=secrets)
         assert exc_info.value.error_code == "ASSET_DELIVERY_SECRET_DETECTED"
 
+    replaced_numeric = sanitize_bundle_files(
+        {"unquoted.json": json.dumps({"n": 4242}).encode("utf-8")},
+        owner_home=owner_home,
+        allow_secret_placeholder_replace=True,
+        extra_secrets=secrets,
+    )
+    assert json.loads(replaced_numeric["unquoted.json"].decode("utf-8")) == {"n": "<REDACTED_SECRET>"}
+    assert b"4242" not in replaced_numeric["unquoted.json"]
+
     with pytest.raises(AssetDeliveryError) as replace_exc:
         sanitize_bundle_files(
-            {"unquoted.json": json.dumps({"n": 4242}).encode("utf-8")},
+            {"syntax.json": b'{"n":4242,"flag":true}'},
             owner_home=owner_home,
             allow_secret_placeholder_replace=True,
-            extra_secrets=secrets,
+            extra_secrets=(*secrets, "true"),
         )
     assert replace_exc.value.error_code == "ASSET_DELIVERY_SECRET_DETECTED"
 
