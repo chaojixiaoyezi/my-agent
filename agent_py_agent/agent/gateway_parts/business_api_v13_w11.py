@@ -11,13 +11,6 @@ def _handle(module_name, function_name, call):
     return getattr(import_module(module_name), function_name)(call)
 
 
-# LLM: readiness也会以未签发context调用，只读当前services宿主来源，不借此授予执行权。
-# 函数用途: 判断当前宿主是否具备能力包来源。
-def _package_ready(call):
-    providers = getattr(call.services.host, 'business_v13_providers', None)
-    return isinstance(providers, dict) and providers.get('package_source') is not None
-
-
 # LLM: 业务开关、原身份与可写路径由W0统一复核；本回调没有持久化副作用。
 # 函数用途: 声明仅使用已有业务存储的动作可被宿主调用。
 def _store_ready(call):
@@ -34,8 +27,6 @@ def _backtest_ready(call):
 # LLM: readiness只做来源路由，不触发网络、模型或持久写入。
 # 函数用途: 为静态动作选择合同指定的依赖检查。
 def _readiness(action):
-    if action in ('packages.index', 'packages.install', 'packages.upgrade'):
-        return _package_ready
     if action == 'skills.backtest':
         return _backtest_ready
     return _store_ready
@@ -424,30 +415,7 @@ V13_JOB_KINDS = {'skill_backtest': {'result_schema': {'type': 'object',
  'required': ['skill_id', 'cases_run', 'passed', 'failed', 'findings'],
  'additionalProperties': False}, 'finalize': _finalize_backtest}}
 
-_ACTION_CONTRACTS = ({'action': 'packages.index',
-  'effect': 'read',
-  'params_schema': {'type': 'object',
-                    'properties': {'query': {'type': 'string', 'minLength': 1, 'maxLength': 256},
-                                   'kind': {'type': 'string', 'enum': ['capability_pack', 'plugin']},
-                                   'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100, 'default': 50},
-                                   'cursor': {'$ref': '#/$defs/Cursor'}},
-                    'required': [],
-                    'additionalProperties': False},
-  'result_schema': {'type': 'object',
-                    'properties': {'items': {'type': 'array',
-                                             'items': {'$ref': '#/$defs/V13PackageIndexItem'},
-                                             'maxItems': 100},
-                                   'next_cursor': {'anyOf': [{'$ref': '#/$defs/Cursor'}, {'type': 'null'}]},
-                                   'coverage': {'$ref': '#/$defs/Coverage'}},
-                    'required': ['items', 'next_cursor', 'coverage'],
-                    'additionalProperties': False},
-  'accepted_result_schema': None,
-  'admin_required': False,
-  'idempotency_required': False,
-  'expected_revision_required': False,
-  'aliases': [],
-  'handler': 'agent_py_agent/agent/business_spaces/v13_w11_packages.py::index(call) -> dict'},
- {'action': 'packages.inspect',
+_ACTION_CONTRACTS = ({'action': 'packages.inspect',
   'effect': 'read',
   'params_schema': {'type': 'object',
                     'properties': {'package_id': {'$ref': '#/$defs/Id'},
@@ -468,33 +436,6 @@ _ACTION_CONTRACTS = ({'action': 'packages.index',
   'expected_revision_required': False,
   'aliases': [],
   'handler': 'agent_py_agent/agent/business_spaces/v13_w11_packages.py::inspect(call) -> dict'},
- {'action': 'packages.install',
-  'effect': 'config',
-  'params_schema': {'type': 'object',
-                    'properties': {'package_id': {'$ref': '#/$defs/Id'},
-                                   'version': {'type': 'string', 'minLength': 1, 'maxLength': 64},
-                                   'space_id': {'$ref': '#/$defs/Id'},
-                                   'mount': {'type': 'boolean'}},
-                    'required': ['package_id', 'version'],
-                    'additionalProperties': False},
-  'result_schema': {'type': 'object',
-                    'properties': {'package_id': {'$ref': '#/$defs/Id'},
-                                   'version': {'type': 'string', 'minLength': 1, 'maxLength': 64},
-                                   'installation_revision': {'type': 'integer', 'minimum': 0},
-                                   'mounted_space_id': {'$ref': '#/$defs/NullableId'},
-                                   'contents': {'$ref': '#/$defs/V13PackageContents'}},
-                    'required': ['package_id',
-                                 'version',
-                                 'installation_revision',
-                                 'mounted_space_id',
-                                 'contents'],
-                    'additionalProperties': False},
-  'accepted_result_schema': None,
-  'admin_required': False,
-  'idempotency_required': True,
-  'expected_revision_required': False,
-  'aliases': [],
-  'handler': 'agent_py_agent/agent/business_spaces/v13_w11_packages.py::install(call) -> dict'},
  {'action': 'packages.uninstall',
   'effect': 'config',
   'params_schema': {'type': 'object',
@@ -515,26 +456,6 @@ _ACTION_CONTRACTS = ({'action': 'packages.index',
   'expected_revision_required': False,
   'aliases': [],
   'handler': 'agent_py_agent/agent/business_spaces/v13_w11_packages.py::uninstall(call) -> dict'},
- {'action': 'packages.upgrade',
-  'effect': 'config',
-  'params_schema': {'type': 'object',
-                    'properties': {'package_id': {'$ref': '#/$defs/Id'},
-                                   'version': {'type': 'string', 'minLength': 1, 'maxLength': 64}},
-                    'required': ['package_id', 'version'],
-                    'additionalProperties': False},
-  'result_schema': {'type': 'object',
-                    'properties': {'package_id': {'$ref': '#/$defs/Id'},
-                                   'from_version': {'type': 'string', 'minLength': 1, 'maxLength': 64},
-                                   'version': {'type': 'string', 'minLength': 1, 'maxLength': 64},
-                                   'installation_revision': {'type': 'integer', 'minimum': 0}},
-                    'required': ['package_id', 'from_version', 'version', 'installation_revision'],
-                    'additionalProperties': False},
-  'accepted_result_schema': None,
-  'admin_required': False,
-  'idempotency_required': True,
-  'expected_revision_required': True,
-  'aliases': [],
-  'handler': 'agent_py_agent/agent/business_spaces/v13_w11_packages.py::upgrade(call) -> dict'},
  {'action': 'compliance.status',
   'effect': 'read',
   'params_schema': {'type': 'object',

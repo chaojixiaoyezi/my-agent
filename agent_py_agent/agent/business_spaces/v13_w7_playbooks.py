@@ -7,13 +7,10 @@ from __future__ import annotations
 
 import hashlib
 import re
-import uuid
-from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
 from ..assets.script_store import ScriptStore
 from ..assets.workflow_store import WorkflowDefinition, WorkflowStore
-from ..common.log_redaction import redact_sensitive_value
 from ..plugin_host.business_action_specs import business_action_spec
 from ..plugin_host.contracts import DomainResult
 from ..plugin_host.errors import HostAPIError
@@ -31,12 +28,9 @@ ROUTE_MAP = {
     'GET /api/v1/live-actions/by-capability/{capability}': 'live_actions.by_capability',
     'GET /api/v1/live-actions/by-vendor/{vendorId}': 'live_actions.by_vendor',
     'POST /api/v1/live-actions/dry-run': 'live_actions.dry_run',
-    'GET /api/v1/community/playbooks': 'community_playbooks.list',
-    'POST /api/v1/community/playbooks/submit': 'community_playbooks.submit',
-    'POST /api/v1/community/playbooks/{id}/install': 'community_playbooks.install',
     'POST /graphql': 'unsupported: closed ActionSpec; use specific actions',
     'GET /api/v1/marketplace/installed': 'spaces.packages.catalog / spaces.packages.list',
-    'POST /api/v1/marketplace/install': 'packages.install (W11 #74)',
+    'POST /api/v1/marketplace/install': 'unsupported: retired (W11 #74)',
 }
 FROZEN_NAME_MAPPING = {
     'workflows.delete': ('workflows.recycle',),
@@ -544,150 +538,3 @@ def dry_run_live_action(call):
     return {'action_ref': selected['action_ref'], 'valid': not errors and scope['in_scope'],
             'errors': errors[:100], 'scope_check': scope,
             'would_require_approval': selected['requires_approval'], 'side_effects': 'none'}
-
-
-# LLM: 社区网络访问归已绑定 provider；缺方法或错误返回不能假装空列表。
-# 函数用途: 取得一个明确可调用的社区目录端口。
-def _community(call, method):
-    from ..gateway_parts.business_api_v13 import v13_provider, v13_require_access
-    v13_require_access(call)
-    provider = v13_provider(call, 'community_catalog')
-    if not callable(getattr(provider, method, None)):
-        raise HostAPIError('HOST_NOT_READY', 503)
-    return provider
-
-
-# LLM: provider 的分页游标只原样透传，返回仍经本地闭合 schema 核验。
-# 函数用途: 浏览社区剧本的公开元数据。
-def list_community_playbooks(call):
-    from ..gateway_parts.business_api_v13 import v13_schema
-    provider = _community(call, 'list')
-    page = provider.list('playbook', query=call.params.get('query', ''), tag=call.params.get('tag', ''),
-                         cursor=call.params.get('cursor'), limit=call.params.get('limit', 50))
-    result = {'items': page['items'], 'next_cursor': page['next_cursor'],
-              'coverage': 'partial' if page['next_cursor'] is not None else 'complete'}
-    for item in result['items']:
-        if item.get('kind') != 'playbook' or item.get('format') != 'workflow':
-            raise HostAPIError('HOST_NOT_READY', 503)
-    return validate_object(result, v13_schema({'type': 'object', 'properties': {
-        'items': {'type': 'array', 'items': {'$ref': '#/$defs/V13CommunityItem'}, 'maxItems': 100},
-        'next_cursor': {'anyOf': [{'$ref': '#/$defs/Cursor'}, {'type': 'null'}]},
-        'coverage': {'$ref': '#/$defs/Coverage'}},
-        'required': ['items', 'next_cursor', 'coverage'], 'additionalProperties': False}))
-
-
-# LLM: 冻结 get 是授权入口；完整正文仍读原 WorkflowStore，不另建正文权威。
-# 函数用途: 取得可提交的现有工作流定义并核实可选空间范围。
-def _authorized_definition(call):
-    from ..gateway_parts.business_api_v13 import v13_call_frozen
-    ref = call.params['workflow_id']
-    try:
-        view = _data(v13_call_frozen(call, 'workflows.get', {'workflow_ref': ref}))
-    except KeyError as error:
-        raise HostAPIError('RESOURCE_NOT_FOUND', 404) from error
-    if call.params.get('space_id'):
-        space = _space(call)
-        if view['scope']['scope_mode'] == 'spaces' and space['space_id'] not in view['scope']['space_ids']:
-            raise HostAPIError('SPACE_SCOPE_MISMATCH', 404)
-    definition = WorkflowStore(call.owner_home).get_workflow(ref)
-    if definition is None or definition.descriptor.owner_id not in ('', call.owner_id):
-        raise HostAPIError('RESOURCE_NOT_FOUND', 404)
-    return _validate_definition(_editable_definition(definition))
-
-
-# LLM: 共享文档不能包含凭据引用或私有访问目标；原存储正文保持不变。
-# 函数用途: 递归移除凭据引用和访问范围，并执行原秘密脱敏。
-def _shareable(value):
-    value = redact_sensitive_value(thaw(value))
-    if isinstance(value, dict):
-        result = {}
-        for key, item in value.items():
-            if key in ('credential_ref', 'access_target'):
-                continue
-            result[key] = [] if key in ('credential_refs', 'access_targets') else _shareable(item)
-        return result
-    if isinstance(value, list):
-        return [_shareable(item) for item in value]
-    return value
-
-
-# LLM: 先完成本地预检再耐久占单外发；外发后未知不重试，回放仍复核当前读取权限。
-# 函数用途: 脱敏提交社区剧本并记录真实 provider 回执。
-def submit_community_playbook(call):
-    from ..gateway_parts.business_api_v13 import v13_require_access
-    provider = _community(call, 'submit')
-    store = v13_store_for(call)
-    fingerprint = _digest([call.action, call.params])
-    submission_id = 'submission-' + _digest([call.owner_id, call.subject_id, call.idempotency_key])[:48]
-    attempt = uuid.uuid4().hex
-    definition = _authorized_definition(call)
-    title = call.params.get('title', definition['descriptor']['name'])
-    document = {'definition': _shareable(definition), 'title': title,
-                'description': call.params.get('description', definition['descriptor'].get('summary', '')),
-                'tags': call.params.get('tags', definition['descriptor'].get('tags', []))}
-    v13_require_access(call)
-
-    # LLM: Store 锁使同键并发者只有一个占单；回执校验先于任何外发或结果重放。
-    # 函数用途: 固定一次且仅一次的外发尝试标识。
-    def claim(records):
-        return {'attempt': attempt}
-
-    claimed = store.transaction('community_playbook_submissions', claim,
-        idempotency_key=call.idempotency_key, params_digest=fingerprint)
-    saved = store.get('community_playbook_submissions', submission_id)
-    if saved is not None:
-        v13_require_access(call, saved)
-        return {'submission': _submission_view(saved)}
-    if claimed['attempt'] != attempt:
-        raise HostAPIError('OUTCOME_UNKNOWN', 503)
-    v13_require_access(call)
-    response = provider.submit('playbook', document)
-    if (not isinstance(response, dict) or response.get('state') not in ('submitted', 'rejected')
-            or not isinstance(response.get('submission_ref'), str) or not 1 <= len(response['submission_ref']) <= 256):
-        raise HostAPIError('OUTCOME_UNKNOWN', 503)
-    at = datetime.fromtimestamp(call.clock(), timezone.utc).isoformat()
-    record = {'submission_id': submission_id, 'owner_id': call.owner_id, 'workflow_id': call.params['workflow_id'],
-              'title': title, 'state': response['state'], 'submission_ref': response['submission_ref'],
-              'submitted_at': at, 'revision': 1, 'created_at': at, 'updated_at': at}
-
-    # LLM: 完成回执只保存公开提交事实，不保存外发正文或秘密。
-    # 函数用途: 原子记录 provider 的准确结果。
-    def complete(records):
-        records[submission_id] = record
-        return {'submission': _submission_view(record)}
-
-    return store.transaction('community_playbook_submissions', complete,
-        idempotency_key='complete-' + _digest([call.subject_id, call.idempotency_key])[:48],
-        params_digest=fingerprint)
-
-
-# LLM: 存储身份和修订留在服务端；公开响应严格按冻结投影。
-# 函数用途: 裁剪提交回执的公共字段。
-def _submission_view(row):
-    return {key: row[key] for key in ('submission_id', 'workflow_id', 'title', 'state', 'submission_ref', 'submitted_at')}
-
-
-# LLM: provider 只供定义；实际安装、幂等和范围仍走冻结 create。
-# 函数用途: 校验社区剧本后保存为原生工作流，不运行它。
-def install_community_playbook(call):
-    from ..gateway_parts.business_api_v13 import v13_call_frozen
-    provider = _community(call, 'get')
-    store = v13_store_for(call)
-
-    # LLM: 回执固定第一次看到的定义和空间，provider 改版不能使同键重放变更输入。
-    # 函数用途: 在不写第二份工作流权威的前提下固定本次安装意图。
-    def remember(records):
-        definition = provider.get('playbook', call.params['playbook_id'])
-        if definition is None:
-            raise HostAPIError('RESOURCE_NOT_FOUND', 404)
-        definition = _validate_definition(definition)
-        space = _space(call)
-        return {'definition': definition, 'space_id': space['space_id']}
-
-    pinned = store.transaction('community_playbook_submissions', remember,
-        idempotency_key='install-' + _digest([call.subject_id, call.idempotency_key])[:48],
-        params_digest=_digest([call.action, call.params]))
-    result = _data(v13_call_frozen(call, 'workflows.create', {'definition': pinned['definition'],
-                   'scope': {'scope_mode': 'spaces', 'space_ids': [pinned['space_id']]}},
-                   idempotency_key=call.idempotency_key))
-    return {key: result[key] for key in ('workflow_ref', 'definition_revision')}

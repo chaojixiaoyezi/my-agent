@@ -1,14 +1,11 @@
 """W9 业务动作：冻结 schema、原生桥接、provider 就绪与异步任务声明。"""
 from __future__ import annotations
 
-import json
-
 from ..business_spaces import v13_w9_ai_assets as assets
 from ..business_spaces import v13_w9_canary_markers as markers
 from ..business_spaces import v13_w9_datasources as datasources
 from ..business_spaces import v13_w9_hunting as hunting
 from ..business_spaces import v13_w9_inbox_oauth as inbox
-from ..business_spaces import v13_w9_intel as intel
 from .business_api_v13_contracts import V13Action
 
 
@@ -30,25 +27,10 @@ def _oauth_ready(call):
     return _provider_ready(call, "oauth_http")
 
 
-# LLM: 同步动作依赖真实 provider，不用空列表伪装同步完成。
-# 函数用途: 报告情报同步适配器就绪情况。
-def _intel_ready(call):
-    return _provider_ready(call, "threat_intel")
-
-
 # LLM: 当前没有内建 FIM 引擎，必须有宿主适配器。
 # 函数用途: 报告 FIM 查询适配器就绪情况。
 def _fim_ready(call):
     return _provider_ready(call, "osquery_fim")
-
-
-# LLM: 模型输出只按 JSON 解码，正式 schema 仍由 W0 job runner 校验。
-# 函数用途: 将诊断模型输出转成结构化结果。
-def _finalize_diagnosis(text):
-    value = json.loads(text)
-    if not isinstance(value, dict):
-        raise ValueError("JOB_RESULT_INVALID")
-    return value
 
 
 V13_DEFS = {'V13AiAsset': {'type': 'object',
@@ -283,35 +265,6 @@ V13_DEFS = {'V13AiAsset': {'type': 'object',
                                 'created_at',
                                 'last_used_at'],
                    'additionalProperties': False},
- 'V13Indicator': {'type': 'object',
-                  'properties': {'indicator_id': {'$ref': '#/$defs/Id'},
-                                 'value': {'type': 'string', 'minLength': 1, 'maxLength': 2048},
-                                 'type': {'type': 'string', 'enum': ['ip', 'domain', 'sha256', 'md5', 'url']},
-                                 'confidence': {'anyOf': [{'type': 'number', 'minimum': 0.0, 'maximum': 100.0},
-                                                          {'type': 'null'}]},
-                                 'family_tags': {'type': 'array',
-                                                 'items': {'type': 'string', 'minLength': 1, 'maxLength': 128},
-                                                 'maxItems': 50},
-                                 'actor_attribution': {'type': 'array',
-                                                       'items': {'type': 'string',
-                                                                 'minLength': 1,
-                                                                 'maxLength': 128},
-                                                       'maxItems': 50},
-                                 'first_seen_at': {'$ref': '#/$defs/Timestamp'},
-                                 'last_seen_at': {'$ref': '#/$defs/Timestamp'},
-                                 'sources': {'type': 'array',
-                                             'items': {'type': 'string', 'minLength': 1, 'maxLength': 128},
-                                             'maxItems': 50}},
-                  'required': ['indicator_id',
-                               'value',
-                               'type',
-                               'confidence',
-                               'family_tags',
-                               'actor_attribution',
-                               'first_seen_at',
-                               'last_seen_at',
-                               'sources'],
-                  'additionalProperties': False},
  'V13LakeColumn': {'type': 'object',
                    'properties': {'name': {'type': 'string', 'minLength': 1, 'maxLength': 256},
                                   'type': {'type': 'string', 'minLength': 1, 'maxLength': 64},
@@ -454,7 +407,6 @@ V13_COLLECTIONS = {'datasource_health': 'owner',
  'datasource_tombstones': 'owner',
  'oauth_apps': 'owner',
  'oauth_states': 'owner',
- 'threat_indicators': 'owner',
  'ai_asset_decisions': 'owner',
  'saved_hunts': 'owner',
  'retro_hunt_settings': 'owner',
@@ -462,17 +414,6 @@ V13_COLLECTIONS = {'datasource_health': 'owner',
  'canary_triggers': 'owner'}
 
 V13_JOB_KINDS = {
-    'datasource_troubleshoot': {"result_schema": {'type': 'object',
- 'properties': {'diagnosis': {'type': 'string', 'minLength': 0, 'maxLength': 4000},
-                'likely_causes': {'type': 'array',
-                                  'items': {'type': 'string', 'minLength': 0, 'maxLength': 500},
-                                  'maxItems': 10},
-                'suggested_steps': {'type': 'array',
-                                    'items': {'type': 'string', 'minLength': 0, 'maxLength': 500},
-                                    'maxItems': 20},
-                'confidence': {'anyOf': [{'type': 'number', 'minimum': 0.0, 'maximum': 1.0}, {'type': 'null'}]}},
- 'required': ['diagnosis', 'likely_causes', 'suggested_steps', 'confidence'],
- 'additionalProperties': False}, "finalize": _finalize_diagnosis},
     'nl_query_translation': {"result_schema": {'type': 'object',
  'properties': {'query': {'type': 'string', 'minLength': 0, 'maxLength': 20000},
                 'target': {'type': 'string', 'enum': ['sql', 'sigma', 'kql']},
@@ -842,29 +783,6 @@ V13_ACTIONS = (
         aliases=(),
     ),
     V13Action(
-        name='datasources.troubleshoot',
-        effect='execute',
-        params_schema={'type': 'object',
- 'properties': {'datasource_id': {'$ref': '#/$defs/Id'},
-                'symptom': {'type': 'string', 'minLength': 0, 'maxLength': 2000}},
- 'required': ['datasource_id'],
- 'additionalProperties': False},
-        result_schema={'type': 'object',
- 'properties': {'job_id': {'$ref': '#/$defs/Id'}},
- 'required': ['job_id'],
- 'additionalProperties': False},
-        accepted_result_schema={'type': 'object',
- 'properties': {'state': {'const': 'accepted'},
-                'operation_id': {'$ref': '#/$defs/Id'},
-                'job_id': {'$ref': '#/$defs/Id'},
-                'task_id': {'$ref': '#/$defs/Id'}},
- 'required': ['state', 'operation_id', 'job_id', 'task_id'],
- 'additionalProperties': False},
-        handler=inbox.troubleshoot, ready=_store_ready, admin=False,
-        idempotency_required=True, expected_revision_required=False,
-        aliases=(),
-    ),
-    V13Action(
         name='datasources.refresh_push_token',
         effect='config',
         params_schema={'type': 'object',
@@ -880,87 +798,6 @@ V13_ACTIONS = (
  'additionalProperties': False},
         accepted_result_schema=None,
         handler=inbox.refresh_push_token, ready=_store_ready, admin=False,
-        idempotency_required=True, expected_revision_required=False,
-        aliases=(),
-    ),
-    V13Action(
-        name='threat_intel.indicators.list',
-        effect='read',
-        params_schema={'type': 'object',
- 'properties': {'type': {'type': 'string', 'enum': ['ip', 'domain', 'sha256', 'md5', 'url']},
-                'source': {'type': 'string', 'minLength': 1, 'maxLength': 128},
-                'min_confidence': {'type': 'number', 'minimum': 0.0, 'maximum': 100.0},
-                'query': {'type': 'string', 'minLength': 1, 'maxLength': 256},
-                'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100, 'default': 50},
-                'cursor': {'$ref': '#/$defs/Cursor'}},
- 'required': [],
- 'additionalProperties': False},
-        result_schema={'type': 'object',
- 'properties': {'items': {'type': 'array', 'items': {'$ref': '#/$defs/V13Indicator'}, 'maxItems': 100},
-                'next_cursor': {'anyOf': [{'$ref': '#/$defs/Cursor'}, {'type': 'null'}]},
-                'coverage': {'$ref': '#/$defs/Coverage'}},
- 'required': ['items', 'next_cursor', 'coverage'],
- 'additionalProperties': False},
-        accepted_result_schema=None,
-        handler=intel.list_indicators, ready=_store_ready, admin=False,
-        idempotency_required=False, expected_revision_required=False,
-        aliases=('soc.threat_intel.indicators.list',),
-    ),
-    V13Action(
-        name='threat_intel.indicators.lookup',
-        effect='read',
-        params_schema={'type': 'object',
- 'properties': {'indicator': {'type': 'string', 'minLength': 1, 'maxLength': 2048},
-                'type': {'type': 'string', 'enum': ['ip', 'domain', 'sha256', 'md5', 'url']}},
- 'required': ['indicator', 'type'],
- 'additionalProperties': False},
-        result_schema={'type': 'object',
- 'properties': {'indicator': {'type': 'string', 'minLength': 1, 'maxLength': 2048},
-                'type': {'type': 'string', 'enum': ['ip', 'domain', 'sha256', 'md5', 'url']},
-                'found': {'type': 'boolean'},
-                'matches': {'type': 'array', 'items': {'$ref': '#/$defs/V13Indicator'}, 'maxItems': 50},
-                'sightings': {'type': 'object',
-                              'properties': {'alert_ids': {'type': 'array',
-                                                           'items': {'$ref': '#/$defs/Id'},
-                                                           'maxItems': 100},
-                                             'count': {'type': 'integer', 'minimum': 0}},
-                              'required': ['alert_ids', 'count'],
-                              'additionalProperties': False},
-                'sources_consulted': {'type': 'array',
-                                      'items': {'type': 'string', 'minLength': 1, 'maxLength': 128},
-                                      'maxItems': 20},
-                'coverage': {'$ref': '#/$defs/Coverage'}},
- 'required': ['indicator', 'type', 'found', 'matches', 'sightings', 'sources_consulted', 'coverage'],
- 'additionalProperties': False},
-        accepted_result_schema=None,
-        handler=intel.lookup, ready=_store_ready, admin=False,
-        idempotency_required=False, expected_revision_required=False,
-        aliases=('soc.threat_intel.lookup',),
-    ),
-    V13Action(
-        name='threat_intel.sources.sync',
-        effect='config',
-        params_schema={'type': 'object',
- 'properties': {'source': {'type': 'string', 'minLength': 1, 'maxLength': 128},
-                'cursor': {'type': 'string', 'minLength': 1, 'maxLength': 2048}},
- 'required': [],
- 'additionalProperties': False},
-        result_schema={'type': 'object',
- 'properties': {'fetched': {'type': 'integer', 'minimum': 0},
-                'upserted': {'type': 'integer', 'minimum': 0},
-                'next_cursor': {'anyOf': [{'type': 'string', 'minLength': 1, 'maxLength': 2048},
-                                          {'type': 'null'}]},
-                'retro_hunt': {'type': 'object',
-                               'properties': {'enabled': {'type': 'boolean'},
-                                              'matched_alert_ids': {'type': 'array',
-                                                                    'items': {'$ref': '#/$defs/Id'},
-                                                                    'maxItems': 500}},
-                               'required': ['enabled', 'matched_alert_ids'],
-                               'additionalProperties': False}},
- 'required': ['fetched', 'upserted', 'next_cursor', 'retro_hunt'],
- 'additionalProperties': False},
-        accepted_result_schema=None,
-        handler=intel.sync_sources, ready=_intel_ready, admin=False,
         idempotency_required=True, expected_revision_required=False,
         aliases=(),
     ),

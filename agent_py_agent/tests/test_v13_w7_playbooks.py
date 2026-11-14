@@ -114,16 +114,6 @@ def test_native_http_frozen_names_graphql_and_route_map(v13_native):
     assert 'W11 #74' in playbooks.ROUTE_MAP['POST /api/v1/marketplace/install']
 
 
-# LLM: 缺 provider 不伪造社区数据，发现目录也必须隐藏这些动作。
-# 函数用途: 验证原 HTTP 503 与按真实来源发布支持动作。
-def test_native_http_community_unbound_hidden(v13_native):
-    status, body = v13_call(v13_native, 'community_playbooks.list', {}, user='business-alice')
-    assert status == 503 and body['error']['code'] == 'HOST_NOT_READY', body
-    status, capabilities = v13_call(v13_native, 'system.capabilities.extensions', {}, user='business-alice')
-    assert status == 200, capabilities
-    assert not any(action.startswith('community_playbooks.') for action in capabilities['data']['supported_actions'])
-
-
 # LLM: 解析、DAG 和目录引用分别失败，不能把模型任意引用当挂载事实。
 # 函数用途: 验证纯草案终结器与可信上下文核对函数。
 def test_workflow_draft_finalizer_and_reference_guard():
@@ -196,42 +186,6 @@ def test_live_script_discovery_and_schema_precheck(v13_host):
     assert not bad['valid'] and not bad['scope_check']['in_scope']
 
 
-# LLM: 外部替身只记录明确请求，不填充业务持久化结果或伪造本地安装。
-# 类用途: 提供社区目录协议的确定性测试端口。
-class _Community:
-    # LLM: 定义由测试提供，副本避免 provider 返回值意外修改原存储。
-    # 函数用途: 保存公开定义和观察到的提交调用。
-    def __init__(self, definition):
-        self.definition = copy.deepcopy(definition)
-        self.documents = []
-        self.get_calls = 0
-        self.fail = False
-
-    # LLM: 读取仅返回公开元数据，原 cursor/tag/query 原样可观察。
-    # 函数用途: 生成社区列表页面。
-    def list(self, kind, *, query, tag, cursor, limit):
-        assert kind == 'playbook'
-        return {'items': [{'item_id': 'community-recovery', 'kind': kind, 'title': '恢复剧本',
-                 'summary': query, 'author': None, 'tags': [tag] if tag else [], 'format': 'workflow',
-                 'version': '1', 'updated_at': '2026-11-02T00:00:00+00:00'}], 'next_cursor': None}
-
-    # LLM: 一次 provider get 不是安装；保存必须由冻结 workflows.create 完成。
-    # 函数用途: 返回当前公开工作流定义。
-    def get(self, kind, item_id):
-        assert kind == 'playbook' and item_id == 'community-recovery'
-        self.get_calls += 1
-        return copy.deepcopy(self.definition)
-
-    # LLM: 即便外发后断连也记录该次调用，重放不可再次外发。
-    # 函数用途: 模拟外部确认或回包丢失。
-    def submit(self, kind, document):
-        assert kind == 'playbook'
-        self.documents.append(copy.deepcopy(document))
-        if self.fail:
-            raise OSError('provider outcome unavailable')
-        return {'submission_ref': 'community:submission1', 'state': 'submitted'}
-
-
 # LLM: 准备对象也沿原冻结入口，不直接手写工作流正文文件。
 # 函数用途: 在当前可信调用上下文创建真实空间及工作流。
 def _prepare(call, definition):
@@ -242,109 +196,6 @@ def _prepare(call, definition):
         'scope': {'scope_mode': 'spaces', 'space_ids': [space['space_id']]}},
         idempotency_key='playbooks-community-create')
     return space['space_id'], workflow['workflow_ref']
-
-
-# LLM: 原集合和原 WorkflowStore 均真实落盘；provider 仅替代外部社区。
-# 函数用途: 验证递归脱敏、耐久回放、键冲突和公开提交记录。
-def test_community_submit_is_redacted_durable_and_not_sent_twice(v13_host):
-    from agent_py_agent.agent.assets.workflow_store import WorkflowStore
-    from agent_py_agent.agent.business_spaces.v13_store import v13_store_for
-    definition = _valid_definition()
-    definition['descriptor']['credential_refs'] = [{'credential_ref': 'private-credential', 'alias': 'api'}]
-    definition['descriptor']['access_targets'] = [{'target_id': 'private-api', 'type': 'http',
-                                                   'endpoint': 'https://private.invalid/api'}]
-    definition['steps'][0]['config'] = {'nested': {'credential_ref': 'private-ref',
-        'access_targets': [{'endpoint': 'https://nested.invalid/secret'}], 'password': 'private-password'}}
-    provider = _Community(definition)
-    v13_host.business_v13_providers['community_catalog'] = provider
-    call = _call(v13_host, 'community_playbooks.submit', {})
-    space_id, workflow_id = _prepare(call, definition)
-    call = replace(call, params={'workflow_id': workflow_id, 'space_id': space_id},
-                   idempotency_key='playbooks-submit-idempotent')
-    original = WorkflowStore(call.owner_home).get_workflow(workflow_id).to_dict()
-    first = playbooks.submit_community_playbook(call)
-    assert first['submission']['state'] == 'submitted'
-    assert playbooks.submit_community_playbook(call) == first
-    assert len(provider.documents) == 1
-    outgoing = json.dumps(provider.documents[0], ensure_ascii=False)
-    for secret in ('private-credential', 'private-ref', 'private-password', 'https://private.invalid/api',
-                   'https://nested.invalid/secret'):
-        assert secret not in outgoing
-    assert WorkflowStore(call.owner_home).get_workflow(workflow_id).to_dict() == original
-    rows = v13_store_for(call).list('community_playbook_submissions')
-    assert len(rows) == 1 and rows[0]['submission_id'] == first['submission']['submission_id']
-    with pytest.raises(BusinessError) as conflict:
-        playbooks.submit_community_playbook(replace(call, params={**call.params, 'title': 'different'}))
-    assert conflict.value.code == 'IDEMPOTENCY_CONFLICT'
-    assert len(provider.documents) == 1
-
-
-# LLM: 失败观察与失败原因分开，外发回包未知不能当作没有发生。
-# 函数用途: 验证断连后同键只返回未知，不重复 provider.submit。
-def test_community_submit_unknown_never_resends(v13_host):
-    provider = _Community(_valid_definition())
-    provider.fail = True
-    v13_host.business_v13_providers['community_catalog'] = provider
-    call = _call(v13_host, 'community_playbooks.submit', {})
-    space_id, workflow_id = _prepare(call, provider.definition)
-    call = replace(call, params={'workflow_id': workflow_id, 'space_id': space_id})
-    with pytest.raises(OSError):
-        playbooks.submit_community_playbook(call)
-    with pytest.raises(HostAPIError) as unknown:
-        playbooks.submit_community_playbook(call)
-    assert unknown.value.code == 'OUTCOME_UNKNOWN' and len(provider.documents) == 1
-
-
-# LLM: 本地读取失败尚未外发，不得消耗仅一次的外发身份。
-# 函数用途: 验证社区提交在工作流暂不可读后可安全同键恢复。
-def test_community_submit_preflight_failure_allows_same_key_retry(v13_host, monkeypatch):
-    provider = _Community(_valid_definition())
-    v13_host.business_v13_providers['community_catalog'] = provider
-    call = _call(v13_host, 'community_playbooks.submit', {})
-    space_id, workflow_id = _prepare(call, provider.definition)
-    call = replace(call, params={'workflow_id': workflow_id, 'space_id': space_id})
-    original = playbooks._authorized_definition
-
-    def unavailable(call):
-        raise HostAPIError('HOST_NOT_READY', 503)
-
-    monkeypatch.setattr(playbooks, '_authorized_definition', unavailable)
-    with pytest.raises(HostAPIError) as failed:
-        playbooks.submit_community_playbook(call)
-    assert failed.value.code == 'HOST_NOT_READY'
-    assert provider.documents == []
-    monkeypatch.setattr(playbooks, '_authorized_definition', original)
-    first = playbooks.submit_community_playbook(call)
-    assert first['submission']['state'] == 'submitted'
-    assert playbooks.submit_community_playbook(call) == first
-    assert len(provider.documents) == 1
-
-
-# LLM: 重放输入使用首次定义，provider 后续内容变化不能创建第二个工作流。
-# 函数用途: 验证列表公开投影、真实原生安装和重放定义钉住。
-def test_community_install_uses_native_create_and_pins_definition(v13_host):
-    from agent_py_agent.agent.assets.workflow_store import WorkflowStore
-    provider = _Community(_valid_definition('community-workflow'))
-    v13_host.business_v13_providers['community_catalog'] = provider
-    call = _call(v13_host, 'community_playbooks.list', {'query': '恢复', 'tag': 'recovery'})
-    page = playbooks.list_community_playbooks(call)
-    assert page['items'][0]['summary'] == '恢复' and page['coverage'] == 'complete'
-    from agent_py_agent.agent.gateway_parts.business_api_v13 import v13_call_frozen
-    space = v13_call_frozen(call, 'spaces.create', {'name': '安装范围'},
-                           idempotency_key='playbooks-install-space')
-    call = replace(call, action='community_playbooks.install', params={'playbook_id': 'community-recovery',
-                   'space_id': space['space_id']}, idempotency_key='playbooks-install-once')
-    first = playbooks.install_community_playbook(call)
-    native = WorkflowStore(call.owner_home).get_workflow(first['workflow_ref'])
-    assert native is not None and native.descriptor.id == 'community-workflow'
-    provider.definition['descriptor']['summary'] = 'new external version'
-    assert playbooks.install_community_playbook(call) == first
-    assert provider.get_calls == 1
-    assert WorkflowStore(call.owner_home).get_workflow(first['workflow_ref']).descriptor.summary == '条件检查'
-    assert len(WorkflowStore(call.owner_home).list_workflows()) == 1
-    provider.definition['steps'][0]['inputs_map'] = {'bad': {'step_id': 'missing'}}
-    with pytest.raises(HostAPIError):
-        playbooks.install_community_playbook(replace(call, idempotency_key='playbooks-invalid-definition'))
 
 
 # LLM: 已安装包采用真实激活与成员摘要；不改包文件或启动包内代码。

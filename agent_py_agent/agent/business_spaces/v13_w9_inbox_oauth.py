@@ -17,7 +17,6 @@ from ..gateway_parts.remote_push_service import persist_push_json, read_push_jso
 from ..plugin_host.errors import HostAPIError
 from ..settings.secret_ref import is_secret_ref, resolve_secret_ref
 from .v13_w9_datasources import (
-    fleet_health,
     w9_datasource,
     w9_datasource_store,
     w9_get,
@@ -450,23 +449,3 @@ def oauth_complete(call):
         return result
 
     return w9_write(call, 'oauth_apps', mutate)
-
-
-# LLM: 白名单事实不含 DSN、路径、凭据；症状正文可能含粘贴口令，不直接送模型。
-# 函数用途: 启动异步连接诊断任务。
-def troubleshoot(call):
-    from ..assets.datasource_store import DatasourceConnectionSpec
-    from ..gateway_parts.business_api_v13 import v13_start_model_job
-
-    spec = w9_datasource(call, call.params['datasource_id'])
-    summary = w9_datasource_store(call).public_summary(DatasourceConnectionSpec(**spec))
-    health = w9_get(call, 'datasource_health', spec['datasource_id']) or {}
-    scoped = replace(call, params={'datasource_id': spec['datasource_id']})
-    facts = {'datasource': {key: summary[key] for key in
-                           ('datasource_id', 'kind', 'has_secret', 'credential_keys')},
-             'last_test': health.get('last_test'), 'fleet': fleet_health(scoped)['items'],
-             'recent_push_error_codes': [], 'recent_push_errors_available': False,
-             'symptom_provided': bool(call.params.get('symptom'))}
-    instruction = '依据结构化连接观察诊断，输出约定 JSON；缺少证据时明确标注未知。\n' + json.dumps(facts, ensure_ascii=False)
-    return v13_start_model_job(call, 'datasource_troubleshoot', instruction,
-                               space_id=w9_require_space(call))

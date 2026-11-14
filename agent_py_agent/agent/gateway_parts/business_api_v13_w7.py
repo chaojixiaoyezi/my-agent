@@ -19,16 +19,6 @@ def _store_ready(call):
     return bool(getattr(call.services.host.config, 'business_spaces_enabled', False))
 
 
-# LLM: 未绑定提供者不得出现在发现目录，也不能返回空列表伪装成功。
-# 函数用途: 检查社区目录端口是否齐备。
-def _community_ready(call):
-    providers = getattr(call.services.host, 'business_v13_providers', {})
-    provider = providers.get('community_catalog')
-    method = ('submit' if call.action == 'community_playbooks.submit' else
-              'list' if call.action.endswith('.list') else 'get')
-    return _store_ready(call) and callable(getattr(provider, method, None))
-
-
 # LLM: 模型作业只经原后台端口与任务观察口，不构造第二个任务系统。
 # 函数用途: 检查通用异步作业所需原生来源。
 def _jobs_ready(call):
@@ -59,7 +49,6 @@ def _validate_draft_result(call, job_row, result):
     return True
 
 V13_DEFS = {
-    'V13CommunityItem': {'type': 'object', 'properties': {'item_id': {'$ref': '#/$defs/Id'}, 'kind': {'type': 'string', 'enum': ['detection', 'playbook']}, 'title': {'type': 'string', 'minLength': 1, 'maxLength': 300}, 'summary': {'type': 'string', 'minLength': 0, 'maxLength': 4096}, 'author': {'anyOf': [{'type': 'string', 'minLength': 1, 'maxLength': 128}, {'type': 'null'}]}, 'tags': {'type': 'array', 'items': {'type': 'string', 'minLength': 1, 'maxLength': 128}, 'maxItems': 100}, 'format': {'type': 'string', 'enum': ['sigma', 'workflow']}, 'version': {'anyOf': [{'type': 'string', 'minLength': 1, 'maxLength': 64}, {'type': 'null'}]}, 'updated_at': {'$ref': '#/$defs/Timestamp'}}, 'required': ['item_id', 'kind', 'title', 'summary', 'author', 'tags', 'format', 'version', 'updated_at'], 'additionalProperties': False},
     'V13DetectionBaseline': {'type': 'object', 'properties': {'baseline_id': {'$ref': '#/$defs/Id'}, 'space_id': {'$ref': '#/$defs/Id'}, 'rule_id': {'$ref': '#/$defs/NullableId'}, 'metric': {'type': 'string', 'enum': ['alerts_per_day', 'fp_ratio']}, 'value': {'type': 'number'}, 'window': {'$ref': '#/$defs/V13TimeWindow'}, 'created_at': {'$ref': '#/$defs/Timestamp'}}, 'required': ['baseline_id', 'space_id', 'rule_id', 'metric', 'value', 'window', 'created_at'], 'additionalProperties': False},
     'V13DetectionProposal': {'type': 'object', 'properties': {'proposal_id': {'$ref': '#/$defs/Id'}, 'space_id': {'$ref': '#/$defs/Id'}, 'title': {'type': 'string', 'minLength': 1, 'maxLength': 200}, 'rationale': {'type': 'string', 'minLength': 0, 'maxLength': 8000}, 'rule': {'$ref': '#/$defs/V13RuleDraft'}, 'mitre_techniques': {'type': 'array', 'items': {'type': 'string', 'minLength': 1, 'maxLength': 16}, 'maxItems': 100}, 'status': {'type': 'string', 'enum': ['draft', 'pending', 'evaluating', 'approved', 'rejected', 'changes_requested', 'promoted']}, 'author': {'type': 'string', 'minLength': 1, 'maxLength': 128}, 'source': {'type': 'string', 'enum': ['analyst', 'ai']}, 'comments': {'type': 'array', 'items': {'$ref': '#/$defs/V13ProposalComment'}, 'maxItems': 200}, 'evaluations': {'type': 'array', 'items': {'$ref': '#/$defs/V13ProposalEvaluation'}, 'maxItems': 50}, 'decision': {'anyOf': [{'$ref': '#/$defs/JsonObject'}, {'type': 'null'}]}, 'promoted_rule_id': {'$ref': '#/$defs/NullableId'}, 'revision': {'type': 'integer', 'minimum': 0}, 'created_at': {'$ref': '#/$defs/Timestamp'}, 'updated_at': {'$ref': '#/$defs/Timestamp'}}, 'required': ['proposal_id', 'space_id', 'title', 'rationale', 'rule', 'mitre_techniques', 'status', 'author', 'source', 'comments', 'evaluations', 'decision', 'promoted_rule_id', 'revision', 'created_at', 'updated_at'], 'additionalProperties': False},
     'V13DraftRefs': {'type': 'object', 'properties': {'skill_ids': {'type': 'array', 'items': {'$ref': '#/$defs/Id'}, 'maxItems': 100}, 'script_ids': {'type': 'array', 'items': {'$ref': '#/$defs/Id'}, 'maxItems': 100}, 'monitor_rule_ids': {'type': 'array', 'items': {'$ref': '#/$defs/Id'}, 'maxItems': 100}}, 'required': ['skill_ids', 'script_ids', 'monitor_rule_ids'], 'additionalProperties': False},
@@ -69,7 +58,6 @@ V13_DEFS = {
     'V13LiveAction': {'type': 'object', 'properties': {'action_ref': {'$ref': '#/$defs/Id'}, 'capability': {'type': 'string', 'pattern': '^[a-z][a-z0-9_]{0,31}$'}, 'vendor_id': {'anyOf': [{'type': 'string', 'minLength': 1, 'maxLength': 128}, {'type': 'null'}]}, 'vendor_name': {'anyOf': [{'type': 'string', 'minLength': 1, 'maxLength': 128}, {'type': 'null'}]}, 'display_name': {'type': 'string', 'minLength': 1, 'maxLength': 200}, 'source': {'type': 'string', 'enum': ['script', 'plugin', 'mcp']}, 'source_ref': {'$ref': '#/$defs/Id'}, 'input_schema': {'$ref': '#/$defs/JsonObject'}, 'risk_level': {'type': 'string', 'enum': ['low', 'medium', 'high', 'critical']}, 'requires_approval': {'type': 'boolean'}, 'available': {'type': 'boolean'}, 'unavailable_reason': {'anyOf': [{'type': 'string', 'minLength': 1, 'maxLength': 256}, {'type': 'null'}]}}, 'required': ['action_ref', 'capability', 'vendor_id', 'vendor_name', 'display_name', 'source', 'source_ref', 'input_schema', 'risk_level', 'requires_approval', 'available', 'unavailable_reason'], 'additionalProperties': False},
     'V13MonitorRule': {'type': 'object', 'properties': {'rule_id': {'$ref': '#/$defs/Id'}, 'space_id': {'$ref': '#/$defs/Id'}, 'name': {'type': 'string', 'minLength': 1, 'maxLength': 200}, 'description': {'type': 'string', 'minLength': 0, 'maxLength': 4096}, 'enabled': {'type': 'boolean'}, 'severity': {'type': 'string', 'enum': ['info', 'low', 'medium', 'high', 'critical']}, 'query': {'$ref': '#/$defs/V13RuleQuery'}, 'schedule': {'anyOf': [{'$ref': '#/$defs/V13MonitorSchedule'}, {'type': 'null'}]}, 'script_id': {'$ref': '#/$defs/NullableId'}, 'skill_ids': {'type': 'array', 'items': {'$ref': '#/$defs/Id'}, 'maxItems': 50}, 'datasource_ids': {'type': 'array', 'items': {'$ref': '#/$defs/Id'}, 'maxItems': 50}, 'mitre_techniques': {'type': 'array', 'items': {'type': 'string', 'minLength': 1, 'maxLength': 16}, 'maxItems': 100}, 'tags': {'type': 'array', 'items': {'type': 'string', 'minLength': 1, 'maxLength': 128}, 'maxItems': 100}, 'exclusions': {'type': 'array', 'items': {'$ref': '#/$defs/V13RuleExclusion'}, 'maxItems': 200}, 'origin': {'type': 'string', 'enum': ['manual', 'proposal', 'community', 'sample']}, 'scheduler_job_id': {'$ref': '#/$defs/NullableId'}, 'last_run': {'anyOf': [{'$ref': '#/$defs/V13ScriptLastRun'}, {'type': 'null'}]}, 'revision': {'type': 'integer', 'minimum': 0}, 'created_at': {'$ref': '#/$defs/Timestamp'}, 'updated_at': {'$ref': '#/$defs/Timestamp'}}, 'required': ['rule_id', 'space_id', 'name', 'description', 'enabled', 'severity', 'query', 'schedule', 'script_id', 'skill_ids', 'datasource_ids', 'mitre_techniques', 'tags', 'exclusions', 'origin', 'scheduler_job_id', 'last_run', 'revision', 'created_at', 'updated_at'], 'additionalProperties': False},
     'V13MonitorSchedule': {'type': 'object', 'properties': {'kind': {'type': 'string', 'enum': ['every', 'cron']}, 'every_seconds': {'type': 'integer', 'minimum': 0}, 'expression': {'type': 'string', 'minLength': 1, 'maxLength': 128}, 'timezone': {'type': 'string', 'minLength': 1, 'maxLength': 64}}, 'required': ['kind'], 'additionalProperties': False},
-    'V13PlaybookSubmission': {'type': 'object', 'properties': {'submission_id': {'$ref': '#/$defs/Id'}, 'workflow_id': {'$ref': '#/$defs/Id'}, 'title': {'type': 'string', 'minLength': 1, 'maxLength': 300}, 'state': {'type': 'string', 'enum': ['submitted', 'rejected']}, 'submission_ref': {'anyOf': [{'type': 'string', 'minLength': 1, 'maxLength': 256}, {'type': 'null'}]}, 'submitted_at': {'$ref': '#/$defs/Timestamp'}}, 'required': ['submission_id', 'workflow_id', 'title', 'state', 'submission_ref', 'submitted_at'], 'additionalProperties': False},
     'V13ProposalComment': {'type': 'object', 'properties': {'comment_id': {'$ref': '#/$defs/Id'}, 'author': {'type': 'string', 'minLength': 1, 'maxLength': 128}, 'text': {'type': 'string', 'minLength': 0, 'maxLength': 4000}, 'created_at': {'$ref': '#/$defs/Timestamp'}}, 'required': ['comment_id', 'author', 'text', 'created_at'], 'additionalProperties': False},
     'V13ProposalEvaluation': {'type': 'object', 'properties': {'job_id': {'$ref': '#/$defs/Id'}, 'mode': {'type': 'string', 'enum': ['eval', 'rule', 'backtest']}, 'state': {'type': 'string', 'minLength': 1, 'maxLength': 32}, 'summary': {'anyOf': [{'$ref': '#/$defs/JsonObject'}, {'type': 'null'}]}, 'at': {'$ref': '#/$defs/Timestamp'}}, 'required': ['job_id', 'mode', 'state', 'summary', 'at'], 'additionalProperties': False},
     'V13QueueItem': {'type': 'object', 'properties': {'alert_id': {'$ref': '#/$defs/Id'}, 'title': {'type': 'string', 'minLength': 1, 'maxLength': 300}, 'severity': {'type': 'string', 'enum': ['info', 'low', 'medium', 'high', 'critical']}, 'status': {'type': 'string', 'minLength': 1, 'maxLength': 32}, 'created_at': {'$ref': '#/$defs/Timestamp'}, 'sla_due_at': {'$ref': '#/$defs/Timestamp'}, 'assignee': {'anyOf': [{'type': 'string', 'minLength': 1, 'maxLength': 128}, {'type': 'null'}]}, 'rule_id': {'$ref': '#/$defs/NullableId'}}, 'required': ['alert_id', 'title', 'severity', 'status', 'created_at', 'sla_due_at', 'assignee', 'rule_id'], 'additionalProperties': False},
@@ -94,8 +82,7 @@ V13_DEFS = {
     'V13WorkflowTemplate': {'type': 'object', 'properties': {'template_id': {'$ref': '#/$defs/Id'}, 'name': {'type': 'string', 'minLength': 1, 'maxLength': 200}, 'summary': {'type': 'string', 'minLength': 0, 'maxLength': 4096}, 'tags': {'type': 'array', 'items': {'type': 'string', 'minLength': 1, 'maxLength': 128}, 'maxItems': 100}, 'source': {'type': 'string', 'enum': ['package', 'builtin']}, 'package_id': {'$ref': '#/$defs/NullableId'}, 'definition': {'$ref': '#/$defs/WorkflowDefinition'}, 'required_script_ids': {'type': 'array', 'items': {'$ref': '#/$defs/Id'}, 'maxItems': 100}, 'required_skill_ids': {'type': 'array', 'items': {'$ref': '#/$defs/Id'}, 'maxItems': 100}}, 'required': ['template_id', 'name', 'summary', 'tags', 'source', 'package_id', 'definition', 'required_script_ids', 'required_skill_ids'], 'additionalProperties': False},
 }
 
-V13_COLLECTIONS = {'community_playbook_submissions': 'owner',
- 'detection_baselines': 'owner',
+V13_COLLECTIONS = {'detection_baselines': 'owner',
  'detection_drift_snapshots': 'owner',
  'detection_proposals': 'owner',
  'detection_tuning': 'owner',
@@ -423,30 +410,6 @@ V13_ACTIONS = (
         admin=False, idempotency_required=True,
         expected_revision_required=True, aliases=()),
     V13Action(
-        name='community_detections.list', effect='read',
-        params_schema={'type': 'object', 'properties': {'query': {'type': 'string', 'minLength': 1, 'maxLength': 256}, 'tag': {'type': 'string', 'minLength': 1, 'maxLength': 128}, 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100, 'default': 50}, 'cursor': {'$ref': '#/$defs/Cursor'}}, 'required': [], 'additionalProperties': False},
-        result_schema={'type': 'object', 'properties': {'items': {'type': 'array', 'items': {'$ref': '#/$defs/V13CommunityItem'}, 'maxItems': 100}, 'next_cursor': {'anyOf': [{'$ref': '#/$defs/Cursor'}, {'type': 'null'}]}, 'coverage': {'$ref': '#/$defs/Coverage'}}, 'required': ['items', 'next_cursor', 'coverage'], 'additionalProperties': False},
-        accepted_result_schema=None,
-        handler=v13_w7_detection_lifecycle.list_community, ready=_community_ready,
-        admin=False, idempotency_required=False,
-        expected_revision_required=False, aliases=()),
-    V13Action(
-        name='community_detections.get', effect='read',
-        params_schema={'type': 'object', 'properties': {'detection_id': {'$ref': '#/$defs/Id'}}, 'required': ['detection_id'], 'additionalProperties': False},
-        result_schema={'type': 'object', 'properties': {'item': {'$ref': '#/$defs/V13CommunityItem'}, 'rule': {'$ref': '#/$defs/V13RuleDraft'}}, 'required': ['item', 'rule'], 'additionalProperties': False},
-        accepted_result_schema=None,
-        handler=v13_w7_detection_lifecycle.get_community, ready=_community_ready,
-        admin=False, idempotency_required=False,
-        expected_revision_required=False, aliases=()),
-    V13Action(
-        name='community_detections.install', effect='config',
-        params_schema={'type': 'object', 'properties': {'detection_id': {'$ref': '#/$defs/Id'}, 'space_id': {'$ref': '#/$defs/Id'}, 'enabled': {'type': 'boolean'}}, 'required': ['detection_id'], 'additionalProperties': False},
-        result_schema={'type': 'object', 'properties': {'rule': {'$ref': '#/$defs/V13MonitorRule'}}, 'required': ['rule'], 'additionalProperties': False},
-        accepted_result_schema=None,
-        handler=v13_w7_detection_lifecycle.install_community, ready=_community_ready,
-        admin=False, idempotency_required=True,
-        expected_revision_required=False, aliases=()),
-    V13Action(
         name='purple_team.drift_snapshot', effect='config',
         params_schema={'type': 'object', 'properties': {'space_id': {'$ref': '#/$defs/Id'}}, 'required': [], 'additionalProperties': False},
         result_schema={'type': 'object', 'properties': {'snapshot': {'$ref': '#/$defs/V13DriftSnapshot'}}, 'required': ['snapshot'], 'additionalProperties': False},
@@ -525,29 +488,5 @@ V13_ACTIONS = (
         accepted_result_schema=None,
         handler=v13_w7_playbooks.dry_run_live_action, ready=_store_ready,
         admin=False, idempotency_required=False,
-        expected_revision_required=False, aliases=()),
-    V13Action(
-        name='community_playbooks.list', effect='read',
-        params_schema={'type': 'object', 'properties': {'query': {'type': 'string', 'minLength': 1, 'maxLength': 256}, 'tag': {'type': 'string', 'minLength': 1, 'maxLength': 128}, 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 100, 'default': 50}, 'cursor': {'$ref': '#/$defs/Cursor'}}, 'required': [], 'additionalProperties': False},
-        result_schema={'type': 'object', 'properties': {'items': {'type': 'array', 'items': {'$ref': '#/$defs/V13CommunityItem'}, 'maxItems': 100}, 'next_cursor': {'anyOf': [{'$ref': '#/$defs/Cursor'}, {'type': 'null'}]}, 'coverage': {'$ref': '#/$defs/Coverage'}}, 'required': ['items', 'next_cursor', 'coverage'], 'additionalProperties': False},
-        accepted_result_schema=None,
-        handler=v13_w7_playbooks.list_community_playbooks, ready=_community_ready,
-        admin=False, idempotency_required=False,
-        expected_revision_required=False, aliases=()),
-    V13Action(
-        name='community_playbooks.submit', effect='config',
-        params_schema={'type': 'object', 'properties': {'workflow_id': {'$ref': '#/$defs/Id'}, 'space_id': {'$ref': '#/$defs/Id'}, 'title': {'type': 'string', 'minLength': 1, 'maxLength': 300}, 'description': {'type': 'string', 'minLength': 0, 'maxLength': 4096}, 'tags': {'type': 'array', 'items': {'type': 'string', 'minLength': 1, 'maxLength': 128}, 'maxItems': 100}}, 'required': ['workflow_id'], 'additionalProperties': False},
-        result_schema={'type': 'object', 'properties': {'submission': {'$ref': '#/$defs/V13PlaybookSubmission'}}, 'required': ['submission'], 'additionalProperties': False},
-        accepted_result_schema=None,
-        handler=v13_w7_playbooks.submit_community_playbook, ready=_community_ready,
-        admin=False, idempotency_required=True,
-        expected_revision_required=False, aliases=()),
-    V13Action(
-        name='community_playbooks.install', effect='config',
-        params_schema={'type': 'object', 'properties': {'playbook_id': {'$ref': '#/$defs/Id'}, 'space_id': {'$ref': '#/$defs/Id'}}, 'required': ['playbook_id'], 'additionalProperties': False},
-        result_schema={'type': 'object', 'properties': {'workflow_ref': {'$ref': '#/$defs/Id'}, 'definition_revision': {'type': 'integer', 'minimum': 0}}, 'required': ['workflow_ref', 'definition_revision'], 'additionalProperties': False},
-        accepted_result_schema=None,
-        handler=v13_w7_playbooks.install_community_playbook, ready=_community_ready,
-        admin=False, idempotency_required=True,
         expected_revision_required=False, aliases=()),
 )

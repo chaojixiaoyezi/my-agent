@@ -28,7 +28,7 @@ from agent_py_agent.agent.gateway_parts.remote_push_service import (
 )
 from agent_py_agent.agent.plugin_host.errors import HostAPIError
 from agent_py_agent.agent.user_space.home_layout import home_paths
-from agent_py_agent.tests.test_v13_w9_hunting import _job, _model_text, _select_echo_model
+from agent_py_agent.tests.test_v13_w9_hunting import _select_echo_model
 
 
 # LLM: 这是 F10 的单元输入 DTO，不替代生产分派器；HTTP 测试不使用它。
@@ -424,20 +424,6 @@ def test_live_denial_and_global_writer_have_no_token_side_effect(unit_env, monke
     assert not (unit_env.root / 'remote_push' / 'tokens.json').exists()
 
 
-# LLM: 指令/facts 不复制用户症状、DSN、options、Vault 或请求原文。
-# 函数用途: 验证诊断任务的脱敏上下文。
-def test_troubleshoot_job_context_has_redacted_facts(unit_env):
-    identifier = _datasource(unit_env)
-    call = unit_env.call('datasources.troubleshoot', {'datasource_id': identifier,
-                                                    'symptom': 'Authorization: synthetic-pasted-secret'})
-    assert inbox.troubleshoot(call)['state'] == 'accepted'
-    job = unit_env.jobs[0]
-    assert job['kind'] == 'datasource_troubleshoot'
-    assert job['facts']['datasource']['datasource_id'] == identifier
-    assert job['facts']['fleet'][0]['status'] == 'unknown'
-    assert 'synthetic-pasted-secret' not in repr(job) and 'database_path' not in repr(job)
-
-
 # LLM: 此夹具不替换 registry、Store、context 或响应，只启本机真实 Gateway 与 echo Agent。
 # 函数用途: 提供端到端业务与原生推送入口。
 @pytest.fixture
@@ -596,33 +582,6 @@ def test_wire_oauth_and_refresh_bound_token(native_http, monkeypatch):
     assert status == 200 and refreshed['data']['token']['token_id'] != minted['data']['token']['token_id']
     status, deleted = _business(native_http, 'oauth.app.delete', {'connector_type': 'wire'}, 'wire-delete-app-key')
     assert status == 200 and deleted['data']['deleted'] is True
-
-
-# LLM: 只替 Echo 输出，任务必须经 Gateway 调度器执行，再由 W0 finalizer/schema 判定终态。
-# 函数用途: 验证诊断作业受理、真实执行、脱敏模型上下文及无效结果拒绝。
-def test_wire_troubleshoot_accepts_real_job(native_http, monkeypatch):
-    space_id = _wire_space(native_http)
-    status, source = _business(native_http, 'datasources.create', {'space_id': space_id,
-        'datasource_id': 'diagnose-source', 'name': '诊断连接', 'kind': 'https'}, 'wire-diagnose-source-key')
-    assert status == 200, source
-    output = {'diagnosis': '仅检查已提供的连接事实', 'likely_causes': ['尚无连接测试记录'],
-              'suggested_steps': ['检查连接配置'], 'confidence': None}
-    observed = _model_text(monkeypatch, output)
-    status, accepted = _business(native_http, 'datasources.troubleshoot',
-        {'datasource_id': 'diagnose-source', 'symptom': 'synthetic symptom'}, 'wire-troubleshoot-key')
-    assert status == 202, json.dumps(accepted, ensure_ascii=False)
-    assert accepted['state'] == 'accepted' and accepted['error'] is None
-    assert set(accepted['data']) == {'state', 'operation_id', 'job_id', 'task_id'}
-    job = _job(native_http, (status, accepted))
-    assert job['job_id'] == accepted['data']['job_id'] and job['kind'] == 'datasource_troubleshoot', job
-    assert job['state'] == 'completed' and job['result'] == output and job['error'] is None, job
-    assert observed and 'diagnose-source' in '\n'.join(observed)
-    assert 'synthetic symptom' not in '\n'.join(observed)
-    _model_text(monkeypatch, {**output, 'confidence': 2})
-    invalid = _job(native_http, _business(native_http, 'datasources.troubleshoot',
-        {'datasource_id': 'diagnose-source'}, 'wire-troubleshoot-invalid-key'))
-    assert invalid['state'] == 'failed' and invalid['result'] is None, invalid
-    assert invalid['error']['code'] == 'JOB_RESULT_INVALID', invalid
 
 
 # LLM: 同键并发必须只有一次原生副作用与一次 secret-once 响应。

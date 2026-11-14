@@ -1,7 +1,6 @@
 """调查领域定向测试；原媒体入库和下载为真实实现，缺 W0 时仅使用显式源替身。"""
 from __future__ import annotations
 
-import hashlib
 import json
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -20,13 +19,11 @@ from agent_py_agent.agent.conversation.business_observability import (
 )
 from agent_py_agent.agent.gateway_parts import business_api as api
 from agent_py_agent.agent.gateway_parts import business_artifacts_http as media
-from agent_py_agent.agent.gateway_parts.business_artifacts_http import artifact_content
 from agent_py_agent.agent.plugin_host.business_action_specs import business_action_spec
 from agent_py_agent.agent.plugin_host.contracts import DomainResult
 from agent_py_agent.agent.plugin_host.errors import HostAPIError
 from agent_py_agent.agent.plugin_host.schemas import validate_object
 from agent_py_agent.tests import test_v13_w0_harness
-from agent_py_agent.tests.test_mega_business_api_actions import native_request
 
 native_http = test_v13_w0_harness.v13_native
 
@@ -313,51 +310,6 @@ def test_share_snapshot_is_redacted_and_expires(investigation_env):
     assert expired.value.status == 404
 
 
-# LLM: 文本报告使用真实媒体配额、registry、冻结读取及内容校验，不替换上传函数。
-# 函数用途: 验证脱敏报告入库、幂等和原 content 下载。
-@pytest.mark.parametrize('fmt', ['md', 'html'])
-def test_report_md_html_persisted_in_artifact_store(investigation_env, fmt):
-    env = investigation_env
-    export = replace(env.call, action='soc.reports.export', params={'case_id': 'CASE-2026-001', 'format': fmt})
-    first = investigation.export_report(export)
-    assert first == investigation.export_report(export)
-    report = first['report']
-    assert report['mime_type'] == 'text/plain' and report['format'] == fmt
-    read = env.frozen(export, 'artifacts.get', {'artifact_id': report['artifact_id'], 'version_ref': report['version_ref']})
-    assert read['available'] and read['artifact']['content_sha256'] == report['content_sha256']
-    status, headers, content = artifact_content(report['artifact_id'], report['version_ref'], export.context, export.services)
-    assert status == 200 and len(content) == report['size_bytes']
-    assert hashlib.sha256(content).hexdigest() == report['content_sha256']
-    assert b'synthetic-report-secret' not in content and b'synthetic-alert-secret' not in content
-    assert '合成告警'.encode() in content
-    if fmt == 'html':
-        assert b'&lt;b&gt;' in content and b'<b>' not in content
-
-
-# LLM: 未绑定 renderer 不假装导出，绑定后仍必须有真实 bytes 入库。
-# 函数用途: 验证 PDF/DOCX 的 provider 边界和真实登记。
-@pytest.mark.parametrize('fmt', ['pdf', 'docx'])
-def test_report_renderer_required_and_bytes_persisted(investigation_env, fmt):
-    env = investigation_env
-    call = replace(env.call, action='soc.reports.export', params={'case_id': 'CASE-2026-001', 'format': fmt})
-    with pytest.raises(HostAPIError) as unbound:
-        investigation.export_report(call)
-    assert unbound.value.code == 'HOST_NOT_READY'
-    seen = []
-
-    # LLM: renderer 是明确替身，只验证转发及持久字节，不声称文档格式已渲染。
-    # 函数用途: 返回可辨认合成字节。
-    def render(markdown, *, format, title):
-        seen.append((markdown, format, title))
-        return b'%PDF-synthetic-renderer' if format == 'pdf' else b'PK\x03\x04synthetic-renderer'
-
-    env.providers['document_renderer'] = SimpleNamespace(render=render)
-    report = investigation.export_report(call)['report']
-    assert seen[0][1] == fmt and 'synthetic-report-secret' not in seen[0][0]
-    status, headers, content = artifact_content(report['artifact_id'], report['version_ref'], call.context, call.services)
-    assert status == 200 and content.endswith(b'synthetic-renderer')
-
-
 # LLM: JSON parser 不修复模型输出，也不接受字段覆盖或非有限数。
 # 函数用途: 验证严格结构化 parse。
 @pytest.mark.parametrize('text', ['[]', 'null', '{"a":1,"a":2}', '{"a":NaN}', '{"a":1e999}', '```json\n{}\n```'])
@@ -475,18 +427,6 @@ def test_native_investigation_report_and_share_roundtrip(native_http):
     status, owner_b = v13_call(native_http, 'investigations.runs.get', {'run_id': run['run_id']},
                               user='business-bob')
     assert status == 404 and owner_b['error']['code'] == 'RESOURCE_NOT_FOUND', owner_b
-    report_params = {'case_id': 'CASE-2026-001', 'run_id': run['run_id'], 'format': 'md'}
-    status, exported = v13_call(native_http, 'soc.reports.export', report_params, user='business-alice',
-                               idempotency_key='native-investigation-report-one')
-    assert status == 200 and exported['error'] is None, exported
-    report = exported['data']['report']
-    status, fetched = v13_call(native_http, 'artifacts.get', {'artifact_id': report['artifact_id'],
-        'version_ref': report['version_ref']}, user='business-alice')
-    assert status == 200 and fetched['data']['available'], fetched
-    status, headers, content = native_request(native_http, 'GET', '/client/business/artifacts/'
-        + report['artifact_id'] + '/content?version_ref=' + report['version_ref'], user='business-alice')
-    assert status == 200 and hashlib.sha256(content).hexdigest() == report['content_sha256']
-    assert b'synthetic-native-secret' not in content
     status, share = v13_call(native_http, 'investigations.share.create', {'run_id': run['run_id']},
         user='business-alice', idempotency_key='native-investigation-share-one')
     assert status == 200 and share['error'] is None, share

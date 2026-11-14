@@ -2,17 +2,13 @@
 from __future__ import annotations
 
 import hashlib
-import html
 import json
 import secrets
 from copy import deepcopy
-from dataclasses import replace
 from datetime import datetime, timezone
-from io import BytesIO
 
 from ..common.log_redaction import redact_sensitive_value
 from ..conversation.business_access import BusinessError
-from ..gateway_parts.business_artifacts_http import upload_artifact
 from ..plugin_host.contracts import DomainResult
 from ..plugin_host.errors import HostAPIError
 
@@ -368,75 +364,3 @@ def get_share(call) -> dict:
         raise HostAPIError('RESOURCE_NOT_FOUND', 404)
     return {'slug': row['slug'], 'snapshot': deepcopy(row['snapshot']), 'redacted': True,
             'expires_at': row['expires_at']}
-
-
-# LLM: 文档只包含实际案件、告警、步骤和结论，不虚构未完成结果。
-# 函数用途: 生成统一 Markdown 文档。
-def _markdown(payload, summary):
-    case = payload['case']
-    lines = ['# ' + case['title'], '', '案件：' + case['case_id'],
-             '状态：' + case['status'], '', case['description'], '']
-    data = payload.get('replay')
-    if data is not None:
-        lines += ['## 调查摘要', json.dumps(data['conclusion'], ensure_ascii=False),
-                  '覆盖：' + data['coverage'], '']
-    if not summary:
-        lines += ['## 告警事实', '```json', json.dumps(payload['alerts'], ensure_ascii=False, indent=2), '```']
-        if data is not None:
-            lines += ['## 记录步骤', '```json', json.dumps(data['steps'], ensure_ascii=False, indent=2), '```']
-    return '\n'.join(lines) + '\n'
-
-
-# LLM: 媒体登记是唯一内容事实源；MIME 来自上传器真实嗅探。
-# 函数用途: 生成脱敏报告并入库，公共回执保护重复导出。
-def export_report(call) -> dict:
-    shared = _shared()
-    case = shared.w8_get(call, 'soc_cases', call.params['case_id'])
-    payload = {'case': shared.w8_view(case), 'alerts': [shared.w8_view(row) for row in _alerts(call, case)]}
-    task_id = None
-    if 'run_id' in call.params:
-        data = replay(replace(call, params={'run_id': call.params['run_id']}))
-        if data['run']['case_id'] != case['case_id'] or data['run']['space_id'] != case['space_id']:
-            raise HostAPIError('RESOURCE_NOT_FOUND', 404)
-        payload['replay'], task_id = data, data['run']['task_id']
-    fmt = call.params['format']
-
-    # LLM: 原媒体锁独立于业务回执；重放不会重复渲染和发表新产物。
-    # 函数用途: 原子绑定报告回执到上传器返回的事实。
-    def mutate(tables):
-        current = tables['soc_cases'].get(case['case_id'])
-        if current is None:
-            raise HostAPIError('RESOURCE_NOT_FOUND', 404)
-        shared.w8_access(call, current)
-        markdown = _markdown(redact_sensitive_value(payload), call.params.get('template') == 'summary')
-        if fmt == 'md':
-            content = markdown.encode()
-        elif fmt == 'html':
-            content = ('<!doctype html><html lang="zh"><meta charset="utf-8"><title>调查报告</title>'
-                '<body><pre>' + html.escape(markdown) + '</pre></body></html>').encode()
-        else:
-            renderer = _foundation().v13_provider(call, 'document_renderer')
-            if renderer is None:
-                raise HostAPIError('HOST_NOT_READY', 503)
-            content = renderer.render(markdown, format=fmt, title=str(redact_sensitive_value(case['title'])))
-            if not isinstance(content, bytes) or not content:
-                raise HostAPIError('HOST_NOT_READY', 503)
-        fields = {'space_id': case['space_id'], 'idempotency_key': call.idempotency_key}
-        if task_id:
-            fields['task_id'] = task_id
-            host = getattr(call.services, 'host', None)
-            store = getattr(host, 'conversation_store', None)
-            if getattr(host, 'business_reference_reader', None) is None and store is not None:
-                def _task_ref_reader(kind, ref_id, _actor, _store=store):
-                    if kind != 'task':
-                        return None
-                    stask = _store.session_tasks.load(str(ref_id))
-                    bc = (getattr(stask, 'metadata', None) or {}).get('business_context') if stask else None
-                    if isinstance(bc, dict):
-                        return {'owner_id': bc.get('owner_id'), 'space_id': bc.get('space_id'), 'task_id': stask.task_id}
-                    return None
-                host.business_reference_reader = _task_ref_reader
-        artifact = upload_artifact(BytesIO(content), fields, 'report.' + fmt, call.context, call.services)
-        return {'report': {key: artifact[key] for key in (
-            'artifact_id', 'version_ref', 'name', 'mime_type', 'size_bytes', 'content_sha256')} | {'format': fmt}}
-    return shared.w8_transaction(call, ('soc_cases',), mutate)
