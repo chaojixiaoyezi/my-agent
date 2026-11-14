@@ -257,7 +257,14 @@ class ClaimStore:
         from ..runtime_db.repository import RuntimeRepository
         from ..runtime_db.schema import runtime_db_path
 
-        db_path = runtime_db_path(self.storage.root.parent)
+        # 生产环境 ConversationStorage.root 位于 workspace/runtime/workspaces/<ws>/conversations，
+        # 须经 resolve_compact_root().parent 回到真正的 owner_home 定位 runtime.db。
+        owner_root = self.storage.resolve_compact_root().parent
+        db_path = runtime_db_path(owner_root)
+        if not db_path.is_file() and self.storage.compact_root is None:
+            direct_db_path = runtime_db_path(self.storage.root)
+            if direct_db_path.is_file():
+                db_path = direct_db_path
         if not db_path.is_file():
             return False
         try:

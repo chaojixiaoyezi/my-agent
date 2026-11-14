@@ -91,37 +91,42 @@ def stop_goal_after_error(
 
 # LLM: 精确 Goal 和任务状态决定续跑；子树仍活动或未知时由原生命周期事件接续，不另建轮询。
 # 函数用途: 一轮报告确认后同步受阻任务状态，或经原去重发布能力安排下一轮；失败仍只记原警告。
-def _raise_goal_wake_with_retry(
+def _continue_goal_after_report_once(
     dependencies: GoalContinuationDependencies,
-    goal: object,
+    signal: WakeSignal,
     *,
-    channel: str,
-    conversation_id: str,
+    report: BackgroundMainAgentReport,
     now: float,
 ) -> None:
+    loaded = _active_goal_for_signal(dependencies, signal)
+    if loaded is None:
+        return
+    # 仅在确认有子代理仍在跑时跳过本片；子代理状态读报错时继续受 idle_limit 约束推进，不静默丢唤醒。
     try:
-        dependencies.raise_wake(
-            goal,
-            channel=channel,
-            conversation_id=conversation_id,
-            now=now,
-        )
-    except Exception as first_exc:
+        subagent_phase, _state_error = dependencies.subagent_phase(loaded[0].task_id)
+    except Exception as phase_exc:
         _LOGGER.warning(
-            "thread goal continuation wake attempt failed; retrying once code=%s goal_id=%s "
+            "goal subagent phase check failed; continuing with idle fuse code=%s task_id=%s "
             "effect_outcome=%s next_action=%s error=%s",
-            "GOAL_CONTINUATION_WAKE_RETRYING",
-            getattr(goal, "goal_id", ""),
-            "not_yet_raised",
-            "retrying idempotent thread-goal wake once",
-            first_exc,
+            "SUBAGENT_STATE_UNKNOWN_CONTINUE",
+            loaded[0].task_id,
+            "continuing_goal_slice",
+            "verify subagent store readability on next scheduler tick",
+            phase_exc,
         )
-        dependencies.raise_wake(
-            goal,
-            channel=channel,
-            conversation_id=conversation_id,
-            now=now,
-        )
+        subagent_phase = "subagent_state_unknown"
+    if subagent_phase == "subagents_active":
+        return
+    goal = _record_continuation_slice(dependencies, signal, report, _GoalSlice(*loaded, now))
+    if goal is None or goal.status != "active":
+        return
+    metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+    dependencies.raise_wake(
+        goal,
+        channel=str(metadata.get("channel") or ""),
+        conversation_id=str(metadata.get("conversation_id") or ""),
+        now=now,
+    )
 
 
 def continue_goal_after_report(
@@ -133,37 +138,31 @@ def continue_goal_after_report(
 ) -> None:
     if not report.goal_continuation_allowed:
         return
+    metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
+    goal_id = str(metadata.get("goal_id") or "").strip()
     try:
-        loaded = _active_goal_for_signal(dependencies, signal)
-        if loaded is None:
-            return
-        # 仅在确认有子代理仍在跑时跳过本片；子代理状态读报错时继续受 idle_limit 约束推进，不静默丢唤醒。
-        try:
-            subagent_phase, _state_error = dependencies.subagent_phase(loaded[0].task_id)
-        except Exception as phase_exc:
-            _LOGGER.warning(
-                "goal subagent phase check failed; continuing with idle fuse code=%s task_id=%s "
-                "effect_outcome=%s next_action=%s error=%s",
-                "SUBAGENT_STATE_UNKNOWN_CONTINUE",
-                loaded[0].task_id,
-                "continuing_goal_slice",
-                "verify subagent store readability on next scheduler tick",
-                phase_exc,
-            )
-            subagent_phase = "subagent_state_unknown"
-        if subagent_phase == "subagents_active":
-            return
-        goal = _record_continuation_slice(dependencies, signal, report, _GoalSlice(*loaded, now))
-        if goal is None or goal.status != "active":
-            return
-        metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
-        _raise_goal_wake_with_retry(
-            dependencies,
-            goal,
-            channel=str(metadata.get("channel") or ""),
-            conversation_id=str(metadata.get("conversation_id") or ""),
-            now=now,
-        )
+        # 覆盖目标读取、状态确认、熔断记账与唤醒发布整条链路，首轮异常退锁后仅重跑一次，依赖 wake_id 去重防重复计数。
+        for attempt in range(2):
+            try:
+                _continue_goal_after_report_once(
+                    dependencies,
+                    signal,
+                    report=report,
+                    now=now,
+                )
+                return
+            except Exception as exc:
+                if attempt == 1:
+                    raise
+                _LOGGER.warning(
+                    "thread goal continuation attempt failed; retrying once code=%s goal_id=%s "
+                    "effect_outcome=%s next_action=%s error=%s",
+                    "GOAL_CONTINUATION_RETRYING",
+                    goal_id,
+                    "retrying_after_lock_unwind",
+                    "retry idempotent thread-goal continuation once",
+                    exc,
+                )
     except Exception as exc:
         _LOGGER.warning(
             "thread goal continuation failed code=%s effect_outcome=%s next_action=%s error=%s",
@@ -189,15 +188,22 @@ class _GoalSlice:
 # 函数用途: 找到这个 wake 对应、仍在运行的目标及其任务状态，找不到就返回 None。
 def _active_goal_for_signal(dependencies: GoalContinuationDependencies, signal: WakeSignal) -> tuple[object, str] | None:
     metadata = signal.metadata if isinstance(signal.metadata, dict) else {}
-    goal = dependencies.goals.load(signal.thread_id, goal_id=str(metadata.get("goal_id") or "").strip())
-    if (goal is None or goal.goal_id != str(metadata.get("goal_id") or "")
-            or goal.task_id != str(signal.root_task_id or "")):
+    goal_id = str(metadata.get("goal_id") or "").strip()
+    goal = dependencies.goals.load(signal.thread_id, goal_id=goal_id)
+    if (
+        goal is None
+        or goal.goal_id != goal_id
+        or goal.task_id != str(signal.root_task_id or "")
+    ):
         return None
     task_status = dependencies.task_status(signal.thread_id, goal.task_id)
     if goal.status != "active":
         if goal.status in {"blocked", "usage_limited", "budget_limited"}:
             dependencies.tasks.update_status({"task_id": goal.task_id, "status": "interrupted"})
         return None
+    if task_status == "":
+        # _background_task_link_status 遇到偶发读取失败会返回空串；先在同轮复读一次确认真实状态。
+        task_status = dependencies.task_status(signal.thread_id, goal.task_id)
     return (goal, task_status) if task_status == "active" else None
 
 
