@@ -20,7 +20,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1712,7 +1712,10 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
             body_error = exc
             raise
         finally:
-            _cleanup_preserving_error(lambda: self._retain_owner_planner_scopes(set()), body_error)
+            _cleanup_preserving_error(
+                lambda: (_release_all_curator_pins(self), self._retain_owner_planner_scopes(set())),
+                body_error,
+            )
 
     # LLM: 异常由 typed 退避组件隔离，不能终止 supervisor、消费事件或修改 Goal；慢流中的执行不经过此门。
     # LLM: 仅本宿主关闭期间的typed中断不计业务失败；其它异常仍沿原退避与结构化诊断。
@@ -1804,6 +1807,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         # 后台记忆策展唤醒:节流扫描 + 独立 in-flight 去重(见 _run_due_curators)。
         self._next_curator_run_at = 0.0
         self._curator_inflight: dict[object, object] = {}
+        self._curator_pin_stacks: dict[object, ExitStack] = {}
         # 纯记忆 owner 只在拿到 curator worker 后临时实例化；完成即逐出，避免历史用户常驻吃内存。
         self._curator_soft_agent_ids: set[int] = set()
         # 轮转游标让 base、硬 owner 与软 owner 共用有限工位而不饿死后排。
@@ -1994,11 +1998,20 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             float(getattr(self, "_watch_recovery_interval", 15.0) or 15.0),
         )
         self._next_watch_recovery_at = current + interval
-        agents = [self._base_agent]
-        pool = getattr(self, "_owner_pool", None)
-        if pool is not None:
+        hard_snapshot = getattr(getattr(self, "_registry", None), "hard_snapshot", None)
+        if getattr(self, "_managed_owner_pool", None) is None and (
+            getattr(self, "_owner_pool", None) is not None
+            or (callable(hard_snapshot) and hard_snapshot())
+        ):
+            self._ensure_managed_owner_pool()
+        entries: list[tuple[object, object | None]] = [(self._base_agent, None)]
+        seen_agent_ids = {id(self._base_agent)}
+        for pool in _iter_loaded_owner_pools(self):
             try:
-                agents.extend(pool.hard_agents())
+                for scoped in pool.hard_agents():
+                    if id(scoped) not in seen_agent_ids:
+                        seen_agent_ids.add(id(scoped))
+                        entries.append((scoped, pool))
             except Exception as exc:
                 _print_gateway_loop_error(
                     "gateway_watch_recovery.owner_pool",
@@ -2007,7 +2020,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
                 )
         ensured = 0
         seen: set[str] = set()
-        for agent in agents:
+        for agent, source_pool in entries:
             owner_home = str(
                 getattr(getattr(agent, "home_paths", None), "owner_home_dir", "")
                 or ""
@@ -2016,7 +2029,11 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
                 continue
             seen.add(owner_home)
             try:
-                ensured += recover_active_audit_harvesters(agent)
+                with ExitStack() as stack:
+                    pin = getattr(source_pool, "pin", None) if source_pool is not None else None
+                    if callable(pin):
+                        stack.enter_context(pin(agent, touch=False))
+                    ensured += recover_active_audit_harvesters(agent)
             except Exception as exc:
                 _print_gateway_loop_error(
                     "gateway_watch_recovery.owner",
@@ -2057,6 +2074,14 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         )
         if available <= 0:
             return
+        registry = getattr(self, "_registry", None)
+        soft_snapshot = getattr(registry, "soft_snapshot", None)
+        hard_snapshot = getattr(registry, "hard_snapshot", None)
+        if getattr(self, "_managed_owner_pool", None) is None and (
+            (callable(soft_snapshot) and soft_snapshot())
+            or (callable(hard_snapshot) and hard_snapshot())
+        ):
+            self._ensure_managed_owner_pool()
         candidates = _curator_candidates(self, pool)
         if not candidates:
             return
@@ -2180,17 +2205,11 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
     # LLM: 与业务控制共用同一基础Agent上的受管池；失败只记录诊断，不回落普通池或克隆管理员实例。
     # 函数用途: 惰性取得受管普通用户的独立准入池。
     def _ensure_managed_owner_pool(self) -> object | None:
-        managed = getattr(self, "_managed_owner_pool", None)
-        if managed is not None:
-            return managed
-        try:
-            from ..agent.gateway_parts.managed_owner_runtime import managed_owner_pool_for_agent
-
-            self._managed_owner_pool = managed_owner_pool_for_agent(self._base_agent)
-        except Exception as exc:
-            _print_gateway_loop_error("gateway_background_main.managed_owner_pool", "background-main", exc)
-            self._managed_owner_pool = None
-        return self._managed_owner_pool
+        return _resolve_managed_owner_pool(
+            self,
+            error_context="gateway_background_main.managed_owner_pool",
+            component="background-main",
+        )
 
     # LLM: 与原普通空闲回收同条件：在途会话车道或持久硬事实仍在时保留；释放后同步清调度器与登记本旧版本。
     # 函数用途: 释放空闲受管Agent及其共享容量名额。
@@ -2238,31 +2257,146 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
 # LLM: 先回收已结束记忆整理future，再计算容量；软所有者代理只在对应future结束后逐出，硬事实及基础代理保持常驻。
 # 逐出失败仅作诊断，不改变调度权威。
 # 函数用途: 清掉已结束的记忆策展 future，并释放这轮临时加载的软 owner agent。
+def _resolve_managed_owner_pool(
+    holder: object,
+    *,
+    error_context: str,
+    component: str,
+) -> object | None:
+    managed = getattr(holder, "_managed_owner_pool", None)
+    if managed is not None:
+        return managed
+    try:
+        from ..agent.gateway_parts.managed_owner_runtime import managed_owner_pool_for_agent
+
+        holder._managed_owner_pool = managed_owner_pool_for_agent(holder._base_agent)
+    except Exception as exc:
+        _print_gateway_loop_error(error_context, component, exc)
+        holder._managed_owner_pool = None
+    return holder._managed_owner_pool
+
+
+def _iter_loaded_owner_pools(
+    holder: object,
+    primary_pool: object | None = None,
+) -> tuple[object, ...]:
+    primary = primary_pool if primary_pool is not None else getattr(holder, "_owner_pool", None)
+    managed = getattr(holder, "_managed_owner_pool", None)
+    pools: list[object] = []
+    seen_ids: set[int] = set()
+    for current in (primary, managed):
+        if current is not None and id(current) not in seen_ids:
+            seen_ids.add(id(current))
+            pools.append(current)
+    return tuple(pools)
+
+
+def _pool_for_owner(
+    owner: object,
+    primary_pool: object | None,
+    managed_pool: object | None,
+) -> object | None:
+    if managed_pool is not None:
+        handles = getattr(managed_pool, "handles", None)
+        if callable(handles) and handles(owner):
+            return managed_pool
+    return primary_pool
+
+
+def _curator_pin_store(supervisor: object) -> dict[object, ExitStack]:
+    pin_stacks = getattr(supervisor, "_curator_pin_stacks", None)
+    if not isinstance(pin_stacks, dict):
+        pin_stacks = {}
+        supervisor._curator_pin_stacks = pin_stacks
+    return pin_stacks
+
+
+def _release_curator_pin(supervisor: object, key: object) -> None:
+    pin_stacks = getattr(supervisor, "_curator_pin_stacks", None)
+    if not isinstance(pin_stacks, dict):
+        return
+    stack = pin_stacks.pop(key, None)
+    if stack is None:
+        return
+    try:
+        stack.close()
+    except Exception as exc:
+        _print_gateway_loop_error("gateway_memory_curator.pin_release", str(key), exc)
+
+
+def _release_all_curator_pins(supervisor: object) -> None:
+    pin_stacks = getattr(supervisor, "_curator_pin_stacks", None)
+    if not isinstance(pin_stacks, dict):
+        return
+    for key in list(pin_stacks):
+        _release_curator_pin(supervisor, key)
+
+
+def _pin_loaded_curator_agent(
+    supervisor: object,
+    agent: object,
+    pool: object | None,
+) -> None:
+    if agent is getattr(supervisor, "_base_agent", None):
+        return
+    pin_stacks = _curator_pin_store(supervisor)
+    key = id(agent)
+    if key in pin_stacks:
+        return
+    for current_pool in _iter_loaded_owner_pools(supervisor, pool):
+        hard_agents = getattr(current_pool, "hard_agents", None)
+        pin = getattr(current_pool, "pin", None)
+        if not callable(hard_agents) or not callable(pin):
+            continue
+        if not any(item is agent for item in hard_agents()):
+            continue
+        stack = ExitStack()
+        try:
+            stack.enter_context(pin(agent, touch=False))
+        except BaseException:
+            stack.close()
+            raise
+        pin_stacks[key] = stack
+        return
+
+
 def _retire_finished_curators(
     supervisor: object,
     soft_agent_ids: set[object],
     pool: object | None,
 ) -> None:
     inflight = getattr(supervisor, "_curator_inflight", {})
+    managed = getattr(supervisor, "_managed_owner_pool", None)
     for key, future in list(inflight.items()):
         if not getattr(future, "done", lambda: True)():
             continue
         inflight.pop(key, None)
+        _release_curator_pin(supervisor, key)
         if key not in soft_agent_ids:
             continue
         soft_agent_ids.discard(key)
-        _evict_soft_curator_agent(pool, key)
+        _evict_soft_curator_agent(pool, key, managed_pool=managed)
 
 
 # LLM: 软代理逐出只是内存清理，不是权限或调度门；逐出失败不得阻塞其他所有者的记忆整理车道。
 # 函数用途: 尝试释放一个软 owner agent；失败只写诊断，不打断后台循环。
-def _evict_soft_curator_agent(pool: object | None, key: object) -> None:
-    if pool is None:
-        return
-    try:
-        pool.evict_soft_agent_id(key)
-    except Exception as exc:
-        _print_gateway_loop_error("gateway_memory_curator.soft_evict", str(key), exc)
+def _evict_soft_curator_agent(
+    pool: object | None,
+    key: object,
+    managed_pool: object | None = None,
+) -> None:
+    seen_ids: set[int] = set()
+    for current_pool in (pool, managed_pool):
+        if current_pool is None or id(current_pool) in seen_ids:
+            continue
+        seen_ids.add(id(current_pool))
+        evict = getattr(current_pool, "evict_soft_agent_id", None)
+        if not callable(evict):
+            continue
+        try:
+            evict(key)
+        except Exception as exc:
+            _print_gateway_loop_error("gateway_memory_curator.soft_evict", str(key), exc)
 
 
 # LLM: 公平性输入按基础代理、常驻硬事实所有者、有界登记表快照排序；公平轮转由游标负责，而不是此收集器。
@@ -2273,9 +2407,13 @@ def _curator_candidates(
     pool: object | None,
 ) -> list[tuple[str, object]]:
     candidates: list[tuple[str, object]] = [("agent", supervisor._base_agent)]
-    if pool is not None:
+    seen_agent_ids = {id(supervisor._base_agent)}
+    for current_pool in _iter_loaded_owner_pools(supervisor, pool):
         try:
-            candidates.extend(("agent", agent) for agent in pool.hard_agents())
+            for agent in current_pool.hard_agents():
+                if id(agent) not in seen_agent_ids:
+                    seen_agent_ids.add(id(agent))
+                    candidates.append(("agent", agent))
         except Exception as exc:
             _print_gateway_loop_error(
                 "gateway_memory_curator.owner_pool",
@@ -2286,8 +2424,8 @@ def _curator_candidates(
     return candidates
 
 
-# LLM: 复用原 pool.peek/get；unknown 不缓存为无活，失败隔离到准确 owner，不造第二逐出器。
-# 函数用途: 先查磁盘再物化冷 owner，启动保护期仅允许紧急策展冷构建。
+# LLM: 复用原 pool.peek/get/acquire_pinned；unknown 不缓存为无活，失败隔离到准确 owner，不造第二逐出器。
+# 函数用途: 先查磁盘再物化冷 owner 并持有 pin 直到提交结束，启动保护期仅允许紧急策展冷构建。
 def _resolve_curator_candidate(
     kind: str,
     candidate: object,
@@ -2296,13 +2434,30 @@ def _resolve_curator_candidate(
 ) -> tuple[object | None, bool]:
     if kind != "owner":
         return candidate, False
-    if pool is None:
+    managed = getattr(supervisor, "_managed_owner_pool", None) if supervisor is not None else None
+    target_pool = _pool_for_owner(candidate, pool, managed)
+    if target_pool is None:
         return None, True
     try:
-        peek = getattr(pool, "peek", None)
+        peek = getattr(target_pool, "peek", None)
         loaded = peek(candidate) if callable(peek) else None
         if loaded is not None:
-            return loaded, True
+            if supervisor is not None and id(loaded) not in getattr(supervisor, "_curator_inflight", {}):
+                pin_stacks = _curator_pin_store(supervisor)
+                pin = getattr(target_pool, "pin", None)
+                if id(loaded) not in pin_stacks and callable(pin):
+                    stack = ExitStack()
+                    try:
+                        stack.enter_context(pin(loaded, touch=False))
+                        pin_stacks[id(loaded)] = stack
+                    except Exception:
+                        stack.close()
+                        if callable(peek) and peek(candidate) is None:
+                            loaded = None
+                        else:
+                            raise
+            if loaded is not None:
+                return loaded, True
         if supervisor is not None:
             state, urgent = _cold_curator_precheck(supervisor, candidate)
             if state == "not_due" or (_startup_grace_active(supervisor) and not urgent):
@@ -2311,7 +2466,33 @@ def _resolve_curator_candidate(
             if builds >= _COLD_CURATOR_BUILDS_PER_TICK_COUNT:
                 return None, True
             supervisor._curator_cold_builds = builds + 1
-        return pool.get(candidate, hard=False), True
+        acquire_pinned = getattr(target_pool, "acquire_pinned", None)
+        if supervisor is not None and callable(acquire_pinned):
+            stack = ExitStack()
+            try:
+                agent = stack.enter_context(acquire_pinned(candidate, hard=False))
+            except BaseException:
+                stack.close()
+                raise
+            key = id(agent)
+            if key in getattr(supervisor, "_curator_inflight", {}) or key in _curator_pin_store(supervisor):
+                stack.close()
+            else:
+                _curator_pin_store(supervisor)[key] = stack
+            return agent, True
+        agent = target_pool.get(candidate, hard=False)
+        pin = getattr(target_pool, "pin", None)
+        if supervisor is not None and agent is not None and callable(pin):
+            key = id(agent)
+            if key not in getattr(supervisor, "_curator_inflight", {}) and key not in _curator_pin_store(supervisor):
+                stack = ExitStack()
+                try:
+                    stack.enter_context(pin(agent, touch=False))
+                    _curator_pin_store(supervisor)[key] = stack
+                except BaseException:
+                    stack.close()
+                    raise
+        return agent, True
     except Exception as exc:
         _print_gateway_loop_error(
             "gateway_memory_curator.owner_build",
@@ -2321,7 +2502,7 @@ def _resolve_curator_candidate(
         return None, True
 
 
-# LLM: 准入只读类型化记忆策略、待处理原因、额度、持久技能学习队列和准确在途映射；被拒软候选立即逐出。
+# LLM: 准入只读类型化记忆策略、待处理原因、额度、持久技能学习队列和准确在途映射；被拒软候选先放 pin 再逐出。
 # 模型正文或推断的任务重要性不参与裁决。
 # 函数用途: 判断一个 agent 本轮是否可提交策展车道（记忆整理或自动总结 Skill），并释放被策略跳过的软 agent。
 def _curator_candidate_is_admitted(
@@ -2336,8 +2517,10 @@ def _curator_candidate_is_admitted(
         return False
     if _curator_run_allowed(supervisor, agent) or _curator_maintenance_due(agent) or _skill_learning_pending(agent):
         return True
+    _release_curator_pin(supervisor, key)
     if is_soft:
-        _evict_soft_curator_agent(pool, key)
+        managed = getattr(supervisor, "_managed_owner_pool", None)
+        _evict_soft_curator_agent(pool, key, managed_pool=managed)
     return False
 
 
@@ -2472,15 +2655,18 @@ def _submit_curator_candidate(
     pool: object | None,
 ) -> None:
     key = id(agent)
+    managed = getattr(supervisor, "_managed_owner_pool", None)
     try:
+        _pin_loaded_curator_agent(supervisor, agent, pool)
         future = supervisor._get_curator_executor().submit(
             supervisor._safe_run_curator,
             agent,
             str(getattr(agent, "owner_id", "local")),
         )
     except Exception:
+        _release_curator_pin(supervisor, key)
         if is_soft:
-            _evict_soft_curator_agent(pool, key)
+            _evict_soft_curator_agent(pool, key, managed_pool=managed)
         raise
     supervisor._curator_inflight[key] = future
     if is_soft:
@@ -2517,6 +2703,14 @@ def _submit_due_curators(
             is_soft=is_soft,
             pool=pool,
         ):
+            if id(agent) not in getattr(supervisor, "_curator_inflight", {}):
+                _release_curator_pin(supervisor, id(agent))
+                if is_soft:
+                    _evict_soft_curator_agent(
+                        pool,
+                        id(agent),
+                        managed_pool=getattr(supervisor, "_managed_owner_pool", None),
+                    )
             continue
         _submit_curator_candidate(
             supervisor,
@@ -2890,6 +3084,7 @@ class _GatewayOrphanReconciler:
         self._base_agent = _gateway_agent_from_context(context)
         self._registry = shared_active_owner_registry(getattr(context, "agent", None))
         self._owner_pool: object | None = None
+        self._managed_owner_pool: object | None = None
         self._discovery_cursor: OwnerWakeCursor | None = None
         self.interval = max(
             0.0,
@@ -3031,6 +3226,24 @@ class _GatewayOrphanReconciler:
             if available_slots <= 0:
                 break
 
+    def _sweep_in_target_pool(
+        self,
+        owner: OwnerIdentity,
+        label: str,
+        target_pool: object,
+        managed: object | None,
+    ) -> dict[str, object]:
+        with ExitStack() as stack:
+            acquire_pinned = getattr(target_pool, "acquire_pinned", None)
+            if target_pool is managed and callable(acquire_pinned):
+                scoped = stack.enter_context(acquire_pinned(owner))
+            else:
+                scoped = target_pool.get(owner, touch=False)
+                pin = getattr(target_pool, "pin", None)
+                if callable(pin):
+                    stack.enter_context(pin(scoped, touch=False))
+            return self._sweep(scoped, label)
+
     # LLM: 租用准确实例不续空闲期；初始化/租用/巡检失败都在finally记录完成后冷却，不影响其它owner车道。
     # 函数用途: 安全巡检单个用户，退出后至少休息一个interval，避免慢巡检无间隔重跑。
     def _sweep_owner(
@@ -3041,11 +3254,11 @@ class _GatewayOrphanReconciler:
         key = self._owner_key(owner)
         try:
             pool = self._ensure_owner_pool()
-            if pool is None:
+            managed = self._ensure_managed_owner_pool()
+            target_pool = _pool_for_owner(owner, pool, managed)
+            if target_pool is None:
                 return {"owner": label, "state": "owner_pool_unavailable"}
-            scoped = pool.get(owner, touch=False)
-            with pool.pin(scoped, touch=False):
-                return self._sweep(scoped, label)
+            return self._sweep_in_target_pool(owner, label, target_pool, managed)
         finally:
             self._owner_next_at[key] = max(self._owner_next_at.get(key, 0.0), time.monotonic() + self.interval)
 
@@ -3077,12 +3290,16 @@ class _GatewayOrphanReconciler:
             return []
         self._seed_owner_registry()
         reports = [self._sweep(self._base_agent, "base")]
+        owners = self._registry.hard_snapshot()
+        if not owners:
+            return reports
         pool = self._ensure_owner_pool()
-        if pool is None:
+        managed = self._ensure_managed_owner_pool()
+        if pool is None and managed is None:
             return reports
         # Keep the synchronous/test entry aligned with the long-running loop:
         # soft curator work has its own scheduler and is not an orphan signal.
-        for owner in self._registry.hard_snapshot():
+        for owner in owners:
             label = "/".join(
                 (
                     str(getattr(owner, "provider", "") or ""),
@@ -3091,9 +3308,10 @@ class _GatewayOrphanReconciler:
                 )
             )
             try:
-                scoped = pool.get(owner, touch=False)
-                with pool.pin(scoped, touch=False):
-                    reports.append(self._sweep(scoped, label))
+                target_pool = _pool_for_owner(owner, pool, managed)
+                if target_pool is None:
+                    continue
+                reports.append(self._sweep_in_target_pool(owner, label, target_pool, managed))
             except Exception as exc:
                 _print_gateway_loop_error("gateway_orphan_reconcile.owner", label, exc)
         return reports
@@ -3126,6 +3344,15 @@ class _GatewayOrphanReconciler:
         except Exception as exc:
             _print_gateway_loop_error("gateway_orphan_reconcile.owner_pool", "orphan-reconcile", exc)
         return self._owner_pool
+
+    # LLM: 受管普通账号由独立准入池承载，与背景维护共用同一实例与失败隔离。
+    # 函数用途: 为孤儿核对惰性取得受管owner池。
+    def _ensure_managed_owner_pool(self) -> object | None:
+        return _resolve_managed_owner_pool(
+            self,
+            error_context="gateway_orphan_reconcile.managed_owner_pool",
+            component="orphan-reconcile",
+        )
 
     # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
     # 函数用途: 执行本owner的一次维护扫描，沿原配额、忙态和停止边界。

@@ -1272,7 +1272,12 @@ class HotRuleRepository:
                 raise RuntimeError("HOT id collision")
             if prior is not None:
                 return prior, False
-            if (lessons_sibling / "archive").is_dir() and str(lesson.path or "").startswith("memory/lessons/"):
+            lesson_raw_path = str(lesson.path or "").strip()
+            in_lessons_sibling = bool(lesson_raw_path) and (
+                lesson_raw_path.startswith("memory/lessons/")
+                or Path(lesson_raw_path).parent == lessons_sibling
+            )
+            if lessons_sibling.is_dir() and in_lessons_sibling:
                 target_name = Path(lesson.path).name
                 try:
                     target_raw = read_text_beneath(lessons_sibling, (target_name,))
@@ -1281,14 +1286,14 @@ class HotRuleRepository:
                 if target_raw is None:
                     raise ValueError(
                         f"HOT_TARGET_ARCHIVED_OR_MISSING: lesson {lesson.lesson_id!r} ({lesson.path!r}) "
-                        "is no longer active in memory/lessons/; side=not_started; "
+                        "is no longer active in memory/lessons/; effect_outcome=not_started; side=not_started; "
                         "next=restore or refresh lesson before promoting to HOT"
                     )
                 target_record = _parse_lesson_text(target_raw, target_name)
                 if target_record.status != "active":
                     raise ValueError(
                         f"HOT_TARGET_ARCHIVED_OR_MISSING: lesson {lesson.lesson_id!r} ({lesson.path!r}) "
-                        f"has status={target_record.status!r}; side=not_started; "
+                        f"has status={target_record.status!r}; effect_outcome=not_started; side=not_started; "
                         "next=promote HOT against the active successor lesson"
                     )
             _write_lesson_text(self.path, _render_hot([*existing, record]), **({} if not self.coordinator_io else {"coordinator_io": True}))
@@ -1351,6 +1356,15 @@ def _validate_hot_candidate(
         raise ValueError("candidate is not a HOT promotion")
     if candidate.target_entry_id != lesson.lesson_id:
         raise ValueError("HOT candidate must target an exact formal lesson_id")
+    candidate_scope = _canonical_lesson_scope(candidate.scope)
+    lesson_scope = _canonical_lesson_scope(lesson.scope)
+    if candidate_scope != lesson_scope:
+        raise ValueError(
+            "hot_candidate_scope_mismatch: HOT candidate scope "
+            f"{candidate_scope!r} does not match target lesson scope {lesson_scope!r}; "
+            "effect_outcome=not_started; "
+            "next_action=align HOT candidate scope_type/scope_key with target lesson scope before promoting"
+        )
     if candidate.conflicts_with:
         raise ValueError("HOT candidate has unresolved conflicts")
     if len(candidate.content.strip()) > _MAX_HOT_RULE_CHARS:

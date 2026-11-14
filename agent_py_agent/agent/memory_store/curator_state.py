@@ -31,7 +31,7 @@ from ..common.request_execution_ports import (
     gateway_short_transaction,
     gateway_transaction_writer,
 )
-from ..gateway_parts.daemon_metadata import build_process_identity
+from ..gateway_parts.daemon_metadata import build_process_identity, process_identity_is_live
 from .candidate_models import normalize_iso_time, utc_now_iso
 from .curator_models import (
     CURATOR_TRIGGER_REASONS,
@@ -543,7 +543,9 @@ def execution_lease_protected(lease: dict[str, object]) -> bool:
     if str(lease.get("host") or "") != _local_hostname():
         return False
     pid = lease.get("pid")
-    return type(pid) is int and pid > 0 and not stale_lease_reclaimable(lease)
+    if type(pid) is not int or pid <= 0 or stale_lease_reclaimable(lease):
+        return False
+    return process_identity_is_live(lease.get("process_identity")) is True
 
 
 # LLM: commit 只认精确 lease_id，run_id/reason 相似不能授权旧运行推进游标。
@@ -673,7 +675,16 @@ def stale_lease_reclaimable(lease: dict[str, object]) -> bool:
     if str(lease.get("host") or "") != _local_hostname():
         return False
     pid = lease.get("pid")
-    if type(pid) is not int or pid <= 0 or pid == os.getpid():
+    if type(pid) is not int or pid <= 0:
+        return False
+    identity = lease.get("process_identity")
+    if identity is not None:
+        identity_live = process_identity_is_live(identity)
+        if identity_live is False:
+            return True
+        if identity_live is True:
+            return False
+    if pid == os.getpid():
         return False
     return _pid_definitely_dead(pid)
 

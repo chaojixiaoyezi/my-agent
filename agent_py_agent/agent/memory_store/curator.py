@@ -77,6 +77,7 @@ from .curator_inputs import (
     CuratorInputBatch,
     CuratorMessageSource,
     CuratorToolReferenceSource,
+    _collect_messages,
     attach_candidate_anchors,
     collect_curator_inputs,
 )
@@ -677,12 +678,22 @@ class _CuratorLifecycleMixin:
             )
         config_revision = live_cfg.revision()
         exclusions_revision = self._read_exclusions_revision()
+        interval_due_elapsed = interval_elapsed(state, current, live_cfg.interval_seconds)
         batch = self._collect(
             state,
             include_formal=False,
+            include_audit=interval_due_elapsed,
             excluded_conversation_ids=excluded_ids,
             effective_config=live_cfg,
         )
+        if not interval_due_elapsed and (batch.load_errors or batch.user_turns() >= live_cfg.turn_threshold):
+            batch = self._collect(
+                state,
+                include_formal=False,
+                include_audit=True,
+                excluded_conversation_ids=excluded_ids,
+                effective_config=live_cfg,
+            )
         precollected = _PrecollectedBatch(batch, state, config_revision, excluded_ids, exclusions_revision)
         if batch.load_errors:
             return self.run(reason="interval", now=current, precollected_batch=precollected)
@@ -1078,6 +1089,7 @@ class _CuratorExecutionMixin:
         state: MemoryCuratorState,
         *,
         include_formal: bool,
+        include_audit: bool = True,
         excluded_conversation_ids: frozenset[str] | None = frozenset(),
         effective_config: MemoryCuratorConfig | None = None,
     ) -> CuratorInputBatch:
@@ -1098,21 +1110,45 @@ class _CuratorExecutionMixin:
         from .retention_scan_budget import RetentionScanBudget
 
         scan_budget = RetentionScanBudget.default(live_cfg)
-        batch = collect_curator_inputs(
-            message_source=CuratorMessageSource(
-                conversation_store=self.conversation_store,
-                excluded_conversation_ids=excluded_conversation_ids,
-            ),
-            audit_dir=self.audit_dir,
-            state=state,
-            config=input_config,
-            formal_memories=formal,
-            tool_reference_source=self.tool_reference_source,
-            scan_budget=scan_budget,
+        message_source = CuratorMessageSource(
+            conversation_store=self.conversation_store,
+            excluded_conversation_ids=excluded_conversation_ids,
         )
-        from .curator_learning_source import attach_audit_sources
+        if include_audit:
+            batch = collect_curator_inputs(
+                message_source=message_source,
+                audit_dir=self.audit_dir,
+                state=state,
+                config=input_config,
+                formal_memories=formal,
+                tool_reference_source=self.tool_reference_source,
+                scan_budget=scan_budget,
+            )
+            from .curator_learning_source import attach_audit_sources
 
-        batch = attach_audit_sources(batch, self.conversation_store, self.owner_id)
+            batch = attach_audit_sources(batch, self.conversation_store, self.owner_id)
+        else:
+            skipped_message_cursors: dict[str, str] = {}
+            scan_state: dict[str, object] = {"partial": False, "reasons": ()}
+            messages, message_errors = _collect_messages(
+                source=message_source,
+                cursors=state.per_thread_cursors,
+                limit=input_config.batch_message_limit,
+                max_chars=input_config.max_input_chars,
+                skipped_cursors=skipped_message_cursors,
+                budget=scan_budget,
+                scan_state=scan_state,
+            )
+            batch = CuratorInputBatch(
+                messages=tuple(messages),
+                audit_events=(),
+                formal_memories=tuple(formal),
+                load_errors=tuple(message_errors),
+                skipped_audit_cursor="",
+                skipped_message_cursors=skipped_message_cursors,
+                message_scan_partial=bool(scan_state["partial"]),
+                message_scan_reasons=tuple(scan_state["reasons"]),
+            )
         if formal_memory_errors:
             batch = replace(batch, formal_memory_errors=tuple(formal_memory_errors))
         return batch
@@ -1848,6 +1884,16 @@ class MemoryCuratorService(
             state_store=self.state_store,
             run_log=self.run_log,
         )
+        try:
+            self.committer.recover_incomplete()
+        except Exception as exc:
+            _LOGGER.warning(
+                "CURATOR_STARTUP_RECOVERY_FAILED: incomplete curator batch recovery failed during service init; "
+                "error_type=%s; error=%s; effect_outcome=not_started; "
+                "next_action=inspect curator state and run_log files before running memory curation",
+                type(exc).__name__,
+                exc,
+            )
 
     # LLM: 人工恢复必须同时核对隔离副本完整性与成功审计游标；验证失败拒绝写入，成功后先恢复状态再移除隔离哨兵并如实记录审计是否写成。
     # 函数用途: 从权威成功审计链重建损坏状态，提供 CLI 显式人工恢复入口。
