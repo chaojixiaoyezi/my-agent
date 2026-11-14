@@ -25,7 +25,7 @@ def _wire_memory_authorities(
         paths["local_store_path"],
         files_dir=paths["local_store_files_dir"],
         events_path=paths["local_store_events_path"],
-        enable_fts=config.local_store_fts_enabled,
+        enable_fts=True,
     )
     agent.memory_candidates = CandidateService(
         agent.home_paths.owner_memory_candidates_jsonl,

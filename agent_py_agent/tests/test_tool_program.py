@@ -188,7 +188,7 @@ def test_original_agent_fake_model_measures_deterministic_chain(tmp_path, record
                 return ModelResponse('',self.name,tool_use_blocks=[{'id':f'read-{n}','name':'probe','input':{'value':n}} for n in numbers])
             return ModelResponse('已核对三项。',self.name)
     agent=SimpleAgent(AgentConfig(enable_tools=True,prompt_files=[],memory_path='memory.jsonl',
-        tool_default_deferral_enabled=False,tool_catalog_deferred_categories=[]),tmp_path)
+        tool_catalog_deferred_categories=[]),tmp_path)
     agent.tools.register(Probe())
     backend=Replay()
     agent.backend=backend

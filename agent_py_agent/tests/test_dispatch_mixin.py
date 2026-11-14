@@ -26,25 +26,29 @@ class TestDispatchMixinBasics:
 
     def test_update_pending_work_state_no_candidates(self) -> None:
         """测试无候选任务时更新待处理状态。"""
-        from agent_py_agent.agent.agent_core.runner.dispatch import _dispatch_runner_candidates
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.service import (
+            update_pending_work_state,
+        )
 
         mixin = SimpleAgentDispatchMixin()
         mixin.config = MagicMock()
         mixin.subagents = MagicMock()
 
         with patch("agent_py_agent.agent.agent_core.runner.dispatch._dispatch_runner_candidates", return_value=[]):
-            mixin._update_pending_work_state()
-            assert mixin._has_pending_work is False
+            assert update_pending_work_state(mixin) is False
 
     def test_update_pending_work_state_with_candidates(self) -> None:
         """测试有候选任务时更新待处理状态。"""
+        from agent_py_agent.agent.agent_core.orchestration.dispatch.service import (
+            update_pending_work_state,
+        )
+
         mixin = SimpleAgentDispatchMixin()
         mixin.config = MagicMock()
         mixin.subagents = MagicMock()
 
         with patch('agent_py_agent.agent.agent_core.runner.dispatch._dispatch_runner_candidates', return_value=[MagicMock(), MagicMock()]):
-            mixin._update_pending_work_state()
-            assert mixin._has_pending_work is True
+            assert update_pending_work_state(mixin) is True
 
     def test_increment_dispatch_rounds(self) -> None:
         """测试递增 dispatch 轮数。"""
@@ -270,3 +274,69 @@ class TestDispatchMixinDispatchReport:
             mixin._build_and_write_report([record], MagicMock(mutate_state=True))
 
         assert not (tmp_path / "data" / "notifications").exists()
+
+
+class TestWatchDispatchInputState:
+    """测试 watch 读取调度输入时不会把账本错误吞成空状态。"""
+
+    def test_watch_dispatch_input_state_reports_list_runs_error(self):
+        from types import SimpleNamespace
+
+        from agent_py_agent.agent.agent_core.services.watch_service import (
+            _watch_dispatch_input_state,
+        )
+
+        def broken_list_runs():
+            raise OSError("subagent index unreadable")
+
+        agent = SimpleNamespace(subagents=SimpleNamespace(list_runs=broken_list_runs))
+
+        state = _watch_dispatch_input_state(agent)
+
+        assert state.has_inputs is False
+        assert state.load_error is not None
+        assert state.load_error["context"] == "watch.subagents.list_runs"
+        assert "subagent index unreadable" in state.load_error["message"]
+
+    def test_watch_dispatch_input_state_reports_available_runs(self):
+        from types import SimpleNamespace
+
+        from agent_py_agent.agent.agent_core.services.watch_service import (
+            _watch_dispatch_input_state,
+        )
+
+        agent = SimpleNamespace(subagents=SimpleNamespace(list_runs=lambda: [object()]))
+
+        state = _watch_dispatch_input_state(agent)
+
+        assert state.has_inputs is True
+        assert state.load_error is None
+
+
+class TestConsecutiveRoundsCounter:
+    """测试连续轮数计数器。"""
+
+    def test_increment_dispatch_rounds(self, tmp_path: Path):
+        """递增连续 dispatch 轮数。"""
+        class MockAgent(SimpleAgentDispatchMixin):
+            def __init__(self):
+                self._consecutive_dispatch_rounds = 0
+
+        agent = MockAgent()
+
+        agent._increment_dispatch_rounds()
+        assert agent._consecutive_dispatch_rounds == 1
+
+        agent._increment_dispatch_rounds()
+        assert agent._consecutive_dispatch_rounds == 2
+
+    def test_reset_dispatch_rounds(self, tmp_path: Path):
+        """重置连续 dispatch 轮数。"""
+        class MockAgent(SimpleAgentDispatchMixin):
+            def __init__(self):
+                self._consecutive_dispatch_rounds = 5
+
+        agent = MockAgent()
+
+        agent._reset_dispatch_rounds()
+        assert agent._consecutive_dispatch_rounds == 0

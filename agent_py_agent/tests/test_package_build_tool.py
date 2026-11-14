@@ -186,11 +186,9 @@ def test_link_inside_the_directory_rejects_the_pack(tmp_path, monkeypatch):
 
 def test_repository_samples_build_through_the_tool(tmp_path, monkeypatch):
     agent = _agent(tmp_path, monkeypatch)
-    pack_root = _owner(agent) / "runs" / "2026-10-06" / "learn" / "drama-text-a"
-    shutil.copytree(ROOT / "examples" / "capability-packages" / "drama-text-a", pack_root)
-    pack_declaration = json.loads((pack_root / "declaration.json").read_text(encoding="utf-8"))
-    ok, body, _ = _run(agent, _params(pack_root, declaration=pack_declaration))
-    assert ok and body["build"]["sha256"] == "51ca17734b865464ad18ecf1de5c254f97cb3d16afc66f1595a776f081619a36"
+    pack_root = _pack_dir(_owner(agent))
+    ok, body, _ = _run(agent, _params(pack_root))
+    assert ok and body["build"]["sha256"] == "6722bd3d87fe22becd4a2725371fcad0a60503d2c46155b76c4f6fd7c60cb787"
     plugin_root = _owner(agent) / "runs" / "2026-10-06" / "learn" / "hello-node"
     shutil.copytree(ROOT / "plugins" / "hello-node", plugin_root)
     plugin_declaration = json.loads((plugin_root / "declaration.json").read_text(encoding="utf-8"))

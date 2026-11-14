@@ -524,10 +524,10 @@ def _uncached_checkpoints(rows):
 def test_w21_middle_in_place_mutation_preserves_wire_exact_digest(digest_cache, before, after):
     rows = [{"role": "user", "content": index} for index in range(96)]
     rows[40]["content"] = before
-    original = digest_cache._chain_checkpoints(rows)
+    original = digest_cache._message_checkpoints(rows, include_content=False)[0]
     assert original == _uncached_checkpoints(rows)
     rows[40]["content"] = after
-    changed = digest_cache._chain_checkpoints(rows)
+    changed = digest_cache._message_checkpoints(rows, include_content=False)[0]
     assert changed == _uncached_checkpoints(rows)
     assert original[0] == changed[0] and original[1:] != changed[1:]
 
@@ -545,12 +545,12 @@ def test_w21_repeated_append_only_hashes_new_rows(digest_cache, monkeypatch):
 
     monkeypatch.setattr(digest_cache, "_digest", counted)
     rows = [{"content": str(index)} for index in range(80)]
-    assert digest_cache._chain_checkpoints(rows) == _uncached_checkpoints(rows)
+    assert digest_cache._message_checkpoints(rows, include_content=False)[0] == _uncached_checkpoints(rows)
     assert len(calls) == 81
     for index in range(4):
         calls.clear()
         rows.append({"content": f"append-{index}"})
-        assert digest_cache._chain_checkpoints(rows) == _uncached_checkpoints(rows)
+        assert digest_cache._message_checkpoints(rows, include_content=False)[0] == _uncached_checkpoints(rows)
         assert len(calls) <= 2, "旧消息不能在追加轮再次执行JSON摘要"
 
 
@@ -567,13 +567,13 @@ def test_w21_repeated_scan_reuses_chain_steps_and_returns_fresh_checkpoints(dige
 
     monkeypatch.setattr(digest_cache.hashlib, "sha256", counted)
     rows = [{"content": str(index)} for index in range(80)]
-    first = digest_cache._chain_checkpoints(rows)
+    first = digest_cache._message_checkpoints(rows, include_content=False)[0]
     calls.clear()
-    second = digest_cache._chain_checkpoints(copy.deepcopy(rows))
+    second = digest_cache._message_checkpoints(copy.deepcopy(rows), include_content=False)[0]
     assert first == second
     assert len(calls) <= 1, "相同行及链步都应命中，不能重复SHA256"
     second[-1]["chain"] = "caller mutation"
-    assert digest_cache._chain_checkpoints(rows) == first
+    assert digest_cache._message_checkpoints(rows, include_content=False)[0] == first
 
 
 # LLM: NaN、无穷、负零、未知类型及有界循环均按明确结构规则断言。
@@ -599,7 +599,7 @@ def test_w21_lru_enforces_row_count_bytes_and_chain_count(digest_cache, monkeypa
     monkeypatch.setattr(digest_cache, "_MAX_ROW_CACHE_BYTES", 4096, raising=False)
     monkeypatch.setattr(digest_cache, "_MAX_CHAIN_CACHE_ENTRIES", 3, raising=False)
     rows = [{"content": str(index)} for index in range(6)]
-    digest_cache._chain_checkpoints(rows)
+    digest_cache._message_checkpoints(rows, include_content=False)[0]
     assert len(digest_cache._ROW_DIGEST_CACHE) == 2
     assert len(digest_cache._CHAIN_STEP_CACHE) == 3
     assert sum(size for _, size in digest_cache._ROW_DIGEST_CACHE.values()) == digest_cache._ROW_CACHE_BYTES
@@ -607,7 +607,7 @@ def test_w21_lru_enforces_row_count_bytes_and_chain_count(digest_cache, monkeypa
     assert digest_cache._strict_json_cache_key(rows[-1]) in digest_cache._ROW_DIGEST_CACHE
     assert digest_cache._strict_json_cache_key(rows[0]) not in digest_cache._ROW_DIGEST_CACHE
     monkeypatch.setattr(digest_cache, "_MAX_ROW_CACHE_BYTES", 1)
-    digest_cache._chain_checkpoints([{"content": "new"}])
+    digest_cache._message_checkpoints([{"content": "new"}], include_content=False)[0]
     assert not digest_cache._ROW_DIGEST_CACHE
     assert digest_cache._ROW_CACHE_BYTES == 0
 
@@ -616,14 +616,14 @@ def test_w21_lru_enforces_row_count_bytes_and_chain_count(digest_cache, monkeypa
 # 函数用途: 验证旁路缓存不改变错误或链值。
 def test_w21_large_or_unsupported_rows_bypass_cache_without_changing_json_errors(digest_cache):
     large = {"content": "x" * (256 * 1024 + 1)}
-    assert digest_cache._chain_checkpoints([large]) == _uncached_checkpoints([large])
+    assert digest_cache._message_checkpoints([large], include_content=False)[0] == _uncached_checkpoints([large])
     assert not digest_cache._ROW_DIGEST_CACHE
     with pytest.raises(TypeError):
-        digest_cache._chain_checkpoints([{"content": object()}])
+        digest_cache._message_checkpoints([{"content": object()}], include_content=False)[0]
     with pytest.raises(ValueError, match="Circular reference"):
         cyclic = []
         cyclic.append(cyclic)
-        digest_cache._chain_checkpoints([cyclic])
+        digest_cache._message_checkpoints([cyclic], include_content=False)[0]
 
 
 # LLM: 多线程只共享LRU，散列前实取同一锁验证非锁内执行，结果对照独立原算法。
@@ -643,7 +643,7 @@ def test_w21_digest_work_is_outside_cache_lock_and_concurrent_results_match(dige
     monkeypatch.setattr(digest_cache, "_digest", checked)
     cases = [[{"content": str(index % 5)} for index in range(size)] for size in range(20, 40)]
     with ThreadPoolExecutor(max_workers=4) as pool:
-        actual = list(pool.map(digest_cache._chain_checkpoints, cases))
+        actual = list(pool.map(lambda rows: digest_cache._message_checkpoints(rows, include_content=False)[0], cases))
     assert actual == [_uncached_checkpoints(rows) for rows in cases]
 
 

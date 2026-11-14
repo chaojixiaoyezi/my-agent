@@ -8,10 +8,6 @@
 
 from __future__ import annotations
 
-import json
-from types import SimpleNamespace
-
-from agent_py_agent.agent.agent_core.runtime.record_finding_tool import execute_record_finding
 from agent_py_agent.agent.ingestion.config import IngestTuning
 from agent_py_agent.agent.ingestion.engine import Candidate, StreamDigestEngine
 from agent_py_agent.agent.ingestion.watch_feedback import (
@@ -182,51 +178,3 @@ def test_candidate_row_renders_audit_and_feedback_triage():
     )
     assert fb_row["triage"]["feedback_match"]["path"] == "status"
     assert fb_row["triage"]["feedback_match"]["value_window_count"] == 17
-
-
-def test_record_finding_links_watch_feedback(tmp_path):
-    home = tmp_path / "home"
-    task_root = tmp_path / "task"
-    (task_root / "work" / "shared").mkdir(parents=True)
-    state = new_state(home, "http://src.example/stream", {})
-    persist_state(state)
-    agent = SimpleNamespace(
-        home_paths=SimpleNamespace(owner_home_dir=str(home)),
-        _current_run_task_workspace=str(task_root),
-        subagents=None,
-    )
-    result = execute_record_finding(
-        agent,
-        {"claim": "事件 evt-1 结果端 diverted 确认", "watch_id": state.watch_id, "stream_pos": 42},
-    )
-    assert result.ok
-    payload = json.loads(result.output)
-    assert payload["watch_feedback_linked"] is True
-    lines = inbox_path(home, state.watch_id).read_text(encoding="utf-8").splitlines()
-    assert json.loads(lines[0])["pos"] == 42
-
-
-def test_record_finding_without_watch_params_unchanged(tmp_path):
-    task_root = tmp_path / "task"
-    (task_root / "work" / "shared").mkdir(parents=True)
-    agent = SimpleNamespace(
-        home_paths=SimpleNamespace(owner_home_dir=str(tmp_path)),
-        _current_run_task_workspace=str(task_root),
-        subagents=None,
-    )
-    result = execute_record_finding(agent, {"claim": "普通结论"})
-    assert result.ok
-    assert "watch_feedback_linked" not in json.loads(result.output)
-
-
-def test_record_finding_rejects_malformed_watch_id(tmp_path):
-    task_root = tmp_path / "task"
-    (task_root / "work" / "shared").mkdir(parents=True)
-    agent = SimpleNamespace(
-        home_paths=SimpleNamespace(owner_home_dir=str(tmp_path)),
-        _current_run_task_workspace=str(task_root),
-        subagents=None,
-    )
-    result = execute_record_finding(agent, {"claim": "x", "watch_id": "../../etc", "stream_pos": 1})
-    assert result.ok  # 结论账主通道不受影响
-    assert json.loads(result.output)["watch_feedback_linked"] is False

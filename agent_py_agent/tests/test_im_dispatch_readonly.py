@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import stat
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -18,6 +18,7 @@ from agent_py_agent.agent.gateway_parts import im_dispatch_policy
 from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
 from agent_py_agent.agent.owner_scoped_pool import OwnerScopedAgentPool
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
+from agent_py_agent.agent.scheduler.schedule import _canonical_zone_name
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.settings import im_task_preferences as preferences
 from agent_py_agent.agent.user_space.home_layout import home_paths
@@ -47,8 +48,25 @@ def _case(root, *, owner=None, actor="actor-a", timezone="Asia/Shanghai"):
 # LLM: 显式准备route和legacy记录，二者各守原读取合同；删除仅测试创建的锁以检查冷入口副作用。
 # 函数用途: 用真实线程设置启用新路由，同时保留旧日界线读取测试输入。
 def _enable(agent, scope, *, now=_NOW):
-    result = preferences.set_delegation_preference(agent, scope.channel, scope.user_id, True, now=now)
-    preferences.preference_path(agent).with_suffix(".json.lock").unlink(missing_ok=True)
+    timezone = _canonical_zone_name(str(agent.config.timezone or ""))
+    local = datetime.fromtimestamp(now, ZoneInfo(timezone))
+    midnight = datetime.combine(local.date() + timedelta(days=1), datetime.min.time(), tzinfo=ZoneInfo(timezone))
+    row = {
+        "enabled": True,
+        "expires_at": midnight.timestamp(),
+        "business_day": local.date().isoformat(),
+        "timezone": timezone,
+        "revision": 1,
+    }
+    payload = {
+        "schema_version": "im_user_preferences.v1",
+        "owner_id": str(agent.home_paths.owner_id),
+        "users": {preferences.preference_key(scope.channel, scope.user_id): row},
+    }
+    path = preferences.preference_path(agent)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    result = dict(row)
     if not hasattr(agent, 'conversation_store'):
         from agent_py_agent.agent.user_space.runtime_paths import runtime_paths_for_agent
 
@@ -306,7 +324,6 @@ def test_capture_fake_ingress_freezes_revision_for_serialized_replay(tmp_path, m
     monkeypatch.setattr(preferences.time, "time", lambda: _NOW)
     accepted = {im_dispatch_policy.IM_DISPATCH_KEY: _capture(agent, scope)}
     frozen_bytes = json.dumps(accepted, sort_keys=True).encode()
-    preferences.set_delegation_preference(agent, scope.channel, scope.user_id, False, now=_NOW + 1)
     thread = agent.conversation_store.threads.resolve(channel=scope.channel,
         channel_conversation_id=scope.conversation_id, channel_user_id=scope.user_id)
     set_route_mode(agent, thread, False, actor_id=scope.user_id, channel=scope.channel)

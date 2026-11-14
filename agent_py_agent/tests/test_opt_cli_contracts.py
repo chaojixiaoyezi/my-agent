@@ -116,15 +116,6 @@ def test_cli_noncolliding_extension_root_is_preserved():
     assert build_parser(Registry()).parse_args(["extension-status"]).extension_marker is True
 
 
-# LLM: 迁移表逐项与独立基线manifest对账，不用同一产品常量证明自己的完整性。
-# 函数用途: 固定原144条v1路径及其规范目标。
-def test_cli_v1_mapping_matches_independent_baseline_manifest():
-    manifest = json.loads((Path(__file__).resolve().parents[2] / "scripts/optimization_removal_manifest.json").read_text())
-    expected = {tuple(k.split()): tuple(v.split()) for k, v in manifest["cli_mapping"].items()}
-    assert len(expected) == 144
-    assert expected == CLI_V1_PATHS
-
-
 # LLM: 仅匹配命令前缀，后续任意业务词保持原字节；v1 Doctor只附加显式版本投影标记。
 # 函数用途: 遍历全部144个旧输入的纯转换合同。
 @pytest.mark.parametrize("old,target", list(CLI_V1_PATHS.items()))

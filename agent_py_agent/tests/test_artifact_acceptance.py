@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 
@@ -571,3 +573,35 @@ def test_validate_artifact_static_site_contract_rejects_missing_required_files(t
     assert report.artifact_kind == "web_project"
     assert any(item.code == "STATIC_SITE_MISSING_REQUIRED_FILES" for item in report.findings)
     assert any(item.value == "app.js" for item in report.findings)
+
+
+def test_validate_artifact_rejects_path_outside_workspace(tmp_path: Path) -> None:
+    from agent_py_agent.agent.contracts.artifact_acceptance import validate_artifact
+    from agent_py_agent.agent.contracts.artifact_acceptance_models import ArtifactAcceptanceRequest
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Summary\n# Evidence\n", encoding="utf-8")
+
+    result = validate_artifact(ArtifactAcceptanceRequest(path=outside, workspace_root=workspace))
+
+    assert result.ok is False
+    assert [item.code for item in result.findings] == ["ARTIFACT_PATH_OUTSIDE_WORKSPACE"]
+
+
+def test_contract_mutation_removing_required_markdown_section_fails(tmp_path: Path) -> None:
+    from agent_py_agent.agent.contracts.artifact_acceptance import validate_artifact
+    from agent_py_agent.agent.contracts.artifact_acceptance_models import ArtifactAcceptanceRequest
+
+    report_path = tmp_path / "report.md"
+    report_path.write_text("# Summary\nok\n# Evidence\nsource\n", encoding="utf-8")
+    contract = {"required_sections": ["Summary", "Evidence"]}
+
+    assert validate_artifact(ArtifactAcceptanceRequest(path=report_path, workspace_root=tmp_path, validation_contract=contract)).ok
+
+    report_path.write_text("# Summary\nok\n", encoding="utf-8")
+    result = validate_artifact(ArtifactAcceptanceRequest(path=report_path, workspace_root=tmp_path, validation_contract=contract))
+
+    assert result.ok is False
+    assert [item.code for item in result.findings] == ["MARKDOWN_REQUIRED_SECTION_MISSING"]

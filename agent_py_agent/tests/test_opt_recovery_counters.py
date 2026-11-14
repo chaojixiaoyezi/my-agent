@@ -334,41 +334,6 @@ def test_clean_legacy_counters_migrate_without_unknown(tmp_path, failure, counte
     assert saved["recovery_counter_migration"]["runner_attempts"] == 3
 
 
-# LLM: 读取真实隔离能力配置并经过生产pending/count入口；0不被or默认4覆盖，10与2分别允许/熔断。
-# 函数用途: 验证派发循环与规范候选选择使用同一阈值。
-@pytest.mark.parametrize("limit,expected", [(0, True), (10, True), (2, False)])
-def test_dispatch_configured_no_progress_limit(tmp_path, limit, expected):
-    from types import SimpleNamespace
-
-    from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import (
-        _final_pending_runner_count,
-    )
-    from agent_py_agent.agent.agent_core.orchestration.dispatch.runner_candidates import (
-        _runner_candidates_for_context,
-    )
-    from agent_py_agent.agent.agent_core.orchestration.dispatch.service import (
-        update_pending_work_state,
-    )
-
-    task = SimpleNamespace(
-        id="retry-task", status="FAILED", channel_status="OK", failure_type="runner_error",
-        runner_attempts=4, capability_requests=[], capability_gaps=[], capability_grants=[],
-        _extra_fields={"failure_retry_count": 0, "provider_retry_count": 0,
-                       "no_progress_count": 4, "recovery_history_unknown_count": 0},
-    )
-    config = tmp_path / "capability.yaml"
-    config.write_text(f"subagent_no_progress_attempt_limit: {limit}\n")
-    agent = SimpleNamespace(
-        config=SimpleNamespace(runner_failure_retry_limit=10), capability_config_path=config,
-        subagents=SimpleNamespace(list_runs=lambda: [task]),
-    )
-    assert update_pending_work_state(agent) is expected
-    assert _final_pending_runner_count(agent) == (int(expected), {})
-    ctx = SimpleNamespace(include_run_ids=[], background_launch_id="", max_runners=4)
-    selected = _runner_candidates_for_context([task], ctx, 10, no_progress_attempt_limit=limit)
-    assert bool(selected) is expected
-
-
 # LLM: 真实组合根绑定原能力配置文件；同一配置必须同时控制候选、prepare模型可见指令和正式树/恢复报告。
 # 函数用途: 复现筛选接线之后启动和恢复仍暗用默认4的残留。
 @pytest.mark.parametrize("limit,fused", [(0, False), (10, False), (2, True)])

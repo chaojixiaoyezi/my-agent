@@ -138,8 +138,7 @@ def test_unbounded_scan_keeps_original_deduplication_and_capacity():
 def test_skill_prefix_result_reports_body_truncation_without_changing_string_api(body, allowance):
     prefix = "Skill 参考（skill_id: owner:method）\n"
     result = method_carry.fit_skill_prefix_result(prefix, body, allowance)
-    assert type(method_carry._fit_skill_prefix(prefix, body, allowance)) is str
-    assert result.text == method_carry._fit_skill_prefix(prefix, body, allowance)
+    assert type(result.text) is str
     assert result.total_chars == len(body)
     assert result.included_chars == (len(result.text) - len(prefix) if result.text else 0)
     assert result.complete is (result.included_chars == len(body))

@@ -327,13 +327,14 @@ def test_idempotency_contract_stable_keys_and_operation_shapes() -> None:
     )
 
 
-def test_real_e2e_matrix_contains_required_scenarios() -> None:
-    from agent_py_agent.agent.contracts.e2e_matrix import REAL_E2E_MATRIX, required_matrix_ids
+def test_idempotency_key_is_stable_and_reuses_existing_ids() -> None:
+    from agent_py_agent.agent.contracts.idempotency import decide_idempotency, idempotency_key
 
-    ids = {item.case_id for item in REAL_E2E_MATRIX}
-    assert required_matrix_ids().issubset(ids)
-    assert "windows_chinese_path_write" in ids
-    assert "compact_resume_continue" in ids
-    assert "subagent_reuses_main_kernel" in ids
-    assert all(item.execution_mode in {"deterministic", "real_model"} for item in REAL_E2E_MATRIX)
-    assert all(item.acceptance for item in REAL_E2E_MATRIX)
+    left = {"target": "artifact://report", "args": {"b": 2, "a": 1}}
+    right = {"args": {"a": 1, "b": 2}, "target": "artifact://report"}
+
+    assert idempotency_key("artifact_write", left) == idempotency_key("artifact_write", right)
+    decision = decide_idempotency("artifact_write", right, existing_ids=["write-1"])
+
+    assert decision.action == "reuse_existing"
+    assert decision.existing_ids == ["write-1"]

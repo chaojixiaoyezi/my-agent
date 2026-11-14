@@ -155,24 +155,38 @@ def test_business_service_rejects_cross_owner_and_schema_injection(business_host
 
 
 def test_business_action_adapter_uses_frozen_schema_and_original_stores(business_host):
+    from agent_py_agent.agent.conversation.background_agents import BackgroundAgentService
+    from agent_py_agent.agent.conversation.session_messaging import queue_owned_background_message
     from agent_py_agent.agent.plugin_host.business_action_specs import business_action_spec
-    from agent_py_agent.agent.tooling.background_agents_tool import execute_background_action
+    from agent_py_agent.agent.plugin_host.schemas import validate_object
     host, actor = business_host
-    create = execute_background_action(host, "background_agents.create", {"space_id": "space-A", "name": "worker"},
-                                       actor=actor, idempotency_key="adapter-create")
-    business_action_spec("background_agents.create").validate_result(create)
+    service = BackgroundAgentService(host)
+    create_spec = business_action_spec("background_agents.create")
+    create_params = validate_object({"space_id": "space-A", "name": "worker"}, create_spec.params_schema)
+    create = create_spec.validate_result(service.create(create_params, actor=actor, idempotency_key="adapter-create"))
     identifier = create["agent"]["agent_id"]
-    for action, request in (("background_agents.get", {"agent_id": identifier}),
-                            ("background_agents.list", {}), ("background_agents.model.get", {"agent_id": identifier})):
-        result = execute_background_action(host, action, request, actor=actor)
-        business_action_spec(action).validate_result(result)
-    message = execute_background_action(host, "background_agents.messages.send", {
-        "agent_id": identifier, "text": "extra requirement", "input_kind": "guidance"}, actor=actor, idempotency_key="message")
+    for action, request, invoke in (
+        ("background_agents.get", {"agent_id": identifier}, lambda params: service.get(params["agent_id"], actor=actor)),
+        ("background_agents.list", {}, lambda params: service.list(params, actor=actor)),
+        ("background_agents.model.get", {"agent_id": identifier}, lambda params: service.get_model(params["agent_id"], actor=actor)),
+    ):
+        spec = business_action_spec(action)
+        result = invoke(validate_object(request, spec.params_schema))
+        spec.validate_result(result)
+    message_spec = business_action_spec("background_agents.messages.send")
+    message_params = validate_object(
+        {"agent_id": identifier, "text": "extra requirement", "input_kind": "guidance"},
+        message_spec.params_schema,
+    )
+    message = message_spec.validate_result(queue_owned_background_message(
+        host, actor=actor, target=service._thread(message_params["agent_id"], actor),
+        text=message_params["text"], input_kind=message_params["input_kind"],
+        operation_key=service._operation_key(actor, "message"),
+    ))
     assert message["target_thread_id"] == identifier and message["receipt_state"] == "accepted"
-    business_action_spec("background_agents.messages.send").validate_result(message)
-    reply = execute_background_action(host, "tasks.submit", {"space_id": "space-A", "instruction": "work"},
-                                     actor=actor, idempotency_key="submit")
-    business_action_spec("tasks.submit").validate_result(reply)
+    submit_spec = business_action_spec("tasks.submit")
+    submit_params = validate_object({"space_id": "space-A", "instruction": "work"}, submit_spec.params_schema)
+    reply = submit_spec.validate_result(service.submit(submit_params, actor=actor, idempotency_key="submit"))
     assert host.conversation_store.session_tasks.require(reply["task_id"]).metadata["business_context"]["space_id"] == "space-A"
 
 
@@ -213,12 +227,16 @@ def test_retirement_preserves_open_capability_and_unreadable_subtree(business_ho
 
 
 def test_suspended_messages_are_durable_and_resume_republishes_original_input(business_host):
-    from agent_py_agent.agent.tooling.background_agents_tool import execute_background_action
+    from agent_py_agent.agent.conversation.session_messaging import queue_owned_background_message
     service, host, actor = _service(business_host)
     view = service.create({"space_id": "space-A", "name": "worker"}, actor=actor, idempotency_key="create")["agent"]
     suspend = service.transition(view["agent_id"], "suspend", actor=actor, expected_revision=view["revision"], idempotency_key="suspend")
     request = {"agent_id": view["agent_id"], "text": "wait for resume", "input_kind": "guidance"}
-    execute_background_action(host, "background_agents.messages.send", request, actor=actor, idempotency_key="input")
+    queue_owned_background_message(
+        host, actor=actor, target=service._thread(view["agent_id"], actor),
+        text=request["text"], input_kind=request["input_kind"],
+        operation_key=service._operation_key(actor, "input"),
+    )
     assert host.conversation_store.wakes.pending(limit=0) == []
     service.transition(view["agent_id"], "resume", actor=actor, expected_revision=suspend["agent"]["revision"], idempotency_key="resume")
     pending = host.conversation_store.guidance.pending("thread", view["agent_id"], limit=0)
@@ -228,8 +246,8 @@ def test_suspended_messages_are_durable_and_resume_republishes_original_input(bu
 
 
 def test_execution_cancel_closes_exact_authority_and_retains_exit_responsibility(business_host, tmp_path):
+    from agent_py_agent.agent.conversation.background_agents import cancel_business_execution
     from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
-    from agent_py_agent.agent.tooling.background_agents_tool import execute_background_action
     service, host, actor = _service(business_host)
     submitted = service.submit({"space_id": "space-A", "instruction": "work"}, actor=actor, idempotency_key="submit")
     task, context = service._owned_task(submitted["task_id"], actor)
@@ -241,8 +259,8 @@ def test_execution_cancel_closes_exact_authority_and_retains_exit_responsibility
     def missing(run_id):
         raise FileNotFoundError(run_id)
     host.subagents = SimpleNamespace(runtime_db=repo, load=missing)
-    result = execute_background_action(host, "executions.cancel", {"run_id": "exact-execution", "attempt_id": record["attempt_id"],
-        "include_descendants": True}, actor=actor, idempotency_key="stop")
+    result = cancel_business_execution(
+        host, service, {"run_id": "exact-execution", "attempt_id": record["attempt_id"], "include_descendants": True}, actor=actor)
     assert repo.get_agent_run(record["agent_run_id"])["status"] == "cancelled"
     assert result["state"] == "pending" and result["unconfirmed_refs"] == ["exact-execution"]
     assert host.conversation_store.session_tasks.require(task.task_id).metadata["cancellation_control"]["outstanding_refs"] == result["unconfirmed_refs"]

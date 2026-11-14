@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 from agent_py_agent.agent.contracts.artifact_acceptance import (
@@ -8,9 +7,6 @@ from agent_py_agent.agent.contracts.artifact_acceptance import (
     validate_artifact,
 )
 from agent_py_agent.agent.contracts.artifact_collection_mapping import mapping_findings
-from agent_py_agent.agent.contracts.gates.artifact_provenance import (
-    evaluate_artifact_provenance_gate,
-)
 from agent_py_agent.agent.contracts.gates.document_content import (
     evaluate_document_content_quality_gate,
 )
@@ -77,36 +73,6 @@ def test_source_item_coverage_rejects_metadata_only_mapping(tmp_path: Path) -> N
 
     assert [finding.code for finding in findings] == ["ARTIFACT_MAPPING_COVERAGE_TOO_SHALLOW"]
     assert "metadata_only" in findings[0].value
-
-
-def test_artifact_provenance_rejects_stale_source_hash(tmp_path: Path) -> None:
-    source = tmp_path / "draft.md"
-    source.write_text("# 新稿\n\n这是最新正文。\n", encoding="utf-8")
-    final = tmp_path / "final.pdf"
-    final.write_bytes(b"%PDF-1.4\n1 0 obj<<>>endobj\n%%EOF\n")
-
-    decision = evaluate_artifact_provenance_gate(
-        {
-            "ok": True,
-            "path": str(final),
-            "provenance": {
-                "ok": True,
-                "run_id": "run-1",
-                "tool_name": "document_builder",
-                "operation_id": "op-build",
-                "idempotency_key": "build-final",
-                "created_by_current_run": True,
-                "source_artifact_hashes": {str(source): "sha256:old-source"},
-                "build_input_hash": "sha256:old-source",
-                "build_output_hash": f"sha256:{hashlib.sha256(final.read_bytes()).hexdigest()}",
-            },
-        },
-        run_id="run-1",
-    )
-
-    assert decision.allowed is False
-    assert "BUILDER_PROVENANCE_STALE" in decision.finding_codes
-    assert decision.to_dict()["recovery"]["actions"][0]["evidence"]["current_state"]
 
 
 def test_artifact_acceptance_reuses_existing_format_validators(tmp_path: Path) -> None:

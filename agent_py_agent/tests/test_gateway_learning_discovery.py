@@ -276,11 +276,10 @@ def test_actual_c_claim_consumes_only_registry_maintenance_source(tmp_path, monk
 
 @pytest.mark.parametrize("age,expected", [(86399.999, False), (86400, True), (86400.001, True)])
 def test_shared_due_boundary_is_exact_and_recomputed(age, expected):
-    from agent_py_agent.agent.capability.skill_learning_maintenance import learning_maintenance_due
+    from agent_py_agent.agent.capability.skill_learning_maintenance import learning_reconcile_due
 
-    assert learning_maintenance_due(100000.0 - age, "autonomous", 100000.0) is expected
-    assert not learning_maintenance_due(100000.0 - age, "observe", 100000.0)
-    assert learning_maintenance_due(100000.0 - age, "autonomous", 100002.0)
+    assert learning_reconcile_due(100000.0 - age, 100000.0, interval_seconds=86400) is expected
+    assert learning_reconcile_due(100000.0 - age, 100002.0, interval_seconds=86400)
 
 
 def test_same_registry_bytes_new_mtime_get_new_transport_identity(tmp_path):

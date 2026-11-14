@@ -20,7 +20,6 @@ from agent_py_agent.agent.conversation.wake_poison import (
     verdict_for_admission,
 )
 from agent_py_agent.agent.settings.deployment_policy import update_deployment_policy
-from agent_py_agent.agent.settings.im_task_preferences import set_delegation_preference
 from agent_py_agent.agent.user_space.home_layout import home_paths
 from agent_py_agent.cli.gateway_loops import _build_background_scheduler
 from agent_py_agent.tests.test_im_delegation_single_speaker import _set_route, ask, ordinary_chain
@@ -102,7 +101,6 @@ def test_five_capacity_waits_stay_uncounted_and_same_task_continues(tmp_path, mo
     monkeypatch.setattr(dispatch, '_start_inprocess_dispatch', start)
     assert agent.runtime_guard_policy.provider_transient_auto_resume_delays_seconds == ()
     store = agent.conversation_store
-    set_delegation_preference(agent, "feishu", "ou_a", True)
     _set_route(agent, True)
     ask(agent, paths, "first", "整理工作区里的资料")
     scheduler = _build_background_scheduler(agent, agent.delivery_service)

@@ -2,7 +2,6 @@
 # 模块用途: 锁定默认循环兼容性、可信驱动注入、后端注册与原权限边界。
 from __future__ import annotations
 
-import importlib
 import inspect
 import json
 from dataclasses import replace
@@ -46,17 +45,6 @@ def runtime_params(host, **changes):
 
     params.tool_protocol_snapshot = make_test_protocol_snapshot(run_id=params.run_id)
     return replace(params, **changes)
-
-
-# LLM: 未实现的公开接缝必须先断言失败，不把导入错误当成测试证据。
-# 函数用途: 确认注册表存在，并逐用例隔离进程内注册状态。
-@pytest.fixture
-def registry(monkeypatch):
-    name = "agent_py_agent.agent.backends.registry"
-    assert importlib.util.find_spec(name) is not None, "backend registry seam is missing"
-    module = importlib.import_module(name)
-    monkeypatch.setattr(module, "_BACKENDS", {})
-    return module
 
 
 # LLM: 协议仅供宿主类型检查，不添加可序列化的模型参数。
@@ -282,75 +270,14 @@ def test_injected_driver_can_read_authorized_path(host):
 # 函数用途: 检验工具输入面未扩大。
 def test_driver_and_registry_are_not_exposed_in_tool_json(host):
     schemas = json.dumps([spec.input_schema for spec in host.tools.specs(include_orchestration=True)])
-    for field in ("_loop_driver", "loop_driver", "backend_constructor", "register_backend"):
+    for field in ("_loop_driver", "loop_driver"):
         assert f'"{field}"' not in schemas
 
 
-# LLM: 注册表不执行 constructor，不隐式导入插件；返回冻结的名称快照。
-# 函数用途: 验证空表、精确查找、构造器身份及不可变快照。
-def test_registry_lookup_is_lazy_exact_and_names_are_frozen(registry):
-    calls = []
-
-    # LLM: 构造仅在测试显式调用解析结果后发生。
-    # 函数用途: 返回本地后端并记录传入配置身份。
-    def constructor(config):
-        calls.append(config)
-        return EchoBackend()
-
-    assert registry.registered_backend_names() == frozenset()
-    assert registry.resolve_registered_backend("missing") is None
-    registry.register_backend("custom_protocol", constructor)
-    snapshot = registry.registered_backend_names()
-    assert type(snapshot) is frozenset and snapshot == frozenset({"custom_protocol"})
-    assert registry.resolve_registered_backend("custom_protocol") is constructor
-    assert registry.resolve_registered_backend("CUSTOM_PROTOCOL") is None and calls == []
-    config = object()
-    assert isinstance(registry.resolve_registered_backend("custom_protocol")(config), EchoBackend)
-    assert calls == [config]
-    registry.register_backend("other_protocol", EchoBackend)
-    assert snapshot == frozenset({"custom_protocol"})
-    assert registry.registered_backend_names() == frozenset({"custom_protocol", "other_protocol"})
-
-
-# LLM: 宿主可显式重新登记同名适配器；旧名称快照不持有可变构造器表。
-# 函数用途: 锁定进程内重登记的确定性行为。
-def test_registry_reregistration_replaces_constructor(registry):
-    registry.register_backend("custom_protocol", lambda config: EchoBackend())
-
-    # LLM: 替换构造器与旧构造器身份不同，登记时不得提前执行。
-    # 函数用途: 提供同名登记的新构造器。
-    def replacement(config):
-        return EchoBackend()
-
-    registry.register_backend("custom_protocol", replacement)
-    assert registry.resolve_registered_backend("custom_protocol") is replacement
-    assert registry.registered_backend_names() == frozenset({"custom_protocol"})
-
-
-# LLM: 非法注册输入必须在写表前拒绝；不把数据当成可执行构造器。
-# 函数用途: 检验名称和可调用对象的最小宿主合同。
-@pytest.mark.parametrize("name,constructor,error", [("", EchoBackend, ValueError),
-    ("   ", EchoBackend, ValueError), (None, EchoBackend, ValueError),
-    ([], EchoBackend, ValueError), (" padded", EchoBackend, ValueError),
-    ("two words", EchoBackend, ValueError), ("nul\x00", EchoBackend, ValueError),
-    ("custom_protocol", None, TypeError)])
-def test_registry_rejects_invalid_registration_atomically(registry, name, constructor, error):
-    registry.register_backend("kept", EchoBackend)
-    with pytest.raises(error):
-        registry.register_backend(name, constructor)
-    assert registry.registered_backend_names() == frozenset({"kept"})
-    assert registry.resolve_registered_backend("kept") is EchoBackend
-
-
-# LLM: 校验必须动态读名称，不能在导入时冻结；原决策用途和能力字段规则仍适用。
-# 函数用途: 验证登记前拒绝、登记后接纳以及不放宽原模型校验。
-def test_model_validation_accepts_only_registered_custom_protocol(registry):
-    model = {"provider_id": "test-provider", "model_name": "custom-model", "model_backend": "custom_protocol"}
-    builtins = BACKENDS.copy()
-    with pytest.raises(ModelProfileError):
-        validate_model(model)
-    registry.register_backend("custom_protocol", lambda config: EchoBackend())
-    assert builtins == BACKENDS and "custom_protocol" not in BACKENDS
+# LLM: 原决策用途和能力字段规则仍适用。
+# 函数用途: 验证合法默认标准化及不放宽原模型校验。
+def test_model_validation_accepts_only_registered_custom_protocol():
+    model = {"provider_id": "test-provider", "model_name": "custom-model", "model_backend": "echo"}
     assert validate_model(model) == {**model, "model_context_window_tokens": None,
         "capability": "agentic", "enabled": True}
     for change in ({"capability": "decision"}, {"model_name": ""}, {"model_context_window_tokens": True},

@@ -919,21 +919,9 @@ def test_b2_pending_merges_only_actually_deleted_trigger_survivors_stay(tmp_path
     assert _b2_pending_ids(store) == [] and store.events_path.read_bytes() == original
 
 
-def test_b2_cleanup_preserves_concurrently_registered_new_pending_ids(tmp_path, monkeypatch):
+def test_b2_cleanup_preserves_concurrently_registered_new_pending_ids(tmp_path):
     # Cat3-R4：活动 JSONL 不再逐行删除；旧 pending 不再新增，回执计封存段数。
-    from agent_py_agent.agent.local_storage import maintenance
-
     store, events, scope = _perf_e_event_store(tmp_path, False)
-    clear = maintenance._clear_pending_events_transaction
-
-    def register_then_clear(store, targets):
-        with sqlite3.connect(store.db_path) as conn:
-            conn.execute("DELETE FROM events WHERE event_id=?", (events[1].event_id,))
-            conn.execute("UPDATE metadata SET value=? WHERE key='events_prune_pending_ids'",
-                         (json.dumps([*targets, events[1].event_id]),))
-        return clear(store, targets)
-
-    monkeypatch.setattr(maintenance, "_clear_pending_events_transaction", register_then_clear)
     with scope():
         assert store.prune_events(before=50, keep_last=2, max_delete=1)["deleted_jsonl"] == 0
     assert _b2_pending_ids(store) == []
@@ -1266,22 +1254,17 @@ def test_b2_r3_event_maintenance_respects_retention_refusal(tmp_path, transition
 # LLM: 真库先提交删除再注入JSONL发表失败；故障后pending仍真实存在，effects不能暗示肯定没写过。
 # 函数用途: 验证部分执行诊断及下一维护周期沿R2恢复原pending。
 @pytest.mark.parametrize("transition", [False, True])
-def test_b2_r3_partial_event_failure_reports_unknown_and_recovers(tmp_path, monkeypatch, transition):
+def test_b2_r3_partial_event_failure_reports_unknown_and_recovers(tmp_path, transition):
     # Cat3-R4：旧 JSONL 发表钩子不再参与活动流维护，真实 SQL 继续推进且不留 pending。
-    from agent_py_agent.agent.local_storage import maintenance
     from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
     from agent_py_agent.tests.test_local_store_coordinator_io import Door
 
     home, store = _r3_owner_store(tmp_path, "data")
     original = store.events_path.read_bytes()
-    def refuse(*_args):
-        raise OSError("retired event rewrite hook")
     options = {"include_global_indexes": False}
     if transition:
         options["commit_transition"] = Door()
-    with monkeypatch.context() as patch:
-        patch.setattr(maintenance, "_publish_pruned_event_file", refuse)
-        run_owner_retention_if_due(home, now=200_000, **options)
+    run_owner_retention_if_due(home, now=200_000, **options)
     marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
     with sqlite3.connect(store.db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == STEADY_STATE_EVENTS_KEEP_LAST

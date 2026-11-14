@@ -482,5 +482,24 @@ class TestIntegrationScenarios:
             assert summary.recent_tasks == []
 
 
+class TestStartupRecoveryEnhancement:
+    """测试启动恢复增强。"""
+
+    def test_format_dispatch_pending(self, tmp_path: Path):
+        """格式化未完成 dispatch 的提示。"""
+        from agent_py_agent.agent.startup_recovery import (
+            ActiveWorkSummary,
+            format_active_work_summary,
+        )
+
+        summary = ActiveWorkSummary()
+        summary.dispatch_pending = True
+        summary.dispatch_rounds = 10
+
+        formatted = format_active_work_summary(summary)
+
+        assert "dispatch" in formatted.lower() or "调度" in formatted
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

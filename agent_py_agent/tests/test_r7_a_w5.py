@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.agent_core.orchestration.dispatch.loop import _final_pending_runner_count
 from agent_py_agent.agent.agent_core.orchestration.dispatch.mixin import (
     _dispatch_context_from_params,
     _finalize_scoped_tasks,
@@ -16,7 +15,6 @@ from agent_py_agent.agent.agent_core.orchestration.dispatch.params import (
     RunnerBatchContext,
 )
 from agent_py_agent.agent.agent_core.orchestration.dispatch.refs import (
-    _visible_run_ids,
     dispatch_scope_tasks,
 )
 from agent_py_agent.agent.agent_core.orchestration.dispatch.runner_batches import (
@@ -103,8 +101,7 @@ def test_selected_dispatch_completion_and_cleanup_ignore_history(tmp_path, monke
         "runner": lambda: execute_runner_jobs(agent, ctx, _batch()),
         "finalize": lambda: _finalize_scoped_tasks(agent, DispatchParams(root_id="request")),
         "pending": lambda: update_pending_work_state(agent, ctx=ctx),
-        "loop_pending": lambda: _final_pending_runner_count(agent),
-        "visible": lambda: _visible_run_ids(agent),
+        "visible": lambda: [task.id for task in dispatch_scope_tasks(agent, limit=20)],
         "hint": lambda: _known_children_hint(agent),
         "capability": lambda: make_capability_route_records(agent, ctx),
         "cancel_selection": lambda: _resolve_run_ids(agent, {"root_id": "request"}),
@@ -118,8 +115,8 @@ def test_selected_dispatch_completion_and_cleanup_ignore_history(tmp_path, monke
         record_property(name + "_stats", len(stats))
     assert results["completion"]["total"] == 7
     assert {task.id for task in results["finalize"]} == selected
-    assert set(results["visible"][0]) == set(results["cancel_selection"].run_ids) == selected
-    assert results["pending"] is False and results["loop_pending"] == (0, {})
+    assert set(results["visible"]) == set(results["cancel_selection"].run_ids) == selected
+    assert results["pending"] is False
     assert results["runner"] == results["capability"] == [] and all(run_id in results["hint"] for run_id in selected)
 
 
@@ -167,7 +164,6 @@ def test_retry_capability_and_terminal_patch_obligations_keep_original_gates(tmp
     assert {record.run_id for record in records} == {"failed", "timeout", "blocked"}
     assert all(record.dry_run and not record.applied for record in records)
     assert update_pending_work_state(agent, ctx=ctx) is True
-    assert _final_pending_runner_count(agent) == (3, {})
 
 
 def test_explicit_include_miss_exclusion_and_suffix_diagnostics(tmp_path, monkeypatch):
@@ -205,8 +201,6 @@ def test_unknown_index_is_neither_empty_success_nor_history_fallback(tmp_path, m
         dispatch_scope_tasks(agent)
     with pytest.raises(errors):
         execute_runner_jobs(agent, _context(root_id="request"), _batch())
-    assert _visible_run_ids(agent)[1] is not None
-    assert _final_pending_runner_count(agent)[1]
     selection = _resolve_run_ids(agent, {"root_id": "request"})
     assert not selection.ok and selection.error_payload["error"]
 
@@ -217,8 +211,8 @@ def test_display_limits_apply_before_canonical_body_reads(tmp_path, monkeypatch)
     _indexed(manager, [_task(manager, "unrelated", root="elsewhere", parent="elsewhere")])
     agent = _agent(manager, tmp_path)
     reads, _stats = _no_history(manager, monkeypatch)
-    ids, error = _visible_run_ids(agent)
-    assert error is None and len(ids) == len(reads) == 20 and "unrelated" not in reads
+    ids = [task.id for task in dispatch_scope_tasks(agent, limit=20)]
+    assert len(ids) == len(reads) == 20 and "unrelated" not in reads
     reads.clear()
     hint = _known_children_hint(agent)
     assert len(reads) <= 12 and hint.count("(RUNNING") == 12 and "unrelated" not in reads
@@ -279,7 +273,7 @@ def test_display_roster_uses_direct_parent_before_limit_and_keeps_terminal_appro
     _indexed(manager, (_task(manager, f"a-grandchild-{number}", root="request", parent="z-child") for number in range(40)))
     reads, _stats = _no_history(manager, monkeypatch)
     agent = _agent(manager, tmp_path)
-    assert set(_visible_run_ids(agent)[0]) == {"z-child", "z-approval"}
+    assert {task.id for task in dispatch_scope_tasks(agent, limit=20)} == {"z-child", "z-approval"}
     hint = _known_children_hint(agent)
     assert "z-child(RUNNING" in hint and "z-approval(DONE,未决申请x1)" in hint
     assert set(reads) <= {"z-child", "z-approval"}

@@ -494,9 +494,6 @@ class TestLogicalIdToolsSelfConflictRegression:
 
     def test_watch_url_alias_adds_the_same_canonical_watch_scope_as_watch_id(self, tmp_path):
         """同一 watch 的 URL/open 与 watch_id 写入口必须在 claim 前互斥。"""
-        from agent_py_agent.agent.agent_core.runtime.record_finding_tool import (
-            execute_record_finding,
-        )
         from agent_py_agent.agent.ingestion.watch_state import watch_id_for
         from agent_py_agent.agent.ingestion.watch_tool import WatchStreamTool
         from agent_py_agent.agent.tooling.executor import _workspace_operation_scopes

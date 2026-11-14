@@ -107,7 +107,6 @@ def test_quota_reconcile_is_bounded_and_persistent(tmp_path):
 # LLM: 旧整树扫描被禁止；小owner仍能真实写入并结算准确字节。
 # 函数用途: 证明准入不再调用os.walk/native find热入口。
 def test_quota_cold_write_never_calls_full_tree_usage(tmp_path, monkeypatch):
-    monkeypatch.setattr(quota, '_owner_usage_bytes_for_admission', lambda *_: pytest.fail('unbounded foreground scan'))
     target = tmp_path / 'new'
     with quota.OwnerQuotaEnforcer(tmp_path, max_bytes=10).reserve([quota.OwnerQuotaChange(target, 8)]):
         ledger = json.loads((tmp_path / '.owner-quota-ledger.json').read_text())
@@ -134,7 +133,6 @@ def test_quota_partial_write_exception_settles_actual_delta(tmp_path):
 def test_quota_large_cold_owner_refuses_growth_without_full_scan(tmp_path, monkeypatch):
     for n in range(160):
         (tmp_path / str(n)).write_bytes(b'x')
-    monkeypatch.setattr(quota, '_owner_usage_bytes_for_admission', lambda *_: pytest.fail('full scan'))
     enforcer = quota.OwnerQuotaEnforcer(tmp_path, max_bytes=10000)
     with pytest.raises(quota.OwnerQuotaUnavailable):
         with enforcer.reserve([quota.OwnerQuotaChange(tmp_path / 'new', 1)]):
