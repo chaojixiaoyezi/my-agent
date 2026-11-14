@@ -1558,7 +1558,7 @@ def test_prompt_snapshot_reuse_and_metrics(tmp_path: Path, monkeypatch: pytest.M
         assert spec_a is spec_b
 
         all_space_actions = list(business_domain_actions()["business_space"])
-        for idx in range(registry_module._NARROWED_MODEL_SPEC_MAX + 24):
+        for idx in range(registry_module._NARROWED_MODEL_SPEC_MAX_ENTRIES + 24):
             pair = [
                 f"business_space:{all_space_actions[idx % len(all_space_actions)]}",
                 f"business_space:{all_space_actions[(idx + 3) % len(all_space_actions)]}",
@@ -1569,7 +1569,7 @@ def test_prompt_snapshot_reuse_and_metrics(tmp_path: Path, monkeypatch: pytest.M
             )
         with registry_module._NARROWED_MODEL_SPEC_LOCK:
             cache_keys = list(registry_module._NARROWED_MODEL_SPEC_CACHE.keys())
-        assert len(cache_keys) <= registry_module._NARROWED_MODEL_SPEC_MAX
+        assert len(cache_keys) <= registry_module._NARROWED_MODEL_SPEC_MAX_ENTRIES
         for tool_key, rev_key, act_tuple in cache_keys:
             assert isinstance(tool_key, str) and isinstance(rev_key, str) and isinstance(act_tuple, tuple)
             assert "bounded-cache-run-" not in rev_key

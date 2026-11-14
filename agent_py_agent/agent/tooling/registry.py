@@ -88,7 +88,8 @@ _TOOL_PROJECTION_INIT_LOCK = threading.Lock()
 _TOOL_PROJECTION_MAX_SNAPSHOTS = 8
 _NARROWED_MODEL_SPEC_LOCK = threading.Lock()
 _NARROWED_MODEL_SPEC_CACHE: OrderedDict[tuple[str, str, tuple[str, ...]], ToolModelSpec] = OrderedDict()
-_NARROWED_MODEL_SPEC_MAX = 128
+# 进程内按动作收窄的工具模型规格 LRU 缓存最大保留条数（满额时按最旧优先淘汰）。
+_NARROWED_MODEL_SPEC_MAX_ENTRIES = 128
 
 
 # LLM: GC only invokes the reentrant C SimpleQueue.put; one shared daemon does lock-taking/IO at a safe execution point.
@@ -1518,7 +1519,7 @@ def _narrow_model_spec_for_actions(spec: ToolModelSpec, allowed_actions: frozens
     with _NARROWED_MODEL_SPEC_LOCK:
         _NARROWED_MODEL_SPEC_CACHE[cache_key] = narrowed
         _NARROWED_MODEL_SPEC_CACHE.move_to_end(cache_key)
-        while len(_NARROWED_MODEL_SPEC_CACHE) > _NARROWED_MODEL_SPEC_MAX:
+        while len(_NARROWED_MODEL_SPEC_CACHE) > _NARROWED_MODEL_SPEC_MAX_ENTRIES:
             _NARROWED_MODEL_SPEC_CACHE.popitem(last=False)
     return narrowed
 

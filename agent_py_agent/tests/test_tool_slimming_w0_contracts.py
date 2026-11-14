@@ -1112,7 +1112,7 @@ def test_grant_intersection_never_widens(tmp_path: Path) -> None:
                 },
             )
             registry_module._narrow_model_spec_for_actions(temp_spec, frozenset({"a"}))
-        assert len(registry_module._NARROWED_MODEL_SPEC_CACHE) <= registry_module._NARROWED_MODEL_SPEC_MAX
+        assert len(registry_module._NARROWED_MODEL_SPEC_CACHE) <= registry_module._NARROWED_MODEL_SPEC_MAX_ENTRIES
     finally:
         registry.close_mcp_clients()
 
@@ -1255,3 +1255,28 @@ def test_snapshot_name_lookup_reuses_index(tmp_path: Path) -> None:
         assert unrelated_touches == 0
     finally:
         registry.close_mcp_clients()
+
+
+def test_mcp_remote_error_contract_and_narrowed_spec_catalog_entry() -> None:
+    from agent_py_agent.agent.settings.constants_catalog import load_catalog
+
+    contract = get_error_contract("MCP_REMOTE_ERROR")
+    assert contract.code == "MCP_REMOTE_ERROR"
+    assert contract.category == "tool"
+    assert contract.retryable is False
+    assert contract.recommended_action == "change_strategy"
+    assert "远端错误文本" in contract.recovery_hint
+    assert "核实目标当前状态" in contract.recovery_hint
+    assert "禁止原样重复提交" in contract.recovery_hint
+
+    assert registry_module._NARROWED_MODEL_SPEC_MAX_ENTRIES == 128
+    matches = [
+        entry
+        for entry in load_catalog()
+        if entry["name"] == "_NARROWED_MODEL_SPEC_MAX_ENTRIES"
+    ]
+    assert len(matches) == 1
+    assert matches[0]["file"] == "agent_py_agent/agent/tooling/registry.py"
+    assert matches[0]["value"] == 128
+    assert matches[0]["unit"] == "条"
+    assert matches[0]["description"]
