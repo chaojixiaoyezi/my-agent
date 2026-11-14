@@ -27,13 +27,21 @@ def test_streams_control(isolated_gateway, slo_data, slo_report):
     scenario = next(row for row in slo_data["scenarios"] if row["id"] == "streams_control")
     profile, endpoint = scenario["load_profile"], urlsplit(base)
     headers = authenticated_headers(home)
+    json_request(
+        base,
+        "/control",
+        {"command": "/stop", "conversation_id": "warmup-fixture", "metadata": {"message_id": "warmup-fixture"}},
+        headers=headers,
+        timeout=slo_data["fixture"]["condition_seconds"],
+    )
     sockets, snapshots, errors = [], [], []
     condition, close = threading.Condition(), threading.Event()
     # LLM: A first NDJSON snapshot proves the socket reached the native stream, not just the backlog.
     # 函数用途: Open one actual observer and retain it until all control probes finish.
     def observer(index):
         connection = http.client.HTTPConnection(endpoint.hostname, endpoint.port, timeout=profile["read_seconds"])
-        sockets.append(connection)
+        with condition:
+            sockets.append(connection)
         try:
             connection.request("POST", "/client/business/stream", json.dumps({"request_id": f"observer-{index}", "filter": {}}),
                                {"Content-Type": "application/json", **headers})
@@ -56,9 +64,12 @@ def test_streams_control(isolated_gateway, slo_data, slo_report):
     with concurrent.futures.ThreadPoolExecutor(max_workers=profile["streams"]) as executor:
         futures = [executor.submit(observer, index) for index in range(profile["streams"])]
         try:
+            expected_streams = min(profile["streams"], GatewayBoundedHTTPServer.max_request_workers)
             with condition:
-                condition.wait_for(lambda: len(snapshots) >= min(profile["streams"], GatewayBoundedHTTPServer.max_request_workers),
-                                   slo_data["fixture"]["condition_seconds"])
+                condition.wait_for(
+                    lambda: len(snapshots) >= expected_streams or len(snapshots) + len(errors) >= profile["streams"],
+                    slo_data["fixture"]["condition_seconds"],
+                )
             samples, responses = [], []
             for path, body in (("/status", None), ("/control", {"command": "/stop", "conversation_id": "control-fixture", "metadata": {"message_id": "stop-fixture"}}),
                                ("/ask", {"prompt": "steer-fixture", "conversation_id": "control-fixture", "metadata": {"message_id": "steer-fixture"}})):
@@ -85,13 +96,15 @@ def test_streams_control(isolated_gateway, slo_data, slo_report):
                 stop_acknowledged=next((row for row in responses if row["path"] == "/control"), None), exit_proof=None)
         finally:
             close.set()
-            for connection in sockets:
-                if connection.sock:
+            with condition:
+                snapshot_sockets = list(sockets)
+            for connection in snapshot_sockets:
+                sock = connection.sock
+                if sock is not None:
                     try:
-                        connection.sock.shutdown(socket.SHUT_RDWR)
+                        sock.shutdown(socket.SHUT_RDWR)
                     except OSError:
                         pass
-                connection.close()
             for future in futures:
                 future.result(timeout=slo_data["fixture"]["teardown_seconds"])
     require_target(len(snapshots) == profile["streams"], report)

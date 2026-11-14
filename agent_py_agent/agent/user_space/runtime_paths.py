@@ -36,10 +36,19 @@ class _OwnerRuntimePathInputs:
 # 函数用途: 返回当前代理唯一的 owner 持久化根目录，供会话恢复、归档和运行账本共同使用。
 def runtime_owner_root(agent: object) -> Path:
     home_paths = getattr(agent, "home_paths", None)
-    owner_home = getattr(home_paths, "owner_home_dir", None)
+    owner_home = getattr(home_paths, "owner_home_dir", None) or getattr(home_paths, "owner_home", None)
     if isinstance(owner_home, str | Path) and str(owner_home).strip():
         return Path(owner_home)
-    return Path(agent.root)
+    root = getattr(agent, "root", None)
+    if isinstance(root, str | Path) and str(root).strip():
+        return Path(root)
+    manager_owner_home = getattr(getattr(agent, "subagents", None), "owner_home_dir", None)
+    if isinstance(manager_owner_home, str | Path) and str(manager_owner_home).strip():
+        return Path(manager_owner_home)
+    from .home_layout import home_paths as build_home_paths
+
+    config_home = getattr(getattr(agent, "config", None), "my_agent_home", None)
+    return build_home_paths(config_home).owner_home_dir
 
 
 def resolve_runtime_paths_for_agent(config: Any, root: Path, home: Any | None) -> RuntimePathResolution:

@@ -892,8 +892,10 @@ def _rejected_approval_execution(
     *,
     repeated: bool = False,
 ) -> ToolExecution:
-    cancelled = decision.decision == "cancelled"
-    code = decision.reason_code or ("CANCELLED" if cancelled else "APPROVAL_REJECTED")
+    decision_kind = str(getattr(decision, "decision", "") or "")
+    cancelled = decision_kind == "cancelled"
+    reason_code = str(getattr(decision, "reason_code", "") or "")
+    code = reason_code or ("CANCELLED" if cancelled else "APPROVAL_REJECTED")
     status = "cancelled" if cancelled else "failed"
     if repeated:
         message = (
@@ -903,16 +905,18 @@ def _rejected_approval_execution(
         )
     else:
         message = "用户取消了这次工具调用，工具没有执行。" if cancelled else "用户拒绝了这次工具调用，工具没有执行。"
-    if decision.reason_code:
+    if reason_code:
         message = _APPROVAL_REJECTION_MESSAGES.get(
-            decision.reason_code,
+            reason_code,
             str(getattr(decision, "message", "") or "工具执行未获批准。"),
         )
-    if decision.diagnostic:
-        message += f"\n宿主诊断：{decision.diagnostic}。工具主体未执行；请刷新原执行/审批状态，必要时修复原账本，不要原样盲重试。"
-    if decision.feedback:
+    diagnostic = str(getattr(decision, "diagnostic", "") or "")
+    if diagnostic:
+        message += f"\n宿主诊断：{diagnostic}。工具主体未执行；请刷新原执行/审批状态，必要时修复原账本，不要原样盲重试。"
+    feedback = str(getattr(decision, "feedback", "") or "")
+    if feedback:
         message = (
-            f"{message}\n用户反馈：{decision.feedback}\n"
+            f"{message}\n用户反馈：{feedback}\n"
             "请按反馈调整做法，不要再次尝试完全相同的工具调用。"
         )
     else:
@@ -926,8 +930,8 @@ def _rejected_approval_execution(
         {
             **execution.decision.evidence,
             "failure_stage": "authorization",
-            "approval_id": decision.permission_id,
-            "approval_decision": decision.decision,
+            "approval_id": str(getattr(decision, "permission_id", "") or ""),
+            "approval_decision": decision_kind,
             "repeated_rejection": repeated,
         },
         resolved_effect=execution.decision.resolved_effect,
