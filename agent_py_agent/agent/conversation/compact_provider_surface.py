@@ -143,6 +143,20 @@ def prepare_conversation_compact_provider_surface(
             required_skill_ids=presentation.required_skill_ids,
         ),
     )
+    if keep_recommendations:
+        from ..agent_core._tool_loop_service import _dedup_native_recommendations_section
+
+        prompt_request = _dedup_native_recommendations_section(
+            agent,
+            SimpleNamespace(
+                turn_trigger=None,
+                tool_runtime_snapshot=runtime_snapshot,
+                allowed_tools=allowed_tools,
+                loaded_tool_names=ordered_tool_names(model_surface.loaded_tool_names),
+                live_archive_state={},
+            ),
+            prompt_request,
+        )
     parent_prompt = _compact_parent_prompt(agent, prompt_request, _compact_persona_params(model_surface, protocol_snapshot))
     layout = prompt_cache_layout(parent_prompt)
     if layout is None or not layout.stable_prefix:
