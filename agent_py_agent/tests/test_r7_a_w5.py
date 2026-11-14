@@ -32,7 +32,6 @@ from agent_py_agent.agent.agent_core.planner_service import (
 )
 from agent_py_agent.agent.agent_core.runner.dispatch import (
     RunnerCandidatePolicy,
-    _dispatch_patch_review_run_ids,
     _is_dispatch_runner_candidate,
 )
 from agent_py_agent.agent.agent_core.tool_loop.completion import _delegated_work_facts
@@ -157,7 +156,6 @@ def test_retry_capability_and_terminal_patch_obligations_keep_original_gates(tmp
     policy = RunnerCandidatePolicy(runner_retry_limit=1)
     assert {task.id for task in selected if _is_dispatch_runner_candidate(task, policy=policy)} == {"failed", "timeout", "blocked"}
     assert not any(_is_dispatch_runner_candidate(task, policy=RunnerCandidatePolicy()) for task in selected)
-    assert _dispatch_patch_review_run_ids(_finalize_scoped_tasks(agent, DispatchParams())) == ["done"]
     assert "approval(DONE,未决申请x1)" in _known_children_hint(agent)
     ctx = _context(root_id="request", max_runners=7)
     records = execute_runner_jobs(agent, ctx, _batch())

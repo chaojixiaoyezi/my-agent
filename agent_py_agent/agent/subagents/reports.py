@@ -299,68 +299,6 @@ class DispatchWatchReport:
     records: list[DispatchWatchRecord]
 
 
-@dataclass
-class PatchReviewRecord:
-    id: str
-    run_id: str
-    dry_run: bool
-    applied: bool
-    ok: bool
-    decision: str
-    message: str
-    patch_count: int
-    approved_count: int = 0
-    blocked_count: int = 0
-    reviewer: str = ""
-    note: str = ""
-    evidence_paths: list[str] = field(default_factory=list)
-    patches: list[dict[str, object]] = field(default_factory=list)
-    load_errors: list[dict[str, object]] = field(default_factory=list)
-    created_at: float = 0.0
-
-
-@dataclass
-class PatchReviewReport:
-    generated_at: float
-    dry_run: bool
-    summary: dict[str, int]
-    records: list[PatchReviewRecord]
-
-
-@dataclass
-class PatchApplyRecord:
-    id: str
-    run_id: str
-    dry_run: bool
-    applied: bool
-    ok: bool
-    decision: str
-    message: str
-    patch_count: int
-    applied_count: int = 0
-    blocked_count: int = 0
-    rollback_performed: bool = False
-    applier: str = ""
-    note: str = ""
-    evidence_paths: list[str] = field(default_factory=list)
-    test_commands: list[str] = field(default_factory=list)
-    test_results: list[dict[str, object]] = field(default_factory=list)
-    patches: list[dict[str, object]] = field(default_factory=list)
-    load_errors: list[dict[str, object]] = field(default_factory=list)
-    owner_policy: dict[str, object] = field(default_factory=dict)
-    batch_validation: dict[str, object] = field(default_factory=dict)
-    failure_recovery: dict[str, object] = field(default_factory=dict)
-    created_at: float = 0.0
-
-
-@dataclass
-class PatchApplyReport:
-    generated_at: float
-    dry_run: bool
-    summary: dict[str, int]
-    records: list[PatchApplyRecord]
-
-
 __all__ = [
     "ActionApplyRecord",
     "ActionApplyReport",
@@ -377,10 +315,6 @@ __all__ = [
     "ParentPlannerParsedOutput",
     "ParentPlannerRecord",
     "ParentPlannerReport",
-    "PatchApplyRecord",
-    "PatchApplyReport",
-    "PatchReviewRecord",
-    "PatchReviewReport",
     "SubAgentBoard",
     "SubAgentBoardItem",
 ]

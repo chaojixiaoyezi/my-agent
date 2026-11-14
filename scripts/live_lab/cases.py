@@ -8,10 +8,8 @@ from __future__ import annotations
 以后要加“记忆长任务”“工具边界任务”“问题任务”，优先在这里加一个新的 case。
 """
 
-import sys
 import textwrap
 
-from .constants import REPO_ROOT
 from .main_agent_artifact_case import (
     case_main_artifact_readback,
     case_main_compact_resume_roundtrip,
@@ -38,9 +36,7 @@ def run_case(lab, case_name: str) -> None:
 
     handlers = {
         "health": case_health,
-        "bad_weather": case_bad_weather,
         "gateway_ask": case_gateway_ask,
-        "long_subagent": case_long_subagent,
         "main_artifact_readback": case_main_artifact_readback,
         "main_compact_resume_roundtrip": case_main_compact_resume_roundtrip,
         "main_compact_stress_long_read": case_main_compact_stress_long_read,
@@ -65,38 +61,6 @@ def case_health(lab) -> None:
     lab.run_command(lab.agent_command("status", "--json"), timeout=60)
     lab.run_command(lab.agent_command("local-doctor", "--json"), timeout=60)
     lab.run_command(lab.agent_command("gateway", "status"), timeout=60)
-
-
-# LLM: 保留当前 Gateway 恢复和 runner 重试入口；执行命令会写入本轮实验目录。
-# 函数用途: 用固定后端运行故障恢复场景，不调用真实模型。
-def case_bad_weather(lab) -> None:
-    """runs focused recovery/guard scenarios that do not require real LLM calls.
-
-    这组是“坏天气测试”：gateway 崩溃残留、runner 临时失败。
-    它们用固定/模拟后端复现坑位，适合快速回归系统边界。"""
-
-    lab.section("CASE bad_weather")
-    workspace = lab.run_root / "bad_weather"
-    for case_name in ["gateway-restart", "runner-retry"]:
-        lab.log(f"### scenario-test --case {case_name}")
-        lab.run_command(
-            lab.agent_command(
-                "scenario-test",
-                "--case",
-                case_name,
-                "--workspace",
-                str(workspace),
-                "--count",
-                str(max(lab.args.count, 1)),
-                "--max-runners",
-                "1",
-                "--max-cycles",
-                str(max(lab.args.max_cycles, 2)),
-                "--timeout",
-                str(lab.args.timeout),
-            ),
-            timeout=lab.args.timeout + 90,
-        )
 
 
 def case_gateway_ask(lab) -> None:
@@ -138,43 +102,3 @@ def case_gateway_ask(lab) -> None:
             timeout=45,
             allow_fail=True,
         )
-
-
-def case_long_subagent(lab) -> None:
-    """runs the existing happy-path scenario with real gateway, runners, and acceptance.
-
-    这是比较接近真实工作的长链路测试：
-    gateway 收到任务、主代理派工、runner 读写文件、父代理验收，全部关在隔离 fixture 里。"""
-
-    lab.section("CASE long_subagent")
-    sys.path.insert(0, str(REPO_ROOT))
-    from agent_py_agent.cli.scenario_utils import (
-        build_scenario_prompt,
-        build_scenario_runner_instruction,
-    )
-
-    lab.record_prompt("long_subagent_main", build_scenario_prompt(max(lab.args.count, 1)))
-    lab.record_prompt(
-        "long_subagent_runner_instruction",
-        build_scenario_runner_instruction(),
-        label="RUNNER INSTRUCTION SENT TO SUBAGENTS",
-    )
-    workspace = lab.run_root / "long_subagent"
-    lab.run_command(
-        lab.agent_command(
-            "scenario-test",
-            "--case",
-            "happy",
-            "--workspace",
-            str(workspace),
-            "--count",
-            str(max(lab.args.count, 1)),
-            "--max-runners",
-            str(max(lab.args.max_runners, 1)),
-            "--max-cycles",
-            str(max(lab.args.max_cycles, 1)),
-            "--timeout",
-            str(lab.args.timeout),
-        ),
-        timeout=lab.args.timeout * max(lab.args.max_cycles, 1) + 180,
-    )

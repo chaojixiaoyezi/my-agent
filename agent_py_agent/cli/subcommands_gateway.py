@@ -1,12 +1,12 @@
-# LLM: 这里只注册 CLI 参数与处理器；场景 choices 从 scenario 注册表读取，删除入口须同步帮助。
+# LLM: 这里只注册 Gateway、守护进程与诊断 CLI 参数及处理器，不在解析阶段执行任务。
 # 模块用途: 注册 Gateway、守护进程和诊断命令，不在解析参数时执行任务。
 from __future__ import annotations
 
-"""logs / gateway / adapter / daemon / scenario subcommand registration helpers.
+"""logs / gateway / adapter / daemon subcommand registration helpers.
 
 给人看的解释：
-这个文件包含日志、gateway、适配器、守护进程和场景测试子命令的注册函数。
-gateway、adapter、daemon、logs 和 scenario 命令注册逻辑集中在这里。
+这个文件包含日志、gateway、适配器、守护进程等子命令的注册函数。
+gateway、adapter、daemon 和 logs 命令注册逻辑集中在这里。
 """
 
 import argparse
@@ -31,7 +31,6 @@ from .gateway_process import (
     cmd_gateway_stop,
     cmd_gateway_uninstall,
 )
-from .scenario import cmd_scenario_test, scenario_case_choices
 from .supervisor import (
     cmd_maintenance_lock,
     cmd_maintenance_unlock,
@@ -84,35 +83,6 @@ def add_daemon_subcommand(sub: argparse._SubParsersAction) -> None:
     daemon.add_argument("--locked-file", action="append", help="接管时锁定的文件，可多次传入")
     daemon.add_argument("--skill-dir", action="append", help="额外 skill 目录，可多次传入")
     daemon.set_defaults(func=cmd_daemon)
-
-
-
-# LLM: case 参数由注册表限定，未知或已删除场景必须在 argparse 阶段被拒绝。
-# 函数用途: 把隔离场景测试加入命令行及帮助列表，不启动模型或写入工作目录。
-def add_scenario_subcommand(sub: argparse._SubParsersAction) -> None:
-    scenario = sub.add_parser("scenario-test", help="跑一轮隔离的真实全流程任务测试")
-    _add_capability_config_arg(scenario)
-    scenario.add_argument(
-        "--case",
-        # choices 从 case runner 注册表派生，新增 case 不需要同步这里
-        choices=scenario_case_choices(),
-        default="happy",
-        help="场景类型：happy 跑真实全流程；verification 测验收防作弊；gateway-restart 测重启恢复；gateway-cross-day-resume 测真实 gateway 请求跨天恢复；gateway-delayed-response 测孤立 response 投影不能阻止请求执行；gateway-multi-worker 测多 request worker 并发抢占；gateway-stale-lease 测 processing stale lease 重排恢复；parent-subagent-cross-day-resume 测真实 runner 写回后的跨天恢复；real-model-recovery 测真实模型 API 的 parent/subagent 跨天恢复；runner-retry 测 runner 失败重试；all 连续运行",
-    )
-    scenario.add_argument("--workspace", help="保存场景测试结果的父目录；不传则使用系统临时目录")
-    scenario.add_argument("--count", type=int, default=2, help="本场景创建多少个子代理")
-    scenario.add_argument("--max-runners", type=int, default=2, help="每轮最多推进多少个 runner")
-    scenario.add_argument("--max-cycles", type=int, default=3, help="最多执行多少轮 dispatch")
-    scenario.add_argument("--timeout", type=float, default=300.0, help="gateway ask 等待响应的秒数")
-    scenario.add_argument("--runner-concurrency", help="仅本次场景测试覆盖 runner_concurrency，例如 5 或 auto")
-    scenario.add_argument("--runner-start-rate", help="仅本次场景测试覆盖 runner_start_rate，例如 10 或 auto")
-    scenario.add_argument("--model-request-timeout", type=float, help="仅本次场景测试覆盖模型 request_timeout 秒数")
-    scenario.add_argument("--dry-run", action="store_true", help="只调度不执行真实 runner API")
-    scenario.add_argument("--planner", action="store_true", help="dispatch 时启用父代理 planner")
-    scenario.add_argument("--direct", action="store_true", help="不经过 gateway，直接用当前进程跑主代理派工")
-    scenario.add_argument("--skill-dir", action="append", help="额外 skill 目录，可多次传入")
-    scenario.set_defaults(func=cmd_scenario_test)
-
 
 
 # LLM: 原Gateway启停选项保持不变，注册不触及进程。

@@ -32,11 +32,6 @@ _CAPABILITY_ROUTE_ACTIONS = {
     "GAP": "gap",
     "PARENT_RESOLUTION_REQUIRED": "parent_resolution_required",
 }
-_PATCH_REVIEW_ACTIONS = {
-    "APPROVE": "approve",
-    "REJECT": "reject",
-    "NO_PATCHES": "no_patches",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -202,57 +197,10 @@ def _scoped_run_ids(agent, ctx) -> list[str]:
     return [task.id for task in scoped_runner_tasks(dispatch_scope_tasks(agent, ctx), ctx)]
 
 
-# LLM: 空任务列表直接返回空记录；正式路径应用审阅并写报告，预演路径只审阅，逐项保留实际决策与应用结果。
-# 函数用途: 将指定子代理的补丁审阅结果转换为本轮派工记录。
-def make_patch_review_records(agent: Any, patch_run_ids: list[str], params: Any):
-    if not patch_run_ids:
-        return []
-    records = []
-    patch_report = (
-        agent.subagents.patch.write_patch_review_report(
-            patch_run_ids,
-            apply=True,
-            reviewer=params.reviewer,
-            note=params.note,
-            limit=params.limit,
-        )
-        if params.mutate_state
-        else agent.subagents.patch.review_patches(
-            patch_run_ids,
-            apply=False,
-            reviewer=params.reviewer,
-            note=params.note,
-            limit=params.limit,
-        )
-    )
-    for item in patch_report.records:
-        records.append(
-            agent.subagents.dispatch.make_dispatch_record(
-                params=DispatchRecordParams(
-                    step="patch_review",
-                    action=_patch_review_action(item.decision),
-                    run_id=item.run_id,
-                    dry_run=item.dry_run,
-                    applied=item.applied,
-                    ok=item.ok,
-                    message=item.message,
-                    evidence_paths=item.evidence_paths,
-                ),
-            )
-        )
-    return records
-
-
 # LLM: 将去除首尾空白的状态文本按固定映射转为动作名；未知状态返回 unknown，不猜测授权结果。
 # 函数用途: 为能力路由派工记录提供标准动作标签。
 def _capability_route_action(status: object) -> str:
     return _CAPABILITY_ROUTE_ACTIONS.get(str(status or "").strip(), "unknown")
-
-
-# LLM: 按固定决策映射读取动作名，空值或未知值返回 unknown；只转换标签，不批准或拒绝补丁。
-# 函数用途: 为补丁审阅派工记录规范化决策动作标签。
-def _patch_review_action(decision: object) -> str:
-    return _PATCH_REVIEW_ACTIONS.get(str(decision or "").strip(), "unknown")
 
 
 # ---------------------------------------------------------------------------

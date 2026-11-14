@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import inspect
-import json
 from pathlib import Path
 
 import pytest
@@ -248,14 +247,8 @@ def test_cli_cross_version_frozen_contracts():
              "run_id": ["run-1", "run-2"], "expected_attempt": [["run-1", "attempt-1"], ["run-2", "attempt-2"]]},
         ),
     }
-    manifest = json.loads((Path(__file__).resolve().parents[2] / "scripts/optimization_removal_manifest.json").read_text())
-    frozen = manifest.get("frozen_cli_cross_version", {})
-    assert set(frozen) == set(expected)
     parser = build_parser()
-    for name, (argv, handler, values) in expected.items():
-        assert frozen[name]["argv"] == argv
-        assert frozen[name]["handler"] == handler
-        assert frozen[name]["expected"] == values
+    for _name, (argv, handler, values) in expected.items():
         args = parser.parse_args(argv)
         assert args.func.__name__ == handler
         assert {key: getattr(args, key) for key in values} == values

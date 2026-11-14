@@ -278,16 +278,6 @@ class TaskSearchOptions:
 
 
 @dataclass(frozen=True)
-class SubagentsPatchOptions:
-
-    action: str
-    run_ids: list[str] | None
-    reviewer: str | None
-    note: str
-    limit: int
-
-
-@dataclass(frozen=True)
 class SubagentsTestsOptions:
 
     run_id: str

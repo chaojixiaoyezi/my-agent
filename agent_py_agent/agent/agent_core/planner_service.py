@@ -55,7 +55,6 @@ class PlannerInputContext:
     due_report: Any
     action_plan: Any
     runner_candidates: list
-    patch_run_ids: list
     open_requests: list
     open_gaps: list
 
@@ -101,9 +100,7 @@ def _collect_parent_planner_context(agent: SimpleAgent, params: PlannerStatePara
     from .orchestration.dispatch.refs import candidate_ids_kwargs, dispatch_scope_tasks
     from .runner.dispatch import (
         RunnerCandidatePolicy,
-        _dispatch_patch_review_run_ids,
         _dispatch_runner_candidates,
-        _limit_items,
     )
 
     tasks = dispatch_scope_tasks(agent)
@@ -123,7 +120,6 @@ def _collect_parent_planner_context(agent: SimpleAgent, params: PlannerStatePara
         params.max_runners,
         policy=RunnerCandidatePolicy(runtime_guard_policy=frozen_policy),
     )
-    patch_run_ids = _limit_items(_dispatch_patch_review_run_ids(tasks), params.limit)
     active_tasks = _active_planner_tasks(tasks)
     open_requests, open_gaps = _collect_open_capability_items(tasks)
     return (
@@ -134,7 +130,6 @@ def _collect_parent_planner_context(agent: SimpleAgent, params: PlannerStatePara
             due_report=due_report,
             action_plan=action_plan,
             runner_candidates=runner_candidates,
-            patch_run_ids=patch_run_ids,
             open_requests=open_requests,
             open_gaps=open_gaps,
         ),
@@ -201,7 +196,6 @@ def _build_gate_summary(ctx: PlannerInputContext) -> dict[str, Any]:
         "due_issues": ctx.due_report.summary.get("total", 0),
         "action_items": ctx.action_plan.summary.get("total", 0),
         "runner_candidates": len(ctx.runner_candidates),
-        "patch_reviews": len(ctx.patch_run_ids),
         "open_capability_requests": len(ctx.open_requests),
         "open_capability_gaps": len(ctx.open_gaps),
     }
@@ -213,7 +207,6 @@ def _build_gate_summary(ctx: PlannerInputContext) -> dict[str, Any]:
                 "due_issues",
                 "action_items",
                 "runner_candidates",
-                "patch_reviews",
                 "open_capability_requests",
                 "open_capability_gaps",
             )
@@ -254,7 +247,6 @@ def _build_planner_state_dict(gate_summary: dict[str, Any], board: Any, ctx: Pla
             for item in _limit_items(ctx.action_plan.actions, limit)
         ],
         "runner_candidates": [_task_state_for_planner(task) for task in ctx.runner_candidates],
-        "patch_review_run_ids": ctx.patch_run_ids,
         "open_capability_requests": _limit_items(ctx.open_requests, limit),
         "open_capability_gaps": _limit_items(ctx.open_gaps, limit),
     }

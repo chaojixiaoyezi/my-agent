@@ -26,7 +26,6 @@ my-agent chat
 my-agent gateway start
 my-agent chat --gateway
 my-agent gateway ask "你好"
-my-agent dev scenario-test
 ```
 
 完整参数手册见仓库根目录的 [CLI_REFERENCE.md](../CLI_REFERENCE.md)。
@@ -65,28 +64,13 @@ subagents probe             检查子代理通道健康
 subagents actions plan      根据 due-check 生成动作计划
 subagents actions apply     dry-run 或 apply 低风险动作
 subagents route-capabilities 路由 open capability request
-subagents patches           审核 runner 输出里的 patch 记录
 subagents dispatch          执行一轮父代理调度
-dev scenario-test           隔离跑 gateway/派工/runner/验收全流程
 gateway                     管理后台 gateway，并向 gateway 投递请求
 adapter                     外部聊天工具 / TUI 文件适配器
 subagents context           生成单个子代理执行上下文
 subagents run               按执行上下文运行子代理 runner
 ```
 
-## 隔离全流程观察
-
-```bash
-python3 -m agent_py_agent dev scenario-test
-```
-
-这条命令会创建临时 fixture 项目，把 `workspace_root` 指过去，然后走：
-
-```text
-gateway ask -> 主代理 create_subagents 创建并后台启动 -> tree/refs -> RUNNING 时等待后台 runner -> 必要时 dispatch 恢复/重跑 -> 主代理收口
-```
-
-所有 memory、subagent、gateway 和文件工具写入都在临时目录里，不会碰当前开发仓库。
 `create_subagents` 的自动启动仍消费持久 argv `subagents-dispatch --apply --start-runners`，不复用 watch 循环，避免和 gateway/daemon 的观察锁互相抢占。这是消费者迁移前不可移除的冻结合同，不是新调用建议；人工调用使用 `subagents dispatch`。
 
 ## 普通运行
@@ -314,18 +298,6 @@ python3 -m agent_py_agent subagents route-capabilities --apply
 
 产物与执行结束事实由宿主账本交回父级，父级结合真实证据复核，不再推荐旧的独立验收命令。
 
-patch 审核 dry-run：
-
-```bash
-python3 -m agent_py_agent subagents patches --dry-run
-```
-
-patch 审核 apply：
-
-```bash
-python3 -m agent_py_agent subagents patches --apply --run-id <run_id>
-```
-
 父代理调度 dry-run：
 
 ```bash
@@ -480,7 +452,6 @@ export AGENT_API_KEY="你的 key"
 python3 -m py_compile agent_py_agent/agent/*.py agent_py_agent/__main__.py
 python3 -m agent_py_agent --help
 python3 -m agent_py_agent subagents run --help
-python3 -m agent_py_agent subagents patches --help
 python3 -m agent_py_agent subagents dispatch --help
 ```
 

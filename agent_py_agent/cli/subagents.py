@@ -33,11 +33,14 @@ from agent_py_agent.cli._leadership import (
     cmd_subagents_leadership_recovery_apply,
     cmd_subagents_leadership_recovery_plan,
 )
-from agent_py_agent.cli._review import (
-    cmd_subagents_patches,
-    cmd_subagents_tests,
+from agent_py_agent.cli._review_tests import (
+    cmd_subagents_tests as _cmd_subagents_tests,
 )
-from agent_py_agent.cli.common import DEFAULT_CAPABILITY_CONFIG
+from agent_py_agent.cli.common import DEFAULT_CAPABILITY_CONFIG, make_agent
+
+
+def cmd_subagents_tests(args) -> int:
+    return _cmd_subagents_tests(args, make_agent_fn=make_agent)
 
 
 def _add_capability_config_arg(p: argparse.ArgumentParser) -> None:
@@ -181,7 +184,6 @@ def _add_agents_action_subcommands(sub):
     route.set_defaults(func=cmd_subagents_route_capabilities, apply=False)
 
     _add_agents_tests_subcommand(sub)
-    _add_agents_patch_subcommand(sub)
 
 
 def _add_agents_tests_subcommand(sub):
@@ -190,20 +192,6 @@ def _add_agents_tests_subcommand(sub):
     tests.add_argument("--re-run", action="store_true", help="显式重新检查 output.json 里的 tests 并写入报告")
     tests.add_argument("--timeout", type=float, default=120.0, help="兼容参数:验收已不执行命令,超时仅作报告元数据记录")
     tests.set_defaults(func=cmd_subagents_tests)
-
-
-def _add_agents_patch_subcommand(sub):
-    patches = sub.add_parser("subagents-patches", help="审核 runner 输出里的 patch 记录")
-    patch_action = patches.add_mutually_exclusive_group()
-    patch_action.add_argument("--dry-run", action="store_const", const="review_dry_run", dest="patch_action", help="只生成 patch 审核报告，不修改记录")
-    patch_action.add_argument("--review-apply", action="store_const", const="review_apply", dest="patch_action", help="写回 patch 审核状态，但不真正 apply 文件")
-    patch_action.add_argument("--apply-dry-run", action="store_const", const="apply_dry_run", dest="patch_action", help="展示将要 apply 的 diff，不真正写文件")
-    patch_action.add_argument("--apply", action="store_const", const="apply", dest="patch_action", help="真正 apply patch、跑 allowlist 测试并记录审计日志")
-    patches.add_argument("--run-id", nargs="*", help="只审核指定子代理运行 ID")
-    patches.add_argument("--limit", type=int, default=None, help="最多处理多少条记录；默认读配置")
-    patches.add_argument("--reviewer", default="parent", help="审核者标识")
-    patches.add_argument("--note", help="写入 patch 审核记录的备注")
-    patches.set_defaults(func=cmd_subagents_patches, patch_action="review_dry_run")
 
 
 # LLM: 宿主入口用隐藏 argv 对运输冻结执行轮；不进入模型工具 schema，watch 锁仍依赖 OS 持有而非文本。

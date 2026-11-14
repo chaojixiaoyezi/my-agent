@@ -59,7 +59,6 @@ def build_parser(extension_registry: ExtensionRegistry | None = None) -> argpars
         add_adapter_subcommand,
         add_daemon_subcommand,
         add_gateway_subcommands,
-        add_scenario_subcommand,
     )
     from .update import add_update_subcommand
 
@@ -75,7 +74,6 @@ def build_parser(extension_registry: ExtensionRegistry | None = None) -> argpars
     add_guidance_subcommand(subparsers)
     add_subagents_subcommands(subparsers)
     add_daemon_subcommand(subparsers)
-    add_scenario_subcommand(subparsers)
     add_gateway_subcommands(subparsers)
     add_adapter_subcommand(subparsers)
     add_task_subcommands(subparsers)
