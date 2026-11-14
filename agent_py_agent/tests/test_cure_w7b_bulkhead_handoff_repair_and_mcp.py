@@ -42,7 +42,9 @@ from agent_py_agent.agent.agent_core.tool_loop.round_execution import (
 from agent_py_agent.agent.backends.base import ModelResponse
 from agent_py_agent.agent.collaboration.handoff_board import HandoffBoardService
 from agent_py_agent.agent.collaboration.store import CollaborationStore
+from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts.stream_writer import BufferedChunkStreamWriter
+from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling.executor import ToolExecution
 from agent_py_agent.agent.tooling.mcp_client import MCPServerConfig, MCPStdioClient
 from agent_py_agent.agent.tooling.models import ToolInvocationContext
@@ -173,21 +175,55 @@ def test_handoff_board_single_agent_rejection_and_list_cases(tmp_path: Path) -> 
     assert "仅用于多代理协作" in spec.description
     assert "单代理进度请用 Todo" in spec.description
 
-    # 3.2 Foreground single agent with zero subagents
-    subagents_mock = MagicMock()
-    subagents_mock.list_runs_for_root_report.return_value = SimpleNamespace(runs=[])
-    subagents_mock.list_current_runs_report.return_value = SimpleNamespace(runs=[])
-    subagents_mock.list_runs.return_value = []
-
-    single_agent = SimpleNamespace(
-        subagents=subagents_mock,
-        collaboration_store=store,
-        workspace_root=tmp_path,
-        _current_run_params=SimpleNamespace(run_id="root-run-001"),
-        _current_thread=SimpleNamespace(thread_id="thread-main", thread_kind="conversation"),
+    # 3.2 Foreground single agent with canonical owner/thread/task and zero subagents
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            enable_subagents=True,
+        ),
+        tmp_path,
     )
-    tool = ManageHandoffBoardTool(agent=single_agent, service=service)
-    ctx = ToolInvocationContext(runtime_snapshot=MagicMock())
+    owner = agent.home_paths.owner_id
+    thread = agent.conversation_store.threads.get_or_create(
+        {
+            "canonical_user_id": "qa",
+            "channel": "local",
+            "channel_conversation_id": "w7b-handoff",
+            "channel_user_id": "qa",
+            "owner_id": owner,
+            "owner_home": str(agent.home_paths.owner_home_dir),
+        }
+    )
+    root_id = "root-run-001"
+    agent.conversation_store.tasks.bind(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": root_id,
+            "goal": "w7b handoff origin",
+            "status": "active",
+        }
+    )
+    repo = agent.subagents.runtime_db
+    task_row = repo.create_task(
+        owner_id=owner,
+        thread_id=thread.thread_id,
+        conversation_task_id=root_id,
+    )
+    task_run = repo.create_task_run(task_id=task_row["task_id"])
+    repo.create_agent_run(task_run_id=task_run["task_run_id"], run_id=root_id, role="main")
+    agent._current_run_params = SimpleNamespace(
+        run_id=root_id,
+        task_id=root_id,
+        task_attributes={
+            "conversation_task_id": root_id,
+            "conversation_thread_id": thread.thread_id,
+        },
+    )
+    agent._current_thread = thread
+
+    tool = ManageHandoffBoardTool(agent=agent, service=service)
+    ctx = ToolInvocationContext(runtime_snapshot=agent.tools.runtime_snapshot())
 
     reject_res = tool.execute_scoped(
         {"action": "open_case", "title": "Single agent attempt"},
@@ -199,20 +235,33 @@ def test_handoff_board_single_agent_rejection_and_list_cases(tmp_path: Path) -> 
     assert reject_res.result_envelope["retryable"] is False
     assert reject_res.result_envelope["next_action"] == "use_todo_tool"
 
-    # 3.3 Multi-agent context allows open_case
-    subagents_mock.list_runs_for_root_report.return_value = SimpleNamespace(runs=[MagicMock()])
+    # 3.3 Multi-agent context with real child subagent and canonical ownership allows open_case
+    agent.subagents.create_run(
+        goal="child worker",
+        thought="",
+        plan=["step"],
+        parent_id=root_id,
+        root_id=root_id,
+        depth=1,
+    )
     allow_res = tool.execute_scoped(
         {"action": "open_case", "title": "Multi agent valid case"},
         ctx,
     )
     assert allow_res.ok is True
-    case_id = allow_res.result_envelope["case"]["case_id"]
+    case_payload = allow_res.result_envelope["case"]
+    case_id = case_payload["case_id"]
+    assert case_id
+    assert case_payload["thread_id"] == thread.thread_id
+    assert case_payload["task_id"] == root_id
+    assert allow_res.result_envelope["scope_resolution"]["case_context"] == "canonical_task"
 
     # 3.4 list_cases slim 4-field output
     list_res = tool.execute_scoped({"action": "list_cases"}, ctx)
     assert list_res.ok is True
     cases = list_res.result_envelope.get("cases") or []
-    assert len(cases) >= 1
+    assert len(cases) == 1
+    assert cases[0]["case_id"] == case_id
     for c in cases:
         assert set(c.keys()) == {"case_id", "status", "title", "updated_at"}
 
