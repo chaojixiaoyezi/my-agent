@@ -556,6 +556,118 @@ def default_observation_readers(owner_home, owner_id, store, runtime, *, resourc
     return readers
 
 
+class _OwnerMediaLatestTarget:
+    """只保留当前 owner 且在游标之后的 business_upload 最新记录，减少全量遍历内存占用。"""
+
+    def __init__(self, owner_id: str, after: str) -> None:
+        self.owner_id = owner_id
+        self.after = str(after)
+        self.items: dict = {}
+
+    def __setitem__(self, artifact_id: str, record) -> None:
+        if (artifact_id > self.after
+                and getattr(record, 'source', None) == 'business_upload'
+                and (getattr(record, 'metadata', None) or {}).get('owner_id') == self.owner_id):
+            self.items[artifact_id] = record
+        else:
+            self.items.pop(artifact_id, None)
+
+
+class _SingleArtifactLatestTarget:
+    """点查询时只保留目标 artifact_id 的最新记录，维持 O(1) 内存。"""
+
+    def __init__(self, target_artifact_id: str) -> None:
+        self.target_artifact_id = target_artifact_id
+        self.item = None
+
+    def __setitem__(self, artifact_id: str, record) -> None:
+        if artifact_id == self.target_artifact_id:
+            self.item = record
+
+
+def _stream_business_media_registry(
+    home: Path,
+    parts: tuple[str, ...],
+    *,
+    latest_target,
+    budget_reason: str,
+    budget_next_action: str,
+    unreadable_reason: str,
+    unreadable_next_action: str,
+    expected_media_revision: str | None = None,
+    include_side_effect_none: bool = False,
+):
+    from ..artifacts.registry_reader import RegistryReadContext, _read_registry_line
+    from ..common.nofollow_fs import open_readonly_file_beneath
+    from ..conversation.business_access import BusinessError
+    from ..conversation.business_observability import ObservationSourceError
+
+    max_line_bytes = 1024 * 1024
+    try:
+        fd = open_readonly_file_beneath(home, parts)
+    except FileNotFoundError:
+        if expected_media_revision is not None and expected_media_revision != 'missing':
+            raise BusinessError('CURSOR_EXPIRED') from None
+        return 'missing', False
+    except (OSError, ValueError) as error:
+        details = {'reason': unreadable_reason, 'next_action': unreadable_next_action}
+        if include_side_effect_none:
+            details['side_effect_state'] = 'none'
+        raise ObservationSourceError('HOST_NOT_READY', details=details) from error
+
+    digest = hashlib.sha256()
+    context = RegistryReadContext(
+        path=home.joinpath(*parts),
+        record_from_payload=_record_from_payload,
+        latest=latest_target,
+    )
+    decode_error = None
+    try:
+        with os.fdopen(fd, 'rb') as fh:
+            line_no = 0
+            while True:
+                raw_line = fh.readline(max_line_bytes + 1)
+                if not raw_line:
+                    break
+                digest.update(raw_line)
+                if len(raw_line) > max_line_bytes:
+                    details = {'reason': budget_reason, 'next_action': budget_next_action}
+                    if include_side_effect_none:
+                        details['side_effect_state'] = 'none'
+                    raise ObservationSourceError('HOST_NOT_READY', details=details)
+                line_no += 1
+                if decode_error is not None or context.errors:
+                    continue
+                try:
+                    text_line = raw_line.decode('utf-8')
+                except UnicodeDecodeError as error:
+                    decode_error = error
+                    continue
+                _read_registry_line(context, text_line, line_no=line_no)
+    except ObservationSourceError:
+        raise
+    except OSError as error:
+        details = {'reason': unreadable_reason, 'next_action': unreadable_next_action}
+        if include_side_effect_none:
+            details['side_effect_state'] = 'none'
+        raise ObservationSourceError('HOST_NOT_READY', details=details) from error
+
+    media_revision = digest.hexdigest()
+    if expected_media_revision is not None and expected_media_revision != media_revision:
+        raise BusinessError('CURSOR_EXPIRED')
+    if decode_error is not None:
+        details = {'reason': unreadable_reason, 'next_action': unreadable_next_action}
+        if include_side_effect_none:
+            details['side_effect_state'] = 'none'
+        raise ObservationSourceError('HOST_NOT_READY', details=details) from decode_error
+    if context.errors:
+        details = {'reason': unreadable_reason, 'next_action': unreadable_next_action}
+        if include_side_effect_none:
+            details['side_effect_state'] = 'none'
+        raise ObservationSourceError('HOST_NOT_READY', details=details)
+    return media_revision, True
+
+
 class _OwnerReaders:
     """绑定一个owner的只读来源；游标签名不保存业务事实。"""
     # 同一进程用固定秘密派生各命名空间密钥；分页寿命不受其它 owner 的访问量影响。
@@ -1039,23 +1151,21 @@ class _OwnerReaders:
                         else {'phase': 'media', 'after': ''})
                     return ObservationPage(tuple(records), 'partial', source_paged=True, next_position={**next_position, 'revision': revision, 'source_coverage': source_coverage})
             phase, after = 'media', ''
-        from ..conversation.task_artifact_observation import _read_source
-
         parts = ('artifacts', 'business', *REGISTRY_RELATIVE_PATH.parts)
-        raw = _read_source(self.home, parts, 2 * 1024 * 1024, 'ARTIFACT_REGISTRY_UNREADABLE')
-        media_revision = hashlib.sha256(raw).hexdigest() if raw is not None else 'missing'
-        if position.get('media_revision') is not None and position['media_revision'] != media_revision:
-            raise BusinessError('CURSOR_EXPIRED')
-        if raw is not None:
-            if len(raw) > 2 * 1024 * 1024:
-                raise ObservationSourceError('HOST_NOT_READY', details={'reason': 'ARTIFACT_MEDIA_REGISTRY_READ_BUDGET',
-                    'side_effect_state': 'none', 'next_action': '原媒体登记簿超过有界读取预算，不能把截断内容当完整列表。'})
-            media, errors = latest_records_from_lines(self.home.joinpath(*parts), raw.decode('utf-8').splitlines(), _record_from_payload)
-            if errors:
-                raise ObservationSourceError('HOST_NOT_READY', details={'reason': 'ARTIFACT_MEDIA_REGISTRY_UNREADABLE',
-                    'side_effect_state': 'none', 'next_action': '原媒体登记簿无法解析，修复来源后重试。'})
-            selected = sorted((item for item in media.values() if item.artifact_id > str(after)
-                and item.metadata.get('owner_id') == self.owner and item.source == 'business_upload'), key=lambda item: item.artifact_id)
+        target = _OwnerMediaLatestTarget(self.owner, after)
+        media_revision, exists = _stream_business_media_registry(
+            self.home,
+            parts,
+            latest_target=target,
+            budget_reason='ARTIFACT_MEDIA_REGISTRY_READ_BUDGET',
+            budget_next_action='原媒体登记簿单条记录超过有界读取预算，不能把截断内容当完整列表。',
+            unreadable_reason='ARTIFACT_MEDIA_REGISTRY_UNREADABLE',
+            unreadable_next_action='原媒体登记簿无法解析，修复来源后重试。',
+            expected_media_revision=position.get('media_revision'),
+            include_side_effect_none=True,
+        )
+        if exists:
+            selected = sorted(target.items.values(), key=lambda item: item.artifact_id)
             for item in selected[:request.limit]:
                 meta = item.metadata
                 value = {'artifact_id': item.artifact_id, 'version_ref': meta['version_ref'], 'name': meta['display_name'],
@@ -1128,21 +1238,18 @@ class _OwnerReaders:
                 'read_ref': row.value['artifact_id'], 'available': row.value['available']}, row)
                 for row in selected if params.get('version_ref', row.value['version_ref']) == row.value['version_ref']))
         parts = ('artifacts', 'business', *REGISTRY_RELATIVE_PATH.parts)
-        raw = _read_source(self.home, parts, 2 * 1024 * 1024, 'ARTIFACT_REGISTRY_UNREADABLE')
-        if raw is not None:
-            from ..conversation.business_observability import ObservationSourceError
-            if len(raw) > 2 * 1024 * 1024:
-                raise ObservationSourceError('HOST_NOT_READY', details={'reason': 'ARTIFACT_REGISTRY_READ_BUDGET',
-                    'next_action': '原媒体登记簿超过点查询只读预算，不能把截断记录当最新版本。'})
-            try:
-                media, errors = latest_records_from_lines(self.home.joinpath(*parts), raw.decode('utf-8').splitlines(), _record_from_payload)
-            except (OSError, ValueError, TypeError) as error:
-                raise ObservationSourceError('HOST_NOT_READY', details={'reason': 'ARTIFACT_REGISTRY_UNREADABLE',
-                    'next_action': '原媒体登记簿无法解析，修复后重试。'}) from error
-            if errors:
-                raise ObservationSourceError('HOST_NOT_READY', details={'reason': 'ARTIFACT_REGISTRY_UNREADABLE',
-                    'next_action': '原媒体登记簿有坏记录，修复后重试。'})
-            item = media.get(params['artifact_id'])
+        target = _SingleArtifactLatestTarget(params['artifact_id'])
+        _, exists = _stream_business_media_registry(
+            self.home,
+            parts,
+            latest_target=target,
+            budget_reason='ARTIFACT_REGISTRY_READ_BUDGET',
+            budget_next_action='原媒体登记簿单条记录超过点查询只读预算，不能把截断记录当最新版本。',
+            unreadable_reason='ARTIFACT_REGISTRY_UNREADABLE',
+            unreadable_next_action='原媒体登记簿无法解析或存在坏记录，修复后重试。',
+        )
+        if exists:
+            item = target.item
             if item is not None and item.metadata.get('owner_id') == self.owner and item.source == 'business_upload':
                 meta = item.metadata
                 value = {'artifact_id': item.artifact_id, 'version_ref': meta['version_ref'], 'name': meta['display_name'],

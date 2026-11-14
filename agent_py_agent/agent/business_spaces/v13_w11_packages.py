@@ -139,17 +139,37 @@ def _mount_call(call, manager):
 # LLM: 只存结果回执，不复制安装权威；原Store绑定主体/输入，并在副作用前后实时复核。
 # 函数用途: 幂等执行一次包生命周期编排。
 def _package_receipted(call, mutate):
+    from .v13_history_rows import copy_value, encode
+
     v13_require_access(call)
+    key = call.idempotency_key
+    if type(key) is not str or not key or len(key) > 128:
+        raise BusinessError('INVALID_SCHEMA')
+    params_digest = _digest([call.action, call.params, call.expected_revision])
+    store = v13_store_for(call)
+    store._authorize()
+    receipt_key = hashlib.sha256(encode([store.subject_id, store.action, key])).hexdigest()
+    fingerprint = hashlib.sha256(encode(['package_operations', store.action, params_digest, None])).hexdigest()
+    receipt = store._rows('package_operations').get('receipts', receipt_key)
+    if receipt is None:
+        receipt = store._read_file('package_operations', allow_missing=True)['receipts'].get(receipt_key)
+    if receipt is not None:
+        if receipt.get('fingerprint') != fingerprint:
+            raise BusinessError('IDEMPOTENCY_CONFLICT')
+        return copy_value(receipt['result'])
+
+    # 域侧包卸载与外部插件锁都在 .store.lock 与外层配额事务外执行，避免锁序倒挂。
+    result = mutate(call)
 
     # LLM: 相同回执重放及异参拒绝都在实际操作之前完成。
-    # 函数用途: 在原生耐久事务内执行尚未完成的操作。
+    # 函数用途: 在原生耐久事务内仅提交幂等回执。
     def apply(records):
         v13_require_access(call)
-        return mutate(call)
+        return copy_value(result)
 
-    return v13_store_for(call).transaction('package_operations', apply,
-        idempotency_key=call.idempotency_key,
-        params_digest=_digest([call.action, call.params, call.expected_revision]))
+    return store.transaction('package_operations', apply,
+        idempotency_key=key,
+        params_digest=params_digest)
 
 
 # LLM: 原生安装表操作身份绑定当前主体与规范动作，不跨主体或动作碰撞。

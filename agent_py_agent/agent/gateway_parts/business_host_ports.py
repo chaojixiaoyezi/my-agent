@@ -25,6 +25,194 @@ def _inspect_callable_arity(fn: Callable[..., Any]) -> int:
         return 1
 
 
+def _fail_host_not_ready(reason: str, next_action: str, cause: BaseException | None = None) -> Any:
+    from ..conversation.business_access import BusinessError
+
+    error = BusinessError(
+        'HOST_NOT_READY',
+        details={
+            'reason': reason,
+            'effect_outcome': 'not_started',
+            'next_action': next_action,
+        },
+    )
+    if cause is not None:
+        raise error from cause
+    raise error
+
+
+def _extract_thread_report(rep: Any, *, strict: bool) -> list[Any]:
+    if isinstance(rep, tuple):
+        rows = list(rep[0])
+        errors = rep[1] if len(rep) > 1 else None
+        if strict and errors:
+            _fail_host_not_ready('THREAD_STORE_UNREADABLE', '线程记录存在损坏或不可读项，修复来源后重试空间归档。')
+        return rows
+    if isinstance(rep, dict):
+        if strict and (rep.get('errors') or rep.get('partial') or rep.get('truncated')):
+            _fail_host_not_ready('THREAD_SCAN_INCOMPLETE', '线程扫描未完整完成，确认宿主线程存储可用后重试空间归档。')
+        return list(rep.get('rows', rep.get('items', [])))
+    if hasattr(rep, 'rows'):
+        if strict and (getattr(rep, 'errors', None) or getattr(rep, 'partial', False) or getattr(rep, 'truncated', False)):
+            _fail_host_not_ready('THREAD_SCAN_INCOMPLETE', '线程扫描未完整完成，确认宿主线程存储可用后重试空间归档。')
+        return list(getattr(rep, 'rows', []) or [])
+    return list(rep)
+
+
+def _list_all_threads(threads_store: Any, *, strict: bool = False, scan_cap: int = 1_000_000) -> list[Any]:
+    instance_dict = getattr(threads_store, '__dict__', {})
+    use_threads_override = 'list_threads' in instance_dict
+    if hasattr(threads_store, 'list_report') and not use_threads_override:
+        try:
+            rep = threads_store.list_report(limit=0)
+        except TypeError:
+            rep = threads_store.list_report()
+        return _extract_thread_report(rep, strict=strict)
+    if hasattr(threads_store, 'list_threads'):
+        try:
+            threads = list(threads_store.list_threads(limit=0))
+        except TypeError:
+            threads = list(threads_store.list_threads())
+        if threads:
+            return threads
+        # 兼容只用切片实现 limit 的测试桩：若 limit=0 返回空，探测无参或大窗口调用。
+        if not hasattr(threads_store, 'list_report'):
+            try:
+                probe = list(threads_store.list_threads(limit=scan_cap))
+            except TypeError:
+                probe = list(threads_store.list_threads())
+            if strict and len(probe) >= scan_cap:
+                _fail_host_not_ready('THREAD_WINDOW_TRUNCATED', '线程数量超出单次窗口上限，确认完整索引后重试。')
+            return probe
+        return threads
+    if hasattr(threads_store, 'list_report'):
+        try:
+            rep = threads_store.list_report(limit=0)
+        except TypeError:
+            rep = threads_store.list_report()
+        return _extract_thread_report(rep, strict=strict)
+    if hasattr(threads_store, 'list_recent'):
+        try:
+            threads = list(threads_store.list_recent(scan_cap))
+        except TypeError:
+            threads = list(threads_store.list_recent())
+        if strict and len(threads) >= scan_cap:
+            _fail_host_not_ready('THREAD_WINDOW_TRUNCATED', '线程数量超出单次窗口上限，确认完整索引后重试。')
+        return threads
+    return []
+
+
+def _list_all_session_tasks(session_tasks: Any, *, scan_cap: int = 1_000_000) -> list[Any]:
+    if hasattr(session_tasks, 'list_page'):
+        tasks: list[Any] = []
+        seen_ids: set[str] = set()
+        seen_cursors: set[Any] = set()
+        cursor: Any = None
+        while True:
+            page = session_tasks.list_page(limit=100) if cursor is None else session_tasks.list_page(limit=100, cursor=cursor)
+            if not isinstance(page, dict):
+                _fail_host_not_ready('SESSION_TASK_SCAN_INVALID', '会话任务分页结果格式无效，请修复后重试。')
+            if page.get('partial') or page.get('truncated') or page.get('errors'):
+                _fail_host_not_ready('SESSION_TASK_SCAN_INCOMPLETE', '会话任务分页未完整完成，不能按无活跃任务归档。')
+            for task in page.get('items', []):
+                tid = getattr(task, 'task_id', None)
+                if tid is not None:
+                    key = str(tid)
+                    if key in seen_ids:
+                        continue
+                    seen_ids.add(key)
+                tasks.append(task)
+            next_cursor = page.get('next_cursor')
+            if not next_cursor:
+                break
+            if next_cursor == cursor or next_cursor in seen_cursors:
+                _fail_host_not_ready('SESSION_TASK_CURSOR_STALLED', '会话任务分页游标停滞，不能跳过未扫描任务。')
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        return tasks
+    if hasattr(session_tasks, 'list_recent'):
+        try:
+            tasks = list(session_tasks.list_recent(scan_cap))
+        except TypeError:
+            tasks = list(session_tasks.list_recent())
+        if len(tasks) >= scan_cap:
+            _fail_host_not_ready('SESSION_TASK_WINDOW_TRUNCATED', '会话任务数量超出窗口上限，确认完整清单后重试。')
+        return tasks
+    return []
+
+
+def _list_unsettled_workflow_runs(
+    owner_home_path: Path, settled_states: set[str], *, scan_cap: int = 1_000_000
+) -> list[tuple[str, dict[str, Any]]]:
+    import sqlite3
+
+    from ..workflows.run_list_index import RunListIndex
+    from ..workflows.run_store import WorkflowRunStore
+
+    runs_dir = owner_home_path / 'data' / 'workflow_runs'
+    index_db = owner_home_path / 'data' / 'workflow_run_index.sqlite3'
+    rstore = WorkflowRunStore(owner_home_path)
+    list_runs_fn = getattr(rstore, 'list_runs', None)
+    use_custom_list = (
+        callable(list_runs_fn)
+        and (
+            not hasattr(rstore, '_read')
+            or 'list_runs' in getattr(rstore, '__dict__', {})
+            or getattr(WorkflowRunStore, 'list_runs', None).__module__ != WorkflowRunStore.__module__
+        )
+    )
+    if use_custom_list:
+        try:
+            runs = list(rstore.list_runs(limit=scan_cap))
+        except TypeError:
+            runs = list(rstore.list_runs())
+        if len(runs) >= scan_cap:
+            _fail_host_not_ready('WORKFLOW_RUN_WINDOW_TRUNCATED', '工作流运行数量超出扫描上限，请使用索引完整查询。')
+        active: list[tuple[str, dict[str, Any]]] = []
+        for run in runs:
+            bc = getattr(run, 'business_context', None) or {}
+            status = getattr(run, 'status', '')
+            if status not in settled_states:
+                run_id = str(getattr(run, 'workflow_run_id', None) or getattr(run, 'run_id', 'run'))
+                active.append((run_id, bc if isinstance(bc, dict) else {}))
+        return active
+
+    if not runs_dir.is_dir() and not index_db.is_file():
+        return []
+
+    index = RunListIndex(owner_home_path)
+    try:
+        with index.connection() as conn:
+            run_ids = [
+                row[0]
+                for row in conn.execute(
+                    'SELECT run_id FROM runs WHERE status NOT IN (?, ?, ?, ?, ?) '
+                    'UNION SELECT run_id FROM pending '
+                    'UNION SELECT run_id FROM legacy',
+                    ('succeeded', 'completed', 'failed', 'cancelled', 'settled'),
+                ).fetchall()
+            ]
+    except sqlite3.Error as error:
+        _fail_host_not_ready('WORKFLOW_INDEX_UNREADABLE', '工作流运行索引不可读，确认宿主存储就绪后重试。', error)
+
+    active_runs: list[tuple[str, dict[str, Any]]] = []
+    for run_id in run_ids:
+        try:
+            data = rstore._read(run_id, 'run.json', concurrent_publication=True)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, TypeError, KeyError, UnicodeError) as error:
+            _fail_host_not_ready('WORKFLOW_RUN_UNREADABLE', f'工作流运行 {run_id} 快照不可读，修复来源后重试。', error)
+        if not isinstance(data, dict):
+            _fail_host_not_ready('WORKFLOW_RUN_UNREADABLE', f'工作流运行 {run_id} 快照格式无效，修复来源后重试。')
+        status = data.get('status', '')
+        if status not in settled_states:
+            bc = data.get('business_context') or {}
+            wf_run_id = str(data.get('workflow_run_id') or data.get('run_id') or run_id)
+            active_runs.append((wf_run_id, bc if isinstance(bc, dict) else {}))
+    return active_runs
+
+
 # LLM: 从会话任务元数据中解析业务上下文，提供只读结构化对象。
 # 函数用途: 根据 task_id 读取对应的 BusinessExecutionContext。
 def build_default_task_business_context(host: Any) -> Callable[[str], Any | None]:
@@ -172,22 +360,7 @@ def build_default_business_space_reference_resolver(host: Any) -> Callable[[str,
                             'space_id': bg.get('space_id') if isinstance(bg, dict) else None,
                             'kind': 'agent'
                         }
-                    threads = []
-                    if hasattr(store.threads, 'list_threads'):
-                        try:
-                            threads = list(store.threads.list_threads(limit=100))[:100]
-                        except TypeError:
-                            threads = list(store.threads.list_threads())[:100]
-                    elif hasattr(store.threads, 'list_report'):
-                        rep = store.threads.list_report(limit=100)
-                        if isinstance(rep, tuple):
-                            threads = rep[0][:100]
-                        elif hasattr(rep, 'rows'):
-                            threads = getattr(rep, 'rows', [])[:100]
-                        else:
-                            threads = list(rep)[:100]
-                    elif hasattr(store.threads, 'list_recent'):
-                        threads = list(store.threads.list_recent(100))[:100]
+                    threads = _list_all_threads(store.threads, strict=False)
 
                     for th in threads:
                         th_title = getattr(th, 'title', '')
@@ -373,16 +546,13 @@ def build_default_business_active_references(host: Any) -> Callable[[str, Any], 
             return []
         blockers: list[dict[str, str]] = []
 
+        from ..conversation.business_access import BusinessError
+
         # 1. non-terminal SessionTasks
         store = getattr(host, 'conversation_store', None)
         if store is not None and hasattr(store, 'session_tasks'):
             try:
-                tasks = []
-                if hasattr(store.session_tasks, 'list_page'):
-                    page = store.session_tasks.list_page(limit=100)
-                    tasks = page.get('items', [])
-                elif hasattr(store.session_tasks, 'list_recent'):
-                    tasks = store.session_tasks.list_recent(100)
+                tasks = _list_all_session_tasks(store.session_tasks)
                 terminal = {'done', 'completed', 'failed', 'cancelled', 'terminated'}
                 for task in tasks:
                     if getattr(task, 'status', '') in terminal:
@@ -396,29 +566,15 @@ def build_default_business_active_references(host: Any) -> Callable[[str, Any], 
                             'kind': 'task',
                             'reason_code': 'ACTIVE_TASK'
                         })
-            except (OSError, ValueError, RuntimeError):
-                pass
+            except BusinessError:
+                raise
+            except (OSError, ValueError, RuntimeError) as error:
+                _fail_host_not_ready('SESSION_TASK_SCAN_FAILED', '无法完整检查活跃会话任务，稍后重试空间归档。', error)
 
         # 2. non-retired background agents
         if store is not None and hasattr(store, 'threads'):
             try:
-                threads = []
-                if hasattr(store.threads, 'list_threads'):
-                    try:
-                        threads = list(store.threads.list_threads(limit=100))[:100]
-                    except TypeError:
-                        threads = list(store.threads.list_threads())[:100]
-                elif hasattr(store.threads, 'list_report'):
-                    rep = store.threads.list_report(limit=100)
-                    if isinstance(rep, tuple):
-                        threads = rep[0][:100]
-                    elif hasattr(rep, 'rows'):
-                        threads = getattr(rep, 'rows', [])[:100]
-                    else:
-                        threads = list(rep)[:100]
-                elif hasattr(store.threads, 'list_recent'):
-                    threads = list(store.threads.list_recent(100))[:100]
-
+                threads = _list_all_threads(store.threads, strict=True)
                 for thread in threads:
                     meta = getattr(thread, 'metadata', None) or {}
                     is_active = False
@@ -432,27 +588,26 @@ def build_default_business_active_references(host: Any) -> Callable[[str, Any], 
                             'kind': 'agent',
                             'reason_code': 'ACTIVE_AGENT'
                         })
-            except (OSError, ValueError, RuntimeError):
-                pass
+            except BusinessError:
+                raise
+            except (OSError, ValueError, RuntimeError) as error:
+                _fail_host_not_ready('THREAD_SCAN_FAILED', '无法完整检查后台代理线程，稍后重试空间归档。', error)
 
         # 3. running/paused/queued/waiting_for_agent WorkflowRunStore runs
         if owner_home_path is not None:
             try:
-                from ..workflows.run_store import WorkflowRunStore
-                rstore = WorkflowRunStore(owner_home_path)
-                if hasattr(rstore, 'list_runs'):
-                    runs = rstore.list_runs(limit=50)
-                    settled_states = {'succeeded', 'completed', 'failed', 'cancelled', 'settled'}
-                    for run in runs:
-                        bc = getattr(run, 'business_context', None) or {}
-                        if bc.get('space_id') == space_id and getattr(run, 'status', '') not in settled_states:
-                            blockers.append({
-                                'ref': str(getattr(run, 'workflow_run_id', None) or getattr(run, 'run_id', 'run')),
-                                'kind': 'workflow_run',
-                                'reason_code': 'ACTIVE_WORKFLOW_RUN'
-                            })
-            except (OSError, ValueError, LookupError, RuntimeError):
-                pass
+                settled_states = {'succeeded', 'completed', 'failed', 'cancelled', 'settled'}
+                for wf_run_id, bc in _list_unsettled_workflow_runs(owner_home_path, settled_states):
+                    if bc.get('space_id') == space_id:
+                        blockers.append({
+                            'ref': wf_run_id,
+                            'kind': 'workflow_run',
+                            'reason_code': 'ACTIVE_WORKFLOW_RUN'
+                        })
+            except BusinessError:
+                raise
+            except (OSError, ValueError, LookupError, RuntimeError) as error:
+                _fail_host_not_ready('WORKFLOW_RUN_SCAN_FAILED', '无法完整检查未完结工作流运行，稍后重试空间归档。', error)
 
         # 4. active ManagedSubscriptionService items
         if owner_home_path is not None:
@@ -492,8 +647,8 @@ def build_default_business_active_references(host: Any) -> Callable[[str, Any], 
                                     'kind': 'subscription',
                                     'reason_code': 'ACTIVE_SUBSCRIPTION'
                                 })
-            except (OSError, ValueError, RuntimeError):
-                pass
+            except (OSError, ValueError, RuntimeError) as error:
+                _fail_host_not_ready('SUBSCRIPTION_SCAN_FAILED', '无法完整检查活跃订阅，稍后重试空间归档。', error)
 
         return blockers[:100]
 

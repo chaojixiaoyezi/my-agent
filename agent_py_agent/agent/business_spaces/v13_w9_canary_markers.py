@@ -112,29 +112,140 @@ def _document(call, space_id, secret):
     return {key: result[key] for key in ("artifact_id", "version_ref", "name", "mime_type", "size_bytes", "content_sha256")}
 
 
+# LLM: 在外层事务之前校验并重放/拦截冲突回执；失败后按 SHA256 回滚孤立附件，避免锁序倒挂或配额泄漏。
+# 函数用途: 预检 W9 幂等回执并在提交失败时清理已上传附件。
+def _precheck_w9_receipt(call, collection):
+    from ..conversation.business_access import BusinessError
+    from .v13_history_rows import copy_value, encode
+    from .v13_store import v13_store_for
+
+    key = call.idempotency_key
+    if type(key) is not str or not key or len(key) > 128:
+        raise BusinessError("INVALID_SCHEMA")
+    params_digest = hashlib.sha256(json.dumps(
+        {"action": call.action, "params": call.params, "expected_revision": call.expected_revision},
+        sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ).encode()).hexdigest()
+    store = v13_store_for(call, "owner")
+    store._authorize()
+    receipt_key = hashlib.sha256(encode([store.subject_id, store.action, key])).hexdigest()
+    fingerprint = hashlib.sha256(encode([collection, store.action, params_digest, None])).hexdigest()
+    receipt = store._rows(collection).get("receipts", receipt_key)
+    if receipt is None:
+        receipt = store._read_file(collection, allow_missing=True)["receipts"].get(receipt_key)
+    if receipt is not None:
+        if receipt.get("fingerprint") != fingerprint:
+            raise BusinessError("IDEMPOTENCY_CONFLICT")
+        return copy_value(receipt["result"])
+    call.context.check(call.action, {"owner_id": call.owner_id})
+    return None
+
+
+def _rollback_document(call, artifact):
+    from pathlib import Path
+
+    from ..artifacts.registry import REGISTRY_RELATIVE_PATH
+    from ..common.directory_lock import locked_private_directory
+    from ..common.nofollow_fs import read_bytes_beneath, write_bytes_atomic_beneath
+    from ..user_space.owner_quota import OwnerQuotaChange, owner_quota_enforcer_from_policy
+
+    if not isinstance(artifact, dict):
+        return
+    artifact_id = artifact.get("artifact_id")
+    expected_sha256 = artifact.get("content_sha256")
+    if not artifact_id or not expected_sha256:
+        return
+    home = Path(call.owner_home)
+    blob_parts = ("artifacts", "business", artifact_id + ".blob")
+    blob_path = home.joinpath(*blob_parts)
+    reg_parts = ("artifacts", "business", *REGISTRY_RELATIVE_PATH.parts)
+    reg_path = home.joinpath(*reg_parts)
+    with owner_quota_enforcer_from_policy(home).admission() as admission:
+        with locked_private_directory(home, relative_parts=("artifacts", "business"),
+                                      lock_name=".business-artifacts.lock"):
+            try:
+                raw_blob = read_bytes_beneath(home, blob_parts)
+            except FileNotFoundError:
+                raw_blob = None
+            remove_blob = raw_blob is not None and hashlib.sha256(raw_blob).hexdigest() == expected_sha256
+            try:
+                reg_raw = read_bytes_beneath(home, reg_parts)
+            except FileNotFoundError:
+                reg_raw = None
+            removed_reg = False
+            new_bytes = b""
+            if reg_raw is not None:
+                kept = []
+                for line in reg_raw.decode("utf-8", errors="replace").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        kept.append(line)
+                        continue
+                    if (isinstance(entry, dict) and entry.get("artifact_id") == artifact_id
+                            and entry.get("sha256") == expected_sha256):
+                        removed_reg = True
+                        continue
+                    kept.append(line)
+                if removed_reg and kept:
+                    new_bytes = ("\n".join(kept) + "\n").encode("utf-8")
+            changes = []
+            if remove_blob:
+                changes.append(OwnerQuotaChange(blob_path, 0))
+            if removed_reg:
+                changes.append(OwnerQuotaChange(reg_path, len(new_bytes)))
+            if changes:
+                # 同一准入事务内单次提交全部配额缩减，避免在超128项目录上分阶段调用使基线失效。
+                admission.check(changes)
+            if remove_blob and not blob_path.is_symlink():
+                blob_path.unlink(missing_ok=True)
+            if removed_reg:
+                if new_bytes:
+                    write_bytes_atomic_beneath(home, reg_parts, new_bytes)
+                elif not reg_path.is_symlink():
+                    reg_path.unlink(missing_ok=True)
+
+
 # LLM: 随机值只在首次响应公开；唯一持久 verifier 是 SHA256，禁止将秘密放进标签或触发详情。
 # 函数用途: 创建凭据、API key 或文档型标记。
 def create_marker(call):
     space_id = w9_require_space(call, call.params.get("space_id"))
+    replayed = _precheck_w9_receipt(call, "canary_markers")
+    if replayed is not None:
+        return replayed
     p = call.params
+    secret = "canary_" + p["kind"] + "_" + secrets.token_urlsafe(32)
+    digest = hashlib.sha256(secret.encode()).hexdigest()
+    identifier = "marker-" + secrets.token_hex(16)
+    now = w9_now(call)
+    expiry = datetime.fromtimestamp(call.clock() + p.get("expires_in_days", 30) * 86400, timezone.utc).isoformat()
+    # 文档上传会在内部获取配额与业务附件锁，必须在 .store.lock 与外层配额事务外先暂存。
+    artifact = _document(call, space_id, secret) if p["kind"] == "document" else None
+    committed = False
 
-    # LLM: 随机值及附件发表都在原幂等事务回调内，重放不再生成或上传。
+    # LLM: 随机值及附件发表都在事务外暂存后原子登记，重放已前置拦截，提交失败回滚暂存附件。
     # 函数用途: 保存标记指纹并构造首次响应。
     def mutate(records):
-        secret = "canary_" + p["kind"] + "_" + secrets.token_urlsafe(32)
-        digest = hashlib.sha256(secret.encode()).hexdigest()
-        identifier = "marker-" + secrets.token_hex(16)
-        now = w9_now(call)
-        expiry = datetime.fromtimestamp(call.clock() + p.get("expires_in_days", 30) * 86400, timezone.utc).isoformat()
+        nonlocal committed
         row = {"token_id": identifier, "space_id": space_id, "kind": p["kind"], "label": p["label"],
             "placement_hint": p.get("placement_hint"), "state": "active", "fingerprint": digest[:16],
-            "artifact": _document(call, space_id, secret) if p["kind"] == "document" else None,
-            "expires_at": expiry, "trigger_count": 0, "last_triggered_at": None,
+            "artifact": artifact, "expires_at": expiry, "trigger_count": 0, "last_triggered_at": None,
             "revision": 1, "created_at": now, "updated_at": now, "owner_id": call.owner_id, "value_sha256": digest}
         records[identifier] = row
+        committed = True
         return {"marker": _view(row), "secret": secret}
 
-    return w9_write(call, "canary_markers", mutate, receipt_view=_receipt)
+    try:
+        result = w9_write(call, "canary_markers", mutate, receipt_view=_receipt)
+    except Exception:
+        if artifact is not None:
+            _rollback_document(call, artifact)
+        raise
+    if artifact is not None and not committed:
+        _rollback_document(call, artifact)
+    return result
 
 
 # LLM: 无论 active/revoked 都按最新记录做 CAS，吊销不抹除既有证据。
@@ -222,7 +333,12 @@ def list_triggers(call):
     known = {(row["source"], row["source_ref"]) for row in w9_list(call, "canary_triggers") if row["token_id"] == identifier}
     pending = [item for item in sources if (item[0], item[1]) not in known]
     batch = pending
+    persistence_degraded = False
+    persistence_warning = None
     if batch:
+        from ..conversation.business_access import BusinessError
+        from ..user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
+
         key = hashlib.sha256(json.dumps([identifier, batch], sort_keys=True).encode()).hexdigest()
         scan_call = replace(call, idempotency_key="marker-scan-" + key,
             params={"token_id": identifier, "scan_digest": key})
@@ -252,11 +368,36 @@ def list_triggers(call):
                     revision=current["revision"] + 1, updated_at=w9_now(call))
             return {"added": added}
 
-        w9_write_many(scan_call, ("canary_markers", "canary_triggers"), mutate)
+        try:
+            w9_write_many(scan_call, ("canary_markers", "canary_triggers"), mutate)
+        except OwnerQuotaExceeded:
+            persistence_degraded = True
+            persistence_warning = "OWNER_QUOTA_EXCEEDED"
+        except OwnerQuotaUnavailable:
+            persistence_degraded = True
+            persistence_warning = "PERSISTENCE_UNAVAILABLE"
+        except (BusinessError, HostAPIError) as error:
+            if getattr(error, "code", None) != "STORE_UNAVAILABLE":
+                raise
+            persistence_degraded = True
+            persistence_warning = "STORE_UNAVAILABLE"
     rows = [{key: value for key, value in row.items() if key not in ("owner_id", "revision", "created_at", "updated_at")}
         for row in w9_list(call, "canary_triggers") if row["token_id"] == identifier]
+    if persistence_degraded:
+        seen_ids = {row["trigger_id"] for row in rows}
+        for source, ref, observed in batch:
+            trigger_id = "trigger-" + hashlib.sha256(json.dumps([identifier, source, ref]).encode()).hexdigest()[:32]
+            if trigger_id in seen_ids:
+                continue
+            seen_ids.add(trigger_id)
+            rows.append({"trigger_id": trigger_id, "token_id": identifier, "observed_at": observed,
+                "source": source, "source_ref": ref,
+                "details": {"matched_by": "sha256", "revoked": marker["state"] == "revoked"}})
     rows.sort(key=lambda row: (row["observed_at"], row["trigger_id"]), reverse=True)
     result = w9_page(call, "canary_triggers", rows)
-    if incomplete or len(pending) > len(batch):
+    if incomplete or len(pending) > len(batch) or persistence_degraded:
         result["coverage"] = "partial"
+    if persistence_degraded:
+        result["persistence_degraded"] = True
+        result["persistence_warning"] = persistence_warning
     return result
