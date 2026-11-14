@@ -493,21 +493,10 @@ def observe_learning(store, name, *, sha256, task_id, outcome, source=None):
 
         data['observations'] = observations[-MAX_OBSERVATIONS_COUNT:]
         data.setdefault('baseline_at', ts)
-        positive, negative_obs = _verified_counts(observations, sha256)
-        data['helped_count'] = positive
-        cur_hurt = max(0, int(data.get("hurt_count") or 0))
+        data['helped_count'] = _verified_counts(observations, sha256)[0]
         if bound_record:
-            # hurt_count == 0 时兼容既有人工/宿主双独立正面验证晋升，一旦存在负反馈则只认3+hurt_count次独立使用。
             if outcome == 'effective':
                 data['last_used_at'] = max(float(data.get('last_used_at') or 0.0), ts)
-            if cur_hurt == 0 and positive >= 2 and negative_obs == 0 and outcome == 'effective':
-                data['quality'] = 'established'
-                data['quality_basis'] = 'verified_effective'
-                data['established_at'] = float(data.get('established_at') or ts)
-                if data.get('state') not in {'disabled', 'archived'}:
-                    if current.maintenance.get('state') == 'trial':
-                        data['promotion_history'] = [*data.get('promotion_history', []), 'active'][-MAX_PROMOTION_HISTORY_COUNT:]
-                    data['state'] = 'active'
         record = replace(current, maintenance=data)
         store.save_registry(replace(registry, skills={**registry.skills, name: record}))
     return {
@@ -955,7 +944,8 @@ def _verify_single_ownership(store: SkillLearningStore, current: LearnedSkill) -
     if dir_exists and has_extra:
         return "user_modified"
     if not dir_exists:
-        return "unknown"
+        # 目录缺失或已清空且无未决操作时交还所有权、释放托管槽位；读取或链接异常仍保留未知状态。
+        return "unknown" if has_extra else "user_modified"
     try:
         text = read_text_beneath(anchor, (*dir_parts, "SKILL.md"))
     except (NoFollowPathError, OSError, UnicodeDecodeError, ValueError):

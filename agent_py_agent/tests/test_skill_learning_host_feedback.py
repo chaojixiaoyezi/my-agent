@@ -48,7 +48,7 @@ def test_real_verification_seam_promotes_only_exact_adopted_run(tmp_path):
         result = _success(call,'not interpreted',{'process':{'status':'exited','return_code':0}})
         record_tool_verification(agent,call,result)
     data = ctx.store.load_registry().skills[NAME].maintenance
-    assert data['quality']=='established'
+    assert data['quality']=='trial' and data['helped_count']==2
     facts = [row for row in data['observations'] if row['authority']=='host']
     assert len(facts)==2 and {row['run_id'] for row in facts}=={'run1','run2'}
     assert all(row['receipt_id'].startswith('verification:') for row in facts)

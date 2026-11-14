@@ -41,10 +41,11 @@ def test_model_adoption_does_not_prove_quality_and_periodic_job_cannot_inflate(t
     assert data['quality']=='trial' and len(data['observations'])==6
     observe_learning(ctx.store,NAME,sha256=row.sha256,task_id='independent-task',outcome='adopted')
     observe_learning(ctx.store,NAME,sha256=row.sha256,task_id='independent-task',outcome='effective',source=LearningObservationSource(authority='human',actor_id='human-test',receipt_id='control-new'))
-    assert ctx.store.load_registry().skills[NAME].maintenance['quality']=='established'
+    data = ctx.store.load_registry().skills[NAME].maintenance
+    assert data['quality']=='trial' and data['helped_count']==2 and len(data['observations'])==8
     for number in range(3):
         observe_learning(ctx.store,NAME,sha256=row.sha256,task_id=f'network-{number}',outcome='environment',source=LearningObservationSource(authority='human',actor_id='human-test',receipt_id=f'control-net-{number}'))
-    assert ctx.store.load_registry().skills[NAME].maintenance['quality']=='established'
+    assert ctx.store.load_registry().skills[NAME].maintenance['quality']=='trial'
     with pytest.raises(ValueError):
         observe_learning(ctx.store,NAME,sha256=row.sha256,task_id='forged',outcome='effective',source=LearningObservationSource())
 
