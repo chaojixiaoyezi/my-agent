@@ -266,7 +266,7 @@ def test_preclaim_validator_fault_fails_closed_without_operation(
 
     result = execution.result
     assert result.ok is False
-    assert result.error_code == "TOOL_ERROR"
+    assert result.error_code == "TOOL_INVOCATION_VALIDATOR_FAILED"
     assert result.metadata["reported_error_code"] == "TOOL_INVOCATION_VALIDATOR_FAILED"
     assert result.failure_stage == "validation"
     assert result.handler_executed is False

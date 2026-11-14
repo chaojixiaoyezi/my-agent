@@ -410,6 +410,19 @@ class ToolResult:
         failure_stage = str(self.failure_stage or "").strip().lower()
         if status == "succeeded" and failure_stage:
             raise ValueError("successful tool result cannot carry failure_stage")
+        effect_outcome = str(self.effect_outcome or "").strip().lower()
+        action_decision = self.metadata.get("action_decision") if isinstance(self.metadata, dict) else None
+        resolved_effect = (
+            str(action_decision.get("resolved_effect") or "").strip().lower()
+            if isinstance(action_decision, dict)
+            else ""
+        )
+        replayed_terminal_mutation = (
+            self.operation is not None
+            and bool(self.operation.replayed)
+            and str(self.operation.status or "").strip().lower() in {"succeeded", "failed", "cancelled"}
+            and resolved_effect not in {"", "read_only"}
+        )
         code = str(self.error_code or "").strip().upper()
         category = str(self.error_category or "").strip()
         retryable = bool(self.retryable)
@@ -419,9 +432,20 @@ class ToolResult:
             contract = error_contract(code or "UNKNOWN_ERROR")
             code = contract.code
             category = contract.category
-            retryable = contract.retryable
+            retryable = (
+                False
+                if (effect_outcome == "unknown" or replayed_terminal_mutation)
+                else contract.retryable
+            )
             recommended = contract.recommended_action
             recovery = contract.recovery_hint
+            if effect_outcome == "unknown" and recommended in {"retry", "retry_after_backoff"}:
+                unknown_contract = error_contract("TOOL_OPERATION_OUTCOME_UNKNOWN")
+                recommended = unknown_contract.recommended_action
+                recovery = unknown_contract.recovery_hint
+            elif replayed_terminal_mutation and recommended in {"retry", "retry_after_backoff"}:
+                recommended = "change_strategy"
+                recovery = "原副作用操作已处于终态重放，禁止原样重复提交同一写操作；请先核实当前目标状态后再换参或调整策略。"
         else:
             code = category = recommended = recovery = ""
             retryable = False
@@ -447,7 +471,7 @@ class ToolResult:
         object.__setattr__(self, "recovery_hint", recovery)
         object.__setattr__(self, "failure_stage", failure_stage)
         object.__setattr__(self, "duration_ms", duration)
-        object.__setattr__(self, "effect_outcome", str(self.effect_outcome or "").strip().lower())
+        object.__setattr__(self, "effect_outcome", effect_outcome)
         object.__setattr__(self, "effect_source_ref", str(self.effect_source_ref or "").strip())
         object.__setattr__(self, "refs", tuple(self.refs))
         object.__setattr__(self, "output_trust", trust)
@@ -619,13 +643,25 @@ class ToolResult:
         if source_effect:
             fields.append(f"source_effect_outcome={source_effect['effect_outcome']}")
         parts = [project(f"[tool-result; {'; '.join(fields)}]"), project(self.output)]
+        has_host_next_action = False
         if self.error_code and trusted_host_error and host_error.get("next_action"):
             from ..common.log_redaction import redact_sensitive_text
 
             action = host_error["next_action"]
-            if isinstance(action, str):
+            if isinstance(action, str) and action.strip():
+                has_host_next_action = True
                 parts.insert(1, "[host-business-recovery] " + project(json.dumps({
                     "next_action": redact_sensitive_text(action[:2048])}, ensure_ascii=False)))
+        raw_next_action = self.metadata.get("next_action") if isinstance(self.metadata, dict) else None
+        if not has_host_next_action and isinstance(raw_next_action, str) and raw_next_action.strip():
+            from ..common.log_redaction import redact_sensitive_text
+
+            bounded_next = redact_sensitive_text(raw_next_action.strip()[:2048])
+            if bounded_next:
+                parts.append(
+                    "[tool-next-action] "
+                    + project(json.dumps({"next_action": bounded_next}, ensure_ascii=False))
+                )
         if self.applied_approval is not None:
             parts.append(
                 "[tool-approval; status=approved; "

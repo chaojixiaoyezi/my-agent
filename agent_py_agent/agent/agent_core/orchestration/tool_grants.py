@@ -13,7 +13,7 @@ from ...subagents.role_templates import (
     active_model_subagent_tools,
     template_for_role,
 )
-from ...tooling.registry_auth import canonical_discovery_grants
+from ...tooling.registry_auth import action_ceilings, normalize_tool_grants
 from ...tooling.write_boundary import WRITE_TOOL_ORDER
 
 CODING_SUBAGENT_TOOLS = [
@@ -54,9 +54,8 @@ _CODING_TOOL_PRESETS = {"coding"}
 # LLM: 先规范化显式发现grant再合并预设；目录令牌不得被预设补入的tool_search覆盖，精确Audit仍取宿主scope，无IO。
 # 函数用途: 按真实显式意图和预设生成子代理授权，保持退休过滤及只读目录限制。
 def subagent_allowed_tools(params: dict[str, object]) -> list[str] | None:
-    allowed_tools = canonical_discovery_grants(active_model_subagent_tools(
-        string_list(params.get("allowed_tools"), TOOL_TEXT_LIST_OPTIONS)
-    ))
+    explicit_list = string_list(params.get("allowed_tools"), TOOL_TEXT_LIST_OPTIONS)
+    allowed_tools = normalize_tool_grants(active_model_subagent_tools(explicit_list))
     # LLM: Internal Audit source phases use an exact host-derived grant.  The
     # expected set comes from their typed attributes rather than the caller's
     # list, and is validated again at the final execution seam.
@@ -68,11 +67,13 @@ def subagent_allowed_tools(params: dict[str, object]) -> list[str] | None:
         )
 
         if exact_scope := audit_worker_tool_scope(attrs):
-            return active_model_subagent_tools(exact_scope)
+            return normalize_tool_grants(active_model_subagent_tools(exact_scope))
     # 窄角色不经 coding 预设补入 shell/写入；显式空清单必须原样保持。
     template = template_for_role(str(params.get("role") or ""))
     if template is not None and not template.inherit_base_tools:
-        return allowed_tools if "allowed_tools" in params else list(template.default_tools)
+        return allowed_tools if "allowed_tools" in params else normalize_tool_grants(list(template.default_tools))
+    if explicit_list and not allowed_tools:
+        return []
     preset = str(params.get("tool_preset") or "").strip().lower()
     preset_tools = _preset_allowed_tools(preset) if preset else None
     if allowed_tools:
@@ -92,7 +93,21 @@ def _preset_allowed_tools(preset: str) -> list[str] | None:
     return None
 
 
-# LLM: Merge preserves order but always applies the canonical model-surface filter.
-# 函数用途: 合并显式与基础工具，并去重、删除已退休控制工具。
+# LLM: 显式授权与预设分别归一；预设补入同名裸工具时必须保留显式 tool:action 动作上界，不扩权。
+# 函数用途: 合并显式与基础工具，去重、删除已退休控制工具并保留精确动作上界。
 def _merge_tool_grants(explicit: list[str], baseline: list[str] | None) -> list[str]:
-    return active_model_subagent_tools([*explicit, *(baseline or [])])
+    exp = normalize_tool_grants(active_model_subagent_tools(explicit))
+    base = normalize_tool_grants(active_model_subagent_tools(baseline or []))
+    exp_bare = {item for item in exp if ":" not in item}
+    exp_ceil = action_ceilings(exp)
+    base_ceil = action_ceilings(base)
+    bare_order = [
+        *(item for item in exp if ":" not in item),
+        *(item for item in base if ":" not in item and item not in exp_bare),
+    ]
+    tokens: list[str] = []
+    for name in bare_order:
+        acts = exp_ceil.get(name) if name in exp_bare else base_ceil.get(name)
+        if acts:
+            tokens.extend(f"{name}:{act}" for act in sorted(acts))
+    return [*bare_order, *tokens]

@@ -5377,4 +5377,20 @@ ERROR_CONTRACTS.update({
         code="UNSUPPORTED_ACTION", category="validation", retryable=False,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="当前宿主未提供该结构化动作；通过原工具发现或公开目录查询实际可用动作及schema，不能换名称猜调、绕过原权限或假称已经执行。"),
+    "SERVICE_UNAVAILABLE": ErrorContract(
+        code="SERVICE_UNAVAILABLE", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="点名的宿主服务当前未就绪或不可用；请核查该具体服务的就绪状态与装配条件，不要原样重复提交。"),
+    "CHANNEL_MESSAGES_UNAVAILABLE": ErrorContract(
+        code="CHANNEL_MESSAGES_UNAVAILABLE", category="capability", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="当前通道消息能力未就绪；请先调用 channel_messages(action=status) 查看缺失的具体通道配置或连接状态，不要盲目重试。"),
+    "TOOL_POST_COMMIT_READBACK_FAILED": ErrorContract(
+        code="TOOL_POST_COMMIT_READBACK_FAILED", category="state", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="主写入动作已提交但后置回读失败；请先读取目标对象当前版本或原始操作回执核实状态，不要重复发起写入以修补账目。"),
+    "TOOL_PARTIAL_COMMIT": ErrorContract(
+        code="TOOL_PARTIAL_COMMIT", category="tool", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="多文件或分步写入已发生部分落盘；请读取 files_modified 与 failed_path 核实实际变更，基于最新版本仅修复剩余部分，禁止原样整体重发。"),
 })

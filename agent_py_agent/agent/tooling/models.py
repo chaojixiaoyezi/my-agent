@@ -12,8 +12,10 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
+from ..common.log_redaction import redact_sensitive_text
 from ..retrieval.embedding import EmbeddingProvider, cosine
 from ..retrieval.embedding_usage import counted_as, embedding_input_type
 from ..workspace_read_context import WorkspaceReadContext
@@ -773,10 +775,13 @@ class ToolHandlerOutcome:
     # 仅由宿主实现显式提供公开错误事实；不参与权限、重试与调度，不从工具正文解析。
     host_error: dict[str, Any] = field(default_factory=dict, kw_only=True)
     source_effect: dict[str, Any] = field(default_factory=dict, kw_only=True)
+    next_action: str = field(default="", kw_only=True)
 
     def __post_init__(self) -> None:
         self.host_error = host_error_facts(self.host_error)
         self.source_effect = source_effect_facts(self.source_effect)
+        raw_next_action = self.next_action.strip() if isinstance(self.next_action, str) else ""
+        self.next_action = redact_sensitive_text(raw_next_action[:2048]) if raw_next_action else ""
         if not isinstance(self.result_envelope, dict):
             object.__setattr__(self, "result_envelope", {})
         else:
@@ -818,9 +823,14 @@ class ToolHandlerOutcome:
         contract = error_contract(control_code) if control_code else error_contract("UNKNOWN_ERROR")
         self.error_code = control_code if control_code == "INTERNAL_ERROR" else contract.code
         self.error_category = contract.category
-        self.retryable = contract.retryable
-        self.recommended_action = contract.recommended_action
-        self.recovery_hint = contract.recovery_hint
+        self.retryable = False if self.effect_outcome == "unknown" else contract.retryable
+        if self.effect_outcome == "unknown" and contract.recommended_action in {"retry", "retry_after_backoff"}:
+            unknown_contract = error_contract("TOOL_OPERATION_OUTCOME_UNKNOWN")
+            self.recommended_action = unknown_contract.recommended_action
+            self.recovery_hint = unknown_contract.recovery_hint
+        else:
+            self.recommended_action = contract.recommended_action
+            self.recovery_hint = contract.recovery_hint
 
     # LLM: prompt 结果必须同时展示工具状态与权威操作生命周期，不能只把提供方正文当终态。
     # 函数用途: 把一次工具结果渲染给下一轮模型，保留失败恢复动作和副作用核对引用。
@@ -1264,14 +1274,18 @@ class ToolRuntimeSnapshot:
     catalog_specs: tuple[ToolModelSpec, ...] = ()
     deferred_categories: tuple[str, ...] = ()
     default_deferral_enabled: bool = False
+    _runtime_by_name: Mapping[str, ToolRuntime] = field(init=False, repr=False, compare=False)
 
     # LLM: 仅校验名称子集、不可变类型与原发现入口；有序加载/预载只是展示事实，不扩权或产生新注册代次。
     # 函数用途: 在创建快照或宿主替换展示投影时拒绝越界名称和无法找回的额外折叠。
     def __post_init__(self) -> None:
-        names = [runtime.model_spec.name for runtime in self.runtimes]
-        if len(names) != len(set(names)):
-            raise ValueError("tool runtime snapshot contains duplicate names")
-        expected_available = frozenset(names)
+        index: dict[str, ToolRuntime] = {}
+        for runtime in self.runtimes:
+            name = runtime.model_spec.name
+            if name in index:
+                raise ValueError("tool runtime snapshot contains duplicate names")
+            index[name] = runtime
+        expected_available = frozenset(index)
         if self.available_tool_names != expected_available:
             raise ValueError("tool runtime snapshot available names do not match runtimes")
         unavailable_names = [str(item[0] or "").strip() for item in self.unavailable_tools]
@@ -1290,7 +1304,7 @@ class ToolRuntimeSnapshot:
         if self.presentation_deferred_names:
             if self.presentation_deferred_names.intersection(TOOL_DISCOVERY_ENTRY_NAMES):
                 raise ValueError("tool discovery entries cannot be deferred by presentation")
-            search = next((runtime for runtime in self.runtimes if runtime.model_spec.name == "tool_search"), None)
+            search = index.get("tool_search")
             if search is None or not search.availability.available or not search.exposure.model_visible:
                 raise ValueError("deferred tool presentation requires the original available tool_search")
         for runtime in self.runtimes:
@@ -1300,6 +1314,67 @@ class ToolRuntimeSnapshot:
         if supplied and supplied != digest:
             raise ValueError("tool runtime snapshot hash mismatch")
         object.__setattr__(self, "snapshot_hash", digest)
+        object.__setattr__(self, "_runtime_by_name", MappingProxyType(index))
+
+    def with_presentation(
+        self,
+        *,
+        loaded_tool_names: tuple[str, ...] | None = None,
+        preloaded_tool_names: tuple[str, ...] | None = None,
+        presentation_deferred_names: frozenset[str] | None | object = ...,
+        presentation_shortlist_names: frozenset[str] | None | object = ...,
+    ) -> ToolRuntimeSnapshot:
+        """Clone presentation-only fields while reusing the immutable runtime index when runtimes identity is unchanged."""
+        next_loaded = self.loaded_tool_names if loaded_tool_names is None else loaded_tool_names
+        next_preloaded = self.preloaded_tool_names if preloaded_tool_names is None else preloaded_tool_names
+        next_deferred = (
+            self.presentation_deferred_names
+            if presentation_deferred_names is ...
+            else presentation_deferred_names
+        )
+        next_shortlist = (
+            self.presentation_shortlist_names
+            if presentation_shortlist_names is ...
+            else presentation_shortlist_names
+        )
+        expected_available = self.available_tool_names
+        for ordered in (next_loaded, next_preloaded):
+            if (
+                type(ordered) is not tuple
+                or any(type(name) is not str or not name.strip() for name in ordered)
+                or len(ordered) != len(set(ordered))
+            ):
+                raise ValueError("tool discovery names must be an ordered immutable unique tuple")
+        for selection in (next_deferred, next_shortlist):
+            if selection is not None and (
+                type(selection) is not frozenset
+                or any(type(name) is not str for name in selection)
+                or not selection.issubset(expected_available)
+            ):
+                raise ValueError("tool presentation names must be an immutable subset of the runtime snapshot")
+        if next_deferred:
+            if next_deferred.intersection(TOOL_DISCOVERY_ENTRY_NAMES):
+                raise ValueError("tool discovery entries cannot be deferred by presentation")
+            search = self._runtime_by_name.get("tool_search")
+            if search is None or not search.availability.available or not search.exposure.model_visible:
+                raise ValueError("deferred tool presentation requires the original available tool_search")
+        cloned = object.__new__(ToolRuntimeSnapshot)
+        object.__setattr__(cloned, "run_id", self.run_id)
+        object.__setattr__(cloned, "runtimes", self.runtimes)
+        object.__setattr__(cloned, "available_tool_names", self.available_tool_names)
+        object.__setattr__(cloned, "unavailable_tools", self.unavailable_tools)
+        object.__setattr__(cloned, "allowed_tools", self.allowed_tools)
+        object.__setattr__(cloned, "snapshot_hash", self.snapshot_hash)
+        object.__setattr__(cloned, "owner_type", self.owner_type)
+        object.__setattr__(cloned, "loaded_tool_names", next_loaded)
+        object.__setattr__(cloned, "preloaded_tool_names", next_preloaded)
+        object.__setattr__(cloned, "presentation_deferred_names", next_deferred)
+        object.__setattr__(cloned, "presentation_shortlist_names", next_shortlist)
+        object.__setattr__(cloned, "catalog_specs", self.catalog_specs)
+        object.__setattr__(cloned, "deferred_categories", self.deferred_categories)
+        object.__setattr__(cloned, "default_deferral_enabled", self.default_deferral_enabled)
+        object.__setattr__(cloned, "_runtime_by_name", self._runtime_by_name)
+        return cloned
 
     @property
     def specs(self) -> tuple[ToolModelSpec, ...]:
@@ -1310,14 +1385,10 @@ class ToolRuntimeSnapshot:
         return tuple(runtime.model_spec for runtime in self.runtimes)
 
     def runtime(self, name: str) -> ToolRuntime | None:
-        runtime = next(
-            (
-                runtime
-                for runtime in self.runtimes
-                if runtime.model_spec.name == str(name or "").strip()
-            ),
-            None,
-        )
+        key = str(name or "").strip()
+        if not key:
+            return None
+        runtime = self._runtime_by_name.get(key)
         if runtime is not None:
             runtime.model_spec.assert_schema_hash()
         return runtime
@@ -1523,6 +1594,12 @@ class BaseTool:
     # 函数用途: 让插件与 MCP 代理在快照冻结后再次报告是否还能执行，其它工具返回 None。
     def precheck_availability(self) -> ToolAvailability | None:
         return None
+
+    # LLM: 只有可信 handler 实现才可声明操作持久化身份映射（如业务域按 action 映射原叶名）；模型输入不得覆盖身份。
+    # 函数用途: 返回本次调用用于副作用账本与幂等命名空间的规范身份。
+    def operation_identity_for(self, arguments: dict[str, Any]) -> str:
+        _ = arguments
+        return self.model_spec.name
 
     # LLM: 只有需要请求快照的工具覆盖本方法；其余 handler 由这个唯一受权入口委托 execute。
     # 函数用途: 在统一调用入口传递请求快照，同时向后兼容现有工具实现。

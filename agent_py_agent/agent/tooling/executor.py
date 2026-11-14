@@ -5,6 +5,8 @@ from __future__ import annotations
 
 """The only state machine allowed to enter a registered tool handler."""
 
+import difflib
+import errno
 import hashlib
 import json
 import logging
@@ -20,7 +22,7 @@ from typing import Any
 _LOGGER = logging.getLogger(__name__)
 
 from ..common.cancellation import CancellationToken
-from ..common.log_redaction import redact_sensitive_value
+from ..common.log_redaction import redact_sensitive_text, redact_sensitive_value
 from ..contracts.diagnostics import DiagnosticEnvelope
 from ..contracts.error_taxonomy import error_contract
 from ..contracts.idempotency import BusinessEffectIdentity
@@ -152,34 +154,154 @@ class ToolExecutor:
     def __init__(self, policy: ActionPolicy | None = None) -> None:
         self.policy = policy or ActionPolicy()
 
-    # LLM: 协议代次只读宿主trusted_run_context；v1归一发生在schema/effect/审批/claim前，不变更调用ID与幂等键。
-    # 函数用途: 在唯一执行链前解码旧输入，保留原请求迁移事实而不重执行历史。
+    # LLM: 协议代次只读宿主trusted_run_context；v1归一与已退役叶子别名解码均发生在schema/effect/审批/claim前，不变更调用ID与幂等键。
+    # 函数用途: 在唯一执行链前解码旧输入与已退役业务别名，保留原请求迁移事实而不重执行历史。
     def execute(self, request: ToolExecutorRequest) -> ToolExecution:
-        from .versioned_input_decoder import decode_tool_input
+        from .versioned_input_decoder import (
+            dead_business_spaces_redirect,
+            decode_retired_tool_call,
+            decode_tool_input,
+        )
 
-        version = (request.trusted_run_context or {}).get("tool_input_version", 2)
-        if version == 2 and type(version) is int:
-            return self._execute_current(request)
         original = request.call
-        try:
-            name, arguments = decode_tool_input(original.tool_name, original.arguments, version=version)
-        except (TypeError, ValueError):
-            decision = ActionDecision("deny", ("TOOL_INVALID_ARGUMENTS",), {"failure_stage": "validation"})
-            return ToolExecution(original, decision, _decision_result(original, decision, time.monotonic()),
-                ("received", "validation_failed", "projected"))
         snapshot = request.runtime_snapshot
+        version = (request.trusted_run_context or {}).get("tool_input_version", 2)
+        is_current_v2 = version == 2 and type(version) is int
+        migration: dict[str, Any] = dict(original.input_migration) if original.input_migration else {}
+        if is_current_v2:
+            name, arguments = original.tool_name, original.arguments
+        else:
+            try:
+                name, arguments = decode_tool_input(original.tool_name, original.arguments, version=version)
+            except (TypeError, ValueError) as exc:
+                safe_summary = redact_sensitive_text(str(exc)[:500])
+                decoder_err = {"exception_type": type(exc).__name__, "summary": safe_summary}
+                decision = ActionDecision(
+                    "deny",
+                    ("TOOL_INVALID_ARGUMENTS",),
+                    {
+                        "failure_stage": "validation",
+                        "decoder_error": decoder_err,
+                        "error_details": {"decoder_error": decoder_err},
+                        "boundary_error": f"{type(exc).__name__}: {safe_summary}",
+                    },
+                )
+                return ToolExecution(
+                    original,
+                    decision,
+                    _decision_result(original, decision, time.monotonic()),
+                    ("received", "validation_failed", "projected"),
+                )
+            migration = {
+                "schema": "tool_input_migration.v1",
+                "input_version": version,
+                "requested_tool_name": original.tool_name,
+                "canonical_tool_name": name,
+                "original_schema_hash": original.schema_hash,
+                "original_args_hash": original.args_hash,
+                "action": arguments.get("action", "") if isinstance(arguments, dict) else "",
+                "call_id_preserved": True,
+                **({"prior_migration": dict(original.input_migration)} if original.input_migration else {}),
+            }
+            if name == "create_subagents":
+                raw_items = original.arguments.get("items")
+                source_items = raw_items if raw_items else [original.arguments]
+                migration["create_projection"] = {
+                    "single": not bool(raw_items),
+                    "item_allowed_tools_explicit": ["allowed_tools" in item for item in source_items],
+                }
+
+        if name == "business_spaces" and "business_spaces" not in snapshot.available_tool_names:
+            redirect = dead_business_spaces_redirect(arguments if isinstance(arguments, dict) else {})
+            err_details = {k: v for k, v in redirect.items() if k != "next_action"}
+            target_label = redirect.get("target_tool") or redirect.get("target_tools") or "business_space"
+            decision = ActionDecision(
+                "deny",
+                ("TOOL_NOT_IN_RUNTIME_SNAPSHOT",),
+                {
+                    "failure_stage": "authorization",
+                    "reported_error_code": "TOOL_RETIRED_REDIRECT",
+                    "unavailable_reason": (
+                        f"已退役工具 business_spaces 与现行操作回执身份不兼容，不可直接执行；请改用 {target_label}"
+                    ),
+                    "error_details": err_details,
+                    "next_action": str(redirect["next_action"]),
+                },
+            )
+            return ToolExecution(
+                original,
+                decision,
+                _decision_result(original, decision, time.monotonic()),
+                ("received", "persisted", "projected"),
+            )
+
+        if name not in snapshot.available_tool_names:
+            try:
+                alias_decoded = decode_retired_tool_call(
+                    name,
+                    arguments,
+                    available=snapshot.available_tool_names,
+                )
+            except (TypeError, ValueError) as exc:
+                safe_summary = redact_sensitive_text(str(exc)[:500])
+                decision = ActionDecision(
+                    "deny",
+                    ("TOOL_INVALID_ARGUMENTS",),
+                    {
+                        "failure_stage": "validation",
+                        "boundary_error": safe_summary,
+                        "error_details": {
+                            "exception_type": type(exc).__name__,
+                            "summary": safe_summary,
+                            "requested_tool_name": original.tool_name,
+                        },
+                    },
+                )
+                return ToolExecution(
+                    original,
+                    decision,
+                    _decision_result(original, decision, time.monotonic()),
+                    ("received", "validation_failed", "projected"),
+                )
+            if alias_decoded is not None:
+                target, migrated_args, alias_action = alias_decoded
+                denial = _retired_alias_target_denial(
+                    snapshot,
+                    requested_name=original.tool_name,
+                    target=target,
+                    action=alias_action,
+                )
+                if denial is not None:
+                    return ToolExecution(
+                        original,
+                        denial,
+                        _decision_result(original, denial, time.monotonic()),
+                        ("received", "persisted", "projected"),
+                    )
+                prior = dict(original.input_migration) if original.input_migration else {}
+                migration = {
+                    "schema": "tool_input_migration.v1",
+                    "input_version": version,
+                    "requested_tool_name": original.tool_name,
+                    "canonical_tool_name": target,
+                    "original_schema_hash": original.schema_hash,
+                    "original_args_hash": original.args_hash,
+                    "action": alias_action,
+                    "call_id_preserved": True,
+                    **({"prior_migration": prior} if prior else {}),
+                }
+                name, arguments = target, migrated_args
+
+        if is_current_v2 and name == original.tool_name and arguments is original.arguments:
+            return self._execute_current(request)
         runtime = snapshot.runtime(name)
-        migration = {"schema": "tool_input_migration.v1", "input_version": version,
-            "requested_tool_name": original.tool_name, "canonical_tool_name": name,
-            "original_schema_hash": original.schema_hash, "original_args_hash": original.args_hash,
-            "action": arguments.get("action", ""), "call_id_preserved": True}
-        if name == "create_subagents":
-            raw_items = original.arguments.get("items")
-            source_items = raw_items if raw_items else [original.arguments]
-            migration["create_projection"] = {"single": not bool(raw_items),
-                "item_allowed_tools_explicit": ["allowed_tools" in item for item in source_items]}
-        call = replace(original, tool_name=name, arguments=arguments, input_migration=migration,
-            schema_hash=runtime.model_spec.schema_hash if runtime is not None else original.schema_hash)
+        call = replace(
+            original,
+            tool_name=name,
+            arguments=arguments,
+            input_migration=migration,
+            schema_hash=runtime.model_spec.schema_hash if runtime is not None else original.schema_hash,
+        )
         return self._execute_current(replace(request, call=call))
 
     # LLM: 规范请求沿原唯一执行状态机；当前权限再核验，归一不能跳过B5、审批或原操作账。
@@ -189,7 +311,7 @@ class ToolExecutor:
         states = ["received"]
         runtime = request.runtime_snapshot.runtime(request.call.tool_name)
         if runtime is None:
-            decision = ActionDecision("deny", ("TOOL_NOT_IN_RUNTIME_SNAPSHOT",))
+            decision = _missing_snapshot_runtime_decision(request.runtime_snapshot, request.call.tool_name)
             result = _decision_result(request.call, decision, started_at)
             return ToolExecution(
                 request.call,
@@ -198,7 +320,7 @@ class ToolExecutor:
                 (*states, "persisted", "projected"),
             )
 
-        call, sources, normalization_error = _normalized_call(request, runtime)
+        call, sources, normalization_error, normalization_details = _normalized_call(request, runtime)
         states.append("normalized")
         if normalization_error:
             _LOGGER.warning(
@@ -208,13 +330,12 @@ class ToolExecutor:
                 str(getattr(request.call, "run_id", "") or ""),
                 str(getattr(request.call, "turn_id", "") or ""),
                 normalization_error,
-                json.dumps(request.call.arguments, ensure_ascii=False)[:500],
+                json.dumps(redact_sensitive_value(request.call.arguments), ensure_ascii=False)[:500],
             )
-            decision = ActionDecision(
-                "deny",
-                (normalization_error,),
-                {"failure_stage": ToolFailureStage.VALIDATION.value},
-            )
+            evidence: dict[str, object] = {"failure_stage": ToolFailureStage.VALIDATION.value}
+            if normalization_details:
+                evidence["error_details"] = normalization_details
+            decision = ActionDecision("deny", (normalization_error,), evidence)
             result = _decision_result(call, decision, started_at, input_sources=sources)
             return ToolExecution(call, decision, result, (*states, "persisted", "projected"))
 
@@ -385,12 +506,23 @@ def _preclaim_validation_outcome(
             call.run_id,
             call.turn_id,
         )
+        safe_summary = redact_sensitive_text(str(exc)[:500])
+        err_no = exc.errno if isinstance(exc, OSError) and type(exc.errno) is int else None
         outcome = ToolHandlerOutcome(
             call.tool_name,
             False,
-            f"工具调用参数校验器故障，已在执行前拒绝：{type(exc).__name__}",
-            error_code="TOOL_ERROR",
+            f"工具调用参数校验器故障，已在执行前拒绝：{type(exc).__name__}"
+            + (f" ({safe_summary})" if safe_summary else ""),
+            error_code="TOOL_INVOCATION_VALIDATOR_FAILED",
             reported_error_code="TOOL_INVOCATION_VALIDATOR_FAILED",
+            result_envelope={
+                "error_details": {
+                    "exception_type": type(exc).__name__,
+                    "summary": safe_summary,
+                    "stage": ToolFailureStage.VALIDATION.value,
+                    **({"errno": err_no} if err_no is not None else {}),
+                }
+            },
         )
     if outcome is None:
         return None
@@ -399,9 +531,25 @@ def _preclaim_validation_outcome(
             call.tool_name,
             False,
             "工具调用参数校验器返回了非法结果，已在执行前拒绝",
-            error_code="TOOL_ERROR",
+            error_code="TOOL_INVOCATION_VALIDATOR_CONTRACT_BROKEN",
             reported_error_code="TOOL_INVOCATION_VALIDATOR_CONTRACT_BROKEN",
+            result_envelope={
+                "error_details": {
+                    "returned_type": type(outcome).__name__,
+                    "returned_ok": bool(getattr(outcome, "ok", False)),
+                    "stage": ToolFailureStage.VALIDATION.value,
+                }
+            },
         )
+    if outcome.error_code in {"", "UNKNOWN_ERROR"}:
+        val_contract = error_contract("TOOL_INVOCATION_VALIDATOR_FAILED")
+        outcome.error_code = val_contract.code
+        if outcome.reported_error_code in {"", "UNKNOWN_ERROR"}:
+            outcome.reported_error_code = val_contract.code
+        outcome.error_category = val_contract.category
+        outcome.retryable = False
+        outcome.recommended_action = val_contract.recommended_action
+        outcome.recovery_hint = val_contract.recovery_hint
     outcome.effect_outcome = "not_started"
     return apply_tool_execution_facts(
         outcome,
@@ -442,10 +590,16 @@ def _pre_handler_failure_execution(
 def _normalized_call(
     request: ToolExecutorRequest,
     runtime: ToolRuntime,
-) -> tuple[ToolCall, tuple[ToolInputSource, ...], str]:
+) -> tuple[ToolCall, tuple[ToolInputSource, ...], str, dict[str, Any]]:
     internal = set(runtime.runtime_policy.input_policy.internal_parameters)
-    if internal.intersection(request.call.arguments):
-        return request.call, (), "TOOL_INTERNAL_PARAMETER_FORBIDDEN"
+    forbidden = sorted(internal.intersection(request.call.arguments))
+    if forbidden:
+        return (
+            request.call,
+            (),
+            "TOOL_INTERNAL_PARAMETER_FORBIDDEN",
+            {"forbidden_fields": forbidden},
+        )
     context = ToolInputCompletionContext(
         call_id=request.call.call_id,
         call_source=request.call.source_protocol,
@@ -459,17 +613,20 @@ def _normalized_call(
     )
     call = replace(request.call, arguments=normalized_arguments)
     if completion.error_code:
-        return call, completion.sources, completion.error_code
+        details: dict[str, Any] = {}
+        if completion.conflict_fields:
+            details["conflict_fields"] = list(completion.conflict_fields)
+        return call, completion.sources, completion.error_code, details
     effect = request.business_effect
     if effect is not None:
         if (not isinstance(effect, BusinessEffectIdentity)
                 or effect.owner_id != request.operation_owner_id or effect.task_id != _task_id(request)
                 or runtime.runtime_policy.idempotency_policy.scope != 'operation'):
-            return call, completion.sources, 'TOOL_AUTHORITY_CONTEXT_MISSING'
-        return replace(call, operation_id=effect.operation_id, idempotency_key=effect.key), completion.sources, ''
+            return call, completion.sources, 'TOOL_AUTHORITY_CONTEXT_MISSING', {}
+        return replace(call, operation_id=effect.operation_id, idempotency_key=effect.key), completion.sources, '', {}
     scope = runtime.runtime_policy.idempotency_policy.scope
     if scope != "business":
-        return call, completion.sources, ""
+        return call, completion.sources, "", {}
     try:
         key = str(
             runtime.handler.business_idempotency_key(_handler_arguments(request, call, runtime))
@@ -478,8 +635,8 @@ def _normalized_call(
     except Exception:
         key = ""
     if not key:
-        return call, completion.sources, "TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING"
-    return replace(call, idempotency_key=key), completion.sources, ""
+        return call, completion.sources, "TOOL_MANIFEST_IDEMPOTENCY_POLICY_MISSING", {}
+    return replace(call, idempotency_key=key), completion.sources, "", {}
 
 
 def _trusted_context(request: ToolExecutorRequest) -> dict[str, Any]:
@@ -507,6 +664,150 @@ def _trusted_context(request: ToolExecutorRequest) -> dict[str, Any]:
     }
 
 
+def _permitted_discovery_next_action(snapshot: ToolRuntimeSnapshot, target: str = "") -> str:
+    from .registry_auth import snapshot_search_can_load
+
+    if "tool_search" in snapshot.available_tool_names:
+        if snapshot_search_can_load(snapshot):
+            if target:
+                return (
+                    f'请先调用 tool_search(names=["{target}"]) 或 tool_search(action="catalog") '
+                    "核实当前已授权工具与动作后再调用；禁止原样盲目重试。"
+                )
+            return '请先调用 tool_search(action="catalog") 或按能力查询已授权工具；禁止原样盲目重试。'
+        return '请先调用 tool_search(action="catalog") 查看本人可见目录；若缺少权限请提交 capability_request，禁止原样盲目重试。'
+    return "当前执行快照未提供发现入口，请核对已授权工具列表或提交 capability_request，禁止原样盲目重试。"
+
+
+def _missing_snapshot_runtime_decision(
+    snapshot: ToolRuntimeSnapshot,
+    tool_name: str,
+) -> ActionDecision:
+    failures = {u_name: (u_code, u_reason) for u_name, u_code, u_reason in snapshot.unavailable_tools}
+    if tool_name in failures:
+        u_code, u_reason = failures[tool_name]
+        code_text = str(u_code or "TOOL_UNAVAILABLE").strip() or "TOOL_UNAVAILABLE"
+        reason_text = redact_sensitive_text(str(u_reason or "工具当前不可用")[:500])
+        return ActionDecision(
+            "deny",
+            ("TOOL_NOT_IN_RUNTIME_SNAPSHOT",),
+            {
+                "failure_stage": "authorization",
+                "reported_error_code": code_text,
+                "unavailable_reason": reason_text,
+                "error_details": {
+                    "tool_name": tool_name,
+                    "unavailable_code": code_text,
+                    "reason": reason_text,
+                },
+                "next_action": _permitted_discovery_next_action(snapshot),
+            },
+        )
+    suggestions = difflib.get_close_matches(
+        str(tool_name or ""),
+        sorted(snapshot.available_tool_names),
+        n=3,
+        cutoff=0.6,
+    )
+    error_details: dict[str, object] = {"tool_name": str(tool_name or "")}
+    if suggestions:
+        error_details["suggestions"] = suggestions
+    return ActionDecision(
+        "deny",
+        ("TOOL_NOT_IN_RUNTIME_SNAPSHOT",),
+        {
+            "failure_stage": "authorization",
+            "error_details": error_details,
+            **({"suggestions": suggestions} if suggestions else {}),
+            "next_action": _permitted_discovery_next_action(snapshot),
+        },
+    )
+
+
+def _retired_alias_target_denial(
+    snapshot: ToolRuntimeSnapshot,
+    *,
+    requested_name: str,
+    target: str,
+    action: str,
+) -> ActionDecision | None:
+    target_rt = snapshot.runtime(target)
+    if target_rt is not None:
+        action_prop = (
+            target_rt.model_spec.input_schema.get("properties", {}).get("action", {})
+            if isinstance(target_rt.model_spec.input_schema, dict)
+            else {}
+        )
+        allowed_actions = action_prop.get("enum") if isinstance(action_prop, dict) else None
+        if not isinstance(allowed_actions, list) or action in allowed_actions:
+            return None
+        reason = f"目标工具 {target} 当前未开放动作 {action}（受动作权限上界或服务就绪范围限制）"
+        return ActionDecision(
+            "deny",
+            ("TOOL_NOT_IN_RUNTIME_SNAPSHOT",),
+            {
+                "failure_stage": "authorization",
+                "reported_error_code": "TOOL_ACTION_NOT_ALLOWED",
+                "unavailable_reason": reason,
+                "error_details": {
+                    "requested_tool_name": requested_name,
+                    "canonical_tool_name": target,
+                    "action": action,
+                    "allowed_actions": list(allowed_actions[:32]),
+                },
+                "next_action": _permitted_discovery_next_action(snapshot, target),
+            },
+        )
+    failures = {u_name: (u_code, u_reason) for u_name, u_code, u_reason in snapshot.unavailable_tools}
+    if target in failures or requested_name in failures:
+        u_code, u_reason = failures.get(target) or failures[requested_name]
+        code_text = str(u_code or "TOOL_UNAVAILABLE").strip() or "TOOL_UNAVAILABLE"
+        reason_text = redact_sensitive_text(str(u_reason or "目标服务当前未就绪")[:500])
+        return ActionDecision(
+            "deny",
+            ("TOOL_NOT_IN_RUNTIME_SNAPSHOT",),
+            {
+                "failure_stage": "authorization",
+                "reported_error_code": code_text,
+                "unavailable_reason": f"{target} ({action}) 不可用：{reason_text}",
+                "error_details": {
+                    "requested_tool_name": requested_name,
+                    "canonical_tool_name": target,
+                    "action": action,
+                    "unavailable_code": code_text,
+                    "reason": reason_text,
+                },
+                "next_action": _permitted_discovery_next_action(snapshot, target),
+            },
+        )
+    return ActionDecision(
+        "deny",
+        ("TOOL_NOT_IN_RUNTIME_SNAPSHOT",),
+        {
+            "failure_stage": "authorization",
+            "reported_error_code": "TOOL_NOT_ALLOWED",
+            "unavailable_reason": f"已退役别名 {requested_name} 对应的目标工具 {target} ({action}) 未在当前授权快照中就绪",
+            "error_details": {
+                "requested_tool_name": requested_name,
+                "canonical_tool_name": target,
+                "action": action,
+            },
+            "next_action": _permitted_discovery_next_action(snapshot, target),
+        },
+    )
+
+
+def _sanitized_error_details(raw: object) -> dict[str, object] | None:
+    if not isinstance(raw, dict) or not raw:
+        return None
+    cleaned = {
+        str(k): v
+        for k, v in raw.items()
+        if str(k) != "next_action"
+    }
+    return redact_sensitive_value(cleaned) if cleaned else None
+
+
 # LLM: 拒绝/待审批只归一宿主裁决结果，不调用handler；门决定专键来自ActionDecision供原归档写账。
 # 函数用途: 生成执行前失败或待审批的标准结果，保留原因码与宿主证据。
 def _decision_result(
@@ -525,6 +826,16 @@ def _decision_result(
     reported = str(decision.evidence.get("reported_error_code") or "").strip().upper()
     if reported:
         metadata["reported_error_code"] = reported
+    err_details = _sanitized_error_details(decision.evidence.get("error_details"))
+    if err_details is None and isinstance(decision.evidence.get("issues"), list) and decision.evidence["issues"]:
+        err_details = {"issues": decision.evidence["issues"][:8]}
+        if isinstance(decision.evidence.get("allowed_parameters"), list):
+            err_details["allowed_parameters"] = list(decision.evidence["allowed_parameters"][:32])
+    if err_details is not None:
+        metadata["error_details"] = err_details
+    raw_next = decision.evidence.get("next_action")
+    if isinstance(raw_next, str) and raw_next.strip():
+        metadata["next_action"] = redact_sensitive_text(raw_next.strip())[:2048]
     return ToolResult.failed(
         call,
         _decision_message(decision),
@@ -594,6 +905,85 @@ def _bound_redacted_input(arguments: dict[str, Any], max_bytes: int = 16384) -> 
         return {}
 
 
+_TRANSIENT_READ_RETRY_CODES = frozenset(
+    {
+        "TOOL_TIMEOUT",
+        "HISTORY_STORAGE_BUSY",
+        "RUNTIME_DB_RECOVERY_DEFERRED",
+        "SCHEDULER_STORE_BUSY",
+        "STORE_UNAVAILABLE",
+    }
+)
+_TRANSIENT_ERRNOS = frozenset(
+    code
+    for code in (
+        errno.EAGAIN,
+        errno.EWOULDBLOCK,
+        errno.EINTR,
+        errno.EBUSY,
+        errno.ETIMEDOUT,
+        getattr(errno, "ECONNRESET", None),
+    )
+    if isinstance(code, int)
+)
+
+
+def _can_auto_retry_read_only(request: ToolExecutorRequest, outcome: ToolHandlerOutcome) -> bool:
+    if (
+        outcome.ok
+        or not outcome.retryable
+        or not outcome.handler_executed
+        or outcome.effect_outcome == "unknown"
+        or _cancelled(request)
+        or outcome.error_code == "CANCELLED"
+    ):
+        return False
+    if outcome.failure_stage in {
+        ToolFailureStage.VALIDATION.value,
+        ToolFailureStage.AUTHORIZATION.value,
+        ToolFailureStage.PROTOCOL.value,
+        ToolFailureStage.RUNTIME_GATE.value,
+    }:
+        return False
+    contract = error_contract(outcome.error_code)
+    if not contract.retryable or contract.recommended_action not in {"retry", "retry_after_backoff"}:
+        return False
+    if outcome.error_code in _TRANSIENT_READ_RETRY_CODES:
+        return True
+    if contract.recommended_action == "retry_after_backoff" and contract.category not in {
+        "validation",
+        "permission",
+        "authorization",
+        "security",
+        "protocol",
+    }:
+        return True
+    if contract.category in {"transient", "timeout", "network"}:
+        return True
+    diag = outcome.result_envelope.get("diagnostic")
+    if isinstance(diag, dict):
+        if diag.get("category") in {"transient", "timeout"}:
+            return True
+        diag_errno = diag.get("errno")
+        if type(diag_errno) is int and diag_errno in _TRANSIENT_ERRNOS:
+            return True
+    storage_err = outcome.result_envelope.get("storage_error")
+    if isinstance(storage_err, dict) and storage_err.get("category") == "busy":
+        return True
+    return False
+
+
+def _operation_identity(call: ToolCall, runtime: ToolRuntime | None) -> str:
+    if runtime is None:
+        return call.tool_name
+    method = getattr(runtime.handler, "operation_identity_for", None)
+    if callable(method):
+        resolved = str(method(call.arguments) or "").strip()
+        if resolved:
+            return resolved
+    return call.tool_name
+
+
 # LLM: 执行仍沿原操作协调器写账；迁移来源须在handler结果持久化前附入信封，不能事后装饰审计。
 # 函数用途: 按原读写及幂等策略执行一次已授权工具并保留可信迁移事实。
 def _invoke_with_operation_policy(
@@ -606,13 +996,14 @@ def _invoke_with_operation_policy(
     if started_at is None:
         started_at = time.monotonic()
     redacted_input = _bound_redacted_input(call.arguments)
+    op_identity = _operation_identity(call, runtime)
 
     # LLM: 只调用本次冻结的原handler；停止先拒绝，可信迁移信息不进入模型参数。
     # 函数用途: 执行或拒绝当前调用，在原操作账写结果前附上迁移来源。
     def invoke() -> ToolHandlerOutcome:
         if _cancelled(request):
             return ToolHandlerOutcome(
-                call.tool_name,
+                op_identity if decision.resolved_effect != "read_only" else call.tool_name,
                 False,
                 "tool cancelled before handler entry",
                 error_code="CANCELLED",
@@ -629,6 +1020,8 @@ def _invoke_with_operation_policy(
             )
         )
         outcome.duration_ms = max(0, _elapsed_ms(started_at))
+        if decision.resolved_effect != "read_only":
+            outcome.tool = op_identity
         if call.input_migration:
             outcome.result_envelope["input_migration"] = dict(call.input_migration)
         return outcome
@@ -643,12 +1036,7 @@ def _invoke_with_operation_policy(
                 error_code='TOOL_INVALID_ARGUMENTS', effect_outcome='not_started',
                 handler_executed=False, failure_stage=ToolFailureStage.VALIDATION.value)
         outcome = invoke()
-        if (
-            not outcome.ok
-            and outcome.retryable
-            and outcome.handler_executed
-            and not _cancelled(request)
-        ):
+        if _can_auto_retry_read_only(request, outcome):
             outcome = invoke()
             outcome.result_envelope.setdefault("tool_resilience", {})["retry_attempts"] = 1
         return outcome
@@ -680,11 +1068,11 @@ def _invoke_with_operation_policy(
             run_id=call.run_id,
             task_id=_task_id(request),
             operation_id=call.operation_id,
-            tool_name=call.tool_name,
+            tool_name=op_identity,
             args_hash=call.args_hash,
             idempotency_key=call.idempotency_key,
             idempotency_scope='business' if request.business_effect is not None else runtime.runtime_policy.idempotency_policy.scope,
-            idempotency_namespace=call.tool_name,
+            idempotency_namespace=op_identity,
             timeout_seconds=runtime.runtime_policy.timeout_policy.seconds,
             invoke=invoke,
             reconcile=None if request.business_effect is not None else _operation_reconciler(runtime, call),
@@ -706,12 +1094,13 @@ def _operation_authority_check(
     require = getattr(request.operation_store, "require_authority", None)
     if require is None:
         return None
+    runtime = request.runtime_snapshot.runtime(call.tool_name)
     authority = ToolOperationAuthorityRequest(
         owner_id=request.operation_owner_id,
         run_id=call.run_id,
         task_id=_task_id(request),
         operation_id=call.operation_id,
-        tool_name=call.tool_name,
+        tool_name=_operation_identity(call, runtime),
         attempt_id=call.attempt_id,
     )
     return partial(require, authority)
@@ -1131,6 +1520,25 @@ def _canonical_result(
         "handler_details": dict(outcome.result_envelope or {}),
         "plugin_gate_decisions": decision.evidence.get(PLUGIN_GATE_DECISION_EVIDENCE_KEY) or [],
     }
+    err_details = _sanitized_error_details((outcome.result_envelope or {}).get("error_details"))
+    if err_details is None:
+        err_details = _sanitized_error_details(decision.evidence.get("error_details"))
+    if err_details is not None:
+        metadata["error_details"] = err_details
+    next_advice = str(outcome.next_action or "").strip()
+    if not next_advice:
+        ev_next = decision.evidence.get("next_action")
+        if isinstance(ev_next, str) and ev_next.strip():
+            next_advice = redact_sensitive_text(ev_next.strip())[:2048]
+    if next_advice:
+        metadata["next_action"] = next_advice
+    if (
+        operation is not None
+        and operation.replayed
+        and decision.resolved_effect != "read_only"
+        and operation.status in {"failed", "cancelled", "succeeded"}
+    ):
+        metadata["replayed_terminal_mutation"] = True
     projection_error = str(projection.metadata.get("projection_error_code") or "")
     if projection_error:
         diagnostic = projection.metadata.get('diagnostic') or {}
@@ -1225,7 +1633,10 @@ def _operation_from_outcome(
         args_hash=call.args_hash,
         status=status,
         handler_executed=outcome.handler_executed,
-        effect_outcome=str(outcome.effect_outcome or _effect_from_operation_status(value)),
+        effect_outcome=str(
+            outcome.effect_outcome
+            or _effect_from_operation_status(value, handler_executed=outcome.handler_executed)
+        ),
         effect_source_ref=source_ref,
         attempt_count=max(1, int(value.get("attempt_count") or 1)),
         result_ref=str(value.get("result_ref") or ""),
@@ -1249,11 +1660,23 @@ def _effect_outcome(
     return "unknown" if outcome.handler_executed else "not_started"
 
 
-def _effect_from_operation_status(value: dict[str, Any]) -> str:
+def _effect_from_operation_status(
+    value: dict[str, Any],
+    *,
+    handler_executed: bool | None = None,
+) -> str:
+    explicit = str(value.get("effect_outcome") or "").strip().lower()
+    if explicit in {"confirmed", "not_started", "failed", "unknown"}:
+        return explicit
     status = str(value.get("status") or "").strip().lower()
     if status == "succeeded":
         return "confirmed"
-    if status in {"not_started", "failed"}:
+    if status == "not_started":
+        return "not_started"
+    orig_exec = value.get("original_tool_execution")
+    if isinstance(orig_exec, dict) and orig_exec.get("handler_executed") is False:
+        return "not_started"
+    if handler_executed is False and value.get("replayed") is not True:
         return "not_started"
     return "unknown"
 
@@ -1310,6 +1733,22 @@ def _decision_message(decision: ActionDecision) -> str:
     boundary_error = str(decision.evidence.get("boundary_error") or "").strip()
     if boundary_error:
         message += f". {boundary_error}"
+    unavail_reason = str(decision.evidence.get("unavailable_reason") or "").strip()
+    if unavail_reason:
+        reported_code = str(decision.evidence.get("reported_error_code") or "").strip()
+        prefix = f" ({reported_code})" if reported_code else ""
+        message += f"。不可用原因{prefix}: {unavail_reason[:500]}"
+    suggestions = decision.evidence.get("suggestions")
+    if isinstance(suggestions, list) and suggestions and all(isinstance(s, str) for s in suggestions):
+        message += "。当前快照最接近的已授权工具: " + ", ".join(s[:128] for s in suggestions[:3])
+    err_details = decision.evidence.get("error_details")
+    if isinstance(err_details, dict):
+        forbidden_fields = err_details.get("forbidden_fields")
+        if isinstance(forbidden_fields, list) and forbidden_fields:
+            message += "。禁止传入内部字段: " + ", ".join(str(f)[:128] for f in forbidden_fields[:16])
+        conflict_fields = err_details.get("conflict_fields")
+        if isinstance(conflict_fields, list) and conflict_fields:
+            message += "。与宿主可信上下文冲突的字段: " + ", ".join(str(f)[:128] for f in conflict_fields[:16])
     precheck = str(decision.evidence.get("precheck") or "")
     if precheck:
         when = "审批前" if precheck == "pre_approval" else "批准后、执行前"

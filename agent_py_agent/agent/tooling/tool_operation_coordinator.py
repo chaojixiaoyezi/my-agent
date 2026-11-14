@@ -785,6 +785,8 @@ def _unknown_claim_result(
         reported_error_code=reported,
     )
     result.effect_outcome = "not_started"
+    if prior.next_action:
+        result.next_action = prior.next_action
     if not isinstance(getattr(result, "result_envelope", None), dict):
         object.__setattr__(result, "result_envelope", {})
     result.source_effect = source_effect_facts(prior.source_effect)
@@ -1029,6 +1031,7 @@ def _completion_persistence_unknown_result(
         effect_outcome="unknown",
         effect_source_ref=reported.effect_source_ref,
         source_effect=reported.source_effect,
+        next_action=reported.next_action,
         handler_executed=reported.handler_executed,
         failure_stage=ToolFailureStage.PERSISTENCE.value,
         duration_ms=reported.duration_ms,
@@ -1209,6 +1212,7 @@ def _unknown_outcome_result(
         effect_outcome="unknown",
         effect_source_ref=reported.effect_source_ref,
         source_effect=reported.source_effect,
+        next_action=reported.next_action,
         handler_executed=reported.handler_executed,
         failure_stage=ToolFailureStage.EFFECT_RECONCILIATION.value,
         duration_ms=reported.duration_ms,
@@ -1223,6 +1227,7 @@ def _reported_tool_result_facts(
     return {
         "ok": reported.ok,
         **({"source_effect": source_effect_facts(reported.source_effect)} if reported.source_effect else {}),
+        **({"next_action": reported.next_action} if reported.next_action else {}),
         "error_code": reported.error_code,
         "reported_error_code": reported.reported_error_code,
         "effect_outcome": reported.effect_outcome,
@@ -1271,6 +1276,7 @@ def _result_payload(
         "reported_error_code": result.reported_error_code,
         "host_error": host_error_facts(result.host_error),
         **({"source_effect": source_effect_facts(result.source_effect)} if result.source_effect else {}),
+        **({"next_action": result.next_action} if result.next_action else {}),
         "error_category": result.error_category,
         "retryable": result.retryable,
         "recommended_action": result.recommended_action,
@@ -1324,6 +1330,7 @@ def _result_from_record(record: ToolOperationRecord) -> ToolHandlerOutcome:
             reported_error_code=str(payload.get("reported_error_code") or ""),
             host_error=host_error_facts(payload.get("host_error")),
             source_effect=source_effect_facts(payload.get("source_effect")),
+            next_action=str(payload.get("next_action") or ""),
             effect_outcome=runtime_effect,
             effect_source_ref=str(payload.get("effect_source_ref") or ""),
             handler_executed=payload.get("handler_executed") is True,
@@ -1340,13 +1347,23 @@ def _result_from_record(record: ToolOperationRecord) -> ToolHandlerOutcome:
         result.error_category = str(
             payload.get("error_category") or result.error_category
         )
-        result.retryable = bool(payload.get("retryable", result.retryable))
+        result.retryable = (
+            False
+            if result.effect_outcome == "unknown"
+            else bool(payload.get("retryable", result.retryable))
+        )
         result.recommended_action = str(
             payload.get("recommended_action") or result.recommended_action
         )
         result.recovery_hint = str(
             payload.get("recovery_hint") or result.recovery_hint
         )
+        if result.effect_outcome == "unknown" and result.recommended_action in {"retry", "retry_after_backoff"}:
+            from ..contracts.error_taxonomy import error_contract
+
+            unknown_contract = error_contract("TOOL_OPERATION_OUTCOME_UNKNOWN")
+            result.recommended_action = unknown_contract.recommended_action
+            result.recovery_hint = unknown_contract.recovery_hint
     return result
 
 
@@ -1366,6 +1383,11 @@ def replay_completed_tool_operation(record: ToolOperationRecord) -> ToolHandlerO
         return _operation_error(
             record.tool, "TOOL_OPERATION_OUTCOME_UNKNOWN", "原操作没有可核对的确定结果，请检查原操作记录。",
         )
+    if not result.ok:
+        result.retryable = False
+        if result.recommended_action in {"retry", "retry_after_backoff"}:
+            result.recommended_action = "change_strategy"
+            result.recovery_hint = "原副作用操作已处于终态重放，禁止原样重复提交同一写操作；请先核实当前目标状态后再换参或调整策略。"
     original = _tool_execution_facts(result)
     delivery = result.result_envelope.get("delivery_evidence")
     if isinstance(delivery, dict):
@@ -1395,8 +1417,11 @@ def _complete_terminal_result(record: ToolOperationRecord) -> bool:
     if payload["tool"] != record.tool or payload["ok"] != (record.status == TOOL_OPERATION_SUCCEEDED):
         return False
     strings = ("result_ref", "call_id", "error_code", "reported_error_code", "error_category",
-               "recommended_action", "recovery_hint", "effect_outcome", "effect_source_ref", "failure_stage")
+               "recommended_action", "recovery_hint", "effect_outcome", "effect_source_ref",
+               "failure_stage", "next_action")
     if any(key in payload and not isinstance(payload[key], str) for key in strings):
+        return False
+    if "next_action" in payload and len(payload["next_action"]) > 2048:
         return False
     if "result_envelope" in payload and not isinstance(payload["result_envelope"], dict):
         return False
