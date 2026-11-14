@@ -5142,16 +5142,23 @@ def _complete_wake_report(
     if not report.wake_handled:
         scheduler._wake_retry_after[signal.wake_signal_id] = now + 30.0
         return None
+    from .technical_continuation import WAKE_REASON, publish_pending, receipt_for
+    cutoff = None
+    if (getattr(getattr(scheduler.runtime.agent, "config", None), "technical_cutoff_continuation_enabled", False)
+            and signal.root_task_id):
+        # 在确认当前 wake 前解析 cutoff 回执，遇到单次任务读取失败时有界重试一次；两轮仍不可读则保留原 wake 并上抛。
+        for attempt in range(2):
+            try:
+                cutoff = receipt_for(scheduler.store.tasks.load(str(signal.root_task_id)))
+                break
+            except (OSError, DataCorruptionError):
+                if attempt == 1:
+                    raise
     scheduler._quota_fallback_wakes.discard(signal.wake_signal_id)
     scheduler._wake_retry_after.pop(signal.wake_signal_id, None)
     if scheduler.scheduler_service is not None:
         scheduler.scheduler_service.repository.record_waiting_delivery(report, now=time.time())
     scheduler.store.wakes.mark_handled(signal.wake_signal_id, now=now)
-    from .technical_continuation import WAKE_REASON, publish_pending, receipt_for
-    cutoff = None
-    if (getattr(getattr(scheduler.runtime.agent, "config", None), "technical_cutoff_continuation_enabled", False)
-            and signal.root_task_id):
-        cutoff = receipt_for(scheduler.store.tasks.load(str(signal.root_task_id)))
     cutoff_owns_next = cutoff is not None and cutoff.status in {"pending", "claimed"}
     if cutoff_owns_next:
         publish_pending(scheduler.runtime.agent, scheduler.store, str(signal.root_task_id or ""))
@@ -5950,7 +5957,8 @@ def _ensure_goal_progress_continuation_once(
     except KeyError:
         return False, True
     except (DataCorruptionError, ValueError) as exc:
-        # 目标文件损坏或选择歧义属于确定性状态，不重试也不阻断回合收尾。
+        # GoalStore 会把文件读 I/O 错误包装成 DataCorruptionError，允许由外层有界重试一次；
+        # 选择歧义（ValueError）属于确定性冲突不重试，均不阻断回合收尾。
         _HEARTBEAT_LOGGER.warning(
             "goal continuation skipped code=%s task_id=%s effect_outcome=%s next_action=%s error=%s",
             "GOAL_STATE_UNREADABLE",
@@ -5959,7 +5967,7 @@ def _ensure_goal_progress_continuation_once(
             "repair or remove the unreadable goal file",
             exc,
         )
-        return False, False
+        return False, isinstance(exc, DataCorruptionError)
     if goal is None:
         return False, True
     if (

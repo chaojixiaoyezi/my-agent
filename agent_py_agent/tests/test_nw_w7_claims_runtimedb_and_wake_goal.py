@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -21,7 +22,7 @@ from agent_py_agent.agent.concurrency.interrupt import (
     is_interrupted,
     register_interruptible,
 )
-from agent_py_agent.agent.conversation import FakeDeliveryService
+from agent_py_agent.agent.conversation import FakeDeliveryService, store_tasks
 from agent_py_agent.agent.conversation.background_goal import (
     GoalContinuationDependencies,
     continue_goal_after_report,
@@ -60,6 +61,7 @@ from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 from agent_py_agent.agent.runtime_db.run_creation import RunCreation, create_run_chain
 from agent_py_agent.agent.runtime_db.schema import runtime_db_path
+from agent_py_agent.agent.runtime_errors import DataCorruptionError
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling.models import EffectResolverPolicy, ToolRuntimePolicy
 
@@ -1252,4 +1254,219 @@ def test_ensure_goal_progress_continuation_handles_corrupt_goal_file_without_rai
         now=10.0,
     )
     assert result is False
+    assert store.wakes.pending(limit=20) == []
+
+
+@pytest.fixture
+def real_goal_io_boundary(tmp_path: Path, monkeypatch):
+    home = tmp_path / "native-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("MY_AGENT_HOME", str(home))
+    agent = SimpleAgent(
+        AgentConfig(
+            model_backend="echo",
+            memory_path="memory.jsonl",
+            technical_cutoff_continuation_enabled=True,
+        ),
+        tmp_path,
+    )
+    store = agent.conversation_store
+    owner_id = agent.home_paths.owner_id
+    thread = store.threads.create(canonical_user_id=owner_id, owner_id=owner_id)
+    task_id = "task-goal-read"
+    store.tasks.bind(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": task_id,
+            "goal": "continue assigned work",
+            "status": "active",
+        }
+    )
+    goal = store.goals.create(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": task_id,
+            "objective": "continue assigned work",
+        }
+    )
+    runner = BackgroundMainAgentRuntime(
+        agent=agent,
+        store=store,
+        channels=FakeDeliveryService(),
+    )
+    scheduler = BackgroundMainAgentScheduler({"runtime": runner, "store": store})
+    report = BackgroundMainAgentReport(
+        thread_id=thread.thread_id,
+        task_id=task_id,
+        reason="thread_goal_continue",
+        response="completed work slice",
+        route_channel="internal",
+        route_target=thread.thread_id,
+        created_at=20.0,
+        tool_call_count=1,
+        tool_success_count=1,
+        material_progress_count=1,
+        wake_handled=True,
+        goal_continuation_allowed=True,
+    )
+    return store, thread, task_id, goal, agent, scheduler, report
+
+
+def _inject_path_read_error(monkeypatch, target: Path, *, persistent: bool = False) -> dict[str, int]:
+    original = Path.read_text
+    counts = {"reads": 0, "errors": 0}
+
+    def read(path: Path, *args, **kwargs):
+        if path == target:
+            counts["reads"] += 1
+            if persistent or counts["errors"] == 0:
+                counts["errors"] += 1
+                raise OSError(errno.EIO, "simulated record read error")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    return counts
+
+
+def _fd_count() -> int | None:
+    fd_dir = Path("/proc/self/fd") if Path("/proc/self/fd").is_dir() else Path("/dev/fd")
+    return len(os.listdir(fd_dir)) if fd_dir.is_dir() else None
+
+
+def test_closeout_retries_one_real_task_io_error(real_goal_io_boundary, monkeypatch):
+    store, thread, task_id, goal, _agent, scheduler, report = real_goal_io_boundary
+    signal = raise_goal_continuation_wake(store, goal, now=10.0)
+    path = store.storage.task_path(task_id)
+    with store_tasks._TASK_LINK_CACHE_LOCK:
+        store_tasks._TASK_LINK_CACHE.pop(str(path), None)
+    counts = _inject_path_read_error(monkeypatch, path)
+    fd_before = _fd_count()
+    actual = _complete_wake_report(
+        scheduler,
+        signal,
+        report,
+        lifecycle_reason="thread_goal_continue",
+        now=20.0,
+    )
+    if fd_before is not None:
+        assert (_fd_count() - fd_before) == 0
+    assert actual is report
+    assert counts == {"reads": 2, "errors": 1}
+    assert store.wakes.pending_one(signal.wake_signal_id) is None
+    pending = store.wakes.pending(limit=20)
+    assert len(pending) == 1
+    assert pending[0].wake_signal_id != signal.wake_signal_id
+    assert store.goals.load(thread.thread_id, goal_id=goal.goal_id).status == "active"
+    assert store.tasks.load(task_id).status == "active"
+
+
+def test_closeout_retains_current_wake_if_task_stays_unreadable(real_goal_io_boundary, monkeypatch):
+    store, _thread, task_id, goal, _agent, scheduler, report = real_goal_io_boundary
+    signal = raise_goal_continuation_wake(store, goal, now=10.0)
+    path = store.storage.task_path(task_id)
+    with store_tasks._TASK_LINK_CACHE_LOCK:
+        store_tasks._TASK_LINK_CACHE.pop(str(path), None)
+    counts = _inject_path_read_error(monkeypatch, path, persistent=True)
+    fd_before = _fd_count()
+    with pytest.raises(DataCorruptionError):
+        _complete_wake_report(
+            scheduler,
+            signal,
+            report,
+            lifecycle_reason="thread_goal_continue",
+            now=20.0,
+        )
+    if fd_before is not None:
+        assert (_fd_count() - fd_before) == 0
+    assert counts == {"reads": 2, "errors": 2}
+    assert store.wakes.pending_one(signal.wake_signal_id) is not None
+    assert len(store.wakes.pending(limit=20)) == 1
+
+
+def test_ensure_retries_real_goal_reader_error(real_goal_io_boundary, monkeypatch):
+    store, thread, task_id, goal, agent, _scheduler, _report = real_goal_io_boundary
+    counts = _inject_path_read_error(monkeypatch, store.storage.goal_path(thread.thread_id))
+    fd_before = _fd_count()
+    assert (
+        ensure_goal_progress_continuation(
+            agent,
+            store=store,
+            task_id=task_id,
+            thread_id=thread.thread_id,
+            goal_id=goal.goal_id,
+            now=20.0,
+        )
+        is True
+    )
+    if fd_before is not None:
+        assert (_fd_count() - fd_before) == 0
+    assert counts == {"reads": 2, "errors": 1}
+    assert len(store.wakes.pending(limit=20)) == 1
+
+
+def test_corrupt_goal_remains_fail_closed(real_goal_io_boundary):
+    store, thread, task_id, goal, agent, _scheduler, _report = real_goal_io_boundary
+    store.storage.goal_path(thread.thread_id).write_text("{invalid record", encoding="utf-8")
+    assert not ensure_goal_progress_continuation(
+        agent,
+        store=store,
+        task_id=task_id,
+        thread_id=thread.thread_id,
+        goal_id=goal.goal_id,
+        now=20.0,
+    )
+    assert store.wakes.pending(limit=20) == []
+
+
+def test_ensure_goal_ambiguity_not_retried_and_persistent_goal_io_fail_closed(
+    real_goal_io_boundary, monkeypatch
+):
+    store, thread, task_id, goal, agent, _scheduler, _report = real_goal_io_boundary
+    goal_path = store.storage.goal_path(thread.thread_id)
+    with monkeypatch.context() as patched:
+        counts = _inject_path_read_error(patched, goal_path, persistent=True)
+        assert (
+            ensure_goal_progress_continuation(
+                agent,
+                store=store,
+                task_id=task_id,
+                thread_id=thread.thread_id,
+                goal_id=goal.goal_id,
+                now=20.0,
+            )
+            is False
+        )
+        assert counts == {"reads": 2, "errors": 2}
+    assert store.wakes.pending(limit=20) == []
+
+    goals_doc = json.loads(goal_path.read_text(encoding="utf-8"))
+    second_row = dict(goals_doc["goals"][0])
+    second_row["goal_id"] = "goal-second-active"
+    second_row["name"] = "second-goal"
+    goals_doc["goals"].append(second_row)
+    goal_path.write_text(json.dumps(goals_doc), encoding="utf-8")
+
+    ambiguity_reads = {"reads": 0}
+    original_read = Path.read_text
+
+    def count_goal_reads(path: Path, *args, **kwargs):
+        if path == goal_path:
+            ambiguity_reads["reads"] += 1
+        return original_read(path, *args, **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "read_text", count_goal_reads)
+        assert (
+            ensure_goal_progress_continuation(
+                agent,
+                store=store,
+                task_id=task_id,
+                thread_id=thread.thread_id,
+                goal_id="",
+                now=30.0,
+            )
+            is False
+        )
+    assert ambiguity_reads["reads"] == 1
     assert store.wakes.pending(limit=20) == []
