@@ -374,6 +374,8 @@ def inventory_for_agent(agent, *, runtime_snapshot, allowed_tools=None, preserve
     if callable(snapshot_factory) and (allowed_tools is None or 'skill_search' in allowed_tools):
         snapshot = snapshot_factory()
         for entry in snapshot.enabled_entries():
+            if not getattr(entry, 'recommended', True):
+                continue
             descriptor = AssetDescriptor(entry.stable_id.rsplit(':', 1)[-1] if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', entry.stable_id.rsplit(':', 1)[-1]) else
                 'skill-' + hashlib.sha256(entry.stable_id.encode()).hexdigest()[:24], 'skill', entry.name,
                 summary=entry.description, metadata={'stable_id': entry.stable_id},

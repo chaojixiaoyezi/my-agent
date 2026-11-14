@@ -6,12 +6,24 @@ import logging
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from .skill_learning_maintenance import LearningObservationSource, observe_learning
+from .skill_learning_maintenance import (
+    _HOST_DELIVERY_KEYS_CTX,
+    LearningObservationSource,
+    observe_learning,
+)
 from .skill_learning_publish import SkillLearningGateError
 from .skill_learning_store import SkillLearningStore, SkillLearningStoreError
+from .skill_usage_receipts import candidate_delivery_task_keys, has_body_delivery_receipt
 
 _TARGET_KEYS = ('skill_id','skill_name','target_skill_id','asset_id','asset_ref','method_id','target_skill_ids')
 _HASH_KEYS = ('sha256','content_hash','content_sha256','skill_content_hash','version_hash')
+_ENVIRONMENTAL_FAILURE_MARKERS = (
+    'timeout', 'timed_out', 'network', 'connection', 'dns', 'provider',
+    'rate_limit', 'quota', 'sandbox_unavailable', 'verifier_timeout',
+    'verifier_cancelled', 'verifier_input_unresolved', 'environment',
+    'environmental', 'transient', 'service_unavailable', 'bad_gateway',
+    'gateway_timeout', 'unavailable',
+)
 
 
 # LLM: 晚到工具回执不能冒当前新run/attempt记分；call身份来自宿主原调用，缺当前scope不猜测。
@@ -36,53 +48,163 @@ def observe_command_verification(agent, params, evidence):
         return _observe(agent,params,'effective',f"verification:{evidence['id']}", evidence)
 
 
-# LLM: 包检查器failed仅来自valid=false的声明式内容检查；not_run/error/cancelled均不记负样本，复用键绑定目标内容hash。
+def _is_environmental_pack_failure(result, evidence: dict) -> bool:
+    if (
+        getattr(result, 'transient', False) is True
+        or getattr(result, 'environmental', False) is True
+        or evidence.get('transient') is True
+        or evidence.get('environmental') is True
+        or str(evidence.get('outcome') or '').strip().lower() == 'environment'
+    ):
+        return True
+    indicators: list[str] = []
+    for attr in ('reason_code', 'error_code', 'error', 'failure_reason', 'status_reason'):
+        val = evidence.get(attr, getattr(result, attr, None))
+        if isinstance(val, str) and val.strip():
+            indicators.append(val.strip().lower())
+    for seq_attr in ('error_codes', 'reasons'):
+        seq = evidence.get(seq_attr, getattr(result, seq_attr, None))
+        if isinstance(seq, (list, tuple, set)):
+            indicators.extend(str(item).strip().lower() for item in seq if item)
+    err_counts = evidence.get('error_counts', getattr(result, 'error_counts', None))
+    if isinstance(err_counts, dict):
+        indicators.extend(str(k).strip().lower() for k in err_counts if k)
+    return any(marker in text for text in indicators for marker in _ENVIRONMENTAL_FAILURE_MARKERS)
+
+
+# LLM: V2-2 通道 C：确定性非环境 pack failed/valid=False 可通过自愿 adopted 或规范正文送达 UsageReceipt 归因；
+#   瞬态网络/超时/provider/环境失败一律跳过不击打。
 # 函数用途: 登记原沙箱检查器的内容有效性结论，不复制目标、检查错误或秘密。
 def observe_pack_verification(agent, params, result, key):
-    if result.status == 'passed' and result.valid is True:
-        return _observe(agent,params,'effective',f'pack:{key}', vars(result))
-    elif result.status == 'failed' and result.valid is False:
-        return _observe(agent,params,'ineffective',f'pack:{key}', vars(result))
+    status = getattr(result, 'status', None)
+    valid = getattr(result, 'valid', None)
+    evidence = dict(vars(result)) if hasattr(result, '__dict__') else {}
+    if status == 'passed' and valid is True:
+        return _observe(agent, params, 'effective', f'pack:{key}', evidence)
+    if status == 'failed' and valid is False:
+        if _is_environmental_pack_failure(result, evidence):
+            return []
+        return _observe(
+            agent,
+            params,
+            'ineffective',
+            f'pack:{key}',
+            evidence,
+            allow_body_delivery_receipt=True,
+        )
+    return []
 
 
-# LLM: 显式目标须准确hash；无目标核对当前及跨更新历史的唯一资产版本对，只有当前版实际采用才能记分。
-# 函数用途: 将原宿主回执归给准确采用的方法，兼容真实验证器没有目标字段的单技能运行。
-def _observe(agent,params,outcome,receipt,evidence=None):
-    if not getattr(getattr(agent,'config',None),'enable_self_learning',False):
+# LLM: 显式目标须准确 hash；无目标核对当前及跨更新历史的唯一资产版本对，只有当前版实际采用或同任务存在正文送达回执才归因。
+# 函数用途: 将原宿主回执归给准确采用或使用过的方法，兼容无目标字段的单技能运行。
+def _observe(agent, params, outcome, receipt, evidence=None, *, allow_body_delivery_receipt: bool = False):
+    if not getattr(getattr(agent, 'config', None), 'enable_self_learning', False):
         return
-    run_id = str(getattr(params,'run_id','') or '')
-    current = getattr(agent,'_current_run_params',None)
-    if not run_id or getattr(current,'run_id',None) != run_id or getattr(current,'attempt_id',None) != getattr(params,'attempt_id',None):
+    run_id = str(getattr(params, 'run_id', '') or '')
+    current = getattr(agent, '_current_run_params', None)
+    if not run_id or getattr(current, 'run_id', None) != run_id or getattr(current, 'attempt_id', None) != getattr(params, 'attempt_id', None):
         return
+    repo = getattr(agent, 'runtime_db', None) or getattr(getattr(agent, 'subagents', None), 'runtime_db', None)
+    provider = (lambda r=repo: r) if repo is not None else None
     try:
-        store = SkillLearningStore.for_home(agent.home_paths)
+        store = SkillLearningStore.for_home(agent.home_paths, usage_runtime_provider=provider)
         registry = store.load_registry()
     except (SkillLearningStoreError, OSError, ValueError) as exc:
         logging.getLogger(__name__).warning("failed to load registry in _observe: %s", exc, exc_info=True)
         return []
     evidence = evidence or {}
-    adopted = [(row, [fact for fact in row.maintenance.get('observations', [])
-                     if fact.get('authority') == 'model' and fact.get('outcome') == 'adopted'
-                     and fact.get('run_id') == run_id and fact.get('sha256') == row.sha256])
-               for row in registry.skills.values()]
-    adopted = [(row, facts) for row, facts in adopted if facts]
-    pairs = _adopted_skill_pairs(registry.skills.values(), run_id)
+    task_id = str(getattr(params, 'task_id', '') or '')
+    request_id = str(getattr(params, 'request_id', '') or '')
+    attrs = getattr(params, 'task_attributes', None) or {}
+    root_task_id = str(attrs.get('root_task_id') or '') if isinstance(attrs, dict) else ''
+    canonical_task = root_task_id or task_id or (f'request:{request_id}' if request_id else run_id)
+
+    candidates: list[tuple[object, list[dict], bool]] = []
+    body_receipt_pairs: set[tuple[str, str]] = set()
+    for row in registry.skills.values():
+        if row.layout == 'owner':
+            continue
+        adoptions = [
+            fact
+            for fact in row.maintenance.get('observations', [])
+            if fact.get('authority') == 'model'
+            and fact.get('outcome') == 'adopted'
+            and fact.get('run_id') == run_id
+            and fact.get('sha256') == row.sha256
+        ]
+        if adoptions:
+            candidates.append((row, adoptions, False))
+        elif allow_body_delivery_receipt and repo is not None and row.sha256:
+            inc = str(row.maintenance.get('incarnation_id') or '')
+            act = str(row.maintenance.get('activation_id') or '')
+            if inc and act and has_body_delivery_receipt(
+                repo,
+                incarnation_id=inc,
+                activation_id=act,
+                content_sha256=row.sha256,
+                root_task_id=root_task_id,
+                task_id=task_id,
+                request_id=request_id,
+            ):
+                body_receipt_pairs.add((row.name, row.sha256))
+                candidates.append((row, [{'task_id': canonical_task, 'job_id': ''}], True))
+
+    pairs = _adopted_skill_pairs(registry.skills.values(), run_id) | body_receipt_pairs
     explicit = any(key in evidence for key in _TARGET_KEYS)
     diagnostics = []
-    for row, adoptions in adopted:
+    for row, items, via_body_receipt in candidates:
         if explicit and not _receipt_targets(evidence, row):
             continue
-        if not explicit and (len(pairs) != 1 or len(adopted) != 1 or not row.sha256 or not _receipt_hash_matches(evidence, row)):
+        if not explicit and (len(pairs) != 1 or len(candidates) != 1 or not row.sha256 or not _receipt_hash_matches(evidence, row)):
             continue
-        for adoption in adoptions:
+        inc = str(row.maintenance.get('incarnation_id') or '')
+        act = str(row.maintenance.get('activation_id') or '')
+        epoch = row.maintenance.get('strike_epoch')
+        epoch_val = epoch if isinstance(epoch, int) and not isinstance(epoch, bool) and epoch >= 0 else None
+        delivery_keys = (
+            tuple(
+                candidate_delivery_task_keys(
+                    root_task_id=root_task_id,
+                    task_id=task_id,
+                    request_id=request_id,
+                )
+            )
+            if via_body_receipt
+            else ()
+        )
+        for item in items:
+            eff_task_id = canonical_task if (via_body_receipt or root_task_id) else (item.get('task_id') or canonical_task)
+            token = _HOST_DELIVERY_KEYS_CTX.set(delivery_keys) if delivery_keys else None
             try:
-                observe_learning(store,row.name,sha256=row.sha256,task_id=adoption['task_id'],outcome=outcome,source=LearningObservationSource(authority='host',run_id=run_id,receipt_id=receipt,job_id=adoption.get('job_id','')))
+                observe_learning(
+                    store,
+                    row.name,
+                    sha256=row.sha256,
+                    task_id=eff_task_id,
+                    outcome=outcome,
+                    source=LearningObservationSource(
+                        authority='host',
+                        run_id=run_id,
+                        receipt_id=receipt,
+                        job_id=item.get('job_id', ''),
+                        incarnation_id=inc,
+                        activation_id=act,
+                        strike_epoch=epoch_val,
+                    ),
+                )
             except SkillLearningGateError as error:
                 # 只跳过这一项的过期观察，CAS不变，旧质量绝不归给新版；其余错误原样交宿主。
                 if error.code != 'SKILL_LEARNING_REVISION_CONFLICT':
                     raise
-                diagnostics.append({'status': 'stale', 'reason': error.code,
-                                    'skill_id': 'owner:' + row.name, 'receipt_ref': receipt})
+                diagnostics.append({
+                    'status': 'stale',
+                    'reason': error.code,
+                    'skill_id': 'owner:' + row.name,
+                    'receipt_ref': receipt,
+                })
+            finally:
+                if token is not None:
+                    _HOST_DELIVERY_KEYS_CTX.reset(token)
     return diagnostics
 
 

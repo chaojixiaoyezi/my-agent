@@ -1,3 +1,33 @@
+## 2026-11-13 Skill 与记忆闭环 R1 返工收敛
+
+在 `sm/integration-20261113` 合入 R1 返工切片（U1–U7）后，隔离 `HOME`/`MY_AGENT_HOME` 完成以下收敛验证：
+
+- `test_sm_rework_config_scope.py`：验证主会话保留全局配置完整 schema、参数账本与热刷新；子代理及受限作用域（`runtime`/`legacy`/`task_local`/`control_plane`/`isolated`/`agent_run_id`/`combined`）裁剪为决策设置分流并在执行阶段拒绝全局配置修改，配置与账本字节保持不变。
+- `test_sm_rework_carrier_source.py`：验证 `lesson_candidate_request` 统一共享格式与去重键，并在入队、模型调用前与提交前重读规范 `candidates.jsonl`；已脱敏/排除/撤回/哈希不符或源丢失按确定性失效拒绝清理，暂时不可读保留请求等待恢复。
+- `test_sm_rework_lifecycle_sync.py`：验证归档、恢复、换出发布（Phase 1/2）、驱逐、删除与回滚在物理替换后遇目录 `fsync` `OSError` 时保留 `pending_operation` 并经 `recover_lifecycle()` 前向收敛；替换前错误清除意图且保持原文件完整。
+- `test_sm_rework_quality.py` 与 `test_sm_w2_bounded_maintenance.py::test_w2_manual_learned_dir_deletion_converges_and_unblocks_publish`：验证移除 `observe_learning` 2 次正向观察捷径后仅认 `3 + hurt_count` 版本绑定真实送达确立质量；手动删除 `learned`/`archived` 目录或删空 `SKILL.md`（含 `read_text_beneath` 返回 `None` 竞态）统一收敛为 `ownership="user_modified"` 并释放容量槽位放行新发布，读取异常与符号链接继续保底 `unknown`。
+- 3 次独立真实送达对齐：`test_sm_w9_feedback_awareness.py`、`test_sm_w10_closed_loop.py`（同时为 `test_275_to_50_convergence_preserves_exempt_layers_and_displaces_coldest_unadopted` 增加 `@pytest.mark.timeout(180)`）及 `test_wave7_autonomous_learning_closure.py::test_r2_trial_to_active_records_one_promotion_transition` 均对齐为 3 次真实送达确立，并额外验证第 4 次任务不再重复追加 `active`。
+- 实际门禁：隔离运行 `test_sm_w10_closed_loop.py`、`test_sm_w9_feedback_awareness.py`、`test_wave7_autonomous_learning_closure.py`、`test_sm_w2_bounded_maintenance.py`、`test_sm_rework_config_scope.py`、`test_sm_rework_carrier_source.py`、`test_sm_rework_lifecycle_sync.py`、`test_sm_rework_quality.py`（`-o addopts= -q --tb=short`）共 **253 项全部通过**（`exit 0`）；改动 Python 文件 Ruff、`scripts/check_import_boundaries.py --json`、`scripts/build_constants_catalog.py --check`（1509 项）及 `git diff --check` 全部通过。本次未跑全仓 pytest。
+
+## 2026-11-13 Skill 与记忆闭环 W10 Stage B（集成候选）
+
+`sm/w10` 合入集成提交 `3e2bcb625`（W0–W9 全部合入，十切片合并门 1595 项全过）后，隔离 `HOME`/`MY_AGENT_HOME` 逐文件运行：
+
+- `test_sm_w10_closed_loop.py` 10 项通过：Stage A 5 项之外，新增 5 项真实组合根用例——`UserConfigTool` 关闭/开启总开关、切换 `observe`、调整上限后同一 Agent 的学习服务与 `self_map` 立即反映，`reset` 回到 `autonomous`；同一任务上主会话 `skill_feedback`、包检查失败、后台总结 `ineffective` 三通道只记 1 击，第二个任务记第 2 击并清零，第三个任务触发回滚到已证明的 v1（新激活身份、不加黑名单）；25 个远程 owner 按每页 4 个分页发现，游标走完全集、无重复，全程不构造 Agent；过程性子代理经验只进 Skill 学习队列，记忆侧自动晋升不写 lesson/HOT，不产生任何待确认提案；真实 lesson 维护写出的热度投影驱动 `self_map` 遥测（`as_of` 带时区），删除整个 `memory/` 目录后遥测降级为未知、`read_ids`/`scope_pairs` 静默返回空。
+- `scripts/build_constants_catalog.py --write` 后 `--check` 一致（1513 项）；`test_constants_catalog.py` 10 项通过、1 项失败：12 个不合规常数（`BUSINESS_CAPABILITY_QUERY_MAX_CHARS`、`WORKFLOW_DOWNLOAD_MAX_BYTES` 等，位于业务、工作流与产物模块）在基线 `f6fea71a5` 上同样失败，均不属于本次闭环改造文件，待对应模块整改。
+
+## 2026-11-13 Skill 与记忆闭环 W10 Stage A（集成候选）
+
+基于集成提交 `4ba014210`（已含 W0/W1/W2/W4/W5/W6/W7/W8），隔离 `HOME`/`MY_AGENT_HOME`，逐文件独立进程运行：
+
+- 新增 `test_sm_w10_closed_loop.py` 5 项通过（约 17 秒）：275 条自学 Skill 在有界多轮维护中收敛到 50 条在役，已知使用、固定、活跃引用、用户改过、owner 手写与工作区 Skill 均保留，换出为最旧的 224 条确证从未使用条目，每轮状态变更不超过 128 条，换出不加黑名单并获得完整宽限起点，收敛后再完整跑一遍无新变更；容量收敛中途子进程在归档搬迁后硬退出，重启后有界轮次内前向收敛、无丢失无重复；5,000 个 owner 的语义指纹 memo 驻留不超过 `resident_owners` 配额，单个 owner 变化不影响其它 owner，同名同正文在两个 owner 下身份与回执键独立；零引用零 lesson 打开、按 ID 刷新不走 `all()`、`scope_pairs` 命中不重扫；互斥载体分类与 lesson 替代后旧 HOT 退役、旧正文保留。
+- 三份旧测试替身按 W7 合同补齐 `scope_pairs`/`read_ids`：`test_business_memory_scope_boundary.py` 4 项、`test_decision_recall.py` 47 项、`test_param_w1_memory_and_compact.py` 67 项通过。
+- 删除经全仓扫描无外部引用的 `test_skill_learning_confirmation.py`；`test_opt_cli_contracts.py` 220 项、`test_decision_cooldown_persistence.py` 5 项通过，CLI 144 条解析路径不变。
+- 改动的 Python 文件 Ruff、导入边界与 `git diff --check` 通过。
+- `scripts/verify_optimization_removal.py` 在 `4ba014210` 上因 `skill_usage_receipts.py` 顶层导入 `RuntimeRepository` 形成循环导入而无法装配 CLI（已由集成分支 `849e08778` 改为 `TYPE_CHECKING` 导入修复）；修复后剩余 5 项失败（`SURF-DEL-109/111/124/150/151`）在基线 `f6fea71a5` 上同样存在，不是本次回归。
+
+未运行全仓 pytest、真实模型、5,000 owner 真实流量或 365 天连续运行。
+
 ## 2026-11-12 验证证据失效与损坏租约
 
 需求输入版本或监控路径变更后，原测试事件保留为历史，并按失效时的事件编号边界排除旧证据。三个已验证范围均需当前同项目的通过记录，验收保存准确独立评审引用。28 项定向测试通过，覆盖旧库迁移、并发首次访问、重新验证恢复和显式未验证记录。

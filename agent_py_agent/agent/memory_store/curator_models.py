@@ -79,11 +79,14 @@ class MemoryCuratorConfig:
     retention_scan_slice_entries: int = RETENTION_SCAN_SLICE_ENTRIES
     retention_scan_slice_bytes: int = RETENTION_SCAN_SLICE_BYTES
     retention_scan_slice_ms: int = RETENTION_SCAN_SLICE_MS
+    # 教训按未命中/已替代保留天数自动归档；0 表示只重建路由与热度、不归档文件。
+    lesson_archive_days: int = 15
 
     # LLM: 只从已 normalize 的 AgentConfig 读取固定引用、门槛和证据/去重预算，0值原样保留，不另解析配置文件。
     # 函数用途: 构造一次运行不可变配置，让 Curator 收集与晋升使用真实配置值。
     @classmethod
     def from_agent_config(cls, config: object) -> MemoryCuratorConfig:
+        raw_archive_days = getattr(config, "memory_lesson_archive_days", 15)
         return cls(
             enabled=bool(getattr(config, "memory_curator_enabled", True)),
             model_profile=str(getattr(config, "memory_curator_model_profile", "") or "").strip(),
@@ -109,6 +112,10 @@ class MemoryCuratorConfig:
             retention_scan_slice_entries=getattr(config, "retention_scan_slice_entries", RETENTION_SCAN_SLICE_ENTRIES),
             retention_scan_slice_bytes=getattr(config, "retention_scan_slice_bytes", RETENTION_SCAN_SLICE_BYTES),
             retention_scan_slice_ms=getattr(config, "retention_scan_slice_ms", RETENTION_SCAN_SLICE_MS),
+            lesson_archive_days=max(
+                0,
+                int(15 if raw_archive_days is None else raw_archive_days),
+            ),
         )
 
     # LLM: revision 反映策展语义/预算；新增字段为默认值时剔除，保持既有state的修订哈希，非默认值仍参与计算。
@@ -127,6 +134,8 @@ class MemoryCuratorConfig:
             payload.pop("task_file_evidence_max_chars", None)
         if payload.get("cross_thread_dedupe_window_seconds") == 600:
             payload.pop("cross_thread_dedupe_window_seconds", None)
+        if payload.get("lesson_archive_days") == 15:
+            payload.pop("lesson_archive_days", None)
         material = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return "curator-config-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
@@ -438,14 +447,29 @@ def parse_curator_extraction(text: str) -> CuratorExtraction:
     # 结构化生成仍强制主字段;缺失补全是纯宿主侧确定性修复,不引入新权威。
     if missing:
         payload = {**payload, **{key: _EMPTY_FIELD_DEFAULT[key] for key in missing}}
-    # 宿主容错: 仅补齐候选条目偶发省略的 link_candidate_id, 不绕过其余必填属性的严格 Schema 校验。
+    # 宿主容错: 仅补齐候选条目及 scope 中偶发省略的可空标量字段，不填补 scope 本身、daily_events 或数组字段。
     if isinstance(payload.get("candidates"), list):
-        payload["candidates"] = [
-            dict(item, link_candidate_id=item.get("link_candidate_id"))
-            if isinstance(item, dict)
-            else item
-            for item in payload["candidates"]
-        ]
+        normalized_candidates: list[object] = []
+        for item in payload["candidates"]:
+            if not isinstance(item, dict):
+                normalized_candidates.append(item)
+                continue
+            normalized_item: dict[str, object] = {
+                "observed_at": None,
+                "valid_from": None,
+                "valid_until": None,
+                "target_entry_id": None,
+                "link_candidate_id": None,
+                **item,
+            }
+            if isinstance(normalized_item.get("scope"), dict):
+                normalized_item["scope"] = {
+                    "applies_when": None,
+                    "excludes_when": None,
+                    **normalized_item["scope"],
+                }
+            normalized_candidates.append(normalized_item)
+        payload["candidates"] = normalized_candidates
     validate_curator_response_payload(payload, curator_response_schema())
     return CuratorExtraction(
         daily_events=tuple(_parse_daily_draft(item) for item in _object_array(payload, "daily_events")),

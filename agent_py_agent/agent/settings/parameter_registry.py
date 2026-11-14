@@ -522,8 +522,89 @@ def _compact_output_reserve(config: object) -> dict[str, object]:
     }
 
 
+def _self_learning_autonomous_enabled(config: object) -> bool:
+    return bool(getattr(config, "enable_self_learning", True)) and (
+        str(getattr(config, "self_learning_maintenance_mode", "autonomous") or "").strip().lower() == "autonomous"
+    )
+
+
+def _effective_self_learning_mode(config: object) -> str:
+    if not getattr(config, "enable_self_learning", True):
+        return "paused"
+    return str(getattr(config, "self_learning_maintenance_mode", "autonomous") or "observe").strip().lower()
+
+
 # 运行时按规则派生的参数：登记“由配置算出实际使用值”的唯一函数与一句中文规则；公式不在这里另写。
 _APPLIED_RULES: dict[str, tuple[Callable[[object], object], str]] = {
+    "enable_self_learning": (
+        lambda config: bool(getattr(config, "enable_self_learning", True)),
+        "配置热刷新立即生效：关闭时暂停后台自学习与自动维护；人工显式确认、删除和恢复始终可用",
+    ),
+    "self_learning_maintenance_mode": (
+        _effective_self_learning_mode,
+        "配置热刷新立即生效：autonomous 执行可恢复合并、3+hurt_count 质量退场与冷藏/归档/清理（受保护或明确在用技能豁免）；"
+        "observe 只观察不自动写盘；enable_self_learning=false 时暂停",
+    ),
+    "self_learning_max_skills": (
+        lambda config: int(getattr(config, "self_learning_max_skills", 50)),
+        "配置热刷新立即生效：0 不限，正数为活跃非豁免技能槽位上限；已固定、待确认、在途及明确引用技能豁免不占位",
+    ),
+    "self_learning_recommended_limit": (
+        lambda config: int(getattr(config, "self_learning_recommended_limit", 50)),
+        "配置热刷新立即生效：0 不限，限制默认常用目录展示的自学技能数；不影响完整搜索与显式读取",
+    ),
+    "self_learning_recommended_explore_percent": (
+        lambda config: (
+            int(getattr(config, "self_learning_recommended_explore_percent", 20))
+            if int(getattr(config, "self_learning_recommended_limit", 50)) > 0
+            else 0
+        ),
+        "配置热刷新立即生效：0 关闭探索配额；self_learning_recommended_limit=0 时不截断目录因而有效探索配额为 0%",
+    ),
+    "self_learning_merge_similarity_percent": (
+        lambda config: (
+            int(getattr(config, "self_learning_merge_similarity_percent", 70))
+            if _self_learning_autonomous_enabled(config)
+            else 0
+        ),
+        "配置热刷新立即生效：0 关闭自动合并；仅 enable_self_learning=true 且 maintenance_mode=autonomous 时按该阈值去重合并",
+    ),
+    "self_learning_keep_versions": (
+        lambda config: (
+            int(getattr(config, "self_learning_keep_versions", 5))
+            if _self_learning_autonomous_enabled(config)
+            else 0
+        ),
+        "配置热刷新立即生效：0 不裁剪历史修订；仅 autonomous 且引用完整时清理无固定/在途/监控引用的旧修订，当前激活版永保留",
+    ),
+    "self_learning_cool_seconds": (
+        lambda config: (
+            int(getattr(config, "self_learning_cool_seconds", 604800))
+            if _self_learning_autonomous_enabled(config)
+            else 0
+        ),
+        "配置热刷新立即生效：0 关闭冷藏；仅 enable_self_learning=true 且 maintenance_mode=autonomous 时生效（受保护技能豁免）",
+    ),
+    "self_learning_archive_seconds": (
+        lambda config: (
+            int(getattr(config, "self_learning_archive_seconds", 1296000))
+            if _self_learning_autonomous_enabled(config)
+            else 0
+        ),
+        "配置热刷新立即生效：0 关闭闲置归档；3+hurt_count 质量退场仍独立判定，受保护或明确在用技能豁免",
+    ),
+    "self_learning_evict_seconds": (
+        lambda config: (
+            int(getattr(config, "self_learning_evict_seconds", 1296000))
+            if _self_learning_autonomous_enabled(config)
+            else 0
+        ),
+        "配置热刷新立即生效：0 表示永久归档（无超时删除、无恢复宽限期过期）；正数按 archived_at 起算秒数，仅 autonomous 时执行清理",
+    ),
+    "memory_lesson_archive_days": (
+        lambda config: int(getattr(config, "memory_lesson_archive_days", 15)),
+        "配置热刷新立即生效：0 关闭教训自动归档；正数天内未被活跃或待审方法引用时静默归档，可审计恢复且不影响永久记忆",
+    ),
     "gateway_event_fallback_poll_seconds": (
         lambda config: getattr(config, "gateway_event_fallback_poll_seconds", 0.0)
         if getattr(config, "gateway_event_hub_ring_events", 0) > 0 else 0,

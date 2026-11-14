@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1512,
+  "count": 1539,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -2764,12 +2764,60 @@
       "description": "浏览当前会话历史时默认取多少条。"
     },
     {
+      "name": "ACTIVE_LESSONS_PROMPT_COUNT",
+      "file": "agent_py_agent/agent/capability/skill_learning.py",
+      "value": 12,
+      "unit": "个",
+      "category": "其它",
+      "description": "中文说明: 提示词中附带的活跃经验规则摘要最多保留条数（条）。"
+    },
+    {
+      "name": "ACTIVE_LESSON_SUMMARY_CHARS",
+      "file": "agent_py_agent/agent/capability/skill_learning.py",
+      "value": 180,
+      "unit": "字符",
+      "category": "其它",
+      "description": "中文说明: 提示词中单条活跃经验规则摘要截断上限（字符）。"
+    },
+    {
+      "name": "DEFAULT_STALE_PROPOSAL_SECONDS",
+      "file": "agent_py_agent/agent/capability/skill_learning.py",
+      "value": 604800,
+      "unit": "秒",
+      "category": "其它",
+      "description": "中文说明: 陈旧学习提案定期清扫的超时阈值（秒，7 天）。"
+    },
+    {
       "name": "FOCUS_LIMIT_CHARS",
       "file": "agent_py_agent/agent/capability/skill_learning.py",
       "value": 500,
       "unit": "字符",
       "category": "上限预算",
       "description": "用户给的总结重点最多保留的字符数。"
+    },
+    {
+      "name": "MAX_MERGE_RETRY_COUNT",
+      "file": "agent_py_agent/agent/capability/skill_learning.py",
+      "value": 1,
+      "unit": "个",
+      "category": "重试",
+      "description": "中文说明: 触发合并优先提示后每轮最多额外调用一次模型进行合并收敛（次）。"
+    },
+    {
+      "name": "MERGE_CANDIDATES_MAX_COUNT",
+      "file": "agent_py_agent/agent/capability/skill_learning.py",
+      "value": 3,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "中文说明: 相似已有技能候选列表中最多展示给模型的候选项条数（条）。"
+    },
+    {
+      "name": "PROPOSAL_PRUNE_BATCH_COUNT",
+      "file": "agent_py_agent/agent/capability/skill_learning.py",
+      "value": 64,
+      "unit": "个",
+      "category": "其它",
+      "description": "中文说明: 每轮后台维护清扫 S1/S3 过期或孤儿提案的批量上限（条）。"
     },
     {
       "name": "UPDATABLE_COUNT",
@@ -2786,6 +2834,62 @@
       "unit": "个",
       "category": "上限预算",
       "description": "同时记着的“用户要求总结”标记、以及按会话记着的“最近完成的那次活”各自的上限：超出丢最早的。"
+    },
+    {
+      "name": "BASE_ESTABLISH_USES_COUNT",
+      "file": "agent_py_agent/agent/capability/skill_learning_maintenance.py",
+      "value": 3,
+      "unit": "个",
+      "category": "其它",
+      "description": "中文说明: 试用或活跃Skill触发第1次负反馈前需达到的基础有效独立任务数。"
+    },
+    {
+      "name": "DEFAULT_TIMESTAMP_CACHE_COUNT",
+      "file": "agent_py_agent/agent/capability/skill_learning_maintenance.py",
+      "value": 256,
+      "unit": "个",
+      "category": "其它",
+      "description": "中文说明: 维护到期时间字符串解析有界LRU缓存条目上限。"
+    },
+    {
+      "name": "LEGACY_DAILY_DUE_SECONDS",
+      "file": "agent_py_agent/agent/capability/skill_learning_maintenance.py",
+      "value": 86400,
+      "unit": "秒",
+      "category": "其它",
+      "description": "中文说明: 传统自动维护每日触发检查间隔（秒）。"
+    },
+    {
+      "name": "MAX_IDENTIFIER_CHARS",
+      "file": "agent_py_agent/agent/capability/skill_learning_maintenance.py",
+      "value": 300,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "中文说明: 学习反馈来源编号允许的最大字符长度。"
+    },
+    {
+      "name": "MAX_OBSERVATIONS_COUNT",
+      "file": "agent_py_agent/agent/capability/skill_learning_maintenance.py",
+      "value": 200,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "中文说明: 注册表内保留的展示级观察历史环形上限条数。"
+    },
+    {
+      "name": "MAX_PROMOTION_HISTORY_COUNT",
+      "file": "agent_py_agent/agent/capability/skill_learning_maintenance.py",
+      "value": 100,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "中文说明: 注册表内保留的晋升历史状态条数上限。"
+    },
+    {
+      "name": "MAX_STRIKE_COUNT",
+      "file": "agent_py_agent/agent/capability/skill_learning_maintenance.py",
+      "value": 3,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "中文说明: 触发版本回滚或退场封禁的累计负反馈阈值。"
     },
     {
       "name": "BODY_MAX_CHARS",
@@ -2876,6 +2980,22 @@
       "description": "提案意图恢复记录允许读取的最大字节数。"
     },
     {
+      "name": "_S3_PRUNE_DEFAULT_BATCH_COUNT",
+      "file": "agent_py_agent/agent/capability/skill_learning_proposals.py",
+      "value": 50,
+      "unit": "个",
+      "category": "其它",
+      "description": "单次自动裁剪 S3 学习提案的默认最大条数。"
+    },
+    {
+      "name": "_S3_PRUNE_MAX_INTENT_CHANGES_COUNT",
+      "file": "agent_py_agent/agent/capability/skill_learning_proposals.py",
+      "value": 200,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "单次 S3 裁剪事务写入意图日志的最大变更条数上限。"
+    },
+    {
       "name": "RECALLED_MEMORY_CHARS",
       "file": "agent_py_agent/agent/capability/skill_learning_request.py",
       "value": 600,
@@ -2962,6 +3082,22 @@
       "unit": "字符",
       "category": "其它",
       "description": "提案描述摘录字符数。"
+    },
+    {
+      "name": "_S1_PRUNE_DEFAULT_BATCH_COUNT",
+      "file": "agent_py_agent/agent/capability/skill_proposals.py",
+      "value": 50,
+      "unit": "个",
+      "category": "其它",
+      "description": "单次自动裁剪 S1 失效待确认提案的默认最大条数。"
+    },
+    {
+      "name": "_S1_PRUNE_MAX_INSPECT_COUNT",
+      "file": "agent_py_agent/agent/capability/skill_proposals.py",
+      "value": 256,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "单次 S1 裁剪扫描在启用游标断点续扫前的最大检查文件数。"
     },
     {
       "name": "_SCENARIO_EXCERPT_CHARS",
@@ -3058,6 +3194,38 @@
       "unit": "个技能",
       "category": "上限预算",
       "description": "单次技能投递最多包含的技能数，仍由原安装确认与配额决定接收。"
+    },
+    {
+      "name": "MAX_USAGE_DELTA_ROWS_COUNT",
+      "file": "agent_py_agent/agent/capability/skill_usage_ledger.py",
+      "value": 2000,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "中文说明：单条使用事件 delta 返回数组的协议最大长度（条）。"
+    },
+    {
+      "name": "DEFAULT_RECEIPT_CLEANUP_BATCH_ENTRIES",
+      "file": "agent_py_agent/agent/capability/skill_usage_receipts.py",
+      "value": 128,
+      "unit": "条",
+      "category": "其它",
+      "description": "中文说明：有界维护扫除单批默认扫描的 SQLite 键数量上限（条）。"
+    },
+    {
+      "name": "MAX_RECEIPT_IDENTIFIER_CHARS",
+      "file": "agent_py_agent/agent/capability/skill_usage_receipts.py",
+      "value": 512,
+      "unit": "字符",
+      "category": "上限预算",
+      "description": "中文说明：单个合法任务/会话或 SHA-256 标识字符串解析的字符数上限（字符）。"
+    },
+    {
+      "name": "MAX_STRIKE_HURT_COUNT",
+      "file": "agent_py_agent/agent/capability/skill_usage_receipts.py",
+      "value": 3,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "中文说明：单次 3 击淘汰/回滚允许的最大负向记次阈值（条）。"
     },
     {
       "name": "MAX_FRONTMATTER_BYTES",
@@ -5540,6 +5708,22 @@
       "description": "秒；真人预览的确认窗口，重放原请求不会延期。"
     },
     {
+      "name": "DEFAULT_LEARNING_MAINTENANCE_INTERVAL_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_background_discovery.py",
+      "value": 10800,
+      "unit": "秒",
+      "category": "其它",
+      "description": "中文说明: 自主技能维护默认检查间隔（秒，3 小时），未配专值时回退此常量。"
+    },
+    {
+      "name": "DEFAULT_LEARNING_OWNER_SCAN_PAGE_COUNT",
+      "file": "agent_py_agent/agent/gateway_parts/multiprocess_background_discovery.py",
+      "value": 64,
+      "unit": "个",
+      "category": "其它",
+      "description": "中文说明: 后台发现每轮分页扫描多用户 owner 目录的默认数量上限（个）。"
+    },
+    {
       "name": "_SOURCE_MAX_BYTES",
       "file": "agent_py_agent/agent/gateway_parts/multiprocess_background_request.py",
       "value": 1048576,
@@ -7540,6 +7724,14 @@
       "description": "正式记忆权威记录一次有界核验最多扫描的记录条数。"
     },
     {
+      "name": "_SCOPE_PAIRS_CACHE_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/memory_store/jsonl.py",
+      "value": 32,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "作用域对有界 LRU 投影缓存最多保留的域类型条目数。"
+    },
+    {
       "name": "_SOURCE_SNAPSHOT_CACHE_COUNT",
       "file": "agent_py_agent/agent/memory_store/learning_source_authority.py",
       "value": 64,
@@ -7556,12 +7748,36 @@
       "description": "冷条目在写入时降级回 lessons（lesson 正文保留，路由仍可命中，零信息丢失）。"
     },
     {
+      "name": "_DEFAULT_LESSON_ARCHIVE_DAYS",
+      "file": "agent_py_agent/agent/memory_store/lessons.py",
+      "value": 15,
+      "unit": "天",
+      "category": "其它",
+      "description": "默认自动归档未引用天数（与 AgentConfig.memory_lesson_archive_days 默认值对齐）。"
+    },
+    {
+      "name": "_LESSON_DAY_SECONDS",
+      "file": "agent_py_agent/agent/memory_store/lessons.py",
+      "value": 86400,
+      "unit": "秒",
+      "category": "其它",
+      "description": "每日秒数，用于将 lesson 静默未命中天数换算成秒级阈值。"
+    },
+    {
       "name": "_MAX_HOT_RULE_CHARS",
       "file": "agent_py_agent/agent/memory_store/lessons.py",
       "value": 300,
       "unit": "字符",
       "category": "上限预算",
       "description": "单条热门规则元数据最多 300 字符：防止超长规则撑爆内存。"
+    },
+    {
+      "name": "_MAX_PENDING_LESSON_HIT_ENTRIES_COUNT",
+      "file": "agent_py_agent/agent/memory_store/lessons.py",
+      "value": 8192,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "内存中待合并命中字典的上限条目数，防止长时间未维护时内存无界增长。"
     },
     {
       "name": "_ROUTING_INDEX_MAX_BYTES",

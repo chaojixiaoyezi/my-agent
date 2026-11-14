@@ -2587,6 +2587,8 @@ IM 多任务和公共包的新长期入口及关键文件职责（均复用原 S
 |-- STATUS.md                            # 当前能力、开放问题与证据边界
 |-- DESIGN_LEDGER.md                     # 当前架构决策及模块设计导航
 |-- TESTS.md                             # 开发测试、真实 TUI 与发布 gate
+|-- DEFECT_PATTERNS.md                   # 跨任务缺陷模式与同类调用点横扫表（同步 07 流水线经验库，含 Skill 与记忆闭环新增模式）
+|-- run_review.py                        # 闭环改造验收工具：按外部 --bundle-dir 校验文件归属零重叠、逐文件独立进程跑 pytest/Ruff/导入边界
 |-- agent_py_agent/agent/attempt/process_run.py # 沙箱同步命令通用取消/超时：临时回调、TERM→宽限→KILL 整组回收及管道释放
 |-- agent_py_agent/agent/attempt/landlock_launcher.py # G5：Linux Landlock 端口拒绝启动器（exec bwrap 前按端口拒绝连本机 Gateway；自包含、fail-closed）
 |-- agent_py_agent/tests/test_pack_verification_cancellation.py # 块 6a：预取消零启动、真实父子组回收、取消入账和不返工，保留平台外复跑
@@ -2807,6 +2809,7 @@ IM 多任务和公共包的新长期入口及关键文件职责（均复用原 S
     |-- WAKE_POISON_PILL.md             # 唤醒毒丸处理：同因连续失败持久计数、瞬时排除、结案与人工重放（方案已审，分步实现中）
     |-- PROVIDER_WIRE_CONTRACT.md       # 出站协议合同：三个后端出口修整坏历史并按协议校验，MiniMax 实测校准与已知边界
     |-- SKILL_AUTO_SUMMARY.md           # 自学习 S3：完成任务后自动总结 Skill，自动闸门代替人工确认、登记表所有权、账本与回滚
+    |-- SKILL_MEMORY_CLOSED_LOOP.md     # Skill 与记忆闭环：出厂自治默认、每 owner 50 上限与豁免层、3/4/5 阶梯、7/15/+15 生命周期、互斥载体与有界召回
     |-- REASONING_EFFORT.md             # 智能程度：各服务商实测、档位与控制方式、会话/子代理档位来源、/effort 与边界
     |-- HOST_NOTICES.md                 # 宿主提示：现有通道查证、线程待送达字段、提交即已读、飞书/TUI/历史显示与边界
     |-- MAINTAINABILITY_AND_JEV_REVIEW.md # 可维护性评估、渐进重构建议及 Computer Use/Jev 能力边界
@@ -3542,6 +3545,7 @@ agent_py_agent/
 |   |   |-- skill_learning_publish.py  # S3 自动闸门与发布：重名/删过的名字/上限/所有权 hash/脱敏/解析/guard，回滚与删除
 |   |   |-- skill_learning_store.py    # S3 唯一落盘权威：请求队列、registry.json、ledger.jsonl、版本全文、removed 归档与锁
 |   |   |-- skill_usage_ledger.py       # owner使用明细与汇总：区分搜索展示、正文读取、宿主注入和采用；有效使用仅正文读取与注入
+|   |   |-- skill_usage_receipts.py     # runtime.db metadata 中按版本/任务去重的精确使用回执与负向记次，3/4/5 阶梯的计数权威
 |   |   |-- skill_learning_report.py   # 自动总结 Skill 的状态推导与用户回滚/删除，CLI 与聊天 /skills 共用
 |   |   |-- decision_skill_proposal_review.py # 自学习 S2：`skills proposals list` 的可选审核顺序点，只重排展示并加宿主标签，从不确认/拒绝/写入
 |   |   |-- persona_repository.py      # owner SOUL/USER/AGENTS 受控加载、版本/CAS/回滚唯一入口
@@ -4435,7 +4439,10 @@ docs/
 - `agent/settings/parameter_registry.py` 与 `parameter_changes.py`：参数中心。登记表是“有哪些参数、什么意思、谁能改”的唯一来源；写入口是 my-agent 的 `user_config` 工具与聊天 `/settings` 共用的唯一修改路径（记录与回滚）。
 - `scripts/build_constants_catalog.py` 与 `agent/settings/constants_catalog.py`：代码常数只读目录（P10）。生成器用 ast 静态扫描产品代码生成随包 `config/constants_catalog.json`，运行时模块只读该 JSON 供 `/settings internal` 与 user_config search 查找；常数权威位置仍是读取它的那行源码，目录只是投影。
 - `docs/design/PARAMETER_CENTER.md`：参数中心的唯一模块设计：来源、目标、安全等级、修改与回滚、my-agent 开发工作树、阶段与验收。
-- `docs/design/SKILL_AUTO_SUMMARY.md`：自学习 S3 的唯一模块设计：用户决定、上游参考取舍、触发、材料、后台执行、输出合同、自动闸门、存储所有权、用户入口与边界。
+- `docs/design/SKILL_AUTO_SUMMARY.md`：自学习 S3 的模块设计：用户决定、上游参考取舍、触发、材料、后台执行、输出合同、自动闸门、存储所有权、用户入口与边界；第 20 节记录闭环改造的覆盖关系。
+- `docs/design/SKILL_MEMORY_CLOSED_LOOP.md`：Skill 与记忆闭环的唯一模块设计：出厂默认与 live 配置、权威位置与两个序号域、托管资格与容量准入、精确回执与 3/4/5 阶梯、有界维护与保护、语义指纹、互斥载体、lesson 生命周期与有界召回、遥测、规模与故障模型及测试映射。
+- `agent_py_agent/agent/capability/skill_usage_receipts.py`：自学 Skill 精确使用回执与任务级负向记次，写在 owner 既有 `runtime.db` 的 `sm-use`/`sm-use-total`/`sm-hurt` metadata 命名空间，单事务插入回执并更新聚合，按前缀区间有界清理退役激活。
+- `DEFECT_PATTERNS.md`、`run_review.py`：缺陷模式横扫表与闭环改造验收工具；后者只校验与运行既有测试，不安装依赖、不修改调用方 HOME，缺失目标一律记失败。
 - `agent_py_agent/agent/subagents/lesson_ledger.py`：子代理经验账本 `lessons.jsonl` 的唯一合同。字段规范成单行且有界，id 取内容 hash（同 run 相同参数只记一次），每 run 最多 5 条、16 KiB，超限返回结构化结论；读回逐行复核版本、字段、id 与 run 归属。工具写入与 runner 结果收口共用，宿主从不解析模型回复正文。
 - `agent_py_agent/agent/agent_core/runtime_write_guards.py`：正在运行的 my-agent 安装目录写保护的唯一实现（开关 `protect_running_runtime`，默认开）。按进程事实认定安装目录（虚拟环境整体 / site-packages 包目录 / 源码运行不保护），写入独立边界键 `runtime_install_roots`：文件工具在 `tooling/write_boundary` 无条件拒写，Shell/终端并入沙箱只读路径，Full Access 同样生效。
 - `agent_py_agent/agent/agent_core/runtime/record_lesson_tool.py`：子代理专属 `record_lesson` 工具。run/attempt 取 runner 上下文、task 取任务记录，Schema 只含四个经验字段；注册表默认隐藏，随子代理 allowed_tools 下发，主线程调用返回 `TOOL_UNAVAILABLE`；所有拒绝都声明 `effect_outcome=not_started`。
@@ -4861,7 +4868,7 @@ docs/
 |-- agents/<run_id>/                    # 子代理 refs-only projection
 |-- data/artifact_backups/v1/           # 前台 shell 改动 ready 产物时保留的 owner 私有哈希恢复 blob
 |-- data/skill_proposals/<id>.json      # 子代理经验 Skill 提案（开关开启后按需创建）；自学习开启时自动走确认链装到 skills/lesson-*；不用 learning_drafts 目录名
-|-- data/skill_learning/                # 自动总结 Skill：requests/、registry.json、ledger.jsonl、versions/、removed/（开关开启后按需创建）
+|-- data/skill_learning/                # 自动总结 Skill：requests/、registry.json、ledger.jsonl、usage_ledger.jsonl、usage_summary.json、versions/、archived/、removed/（按需创建）
 |-- skills/learned/<name>/SKILL.md      # 自动总结发布的 Skill；归属只由 data/skill_learning/registry.json 认定
 |-- workspace/runtime/workspaces/<scope>/# LocalStore、gateway、conversation 等 workspace 账本
 `-- global_index/                       # 可重建轻量索引
@@ -5025,7 +5032,22 @@ agent_py_agent/agent/capability/
 |   |   |-- skill_learning_migration.py # 按原committed来源与hash纳管S1，保原路径和身份
 |   |   |-- skill_feedback_tool.py # 当前任务结构化采用声明，不能冒充人类结果或自批
 |   |   |-- skill_learning_versions.py # 自学单调修订与不可变正文快照固定，撤销后禁止读历史
-|   |-- test_skill_learning_confirmation.py # S3仅候选、精确确认/拒绝、停用阻旧确认及IM用户入口
+|   |-- test_sm_w0_live_policy.py # 闭环 W0：出厂默认、可调键、主会话可调/子代理拒绝与 live 重载
+|   |-- test_sm_w1_store_transitions.py # 闭环 W1：托管判据、容量准入与换出、六类转换子进程崩溃恢复、显式动作
+|   |-- test_sm_w2_usage_strikes.py # 闭环 W2：版本/任务精确回执、3/4/5 阶梯与多通道同任务去重
+|   |-- test_sm_w2_bounded_maintenance.py # 闭环 W2：活跃索引保护、80/20 推荐、7/15/15 生命周期、游标维护与回执清理
+|   |-- test_sm_w3_intake_runtime.py # 闭环 W3：组合根 live 接线、合并优先、后台总结通道、载体入队与多 owner 分页发现
+|   |-- test_sm_w4_catalog_projection.py # 闭环 W4：语义指纹、推荐边界、owner 局部失效与有界 memo
+|   |-- test_sm_w5_carrier_hygiene.py # 闭环 W5：互斥载体分类与提案有界清理
+|   |-- test_sm_w6_lesson_repository.py # 闭环 W6：lesson 身份、替代与 HOT 退役、热度与永久归档
+|   |-- test_sm_w7_recall_bounds.py # 闭环 W7：有界 lesson/HOT 读取、read_ids/scope_pairs 与缺损自愈
+|   |-- test_sm_w8_promotion_curator.py # 闭环 W8：lesson CAS 晋升、载体委派与整理器维护
+|   |-- test_sm_w9_feedback_awareness.py # 闭环 W9：skill_feedback 五动作、UserConfigTool live 策略与 self_map 遥测
+|   |-- test_sm_w10_closed_loop.py # 闭环跨切片组合：275→50 收敛、崩溃恢复、5,000 owner 隔离、工作计数；真实组合根上的 V2-1..V2-5 全链路
+|   |-- test_sm_rework_config_scope.py # R1 返工：全局配置仅限主会话开放，受限上下文保留决策设置分流与执行阶段复核
+|   |-- test_sm_rework_carrier_source.py # R1 返工：lesson 载体请求共享 schema 与去重键，入队/执行/提交重验规范候选源
+|   |-- test_sm_rework_lifecycle_sync.py # R1 返工：生命周期替换发布后目录 fsync 异常保留 pending_operation 并冷启收敛
+|   |-- test_sm_rework_quality.py # R1 返工：质量确立唯一认 3+hurt_count 版本绑定真实使用，以及删除托管目录交还 user_modified
 |   |-- test_wave7_autonomous_learning_closure.py # W2自包含F01–F17及R2六项修复回归；CAS/冻结/输出合同限W2自身入口
 |   |-- test_wave7_w1_integration_contracts.py # W1三项原普通断言原样保留，正常收集、不skip/xfail，跨线集成须另验
 |   |-- test_skill_learning_maintenance.py # 采用与质量分离、引用保护/归档回滚、52条真实库与缓存失效

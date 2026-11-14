@@ -17,15 +17,25 @@ def learned_store(entry):
     return SkillLearningStore(frozen.parents[2], frozen.parents[4] / 'skills')
 
 
-# LLM: 单项与批量共用判据；registry已做名称/layout解析，保留canonical活动路径和is_file检查。
+# LLM: 单项与批量共用判据；registry已做名称/layout解析，保留canonical活动路径、非符号链接与is_file检查。
 # 函数用途: 从一份登记事实投影单项状态，不读活动或版本正文。
 def metadata_from_registry(entry, store, registry):
     record = registry.skills.get(entry.name)
     state = record.maintenance.get('state', 'trial') if record is not None else 'removed'
-    root = store.skills_root if record is not None and record.layout == 'owner' else store.learned_root
-    expected = root / entry.name / 'SKILL.md'
-    authorized = bool(record is not None and state not in {'disabled', 'archived'}
-                      and Path(entry.path) == expected and Path(entry.path).is_file())
+    expected = (
+        store.skill_path(entry.name, record=record)
+        if record is not None
+        else store.learned_root / entry.name / 'SKILL.md'
+    )
+    entry_path = Path(entry.path)
+    authorized = bool(
+        record is not None
+        and state not in {'disabled', 'archived'}
+        and record.maintenance.get('ownership') != 'user_modified'
+        and entry_path == expected
+        and not entry_path.is_symlink()
+        and entry_path.is_file()
+    )
     return {'state': state, 'authorized': authorized,
             'revision': record.revision if record else None, 'version': record.version if record else None}
 

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -96,7 +95,6 @@ from .conversation.session_messaging import (
 )
 from .conversation.task_follow_up import task_follow_up_facts
 from .delivery import (
-    DeliveryContext,
     DeliveryService,
     RuntimeHealthProvider,
     build_default_channel_registry,
@@ -262,19 +260,6 @@ def _curator_model_router(agent: object, config: AgentConfig, curator_config: Me
 
     return route
 
-
-
-# LLM: 只在用到 owner 默认模型时记来源（留空、或指定档案退回）；指定档案能用时什么都不记。都是结构化短词，
-#   成功和失败的运行记录都会带上（model-less owner 失败时能看出是“部署默认没配模型”，不是档案问题）。
-# 函数用途: 生成整批共用的路由警告：指定档案退回的原因、owner 默认模型的来源。
-def _curator_route_warnings(agent: object, fixed: str, fallback: str) -> tuple[str, ...]:
-    from .settings.curator_profile import curator_default_model_source
-
-    warnings = [f"curator_profile_unavailable_fallback:{fallback}"] if fallback else []
-    source = curator_default_model_source(agent) if fallback or not fixed else ""
-    if source:
-        warnings.append(f"curator_default_model_source:{source}")
-    return tuple(warnings)
 
 
 # LLM: 只读校验固定Curator模型档案在当前owner（含管理员共享目录）下是否可解析且含有效凭据，不实例化后端。
@@ -443,22 +428,42 @@ def _wire_memory_curator(agent: object, config: AgentConfig) -> None:
                     if root
                 ),
             ),
+            config_provider=lambda: _live_agent_config(agent, config),
         ),
     )
-    agent.skill_learning = _skill_learning_service(agent, config)
+    agent._skill_learning_service = _skill_learning_service(agent, config)
 
 
-# LLM: 自学习关闭时返回 None，收口与 Gateway 车道都按缺席处理；开启时与 Curator 共用统一后台辅助模型（非流式）；
-#   留空时返回 None（0次后台调用，不退回默认模型），指定且可用时解析该模型后端。
-# 函数用途: 按自学习开关为当前 owner 创建自动总结 Skill 服务。
-def _skill_learning_service(agent: object, config: AgentConfig) -> SkillLearningService | None:
-    if not getattr(config, "enable_self_learning", False):
-        return None
+_MISSING_SKILL_LEARNING = object()
+
+
+# LLM: 按 config_path 热刷新实时开关（仅当配置文件真实存在），异常时不阻断已有内存配置读取。
+# 函数用途: 实时获取代理当前有效配置对象，确保热开关与周期参数无需重启即刻生效。
+def _live_agent_config(agent: object, fallback: AgentConfig) -> AgentConfig:
+    cfg = getattr(agent, "config", fallback) or fallback
+    raw_path = getattr(cfg, "config_path", None)
+    if raw_path is not None and str(raw_path).strip():
+        try:
+            if Path(raw_path).expanduser().is_file():
+                from .settings.live_switches import refresh_live_switches
+
+                refresh_live_switches(cfg)
+        except Exception:  # noqa: BLE001
+            pass
+    return cfg
+
+
+# LLM: 始终惰性构造无副作用的 SkillLearningService（不创建目录/文件），并挂载实时 config_provider 与
+#   延迟检查 ExecutionMode 的 usage_runtime_provider；是否暴露由 SimpleAgent.skill_learning 属性按实时开关决定。
+# 函数用途: 为当前 owner 惰性构造并绑定自学习 Skill 服务，与 Curator 共用辅助模型。
+def _skill_learning_service(agent: object, config: AgentConfig) -> SkillLearningService:
     from .capability.skill_learning_protection import learning_protection_for_agent
+    from .runtime_db.execution_mode import ExecutionMode, resolve_execution_mode
     from .settings.curator_profile import effective_auxiliary_model_profile
 
     def resolve_backend():
-        prof = effective_auxiliary_model_profile(getattr(agent, "config", config))
+        live_cfg = _live_agent_config(agent, config)
+        prof = effective_auxiliary_model_profile(live_cfg)
         if not prof:
             return None
         backend, _, _, fallback = _curator_backend(agent, prof)
@@ -466,9 +471,26 @@ def _skill_learning_service(agent: object, config: AgentConfig) -> SkillLearning
             return None
         return backend
 
+    def resolve_usage_runtime():
+        subagents = getattr(agent, "subagents", None)
+        mode = getattr(subagents, "execution_mode", None)
+        if mode is None:
+            raw_mode = str(getattr(_live_agent_config(agent, config), "execution_mode", "") or "").strip()
+            has_home = bool(getattr(getattr(agent, "home_paths", None), "owner_home_dir", ""))
+            mode = resolve_execution_mode(raw_mode, has_home_dir=has_home)
+        elif isinstance(mode, str):
+            has_home = bool(getattr(getattr(agent, "home_paths", None), "owner_home_dir", ""))
+            mode = resolve_execution_mode(mode.strip(), has_home_dir=has_home)
+        if mode is ExecutionMode.LOCAL_UNMANAGED:
+            return None
+        return getattr(subagents, "runtime_db", None)
+
     curator_be = getattr(getattr(agent, "memory_curator", None), "backend", None)
     return SkillLearningService(
-        SkillLearningStore.for_home(agent.home_paths),
+        SkillLearningStore.for_home(
+            agent.home_paths,
+            usage_runtime_provider=resolve_usage_runtime,
+        ),
         SkillLearningSettings.from_config(config),
         SkillLearningRuntime(
             backend=curator_be,
@@ -476,9 +498,15 @@ def _skill_learning_service(agent: object, config: AgentConfig) -> SkillLearning
             guard_config=config,
             owner_id=str(agent.home_paths.owner_id or "local/main"),
             protection_provider=lambda: learning_protection_for_agent(agent),
-            lesson_provider=lambda: SkillProposalService(agent.home_paths, config=config),
+            lesson_provider=lambda: SkillProposalService(
+                agent.home_paths,
+                config=_live_agent_config(agent, config),
+            ),
             deployment_root=agent.home_paths.root,
+            task_completion_host=agent,
             backend_provider=resolve_backend,
+            config_provider=lambda: _live_agent_config(agent, config),
+            usage_runtime_provider=resolve_usage_runtime,
         ),
     )
 
@@ -509,6 +537,25 @@ class SimpleAgent(
     prompts = ModelScopedAttribute("prompts")
     tools = ModelScopedAttribute("tools")
 
+    # LLM: 按实时有效开关暴露自学习服务（支持 false->true->false 无重启切换），并兼容测试显式注入替换。
+    # 函数用途: 读取当前有效的自学习 Skill 服务。
+    @property
+    def skill_learning(self) -> SkillLearningService | None:
+        injected = getattr(self, "_injected_skill_learning", _MISSING_SKILL_LEARNING)
+        if injected is not _MISSING_SKILL_LEARNING:
+            return injected
+        service = getattr(self, "_skill_learning_service", None)
+        if service is None:
+            return None
+        cfg = _live_agent_config(self, getattr(self, "config", None))
+        if not getattr(cfg, "enable_self_learning", False):
+            return None
+        return service
+
+    @skill_learning.setter
+    def skill_learning(self, value: SkillLearningService | None) -> None:
+        self._injected_skill_learning = value
+
     # LLM: 保持W原bootstrap及owner初始化顺序；会话库显式绑定owner_compact_dir，defer仅透传实例MCP策略，默认eager、不修改配置或子worker策略；home绑定后登记弱活动源。
     # 函数用途: 按真实owner装配代理及统一冷检查点路径，可为控制面延后普通MCP连接，原工作区与孤儿消费者接线保持。
     def __init__(
@@ -526,6 +573,8 @@ class SimpleAgent(
         创建主代理时会准备本地账本、记忆、prompt 构造器、模型后端、子代理管理器和工具注册表。
         最后只注册创建、查看、发消息/纠偏、中断取消和能力裁决等用户级子代理操作。
         """
+        self._skill_learning_service: SkillLearningService | None = None
+        self._injected_skill_learning: object = _MISSING_SKILL_LEARNING
         config = _initialize_agent_construction(self, config, root, worker_bootstrap, workspace_roots)
         self.capability_config_path = default_capability_config_path(self.root)
         self._capability_config_runtime_snapshot = None
@@ -572,8 +621,9 @@ class SimpleAgent(
             policy_provider=lambda: resolve_effective_owner_policy(self.home_paths),
             plugin_roots=self._plugin_skill_roots,
             package_provider=self._capability_packages,
-            learning_recommended_limit_provider=lambda: config.self_learning_recommended_limit,
+            learning_recommended_limit_provider=lambda: _live_agent_config(self, config).self_learning_recommended_limit,
             cache_entries=owner_agent_slot_count(config),
+            learning_explore_percent_provider=lambda: _live_agent_config(self, config).self_learning_recommended_explore_percent,
         )
         self.capability_router = CapabilityRouter(
             config=config,
@@ -1007,6 +1057,27 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
         capability_config_for_paths, root=agent.root, user_path=agent.capability_config_path,
     )
     manager.skill_proposals = _skill_proposal_service(agent)
+
+    # LLM: 延迟解析当前有效 agent.skill_learning，支持运行时热开关且在关闭或服务缺席时显式 deferred，绝不回退 S1 弹窗。
+    # 函数用途: 宿主侧子代理过程性经验候选入队回调。
+    def _enqueue_subagent_lesson_candidates(candidates):
+        learning = getattr(agent, "skill_learning", None)
+        if learning is None or not callable(getattr(learning, "enqueue_lesson_candidates", None)):
+            return {
+                "queued": [],
+                "refused": [],
+                "deferred": [
+                    {
+                        "candidate_id": str(getattr(item, "candidate_id", "") or ""),
+                        "code": "SKILL_LEARNING_DISABLED",
+                        "reason": "自学习开关关闭或服务未激活，过程性候选已保留等待重新启用后重放。",
+                    }
+                    for item in (candidates or ())
+                ],
+            }
+        return learning.enqueue_lesson_candidates(candidates)
+
+    manager.enqueue_lesson_candidates = _enqueue_subagent_lesson_candidates
     agent.capability_router._ensure_mcp_catalog = partial(agent.ensure_mcp_catalog_ready, agent.capability_router)
     return manager
 
@@ -1250,42 +1321,6 @@ def _build_owner_quota_enforcer(
     from .memory_store.owner_resources import build_owner_memory_quota
 
     return build_owner_memory_quota(agent.home_paths, agent.owner_policy)
-
-
-# LLM: 当前绑定只从 owner-scoped ConversationStore 的结构化 thread binding 读取；不得从 prompt 或配置猜目标。
-# 函数用途: 为能力自述提供本轮真实通道类型，目标只留在可信上下文且不会被清单输出。
-def _current_delivery_context(agent: SimpleAgent) -> DeliveryContext | None:
-    current = getattr(agent, "_current_run_params", None)
-    attrs = getattr(current, "task_attributes", None) if current is not None else None
-    thread_id = (
-        str(attrs.get("conversation_thread_id") or "").strip()
-        if isinstance(attrs, dict)
-        else ""
-    )
-    if not thread_id:
-        return None
-    try:
-        thread, load_error = agent.conversation_store.threads.load_report(thread_id)
-    except Exception:
-        return None
-    if load_error is not None or thread is None:
-        return None
-    bindings = list(getattr(thread, "channel_bindings", ()) or ())
-    if not bindings:
-        return None
-    binding = max(
-        bindings,
-        key=lambda item: float(getattr(item, "last_active_at", 0.0) or 0.0),
-    )
-    channel = str(getattr(binding, "channel", "") or "").strip()
-    target = str(
-        getattr(binding, "channel_user_id", "")
-        or getattr(binding, "channel_conversation_id", "")
-        or ""
-    ).strip()
-    if not channel or not target:
-        return None
-    return DeliveryContext(channel=channel, target=target, mode="proactive", thread_id=thread_id)
 
 
 # LLM: 始终返回当前owner的home目录作为受保护人格根，不随临时admin文件访问豁免而解除SOUL/AGENTS写保护。

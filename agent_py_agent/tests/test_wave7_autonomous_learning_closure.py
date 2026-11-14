@@ -30,6 +30,9 @@ from agent_py_agent.agent.capability.skill_learning_publish import (
 )
 from agent_py_agent.agent.capability.skill_learning_request import build_learning_request
 from agent_py_agent.agent.capability.skill_learning_store import SkillLearningStore
+from agent_py_agent.agent.capability.skill_usage_ledger import record_skill_usage_event
+from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+from agent_py_agent.agent.runtime_db.schema import runtime_db_path
 from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 
 BODY = ('# 数据整理\n\n## 步骤\n先核对表头、编码和输入合同，再按日期稳定排序。'
@@ -308,13 +311,34 @@ def test_f12_new_hash_resets_trial_and_keeps_previous_stable(learned):
     current = store.load_registry().skills['csv-cleaner']
     with store.state_lock():
         registry = store.load_registry()
-        store.save_registry(replace(registry, skills={current.name: replace(current, maintenance={'state': 'active', 'quality': 'established', 'helped_count': 8})}))
+        store.save_registry(
+            replace(
+                registry,
+                skills={
+                    current.name: replace(
+                        current,
+                        maintenance={
+                            **current.maintenance,
+                            'state': 'active',
+                            'quality': 'established',
+                            'established_at': 1000.0,
+                            'helped_count': 8,
+                        },
+                    )
+                },
+            )
+        )
     update = replace(decision(), decision='update', update_target=current.name, body=BODY+'\n检查空值。')
     publish_learned_skill(store, PublishRequest(update, expected_revision=current.revision, expected_sha256=current.sha256))
     after = store.load_registry().skills[current.name]
     assert after.maintenance['state'] == after.maintenance['quality'] == 'trial'
     assert after.maintenance['helped_count'] == after.maintenance['hurt_count'] == 0
-    assert after.maintenance['previous_stable'] == {'version': current.version, 'revision': current.revision, 'sha256': current.sha256}
+    assert after.maintenance['previous_stable'] == {
+        'version': current.version,
+        'revision': current.revision,
+        'sha256': current.sha256,
+        'established_at': 1000.0,
+    }
 
 
 # LLM: 说明中明确排除的源代码审计不能因关键词出现而加分，真正适用的审计卡片应获正分。
@@ -472,6 +496,25 @@ def test_f05_workspace_script_executes_actual_code(tmp_path):
 def test_f12_trial_regressions_restore_previous_stable(learned):
     _, store = learned
     current = store.load_registry().skills['csv-cleaner']
+    with store.state_lock():
+        reg = store.load_registry()
+        store.save_registry(
+            replace(
+                reg,
+                skills={
+                    **reg.skills,
+                    current.name: replace(
+                        current,
+                        maintenance={
+                            **current.maintenance,
+                            'state': 'active',
+                            'quality': 'established',
+                            'established_at': 1000.0,
+                        },
+                    ),
+                },
+            )
+        )
     update = replace(decision(), decision='update', update_target=current.name, body=BODY+'\n错误改版。')
     publish_learned_skill(store, PublishRequest(update, expected_revision=current.revision, expected_sha256=current.sha256))
     trial = store.load_registry().skills[current.name]
@@ -479,9 +522,14 @@ def test_f12_trial_regressions_restore_previous_stable(learned):
         observe_learning(store, current.name, sha256=trial.sha256, task_id=task, outcome='adopted')
         observe_learning(store, current.name, sha256=trial.sha256, task_id=task, outcome='ineffective',
                          source=LearningObservationSource(authority='host', receipt_id=task))
+    assert store.load_registry().skills[current.name].sha256 == trial.sha256
+    observe_learning(store, current.name, sha256=trial.sha256, task_id='regression-3', outcome='adopted')
+    observe_learning(store, current.name, sha256=trial.sha256, task_id='regression-3', outcome='ineffective',
+                     source=LearningObservationSource(authority='host', receipt_id='regression-3'))
     restored = store.load_registry().skills[current.name]
     assert restored.sha256 == current.sha256 and restored.version == current.version
     assert restored.revision > trial.revision
+    assert restored.maintenance.get('quality_basis') == 'rollback_established'
     assert store.read_version(current.name, current.version) == store.skill_path(current.name).read_text()
 
 
@@ -520,10 +568,12 @@ def test_f17_empty_refs_and_completed_history_do_not_block_protection(learned, t
     def load(task):
         status = 'running' if task == '1001' else 'completed'
         return SimpleNamespace(status=status, skill_snapshot_refs=[], to_dict=lambda: {'skill_snapshot_refs':[]}), None
+    def list_report_forbidden(**kw):
+        raise AssertionError('threads.list_report full scan must not be called')
     agent = SimpleNamespace(home_paths=home, conversation_store=SimpleNamespace(
-        threads=SimpleNamespace(list_report=lambda **kw: ([SimpleNamespace(thread_id='t')], [])),
+        threads=SimpleNamespace(list_report=list_report_forbidden),
         tasks=SimpleNamespace(storage=SimpleNamespace(tasks_dir=directory), load_report=load,
-                              active_report=lambda thread: ([load('1001')[0]], []))),
+                              unsettled_report=lambda: ([load('1001')[0]], []))),
         scheduler_repository=SimpleNamespace(list_jobs=lambda **kw: ([], [])),
         subagents=SimpleNamespace(list_runs_report=lambda: SimpleNamespace(load_errors=[], runs=[])))
     assert learning_protection_for_agent(agent, scan_limit=10)['protection_complete'] is True
@@ -876,8 +926,8 @@ def test_r2_protection_source_failure_preserves_other_references(learned, monkey
         raise RuntimeError('one source unavailable')
     task = SimpleNamespace(status='running', to_dict=lambda: {'allowed_skills':['owner:task']})
     agent = SimpleNamespace(home_paths=home, conversation_store=SimpleNamespace(
-        threads=SimpleNamespace(list_report=fail if broken == 'conversations' else lambda **kw: ([SimpleNamespace(thread_id='t')], [])),
-        tasks=SimpleNamespace(active_report=lambda thread: ([task], []))),
+        threads=SimpleNamespace(list_report=fail),
+        tasks=SimpleNamespace(unsettled_report=fail if broken == 'conversations' else lambda: ([task], []))),
         scheduler_repository=SimpleNamespace(list_jobs=fail if broken == 'scheduler' else lambda **kw: ([{'allowed_skills':['owner:job']}], [])),
         subagents=SimpleNamespace(list_runs_report=fail if broken == 'subagents' else lambda: SimpleNamespace(
             load_errors=[], runs=[SimpleNamespace(status='running', attributes={'allowed_skills':['owner:child']})])))
@@ -889,18 +939,55 @@ def test_r2_protection_source_failure_preserves_other_references(learned, monkey
     assert set(expected.values()) - {expected[broken]} <= set(result['protected_ids'])
 
 
-# LLM: 三个独立任务的采用及宿主有效反馈使试用转为 active，晋升历史应追加一次而非重写或重复追加。
+# LLM: 三个独立任务的真实送达与宿主有效反馈使试用转为 active，晋升历史应追加一次而非重写或重复追加。
 # 函数用途: 检查试用技能激活后的状态和完整晋升轨迹。
 def test_r2_trial_to_active_records_one_promotion_transition(learned):
-    _, store = learned
+    home, _ = learned
+    repo = RuntimeRepository(runtime_db_path(home.owner_home_dir))
+    store = SkillLearningStore.for_home(home, usage_runtime_provider=lambda: repo)
     current = store.load_registry().skills['csv-cleaner']
     for task in ('one', 'two', 'three'):
+        record_skill_usage_event(
+            store,
+            event='manual_get',
+            skill_id=f'owner:{current.name}',
+            source='learned',
+            kind='skill',
+            task_id=task,
+            chars=len(BODY),
+            body_chars=len(BODY),
+            content_sha256=current.sha256,
+            incarnation_id=str(current.maintenance.get('incarnation_id') or ''),
+            activation_id=str(current.maintenance.get('activation_id') or ''),
+            strike_epoch=int(current.maintenance.get('strike_epoch', 0) or 0),
+        )
         observe_learning(store, current.name, sha256=current.sha256, task_id=task, outcome='adopted')
         observe_learning(store, current.name, sha256=current.sha256, task_id=task, outcome='effective',
                          source=LearningObservationSource(authority='host', receipt_id=task))
     row = store.load_registry().skills[current.name]
     assert row.maintenance['state'] == 'active'
-    assert row.maintenance['promotion_history'] == ['observed','candidate','validated','trial','active']
+    assert row.maintenance['quality'] == 'established'
+    assert row.maintenance['promotion_history'] == ['observed', 'candidate', 'validated', 'trial', 'active']
+    record_skill_usage_event(
+        store,
+        event='manual_get',
+        skill_id=f'owner:{current.name}',
+        source='learned',
+        kind='skill',
+        task_id='four',
+        chars=len(BODY),
+        body_chars=len(BODY),
+        content_sha256=current.sha256,
+        incarnation_id=str(current.maintenance.get('incarnation_id') or ''),
+        activation_id=str(current.maintenance.get('activation_id') or ''),
+        strike_epoch=int(current.maintenance.get('strike_epoch', 0) or 0),
+    )
+    observe_learning(store, current.name, sha256=current.sha256, task_id='four', outcome='adopted')
+    observe_learning(store, current.name, sha256=current.sha256, task_id='four', outcome='effective',
+                     source=LearningObservationSource(authority='host', receipt_id='four'))
+    assert store.load_registry().skills[current.name].maintenance['promotion_history'] == [
+        'observed', 'candidate', 'validated', 'trial', 'active',
+    ]
 
 
 # LLM: 默认 Runtime 必须有宿主验证器；请求内自报的执行成功回执不可信，发布后应记录独立静态验证事实。
@@ -1065,14 +1152,14 @@ def test_r3_f12_repeated_trial_updates_restore_original_stable(learned):
     stable = store.load_registry().skills['csv-cleaner']
     with store.state_lock():
         registry = store.load_registry()
-        store.save_registry(replace(registry, skills={stable.name:replace(stable, maintenance={**stable.maintenance, 'state':'active'})}))
+        store.save_registry(replace(registry, skills={stable.name:replace(stable, maintenance={**stable.maintenance, 'state':'active', 'quality':'established', 'established_at': 1000.0})}))
     for suffix in ('second', 'third'):
         current = store.load_registry().skills[stable.name]
         draft = replace(decision(), decision='update', body=BODY+'\n'+suffix)
         publish_learned_skill(store, PublishRequest(draft, expected_revision=current.revision, expected_sha256=current.sha256))
     trial = store.load_registry().skills[stable.name]
     assert trial.maintenance['previous_stable']['sha256'] == stable.sha256
-    for task in ('regression-a', 'regression-b'):
+    for task in ('regression-a', 'regression-b', 'regression-c'):
         observe_learning(store, stable.name, sha256=trial.sha256, task_id=task, outcome='adopted')
         observe_learning(store, stable.name, sha256=trial.sha256, task_id=task, outcome='ineffective',
                          source=LearningObservationSource(authority='host', receipt_id=task))
@@ -1299,14 +1386,35 @@ def test_r2_uncommitted_version_removed_and_different_retry_succeeds(tmp_path, m
 def test_r2_failed_trial_rollback_cleans_uncommitted_version(learned, monkeypatch, legacy_registry):
     _, store = learned
     stable = store.load_registry().skills['csv-cleaner']
+    with store.state_lock():
+        reg = store.load_registry()
+        store.save_registry(
+            replace(
+                reg,
+                skills={
+                    **reg.skills,
+                    stable.name: replace(
+                        stable,
+                        maintenance={
+                            **stable.maintenance,
+                            'state': 'active',
+                            'quality': 'established',
+                            'established_at': 1000.0,
+                        },
+                    ),
+                },
+            )
+        )
+    stable = store.load_registry().skills['csv-cleaner']
     request = PublishRequest(replace(decision(), decision='update', body=BODY + '\n试用新版。'),
                              expected_revision=stable.revision, expected_sha256=stable.sha256)
     publish_learned_skill(store, request)
     trial = store.load_registry().skills[stable.name]
-    for task in ('first', 'second'):
+    for task in ('first', 'second', 'third'):
         observe_learning(store, trial.name, sha256=trial.sha256, task_id=task, outcome='adopted')
-    observe_learning(store, trial.name, sha256=trial.sha256, task_id='first', outcome='ineffective',
-                     source=LearningObservationSource(authority='host', receipt_id='first'))
+    for task in ('first', 'second'):
+        observe_learning(store, trial.name, sha256=trial.sha256, task_id=task, outcome='ineffective',
+                         source=LearningObservationSource(authority='host', receipt_id=task))
     if legacy_registry:
         raw = json.loads(store.registry_path.read_text())
         raw['skills'][trial.name].pop('revision')
@@ -1314,17 +1422,21 @@ def test_r2_failed_trial_rollback_cleans_uncommitted_version(learned, monkeypatc
     before = store.load_registry()
     previous = store.skill_path(trial.name).read_text()
     original = store.save_registry
+    state = {'raised': False}
 
-    # LLM: 验证确实已写回退版本后抛异常，不跳过真实反馈汇总和回退逻辑。
-    # 函数用途: 命中自动回退的登记失败窗口。
+    # LLM: 放行 pending_operation 预写并在最终提交登记时模拟一次 I/O 失败，随后放行 rollback 恢复原登记。
+    # 函数用途: 命中自动回退的最终登记失败窗口。
     def fail_registry(registry):
+        if registry.pending_operation is not None or state['raised']:
+            return original(registry)
         assert store.read_version(trial.name, trial.revision + 1) == store.read_version(stable.name, stable.version)
+        state['raised'] = True
         raise OSError('trial registry unavailable')
 
     monkeypatch.setattr(store, 'save_registry', fail_registry)
     with pytest.raises(OSError, match='trial registry unavailable'):
-        observe_learning(store, trial.name, sha256=trial.sha256, task_id='second', outcome='ineffective',
-                         source=LearningObservationSource(authority='host', receipt_id='second'))
+        observe_learning(store, trial.name, sha256=trial.sha256, task_id='third', outcome='ineffective',
+                         source=LearningObservationSource(authority='host', receipt_id='third'))
     assert store.load_registry() == before
     assert store.skill_path(trial.name).read_text() == previous
     assert store.read_version(trial.name, trial.revision + 1) is None

@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, replace
-from typing import Any
 
 # 单条记忆项预览最多 1200 字符：给模型看够判断的摘要，避免整条灌入。
 _ITEM_PREVIEW_CHARS = 1_200
@@ -120,6 +119,7 @@ def _lesson_items(repository: object) -> list[CuratorFormalMemoryInput]:
             scope_type=str(item.scope.get("scope_type") or ""),
             scope_key=str(item.scope.get("scope_key") or ""),
             updated_at=str(item.updated_at),
+            authority_version=getattr(item, "revision", None),
         )
         for item in reader()
         if str(getattr(item, "status", "active")) == "active"
@@ -167,6 +167,7 @@ def _formal_item(
     scope_type: str,
     scope_key: str,
     updated_at: str,
+    authority_version: int | None = None,
 ) -> CuratorFormalMemoryInput:
     body = " ".join(str(content or "").split())
     return CuratorFormalMemoryInput(
@@ -179,6 +180,7 @@ def _formal_item(
         scope_type=scope_type,
         scope_key=scope_key,
         updated_at=updated_at,
+        authority_version=authority_version,
         content_chars=len(body),
     )
 

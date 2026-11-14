@@ -15,6 +15,21 @@ class _Repository:
     def list(self):
         return [self.record]
 
+    def read_refs(self, refs):
+        from agent_py_agent.agent.memory_store.lessons import _parse_canonical_lesson_ref
+
+        result = {}
+        for ref in refs:
+            rel_path, _filename, fragment_id = _parse_canonical_lesson_ref(ref)
+            if rel_path == self.record.path:
+                if fragment_id is not None and self.record.lesson_id != fragment_id:
+                    raise ValueError(f"LESSON_HEADER_ID_MISMATCH: expected={fragment_id!r}")
+                result[ref] = self.record
+        return result
+
+    def note_hits(self, lesson_ids, *, at=None):
+        return None
+
 
 def _lesson(updated_at: str) -> LessonRecord:
     return LessonRecord(
@@ -30,7 +45,7 @@ def _lesson(updated_at: str) -> LessonRecord:
         source_run_ids=(),
         created_at=updated_at,
         updated_at=updated_at,
-        path="memory/lessons/age.md",
+        path="memory/lessons/age-12345678.md",
     )
 
 

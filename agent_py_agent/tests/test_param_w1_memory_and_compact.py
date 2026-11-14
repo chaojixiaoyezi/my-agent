@@ -145,9 +145,16 @@ def test_context_budget_changes_hot_and_working_agreement_pools():
 
 def test_refresh_keeps_the_same_context_budget():
     records = [_record(f"fact-{index}", "事实" * 1400) for index in range(3)]
-    agent = SimpleNamespace(memory=SimpleNamespace(all=lambda: records),
-        memory_hot=SimpleNamespace(list=lambda: []), memory_lessons=SimpleNamespace(list=lambda: []),
-        config=SimpleNamespace())
+    by_id = {row.entry_id: row for row in records}
+    agent = SimpleNamespace(
+        memory=SimpleNamespace(
+            all=lambda: records,
+            read_ids=lambda ids: [by_id[eid] for eid in ids if eid in by_id],
+        ),
+        memory_hot=SimpleNamespace(list=lambda: []),
+        memory_lessons=SimpleNamespace(list=lambda: []),
+        config=SimpleNamespace(),
+    )
     selected = loop_support._refresh_recall_candidates(agent, records, [], MemoryRecallScope.from_runtime(),
                                                        budget=ContextBudget(12000, 0))
     assert [row.entry_id for row in selected] == [row.entry_id for row in records]

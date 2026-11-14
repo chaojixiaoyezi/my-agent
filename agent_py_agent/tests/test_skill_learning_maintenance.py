@@ -41,10 +41,11 @@ def test_model_adoption_does_not_prove_quality_and_periodic_job_cannot_inflate(t
     assert data['quality']=='trial' and len(data['observations'])==6
     observe_learning(ctx.store,NAME,sha256=row.sha256,task_id='independent-task',outcome='adopted')
     observe_learning(ctx.store,NAME,sha256=row.sha256,task_id='independent-task',outcome='effective',source=LearningObservationSource(authority='human',actor_id='human-test',receipt_id='control-new'))
-    assert ctx.store.load_registry().skills[NAME].maintenance['quality']=='established'
+    data = ctx.store.load_registry().skills[NAME].maintenance
+    assert data['quality']=='trial' and data['helped_count']==2 and len(data['observations'])==8
     for number in range(3):
         observe_learning(ctx.store,NAME,sha256=row.sha256,task_id=f'network-{number}',outcome='environment',source=LearningObservationSource(authority='human',actor_id='human-test',receipt_id=f'control-net-{number}'))
-    assert ctx.store.load_registry().skills[NAME].maintenance['quality']=='established'
+    assert ctx.store.load_registry().skills[NAME].maintenance['quality']=='trial'
     with pytest.raises(ValueError):
         observe_learning(ctx.store,NAME,sha256=row.sha256,task_id='forged',outcome='effective',source=LearningObservationSource())
 
@@ -61,7 +62,7 @@ def test_idle_baseline_protection_cold_archive_restore_and_user_remove(tmp_path)
     maintain_learning(ctx.store,mode='autonomous',cool_seconds=10,archive_seconds=20,now=now+30,protected_ids=[f'owner:{NAME}'],protection_complete=True)
     assert ctx.store.skill_path(NAME).exists()
     maintain_learning(ctx.store,mode='autonomous',cool_seconds=10,archive_seconds=20,now=now+30,protection_complete=False)
-    assert ctx.store.load_registry().skills[NAME].maintenance['state']=='cooled' and ctx.store.skill_path(NAME).exists()
+    assert ctx.store.load_registry().skills[NAME].maintenance['state']=='trial' and ctx.store.skill_path(NAME).exists()
     maintain_learning(ctx.store,mode='autonomous',cool_seconds=10,archive_seconds=20,now=now+30,protection_complete=True)
     assert ctx.store.load_registry().skills[NAME].maintenance['state']=='archived' and not ctx.store.skill_path(NAME).exists()
     control_learning(ctx.store,NAME,operation='restore')
@@ -206,7 +207,8 @@ def _feedback_status_case(tmp_path):
 # LLM: 旧参数仅由显式v1解码器在effect前转换；不能把未解码的operation当规范业务输入。
 # 函数用途: 验证唯一action声明及规范化后采用的写入级别。
 @pytest.mark.parametrize('params,effect', [({}, 'read_only'), ({'operation': 'status'}, 'read_only'),
-    ({'action': 'status'}, 'read_only'), ({'operation': 'adopted'}, 'mutating'), ({'action': 'adopted'}, 'mutating')])
+    ({'action': 'status'}, 'read_only'), ({'operation': 'adopted'}, 'mutating'), ({'action': 'adopted'}, 'mutating'),
+    ({'action': 'remove'}, 'mutating'), ({'action': 'restore'}, 'mutating'), ({'action': 'ineffective'}, 'mutating')])
 def test_feedback_status_schema_and_action_effects(params, effect):
     from agent_py_agent.agent.capability.skill_feedback_tool import SkillFeedbackTool
     from agent_py_agent.agent.tooling.models import (
@@ -216,7 +218,9 @@ def test_feedback_status_schema_and_action_effects(params, effect):
 
     assert SkillFeedbackTool.model_spec.input_schema['required'] == []
     assert set(SkillFeedbackTool.model_spec.input_schema['properties']) == {'action', 'skill_id'}
-    assert set(SkillFeedbackTool.model_spec.input_schema['properties']['action']['enum']) == {'status', 'adopted'}
+    assert set(SkillFeedbackTool.model_spec.input_schema['properties']['action']['enum']) == {
+        'status', 'adopted', 'remove', 'restore', 'ineffective',
+    }
     original = dict(params)
     name, canonical = decode_tool_input('skill_feedback', params, version=1)
     assert name == 'skill_feedback' and params == original and 'operation' not in canonical
@@ -225,11 +229,11 @@ def test_feedback_status_schema_and_action_effects(params, effect):
 
 
 # LLM: 查询不要求自学习开关或任务快照授权；比较实际文件字节确保不确认、消费或发布候选。
-# 函数用途: 检查默认/规范及显式v1归一后的全景状态、计数口径和可复制命令。
+# 函数用途: 检查默认/规范及显式v1归一后的全景状态、计数口径并确认不再暴露已下线的pending_learning_proposals。
 @pytest.mark.parametrize('params', [{}, {'operation': 'status'}, {'action': 'status'}])
 @pytest.mark.parametrize('enabled', [False, True])
 def test_feedback_status_panorama_is_readonly(tmp_path, params, enabled):
-    ctx, tool, proposal_id = _feedback_status_case(tmp_path)
+    ctx, tool, _proposal_id = _feedback_status_case(tmp_path)
     tool.agent.config.enable_self_learning = enabled
     before = {str(p): p.read_bytes() for p in ctx.home.owner_home_dir.rglob('*') if p.is_file()}
     _name, canonical = decode_tool_input('skill_feedback', params, version=1)
@@ -238,11 +242,8 @@ def test_feedback_status_panorama_is_readonly(tmp_path, params, enabled):
     result = json.loads(outcome.output)
     assert result['self_learning_enabled'] is enabled and result['learned_skills_count'] == 1
     assert result['learned_skills'][0]['name'] == NAME
-    assert result['pending_requests_count'] == 1 and result['pending_learning_proposals_count'] == 1
-    pending = result['pending_learning_proposals'][0]
-    assert pending['proposal_id'] == proposal_id and pending['revision'] == 1 and pending['skill_name'] == 'pending-method'
-    assert pending['confirm_command'] == f'/skills learned confirm {proposal_id} 1'
-    assert pending['preview_command'] == f'/skills learned proposal-show {proposal_id}'
+    assert isinstance(result.get('pending_requests_count'), int) and result['pending_requests_count'] >= 1
+    assert 'pending_learning_proposals' not in result
     registry = ctx.store.load_registry()
     assert result['daily_summarization_calls'] == {'owner_date': registry.daily_date, 'owner_calls': registry.daily_calls,
         'owner_daily_limit': 5, 'note': '本身份后台自动总结 LLM 调用次数（非 skill_search 工具调用次数）'}
@@ -250,20 +251,18 @@ def test_feedback_status_panorama_is_readonly(tmp_path, params, enabled):
     assert '拟保存内容' not in outcome.output and str(ctx.home.owner_home_dir) not in outcome.output
 
 
-# LLM: 状态按registry或候选精确查找，不把任务采用权限用于只读报告。
-# 函数用途: 查询已发布名字、owner编号或候选编号/名字。
-@pytest.mark.parametrize('reference', [NAME, f'owner:{NAME}', 'pending-method', 'proposal-id'])
+# LLM: 状态按registry精确查找，不把任务采用权限用于只读报告；V2-4已移除旧待确认提案状态查询。
+# 函数用途: 查询已发布名字或owner编号，并确认旧提案查询不再作为已发布技能返回。
+@pytest.mark.parametrize('reference', [NAME, f'owner:{NAME}'])
 def test_feedback_status_resolves_registered_or_pending_skill(tmp_path, reference):
     ctx, tool, proposal_id = _feedback_status_case(tmp_path)
-    outcome = tool.execute({'action': 'status', 'skill_id': proposal_id if reference == 'proposal-id' else reference})
+    outcome = tool.execute({'action': 'status', 'skill_id': reference})
     assert outcome.ok, outcome.output
     result = json.loads(outcome.output)
-    if reference in {NAME, f'owner:{NAME}'}:
-        assert result['skill']['sha256'] == ctx.store.load_registry().skills[NAME].sha256
-        assert result['maintenance'] == ctx.store.load_registry().skills[NAME].maintenance
-    else:
-        assert result['status'] == 'pending' and result['proposal_id'] == proposal_id
-        assert result['confirm_command'] == f'/skills learned confirm {proposal_id} 1'
+    assert result['skill']['sha256'] == ctx.store.load_registry().skills[NAME].sha256
+    assert result['maintenance'] == ctx.store.load_registry().skills[NAME].maintenance
+    assert not tool.execute({'action': 'status', 'skill_id': 'pending-method'}).ok
+    assert not tool.execute({'action': 'status', 'skill_id': proposal_id}).ok
 
 
 # LLM: 内置/工作区/共享快照只返回公开身份；不得误登记为自学方法或要求采用权限。
@@ -430,7 +429,7 @@ def test_feedback_status_through_canonical_executor(background, params):
     assert result.ok, result.output
     if input_version == 1:
         assert result.metadata['input_migration']['action'] == 'status'
-    assert 'learned_skills_count' in result.output and 'pending_learning_proposals_count' in result.output
+    assert 'learned_skills_count' in result.output and 'pending_requests_count' in result.output
     missing = execute_registry_test_call(agent.tools, 'skill_feedback', {'action': 'adopted'}, run_id=background.task_id,
                                          register_with=agent, call_id='feedback-missing-id')
     assert not missing.ok and 'action=adopted 时必须提供 skill_id' in missing.output

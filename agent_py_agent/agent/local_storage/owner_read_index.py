@@ -204,6 +204,9 @@ _FIELDS = {
         "record_type": "TEXT", "skill_id": "TEXT", "event": "TEXT",
         "kind": "TEXT", "source": "TEXT", "date": "TEXT", "at": "TEXT",
         "sequence": "INTEGER", "chars": "INTEGER",
+        "body_chars": "INTEGER", "strike_epoch": "INTEGER",
+        "content_sha256": "TEXT", "task_key": "TEXT",
+        "incarnation_id": "TEXT", "activation_id": "TEXT",
     },
 }
 _TABLES = {domain: "ori_" + domain for domain in _FIELDS}
@@ -708,6 +711,16 @@ class OwnerReadIndex:
             f"pos INTEGER NOT NULL, stop INTEGER NOT NULL, payload TEXT NOT NULL, {columns}, "
             "PRIMARY KEY (sid, generation, pos, stop))"
         )
+        existing = {
+            str(row[1])
+            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        for name, kind in _FIELDS[domain].items():
+            if name not in existing:
+                default = "''" if kind == "TEXT" else "0"
+                connection.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {name} {kind} NOT NULL DEFAULT {default}"
+                )
         for label, field in (("identity", _ID_FIELDS[domain]), ("time", _TIME_FIELDS[domain])):
             connection.execute(
                 f"CREATE INDEX IF NOT EXISTS {table}_{label} ON {table}"
@@ -1243,9 +1256,14 @@ class OwnerReadIndex:
             for key in ("at", "date", "source"):
                 if not isinstance(row.get(key), str):
                     raise _Issue("invalid_schema")
-            for key in ("chars", "sequence"):
+            for key in ("chars", "sequence", "body_chars", "strike_epoch"):
                 value = row.get(key, 0)
                 if type(value) is not int or value < 0:
+                    raise _Issue("invalid_schema")
+                values[key] = value
+            for key in ("content_sha256", "task_key", "incarnation_id", "activation_id"):
+                value = row.get(key, "")
+                if not isinstance(value, str):
                     raise _Issue("invalid_schema")
                 values[key] = value
         for key, kind in _FIELDS[domain].items():
@@ -1609,7 +1627,7 @@ class OwnerReadIndex:
             with self._database(
                 create=True, write=True, deadline=budget.deadline,
             ) as connection:
-                if domain == "task_rounds":
+                if domain in {"task_rounds", "usage"}:
                     self._initialize_domain(connection, domain)
                 checkpoint = self._checkpoint(connection, sid, domain, parts)
                 old = checkpoint
@@ -2131,7 +2149,7 @@ class OwnerReadIndex:
                 "telemetry": {"duration_ms", "started_at", "ended_at", "output_bytes"},
                 "audit": {"timestamp"},
                 "scheduler": set(),
-                "usage": {"sequence", "chars"},
+                "usage": {"sequence", "chars", "body_chars", "strike_epoch"},
             }
             if field not in allowed[checked["domain"]]:
                 raise ValueError("unknown numeric field")

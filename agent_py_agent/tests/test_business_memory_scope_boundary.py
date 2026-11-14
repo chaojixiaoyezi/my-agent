@@ -50,7 +50,13 @@ def test_frozen_business_scope_is_exact_and_shared_by_search(project):
 
 
 def test_nonbusiness_scope_keeps_existing_project_recall():
-    memory = SimpleNamespace(all=lambda: [_record("project", "project:project-B")])
+    record = _record("project", "project:project-B")
+    memory = SimpleNamespace(
+        all=lambda: [record],
+        scope_pairs=lambda scope_type: (("project", "project:project-B"),)
+        if scope_type == "project"
+        else (),
+    )
     scope = runtime_long_term_scope(memory, task_id="task-A")
     assert scope.allows("project", "project:project-B")
     agent = SimpleNamespace(

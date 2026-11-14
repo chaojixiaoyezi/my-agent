@@ -13,6 +13,14 @@ file writes must all apply the same rule set.
 import re
 from dataclasses import dataclass
 
+_CREDENTIAL_TOKEN_PATTERN: re.Pattern[str] = re.compile(
+    r"\bghp_[A-Za-z0-9]{36}\b"
+    r"|\bgithub_pat_[A-Za-z0-9_]{60,}\b"
+    r"|\bsk-(?:[A-Za-z0-9]{20,}|[A-Za-z0-9]+-[A-Za-z0-9_-]{16,})\b"
+    r"|\bAKIA[0-9A-Z]{16}\b"
+    r"|\bBearer\s+[A-Za-z0-9._~+/=-]{16,}"
+)
+
 _MEMORY_THREAT_PATTERNS: tuple[tuple[re.Pattern[str], str, str, str], ...] = (
     (
         re.compile(
@@ -120,10 +128,7 @@ _MEMORY_THREAT_PATTERNS: tuple[tuple[re.Pattern[str], str, str, str], ...] = (
         "instruction to send secrets externally",
     ),
     (
-        re.compile(
-            r"\bghp_[A-Za-z0-9]{36}\b|\bgithub_pat_[A-Za-z0-9_]{60,}\b|"
-            r"\bsk-[A-Za-z0-9]{32,}\b|\bAKIA[0-9A-Z]{16}\b"
-        ),
+        _CREDENTIAL_TOKEN_PATTERN,
         "exfil_hardcoded_token",
         "exfiltration",
         "hardcoded credential/token in memory",
@@ -183,8 +188,17 @@ def scan_memory_content(content: str) -> MemoryThreatScanResult:
     return MemoryThreatScanResult(not findings, tuple(findings))
 
 
+def redact_memory_quote(text: str) -> str:
+    """Redact hardcoded credential tokens in host-persisted message quotes/summaries."""
+    raw = str(text or "")
+    if not raw:
+        return ""
+    return _CREDENTIAL_TOKEN_PATTERN.sub("[REDACTED_CREDENTIAL]", raw)
+
+
 __all__ = [
     "MemoryThreatFinding",
     "MemoryThreatScanResult",
+    "redact_memory_quote",
     "scan_memory_content",
 ]

@@ -32,9 +32,28 @@ from agent_py_agent.agent.prompting_parts.memory_context import memory_context_t
 class _ListRepository:
     def __init__(self, records: list[object]) -> None:
         self.records = records
+        self.hit_calls: list[list[str]] = []
 
     def list(self) -> list[object]:
         return list(self.records)
+
+    def read_refs(self, refs) -> dict[str, object]:
+        from agent_py_agent.agent.memory_store.lessons import _parse_canonical_lesson_ref
+
+        by_path = {getattr(item, "path", ""): item for item in self.records}
+        result: dict[str, object] = {}
+        for ref in refs:
+            rel_path, _filename, fragment_id = _parse_canonical_lesson_ref(ref)
+            item = by_path.get(rel_path)
+            if item is None:
+                continue
+            if fragment_id is not None and getattr(item, "lesson_id", None) != fragment_id:
+                raise ValueError(f"LESSON_HEADER_ID_MISMATCH: expected={fragment_id!r}")
+            result[ref] = item
+        return result
+
+    def note_hits(self, lesson_ids, *, at: object = None) -> None:
+        self.hit_calls.append(list(lesson_ids))
 
 
 def _record(
@@ -77,7 +96,7 @@ def _lesson(now: datetime) -> LessonRecord:
         source_run_ids=(),
         created_at=(now - timedelta(days=30)).isoformat(),
         updated_at=(now - timedelta(days=30)).isoformat(),
-        path="memory/lessons/testing-lesson.md",
+        path="memory/lessons/testing-lesson-12345678.md",
     )
 
 
@@ -87,7 +106,7 @@ def _hot(now: datetime) -> HotRuleRecord:
         hot_id="hot-1",
         candidate_id="candidate-hot",
         lesson_id="lesson-1",
-        lesson_ref="memory/lessons/testing-lesson.md",
+        lesson_ref="memory/lessons/testing-lesson-12345678.md",
         rule="失败路径必须验证。",
         occurrence_count=3,
         evidence_groups=("task:a", "task:b"),

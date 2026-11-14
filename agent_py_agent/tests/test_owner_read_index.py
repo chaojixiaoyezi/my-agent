@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from agent_py_agent.agent.local_storage.owner_read_index import OwnerReadIndex
 from agent_py_agent.agent.observability.telemetry_ledger import ToolCallRecord
@@ -628,3 +627,95 @@ def test_r3_legacy_four_field_append_witness_requires_prefix_reverification(tmp_
         assert fresh_ledger.get_tool_call('call-0') is None
         assert fresh_ledger.get_tool_call('call-X') is not None
         assert new_page['total_count'] == 5
+
+
+
+# 函数用途: 验证 ori_usage 新增版本与正文字节字段在写入、查询与分位统计中完整保留，并可对旧表惰性扩容。
+def test_w2_ori_usage_projected_fields_and_lazy_column_upgrade(tmp_path):
+    import sqlite3
+
+    usage_parts = ('data', 'skill_learning', 'usage_ledger.jsonl')
+    src_path = tmp_path.joinpath(*usage_parts)
+    src_path.parent.mkdir(parents=True, exist_ok=True)
+    row_bound = {
+        'sequence': 1,
+        'date': '2026-11-10',
+        'at': '2026-11-10T01:00:00+00:00',
+        'event': 'manual_get',
+        'kind': 'skill',
+        'skill_id': 'owner:alpha',
+        'source': 'owner',
+        'chars': 120,
+        'body_chars': 120,
+        'content_sha256': 'a' * 64,
+        'task_key': 'task:t-1',
+        'incarnation_id': 'inc-1',
+        'activation_id': 'act-1',
+        'strike_epoch': 0,
+    }
+    row_ref_only = {
+        'sequence': 2,
+        'date': '2026-11-10',
+        'at': '2026-11-10T02:00:00+00:00',
+        'event': 'host_injected',
+        'kind': 'skill',
+        'skill_id': 'owner:alpha',
+        'source': 'owner',
+        'chars': 80,
+        'body_chars': 0,
+        'content_sha256': 'a' * 64,
+        'task_key': 'task:t-2',
+        'incarnation_id': 'inc-1',
+        'activation_id': 'act-1',
+        'strike_epoch': 1,
+    }
+
+    # 先让 OwnerReadIndex 建立合法私有缓存库，再将 ori_usage 降回旧版 9 个字段列，验证首次 advance 时惰性 ALTER TABLE 升级。
+    src_path.write_text(json.dumps(row_bound) + '\n', encoding='utf-8')
+    index = OwnerReadIndex(tmp_path, owner_id='owner')
+    with index._database(create=True, write=True):
+        pass
+    db_path = tmp_path / 'cache' / 'owner_read_index.sqlite3'
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute('DROP TABLE ori_usage')
+        conn.execute(
+            'CREATE TABLE ori_usage ('
+            'sid TEXT NOT NULL, generation TEXT NOT NULL, '
+            'pos INTEGER NOT NULL, stop INTEGER NOT NULL, payload TEXT NOT NULL, '
+            'record_type TEXT, skill_id TEXT, event TEXT, kind TEXT, '
+            'source TEXT, date TEXT, at TEXT, sequence INTEGER, chars INTEGER, '
+            'PRIMARY KEY (sid, generation, pos, stop))'
+        )
+        conn.commit()
+        old_cols = {row[1] for row in conn.execute('PRAGMA table_info(ori_usage)').fetchall()}
+        assert 'body_chars' not in old_cols
+        assert 'content_sha256' not in old_cols
+    finally:
+        conn.close()
+
+    src_path.write_text(json.dumps(row_bound) + '\n' + json.dumps(row_ref_only) + '\n', encoding='utf-8')
+    view = index.advance('usage', usage_parts)
+    assert view['status'] == 'complete'
+
+    conn = sqlite3.connect(db_path)
+    try:
+        new_cols = {row[1] for row in conn.execute('PRAGMA table_info(ori_usage)').fetchall()}
+        assert {'body_chars', 'strike_epoch', 'content_sha256', 'task_key', 'incarnation_id', 'activation_id'} <= new_cols
+    finally:
+        conn.close()
+
+    queried = index.query(view, limit=10)
+    assert len(queried['rows']) == 2
+    assert queried['rows'][0]['body_chars'] == 120
+    assert queried['rows'][0]['content_sha256'] == 'a' * 64
+    assert queried['rows'][0]['task_key'] == 'task:t-1'
+    assert queried['rows'][0]['incarnation_id'] == 'inc-1'
+    assert queried['rows'][0]['activation_id'] == 'act-1'
+    assert queried['rows'][0]['strike_epoch'] == 0
+    assert queried['rows'][1]['body_chars'] == 0
+    assert queried['rows'][1]['strike_epoch'] == 1
+
+    quant = index.quantiles(view, field='body_chars', probabilities=(0.5,))
+    assert quant['total_count'] == 2
+    assert quant['values']['0.5'] == 0

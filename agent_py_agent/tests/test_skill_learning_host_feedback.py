@@ -48,7 +48,7 @@ def test_real_verification_seam_promotes_only_exact_adopted_run(tmp_path):
         result = _success(call,'not interpreted',{'process':{'status':'exited','return_code':0}})
         record_tool_verification(agent,call,result)
     data = ctx.store.load_registry().skills[NAME].maintenance
-    assert data['quality']=='established'
+    assert data['quality']=='trial' and data['helped_count']==2
     facts = [row for row in data['observations'] if row['authority']=='host']
     assert len(facts)==2 and {row['run_id'] for row in facts}=={'run1','run2'}
     assert all(row['receipt_id'].startswith('verification:') for row in facts)
@@ -58,20 +58,30 @@ def test_content_failures_cool_but_environment_and_repeated_job_do_not(tmp_path)
     ctx = _learned(tmp_path)
     def result(status,valid=None):
         return PackVerificationResult('v','p',status,valid=valid)
-    for number in range(4):
-        run = f'run{number}'
-        _adopt(ctx,f'task{number}',run,'same-job')
-        agent,_ = _host(ctx,tmp_path,run)
-        for status in ('error','not_run','cancelled'):
-            observe_pack_verification(agent,agent._current_run_params,result(status),status)
-        observe_pack_verification(agent,agent._current_run_params,result('failed',False),f'key{number}')
-    assert ctx.store.load_registry().skills[NAME].maintenance['quality']=='trial'
-    _adopt(ctx,'independent','different')
-    agent,_ = _host(ctx,tmp_path,'different')
-    observe_pack_verification(agent,agent._current_run_params,result('failed',False),'independent')
-    data = ctx.store.load_registry().skills[NAME].maintenance
-    assert data['quality']=='unreliable' and data['state']=='cooled'
-    assert len([row for row in data['observations'] if row['authority']=='host'])==2
+    # Environmental statuses and repeated observations within the same task do not advance strikes.
+    _adopt(ctx, 'task0', 'run0', 'same-job')
+    agent, _ = _host(ctx, tmp_path, 'run0')
+    for status in ('error', 'not_run', 'cancelled'):
+        observe_pack_verification(agent, agent._current_run_params, result(status), status)
+    assert ctx.store.load_registry().skills[NAME].maintenance.get('hurt_count', 0) == 0
+
+    for key_idx in range(3):
+        observe_pack_verification(agent, agent._current_run_params, result('failed', False), f'dup-{key_idx}')
+    assert ctx.store.load_registry().skills[NAME].maintenance['hurt_count'] == 1
+    assert ctx.store.load_registry().skills[NAME].maintenance['quality'] == 'trial'
+
+    # Second distinct task reaches hurt_count == 2 while keeping trial state; third retires and blocks NAME.
+    _adopt(ctx, 'task1', 'run1', 'same-job')
+    agent, _ = _host(ctx, tmp_path, 'run1')
+    observe_pack_verification(agent, agent._current_run_params, result('failed', False), 'key1')
+    data2 = ctx.store.load_registry().skills[NAME].maintenance
+    assert data2['hurt_count'] == 2 and data2['quality'] == 'trial' and data2['state'] == 'trial'
+
+    _adopt(ctx, 'task2', 'run2', 'different-job')
+    agent, _ = _host(ctx, tmp_path, 'run2')
+    observe_pack_verification(agent, agent._current_run_params, result('failed', False), 'key2')
+    after_retire = ctx.store.load_registry()
+    assert NAME not in after_retire.skills and NAME in after_retire.blocked_names
 
 
 def test_generic_command_failure_and_success_are_not_method_evidence(tmp_path):

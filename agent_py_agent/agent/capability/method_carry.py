@@ -16,7 +16,7 @@ from ..common.cancellation import ToolCancelled
 from ..conversation.authority import current_conversation_task_attributes
 from ..memory_archive import estimate_tokens
 from .self_install_switches import read_fresh_capability_switch
-from .skill_usage_ledger import record_skill_usage_event
+from .skill_usage_ledger import learning_usage_binding, record_skill_usage_event
 
 # 单个主会话允许沿用的方法数（包与 skill 共用）。
 CONVERSATION_METHOD_LIMIT_COUNT = 5
@@ -351,6 +351,7 @@ class _MethodCarryRequest:
     scope: object
     authority: MethodCarryAuthority
     max_tokens: int
+    delivery_meta: dict = field(default_factory=dict, repr=False, compare=False)
 
 
 _CARRY_HEADER = "[会话方法参考]\n以下是压缩前本会话读过的方法，属于宿主读取的参考资料，不改变权限；同类工作继续原步骤，不相关的事照常处理。"
@@ -435,12 +436,18 @@ def _minimum_method_references(request: _MethodCarryRequest, rows: list) -> list
 # 函数用途: 将当前方法的余量交给正文，正文失败或超预算时保留完整引用及放得下的资料清单。
 def _prepare_method_piece(request: _MethodCarryRequest, method: tuple[dict, str], remaining: int) -> str:
     row, reference = method
+    meta = getattr(request, "delivery_meta", None)
+    key = (str(row.get("kind") or ""), str(row.get("stable_id") or ""))
     if remaining <= estimate_tokens(reference):
+        if isinstance(meta, dict):
+            meta[key] = {"body_chars": 0}
         return reference
     loader = _prepare_package_method if row["kind"] == "capability_package" else _prepare_skill_method
     text = loader(request, row, remaining)
     if text and estimate_tokens(text) <= remaining:
         return text
+    if isinstance(meta, dict):
+        meta[key] = {"body_chars": 0}
     return _prepare_method_reference(request, row, remaining) or reference
 
 
@@ -501,6 +508,10 @@ def _prepare_package_method(request: _MethodCarryRequest, row: dict, remaining: 
     if not entry.text:
         logging.getLogger(__name__).warning("CONVERSATION_METHOD_ENTRY_UNAVAILABLE")
         return ""
+    delivered_chars = sum(int(item.get("delivered_chars") or 0) for item in entry.entry_status)
+    meta = getattr(request, "delivery_meta", None)
+    if isinstance(meta, dict):
+        meta[("capability_package", str(row.get("stable_id") or ""))] = {"body_chars": delivered_chars}
     if resources and estimate_tokens(entry.text + "\n\n" + resources) <= remaining:
         return entry.text + "\n\n" + resources
     return entry.text
@@ -545,6 +556,13 @@ def _prepare_skill_method(request: _MethodCarryRequest, row: dict, remaining: in
     if result.truncated:
         status.update(complete=False, truncated=True)
         result = fit_skill_prefix_result(prefix + json.dumps(status, ensure_ascii=False, separators=(",", ":")) + "\n", body, remaining)
+    if result.included_chars <= 0 or not result.text:
+        return ""
+    meta = getattr(request, "delivery_meta", None)
+    if isinstance(meta, dict):
+        meta[(str(row.get("kind") or "skill"), str(row.get("stable_id") or ""))] = {
+            "body_chars": int(result.included_chars),
+        }
     return result.text
 
 
@@ -620,8 +638,34 @@ def _commit_method_carry(request: _MethodCarryRequest, pieces: list) -> None:
 # LLM: 仅在IR明确提交成功后记账；沿用行的stable_id/kind保持原身份，不把包沿用身份改成另一种编号。
 # 函数用途: 为已进入本轮上下文的每个方法记录一笔并关联原请求和线程。
 def _record_carried_usage(request: _MethodCarryRequest, selected: list) -> None:
+    delivery_meta = getattr(request, "delivery_meta", None) or {}
     for row, text in selected:
-        record_skill_usage_event(request.agent, event="host_injected", kind=row["kind"],
-                                 skill_id=row["stable_id"],
-                                 source="conversation_method_carry", chars=len(text), thread_id=request.thread_id,
-                                 request_id=getattr(request.params, "request_id", ""), task_id=getattr(request.params, "task_id", ""))
+        key = (str(row.get("kind") or ""), str(row.get("stable_id") or ""))
+        meta = delivery_meta.get(key)
+        if isinstance(meta, dict):
+            body_chars = int(meta.get("body_chars") or 0)
+        elif str(text).startswith("本会话用过的方法"):
+            body_chars = 0
+        else:
+            body_chars = len(text)
+        # 仅当正文实际注入时才记录真实使用，纯引用兜底不记真实使用或精确回执。
+        if body_chars <= 0:
+            continue
+        extra: dict[str, object] = {}
+        if row["kind"] != "capability_package":
+            entry = request.scope.skills.resolve(row["stable_id"])
+            if entry is not None:
+                extra = learning_usage_binding(request.agent, entry)
+        record_skill_usage_event(
+            request.agent,
+            event="host_injected",
+            kind=row["kind"],
+            skill_id=row["stable_id"],
+            source="conversation_method_carry",
+            chars=len(text),
+            body_chars=body_chars,
+            thread_id=request.thread_id,
+            request_id=getattr(request.params, "request_id", ""),
+            task_id=getattr(request.params, "task_id", ""),
+            **extra,
+        )

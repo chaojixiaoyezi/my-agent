@@ -92,10 +92,12 @@ def cli(capsys, config_path: Path, extra: tuple[str, ...] = ()) -> tuple[int, st
 # 函数用途: 生成 S1 版本 list（全部待确认、开关关闭）的 --json 与中文输出。
 def s1_outputs(context) -> tuple[str, str]:
     proposals = context.service.list()
+    enabled = bool(getattr(context, "self_learning_enabled", False))
     payload = {"command": "skills proposals list", "ok": True, "owner_id": context.owner_id,
-               "proposal_dir": str(context.service.directory), "self_learning_enabled": False, "status_filter": "",
+               "proposal_dir": str(context.service.directory), "self_learning_enabled": enabled, "status_filter": "",
                "count": len(proposals), "proposals": [item.to_record() for item in proposals]}
-    human = [f"Skill 提案（owner {context.owner_id}，共 {len(proposals)} 条；自学习开关：关闭）"]
+    switch = "开启" if enabled else "关闭"
+    human = [f"Skill 提案（owner {context.owner_id}，共 {len(proposals)} 条；自学习开关：{switch}）"]
     for item in proposals:
         human.append(f"- {item.proposal_id} [待确认] 版本 {item.revision} 目标 {item.target.skill_name} "
                      f"来源任务 {'、'.join(item.source.task_ids)}")
@@ -201,7 +203,7 @@ def test_proposal_rejected_during_request_keeps_original_output(tmp_path, monkey
 
 @pytest.mark.parametrize("value", ["need_data", "not_needed", "abstain", "bogus"])
 def test_non_selection_or_invalid_real_answer_keeps_original(tmp_path, monkeypatch, capsys, value):
-    ctx = seeded(tmp_path, 3)
+    seeded(tmp_path, 3)
     config_path = config_at(tmp_path)
     configure(config_path, "apply")
     sent = install_http(monkeypatch, {"proposal_1": value, "proposal_3": "review_first"})

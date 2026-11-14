@@ -147,7 +147,8 @@ def test_learned_skill_list_show_revert_and_remove_use_the_registry(tmp_path, mo
 
 
 def test_a_failure_after_the_change_does_not_claim_nothing_changed(tmp_path, monkeypatch):
-    # 删除先归档目录、写登记表，再追加账本；账本追加失败时删除已经生效，回执不能说“没有改动”，要让用户先查当前状态。
+    # W1 对齐：删除先归档目录、写登记表，再追加账本；账本追加失败时 apply_learned_skill_action 返回 committed=True + ledger_appended=False。
+    # 对话控制层如实回报删除已生效但台账追加失败，并给出核对状态命令，不能说“没有改动”。
     ctx = _learning_runtime(tmp_path, _output())
     _publish_first(ctx)
 
@@ -155,9 +156,18 @@ def test_a_failure_after_the_change_does_not_claim_nothing_changed(tmp_path, mon
         raise OSError("ledger unwritable")
 
     monkeypatch.setattr(SkillLearningStore, "append_event", _ledger_unwritable)
+    partial = _run(monkeypatch, ctx.home, f"/skills learned remove {NAME}")
+    assert partial.ok is True and not _learned_file(ctx).exists()
+    assert "事件台账追加失败" in partial.message and f"/skills learned show {NAME}" in partial.message
+    assert "没有改动" not in partial.message
+
+    # 若发生未预期写操作异常（未返回 committed），仍返回“已触发改动但没能完整确认”提示用户查当前状态。
+    def _unexpected_write_error(*_args):
+        raise RuntimeError("unexpected post mutation error")
+
+    monkeypatch.setattr(module, "apply_learned_skill_action", _unexpected_write_error)
     failed = _run(monkeypatch, ctx.home, f"/skills learned remove {NAME}")
-    assert failed.ok is False and not _learned_file(ctx).exists()
-    assert "没能完整确认" in failed.message and "/skills learned" in failed.message and "没有改动" not in failed.message
+    assert failed.ok is False and "没能完整确认" in failed.message and "/skills learned" in failed.message
 
     def _registry_unreadable(*_args):
         raise RuntimeError("registry unreadable")
@@ -183,9 +193,9 @@ def _automatic_candidate(home, name='automatic-method'):
     return learning_proposal(store, event.reason)
 
 
-# LLM: 两类提案共用原owner；新增展示不能改旧提案命令格式、确认版本或自动发布正式内容。
-# 函数用途: 验证overview/proposals/all同时展示旧提案和自动候选及完整命令。
-@pytest.mark.parametrize('command', ['/skills', '/skills proposals', '/skills proposals all'])
+# LLM: V2-4 /skills 总览展示自主维护摘要并退役待确认学习候选，旧提案与历史学习候选继续由 /skills proposals [all] 查看。
+# 函数用途: 验证 /skills proposals/all 保留旧提案与历史自动候选命令，而 /skills 总览转向自主维护状态。
+@pytest.mark.parametrize('command', ['/skills proposals', '/skills proposals all'])
 def test_chat_lists_automatic_candidates_with_existing_proposals(tmp_path, monkeypatch, command):
     ctx = _proposal_ctx(tmp_path)
     row = _automatic_candidate(ctx.home)
@@ -199,12 +209,15 @@ def test_chat_lists_automatic_candidates_with_existing_proposals(tmp_path, monke
     assert f'/skills learned confirm {row["proposal_id"]} {row["revision"]}' in result.message
     assert f'/skills learned reject {row["proposal_id"]} {row["revision"]}' in result.message
     assert f'修订 {row["revision"]}' in result.message
+    overview = _run(monkeypatch, ctx.home, '/skills', self_learning=False)
+    assert overview.ok and ctx.proposal.target.skill_name in overview.message
+    assert '自主学习维护：mode=autonomous' in overview.message and '待确认学习候选' not in overview.message
     assert not store.load_registry().skills and str(ctx.home.owner_home_dir) not in result.message
 
 
-# LLM: 存在自动候选时不能同时称“没有提案”；all显示历史但不给已拒绝候选可误用的确认命令。
-# 函数用途: 验证仅有自动候选、拒绝后pending过滤和all历史展示。
-@pytest.mark.parametrize('command', ['/skills', '/skills proposals'])
+# LLM: /skills proposals 存在遗留自动候选时不称“没有提案”；all显示历史但不给已拒绝候选可误用的确认命令；/skills 总览保持 V2-4 自主状态。
+# 函数用途: 验证 /skills proposals 遗留候选、拒绝过滤与 V2-4 总览边界。
+@pytest.mark.parametrize('command', ['/skills proposals'])
 def test_chat_automatic_only_candidates_are_not_reported_empty(tmp_path, monkeypatch, command):
     from agent_py_agent.agent.capability.skill_learning_proposals import resolve_learning_proposal
 
@@ -213,6 +226,8 @@ def test_chat_automatic_only_candidates_are_not_reported_empty(tmp_path, monkeyp
     result = _run(monkeypatch, ctx.home, command)
     assert result.ok and row['proposal_id'] in result.message
     assert '没有需要你处理的提案' not in result.message
+    overview = _run(monkeypatch, ctx.home, '/skills')
+    assert overview.ok and '自主学习维护：mode=autonomous' in overview.message and row['proposal_id'] not in overview.message
     resolve_learning_proposal(ctx.store, row['proposal_id'], row['revision'], decision='reject')
     pending = _run(monkeypatch, ctx.home, '/skills proposals')
     assert pending.ok and row['proposal_id'] not in pending.message
@@ -222,18 +237,21 @@ def test_chat_automatic_only_candidates_are_not_reported_empty(tmp_path, monkeyp
     assert f'/skills learned reject {row["proposal_id"]}' not in history.message
 
 
-# LLM: 自动候选为空时返回必须逐字兼容旧展示，不改变子代理提案服务格式或审核顺序点。
-# 函数用途: 锁住空候选时overview和proposals的原文。
+# LLM: /skills proposals 空列表保持原展示；/skills 总览按 V2-4 输出自主学习维护实时模式与计数。
+# 函数用途: 锁住 V2-4 总览格式及 /skills proposals 空状态格式。
 def test_chat_empty_automatic_candidate_lists_preserve_exact_old_output(tmp_path, monkeypatch):
     ctx = _learning_runtime(tmp_path)
     assert _run(monkeypatch, ctx.home, '/skills proposals').message == '待确认的技能提案：0 条（自学习：开启）\n没有需要你处理的提案。'
-    assert _run(monkeypatch, ctx.home, '/skills').message == ('待确认的技能提案：0 条（自学习：开启）\n没有需要你处理的提案。\n\n'
-        '自动总结的 Skill：0 个（发 /skills learned 查看）。\n待确认学习候选：0份（/skills learned proposals 查看，确认前不写正式Skill）。')
+    assert _run(monkeypatch, ctx.home, '/skills').message == (
+        '待确认的技能提案：0 条（自学习：开启）\n没有需要你处理的提案。\n\n'
+        '自动总结的 Skill：0 个（发 /skills learned 查看）。\n'
+        '自主学习维护：mode=autonomous（在役 0 / 冷藏 0 / 归档 0；无需人工确认候选）。'
+    )
 
 
 # LLM: 新式候选读口的include_overflow为只读范围开关，不是另一套候选存储；旧接口无此参数时仍兼容。
-# 函数用途: 验证overview与proposals不会漏掉可选溢出候选。
-@pytest.mark.parametrize('command', ['/skills', '/skills proposals', '/skills proposals all'])
+# 函数用途: 验证 /skills proposals/all 不会漏掉可选溢出候选。
+@pytest.mark.parametrize('command', ['/skills proposals', '/skills proposals all'])
 def test_chat_candidate_lists_include_optional_overflow(tmp_path, monkeypatch, command):
     ctx = _learning_runtime(tmp_path)
     first = _automatic_candidate(ctx.home, 'ordinary-method')

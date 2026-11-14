@@ -20,7 +20,7 @@ from ..conversation.host_actor import HostActorError, model_long_term_scope
 from ..memory_store import recall
 from ..memory_store.candidate_models import CandidateObservation, MemoryScope
 from ..memory_store.promotion_remove_recovery import CommittedRemoval
-from ..memory_store.security import scan_memory_content
+from ..memory_store.security import redact_memory_quote, scan_memory_content
 from ..tooling.models import (
     BaseTool,
     EffectResolverPolicy,
@@ -784,7 +784,12 @@ def _current_user_message_ref(agent: object, candidate_content: str) -> dict[str
     content = str(getattr(message, "content", "") or "")
     if not content:
         return None
-    quote = candidate_content if candidate_content in content else content[:300]
+    redacted_content = redact_memory_quote(content)
+    quote = (
+        candidate_content
+        if candidate_content and candidate_content in redacted_content
+        else redacted_content[:300]
+    )
     return {
         "message_id": str(getattr(message, "message_id", "") or ""),
         "thread_id": thread_id,

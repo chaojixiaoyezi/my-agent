@@ -92,14 +92,18 @@
 
 ## 自学习功能约束
 
-自学习功能由 `enable_self_learning` 控制，默认关闭。
+自学习功能由 `enable_self_learning` 控制，出厂默认开启（`true`），维护模式 `self_learning_maintenance_mode` 默认 `autonomous`。用户可随时改回 `false` 或 `observe`，经 live 配置在下一次操作生效，无需重启；主会话可经 `user_config` 或 `/settings` 调整，子代理不能修改自学习开关、也不能删除或停用 Skill。完整设计见 [Skill 与记忆闭环](docs/design/SKILL_MEMORY_CLOSED_LOOP.md)。
 
 当前规则（2026-10-25 自动审核恢复的集成约定）取代 2026-10-16 对所有正式记忆一律人工确认的约定；来源可学本身仍不等于批准。记忆实现的合入与验收状态见 [memory 进度](docs/modules/memory/02-progress.md)，本约定不代表运行版本已经切换。
 - `AGENTS.md` 和 `SOUL.md` 仍仅限当前用户当场显式修改/确认；AGENTS 沿 `/agents` 完整预览确认或用户直接编辑，SOUL 沿原人格修改与宿主审批。模型、子代理、定时与后台不能签发两者的正式修改权。
 - 普通正式 Memory（`long_term`）、用户画像偏好（`user`），以及达到重复门槛的经验规则（`lesson` / `hot`），在通过宿主学习来源核验、证据核验与安全门后，由后台记忆整理（`MemoryCurator` / `MemoryPromotionService`）自动完成确认与归档；保留原 owner/actor、范围、冲突、配额和目标版本 CAS，不把模型声明当核验或用户指令。
 - 普通/群 IM 本人仍可用 `/memory candidates` 查看候选，再 `preview <候选ID>`，复制该预览给出的 `confirm <预览编号>`；人工确认继续绑定原 owner/actor/thread、完整版本与目标 CAS。来源不可学、证据不足或未过安全门的候选不得自动晋升。
 - 超过 `rejected_candidate_days`（默认 30 天）仍未晋升的陈旧非 `promoted` 候选由定期 retention 自动清理，不把已晋升的正式记忆当陈旧候选删除。
-- 正式 Skill 沿 main 现有用户确认、版本与 CAS 链，内置、共享、插件、工作区和用户手写内容不由自动流程覆盖。输出合同、重名、数量、脱敏、frontmatter 和安全扫描仍是必要条件，不能替代确认。
+- 自学 Skill 经确定性自动闸门（输出合同、重名、数量、脱敏、frontmatter、安全扫描、来源与证据核验）直接发布，自动流程不再弹出人工确认；内置、共享、插件、工作区、owner 手写和用户改过的 Skill 不由自动流程覆盖、不计入上限。
+- 每个 owner 最多 50 条在役的机器托管 Skill（`self_learning_max_skills`）；新条目与已有托管条目相似度 ≥70% 时先尝试合并、同一请求最多重试一次，仍为同族重复则拒绝。满额时按“确证从未使用 → 已冷藏 → 其它”顺序换出最冷条目，换出进入归档并获得完整宽限期，不加入黑名单。
+- 质量阶梯固定为 3/4/5：无负面时需 3 次不同任务的有效使用确立；第 1、2 击分别清零并要求 4、5 次；第 3 击立即回滚到已证明有效的旧版本，没有就退役并阻止同名同族再生。负面信号来自主会话反馈、后台总结复核与包检查三个通道，同一任务最多记 1 击，不依赖用户手动评分。
+- 闲置 7 天冷藏、累计闲置 15 天归档、归档后 15 天清除（各阶段 `0` 表示关闭），宽限期内可恢复，恢复重置闲置基线但不伪造使用记录。lesson 归档（`memory_lesson_archive_days`，默认 15）永久保留在磁盘上，不按年龄删除。
+- 同一条经验只走一个载体：过程性内容进 Skill 学习队列，陈述性内容留在 lesson/HOT；`skill_feedback` 只在主会话可用，子代理调用一律拒绝。
 - 自学 Skill 的所有权仍只由 `<owner_home>/data/skill_learning/registry.json` 认定；内容 hash 不符即视为用户修改，版本全文与原 ledger 保留，撤回和删除不新建第二清单。
 - 学习材料与账本不保存密钥；用户纠正可成为候选信号，但不能绕过来源、证据、安全及目标专属门。自动维护仅按上述显式策略晋升、保留或清理，临时指令不能固化为长期偏好。
 - `self_map` 只聚合原公开读口，不授权、不执行、不解析正文作权限；普通/群/子代理不得借目录扩大范围，unknown/partial 不能当作空。实现与边界见[自我目录](docs/design/SELF_MAP.md)和[规则归属](docs/design/PERSONA_AGENTS_OWNERSHIP.md)。
@@ -107,8 +111,8 @@
 建议目录：
 
 ```text
-<owner_home>/data/skill_learning/                     # 自动总结 Skill 的请求队列、登记表、账本、版本全文与删除归档
-<owner_home>/skills/learned/<name>/SKILL.md           # 用户确认后发布的自学 Skill（category=learned）
+<owner_home>/data/skill_learning/                     # 自动总结 Skill 的请求队列、登记表、账本、使用明细与汇总、版本全文、归档与删除归档
+<owner_home>/skills/learned/<name>/SKILL.md           # 经自动闸门发布的自学 Skill（category=learned）
 <owner_home>/data/skill_proposals/<proposal_id>.json  # 子代理经验 Skill 提案（经原用户确认后安装到 <owner_home>/skills/lesson-*）；不得改用 learning_drafts，Curator 迁移会清理该名字的目录
 agent_py_agent/skills/                        # 内置 skill，随仓库发布
 ~/.my-agent/skills/                           # 用户长期 skill，默认不进仓库

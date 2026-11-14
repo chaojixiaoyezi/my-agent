@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from ._memory_coercion import COMPACT_RECOVERY_PERCENT_RANGE, COMPACT_TRIGGER_PERCENT_RANGE
+from ._memory_coercion import COMPACT_RECOVERY_PERCENT_RANGE
 from .config_io import load_simple_yaml
 
 # 生效时机（如实报告，不夸大）
@@ -50,49 +50,70 @@ class TunableSpec:
     effect: str = EFFECT_NEXT_SESSION
 
 
-# LLM: 每个百分比项按自己的有效范围校验，范围取自配置解析的同一常量；接受的值必须原样生效，不能再被运行时夹取成别的值。
-# 函数用途: 生成一个只接受 [low, high] 内整数百分比的校验函数，供自助修改白名单使用。
-def _percent_within(bounds: tuple[int, int]) -> Callable[[object], tuple[bool, str, object]]:
-    low, high = bounds
-    message = f"必须是 {low}~{high} 之间的整数百分比"
+_STRICT_INT = re.compile(r"-?[0-9]+")
 
-    # LLM: 纯函数，只做整数与区间判断，不解析自然语言。
-    # 函数用途: 校验一次自助修改提交的百分比取值。
+
+def _parse_strict_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    text = str(value).strip() if value is not None else ""
+    if not _STRICT_INT.fullmatch(text):
+        return None
+    return int(text)
+
+
+# LLM: 与配置解析同一口径校验有界整数（拒绝布尔、小数与下划线字面量），接受即按原值生效。
+# 函数用途: 生成闭环策略天/秒/上限等整数参数的范围校验器。
+def _int_within(
+    low: int,
+    high: int | None = None,
+    *,
+    message: str,
+) -> Callable[[object], tuple[bool, str, object]]:
     def validate(value: object) -> tuple[bool, str, object]:
-        try:
-            number = int(str(value).strip())
-        except (TypeError, ValueError):
-            return False, message, 0
-        if not low <= number <= high:
+        number = _parse_strict_int(value)
+        if number is None or number < low or (high is not None and number > high):
             return False, message, 0
         return True, "", number
 
     return validate
 
 
+# LLM: 策略模式等封闭枚举校验，去空白并统一小写，不猜自然语言近似词。
+# 函数用途: 生成枚举字符串校验器（如 observe/autonomous）。
+def _choice(choices: tuple[str, ...]) -> Callable[[object], tuple[bool, str, object]]:
+    allowed = frozenset(choices)
+    label = "/".join(choices)
+
+    def validate(value: object) -> tuple[bool, str, object]:
+        if not isinstance(value, str):
+            return False, f"必须是 {label}", ""
+        normalized = value.strip().lower()
+        if normalized not in allowed:
+            return False, f"必须是 {label}", ""
+        return True, "", normalized
+
+    return validate
+
+
+# LLM: 每个百分比项按自己的有效范围校验，范围取自配置解析的同一常量；接受的值必须原样生效，不能再被运行时夹取成别的值。
+# 函数用途: 生成一个只接受 [low, high] 内整数百分比的校验函数，供自助修改白名单使用。
+def _percent_within(bounds: tuple[int, int]) -> Callable[[object], tuple[bool, str, object]]:
+    low, high = bounds
+    return _int_within(low, high, message=f"必须是 {low}~{high} 之间的整数百分比")
+
+
 # LLM: 参数中心校验/展示辅助；不越过专用写入与授权，修改须同步参数工具测试。
 # 函数用途: 校验参数为正整数，不让布尔值冒充数量。
 def _positive_int(value: object) -> tuple[bool, str, object]:
-    try:
-        number = int(str(value).strip())
-    except (TypeError, ValueError):
-        return False, "必须是正整数", 0
-    if number <= 0:
-        return False, "必须是正整数", 0
-    return True, "", number
+    return _int_within(1, None, message="必须是正整数")(value)
 
 
 # LLM: 与配置解析（_memory_coercion 的 int 字段，下限 0、无上限）和运行时 compact_trigger_max_tokens 同一口径：
 #   接受的值必须原样生效，所以只拒非整数和负数，不另设上限；0 表示不封顶。
 # 函数用途: 校验一次自助修改提交的非负整数（比如压缩触发线的绝对 token 上限）。
 def _non_negative_int(value: object) -> tuple[bool, str, object]:
-    try:
-        number = int(str(value).strip())
-    except (TypeError, ValueError):
-        return False, "必须是 0 或正整数（0 表示不封顶）", 0
-    if number < 0:
-        return False, "必须是 0 或正整数（0 表示不封顶）", 0
-    return True, "", number
+    return _int_within(0, None, message="必须是 0 或正整数（0 表示不封顶）")(value)
 
 
 # LLM: 参数中心校验/展示辅助；不越过专用写入与授权，修改须同步参数工具测试。
@@ -141,6 +162,72 @@ def _non_negative_numbers(value: object, *, yaml_scalars: bool = False) -> tuple
 # LLM: 白名单宁窄勿宽：新池只调整已存在执行器的有界容量，不扩大认证、路径或模型路由权限。
 # 常量用途: 声明可自助修改的配置项。
 TUNABLE_KEYS: dict[str, TunableSpec] = {
+    "enable_self_learning": TunableSpec(
+        key="enable_self_learning",
+        describe="自学习与后台生命周期维护总开关（默认 true）；关闭后暂停后台自动总结与自动维护，人工显式操作仍可用",
+        validate=lambda value: (True, "", value),
+        effect=EFFECT_IMMEDIATE,
+    ),
+    "self_learning_maintenance_mode": TunableSpec(
+        key="self_learning_maintenance_mode",
+        describe="自学习托管维护模式（observe=只观察，autonomous=自动合并/退场/冷藏/归档/清理，默认 autonomous）",
+        validate=_choice(("observe", "autonomous")),
+        effect=EFFECT_IMMEDIATE,
+    ),
+    "self_learning_max_skills": TunableSpec(
+        key="self_learning_max_skills",
+        describe="活跃非豁免自学技能槽位上限（默认 50，0 表示不限；已固定、待确认、在途及明确引用豁免）",
+        validate=_non_negative_int,
+        effect=EFFECT_IMMEDIATE,
+    ),
+    "self_learning_recommended_limit": TunableSpec(
+        key="self_learning_recommended_limit",
+        describe="默认常用目录最多展示的自学技能数（默认 50，0 表示不限；不影响完整搜索与显式读取）",
+        validate=_non_negative_int,
+        effect=EFFECT_IMMEDIATE,
+    ),
+    "self_learning_recommended_explore_percent": TunableSpec(
+        key="self_learning_recommended_explore_percent",
+        describe="常用推荐目录预留给探索自学技能的比例（0~100 整数百分比，默认 20；0 关闭探索名额）",
+        validate=_percent_within((0, 100)),
+        effect=EFFECT_IMMEDIATE,
+    ),
+    "self_learning_merge_similarity_percent": TunableSpec(
+        key="self_learning_merge_similarity_percent",
+        describe="候选技能或同源方法自动去重合并的相似度阈值（0~100 整数百分比，默认 70；0 关闭自动合并）",
+        validate=_percent_within((0, 100)),
+        effect=EFFECT_IMMEDIATE,
+    ),
+    "self_learning_keep_versions": TunableSpec(
+        key="self_learning_keep_versions",
+        describe="自治维护下未引用技能保留的最近修订数（默认 5，0 表示不裁剪；当前激活与受保护修订永保留）",
+        validate=_non_negative_int,
+        effect=EFFECT_IMMEDIATE,
+    ),
+    "self_learning_cool_seconds": TunableSpec(
+        key="self_learning_cool_seconds",
+        describe="自学技能闲置多少秒后进入冷藏（默认 604800=7 天，0 表示关闭冷藏）",
+        validate=_int_within(0, None, message="必须是 0 或正整数（秒，0 表示关闭冷藏）"),
+        effect=EFFECT_IMMEDIATE,
+    ),
+    "self_learning_archive_seconds": TunableSpec(
+        key="self_learning_archive_seconds",
+        describe="自学技能连续闲置多少秒后进入归档（默认 1296000=15 天，0 表示关闭闲置归档）",
+        validate=_int_within(0, None, message="必须是 0 或正整数（秒，0 表示关闭闲置归档）"),
+        effect=EFFECT_IMMEDIATE,
+    ),
+    "self_learning_evict_seconds": TunableSpec(
+        key="self_learning_evict_seconds",
+        describe="已归档自学技能从 archived_at 起算的保留宽限与清理秒数（默认 1296000=15 天，0 表示永久归档不过期）",
+        validate=_int_within(0, None, message="必须是 0 或正整数（秒，0 表示永久归档不过期）"),
+        effect=EFFECT_IMMEDIATE,
+    ),
+    "memory_lesson_archive_days": TunableSpec(
+        key="memory_lesson_archive_days",
+        describe="已接受教训连续未被引用多少天后自动归档（0~3650 整数天，默认 15；0 表示关闭教训自动归档）",
+        validate=_int_within(0, 3650, message="必须是 0~3650 之间的整数（天，0 表示关闭教训自动归档）"),
+        effect=EFFECT_IMMEDIATE,
+    ),
     "tool_discovery_cache_pin_enabled": TunableSpec(
         key="tool_discovery_cache_pin_enabled",
         describe="工具发现时保持本缓存段的原生工具表不变，新定义随结果给出并在下次压缩并入；默认关闭",

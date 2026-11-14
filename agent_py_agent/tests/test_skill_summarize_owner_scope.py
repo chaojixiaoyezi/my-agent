@@ -77,7 +77,10 @@ def test_model_schemas_have_no_human_approval_authority():
     from agent_py_agent.agent.tooling.skill_summarize_tool import SkillSummarizeTool
     feedback = SkillFeedbackTool.model_spec.input_schema
     summarize = SkillSummarizeTool.model_spec.input_schema
-    # 7101c9fa2 起显式输入键为 action；枚举仍只有 adopted/status，没有人工确认权。
-    assert feedback['properties']['action']['enum']==['adopted','status'] and 'operation' not in feedback['properties']
+    # V2 显式输入键为 action；仅含 status/adopted/remove/restore/ineffective，绝无人工审批/确认动作。
+    actions = feedback['properties']['action']['enum']
+    assert set(actions) == {'status', 'adopted', 'remove', 'restore', 'ineffective'}
+    assert 'confirm' not in actions and 'approve' not in actions
+    assert 'operation' not in feedback['properties']
     assert set(summarize['properties'])=={'target','focus'}
     assert feedback['additionalProperties'] is False and summarize['additionalProperties'] is False

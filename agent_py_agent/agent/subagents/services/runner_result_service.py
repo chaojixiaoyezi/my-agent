@@ -14,10 +14,12 @@ from ...common.request_execution_ports import (
 """Runner result recording and debrief persistence service."""
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 
+from ...capability.skill_proposals import lesson_candidate_eligible, lesson_carrier
 from .. import debug_trace, runner_completion_wake
 from ..lesson_ledger import (
     LEDGER_ABSENT,
@@ -62,17 +64,56 @@ def _runner_append_debrief(task, parsed):
 # 函数用途: 为本次lesson候选生成待用户确认的Skill提案，返回工作日志事实，不安装正式内容。
 # LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
 # 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
-def _skill_proposal_note(manager, memory_candidates: list) -> str:
-    service = getattr(manager, "skill_proposals", None)
-    if service is None or not memory_candidates:
+def _skill_proposal_note(manager, memory_candidates: list, *, completed: bool = True) -> str:
+    # V2-4：自主 runner 流程严禁生成 S1 待确认 Skill 提案；程序型 lesson 只经宿主回调路由到学习 FIFO。
+    if not completed or not memory_candidates:
         return ""
+    procedural = [
+        item
+        for item in memory_candidates
+        if lesson_candidate_eligible(item) and lesson_carrier(item) == "skill"
+    ]
+    if not procedural:
+        return ""
+    callback = getattr(manager, "enqueue_lesson_candidates", None)
+    if not callable(callback):
+        # 回调未挂载时保留候选等待重放，严禁回退生成 S1 待确认弹窗提案。
+        return (
+            f" skill_carrier_queued=0 skill_carrier_duplicate=0"
+            f" skill_carrier_deferred={len(procedural)} skill_carrier_refused=0"
+            f" skill_carrier_code=SKILL_CARRIER_UNAVAILABLE"
+        )
     try:
-        created = service.propose_from_candidates(memory_candidates)
-        committed = []  # 用户确认前仅保存提案，不自动写入正式Skill。
-    except Exception as exc:  # noqa: BLE001 - 可选提案失败不得影响子代理结果交付。
+        outcome = callback(procedural)
+    except Exception as exc:  # noqa: BLE001 - 可选载体入队失败不得影响子代理结果交付。
         raise_if_transport_uncertain(exc)
-        return f" skill_proposals_error={type(exc).__name__}"
-    return f" skill_proposals={len(created)} skill_proposals_committed={sum(1 for item in committed if item.ok)}"
+        return f" skill_carrier_error={type(exc).__name__} skill_carrier_deferred={len(procedural)}"
+    if not isinstance(outcome, Mapping):
+        return f" skill_carrier_error=InvalidCarrierResult skill_carrier_deferred={len(procedural)}"
+    queued_raw = outcome.get("queued")
+    refused_raw = outcome.get("refused")
+    deferred_raw = outcome.get("deferred")
+    if (
+        not isinstance(queued_raw, (list, tuple))
+        or not isinstance(refused_raw, (list, tuple))
+        or not isinstance(deferred_raw, (list, tuple))
+    ):
+        return f" skill_carrier_error=InvalidCarrierResult skill_carrier_deferred={len(procedural)}"
+    queued_new = 0
+    queued_dup = 0
+    for entry in queued_raw:
+        if not isinstance(entry, Mapping):
+            continue
+        if entry.get("status") == "duplicate":
+            queued_dup += 1
+        else:
+            queued_new += 1
+    return (
+        f" skill_carrier_queued={queued_new}"
+        f" skill_carrier_duplicate={queued_dup}"
+        f" skill_carrier_deferred={len(deferred_raw)}"
+        f" skill_carrier_refused={len(refused_raw)}"
+    )
 
 
 # LLM: lessons 为合并后的最终列表；lesson_ledger 默认 absent，保持旧调用方按位置构造不变。
@@ -278,7 +319,12 @@ class SubAgentRunnerResultService:
             if parsed.found and parsed.ok:
                 _runner_append_debrief(task, parsed)
             memory_candidates, candidate_note = _record_memory_candidates(self.manager, task, params)
-            proposal_note = _skill_proposal_note(self.manager, memory_candidates)
+            completed = (
+                not params.dry_run
+                and bool(result.ok)
+                and str(getattr(task, "status", "") or "").strip().upper() == TaskStatus.DONE.value
+            )
+            proposal_note = _skill_proposal_note(self.manager, memory_candidates, completed=completed)
             self.manager.actions._append_task_work_log(
                 task,
                 f"subagent_runner: dry_run={params.dry_run} ok={result.ok} status={task.status} "

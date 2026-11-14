@@ -246,9 +246,16 @@ def test_default_view_lists_only_the_common_parameters(monkeypatch, user_config)
     assert "dynamic_timeout_min" not in shown.message and "另外你还改过 1 个其它参数" in shown.message
     assert f"一共 {len(listed_parameters())} 项参数" in shown.message and "/settings all" in shown.message
     assert "- memory_compact_trigger_percent = 80：" in shown.message
-    # 布尔值按配置文件写法显示，不能因为 False 是假值就显示成“（空）”。
-    assert "- enable_self_learning = false：自学习（默认关闭）" in shown.message
+    # 布尔值按配置文件写法显示，开启显示 true，显式关闭也显示 false（不能因为 False 是假值就显示成“（空）”）。
+    assert "- enable_self_learning = true：自学习（默认开启）" in shown.message
     assert "- enable_subagents = true：" in shown.message
+    user_config.write_text('request_timeout: 300\ndynamic_timeout_min: 40\nenable_self_learning: false\n', encoding="utf-8")
+    monkeypatch.setattr(module, "_scoped_home", lambda _agent, _scope: _ADMIN)
+    false_agent = SimpleNamespace(
+        config=SimpleNamespace(config_path=str(user_config), max_tokens=65536, request_timeout=300, enable_self_learning=False),
+    )
+    false_shown = module.execute_settings_control(false_agent, _settings("/settings"), None)
+    assert "- enable_self_learning = false（改过，默认 true）：" in false_shown.message
 
 
 def test_default_view_marks_a_change_that_waits_for_restart(monkeypatch, user_config):

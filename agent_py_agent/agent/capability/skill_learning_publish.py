@@ -8,8 +8,13 @@ from __future__ import annotations
 
 import json
 import os
+import time
+import uuid
+from collections.abc import Callable, Mapping
 from contextlib import ExitStack
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 
 from ..common.log_redaction import redact_sensitive_text
@@ -17,8 +22,9 @@ from ..common.nofollow_fs import read_text_beneath, unlink_file_beneath
 from ..contracts.gates.skill_guard import SkillScanResult, install_decision
 from .skill_learning_prompt import DECISION_CREATE, SkillLearningDecision
 from .skill_learning_store import (
+    CODE_EVIDENCE_INCOMPLETE,
+    CODE_MAINTENANCE_OBSERVE_ONLY,
     EVENT_PUBLISHED,
-    EVENT_REMOVED,
     EVENT_REVERTED,
     EVENT_SKIPPED,
     EVENT_UPDATED,
@@ -28,7 +34,9 @@ from .skill_learning_store import (
     SkillLearningRegistry,
     SkillLearningStore,
     SkillLearningStoreError,
+    is_proven_stable_version,
     replace_skill_file,
+    skill_family_fingerprint,
     utc_now,
 )
 from .skill_snapshot import skill_content_sha256
@@ -36,6 +44,8 @@ from .skills import MAX_SKILL_BYTES, split_skill_frontmatter
 
 CODE_NAME_TAKEN = "SKILL_LEARNING_NAME_TAKEN"
 CODE_NAME_BLOCKED = "SKILL_LEARNING_NAME_BLOCKED"
+CODE_FAMILY_BLOCKED = "SKILL_LEARNING_FAMILY_BLOCKED"
+CODE_LEARNING_DISABLED = "SKILL_LEARNING_DISABLED"
 CODE_LIMIT_REACHED = "SKILL_LEARNING_LIMIT_REACHED"
 CODE_TARGET_MISSING = "SKILL_LEARNING_TARGET_MISSING"
 CODE_TARGET_USER_OWNED = "SKILL_LEARNING_TARGET_USER_OWNED"
@@ -55,14 +65,14 @@ class SkillLearningGateError(SkillLearningStoreError):
     # LLM: 构造时复制 detail，避免调用方之后修改原字典。
     # 函数用途: 保存结果码与结构化细节。
     def __init__(self, code: str, detail: dict[str, object] | None = None) -> None:
-        super().__init__(code)
+        super().__init__(code, detail=detail)
         self.code = code
         self.reason = code
         self.detail = dict(detail or {})
 
 
 # LLM: taken_names 是当前快照里所有来源的 Skill 名（含停用的），新建时不能与之重名，避免遮蔽内置/用户 Skill；
-#   max_skills<=0 表示不限；request 只取 request_key/run_id 写账本和来源。
+#   max_skills<=0 表示不限；protection_provider / config_provider 由宿主在调用锁外注入最新保护与开关政策。
 # 类用途: 打包一次发布需要的决定、来源与闸门参数。
 @dataclass(frozen=True)
 class PublishRequest:
@@ -75,6 +85,25 @@ class PublishRequest:
     expected_sha256: str = ""
     promotion_authority: str = "user_control"
     verification_receipt: dict = field(default_factory=dict)
+    protection_provider: Callable[[], dict] | None = None
+    config_provider: Callable[[], object] | None = None
+
+    # LLM: 允许预审流程复制请求而不尝试深拷贝绑定了宿主锁的闭包包。
+    # 函数用途: 复制 PublishRequest 并按引用保留宿主 provider 回调。
+    def __deepcopy__(self, memo: dict[int, object]) -> PublishRequest:
+        return PublishRequest(
+            decision=deepcopy(self.decision, memo),
+            request=deepcopy(self.request, memo),
+            taken_names=deepcopy(self.taken_names, memo),
+            max_skills=self.max_skills,
+            guard_config=deepcopy(self.guard_config, memo),
+            expected_revision=self.expected_revision,
+            expected_sha256=self.expected_sha256,
+            promotion_authority=self.promotion_authority,
+            verification_receipt=deepcopy(self.verification_receipt, memo),
+            protection_provider=self.protection_provider,
+            config_provider=self.config_provider,
+        )
 
 
 # LLM: 仅发布器内部传递已安装inode和冻结proof；继承显式to_record，不改变外部账本格式。
@@ -86,15 +115,26 @@ class _PublishedSkillEvent(SkillLearningEvent):
     verification_proof_json: str = ''
 
 
-# LLM: 入口只接受 create/update；skip 不应走到这里。整个发布在 state_lock 内完成，返回写账本用的事件。
+# LLM: 入口只接受 create/update；在 state_lock 外先重读最新实时配置与完整保护集合，避免锁重入与死锁。
 # 函数用途: 按决定新建或更新一个自学 Skill，被闸门拒绝时抛 SkillLearningGateError。
 def publish_learned_skill(store: SkillLearningStore, publish: PublishRequest) -> SkillLearningEvent:
+    policy_enable, policy_mode, effective_max, effective_guard = _resolve_live_policy(publish)
+    if policy_enable is False:
+        raise SkillLearningGateError(CODE_LEARNING_DISABLED, {"enable_self_learning": False})
+    effective = replace(publish, max_skills=effective_max, guard_config=effective_guard)
+    protection_snapshot = _read_protection_outside_lock(effective.protection_provider)
     store.directory.mkdir(parents=True, exist_ok=True)
     with store.state_lock():
-        registry = store.load_registry()
-        if publish.decision.decision == DECISION_CREATE:
-            return _create_locked(store, registry, publish)
-        return _update_locked(store, registry, publish)
+        registry = store._prepare_clean_registry_locked(store.load_registry())
+        if effective.decision.decision == DECISION_CREATE:
+            return _create_locked(
+                store,
+                registry,
+                effective,
+                maintenance_mode=policy_mode,
+                protection_snapshot=protection_snapshot,
+            )
+        return _update_locked(store, registry, effective)
 
 
 # LLM: 与 skills._parse_meta 往返无损：只写 name/description，when_to_use 与 tags 为空时整行省略
@@ -109,54 +149,135 @@ def render_learned_skill(decision: SkillLearningDecision) -> str:
     return "\n".join([*lines, "---", "", decision.body.rstrip(), ""])
 
 
-# LLM: 名字闸门在前（删过的名字、快照重名、目录已存在、数量上限），通过后才渲染、检查、安装；
-#   元数据先准备再移动；仅确认登记未提交才补偿版本与原inode安装，已提交或状态不明时保留，取消首因不改类。
-# 函数用途: 在锁内新建自学Skill，失败时不删除已经提交的正式安装。
-def _create_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
-                   publish: PublishRequest) -> SkillLearningEvent:
+# LLM: 名字闸门与家族封禁在前，随后单事务容量准入（按 R-2 确定性选择或报精确失败码），再渲染、检查并安装；
+#   若触发置换发布，淘汰归档与新发布在同一次配额/状态锁与 pending_operation 内完成；仅确认未提交才回滚正文。
+# 函数用途: 在锁内新建自学 Skill，必要时原子置换淘汰者，失败时不破坏已提交状态。
+def _create_locked(
+    store: SkillLearningStore,
+    registry: SkillLearningRegistry,
+    publish: PublishRequest,
+    *,
+    maintenance_mode: str = "",
+    protection_snapshot: dict | None = None,
+) -> SkillLearningEvent:
     name = publish.decision.name
-    _require_new_name(store, registry, publish)
+    _require_new_name_locked(store, registry, publish)
     reusable = _family_record_locked(store, registry, publish) if publish.promotion_authority == 'autonomous_verified' else None
     if reusable is not None:
         return _event(EVENT_SKIPPED, reusable, publish, 'SKILL_LEARNING_FAMILY_REUSED')
     publish, redacted = _redacted_publish(publish)
     text = render_learned_skill(publish.decision)
+    family = skill_family_fingerprint(text)
+    if family in registry.blocked_task_families:
+        raise SkillLearningGateError(CODE_FAMILY_BLOCKED, {"skill_name": name, "task_family_fingerprint": family})
+
+    # 先验证草稿可往返并通过 guard，再决定是否需要容量淘汰，防止非法草稿挤掉既有 Skill。
+    _stage_and_check(store, publish, text)
+    victim_name = _admit_capacity_or_select_victim_locked(
+        store,
+        registry,
+        publish,
+        maintenance_mode=maintenance_mode,
+        protection_snapshot=protection_snapshot,
+    )
+
+    now_iso = utc_now()
+    ts = time.time()
+    maint = _initial_maintenance(
+        publish=publish,
+        family=family,
+        now_ts=ts,
+    )
+    record = LearnedSkill(
+        name,
+        1,
+        skill_content_sha256(text),
+        now_iso,
+        now_iso,
+        _runs((), publish.request),
+        1,
+        str(publish.request.get("operation_id") or ""),
+        maint,
+        "learned",
+    )
+
+    if victim_name is not None:
+        # 受害者在最后移出前若恰好被用户修改，底层会交出管辖并允许本事务重选下一受害者或按空余槽位直接发布。
+        for _attempt in range(max(1, len(registry.skills) + 1)):
+            try:
+                asset_updated = _registered_publication(store, registry, record, publish)
+                _, _, committed_candidate = store._transition_displace_publish_locked(
+                    registry,
+                    victim_name=victim_name,
+                    candidate_record=record,
+                    candidate_text=text,
+                    candidate_assets=asset_updated.assets,
+                    now=ts,
+                )
+                _, dir_id, file_id = _read_skill_binding(store, committed_candidate.name, record=committed_candidate)
+                return _event(
+                    EVENT_PUBLISHED,
+                    committed_candidate,
+                    publish,
+                    CODE_REDACTED if redacted else "",
+                    binding=(dir_id, file_id),
+                )
+            except SkillLearningStoreError as exc:
+                if exc.code != "SKILL_LEARNING_VICTIM_USER_MODIFIED":
+                    raise
+                registry = store._prepare_clean_registry_locked(store.load_registry())
+                victim_name = _admit_capacity_or_select_victim_locked(
+                    store,
+                    registry,
+                    publish,
+                    maintenance_mode=maintenance_mode,
+                    protection_snapshot=protection_snapshot,
+                )
+                if victim_name is None:
+                    break
+
     target = store.learned_root / name
-    now = utc_now()
-    record = LearnedSkill(name, 1, skill_content_sha256(text), now, now, _runs((), publish.request), last_operation_id=str(publish.request.get("operation_id") or ""))
-    record = replace(record, maintenance={'state':'trial','quality':'trial',
-        'promotion_authority':publish.promotion_authority,'verification_receipt':publish.verification_receipt,
-        'promotion_history':['observed','candidate','validated','trial']})
     installed_identity, file_identity = _stage_check_and_move(store, publish, text, target)
-    event = _event(EVENT_PUBLISHED, record, publish, CODE_REDACTED if redacted else '',
-                   binding=(installed_identity, file_identity))
+    event = _event(
+        EVENT_PUBLISHED,
+        record,
+        publish,
+        CODE_REDACTED if redacted else "",
+        binding=(installed_identity, file_identity),
+    )
     try:
         with ExitStack() as rollback:
             _save_version_with_rollback(store, name, 1, text, rollback)
             store.save_registry(_registered_publication(store, registry, record, publish))
             rollback.pop_all()
     except BaseException as exc:
+        committed = False
         try:
             if _publication_uncommitted(store, record, exc):
                 _rollback_created_skill(store, target, installed_identity)
+            else:
+                committed = True
         except BaseException as rollback_error:
             exc.add_note('installed_skill_rollback_failed:' + type(rollback_error).__name__)
             raise exc from rollback_error
         if not isinstance(exc, (OSError, SkillLearningStoreError)):
             raise
-        raise SkillLearningGateError(CODE_INSTALL_FAILED, {"error": type(exc).__name__}) from exc
+        raise SkillLearningGateError(
+            CODE_INSTALL_FAILED,
+            {"error": type(exc).__name__, "committed": committed},
+        ) from exc
     return event
 
 
-# LLM: 更新须CAS/磁盘hash一致，保稳定快照/历史身份；仅确认登记未提交才恢复旧文，取消/首因保持原类。
-#   副作用：原子替换SKILL.md且保同目录其它文件，写versions/registry，已提交或状态不明时禁止破坏性正文补偿。
-# 函数用途: 在锁内更新自学Skill，不让非OS持久化错误留下与registry不一致的新正文。
+# LLM: 更新须 CAS/磁盘 hash 一致；保留经过正数 established_at 证实的上一稳定版本指针，绝不把未证实试用版写入 previous_stable；
+#   更新产生新的 activation_id 而不改变 incarnation_id，并重置本轮激活期计数与打击基线。
+# 函数用途: 在锁内更新自学 Skill，不让非 OS 持久化错误留下与 registry 不一致的新正文。
 def _update_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
                    publish: PublishRequest) -> SkillLearningEvent:
     current = _owned_record(store, registry, publish.decision.name)
     if publish.promotion_authority == 'autonomous_verified' and current.layout != 'learned':
         raise SkillLearningGateError(CODE_NOT_LEARNED)
-    if current.maintenance.get("state") in {"disabled","archived"}:
+    if current.maintenance.get("state") in {"disabled", "archived"}:
         raise SkillLearningGateError("SKILL_LEARNING_TARGET_DISABLED")
     if publish.expected_revision != current.revision or publish.expected_sha256 != current.sha256:
         raise SkillLearningGateError("SKILL_LEARNING_REVISION_CONFLICT")
@@ -164,24 +285,33 @@ def _update_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
     text = render_learned_skill(publish.decision)
     sha = skill_content_sha256(text)
     if sha == current.sha256:
-        _, directory_identity, file_identity = _read_skill_binding(store, current.name)
+        _, directory_identity, file_identity = _read_skill_binding(store, current.name, record=current)
         return _event(EVENT_SKIPPED, current, publish, CODE_UNCHANGED, binding=(directory_identity, file_identity))
-    path = store.skill_path(current.name)
+    family = skill_family_fingerprint(text)
+    if family in registry.blocked_task_families:
+        raise SkillLearningGateError(
+            CODE_FAMILY_BLOCKED,
+            {"skill_name": current.name, "task_family_fingerprint": family},
+        )
+    path = store.skill_path(current.name, record=current)
     previous = read_text_beneath(store.skills_root, path.relative_to(store.skills_root).parts)
     _stage_and_check(store, publish, text)
-    stable = current.maintenance.get('previous_stable') if current.maintenance.get('state') == 'trial' else None
-    record = replace(current, version=current.revision + 1, revision=current.revision + 1, sha256=sha, updated_at=utc_now(),
-                     source_run_ids=_runs(current.source_run_ids, publish.request), last_operation_id=str(publish.request.get("operation_id") or ""),
-                     maintenance={**current.maintenance, 'state':'trial', 'quality':'trial', 'helped_count':0, 'hurt_count':0,
-                                   'promotion_authority':publish.promotion_authority,'verification_receipt':publish.verification_receipt,
-                                   'promotion_history':['observed','candidate','validated','trial'],
-                                   'historical_adoptions':_historical_adoptions(current),
-                                   'previous_verification':current.maintenance.get('previous_verification', {}) if stable else {key:current.maintenance.get(key) for key in ('promotion_authority','verification_receipt')},
-                                  'observations':[], 'previous_stable':stable or {'version':current.version,'revision':current.revision,'sha256':current.sha256}})
+    ts = time.time()
+    next_maint = _updated_maintenance(current, publish=publish, family=family, now_ts=ts)
+    record = replace(
+        current,
+        version=current.revision + 1,
+        revision=current.revision + 1,
+        sha256=sha,
+        updated_at=utc_now(),
+        source_run_ids=_runs(current.source_run_ids, publish.request),
+        last_operation_id=str(publish.request.get("operation_id") or ""),
+        maintenance=next_maint,
+    )
     try:
-        store.check_write(path,text)
+        store.check_write(path, text)
         replace_skill_file(path, text)
-        actual, directory_identity, file_identity = _read_skill_binding(store, current.name)
+        actual, directory_identity, file_identity = _read_skill_binding(store, current.name, record=current)
         if actual != text:
             raise SkillLearningGateError('LEARNING_FORMAL_REVISION_CHANGED', {'carrier': 'skill'})
         event = _event(EVENT_UPDATED, record, publish, CODE_REDACTED if redacted else '',
@@ -191,15 +321,21 @@ def _update_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
             store.save_registry(_registered_publication(store, registry, record, publish))
             rollback.pop_all()
     except BaseException as exc:
+        committed = False
         try:
             if _publication_uncommitted(store, record, exc):
                 replace_skill_file(path, previous)
+            else:
+                committed = True
         except BaseException as rollback_error:
             exc.add_note('updated_skill_rollback_failed:' + type(rollback_error).__name__)
             raise exc from rollback_error
         if not isinstance(exc, (OSError, SkillLearningStoreError)):
             raise
-        raise SkillLearningGateError(CODE_INSTALL_FAILED, {"error": type(exc).__name__}) from exc
+        raise SkillLearningGateError(
+            CODE_INSTALL_FAILED,
+            {"error": type(exc).__name__, "committed": committed},
+        ) from exc
     return event
 
 
@@ -319,86 +455,481 @@ def retain_proposed_business_source(store, publish):
         store.save_registry(registry)
 
 
-# 回滚仍持原state/配额锁；只有确认registry未提交才恢复正文，历史清理复用发布事务。
-# v1回滚等同删除；激活版本回退但revision单调递增，已提交或未知状态禁止破坏性补偿。
+# 回滚仍持原 state/配额锁；通过 pending_operation 推进可恢复版本替换；v1 回滚等同用户删除。
 def revert_learned_skill(store: SkillLearningStore, name: str) -> SkillLearningEvent:
     with store.state_lock():
-        registry = store.load_registry()
+        registry = store._prepare_clean_registry_locked(store.load_registry())
         current = _owned_record(store, registry, name, code=CODE_USER_MODIFIED)
         if current.version <= 1:
-            return _remove_locked(store, registry, current)
-        text = store.read_version(name, current.version - 1)
+            _, event = store._transition_remove_locked(registry, current.name, reason_code="manual_revert_v1")
+            return event
+        target_ver = current.version - 1
+        text = store.read_version(name, target_ver)
         if text is None:
-            raise SkillLearningGateError(CODE_VERSION_MISSING, {"version": current.version - 1})
-        record = replace(current, version=current.version - 1, revision=current.revision + 1, sha256=skill_content_sha256(text), updated_at=utc_now())
-        path = store.skill_path(name)
-        previous = read_text_beneath(store.skills_root, path.relative_to(store.skills_root).parts)
-        if previous is None or skill_content_sha256(previous) != current.sha256:
-            raise SkillLearningGateError(CODE_USER_MODIFIED, {'skill_name': name})
-        try:
-            with ExitStack() as rollback:
-                _save_version_with_rollback(store, name, record.revision, text, rollback)
-                store.check_write(path, text)
-                replace_skill_file(path, text)
-                store.save_registry(replace(registry, skills={**registry.skills, name: record}))
-                rollback.pop_all()
-        except BaseException as primary:
-            try:
-                if _publication_uncommitted(store, record, primary):
-                    replace_skill_file(path, previous)
-            except BaseException as compensation:
-                primary.add_note('reverted_skill_rollback_failed:' + type(compensation).__name__)
-                raise primary from compensation
-            raise
-    return SkillLearningEvent(EVENT_REVERTED, "", name, record.version, record.sha256)
+            raise SkillLearningGateError(CODE_VERSION_MISSING, {"version": target_ver})
+        target_sha = skill_content_sha256(text)
+        ts = time.time()
+        next_maint = dict(current.maintenance)
+        stable = next_maint.get("previous_stable")
+        if is_proven_stable_version(stable) and stable["version"] == target_ver and stable["sha256"] == target_sha:
+            est_at = float(stable["established_at"])
+            next_maint.pop("previous_stable", None)
+            next_maint.pop("previous_verification", None)
+            next_maint.update({
+                "state": "active",
+                "quality": "established",
+                "quality_basis": "rollback_established",
+                "established_at": est_at,
+                "helped_count": 0,
+                "hurt_count": 0,
+                "independent_uses": 0,
+                "independent_uses_coverage": "exact",
+                "uses_since_hurt": 0,
+                "activation_id": uuid.uuid4().hex,
+                "epoch_started_at": ts,
+                "observations": [],
+                "rolled_back_from": current.sha256,
+            })
+        else:
+            next_maint.update({
+                "state": "active",
+                "quality": "trial",
+                "quality_basis": "manual_revert",
+                "helped_count": 0,
+                "hurt_count": 0,
+                "independent_uses": 0,
+                "uses_since_hurt": 0,
+                "activation_id": uuid.uuid4().hex,
+                "epoch_started_at": ts,
+                "observations": [],
+                "rolled_back_from": current.sha256,
+            })
+            next_maint.pop("established_at", None)
+        next_maint["task_family_fingerprint"] = skill_family_fingerprint(text)
+        record = replace(
+            current,
+            version=target_ver,
+            revision=current.revision + 1,
+            sha256=target_sha,
+            updated_at=utc_now(),
+            maintenance=next_maint,
+        )
+        _, committed = store._transition_rollback_locked(
+            registry,
+            current=current,
+            next_record=record,
+            target_version=target_ver,
+            target_sha256=target_sha,
+            target_text=text,
+            reason_code="manual_revert",
+            now=ts,
+        )
+    return SkillLearningEvent(EVENT_REVERTED, "", name, committed.version, committed.sha256)
 
 
-# LLM: 删除把目录移到 removed/ 归档（不物理删除），从登记表去掉并把名字加入 blocked_names；
+# LLM: 仅允许回退到具备正数 established_at 的已证实上一稳定版本；恢复 established 质量与新 activation_id 并清零打击计数。
+# 函数用途: 供三次负反馈或维护路径调用的已证实稳定回滚原语（需已持 state_lock）。
+def _rollback_to_proven_stable_locked(
+    store: SkillLearningStore,
+    registry: SkillLearningRegistry,
+    current: LearnedSkill,
+    *,
+    reason_code: str = "third_strike_rollback",
+    now: float | None = None,
+) -> tuple[SkillLearningRegistry, LearnedSkill]:
+    stable = current.maintenance.get("previous_stable")
+    if not is_proven_stable_version(stable):
+        raise SkillLearningGateError(
+            CODE_VERSION_MISSING,
+            {"skill_name": current.name, "reason": "no_proven_stable_version"},
+        )
+    owned = _owned_record(store, registry, current.name, code=CODE_USER_MODIFIED)
+    target_ver = int(stable["version"])
+    target_sha = str(stable["sha256"])
+    text = store.read_version(current.name, target_ver)
+    if text is None or skill_content_sha256(text) != target_sha:
+        raise SkillLearningGateError(CODE_VERSION_MISSING, {"skill_name": current.name, "version": target_ver})
+    ts = time.time() if now is None else float(now)
+    maint = dict(owned.maintenance)
+    maint.pop("previous_stable", None)
+    maint.pop("previous_verification", None)
+    maint.update({
+        "state": "active",
+        "quality": "established",
+        "quality_basis": "rollback_established",
+        "established_at": float(stable["established_at"]),
+        "helped_count": 0,
+        "hurt_count": 0,
+        "independent_uses": 0,
+        "independent_uses_coverage": "exact",
+        "uses_since_hurt": 0,
+        "activation_id": uuid.uuid4().hex,
+        "epoch_started_at": ts,
+        "observations": [],
+        "rolled_back_from": owned.sha256,
+        "task_family_fingerprint": skill_family_fingerprint(text),
+    })
+    next_record = replace(
+        owned,
+        version=target_ver,
+        revision=owned.revision + 1,
+        sha256=target_sha,
+        updated_at=utc_now(),
+        maintenance=maint,
+    )
+    return store._transition_rollback_locked(
+        registry,
+        current=owned,
+        next_record=next_record,
+        target_version=target_ver,
+        target_sha256=target_sha,
+        target_text=text,
+        reason_code=reason_code,
+        now=ts,
+    )
+
+
+# LLM: 无已证实稳定前驱可退时的三次负反馈退场：安全核验归属后驱逐目录、封禁名字与任务家族、并清理 skill 专属资产行。
+# 函数用途: 供三次负反馈或维护路径调用的安全退场原语（需已持 state_lock）。
+def _retire_third_strike_locked(
+    store: SkillLearningStore,
+    registry: SkillLearningRegistry,
+    current: LearnedSkill,
+    *,
+    reason_code: str = "third_strike_retire",
+    now: float | None = None,
+) -> SkillLearningRegistry:
+    try:
+        path = store.canonical_skill_path(current.name, record=current)
+        root = store.directory if current.maintenance.get("state") == "archived" else store.skills_root
+        text = read_text_beneath(root, path.relative_to(root).parts)
+        if text is None:
+            text = store.read_version(current.name, current.version)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise SkillLearningStoreError(
+            CODE_EVIDENCE_INCOMPLETE,
+            f"unreadable managed skill file for {current.name}",
+            detail={"skill_name": current.name, "reason": type(exc).__name__},
+        ) from exc
+    family = str(current.maintenance.get("task_family_fingerprint") or "")
+    if not family and text is not None:
+        family = skill_family_fingerprint(text)
+    return store._transition_evict_locked(
+        registry,
+        current.name,
+        now=now,
+        block=True,
+        block_family=family,
+        reason_code=reason_code,
+    )
+
+
+# LLM: 删除把目录移到 removed/ 归档（不物理删除），从登记表去掉并把名字与任务家族加入封禁列表，有界清理旧版本；
 #   用户改过的 Skill 也允许删除（用户显式动作），但不在登记表里的名字拒绝。
 # 函数用途: 删除一个自学 Skill，返回账本事件。
 def remove_learned_skill(store: SkillLearningStore, name: str) -> SkillLearningEvent:
     with store.state_lock():
-        registry = store.load_registry()
-        current = registry.skills.get(name)
-        if current is None:
+        registry = store._prepare_clean_registry_locked(store.load_registry())
+        if name not in registry.skills:
             raise SkillLearningGateError(CODE_NOT_LEARNED, {"skill_name": name})
-        return _remove_locked(store, registry, current)
+        _, event = store._transition_remove_locked(registry, name, reason_code="user_removed")
+        return event
 
 
-# LLM: 调用方已持 state_lock；先移目录再写登记表，目录不存在（用户手动删了）也照样完成登记。
+# LLM: 锁内委托给同一可恢复删除过渡，保留兼容性调用签名。
 # 函数用途: 在锁内完成删除并返回事件。
 def _remove_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
                    current: LearnedSkill) -> SkillLearningEvent:
-    store.archive_removed(current.name)
-    skills = {key: value for key, value in registry.skills.items() if key != current.name}
-    store.save_registry(replace(registry, skills=skills, blocked_names=(*registry.blocked_names, current.name)))
-    return SkillLearningEvent(EVENT_REMOVED, "", current.name, current.version, current.sha256)
+    _, event = store._transition_remove_locked(registry, current.name, reason_code="user_removed")
+    return event
 
 
-# LLM: 删过的名字最先判（用户意愿优先），其次快照重名与目录已存在，最后数量上限（只限新建）。
-# 函数用途: 校验新建名字可用。
-def _require_new_name(store: SkillLearningStore, registry: SkillLearningRegistry, publish: PublishRequest) -> None:
+# LLM: 删过的名字最先判（用户意愿优先），其次快照重名与目录已存在。
+# 函数用途: 校验新建名字未被封禁、未重名且目标目录空。
+def _require_new_name_locked(store: SkillLearningStore, registry: SkillLearningRegistry, publish: PublishRequest) -> None:
     name = publish.decision.name
     if name in registry.blocked_names:
         raise SkillLearningGateError(CODE_NAME_BLOCKED, {"skill_name": name})
     taken = name in publish.taken_names or name in registry.skills
     if taken or (store.learned_root / name).exists() or (store.learned_root / name).is_symlink():
         raise SkillLearningGateError(CODE_NAME_TAKEN, {"skill_name": name})
-    if publish.max_skills > 0 and len(registry.skills) >= publish.max_skills:
-        raise SkillLearningGateError(CODE_LIMIT_REACHED, {"limit": publish.max_skills})
 
 
-# LLM: 所有权 = 登记在册 + 磁盘 SKILL.md 存在 + 其 hash 等于登记值；任一不满足都视为用户所有，自动流程不碰。
+# LLM: 最终容量准入（在 state_lock 内执行）：经 store.managed_records + live_count 验证真实在役机器槽位；
+#   不完整证据、observe 模式与全员受保护各有独立结构化错误码，不再混为一谈。
+# 函数用途: 检查容量或按 R-2 优先级选定一名非受保护的淘汰者。
+def _admit_capacity_or_select_victim_locked(
+    store: SkillLearningStore,
+    registry: SkillLearningRegistry,
+    publish: PublishRequest,
+    *,
+    maintenance_mode: str = "",
+    protection_snapshot: dict | None = None,
+) -> str | None:
+    if publish.max_skills <= 0:
+        return None
+    try:
+        managed = store.managed_records(registry, include_archived=False)
+    except SkillLearningStoreError as exc:
+        if exc.code == CODE_EVIDENCE_INCOMPLETE:
+            raise SkillLearningGateError(CODE_EVIDENCE_INCOMPLETE, exc.detail) from exc
+        raise
+    live = registry.live_count(managed_names=managed.keys())
+    if live < publish.max_skills:
+        return None
+    if maintenance_mode == "observe":
+        raise SkillLearningGateError(
+            CODE_MAINTENANCE_OBSERVE_ONLY,
+            {"limit": publish.max_skills, "live": live, "mode": "observe"},
+        )
+    if publish.protection_provider is None:
+        raise SkillLearningGateError(CODE_LIMIT_REACHED, {"limit": publish.max_skills, "live": live})
+    if not isinstance(protection_snapshot, dict):
+        raise SkillLearningGateError(
+            CODE_EVIDENCE_INCOMPLETE,
+            {"reason": "protection_unavailable", "limit": publish.max_skills, "live": live},
+        )
+    complete = (
+        bool(protection_snapshot["protection_complete"])
+        if "protection_complete" in protection_snapshot
+        else bool(protection_snapshot.get("complete"))
+    )
+    if not complete:
+        raise SkillLearningGateError(
+            CODE_EVIDENCE_INCOMPLETE,
+            {"reason": "protection_incomplete", "limit": publish.max_skills, "live": live},
+        )
+    protected_raw = {str(item) for item in (protection_snapshot.get("protected_ids") or ())}
+    for key in ("pinned_ids", "active_ids"):
+        protected_raw.update(str(item) for item in (protection_snapshot.get(key) or ()))
+    if "*" in protected_raw:
+        raise SkillLearningGateError(
+            CODE_LIMIT_REACHED,
+            {"limit": publish.max_skills, "live": live, "all_protected": True},
+        )
+    eligible: list[tuple[tuple[object, ...], str]] = []
+    for candidate_name, record in sorted(managed.items()):
+        maint = record.maintenance
+        if (
+            maint.get("pinned") is True
+            or maint.get("state") in {"disabled", "archived"}
+            or candidate_name in protected_raw
+            or f"owner:{candidate_name}" in protected_raw
+        ):
+            continue
+        eligible.append((_victim_rank_key(candidate_name, record), candidate_name))
+    if not eligible:
+        raise SkillLearningGateError(
+            CODE_LIMIT_REACHED,
+            {"limit": publish.max_skills, "live": live, "all_protected": True},
+        )
+    eligible.sort(key=lambda item: item[0])
+    return eligible[0][1]
+
+
+def _victim_rank_key(name: str, record: LearnedSkill) -> tuple[int, float, int, float, str, str]:
+    maint = record.maintenance
+    uses = int(maint.get("independent_uses") or 0)
+    helped = int(maint.get("helped_count") or 0)
+    last_used = float(maint.get("last_used_at") or 0.0)
+    legacy_upper = maint.get("legacy_last_activity_upper_bound")
+    has_activity = (
+        maint.get("ever_used") is True
+        or uses > 0
+        or helped > 0
+        or last_used > 0.0
+        or legacy_upper is not None
+    )
+    proven_never_used = (
+        not has_activity
+        and maint.get("independent_uses_coverage") == "exact"
+        and maint.get("ever_used") in (False, None)
+    )
+    created_ts = _iso_ts(record.created_at)
+    baseline_ts = float(maint.get("baseline_at") or 0.0) or created_ts
+    if proven_never_used:
+        return (0, baseline_ts, 0, created_ts, record.created_at, name)
+    real_use_ts = last_used or (float(legacy_upper) if legacy_upper is not None else 0.0)
+    tier = 1 if maint.get("state") == "cooled" else 2
+    return (tier, real_use_ts, uses, created_ts, record.created_at, name)
+
+
+def _iso_ts(raw: str) -> float:
+    if not raw:
+        return 0.0
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _initial_maintenance(*, publish: PublishRequest, family: str, now_ts: float) -> dict[str, object]:
+    return {
+        "state": "trial",
+        "quality": "trial",
+        "quality_basis": "trial_unproven",
+        "pinned": False,
+        "baseline_at": float(now_ts),
+        "independent_uses": 0,
+        "independent_uses_coverage": "exact",
+        "ever_used": False,
+        "uses_since_hurt": 0,
+        "hurt_count": 0,
+        "strike_epoch": 0,
+        "incarnation_id": uuid.uuid4().hex,
+        "activation_id": uuid.uuid4().hex,
+        "epoch_started_at": float(now_ts),
+        "usage_receipt_sequence": 0,
+        "ownership": "machine",
+        "observations": [],
+        "promotion_authority": publish.promotion_authority,
+        "verification_receipt": publish.verification_receipt,
+        "promotion_history": ["observed", "candidate", "validated", "trial"],
+        "task_family_fingerprint": family,
+    }
+
+
+def _updated_maintenance(
+    current: LearnedSkill,
+    *,
+    publish: PublishRequest,
+    family: str,
+    now_ts: float,
+) -> dict[str, object]:
+    cur = dict(current.maintenance)
+    est_at = cur.get("established_at")
+    current_proven = (
+        cur.get("quality") == "established"
+        and isinstance(est_at, (int, float))
+        and not isinstance(est_at, bool)
+        and float(est_at) > 0
+    )
+    prior_stable = cur.get("previous_stable")
+    if current_proven:
+        next_stable: dict[str, object] | None = {
+            "version": current.version,
+            "revision": current.revision,
+            "sha256": current.sha256,
+            "established_at": float(est_at),
+        }
+        prev_verif = {key: cur.get(key) for key in ("promotion_authority", "verification_receipt")}
+    elif is_proven_stable_version(prior_stable):
+        next_stable = dict(prior_stable)
+        prev_verif = cur.get("previous_verification", {})
+    else:
+        next_stable = None
+        prev_verif = None
+
+    incarnation_id = str(cur.get("incarnation_id") or "") or uuid.uuid4().hex
+    next_maint: dict[str, object] = {
+        **cur,
+        "state": "trial",
+        "quality": "trial",
+        "quality_basis": "trial_unproven",
+        "baseline_at": float(now_ts),
+        "helped_count": 0,
+        "hurt_count": 0,
+        "uses_since_hurt": 0,
+        "independent_uses": 0,
+        "independent_uses_coverage": "exact",
+        "strike_epoch": 0,
+        "epoch_started_at": float(now_ts),
+        "incarnation_id": incarnation_id,
+        "activation_id": uuid.uuid4().hex,
+        "ownership": "machine",
+        "promotion_authority": publish.promotion_authority,
+        "verification_receipt": publish.verification_receipt,
+        "promotion_history": ["observed", "candidate", "validated", "trial"],
+        "historical_adoptions": _historical_adoptions(current),
+        "observations": [],
+        "task_family_fingerprint": family,
+    }
+    next_maint.pop("established_at", None)
+    if next_stable is not None:
+        next_maint["previous_stable"] = next_stable
+        next_maint["previous_verification"] = prev_verif
+    else:
+        next_maint.pop("previous_stable", None)
+        next_maint.pop("previous_verification", None)
+    return next_maint
+
+
+_MISSING_SENTINEL = object()
+
+
+def _cfg_lookup(cfg: object, key: str, default: object = _MISSING_SENTINEL) -> object:
+    if isinstance(cfg, Mapping):
+        return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+
+def _resolve_live_policy(publish: PublishRequest) -> tuple[bool, str, int, object | None]:
+    if publish.config_provider is None:
+        return True, "", publish.max_skills, publish.guard_config
+    try:
+        cfg = publish.config_provider()
+    except Exception as exc:
+        raise SkillLearningGateError(
+            CODE_EVIDENCE_INCOMPLETE,
+            {"reason": "config_provider_failed", "error": type(exc).__name__},
+        ) from exc
+    if cfg is None:
+        return True, "", publish.max_skills, publish.guard_config
+    raw_enable = _cfg_lookup(cfg, "enable_self_learning")
+    enabled = True if raw_enable is _MISSING_SENTINEL else (raw_enable is not False)
+    raw_mode = _cfg_lookup(cfg, "self_learning_maintenance_mode")
+    if raw_mode is _MISSING_SENTINEL:
+        raw_mode = _cfg_lookup(cfg, "maintenance_mode", "")
+    mode = str(raw_mode or "").strip().lower() if raw_mode is not _MISSING_SENTINEL else ""
+    raw_max = _cfg_lookup(cfg, "self_learning_max_skills")
+    if raw_max is _MISSING_SENTINEL:
+        raw_max = _cfg_lookup(cfg, "max_learned_skills")
+    if raw_max is _MISSING_SENTINEL:
+        raw_max = _cfg_lookup(cfg, "max_skills")
+    effective_max = publish.max_skills if raw_max is _MISSING_SENTINEL or raw_max is None else int(raw_max)
+    raw_guard = _cfg_lookup(cfg, "guard_config")
+    if raw_guard is _MISSING_SENTINEL:
+        if (
+            _cfg_lookup(cfg, "skill_guard_max_files") is not _MISSING_SENTINEL
+            or _cfg_lookup(cfg, "skill_guard_max_size_kb") is not _MISSING_SENTINEL
+        ):
+            raw_guard = cfg
+        else:
+            candidate_policy = _cfg_lookup(cfg, "runtime_guard_policy")
+            if candidate_policy is None or (
+                candidate_policy is not _MISSING_SENTINEL
+                and (
+                    _cfg_lookup(candidate_policy, "skill_guard_max_files") is not _MISSING_SENTINEL
+                    or _cfg_lookup(candidate_policy, "skill_guard_max_size_kb") is not _MISSING_SENTINEL
+                )
+            ):
+                raw_guard = candidate_policy
+    effective_guard = publish.guard_config if raw_guard is _MISSING_SENTINEL else raw_guard
+    return enabled, mode, effective_max, effective_guard
+
+
+def _read_protection_outside_lock(provider: Callable[[], dict] | None) -> dict | None:
+    if provider is None:
+        return None
+    try:
+        result = provider()
+    except Exception:
+        return {"protection_complete": False, "protected_ids": ()}
+    return result if isinstance(result, dict) else {"protection_complete": False, "protected_ids": ()}
+
+
+# LLM: 所有权 = 登记在册 + 磁盘 SKILL.md 存在 + 其 hash 等于登记值；优先使用已知 record 避免重复读 registry。
 # 函数用途: 取出一个仍归自动流程所有的登记记录。
 def _owned_record(store: SkillLearningStore, registry: SkillLearningRegistry, name: str,
                   code: str = CODE_TARGET_USER_OWNED) -> LearnedSkill:
     current = registry.skills.get(name)
     if current is None:
         raise SkillLearningGateError(CODE_TARGET_MISSING, {"skill_name": name})
-    path = store.skill_path(name)
+    path = store.skill_path(name, record=current)
     if path.is_symlink() or not path.is_file():
         raise SkillLearningGateError(code, {"skill_name": name, "state": "missing"})
-    if skill_content_sha256(read_text_beneath(store.skills_root, path.relative_to(store.skills_root).parts)) != current.sha256:
+    body = read_text_beneath(store.skills_root, path.relative_to(store.skills_root).parts)
+    if body is None or skill_content_sha256(body) != current.sha256:
         raise SkillLearningGateError(code, {"skill_name": name, "state": "user_modified"})
     return current
 
@@ -555,12 +1086,16 @@ def _rollback_created_skill(store, target, identity):
         raise
 
 
-# LLM: 原state/配额锁内只经本次固定stage FD写读扫描，退出精确清理；不创建第二份持久状态或复制整库。
+# LLM: 原state/配额锁内只经本次固定stage FD写读扫描，退出精确清理；write或清理报OSError转为结构化安装错误并保留cleanup_pending。
 # 函数用途: 在隔离对象内检查更新正文，不重新解析可变stage路径。
 def _stage_and_check(store: SkillLearningStore, publish: PublishRequest, text: str) -> None:
     from .asset_promotion import _stage_dir
-    with _stage_dir(store.skills_root.parent, with_fd=True) as (stage, stage_fd):
-        _staged_skill(store, stage, publish, text, stage_fd=stage_fd)
+    try:
+        with _stage_dir(store.skills_root.parent, with_fd=True) as (stage, stage_fd):
+            _staged_skill(store, stage, publish, text, stage_fd=stage_fd)
+    except OSError as exc:
+        # 预检暂存未移动任何正文；写入或清理失败统一给结构化安装错误，清理回执由 _stage_dir 保留。
+        raise SkillLearningGateError(CODE_INSTALL_FAILED, {"error": type(exc).__name__, "phase": "stage_check"}) from exc
 
 
 # LLM: 只经固定stage FD创建/读取单文件Skill；共用frontmatter codec并显式保留description必填门，以agent_generated扫描，返回名字与inode。
@@ -626,11 +1161,11 @@ def _read_staged_text(directory_fd, *, with_identity=False):
 
 # LLM: 调用方持state锁；按已登记layout逐段nofollow打开，目录FD与同FD下叶读出身份，读后核名字仍是原目录，独立关闭资源。
 # 函数用途: 在登记前冻结、或回执读回时取得正文及目录/文件物理身份，不对可变路径分离stat和读取。
-def _read_skill_binding(store, name):
+def _read_skill_binding(store, name, *, record=None):
     from ..common.nofollow_fs import _openat_directory, open_directory_beneath
     from .asset_promotion import _StageFDStack
 
-    parts = store.skill_path(name).parent.relative_to(store.skills_root).parts
+    parts = store.skill_path(name, record=record).parent.relative_to(store.skills_root).parts
     with _StageFDStack() as descriptors:
         parent_fd = open_directory_beneath(store.skills_root, parts[:-1], require_dir_fd=True)
         descriptors.callback(os.close, parent_fd)
@@ -710,8 +1245,10 @@ def _event(kind: str, record: LearnedSkill, publish: PublishRequest, code: str, 
 
 __all__ = [
     "CODE_DRAFT_INVALID",
+    "CODE_FAMILY_BLOCKED",
     "CODE_GUARD_BLOCKED",
     "CODE_INSTALL_FAILED",
+    "CODE_LEARNING_DISABLED",
     "CODE_LIMIT_REACHED",
     "CODE_NAME_BLOCKED",
     "CODE_NAME_TAKEN",

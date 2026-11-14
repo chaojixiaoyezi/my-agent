@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from ..conversation.business_contracts import BusinessExecutionContext
 from .skill_learning_store import SkillLearningStore
-from .skill_usage_ledger import record_skill_usage_events
+from .skill_usage_ledger import _usage_store, learning_usage_binding, record_skill_usage_events
 
 
 @dataclass(frozen=True)
@@ -74,15 +74,20 @@ def method_row(params, *, event, kind, stable_id, version_ref, source, receipt_r
             'receipt_ref': receipt_ref, 'source_key': key, 'chars': chars, **context}
 
 
-def snapshot_row(params, entry, *, event, source, receipt_ref='', chars=0):
+def snapshot_row(params, entry, *, event, source, receipt_ref='', chars=0, usage_binding=None):
     kind = 'capability_package' if hasattr(entry, 'package_sha256') else 'skill'
-    return method_row(params, event=event, kind=kind, stable_id=entry.stable_id,
+    binding = (usage_binding if usage_binding is not None else learning_usage_binding(None, entry)) if kind == 'skill' else {}
+    row = method_row(params, event=event, kind=kind, stable_id=entry.stable_id,
         version_ref=entry.package_sha256 if kind == 'capability_package' else entry.content_sha256,
-        activation_id=getattr(entry, 'activation_id', ''), source=source,
+        activation_id=binding.get('activation_id', getattr(entry, 'activation_id', '')), source=source,
         method_source='package' if kind == 'capability_package' else entry.source,
         receipt_ref=receipt_ref or getattr(_producer_params(params), 'request_id', '')
                     or f"run:{getattr(_producer_params(params), 'run_id', '')}", chars=chars)
 
+    if row is not None:
+        row.update(binding)
+        row['body_chars'] = chars if event == 'manual_get' else 0
+    return row
 
 def record_candidates(agent, snapshot, matches, *, source):
     """只消费确实将返回的授权候选；空结果、未投递卡片和未选择均不补事件。"""
@@ -103,7 +108,7 @@ def record_candidates(agent, snapshot, matches, *, source):
                 # 旧无任务调用保持原人工检索统计，不补造任务归属或可见阶段。
                 rows.append({'event': 'manual_search', 'kind': match['kind'],
                     'skill_id': entry.stable_id, 'source': 'package' if match['kind'] == 'capability_package' else entry.source})
-        record_skill_usage_events(SkillLearningStore.for_home(agent.home_paths), [x for x in rows if x])
+        record_skill_usage_events(_usage_store(agent), [x for x in rows if x])
     except Exception as error:
         logging.getLogger(__name__).warning('METHOD_USAGE_CANDIDATES_UNRECORDED: %s', type(error).__name__)
 
@@ -111,12 +116,13 @@ def record_candidates(agent, snapshot, matches, *, source):
 def record_read(agent, entry, *, chars):
     with _best_effort('record_read'):
         params = getattr(agent, '_current_run_params', None)
-        row = snapshot_row(params, entry, event='manual_get', source='skill_search.get', chars=chars)
+        binding = learning_usage_binding(agent, entry) if not hasattr(entry, 'package_sha256') else {}
+        row = snapshot_row(params, entry, event='manual_get', source='skill_search.get', chars=chars, usage_binding=binding)
         if row is None:
             kind = 'capability_package' if hasattr(entry, 'package_sha256') else 'skill'
             row = {'event': 'manual_get', 'kind': kind, 'skill_id': entry.stable_id,
-                   'source': 'package' if kind == 'capability_package' else entry.source, 'chars': chars}
-        record_skill_usage_events(SkillLearningStore.for_home(agent.home_paths), [row])
+                   'source': 'package' if kind == 'capability_package' else entry.source, 'chars': chars, 'body_chars': chars, **binding}
+        record_skill_usage_events(_usage_store(agent), [row])
 
 
 def record_template_selection(tool, definition, source_ref, *, chars=0):

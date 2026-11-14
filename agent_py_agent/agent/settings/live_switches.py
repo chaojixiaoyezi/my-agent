@@ -1,4 +1,4 @@
-"""按文件代次刷新已注册配置的布尔开关；不写配置、不授予写权限。"""
+"""按文件代次刷新已注册配置的热更新开关与自学习策略字段；不写配置、不授予写权限。"""
 from __future__ import annotations
 
 import threading
@@ -11,6 +11,22 @@ from ..common.cache_freshness import cache_entry_trustworthy, cache_stat_signatu
 from .config import AgentConfig, load_config, normalize_agent_memory_config
 from .memory import MemorySettings
 from .runtime_guard_config import RuntimeGuardPolicy, runtime_guard_policy
+
+_MISSING = object()
+
+SELF_LEARNING_LIVE_POLICY_KEYS = frozenset({
+    "enable_self_learning",
+    "self_learning_maintenance_mode",
+    "self_learning_max_skills",
+    "self_learning_recommended_limit",
+    "self_learning_recommended_explore_percent",
+    "self_learning_merge_similarity_percent",
+    "self_learning_keep_versions",
+    "self_learning_cool_seconds",
+    "self_learning_archive_seconds",
+    "self_learning_evict_seconds",
+    "memory_lesson_archive_days",
+})
 
 DEPLOY_LIVE_SWITCH_KEYS = frozenset({
     "gateway_edge_identity_required", "owner_epoch_fence_enabled",
@@ -64,9 +80,23 @@ LIVE_SWITCH_KEYS = frozenset({
 _AUTH_KEYS = frozenset({"auth_enabled", "gateway_per_user_owner_scoping", "admin_channel_identity_enabled",
                         "gateway_edge_identity_required"})
 _GUARD_KEYS = frozenset({"terminal_block_enabled", "hard_failure_halt_enabled"})
-_MEMORY_KEYS = LIVE_SWITCH_KEYS & frozenset(item.name for item in fields(MemorySettings))
+_MEMORY_KEYS = (LIVE_SWITCH_KEYS | SELF_LEARNING_LIVE_POLICY_KEYS) & frozenset(item.name for item in fields(MemorySettings))
 _LOCK = threading.RLock()
 _AUTH_PIPELINE_PRESENT = threading.Event()
+
+
+def _same_live_value(left: object, right: object) -> bool:
+    return type(left) is type(right) and left == right
+
+
+def live_switch_snapshot(config: object) -> dict[str, bool | int | str]:
+    """提取配置对象上属于热刷新开关或自学习闭环策略的标量字段快照。"""
+    snapshot: dict[str, bool | int | str] = {}
+    for key in sorted(LIVE_SWITCH_KEYS | SELF_LEARNING_LIVE_POLICY_KEYS):
+        value = getattr(config, key, _MISSING)
+        if value is not _MISSING and type(value) in (bool, int, str):
+            snapshot[key] = value
+    return snapshot
 
 
 @dataclass(eq=False)
@@ -83,7 +113,7 @@ class _FileConfigs:
 class _ConfigBinding:
     config: weakref.ReferenceType
     source: _FileConfigs
-    applied: dict[str, bool]
+    applied: dict[str, bool | int | str]
     guard_applied: dict[str, bool]
     raw_path: str | Path
     settled_revision: int | None = None
@@ -127,9 +157,7 @@ def _register(config) -> _ConfigBinding | None:
     policy = config.runtime_guard_policy
     provenance = config.config_sources
     inherited = isinstance(provenance, _ConfigSources) and getattr(provenance, "path", None) == path
-    applied = dict(provenance.applied) if inherited else {
-        key: getattr(source.fresh, key) for key in LIVE_SWITCH_KEYS if type(getattr(source.fresh, key, None)) is bool
-    }
+    applied = dict(provenance.applied) if inherited else live_switch_snapshot(source.fresh)
     guard_applied = dict(provenance.guard_applied) if inherited and provenance.guard_applied else (
         {key: getattr(policy, key) for key in _GUARD_KEYS} if isinstance(policy, RuntimeGuardPolicy) else {}
     )
@@ -165,8 +193,8 @@ def note_auth_pipeline_present() -> None:
         _AUTH_PIPELINE_PRESENT.set()
 
 
-# LLM: 同一锁内按文件代次解析并整值赋值；未变 YAML 一次 stat、零解析，近期 mtime 不缓存；只改 bool 与守卫快照。
-# 函数用途: 把最新文件开关应用到所有已注册副本，并返回实际变化的键。
+# LLM: 同一锁内按文件代次解析并整值赋值；未变 YAML 一次 stat、零解析，近期 mtime 不缓存；只更新热刷新字段与守卫快照。
+# 函数用途: 把最新文件开关与闭环策略应用到所有已注册副本，并返回实际变化的键。
 def refresh_live_switches(config=None, *, path=None, force=False) -> frozenset[str]:
     with _LOCK:
         binding = _register(config) if config is not None else None
@@ -197,7 +225,8 @@ def refresh_live_switches(config=None, *, path=None, force=False) -> frozenset[s
                     changed.update(_apply_switches(candidate, registered, source.fresh))
                     # 只有全部文件基线都已采用，外部局部覆盖才不可能产生待补的文件更新。
                     registered.settled_revision = source.revision if all(
-                        previous == getattr(source.fresh, key) for key, previous in registered.applied.items()
+                        _same_live_value(previous, getattr(source.fresh, key, _MISSING))
+                        for key, previous in registered.applied.items()
                     ) else None
                 changed.update(_refresh_guard(candidate, registered, checked_policies, force=force))
             finally:
@@ -232,11 +261,13 @@ def _auth_warning(fresh, candidate) -> str | None:
 def _apply_switches(config, binding, fresh) -> set[str]:
     file_sources = ({}, *fresh.config_layers)
     updates = {
-        key: getattr(fresh, key) for key, previous in binding.applied.items()
+        key: fresh_value for key, previous in binding.applied.items()
         if config.config_sources.get(key, {}) in file_sources
-        and getattr(config, key) == previous and getattr(fresh, key) != previous
+        and _same_live_value(getattr(config, key, _MISSING), previous)
+        and (fresh_value := getattr(fresh, key, _MISSING)) is not _MISSING
+        and not _same_live_value(fresh_value, previous)
     }
-    if any(getattr(config, key) != updates.get(key, getattr(config, key)) for key in _AUTH_KEYS):
+    if any(not _same_live_value(getattr(config, key, _MISSING), updates.get(key, getattr(config, key, _MISSING))) for key in _AUTH_KEYS):
         candidate = copy(config)
         for key in _AUTH_KEYS & updates.keys():
             setattr(candidate, key, updates[key])
@@ -249,18 +280,27 @@ def _apply_switches(config, binding, fresh) -> set[str]:
     for key, value in updates.items():
         # 局部来源或值在准备阶段变化时不提交，也不为未变化字段制造覆盖写入。
         if (config.config_sources.get(key, {}) not in file_sources
-                or getattr(config, key) != binding.applied[key]):
+                or not _same_live_value(getattr(config, key, _MISSING), binding.applied[key])):
             continue
         setattr(config, key, value)
         binding.applied[key] = value
         changed.add(key)
     if changed & _MEMORY_KEYS:
-        # 原归一器会写全部 Memory 数字项；在独立浅副本上运行，只采用本次布尔镜像及诊断。
+        # 原归一器会写全部 Memory 字段；在独立浅副本上运行，只采用本次变更的实时 Memory 字段及诊断。
+        changed_memory = changed & _MEMORY_KEYS
         normalized = copy(config)
         normalize_agent_memory_config(normalized)
-        for key in changed & _MEMORY_KEYS:
+        for key in changed_memory:
             setattr(config, key, getattr(normalized, key))
-        config.memory_config_warnings = normalized.memory_config_warnings
+        fresh_warnings = [
+            item for item in getattr(fresh, "memory_config_warnings", ())
+            if isinstance(item, dict) and item.get("field_name") in changed_memory
+        ]
+        merged_warnings = list(normalized.memory_config_warnings)
+        for item in fresh_warnings:
+            if item not in merged_warnings:
+                merged_warnings.append(item)
+        config.memory_config_warnings = merged_warnings
     return changed
 
 
@@ -303,3 +343,18 @@ def _refresh_guard(config, binding, checked, *, force) -> set[str]:
         config.runtime_guard_policy = replacement
     binding.guard_applied.update(updates)
     return changed
+
+
+class LiveSwitches:
+    """按配置文件 stat 指纹热刷新布尔开关与自学习闭环策略字段。"""
+
+    KEYS = LIVE_SWITCH_KEYS
+    POLICY_KEYS = SELF_LEARNING_LIVE_POLICY_KEYS
+
+    @staticmethod
+    def register(config) -> None:
+        register_live_config(config)
+
+    @staticmethod
+    def refresh(config=None, *, path=None, force: bool = False) -> frozenset[str]:
+        return refresh_live_switches(config, path=path, force=force)

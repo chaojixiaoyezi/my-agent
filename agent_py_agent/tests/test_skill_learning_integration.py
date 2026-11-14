@@ -29,6 +29,7 @@ from agent_py_agent.agent.conversation.business_contracts import (
     BusinessExecutionContext,
     TrustedTaskCompletion,
 )
+from agent_py_agent.agent.conversation.learning_source import user_dialogue_projection
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.memory_store.candidates import CandidateService
 from agent_py_agent.agent.settings import load_config
@@ -49,7 +50,10 @@ BODY = (
 
 
 def test_agent_wires_skill_learning_only_when_self_learning_is_on(tmp_path: Path) -> None:
-    off = SimpleAgent(AgentConfig(my_agent_home=str(tmp_path / "off"), prompt_files=[]), tmp_path / "ws-off")
+    off = SimpleAgent(
+        AgentConfig(my_agent_home=str(tmp_path / "off"), prompt_files=[], enable_self_learning=False),
+        tmp_path / "ws-off",
+    )
     on = SimpleAgent(
         AgentConfig(my_agent_home=str(tmp_path / "on"), prompt_files=[], enable_self_learning=True,
                      self_learning_min_tool_rounds=4, self_learning_daily_limit=7, my_agent_owner_provider="feishu",
@@ -59,11 +63,17 @@ def test_agent_wires_skill_learning_only_when_self_learning_is_on(tmp_path: Path
     service = on.skill_learning
 
     assert off.skill_learning is None
+    assert not (off.home_paths.owner_home_dir / "data" / "skill_learning").exists()
+    off.config.enable_self_learning = True
+    assert isinstance(off.skill_learning, SkillLearningService)
+    off.config.enable_self_learning = False
+    assert off.skill_learning is None
+
     assert isinstance(service, SkillLearningService)
     assert service.runtime.owner_id == str(on.home_paths.owner_id) and "ou_1" in service.runtime.owner_id
     assert service.store.directory == on.home_paths.owner_home_dir / "data" / "skill_learning"
     assert service.store.learned_root == on.home_paths.owner_home_dir / "skills" / "learned"
-    assert service.runtime.backend is on.memory_curator.backend
+    assert callable(service.runtime.backend_provider) and service.runtime.backend_provider() is None
     assert (service.settings.min_tool_rounds, service.settings.daily_limit) == (4, 7)
     assert not service.store.directory.exists()
 
@@ -230,30 +240,42 @@ def test_cli_list_show_revert_remove_round_trip(tmp_path: Path, capsys) -> None:
 
 def _subagent_task(run_id: str) -> SubAgentTask:
     return SubAgentTask(id=run_id, root_id="project-root", goal="修复并发写入导致的状态覆盖", thought="", plan=[],
-                        output_json=f"/artifacts/{run_id}/output.json", updated_at=100.0)
+                        output_json=f"/artifacts/{run_id}/output.json", updated_at=100.0,
+                        attributes={"learning_source": user_dialogue_projection()})
 
 
 def test_subagent_lesson_proposals_wait_for_user_confirmation(tmp_path: Path) -> None:
     home = ensure_my_agent_home(tmp_path / "home")
+    agent = SimpleAgent(
+        AgentConfig(my_agent_home=str(tmp_path / "home"), prompt_files=[], enable_self_learning=True),
+        tmp_path / "ws",
+    )
     manager = SubAgentManager(tmp_path / "subagents", candidate_service=CandidateService(home.owner_memory_candidates_jsonl))
     manager.skill_proposals = SkillProposalService(home)
+    manager.enqueue_lesson_candidates = agent.skill_learning.enqueue_lesson_candidates
     task = _subagent_task("run-1")
     manager.save(task)
-    structured = SubAgentParsedOutput(found=True, ok=True, status="DONE", summary="已完成",
-                                      lessons=["修改共享状态前先读取当前版本，再用精确版本做比较交换写入。"])
+    structured = SubAgentParsedOutput(
+        found=True,
+        ok=True,
+        status="DONE",
+        summary="已完成",
+        lessons=[
+            "# 共享状态版本比较写入流程\n\n## 触发条件\n需要更新共享配置或状态表且存在并发写竞争时触发。\n\n"
+            "## 步骤\n1. 先读取当前版本号与结构化状态快照。\n2. 校验依赖前置条件后再执行精确比较交换写入。"
+        ],
+    )
 
     result = manager.runner_result.record_runner_result(RecordRunnerResultParams(
         run_id=task.id, dry_run=False, ok=True, message="已完成", status="DONE",
         turn_end_reason="completed", structured_output=structured,
     ))
-    [proposal] = manager.skill_proposals.list()
-    work_log = Path(manager.load(task.id).work_log_file).read_text(encoding="utf-8")
+    assert manager.skill_proposals.list() == []
+    pending = agent.skill_learning.store.pending_requests()
 
-    assert result.ok is True and proposal.status == "pending_confirmation" and not proposal.receipt
-    assert not (home.owner_home_dir / "skills" / proposal.target.skill_name / "SKILL.md").exists()
-    assert manager.skill_proposals.confirm(proposal.proposal_id,proposal.revision).ok
-    assert (home.owner_home_dir / "skills" / proposal.target.skill_name / "SKILL.md").is_file()
-    assert "skill_proposals=1 skill_proposals_committed=0" in work_log
+    assert result.ok is True
+    assert len(pending) == 1
+    assert not (home.owner_home_dir / "skills" / "learned").exists()
 
 
 def test_self_learning_budget_keys_ship_in_yaml_dataclass_and_normalizer() -> None:
@@ -265,11 +287,11 @@ def test_self_learning_budget_keys_ship_in_yaml_dataclass_and_normalizer() -> No
         "self_learning_timeout_seconds": 3,
     })
 
-    assert shipped.enable_self_learning is False
+    assert shipped.enable_self_learning is True
     assert (shipped.self_learning_min_tool_rounds, shipped.self_learning_daily_limit) == (6, 20)
-    assert (shipped.self_learning_max_skills, shipped.self_learning_timeout_seconds) == (0, 180)
+    assert (shipped.self_learning_max_skills, shipped.self_learning_timeout_seconds) == (50, 180)
     assert normalized["self_learning_min_tool_rounds"] == 6 and normalized["self_learning_daily_limit"] == 5
-    assert normalized["self_learning_max_skills"] == 0 and normalized["self_learning_timeout_seconds"] == 180
+    assert normalized["self_learning_max_skills"] == 50 and normalized["self_learning_timeout_seconds"] == 180
     assert len(warnings) == 3
 
 

@@ -96,6 +96,7 @@ _FIELDS = (
     ),
     _FieldSpec("memory_lesson_min_occurrences", "int", 2, 100),
     _FieldSpec("memory_hot_min_occurrences", "int", 3, 100),
+    _FieldSpec("memory_lesson_archive_days", "int", 0, 3650),
     _FieldSpec("memory_curator_task_file_evidence_max_chars", "int", 0, 40_000),
     _FieldSpec("memory_curator_cross_thread_dedupe_window_seconds", "int", 0, 86_400),
     _FieldSpec("memory_rule_notices_enabled", "bool"),

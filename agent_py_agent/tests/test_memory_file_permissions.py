@@ -107,12 +107,62 @@ def test_lesson_file_is_private_and_routing_index_is_tightened_on_rebuild(tmp_pa
                         candidate_type="lesson", promotion_target="lesson", subject_key="testing.permissions")
     record = repository.promote(candidate)
     lesson_file = tmp_path / record.path
-    assert (_mode(lesson_file), _mode(lessons_dir), _mode(index), _mode(index.parent)) == (0o600, 0o700, 0o600, 0o700)
+    heat_path = repository.heat_path
+    assert (
+        _mode(lesson_file),
+        _mode(lessons_dir),
+        _mode(index),
+        _mode(index.parent),
+        _mode(heat_path),
+    ) == (0o600, 0o700, 0o600, 0o700, 0o600)
 
     _loosen(index)
+    _loosen(heat_path)
     repository.rebuild_routing_index()
 
-    assert (_mode(index), _mode(index.parent)) == (0o600, 0o755), "索引文件被收紧；已存在的目录权限不动"
+    assert (_mode(index), _mode(heat_path), _mode(index.parent)) == (
+        0o600,
+        0o600,
+        0o755,
+    ), "索引与热度文件被收紧；已存在的目录权限不动"
+
+
+@_POSIX_ONLY
+def test_lesson_archive_directories_and_archived_files_are_private(tmp_path, open_umask):
+    lessons_dir = tmp_path / "memory" / "lessons"
+    index = tmp_path / "memory" / "routing" / "INDEX.md"
+    repository = LessonRepository(lessons_dir, index)
+    hot = HotRuleRepository(tmp_path / "memory" / "memory-hot.md")
+    old = repository.promote(
+        replace(
+            _hot_candidate(content="旧的归档教训内容。"),
+            candidate_id="candidate-archive-old",
+            candidate_type="lesson",
+            promotion_target="lesson",
+            subject_key="testing.archive.permissions",
+        )
+    )
+    new_cand = replace(
+        _hot_candidate(content="新的替代教训内容。"),
+        candidate_id="candidate-archive-new",
+        candidate_type="lesson",
+        promotion_target="lesson",
+        subject_key="testing.archive.permissions",
+    )
+    repository.supersede_with_receipt(
+        new_cand,
+        target_lesson_id=old.lesson_id,
+        hot=hot,
+        expected_revision=old.revision,
+    )
+    archived_time = datetime.now(timezone.utc) + timedelta(days=16)
+    result = repository.maintain(now=archived_time, archive_days=15)
+    assert result["archived"] == 1
+    archive_root = lessons_dir / "archive"
+    bucket = archive_root / f"{archived_time.year:04d}-{archived_time.month:02d}"
+    archived_file = bucket / Path(old.path).name
+    assert archived_file.exists()
+    assert (_mode(archive_root), _mode(bucket), _mode(archived_file)) == (0o700, 0o700, 0o600)
 
 
 @_POSIX_ONLY

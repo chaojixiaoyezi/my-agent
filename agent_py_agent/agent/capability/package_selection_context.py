@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import CancelledError
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from ..common.cancellation import ToolCancelled
 from ..memory_archive import estimate_tokens
@@ -93,10 +93,20 @@ def prepare_package_entry_context(agent, params, scope, references, *, authority
 # 函数用途: 为提交边界准备无正文的待记录使用事件。
 def _entry_usage_events(params, pages: list[dict]) -> tuple[dict, ...]:
     attrs = getattr(params, "task_attributes", None) or {}
-    return tuple({"event": "host_injected", "skill_id": page["package_id"], "kind": "capability_package",
-                  "source": "capability_package_entry_context", "chars": len(page.get("body") or ""),
-                  "request_id": getattr(params, "request_id", ""), "task_id": getattr(params, "task_id", ""),
-                  "thread_id": attrs.get("conversation_thread_id", "")} for page in pages)
+    return tuple(
+        {
+            "event": "host_injected",
+            "skill_id": page["package_id"],
+            "kind": "capability_package",
+            "source": "capability_package_entry_context",
+            "chars": len(page.get("body") or ""),
+            "body_chars": len(page.get("body") or ""),
+            "request_id": getattr(params, "request_id", ""),
+            "task_id": getattr(params, "task_id", ""),
+            "thread_id": attrs.get("conversation_thread_id", ""),
+        }
+        for page in pages
+    )
 
 
 # LLM: 调用方负责提交门；默认直接返回入口或主选包已成功写IR后才调用，统计自身只软失败，不改准入或pin。

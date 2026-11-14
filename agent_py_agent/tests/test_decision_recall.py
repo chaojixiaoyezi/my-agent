@@ -227,7 +227,11 @@ def test_refresh_uses_current_active_scoped_sources_and_original_budget(prepared
     other_scope = replace(records[1], attributes={"scope_type": "company", "scope_key": "company:other"})
     updated = replace(records[2], content="当前有效正文", kind="note", version=2)
     unrelated = replace(records[0], entry_id="new-not-selected")
-    host.memory = SimpleNamespace(all=lambda: [other_scope, updated, unrelated])
+    by_id = {rec.entry_id: rec for rec in (other_scope, updated, unrelated)}
+    host.memory = SimpleNamespace(
+        all=lambda: [other_scope, updated, unrelated],
+        read_ids=lambda ids: [by_id[eid] for eid in ids if eid in by_id],
+    )
     result = _refresh_recall_candidates(host, records, [], scope)
     assert [record.entry_id for record in result] == ["m2"] and result[0].content == "当前有效正文"
 
