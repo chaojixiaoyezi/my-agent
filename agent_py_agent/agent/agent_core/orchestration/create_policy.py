@@ -41,7 +41,12 @@ from ...subagents.role_templates import (
     template_for_role,
 )
 from ...subagents.services.base import CreateRunParams
-from ...tooling.registry_auth import CATALOG_ONLY_TOOL_GRANT, snapshot_tool_grants
+from ...tooling.registry_auth import (
+    CATALOG_ONLY_TOOL_GRANT,
+    creation_snapshot_tool_grants,
+    intersect_tool_grants,
+    snapshot_tool_grants,
+)
 from ..parameters import _bool_param, _positive_int
 from ..runner.prompts import SUBAGENT_DEFAULT_PLAN, SUBAGENT_DEFAULT_THOUGHT
 from ..runner.ref_fields import params_input_refs, params_output_refs
@@ -404,7 +409,7 @@ def _within_parent_tool_authority(agent, tools: list[str]) -> list[str]:
     registry = getattr(agent, "tools", None)
     if authority:
         available = set(authority["available_tool_names"])
-        parent_grants = authority.get("tool_grants", [])
+        parent_grants = creation_snapshot_tool_grants(authority)
     elif isinstance(registry, ToolRegistry):
         current = getattr(agent, "_current_run_params", None)
         snapshot = registry.runtime_snapshot(allowed_tools=getattr(current, "allowed_tools", None))
@@ -416,12 +421,10 @@ def _within_parent_tool_authority(agent, tools: list[str]) -> list[str]:
     dispatchable = _parent_tool_authority_names(agent)
     if dispatchable is not None:
         available = dispatchable
-    catalog_only = CATALOG_ONLY_TOOL_GRANT in tools or CATALOG_ONLY_TOOL_GRANT in parent_grants
-    result = list(dict.fromkeys("tool_search" if name == "list_tools" else name
-        for name in tools if ("tool_search" if name == "list_tools" else name) in available))
-    if catalog_only and "tool_search" in result:
-        result.append(CATALOG_ONLY_TOOL_GRANT)
-    return result
+    effective_parent = intersect_tool_grants(
+        [*parent_grants, *available], list(available),
+    )
+    return intersect_tool_grants(tools, effective_parent)
 
 
 # LLM: 模型只给业务参数，host actor 从父当前宿主字段取得，不从 raw 同名键或 attributes 升级。
