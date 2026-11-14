@@ -423,9 +423,9 @@ def _skill_receipted(call, mutate, *, staged=None):
     store._authorize()
     receipt_key = hashlib.sha256(encode([store.subject_id, store.action, key])).hexdigest()
     fingerprint = hashlib.sha256(encode(['skill_operations', store.action, digest, None])).hexdigest()
-    receipt = store._rows('skill_operations').get('receipts', receipt_key)
+    receipt = (store._read('skill_operations').get('receipts') or {}).get(receipt_key)
     if receipt is None:
-        receipt = store._read_file('skill_operations', allow_missing=True)['receipts'].get(receipt_key)
+        receipt = store._rows('skill_operations').get('receipts', receipt_key)
     if receipt is not None:
         if receipt.get('fingerprint') != fingerprint:
             raise BusinessError('IDEMPOTENCY_CONFLICT')

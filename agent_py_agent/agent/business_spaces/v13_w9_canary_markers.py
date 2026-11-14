@@ -130,9 +130,9 @@ def _precheck_w9_receipt(call, collection):
     store._authorize()
     receipt_key = hashlib.sha256(encode([store.subject_id, store.action, key])).hexdigest()
     fingerprint = hashlib.sha256(encode([collection, store.action, params_digest, None])).hexdigest()
-    receipt = store._rows(collection).get("receipts", receipt_key)
+    receipt = (store._read(collection).get("receipts") or {}).get(receipt_key)
     if receipt is None:
-        receipt = store._read_file(collection, allow_missing=True)["receipts"].get(receipt_key)
+        receipt = store._rows(collection).get("receipts", receipt_key)
     if receipt is not None:
         if receipt.get("fingerprint") != fingerprint:
             raise BusinessError("IDEMPOTENCY_CONFLICT")
@@ -392,12 +392,10 @@ def list_triggers(call):
             seen_ids.add(trigger_id)
             rows.append({"trigger_id": trigger_id, "token_id": identifier, "observed_at": observed,
                 "source": source, "source_ref": ref,
-                "details": {"matched_by": "sha256", "revoked": marker["state"] == "revoked"}})
+                "details": {"matched_by": "sha256", "revoked": marker["state"] == "revoked",
+                    "persistence_degraded": True, "persistence_warning": persistence_warning}})
     rows.sort(key=lambda row: (row["observed_at"], row["trigger_id"]), reverse=True)
     result = w9_page(call, "canary_triggers", rows)
     if incomplete or len(pending) > len(batch) or persistence_degraded:
         result["coverage"] = "partial"
-    if persistence_degraded:
-        result["persistence_degraded"] = True
-        result["persistence_warning"] = persistence_warning
     return result

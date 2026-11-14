@@ -150,9 +150,9 @@ def _package_receipted(call, mutate):
     store._authorize()
     receipt_key = hashlib.sha256(encode([store.subject_id, store.action, key])).hexdigest()
     fingerprint = hashlib.sha256(encode(['package_operations', store.action, params_digest, None])).hexdigest()
-    receipt = store._rows('package_operations').get('receipts', receipt_key)
+    receipt = (store._read('package_operations').get('receipts') or {}).get(receipt_key)
     if receipt is None:
-        receipt = store._read_file('package_operations', allow_missing=True)['receipts'].get(receipt_key)
+        receipt = store._rows('package_operations').get('receipts', receipt_key)
     if receipt is not None:
         if receipt.get('fingerprint') != fingerprint:
             raise BusinessError('IDEMPOTENCY_CONFLICT')

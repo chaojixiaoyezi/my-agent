@@ -23,6 +23,7 @@ from agent_py_agent.agent.business_spaces import (
     v13_w11_packages,
     v13_w11_skills_learning,
 )
+from agent_py_agent.agent.business_spaces import v13_store as v13_store_mod
 from agent_py_agent.agent.business_spaces.v13_store import V13Store
 from agent_py_agent.agent.conversation.business_access import BusinessError
 from agent_py_agent.agent.conversation.business_observability import (
@@ -32,7 +33,7 @@ from agent_py_agent.agent.conversation.business_observability import (
 from agent_py_agent.agent.conversation.store_layout import ConversationStorage
 from agent_py_agent.agent.conversation.store_threads import ThreadStore
 from agent_py_agent.agent.gateway_parts import business_host_ports
-from agent_py_agent.agent.gateway_parts.business_api import BusinessServices, bind_business_context
+from agent_py_agent.agent.gateway_parts.business_api import bind_business_context
 from agent_py_agent.agent.gateway_parts.business_api_v13 import V13Call
 from agent_py_agent.agent.gateway_parts.business_api_v13_readers import default_observation_readers
 from agent_py_agent.agent.gateway_parts.http_service import (
@@ -47,7 +48,6 @@ from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.user_space import owner_quota
 from agent_py_agent.agent.user_space.owner_resolver import (
     OwnerIdentity,
-    home_paths_with_owner,
     resolve_owner_home,
 )
 from agent_py_agent.agent.workflows.models import WorkflowRunRecord
@@ -122,8 +122,8 @@ def _http_business(
 
 def _ok_http(server, action: str, params: dict, **kwargs):
     status, body = _http_business(server, action, params, **kwargs)
-    assert status == 200, body
-    assert body["state"] == "completed" and body["error"] is None, body
+    assert status == 200, json.dumps(body, ensure_ascii=False)
+    assert body["state"] == "completed" and body["error"] is None, json.dumps(body, ensure_ascii=False)
     return body["data"]
 
 
@@ -468,51 +468,261 @@ def test_w9_canary_list_triggers_degrades_on_quota_or_store_unavailable(w4_http,
         params_digest="seed",
     )
 
-    # 先将磁盘填充至超出 1 MB 配额并开启 quota.json，使只读触发写回执真实命中 OwnerQuotaExceeded。
+    # 先将磁盘填充至超出 1 MB 配额并开启 quota.json，使只读触发写回执真实命中 OwnerQuotaExceeded，
+    # 且经由真实 HTTP /client/business 路由通过严格结果 schema 校验。
     (main_owner.home_dir / "filler.bin").write_bytes(b"z" * (1024 * 1024 + 64))
     main_owner.quota_json.write_text(json.dumps({"max_disk_mb": 1}), encoding="utf-8")
 
-    host = SimpleNamespace(
-        home_paths=home_paths_with_owner(agent.home_paths, main_owner),
-        config=agent.config,
-        business_v13_providers=getattr(agent, "business_v13_providers", {}),
-    )
-    ctx = bind_business_context(host, authorize=lambda *_: True, subject_id="local/main")
-    services = BusinessServices(host)
-    call = V13Call(
+    degraded = _ok_http(
+        server,
         "honeytokens.triggers.list",
         {"token_id": token_id, "limit": 20},
-        "req-degrade",
-        "local/main",
-        "local/main",
-        ctx,
-        services,
-        main_owner.home_dir,
-        "",
     )
-    degraded = v13_w9_canary_markers.list_triggers(call)
+    assert set(degraded) == {"items", "next_cursor", "coverage"}
+    assert "persistence_degraded" not in degraded
+    assert "persistence_warning" not in degraded
     assert degraded["coverage"] == "partial"
-    assert degraded["persistence_degraded"] is True
-    assert degraded["persistence_warning"] == "OWNER_QUOTA_EXCEEDED"
     assert [row["source_ref"] for row in degraded["items"]] == ["alert-quota-1"]
+    assert degraded["items"][0]["details"]["persistence_degraded"] is True
+    assert degraded["items"][0]["details"]["persistence_warning"] == "OWNER_QUOTA_EXCEEDED"
 
     def raise_unavailable(*args, **kwargs):
         raise owner_quota.OwnerQuotaUnavailable("quota_unavailable")
 
     monkeypatch.setattr(v13_w9_canary_markers, "w9_write_many", raise_unavailable)
-    degraded_unavail = v13_w9_canary_markers.list_triggers(call)
-    assert degraded_unavail["persistence_degraded"] is True
-    assert degraded_unavail["persistence_warning"] == "PERSISTENCE_UNAVAILABLE"
+    degraded_unavail = _ok_http(
+        server,
+        "honeytokens.triggers.list",
+        {"token_id": token_id, "limit": 20},
+    )
+    assert set(degraded_unavail) == {"items", "next_cursor", "coverage"}
+    assert degraded_unavail["coverage"] == "partial"
     assert [row["source_ref"] for row in degraded_unavail["items"]] == ["alert-quota-1"]
+    assert degraded_unavail["items"][0]["details"]["persistence_degraded"] is True
+    assert degraded_unavail["items"][0]["details"]["persistence_warning"] == "PERSISTENCE_UNAVAILABLE"
 
     def raise_store_unavailable(*args, **kwargs):
         raise BusinessError("STORE_UNAVAILABLE")
 
     monkeypatch.setattr(v13_w9_canary_markers, "w9_write_many", raise_store_unavailable)
-    degraded_store = v13_w9_canary_markers.list_triggers(call)
-    assert degraded_store["persistence_degraded"] is True
-    assert degraded_store["persistence_warning"] == "STORE_UNAVAILABLE"
+    degraded_store = _ok_http(
+        server,
+        "honeytokens.triggers.list",
+        {"token_id": token_id, "limit": 20},
+    )
+    assert set(degraded_store) == {"items", "next_cursor", "coverage"}
+    assert degraded_store["coverage"] == "partial"
     assert [row["source_ref"] for row in degraded_store["items"]] == ["alert-quota-1"]
+    assert degraded_store["items"][0]["details"]["persistence_degraded"] is True
+    assert degraded_store["items"][0]["details"]["persistence_warning"] == "STORE_UNAVAILABLE"
+
+
+def test_w9_w11_prelock_replay_reads_unmaterialized_journal(w4_http, monkeypatch):
+    server, agent = w4_http
+    main_owner = resolve_owner_home(agent.home_paths.root)
+    owner_home = main_owner.home_dir
+    owner_home.mkdir(parents=True, exist_ok=True)
+
+    pkg_src = agent.home_paths.root / "pkg-unmat-src"
+    pkg_src.mkdir(parents=True, exist_ok=True)
+    (pkg_src / "CAPABILITY.md").write_text("# Unmaterialized Journal Demo\n", encoding="utf-8")
+    pkg_zip = build_capability_package(
+        {
+            "plugin_id": "w4-unmat-pkg",
+            "version": "1.0",
+            "summary": "未物化日志回放演示包",
+            "capability": {"description": "包卸载回放", "keywords": ["demo"], "entry_document": "CAPABILITY.md"},
+            "files": [{"path": "CAPABILITY.md"}],
+            "settings_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+        pkg_src,
+        agent.home_paths.root / "w4-unmat-pkg.zip",
+    )
+    snap = inspect_plugin_package(pkg_zip.read_bytes())
+    PluginInstallStore(main_owner).install(PluginInstallRequest(snap, "w4-pkg-unmat-001", 0))
+
+    spy = _install_quota_reentry_spy(monkeypatch)
+    space = _ok_http(
+        server,
+        "spaces.create",
+        {"name": "unmat-space"},
+        idempotency_key="sp-unmat-" + uuid4().hex,
+    )["space_id"]
+
+    orig_write = v13_store_mod.write_bytes_atomic_beneath
+    freeze = {"active": False, "journal_written": False}
+
+    def freeze_after_journal(root, parts, raw_bytes):
+        if freeze["active"]:
+            if tuple(parts) == ("data", "business_v13", ".transaction.json") and json.loads(raw_bytes):
+                freeze["journal_written"] = True
+                return orig_write(root, parts, raw_bytes)
+            if freeze["journal_written"]:
+                return None
+        return orig_write(root, parts, raw_bytes)
+
+    monkeypatch.setattr(v13_store_mod, "write_bytes_atomic_beneath", freeze_after_journal)
+
+    tx_calls = []
+    orig_tx_many = V13Store.transaction_many
+
+    def tracked_tx_many(self, collections, mutate, **kwargs):
+        tx_calls.append(tuple(collections))
+        return orig_tx_many(self, collections, mutate, **kwargs)
+
+    doc_calls = []
+    orig_doc = v13_w9_canary_markers._document
+
+    def tracked_doc(*args, **kwargs):
+        doc_calls.append(1)
+        return orig_doc(*args, **kwargs)
+
+    skill_stage_calls = []
+    orig_skill_stage = v13_w11_skills_learning._write_skill_staged
+
+    def tracked_skill_stage(*args, **kwargs):
+        skill_stage_calls.append(1)
+        return orig_skill_stage(*args, **kwargs)
+
+    pkg_remove_calls = []
+    orig_pkg_remove = PluginInstallStore.remove
+
+    def tracked_pkg_remove(self, *args, **kwargs):
+        pkg_remove_calls.append(1)
+        return orig_pkg_remove(self, *args, **kwargs)
+
+    monkeypatch.setattr(V13Store, "transaction_many", tracked_tx_many)
+    monkeypatch.setattr(v13_w9_canary_markers, "_document", tracked_doc)
+    monkeypatch.setattr(v13_w11_skills_learning, "_write_skill_staged", tracked_skill_stage)
+    monkeypatch.setattr(PluginInstallStore, "remove", tracked_pkg_remove)
+
+    def _assert_receipt_only_in_journal(collection: str) -> None:
+        journal_path = owner_home / "data" / "business_v13" / ".transaction.json"
+        journal_data = json.loads(journal_path.read_text(encoding="utf-8"))
+        pending_receipts = journal_data["states"][collection]["receipts"]
+        assert len(pending_receipts) >= 1
+        fresh_store = V13Store(owner_home)
+        assert all(fresh_store._rows(collection).get("receipts", rk) is None for rk in pending_receipts)
+        assert all(
+            fresh_store._read_file(collection, allow_missing=True)["receipts"].get(rk) is None
+            for rk in pending_receipts
+        )
+
+    # 1) W9 honeytokens.create 在未物化日志态重放，不得重复上传文档或进入事务锁。
+    marker_key = "unmat-marker-" + uuid4().hex
+    freeze["active"] = True
+    freeze["journal_written"] = False
+    created_marker = _ok_http(
+        server,
+        "honeytokens.create",
+        {"space_id": space, "kind": "document", "label": "unmat-doc"},
+        idempotency_key=marker_key,
+    )
+    freeze["active"] = False
+    freeze["journal_written"] = False
+    _assert_receipt_only_in_journal("canary_markers")
+    assert len(doc_calls) == 1
+    tx_before = len(tx_calls)
+    entries_before = spy["entries"]
+
+    marker_replay = _ok_http(
+        server,
+        "honeytokens.create",
+        {"space_id": space, "kind": "document", "label": "unmat-doc"},
+        idempotency_key=marker_key,
+    )
+    assert marker_replay["secret"] == "<redacted>"
+    assert marker_replay["marker"] == created_marker["marker"]
+    assert len(doc_calls) == 1
+    assert len(tx_calls) == tx_before
+    assert spy["entries"] == entries_before
+
+    status_mk_conflict, mk_conflict = _http_business(
+        server,
+        "honeytokens.create",
+        {"space_id": space, "kind": "document", "label": "other-doc"},
+        idempotency_key=marker_key,
+    )
+    assert status_mk_conflict == 409 and mk_conflict["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+    assert len(doc_calls) == 1
+    assert len(tx_calls) == tx_before
+
+    # 2) W11 skills.create 在未物化日志态重放，不得重复落盘技能或进入事务锁。
+    skill_md = "---\nname: unmat-skill\ndescription: 未物化日志重放技能\n---\n\n# Steps\n\n1. Verify\n"
+    skill_key = "unmat-skill-" + uuid4().hex
+    freeze["active"] = True
+    freeze["journal_written"] = False
+    created_skill = _ok_http(
+        server,
+        "skills.create",
+        {"skill_id": "unmat-skill", "body_markdown": skill_md},
+        idempotency_key=skill_key,
+    )
+    freeze["active"] = False
+    freeze["journal_written"] = False
+    _assert_receipt_only_in_journal("skill_operations")
+    assert len(skill_stage_calls) == 1
+    tx_before = len(tx_calls)
+    entries_before = spy["entries"]
+
+    skill_replay = _ok_http(
+        server,
+        "skills.create",
+        {"skill_id": "unmat-skill", "body_markdown": skill_md},
+        idempotency_key=skill_key,
+    )
+    assert skill_replay == created_skill
+    assert len(skill_stage_calls) == 1
+    assert len(tx_calls) == tx_before
+    assert spy["entries"] == entries_before
+
+    status_sk_conflict, sk_conflict = _http_business(
+        server,
+        "skills.create",
+        {"skill_id": "unmat-skill", "body_markdown": skill_md + "\nExtra\n"},
+        idempotency_key=skill_key,
+    )
+    assert status_sk_conflict == 409 and sk_conflict["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+    assert len(skill_stage_calls) == 1
+    assert len(tx_calls) == tx_before
+
+    # 3) W11 packages.uninstall 在未物化日志态重放，不得重复卸载包或进入事务锁。
+    pkg_key = "unmat-pkg-" + uuid4().hex
+    freeze["active"] = True
+    freeze["journal_written"] = False
+    uninstalled_pkg = _ok_http(
+        server,
+        "packages.uninstall",
+        {"package_id": "w4-unmat-pkg"},
+        idempotency_key=pkg_key,
+    )
+    freeze["active"] = False
+    freeze["journal_written"] = False
+    _assert_receipt_only_in_journal("package_operations")
+    assert len(pkg_remove_calls) == 1
+    tx_before = len(tx_calls)
+    entries_before = spy["entries"]
+
+    pkg_replay = _ok_http(
+        server,
+        "packages.uninstall",
+        {"package_id": "w4-unmat-pkg"},
+        idempotency_key=pkg_key,
+    )
+    assert pkg_replay == uninstalled_pkg
+    assert len(pkg_remove_calls) == 1
+    assert len(tx_calls) == tx_before
+    assert spy["entries"] == entries_before
+
+    status_pk_conflict, pk_conflict = _http_business(
+        server,
+        "packages.uninstall",
+        {"package_id": "other-pkg"},
+        idempotency_key=pkg_key,
+    )
+    assert status_pk_conflict == 409 and pk_conflict["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+    assert len(pkg_remove_calls) == 1
+    assert len(tx_calls) == tx_before
 
 
 def test_active_references_and_resolver_scan_past_caps_and_fail_closed(tmp_path):
