@@ -170,6 +170,9 @@ def test_w6_21_curator_init_recovers_pending_journal_before_foreground_write(tmp
     store, thread, message = _conversation(tmp_path)
     backend = _StaticStructuredBackend(_valid_output(thread.thread_id, message.message_id, message.content))
     first = _service(tmp_path, backend, store)
+    assert not (first.state_store.path.parent / "state.json.lock").exists()
+    assert list(first.runs_dir.iterdir()) == []
+    assert not (tmp_path / "memory" / "candidates.jsonl.lock").exists()
     acquired = first.state_store.acquire(reason="admin", config_revision="rev1", lease_seconds=60)
     assert acquired is not None
     state, lease = acquired
@@ -244,6 +247,7 @@ def test_w6_21_curator_init_startup_recovery_error_logs_structured_warning(tmp_p
         raise OSError("journal dir locked")
 
     monkeypatch.setattr(curator_commit.CuratorBatchCommitter, "recover_incomplete", fail_recovery)
+    (tmp_path / "memory" / "curator" / "transactions" / "run-pending").mkdir(parents=True)
     with caplog.at_level(logging.WARNING):
         service = _service(tmp_path, backend, store)
     assert service is not None

@@ -1885,7 +1885,9 @@ class MemoryCuratorService(
             run_log=self.run_log,
         )
         try:
-            self.committer.recover_incomplete()
+            transactions_dir = self.committer.transactions_dir
+            if transactions_dir.is_symlink() or any(transactions_dir.iterdir()):
+                self.committer.recover_incomplete()
         except Exception as exc:
             _LOGGER.warning(
                 "CURATOR_STARTUP_RECOVERY_FAILED: incomplete curator batch recovery failed during service init; "
