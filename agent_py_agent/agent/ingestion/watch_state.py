@@ -153,6 +153,11 @@ class WatchState:
     audit_baseline: dict[str, int] = field(default_factory=dict)
     source_binding_revision_seq: int = 0
     lock: threading.RLock = field(default_factory=threading.RLock)
+    _disk_source_baseline: tuple[str, str, int, int, int] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
 
 def _unique_tmp(path: Path) -> Path:
@@ -302,6 +307,7 @@ def new_state(
         opened_at=time.time(),
         watch_window_seconds=_window_seconds(params),
     )
+    _record_disk_baseline(state)
     return state
 
 
@@ -312,15 +318,95 @@ def _window_seconds(params: dict[str, object]) -> int:
         return 0
 
 
-def persist_state(state: WatchState) -> None:
+def _safe_int(value: object, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value) if value is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _source_position_tuple(state: WatchState) -> tuple[str, str, int, int]:
+    return (
+        str(state.harvest_commit_id or ""),
+        str(state.file_identity or ""),
+        max(0, int(state.cursor or 0)),
+        max(0, int(state.line_cursor or 0)),
+    )
+
+
+def _record_disk_baseline(state: WatchState) -> None:
+    state._disk_source_baseline = (
+        str(state.harvest_commit_id or ""),
+        str(state.file_identity or ""),
+        max(0, int(state.cursor or 0)),
+        max(0, int(state.line_cursor or 0)),
+        max(0, int(state.feedback_offset or 0)),
+    )
+
+
+def _adopt_disk_source_snapshot(state: WatchState, disk: dict[str, Any]) -> None:
+    disk_commit_id = str(disk.get("harvest_commit_id") or "")
+    if disk_commit_id:
+        state.harvest_commit_id = disk_commit_id
+    state.cursor = max(0, _safe_int(disk.get("cursor"), 0))
+    state.line_cursor = max(0, _safe_int(disk.get("line_cursor"), 0))
+    checkpoint = disk.get("source_checkpoint")
+    if isinstance(checkpoint, dict):
+        state.source_checkpoint = deepcopy(checkpoint)
+    if "last_reached_end" in disk and disk.get("last_reached_end") is not None:
+        state.last_reached_end = bool(disk.get("last_reached_end"))
+    if "file_identity" in disk and disk.get("file_identity") is not None:
+        state.file_identity = str(disk.get("file_identity") or "")
+    if "file_fragment_start" in disk and disk.get("file_fragment_start") is not None:
+        state.file_fragment_start = _safe_int(disk.get("file_fragment_start"), 0)
+    if "file_fragment_bytes" in disk and disk.get("file_fragment_bytes") is not None:
+        state.file_fragment_bytes = _safe_int(disk.get("file_fragment_bytes"), 0)
+    if "file_fragment_sha256" in disk and disk.get("file_fragment_sha256") is not None:
+        state.file_fragment_sha256 = str(disk.get("file_fragment_sha256") or "")
+
+
+def persist_state(
+    state: WatchState,
+    *,
+    expected_source_position: tuple[str, str, int, int] | None = None,
+) -> None:
     """快照原子写盘(tmp+rename);包含引擎画像/census,重启后从游标+温启动续。"""
     if not is_valid_watch_id(state.watch_id):
         raise ValueError(f"invalid watch_id: {state.watch_id!r}")
     path = state_dir(state.owner_home) / f"{state.watch_id}.json"
-    with locked_json_path(path):
-        disk = _disk_merge_facts(path)
-        _merge_monotonic_disk_state(state, disk)
-        _write_state_payload(path, _state_payload(state, disk))
+    with state.lock:
+        baseline = state._disk_source_baseline
+        candidate_pos = _source_position_tuple(state)
+        with locked_json_path(path):
+            disk = _disk_merge_facts(path)
+            if expected_source_position is not None and disk:
+                exp_pos = (
+                    str(expected_source_position[0] or ""),
+                    str(expected_source_position[1] or ""),
+                    max(0, _safe_int(expected_source_position[2], 0)),
+                    max(0, _safe_int(expected_source_position[3], 0)),
+                )
+                disk_pos = (
+                    str(disk.get("harvest_commit_id") or ""),
+                    str(disk.get("file_identity") or ""),
+                    max(0, _safe_int(disk.get("cursor"), 0)),
+                    max(0, _safe_int(disk.get("line_cursor"), 0)),
+                )
+                if disk_pos != exp_pos and disk_pos != candidate_pos:
+                    raise OSError(
+                        f"watch_state source position conflict for {state.watch_id}: "
+                        f"expected={exp_pos!r}, actual={disk_pos!r}"
+                    )
+            _merge_monotonic_disk_state(
+                state,
+                disk,
+                source_commit=(expected_source_position is not None),
+                baseline=baseline,
+            )
+            _write_state_payload(path, _state_payload(state, disk))
+            _record_disk_baseline(state)
 
 
 def persist_source_binding_revision(state: WatchState) -> None:
@@ -338,29 +424,37 @@ def persist_source_binding_revision(state: WatchState) -> None:
     if not is_valid_watch_id(state.watch_id):
         raise ValueError(f"invalid watch_id: {state.watch_id!r}")
     path = state_dir(state.owner_home) / f"{state.watch_id}.json"
-    profile_ref = state.source_profile_ref
-    document_refs = list(state.document_refs)
-    config_version = state.source_config_version
-    with locked_json_path(path):
-        disk = _disk_merge_facts(path)
-        for key in (
-            "source_profile_ref",
-            "document_refs",
-            "source_config_version",
-        ):
-            disk.pop(key, None)
-        _merge_monotonic_disk_state(state, disk, prefer_disk_commit=True)
-        state.source_profile_ref = profile_ref
-        state.document_refs = document_refs
-        state.source_config_version = config_version
-        state.source_binding_revision_seq = (
-            max(
-                int(state.source_binding_revision_seq or 0),
-                int(disk.get("source_binding_revision_seq") or 0),
+    with state.lock:
+        baseline = state._disk_source_baseline
+        profile_ref = state.source_profile_ref
+        document_refs = list(state.document_refs)
+        config_version = state.source_config_version
+        with locked_json_path(path):
+            disk = _disk_merge_facts(path)
+            for key in (
+                "source_profile_ref",
+                "document_refs",
+                "source_config_version",
+            ):
+                disk.pop(key, None)
+            _merge_monotonic_disk_state(
+                state,
+                disk,
+                prefer_disk_commit=True,
+                baseline=baseline,
             )
-            + 1
-        )
-        _write_state_payload(path, _state_payload(state, disk))
+            state.source_profile_ref = profile_ref
+            state.document_refs = document_refs
+            state.source_config_version = config_version
+            state.source_binding_revision_seq = (
+                max(
+                    int(state.source_binding_revision_seq or 0),
+                    int(disk.get("source_binding_revision_seq") or 0),
+                )
+                + 1
+            )
+            _write_state_payload(path, _state_payload(state, disk))
+            _record_disk_baseline(state)
 
 
 def _merge_disk_progress_facts(
@@ -368,6 +462,8 @@ def _merge_disk_progress_facts(
     disk: dict[str, Any],
     *,
     prefer_disk_commit: bool,
+    source_commit: bool = False,
+    baseline: tuple[str, str, int, int, int] | None = None,
 ) -> None:
     """Merge monotonic progress and durable harvest commit identity from disk."""
 
@@ -377,23 +473,49 @@ def _merge_disk_progress_facts(
         max(0, int(state.cursor or 0)),
         max(0, int(state.line_cursor or 0)),
     )
-    orig_commit_id = state.harvest_commit_id
-    disk_gen = max(0, int(disk.get("spool_generation") or 0))
-    disk_seq = max(0, int(disk.get("spool_seq") or 0))
-    disk_cursor = max(0, int(disk.get("cursor") or 0))
-    disk_line_cursor = max(0, int(disk.get("line_cursor") or 0))
+    orig_commit_id = str(state.harvest_commit_id or "")
+    orig_source_pos = (
+        orig_commit_id,
+        str(state.file_identity or ""),
+        orig_position[2],
+        orig_position[3],
+    )
+    orig_feedback_offset = max(0, int(state.feedback_offset or 0))
+    disk_gen = max(0, _safe_int(disk.get("spool_generation"), 0))
+    disk_seq = max(0, _safe_int(disk.get("spool_seq"), 0))
+    disk_cursor = max(0, _safe_int(disk.get("cursor"), 0))
+    disk_line_cursor = max(0, _safe_int(disk.get("line_cursor"), 0))
     disk_position = (disk_gen, disk_seq, disk_cursor, disk_line_cursor)
+    disk_commit_id = str(disk.get("harvest_commit_id") or "")
+    disk_file_id = str(disk.get("file_identity") or "")
+    disk_source_pos = (disk_commit_id, disk_file_id, disk_cursor, disk_line_cursor)
+    disk_feedback_offset = max(0, _safe_int(disk.get("feedback_offset"), 0))
 
     state.spool_generation = max(orig_position[0], disk_gen)
     state.spool_seq = max(orig_position[1], disk_seq)
-    state.cursor = max(orig_position[2], disk_cursor)
-    state.line_cursor = max(orig_position[3], disk_line_cursor)
     state.last_pull_at = max(state.last_pull_at, float(disk.get("last_pull_at") or 0.0))
     state.last_poll_at = max(state.last_poll_at, float(disk.get("last_poll_at") or 0.0))
-    state.feedback_offset = max(
-        state.feedback_offset,
-        int(disk.get("feedback_offset") or 0),
-    )
+
+    if baseline is not None:
+        caller_source_untouched = orig_source_pos == baseline[:4]
+        caller_feedback_untouched = orig_feedback_offset == baseline[4]
+        disk_source_moved = disk_source_pos != baseline[:4]
+        disk_feedback_moved = disk_feedback_offset != baseline[4]
+    else:
+        caller_source_untouched = orig_source_pos == ("", "", 0, 0)
+        caller_feedback_untouched = orig_feedback_offset == 0
+        disk_source_moved = True
+        disk_feedback_moved = disk_feedback_offset != 0
+
+    if source_commit:
+        if caller_feedback_untouched and disk_feedback_moved:
+            state.feedback_offset = disk_feedback_offset
+    else:
+        if caller_feedback_untouched:
+            if disk_feedback_moved:
+                state.feedback_offset = disk_feedback_offset
+        elif disk_feedback_moved:
+            state.feedback_offset = max(orig_feedback_offset, disk_feedback_offset)
 
     disk_totals = disk.get("totals")
     if isinstance(disk_totals, dict):
@@ -407,8 +529,22 @@ def _merge_disk_progress_facts(
                 continue
             state.totals[key_str] = max(int(state.totals.get(key_str, 0) or 0), value)
 
-    disk_commit_id = str(disk.get("harvest_commit_id") or "")
+    if source_commit:
+        return
+
+    gen_changed = (
+        (bool(disk_commit_id) and disk_commit_id != orig_commit_id)
+        or (bool(disk_file_id) and disk_file_id != orig_source_pos[1])
+    )
     if prefer_disk_commit:
+        if disk_source_moved and gen_changed:
+            _adopt_disk_source_snapshot(state, disk)
+            return
+        if caller_source_untouched and disk_source_moved:
+            _adopt_disk_source_snapshot(state, disk)
+            return
+        state.cursor = max(orig_position[2], disk_cursor)
+        state.line_cursor = max(orig_position[3], disk_line_cursor)
         if disk_commit_id:
             state.harvest_commit_id = disk_commit_id
         if disk_position > orig_position or (
@@ -422,14 +558,29 @@ def _merge_disk_progress_facts(
             if "file_identity" in disk and disk.get("file_identity") is not None:
                 state.file_identity = str(disk.get("file_identity") or "")
             if "file_fragment_start" in disk and disk.get("file_fragment_start") is not None:
-                state.file_fragment_start = int(disk.get("file_fragment_start") or 0)
+                state.file_fragment_start = _safe_int(disk.get("file_fragment_start"), 0)
             if "file_fragment_bytes" in disk and disk.get("file_fragment_bytes") is not None:
-                state.file_fragment_bytes = int(disk.get("file_fragment_bytes") or 0)
+                state.file_fragment_bytes = _safe_int(disk.get("file_fragment_bytes"), 0)
             if "file_fragment_sha256" in disk and disk.get("file_fragment_sha256") is not None:
                 state.file_fragment_sha256 = str(disk.get("file_fragment_sha256") or "")
-    elif disk_commit_id:
-        if (disk_gen, disk_seq) > (orig_position[0], orig_position[1]) or not state.harvest_commit_id:
-            state.harvest_commit_id = disk_commit_id
+        return
+
+    if disk_source_moved and gen_changed:
+        _adopt_disk_source_snapshot(state, disk)
+        return
+    if caller_source_untouched:
+        if disk_source_moved:
+            _adopt_disk_source_snapshot(state, disk)
+        return
+    if not disk_source_moved:
+        return
+    state.cursor = max(orig_position[2], disk_cursor)
+    state.line_cursor = max(orig_position[3], disk_line_cursor)
+    if disk_commit_id and (
+        (disk_gen, disk_seq) > (orig_position[0], orig_position[1])
+        or not state.harvest_commit_id
+    ):
+        state.harvest_commit_id = disk_commit_id
 
 
 def _merge_monotonic_disk_state(
@@ -437,6 +588,8 @@ def _merge_monotonic_disk_state(
     disk: dict[str, Any],
     *,
     prefer_disk_commit: bool = False,
+    source_commit: bool = False,
+    baseline: tuple[str, str, int, int, int] | None = None,
 ) -> None:
     """Preserve facts another process may have advanced before snapshot replace."""
     if not disk:
@@ -472,7 +625,13 @@ def _merge_monotonic_disk_state(
             float(disk.get("ingest_records_per_second") or 0.0),
         )
         state.ingest_rate_updated_at = disk_ingest_updated_at
-    _merge_disk_progress_facts(state, disk, prefer_disk_commit=prefer_disk_commit)
+    _merge_disk_progress_facts(
+        state,
+        disk,
+        prefer_disk_commit=prefer_disk_commit,
+        source_commit=source_commit,
+        baseline=baseline,
+    )
     disk_binding_rev = max(0, int(disk.get("source_binding_revision_seq") or 0))
     state_binding_rev = max(0, int(state.source_binding_revision_seq or 0))
     if not prefer_disk_commit and (
@@ -673,7 +832,7 @@ def _disk_merge_facts(path: Path) -> dict[str, Any]:
     return {key: state_doc.get(key) for key in _MERGE_FACT_KEYS}
 
 
-def refresh_scalars_from_disk(state: WatchState) -> None:
+def _refresh_scalars_from_disk_impl(state: WatchState) -> None:
     """从盘上快照回灌覆盖类标量(游标/账目/closed/spool 序号)——供「收割者在别的进程」
     时的 pull 侧展示新鲜覆盖;不动引擎画像(引擎归收割者)。调用方自行持锁。"""
     path = state_dir(state.owner_home) / f"{state.watch_id}.json"
@@ -686,14 +845,39 @@ def refresh_scalars_from_disk(state: WatchState) -> None:
     _refresh_audit_identity(state, payload)
     _refresh_ingest_rate(state, payload)
     _refresh_engine_totals(state, payload)
+    _record_disk_baseline(state)
 
 
-def _refresh_source_position(state: WatchState, payload: dict[str, Any]) -> None:
-    checkpoint = payload.get("source_checkpoint")
+def refresh_scalars_from_disk(state: WatchState) -> None:
+    """从盘上快照回灌覆盖类标量，持 state.lock 保证读写快照一致。"""
+    with state.lock:
+        _refresh_scalars_from_disk_impl(state)
+
+
+def _refresh_source_position(state: WatchState, state_doc: dict[str, Any]) -> None:
+    disk_commit_id = str(state_doc.get("harvest_commit_id") or "")
+    disk_file_identity = (
+        str(state_doc.get("file_identity") or "")
+        if "file_identity" in state_doc
+        else state.file_identity
+    )
+    gen_changed = (
+        (bool(disk_commit_id) and disk_commit_id != str(state.harvest_commit_id or ""))
+        or disk_file_identity != str(state.file_identity or "")
+    )
+    checkpoint = state_doc.get("source_checkpoint")
     if isinstance(checkpoint, dict):
         state.source_checkpoint = deepcopy(checkpoint)
-    state.cursor = max(state.cursor, int(payload.get("cursor") or 0))
-    state.line_cursor = max(state.line_cursor, int(payload.get("line_cursor") or 0))
+    disk_cursor = max(0, _safe_int(state_doc.get("cursor"), 0))
+    disk_line_cursor = max(0, _safe_int(state_doc.get("line_cursor"), 0))
+    if gen_changed:
+        state.cursor = disk_cursor
+        state.line_cursor = disk_line_cursor
+    else:
+        state.cursor = max(state.cursor, disk_cursor)
+        state.line_cursor = max(state.line_cursor, disk_line_cursor)
+    if "feedback_offset" in state_doc:
+        state.feedback_offset = max(0, _safe_int(state_doc.get("feedback_offset"), 0))
     # These four fields are one lifecycle snapshot, not monotonic counters.
     # A named Audit may explicitly reopen the same stable watch in a later run;
     # that transition resets ``opened_at``/``window_finalized_at`` and clears
@@ -702,36 +886,39 @@ def _refresh_source_position(state: WatchState, payload: dict[str, Any]) -> None
     # explicit reopen in another process.  Refresh from the authoritative
     # atomic disk snapshot exactly, otherwise the Gateway keeps projecting the
     # new worker as closed and cancels every replacement before its first turn.
-    state.opened_at = float(payload.get("opened_at") or state.opened_at)
+    state.opened_at = float(state_doc.get("opened_at") or state.opened_at)
     state.watch_window_seconds = max(
         0,
-        int(payload.get("watch_window_seconds") or 0),
+        _safe_int(state_doc.get("watch_window_seconds"), 0),
     )
-    state.window_finalized_at = float(payload.get("window_finalized_at") or 0.0)
-    if "file_identity" in payload:
-        state.file_identity = str(payload.get("file_identity") or "")
-    if "file_fragment_start" in payload:
-        state.file_fragment_start = int(payload.get("file_fragment_start") or 0)
-    if "file_fragment_bytes" in payload:
-        state.file_fragment_bytes = int(payload.get("file_fragment_bytes") or 0)
-    if "file_fragment_sha256" in payload:
-        state.file_fragment_sha256 = str(payload.get("file_fragment_sha256") or "")
-    state.last_reached_end = bool(payload.get("last_reached_end"))
-    state.closed = bool(payload.get("closed"))
-    disk_closed_at = float(payload.get("closed_at") or 0.0)
+    state.window_finalized_at = float(state_doc.get("window_finalized_at") or 0.0)
+    if "file_identity" in state_doc:
+        state.file_identity = str(state_doc.get("file_identity") or "")
+    if "file_fragment_start" in state_doc:
+        state.file_fragment_start = _safe_int(state_doc.get("file_fragment_start"), 0)
+    if "file_fragment_bytes" in state_doc:
+        state.file_fragment_bytes = _safe_int(state_doc.get("file_fragment_bytes"), 0)
+    if "file_fragment_sha256" in state_doc:
+        state.file_fragment_sha256 = str(state_doc.get("file_fragment_sha256") or "")
+    state.last_reached_end = bool(state_doc.get("last_reached_end"))
+    state.closed = bool(state_doc.get("closed"))
+    disk_closed_at = float(state_doc.get("closed_at") or 0.0)
     if state.closed and disk_closed_at > 0:
         state.closed_at = disk_closed_at
-        state.close_reason = str(payload.get("close_reason") or "")
+        state.close_reason = str(state_doc.get("close_reason") or "")
         state.close_pending_records = max(
             0,
-            int(payload.get("close_pending_records") or 0),
+            _safe_int(state_doc.get("close_pending_records"), 0),
         )
     elif not state.closed:
         state.closed_at = 0.0
         state.close_reason = ""
         state.close_pending_records = 0
-    state.spool_seq = max(state.spool_seq, int(payload.get("spool_seq") or 0))
-    state.spool_generation = max(state.spool_generation, int(payload.get("spool_generation") or 0))
+    state.spool_seq = max(state.spool_seq, _safe_int(state_doc.get("spool_seq"), 0))
+    state.spool_generation = max(
+        state.spool_generation,
+        _safe_int(state_doc.get("spool_generation"), 0),
+    )
 
 
 def _refresh_durable_totals(state: WatchState, payload: dict[str, Any]) -> None:
@@ -936,6 +1123,7 @@ def load_state(owner_home: Path, watch_id: str) -> WatchState | None:
         if key in state.totals:
             state.totals[key] = int(value)
     state.engine.restore(dict(state_doc.get("engine") or {}), time.time())
+    _record_disk_baseline(state)
     return state
 
 
