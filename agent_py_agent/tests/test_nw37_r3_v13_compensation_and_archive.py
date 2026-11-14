@@ -4,6 +4,9 @@ from __future__ import annotations
 import errno
 import http.client
 import json
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from types import SimpleNamespace
 from uuid import uuid4
@@ -15,8 +18,10 @@ from agent_py_agent.agent.business_spaces import (
     v13_w9_canary_markers as markers_mod,
 )
 from agent_py_agent.agent.common import nofollow_fs
+from agent_py_agent.agent.common.directory_lock import locked_private_directory
 from agent_py_agent.agent.conversation.business_access import BusinessError
 from agent_py_agent.agent.core import SimpleAgent
+from agent_py_agent.agent.gateway_parts import business_api as business_api_mod
 from agent_py_agent.agent.gateway_parts import business_host_ports as host_ports
 from agent_py_agent.agent.gateway_parts.business_upload_registry import (
     lookup_business_upload,
@@ -731,3 +736,334 @@ def test_spaces_archive_skipped_workflow_run_allowed_while_active_blocked(r3_nat
         )
     }
     assert unsettled_custom == {"wfrun_skipped_01", "wfrun_paused_01"}
+
+
+def _count_open_fds() -> int:
+    for fd_dir in ("/dev/fd", "/proc/self/fd"):
+        if os.path.isdir(fd_dir):
+            return len(os.listdir(fd_dir))
+    return -1
+
+
+def _run_blocked_skill_race(
+    server: GatewayHTTPServer,
+    monkeypatch,
+    action_a: str,
+    params_a: dict,
+    key_a: str,
+    action_b: str,
+    params_b: dict,
+    key_b: str,
+    *,
+    expect_b_blocked: bool,
+) -> tuple[int, tuple[int, dict], tuple[int, dict]]:
+    """把请求 A 停在 skill_operations 回执提交前并触发单次 EIO，同时并发发起请求 B。"""
+    entered = threading.Event()
+    released = threading.Event()
+    original = v13_store_mod.V13Store.transaction
+    errors = 0
+
+    def transaction(self, collection, mutate, **kwargs):
+        nonlocal errors
+        if collection == "skill_operations" and kwargs.get("idempotency_key") == key_a:
+            entered.set()
+            if not released.wait(10):
+                raise AssertionError("release signal missing")
+            errors += 1
+            raise OSError(errno.EIO, "simulated receipt publication error")
+        return original(self, collection, mutate, **kwargs)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(v13_store_mod.V13Store, "transaction", transaction)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(
+                _http_business, server, action_a, params_a, idempotency_key=key_a
+            )
+            b_result = None
+            try:
+                assert entered.wait(10)
+                second = pool.submit(
+                    _http_business, server, action_b, params_b, idempotency_key=key_b
+                )
+                if expect_b_blocked:
+                    try:
+                        second.result(timeout=1.5)
+                    except TimeoutError:
+                        pass
+                    else:
+                        raise AssertionError(
+                            "concurrent same-skill request completed before operation guard released"
+                        )
+                else:
+                    b_result = second.result(timeout=10)
+                    assert b_result[0] == 200, b_result
+            finally:
+                released.set()
+            a_result = first.result(timeout=10)
+            if b_result is None:
+                b_result = second.result(timeout=10)
+    return errors, a_result, b_result
+
+
+def test_completed_skill_request_survives_other_request_compensation(
+    r3_native, monkeypatch
+):
+    """P1-04：同技能并发写入时，请求 A 日志前 EIO 补偿不得删除请求 B 已提交并确认的技能。"""
+    server, agent = r3_native
+    key_a, key_b = "audit-write-a-000001", "audit-write-b-000001"
+    params = {
+        "skill_id": "shared-skill",
+        "body_markdown": _skill_markdown("shared-skill", "Shared operation"),
+    }
+
+    errors, (a_status, a_body), (b_status, _b_body) = _run_blocked_skill_race(
+        server,
+        monkeypatch,
+        "skills.create",
+        params,
+        key_a,
+        "skills.create",
+        params,
+        key_b,
+        expect_b_blocked=True,
+    )
+    path = agent.home_paths.owner_home_dir / "skills" / "shared-skill" / "SKILL.md"
+    assert errors == 1
+    assert a_status == 503 and a_body["error"]["code"] == "OUTCOME_UNKNOWN"
+    assert b_status == 200
+    assert path.read_text(encoding="utf-8") == params["body_markdown"]
+
+    replay_status, _replay_body = _http_business(
+        server, "skills.create", params, idempotency_key=key_b
+    )
+    assert replay_status == 200
+    assert path.read_text(encoding="utf-8") == params["body_markdown"]
+
+
+def test_skill_toggle_and_cross_operation_concurrency_and_target_isolation(
+    r3_native, monkeypatch
+):
+    """P1-04：启停补偿、跨动作（update/retire/activate）同技能串行及异技能不阻塞隔离验证。"""
+    server, agent = r3_native
+    owner_home = agent.home_paths.owner_home_dir
+
+    # 1. 创建目标技能后，验证并发 skills.retire 的失败补偿不会把已提交的 enabled=False 翻回 True
+    skill_id = "toggle-race-skill"
+    v1_body = _skill_markdown(skill_id, "version one")
+    create_status, created = _http_business(
+        server,
+        "skills.create",
+        {"skill_id": skill_id, "body_markdown": v1_body},
+        idempotency_key="r3-toggle-init-" + uuid4().hex,
+    )
+    assert create_status == 200, created
+    v1_ref = created["data"]["skill"]["version_ref"]
+
+    errors, (a_retire, _), (b_retire, b_retire_body) = _run_blocked_skill_race(
+        server,
+        monkeypatch,
+        "skills.retire",
+        {"skill_id": skill_id},
+        "r3-retire-a-000001",
+        "skills.retire",
+        {"skill_id": skill_id},
+        "r3-retire-b-000001",
+        expect_b_blocked=True,
+    )
+    assert errors == 1 and a_retire == 503 and b_retire == 200
+    assert b_retire_body["data"]["skill"]["enabled"] is False
+    meta = json.loads((owner_home / "skills" / skill_id / "skill_meta.json").read_text(encoding="utf-8"))
+    assert meta["enabled"] is False
+    replay_retire, replay_retire_body = _http_business(
+        server, "skills.retire", {"skill_id": skill_id}, idempotency_key="r3-retire-b-000001"
+    )
+    assert replay_retire == 200 and replay_retire_body["data"]["skill"]["enabled"] is False
+
+    # 2. 并发 skills.activate：A 失败回滚后，B 仍成功启用并保留 enabled=True
+    errors, (a_act, _), (b_act, b_act_body) = _run_blocked_skill_race(
+        server,
+        monkeypatch,
+        "skills.activate",
+        {"skill_id": skill_id},
+        "r3-activate-a-000001",
+        "skills.activate",
+        {"skill_id": skill_id},
+        "r3-activate-b-000001",
+        expect_b_blocked=True,
+    )
+    assert errors == 1 and a_act == 503 and b_act == 200
+    assert b_act_body["data"]["skill"]["enabled"] is True
+    meta = json.loads((owner_home / "skills" / skill_id / "skill_meta.json").read_text(encoding="utf-8"))
+    assert meta["enabled"] is True
+
+    # 3. 并发 skills.update：A（expected_version_ref=v1）在提交前失败回滚 v1，B 同用 v1 成功提交 v2_b
+    v2_a = _skill_markdown(skill_id, "version two a")
+    v2_b = _skill_markdown(skill_id, "version two b")
+    errors, (a_upd, _), (b_upd, b_upd_body) = _run_blocked_skill_race(
+        server,
+        monkeypatch,
+        "skills.update",
+        {"skill_id": skill_id, "body_markdown": v2_a, "expected_version_ref": v1_ref},
+        "r3-update-a-000001",
+        "skills.update",
+        {"skill_id": skill_id, "body_markdown": v2_b, "expected_version_ref": v1_ref},
+        "r3-update-b-000001",
+        expect_b_blocked=True,
+    )
+    assert errors == 1 and a_upd == 503 and b_upd == 200
+    assert b_upd_body["data"]["skill"]["description"] == "version two b"
+    assert (owner_home / "skills" / skill_id / "SKILL.md").read_text(encoding="utf-8") == v2_b
+
+    # 4. 不同技能 ID 使用各自独立操作锁：alpha 阻塞在提交前时，beta 须立即完成
+    beta_body = _skill_markdown("isolated-beta", "Beta independent skill")
+    errors, (alpha_status, _), (beta_status, _beta_body) = _run_blocked_skill_race(
+        server,
+        monkeypatch,
+        "skills.create",
+        {
+            "skill_id": "isolated-alpha",
+            "body_markdown": _skill_markdown("isolated-alpha", "Alpha blocked"),
+        },
+        "r3-alpha-a-000001",
+        "skills.create",
+        {"skill_id": "isolated-beta", "body_markdown": beta_body},
+        "r3-beta-b-000001",
+        expect_b_blocked=False,
+    )
+    assert errors == 1 and alpha_status == 503 and beta_status == 200
+    assert not (owner_home / "skills" / "isolated-alpha").exists()
+    assert (owner_home / "skills" / "isolated-beta" / "SKILL.md").read_text(encoding="utf-8") == beta_body
+    locks_dir = owner_home / "data" / "business_v13"
+    assert (locks_dir / ".skill-operation-isolated-alpha.lock").is_file()
+    assert (locks_dir / ".skill-operation-isolated-beta.lock").is_file()
+
+
+def test_skill_operation_guard_releases_lock_and_zero_fd_delta_on_all_exits(
+    r3_native, monkeypatch
+):
+    """P1-04：成功与异常（含 pre_journal EIO、重放冲突与非法参数）退出均须释放操作锁且 fd_delta == 0。"""
+    _server, agent = r3_native
+    owner_home = agent.home_paths.owner_home_dir
+    context, services = business_api_mod.local_business_context(agent)
+    skill_id = "r3-fd-guard-skill"
+    v1_body = _skill_markdown(skill_id, "fd check v1")
+    v2_body = _skill_markdown(skill_id, "fd check v2")
+
+    def _invoke(action: str, params: dict, key: str) -> tuple[int, dict]:
+        return business_api_mod.execute_business(
+            {
+                "action": action,
+                "request_id": "fd-" + uuid4().hex,
+                "params": params,
+                "idempotency_key": key,
+            },
+            context,
+            services,
+        )
+
+    def _assert_guard_unlocked(target_skill: str) -> None:
+        try:
+            import fcntl
+        except ImportError:
+            fcntl = None
+        lock_file = owner_home / "data" / "business_v13" / f".skill-operation-{target_skill}.lock"
+        if fcntl is not None and lock_file.exists():
+            fd = os.open(lock_file, os.O_RDWR)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+        with locked_private_directory(
+            owner_home,
+            relative_parts=("data", "business_v13"),
+            lock_name=f".skill-operation-{target_skill}.lock",
+        ):
+            pass
+
+    # 预热一次性懒导入与底层初始化，确保基线稳定
+    warm_status, _ = _invoke(
+        "skills.create",
+        {"skill_id": "r3-fd-warmup", "body_markdown": _skill_markdown("r3-fd-warmup", "warm")},
+        "r3-fd-warm-" + uuid4().hex,
+    )
+    assert warm_status == 200
+
+    fd_before = _count_open_fds()
+    try:
+        # 1. pre_journal 失败退出 -> 503，锁释放且不留文件
+        with monkeypatch.context() as mp:
+            _arm_materialization_error(mp, "skill_operations.json", mode="pre_journal")
+            st_err, _ = _invoke(
+                "skills.create",
+                {"skill_id": skill_id, "body_markdown": v1_body},
+                "r3-fd-create-err-" + uuid4().hex,
+            )
+            assert st_err == 503
+        _assert_guard_unlocked(skill_id)
+        assert not (owner_home / "skills" / skill_id).exists()
+
+        # 2. create / replay / IDEMPOTENCY_CONFLICT / update / retire(err+ok) / activate(err+ok)
+        create_key = "r3-fd-create-ok-" + uuid4().hex
+        st_create, created = _invoke(
+            "skills.create", {"skill_id": skill_id, "body_markdown": v1_body}, create_key
+        )
+        assert st_create == 200
+        v1_ref = created["data"]["skill"]["version_ref"]
+        _assert_guard_unlocked(skill_id)
+
+        st_replay, _ = _invoke(
+            "skills.create", {"skill_id": skill_id, "body_markdown": v1_body}, create_key
+        )
+        assert st_replay == 200
+        st_conflict, conflict = _invoke(
+            "skills.create", {"skill_id": skill_id, "body_markdown": v2_body}, create_key
+        )
+        assert st_conflict == 409 and conflict["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+        _assert_guard_unlocked(skill_id)
+
+        st_update, _ = _invoke(
+            "skills.update",
+            {"skill_id": skill_id, "body_markdown": v2_body, "expected_version_ref": v1_ref},
+            "r3-fd-update-" + uuid4().hex,
+        )
+        assert st_update == 200
+        _assert_guard_unlocked(skill_id)
+
+        with monkeypatch.context() as mp:
+            _arm_materialization_error(mp, "skill_operations.json", mode="pre_journal")
+            st_retire_err, _ = _invoke(
+                "skills.retire", {"skill_id": skill_id}, "r3-fd-retire-err-" + uuid4().hex
+            )
+            assert st_retire_err == 503
+        _assert_guard_unlocked(skill_id)
+
+        st_retire_ok, retired = _invoke(
+            "skills.retire", {"skill_id": skill_id}, "r3-fd-retire-ok-" + uuid4().hex
+        )
+        assert st_retire_ok == 200 and retired["data"]["skill"]["enabled"] is False
+        _assert_guard_unlocked(skill_id)
+
+        with monkeypatch.context() as mp:
+            _arm_materialization_error(mp, "skill_operations.json", mode="pre_journal")
+            st_act_err, _ = _invoke(
+                "skills.activate", {"skill_id": skill_id}, "r3-fd-act-err-" + uuid4().hex
+            )
+            assert st_act_err == 503
+        _assert_guard_unlocked(skill_id)
+
+        st_act_ok, activated = _invoke(
+            "skills.activate", {"skill_id": skill_id}, "r3-fd-act-ok-" + uuid4().hex
+        )
+        assert st_act_ok == 200 and activated["data"]["skill"]["enabled"] is True
+        _assert_guard_unlocked(skill_id)
+
+        # 3. 缺省/非法 skill_id 必须在建锁前拒绝
+        st_bad, bad = _invoke(
+            "skills.activate", {"skill_id": "../bad"}, "r3-fd-bad-" + uuid4().hex
+        )
+        assert st_bad == 400 and bad["error"]["code"] == "INVALID_SCHEMA"
+    finally:
+        fd_after = _count_open_fds()
+        if fd_before >= 0 and fd_after >= 0:
+            assert fd_after - fd_before == 0

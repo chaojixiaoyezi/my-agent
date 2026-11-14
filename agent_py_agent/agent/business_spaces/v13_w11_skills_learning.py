@@ -14,10 +14,12 @@ import os
 import re
 import shutil
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
 from ..capability.skills import skill_catalog_roots
+from ..common.directory_lock import locked_private_directory
 from ..common.nofollow_fs import list_names_beneath, read_bytes_beneath, write_text_atomic_beneath
 from ..conversation.business_access import BusinessError
 from ..gateway_parts.business_api_v13 import (
@@ -425,8 +427,20 @@ def _has_durable_skill_receipt(store, receipt_key, fingerprint):
 
 
 # LLM: 这里只留原生资产变更的耐久结果回执，不复制技能权威状态；原Store绑定owner/subject/key。
-# 函数用途: 执行一次技能写入并支持完整参数冲突和无副作用重放。
+# 函数用途: 按 owner 与已校验技能串行执行技能操作，覆盖回执预检、原生暂存、提交与补偿。
 def _skill_receipted(call, mutate, *, staged=None):
+    _require(call)
+    raw_skill_id = call.params.get('skill_id') if isinstance(call.params, Mapping) else None
+    skill_id = _safe_skill_id(raw_skill_id)
+    # 同一 owner 的同一技能写操作（create/update/activate/retire）共用外层操作锁，
+    # 锁序恒为 操作锁 -> 配额 -> 资产锁 / .store.lock，严禁跨锁倒置。
+    with locked_private_directory(Path(call.owner_home), relative_parts=('data', 'business_v13'),
+                                  lock_name=f'.skill-operation-{skill_id}.lock'):
+        return _skill_receipted_locked(call, mutate, staged=staged)
+
+
+# 函数用途: 在技能操作锁内执行回执预检、原生写入及失败后按耐久回执核查的补偿。
+def _skill_receipted_locked(call, mutate, *, staged=None):
     from .v13_history_rows import copy_value, encode
 
     _require(call)
