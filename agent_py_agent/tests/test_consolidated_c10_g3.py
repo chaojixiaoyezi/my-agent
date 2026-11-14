@@ -1595,3 +1595,86 @@ def test_expired_scope_during_notification_keeps_original_lease(harvest_case, mo
 
     assert lease_path.read_bytes() == held["lease"]
     assert _committed(harvest_case).cursor == 3
+
+
+def _harvester_open_fd_count() -> int:
+    for fd_dir in ("/proc/self/fd", "/dev/fd"):
+        if os.path.isdir(fd_dir):
+            return len(os.listdir(fd_dir))
+    return -1
+
+
+# LLM: 提交落盘前遇到普通 I/O 写错时，保留持久事务标记以便现有恢复核验并释放原租约，下一拍可继续推进。
+# 函数用途: 回归 P1-02——写 WatchState 快照遇普通 OSError 不清除事务标记，不卡死租约。
+def test_pre_replacement_state_write_error_recovers_intent_releases_lease_and_advances(harvest_case, monkeypatch):
+    monkeypatch.setattr(source_worker, "wake_audit_source_worker", lambda *_args: True)
+    target = ws.state_dir(harvest_case.state.owner_home) / f"{harvest_case.state.watch_id}.json"
+    write_state = ws._write_state_payload
+    faults = 0
+
+    def fail_once(path, state_doc):
+        nonlocal faults
+        if path == target and faults == 0:
+            faults += 1
+            raise OSError(errno.EIO, "simulated I/O error")
+        return write_state(path, state_doc)
+
+    monkeypatch.setattr(ws, "_write_state_payload", fail_once)
+    fd_before = _harvester_open_fd_count()
+    with pytest.raises(OSError) as exc_info:
+        _run(harvest_case)
+    fd_after = _harvester_open_fd_count()
+    if fd_before >= 0 and fd_after >= 0:
+        assert fd_after - fd_before == 0
+
+    assert type(exc_info.value) is OSError
+    assert faults == 1
+    assert not _harvester_lease(harvest_case).exists()
+    assert not hv._harvest_transaction_path(harvest_case.state).exists()
+    assert _committed(harvest_case).cursor == 0
+    assert execution._observe_lease(harvest_case.state)[1] is True
+
+    next_call = _run(harvest_case)
+    assert next_call == {"outcome": "handled", "status": "ok", "cursor": 3}
+    assert len(harvest_case.fetches) == 2
+    assert _committed(harvest_case).cursor == 3
+    assert not _harvester_lease(harvest_case).exists()
+    assert not hv._harvest_transaction_path(harvest_case.state).exists()
+
+
+# LLM: 提交前读取规范快照遇普通 I/O 读错时，同样保持事务标记供原恢复回滚并释放原租约，下一拍可推进。
+# 函数用途: 回归 P1-01/P1-02 联合路径——提交阶段读盘失败保留意图、释放原租约并允许后继请求推进。
+def test_commit_state_merge_read_error_recovers_intent_releases_lease_and_advances(harvest_case, monkeypatch):
+    monkeypatch.setattr(source_worker, "wake_audit_source_worker", lambda *_args: True)
+    target = ws.state_dir(harvest_case.state.owner_home) / f"{harvest_case.state.watch_id}.json"
+    original_read_text = Path.read_text
+    faults = 0
+
+    def fail_once(self, *args, **kwargs):
+        nonlocal faults
+        if self == target and faults == 0 and hv._harvest_transaction_path(harvest_case.state).exists():
+            faults += 1
+            raise OSError(errno.EIO, "simulated I/O error")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_once)
+    fd_before = _harvester_open_fd_count()
+    with pytest.raises(OSError) as exc_info:
+        _run(harvest_case)
+    fd_after = _harvester_open_fd_count()
+    if fd_before >= 0 and fd_after >= 0:
+        assert fd_after - fd_before == 0
+
+    assert type(exc_info.value) is OSError
+    assert faults == 1
+    assert not _harvester_lease(harvest_case).exists()
+    assert not hv._harvest_transaction_path(harvest_case.state).exists()
+    assert _committed(harvest_case).cursor == 0
+    assert execution._observe_lease(harvest_case.state)[1] is True
+
+    next_call = _run(harvest_case)
+    assert next_call == {"outcome": "handled", "status": "ok", "cursor": 3}
+    assert len(harvest_case.fetches) == 2
+    assert _committed(harvest_case).cursor == 3
+    assert not _harvester_lease(harvest_case).exists()
+    assert not hv._harvest_transaction_path(harvest_case.state).exists()

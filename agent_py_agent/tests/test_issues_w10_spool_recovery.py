@@ -276,10 +276,10 @@ def test_harvest_tick_finishes_replace_before_persist_exactly_once(watch, monkey
     original = _rows(hv.spool_path(state))
     persist = hv.persist_state
 
-    def interrupted(current):
+    def interrupted(current, **kwargs):
         if current.spool_generation:
             raise _Crash()
-        return persist(current)
+        return persist(current, **kwargs)
 
     monkeypatch.setattr(hv, "persist_state", interrupted)
     with pytest.raises(_Crash):
@@ -520,10 +520,10 @@ def _rotation_with_unpublished_generation(watch, monkeypatch):
     previous, persist = state.spool_generation, hv.persist_state
     failure = OSError("injected rotation generation publication failure")
 
-    def reject_generation(current):
+    def reject_generation(current, **kwargs):
         if current.spool_generation != previous:
             raise failure
-        return persist(current)
+        return persist(current, **kwargs)
 
     with monkeypatch.context() as patch:
         patch.setattr(hv, "persist_state", reject_generation)
