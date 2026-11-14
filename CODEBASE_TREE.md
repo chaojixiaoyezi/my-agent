@@ -11,7 +11,9 @@ agent_py_agent/tests/
 |-- test_tool_slimming_w4_admin_schemas.py          # W4 管理配置工具嵌套说明、无秘密示例与写前拒绝证明
 |-- test_tool_slimming_w5_computer_use.py           # W5 Computer Use 上游中文说明、按键成对释放与 MCP 三段式错误契约
 |-- test_tool_slimming_w6_wire_acceptance.py        # W6 原生/HTTP 往返、104 项双版本别名迁移、只读上界、单故障重放与快照复用验收
-`-- test_tool_slim_r1_pre_handler_effect.py         # R1 预执行器确定性校验拒绝白名单恢复 not_started 与重放契约
+|-- test_tool_slim_r1_pre_handler_effect.py         # R1 预执行器确定性校验拒绝白名单恢复 not_started 与重放契约
+|-- test_tool_slim_r2_creation_action_ceilings.py   # R2 子代理创建策略保留父快照 tool:action 动作上界与叶子别名收敛
+`-- test_tool_slim_r2_controlled_exec_refusal.py    # R2 controlled_exec 计划拒绝保持 WRITE_FORBIDDEN、not_started 与安全重放
 ```
 
 ## 2026-11-14 全仓精简瘦身（Waves 1–4）与无损单测归并
