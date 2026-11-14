@@ -268,9 +268,31 @@ def _scan_stamp(path):
     return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
 
 
+# LLM: 仅校验内部续扫游标结构，非法或非整数游标一律忽略并退回从头扫描。
+# 函数用途: 解析可选续扫游标，合法时返回 (operation_id, segment_idx, offset)。
+def _parse_scan_continuation(continuation: object) -> tuple[str, int, int] | None:
+    if not isinstance(continuation, dict):
+        return None
+    op_id = continuation.get("operation_id")
+    raw_cursor = continuation.get("cursor")
+    if (
+        isinstance(op_id, str)
+        and op_id
+        and isinstance(raw_cursor, (list, tuple))
+        and len(raw_cursor) == 2
+        and type(raw_cursor[0]) is int
+        and type(raw_cursor[1]) is int
+        and raw_cursor[0] >= 0
+        and raw_cursor[1] >= 0
+    ):
+        return op_id, raw_cursor[0], raw_cursor[1]
+    return None
+
+
 # LLM: 控制源、墓碑与分片累计计费；换代最多重读两次且不重置预算，真损坏拒绝，未核全屏障不暴露正文。
+#   可选 continuation=(operation_id, cursor) 仅在同代同 operation_id 下跳过已扫描分片/偏移，错代或异常游标退回 [0, 0]。
 # 函数用途: 有界读取当前权威候选，并报告实际解析条数/字节与停止位置。
-def bounded_authority_records(memory, *, max_records, max_bytes):
+def bounded_authority_records(memory, *, max_records, max_bytes, continuation=None):
     import hashlib
     import json
     import time
@@ -290,6 +312,8 @@ def bounded_authority_records(memory, *, max_records, max_bytes):
     controls = [store.manifest_path, store.tombstones.path, _tombstone_path(memory.path), store.tombstones.index.path]
     used, scanned, examined = 0, 0, 0
     cache = {}
+    parsed_cont = _parse_scan_continuation(continuation)
+    resume_op_id, resume_seg, resume_off = parsed_cont if parsed_cont is not None else (None, 0, 0)
 
     # LLM: 预算先于正文；底层最多多读一个拒绝探测字节，只转换明确超限错误，不吞完整性错误。
     # 函数用途: 读取一个受预算约束的私有权威文件。
@@ -332,8 +356,11 @@ def bounded_authority_records(memory, *, max_records, max_bytes):
                     segments = root["segments"] if root else [{"path": memory.path.name}]
                     if root is None:
                         stamps[memory.path] = _scan_stamp(memory.path)
+                    resuming = bool(root and resume_op_id and root.get("operation_id") == resume_op_id)
                     for number, segment in enumerate(segments):
-                        cursor = [number, 0]
+                        if resuming and number < resume_seg:
+                            continue
+                        cursor = [number, resume_off if resuming and number == resume_seg and resume_off > 0 else 0]
                         expires = segment.get("expires_before")
                         if type(expires) in (int, float) and 0 < expires <= time.time():
                             continue
@@ -346,6 +373,8 @@ def bounded_authority_records(memory, *, max_records, max_bytes):
                         if root and len(lines) != segment["count"]:
                             raise ValueError("MEMORY_GENERATION_UNREADABLE")
                         for offset, line in enumerate(lines):
+                            if resuming and number == resume_seg and offset < resume_off:
+                                continue
                             cursor = [number, offset]
                             if examined >= max_records:
                                 raise _AuthorityScanLimit()
@@ -379,7 +408,7 @@ def bounded_authority_records(memory, *, max_records, max_bytes):
         if any(_scan_stamp(path) != stamp for path, stamp in stamps.items()):
             if attempt < 2 and used < max_bytes and scanned < max_records:
                 continue
-            records, partial = [], True
+            records, partial, cursor = [], True, None
         break
     return records, {"partial": partial, "scanned_records": scanned, "scanned_bytes": used,
         "examined_records": examined,
