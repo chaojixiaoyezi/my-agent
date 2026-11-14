@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+import uuid
 from collections.abc import Callable
 from contextlib import ExitStack
 from contextvars import ContextVar
@@ -1201,7 +1202,31 @@ def maintain_learning(
                 current = registry.skills.get(name)
                 if current is not None:
                     owned_status = _verify_single_ownership(store, current)
-                    if current.maintenance.get("ownership") != owned_status:
+                    inc_id = str(current.maintenance.get("incarnation_id") or "").strip()
+                    act_id = str(current.maintenance.get("activation_id") or "").strip()
+                    if current.layout != "owner" and owned_status == "machine" and (not inc_id or not act_id):
+                        # 仅在写授权的维护路径内为仍属机器托管的遗留记录补齐唯一标识，不伪造历史精确计数
+                        next_maint = dict(current.maintenance)
+                        hurt_raw = next_maint.get("hurt_count")
+                        epoch_raw = next_maint.get("strike_epoch")
+                        has_prior_activity = bool(next_maint.get("ever_used") or next_maint.get("last_used_at"))
+                        next_maint.update({
+                            "ownership": owned_status,
+                            "incarnation_id": inc_id or uuid.uuid4().hex,
+                            "activation_id": act_id or uuid.uuid4().hex,
+                            "independent_uses": 0,
+                            "uses_since_hurt": 0,
+                            "hurt_count": hurt_raw if isinstance(hurt_raw, int) and not isinstance(hurt_raw, bool) and hurt_raw >= 0 else 0,
+                            "strike_epoch": epoch_raw if isinstance(epoch_raw, int) and not isinstance(epoch_raw, bool) and epoch_raw >= 0 else 0,
+                            "epoch_started_at": float(next_maint.get("epoch_started_at") or started_at),
+                            "independent_uses_coverage": "lower_bound" if has_prior_activity else "exact",
+                        })
+                        registry = replace(
+                            registry,
+                            skills={**registry.skills, name: replace(current, maintenance=next_maint)},
+                        )
+                        changed.append(name)
+                    elif current.maintenance.get("ownership") != owned_status:
                         next_maint = {**current.maintenance, "ownership": owned_status}
                         registry = replace(
                             registry,

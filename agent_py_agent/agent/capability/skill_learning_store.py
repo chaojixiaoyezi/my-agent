@@ -2016,7 +2016,10 @@ class SkillLearningStore:
             if self.read_version(name, cand_rev) is None:
                 self.save_version(name, cand_rev, ver_text)
             if current.last_operation_id != op_id:
+                from .skill_learning_publish import _historical_adoptions
+
                 maint = dict(current.maintenance)
+                hist_adoptions = _historical_adoptions(current)
                 stable = maint.get("previous_stable")
                 if is_proven_stable_version(stable) and stable["version"] == target_ver and stable["sha256"] == cand_sha:
                     est_at = float(stable["established_at"])
@@ -2030,8 +2033,10 @@ class SkillLearningStore:
                         "independent_uses": 0,
                         "independent_uses_coverage": "exact",
                         "uses_since_hurt": 0,
+                        "strike_epoch": 0,
                         "activation_id": uuid.uuid4().hex,
                         "epoch_started_at": ts,
+                        "historical_adoptions": hist_adoptions,
                         "observations": [],
                         "rolled_back_from": current.sha256,
                     })
@@ -2045,9 +2050,12 @@ class SkillLearningStore:
                         "helped_count": 0,
                         "hurt_count": 0,
                         "independent_uses": 0,
+                        "independent_uses_coverage": "exact",
                         "uses_since_hurt": 0,
+                        "strike_epoch": 0,
                         "activation_id": uuid.uuid4().hex,
                         "epoch_started_at": ts,
+                        "historical_adoptions": hist_adoptions,
                         "observations": [],
                         "rolled_back_from": current.sha256,
                     })
