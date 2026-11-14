@@ -265,12 +265,53 @@ def _get(state, call):
 
 # LLM: 幂等回执只保留数据，命中也重核本次 live 授权、工作根及订阅路径策略。
 # 函数用途: 在有界 owner 状态中执行控制或重放原结果。
+def _find_evictable_receipt_key(state, action, now):
+    tier1 = []
+    tier2 = []
+    tier3 = []
+    oldest_any = None
+    for idx, (rkey, receipt) in enumerate(state.receipts.items()):
+        _, res_copy, ts, rsid = receipt
+        order = (ts, idx)
+        if oldest_any is None or order < oldest_any[0]:
+            oldest_any = (order, rkey)
+        sub_missing = rsid is None or state.subscriptions.get(rsid) is None
+        search_id = res_copy.get('search_id') if isinstance(res_copy, dict) else None
+        evicted_search = (
+            rkey[1] in ('fs_watch.search', 'fs_watch.search_cancel')
+            and search_id is not None
+            and search_id not in state.searches
+        )
+        if sub_missing or evicted_search:
+            tier1.append((order, rkey))
+            continue
+        if now - ts >= FS_WATCH_IDLE_EXPIRY_SECONDS:
+            tier2.append((order, rkey))
+            continue
+        if action != 'fs_watch.search':
+            if search_id is not None and search_id in state.searches:
+                job = state.searches[search_id]
+                if not job.done.is_set():
+                    continue
+            tier3.append((order, rkey))
+    if tier1:
+        return min(tier1)[1]
+    if tier2:
+        return min(tier2)[1]
+    if tier3:
+        return min(tier3)[1]
+    if action in ('fs_watch.unsubscribe', 'fs_watch.search_cancel') and oldest_any is not None:
+        return oldest_any[1]
+    return None
+
+
 def _control(call, mutate):
-    """沿 V13 的 subject/action/key 指纹去重；满额拒绝，不丢回执重开搜索。"""
+    """沿 V13 的 subject/action/key 指纹去重；满额先淘汰已失效/过期/已完结旧回执，再保底不锁死停止。"""
     with _state_lock:
         state = _state(call)
         if not call.idempotency_key:
             raise HostAPIError('INVALID_SCHEMA')
+        now = call.clock()
         key = (call.subject_id, call.action, call.idempotency_key)
         digest = hashlib.sha256(json.dumps([call.params, call.expected_revision],
             sort_keys=True, ensure_ascii=False).encode()).hexdigest()
@@ -281,17 +322,22 @@ def _control(call, mutate):
             sub = state.subscriptions.get(old[3])
             if sub is not None:
                 _still_current(call, state, sub)
-                sub.touched = call.clock()
+                sub.touched = now
             return deepcopy(old[1])
-        if len(state.receipts) >= FS_WATCH_EVENT_RING:
+        if len(state.receipts) >= FS_WATCH_EVENT_RING and _find_evictable_receipt_key(state, call.action, now) is None:
             code = ('LIMIT_EXCEEDED' if call.action in ('fs_watch.subscribe', 'fs_watch.search')
                     else 'OUTCOME_UNKNOWN')
             raise HostAPIError(code, 400 if code == 'LIMIT_EXCEEDED' else 503)
         result = mutate(state)
+        while len(state.receipts) >= FS_WATCH_EVENT_RING:
+            evict_key = _find_evictable_receipt_key(state, call.action, now)
+            if evict_key is None:
+                break
+            del state.receipts[evict_key]
         sid = result.get('subscription_id', call.params.get('subscription_id'))
         if 'search_id' in result and result['search_id'] in state.searches:
             sid = state.searches[result['search_id']].subscription.sid
-        state.receipts[key] = (digest, deepcopy(result), call.clock(), sid)
+        state.receipts[key] = (digest, deepcopy(result), now, sid)
         return result
 
 

@@ -348,12 +348,17 @@ def validate(call):
 
 # LLM: 准入后在同一个原生资产锁内重读目标、比较CAS并做live末核；原子nofollow写不越owner。
 # 函数用途: 原子写入一个用户层 Skill 正文。
-def _write_skill(call, skill_id, body, *, creating=False):
+def _write_skill_staged(call, skill_id, body, *, creating=False):
     from ..assets import asset_root_lock
     from ..user_space.owner_quota import OwnerQuotaChange, owner_quota_enforcer_from_policy
 
     home = Path(call.owner_home)
     parts = ('skills', skill_id, 'SKILL.md')
+    target = home.joinpath(*parts)
+    skill_dir = home.joinpath('skills', skill_id)
+    had_skill_dir = skill_dir.exists()
+    wrote = False
+    existing = None
     with owner_quota_enforcer_from_policy(home).admission() as admission:
         with asset_root_lock(home):
             existing = _existing_text(call, skill_id)
@@ -366,29 +371,85 @@ def _write_skill(call, skill_id, body, *, creating=False):
                     raise BusinessError('STATE_CONFLICT')
                 if _version_ref(descriptor) != call.params['expected_version_ref']:
                     raise BusinessError('REVISION_CONFLICT')
-            admission.check([OwnerQuotaChange(home.joinpath(*parts), len(body.encode('utf-8')))])
+            admission.check([OwnerQuotaChange(target, len(body.encode('utf-8')))])
             _require(call)
             if existing != body:
                 write_text_atomic_beneath(home, parts, body)
-            return {'skill': _view(_descriptor(call, skill_id), learned=_learned_names(call),
+                wrote = True
+            result = {'skill': _view(_descriptor(call, skill_id), learned=_learned_names(call),
                                    index=_directory_index(call))}
+
+    def rollback():
+        if not wrote:
+            return
+        with owner_quota_enforcer_from_policy(home).admission() as rollback_admission:
+            with asset_root_lock(home):
+                if _existing_text(call, skill_id) != body:
+                    return
+                if existing is None:
+                    rollback_admission.check([OwnerQuotaChange(target, 0)])
+                    if not target.is_symlink():
+                        target.unlink(missing_ok=True)
+                    if not had_skill_dir and skill_dir.is_dir() and not skill_dir.is_symlink():
+                        try:
+                            if not any(skill_dir.iterdir()):
+                                skill_dir.rmdir()
+                        except OSError:
+                            pass
+                else:
+                    rollback_admission.check([OwnerQuotaChange(target, len(existing.encode('utf-8')))])
+                    write_text_atomic_beneath(home, parts, existing)
+
+    return result, rollback
+
+
+def _write_skill(call, skill_id, body, *, creating=False):
+    result, _ = _write_skill_staged(call, skill_id, body, creating=creating)
+    return result
 
 
 # LLM: 这里只留原生资产变更的耐久结果回执，不复制技能权威状态；原Store绑定owner/subject/key。
 # 函数用途: 执行一次技能写入并支持完整参数冲突和无副作用重放。
-def _skill_receipted(call, mutate):
+def _skill_receipted(call, mutate, *, staged=None):
+    from .v13_history_rows import copy_value, encode
+
     _require(call)
+    key = call.idempotency_key
+    if type(key) is not str or not key or len(key) > 128:
+        raise BusinessError('INVALID_SCHEMA')
     digest = hashlib.sha256(json.dumps([call.action, call.params, call.expected_revision],
         ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+    store = v13_store_for(call)
+    store._authorize()
+    receipt_key = hashlib.sha256(encode([store.subject_id, store.action, key])).hexdigest()
+    fingerprint = hashlib.sha256(encode(['skill_operations', store.action, digest, None])).hexdigest()
+    receipt = (store._read('skill_operations').get('receipts') or {}).get(receipt_key)
+    if receipt is None:
+        receipt = store._rows('skill_operations').get('receipts', receipt_key)
+    if receipt is not None:
+        if receipt.get('fingerprint') != fingerprint:
+            raise BusinessError('IDEMPOTENCY_CONFLICT')
+        return copy_value(receipt['result'])
+
+    # 资产写入/启停及其外部配额和资产锁必须在 .store.lock 与外层配额事务外完成。
+    if staged is not None:
+        result, rollback = staged()
+    else:
+        result, rollback = mutate(), None
 
     # LLM: 回执不保存正文或第二份技能数据，只保存经过原生读回的公开结果。
-    # 函数用途: 在原Store事务持锁期间调用实际资产变更。
+    # 函数用途: 在原Store事务持锁期间仅提交幂等回执。
     def apply(records):
         _require(call)
-        return mutate()
+        return copy_value(result)
 
-    return v13_store_for(call).transaction('skill_operations', apply,
-        idempotency_key=call.idempotency_key, params_digest=digest)
+    try:
+        return store.transaction('skill_operations', apply,
+            idempotency_key=key, params_digest=digest)
+    except Exception:
+        if rollback is not None:
+            rollback()
+        raise
 
 
 # LLM: 读取只沿 no-follow 链，缺失返回 None 供创建路径区分新增与同键重放。
@@ -408,7 +469,7 @@ def create_skill(call):
     parsed = _parse_body(call, body, skill_id)
     if not parsed['valid']:
         raise BusinessError('INVALID_SCHEMA')
-    return _skill_receipted(call, lambda: _write_skill(call, skill_id, body, creating=True))
+    return _skill_receipted(call, None, staged=lambda: _write_skill_staged(call, skill_id, body, creating=True))
 
 
 # LLM: 只有用户层可改；同键先重放，CAS由原生资产锁内的当前正文决定，不在锁外比较。
@@ -420,12 +481,10 @@ def update_skill(call):
     parsed = _parse_body(call, body, skill_id)
     if not parsed['valid']:
         raise BusinessError('INVALID_SCHEMA')
-    return _skill_receipted(call, lambda: _write_skill(call, skill_id, body))
+    return _skill_receipted(call, None, staged=lambda: _write_skill_staged(call, skill_id, body))
 
 
-# LLM: 启停只沿原生侧元数据锁与 owner 配额，已在目标态时不重复写。
-# 函数用途: 切换一个可管理 Skill 的启停状态。
-def _toggle(call, enabled):
+def _toggle_staged(call, enabled):
     from ..assets.skill_adapter import SkillAdapter
 
     _require(call)
@@ -434,26 +493,47 @@ def _toggle(call, enabled):
     learned = _learned_names(call)
     if _layer(descriptor, learned) not in {'user', 'learned'}:
         raise BusinessError('STATE_CONFLICT')
-    if bool(descriptor.get('enabled', True)) != enabled:
+    prior_enabled = bool(descriptor.get('enabled', True))
+    changed = prior_enabled != enabled
+    if changed:
         try:
             _require(call)
             SkillAdapter(call.owner_home).set_enabled(descriptor['id'], enabled)
         except (ValueError, FileNotFoundError) as error:
             raise BusinessError('STATE_CONFLICT') from error
     learned = _learned_names(call)
-    return {'skill': _view(_descriptor(call, skill_id), learned=learned, index=_directory_index(call))}
+    result = {'skill': _view(_descriptor(call, skill_id), learned=learned, index=_directory_index(call))}
+
+    def rollback():
+        if not changed:
+            return
+        try:
+            current = _descriptor(call, skill_id)
+            if bool(current.get('enabled', True)) == enabled:
+                SkillAdapter(call.owner_home).set_enabled(current['id'], prior_enabled)
+        except (BusinessError, ValueError, FileNotFoundError):
+            pass
+
+    return result, rollback
+
+
+# LLM: 启停只沿原生侧元数据锁与 owner 配额，已在目标态时不重复写。
+# 函数用途: 切换一个可管理 Skill 的启停状态。
+def _toggle(call, enabled):
+    result, _ = _toggle_staged(call, enabled)
+    return result
 
 
 # LLM: 启用沿原生技能侧文件，重放返回旧回执而不覆写后来停用的当前状态。
 # 函数用途: 启用一个用户层或自学 Skill。
 def activate(call):
-    return _skill_receipted(call, lambda: _toggle(call, True))
+    return _skill_receipted(call, None, staged=lambda: _toggle_staged(call, True))
 
 
 # LLM: 停用不删除正文与版本，真实变更与耐久结果回执使用同一幂等边界。
 # 函数用途: 停用一个用户层或自学 Skill。
 def retire(call):
-    return _skill_receipted(call, lambda: _toggle(call, False))
+    return _skill_receipted(call, None, staged=lambda: _toggle_staged(call, False))
 
 
 # LLM: 回测只派发原生后台任务，HTTP 线程不执行模型；空间必须是真实记录。
