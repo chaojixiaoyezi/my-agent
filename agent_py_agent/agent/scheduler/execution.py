@@ -252,6 +252,46 @@ def _run_with_claim_interrupts(names, early, callback):
         return callback()
 
 
+def _close_skipped_target_claim(service, claim, signal, *, response, error_code):
+    now = time.time()
+    service.finish(claim, status='skipped', response=response, error_code=error_code, now=now)
+    service.conversation_store.tasks.update_status({
+        'task_id': claim.run_id,
+        'status': 'cancelled',
+        'expected_status': 'active',
+        'now': now,
+    })
+    service.conversation_store.wakes.mark_handled(signal.wake_signal_id, now=now)
+
+
+def _unsettled_prior_run_response(receipt):
+    running_run_id = str(receipt.get('running_run_id') or '')
+    holder_phase = str(receipt.get('holder_phase') or '')
+    hint = f'（前置运行 {running_run_id} 仍未收口）' if running_run_id else '（存在未收口的前置运行）'
+    error_message = (
+        f'目标工作流当前不可用{hint}，本次调度未启动目标执行（effect_outcome=not_started）。'
+        '请先检查并恢复、取消或清理对应运行后再重新触发。'
+    )
+    next_action = (
+        f'inspect_and_settle_workflow_run:{running_run_id}'
+        if running_run_id
+        else 'inspect_and_settle_prior_workflow_run'
+    )
+    detail = {
+        **receipt,
+        'status': 'failed',
+        'error_code': 'SCHEDULER_EXECUTION_TARGET_UNAVAILABLE',
+        'source_error_code': receipt.get('error_code', 'WORKFLOW_RUN_SKIPPED_ALREADY_RUNNING'),
+        'reason_code': 'prior_run_unsettled',
+        'running_run_id': running_run_id,
+        'holder_phase': holder_phase,
+        'effect_outcome': 'not_started',
+        'error_message': error_message,
+        'next_action': next_action,
+    }
+    return json.dumps(detail, ensure_ascii=False)
+
+
 # LLM: 业务仅执行一次，原claim停止传入worker且返回后重查；仅在真实 worker 退出后清理终态工具资源，异常不掩盖原中断。
 # 函数用途: 执行固定目标并沿原TaskLink、终态和冻结通知收口，保留相同运输身份且不重跑业务。
 def execute_scheduled_target(agent, service, claim, signal, kwargs, *, notify=None):
@@ -292,29 +332,68 @@ def execute_scheduled_target(agent, service, claim, signal, kwargs, *, notify=No
             result = future.result()
         if is_interrupted():
             raise InterruptedError('定时资产执行已中断')
+        unsettled_receipt = None
         if isinstance(result, dict) and result.get('status') == 'skipped':
-            service.finish(claim, status='skipped', response=json.dumps(result), error_code=result['error_code'])
-            service.conversation_store.tasks.update_status({'task_id': claim.run_id, 'status': 'cancelled',
-                'expected_status': 'active', 'now': time.time()})
-            service.conversation_store.wakes.mark_handled(signal.wake_signal_id, now=time.time())
-            return
-        execution, output = result
+            is_unsettled_wf_skip = (
+                result.get('error_code') == 'WORKFLOW_RUN_SKIPPED_ALREADY_RUNNING'
+                and (
+                    result.get('reason') == 'closed'
+                    or ('holder_phase' in result and result.get('holder_phase') != 'executing')
+                )
+            )
+            if not is_unsettled_wf_skip:
+                _close_skipped_target_claim(
+                    service,
+                    claim,
+                    signal,
+                    response=json.dumps(result),
+                    error_code=result['error_code'],
+                )
+                return
+            unsettled_receipt = result
+        else:
+            execution, output = result
     except ScheduleValidationError as exc:
         code = getattr(exc, 'error_code', 'SCHEDULER_EXECUTION_TARGET_UNAVAILABLE')
         ok, output = False, json.dumps({'error_code': code, 'reason': getattr(exc, 'reason', '')}, ensure_ascii=False)
     else:
-        ok, code = execution.result.ok, execution.result.error_code or ''
-        if not ok and notify is not None:
-            from ..conversation.host_notification_scope import notification_scope
-            from ..conversation.required_user_action import (
-                freeze_tool_notice,
-                required_action_from_result,
-            )
-            if required_action_from_result(execution.result) is not None:
-                request = _run_request(kwargs)
-                with notification_scope(agent, request):
-                    if freeze_tool_notice(agent, request, execution.result):
-                        return notify(kwargs)
+        if unsettled_receipt is not None:
+            ok = False
+            code = 'SCHEDULER_EXECUTION_TARGET_UNAVAILABLE'
+            output = _unsettled_prior_run_response(unsettled_receipt)
+        else:
+            ok, code = execution.result.ok, execution.result.error_code or ''
+            if not ok and notify is not None:
+                from ..conversation.host_notification_scope import notification_scope
+                from ..conversation.required_user_action import (
+                    freeze_tool_notice,
+                    required_action_from_result,
+                )
+                if required_action_from_result(execution.result) is not None:
+                    request = _run_request(kwargs)
+                    with notification_scope(agent, request):
+                        if freeze_tool_notice(agent, request, execution.result):
+                            return notify(kwargs)
+            try:
+                parsed_json = json.loads(output)
+            except (ValueError, TypeError):
+                parsed_json = None
+            if (
+                isinstance(parsed_json, dict)
+                and parsed_json.get('error_code') == 'WORKFLOW_RUN_SKIPPED_ALREADY_RUNNING'
+            ):
+                if parsed_json.get('holder_phase') == 'executing':
+                    _close_skipped_target_claim(
+                        service,
+                        claim,
+                        signal,
+                        response=output,
+                        error_code='WORKFLOW_RUN_SKIPPED_ALREADY_RUNNING',
+                    )
+                    return
+                ok = False
+                code = 'SCHEDULER_EXECUTION_TARGET_UNAVAILABLE'
+                output = _unsettled_prior_run_response(parsed_json)
     usage = model_call_ledger(agent).cumulative_summary(run_id=claim.run_id)
     count = int(usage['physical_model_attempt_count']) if usage is not None else 0
     service.repository.record_target_usage(claim.run_id, claim.claim_id, count)
@@ -328,6 +407,10 @@ def execute_scheduled_target(agent, service, claim, signal, kwargs, *, notify=No
     outcome = {'schema': 'scheduler.target-outcome.v1', 'run_id': claim.run_id,
         'status': 'succeeded' if ok else 'failed', 'response': output,
         'error_code': '' if ok else code or 'SCHEDULER_EXECUTION_TARGET_FAILED', 'error_message': message if not ok else ''}
+    if not ok and isinstance(parsed, dict) and parsed.get('reason_code') == 'prior_run_unsettled':
+        for extra_key in ('reason_code', 'running_run_id', 'effect_outcome', 'next_action', 'holder_phase'):
+            if extra_key in parsed:
+                outcome[extra_key] = parsed[extra_key]
     service.repository.record_rule_result(claim.run_id, claim.claim_id, parsed, target_outcome=outcome)
     return _finish_target_execution(agent, service, claim, signal, kwargs, output, ok=ok, code=outcome['error_code'], count=count,
         error_message=outcome['error_message'])

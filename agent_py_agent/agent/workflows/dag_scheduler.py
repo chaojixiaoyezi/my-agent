@@ -194,6 +194,17 @@ def _is_blocked_by_skipped_upstream(
     return False
 
 
+def _clear_unadmitted_worker_effect(step, spec):
+    """未进入工作流效果准入即失败/取消的非 foreach 步骤，清除协调线程预标记的 effect_started。"""
+    if (
+        step.status in ('failed', 'cancelled')
+        and getattr(step, '_worker_effect_admitted', None) is False
+        and spec.get('foreach') is None  # foreach 父步骤自行维护批义务，不能清除预标记
+    ):
+        step.escalation_result['effect_started'] = False
+        step.escalation_result.setdefault('effect_outcome', 'not_started')
+
+
 # LLM: 纯计算工作线程函数；不写Store、不继承协调线程锁凭据，避免跨线程锁状态泄漏与死锁。
 # 函数用途: 在线程池内执行单步实际业务逻辑并返回结果。
 def _run_step_worker(engine, step, spec, local_outputs, definition, local_record):
@@ -207,6 +218,7 @@ def _run_step_worker(engine, step, spec, local_outputs, definition, local_record
         _check_stop()
         step.ended_at = time.time()
         step.duration_ms = (time.monotonic() - clock) * 1000
+        _clear_unadmitted_worker_effect(step, spec)
         return (step, None)
     except (KeyboardInterrupt, SystemExit, ToolCancelled, InterruptedError) as exc:
         step.ended_at = time.time()
@@ -221,6 +233,7 @@ def _run_step_worker(engine, step, spec, local_outputs, definition, local_record
         step.needs_repair = True
         step.ended_at = time.time()
         step.duration_ms = (time.monotonic() - clock) * 1000
+        _clear_unadmitted_worker_effect(step, spec)
         return (step, None)
 
 
@@ -324,8 +337,9 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
         )
         if exc is not None:
             state['record'] = record
-            halt_reason['type'] = 'cancel'
-            halt_reason['exc'] = exc
+            if halt_reason['type'] != 'cancel':
+                halt_reason['type'] = 'cancel'
+                halt_reason['exc'] = exc
             halt_event = True
             return
 
@@ -336,14 +350,16 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
 
         step_status[sid] = completed_step.status
         if completed_step.status == 'waiting_for_agent':
-            halt_reason['type'] = 'waiting_for_agent'
-            halt_reason['step'] = completed_step
+            if halt_reason['type'] != 'cancel':
+                halt_reason['type'] = 'waiting_for_agent'
+                halt_reason['step'] = completed_step
             halt_event = True
         elif completed_step.status in ('failed', 'paused_for_resume'):
             if not completed_step.needs_repair and completed_step.output_snapshot:
                 outputs[sid] = payload(completed_step.output_snapshot)
-            halt_reason['type'] = completed_step.status
-            halt_reason['step'] = completed_step
+            if halt_reason['type'] != 'cancel':
+                halt_reason['type'] = completed_step.status
+                halt_reason['step'] = completed_step
             halt_event = True
         elif completed_step.status in SUCCESS:
             if completed_step.status != 'skipped':
@@ -459,10 +475,12 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
                 break
 
             if not active_futures and unstarted_step_ids:
+                if _get_ready_step_ids():
+                    continue
                 newly_handled = False
                 for sid in list(unstarted_step_ids):
                     spec = step_specs[sid]
-                    if any(step_status.get(d) == 'skipped' for d in deps.get(sid, ())):
+                    if _is_blocked_by_skipped_upstream(spec, deps, step_status):
                         unstarted_step_ids.remove(sid)
                         _mark_step_skipped(spec, reason='upstream_skipped')
                         newly_handled = True
@@ -495,6 +513,7 @@ def execute_workflow_dag(*, engine, record, definition, start, execution_state):
         raise halt_reason['exc']
 
     if halt_reason['type'] == 'waiting_for_agent':
+        _check_stop()
         waiting_step = halt_reason['step']
         engine._step_progress(record, waiting_step, progress)
         record = replace_run_record(

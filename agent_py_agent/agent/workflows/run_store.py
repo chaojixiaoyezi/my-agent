@@ -170,6 +170,31 @@ class WorkflowExecutionError(RuntimeError):
                 next_action='retry_same_key_completion_clock_only')
 
 
+def _non_agent_step_settled(step, result):
+    """判断非 agent_task 步骤在 effect_started=True 后是否已有终态确定证明。"""
+    if step.status in ('succeeded', 'escalated_recovered', 'skipped'):
+        return True
+    if step.status not in ('failed', 'cancelled'):
+        return False
+    if result.get('effect_outcome') == 'unknown':
+        return False
+    tool_receipt = result.get('tool_receipt')
+    if isinstance(tool_receipt, dict):
+        return (
+            tool_receipt.get('effect_outcome') in ('failed', 'confirmed', 'succeeded')
+            and tool_receipt.get('status') in ('failed', 'succeeded')
+        )
+    subworkflow_receipt = result.get('subworkflow_receipt')
+    if isinstance(subworkflow_receipt, dict):
+        return (
+            subworkflow_receipt.get('effect_outcome') != 'unknown'
+            and subworkflow_receipt.get('status') in ('succeeded', 'failed', 'skipped', 'cancelled')
+        )
+    if result.get('tool_operation_binding') is not None:
+        return False
+    return result.get('effect_outcome') in ('confirmed', 'failed', 'succeeded', 'not_started')
+
+
 def _concurrency_settled(record):
     """终态标签不等于义务消失；只消费原步骤上的完成、取消或未提交证明。"""
     if record.status in ('queued', 'running', 'waiting_for_agent', 'cancelling'):
@@ -188,7 +213,7 @@ def _concurrency_settled(record):
                 and result.get('reconciliation_state') == 'absent')
             if obligation and not settled:
                 return False
-        elif result.get('effect_started') and step.status not in ('succeeded', 'escalated_recovered', 'skipped'):
+        elif result.get('effect_started') and not _non_agent_step_settled(step, result):
             return False
     return record.status in ('succeeded', 'failed', 'skipped', 'cancelled') or record.effect_outcome == 'not_started'
 

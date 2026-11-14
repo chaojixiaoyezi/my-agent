@@ -469,10 +469,36 @@ class _WorkflowRunLifecycle:
             ids = [s.step_id for s in record.steps]
             if from_step_id is not None and from_step_id not in ids:
                 raise ValueError('恢复步骤不存在')
-            start = ids.index(from_step_id) if from_step_id is not None else next(
-                (i for i, step in enumerate(record.steps) if step.status not in SUCCESS), len(ids))
-            if any(step.status not in SUCCESS for step in record.steps[:start]):
-                raise ValueError('不能跳过未成功的前序步骤')
+            dag_sched = self._get_dag_scheduler()
+            is_dag = (
+                dag_sched is not None
+                and (
+                    any(bool(s.get('depends_on')) for s in definition.get('steps', ()))
+                    or getattr(dag_sched, 'should_schedule_dag', lambda d: False)(definition)
+                )
+                and hasattr(dag_sched, 'build_dag')
+            )
+            deps = {}
+            reverse_deps = {}
+            incomplete_ids = {step.step_id for step in record.steps if step.status not in SUCCESS}
+            reset_ids = None
+            if is_dag:
+                deps, reverse_deps, _ = dag_sched.build_dag(definition['steps'])
+                step_by_id = {step.step_id: step for step in record.steps}
+                if from_step_id is not None:
+                    start = ids.index(from_step_id)
+                    ancestors = self._dag_step_closure(deps.get(from_step_id, ()), deps)
+                    if any(step_by_id[anc].status not in SUCCESS for anc in ancestors if anc in step_by_id):
+                        raise ValueError('不能跳过未成功的前序步骤')
+                    reset_ids = self._dag_step_closure({from_step_id}, reverse_deps)
+                else:
+                    start = next((i for i, step in enumerate(record.steps) if step.status not in SUCCESS), len(ids))
+                    reset_ids = self._dag_step_closure(incomplete_ids, reverse_deps) if incomplete_ids else set()
+            else:
+                start = ids.index(from_step_id) if from_step_id is not None else next(
+                    (i for i, step in enumerate(record.steps) if step.status not in SUCCESS), len(ids))
+                if any(step.status not in SUCCESS for step in record.steps[:start]):
+                    raise ValueError('不能跳过未成功的前序步骤')
             repaired = None
             if patched_step_output is not None:
                 if start == len(ids):
@@ -480,7 +506,13 @@ class _WorkflowRunLifecycle:
                 repaired = self._patched_step(record.steps[start], definition['steps'][start], patched_step_output, resolution_origin)
             if updated_data_sources is not None and not isinstance(updated_data_sources, (dict, list)):
                 raise ValueError('updated_data_sources必须为dict或list')
-            blocked = self._resume_script_gate(record, definition, start, allow_script_drift)
+            blocked = self._resume_script_gate(
+                record,
+                definition,
+                start,
+                allow_script_drift,
+                step_ids_override=reset_ids,
+            )
             if blocked is not None:
                 return blocked
             if updated_data_sources is not None:
@@ -489,16 +521,37 @@ class _WorkflowRunLifecycle:
                 self._save_definition(record, definition)
             if start == len(ids) and record.status == 'succeeded':
                 return self.store.complete_control(workflow_run_id, operation_key) if operation_key else record
-            suffix = [_pending(spec) for spec in definition['steps'][start + bool(repaired):]]
-            pending_native_review = (not repaired and start < len(ids)
-                and record.steps[start].error_code in {'WORKFLOW_REVIEW_REQUIRED', 'WORKFLOW_REVIEW_STALE', 'WORKFLOW_REVIEW_CHANGES_REQUESTED',
-                    'WORKFLOW_REPLAN_READY', 'WORKFLOW_REPLAN_FAILED', 'WORKFLOW_REWORK_LIMIT_REACHED', 'WORKFLOW_REWORK_NO_PROGRESS'}
-                and isinstance(record.steps[start].escalation_result.get('pending_review'), dict)
-                and record.steps[start].escalation_result['pending_review'].get('schema') == 'workflow.pending-review.v1'
-                and not record.steps[start].escalation_result.get('effect_started'))
-            if not repaired and start < len(ids) and (definition['steps'][start].get('foreach') is not None or pending_native_review):
-                suffix[0] = replace(record.steps[start], status='pending', needs_repair=False, error_code='', error_message='')
-            steps = record.steps[:start] + ((repaired,) if repaired else ()) + tuple(suffix)
+            if is_dag:
+                rebuilt = []
+                for idx, spec in enumerate(definition['steps']):
+                    sid = spec['step_id']
+                    if repaired is not None and idx == start:
+                        rebuilt.append(repaired)
+                    elif sid in reset_ids:
+                        can_preserve_partial = (
+                            not repaired
+                            and (
+                                idx == start
+                                or (sid in incomplete_ids and not (deps.get(sid, set()) & reset_ids))
+                            )
+                            and (spec.get('foreach') is not None or self._is_pending_native_review(record.steps[idx]))
+                        )
+                        if can_preserve_partial:
+                            rebuilt.append(replace(record.steps[idx], status='pending', needs_repair=False, error_code='', error_message=''))
+                        else:
+                            rebuilt.append(_pending(spec))
+                    else:
+                        rebuilt.append(record.steps[idx])
+                steps = tuple(rebuilt)
+                drive_start = max(start + bool(repaired), 1 if any(s.status in SUCCESS for s in steps) else 0)
+            else:
+                suffix = [_pending(spec) for spec in definition['steps'][start + bool(repaired):]]
+                pending_native_review = (not repaired and start < len(ids)
+                    and self._is_pending_native_review(record.steps[start]))
+                if not repaired and start < len(ids) and (definition['steps'][start].get('foreach') is not None or pending_native_review):
+                    suffix[0] = replace(record.steps[start], status='pending', needs_repair=False, error_code='', error_message='')
+                steps = record.steps[:start] + ((repaired,) if repaired else ()) + tuple(suffix)
+                drive_start = start + bool(repaired)
             record = replace_run_record(record, dict(steps=steps, status='running', ended_at=0, failed_step_id='',
                              needs_repair=False, current_step_id='', final_output={}, resumed_from_step_id=ids[start] if start < len(ids) else ''))
             record = replace_run_record(record, dict(breakpoint=None))
@@ -508,7 +561,7 @@ class _WorkflowRunLifecycle:
             self.store.save_run(record, resuming=True)
             if repaired:
                 self._step_progress(record, repaired, {'seq': record.progress_seq})
-            result = self._drive(record, definition, start + bool(repaired))
+            result = self._drive(record, definition, drive_start)
             return self.store.complete_control(workflow_run_id, operation_key) if operation_key else result
 
     resume_workflow = resume_workflow_run
@@ -702,8 +755,34 @@ class _WorkflowRunLifecycle:
 
     # LLM: 非漂移故障可修复当前依赖及后缀中完全相同原pin的同版本复用；其它后续/确认断点仍核原pin，前缀不变。
     # 函数用途: 接纳当前故障资产修复，拦截其它后续漂移，仅在核验通过后发表新pin。
-    def _resume_script_gate(self, record, definition, start, allow):
-        current = self._script_pins(definition['steps'][start:])
+    def _dag_step_closure(self, seed_ids, adjacency):
+        seen = set(seed_ids)
+        stack = list(seen)
+        while stack:
+            curr = stack.pop()
+            for nxt in adjacency.get(curr, ()):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        return seen
+
+    @staticmethod
+    def _is_pending_native_review(step):
+        return (
+            step.error_code in {'WORKFLOW_REVIEW_REQUIRED', 'WORKFLOW_REVIEW_STALE', 'WORKFLOW_REVIEW_CHANGES_REQUESTED',
+                'WORKFLOW_REPLAN_READY', 'WORKFLOW_REPLAN_FAILED', 'WORKFLOW_REWORK_LIMIT_REACHED', 'WORKFLOW_REWORK_NO_PROGRESS'}
+            and isinstance(step.escalation_result.get('pending_review'), dict)
+            and step.escalation_result['pending_review'].get('schema') == 'workflow.pending-review.v1'
+            and not step.escalation_result.get('effect_started')
+        )
+
+    def _resume_script_gate(self, record, definition, start, allow, *, step_ids_override=None):
+        steps_scope = (
+            [spec for spec in definition['steps'] if spec['step_id'] in step_ids_override]
+            if step_ids_override is not None
+            else definition['steps'][start:]
+        )
+        current = self._script_pins(steps_scope)
         frozen = definition.get('_frozen_scripts', {})
         historical = {key for key, value in current.items() if not _same_pin(frozen.get(key), value)
                       and historical_pin_available(self.owner_home, frozen.get(key))}
@@ -1320,14 +1399,19 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                 record.status = 'succeeded'
                 record.escalation_result['debug_logs'] = ['仅预览：未执行脚本、外部分析器、网络、工具或子工作流']
                 return
+        if record.mode == 'agent_task' and (run.ephemeral_debug or self.agent_steps is None):
+            if (
+                getattr(record, '_worker_effect_admitted', None) is False
+                or 'effect_started' not in record.escalation_result
+            ):
+                record.escalation_result['effect_started'] = False
+            raise ValueError('WORKFLOW_AGENT_EXECUTOR_UNAVAILABLE')
         # 纯分析在解析技能和宿主 preflight 之后、真实调用之前准入；缺回调不产生未知效果。
         # hybrid 的脚本仍必须先准入，不能把前段脚本产生的义务误记为未执行。
         analysis_only = record.mode in ('llm_skill_analysis', 'llm_prompt')
         if not analysis_only and self._admit_effect(run, record, outputs=outputs) is False:
             return
         if record.mode == 'agent_task':
-            if run.ephemeral_debug or self.agent_steps is None:
-                raise ValueError('WORKFLOW_AGENT_EXECUTOR_UNAVAILABLE')
             record.status = 'waiting_for_agent'
             self.agent_steps.submit(run, spec, record)
             return

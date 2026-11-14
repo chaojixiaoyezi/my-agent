@@ -13,12 +13,55 @@ def execute_scheduled_tool(agent, service, claim, signal, kwargs, *, notify=None
     from ..agent_core.tool_only_execution import execute_tool_work
     from ..conversation.background_execution import _BackgroundRunControl
     from ..conversation.runtime import _background_task_attributes, _run_request
+    from .execution_policy import scheduled_business_context
+    from .schedule import ScheduleValidationError
 
     if _recover_tool_delivery(agent, service, claim, signal, kwargs):
+        return
+    try:
+        business_context = scheduled_business_context(agent, claim.run)
+    except ScheduleValidationError as exc:
+        now = time.time()
+        code = getattr(exc, 'error_code', 'SCHEDULER_EXECUTION_TARGET_UNAVAILABLE')
+        reason = getattr(exc, 'reason', '') or str(exc)
+        response = json.dumps(
+            {
+                'error_code': code,
+                'reason': reason,
+                'effect_outcome': getattr(exc, 'effect_outcome', 'not_started'),
+                'error_message': str(exc) or reason,
+                'next_action': 'rebind_or_remove_stale_scheduled_business_context',
+            },
+            ensure_ascii=False,
+        )
+        service.conversation_store.tasks.update_status({
+            'task_id': claim.run_id,
+            'status': 'abandoned',
+            'expected_status': 'active',
+            'now': now,
+        })
+        service.finish(
+            claim,
+            status='failed',
+            response=response,
+            delivery_status='suppressed',
+            delivery_reason='tool_only_internal_result',
+            error_code=code,
+            error_message=str(exc) or reason,
+            now=now,
+        )
+        service.conversation_store.wakes.mark_handled(signal.wake_signal_id, now=now)
+        from ..conversation.task_run_closeout import settle_terminal_task_run
+        settle_terminal_task_run(
+            getattr(getattr(agent, 'subagents', None), 'runtime_db', None),
+            service.conversation_store,
+            task_id=claim.run_id,
+        )
         return
     thread = agent.conversation_store.threads.require(claim.run['thread_id'])
     params = RunParams(request_id=claim.run_id, run_id=claim.run_id, task_id=claim.run_id,
         source='scheduler_tool', root_user_prompt=claim.run['name'],
+        business_context=business_context,
         conversation_task_binding_callback=_BackgroundRunControl(claim.run_id, None),
         task_attributes=_background_task_attributes(thread.thread_id, _run_request(kwargs), agent, thread=thread),
         write_boundary={'task_id': claim.run_id})
