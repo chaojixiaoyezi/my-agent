@@ -102,9 +102,16 @@ def case(tmp_path, monkeypatch):
                            frozen=frozen, out_a=out_a.resolve(), out_b=out_b.resolve())
 
 
-# 每个宿主运行只授权自己的墙外输出目录；owner home 是两者共有的产品工作区。
-def _params(run_id, task_id, output_dir):
-    return RunParams(run_id=run_id, task_id=task_id, attempt_id=f'{run_id}-attempt', task_attributes={},
+# 每个宿主运行在权威运行库登记独立执行链，并只授权自己的墙外输出目录；owner home 是两者共有的产品工作区。
+def _params(case, run_id, task_id, output_dir):
+    record = case.agent.subagents.runtime_db.record_run_creation(
+        owner_id=case.agent.home_paths.owner_id,
+        goal=run_id,
+        conversation_task_id=task_id,
+        run_id=run_id,
+        role='main',
+    )
+    return RunParams(run_id=run_id, task_id=task_id, attempt_id=record['attempt_id'], task_attributes={},
                      write_boundary={'allowed_write_roots': [str(output_dir)]})
 
 
@@ -200,8 +207,8 @@ def test_waiting_run_keeps_its_own_runner_when_another_run_starts(case, monkeypa
         return engine
 
     monkeypatch.setattr(case.tool, '_execution_engine', observed_engine)
-    run_a, run_b = _overlap(case, _params('run-a', 'task-a', out_a), {'action': 'run', 'workflow_id': 'flow-a'},
-                            _params('run-b', 'task-b', out_b), {'action': 'run', 'workflow_id': 'flow-b'})
+    run_a, run_b = _overlap(case, _params(case, 'run-a', 'task-a', out_a), {'action': 'run', 'workflow_id': 'flow-a'},
+                            _params(case, 'run-b', 'task-b', out_b), {'action': 'run', 'workflow_id': 'flow-b'})
     probe, written = run_a['steps'][1]['output_snapshot'], run_b['steps'][0]['output_snapshot']
     # A 放行后的脚本仍用 A 冻结的身份与范围：写不进 B 的目录，B 的产物原样保留。
     assert (probe['run_id'], probe['task_id']) == ('run-a', 'task-a')
@@ -240,12 +247,12 @@ def test_resume_keeps_its_own_runner_and_successful_prefix_when_another_run_star
                _probe_step('probe', out_a / 'a.txt', out_b / 'report.txt', 'A'))
     _save_flow_b(case)
     case.gate.pause_once.add('gate')
-    case.agent._current_run_params = _params('run-a', 'task-a', out_a)
+    case.agent._current_run_params = _params(case, 'run-a', 'task-a', out_a)
     paused = _execute(case.tool, {'action': 'run', 'workflow_id': 'flow-r'})
     assert (paused['status'], paused['confirmed_step_refs']) == ('paused_for_resume', ['prefix'])
     resumed, run_b = _overlap(
-        case, _params('run-a-resume', 'task-a', out_a), {'action': 'resume', 'workflow_run_id': paused['workflow_run_id']},
-        _params('run-b', 'task-b', out_b), {'action': 'run', 'workflow_id': 'flow-b'})
+        case, _params(case, 'run-a-resume', 'task-a', out_a), {'action': 'resume', 'workflow_run_id': paused['workflow_run_id']},
+        _params(case, 'run-b', 'task-b', out_b), {'action': 'run', 'workflow_id': 'flow-b'})
     prefix, probe = resumed['steps'][0], resumed['steps'][2]['output_snapshot']
     # 成功前缀不重跑：步骤记录与暂停时完全一致，其唯一一次副作用也只出现一次。
     assert prefix == paused['steps'][0] and prefix['output_snapshot']['run_id'] == 'run-a'
@@ -270,7 +277,7 @@ def test_injected_engine_serves_run_and_resume_unchanged(case):
     runner = injected.runner
     tool = WorkflowsTool(case.owner, engine=injected, workspace_root=case.workspace,
                          runner_options_provider=case.tool.runner_options_provider)
-    case.agent._current_run_params = _params('run-a', 'task-a', case.out_a)
+    case.agent._current_run_params = _params(case, 'run-a', 'task-a', case.out_a)
     assert tool._execution_engine() is injected
     paused = _execute(tool, {'action': 'run', 'workflow_id': 'flow-r'})
     resumed = _execute(tool, {'action': 'resume', 'workflow_run_id': paused['workflow_run_id']})
@@ -285,13 +292,13 @@ def test_injected_engine_serves_run_and_resume_unchanged(case):
 def test_inspect_run_reads_durable_record_without_building_execution_context(case):
     _save_flow(case, 'flow-r', _probe_step('prefix', case.out_a / 'prefix.txt', text='prefix'), _analysis_step('gate'))
     case.gate.pause_once.add('gate')
-    case.agent._current_run_params = _params('run-a', 'task-a', case.out_a)
+    case.agent._current_run_params = _params(case, 'run-a', 'task-a', case.out_a)
     paused = _execute(case.tool, {'action': 'run', 'workflow_id': 'flow-r'})
     cached = case.tool._lazy_engine
     runner, folder = cached.runner, cached.store.run_dir(paused['workflow_run_id'])
     before = _tree_bytes(folder)
     # 换成另一个活动上下文：只读检查既不能冻结它，也不能改写原持久账本。
-    case.agent._current_run_params = _params('run-b', 'task-b', case.out_b)
+    case.agent._current_run_params = _params(case, 'run-b', 'task-b', case.out_b)
     inspected = _execute(case.tool, {'action': 'inspect_run', 'workflow_run_id': paused['workflow_run_id']})
     assert inspected == paused
     assert case.frozen == [('run-a', 'task-a')] and case.gate.calls == ['gate']
@@ -312,11 +319,11 @@ def test_run_skill_snapshots_remain_frozen_when_host_snapshot_changes(case, monk
         return original(home, step, context, **options)
 
     monkeypatch.setattr(workflows_tool, '_resolve_owner_skills', resolve)
-    case.agent._current_run_params = _params('snapshot-a', 'task-a', case.out_a)
+    case.agent._current_run_params = _params(case, 'snapshot-a', 'task-a', case.out_a)
     first = case.tool._execution_engine()
     cached = case.tool._lazy_engine
     active[0] = {}  # 空受限快照与无快照不同，不能复用原无限制解析器。
-    case.agent._current_run_params = _params('snapshot-b', 'task-b', case.out_b)
+    case.agent._current_run_params = _params(case, 'snapshot-b', 'task-b', case.out_b)
     second = case.tool._execution_engine()
     case.tool.skill_snapshot_provider = lambda: pytest.fail('execution reread the current host snapshot')
     spec = SimpleNamespace(skill_ids=(), skill_tags=())

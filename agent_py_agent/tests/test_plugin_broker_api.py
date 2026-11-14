@@ -384,11 +384,7 @@ def test_real_script_workflow_and_resume(homes):
     from agent_py_agent.agent.tooling.scripts_tool import ScriptsTool
     from agent_py_agent.agent.tooling.workflows_tool import WorkflowsTool
     script_tool, workflow_tool = ScriptsTool(homes[0]), WorkflowsTool(homes[0])
-    # LLM: 默认工具已提供分析摘要；显式注入失败确保此测试仍覆盖真实失败和恢复，而非依赖缺省实现。
-    # 函数用途: 在分析步制造确定的失败，保留前序真实脚本执行快照。
-    def failing_analysis(step, outputs, skills):
-        raise RuntimeError('intentional analysis failure')
-    workflow_tool._engine().analysis_handler = failing_analysis
+    # 默认工具无分析器（ANALYZER_UNAVAILABLE，effect_started=False），前序脚本成功后停在分析步等待续跑。
     # LLM: 该测试授权只覆盖两个绑定临时owner的工具，不支持任意命令或跨用户。
     # 函数用途: 作为真实工具与Broker之间的受控调用器。
     def invoke(name, arguments):
@@ -682,9 +678,12 @@ def test_broker_patched_workflow_resume(homes):
     def invoke(name, arguments):
         return {'scripts': scripts, 'workflows': workflows}[name].execute(arguments)
     service = broker.PluginBrokerService(homes[0], owner_id='providers/test/users/alice', tool_invoker=invoke)
+    missing = [{'source_id': 'missing', 'system': 'logs', 'query_scope': {}, 'evaluated_candidates': []}]
     assert service.dispatch('assets.save', {'kind': 'script', 'descriptor': {'id': 'bad', 'kind': 'script',
-        'name': '失败脚本', 'io_contract': {'outputs': ['value']}}, 'code': 'raise SystemExit(4)'})['ok']
-    assert service.dispatch('assets.save', {'kind': 'workflow', 'descriptor': {'id': 'repair', 'kind': 'workflow', 'name': '修复'},
+        'name': '失败脚本', 'data_sources': missing, 'io_contract': {'outputs': ['value']}},
+        'code': 'raise AssertionError("preflight must prevent execution")'})['ok']
+    assert service.dispatch('assets.save', {'kind': 'workflow', 'descriptor': {
+        'id': 'repair', 'kind': 'workflow', 'name': '修复', 'data_sources': missing},
         'steps': [{'step_id': 'bad', 'name': '失败', 'mode': 'deterministic_script', 'script_id': 'bad'}]})['ok']
     paused = service.dispatch('execute.workflow', {'workflow_id': 'repair'})['data']['result']
     assert paused['status'] == 'paused_for_resume'

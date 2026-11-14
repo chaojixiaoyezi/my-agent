@@ -1159,7 +1159,7 @@ class BackgroundMainAgentRuntime:
         )
         from .technical_continuation import suppress_intermediate
 
-        identity = execution_result.execution_identity or {}
+        identity = getattr(execution_result, "execution_identity", None) or {}
         if suppress_intermediate(self.store, task_id=request.task_id,
                                  run_id=identity.get("run_id", ""),
                                  attempt_id=identity.get("attempt_id", "")):
@@ -1181,7 +1181,7 @@ class BackgroundMainAgentRuntime:
                 public_receipt=execution_result.public_receipt,
                 delivery_artifacts=execution_result.delivery_artifacts,
                 message_tool_deliveries=execution_result.message_tool_deliveries,
-                execution_identity=execution_result.execution_identity,
+                execution_identity=getattr(execution_result, "execution_identity", None),
                 operation_verification=execution_result.operation_verification,
                 assistant_commentaries=execution_result.assistant_commentaries,
                 display_snapshot=execution_result.display_snapshot,
@@ -1497,8 +1497,14 @@ def _close_out_session_task_turn(
     delegated = delegated_delivery_task(agent, request.thread_id, task_id=request.task_id)
     from .background_failed_task import closed_failure_without_handlers
 
-    identity = execution.execution_identity or {}
-    original_task = agent.conversation_store.session_tasks.load(identity.get('task_id', '')) if identity.get('task_id') else None
+    identity = getattr(execution, "execution_identity", None) or {}
+    store = getattr(agent, "conversation_store", None)
+    session_tasks = getattr(store, "session_tasks", None) if store is not None else None
+    original_task = (
+        session_tasks.load(identity.get("task_id", ""))
+        if session_tasks is not None and identity.get("task_id")
+        else None
+    )
     failed_without_handlers = bool(original_task is not None and original_task.target_thread_id == request.thread_id
         and closed_failure_without_handlers(agent, original_task, identity))
     try:
@@ -1518,7 +1524,6 @@ def _close_out_session_task_turn(
         if closed is not None:
             from .session_task_report import result_report_key
 
-            store = getattr(agent, "conversation_store", None)
             if store is not None and hasattr(store, "session_tasks") and hasattr(store.session_tasks, "record_turn_reply_linkage"):
                 try:
                     store.session_tasks.record_turn_reply_linkage(
@@ -1535,7 +1540,6 @@ def _close_out_session_task_turn(
         except Exception:  # best-effort: background team lifecycle reconciliation is non-fatal
             pass
 
-        identity = execution.execution_identity or {}
         if identity.get("run_id") and identity.get("attempt_id"):
             from .session_tasks import (
                 confirm_background_task_completion,

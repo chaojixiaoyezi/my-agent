@@ -115,9 +115,15 @@ def lifecycle_session_message_origin(store, thread_id, task_id, wake, *, reason)
     link, error = store.tasks.link_report(thread_id, task_id)
     if error or link is None or link.status != 'active' or wake.get('root_task_id') != task_id:
         return None
-    home = Path(receiver.owner_home).absolute()
-    path = store.storage.wake_handled_dir / f'{task_id}.json'
-    raw = read_bytes_beneath(home, path.absolute().relative_to(home).parts, max_bytes=1024 * 1024)
+    # 无 owner_home 的本地独立会话或独立存储不承载 session_message 后台线程，交给 Goal/scheduler/对话原合同处理。
+    raw_home = str(receiver.owner_home or '').strip()
+    if not raw_home:
+        return None
+    home = Path(raw_home).absolute()
+    path = (store.storage.wake_handled_dir / f'{task_id}.json').absolute()
+    if not path.is_relative_to(home):
+        return None
+    raw = read_bytes_beneath(home, path.relative_to(home).parts, max_bytes=1024 * 1024)
     if raw is None:
         return None  # 其它类型根仍沿Goal/scheduler/真实对话各自的原合同。
     original = json.loads(raw)
