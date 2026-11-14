@@ -5949,6 +5949,17 @@ def _ensure_goal_progress_continuation_once(
         goal = selected_store.goals.load(resolved_thread_id, goal_id=goal_id, task_id=task_id)
     except KeyError:
         return False, True
+    except (DataCorruptionError, ValueError) as exc:
+        # 目标文件损坏或选择歧义属于确定性状态，不重试也不阻断回合收尾。
+        _HEARTBEAT_LOGGER.warning(
+            "goal continuation skipped code=%s task_id=%s effect_outcome=%s next_action=%s error=%s",
+            "GOAL_STATE_UNREADABLE",
+            task_id,
+            "not_started",
+            "repair or remove the unreadable goal file",
+            exc,
+        )
+        return False, False
     if goal is None:
         return False, True
     if (

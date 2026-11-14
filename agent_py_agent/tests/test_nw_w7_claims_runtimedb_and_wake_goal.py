@@ -1231,3 +1231,25 @@ def test_ensure_goal_progress_continuation_retries_once_and_reraises_on_double_e
     assert load_exc_info.value.errno == errno.EIO
     assert "persistent goal read #2" in str(load_exc_info.value)
     assert store.wakes.pending(limit=20) == []
+
+
+def test_ensure_goal_progress_continuation_handles_corrupt_goal_file_without_raising(tmp_path: Path):
+    agent = SimpleAgent(AgentConfig(model_backend="echo", memory_path="memory.jsonl"), tmp_path)
+    store = agent.conversation_store
+    thread = _make_thread(store, "conv-corrupt-goal-u11")
+    task_id = "task-corrupt-goal-u11"
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": task_id, "goal": "keep moving", "status": "active"})
+    goal = store.goals.create({"thread_id": thread.thread_id, "objective": "keep moving", "task_id": task_id})
+
+    store.storage.goal_path(thread.thread_id).write_text("{corrupt", encoding="utf-8")
+
+    result = ensure_goal_progress_continuation(
+        agent,
+        task_id=task_id,
+        thread_id=thread.thread_id,
+        store=store,
+        goal_id=goal.goal_id,
+        now=10.0,
+    )
+    assert result is False
+    assert store.wakes.pending(limit=20) == []
