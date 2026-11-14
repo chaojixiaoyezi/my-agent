@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+import sys
 import types
 from pathlib import Path
 
@@ -733,3 +736,56 @@ def test_final_facts_skip_the_ledger_when_switch_is_off(env, fake_runner, monkey
     env.agent._capability_config_runtime_snapshot.config = CapabilityConfig()
     monkeypatch.setattr(PackVerificationLedger, "records", lambda self: pytest.fail("开关关着不该读账本"))
     assert run_pack_verification_facts(env.agent, env.params) is None
+
+
+_ISOLATED_CHECKER = (
+    "import argparse, json\n"
+    "from pathlib import Path\n"
+    "parser = argparse.ArgumentParser()\n"
+    "parser.add_argument('target')\n"
+    "parser.add_argument('--strict', action='store_true')\n"
+    "parser.add_argument('--source')\n"
+    "parser.add_argument('--handoff')\n"
+    "parser.add_argument('--baseline-project')\n"
+    "ns = parser.parse_args()\n"
+    "data = json.loads(Path(ns.target).read_text(encoding='utf-8'))\n"
+    "inputs_ok = all(json.loads(Path(p).read_text(encoding='utf-8')) for p in (ns.source, ns.handoff, ns.baseline_project) if p)\n"
+    "valid = isinstance(data, dict) and inputs_ok\n"
+    "print(json.dumps({'schema': 'pack_verifier_result.v1', 'valid': valid, 'errors': [] if valid else [{'code': 'bad'}]}))\n"
+)
+
+
+@pytest.mark.parametrize("case", ["required-source", "optional-baseline"])
+def test_declared_args_and_inputs_drive_the_real_checker_like_the_host(tmp_path, case):
+    pkg_root = tmp_path / "pkg"
+    (pkg_root / "scripts").mkdir(parents=True)
+    (pkg_root / "scripts/check.py").write_text(_ISOLATED_CHECKER, encoding="utf-8")
+    if case == "required-source":
+        declaration = {"capability": {"verification": {
+            "verifiers": [{"id": "check-a", "member": "scripts/check.py", "args": ["{target}"],
+                           "inputs": [{"flag": "--source", "required": True}]}]}}}
+        files = {
+            "{target}": _write(pkg_root / "in/delivery.json", {"schema": "delivery.v1"}),
+            "--source": _write(pkg_root / "in/source.json", {"schema": "source.v1"}),
+        }
+    else:
+        declaration = {"capability": {"verification": {
+            "verifiers": [{"id": "check-b", "member": "scripts/check.py", "args": ["{target}", "--strict"],
+                           "inputs": [{"flag": "--handoff", "required": False}, {"flag": "--baseline-project", "required": False}]}]}}}
+        files = {
+            "{target}": _write(pkg_root / "in/project.json", {"schema": "project.v1"}),
+            "--baseline-project": _write(pkg_root / "in/project.json", {"schema": "project.v1"}),
+        }
+    [verifier] = declaration["capability"]["verification"]["verifiers"]
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    shutil.copyfile(pkg_root / verifier["member"], sandbox / "verifier.py")
+    args = [str(files["{target}"]) if arg == "{target}" else arg for arg in verifier["args"]]
+    for entry in verifier["inputs"]:
+        if entry["flag"] in files:
+            args += [entry["flag"], str(files[entry["flag"]])]
+    process = subprocess.run([sys.executable, "-I", "-S", str(sandbox / "verifier.py"), *args], cwd=sandbox,
+                             env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True, encoding="utf-8", timeout=20)
+    assert process.returncode == 0 and not process.stderr, process.stderr
+    result = json.loads(process.stdout)
+    assert result["schema"] == "pack_verifier_result.v1" and result["valid"] is True, result["errors"]

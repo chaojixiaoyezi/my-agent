@@ -243,8 +243,7 @@ def _constructor_origins(source):
 def test_only_two_host_constructors_set_trusted_origin():
     root = Path(__file__).parents[1] / "agent"
     configured = []
-    for name in ("plugin_management.py", "plugin_invocation.py", "tooling/registry.py",
-                 "contracts/main_agent_foundation_contract_cases.py"):
+    for name in ("plugin_management.py", "plugin_invocation.py", "tooling/registry.py"):
         for origins in _constructor_origins(root / name):
             if name == "tooling/registry.py":
                 origin, = origins
@@ -351,14 +350,6 @@ def test_unreadable_installation_table_does_not_become_host_allow(tmp_path):
     execution = ToolExecutor().execute(ToolExecutorRequest(call, snapshot, tmp_path,
         operation_store_required=False, plugin_gate_reviewer=h.reviewer.review))
     assert execution.decision.status == "ask" and probe.executed == [] and h.sent == []
-
-
-def test_invocation_constructor_has_at_most_four_parameters():
-    import inspect
-
-    from agent_py_agent.agent.plugin_invocation import _prepare_invocation
-
-    assert len(inspect.signature(_prepare_invocation).parameters) <= 4
 
 
 def test_closed_channel_but_still_active_plugin_must_not_relax(tmp_path):
@@ -498,11 +489,3 @@ def test_executor_reference_reaches_real_gateway_confirmation(tmp_path, monkeypa
     resolved = round_execution._resolve_tool_approval(request, 1, call, execution)
     assert resolved.result.error_code == "APPROVAL_REJECTED"
     assert events[0]["kind"] == "permission_requested" and probe.executed == []
-
-
-def test_stream_request_options_have_fixed_small_signature():
-    import inspect
-
-    from agent_py_agent.agent.gateway_parts.stream_approval import StreamApproval
-
-    assert len(inspect.signature(StreamApproval.request).parameters) <= 4

@@ -24,43 +24,6 @@ import pytest
 # Regression 1: max_tool_rounds from task_attributes (a413083)
 # ============================================================
 
-def test_regression_qq_adapter_urllib_import():
-    """验证 QQ adapter 的 urllib import 在文件顶部（可在任何函数外导入）"""
-    # 修复前：urllib 在文件底部 import，导致某些情况下 ImportError
-    # 修复后：在文件顶部导入，可在任何地方使用
-    # urllib.error 和 urllib.request 应该在模块级别可用
-    # 检查模块源码中 urllib import 位置
-    import inspect
-
-    import agent_py_agent.agent.adapter.qq as qq_module
-    source = inspect.getsource(qq_module)
-    # urllib 应该在文件前 500 字符内导入（顶部），而不是在文件末尾
-    import_pos = source.find("import urllib")
-    assert import_pos != -1, "urllib import not found"
-    assert import_pos < 500, f"urllib import at position {import_pos}, should be near top"
-
-def test_regression_gateway_heartbeat_retry_threshold():
-    """验证 gateway heartbeat 重试次数达到阈值后放弃"""
-    # 修复前：一次失败就放弃
-    # 修复后：连续 3 次失败才放弃
-    max_retries = 3
-    failures = 0
-
-    def attempt_heartbeat():
-        nonlocal failures
-        failures += 1
-        return failures < max_retries  # True = success, False = stop
-
-    results = []
-    for i in range(5):
-        if not attempt_heartbeat():
-            results.append("abandoned")
-            break
-        results.append("success")
-
-    assert results[-1] == "abandoned"
-    assert failures == 3  # 失败 3 次后放弃
-
 def test_regression_gateway_late_pending_tracking():
     """验证 gateway 能跟踪 late 的响应"""
     # 修复前：超时的请求结果被丢弃

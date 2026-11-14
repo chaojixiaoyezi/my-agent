@@ -91,20 +91,6 @@ def test_every_listed_key_has_a_reader():
                             if spec.source == "agent" and key not in LOADER_METADATA_KEYS}
 
 
-# LLM: CI-FIX-5 的恒开开关只保留兼容定义；展示不能复活运行时读取，也不能伪造业务消费者。
-# 函数用途: 验证五个遗留字段明确展示兼容定义来源，原全量读取方断言不放宽。
-@pytest.mark.parametrize("key", [
-    "background_tick_cheap_checks", "local_store_fts_enabled", "sqlite_connection_reuse",
-    "thread_prompt_prefix_freeze_enabled", "tool_default_deferral_enabled",
-])
-def test_always_on_compatibility_fields_show_definition_not_runtime_reader(key):
-    spec = parameter_registry()[key]
-    assert spec.default is True
-    assert spec.owner_module == "settings"
-    assert spec.reader == "agent/settings/config（兼容定义，非运行时读取方）"
-    assert field_readers()[key] == (spec.owner_module, spec.reader)
-
-
 # LLM: 通用兼容推导只接默认True且不属实时开关的布尔项；真实引用优先，其余缺失继续暴露。
 # 函数用途: 用独立源码夹具锁住分类边界，防止给任意未读参数填假读取方。
 def test_compatibility_derivation_preserves_real_readers_and_missing_fields(tmp_path, monkeypatch):

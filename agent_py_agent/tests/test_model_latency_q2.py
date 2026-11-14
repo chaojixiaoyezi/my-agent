@@ -518,13 +518,16 @@ def test_w21_projection_borrowed_prior_placeholder_and_midflight_mutation_guard(
         return res
 
     monkeypatch.setattr(cd.json, "dumps", aba_dumps)
-    cd._chain_checkpoints([row])
+    cd._message_checkpoints([row], include_content=False)[0]
     monkeypatch.setattr(cd.json, "dumps", orig_dumps)
-    assert cd._chain_checkpoints([{"content": "old"}]) != cd._chain_checkpoints([{"content": "new"}])
+    assert (
+        cd._message_checkpoints([{"content": "old"}], include_content=False)[0]
+        != cd._message_checkpoints([{"content": "new"}], include_content=False)[0]
+    )
 
     large_prior = [{"role": "user", "content": f"{i}:" + ("x" * 65536)} for i in range(80)]
     tool_ir_history.project_native_provider_messages([], prior_messages=large_prior, copy_prior=False)
-    cd._chain_checkpoints([{"content": [f"{i}:" + ("x" * 65536) for i in range(80)]}])
+    cd._message_checkpoints([{"content": [f"{i}:" + ("x" * 65536) for i in range(80)]}], include_content=False)[0]
     assert getattr(tool_ir_history._PROJECTION_TLS, "observed_key", None) is None
     assert getattr(tool_ir_history._PROJECTION_TLS, "post_key", None) is None
     assert getattr(cd._DIGEST_TLS, "observed_key", None) is None

@@ -1,5 +1,6 @@
 """能力包 v2 块 1：capability.verification 声明、启用前执行确认与同意摘要的组件验证（不运行包内程序、不起 Gateway）。"""
 
+import hashlib
 import json
 
 import pytest
@@ -19,6 +20,7 @@ from agent_py_agent.agent.plugin_manifest import PluginPackageError
 from agent_py_agent.agent.plugin_package import inspect_plugin_package
 from agent_py_agent.tests.test_capability_activation import content_manager
 from agent_py_agent.tests.test_capability_package import content_bundle
+from scripts.build_capability_package import build_capability_package
 
 CHECKER = b"import json, sys\nprint(json.dumps({'schema': 'pack_verifier_result.v1', 'valid': True}))\n"
 VERIFICATION = {
@@ -162,3 +164,107 @@ def test_enable_without_verifiers_needs_no_confirmation(tmp_path, monkeypatch):
     enabled = service.command("/plugins enable story-content", revision=service.catalog().revision, request_id="en")
     assert enabled["state"] == "succeeded", enabled
     assert "verifier_consent_sha256" not in service.installations.snapshot()[0].activation.to_payload()
+
+
+_GENERIC_VERIFICATION_CASES = {
+    "pkg-required-source": (
+        {
+            "deliverables": [{"id": "delivery", "path_patterns": ["out/**/*.json"], "required": True,
+                              "field_match": {"format": "json", "field": "schema", "equals": ["delivery.v1"]}}],
+            "verifiers": [{"id": "check-delivery", "member": "scripts/check.py", "runtime": "python",
+                           "applies_to": "delivery", "args": ["{target}"], "timeout_seconds": 20,
+                           "inputs": [{"flag": "--source", "source": "task_input", "path_patterns": ["**/*.json"],
+                                       "required": True,
+                                       "field_match": {"format": "json", "field": "schema", "equals": ["source.v1"]}}]}],
+            "input_policy": "preserve_originals",
+        },
+        ["--source"],
+        ["--source（任务开始时已有的文件，必需）"],
+    ),
+    "pkg-optional-inputs": (
+        {
+            "deliverables": [{"id": "project", "path_patterns": ["out/**/*.json"], "required": True,
+                              "field_match": {"format": "json", "field": "schema", "equals": ["project.v1"]}}],
+            "verifiers": [{"id": "check-project", "member": "scripts/check.py", "runtime": "python",
+                           "applies_to": "project", "args": ["{target}", "--strict"], "timeout_seconds": 20,
+                           "inputs": [{"flag": "--handoff", "source": "turn_output", "path_patterns": ["**/*.json"],
+                                       "required": False,
+                                       "field_match": {"format": "json", "field": "schema", "equals": ["handoff.v1"]}},
+                                      {"flag": "--baseline-project", "source": "task_input", "path_patterns": ["**/*.json"],
+                                       "required": False,
+                                       "field_match": {"format": "json", "field": "schema", "equals": ["project.v1"]}}]}],
+            "input_policy": "preserve_originals",
+        },
+        ["--handoff", "--baseline-project"],
+        ["--handoff（本回合写出的文件）", "--baseline-project（任务开始时已有的文件）"],
+    ),
+}
+
+
+def _build_generic_verified_package(tmp_path, package: str) -> tuple[dict, bytes, object]:
+    verification, _flags, _texts = _GENERIC_VERIFICATION_CASES[package]
+    root = tmp_path / "src" / package
+    (root / "scripts").mkdir(parents=True, exist_ok=True)
+    (root / "CAPABILITY.md").write_text(f"# {package}\n", encoding="utf-8")
+    (root / "scripts/check.py").write_bytes(CHECKER)
+    declaration = {
+        "plugin_id": package,
+        "version": "1.0.0",
+        "summary": f"{package} 核验包",
+        "capability": {
+            "description": f"{package} 描述",
+            "keywords": ["verify"],
+            "entry_document": "CAPABILITY.md",
+            "verification": verification,
+        },
+        "files": [{"path": "CAPABILITY.md"}, {"path": "scripts/check.py"}],
+        "settings_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    }
+    bundle = build_capability_package(declaration, root, tmp_path / f"{package}.zip")
+    return declaration, bundle.read_bytes(), root
+
+
+@pytest.mark.parametrize("package", _GENERIC_VERIFICATION_CASES)
+def test_verification_block_roundtrips_and_pins_the_checker(tmp_path, package):
+    declaration, raw, root = _build_generic_verified_package(tmp_path, package)
+    inspected = inspect_plugin_package(raw)
+    verification = inspected.manifest.capability.verification
+    assert verification.to_payload() == declaration["capability"]["verification"]
+    assert verification.input_policy == "preserve_originals"
+    assert [item.required for item in verification.deliverables] == [True]
+    [verifier] = verification.verifiers
+    member = {item.path: item for item in inspected.manifest.files}[verifier.member]
+    assert member.sha256 == hashlib.sha256((root / verifier.member).read_bytes()).hexdigest()
+    assert member.executable is False, "检查程序只由宿主在沙箱里跑，包本身不声明可执行入口"
+
+
+@pytest.mark.parametrize("package", _GENERIC_VERIFICATION_CASES)
+def test_confirmation_lists_the_declared_inputs(tmp_path, package):
+    _verification, flags, texts = _GENERIC_VERIFICATION_CASES[package]
+    _declaration, raw, _root = _build_generic_verified_package(tmp_path, package)
+    inspected = inspect_plugin_package(raw)
+    details = verifier_confirmation_details(inspected.manifest, inspected.sha256)
+    assert details["kind"] == CONSENT_KIND
+    assert [entry["flag"] for entry in details["verifiers"][0]["inputs"]] == flags
+    message = verifier_confirmation_message({**details, "confirm_code": verifier_confirmation_code(details)})
+    assert all(text in message for text in texts), message
+
+
+@pytest.mark.parametrize("package", _GENERIC_VERIFICATION_CASES)
+def test_enable_asks_for_confirmation_then_records_consent(tmp_path, monkeypatch, package):
+    _declaration, raw, _root = _build_generic_verified_package(tmp_path, package)
+    service, source = content_manager(tmp_path, monkeypatch)
+    removed = service.command("/plugins remove story-content", revision=service.catalog().revision, request_id="rm0")
+    assert removed["state"] == "succeeded", removed
+    source.write_bytes(raw)
+    installed = service.command(f'/plugins install "{source}"', revision=service.catalog().revision, request_id="inst")
+    assert installed["state"] == "succeeded", installed
+    preview = service.command(f"/plugins enable {package}", revision=service.catalog().revision, request_id="en1")
+    confirmation = preview["details"]["confirmation"]
+    assert preview["details"]["reason"] == "confirmation_required" and confirmation["kind"] == CONSENT_KIND
+    assert service.installations.snapshot()[0].activation is None, "没确认前不启用"
+    enabled = service.command(f"/plugins enable {package} --confirm {confirmation['confirm_code']}",
+                              revision=service.catalog().revision, request_id="en2")
+    assert enabled["state"] == "succeeded", enabled
+    entry = service.installations.snapshot()[0]
+    assert verifier_consent_matches(entry.manifest, entry.package_sha256, entry.activation.verifier_consent_sha256)

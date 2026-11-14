@@ -6,7 +6,6 @@ import hashlib
 import inspect
 import json
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Barrier
 
@@ -225,8 +224,8 @@ def test_index_write_error_preserves_previous_index(tmp_path, monkeypatch):
     assert [row['version'] for row in history.list_versions(tmp_path, 'script', 'demo')] == [3, 2, 1]
 
 
-# LLM: 草稿不占发布版本号；按注入时间处理三类TTL，不动正式历史与blob。
-# 函数用途: 验证草稿CRUD、过期清理和无限正式保留。
+# LLM: 草稿不占发布版本号。
+# 函数用途: 验证草稿CRUD。
 def test_drafts_prune_and_published_retention(tmp_path):
     result = history.save_draft(tmp_path, 'script', 'demo', payload=_payload(), code=b'draft',
         side_files={'README.md': 'draft'}, base_version=2)
@@ -236,31 +235,6 @@ def test_drafts_prune_and_published_retention(tmp_path):
     assert history.latest_version(tmp_path, 'script', 'demo') is None
     assert history.delete_draft(tmp_path, 'script', 'demo') is True
     assert history.delete_draft(tmp_path, 'script', 'demo') is False
-    result = history.save_draft(tmp_path, 'script', 'demo', payload=_payload(), code=b'draft')
-    old = '2020-01-01T00:00:00+00:00'
-    for number in range(1, 102):
-        history.record_version(tmp_path, 'script', 'demo', payload=_payload(), code=str(number).encode(), published_at=old)
-    root = _root(tmp_path)
-    request = root / 'requests' / 'run.json'
-    request.parent.mkdir(parents=True)
-    request.write_text(json.dumps({'created_at': old}))
-    candidate = root / 'candidates' / 'script' / 'demo' / 'candidate.json'
-    candidate.parent.mkdir(parents=True)
-    candidate.write_text(json.dumps({'created_at': old}))
-    now = datetime.fromisoformat(result['updated_at'])
-    history.prune_history(tmp_path, now=(now + timedelta(days=13)).isoformat())
-    assert history.get_draft(tmp_path, 'script', 'demo') == result
-    removed = history.prune_history(tmp_path, now=(now + timedelta(days=15)).isoformat())
-    assert isinstance(removed, dict)
-    assert history.get_draft(tmp_path, 'script', 'demo') is None
-    assert not request.exists() and not candidate.exists()
-    rows = history.list_versions(tmp_path, 'script', 'demo', limit=200)
-    assert len(rows) == 101
-    assert history.get_version(tmp_path, 'script', 'demo', 1)['legacy'] is False
-    for row in rows:
-        record = history.get_version(tmp_path, 'script', 'demo', row['version'])
-        assert history.blob_exists(tmp_path, record['code_sha256'])
-        assert history.blob_exists(tmp_path, record['payload_blob'])
 
 
 # LLM: 回放判定只认枚举；后写入的相同边结论覆盖旧观察，非连续边不跳级。
@@ -351,7 +325,6 @@ def test_history_public_signatures():
         'materialize_script': 'owner_home, record: Mapping, staging_root',
         'save_draft': 'owner_home, kind, asset_id, *, payload: Mapping, code: bytes | None = None, side_files: Mapping[str, str | None] | None = None, base_version: int | None = None',
         'get_draft': 'owner_home, kind, asset_id', 'delete_draft': 'owner_home, kind, asset_id',
-        'prune_history': 'owner_home, *, now: str, draft_ttl_days: int = 14, request_ttl_days: int = 14, candidate_ttl_days: int = 30',
         'normalize_code_text': 'text: str', 'code_fingerprint': 'code: bytes | str',
         'payload_fingerprint': 'payload: Mapping',
         'asset_fingerprint': '*, payload: Mapping, code: bytes | str | None = None, side_files: Mapping[str, str | None] | None = None',

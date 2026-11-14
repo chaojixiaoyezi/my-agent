@@ -162,7 +162,7 @@ def test_retired_fts_configuration_cannot_disable_formal_index_upgrade(tmp_path,
     policy['maintenance_enabled'] = False
     home.owner_retention_json.write_text(json.dumps(policy))
     # 上层性能开关已退役；正式写者常开，维护不能独自复活旧配置门。
-    config = SimpleNamespace(local_store_fts_enabled=False)
+    config = SimpleNamespace()
     formal = build_owner_local_store(config, {'local_store_path': store.db_path,
         'local_store_files_dir': store.files_dir, 'local_store_events_path': store.events_path})
     assert formal.enable_fts and formal.fts_available

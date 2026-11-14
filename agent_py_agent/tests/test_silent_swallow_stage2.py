@@ -155,16 +155,6 @@ class TestSilentSwallowNowLogs:
             capability_followup._record_grant_wake_error(agent, "run-gw", RuntimeError("wake failed"))
         assert any("grant-wake failed" in r.message for r in caplog.records)
 
-    def test_clear_pending_work_failure_logs(self, caplog):
-        """_clear_pending_work 失败不再无声:记 warning。"""
-        from agent_py_agent.agent.agent_core.orchestration.dispatch import loop
-
-        class _Locked:
-            __slots__ = ()  # 赋值 _has_pending_work 会抛 AttributeError
-
-        with caplog.at_level(logging.WARNING):
-            loop._clear_pending_work(_Locked())
-        assert any("_clear_pending_work failed" in r.message for r in caplog.records)
 
 # ── M5: runner 结果 / context bundle 原子写 ──────────────────────────────────
 

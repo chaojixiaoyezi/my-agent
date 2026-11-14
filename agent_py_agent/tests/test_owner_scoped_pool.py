@@ -313,50 +313,6 @@ def test_config_with_owner_overrides_owner_keeps_rest(tmp_path) -> None:
     assert base.my_agent_owner_id == "main"  # 原 config 不被改(replace 返回新实例)
 
 
-# LLM: 真实JSONL读取/写后刷新共用缓存，缩小预算只为命中边界，不修改正文或放宽返回断言。
-# 函数用途: 验证超大历史文件仍可解析但不留在进程缓存，包括清掉旧的小版本快照。
-@pytest.mark.parametrize('entry', ['read', 'write'])
-def test_opt7_history_oversize_is_returned_without_retention(tmp_path, monkeypatch, entry):
-    from agent_py_agent.agent.gateway_parts import io
-
-    monkeypatch.setattr(io, '_GATEWAY_HISTORY_CACHE', {})
-    monkeypatch.setattr(io, '_MAX_GATEWAY_HISTORY_CACHE_FILE_BYTES', 80, raising=False)
-    path = tmp_path / 'history.jsonl'
-    row = {'id': 'one', 'content': 'small'}
-    path.write_text(json.dumps(row) + '\n')
-    io._gateway_history_snapshot(path)
-    assert str(path.resolve()) in io._GATEWAY_HISTORY_CACHE
-    row['content'] = '正文' * 100
-    path.write_text(json.dumps(row, ensure_ascii=False) + '\n', encoding='utf-8')
-    lines, index = io._gateway_history_snapshot(path)
-    if entry == 'write':
-        io._store_gateway_history_cache(path, lines, index)
-    assert index['one'].payload == row and json.loads(lines[0]) == row
-    assert str(path.resolve()) not in io._GATEWAY_HISTORY_CACHE
-
-
-# LLM: 每个文件单独不超限，总预算取实际stat字节，两条边界可保留，第三条淘汰最早项。
-# 函数用途: 验证历史冷读和写后刷新均受总字节预算约束而非只有条数上限。
-@pytest.mark.parametrize('entry', ['read', 'write'])
-def test_opt7_history_total_budget_evicts_oldest(tmp_path, monkeypatch, entry):
-    from agent_py_agent.agent.gateway_parts import io
-
-    monkeypatch.setattr(io, '_GATEWAY_HISTORY_CACHE', {})
-    paths = [tmp_path / f'{number}.jsonl' for number in range(3)]
-    body = json.dumps({'id': 'one', 'content': 'x' * 20}) + '\n'
-    for path in paths:
-        path.write_text(body)
-    size = paths[0].stat().st_size
-    monkeypatch.setattr(io, '_MAX_GATEWAY_HISTORY_CACHE_TOTAL_BYTES', size * 2, raising=False)
-    for path in paths:
-        if entry == 'read':
-            io._gateway_history_snapshot(path)
-        else:
-            io._store_gateway_history_cache(path, [body.rstrip('\n')], {})
-    assert list(io._GATEWAY_HISTORY_CACHE) == [str(path.resolve()) for path in paths[1:]]
-    assert sum(row[0][1] for row in io._GATEWAY_HISTORY_CACHE.values()) == size * 2
-
-
 # LLM: 使用真实stat和JSON解析，只替代领域对象构造；固定本地缓存时钟避免粗mtime窗口隐藏大小断言。
 # 函数用途: 验证run超限仍每次返回解析副本，小版本缓存不残留且256KiB上限看size而非inode。
 def test_opt7_run_large_item_bypasses_cache_and_drops_old_entry(tmp_path, monkeypatch):

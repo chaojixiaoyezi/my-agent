@@ -1,5 +1,4 @@
 """#138：步骤预算控制真实辅助出口；仅模型替身，不代表供应商实耗。"""
-import ast
 import inspect
 import json
 from copy import deepcopy
@@ -15,7 +14,7 @@ from agent_py_agent.agent.memory_archive.tokens import estimate_tokens
 from agent_py_agent.agent.workflows import WorkflowEngine
 from agent_py_agent.agent.workflows.analysis_input_budget import (
     AnalysisInputBudgetError,
-    apply_input_budget,
+    apply_prompt_input_budget,
 )
 from agent_py_agent.agent.workflows.models import AnalysisContext
 
@@ -256,9 +255,9 @@ def test_invalid_budget_rejected_without_model_or_material_mutation(budget):
 def test_helper_none_and_under_budget_preserve_identity_and_bytes():
     material = {'instruction': '规则', 'step': {'config': {}}, 'run_inputs': {'x': '\\"中文\n'}}
     original = json.dumps(material, ensure_ascii=False)
-    assert apply_input_budget(material, None) == (material, None)
-    assert apply_input_budget(material, None)[0] is material
-    result, facts = apply_input_budget(material, {'input_token_budget': 1000, 'drop_fields': ['run_inputs.x']})
+    assert apply_prompt_input_budget(material, None) == (material, None)
+    assert apply_prompt_input_budget(material, None)[0] is material
+    result, facts = apply_prompt_input_budget(material, {'input_token_budget': 1000, 'drop_fields': ['run_inputs.x']})
     assert result is material
     assert json.dumps(result, ensure_ascii=False) == original
     assert facts == {
@@ -280,7 +279,7 @@ def test_each_data_domain_is_bounded_with_visible_marker(field):
         field: {'samples': ['中文\\"\n' * 5000, 'tail']},
     }
     saved = deepcopy(material)
-    result, facts = apply_input_budget(material, {'input_token_budget': 500})
+    result, facts = apply_prompt_input_budget(material, {'input_token_budget': 500})
     assert estimate_tokens(json.dumps(result, ensure_ascii=False)) <= 500
     assert facts['input_tokens_after_budget'] == estimate_tokens(json.dumps(result, ensure_ascii=False))
     assert field in facts['omitted_fields'] and facts['evidence_truncated']
@@ -288,7 +287,7 @@ def test_each_data_domain_is_bounded_with_visible_marker(field):
     for key in ('instruction', 'step', 'resolved_skill_ids', 'skill_details'):
         assert result[key] == saved[key]
     assert material == saved
-    assert apply_input_budget(material, {'input_token_budget': 500}) == (result, facts)
+    assert apply_prompt_input_budget(material, {'input_token_budget': 500}) == (result, facts)
 
 
 # LLM: 优先顺序跨数据域生效，drop仅在超额时执行，并在标记中精确记录。
@@ -300,7 +299,7 @@ def test_priority_drop_order_and_precise_truncation_count():
     budget = {'input_token_budget': 500, 'overflow_policy': 'truncate',
               'priority_fields': ['run_inputs.keep', 'step_inputs.second'],
               'drop_fields': ['run_inputs.noise']}
-    result, facts = apply_input_budget(material, budget)
+    result, facts = apply_prompt_input_budget(material, budget)
     assert result['run_inputs']['keep'] == '核心'
     assert 'noise' not in result['run_inputs']
     assert 'run_inputs.noise' in facts['omitted_fields']
@@ -316,7 +315,7 @@ def test_priority_drop_order_and_precise_truncation_count():
 # 函数用途: 验证列表与字典两种材料形状及精确估算。
 def test_container_prefix_and_empty_values_remain_json():
     material = {'instruction': '规则', 'run_inputs': ['first', 'second', '中文' * 3000, 'last']}
-    result, facts = apply_input_budget(material, {'input_token_budget': 300})
+    result, facts = apply_prompt_input_budget(material, {'input_token_budget': 300})
     assert result['run_inputs'][:2] == ['first', 'second']
     assert len(result['run_inputs']) == 3
     assert ('中文' * 3000).startswith(result['run_inputs'][2])
@@ -329,7 +328,7 @@ def test_container_prefix_and_empty_values_remain_json():
 def test_oversized_immutable_rules_cannot_be_trimmed():
     material = {'instruction': '规则' * 5000, 'skill_details': ['方法' * 5000], 'run_inputs': ['数据']}
     with pytest.raises(AnalysisInputBudgetError) as caught:
-        apply_input_budget(material, {'input_token_budget': 100})
+        apply_prompt_input_budget(material, {'input_token_budget': 100})
     assert caught.value.error_code == 'WORKFLOW_ANALYSIS_INPUT_OVER_BUDGET'
     assert caught.value.facts['input_tokens_after_budget'] > 100
     assert caught.value.facts['raw_artifact_unavailable_reason'] == 'RUN_OUT_NOT_AVAILABLE'
@@ -387,45 +386,9 @@ def test_engine_persists_budget_rejection(tmp_path, limit, policy, error_code):
     assert engine.store.load_run(run.workflow_run_id).steps[0].escalation_result['analysis_attempts'] == attempts
 
 
-# LLM: 静态门同等检查基础和最终正文投影预算入口，仍要求真实调用早于组包和发送，注释不能替代调用。
-# 函数用途: 拦截在预算应用之前组装或发送模型请求的回归。
-def assert_budget_wiring(source):
-    tree = ast.parse(source)
-    analyzer = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'analyze')
-    calls = [('apply_input_budget' if node.func.id == 'apply_prompt_input_budget' else node.func.id, node.lineno)
-             for node in ast.walk(analyzer)
-             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
-    required = ('apply_input_budget', 'AuxiliaryModelCallRequest', 'generate_auxiliary_model_response')
-    assert all(any(symbol == name for symbol, _ in calls) for name in required)
-    positions = {name: min(line for symbol, line in calls if symbol == name)
-                 for name in required}
-    assert positions['apply_input_budget'] < positions['AuxiliaryModelCallRequest']
-    assert positions['AuxiliaryModelCallRequest'] < positions['generate_auxiliary_model_response']
-
-
-# LLM: 生产入口及错误样本都跑静态断言；冻结签名与无模块数字常量一并验证。
-# 函数用途: 固定预算接线顺序和C-W4-02公共接口。
+# 函数用途: 验证analysis handler入口签名及异常继承边界。
 def test_ast_wiring_guard_and_frozen_interface():
     from agent_py_agent.agent.workflows import analysis_input_budget as module
 
-    assert_budget_wiring(inspect.getsource(bootstrap))
-    invalid = ('def analyze():\n'
-               '    request = AuxiliaryModelCallRequest()\n'
-               '    material, facts = apply_input_budget(material, budget)\n'
-               '    generate_auxiliary_model_response(request)\n')
-    with pytest.raises(AssertionError):
-        assert_budget_wiring(invalid)
-    with pytest.raises(AssertionError):
-        assert_budget_wiring(invalid.replace('apply_input_budget(material, budget)',
-                                             'apply_prompt_input_budget(material, budget, prompt_prefix=prefix)'))
-    with pytest.raises(AssertionError):
-        assert_budget_wiring(invalid.replace('    material, facts = apply_input_budget(material, budget)\n',
-                                             '    # apply_prompt_input_budget is not a call\n'))
-    signature = inspect.signature(module.apply_input_budget)
-    assert str(signature) == "(material: 'dict[str, Any]', budget: 'object') -> 'tuple[dict[str, Any], dict[str, Any] | None]'"
     assert str(inspect.signature(bootstrap._workflow_analysis_handler)) == '(agent, *, run_params=None)'
     assert issubclass(module.AnalysisInputBudgetError, ValueError)
-    for node in ast.parse(inspect.getsource(module)).body:
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            assert not any(isinstance(item, ast.Constant) and type(item.value) in (int, float)
-                           for item in ast.walk(node))

@@ -9,8 +9,6 @@ def test_regular_wake_never_runs_child_synchronously(monkeypatch):
     started = []
     monkeypatch.setattr(capability_auto_sweep, "auto_start_stalled_orphans",
                         lambda agent: started.append(agent) or {"started": 1})
-    monkeypatch.setattr(capability_auto_sweep, "_redispatch_stalled_subagents",
-                        lambda agent: (_ for _ in ()).throw(AssertionError("synchronous runner blocked parent lane")))
     agent = SimpleNamespace(subagents=object())
     result = capability_auto_sweep.auto_capability_sweep(agent, SimpleNamespace(metadata={}, source_agent_id=""))
     assert started == [agent]

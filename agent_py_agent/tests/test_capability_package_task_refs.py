@@ -361,3 +361,32 @@ def test_bare_package_name_is_not_implicitly_converted_to_package_grant(tmp_path
     assert current.capability_requests[0].status == "OPEN"
     assert current.capability_grants == [] and current.allowed_skills == []
     assert task_skill_references(current) == []
+
+
+@pytest.mark.parametrize("grant_mode", ["explicit", "omitted", "empty"])
+def test_documented_batch_grant_pins_host_version_without_default_expansion(tmp_path, grant_mode):
+    agent, _store, entries = _agent(tmp_path)
+    enabled = entries[0]
+    request = {
+        "items": [{"goal": "按批处理请求执行受控能力任务", "allowed_skills": ["capability:story-a"]}],
+        "defer_start": True,
+    }
+    if grant_mode == "omitted":
+        del request["items"][0]["allowed_skills"]
+    elif grant_mode == "empty":
+        request["items"][0]["allowed_skills"] = []
+
+    result = CreateSubagentsTool(agent).execute(request)
+
+    assert result.ok, result.output
+    tasks = agent.subagents.list_runs()
+    assert len(tasks) == 1
+    task = tasks[0]
+    assert task.allowed_skills == (["capability:story-a"] if grant_mode == "explicit" else [])
+    refs = task.attributes.get("skill_snapshot_refs", [])
+    if grant_mode == "explicit":
+        assert refs == [agent.current_skill_snapshot().resolve_package("story-a").to_ref()]
+        assert refs[0]["activation_id"] == enabled.activation_id
+        assert refs[0]["content_sha256"] == enabled.package_sha256
+    else:
+        assert not refs
