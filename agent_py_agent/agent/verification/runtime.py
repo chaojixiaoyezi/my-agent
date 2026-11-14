@@ -11,7 +11,6 @@ to write advisory evidence must never change the underlying tool result.
 
 import logging
 import sqlite3
-from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -41,25 +40,6 @@ class VerificationItem:
     passed: bool = False
     message: str = ""
     details: dict[str, object] = field(default_factory=dict)
-
-
-class VerificationRuntime:
-    """Runtime verifier execution and isolation."""
-
-    @staticmethod
-    def verify(verifier: Callable, context: object) -> VerificationItem:
-        try:
-            res = verifier(context)
-            if isinstance(res, VerificationItem):
-                return res
-            if isinstance(res, bool):
-                return VerificationItem(passed=res)
-            return VerificationItem(passed=True, details=res if isinstance(res, dict) else {})
-        except (InterruptedError, KeyboardInterrupt):
-            raise
-        except Exception as exc:
-            logging.getLogger(__name__).warning("verifier internal error: %s", exc, exc_info=True)
-            return VerificationItem(passed=False, message=f"verifier internal error: {type(exc).__name__}")
 
 
 # 函数用途: 根据真实工具结果记录测试证据、标记旧证据过期并写入Owner工具调用耗时遥测；已落账通过事实反馈本run采用的准确自学版本，不改变原工具结果。

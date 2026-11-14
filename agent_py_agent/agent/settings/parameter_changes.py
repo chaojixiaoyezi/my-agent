@@ -26,7 +26,6 @@ from ..common.json_io import (
     read_jsonl_objects_report,
     write_private_text_file_atomic_unlocked,
 )
-from ..common.nofollow_fs import ensure_private_dir
 from .config_io import (
     parse_scalar,
     render_config_change,
@@ -624,16 +623,6 @@ def set_feishu_connection(app_id: str, app_secret: str, *, paths: WritePaths, or
         return _failure(error)
     except (OSError, ValueError):
         return _failure(ParameterChangeError("USER_CONFIG_WRITE_FAILED", "配置事务写入失败，请核对配置与账本。"))
-
-
-# LLM: 参数中心新建的配置文件可能放凭据类键（capability 来源也会走到这里），一律以 0600 新建；已存在就报错交给调用方，
-#   调用方只在确认不存在时才调用。之后的写回由 config_io 保留这个权限。
-# 函数用途: 以仅本人可读写的权限新建一份只含说明行的配置文件。副作用：新建文件。
-def _create_config_file(path: Path) -> None:
-    ensure_private_dir(path.parent)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write("# 由参数中心创建（只含被改的键，其余按随包默认）\n")
 
 
 # LLM: 文件原本不存在时恢复 = 删除新建文件，避免留下半截配置；原本存在则原样写回。

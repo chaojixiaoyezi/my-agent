@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import read_text_lines_cached
 from ..runtime_errors import runtime_error_report
 
 
@@ -30,29 +29,6 @@ class RegistryReadContext:
     record_from_payload: Callable[[object], Any]
     latest: dict[str, Any] = field(default_factory=dict)
     errors: list[dict[str, Any]] = field(default_factory=list)
-
-
-def latest_records_with_errors(
-    path: Path,
-    record_from_payload: Callable[[object], Any],
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Return latest records by id and preserve malformed-row diagnostics."""
-
-    context = RegistryReadContext(path=path, record_from_payload=record_from_payload)
-    if not path.exists():
-        return context.latest, context.errors
-    try:
-        # mtime+size 守门缓存(批4):注册表反复 lookup 时免整文件重读。
-        lines = read_text_lines_cached(path)
-    except (OSError, UnicodeError) as exc:
-        context.errors.append(_error_report(exc, context="artifact_registry.read", path=path))
-        return context.latest, context.errors
-    return latest_records_from_lines(
-        path,
-        lines,
-        record_from_payload,
-        initial_errors=context.errors,
-    )
 
 
 # LLM: Host-owned callers may obtain bytes through descriptor-anchored IO. Keep parsing separate so

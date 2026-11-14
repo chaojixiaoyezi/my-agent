@@ -64,21 +64,6 @@ def decode_bytes(data: bytes) -> tuple[str, str]:
         return best
 
 
-def detect_encoding(data: bytes) -> str:
-    """只返回探测到的编码名(写回保留原编码用)。测不出退 utf-8。"""
-    bom = _bom_encoding(data)
-    if bom:
-        return bom
-    try:
-        data.decode("utf-8")
-        return "utf-8"
-    except UnicodeDecodeError:
-        if b"\x00" in data:
-            return "utf-8"  # 二进制:写回不按它"编码"保留,用 utf-8 默认
-        best = _charset_best(data)
-        return best[1] if best else "utf-8"
-
-
 # LLM: UTF-16/32 的换行必须先按 BOM 解码；不能把分散在代码单元里的 CR/LF 当成单字节文本。
 # 函数用途: 根据文本字符而非 UTF-16 原始字节统计主导换行风格。
 def detect_line_ending(data: bytes) -> str:

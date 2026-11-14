@@ -7,7 +7,7 @@ import os
 from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -81,13 +81,6 @@ def bind_coordinator_requirement(provider: Callable) -> None:
     _coordinator_required = provider
 
 
-# LLM: 分支只有ContextVar、冻结W分区及原C纯内存登记；角色信号只拒默认绕行，零路径不构造账本、不查询进程或FD、不读写磁盘。
-# 函数用途: 告诉原入口本次启动是否必须登记，丢失C/W上下文不能回落普通Popen。
-def executor_registration_enabled() -> bool:
-    partition = _worker_partition()
-    return _SCOPE.get() is not None or (partition is not None and partition.count > 0) or bool(_coordinator_required())
-
-
 # LLM: 只核原冻结W/C provider及不可逆host拒事实，显式Count0 launcher不是MP模式；纯内存，不授P5或恢复scope。
 # 函数用途: 告诉跨层业务是否必须携带原请求执行端口。
 def managed_request_execution_required() -> bool:
@@ -105,25 +98,6 @@ def executor_scope(launch: Callable | None, partition=None):
     if launch is not None and required is not None and required != partition:
         raise ExecutorRegistrationError({"error_code": "EXECUTOR_CONTEXT_CONFLICT", "stage": "binding"})
     token = _SCOPE.set(_ExecutorScope(launch, os.getpid()) if launch is not None else None)
-    try:
-        yield
-    finally:
-        _SCOPE.reset(token)
-
-
-# LLM: ToolExecutor在批准后的真实handler边界绑定规范call_id；纯内存上下文不授予权限、不读用户参数。
-# 函数用途: 为已安装的执行上下文临时绑定当前工具调用，默认路径保持无查询和无I/O。
-@contextmanager
-def executor_tool_call_scope(tool_call_id: str):
-    scope = _SCOPE.get()
-    if scope is None:
-        yield
-        return
-    if scope.creator_pid != os.getpid():
-        raise ExecutorRegistrationError({"error_code": "EXECUTOR_CONTEXT_REQUIRED", "stage": "binding"})
-    if not isinstance(tool_call_id, str) or not tool_call_id.strip() or len(tool_call_id) > 512:
-        raise ExecutorRegistrationError({"error_code": "EXECUTOR_TOOL_CALL_INVALID", "stage": "binding"})
-    token = _SCOPE.set(replace(scope, tool_call_id=tool_call_id))
     try:
         yield
     finally:
@@ -150,15 +124,6 @@ def capture_executor_launcher():
     if scope.creator_pid != os.getpid():
         raise ExecutorRegistrationError({"error_code": "EXECUTOR_CONTEXT_REQUIRED", "stage": "binding"})
     return scope.launch
-
-
-# LLM: 没有受信绑定或 fork 继承的旧绑定一律拒绝；绝不执行旧 Popen，也不重试启动。
-# 函数用途: 让已获准命令经过注入的先登记后放行实现，返回原等待链路所需的 Popen。
-def registered_popen(kind: str, argv, options: ExecutorProcessOptions):
-    scope = _SCOPE.get()
-    if scope is None or scope.creator_pid != os.getpid():
-        raise ExecutorRegistrationError({"error_code": "EXECUTOR_CONTEXT_REQUIRED", "stage": "binding"})
-    return scope.launch(kind, argv, options)
 
 
 # LLM: 当前 P1a 垫片使用 POSIX FD/PGID/SID 协议；内部模式 Windows 必须拒绝，而不是偷偷走原 powershell。

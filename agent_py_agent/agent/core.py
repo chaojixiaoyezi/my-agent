@@ -275,27 +275,6 @@ def _fixed_curator_profile_usable(agent: object, profile_id: str) -> bool:
     return True
 
 
-# LLM: 使用已解析的模型档案配置构造关闭流式输出的Curator专用后端路由，失败时安全返回None交由调用方回退。
-# 函数用途: 用一个会话档案的完整配置建无工具非流式后端；建不出来返回 None（调用方退回默认组）。
-def _curator_profile_route(profile_id: str, profile_config: object, out_reasons: dict[str, str] | None = None):
-    from .memory_store.curator_models import CuratorModelRoute
-
-    scoped = replace(profile_config, stream_enabled=False)
-    try:
-        backend = get_backend(str(scoped.model_backend), scoped)
-    except Exception:  # noqa: BLE001 - 后端构造失败只让这批会话退回默认模型，不中断整理。
-        if out_reasons is not None:
-            out_reasons[profile_id] = "backend_unavailable"
-        return None
-    if getattr(backend, "name", "") == "anthropic_compatible" and "specific" not in getattr(
-        getattr(backend, "model_request_capabilities", None), "native_tool_choices", ("specific",)
-    ):
-        if out_reasons is not None:
-            out_reasons[profile_id] = "forced_tool_choice_not_supported"
-        return None
-    return CuratorModelRoute(profile_id, backend, str(scoped.model_backend), str(scoped.model_name))
-
-
 # LLM: 组合根是唯一允许将Memory Store与归档控制面桥接的适配层，一次调用批量扫描run_id集合的索引元数据。
 # 函数用途: 按 run_id 集合查询当前 owner 的工具产物索引，并保持内部层依赖单向。
 def _query_curator_tool_references(
@@ -1132,15 +1111,6 @@ TOOL_DETAIL_MAX_CHARS = 4000
 # 每次注入 prompt 的“工具详细说明”条数上限：调大只多花 token、调小会漏工具；
 # 2026-09-28 参数减量从配置降为常量（值不变）。
 TOOL_RETRIEVAL_LIMIT_COUNT = 12
-
-
-def build_script_work_context(agent: SimpleAgent, *, scratch_dir: Path, run_id: str = '', task_id: str = '',
-                              effective_path_scope: object):
-    """供原脚本启动器冻结真实工作区；scratch 和有效读写范围必须由宿主显式传入。"""
-    from .workflows.models import ScriptWorkContext
-
-    return ScriptWorkContext(workspace_root=agent.effective_workspace_root, scratch_dir=scratch_dir,
-                             run_id=run_id, task_id=task_id, effective_path_scope=effective_path_scope)
 
 
 def _tool_registry_host_exclusive_kwargs(home_paths: object, config: AgentConfig) -> dict[str, object]:

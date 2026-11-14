@@ -615,51 +615,6 @@ def _expired(value, now, days):
     return instant is not None and instant + timedelta(days=days) <= now
 
 
-# LLM: 非草稿对象沿其文件锁重读，只有确定过期才清除；不读取versions或blobs集合。
-# 函数用途: 删除一个过期请求或候选。
-def _prune_leaf(owner_home, parts, now, days):
-    with locked_json_path(Path(owner_home).joinpath(*parts)):
-        try:
-            value = _read_json(owner_home, parts)
-        except (ValueError, UnicodeDecodeError):
-            return False
-        if not _expired(value, now, days):
-            return False
-        unlink_file_beneath(Path(owner_home), parts)
-        return True
-
-
-# LLM: 只遍历合同固定层级的辅助JSON；所有正式版本和所有blob保留，避免误收在途引用。
-# 函数用途: 惰性清理过期草稿、演进请求与候选。
-def prune_history(owner_home, *, now: str, draft_ttl_days: int = 14,
-                  request_ttl_days: int = 14, candidate_ttl_days: int = 30) -> dict:
-    instant = datetime.fromisoformat(_iso_time(now))
-    for days in (draft_ttl_days, request_ttl_days, candidate_ttl_days):
-        _integer(days)
-    result = {'drafts_removed': 0, 'requests_removed': 0, 'candidates_removed': 0}
-    for kind in _HISTORY_KINDS:
-        for name in _names(owner_home, (*_HISTORY_PARTS, 'drafts', kind)):
-            if not name.endswith('.json'):
-                continue
-            asset_id = safe_asset_id(name[:-5])
-            with _asset_lock(owner_home, kind, asset_id):
-                if _expired(get_draft(owner_home, kind, asset_id), instant, draft_ttl_days):
-                    unlink_file_beneath(Path(owner_home), (*_HISTORY_PARTS, 'drafts', kind, name))
-                    result['drafts_removed'] += 1
-        for asset_id in _names(owner_home, (*_HISTORY_PARTS, 'candidates', kind)):
-            safe_asset_id(asset_id)
-            parent = (*_HISTORY_PARTS, 'candidates', kind, asset_id)
-            for name in _names(owner_home, parent):
-                if name.endswith('.json'):
-                    safe_asset_id(name[:-5])
-                    result['candidates_removed'] += int(_prune_leaf(owner_home, (*parent, name), instant, candidate_ttl_days))
-    for name in _names(owner_home, (*_HISTORY_PARTS, 'requests')):
-        if name.endswith('.json'):
-            safe_asset_id(name[:-5])
-            result['requests_removed'] += int(_prune_leaf(owner_home, (*_HISTORY_PARTS, 'requests', name), instant, request_ttl_days))
-    return result
-
-
 # LLM: 兼容账本只存结构化回放结论，读取不触发升级或执行。
 # 函数用途: 读取原顺序兼容边。
 def read_compat_edges(owner_home, kind, asset_id) -> list[dict]:

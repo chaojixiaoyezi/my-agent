@@ -34,7 +34,6 @@ from ....subagents.capability_auto_grant import auto_grant_open_requests
 from ....subagents.manager import (
     SubAgentManager,
     SubagentRunIndexUnavailable,
-    request_scope_runs,
     select_current_runs,
     select_recovery_runs,
 )
@@ -45,8 +44,6 @@ from ....subagents.models import (
 )
 from ....subagents.services.runtime_closeout import recover_pending_closeouts
 from .conversation_lifecycle_gate import conversation_lifecycle_decisions
-from .params import DispatchParams
-from .tool_helpers import _dispatch_capability_config
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1315,71 +1312,6 @@ def _sync_completed_source_worker_link(
             run_id,
             exc_info=True,
         )
-
-
-# LLM: 续派走 dispatch 全量重评估(与模型调 dispatch_subagents 完全同一条服务链路:
-#   同样的候选判定/防重/报告落盘),只是触发者从模型换成机制;no candidates 即 no-op。
-# 函数用途: 用编程入口跑一次 apply+start_runners 的 dispatch,返回实际启动的 runner 数。
-def _redispatch_stalled_subagents(agent: Any) -> int:
-    manager = getattr(agent, "subagents", None)
-    if manager is None:
-        return 0
-    from ...runner.dispatch import RunnerCandidatePolicy, _is_dispatch_runner_candidate
-
-    frozen_policy = getattr(agent, "runtime_guard_policy", None) or getattr(
-        getattr(agent, "config", None), "runtime_guard_policy", None
-    )
-    candidate_policy = RunnerCandidatePolicy(runtime_guard_policy=frozen_policy)
-    if isinstance(manager, SubAgentManager):
-        from ....subagents.services.persistence.run_index import request_selection
-
-        current = getattr(agent, "_current_run_params", None)
-        request_id = str(getattr(current, "request_id", "") or "").strip()
-        selection = request_selection(agent, request_id)
-        # 终态重试只读本请求历史；没有请求时仅巡检可派活跃集，不扫全 owner 的 FAILED/BLOCKED。
-        selected = (request_scope_runs(manager, *selection) if selection[0] or selection[1] else
-                    select_current_runs(manager, statuses=("PLANNING", "PENDING")))
-    else:
-        selected = manager.list_runs()
-    tasks = [task for task in selected if _is_dispatch_runner_candidate(task, policy=candidate_policy)]
-    if not tasks:
-        return 0
-    decisions = conversation_lifecycle_decisions(agent, tasks)
-    candidates = [
-        task
-        for task in tasks
-        if decisions.get(str(getattr(task, "id", "") or ""), None) is not None
-        and decisions[str(getattr(task, "id", "") or "")].allowed
-    ]
-    if not candidates:
-        return 0
-    cfg = _dispatch_capability_config(agent)
-    router = getattr(agent, "capability_router", None)
-    if router is None:
-        raise RuntimeError("agent capability router is unavailable")
-    report = agent.dispatch_subagents(
-        router,
-        cfg,
-        params=DispatchParams(
-            apply=True,
-            start_runners=True,
-            max_runners=min(20, len(candidates)),
-            limit=max(20, len(candidates)),
-            include_run_ids=[str(task.id) for task in candidates],
-            note="capability_auto_sweep: 唤醒轮机制层续派(自动批后/停滞候选)",
-        ),
-    )
-    return _started_runner_count(report)
-
-
-def _started_runner_count(report: Any) -> int:
-    count = 0
-    for record in getattr(report, "records", None) or []:
-        if str(getattr(record, "step", "") or "") != "runner":
-            continue
-        if str(getattr(record, "action", "") or "") in {"started", "dispatched"}:
-            count += 1
-    return count
 
 
 def _signal_run_id(signal: Any) -> str:

@@ -9,9 +9,7 @@ import hashlib
 import json
 import math
 import os
-import selectors
 import stat
-import subprocess
 import sys
 import time
 import uuid
@@ -26,7 +24,7 @@ from pathlib import Path
 from threading import RLock
 
 from ..common import cache_capacity
-from ..common.cancellation import ToolCancelled, cancellation_requested, current_cancellation_token
+from ..common.cancellation import ToolCancelled, cancellation_requested
 from ..common.global_write_commit import GlobalWriteCommitUnavailable, execute_global_write
 from ..common.global_write_guard import GlobalWriteInWorkerError
 from ..common.json_io import locked_json_path, read_json_object_report
@@ -50,8 +48,6 @@ OWNER_QUOTA_PRESSURE_CRITICAL_PERCENT = 95
 OWNER_QUOTA_PERMANENT_HEADROOM_PERCENT = 5
 # 对账未完成期间永久资产累计允许增长的字节数。
 OWNER_QUOTA_PERMANENT_PENDING_GROWTH_BYTES = 32 * 1024 * 1024
-# 原生用量扫描最多 15 秒：扫描挂起不应拖住配额判定，超时按不可用处理。
-_NATIVE_USAGE_SCAN_TIMEOUT_SECONDS = 15.0
 # 前台快照仍限128项；墙钟预算容纳繁忙主机数百毫秒的调度暂停，超时仍拒绝未知用量增长。
 _FOREGROUND_SCAN_MAX_MS = 2500.0
 # 仅用量展示可短期复用碎片目录统计；权威写入准入绝不读取这个缓存。
@@ -789,29 +785,6 @@ def owner_logical_usage_bytes(root: str | Path, *, exact: bool = False, should_c
     return total
 
 
-# LLM: 配额准入保持精确；Linux原native扫描保留，portable路径显式exact，不借展示TTL放宽写入权限。
-# 函数用途: 为持锁配额准入返回准确用量，包括回收站和冷归档。
-def _owner_usage_bytes_for_admission(root: str | Path, *, should_cancel: Callable[[], bool] | None = None) -> int:
-    """Return exact regular-file usage without monopolising the Python runtime.
-
-    Large owner workspaces can contain hundreds of thousands of files.  Running
-    the authoritative walk in Python while the per-owner quota lock is held can
-    starve an otherwise healthy Gateway under concurrent background work.  On
-    Linux, delegate only the mechanical directory traversal to the system
-    ``find`` implementation; the same regular-file, no-symlink-following and
-    per-visible-hardlink semantics are preserved.  Unsupported platforms keep
-    the portable Python implementation.  Runtime scan failures remain
-    fail-closed instead of silently bypassing quota enforcement.
-    """
-
-    owner_root = Path(root).expanduser().resolve(strict=False)
-    _check_quota_cancelled(should_cancel)
-    native = _native_regular_file_usage_bytes(owner_root, should_cancel=should_cancel)
-    if native is not None:
-        return native
-    return owner_logical_usage_bytes(owner_root, exact=True, should_cancel=should_cancel)
-
-
 # LLM: 只缓存单目录直接文件总数；目录身份/时间、已遍历文件名或TTL失效即重算，权限错误不回旧值。
 # 函数用途: 为展示档案目录复用短期统计；exact调用方不使用缓存。
 def _directory_usage_bytes(owner_root: Path, base: Path, names: list[str], *, cached: bool) -> int:
@@ -853,61 +826,6 @@ def _directory_regular_bytes(owner_root: Path, base: Path, names: list[str]) -> 
         if stat.S_ISREG(info.st_mode) and not _quota_excluded(parts, name, info):
             total += max(0, int(info.st_size))
     return total
-
-
-# LLM: 仅Linux调用系统find并限制15秒；非支持平台返回None，真实扫描故障拒绝，不使用展示缓存。
-# 函数用途: 为需要精确扫描的原调用方统计普通文件字节，不跟随符号链接。
-def _native_regular_file_usage_bytes(owner_root: Path, *, should_cancel: Callable[[], bool] | None = None) -> int | None:
-    if not sys.platform.startswith("linux"):
-        return None
-    try:
-        root_info = owner_root.stat(follow_symlinks=False)
-    except FileNotFoundError:
-        return 0
-    except OSError as exc:
-        raise OwnerQuotaUnavailable("owner disk usage root is unavailable", reason_code="root_unavailable") from exc
-    if not stat.S_ISDIR(root_info.st_mode):
-        raise OwnerQuotaUnavailable("owner disk usage root is not a directory", reason_code="root_unavailable")
-    find_path = next(
-        (
-            candidate
-            for candidate in ("/usr/bin/find", "/bin/find")
-            if os.access(candidate, os.X_OK)
-        ),
-        "",
-    )
-    if not find_path:
-        return None
-    # 空锁侧车本就是0字节；其余排除项与权威扫描相同，运行时子树按路径前缀排除。
-    excluded = [os.fspath(owner_root / name) for name in _QUOTA_CONTROL_NAMES]
-    excluded += [os.fspath(owner_root.joinpath(*parts)) for parts in sorted(_QUOTA_RUNTIME_FILES)]
-    excluded += [os.fspath(owner_root.joinpath(*parts)) + "/*" for parts in sorted(_QUOTA_RUNTIME_DIRS)]
-    command = [find_path, os.fspath(owner_root), "-type", "f"]
-    for path in excluded:
-        command += ["!", "-path", path]
-    try:
-        if should_cancel is not None or current_cancellation_token() is not None:
-            return _cancellable_find_usage([*command, "-printf", "%s\n"], should_cancel=should_cancel)
-        completed = subprocess.run(
-            [*command, "-printf", "%s\n"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_NATIVE_USAGE_SCAN_TIMEOUT_SECONDS,
-        )
-    except FileNotFoundError:
-        return None
-    except subprocess.TimeoutExpired as exc:
-        raise OwnerQuotaUnavailable("owner disk usage scan timed out", reason_code="scan_failed") from exc
-    if completed.returncode != 0:
-        detail = str(completed.stderr or "").lower()
-        if any(token in detail for token in ("unknown predicate", "unrecognized", "illegal option")):
-            return None
-        raise OwnerQuotaUnavailable("owner disk usage scan failed", reason_code="scan_failed")
-    try:
-        return sum(int(line) for line in completed.stdout.splitlines() if line)
-    except ValueError as exc:
-        raise OwnerQuotaUnavailable("owner disk usage scan returned invalid data", reason_code="scan_failed") from exc
 
 
 # LLM: 只处理当前owner规范路径；控制账及锁不得作为免费payload目标，追加合并不改变原批次计费语义。
@@ -2849,50 +2767,3 @@ def _quota_control_baseline(root, ledger, *, reservation):
         return False
     info = root.stat(follow_symlinks=False)
     return (info.st_dev, info.st_ino) == (cursor.get('root_dev'), cursor.get('root_ino'))
-
-
-# LLM: 两条管道都用有界非阻塞块读取，不缓存全find输出；取消/超时必须杀死并回收子进程。
-#   没有可取消上下文的旧调用保留subprocess.run合同；实际工具令牌始终走本路径。
-# 函数用途: Linux精确扫描在每块输出和等待间隙检查取消。
-def _cancellable_find_usage(command, *, should_cancel=None, poll_seconds=0.05, chunk_bytes=32768):
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    total, pending = 0, b''
-    deadline = time.monotonic() + _NATIVE_USAGE_SCAN_TIMEOUT_SECONDS
-    try:
-        with selectors.DefaultSelector() as selector:
-            for pipe in (process.stdout, process.stderr):
-                os.set_blocking(pipe.fileno(), False)
-                selector.register(pipe, selectors.EVENT_READ)
-            while selector.get_map():
-                _check_quota_cancelled(should_cancel)
-                if time.monotonic() >= deadline:
-                    raise OwnerQuotaUnavailable('owner disk usage scan timed out', reason_code='scan_failed')
-                for key, _ in selector.select(poll_seconds):
-                    _check_quota_cancelled(should_cancel)
-                    chunk = os.read(key.fileobj.fileno(), chunk_bytes)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                        continue
-                    if key.fileobj is process.stderr:
-                        continue
-                    lines = (pending + chunk).split(b'\n')
-                    pending = lines.pop()
-                    if len(pending) > chunk_bytes:
-                        raise ValueError('invalid find size record')
-                    total += sum(int(line) for line in lines if line)
-            while process.poll() is None:
-                _check_quota_cancelled(should_cancel)
-                if time.monotonic() >= deadline:
-                    raise OwnerQuotaUnavailable('owner disk usage scan timed out', reason_code='scan_failed')
-                time.sleep(poll_seconds)
-        if process.returncode:
-            raise OwnerQuotaUnavailable('owner disk usage scan failed', reason_code='scan_failed')
-        return total + (int(pending) if pending else 0)
-    except (OSError, ValueError) as exc:
-        raise OwnerQuotaUnavailable('owner disk usage scan returned invalid data', reason_code='scan_failed') from exc
-    finally:
-        if process.poll() is None:
-            process.kill()
-        process.wait()
-        process.stdout.close()
-        process.stderr.close()

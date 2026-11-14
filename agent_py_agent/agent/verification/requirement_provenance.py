@@ -9,7 +9,6 @@ acceptance verdicts. It never parses natural language to gate tool execution.
 """
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -314,9 +313,3 @@ def provenance_closeout_summary(records: list[RequirementProvenanceRecord]) -> d
         "is_closeout_ready": all_ready,
         "advisory_notes": advisory_notes,
     }
-
-
-# LLM: 获取当前 UTC ISO 时间戳。
-# 函数用途: 返回统一格式的时间戳字符串。
-def utc_iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat()

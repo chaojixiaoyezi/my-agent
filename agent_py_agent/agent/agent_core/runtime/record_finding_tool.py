@@ -7,28 +7,16 @@
 from __future__ import annotations
 
 import json
-import re
 import time
 import uuid
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from ...common.audit_activation import (
-    AUDIT_RUN_EPOCH_ATTR,
-    AUDIT_SOURCE_ID_ATTR,
-    AUDIT_SOURCE_OWNER_HOME_ATTR,
-    AUDIT_SOURCE_WATCH_ID_ATTR,
-    current_audit_attributes,
-    structured_audit_source_worker_attributes,
-)
 from ...common.json_io import (
     locked_json_path,
     read_jsonl_objects_report,
 )
-from ...conversation.authority import CONVERSATION_REQUEST_ID_ATTR
-from ...runtime_context import current_subagent_attempt_id, current_subagent_run_id
-from ...tooling.models import ToolHandlerOutcome
 
 # 认领字段的最大字符数。
 _MAX_CLAIM_CHARS = 2000
@@ -39,94 +27,6 @@ _MAX_REF_COUNT = 20
 # exposed by source_ref; never cut a record in half for the report prompt.
 # 发现证据内联文本的最大字符数。
 _FINDING_EVIDENCE_INLINE_MAX_CHARS = 12_000
-_WATCH_ID_PATTERN = re.compile(r"^ws-[0-9a-f]{10}$")
-_FINDING_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-
-
-def execute_record_finding(agent: object, params: dict[str, object]) -> ToolHandlerOutcome:
-    claim = str(params.get("claim") or "").strip()
-    if not claim:
-        return ToolHandlerOutcome(
-            "record_finding",
-            False,
-            "缺少 claim:一句话写清你确认了什么。",
-            error_code="TOOL_PARAMETER_REQUIRED",
-        )
-    ledger_path, ledger_scope = _findings_ledger_path(agent)
-    if not ledger_path:
-        return ToolHandlerOutcome(
-            "record_finding",
-            False,
-            "当前上下文没有可用的结论账本(没有运行中的任务工作区)。",
-            error_code="TOOL_UNAVAILABLE",
-        )
-    audit_context, audit_error = _audit_finding_context(agent, params)
-    if audit_error:
-        return ToolHandlerOutcome(
-            "record_finding",
-            False,
-            audit_error,
-            error_code="TOOL_PERMISSION_DENIED",
-        )
-    requested_id = str(params.get("finding_id") or "").strip()
-    if requested_id and not _FINDING_ID_PATTERN.fullmatch(requested_id):
-        return ToolHandlerOutcome(
-            "record_finding",
-            False,
-            "finding_id 格式无效。",
-            error_code="TOOL_INVALID_ARGUMENTS",
-        )
-    record = _finding_record(agent, claim, params, audit_context=audit_context)
-    try:
-        path = Path(ledger_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        recorded, revision = _append_finding_revision(path, record)
-    except OSError as exc:
-        return ToolHandlerOutcome(
-            "record_finding",
-            False,
-            f"结论账本写入失败: {exc}",
-            error_code="TOOL_PERSISTENCE_FAILED",
-        )
-    payload = {
-        "ok": True,
-        "recorded": recorded,
-        "reused": not recorded,
-        "finding_id": record["id"],
-        "revision": revision,
-        "ledger_ref": ledger_path,
-        "ledger_scope": ledger_scope,
-    }
-    linked = _link_watch_feedback(agent, params)
-    if linked is not None:
-        payload["watch_feedback_linked"] = linked
-    if audit_context:
-        from ...ingestion.source_worker import reconcile_audit_finding_outbox
-
-        payload["coordination_event"] = reconcile_audit_finding_outbox(
-            agent,
-            current_subagent_run_id(agent),
-        )
-    return ToolHandlerOutcome(
-        "record_finding", True, json.dumps(payload, ensure_ascii=False, indent=2)
-    )
-
-
-def _finding_record(
-    agent: object,
-    claim: str,
-    params: dict[str, object],
-    *,
-    audit_context: dict[str, Any],
-) -> dict[str, object]:
-    return _finding_record_for_context(
-        claim,
-        params,
-        audit_context=audit_context,
-        run_id=current_subagent_run_id(agent),
-        attempt_id=current_subagent_attempt_id(agent),
-        source="record_finding_tool",
-    )
 
 
 def _finding_record_for_context(
@@ -344,134 +244,6 @@ def _same_finding_projection(
     }
 
 
-def _audit_finding_context(
-    agent: object,
-    params: dict[str, object],
-) -> tuple[dict[str, Any], str]:
-    attrs = current_audit_attributes(agent)
-    if not structured_audit_source_worker_attributes(attrs):
-        return {}, ""
-    assert isinstance(attrs, dict)
-    owner_home = Path(str(attrs.get(AUDIT_SOURCE_OWNER_HOME_ATTR) or ""))
-    watch_id = str(attrs.get(AUDIT_SOURCE_WATCH_ID_ATTR) or "")
-    source_id = str(attrs.get(AUDIT_SOURCE_ID_ATTR) or "")
-    audit_id = str(attrs.get(CONVERSATION_REQUEST_ID_ATTR) or "")
-    try:
-        caller_epoch = max(0, int(attrs.get(AUDIT_RUN_EPOCH_ATTR) or 0))
-    except (TypeError, ValueError):
-        caller_epoch = -1
-    from ...ingestion.watch_state import load_state
-
-    state = load_state(owner_home, watch_id)
-    if (
-        state is None
-        or state.closed
-        or state.source_id != source_id
-        or state.audit_root_task_id != audit_id
-        or caller_epoch != max(0, int(state.audit_run_epoch or 0))
-    ):
-        return {}, "当前来源工作者的持久来源绑定不可用。"
-    refs = _audit_finding_refs(params)
-    if not refs:
-        return {}, "Audit finding 必须引用当前 watch 已判断的 source_ref。"
-    verdicts, evidence_records, evidence_error = _audit_finding_evidence(
-        state,
-        watch_id=watch_id,
-        refs=refs,
-    )
-    if evidence_error:
-        return {}, evidence_error
-    if not verdicts:
-        return {}, "Audit finding 必须引用当前 watch 已签收判断的 source_ref。"
-    primary = verdicts[0]
-    return {
-        "audit_finding": True,
-        "owner_id": state.owner_id,
-        "audit_id": audit_id,
-        # The finding belongs to the currently active named-Audit run.  Each
-        # evidence row separately retains the run in which it entered the
-        # queue and the run in which its first verdict was accepted.
-        "audit_run_epoch": max(0, int(state.audit_run_epoch or 0)),
-        "ingest_run_epoch": max(
-            0,
-            int(primary.get("ingest_run_epoch") or 0),
-        ),
-        "source_id": source_id,
-        "watch_id": watch_id,
-        "source_url": state.source_url,
-        "source_refs": refs,
-        "verdict": primary.get("verdict"),
-        "score": primary.get("score"),
-        "score_range": primary.get("score_range"),
-        "dimensions": primary.get("dimensions"),
-        "verdict_note": primary.get("note"),
-        "evidence_verdicts": verdicts,
-        "evidence_records": evidence_records,
-    }, ""
-
-
-def _audit_finding_refs(params: dict[str, object]) -> list[str]:
-    refs_value = params.get("evidence_refs")
-    raw_refs = refs_value if isinstance(refs_value, list) else ([refs_value] if refs_value else [])
-    return list(dict.fromkeys(str(item).strip() for item in raw_refs if str(item or "").strip()))[
-        :_MAX_REF_COUNT
-    ]
-
-
-def _audit_finding_evidence(
-    state: object,
-    *,
-    watch_id: str,
-    refs: list[str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
-    from ...ingestion.harvester import (
-        inspect_audit_record,
-        parse_audit_source_ref,
-    )
-
-    verdicts: list[dict[str, Any]] = []
-    evidence_records: list[dict[str, Any]] = []
-    for ref in refs:
-        parsed = parse_audit_source_ref(ref)
-        # Non-Audit refs are supplementary pointers only.  They never grant
-        # source authority, but the public ToolModelSpec explicitly allows paths,
-        # event ids and URLs, so rejecting them here made Schema and execution
-        # disagree.  An audit:// ref for a sibling watch remains a hard denial.
-        if parsed is None:
-            continue
-        if parsed[0] != watch_id:
-            return [], [], "Audit finding 只能引用当前来源工作者自己的 source_ref。"
-        inspected = inspect_audit_record(state, parsed[1])
-        status = inspected.get("processing_status")
-        if not inspected.get("ok") or not (
-            isinstance(status, dict) and bool(status.get("acknowledged"))
-        ):
-            return [], [], "Audit finding 的 source_ref 尚无已签收首次判断。"
-        verdict = inspected.get("verdict")
-        evidence_records.append(_audit_evidence_record(inspected, source_ref=ref, ack_id=parsed[1]))
-        if isinstance(verdict, dict):
-            verdicts.append(
-                {
-                    "source_ref": ref,
-                    "ack_id": parsed[1],
-                    "audit_run_epoch": max(
-                        0,
-                        int(verdict.get("audit_run_epoch") or 0),
-                    ),
-                    "ingest_run_epoch": max(
-                        0,
-                        int(verdict.get("ingest_run_epoch") or 0),
-                    ),
-                    "verdict": verdict.get("verdict"),
-                    "score": verdict.get("score"),
-                    "score_range": verdict.get("score_range"),
-                    "dimensions": verdict.get("dimensions"),
-                    "note": verdict.get("note"),
-                }
-            )
-    return verdicts, evidence_records, ""
-
-
 def _audit_evidence_record(
     inspected: dict[str, Any],
     *,
@@ -523,55 +295,5 @@ def _audit_evidence_record(
     record["inline"] = True
     record["raw_event"] = raw_event
     return record
-
-
-# LLM: 摄取召回反馈接缝(B3):盯守候选被确认时把 (watch_id, stream_pos) 追加进该
-#   watch 的反馈收件箱——引擎属主消费后将该事件的结构特征回灌预筛,自动抬同类、
-#   抽检向盲区源倾斜。best-effort:参数缺/格式不符/watch 不存在都静默跳过(None),
-#   绝不影响结论账主通道;返回 True/False 只作观测。
-# 函数用途: 确认的盯守候选 → 反馈收件箱一行(召回自愈的对账通路)。
-def _link_watch_feedback(agent: object, params: dict[str, object]) -> bool | None:
-    watch_id = str(params.get("watch_id") or "").strip()
-    raw_pos = params.get("stream_pos")
-    if not watch_id or raw_pos is None:
-        return None
-    if not _WATCH_ID_PATTERN.fullmatch(watch_id):
-        return False
-    try:
-        stream_pos = int(str(raw_pos).strip())
-    except (TypeError, ValueError):
-        return False
-    owner_home = str(
-        getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or ""
-    ).strip()
-    if not owner_home:
-        return False
-    from ...ingestion.watch_feedback import append_confirmation
-
-    return append_confirmation(Path(owner_home), watch_id, stream_pos)
-
-
-def _findings_ledger_path(agent: object) -> tuple[str, str]:
-    """账本落点:子代理 runner 轮 → 本 run 的 findings.jsonl(权威通道);
-    主代理长任务 → 任务工作区 work/shared/findings.jsonl(同名共享通道)。"""
-    run_id = current_subagent_run_id(agent)
-    run_path = _run_ledger_path(agent, run_id) if run_id else ""
-    if run_path:
-        return run_path, run_id
-    task_root = str(getattr(agent, "_current_run_task_workspace", "") or "").strip()
-    if task_root:
-        return str(Path(task_root) / "work" / "shared" / "findings.jsonl"), "task_workspace"
-    return "", ""
-
-
-def _run_ledger_path(agent: object, run_id: str) -> str:
-    manager = getattr(agent, "subagents", None)
-    if manager is None or not callable(getattr(manager, "load", None)):
-        return ""
-    try:
-        task = manager.load(run_id)
-    except (FileNotFoundError, TypeError):
-        return ""
-    return str(getattr(task, "agent_run_findings_jsonl", "") or "").strip()
 
 

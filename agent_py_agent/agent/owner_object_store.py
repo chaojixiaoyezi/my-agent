@@ -89,10 +89,6 @@ class OwnerSnapshotCommitUnknown(RuntimeError):
     """快照事务的提交结果未知。"""
 
 
-# LLM: 忙租约只在模块内等待，不传播给有重试次数上限的队列。
-# 类用途: 标识内部租约竞争，不作为外部失败接口。
-class OwnerSnapshotLeaseBusy(RuntimeError):
-    """内部租约忙信号；acquire 以 None 表达。"""
 
 
 # 快照协议的封闭代码路径集合，不是容量或重试调优参数。

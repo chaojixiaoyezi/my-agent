@@ -89,11 +89,6 @@ def retire_for_enable(context: LegacyEnableContext, entry):
     return result.installation, result.report
 
 
-# LLM: 仅供实际返回记录已与预测目标相等后调用；旧代存在、同撤旧子提交 release 回执与空激活共同证明，不信报告是否存在。
-# 函数用途: 判断本次是否真的撤销并释放过原激活，供失败回执区分原表已提交与尚未提交。
-def retirement_committed(before, after, operation_id: str) -> bool:
-    return (before.activation is not None and after.activation is None and after.last_commit.action == "release"
-            and after.last_commit.operation_id == retirement_operation(operation_id))
 
 
 # LLM: 模式、路径、包、解释器与原操作同次冻结；v9强制restricted并将API选择加入原完整确认，不施加OS规则。

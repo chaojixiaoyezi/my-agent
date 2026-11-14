@@ -93,10 +93,6 @@ def params_output_refs(params: dict[str, object]) -> list[str]:
     return _unique_refs(refs)
 
 
-def task_output_refs(task: object) -> list[str]:
-    return _attributes_refs(task, _OUTPUT_REF_FIELDS)
-
-
 def _manifest_required_paths(manifest: object) -> list[str]:
     if isinstance(manifest, dict):
         raw = manifest.get("required_read_paths")

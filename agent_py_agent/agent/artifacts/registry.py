@@ -17,23 +17,20 @@ import re
 import sqlite3
 import time
 from collections.abc import Mapping
-from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import _flock_descriptor, _funlock_descriptor, path_thread_lock
 from ..common.nofollow_fs import (
     NoFollowPathError,
     append_text_beneath,
-    open_private_lock_beneath_tightened,
     read_bytes_beneath,
     read_text_beneath,
     write_bytes_atomic_beneath,
 )
 from ..runtime_errors import runtime_error_report
 from .registry_projection_cache import detached_payload, registry_projection, trusted_root_identity
-from .registry_reader import inheritance_scope_matches, lookup_record_with_errors
+from .registry_reader import lookup_record_with_errors
 
 SCHEMA_VERSION = "artifact_registry.v1"
 REGISTRY_RELATIVE_PATH = Path("data") / "artifacts" / "registry.jsonl"
@@ -130,60 +127,6 @@ class ArtifactRegistryAttempt:
     owner_id: str
     request_id: str
     attempt_id: str
-
-
-# LLM: 只继承登记表，不创建工具输出索引或读取权限；宿主须在来源退出、目标普通登记开始前显式调用。
-# 函数用途: 为同一 owner/request 的下一次 Attempt 保留已登记产物。
-def inherit_artifact_registry(previous: ArtifactRegistryAttempt, current: ArtifactRegistryAttempt) -> int:
-    previous_home, current_home = _workspace_root_path(previous.owner_home), _workspace_root_path(current.owner_home)
-    if not inheritance_scope_matches(
-        {'owner_id': previous.owner_id, 'owner_home': str(previous_home), 'request_id': previous.request_id},
-        {'owner_id': current.owner_id, 'owner_home': str(current_home), 'request_id': current.request_id},
-    ):
-        return 0
-    if (not isinstance(previous.attempt_id, str) or not previous.attempt_id.strip()
-            or not isinstance(current.attempt_id, str) or not current.attempt_id.strip()
-            or previous.attempt_id == current.attempt_id):
-        return 0
-    source, target = _workspace_root_path(previous.workspace_root), _workspace_root_path(current.workspace_root)
-    source.relative_to(current_home)
-    target.relative_to(current_home)
-    if source == target:
-        return 0
-    report = latest_artifact_records_report(source)
-    if report.errors:
-        raise ValueError('artifact inheritance source registry is unreadable')
-    if not report.records:
-        return 0
-    # 启动阶段的继承重试串行化；普通登记不持此锁，调用方不得让它与继承并发。
-    with _inheritance_registry_lock(current_home, target):
-        current_report = latest_artifact_records_report(target)
-        if current_report.errors:
-            raise ValueError('artifact inheritance target registry is unreadable')
-        inherited = [record for key, record in report.records.items() if key not in current_report.records]
-        if inherited:
-            lines = ''.join(json.dumps(record.to_dict(), ensure_ascii=False, sort_keys=True) + '\n' for record in inherited)
-            append_text_beneath(target, tuple(REGISTRY_RELATIVE_PATH.parts), lines)
-        return len(inherited)
-
-
-# LLM: 复用既有线程锁和跨平台描述符锁；锁文件及父目录必须从可信 home 逐层 no-follow 打开。
-# 函数用途: 串行化目标登记表继承，不让创建锁的过程跟随被替换的工作目录链接。
-@contextmanager
-def _inheritance_registry_lock(owner_home: Path, workspace_root: Path):
-    path = registry_path(workspace_root)
-    relative = (*workspace_root.relative_to(owner_home).parts, *REGISTRY_RELATIVE_PATH.parts[:-1], path.name + '.lock')
-    handle = path_thread_lock(path)
-    with handle.lock:
-        descriptor = open_private_lock_beneath_tightened(owner_home, relative)
-        try:
-            _flock_descriptor(descriptor)
-            try:
-                yield
-            finally:
-                _funlock_descriptor(descriptor)
-        finally:
-            os.close(descriptor)
 
 
 def registry_path(workspace_root: str | Path) -> Path:

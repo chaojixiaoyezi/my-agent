@@ -217,14 +217,6 @@ class CrossChannelSession:
 
         return sessions, load_errors
 
-    def _session_id_for_channel(
-        self,
-        session_dir: Path,
-        user_id: str,
-        channel: str,
-    ) -> str | None:
-        session_id, _load_error = self._session_id_for_channel_report(session_dir, user_id, channel)
-        return session_id
 
     def _session_id_for_channel_report(
         self,

@@ -5,13 +5,12 @@ from __future__ import annotations
 import hashlib
 import math
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ..common.json_io import read_json_object_report
 from ..conversation.channels import supports_transcript_delivery
-from ..gateway_parts.io import update_json_file_atomic
 from ..runtime_errors import DataCorruptionError
 from ..user_space.home_layout import MyAgentHomePaths
 
@@ -87,31 +86,3 @@ def delegation_preference_by_paths(
     current = time.time() if now is None else now
     day = datetime.fromtimestamp(current, ZoneInfo(row["timezone"])).date().isoformat()
     return {**row, "enabled": bool(row["enabled"] and day == row["business_day"] and current < row["expires_at"])}
-
-
-# LLM: 控制写入只改变本人偏好，使用原配置 JSON 原子锁；执行任务以后保存该快照，不重读它来改变旧任务。
-# 函数用途: 开启到下一部署时区零点，或立即关闭；重置无需零点定时器，写入不影响在途任务。
-def set_delegation_preference(agent: object, channel: str, actor_id: str, enabled: bool, *, now: float | None = None) -> dict:
-    key = preference_key(channel, actor_id)
-    if type(enabled) is not bool:
-        raise ValueError("IM 委派开关必须是布尔值")
-    current = time.time() if now is None else now
-    from ..scheduler.schedule import _canonical_zone_name
-
-    timezone = _canonical_zone_name(str(agent.config.timezone or ""))
-    local = datetime.fromtimestamp(current, ZoneInfo(timezone))
-    midnight = datetime.combine(local.date() + timedelta(days=1), datetime.min.time(), tzinfo=ZoneInfo(timezone))
-
-    # LLM: updater 在原 JSON 锁内校验整个记录，再仅前进本人版本；不能覆盖其它群发送者或并发写入。
-    # 函数用途: 在一次配置提交中保存新的每日有效期和版本。
-    def update(payload):
-        payload = _validated(payload, str(agent.home_paths.owner_id))
-        if key not in payload["users"] and len(payload["users"]) >= 4096:
-            raise ValueError("IM 发送者偏好数量超出上限")
-        previous = payload["users"].get(key, {})
-        row = {"enabled": enabled, "expires_at": midnight.timestamp() if enabled else 0.0,
-               "business_day": local.date().isoformat(), "timezone": timezone, "revision": previous.get("revision", 0) + 1}
-        return {**payload, "users": {**payload["users"], key: row}}
-
-    update_json_file_atomic(preference_path(agent), update)
-    return delegation_preference(agent, channel, actor_id, now=current)
