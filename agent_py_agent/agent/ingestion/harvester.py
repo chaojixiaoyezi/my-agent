@@ -345,6 +345,7 @@ def _begin_harvest_transaction(state: WatchState) -> dict[str, Any]:
                 "source_checkpoint": deepcopy(state.source_checkpoint),
                 "cursor": state.cursor,
                 "line_cursor": state.line_cursor,
+                "file_identity": state.file_identity,
                 "spool_seq": state.spool_seq,
                 "spool_generation": state.spool_generation,
                 "spool_bytes": _path_size(spool_path(state)),
@@ -365,6 +366,13 @@ def _commit_harvest_transaction(
     marker = _harvest_transaction_path(state)
     with locked_json_path(marker):
         _assert_active_harvest_transaction(state, transaction)
+        start_info = dict(transaction.get("start") or {})
+        expected_pos = (
+            str(start_info.get("harvest_commit_id") or ""),
+            str(start_info.get("file_identity") or ""),
+            int(start_info.get("cursor") or 0),
+            int(start_info.get("line_cursor") or 0),
+        )
         transaction["status"] = "ready"
         transaction["target"] = {
             "source_checkpoint": deepcopy(state.source_checkpoint),
@@ -373,9 +381,17 @@ def _commit_harvest_transaction(
             "spool_seq": state.spool_seq,
             "spool_generation": state.spool_generation,
         }
+        prev_commit_id = state.harvest_commit_id
         state.harvest_commit_id = str(transaction["transaction_id"])
         _write_harvest_transaction(marker, transaction)
-        persist_state(state)
+        try:
+            persist_state(state, expected_source_position=expected_pos)
+        except _HarvestTransactionUnavailable:
+            state.harvest_commit_id = prev_commit_id
+            raise
+        except OSError as exc:
+            state.harvest_commit_id = prev_commit_id
+            raise _HarvestTransactionUnavailable(str(exc)) from exc
         _commit_transaction_source_record_keys(state, transaction)
         _clear_harvest_transaction_unlocked(
             state,
@@ -515,6 +531,7 @@ def _recover_pending_harvest_unlocked(
         or restored.source_checkpoint not in (initial_checkpoint, boundary_checkpoint)
         or restored.cursor != int(start.get("cursor") or 0)
         or restored.line_cursor != int(start.get("line_cursor") or 0)
+        or ("file_identity" in start and restored.file_identity != str(start.get("file_identity") or ""))
         or restored.spool_seq != int(start.get("spool_seq") or 0)
         or restored.spool_generation != int(start.get("spool_generation") or 0)
     ):

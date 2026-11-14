@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from ..contracts.gates.network_safety import GatewayEndpointConfig, NetworkSafetySettings
 from ..tooling.models import (
@@ -591,6 +592,12 @@ def _drain_and_digest(
         page_limit=state.tuning.page_limit,
         deadline=time.time() + SOURCE_FETCH_TIMEOUT_SECONDS,
     )
+    prior_source_position = (
+        state.harvest_commit_id,
+        state.file_identity,
+        state.cursor,
+        state.line_cursor,
+    )
     drain = drain_watch_source(state, tool._fetch_json, budget)
     apply_cursor_page_feedback(state, drain)
     if not drain.error and not persist_file_fragment(state, drain):
@@ -609,7 +616,8 @@ def _drain_and_digest(
         time.time(),
         cold_start=state.source_spec is None,
     )
-    persist_state(state)
+    state.harvest_commit_id = uuid4().hex
+    persist_state(state, expected_source_position=prior_source_position)
     audit_append(state, build_audit_record(drain, digest))
     return digest
 
