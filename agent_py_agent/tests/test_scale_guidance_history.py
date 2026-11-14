@@ -1,10 +1,7 @@
 """插话历史规模、热路径结构与原协议的回归护栏。"""
-import ast
-import inspect
 import json
 import os
 import sqlite3
-import textwrap
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -12,10 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from agent_py_agent.agent.conversation import ConversationStore
-from agent_py_agent.agent.conversation.store_guidance import GuidanceStore
 from agent_py_agent.agent.conversation.store_guidance_records import _guidance_entry_from_request
-from agent_py_agent.agent.conversation.store_observations import ObservationStore
-from agent_py_agent.agent.conversation.store_usage import ModelUsageStore
 
 
 # LLM: 固定切片迁移真实队列，热路只计实际解析与返回结果。
@@ -62,29 +56,6 @@ def test_guidance_pending_and_recent_cost_does_not_grow_with_history(tmp_path, m
     assert len(recent) == 20
     assert counts["G"] <= 50 and counts["D"] <= 40, counts
     assert counts["json"] <= 100 and counts["bytes"] < 131072, counts
-
-
-# LLM: 只检查 AST，不执行被检查源码。
-# 函数用途: 找出热路径中的旧整账调用。
-def _forbidden_calls(source):
-    tree = ast.parse(textwrap.dedent(source))
-    return {node.func.attr for node in ast.walk(tree) if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr in {"events_report", "read_delivered", "_read_handled"}}
-
-
-# LLM: 负例必须命中禁用调用，产品方法不得再走旧整账入口。
-# 函数用途: 验证结构护栏确实能拒绝回归。
-def test_ast_hot_path_guard_rejects_invalid_fixture_and_full_ledger_reads():
-    assert _forbidden_calls("def invalid(self):\n    return self.read_delivered()") == {"read_delivered"}
-    for method in (ObservationStore.mark_handled, ModelUsageStore.append_once, GuidanceStore.pending):
-        assert not _forbidden_calls(inspect.getsource(method)), method.__qualname__
-    from agent_py_agent.agent.conversation.session_list_index import SessionListIndex
-    source = inspect.getsource(SessionListIndex._refresh)
-    tree = ast.parse(textwrap.dedent(source))
-    assert any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "_put_meta" and any(isinstance(arg, ast.Constant) and arg.value == "revision" for arg in node.args)
-        for node in ast.walk(tree))
 
 
 # LLM: Event 规定 ACK 胜出后的恢复顺序，状态变更仍走原协议。

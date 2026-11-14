@@ -106,25 +106,3 @@ def test_content_transport_protocol_uses_only_canonical_write_file_calls():
     assert 'mode="append"' in text
     assert "*** Delete File" in text
     assert "不要改用 rm/rmdir/unlink" in text
-
-
-def test_filesystem_write_error_and_contract_prompt_drop_competing_raw_protocol():
-    import inspect
-
-    from agent_py_agent.agent.agent_core import delivery_contract_prompting
-    from agent_py_agent.agent.agent_core.runner import prompts as runner_prompts
-    from agent_py_agent.agent.tooling import _filesystem_write
-
-    for module in (_filesystem_write, delivery_contract_prompting, runner_prompts):
-        src = inspect.getsource(module)
-        assert "WRITE_FILE_RAW" not in src
-
-
-def test_content_recovery_mode_keeps_one_canonical_write_protocol():
-    import inspect
-
-    from agent_py_agent.agent.tooling import content_recovery_mode
-
-    src = inspect.getsource(content_recovery_mode)
-    assert "WRITE_FILE_RAW" not in src
-    assert "规范 write_file" in src

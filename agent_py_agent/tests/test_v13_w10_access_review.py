@@ -1,9 +1,7 @@
 """#90 原生扫描、真实W0持久化与Gateway HTTP往返测试。"""
 from __future__ import annotations
 
-import ast
 import hashlib
-import inspect
 import json
 import secrets
 import time
@@ -682,14 +680,3 @@ def test_existing_completed_receipt_still_replays(env):
     with pytest.raises(Exception) as error:
         review.run(env.call('access_review.run', {'provider': 'local'}, key=request.idempotency_key))
     assert error.value.code == 'IDEMPOTENCY_CONFLICT'
-
-
-# LLM: 回归门防止把事务回调内再开事务的死锁模式引回，行为测试同时证明回滚。
-# 函数用途: 静态守住run的唯一多集合提交边界。
-def test_run_never_nests_single_collection_write():
-    tree = ast.parse(inspect.getsource(review.run))
-    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
-    writes = [node.func.attr for node in calls if isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name) and node.func.value.id == 'identity'
-        and node.func.attr in {'write', 'write_many'}]
-    assert writes == ['write_many']

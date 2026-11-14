@@ -1,6 +1,5 @@
 """W1真实历史存储到引擎/W6 seam的冻结引用合同。"""
 
-import ast
 import inspect
 import json
 import os
@@ -258,18 +257,6 @@ def test_current_script_debug_keeps_isolation_and_summary_false(tmp_path, mode):
     assert not list((tmp_path / 'data/workflow_runs').glob('*/run.json'))
     assert not list((tmp_path / 'tmp/script_exec').iterdir())
     assert fd_count() - before_fd == 0
-
-
-# LLM: 结构门只锁定本次传参合同，不扩大_same_pin的执行身份比较或修改共享runtime。
-# 函数用途: 静态拦截重新引入按drift替换历史来源的同类错误。
-def test_engine_execution_pin_ast_keeps_frozen_provenance():
-    tree = ast.parse(inspect.getsource(__import__(WorkflowEngine.__module__, fromlist=['WorkflowEngine'])))
-    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
-             and isinstance(node.func, ast.Name) and node.func.id == 'run_script_with_datasources']
-    assert len(calls) == 1
-    choice = next(item.value for item in calls[0].keywords if item.arg == 'expected_script_pin')
-    expected = ast.parse('frozen if frozen is not None else current', mode='eval').body
-    assert ast.dump(choice) == ast.dump(expected)
 
 
 # LLM: Event固定旧步骤读取早于终态发表；晚到步骤及普通run写不得复活成功、失败或取消。

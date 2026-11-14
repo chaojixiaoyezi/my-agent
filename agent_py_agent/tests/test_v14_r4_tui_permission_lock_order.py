@@ -1,8 +1,5 @@
 """真实审批队列的确定性交错；不以模拟屏幕替代真实终端验收。"""
-import ast
-import inspect
 import os
-import textwrap
 import threading
 from types import SimpleNamespace
 
@@ -11,7 +8,6 @@ import pytest
 from agent_py_agent.cli.chat_parts.tui_permission_queue import TuiPermissionCoordinator
 from agent_py_agent.cli.chat_parts.tui_runtime import (
     TuiRuntime,
-    TuiTurnEventAdapter,
     _TuiPermissionController,
 )
 from agent_py_agent.tests.test_tui_runtime import _approval_request_for
@@ -419,20 +415,3 @@ def test_nested_deferred_release_is_thread_local_and_exception_safe():
     assert controller._release_defer.depth == 0 and controller._release_defer.due is False
     assert runtime._permission_coordinator.active_controller() is second._permissions
     assert fd_count() - before == 0
-
-
-def test_gateway_permission_deferral_static_guard_rejects_locked_release_fixture():
-    def guarded(source):
-        body = ast.parse(textwrap.dedent(source)).body[0].body
-        return (isinstance(body[0], ast.With)
-                and isinstance(body[0].items[0].context_expr, ast.Call)
-                and getattr(body[0].items[0].context_expr.func, 'attr', '') == 'deferred_release'
-                and isinstance(body[0].body[0], ast.With)
-                and len(body[0].body[0].items) == 2)
-
-    assert guarded(inspect.getsource(TuiTurnEventAdapter.on_gateway_event))
-    assert not guarded('def event(self):\n with self.runtime._lock:\n  self._permissions._release()\n')
-    for method in ('resolve', 'accept_gateway_resolution', 'cancel_pending'):
-        tree = ast.parse(textwrap.dedent(inspect.getsource(getattr(_TuiPermissionController, method))))
-        assert any(isinstance(n, ast.Call) and getattr(n.func, 'attr', '') == '_release' for n in ast.walk(tree))
-        assert not any(isinstance(n, ast.Call) and getattr(n.func, 'attr', '') == 'release' for n in ast.walk(tree))

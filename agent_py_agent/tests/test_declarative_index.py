@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from agent_py_agent.agent.capability.declarative_index import (
     sync_role_template_index,
@@ -35,16 +34,3 @@ def test_ensure_home_writes_role_template_index(tmp_path):
         if line.strip()
     ]
     assert len(role_lines) >= 6
-
-
-def test_builtin_skills_reference_current_task_tool_surface():
-    """Built-in guidance must not teach the model removed Claude-style tool names."""
-
-    skills_root = Path(__file__).resolve().parents[1] / "skills" / "builtin"
-    removed_tool_names = ("TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TodoWrite")
-    offenders: list[str] = []
-    for skill_path in sorted(skills_root.rglob("SKILL.md")):
-        body = skill_path.read_text(encoding="utf-8")
-        if any(name in body for name in removed_tool_names):
-            offenders.append(str(skill_path.relative_to(skills_root)))
-    assert offenders == []

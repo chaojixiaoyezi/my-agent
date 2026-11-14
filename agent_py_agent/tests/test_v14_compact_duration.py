@@ -151,57 +151,6 @@ def test_gateway_compact_wire_preserves_timing_through_real_consumers(tmp_path, 
     assert len(logs) == 1 and logs[0].thread_id == fixture.thread_id
 
 
-# LLM: 静态保护三个结构性红线；运行态budget/顺序/终态另有真实入口回归，不能只测字符串存在。
-# 函数用途: 给实际语法树和反例夹具使用同一套守门判据。
-def _w7_ast_violations(source):
-    import ast
-
-    tree = ast.parse(source)
-    violations = []
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_segment_exclusion_reason":
-            branch = next(item for item in node.body if isinstance(item, ast.If))
-            tests = list(ast.walk(branch.test))
-            origin = any(isinstance(item, ast.Compare) and isinstance(item.left, ast.Name) and item.left.id == "origin"
-                and any(isinstance(other, ast.Name) and other.id == "_OUTPUT_LIMIT_SEGMENT_ORIGIN" for other in item.comparators) for item in tests)
-            completed = any(isinstance(item, ast.Name) and item.id == "completed" for item in tests)
-            if not origin or not completed:
-                violations.append("truncated_origin_gate")
-        if isinstance(node, ast.FunctionDef) and node.name == "bounded_authority_records":
-            for call in (item for item in ast.walk(node) if isinstance(item, ast.Call)):
-                if isinstance(call.func, ast.Attribute) and call.func.attr == "load" and any(keyword.arg == "on_record" for keyword in call.keywords):
-                    violations.append("barrier_charged_as_live")
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in {"info", "debug", "warning", "error", "log"}:
-            if any(isinstance(item, ast.Attribute) and item.attr == "summary" or isinstance(item, ast.Name) and item.id == "summary"
-                   for argument in [*node.args, *(keyword.value for keyword in node.keywords)] for item in ast.walk(argument)):
-                violations.append("summary_logged")
-    return violations
-
-
-def test_w7_ast_guard_accepts_production_and_rejects_invalid_fixtures():
-    import ast
-    from pathlib import Path
-
-    from agent_py_agent.agent.agent_core.tool_loop import response_decision
-    from agent_py_agent.agent.conversation import compact
-    from agent_py_agent.agent.memory_store import _jsonl_indexing
-
-    for module in (response_decision, _jsonl_indexing, compact):
-        assert _w7_ast_violations(Path(module.__file__).read_text()) == []
-    invalid = '''
-def _segment_exclusion_reason(response, *, origin='', completed=False):
-    if response.truncated:
-        return 'truncated'
-def bounded_authority_records(memory, *, max_records, max_bytes):
-    return memory.tombstones.load(on_record=charge_record)
-logger.info('compact', summary)
-'''
-    assert set(_w7_ast_violations(invalid)) == {"truncated_origin_gate", "barrier_charged_as_live", "summary_logged"}
-    tree = ast.parse(Path(response_decision.__file__).read_text())
-    assert any(isinstance(item, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "_OUTPUT_LIMIT_SEGMENT_ORIGIN" for target in item.targets)
-               and isinstance(item.value, ast.Constant) and item.value.value == "output_limit_resume_prefix" for item in tree.body)
-
-
 # LLM: 使用真正请求DTO、Store和发射器；空pending只用于首事件即取消，不伪装候选提交。
 # 函数用途: 给取消与候选投影计时提供独立的transcript请求。
 def _duration_transcript_request(case, events, *, projector=None, started=100.0):

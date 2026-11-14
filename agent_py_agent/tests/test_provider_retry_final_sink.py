@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import ast
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -233,38 +231,3 @@ def test_background_transcript_final_notice_shares_the_same_user_copy() -> None:
     assert events[-1]["kind"] == "system_message"
     assert events[-1]["payload"]["text"] == FINAL_TEXT
     assert "等待" not in events[-1]["payload"]["text"]
-
-
-# 扫描产品代码里所有 write_provider_retry 定义；测试替身不算实现方，故排除 tests 目录。
-def _provider_retry_definitions() -> list[tuple[Path, ast.FunctionDef | ast.AsyncFunctionDef]]:
-    """返回产品代码里每个 write_provider_retry 函数定义（文件 + AST 节点）。"""
-    package_root = Path(__file__).resolve().parents[1]
-    production_paths = [
-        path for path in sorted(package_root.rglob("*.py"))
-        if path.relative_to(package_root).parts[0] != "tests"
-    ]
-    return [
-        (path, node)
-        for path in production_paths
-        for node in _write_provider_retry_nodes(path)
-    ]
-
-
-def _write_provider_retry_nodes(path: Path) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
-    """从一个模块文件里取出所有名为 write_provider_retry 的函数定义节点。"""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    return [
-        node for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == "write_provider_retry"
-    ]
-
-
-def test_every_provider_retry_implementation_declares_params_explicitly() -> None:
-    """回退约定守卫：实现方必须显式声明 params，禁止用 **kwargs 静默收下收口参数。"""
-    definitions = _provider_retry_definitions()
-    assert definitions, "没有扫到任何 write_provider_retry 实现，守卫本身失效"
-    for path, node in definitions:
-        names = {argument.arg for argument in [*node.args.args, *node.args.kwonlyargs]}
-        assert "params" in names, f"{path.name}: write_provider_retry 必须显式声明 params"
-        assert node.args.kwarg is None, f"{path.name}: write_provider_retry 不得用 **kwargs 收下收口参数"

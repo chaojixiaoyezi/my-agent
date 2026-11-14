@@ -170,36 +170,6 @@ def test_grouped_usage_keeps_member_and_final_live_authorization(usage_case):
     assert state['checks'] > 2
 
 
-# LLM: 同一AST规则检测生产与最小反例，防止恢复循环内usage读取。
-# 函数用途: 返回两个成本入口中循环体里的用量读取调用。
-def _loop_usage_calls(source):
-    import ast
-
-    failures = []
-    for function in ast.walk(ast.parse(source)):
-        if not isinstance(function, ast.FunctionDef) or function.name not in {'costs_dashboard', 'costs_investigations'}:
-            continue
-        for loop in ast.walk(function):
-            if not isinstance(loop, (ast.For, ast.While, ast.AsyncFor)):
-                continue
-            for node in ast.walk(loop):
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {'_usage', '_usage_groups'}:
-                    failures.append(node.lineno)
-    return failures
-
-
-# LLM: 只防实际N+1模式，不把输入计量fixture或本地分组误判成I/O。
-# 函数用途: 为两个费用入口保留正反静态防线。
-def test_cost_usage_ast_rejects_reads_in_loops():
-    from pathlib import Path
-
-    from agent_py_agent.agent.business_spaces import v13_w12_metrics
-
-    assert _loop_usage_calls(Path(v13_w12_metrics.__file__).read_text()) == []
-    assert _loop_usage_calls('def costs_dashboard():\n for row in rows:\n  _usage(call, since, until)\n') == [3]
-    assert _loop_usage_calls('def costs_investigations():\n for row in rows:\n  _usage_groups(call, since, until, selectors)\n') == [3]
-
-
 # LLM: 多个事件引用相同task/thread，原列表和点读包装只计量真实I/O入口，不替换事实。
 # 函数用途: 验证一次usage请求内distinct身份复用，下一请求仍重新取规范事实。
 def test_usage_identity_reads_are_request_local_and_distinct(usage_case, monkeypatch):

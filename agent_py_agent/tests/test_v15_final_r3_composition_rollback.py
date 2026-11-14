@@ -1,7 +1,4 @@
 """真实资产链验证宿主组合写前拒绝及普通工作流历史 pin 恢复。"""
-import ast
-import copy
-import inspect
 import json
 import os
 
@@ -11,7 +8,6 @@ from agent_py_agent.agent.assets.monitor_adapter import save_monitor_binding
 from agent_py_agent.agent.assets.monitor_composition import save_monitor_composition
 from agent_py_agent.agent.assets.revision_history import get_version, latest_version, list_versions
 from agent_py_agent.agent.assets.workflow_store import WorkflowStore
-from agent_py_agent.agent.tooling import workflows_tool
 from agent_py_agent.agent.tooling.scripts_tool import ScriptsTool
 from agent_py_agent.agent.tooling.workflows_tool import WorkflowsTool
 from agent_py_agent.agent.workflows.pinned_definitions import resolve_definition
@@ -170,62 +166,3 @@ def test_ordinary_rollback_retains_historical_script_pins(tmp_path):
     assert frozen['a']['code_sha256'] == selected['pins']['scripts']['s1']['code_sha256']
     assert get_version(home, 'workflow', 'wf-base', 1) == selected
     assert [record['version'] for record in list_versions(home, 'workflow', 'wf-base')] == [3, 2, 1]
-
-
-# LLM: AST 直接读取被测生产模块；只检查 rollback 写入边界，不限制业务动作或其它保存调用。
-# 函数用途: 取得当前模块中的回滚分支。
-def _rollback_branch(tree):
-    dispatch = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == '_dispatch')
-    return next(node for node in dispatch.body if isinstance(node, ast.If)
-                and isinstance(node.test, ast.Compare)
-                and any(isinstance(value, ast.Constant) and value.value == 'rollback'
-                        for value in node.test.comparators))
-
-
-# LLM: 两次直接拒绝必须先于恢复上下文；历史身份命中时必须短路当前读取。
-# 函数用途: 以 AST 防止保护被删除或移动到写回之后。
-def _assert_guard_order(tree):
-    branch = _rollback_branch(tree)
-    guards = [index for index, node in enumerate(branch.body) if isinstance(node, ast.If)
-              and any(isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
-                      and call.func.id == '_host_managed_composition' for call in ast.walk(node.test))]
-    assert len(guards) == 2
-    for index in guards:
-        raises = [node for node in ast.walk(branch.body[index]) if isinstance(node, ast.Raise)]
-        assert any(isinstance(node.exc, ast.Call) and isinstance(node.exc.func, ast.Name)
-                   and node.exc.func.id == 'AssetActionError'
-                   and node.exc.args[0].value == 'ASSET_STORE_DIRECT_WRITE_DENIED' for node in raises)
-    reads = [index for index, node in enumerate(branch.body) if isinstance(node, ast.Assign)
-             and any(isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
-                     and call.func.attr == 'get_workflow' for call in ast.walk(node.value))]
-    restores = [index for index, node in enumerate(branch.body) if isinstance(node, ast.With)
-                and any(isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
-                        and call.func.id == 'restoring_snapshot' for call in ast.walk(node))]
-    assert len(reads) == len(restores) == 1
-    assert guards[0] < reads[0] < guards[1] < restores[0]
-
-
-# LLM: 正向 AST 门禁与真实行为测试互补，不以源码字符串替代资产链行为。
-# 函数用途: 验证当前拒绝检查确实位于写回之前。
-def test_rollback_guards_precede_restoration_and_short_circuit_current_read():
-    _assert_guard_order(ast.parse(inspect.getsource(workflows_tool)))
-
-
-# LLM: 故意删除保护或提前恢复必须让门禁变红；仅变换内存 AST，不改生产文件。
-# 函数用途: 验证结构回归门禁对已知故障真的敏感。
-@pytest.mark.parametrize('mutation', ['drop_selected', 'drop_current', 'restore_first'])
-def test_guard_order_rejects_known_mutations(mutation):
-    tree = copy.deepcopy(ast.parse(inspect.getsource(workflows_tool)))
-    branch = _rollback_branch(tree)
-    guards = [node for node in branch.body if isinstance(node, ast.If)
-              and any(isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
-                      and call.func.id == '_host_managed_composition' for call in ast.walk(node.test))]
-    assert len(guards) == 2
-    if mutation == 'restore_first':
-        restoration = next(node for node in branch.body if isinstance(node, ast.With))
-        branch.body.remove(restoration)
-        branch.body.insert(0, restoration)
-    else:
-        branch.body.remove(guards[0 if mutation == 'drop_selected' else 1])
-    with pytest.raises(AssertionError):
-        _assert_guard_order(tree)

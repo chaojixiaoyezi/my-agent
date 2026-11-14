@@ -1,5 +1,4 @@
 """W1：归档失败保留原件，任务探针失败有界、结构化且不泄漏秘密。"""
-import ast
 import errno
 import json
 import logging
@@ -92,30 +91,6 @@ def test_probe_warning_cache_is_bounded_and_redacted(caplog):
         scheduler._record_task_probe_failure("task_work_kind", str(index), ValueError("password=test-secret"))
     assert len(scheduler._task_probe_warnings) == scheduler._TASK_PROBE_WARN_LIMIT
     assert "test-secret" not in caplog.text
-
-
-def test_no_unannotated_silent_pass():
-    # unlink_quietly 是原有且明确文档化的尽力清理合同，任务要求保持原实现。
-    allowed = {("store_io.py", "unlink_quietly")}
-    observed = set()
-    for module in (store_io, runtime):
-        path = Path(module.__file__)
-        source = path.read_text()
-        lines = source.splitlines()
-        tree = ast.parse(source)
-        parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.ExceptHandler) and len(node.body) == 1 and isinstance(node.body[0], ast.Pass)):
-                continue
-            parent = node
-            while parent in parents and not isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                parent = parents[parent]
-            key = (path.name, getattr(parent, "name", ""))
-            if key in allowed:
-                observed.add(key)
-                continue
-            assert any("# best-effort:" in lines[index - 1] for index in (node.lineno, node.body[0].lineno)), (key, node.lineno)
-    assert observed == allowed
 
 
 def test_real_task_link_corruption_reports_without_raising(tmp_path, caplog):

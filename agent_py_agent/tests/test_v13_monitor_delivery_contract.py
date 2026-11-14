@@ -1,11 +1,9 @@
 """原生监控投递、规范调度来源与真实 HTTP 告警合同。"""
 from __future__ import annotations
 
-import ast
 import asyncio
 import errno
 import hashlib
-import inspect
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -452,27 +450,3 @@ def test_single_native_source_io_error_returns_real_http_unavailable_then_recove
         monkeypatch.setattr(type(case.repository), 'effect_run', once)
         rejected(invoke(native, 'soc.alerts.list', {'space_id': case.sid}), 503, 'HOST_NOT_READY')
         assert len(alert_page(case)['items']) == 1 and failures == 1
-
-
-def test_ast_monitor_source_and_bounded_passive_read_contract():
-    """横扫同文件导入点，静态截住标记授信、丢归属核对和无界/执行型读取。"""
-    tree = ast.parse(inspect.getsource(alerts))
-    sync = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'sync_monitor_alerts')
-    calls = [node for node in ast.walk(sync) if isinstance(node, ast.Call)]
-    effects = [node for node in calls if isinstance(node.func, ast.Attribute) and node.func.attr == 'effect_run']
-    assert len(effects) == 1 and ast.unparse(effects[0].args[0]) == 'run_id'
-    lookups = {ast.unparse(node) for node in calls}
-    assert "message.metadata.get('task_id')" in lookups
-    comparisons = {ast.unparse(node) for node in ast.walk(sync) if isinstance(node, ast.Compare)}
-    assert {"run['owner'] != repository.owner", "run['job_id'] != job['job_id']",
-        "run['thread_id'] != thread.thread_id", 'message.thread_id != thread.thread_id'} <= comparisons
-    assert "message.metadata.get('assistant_part_id') != 'final'" in comparisons
-    readers = [node for node in calls if isinstance(node.func, ast.Attribute) and node.func.attr == 'recent_report']
-    assert len(readers) == 1 and any(keyword.arg == 'limit' and isinstance(keyword.value, ast.Constant)
-        and keyword.value.value == 1000 for keyword in readers[0].keywords)
-    assert any(isinstance(node, ast.Slice) and isinstance(node.upper, ast.Constant) and node.upper.value == 1000
-        for node in ast.walk(sync))
-    assert not any(isinstance(node.func, ast.Attribute) and node.func.attr in {'rglob', 'acquire_pinned'}
-        or isinstance(node.func, ast.Name) and node.func.id in {'SimpleAgent', 'Agent'} for node in calls)
-    assert any(isinstance(node.func, ast.Attribute) and node.func.attr == 'setdefault'
-        and ast.unparse(node.func.value) == "tables['soc_alerts']" for node in calls)

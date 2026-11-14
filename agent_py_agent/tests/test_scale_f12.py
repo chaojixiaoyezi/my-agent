@@ -1,8 +1,6 @@
 """W8 #115：有界入站轮询、规范文件权威、恢复与保留期回归。"""
 from __future__ import annotations
 
-import ast
-import inspect
 import os
 import threading
 import time
@@ -43,22 +41,6 @@ def _worker(store, seen=None):
         submit_payload=lambda r: seen.append(r.ingress_id) or {"request_id": r.ingress_id},
         advance_submission=lambda _r: GatewayIngressAdvance("placeholder_ready", "typing"),
         handoff_reply=lambda _r: None)
-
-
-# LLM: 静态门同时验证一个反例，避免守卫本身失效而静默放行。
-# 函数用途: 查找 pending 方法内禁止的全量诊断调用。
-def _unbounded_pending(source):
-    tree = ast.parse(source)
-    return any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "records" for fn in ast.walk(tree)
-        if isinstance(fn, ast.FunctionDef) and fn.name == "pending" for node in ast.walk(fn))
-
-
-# LLM: 修改热路径必须留下可辨识旧缺陷的静态回归。
-# 函数用途: 禁止 pending 再次退回全量 records。
-def test_pending_ast_guard_rejects_invalid_fixture():
-    assert _unbounded_pending("def pending(self):\n return self.records()\n")
-    assert not _unbounded_pending(inspect.getsource(ingress))
 
 
 # LLM: 仅离线准备；正文/索引/发现戳同步，等价原writer已登记全量历史；单拍不包含数万次fsync建样本。

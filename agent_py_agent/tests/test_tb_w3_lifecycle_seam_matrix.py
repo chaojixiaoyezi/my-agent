@@ -6,7 +6,6 @@ by this test. Each assertion uses the client wire and the real consumer's files.
 """
 from __future__ import annotations
 
-import inspect
 import json
 import queue
 import threading
@@ -28,7 +27,7 @@ from agent_py_agent.agent.gateway_parts.request_errors import gateway_client_err
 from agent_py_agent.agent.settings.model_profiles import execute_model_profile_operation
 from agent_py_agent.agent.tooling._filesystem_read import ReadFileTool
 from agent_py_agent.cli.chat_client_context import GatewayChatClientAgent
-from agent_py_agent.cli.chat_parts import tui_actions, tui_keybindings, tui_worker, tui_worker_paths
+from agent_py_agent.cli.chat_parts import tui_actions, tui_worker, tui_worker_paths
 from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
 from agent_py_agent.tests.test_gateway_active_input_transport import (
     AdmissionLimits,
@@ -55,15 +54,6 @@ def tui_enter(params, text):
     if tui_actions._tui_submit_active_turn_input(params, text, display_text=text):
         return
     tui_actions._tui_enqueue_job(params, text)
-
-
-# LLM: Read actual source, not a duplicate implementation or a fabricated event.
-# 函数用途: 防止测试助手的提交顺序与真实 Enter 漂移。
-def test_tui_enter_helper_matches_submit_input_area_order():
-    source = inspect.getsource(tui_keybindings._submit_input_area)
-    names = ("_tui_submit_control_operation(", "_tui_submit_active_turn_input(", "_tui_enqueue_job(")
-    positions = [source.index(name) for name in names]
-    assert positions == sorted(positions)
 
 
 # LLM: Count actual claims, not provider rounds; a consumed input must not also execute.

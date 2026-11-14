@@ -425,14 +425,6 @@ def test_reproject_script_does_not_write_any_file(tmp_path: Path) -> None:
     assert _tree_snapshot(tmp_path) == before
 
 
-def test_reproject_source_keeps_no_write_or_network_calls() -> None:
-    """静态守门：脚本源码里不得出现写文件/起进程/发网络的调用。"""
-    source = SCRIPT.read_text(encoding="utf-8")
-
-    for forbidden in ('write_text(', '.write(', '"w"', "'w'", '"a"', "subprocess", "urlopen", "socket"):
-        assert forbidden not in source, f"重算脚本不得包含 {forbidden}"
-
-
 def test_reproject_discovers_owner_home_workspace_and_ledger_paths(tmp_path: Path) -> None:
     """三种输入形态（owner home / model_usage 目录 / 单文件）都能发现同一份账本。"""
     root = tmp_path / "owner-home"

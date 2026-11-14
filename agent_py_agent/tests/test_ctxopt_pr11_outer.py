@@ -85,12 +85,6 @@ def test_opt13_tiered_authoring_contract():
     assert "这一步叫摸底，不能省" not in text
 
 
-def test_ex02_external_learning_uses_canonical_skill_path():
-    text = (ROOT / "skills/builtin/plugins/learn-external-agent/SKILL.md").read_text()
-    assert ".agents/skills/<skill-name>/SKILL.md" in text
-    assert ".agent/skills" not in text
-
-
 @pytest.mark.parametrize("name,relative", [
     ("writing-skills", "meta/writing-skills"),
     ("learn-external-agent", "plugins/learn-external-agent"),

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import http.client
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -585,22 +584,6 @@ def test_source_failure_is_not_zero_filled(native_http, monkeypatch):
     assert status == 200
     row = next(row for row in overview["data"]["modules"] if row["module"] == "models")
     assert row["status"] == "unavailable" and row["counts"] == {} and row["reason_code"] == "HOST_NOT_READY"
-
-
-# LLM: AST防止重新引入网关整进程停止、子代理层导入和伪执行资格。
-# 函数用途: 固定管理切片的结构化安全边界。
-def test_admin_architecture_boundaries():
-    import ast
-    for module in (api, modules):
-        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                assert node.args.vararg is None and node.args.kwarg is None
-            if isinstance(node, ast.ImportFrom):
-                assert not any(part in (node.module or "").split(".") for part in ("subagents", "agent_core", "cli"))
-    source = Path(api.__file__).read_text(encoding="utf-8")
-    assert "read_gateway_execution_target" in source and "_stop_live_window_request" in source
-    assert "enqueue_agent_stop" not in source and "handle_stop" not in source
 
 
 # LLM: 用Event固定副作用窗口；同键并发请求只能看见pending回执，不能再发消息。

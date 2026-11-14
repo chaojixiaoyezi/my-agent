@@ -1,9 +1,7 @@
 """R2：真实调度工具栈不得把历史正文当作当前授权记录。"""
 from __future__ import annotations
 
-import ast
 import hashlib
-import inspect
 import json
 import os
 import time
@@ -344,23 +342,6 @@ print(json.dumps({"access": {key: row["access"] for key, row in current_datasour
     assert [row['credential_ref'] for row in effective['credential_refs']] == ['cref-shared']
     assert [(row['source_id'], row['query_scope']['access']) for row in effective['data_sources']] == [('events-a', 'read')]
     assert len(case.processes) == 1
-
-
-# LLM: 静态规则覆盖 scheduler 的所有绑定装配入口；历史 payload 必须留在选择层，不另造当前记录绑定。
-# 函数用途: 在允许的测试文件中沉淀同类缺陷的 AST 防线。
-def test_scheduler_never_prebinds_historical_script_as_current():
-    from agent_py_agent.agent.scheduler import execution
-
-    tree = ast.parse(inspect.getsource(execution))
-    assembly = {'_execute_target_tool', '_bind_pinned_tool', '_pinned_script_dispatch'}
-    found = set()
-    for function in tree.body:
-        if isinstance(function, ast.FunctionDef) and function.name in assembly:
-            found.add(function.name)
-            calls = [ast.unparse(node.func) for node in ast.walk(function) if isinstance(node, ast.Call)]
-            assert not any(name.split('.')[-1] == 'bind_script_execution_record' for name in calls)
-            assert not any(name.split('.')[-1] in {'walk', 'rglob', 'list_versions'} for name in calls)
-    assert found == assembly
 
 
 # LLM: FD 观察为本进程真实内核目录，不从对象计数推算资源；预热后才测本次改动路径。

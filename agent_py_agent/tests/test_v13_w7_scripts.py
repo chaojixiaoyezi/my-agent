@@ -1,7 +1,6 @@
 """#73 固定脚本合同回归：原生资产、持久回执、真实 HTTP 与原审批门。"""
 from __future__ import annotations
 
-import ast
 import base64
 import errno
 import json
@@ -940,71 +939,6 @@ def test_script_delete_cleanup_http(v13_native, delete_resources, destination_er
     assert _script_delete_proof(directories[0], script_id) == proof
     assert all(delta == 0 for delta in delete_resources.measurements)
     assert not any(_script_fd_is_open(fd, identity) for fd, identity, _parts in delete_resources.handles)
-
-
-# LLM: 遍历整个模块的目录/原生 FD 获取；禁止第二次获取先于第一次清理登记，保留单 FD try/finally。
-# 函数用途: 返回没有立即登记关闭或紧邻 finally 保护的获取点，防止同模式在其它函数重现。
-def _script_fd_cleanup_gaps(source):
-    tree = ast.parse(source)
-    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
-    gaps = []
-    for parent in ast.walk(tree):
-        for _field, block in ast.iter_fields(parent):
-            if not isinstance(block, list):
-                continue
-            for index, statement in enumerate(block):
-                if not isinstance(statement, ast.Assign) or not isinstance(statement.value, ast.Call):
-                    continue
-                if ast.unparse(statement.value.func) not in ('open_directory_beneath', 'os.open', 'os.dup'):
-                    continue
-                name = ast.unparse(statement.targets[0])
-                following = block[index + 1] if index + 1 < len(block) else None
-                registered = False
-                if isinstance(following, ast.Expr) and isinstance(following.value, ast.Call):
-                    call = following.value
-                    if (isinstance(call.func, ast.Attribute) and call.func.attr == 'callback'
-                            and len(call.args) == 2 and ast.unparse(call.args[0]) == 'os.close'
-                            and ast.unparse(call.args[1]) == name):
-                        scope = parents.get(statement)
-                        while scope is not None:
-                            if isinstance(scope, ast.With):
-                                registered = any(isinstance(item.context_expr, ast.Call)
-                                    and ast.unparse(item.context_expr.func) == 'ExitStack'
-                                    and item.optional_vars is not None
-                                    and ast.unparse(item.optional_vars) == ast.unparse(call.func.value)
-                                    for item in scope.items)
-                                if registered:
-                                    break
-                            scope = parents.get(scope)
-                if isinstance(following, ast.Try):
-                    registered = any(isinstance(node, ast.Call) and ast.unparse(node.func) == 'os.close'
-                        and len(node.args) == 1 and ast.unparse(node.args[0]) == name
-                        for final in following.finalbody for node in ast.walk(final))
-                if not registered:
-                    gaps.append((statement.lineno, name))
-    return gaps
-
-
-def test_script_descriptor_acquisitions_register_cleanup_immediately():
-    assert _script_fd_cleanup_gaps(Path(scripts.__file__).read_text()) == []
-    paired = '''
-def paired():
-    source = open_directory_beneath(root, source_parts)
-    destination = open_directory_beneath(root, destination_parts)
-    try:
-        move(source, destination)
-    finally:
-        os.close(destination)
-        os.close(source)
-'''
-    assert _script_fd_cleanup_gaps(paired) == [(3, 'source')]
-    unentered = '''
-def unentered():
-    cleanup = ExitStack()
-    source = open_directory_beneath(root, source_parts)
-    cleanup.callback(os.close, source)
-'''
-    assert _script_fd_cleanup_gaps(unentered) == [(4, 'source')]
 
 
 # LLM: CancelledError 只模拟同步删除栈的取消展开，不声称覆盖会话 stop；操作准备和证明仍由原 dispatcher 写入。

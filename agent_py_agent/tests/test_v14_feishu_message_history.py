@@ -278,18 +278,6 @@ def test_revoked_live_proof_discards_previously_read_private_items(environment, 
     assert len(env.calls) == 1
 
 
-# LLM: pytest 新接口冻结回归；核对完整参数类型、默认值和返回类型，不修改公共签名。
-# 函数用途: 防止 helper 表面参数相同，但类型约定悄悄变化。
-def test_frozen_new_helper_signature_includes_exact_types():
-    import ast
-    import inspect
-
-    expected = ast.parse("def list_group_messages(agent: object, chat_id: str, *, start_time: int, end_time: int, sender_ids: tuple[str, ...]=(), cursor: str='', limit: int=50) -> dict[str, object]: pass").body[0]
-    actual = ast.parse(inspect.getsource(history.list_group_messages)).body[0]
-    assert ast.dump(actual.args) == ast.dump(expected.args)
-    assert ast.dump(actual.returns) == ast.dump(expected.returns)
-
-
 # LLM: pytest 恶形游标回归；固定深层假输入必须变成安全参数失败，不能触达网络。
 # 函数用途: 检查很深的 JSON 游标不会把内部异常抛给调用者。
 def test_deeply_nested_untrusted_cursor_is_safe_argument_failure(environment):

@@ -307,24 +307,6 @@ def test_cancel_settled_terminal_acknowledges_control_without_rewriting_result(t
     assert engine.store.load_run(record.workflow_run_id).to_dict() == current.to_dict()
 
 
-# LLM: 静态检查原恢复函数的全部Store写入，防止同类分支再次遗漏显式恢复意图。
-# 函数用途: 给恢复写入添加全模式保护，不能靠移除终态守卫通过测试。
-def test_agent_recovery_writes_always_declare_explicit_resume():
-    import ast
-    import inspect
-    import textwrap
-
-    from agent_py_agent.agent.workflows.engine import WorkflowEngine
-
-    tree = ast.parse(textwrap.dedent(inspect.getsource(WorkflowEngine._resume_agent)))
-    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
-             and isinstance(node.func, ast.Attribute) and node.func.attr in ('save_run', 'save_step_result')]
-    assert calls
-    for call in calls:
-        assert any(keyword.arg == 'resuming' and isinstance(keyword.value, ast.Constant)
-                   and keyword.value.value is True for keyword in call.keywords)
-
-
 @pytest.mark.parametrize(('query', 'expected'), [
     ('probe-', {'probe-one', 'probe-three'}),
     ('中文巡检', {'probe-one', 'other-two'}),

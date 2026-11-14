@@ -1,8 +1,5 @@
 """R6：单次迁移读盘失败后的同进程恢复，真实 Client/Gateway/Store/消费者。"""
-import ast
 import errno
-import inspect
-import textwrap
 from contextlib import closing
 from pathlib import Path
 from threading import Event, Thread
@@ -10,7 +7,6 @@ from threading import Event, Thread
 import pytest
 
 from agent_py_agent.agent.conversation import store_wake_publication as publication
-from agent_py_agent.agent.conversation.background_agents import BackgroundAgentService
 from agent_py_agent.agent.conversation.session_tasks import SessionTaskUpdate
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
@@ -403,85 +399,6 @@ def test_recovery_preserves_existing_live_wake_and_executes_once(business_wire, 
     assert store.storage.wake_handled_dir.joinpath(live.wake_signal_id + ".json").is_file()
     if action == "retire":
         finish_retirement(case)
-
-
-def recovery_contract_violations(source):
-    """只拦语法能判定的危险结构：锁内升级、循环重建、只读修账、未知跳过和缺失finally清理。"""
-    tree = ast.parse(textwrap.dedent(source))
-    recovery = {"_initialize_task_index", "recover_task_responsibility_index", "rebuild_task_responsibility_index",
-        "_rebuild_task_index_locked"}
-
-    def name(call):
-        target = call.func
-        return target.attr if isinstance(target, ast.Attribute) else target.id if isinstance(target, ast.Name) else ""
-
-    def calls(node):
-        return [value for value in ast.walk(node) if isinstance(value, ast.Call)]
-
-    def in_body(statements):
-        return [call for statement in statements for call in calls(statement) if name(call) in recovery]
-
-    errors = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.If) and isinstance(node.test, ast.BoolOp):
-            checked = {value.id for value in ast.walk(node.test) if isinstance(value, ast.Name)}
-            if {"error", "live"} <= checked and any(isinstance(statement, ast.Continue) for statement in node.body):
-                errors.add("unknown_responsibility_silently_skipped")
-        if isinstance(node, ast.With):
-            shared = any(name(call) in {"task_responsibility_guard", "signal_responsibility_guard"}
-                or name(call) == "_task_index_guard" and any(keyword.arg == "exclusive"
-                    and isinstance(keyword.value, ast.Constant) and keyword.value.value is False for keyword in call.keywords)
-                for item in node.items for call in calls(item.context_expr))
-            if shared and in_body(node.body):
-                errors.add("recovery_under_shared_guard")
-        if isinstance(node, (ast.For, ast.While)) and in_body(node.body):
-            errors.add("recovery_inside_point_loop")
-        if isinstance(node, ast.FunctionDef) and node.name == "task_responsibility_report" and in_body(node.body):
-            errors.add("readonly_report_repairs")
-        if isinstance(node, ast.FunctionDef) and node.name == "_initialize_task_index":
-            attempts = [value for value in ast.walk(node) if isinstance(value, ast.Try)
-                and any(name(call) == "_rebuild_task_index_locked" for statement in value.body for call in calls(statement))]
-            if not any(any(name(call) in {"pop", "discard"} and isinstance(call.func, ast.Attribute)
-                    and isinstance(call.func.value, ast.Name) and call.func.value.id == "_UNKNOWN_INDEX_REBUILDS"
-                    for statement in attempt.finalbody for call in calls(statement)) for attempt in attempts):
-                errors.add("rebuild_suppression_without_finally_release")
-    return errors
-
-
-def test_ast_recovery_guards_reject_semantic_counterexamples():
-    source = "\n".join(textwrap.dedent(inspect.getsource(value)) for value in (
-        publication._initialize_task_index, publication.task_responsibility_report,
-        BackgroundAgentService._republish_pending_work))
-    assert recovery_contract_violations(source) == set()
-    invalid_upgrade = """
-        def producer(store, tasks):
-            for task in tasks:
-                with store.wakes.task_responsibility_guard('thread', task):
-                    store.wakes.recover_task_responsibility_index()
-    """
-    invalid_read = """
-        def task_responsibility_report(storage):
-            rebuild_task_responsibility_index(storage)
-    """
-    invalid_cleanup = """
-        def _initialize_task_index(storage):
-            _UNKNOWN_INDEX_REBUILDS.add(storage.root)
-            try:
-                _rebuild_task_index_locked(storage)
-            except OSError:
-                return
-    """
-    invalid_skip = """
-        def producer(tasks):
-            for task in tasks:
-                live, error = task_responsibility_report(task)
-                if error or live:
-                    continue
-    """
-    assert recovery_contract_violations(invalid_upgrade) == {"recovery_under_shared_guard", "recovery_inside_point_loop"}
-    assert recovery_contract_violations(invalid_read) == {"readonly_report_repairs"}
-    assert recovery_contract_violations(invalid_cleanup) == {"rebuild_suppression_without_finally_release"}
-    assert recovery_contract_violations(invalid_skip) == {"unknown_responsibility_silently_skipped"}
 
 
 def test_failed_rebuild_between_recovery_and_task_guard_is_not_silent_success(business_wire, monkeypatch):

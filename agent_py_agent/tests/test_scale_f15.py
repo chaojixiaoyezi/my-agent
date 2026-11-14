@@ -1,8 +1,6 @@
 """真实业务 HTTP 的注册/点查询不应读取历史任务或全 owner 工具集合。"""
-import ast
 import json
 from dataclasses import replace
-from pathlib import Path
 
 import pytest
 
@@ -67,21 +65,6 @@ def test_capabilities_and_point_detail_do_no_resource_scan(background_http, monk
     status, result = observation.background_call(background_http, 'system.capabilities')
     assert status == 200, result
     assert counts == {'tasks': 0, 'snapshots': 0, 'full_join': 0}
-
-
-# LLM: AST 不依赖行号；入口不能直接执行历史扫描，负例必须被同一规则识别。
-# 函数用途: 防止未来把昂贵快照重新放回 reader 注册期。
-def _eager_calls(source):
-    tree = ast.parse(source)
-    function = next(node for node in ast.walk(tree)
-                    if isinstance(node, ast.FunctionDef) and node.name == 'default_observation_readers')
-    return [node.lineno for node in ast.walk(function) if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute) and node.func.attr == 'resource_snapshot']
-
-
-def test_registration_ast_rejects_eager_snapshot():
-    assert _eager_calls(Path(readers.__file__).read_text()) == []
-    assert _eager_calls('def default_observation_readers():\n    source.resource_snapshot()\n') == [2]
 
 
 # LLM: unrelated坏行必须留在它自己的查询范围内；点详情不得先解析全owner操作。

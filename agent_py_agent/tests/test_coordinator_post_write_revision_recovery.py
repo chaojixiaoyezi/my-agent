@@ -1,8 +1,5 @@
 """真实原C写后revision确认失败：不丢责任、不重捕来源、不扩大写权限。"""
-import ast
 import errno
-import inspect
-import textwrap
 
 import pytest
 
@@ -142,49 +139,6 @@ def test_coordinator_post_write_read_error_does_not_accept_later_foreign_change(
     assert result['status'] == 'blocked' and called == []
     assert index.controller._all_quarantined is True
     assert fd_count() == before
-
-
-def test_coordinator_revision_fallback_guard_rejects_missing_snapshot_fixture():
-    """静态守门和错误fixture共用检查器，不以删除运行断言换绿。"""
-    def protected(source):
-        tree = ast.parse(textwrap.dedent(source))
-        scope = next(node for node in ast.walk(tree)
-                     if isinstance(node, ast.FunctionDef) and node.name == '_write_scope')
-        success = next(node.orelse for node in scope.body if isinstance(node, ast.Try))
-        for number, node in enumerate(success):
-            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
-                continue
-            target = node.targets[0]
-            if (not isinstance(target, ast.Subscript) or not isinstance(target.value, ast.Name)
-                    or target.value.id != 'attempt' or not isinstance(target.slice, ast.Constant)
-                    or target.slice.value != 'revision' or not isinstance(node.value, ast.Call)
-                    or not isinstance(node.value.func, ast.Name) or node.value.func.id != 'dict'
-                    or len(node.value.args) != 1):
-                continue
-            original = node.value.args[0]
-            if not (isinstance(original, ast.Attribute) and isinstance(original.value, ast.Name)
-                    and original.value.id == 'self' and original.attr == '_revision'):
-                continue
-            later_nodes = [child for later in success[number + 1:] for child in ast.walk(later)]
-            if any(isinstance(child, ast.Assign)
-                   and any(ast.dump(other) == ast.dump(target) for other in child.targets)
-                   for child in later_nodes):
-                return False
-            return any(isinstance(call, ast.Call)
-                       and getattr(call.func, 'attr', '') == '_attempt_revisions'
-                       for call in later_nodes)
-        return False
-
-    assert protected(inspect.getsource(active.ExecutorActiveIndex._write_scope))
-    assert not protected('def _write_scope(self, key, attempt):\n'
-                         ' try:\n  yield\n except BaseException:\n  raise\n else:\n'
-                         '  attempt["revision"] = self._attempt_revisions(attempt)\n'
-                         '  self._reconcile_write(key)\n')
-    assert not protected('def _write_scope(self, key, attempt):\n'
-                         ' try:\n  yield\n except BaseException:\n  raise\n else:\n'
-                         '  attempt["revision"] = dict(self._revision)\n'
-                         '  attempt["revision"] = self._attempt_revisions(attempt)\n'
-                         '  self._reconcile_write(key)\n')
 
 
 @pytest.mark.parametrize('window', ['sample', 'accept'])

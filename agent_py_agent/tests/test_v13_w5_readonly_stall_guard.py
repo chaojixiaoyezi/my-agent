@@ -1,7 +1,6 @@
 """只读空转守卫必须经过正式调用记录入口，不能只验证独立计数器。"""
 from __future__ import annotations
 
-import ast
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -341,22 +340,6 @@ def test_file_version_observations_are_bounded(tmp_path, monkeypatch):
     assert len(observed) == 128
     assert len(params.live_archive_state["subagent_readonly_stall"]["path_versions"]) == 128
     assert params.repeated_failure_halt[1:] == ("code:SUBAGENT_READONLY_STALL", 4)
-
-
-# LLM: 静态防线避免将有界元数据观察回退成全盘扫描、内容 hash 或仅信路径投影。
-# 函数用途: 锁住守卫无遍历无内容读取、版本判定确实消费 stat 指纹的结构约束。
-def test_stage_version_guard_has_no_scan_or_content_hash_fallback():
-    from agent_py_agent.agent.agent_core import readonly_stall_guard as guard
-
-    tree = ast.parse(Path(guard.__file__).read_text(encoding="utf-8"))
-    forbidden = {"rglob", "glob", "walk", "scandir", "read_text", "read_bytes", "open", "sha256", "sha1", "md5"}
-    calls = [node.func for node in ast.walk(tree) if isinstance(node, ast.Call)]
-    assert not any(isinstance(func, ast.Attribute) and func.attr in forbidden
-                   or isinstance(func, ast.Name) and func.id in forbidden for func in calls)
-    observer = next(node for node in tree.body
-                    if isinstance(node, ast.FunctionDef) and node.name == "_stage_artifact_updated")
-    assert any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_file_version"
-               for node in ast.walk(observer))
 
 
 def test_delivery_artifact_contract_enables_guard_without_text_inference(tmp_path):

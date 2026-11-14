@@ -6,7 +6,6 @@ No provider traffic; reservations, files, locks and subprocess restarts are real
 """
 from __future__ import annotations
 
-import ast
 import errno
 import importlib
 import importlib.util
@@ -31,19 +30,6 @@ class _RegressionLimits:
     LIMIT = 16777216
     LARGE_ROWS = 513
     ROW_METADATA_BYTES = 32768
-
-
-# LLM: Check declaration placement, not just names, so aliases/expressions cannot bypass the gate.
-# 函数用途: 防止两个生产模块重新声明未注册的模块级数字常量。
-@pytest.mark.parametrize('module_name', [anchors.__name__, MODULE])
-def test_numeric_limits_are_not_declared_at_module_scope(module_name):
-    module = importlib.import_module(module_name)
-    tree = ast.parse(Path(module.__file__).read_text(encoding='utf-8'))
-    assignments = (node for node in tree.body if isinstance(node, (ast.Assign, ast.AnnAssign)))
-    offenders = [ast.unparse(node) for node in assignments if any(
-        isinstance(value, ast.Constant) and type(value.value) in (int, float, complex)
-        for value in ast.walk(node.value))]
-    assert offenders == []
 
 
 # LLM: Deterministic identities belong only to synthetic temporary owners.

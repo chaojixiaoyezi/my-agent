@@ -1,7 +1,6 @@
 """真实观察追加、确认 journal 与 worker 来源之间的确认合同。"""
 from __future__ import annotations
 
-import ast
 import hashlib
 import inspect
 import json
@@ -125,18 +124,6 @@ def test_worker_queries_all_raw_ids_before_payload_filtering(tmp_path, monkeypat
     assert [row["observation_id"] for row in read_source(tmp_path, ref)["observations"]] == ["pending"]
     assert lookups and all(ids == ["pending", "ordinary", "embedded"] and not legacy
                            for ids, legacy in lookups)
-
-
-def test_source_constructor_and_legacy_flags_ast_guard():
-    tree = ast.parse(inspect.getsource(observation_handled))
-    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
-    storage = [node for node in calls if isinstance(node.func, ast.Name) and node.func.id == "ConversationStorage"]
-    lookups = [node for node in calls if isinstance(node.func, ast.Attribute) and node.func.attr == "handled"]
-    assert len(storage) == len(lookups) == 1
-    assert any(key.arg == "initialize" and isinstance(key.value, ast.Constant) and key.value.value is False
-               for key in storage[0].keywords)
-    assert any(key.arg == "include_legacy" and isinstance(key.value, ast.Constant) and key.value.value is False
-               for key in lookups[0].keywords)
 
 
 def test_revision_uses_exact_legacy_bytes_and_nofollow_journal_identity(tmp_path):

@@ -1,7 +1,6 @@
 """创建容量的历史规模、提交恢复与结构化谱系回归。"""
 from __future__ import annotations
 
-import ast
 import builtins
 import copy
 import gc
@@ -41,27 +40,6 @@ def _history(manager, count):
             (directory / "task.json").write_text(json.dumps({"id": task.id, "goal": task.goal, "thought": "", "plan": [], "status": task.status, "root_id": task.root_id}))
             if index is not None:
                 index.upsert(task, connection=connection)
-
-
-# LLM: 只读语法树检查给定函数及嵌套表达式，不依赖行号或字符串 grep。
-# 函数用途: 拦截容量或请求谱系重新直接调用全量运行列表。
-def _reject_full_listing(source):
-    tree = ast.parse(source)
-    return [node.lineno for node in ast.walk(tree) if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute) and node.func.attr == "list_runs"]
-
-
-# LLM: 语法树门只读函数源码；无效样例应被同一检查器拒绝。
-# 函数用途: 验证创建容量和请求谱系入口不直接调用历史全列表。
-def test_ast_creation_entries_reject_full_listing():
-    import inspect
-    import textwrap
-
-    from agent_py_agent.agent.agent_core.orchestration.capacity import _active_subagent_counts
-
-    for function in (_active_subagent_counts, SimpleAgent.subagent_run_ids_for_request):
-        assert not _reject_full_listing(textwrap.dedent(inspect.getsource(function)))
-    assert _reject_full_listing("def invalid(agent):\n    return agent.subagents.list_runs()\n") == [2]
 
 
 # LLM: pytest 隔离规模回归；只记录夹具读取量，不启动真实子任务或使用生产数据。

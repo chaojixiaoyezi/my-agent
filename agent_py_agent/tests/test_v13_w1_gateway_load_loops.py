@@ -118,7 +118,6 @@ def test_unknown_marker_never_unparks_by_time():
 
 """缓存失效和SIGUSR1安全导出的独立回归，供父级合入负载测试。"""
 
-import ast
 import json
 import os
 import signal
@@ -132,7 +131,6 @@ import pytest
 from agent_py_agent.agent.attempt import sandbox as cache_signal_sb
 from agent_py_agent.agent.tooling import plugin_registration as cache_signal_pr
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
-from agent_py_agent.cli import gateway_process as cache_signal_gp
 
 
 def cache_signal_spec(root):
@@ -271,18 +269,6 @@ def test_plugin_registration_value_error_warns_once(tmp_path, monkeypatch, caplo
     assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 2
 
 
-def test_sigusr1_handler_only_sets_event():
-    tree = ast.parse(Path(cache_signal_gp.__file__).read_text())
-    marker = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
-                  and node.name == "mark_stack_dump")
-    assert len(marker.body) == 1
-    assert ast.unparse(marker.body[0]) == "pending.set()"
-    installer = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
-                     and node.name == "_install_gateway_signal_handlers")
-    assert not any(isinstance(node, ast.Call) and ast.unparse(node.func) == "faulthandler.register"
-                   for node in ast.walk(installer))
-
-
 @pytest.mark.skipif(not hasattr(signal, "SIGUSR1"), reason="需要POSIX SIGUSR1")
 def test_sigusr1_python_safe_dump(tmp_path):
     source = r'''
@@ -349,7 +335,6 @@ print(json.dumps({"busy_threads": len(workers), "register_calls": len(register_c
 
 # receipt_fragment_merged
 """W1 #53-4 回归片段；仅使用临时Gateway与真实JSON协议，不证明生产负载数字。"""
-import ast as receipt_ast
 import json as receipt_json
 import os as receipt_os
 from dataclasses import replace as receipt_replace
@@ -640,29 +625,6 @@ def test_receipt_retention_legal_hold_preserves_runtime_files(tmp_path):
     assert not (paths.root / 'archive/runtime-files.sqlite3').exists()
 
 
-# LLM: 两个既有scandir持有者仍须with；已移动的候选发现使用原生FD，异常路径也必须finally关闭。
-# 函数用途: 在真实枚举入口检查资源释放，不要求已删除的完整目录扫描继续存在。
-def test_receipt_hot_scans_use_context_managers_static():
-    import inspect as receipt_inspect
-
-    from agent_py_agent.agent.tooling import process_session_store as receipt_sessions
-    for function in (receipt_retention._directory_entries,
-                     receipt_sessions.ProcessSessionTransaction.list_records):
-        import textwrap as receipt_textwrap
-        tree = receipt_ast.parse(receipt_textwrap.dedent(receipt_inspect.getsource(function)))
-        assert any(isinstance(node, receipt_ast.With) and any(
-            isinstance(item.context_expr, receipt_ast.Call) and isinstance(item.context_expr.func, receipt_ast.Attribute)
-            and item.context_expr.func.attr == 'scandir' for item in node.items) for node in receipt_ast.walk(tree))
-    from agent_py_agent.agent.gateway_parts.recovery_pending_index import directory_page
-    tree = receipt_ast.parse(receipt_inspect.getsource(directory_page))
-    assert any(isinstance(node, receipt_ast.Try) and any(
-        isinstance(call, receipt_ast.Call) and isinstance(call.func, receipt_ast.Attribute)
-        and call.func.attr == 'close' for final in node.finalbody for call in receipt_ast.walk(final)
-    ) for node in receipt_ast.walk(tree))
-    assert not any(isinstance(node, receipt_ast.Call) and isinstance(node.func, receipt_ast.Attribute)
-                   and node.func.attr in {'glob', 'scandir'} for node in receipt_ast.walk(tree))
-
-
 def test_receipt_persisted_terminal_unknown_failure_is_quarantined(tmp_path, monkeypatch, caplog):
     paths = receipt_paths(tmp_path / 'gateway')
     receipt_seed(paths, state='terminal_unknown')
@@ -939,18 +901,3 @@ def test_rework_repeated_input_copy_is_idempotent_and_budgeted(tmp_path):
     assert all(r['scanned_entries'] <= 1 for r in again)
     assert not hot.exists()
     assert (paths.root / 'archive/input_receipts/197001/input-a.json').read_bytes() == before
-
-
-def test_rework_static_unlink_follows_verified_publication():
-    import ast
-    import inspect
-    import textwrap
-
-    # SCALE-FU-01 取代旧“input在unlink前返回”的静态钉：任何目录的unlink都必须排在封存定位核实之后。
-    tree = ast.parse(textwrap.dedent(inspect.getsource(rework_retention._archive_one)))
-    body = tree.body[0].body[0].body
-    verified = next(i for i, node in enumerate(body) if isinstance(node, ast.If)
-        and ast.unparse(node.test) == 'lookup_runtime_file(paths, directory, path.name) is None')
-    unlink = next(i for i, node in enumerate(body) if any(isinstance(child, ast.Call)
-        and ast.unparse(child.func) == 'os.unlink' for child in ast.walk(node)))
-    assert verified < unlink

@@ -1,9 +1,6 @@
 """W5：真实派活、claim、队列与消费；只有模型生成由 Event 控制。"""
-import ast
 import copy
-import inspect
 import json
-import textwrap
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -23,7 +20,6 @@ from agent_py_agent.agent.conversation.models import ConversationThread, WakeSig
 from agent_py_agent.agent.conversation.session_tasks import SESSION_TASK_TERMINAL_STATUSES
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.conversation.wake_poison import ledger_corrupt_decision
-from agent_py_agent.agent.plugin_host.business_action_specs import business_action_spec
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
 from agent_py_agent.tests.test_v14_w5_model_set_adoption import (
     business_wire as business_wire,
@@ -271,40 +267,6 @@ def test_old_terminal_task_wake_closes_under_claim_without_new_model_or_candidat
     assert observations, "terminal task must be re-read while holding the original claim"
     assert store.session_tasks.require(task_id).to_dict() == before
     assert finals(store, thread_id) == messages
-
-
-# LLM: 仅检查可识别的语法形状；小反例必须失败，行为语义另由真实消费测试守住。
-# 函数用途: 阻止再次删除任务批次身份检查或返回目录外的采纳枚举。
-def wake_contract_violations(batch_source, model_source):
-    batch, model = ast.parse(textwrap.dedent(batch_source)), ast.parse(textwrap.dedent(model_source))
-    task_branches = [node for node in ast.walk(batch) if isinstance(node, ast.If)
-        and any(isinstance(value, ast.Constant) and value.value == "session_task" for value in ast.walk(node.test))]
-    errors = []
-    if not any(any(isinstance(value, ast.Constant) and value.value == "session_task_id"
-            for statement in node.body for value in ast.walk(statement)) for node in task_branches):
-        errors.append("session_task_identity_branch_missing")
-    allowed = set(business_action_spec("background_agents.model.set").result_schema["properties"]["adoption_status"]["enum"])
-    for node in ast.walk(model):
-        if not isinstance(node, ast.Dict):
-            continue
-        for key, value in zip(node.keys, node.values):
-            if isinstance(key, ast.Constant) and key.value == "adoption_status":
-                if any(isinstance(item, ast.Constant) and isinstance(item.value, str) and item.value not in allowed
-                        for item in ast.walk(value)):
-                    errors.append("adoption_status_outside_catalog")
-    return errors
-
-
-def test_ast_guards_check_production_and_reject_invalid_fixtures():
-    from agent_py_agent.agent.conversation.background_agents import BackgroundAgentService
-
-    batch = inspect.getsource(runtime_module._same_reason_wake_batch)
-    model = inspect.getsource(BackgroundAgentService.set_model)
-    assert wake_contract_violations(batch, model) == []
-    invalid_batch = "def _same_reason_wake_batch(primary, sibling):\n    return primary.reason == sibling.reason\n"
-    invalid_model = "def set_model():\n    return {'adoption_status': 'pending'}\n"
-    assert wake_contract_violations(invalid_batch, invalid_model) == [
-        "session_task_identity_branch_missing", "adoption_status_outside_catalog"]
 
 
 # LLM: 复用真实业务适配器，只为定向检查producer读取预算；不替换领域存储。

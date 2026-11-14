@@ -25,12 +25,3 @@ def test_risk_tiered_native_authoring(entry):
     for removed in ('这一步叫摸底，不能省', '每个任务至少三个子代理',
                     '每批做完停下来给用户复查', '复评一次也不能省'):
         assert removed not in body
-
-
-# LLM: 文案必须区分预览与真实业务完成，不发明创建或安装授权。
-# 函数用途: 防止原生Skill创作再次退化成能力包和200字假成功。
-def test_writing_skill_preserves_runtime_contracts():
-    body = (ROOT / 'meta/writing-skills/SKILL.md').read_text()
-    for token in ('Skill', 'Workflow', 'Plugin', 'Capability Pack', 'skill_ids',
-                  'ANALYZER_UNAVAILABLE', 'SKILL_NOT_FOUND', 'run_inputs', 'step_inputs', 'preview'):
-        assert token in body

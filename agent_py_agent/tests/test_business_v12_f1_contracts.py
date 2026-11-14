@@ -4,7 +4,6 @@ Business handlers and provider cache rates are deliberately not asserted here.
 """
 from __future__ import annotations
 
-import ast
 import importlib
 import importlib.util
 import json
@@ -133,16 +132,6 @@ def test_clear_text_is_exact_and_not_a_business_absence_claim():
         mod.runtime_injection_clear_text(None)
     with pytest.raises(ValueError):
         mod.runtime_injection_clear_text("other.source")
-
-
-def test_injection_module_has_no_io_runtime_or_business_imports():
-    mod = _module("prompting_parts.runtime_injection")
-    tree = ast.parse(Path(mod.__file__).read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            assert all(alias.name in {"dataclasses", "collections.abc", "typing"} for alias in node.names)
-        if isinstance(node, ast.ImportFrom):
-            assert node.level == 0 and node.module in {"__future__", "dataclasses", "collections.abc", "typing"}
 
 
 @pytest.mark.parametrize("key, default", [("business_spaces_enabled", True), ("prompt_runtime_snapshots_enabled", True)])

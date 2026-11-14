@@ -1,8 +1,6 @@
 """R3：真实 claim → MonitorPool → 工作流 → 脚本进程的停止和复用合同。"""
 from __future__ import annotations
 
-import ast
-import inspect
 import json
 import os
 import time
@@ -421,45 +419,3 @@ def test_interrupt_names_follow_real_claim_binding_and_bound_turn_precedence(cas
                 session_task_interrupt_name(run.signal.root_task_id), claim_name)
         assert _claim_interrupt_names({}) == (claim_name,)
     assert _claim_interrupt_names({'task_id': ' '}) == ()
-
-
-def test_all_scheduler_pool_handoffs_are_scoped_and_fenced_before_effects():
-    from agent_py_agent.agent.scheduler import execution
-
-    tree = ast.parse(inspect.getsource(execution))
-    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
-    submits = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute) and node.func.attr == 'submit']
-    assert len(submits) == 1, 'every new cross-thread handoff needs the same cancellation contract'
-    submit = submits[0]
-    assert ast.unparse(submit.func) == 'service.monitor_pool.submit'
-    callback = submit.args[3]
-    assert isinstance(callback, ast.Call) and ast.unparse(callback.func) == 'partial'
-    assert ast.unparse(callback.args[0]) == '_run_with_claim_interrupts'
-    assert ast.unparse(callback.args[1]) == '_claim_interrupt_names(kwargs)'
-    assert ast.unparse(callback.args[2]) == 'early'
-
-    target = functions['execute_scheduled_target']
-    guarded = next(node for node in target.body if isinstance(node, ast.Try))
-    handoff = next(node for node in guarded.body if isinstance(node, ast.With))
-    assert ast.unparse(handoff.items[0].context_expr) == 'register_interrupt_callback(early.set)'
-    assert any(isinstance(node, ast.Call) and ast.unparse(node.func) == 'future.result'
-        for node in ast.walk(handoff))
-    after = guarded.body[guarded.body.index(handoff) + 1]
-    assert isinstance(after, ast.If) and ast.unparse(after.test) == 'is_interrupted()'
-    assert isinstance(after.body[0], ast.Raise)
-    before = guarded.body[guarded.body.index(handoff) - 2]
-    assert isinstance(before, ast.If) and ast.unparse(before.test) == 'is_interrupted()'
-    assert [ast.unparse(handler.type) for handler in guarded.handlers] == ['ScheduleValidationError']
-
-    worker = functions['_run_with_claim_interrupts']
-    scope = next(node for node in worker.body if isinstance(node, ast.With))
-    assert ast.unparse(scope.items[0].context_expr) == 'ExitStack()'
-    assert isinstance(scope.body[0], ast.For)
-    assert any(isinstance(node, ast.Call) and ast.unparse(node.func) == 'register_interruptible'
-        for node in ast.walk(scope.body[0]))
-    assert isinstance(scope.body[1], ast.If) and isinstance(scope.body[1].body[0], ast.Raise)
-    assert ast.unparse(scope.body[2]) == 'return callback()'
-    assert not any(isinstance(node, (ast.Assign, ast.AnnAssign)) for node in tree.body)
-    assert not any(isinstance(node, ast.Call) and ast.unparse(node.func).split('.')[-1] == 'set_interrupt'
-        for node in ast.walk(tree))

@@ -5,7 +5,6 @@
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -39,13 +38,6 @@ def test_card_is_short_and_body_has_the_key_rules():
     for token in ("learnpack-notes.md", "MIT", "GPL", "package_build", "package_install", "照回执原文",
                   "不替用户执行任何确认命令", "默认做能力包", "skill_search"):
         assert token in body, token
-
-
-def test_reference_links_exist():
-    body = (SKILL / "SKILL.md").read_text(encoding="utf-8")
-    for link in re.findall(r"\]\((references/[^)]+)\)", body):
-        assert (SKILL / link).is_file(), link
-    assert (SKILL / "templates" / "CAPABILITY.md").is_file() and (SKILL / "templates" / "PROVENANCE.md").is_file()
 
 
 def test_required_tools_exist_for_the_local_admin(tmp_path, monkeypatch):

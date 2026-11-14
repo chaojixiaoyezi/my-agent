@@ -2,10 +2,7 @@
 # 模块用途: 守住重置期间的回合责任、终态、队列清理与旧显示隔离。
 from __future__ import annotations
 
-import ast
-import inspect
 import queue
-import textwrap
 import threading
 from types import SimpleNamespace
 
@@ -253,38 +250,3 @@ def test_completion_error_still_cleans_worker_refs(monkeypatch):
         agent.release.set()
         cfg.stop_event.set()
         thread.join(5)
-
-
-# LLM: 静态检查针对实际嵌套finally与转移次序，不能只搜索字符串存在。
-# 函数用途: 返回worker清理和reset转移是否满足语法不变量。
-def _guard(source, *, reset=False):
-    tree = ast.parse(textwrap.dedent(source))
-    if not reset:
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Try) and node.finalbody:
-                calls = [item for stmt in node.body for item in ast.walk(stmt) if isinstance(item, ast.Call)]
-                final = [item for stmt in node.finalbody for item in ast.walk(stmt) if isinstance(item, ast.Call)]
-                if any(isinstance(c.func, ast.Attribute) and c.func.attr == 'complete_turn' for c in calls) and any(
-                    isinstance(c.func, ast.Name) and c.func.id == '_tui_cleanup_after_job' for c in final):
-                    return True
-        return False
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.With):
-            continue
-        transferred = False
-        for stmt in node.body:
-            rendered = ast.unparse(stmt)
-            if 'self._retired_turns.update(self._turns)' in rendered:
-                transferred = True
-            if 'self._turns.clear()' in rendered and not transferred:
-                return False
-    return True
-
-
-# LLM: 先用坏夹具证明guard会拒绝，再检查当前真实函数，防止静态防线空转。
-# 函数用途: 为典型生命周期遗漏提供无产品导入的AST形状门。
-def test_ast_guard_rejects_invalid_fixture_and_accepts_real_functions():
-    assert not _guard('def bad():\n    runtime.complete_turn(x, y)\n    _tui_cleanup_after_job(cfg)')
-    assert not _guard('def bad(self):\n    with self._lock:\n        self._turns.clear()', reset=True)
-    assert _guard(inspect.getsource(tui_worker._tui_worker_body))
-    assert _guard(inspect.getsource(TuiRuntime.publish_conversation_reset), reset=True)

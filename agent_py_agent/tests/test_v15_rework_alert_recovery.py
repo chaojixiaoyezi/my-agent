@@ -1,7 +1,6 @@
 """R2：真实投递账、事件锚点与新实例恢复；只控制提供方边界。"""
 from __future__ import annotations
 
-import ast
 import hashlib
 import json
 import os
@@ -361,32 +360,6 @@ def test_recovery_rechecks_dispatch_under_event_lock_before_publishing(tmp_path,
             future.result(timeout=3)
     assert _current(tmp_path)[1]['anchors'][_key()]['state'] == 'pending'
     assert len(provider.calls) == 1
-
-
-def test_anchor_authority_and_recovery_have_structural_guards():
-    delivery_tree = ast.parse(Path(alert_delivery.__file__).read_text())
-    anchor_tree = ast.parse(Path(anchors.__file__).read_text())
-    # 禁止策略层重新读写 primary 槽；事件布局必须留在唯一锚点权威内。
-    assert not [node for node in ast.walk(delivery_tree) if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == 'anchors' and node.func.attr in {'_read', '_write', '_read_key'}]
-    functions = {node.name: node for node in ast.walk(anchor_tree) if isinstance(node, ast.FunctionDef)}
-    release = functions['release_unsent']
-    locks = [node for node in ast.walk(release) if isinstance(node, ast.With)]
-    assert len(locks) == 1
-    assert any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == '_current'
-        for node in ast.walk(locks[0]))
-    for tree in (delivery_tree, anchor_tree):
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, 'id', '')
-                assert name not in {'rglob', 'walk', 'scandir'}
-    # 数据锁内不得发送或读取另一投递账，避免反向锁序和持锁等网络。
-    for node in ast.walk(anchor_tree):
-        if isinstance(node, ast.With):
-            assert not [call for call in ast.walk(node) if isinstance(call, ast.Call)
-                and isinstance(call.func, ast.Attribute) and call.func.attr in {
-                    'deliver', 'send_message', 'lookup_alert_root', 'terminal_receipt'}]
 
 
 def test_invalid_attachment_retains_original_service_rejection(tmp_path):

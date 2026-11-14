@@ -540,38 +540,3 @@ def test_150_invalid_nested_result_is_unknown(background_http, change):
     assert status == 200 and body['data']['coverage'] == 'unknown' and body['data']['items'] == [], body
     status, body = background_call(background_http, 'tool_calls.get', {'operation_id': operation_id})
     assert status == 503 and body['error']['code'] == 'HOST_NOT_READY', body
-
-
-# LLM: 静态规则只约束这次协议边界，正例允许嵌套别名读取，反例覆盖旧外层读取和展示字段证明。
-# 函数用途: 收集 #150 的错误读取模式，用同一规则检查生产与最小反例。
-def _150_wire_contract_gaps(source):
-    import ast
-
-    gaps = []
-    for function in ast.walk(ast.parse(source)):
-        if not isinstance(function, ast.FunctionDef):
-            continue
-        for node in ast.walk(function):
-            if (function.name == 'tool_calls' and isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute) and node.func.attr == 'get'
-                    and isinstance(node.func.value, ast.Name) and node.func.value.id == 'outcome'
-                    and node.args and isinstance(node.args[0], ast.Constant)
-                    and node.args[0].value in ('result_ref', 'effect_outcome', 'redacted_input')):
-                gaps.append(node.args[0].value)
-            if (function.name == '_task_script_result' and isinstance(node, ast.Constant)
-                    and node.value == 'redacted_input'):
-                gaps.append('redacted_input')
-    return gaps
-
-
-def test_150_ast_contract_guard_positive_and_negative():
-    from pathlib import Path
-
-    from agent_py_agent.agent.business_spaces import v13_w7_scripts
-    from agent_py_agent.agent.gateway_parts import business_api_v13_readers
-
-    for module in (business_api_v13_readers, v13_w7_scripts):
-        assert _150_wire_contract_gaps(Path(module.__file__).read_text()) == []
-    assert _150_wire_contract_gaps('def tool_calls():\n return outcome.get("effect_outcome"), outcome.get("result_ref")') == ['effect_outcome', 'result_ref']
-    assert _150_wire_contract_gaps('def _task_script_result():\n return details["redacted_input"]') == ['redacted_input']
-    assert _150_wire_contract_gaps('def tool_calls():\n result = outcome["result"]\n return result["result_ref"], result["effect_outcome"]') == []

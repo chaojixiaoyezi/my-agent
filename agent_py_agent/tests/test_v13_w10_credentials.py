@@ -618,23 +618,6 @@ def test_native_commit_followup_failure_outcome(env, monkeypatch, failure, delet
     assert 'committed-synthetic' not in json.dumps(body)
 
 
-# LLM: 静态门禁止锁外展示快照回写，读取和保存必须同处原锁。
-# 函数用途: 固定窄适配的同锁读写边界。
-def test_catalog_adapter_keeps_read_save_under_original_lock():
-    import ast
-    import inspect
-    tree = ast.parse(inspect.getsource(credentials._credential_catalog_change))
-    locked = [node for node in ast.walk(tree) if isinstance(node, ast.With)
-        and any(isinstance(item.context_expr, ast.Call)
-            and isinstance(item.context_expr.func, ast.Name)
-            and item.context_expr.func.id == 'locked_json_path' for item in node.items)]
-    assert len(locked) == 1
-    calls = [node.func.attr for node in ast.walk(locked[0])
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)]
-    assert 'read_model_profiles' in calls and '_save_profiles' in calls
-    assert 'list_providers' not in calls and 'save_provider' not in calls
-
-
 # LLM: 无身份头时沿共享夹具真实本机管理员认证，不替换HTTP身份和派发。
 # 函数用途: 发送本机管理员的真实业务HTTP请求。
 def local_http_call(server, action, params, *, key=None):

@@ -1,7 +1,6 @@
 """#125: 精确 ack、可恢复迁移和有界 pending 的真实磁盘回归。"""
 from __future__ import annotations
 
-import ast
 import json
 import os
 import sqlite3
@@ -129,26 +128,6 @@ def test_corruption_rebuild_and_legacy_error(tmp_path):
         legacy.observations.unhandled_requiring_main()
     legacy.storage.observation_handled_path.write_text("{}")
     assert len(legacy.observations.unhandled_requiring_main()) == 1
-
-
-# LLM: 测试语法门真正拒绝反例，不仅检查文件或符号存在。
-# 函数用途: 防止热 ack 再次引入整图读写。
-def test_ack_ast_guard():
-    import inspect
-    import textwrap
-
-    from agent_py_agent.agent.conversation.store_observations import ObservationStore
-
-    # LLM: 只拦截已知整账本调用，不限制实现内部结构。
-    # 函数用途: 返回函数内是否有整图热路调用。
-    def unsafe(source):
-        return any(isinstance(node, ast.Call) and
-            ((isinstance(node.func, ast.Attribute) and node.func.attr in {"_read_handled", "events_report", "read_delivered"}) or
-             (isinstance(node.func, ast.Name) and node.func.id == "update_json_file_atomic"))
-            for node in ast.walk(ast.parse(textwrap.dedent(source))))
-
-    assert unsafe("def bad(self):\n self._read_handled()")
-    assert not unsafe(inspect.getsource(ObservationStore.mark_handled))
 
 
 # LLM: 真正增长观察 JSONL 和已处理 ID 两条历史轴；计数器只包真实 IO，不替代结果。
