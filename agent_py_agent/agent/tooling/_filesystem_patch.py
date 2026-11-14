@@ -37,6 +37,10 @@ from .models import (
 
 # 缺上下文预览最多 4000 字符：控制补丁回执体积。
 _MAX_MISSING_CONTEXT_PREVIEW_CHARS = 4_000
+_PARTIAL_PATCH_NEXT_ACTION = (
+    "先用 read_file 读取已提交的 files_modified 与失败目标 failed_path 核实当前文本和最新 file_version，"
+    "再只针对尚未生效的剩余改动重做补丁；禁止原样重提整份补丁。"
+)
 
 
 class PatchTargetMissingError(ValueError):
@@ -49,7 +53,7 @@ class PatchTargetMissingError(ValueError):
 
 
 # LLM: 批量补丁不是文件系统事务；保留已提交路径与失败目标，不得把部分写入说成零副作用。failed_effect 是失败那一项自己的
-#   副作用："none" 只在能确定没动过时给（目前只有删除：失败后目标还在），其余一律 "unknown"。
+#   副作用："none" 仅在预检/版本复核证明该目标未被改动时给出，其余一律 "unknown"。
 # 类用途: 将多文件执行中途失败的事实带回工具结果。
 class PatchApplyError(OSError):
     # LLM: 只保存本次执行的结构化路径与异常类型；不执行补偿覆盖，避免毁掉并发修改。
@@ -183,6 +187,7 @@ class ApplyPatchTool(FileSystemTool):
     # 函数用途: 应用补丁，返回引用、删除记录、差异及可选观察，展示不参与权限和成功判断。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         diagnostics = FileSyntaxDiagnostics() if self.enable_file_syntax_diagnostics else None
+        patch_started = False
         try:
             patch = _text_param(params.get("patch"), name="patch", max_chars=_MAX_WRITE_TEXT_CHARS)
             changes = _parse_simple_patch(patch)
@@ -193,33 +198,82 @@ class ApplyPatchTool(FileSystemTool):
                     False,
                     approval_error,
                     error_code="PERSONA_WRITE_REQUIRES_TOOL",
+                    effect_outcome="not_started",
                 )
             quota_changes, display = _preview_patch_quota_changes(changes, self)
             with self.quota_changes(quota_changes):
+                patch_started = True
                 touched = _apply_simple_patch(changes, self, versions=versions, diagnostics=diagnostics)
         except StaleFileVersionError as exc:
             return ToolHandlerOutcome("apply_patch", False, str(exc), error_code="STALE_VERSION", effect_outcome="not_started", retryable=True)
         except (OwnerQuotaExceeded, OwnerQuotaUnavailable) as exc:
-            return owner_quota_error_result("apply_patch", exc)
+            outcome = owner_quota_error_result("apply_patch", exc)
+            if not patch_started and not outcome.effect_outcome:
+                outcome.effect_outcome = "not_started"
+            return outcome
         except PatchApplyError as exc:
             untouched = exc.error_code == "STALE_VERSION" or exc.failed_effect == "none"
+            failed_effect = "none" if untouched else exc.failed_effect
+            envelope = {
+                "files_modified": exc.touched,
+                "failed_path": exc.failed_path,
+                "artifact_refs": _patch_artifact_refs(self, exc.touched, versions),
+                "partial_commit": bool(exc.touched),
+                "failed_path_effect": failed_effect,
+            }
+            if exc.touched:
+                return attach_syntax_diagnostics(ToolHandlerOutcome(
+                    "apply_patch",
+                    False,
+                    _patch_failure_message(exc),
+                    error_code="TOOL_PARTIAL_COMMIT",
+                    reported_error_code=exc.error_code,
+                    effect_outcome="failed" if untouched else "unknown",
+                    next_action=_PARTIAL_PATCH_NEXT_ACTION,
+                    result_envelope=envelope,
+                ), diagnostics)
             return attach_syntax_diagnostics(ToolHandlerOutcome(
-                "apply_patch", False, _patch_failure_message(exc),
-                error_code=exc.error_code, effect_outcome="failed" if exc.touched else "not_started" if untouched else "unknown",
-                result_envelope={"files_modified": exc.touched, "failed_path": exc.failed_path,
-                                 "artifact_refs": _patch_artifact_refs(self, exc.touched, versions),
-                                 "partial_commit": bool(exc.touched), "failed_path_effect": exc.failed_effect},
+                "apply_patch",
+                False,
+                _patch_failure_message(exc),
+                error_code=exc.error_code,
+                effect_outcome="not_started" if untouched else "unknown",
+                result_envelope=envelope,
             ), diagnostics)
         except PatchTargetMissingError as exc:
             # 目标文件不存在(Update/Delete)→PATH_NOT_FOUND(改路径/先定位)，而非
             # TOOL_INVALID_ARGUMENTS——后者会让模型反复重写补丁文本而非确认路径。
-            return ToolHandlerOutcome("apply_patch", False, str(exc), error_code="PATH_NOT_FOUND")
+            return ToolHandlerOutcome(
+                "apply_patch",
+                False,
+                str(exc),
+                error_code="PATH_NOT_FOUND",
+                effect_outcome="not_started",
+            )
         except WriteScopeError as exc:
-            return ToolHandlerOutcome("apply_patch", False, str(exc), error_code=exc.access_code or "WRITE_FORBIDDEN")
+            return ToolHandlerOutcome(
+                "apply_patch",
+                False,
+                str(exc),
+                error_code=exc.access_code or "WRITE_FORBIDDEN",
+                effect_outcome="not_started",
+            )
         except ValueError as exc:
-            return ToolHandlerOutcome("apply_patch", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+            return ToolHandlerOutcome(
+                "apply_patch",
+                False,
+                str(exc),
+                error_code="TOOL_INVALID_ARGUMENTS",
+                effect_outcome="not_started",
+            )
         except OSError as exc:
-            return ToolHandlerOutcome("apply_patch", False, f"补丁写入失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
+            return ToolHandlerOutcome(
+                "apply_patch",
+                False,
+                f"补丁写入失败: {exc}",
+                error_code="TOOL_EXECUTION_FAILED",
+                effect_outcome="not_started" if not patch_started else "",
+            )
         return attach_syntax_diagnostics(ToolHandlerOutcome(
             "apply_patch",
             True,
@@ -232,12 +286,17 @@ class ApplyPatchTool(FileSystemTool):
         ), diagnostics)
 
 
-# LLM: 失败说明只按结构化字段选：什么都没提交且失败那一项确定没动过时直说"没执行、什么都没改"，否则照旧写已提交几个路径。
+# LLM: 失败说明只按结构化字段选：什么都没提交且失败那一项确定没动过时直说"没执行、什么都没改"，部分提交明确指引重读剩余项。
 #   纯函数。
 # 函数用途: 生成补丁失败时给模型和用户看的说明。
 def _patch_failure_message(exc: PatchApplyError) -> str:
     if not exc.touched and exc.failed_effect == "none":
         return f"补丁没有执行，什么都没改：{exc.failed_path} 没删成（{exc}）。"
+    if exc.touched:
+        return (
+            f"补丁部分提交：已提交 {len(exc.touched)} 个路径（{', '.join(exc.touched)}）；"
+            f"失败目标 {exc.failed_path}: {exc}。{_PARTIAL_PATCH_NEXT_ACTION}"
+        )
     return f"补丁未全部完成，已提交 {len(exc.touched)} 个路径；失败目标 {exc.failed_path}: {exc}"
 
 
@@ -387,8 +446,23 @@ def _apply_simple_patch(changes: list[dict[str, Any]], tool: FileSystemTool, *, 
     touched: list[str] = []
     for change in changes:
         target = tool.resolve_write_path(str(change["path"]))
+        expected_target_version: str | None = versions.get(target) if versions is not None else None
+        destination = target
+        expected_dest_version: str | None = expected_target_version
         previous_count = len(touched)
         try:
+            if expected_target_version is None:
+                expected_target_version = file_version(target)
+            if change.get("type") == "update":
+                destination = _patch_destination(change, target, tool)
+            if destination != target:
+                expected_dest_version = (
+                    versions.get(destination)
+                    if versions is not None and destination in versions
+                    else file_version(destination)
+                )
+            else:
+                expected_dest_version = expected_target_version
             if versions is not None:
                 check_file_version(target, versions.get(target))
             _apply_patch_change(change, target, tool, touched, diagnostics)
@@ -396,12 +470,39 @@ def _apply_simple_patch(changes: list[dict[str, Any]], tool: FileSystemTool, *, 
                 changed = (tool.resolve_write_path(name) for name in touched[previous_count:])
                 versions.update((path, file_version(path)) for path in changed)
         except (OSError, ValueError) as exc:
-            # 删除只有一次 unlink：失败后目标还在，就能确定这一项什么都没动（learnpack 生产复测：只读目录里删不掉的文件被记成
-            # "副作用未知"，宿主停掉了整轮）。其余失败照旧按未知处理。
-            unchanged = change.get("type") == "delete" and target.is_file()
+            unchanged = isinstance(exc, StaleFileVersionError) or _patch_target_proven_unchanged(
+                target,
+                destination=destination,
+                expected_target_version=expected_target_version,
+                expected_dest_version=expected_dest_version,
+                committed_in_step=len(touched) > previous_count,
+            )
             raise PatchApplyError(exc, touched, tool.display_path(target),
                                   failed_effect="none" if unchanged else "unknown") from exc
     return touched
+
+
+def _patch_target_proven_unchanged(
+    target: Path,
+    *,
+    destination: Path,
+    expected_target_version: str | None,
+    expected_dest_version: str | None,
+    committed_in_step: bool,
+) -> bool:
+    """确认失败步骤未改动目标文件；stat 异常或指纹变化均按未证明处理。"""
+    try:
+        if expected_target_version is None or file_version(target) != expected_target_version:
+            return False
+        if (
+            destination != target
+            and not committed_in_step
+            and (expected_dest_version is None or file_version(destination) != expected_dest_version)
+        ):
+            return False
+        return True
+    except OSError:
+        return False
 
 
 # LLM: 单目标分发不拥有版本或事务权威；调用方持有预算和提交列表，失败不得隐藏已发生的副作用。

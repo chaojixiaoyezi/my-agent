@@ -824,9 +824,20 @@ def _unproven_requester_capability_failure() -> ToolHandlerOutcome:
     )
 
 
-# 函数用途: 统一的参数错误响应（带准确分类码，避免无码兜底成 UNKNOWN_ERROR 误导模型放弃）。
-def _error_result(message: str, *, error_code: str = "TOOL_INVALID_ARGUMENTS") -> ToolHandlerOutcome:
-    return ToolHandlerOutcome("resolve_capability_requests", False, message, error_code=error_code)
+# 函数用途: 统一的参数错误响应（仅用于落盘前的确定性拒绝，带准确分类码与 not_started，避免无码兜底成 UNKNOWN）。
+def _error_result(
+    message: str,
+    *,
+    error_code: str = "TOOL_INVALID_ARGUMENTS",
+    effect_outcome: str = "not_started",
+) -> ToolHandlerOutcome:
+    return ToolHandlerOutcome(
+        "resolve_capability_requests",
+        False,
+        message,
+        error_code=error_code,
+        effect_outcome=effect_outcome,
+    )
 
 
 __all__ = ["ResolveCapabilityRequestsTool"]

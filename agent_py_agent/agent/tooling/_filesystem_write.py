@@ -270,6 +270,7 @@ class WriteFileTool(FileSystemTool):
                 False,
                 request.content_policy.message,
                 error_code="ARTIFACT_VALIDATION_FAILED",
+                effect_outcome="not_started",
             )
         ledger_error = _system_ledger_write_error(request.target)
         if ledger_error:
@@ -281,11 +282,16 @@ class WriteFileTool(FileSystemTool):
                 False,
                 approval_error,
                 error_code="PERSONA_WRITE_REQUIRES_TOOL",
+                effect_outcome="not_started",
             )
         persona_error = _persona_injection_write_error(request.target, _persona_content(request))
         if persona_error:
             return ToolHandlerOutcome(
-                "write_file", False, persona_error, error_code="PERSONA_INJECTION_BLOCKED"
+                "write_file",
+                False,
+                persona_error,
+                error_code="PERSONA_INJECTION_BLOCKED",
+                effect_outcome="not_started",
             )
         before_content = (
             existing_utf8_text_for_display(request.target)
@@ -344,6 +350,7 @@ def _atomic_write_or_error(
     diagnostics: FileSyntaxDiagnostics | None = None,
 ) -> ToolHandlerOutcome | None:
     """执行原子写入；失败返回 ToolHandlerOutcome，成功返回 None。从 execute 抽出以控行数。"""
+    write_started = False
     try:
         change = OwnerQuotaChange(
             target,
@@ -351,18 +358,23 @@ def _atomic_write_or_error(
             append=request.mode == "append",
         )
         with tool.quota_changes([change]):
+            write_started = True
             observation = _atomic_write_bytes(target, request.data, mode=request.mode,
                                               expected_version=request.observed_version, diagnostics=diagnostics)
     except StaleFileVersionError as exc:
         return ToolHandlerOutcome("write_file", False, str(exc), error_code="STALE_VERSION", effect_outcome="not_started", retryable=True)
     except (OwnerQuotaExceeded, OwnerQuotaUnavailable) as exc:
-        return owner_quota_error_result("write_file", exc)
+        outcome = owner_quota_error_result("write_file", exc)
+        if not write_started and not outcome.effect_outcome:
+            outcome.effect_outcome = "not_started"
+        return outcome
     except ValueError as exc:
         return ToolHandlerOutcome(
             "write_file",
             False,
             str(exc),
             error_code="ARTIFACT_VALIDATION_FAILED",
+            effect_outcome="not_started",
             retryable=True,
             recommended_action=RecoveryAction.REWRITE_ARTIFACT_BYTES.value,
         )
@@ -444,6 +456,7 @@ def _system_ledger_write_blocked_result(message: str) -> ToolHandlerOutcome:
         False,
         message,
         error_code="SYSTEM_LEDGER_WRITE_BLOCKED",
+        effect_outcome="not_started",
         retryable=True,
         recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
     )

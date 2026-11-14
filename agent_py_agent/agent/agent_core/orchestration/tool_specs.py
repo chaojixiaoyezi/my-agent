@@ -140,11 +140,25 @@ def build_task_progress_model_spec() -> ToolModelSpec:
         "coverage": {
             "type": "object",
             "properties": {
-                "goal": {"type": "string"},
-                "dimensions": {"type": "array", "items": {"type": "string"}},
-                "targets": {"type": "array", "items": coverage_target_schema},
-                "coverage_requirement": {"type": "string"},
-                "enforcement": {"type": "string"},
+                "goal": {"type": "string", "description": "覆盖账本总体目标说明（要覆盖哪些对象及达标要求）。"},
+                "dimensions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "每个覆盖对象需要核查的开放维度名称列表（与 targets[].checks 的键对应）。",
+                },
+                "targets": {
+                    "type": "array",
+                    "items": coverage_target_schema,
+                    "description": "待覆盖目标对象数组；每项按稳定 id 记录各维度核查状态与证据引用。",
+                },
+                "coverage_requirement": {
+                    "type": "string",
+                    "description": "可选。覆盖范围达标口径说明（软自检元数据，不替代系统验收硬门）。",
+                },
+                "enforcement": {
+                    "type": "string",
+                    "description": "可选。覆盖自检提示级别说明（仅作模型续轮与复核参考）。",
+                },
             },
             "additionalProperties": False,
         },
@@ -188,31 +202,60 @@ def _task_progress_model_hints() -> ToolModelHints:
     )
 
 
+_TASK_PROGRESS_SHARED_ENTRY_DESCRIPTIONS: dict[str, str] = {
+    "title": "可读标题；新建进度项时必填，更新已有项备注或状态时可省略。",
+    "status": "条目状态：仅限 pending、in_progress、done、skipped 或 blocked（说明文字请填 notes/summary）。",
+    "evidence": "完成或阻塞的客观证据引用列表（如文件路径、行号范围、artifact_ref 或测试输出摘要）。",
+    "notes": "读取或执行过程中记录的简短客观事实说明。",
+    "next": "该条目下一步待执行的具体动作。",
+    "owner": "可选。承接该条目的负责人或子代理标识（如 run_id 或角色名）。",
+    "priority": "可选。条目优先级标记（字符串或整数，仅用于排序提示）。",
+    "updated_at": "可选。条目更新时间标记（如 ISO-8601 时间戳；通常由宿主维护）。",
+}
+
+
+def _with_shared_progress_descriptions(properties: dict[str, dict[str, object]]) -> dict[str, dict[str, object]]:
+    for field_name, description in _TASK_PROGRESS_SHARED_ENTRY_DESCRIPTIONS.items():
+        if field_name in properties and "description" not in properties[field_name]:
+            properties[field_name]["description"] = description
+    return properties
+
+
 # LLM: 每项更新都须有精确 ID，与运行时身份门一致；仅新项必需 title、显式状态合法性继续由 handler 校验。
 # 函数用途: 让模型生成阶段就知道 Todo 必须填写 ID，备注更新仍可省略标题和状态，不替模型猜已有项。
 def _task_progress_item_schema() -> dict[str, object]:
+    properties: dict[str, dict[str, object]] = {
+        "id": {"type": "string", "description": "稳定条目 ID；更新已有项或子代理 covers 绑定时必须使用原 ID。"},
+        "title": {"type": "string"},
+        "status": {"type": "string"},
+        "evidence": {"type": "array", "items": {"type": "string"}},
+        "notes": {"type": "string"},
+        "next": {"type": "string"},
+        "result": {"type": "string", "description": "可选。该进度项产出的结果摘要。"},
+        "outcome": {"type": "string", "description": "可选。该进度项的执行结果小结。"},
+        "conclusion": {"type": "string", "description": "可选。该进度项得出的核查结论。"},
+        "decision": {"type": "string", "description": "可选。围绕该进度项记录的关键取舍或决策。"},
+        "summary": {"type": "string", "description": "可选。单条进度项的一句话进展概括。"},
+        "owner": {"type": "string"},
+        "priority": {},
+        "updated_at": {},
+        "correction": {
+            "type": "boolean",
+            "description": "可选。返工重开已完成项时设为 true，并配合原 id 与 status=in_progress。",
+        },
+        "overwrite": {
+            "type": "boolean",
+            "description": "可选。设为 true 时用本次传入字段覆盖已有项对应内容而非增量合并。",
+        },
+        "replace": {
+            "type": "boolean",
+            "description": "可选。overwrite 的兼容布尔开关，显式替换同 id 旧条目字段。",
+        },
+    }
     return {
         "type": "object",
         "required": ["id"],
-        "properties": {
-            "id": {"type": "string", "description": "稳定条目 ID；更新已有项时使用原 ID。"},
-            "title": {"type": "string"},
-            "status": {"type": "string"},
-            "evidence": {"type": "array", "items": {"type": "string"}},
-            "notes": {"type": "string"},
-            "next": {"type": "string"},
-            "result": {"type": "string"},
-            "outcome": {"type": "string"},
-            "conclusion": {"type": "string"},
-            "decision": {"type": "string"},
-            "summary": {"type": "string"},
-            "owner": {"type": "string"},
-            "priority": {},
-            "updated_at": {},
-            "correction": {"type": "boolean"},
-            "overwrite": {"type": "boolean"},
-            "replace": {"type": "boolean"},
-        },
+        "properties": _with_shared_progress_descriptions(properties),
     }
 
 
@@ -220,25 +263,27 @@ def _task_progress_item_schema() -> dict[str, object]:
 # validation; provider-side enums would hide exact bad values from feedback.
 # 函数用途: 构造覆盖对象的模型 JSON 形状。
 def _task_progress_coverage_target_schema() -> dict[str, object]:
+    properties: dict[str, dict[str, object]] = {
+        "id": {"type": "string", "description": "被覆盖目标对象的稳定唯一 ID（如模块路径、项目名或章节号）。"},
+        "title": {"type": "string"},
+        "status": {"type": "string"},
+        "checks": {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+            "description": "维度名到状态的键值映射；键对应 coverage.dimensions，值仅限 pending/in_progress/done/skipped/blocked。",
+        },
+        "evidence": {"type": "array", "items": {"type": "string"}},
+        "notes": {"type": "string"},
+        "next": {"type": "string"},
+        "owner": {"type": "string"},
+        "priority": {},
+        "updated_at": {},
+        "coverage_kind": {"type": "string", "description": "可选。覆盖对象类别标识（如 file、module、api、chapter）。"},
+        "source_ref": {"type": "string", "description": "可选。该覆盖对象的权威来源路径或引用标识。"},
+    }
     return {
         "type": "object",
-        "properties": {
-            "id": {"type": "string"},
-            "title": {"type": "string"},
-            "status": {"type": "string"},
-            "checks": {
-                "type": "object",
-                "additionalProperties": {"type": "string"},
-            },
-            "evidence": {"type": "array", "items": {"type": "string"}},
-            "notes": {"type": "string"},
-            "next": {"type": "string"},
-            "owner": {"type": "string"},
-            "priority": {},
-            "updated_at": {},
-            "coverage_kind": {"type": "string"},
-            "source_ref": {"type": "string"},
-        },
+        "properties": _with_shared_progress_descriptions(properties),
     }
 
 

@@ -155,9 +155,22 @@ def build_manage_requirement_provenance_model_spec() -> ToolModelSpec:
         },
         hints=ToolModelHints(
             category="orchestration",
-            use_cases=("绑定需求与代码路径及输入版本", "关联真实单测证据并诚实验证范围", "记录独立评审与最终验收", "查询结构化溯源闭环与失效建议"),
-            avoid_when=("普通只读文件操作无需调用", "没有需求与版本绑定关系时"),
+            use_cases=(
+                "绑定需求项与代码路径及冻结输入版本（bind_requirement）",
+                "将真实测试命令事件关联到需求并诚实声明观测范围（link_verification）",
+                "登记异体独立评审结论（record_independent_review）、签署最终验收（record_acceptance）或查询溯源闭环（query_provenance）",
+            ),
+            avoid_when=(
+                "普通只读文件查看或没有正式需求与输入版本绑定关系时无需调用",
+                "维护单代理日常步骤待办与软覆盖清单时改用 task_progress",
+                "管理多代理任务派发签收、独占写集交接或外部文件邮箱时改用 manage_handoff_board",
+            ),
             keywords=("需求溯源", "输入版本", "独立评审", "验收", "provenance", "review", "acceptance"),
+            examples=(
+                '{"action":"bind_requirement","requirement_id":"req-01","input_version":"6ddc216f","watched_paths":["src/service.py"]}',
+                '{"action":"link_verification","requirement_id":"req-01","verification_event_ids":[1],"observation_scope":"module_only"}',
+                '{"action":"query_provenance","requirement_id":"req-01"}',
+            ),
             default_deferred=True,
             deferred_summary="管理需求到版本、单测、独立评审与验收的闭环溯源",
         ),

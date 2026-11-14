@@ -358,6 +358,7 @@ def _nested_create_params(
             False,
             items,
             error_code="TOOL_INVALID_ARGUMENTS",
+            effect_outcome="not_started",
         )
     delegated_items = items
     allowed_tool_values = [subagent_allowed_tools(item.params) for item in delegated_items]
@@ -462,10 +463,22 @@ def _create_subagents_transaction(agent: object):
 # 函数用途: 整批准备直属子代理，失败时不创建，v1兼容不改变事务或权限。
 def _prepare_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> PreparedSubagentCreation | ToolHandlerOutcome:
     if not agent.config.enable_subagents:
-        return ToolHandlerOutcome("create_subagents", False, "配置已禁用 subagent。", error_code="TOOL_UNAVAILABLE")
+        return ToolHandlerOutcome(
+            "create_subagents",
+            False,
+            "配置已禁用 subagent。",
+            error_code="TOOL_UNAVAILABLE",
+            effect_outcome="not_started",
+        )
     items = create_items_from_params(params)
     if isinstance(items, str):
-        return ToolHandlerOutcome("create_subagents", False, items, error_code="TOOL_INVALID_ARGUMENTS")
+        return ToolHandlerOutcome(
+            "create_subagents",
+            False,
+            items,
+            error_code="TOOL_INVALID_ARGUMENTS",
+            effect_outcome="not_started",
+        )
     prepared = _prepare_items(agent, items, params)
     migration = params.get("__input_migration") or {}
     projection = migration.get("create_projection") or {}
@@ -526,10 +539,15 @@ def _prepare_items(
                 item.params["delegation_constraints"] = top_c
     capacity = _checked_creation_capacity(agent)
     if isinstance(capacity, ToolHandlerOutcome):
+        if not capacity.effect_outcome:
+            capacity.effect_outcome = "not_started"
         return capacity
     slots, limits = capacity
     if len(items) > slots:
-        return _subagent_quota_result(len(items), slots, limits)
+        quota_outcome = _subagent_quota_result(len(items), slots, limits)
+        if not quota_outcome.effect_outcome:
+            quota_outcome.effect_outcome = "not_started"
+        return quota_outcome
     related_items, relation_error = _items_with_finding_relations(agent, items)
     if relation_error:
         return ToolHandlerOutcome(
@@ -537,6 +555,7 @@ def _prepare_items(
             False,
             relation_error,
             error_code="TOOL_INVALID_ARGUMENTS",
+            effect_outcome="not_started",
         )
     capped = _items_with_parent_context(agent, related_items)
     capped, skill_error = _items_with_skill_snapshot_refs(agent, capped)
@@ -546,6 +565,7 @@ def _prepare_items(
             False,
             skill_error,
             error_code="TOOL_INVALID_ARGUMENTS",
+            effect_outcome="not_started",
         )
     capped, audit_scope_error = _items_with_audit_child_scopes(agent, capped)
     if audit_scope_error:
@@ -554,13 +574,20 @@ def _prepare_items(
             False,
             audit_scope_error,
             error_code="TOOL_INVALID_ARGUMENTS",
+            effect_outcome="not_started",
         )
     allowed_tool_values = [subagent_allowed_tools(item.params) for item in capped]
     if invalid := _planned_delegation_result(agent, capped, allowed_tool_values):
         return invalid
     validation = _validate_items(agent, capped, allowed_tool_values)
     if validation:
-        return ToolHandlerOutcome("create_subagents", False, validation, error_code="TOOL_INVALID_ARGUMENTS")
+        return ToolHandlerOutcome(
+            "create_subagents",
+            False,
+            validation,
+            error_code="TOOL_INVALID_ARGUMENTS",
+            effect_outcome="not_started",
+        )
     try:
         task_params = _indexed_item_run_params(agent, capped)
     except (ModelProfileError, SubagentInputMediaError, DelegationConstraintError) as exc:

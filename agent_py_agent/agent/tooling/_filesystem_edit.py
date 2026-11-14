@@ -125,9 +125,21 @@ class EditFileTool(FileSystemTool):
             if old == new:
                 raise ValueError("old_string 与 new_string 相同，无需编辑")
         except WriteScopeError as exc:
-            return ToolHandlerOutcome("edit_file", False, str(exc), error_code=exc.access_code or "WRITE_FORBIDDEN")
+            return ToolHandlerOutcome(
+                "edit_file",
+                False,
+                str(exc),
+                error_code=exc.access_code or "WRITE_FORBIDDEN",
+                effect_outcome="not_started",
+            )
         except ValueError as exc:
-            return ToolHandlerOutcome("edit_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+            return ToolHandlerOutcome(
+                "edit_file",
+                False,
+                str(exc),
+                error_code="TOOL_INVALID_ARGUMENTS",
+                effect_outcome="not_started",
+            )
         # 文件不存在是路径/状态问题，不是"改 old_string/new_string 格式"能修的：
         # 旧实现把它和参数错混在一个 except 里报 TOOL_INVALID_ARGUMENTS，会让模型
         # 反复纠结 old_string 是否匹配，而真正该做的是先创建文件(write_file)或改对路径。
@@ -136,7 +148,7 @@ class EditFileTool(FileSystemTool):
             # 候选裁决用 check_path_access（**读取**裁决），不是写入范围/写边界 —— 这是既有设计：
             # "你是不是想改这个文件"只做只读、不落盘，所以按读权限判断即可。写入本身仍受
             # write_boundary 约束（上面那层）。见 2026-09-28 dsh-9b 复审；此处只补说明、未改行为。
-            return missing_path_result(MissingPathRequest(
+            missing = missing_path_result(MissingPathRequest(
                 tool_name="edit_file",
                 raw_path=self.display_path(target),
                 target=target,
@@ -146,6 +158,9 @@ class EditFileTool(FileSystemTool):
                 retry_tool="read_file",
                 decide_access=self.check_path_access,
             ))
+            if not missing.effect_outcome:
+                missing.effect_outcome = "not_started"
+            return missing
         try:
             observed_version = check_file_version(target, params.get("expected_version"))
             original = target.read_bytes()
@@ -159,27 +174,63 @@ class EditFileTool(FileSystemTool):
         except _EditMatchError as exc:
             return _edit_match_failure(self.display_path(target), content, old, observed_version, str(exc))
         except ValueError as exc:
-            return ToolHandlerOutcome("edit_file", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
+            return ToolHandlerOutcome(
+                "edit_file",
+                False,
+                str(exc),
+                error_code="TOOL_INVALID_ARGUMENTS",
+                effect_outcome="not_started",
+            )
         except OSError as exc:
-            return ToolHandlerOutcome("edit_file", False, f"读取失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
+            return ToolHandlerOutcome(
+                "edit_file",
+                False,
+                f"读取失败: {exc}",
+                error_code="TOOL_EXECUTION_FAILED",
+                effect_outcome="not_started",
+            )
         approval_error = _persona_approval_write_error(target, self.protected_persona_root)
         if approval_error:
             return ToolHandlerOutcome(
-                "edit_file", False, approval_error, error_code="PERSONA_WRITE_REQUIRES_TOOL"
+                "edit_file",
+                False,
+                approval_error,
+                error_code="PERSONA_WRITE_REQUIRES_TOOL",
+                effect_outcome="not_started",
             )
         persona_error = _persona_injection_write_error(target, updated)  # 改 owner SOUL/USER/AGENTS 也过注入扫描
         if persona_error:
-            return ToolHandlerOutcome("edit_file", False, persona_error, error_code="PERSONA_INJECTION_BLOCKED")
+            return ToolHandlerOutcome(
+                "edit_file",
+                False,
+                persona_error,
+                error_code="PERSONA_INJECTION_BLOCKED",
+                effect_outcome="not_started",
+            )
         diagnostics = FileSyntaxDiagnostics() if self.enable_file_syntax_diagnostics else None
         try:
             updated_bytes = encode_like_original(updated, original)
+        except UnicodeError as exc:
+            return ToolHandlerOutcome(
+                "edit_file",
+                False,
+                f"写入失败: {exc}",
+                error_code="TOOL_EXECUTION_FAILED",
+                effect_outcome="not_started",
+            )
+        write_started = False
+        try:
             with self.quota_changes([OwnerQuotaChange(target, len(updated_bytes))]):
+                write_started = True
                 observation = _atomic_write_bytes(target, updated_bytes, expected_version=observed_version, diagnostics=diagnostics)
         except StaleFileVersionError as exc:
             return ToolHandlerOutcome("edit_file", False, str(exc), error_code="STALE_VERSION", effect_outcome="not_started", retryable=True)
         except (OwnerQuotaExceeded, OwnerQuotaUnavailable) as exc:
-            return owner_quota_error_result("edit_file", exc)
-        except (OSError, UnicodeError) as exc:
+            outcome = owner_quota_error_result("edit_file", exc)
+            if not write_started and not outcome.effect_outcome:
+                outcome.effect_outcome = "not_started"
+            return outcome
+        except OSError as exc:
             return ToolHandlerOutcome("edit_file", False, f"写入失败: {exc}", error_code="TOOL_EXECUTION_FAILED")
         note = "" if strategy == "exact" else f"（{strategy} 容错匹配）"
         # EXEC-31: 编辑成功只回显"替换 N 处"，

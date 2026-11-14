@@ -23,6 +23,7 @@ from ..tooling.models import (
     IdempotencyPolicy,
     ResourceScopePolicy,
     ToolHandlerOutcome,
+    ToolModelHints,
     ToolModelSpec,
     ToolRuntimePolicy,
 )
@@ -1403,6 +1404,25 @@ class SkillFeedbackTool(BaseTool):
             "required": [],
             "additionalProperties": False,
         },
+        hints=ToolModelHints(
+            category="capability",
+            use_cases=(
+                "主会话查看当前 owner 自学 Skill 登记表、质量阶梯与归档宽限期状态（action=status）",
+                "主会话标记本任务已送达的自学 Skill 被有效采用（adopted）或静默记录失效/误导负反馈（ineffective）",
+                "主会话按用户明确要求归档移除（remove）或恢复（restore）机器托管的自学 Skill",
+            ),
+            avoid_when=(
+                "需要检索可用 Skill 列表或读取 SKILL.md 步骤正文时改用 skill_search（本工具不读取技能正文）",
+                "需要记录陈述性事实/事件时改用 remember，需要修改 USER 画像或 SOUL 语气时改用 update_persona",
+                "当前处于子代理或受限隔离运行时禁止调用（skill_feedback 仅在主会话可用，子代理调用一律拒绝）",
+            ),
+            keywords=("skill_feedback", "自学技能", "技能反馈", "adopted", "ineffective", "归档恢复"),
+            examples=(
+                '{"action":"status"}',
+                '{"action":"adopted","skill_id":"owner:deploy-helper"}',
+                '{"action":"ineffective","skill_id":"owner:deploy-helper"}',
+            ),
+        ),
     )
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy(

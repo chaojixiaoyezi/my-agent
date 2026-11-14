@@ -126,13 +126,14 @@ def _remember_scope_schema() -> dict[str, object]:
 
 
 # LLM: Batch items use the same domain fields as a single mutation and cannot nest batch/list
-# control operations. 批量项的 scope 与顶层同结构同义，只留“同顶层 scope。”，不在每轮请求里重复整段范围说明。
+# control operations. 批量项复用同一份业务字段与 scope 字段说明源，避免顶层与 batch 漂移。
 # 函数用途: 构造 remember batch 单项 Schema。
 def _remember_operation_schema(scope_schema: dict[str, object]) -> dict[str, object]:
     properties = _remember_business_fields(_remember_batch_scope_schema(scope_schema))
     properties["action"] = {
         "type": "string",
         "enum": ["add", "replace", "remove"],
+        "description": "单项记忆变更动作：add、replace 或 remove（batch 内不可嵌套 list 或 batch）。",
     }
     return {
         "type": "object",
@@ -142,22 +143,20 @@ def _remember_operation_schema(scope_schema: dict[str, object]) -> dict[str, obj
     }
 
 
-# LLM: 只改说明文字：字段、类型、枚举、必填与 additionalProperties 原样复制，顶层 scope 的权威说明不动。
-# 函数用途: 生成批量项用的 scope Schema 副本，去掉与顶层重复的说明文字。
+# LLM: 字段、类型、枚举、子字段说明、必填与 additionalProperties 从顶层 scope 同源继承，顶层仅简写外层说明。
+# 函数用途: 生成批量项用的 scope Schema 副本，保留内部字段说明供原生嵌套 Schema 自省。
 def _remember_batch_scope_schema(scope_schema: dict[str, object]) -> dict[str, object]:
     batch = deepcopy(scope_schema)
-    for shape in (batch.get("properties") or {}).values():
-        if isinstance(shape, dict):
-            shape.pop("description", None)
     batch["description"] = "同顶层 scope。"
     return batch
 
 
 # LLM: Field construction is shared by top-level and batch schemas, preventing drift in origin,
 # kind, evidence, or expiry semantics.
-# 函数用途: 构造 remember 的业务字段 Schema。
+# 函数用途: 构造 remember 的业务字段 Schema，并从唯一说明源挂载字段描述供顶层与 batch 共用。
 def _remember_business_fields(scope_schema: dict[str, object]) -> dict[str, object]:
-    return {
+    descriptions = _remember_parameter_descriptions()
+    fields: dict[str, dict[str, object]] = {
         "entry_id": {"type": "string"},
         "content": {"type": "string"},
         "kind": {"type": "string", "enum": ["fact", "event", "project"]},
@@ -168,10 +167,14 @@ def _remember_business_fields(scope_schema: dict[str, object]) -> dict[str, obje
         },
         "evidence_refs": {"type": "array", "items": {"type": "string"}},
         "subject_key": {"type": "string"},
-        "scope": scope_schema,
+        "scope": deepcopy(scope_schema),
         "valid_from": {"type": "string"},
         "valid_until": {"type": "string"},
     }
+    for name, shape in fields.items():
+        if name in descriptions and "description" not in shape:
+            shape["description"] = descriptions[name]
+    return fields
 
 
 # LLM: Top-level action adds list/batch controls while reusing the exact single-operation

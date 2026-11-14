@@ -129,9 +129,22 @@ def build_manage_handoff_board_model_spec() -> ToolModelSpec:
         },
         hints=ToolModelHints(
             category="orchestration",
-            use_cases=("跨代理交付与交接项板管理", "外部交互式助手安全文件邮箱同步"),
-            avoid_when=("内部同一会话简单发消息用 send_session_message",),
+            use_cases=(
+                "多代理协作时创建协作单（open_case）、向真实 run_id 或外部助手发布带独占写集的交接项（publish_item）",
+                "接收方签收（record_ack）、提交阶段交付证据（submit_handoff）及有权限主体按 submission_digest 终审（decide_acceptance）",
+                "与外部交互式助手同步单写者文件邮箱（sync_external_mailbox）",
+            ),
+            avoid_when=(
+                "单代理独立维护自己的待办或跨轮进度清单时改用 task_progress，不要自建跨代理交接单",
+                "向正在运行的直属子代理追加实时引导时改用 send_guidance；跨会话发普通消息时改用 send_session_message",
+                "需要绑定需求输入版本、关联验证事件或登记独立评审/需求级验收溯源时改用 manage_requirement_provenance",
+            ),
             keywords=("交接板", "handoff", "mailbox", "验收", "ack"),
+            examples=(
+                '{"action":"open_case","title":"前后端接口联调","summary":"对齐字段契约与独占写集"}',
+                '{"action":"publish_item","case_id":"case-01","responsible_actor":"run-child-01","actor_kind":"internal_run","frozen_input_version":"v1","exclusive_write_set":["src/api.py"]}',
+                '{"action":"list_items","case_id":"case-01"}',
+            ),
             default_deferred=True,
             deferred_summary="管理跨代理交接板项目状态与外部助手邮箱",
         ),

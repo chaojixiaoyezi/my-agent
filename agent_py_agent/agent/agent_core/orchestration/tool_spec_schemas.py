@@ -42,17 +42,47 @@ _CREATE_ITEM_PARAMETER_SCHEMA: dict[str, Any] = {
     "delegation_constraints": {
         "type": "object",
         "properties": {
-            "schema_version": {"type": "string"},
-            "actor_runtime": {"type": "string", "enum": ["native", "external_instruction_only"]},
-            "max_cumulative_children": {"type": "integer", "minimum": 0},
-            "allow_descendants": {"type": "boolean"},
+            "schema_version": {
+                "type": "string",
+                "description": "可选。派工约束协议版本标识（如 delegation_constraints.v1；省略时采用宿主当前版本）。",
+            },
+            "actor_runtime": {
+                "type": "string",
+                "enum": ["native", "external_instruction_only"],
+                "description": "执行体运行形态枚举：native 为宿主受管原生子代理，external_instruction_only 仅生成受控外部协作指令。",
+            },
+            "max_cumulative_children": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "该子代理生命周期内累计可创建的下级上限（>= 0 整数，0 禁止创建任何下级；不得超过父级剩余配额）。",
+            },
+            "allow_descendants": {
+                "type": "boolean",
+                "description": "是否允许该子代理继续向下派工创建后代（false 等效禁止再派子代，不能突破父级深度与配额上界）。",
+            },
             "max_descendant_depth": {"type": "integer", "minimum": 0, "description": "交给该子代理的剩余后代代数（非根树绝对深度）：0 禁止它再派子代，1 允许再派一代；每次派工继承时减1，子代显式值必须小于父级原剩余值。省略表示继承父级剩余值减1；无父级限制时省略表示不加此限。"},
-            "exact_write_set": {"type": "array", "items": {"type": "string"}},
-            "allowed_read_inputs": {"type": "array", "items": {"type": "string"}},
-            "allowed_output_dirs": {"type": "array", "items": {"type": "string"}},
+            "exact_write_set": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "授予该子代理的精确可写文件/目录路径围栏列表（仅在父级已授权写边界内收紧，不能扩权）。",
+            },
+            "allowed_read_inputs": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "允许该子代理读取的显式输入文件或目录路径列表（必须在当前 owner 可见读范围内）。",
+            },
+            "allowed_output_dirs": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "允许该子代理落盘交付产物的目录路径列表（必须位于父级允许的写入范围内）。",
+            },
             "permitted_tools": {"type": "array", "items": {"type": "string"},
                                 "description": "创建时的精确工具清单，覆盖 allowed_tools 的默认补齐，不能超过父级当前权限。后续缺失能力须走原 capability_request 和父级裁决。审批不能绕过宿主禁用项、路径围栏或不可扩大的授权上界。"},
-            "prohibited_actions": {"type": "array", "items": {"type": "string"}},
+            "prohibited_actions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "显式禁止该子代理执行的动作或工具标识列表（在父级禁令基础上只增不减）。",
+            },
         },
         "additionalProperties": False,
     },
