@@ -1,3 +1,14 @@
+## 2026-11-14 全仓精简瘦身（Waves 1–4）与无损单测归并
+
+```text
+agent_py_agent/tests/
+|-- plugin_samples/fixtures/            # 迁入原顶层 6 个协议示例插件（hello-go、hello-node、event-watch、rm-guard、rm-guard-node、status-pet）供单测专用
+|-- test_plugin_protocol_samples.py     # 统一验证跨语言插件、事件观察钩子与命令收紧门示例协议
+`-- test_consolidated_c1_g1.py..c10_g3.py # 31 个无损归并单测模块（合并原 217 个碎片化回归测试文件，保留全部用例与断言）
+plugins/
+`-- (保留 12 个真实功能插件 + sdk/)      # activity-line、browser-lite、context-inspector、design-lite、desktop-lite、genui-lite、harness-console、image-text、savepoint-lite、web-board、workspace-peek、worktable-lite
+```
+
 ## 2026-11-13 子代理派工、空间挂包与后台详情回归
 
 ```text
@@ -2600,9 +2611,6 @@ IM 多任务和公共包的新长期入口及关键文件职责（均复用原 S
 |-- agent_py_agent/tests/test_plugin_gate_consumers.py # B5真实隔离主/子消费者与I4恢复重问，旧子审批不可跨attempt；不启停真实Gateway
 |-- agent_py_agent/tests/test_plugin_gate_cross_bfail.py # B5×B7跨件：冷启动撞预算/沙箱起不来/进程被杀都收紧成ask；只替插件进程
 |-- agent_py_agent/tests/test_plugin_gate_reapproval.py # B5六身份精确批准重跑、主子实际批准/再问/拒绝及鲜活换代，不读真实owner
-|-- agent_py_agent/tests/test_plugin_gate_event_combination.py # 17j B5/B4/B8组合：拒绝零handler/零工具事件，原归档/唯一写账→真实临时库→B6 info；三项转正
-|-- agent_py_agent/tests/test_plugin_m1_joint_e2e.py # jb6：真实样例stdio、B3/B2与只读展示，队列手工推进，不代宿主启用/B7
-|-- agent_py_agent/tests/test_plugin_m1_joint_tool_gate.py # jb6/jb6b：目标插件非空观察、实际B5拒绝链；ask 批准/不可交互/消费者答 unavailable 三出口账本与最近决定排序
 |-- agent_py_agent/tests/test_plugin_tool_gate_decision_ledger.py # B5决定字段/全部review/批准排除/单门多门与canonical信封组件反证
 |-- agent_py_agent/tests/fixtures/plugin_tool_gate_mutation_probe.py # B5 第一段五个真实内存变异，保留 pytest 退出码，不写产品源码
 |-- agent_py_agent/agent/capability_package_manifest.py # 独立能力内容声明与资源路径校验
@@ -2699,33 +2707,11 @@ IM 多任务和公共包的新长期入口及关键文件职责（均复用原 S
 |-- agent_py_agent/tests/test_capability_selection_authority.py # 原执行权和只读准入组合验证
 |-- agent_py_agent/tests/test_capability_package_entry_context.py # 多入口总预算、分页和失败隔离
 |-- agent_py_agent/tests/test_capability_package_selection_runtime.py # 主请求一次准备及停止续跑组合
-|-- agent_py_agent/tests/test_capability_package_drama_text_duration.py # A包逐场镜头与来源目标时长对账
-|-- agent_py_agent/tests/test_capability_package_drama_text_basis.py # A包v3镜头来源、改编与未知声明及报告版本
-|-- agent_py_agent/tests/test_capability_package_drama_text_visibility.py # A包人物字面覆盖、画外声明及有界诊断
-|-- agent_py_agent/tests/test_capability_package_drama_text_lines.py # A包0.4.0可选台词、逐字引用、道具状态接续与检查器身份
-|-- agent_py_agent/tests/test_capability_package_drama_text_v05.py # A包0.5.0新增7项检查（占位、内嵌引文、改编原文、道具状态/来源、画外点名、过短镜头）与--host-json宿主核验输出
-|-- agent_py_agent/tests/test_capability_package_drama_text_source_marks.py # A包0.5.3来源与改编标注三条规则（道具来源标错、未标改编、说明与原文矛盾）与hint
-|-- agent_py_agent/tests/test_capability_package_drama_text_hint_guard.py # A包hint通用守卫：无未替换占位符、≤200字、无控制字符，清单从脚本现取
-|-- agent_py_agent/tests/test_capability_package_drama_text_review_fixes.py # A包0.5.4：台词逐字必须在段落引号内、镜内道具交接提醒补prop_handoffs
-|-- agent_py_agent/tests/test_capability_package_drama_workflow_duration.py # B包分集镜头与明确目标对账
-|-- agent_py_agent/tests/test_capability_package_b_template.py # B完整模板、制作交接及原派工授权接口
-|-- agent_py_agent/tests/test_capability_package_drama_workflow_handoff.py # B交接绑定、原字节摘要、对象地址及路径别名缓存边界
-|-- agent_py_agent/tests/test_capability_package_drama_workflow_baseline.py # B包0.2.0基线逐ID对比、交接覆盖与虚假新增/省略、检查器身份
-|-- agent_py_agent/tests/test_capability_package_host_mode_robustness.py # A/B 检查器遇到列表、对象等坏形状时宿主模式仍输出合格 v1、不崩溃
-|-- agent_py_agent/tests/test_capability_package_verification_blocks.py # A/B 两包 verification 块经真实构建器往返、启用确认列出输入、按声明参数驱动检查器
-|-- agent_py_agent/tests/test_capability_package_drama_workflow_v03.py # B包0.3.0新增检查（缺表/外键、编造参考ID、节拍角色、出镜参考、未列出基线改动、虚假改动声明）与--host-json按摘要对应交接
 |-- agent_py_agent/tests/test_subagent_package_entries.py # 子代理同代包入口的首请求、显式选模、权限和恢复组合
 |-- agent_py_agent/tests/test_file_syntax_diagnostics.py # 有界语法观察、反馈与诊断异常隔离
 |-- agent_py_agent/tests/test_filesystem_syntax_feedback.py # 三文件入口的真实发布、部分提交与取消回归
 |-- agent_py_agent/tests/test_file_syntax_diagnostics_runtime.py # 配置到模型可见回执及修复选择的替身验证
 |-- scripts/build_capability_package.py   # 不执行代码的可重复内容包构建入口
-|-- examples/capability-packages/         # 来源独立的短剧与证据报告样包源码
-|   |-- drama-text-a/methods/review-source.md # 原文与下游事实的成对证据审阅
-|   |-- drama-text-a/methods/review-continuity.md # 同镜、相邻镜与跨场接续的定向阅读
-|   |-- drama-text-a/methods/review-delivery.md # 实际合并产物、检查回执与拟对外陈述核对
-|   |-- drama-text-a/methods/visible-characters.md # 从成稿回填可见与画外人物，解释字面诊断边界
-|   |-- drama-text-a/templates/review.md # 人与模型使用的审阅反馈形状，不生成机器状态
-|   `-- drama-workflow-b/templates/handoff.json # 制作阶段输入与对象转换的待填写业务资料
 |-- docs/design/IM_TASK_EXECUTION_POLICY.md # IM 定时后台、当天委派开关与零点失效的待实施合同
 |-- docs/design/PUBLIC_CAPABILITY_PACKS.md # 管理员公共发布、普通用户只读消费与原执行权限隔离的评估
 |-- docs/design/OWNER_HOME_PERMISSION_REVIEW.md # 家目录授权误拦、Shell 锁保护与子代理审批换代的证据及待实施方案
@@ -2890,10 +2876,6 @@ agent_py_agent/
 |   |-- chat.py                         # 本地 chat 入口
 |   |-- chat_client_context.py          # 轻量 Gateway TUI 客户端、活动输入三态与 input-status 查询
 |   |-- gateway_client_headers.py       # 仓库HTTP验收脚本复用原部署配置与G3凭据，不增传输入口
-|   |-- scenario.py                     # 隔离诊断场景注册、命令参数来源及 suite 调度
-|   |-- scenario_cases/                 # 各类诊断场景及其专用替身
-|   |   |-- runner_retry_case.py        # runner 重试场景，保留现有收口断言及其失败证据
-|   |   `-- runner_retry_backend.py     # 只供该场景注入的离线失败后端
 |   |-- memory_admin_parser.py          # Memory v2 唯一管理员命令树与中文参数帮助
 |   |-- memory_admin_commands.py        # Candidate/Curator/Retention/Doctor/Migration 共用正式 Service 的 CLI 适配
 |   |-- skill_proposal_commands.py      # `skills proposals list/show/confirm/reject`：子代理经验提案的用户入口；也挂 learned 子树
@@ -3051,7 +3033,6 @@ agent_py_agent/
 |   |   |-- subagent/model_selection.py # 首个真实子代理模型请求的宿主资格、持久选择及失败保留协调
 |   |   |-- runtime/                    # 单 child guidance、active-turn compact carrier、sleep 闹钟与 loop support
 |   |   |   |-- conversation_state.py  # 主/子代理当前 Compact 代次的结构化模型事实投影
-|   |   |   |-- sleep_tool.py           # clock.sleep 工具：模型主动定时等待，写 wake_queue 字条、事件提前醒取消
 |   |   |   |-- record_lesson_tool.py   # 子代理专属 record_lesson：身份取 runner 上下文，把一条可复用做法记进本 run 的 lessons.jsonl
 |   |   |   |-- turn_trigger.py         # 回合触发类型：生命周期唤醒以“# Host Event”开头、固定推荐短名单、本片注入不进后续重放
 |   |   |-- model/                      # 主工具循环的统一模型调用账、动态超时、上下文压力与成本统计
@@ -3119,7 +3100,6 @@ agent_py_agent/
 |   |   |   |-- actions/                # action-plan 应用、取消/接管动作
 |   |   |   |-- takeover/               # 接管 run、接管就绪包；record.py 是接管/接替边的唯一落账入口（已结束来源只记 superseded_by）
 |   |   |   |-- hierarchy/              # 多层调度和恢复包
-|   |   |   |-- patch_apply/            # patch review/apply/report
 |   |   |   |-- capability_service.py   # 能力请求、grant、gap、路由
 |   |   |   `-- memory_candidates.py   # 子代理 lessons/findings 只经父级写入 owner 唯一候选账本
 |   |   |-- patch/                     # patch review/apply 底层实现
@@ -3194,11 +3174,7 @@ agent_py_agent/
 |   |   |-- request_execution.py        # 单个已领取请求的租约、模型执行、超窗恢复与收尾编排
 |   |   |-- request_context.py          # 原车道内的会话快照、Compact 与工作目录准备
 |   |   |-- request_binding.py          # 精确请求与运行身份绑定、执行车道和原子更新
-|   |   |-- request_experiment.py       # /experiment 冻结参数在主轮绑定后、首个模型调用前的单次实验授权与回执
-|   |   |-- request_experiment_records.py # 实验对照记录写入请求记录、回合收尾补写实际工具用量、授权指针证据链与只读评估
 |   |   |-- request_audit_records.py   # 审计只读：窗口内请求记录的决策观察与请求结果（owner_id 优先、会话归属兜底），白名单、有界、不写文件
-|   |   |-- request_experiment_promotion.py # /experiment apply 授权内：证据满足规则时经原设置 CAS 晋升 skill_tool 并写回执
-|   |   |-- request_experiment_notice.py # 新晋升回执生成中文宿主提示，复用原队列、当轮流与 IM final，旧回执不补投
 |   |   |-- request_pack_verification_notice.py # 回合结束时把能力包宿主核验结论排成宿主提示，和当轮提示一起发布
 |   |   |-- steer_closeout_replay.py  # 收口时给没有入口回执的插话定两级出口：可重放就排备用下一轮，否则排“请重新发送”宿主提示
 |   |   |-- request_history.py          # 公开正文、canonical 历史提交、去重与延迟补交
@@ -3298,8 +3274,6 @@ agent_py_agent/
 |   |   |-- decision_point_limits.py  # 决策点数量界限（焦点/候选/网页/待办/提案/记忆的上下限）：点位判定与诊断大白话共用的唯一定义
 |   |   |-- decision_reach_counts.py  # 决策点到达/未触发原因计数：进程内按小时累加，节流合并落 owner data/decision/reach_counts.json，原因码配大白话；Gateway 正常停止时补写尾巴
 |   |   |-- decision_model_call.py    # 实际决策 worker 复用原准入、身份头、HTTP 观察和唯一调用账；实验先算经验上界再预留
-|   |   |-- decision_experiment.py    # 实验准入/路由/在途复核：只读原授权、账本代次与 v2 上界口径
-|   |   |-- decision_experiment_evaluation.py # 只读证据评估：召回/节省/结算三项事实，决定 skill_tool off→apply 建议
 |   |   |-- decision_audit.py         # 决策审计汇总：设置摘要与 model_usage 决策分区计数（时间窗、按会话明细），只读
 |   |   |-- decision_send_permit.py   # 实验单次发送许可：连接前复核绑定、撤销/期限、设置与连接后在原账锁内消费
 |   |   |-- tool_context_window.py    # text/native 共用的有界工具历史窗口与稳定前缀投影
@@ -3418,8 +3392,6 @@ agent_py_agent/
 |   |   |-- decision_settings_schema.py # 决策字段/范围校验及旧会话覆盖迁移，不持有默认值
 |   |   |-- decision_settings_defaults.py # 投影原 Agent/能力/记忆配置默认值和继承来源
 |   |   |-- decision_settings_projection.py # 原模型引用可用性与有效设置读回，不发请求、不暴露凭据
-|   |   |-- decision_experiment_schema.py # 准确线程实验授权的来源/范围/期限/有限预算严格信封
-|   |   |-- decision_experiment.py    # 宿主显式授权保存与撤销原语；普通模型不能建立许可
 |   |   |-- model_oauth.py              # owner 登录代次、取消与刷新并发控制，复用私有配置源
 |   |   |-- model_oauth_schema.py       # 授权配置、凭据目的地、私有状态与绑定校验
 |   |   |-- model_oauth_wire.py         # 设备码、兑换和刷新协议的有界无重定向 HTTP
@@ -3494,7 +3466,6 @@ agent_py_agent/
 |   |   |-- runtime_boundary.py       # task 相对路径归一与精确读边界检查
 |   |   |-- workspace_read_scope.py   # 沿原 exact 与墙外授权生成本次 cwd 内的读取上界
 |   |   |-- workspace_write_scope.py  # 按原写入边界解析生成本次写入范围，无范围时只允许 cwd
-|   |   |-- capabilities_tool.py      # 从真实工具目录与唯一 channel registry 投影模型能力
 |   |   |-- _filesystem_display.py   # 文件工具共用的有界 diff/write 富终端展示事实构造器
 |   |   |-- file_syntax_diagnostics.py # 原子候选同源的有界语法观察及成功写入后的软反馈
 |   |   |-- _persona_write_guard.py   # SOUL/USER/AGENTS 统一强制走 update_persona
@@ -3535,7 +3506,6 @@ agent_py_agent/
 |   |   |-- subagent_entry_authority.py # 子入口新建材料及当前run/attempt的只读授权复核
 |   |   |-- decision_candidates.py     # 原能力快照候选、独立适用性题及必要引用，不读取Skill正文
 |   |   |-- decision_recommendation.py # 每工作片可选推荐及采用前复核，只改变展示不改授权
-|   |   |-- decision_experiment_sample.py # 只观察实验的对照条目：基线/候选名单、配置版本与原账结算视图
 |   |   |-- skill_service.py           # bounded builtin/shared/owner/workspace discovery、policy 与缓存
 |   |   |-- skill_snapshot.py          # 不可变稳定引用、正文 hash/guard 校验与子代理收窄
 |   |   |-- skill_proposals.py         # 自学习 S1：子代理 lesson 候选→Skill 提案→确认链（用户 CLI 或自学习开启时自动）经 guard 原子安装
@@ -3547,7 +3517,6 @@ agent_py_agent/
 |   |   |-- skill_usage_ledger.py       # owner使用明细与汇总：区分搜索展示、正文读取、宿主注入和采用；有效使用仅正文读取与注入
 |   |   |-- skill_usage_receipts.py     # runtime.db metadata 中按版本/任务去重的精确使用回执与负向记次，3/4/5 阶梯的计数权威
 |   |   |-- skill_learning_report.py   # 自动总结 Skill 的状态推导与用户回滚/删除，CLI 与聊天 /skills 共用
-|   |   |-- decision_skill_proposal_review.py # 自学习 S2：`skills proposals list` 的可选审核顺序点，只重排展示并加宿主标签，从不确认/拒绝/写入
 |   |   |-- persona_repository.py      # owner SOUL/USER/AGENTS 受控加载、版本/CAS/回滚唯一入口
 |   |   |-- model_profile_tool.py      # manage_models：主会话代理自助增删改切 owner 模型目录，复用唯一配置服务，回执不含密钥
 |   |   |-- channel_message_target.py  # 当前 owner 与本机管理员绑定目标的唯一外发解析
@@ -3615,12 +3584,6 @@ agent_py_agent/
 |   |-- test_parameter_changes.py      # 参数中心写入：按类型写入并真正生效、拒绝不改文件、回读不一致回滚、记录与回滚链、user_config 工具
 |   |-- test_config_write_permissions.py # 配置/账本写回保留原权限（600 不被放宽）、参数中心新建文件 0600、配置写回不用固定 .tmp 名
 |   |-- test_parameter_sources.py      # 参数中心来源维度 P17：四来源 search/view、运行值真实读文件与 owner 覆盖值、capability 写运行时文件且运行时入口读到新值、文件缺失时新建、只读来源 PARAMETER_SOURCE_READ_ONLY 拒绝、回读失败恢复/删除、边界拒绝、user_config 工具链路
-|   |-- test_e905_sol3_r1_runtime.py   # R1：真实构造/重建的可信Home冻结、主恢复账本与runner额度同快照
-|   |-- test_e905_sol3_r1_rate.py      # R1：真实registry/executor限流只收紧，零值、容量和失败次数退避对齐
-|   |-- test_e905_sol3_r1_commit.py    # R1：部署策略提交状态、完整payload/revision回读与并发篡改拒绝
-|   |-- test_e905_sol3_r1_catalog.py   # R1：TUI/飞书v6字段保留、离线空值/env迟到与echo目录链路
-|   |-- test_e905_sol3_r1_window.py    # R1：子代理未知/混合/正小窗口不丢失决策建议
-|   |-- test_e905_sol3_r1_settings.py  # R1：冻结运行值与持久策略分离、来源文案/层级/旧键退出
 |   |-- test_settings_chat_control.py  # 聊天 /settings：解析、Gateway 分派、TUI 还原与本地拒绝、仅管理员、常用/全部两种视图、完整修改与回滚流程
 |   |-- test_plugins_chat_control.py   # IM 插件公共解析、共享服务、权限错误码、启用确认和持久控制重放
 |   |-- test_config_field_readers.py   # 每个 AgentConfig 字段都必须有读取方（属性访问、字符串键或决策设置映射），防止死配置
@@ -3630,7 +3593,6 @@ agent_py_agent/
 |   |-- test_vector_identity.py        # P14 向量空间身份：端点/协议决定空间、凭据不进身份、接线一次解析且身份缺失关通道、读写裁决、重建入口只认本机管理员（拒绝时不嵌入不改文件）
 |   |-- test_vector_snapshot_consistency.py # P14 单文件快照：换代重载、锁内重读、交错与跨进程锁、重建全有或全无且计数如实、维度以实际向量为准
 |   |-- test_model_output_cap.py       # 输出上限统一 64K：常量/YAML/dataclass 同值、按已知窗口一处夹取、默认模型同规则、vision 死配置已删
-|   |-- test_constant_names_unique.py  # 同一数值常数名只在一个模块定义；确属不同含义的列白名单写原因，过期条目也失败
 |   |-- test_ci_workflow_paths.py      # CI 工作流里点名的测试文件必须存在，删除或改名测试时同批改工作流
 |   |-- test_runtime_write_guards.py   # 正在运行的安装目录写保护：按进程事实认定、开关、文件工具与 Shell 只读、Full Access 仍可写外部目录
 |   |-- test_skill_chat_control.py     # 聊天 /skills：解析校验、Gateway 分派不落入 stop、TUI 文本还原与本地拒绝、提案确认版本、自动 Skill 回滚删除
@@ -3644,9 +3606,7 @@ agent_py_agent/
 |   |-- test_structured_output_mode.py  # 结构化输出方式：方式解析、DeepSeek 用 json_object 且 schema 进提示、其余仍 json_schema、档案字段、缓存键、TUI 与配置
 |   |-- test_skill_learning_integration.py # 自学习 S3 接线：组合根装配、收口入队、Gateway 策展车道准入、learned CLI、S1 自动确认与配置
 |   |-- test_subagent_lesson_ledger.py  # record_lesson：身份与 Schema、字段/条数/字节上限、幂等、账本复核、结果合并、候选与 S1 提案、暴露面与提示
-|   |-- test_decision_skill_proposal_review.py # 自学习 S2 审核顺序点：资格边界、别名与脱敏、逐题校验、采用前复核、取消传播、零写入
 |   |-- test_decision_cooldown_persistence.py # 冷却持久化：快照恢复/落盘、过期丢弃、坏文件回退、S2 入口落盘 .cooldown.json
-|   |-- test_decision_skill_proposal_review_integration.py # 自学习 S2 经真实 CLI/设置/决策服务（只替换 HTTP）：输出字节、observe 记账、冷却超时、菜单与默认值
 |   |-- test_decision_model_profiles.py # 决策用途隔离、旧目录迁移、共享撤销与生成选择不退化
 |   |-- test_model_usage_tags.py       # 模型用途标签：规范化与拒绝、决策模型不收、不进运行时配置、两处决策候选与 /model 表单
 |   |-- test_decision_model_operations.py # 原模型操作中的决策设置、原生HTTP测试和用量结算
@@ -3717,7 +3677,6 @@ agent_py_agent/
 |   |-- test_gateway_background_sessions_shutdown.py # Gateway 停机时只读列出仍存活的受管后台会话并写事件/state 计数，不停进程
 |   |-- test_gateway_host_identity.py # 主机名变化后 SIGTERM 仍能停网关：信号用启动身份、host_id 进程内缓存、macOS 硬件 UUID、跨进程核验表现
 |   |-- test_tool_operation_host_identity.py # 工具操作持有者同主机判定用 process_host_id：主机名变化后本机死进程可接管、老主机名记录等租约到期
-|   |-- test_plugin_catalog_digest_stability.py # 激活目录摘要跨声明版本稳定：可选字段为空不改变旧安装的 catalog_sha256
 |   |-- test_background_listen_scope.py        # 后台服务默认只监听回环：授权键、approved_owner 面板与 owner 授权存储、host 按 socket 表回收越界服务
 |   |-- test_decision_action_candidate.py # 动作候选资格、隐私、非选择、新鲜度与来源复核、取消、text/native 同段与设置入口
 |   |-- test_decision_action_execute.py # J16 片 D：粗位置、假 Jev 四档、自动执行各生效条件、两本账 actor/decision_ref、审批/失败/中断只记不重试
@@ -3826,14 +3785,6 @@ agent_py_agent/
 |   |-- test_decision_curator_relation.py # 正式版本/完整性、独立后台设置、关系注释与原提取提交边界
 |   |-- test_decision_curator_relation_selection.py # 关系对按 BM25 词面相关度挑选：越界对可达、确定性、空材料边界与覆盖声明
 |   |-- test_decision_model_call.py     # 实际 worker 账本保留、HTTP 尝试、身份、准入与取消
-|   |-- test_decision_experiment_authorization.py # 设置授权来源、CAS/撤销、v2 上界口径与普通模式互斥
-|   |-- test_decision_experiment_send_gate.py # 本地 HTTP 统计 TCP accept：拒绝/绕过零连接、单次发送结算、超上界与挂起
-|   |-- test_decision_experiment_command.py # /experiment 解析、HTTP 入口重推 system_task、单次授权与重放/重启/Compact
-|   |-- test_decision_experiment_records.py # E2 对照记录：结算等于原账、基线/候选、写入边界、回合收尾实际用量
-|   |-- test_decision_experiment_evaluation.py # F1a 规则矩阵、外来记录忽略、授权指针证据链与 decision_read 只读暴露
-|   |-- test_decision_experiment_promotion.py # F1b apply 授权内 CAS 晋升、回执幂等、用户后改/撤销/到期跳过
-|   |-- test_decision_experiment_notice.py # J6：晋升回执到当轮 TUI、同会话 IM final、消费后重启去重及无晋升不提示
-|   |-- test_decision_experiment_gateway_turn.py # 真实 Gateway 回合：本地 HTTP 实验、真实工具账实际用量与链上晋升
 |   |-- test_model_call_input_budget.py # 原账带标签上界预留、单次发送许可、拒绝/绕过结算与代次/LRU 隔离
 |   |-- test_model_call_ledger_partitions.py # 原账本用途、字段真值、单调终态及 worker 精确保留
 |   |-- test_model_call_ledger_open_calls.py # 账本裁剪不丢进行中的调用：长压缩/主回合遇另一会话 129 次调用不 KeyError、请求计数完整、停机结清可见、6 小时无活动算失联可裁
@@ -3926,9 +3877,9 @@ agent_py_agent/
 |   |-- test_plugin_manifest_v8.py     # M1 B1：严格静态声明、旧 v1–v7 字节、订阅确认、构建与原确认组件
 |   |-- fixtures/plugin_manifest_v1_v7.json # 固定设计基线的七版本序列化字节，不在测试中重建
 |   |-- test_plugin_any_language.py    # v6 非 Python 插件：包描述、可复现打包、确认回执、解包准备、解释器固定与真实 MCP 启停
-|   |-- test_plugin_any_language_samples.py # 跨语言读取检查一致性用例（Python 参考 + Node 移植）与 hello-node/hello-go 宿主链路
-|   |-- test_shuohao_novel_gates.py     # C14 M-B1：五阶段真实 Node MCP、74+20 读取向量、原样许可/NUL、自检、无写入与宿主链（环境失败保留）
-|   |-- fixtures/shuohao_skills/        # 固定上游 B 的五阶段自检/样例、三张镜头卡与 report 测试闭包；不进插件 ZIP
+|   |-- plugin_samples/fixtures/       # 跨语言与钩子协议回归示例插件集（hello-go/hello-node/event-watch/rm-guard/rm-guard-node/status-pet）
+|   |-- test_plugin_protocol_samples.py # 插件跨语言读取、事件钩子与收紧门示例端到端协议测试
+|   |-- test_consolidated_c1_g1.py     # Wave 3 无损归并单测集（c1..c10 共 31 个归并测试模块，覆盖原 217 个细粒度回归文件）
 |   |-- fixtures/web_portal_plugin_handoff/ # 独立 SecOps Web 工作台与插件打包脚本的仓内脱敏测试固件
 |   |-- test_plugin_sandbox.py         # 插件进程沙箱：开关默认值、bwrap 整根只读布局、包装与 TMPDIR、不可用拒绝、真实平台写边界
 |   |-- plugin_wheel_fixtures.py       # 合成标准 wheel 与导入陷阱，仅用于开发组件检查
@@ -3955,7 +3906,6 @@ agent_py_agent/
 |   |-- test_process_session_retry_settles_unknown.py # 重试停止按 PID 出生标识结清实例已消失的旧 unknown 记录；首次停止不凭空确认
 |   |-- test_plugin_proxy_observation.py # 插件代理观察路径：结果改写与归档信封、整份拒绝、动作候选 _meta、未知/过期不发送
 |   |-- test_mcp_observation_binding.py # MCP 逐工具声明与共用观察绑定：审批只能更严、整服务拒绝带原因码、未发现只提醒、代理铸 ID 与复核、always 真的审批
-|   |-- test_plugin_proxy_revoked_call.py # 插件代理发送前复核激活：撤销固定 TOOL_UNAVAILABLE/not_started 且不发送，激活有效沿原 MCP 链
 |   |-- test_plugin_tool_approval_recheck.py # C12e：真实插件进程+真实激活撤销+真实执行器审批流：批准后/审批前/发送前/下一轮四处复核都不让停用插件收到调用
 |   |-- test_plugin_release.py        # 原 handler 退出、环境删除、结果落账与重送消费边界
 |   |-- test_plugin_removal.py        # 管理卸载、权限、旧请求重放、准备未退与持久成功后包回收
@@ -4034,15 +3984,9 @@ agent_py_agent/
 |   |-- test_scheduler_quota_settle.py # 定时任务撞额度用完：每次到期一次模型调用、一条通知，run 记 failed 带额度码，唤醒同拍确认；通知没送达只重投
 |   |-- test_compact_quota_wake.py     # 压缩调用撞额度：按错误码或异常链认成额度用完，Goal 记 usage_limited 并发额度通知，不看文案
 |   |-- test_tool_unknown_reason_preservation.py # 工具结果未知时 unknown_reason、重放回执、受管账本保留原始结论
-|   |-- test_sleep_tool.py             # clock.sleep 参数边界、字条落盘、唤醒取消与错误码回归
 |   |-- test_memory_hardening.py       # 来源证据、候选、并发去重、hard delete 与信封安全回归
 |   |-- test_memory_candidate_daily_v2.py # Candidate/Daily v2 身份、状态、顺序、并发与大输出边界
 |   |-- test_memory_curator_v2.py      # Curator 触发、模型配置、权限、失败恢复与整批提交
-|   |-- test_r9_candidate_promotion_windows.py  # 候选晋升分页、重启续读和调度收尾
-|   |-- test_r9_model_result_consumer_lifetime.py  # 模型结果迟到时的引用释放与正常错误交付
-|   |-- test_r9_tui_stream_bootstrap_wire.py  # 真实客户端首次控制、流式显示及跨版本重试
-|   |-- test_r9_background_observation_bounds.py  # 后台未决责任的轮转检查和退出引用释放
-|   |-- test_r9_candidate_anchor_index.py  # 有序候选锚点、旧库续建和配额
 |   |-- test_r9_restart_drain_lifecycle.py  # 可逆排空与失败收尾的同代证明
 |   |-- test_curator_dispatch_eligibility.py # 待确认候选不单独运输/策展，保pending、旧lease、新输入与日终
 |   |-- test_curator_recovery_race.py  # Curator 双进程发现/清理交错与唯一恢复执行
@@ -4096,23 +4040,6 @@ scripts/
 plugins/
 |-- sdk/pyproject.toml                  # 独立 SDK 的唯一发行版本及标准构建声明
 |-- sdk/conformance/workspace_read_check.json # 工作区读取检查的跨语言一致性用例（期望值由宿主参考实现裁决）
-|-- shuohao-novel-gates/                # C14 M-B1：v6 Node 五阶段只读结构校验与质量门；待外部复验/集成
-|   |-- README.md                      # 构建、本人确认、五工具用法、回执与未验证边界
-|   |-- declaration.json               # 安装清单、动作与五工具 schema 的同源声明
-|   |-- LICENSE                        # 上游 Apache-2.0 原文
-|   |-- NOTICE                         # 上游版权通知原文，旧样例路径不改
-|   |-- PROVENANCE.md                   # 固定来源、逐文件摘要、未暴露写入口与排除项
-|   |-- UPSTREAM.json                  # 上游路径、本仓库目标、SHA-256 与改动的机器清单
-|   |-- conformance.js                 # 仓库内读取向量验证，不进插件 ZIP
-|   |-- src/
-|   |   |-- server.js                  # 串行 MCP stdio 入口，只协商读取上下文 v1
-|   |   |-- arguments.js               # 同源 schema 参数检查，拒绝未知字段和写操作
-|   |   |-- errors.js                  # 稳定公开错误码，不回显输入、私有路径或栈
-|   |   |-- workspace_read.js          # hello-node 读取权限移植，算法保持
-|   |   |-- workspace_files.js         # 普通文件完整 UTF-8 读取、no-follow 与 dev/ino 复核
-|   |   |-- cast.js                    # 补齐角色 CLI 顶层与原文逐字核对
-|   |   `-- gates.js                   # 同进程调用导出函数；门/跳过计数与已有日志统计，不写门日志
-|   `-- upstream/skills/               # 五份固定原样 ESM CLI，characters 的 NUL 按字节保留
 |-- activity-line/                     # 自有纯展示插件：面板显示运行状态、活动与耗时，无工具、无依赖
 |   |-- README.md                      # 构建与面板用法
 |   |-- pyproject.toml                 # 插件发行身份，无运行依赖
@@ -4145,15 +4072,6 @@ plugins/
 |       |-- __init__.py                #
 |       |-- __main__.py                # python -m context_inspector 启动 stdio 服务
 |       `-- server.py                  # 握手声明展示能力，把 context 主题数字渲染成状态字段
-|-- status-pet/                        # 自有纯展示插件：文字小宠物显示工作/等待审批/空闲，外观与名字可配置，无工具、无依赖
-|   |-- README.md                      # 构建、面板用法与改外观步骤
-|   |-- pyproject.toml                 # 插件发行身份，无运行依赖
-|   `-- src/status_pet/
-|       |-- declaration.json           # 展示动作、text 面板（run_state、activity 主题）与 style/name 设置的唯一声明
-|       |-- __init__.py                #
-|       |-- __main__.py                # python -m status_pet 启动 stdio 服务
-|       |-- art.py                     # 三种外观 × 三种状态的自绘字符小图
-|       `-- server.py                  # 启动时校验设置，只实现只读 my-agent/display.render
 |-- desktop-lite/                      # 自有桌面小工具插件：系统通知、默认程序打开工作区文档、写剪贴板，只调用本机系统程序
 |   |-- README.md                      # 构建、三个动作用法、平台支持表与安全边界
 |   |-- pyproject.toml                 # 插件发行身份及精确 SDK 依赖
@@ -4165,29 +4083,6 @@ plugins/
 |       |-- declarations.py            # 读取同源声明并验证平面参数和设置
 |       |-- commands.py                # 业务错误、按平台定位系统程序、组装 argv/stdin 命令并以超时运行
 |       `-- opening.py                 # open 的授权、no-follow 普通文件校验与可执行/脚本类扩展名拒绝清单
-|-- drama-media-shell/                 # A/drama-skills 离线媒体外壳：四个提示词检查器 + fixture-only 生产作业
-|   |-- README.md                      # 十个工具、夹具边界、作业流程、构建与测试说明
-|   |-- pyproject.toml                 # 插件发行身份、精确 SDK 0.2.0 依赖及许可/来源资源打包
-|   `-- src/drama_media_shell/
-|       |-- declaration.json           # 10 个工具的名称、说明、effect 与 inputSchema 唯一声明
-|       |-- __init__.py                # 独立插件包入口
-|       |-- __main__.py                # python -m drama_media_shell 启动 stdio 服务
-|       |-- server.py                  # MCP 握手、逐次读写上下文恢复、固定工具分派与结构化错误
-|       |-- declarations.py            # 读取同源声明并验证工具参数
-|       |-- errors.py                  # 稳定错误码与中文安全消息
-|       |-- workspace_io.py            # SDK 读取上下文 + no-follow 有界 JSON/JSONL 读取
-|       |-- image_prompt_check.py      # 图片提示词资产、引用、字段及负面词检查
-|       |-- container_check.py         # 视频容器与镜头所有权、时长和覆盖核对
-|       |-- motion_timing_check.py     # 运动窗口、镜头时长及所有权核对
-|       |-- music_spec_check.py        # 音乐提示词字段与负面词检查
-|       |-- job_contract.py            # 作业清单规范化、输入摘要与固定指纹
-|       |-- production_state.py        # prepare/confirm/status 的确认消费状态机
-|       |-- production.py              # fixture-only run/collect 与供应商拒绝边界
-|       |-- production_audit.py        # 当前指纹运行证据和工作区输出摘要审计
-|       |-- fixture_adapter.py         # 内置离线夹具字节；明确不是真实媒体生成
-|       |-- private_store.py           # 只在绝对插件私有数据目录保存作业 JSON
-|       |-- LICENSE.drama-skills       # 上游 MIT 原文与版权行
-|       `-- PROVENANCE.md              # 固定提交、逐文件 sha256、改动和排除项
 |-- genui-lite/                        # 自有数据展示插件：JSON 渲染为表格/文字条形图，可导出独立 HTML，随包带 Skill
 |   |-- README.md                      # 构建、两个动作用法、数据格式与中文示例
 |   |-- pyproject.toml                 # 插件发行身份、精确 SDK 依赖，package-data 打入声明与 SKILL.md
@@ -4261,33 +4156,6 @@ plugins/
 |       |-- board.py                   # ThreadingHTTPServer 服务：令牌/cookie、GET/HEAD 路由、计数、空闲自停、关闭释放端口
 |       |-- reading.py                 # 业务错误、根目录与请求路径授权、no-follow 目录枚举与有界读取
 |       `-- pages.py                   # 目录列表/预览/错误页 HTML 渲染，全部转义、内联 CSS、HTML 走 sandbox iframe
-|-- hello-go/                          # Go 示例插件（v6 随包可执行文件）：交叉编译成单文件，提供问候工具
-|   |-- README.md                      # 构建、打包、安装与确认步骤
-|   |-- go.mod                         # Go 模块声明，只用标准库
-|   |-- declaration.json               # 包声明（打包时生成摘要），同时编译嵌入作工具目录
-|   `-- main.go                        # stdio MCP 服务：握手、工具目录与 hello
-|-- hello-node/                        # Node.js 示例插件（v6 系统解释器）：问候与按宿主读取上下文读文本
-|   |-- README.md                      # 构建、安装、确认与读取检查说明
-|   |-- declaration.json               # 包声明，同时随包供服务读取工具目录
-|   |-- conformance.js                 # 开发用：跑工作区读取一致性用例（不打进包）
-|   `-- src/
-|       |-- server.js                  # stdio MCP 服务：握手声明读取扩展、工具分派、打开后复核的有界读取
-|       `-- workspace_read.js          # 工作区读取上下文的 Node 移植：逐段解析链接、owner/凭据/危险目录裁决
-|-- event-watch/                       # M1 B8 事件观察样例（v8）：订阅全部 6 类事件，只读 table 面板显示收到与合并丢弃计数
-|   |-- README.md                      # 构建、确认启用与计数说明
-|   |-- declaration.json               # 6 类事件（content none）、watch 面板与默认断网的唯一声明
-|   `-- src/
-|       `-- server.py                  # stdio MCP 服务：握手声明事件与展示能力，只回观察回执与只读计数表
-|-- rm-guard/                          # M1 B8 工具收紧样例（v8，Python）：rm 加 -r 和 -f 要求确认、delete_file 直接拒绝
-|   |-- README.md                      # 构建、确认启用与命中写法说明
-|   |-- declaration.json               # guard-rm（run_command，full 参数）与 guard-delete（delete_file）收紧门声明
-|   `-- src/
-|       `-- server.py                  # stdio MCP 服务：握手声明收紧能力，只按结构化 command 裁决
-|-- rm-guard-node/                     # M1 B8 工具收紧样例（v8，Node）：与 rm-guard 行为一致的 Node.js 实现
-|   |-- README.md                      # 构建、确认启用与跨语言一致性说明
-|   |-- declaration.json               # 与 rm-guard 相同的两个收紧门声明
-|   `-- src/
-|       `-- server.js                  # stdio MCP 服务：与 Python 版逐条对齐的裁决逻辑
 |-- workspace-peek/                    # 自有文件预览插件；不依赖完整宿主运行包
 |   |-- README.md                      # 离线构建、命令示例与当前验收边界
 |   |-- pyproject.toml                 # 插件发行身份及精确 SDK 依赖
@@ -4315,7 +4183,6 @@ deploy/
 `-- k8s/                              # stable/canary、Gateway route、migration、monitor 与 DR 清单
 docs/
 |-- PRODUCT_FACTS.md                    # 当前功能与边界说明；发布风险统一指向 STATUS
-|-- audits/r223-report/                 # R223 中文只读 HTML 报告的独立公开目录，不放配置或任务产物
 |-- design/SUBAGENT_TOOL_APPROVAL_BRIDGE.md # child→owner 具体工具审批的身份、租约、FIFO 与失败语义
 |-- design/LONG_TASK_RUNTIME_REVIEW.md # 长任务问题、模块边界及 L 线实施验收
 |-- design/SCHEDULER_EXECUTION_POLICIES.md # 原调度链的上下文、模型、失败策略和预检合同
@@ -4327,7 +4194,6 @@ docs/
 |-- design/CLI_READONLY_STARTUP.md # 只读 CLI 现状与裁定：3a 定乙不在沙箱支持只读启动，保留 H3 错误并列出内置工具覆盖与缺口
 |-- design/TUI_DESIGN.md # 终端交互 TUI Python 原生复刻的用户行为、事件架构与验收规格
 |-- design/TUI_BEHAVIOR_CHECKLIST.md # 启动、消息、输入、权限、生命周期和命令映射逐项证据账
-|-- tasks/completed/TASK-20260818-终端交互-tui-parity.md # 已完成 TUI 复刻实施、测试机边界和验收记录
 |-- tasks/REFACTOR_PLUGIN_GOAL.md       # 同版发布部署、十步重构状态与逐步多 TUI 验收
 |-- tasks/TUI_READING_HANDOFF.md        # 阅读锚点、连续滚动、插话顺序与真实终端验收交接
 |-- tasks/HANDOFF_STEP7_SUBAGENT_LIFECYCLE.md # 第 7 步子代理结果链的代码、验证和集成交接

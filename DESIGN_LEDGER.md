@@ -1,3 +1,11 @@
+## 2026-11-14 全仓精简瘦身（Waves 1–4）与无损单测归并
+
+按已冻结范围完成全仓冗余代码、退役模块与重复静态断言清理，并将细碎单测文件按领域无损归并：
+
+- **生产面与插件面收敛（Waves 1–2）**：移除零生产引用的示例/教学插件目录（相关协议样例迁入 `agent_py_agent/tests/plugin_samples/fixtures/` 由协议单测统一校验），保留全部 12 个真实顶层业务插件与 `plugins/sdk/`；下线已退役的 `qq` 通道适配、`cli/scenario.py`、`patch_apply`、实验性 `decision_experiment*` 字段、旧 `/admin/*` HTTP 路由（保留 `admin_control_service.py`、`workbench_server.py`、本地 `/client/business` 与 `PluginManagement`）及未采用的 `v13` 切片（完整保留 `#3 llm_probe`、`#4 oauth_http`、`#7 osquery_fim`、K8s `[scale]`、多进程执行桥、`HandoffBoardService`、`decision_*` 三档模式及全部 70 项 `CapabilityConfig` 配置）。
+- **无损单测归并（Wave 3）**：将 217 个小型同领域回归测试文件无损归并为 31 个 `test_consolidated_c1..c10_*.py` 文件（用例数 `3,936 -> 3,936` 零丢失），全仓测试文件由基线 `3,152` 个收敛至 `2,817` 个。
+- **台账与静态目录对齐（Wave 4）**：同步 `CODEBASE_TREE.md`、`docs/development/TESTING_RULES.md` 与 `constants_catalog.json`（`1,509` 项一致），修复鸭子类型属性读取与测试夹具对齐。
+
 ## 2026-11-13 长任务压缩、后台续作和工具错误回执（本地修复候选）
 
 正式上传素材按原始登记簿中的顺序核对精确版本。登记簿较大时每次只核验有限字节，进度绑定同一源文件；源被替换后重新核验。历史总字节数超过一轮预算时可以继续推进。原始登记和当前任务对该版本的读取权限仍分别核对。

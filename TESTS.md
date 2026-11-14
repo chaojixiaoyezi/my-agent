@@ -1,3 +1,15 @@
+## 2026-11-14 全仓精简瘦身（Waves 1–4）与无损单测归并全量验收
+
+基于瘦身前基线 `d829a882b` 完成 Waves 1–4 收敛与 4 路回归补齐（`d36af38ac`、`15e871b9f`、`eea7961d5`、`60a52631c`），在隔离 `HOME`/`MY_AGENT_HOME`/`TMPDIR` 下完成全仓验证：
+
+- **Wave 3 无损单测归并核验**：`C1`–`C10` 共 217 个细碎单测文件归并为 31 个 `test_consolidated_c1..c10_*.py`，归并前后收集并执行用例 **3,936 -> 3,936 项（零丢失、零失败）**，全仓测试文件收敛至 `2,817` 个。
+- **10 路全仓 `pytest` 分片覆盖与回归清零**：全仓 `2,817` 个测试文件分 10 路并发执行（首轮 `70,989 passed`），对检出的鸭子类型属性读取（`runtime.py`、`execution_threads.py`、`runtime_paths.py`、`round_execution.py`、`tui_background_approvals.py`）、能力观测挂钩（`request_execution.py`）、退役模块引用与 golden 基线刷新逐项修复并独立复跑：
+  - `R-C`（交接板权威夹具）：58 项通过；
+  - `R-A`（后台运行态、唤醒目录边界与工作流恢复）：424 项通过；
+  - `R-D`（能力呈现观测、业务执行上下文与错误码扫描列表）：225 项通过；
+  - `R-B`（运行目录解析、审批拒绝诊断、10 套 golden 回放与 SLO 流控）：261 项通过，外加 `test_agent_tree_model_view.py` 22 项通过，全部 `0 failed`。
+- **7 项全仓静态门禁全部通过**：`ruff check agent_py_agent scripts setup.py package_boundary_policy.py`、`git diff --check`、`scripts/check_import_boundaries.py --json`（`[]`）、`scripts/check_clean_package.py --mode worktree .`、`scripts/check_contract_test_pyramid.py --repo-root . --json`（`"ok": true`）、`scripts/check_boolean_switches_and_hot_reload.py`（`0 new`）及 `scripts/build_constants_catalog.py --check`（`1,509` 项一致）。
+
 ## 2026-11-13 Skill 与记忆闭环 R2 返工收敛
 
 在 `sm/integration-20261113` 合入 R2 终审返工切片（`P1-01`–`P1-05`）并补充 `skill_learning_store._encode_rel` 显式序列参数收口与 `MemoryCuratorService._call_promote_eligible` 兼容性适配后，隔离 `HOME`/`MY_AGENT_HOME` 完成以下收敛验证：
