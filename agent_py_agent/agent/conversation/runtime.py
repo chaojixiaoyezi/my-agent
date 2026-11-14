@@ -3545,6 +3545,8 @@ def _select_successful_completion_batch(
     primary: WakeSignal,
     signals: list[WakeSignal],
 ) -> tuple[WakeSignal, ...]:
+    if cached_owner_delivery(primary) is not None:
+        return (primary,)
     config = getattr(getattr(scheduler.runtime, "agent", None), "config", None)
     item_limit = BACKGROUND_PENDING_WAKE_PROMPT_LIMIT_COUNT
     context_tokens = _agent_config_int(config, "background_context_max_total_tokens") or 8000
@@ -3561,6 +3563,8 @@ def _select_successful_completion_batch(
             primary_seen = True
             continue
         if not primary_seen or not _same_successful_completion_batch(primary, candidate):
+            continue
+        if cached_owner_delivery(candidate) is not None:
             continue
         candidate_payload = candidate.to_dict()
         next_projected = [*projected, candidate_payload]
@@ -3614,6 +3618,8 @@ def _select_same_reason_wake_batch(
     committed.  Unrelated same-thread events are never swept up implicitly.
     """
 
+    if cached_owner_delivery(primary) is not None:
+        return (primary,)
     config = getattr(getattr(scheduler.runtime, "agent", None), "config", None)
     item_limit = BACKGROUND_PENDING_WAKE_PROMPT_LIMIT_COUNT
     context_tokens = _agent_config_int(config, "background_context_max_total_tokens") or 8000
@@ -3630,6 +3636,8 @@ def _select_same_reason_wake_batch(
             primary_seen = True
             continue
         if not primary_seen or not _same_reason_wake_batch(primary, candidate):
+            continue
+        if cached_owner_delivery(candidate) is not None:
             continue
         candidate_payload = candidate.to_dict()
         next_projected = [*projected, candidate_payload]
@@ -5013,6 +5021,8 @@ def _handle_nonquota_wake_error(
                 )
     if lifecycle_reason != "thread_goal_continue":
         return
+    if is_provider_transient_error(error) and not is_provider_usage_limit_error(error):
+        return
     status = "usage_limited" if is_provider_usage_limit_error(error) else "blocked"
     stop_goal_after_error(
         _background_goal_dependencies(scheduler), signal, status=status,
@@ -5142,7 +5152,7 @@ def _complete_wake_report(
     if (getattr(getattr(scheduler.runtime.agent, "config", None), "technical_cutoff_continuation_enabled", False)
             and signal.root_task_id):
         cutoff = receipt_for(scheduler.store.tasks.load(str(signal.root_task_id)))
-    cutoff_owns_next = cutoff is not None and cutoff.status in {"pending", "claimed", "stopped"}
+    cutoff_owns_next = cutoff is not None and cutoff.status in {"pending", "claimed"}
     if cutoff_owns_next:
         publish_pending(scheduler.runtime.agent, scheduler.store, str(signal.root_task_id or ""))
     elif lifecycle_reason == WAKE_REASON and report.goal_continuation_allowed:

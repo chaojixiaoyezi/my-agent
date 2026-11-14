@@ -32,6 +32,34 @@ class RunCreation:
 def create_run_chain(conn: sqlite3.Connection, request: RunCreation, *, now: float) -> dict[str, str]:
     task_id, task_run_id, parent_id = _task_tree(conn, request, now)
     agent_id, attempt_id = _first_attempt(conn, request, task_run_id, parent_id, now)
+    if parent_id:
+        previous = conn.execute(
+            "SELECT status, closed_at FROM task_runs WHERE task_run_id = ?",
+            (task_run_id,),
+        ).fetchone()
+        if previous is not None and float(previous["closed_at"] or 0) > 0:
+            conn.execute(
+                "UPDATE task_runs SET status = 'created', closed_at = 0, updated_at = ? WHERE task_run_id = ?",
+                (now, task_run_id),
+            )
+            conn.execute(
+                "INSERT INTO runtime_events(event_id, event_type, attempt_id, agent_run_id, "
+                "task_run_id, payload_json, created_at) VALUES(?, 'task_run.reopened', ?, ?, ?, ?, ?)",
+                (
+                    uuid.uuid4().hex,
+                    attempt_id,
+                    agent_id,
+                    task_run_id,
+                    json.dumps(
+                        {
+                            "previous_status": previous["status"],
+                            "previous_closed_at": previous["closed_at"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    now,
+                ),
+            )
     delegation_id = _delegate(conn, parent_id, agent_id, attempt_id, now) if parent_id else ""
     for event_type in ("task.created", "agent_run.created"):
         conn.execute(

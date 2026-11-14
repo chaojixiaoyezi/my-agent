@@ -136,3 +136,137 @@ def test_lost_or_failing_renew_ends_the_heartbeat_quietly(monkeypatch):
         assert not heartbeat.is_alive() and claims.count(name) == 1
         heartbeat.stop()
     assert hooked == []
+
+
+def test_transient_os_error_reschedules_within_ttl_and_stops_after_ttl(monkeypatch):
+    from agent_py_agent.agent.concurrency.interrupt import (
+        is_interrupted,
+        register_interruptible,
+    )
+    from agent_py_agent.agent.conversation.run_claim import (
+        conversation_claim_interrupt_name,
+    )
+
+    # 1. Single transient OSError within TTL reschedules next tick and recovers without interrupting.
+    calls = 0
+
+    def flaky_renew(req):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("temporary i/o glitch")
+        return {"claim_id": req["claim_id"]}
+
+    claims = _Claims(flaky_renew)
+    hb = _heartbeat(claims, "flaky-ok")
+    hb.start()
+    try:
+        assert _wait_until(lambda: claims.count("flaky-ok") >= 3)
+        assert hb.is_alive()
+    finally:
+        hb.stop()
+    assert not hb.is_alive()
+
+    # 2. Persistent OSError past TTL exits heartbeat and fires conversation-claim:<id> interrupt.
+    import agent_py_agent.agent.conversation.run_claim as run_claim_mod
+
+    clock = [100.0]
+    monkeypatch.setattr(run_claim_mod.time, "monotonic", lambda: clock[0])
+
+    attempt_count = 0
+
+    def always_os_error(_req):
+        nonlocal attempt_count
+        attempt_count += 1
+        if attempt_count >= 2:
+            clock[0] += 10.0
+        raise OSError("persistent disk i/o failure")
+
+    ready, release = threading.Event(), threading.Event()
+    interrupted_flag: list[bool] = []
+
+    def worker():
+        with register_interruptible(conversation_claim_interrupt_name("expired-io")):
+            ready.set()
+            assert _wait_until(is_interrupted)
+            interrupted_flag.append(is_interrupted())
+            release.wait(WAIT_SECONDS)
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    try:
+        assert ready.wait(WAIT_SECONDS)
+        hb_fail = ConversationRunClaimHeartbeat(
+            {
+                "store": SimpleNamespace(claims=_Claims(always_os_error)),
+                "thread_id": "thread-expired-io",
+                "claim_id": "expired-io",
+                "lease_seconds": 2,
+                "interval_seconds": INTERVAL_SECONDS,
+            }
+        )
+        hb_fail.start()
+        hb_fail.join(WAIT_SECONDS)
+        assert not hb_fail.is_alive()
+        assert attempt_count >= 2
+        assert _wait_until(lambda: interrupted_flag == [True])
+    finally:
+        release.set()
+        thread.join(WAIT_SECONDS)
+
+
+def test_lost_ownership_fires_claim_interrupt_while_normal_stop_does_not():
+    from agent_py_agent.agent.concurrency.interrupt import (
+        is_interrupted,
+        register_interruptible,
+    )
+    from agent_py_agent.agent.conversation.run_claim import (
+        conversation_claim_interrupt_name,
+    )
+
+    ready, release = threading.Event(), threading.Event()
+    observed: list[bool] = []
+
+    def worker():
+        with register_interruptible(conversation_claim_interrupt_name("lost-owner")):
+            ready.set()
+            assert _wait_until(is_interrupted)
+            observed.append(is_interrupted())
+            release.wait(WAIT_SECONDS)
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    try:
+        assert ready.wait(WAIT_SECONDS)
+        hb = _heartbeat(_Claims(lambda _req: None), "lost-owner")
+        hb.start()
+        hb.join(WAIT_SECONDS)
+        assert not hb.is_alive()
+        assert _wait_until(lambda: observed == [True])
+    finally:
+        release.set()
+        t.join(WAIT_SECONDS)
+
+    # Normal stop() with healthy renewals must NOT fire the claim interrupt.
+    stop_ready, stop_release = threading.Event(), threading.Event()
+    stop_interrupted: list[bool] = []
+
+    def healthy_worker():
+        with register_interruptible(conversation_claim_interrupt_name("healthy-stop")):
+            stop_ready.set()
+            stop_release.wait(WAIT_SECONDS)
+            stop_interrupted.append(is_interrupted())
+
+    healthy_t = threading.Thread(target=healthy_worker, daemon=True)
+    healthy_t.start()
+    try:
+        assert stop_ready.wait(WAIT_SECONDS)
+        healthy_hb = _heartbeat(_Claims(), "healthy-stop")
+        healthy_hb.start()
+        assert _wait_until(lambda: healthy_hb._pending is not None)
+        healthy_hb.stop()
+        assert not healthy_hb.is_alive()
+    finally:
+        stop_release.set()
+        healthy_t.join(WAIT_SECONDS)
+    assert stop_interrupted == [False]

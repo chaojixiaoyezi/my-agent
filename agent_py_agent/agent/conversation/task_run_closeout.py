@@ -25,6 +25,18 @@ def settle_terminal_task_run(repo: Any, store: Any, *, run_id: str = "", task_id
         row = repo.agent_run_for_run_id(run_id) if run_id else None
         if row is None and task_id:
             row = repo.main_agent_run_for_task(task_id)
+        if row is None and task_id:
+            list_runs = getattr(repo, "task_runs_for_task", None)
+            list_agents = getattr(repo, "agent_runs_for_task_run", None)
+            if callable(list_runs) and callable(list_agents):
+                for tr in reversed(list_runs(task_id)):
+                    if float(tr["closed_at"] or 0.0) > 0:
+                        continue
+                    agents = list_agents(str(tr["task_run_id"] or ""))
+                    roots = [item for item in agents if not str(item["parent_agent_run_id"] or "")]
+                    if len(roots) == 1:
+                        row = roots[0]
+                        break
         if row is None or str(row["status"] or "") not in AGENT_RUN_TERMINAL_STATUSES:
             return
         task_run_id = str(row["task_run_id"] or "").strip()
