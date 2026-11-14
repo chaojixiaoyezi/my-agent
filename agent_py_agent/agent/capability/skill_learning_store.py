@@ -706,8 +706,9 @@ class SkillLearningStore:
                     return True
         return False
 
-    # LLM: 唯一机器管辖归属核验边界；layout=owner、已标记owner_layout/user_modified与已证实正文hash失配是常规排除；
-    #   符号链接、缺失、超限、不可读、未收敛prepared/moved操作或unknown标记一律fail-closed抛SKILL_LEARNING_EVIDENCE_INCOMPLETE。
+    # LLM: 唯一机器管辖归属核验边界；layout=owner、owner_layout/user_modified、正文hash失配，
+    #   以及无prepared/moved未决操作时的missing正文均作排除；链接、超限、不可读、invalid_utf8、
+    #   未收敛prepared/moved操作或unknown标记仍fail-closed抛SKILL_LEARNING_EVIDENCE_INCOMPLETE。
     # 函数用途: 返回当前磁盘核验通过的机器管辖自学 Skill 映射（可选择是否含已归档条目）。
     def managed_records(
         self,
@@ -739,7 +740,13 @@ class SkillLearningStore:
                 )
             anchor = self.directory if is_archived else self.skills_root
             rel_parts = ("archived", name, "SKILL.md") if is_archived else (LEARNED_DIR_NAME, name, "SKILL.md")
-            text = _read_managed_skill_text_strict(anchor, rel_parts, skill_name=name)
+            try:
+                text = _read_managed_skill_text_strict(anchor, rel_parts, skill_name=name)
+            except SkillLearningStoreError as exc:
+                if (exc.detail or {}).get("reason") == "missing":
+                    # 无未决操作时正文缺失按手动删除排除并释放槽位，后续归属核验再标记user_modified。
+                    continue
+                raise
             if skill_content_sha256(text) != record.sha256:
                 # 磁盘存在完整常规文件且正文摘要明确不同，确认用户已接管修改，作排除项而非未决证据。
                 continue
@@ -2065,6 +2072,8 @@ class SkillLearningStore:
             return self._handoff_corrupt_op_locked(registry, op, ownership="user_modified", reason="user_modified_during_rollback")
         return self._handoff_corrupt_op_locked(registry, op, ownership="unknown", reason="rollback_state_uncertain")
 
+    # LLM: 生命周期调用方在state_lock内注册回调；正文已发布但同步失败时保留未决意图供恢复推进。
+    # 函数用途: 为尚未发布的生命周期操作创建补偿回调。
     def _make_op_rollback(
         self,
         before_registry: SkillLearningRegistry,
@@ -2072,7 +2081,11 @@ class SkillLearningStore:
         *,
         undo_actions: list[Callable[[], None]],
     ):
+        # LLM: 已发布错误不执行撤销或清除登记，未发布错误沿原读回与补偿路径处理。
+        # 函数用途: 按文件发布结果保留恢复标记或撤销未提交操作。
         def _callback(exc_type, primary, traceback):
+            if getattr(primary, "_skill_lifecycle_published", False):
+                return False
             if exc_type is None:
                 return False
             try:
@@ -2674,6 +2687,8 @@ def _is_op_committed_in_raw(raw_doc: object, op: dict[str, object]) -> bool:
     return False
 
 
+# LLM: 同设备rename发布后同步报错须标记原异常；仅rename本身EXDEV时进入原跨设备复制路径。
+# 函数用途: 移动目录项并区分发布前失败与发布后同步失败。
 def _rename_entry_with_exdev_fallback(
     src_parent_fd: int,
     src_name: str,
@@ -2685,12 +2700,17 @@ def _rename_entry_with_exdev_fallback(
     dst_root: Path,
     dst_parts: tuple[str, ...],
 ) -> None:
+    published = False
     try:
         os.rename(src_name, dst_name, src_dir_fd=src_parent_fd, dst_dir_fd=dst_parent_fd)
+        published = True
         os.fsync(dst_parent_fd)
         os.fsync(src_parent_fd)
         return
     except OSError as exc:
+        if published:
+            exc._skill_lifecycle_published = True
+            raise
         if exc.errno != errno.EXDEV:
             raise
     _copy_entry_nofollow(src_root, src_parts, dst_root, dst_parts)
@@ -2836,24 +2856,30 @@ def _version_name_number(name: str) -> int:
     return int(digits) if digits.isdigit() else 0
 
 
-# LLM: 发布与回滚共用：只在目标 SKILL.md 所在目录写临时文件并落盘同步再原子替换，拒绝链接且保留用户同目录其它文件。
+# LLM: 发布与回滚共用：同目录临时文件同步后原子替换，拒绝链接且保留其它文件；替换后OSError标记正文已发布。
 # 函数用途: 原子替换一个 SKILL.md 文件。
 def replace_skill_file(path: Path, text: str) -> None:
     if path.is_symlink() or path.parent.is_symlink():
         raise NoFollowPathError("refusing to replace symlinked skill file")
     tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    published = False
     try:
         with open(tmp, "w", encoding="utf-8") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
+        published = True
         if hasattr(os, "O_DIRECTORY"):
             dir_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
             try:
                 os.fsync(dir_fd)
             finally:
                 os.close(dir_fd)
+    except OSError as exc:
+        if published:
+            exc._skill_lifecycle_published = True
+        raise
     finally:
         tmp.unlink(missing_ok=True)
 
