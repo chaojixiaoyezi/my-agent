@@ -148,9 +148,9 @@ def test_health_only_heals_intended_running_adapter(case, monkeypatch, state, he
 
 # LLM: 只替代Popen系统边界，真实组装参数/env/日志和冷却逻辑运行。
 # 函数用途: 覆盖通道优先级、退回all、30秒边界及进程启动故障。
-@pytest.mark.parametrize("extra,channel", [({"requested_channel": "qq", "channels": ["feishu"]}, "qq"),
+@pytest.mark.parametrize("extra,channel", [({"requested_channel": "feishu", "channels": ["unknown"]}, "feishu"),
     ({"requested_channel": "all"}, "all"), ({"channels": ["feishu"]}, "feishu"),
-    ({"channels": ["qq"]}, "qq"), ({"channels": ["feishu", "qq"]}, "all"),
+    ({"channels": ["feishu", "web"]}, "all"),
     ({"requested_channel": "bad", "channels": ["unknown"]}, "all")])
 def test_adapter_spawn_environment_cooldown(case, monkeypatch, extra, channel):
     (case._paths.root / "adapter_state.json").write_text(json.dumps({"state": "running", **extra}))
@@ -287,14 +287,14 @@ def test_real_dead_adapter_pid_triggers_heal(case, monkeypatch):
     dead = subprocess.Popen([sys.executable, "-c", "pass"])
     dead.wait(timeout=10)
     case._paths.adapter_pid.write_text(json.dumps({"pid": dead.pid}))
-    (case._paths.root / "adapter_state.json").write_text(json.dumps({"state": "running", "requested_channel": "qq"}))
+    (case._paths.root / "adapter_state.json").write_text(json.dumps({"state": "running", "requested_channel": "feishu"}))
     monkeypatch.setattr(sv, "get_running_pid_report", get_running_pid_report)
     monkeypatch.setattr(case, "_is_gateway_healthy", lambda: True)
     spawn = Mock()
     monkeypatch.setattr(sv.subprocess, "Popen", spawn)
     assert sv._run_health_check(case, 2) == 0
     spawn.assert_called_once()
-    assert spawn.call_args.args[0][-1] == "qq"
+    assert spawn.call_args.args[0][-1] == "feishu"
 
 
 # LLM: 非零systemctl回执与字面参数编码均需保留；写文件不等于服务已启用。

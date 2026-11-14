@@ -50,7 +50,7 @@ def test_actual_auth_enabled_agent_without_injected_middleware_remains_protected
 
 
 @pytest.mark.parametrize('unsafe', ['owners', 'feishu_app_id', 'feishu_app_secret', 'feishu_verification_token',
-                                   'feishu_encrypt_key', 'qq_app_id', 'qq_app_secret'])
+                                   'feishu_encrypt_key'])
 def test_explicit_no_auth_rejects_multiowner_or_any_declared_im_before_g1_or_socket(tmp_path, unsafe):
     values = dict(auth_enabled=False, gateway_per_user_owner_scoping=unsafe=='owners')
     if unsafe != 'owners':
@@ -83,8 +83,7 @@ def test_explicit_no_auth_single_local_preserves_original_boundary(tmp_path):
 
 
 @pytest.mark.parametrize('values', [dict(auth_enabled=False, gateway_per_user_owner_scoping=True),
-    dict(auth_enabled=True, gateway_per_user_owner_scoping=False, feishu_app_id='SYNTHETIC_APP'),
-    dict(auth_enabled=True, gateway_per_user_owner_scoping=False, qq_app_id='SYNTHETIC_APP')])
+    dict(auth_enabled=True, gateway_per_user_owner_scoping=False, feishu_app_id='SYNTHETIC_APP')])
 def test_cli_rejects_unsafe_auth_configuration_before_recovery_or_threads(tmp_path, monkeypatch, capsys, values):
     agent = _agent(tmp_path, **values)
     config_path = tmp_path / 'unsafe-cli.yaml'
@@ -144,7 +143,7 @@ def test_auth_enabled_preserves_explicit_enabled_middleware_and_custom_token(tmp
 
 
 @pytest.mark.parametrize('field', ['feishu_app_id', 'feishu_app_secret', 'feishu_verification_token',
-                                  'feishu_encrypt_key', 'qq_app_id', 'qq_app_secret'])
+                                  'feishu_encrypt_key'])
 def test_im_without_owner_scoping_is_rejected_even_with_enabled_auth(tmp_path, field):
     agent = _agent(tmp_path, auth_enabled=True, gateway_per_user_owner_scoping=False, **{field:'OWNED_DECLARED_SECRET'})
     server = GatewayHTTPServer(0, gateway_paths(agent), params=GatewayHTTPServerParams(agent=agent))
@@ -160,7 +159,7 @@ def test_im_without_owner_scoping_is_rejected_even_with_enabled_auth(tmp_path, f
     assert not (agent.home_paths.root/'secrets/gateway-local-client-token').exists()
 
 
-@pytest.mark.parametrize('provider', ['feishu', 'qq'])
+@pytest.mark.parametrize('provider', ['feishu'])
 def test_im_with_scoping_and_auth_preserves_original_protected_start(tmp_path, provider):
     agent = _agent(tmp_path, auth_enabled=True, gateway_per_user_owner_scoping=True,
                    **{provider+'_app_id':'SYNTHETIC_APP', provider+'_app_secret':'SYNTHETIC_SECRET'})

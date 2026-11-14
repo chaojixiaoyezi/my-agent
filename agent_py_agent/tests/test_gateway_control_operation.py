@@ -625,7 +625,7 @@ def test_control_status_auth_matches_channel_user_and_group_owner(tmp_path, monk
     )
 
     assert _can_read_control_operation(handler, receipt) is True
-    middleware.extract_identity.return_value = ("u-1", "qq")
+    middleware.extract_identity.return_value = ("u-1", "web")
     assert _can_read_control_operation(handler, receipt) is False
     middleware.extract_identity.return_value = ("u-1", "feishu")
     handler.headers = {**headers, "X-Channel-Chat-Id": "group-b"}

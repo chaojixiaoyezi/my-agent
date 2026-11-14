@@ -8,7 +8,7 @@ from ..runtime_errors import runtime_error_report
 def channel_activity_items_report(cross_channel, user_id: str) -> tuple[list[dict], list[dict]]:
     items = []
     load_errors: list[dict] = []
-    for channel in ["chat", "feishu", "qq", "web"]:
+    for channel in ["chat", "feishu", "web"]:
         session_ids, errors = cross_channel.list_sessions_by_channel_report(user_id, channel)
         load_errors.extend(errors)
         for session_id in session_ids:

@@ -2,7 +2,7 @@
 
 给人看的解释：
 测试 IncomingMessage / OutgoingMessage 的序列化、
-feishu_to_incoming / qq_to_incoming 转换函数、outgoing_to_feishu / outgoing_to_qq 转换函数。
+feishu_to_incoming 转换函数、outgoing_to_feishu 转换函数。
 """
 
 from __future__ import annotations
@@ -14,8 +14,6 @@ from agent_py_agent.agent.adapter.protocol import (
     OutgoingMessage,
     feishu_to_incoming,
     outgoing_to_feishu,
-    outgoing_to_qq,
-    qq_to_incoming,
 )
 
 
@@ -54,7 +52,7 @@ class TestIncomingOutgoingMessages:
 
     def test_incoming_message_default_timestamp(self) -> None:
         before = time.time()
-        msg = IncomingMessage(channel="qq", user_id="777", content="test", message_id="q1")
+        msg = IncomingMessage(channel="feishu", user_id="ou_777", content="test", message_id="m1")
         after = time.time()
         assert before <= msg.timestamp <= after
 
@@ -160,52 +158,6 @@ class TestFeishuConversion:
         result = outgoing_to_feishu(msg)
         assert result["msg_type"] == "text"
         assert result["content"] == {"text": "回复内容"}
-
-
-class TestQQConversion:
-    """测试 QQ 消息格式转换。"""
-
-    def test_qq_new_format_converted(self) -> None:
-        payload = {
-            "d": {
-                "author": {"id": "123456"},
-                "content": "hello qq",
-                "msg_id": "msg_abc",
-                "timestamp": 1234567890.5,
-                "guild_id": "guild_1",
-                "channel_id": "chn_2",
-            },
-        }
-        msg = qq_to_incoming(payload)
-        assert msg is not None
-        assert msg.channel == "qq"
-        assert msg.user_id == "123456"
-        assert msg.content == "hello qq"
-        assert msg.message_id == "msg_abc"
-        assert msg.metadata["qq_guild_id"] == "guild_1"
-        assert msg.metadata["qq_channel_id"] == "chn_2"
-
-    def test_qq_event_without_official_payload_is_ignored(self) -> None:
-        payload = {
-            "event": {
-                "user_id": 999,
-                "content": "plain msg",
-                "msg_id": "old_id",
-                "timestamp": 1111111,
-                "guild_id": "g1",
-                "channel_id": "c1",
-            },
-        }
-        assert qq_to_incoming(payload) is None
-
-    def test_qq_empty_content_returns_none(self) -> None:
-        payload = {"d": {"author": {"id": "1"}, "content": "  ", "msg_id": "x"}}
-        assert qq_to_incoming(payload) is None
-
-    def test_outgoing_to_qq(self) -> None:
-        msg = OutgoingMessage(channel="qq", user_id="777", content="qq 回复")
-        result = outgoing_to_qq(msg)
-        assert result["content"] == "qq 回复"
 
 
 class TestBaseChannelAdapter:

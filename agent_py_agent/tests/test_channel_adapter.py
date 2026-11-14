@@ -99,13 +99,13 @@ class TestIncomingMessage:
         from agent_py_agent.agent.adapter.protocol import IncomingMessage
 
         msg = IncomingMessage(
-            channel="qq",
+            channel="web",
             user_id="user_456",
             message_id="msg_789",
             content="hello",
         )
 
-        assert msg.channel == "qq"
+        assert msg.channel == "web"
         assert msg.user_id == "user_456"
         assert msg.message_id == "msg_789"
         assert msg.content == "hello"

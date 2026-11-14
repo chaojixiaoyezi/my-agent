@@ -308,13 +308,11 @@ def test_update_services_uses_canonical_prefix_paths_and_restores_old_channel(tm
 
 @pytest.mark.parametrize("state,expected", [
     ({"channels": [{"name": "feishu"}]}, "feishu"),
-    ({"channels": [{"name": "qq"}]}, "qq"),
-    ({"channels": [{"name": "feishu"}, {"name": "qq"}]}, "all"),
+    ({"requested_channel": "feishu", "channels": [{"name": "feishu"}]}, "feishu"),
     ({"requested_channel": "all", "channels": [{"name": "feishu"}]}, "all"),
     ({"channels": []}, None),
     ({"channels": [{"name": "unknown"}]}, None),
     ({"channels": [{"name": "feishu"}, {"name": "feishu"}]}, None),
-    ({"requested_channel": "qq", "channels": [{"name": "feishu"}]}, None),
     ({"requested_channel": "invalid", "channels": [{"name": "feishu"}]}, None),
     ({"channels": [{"name": []}]}, None),
     ({"requested_channel": [], "channels": [{"name": "feishu"}]}, None),
@@ -464,7 +462,7 @@ def test_update_maintenance_lock_supervisor_stop_restore_and_order(update_instal
     case = update_installation
     for name in ('gateway.pid', 'adapter.pid', 'supervisor.pid'):
         write_pid_record(case.service / name)
-    (case.service / 'adapter_state.json').write_text(json.dumps({'channels': [{'name': 'qq'}]}))
+    (case.service / 'adapter_state.json').write_text(json.dumps({'channels': [{'name': 'feishu'}]}))
     (case.service / 'supervisor_service.json').write_text(json.dumps({'unit_name': 'custom-agent-supervisor.service'}))
     lock = case.service / 'maintenance_lock.json'
     commands = []
@@ -506,7 +504,7 @@ def test_update_maintenance_lock_supervisor_stop_restore_and_order(update_instal
         str(case.prefix / 'bin/my-agent-preview'), 'gateway', 'supervisor-start']
     assert commands[-1] == expected
     assert commands[0][1:3] == ['gateway', 'start']
-    assert commands[1][1:] == ['adapter', 'start', '--daemon', '--channel', 'qq']
+    assert commands[1][1:] == ['adapter', 'start', '--daemon', '--channel', 'feishu']
 
 
 def test_legacy_restore_tuple_always_removes_maintenance_lock(update_installation, monkeypatch):
@@ -534,7 +532,7 @@ def test_restore_attempts_all_components_after_one_start_failure(update_installa
         return subprocess.CompletedProcess(command, int(command[1:3] == [failed_component, 'start']))
 
     monkeypatch.setattr(installer.subprocess, 'run', run)
-    state = (True, True, 'qq', True, True, 'my-agent-gw-supervisor.service')
+    state = (True, True, 'feishu', True, True, 'my-agent-gw-supervisor.service')
     with pytest.raises(ValueError, match='服务'):
         installer.update_services(case.prefix, restore=state)
     assert not lock.exists()

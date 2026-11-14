@@ -33,7 +33,7 @@ def test_original_actor_can_verify_and_other_actor_cannot(tmp_path):
     owner, payload, ref = _case(tmp_path)
     assert verify_interaction_reference(tmp_path, ref, channel="feishu", actor_id="ou_creator") == payload
     assert len(interaction_key(owner.home_dir)) == 32
-    for channel, actor in (("qq", "ou_creator"), ("feishu", "ou_other")):
+    for channel, actor in (("web", "ou_creator"), ("feishu", "ou_other")):
         with pytest.raises(ValueError):
             verify_interaction_reference(tmp_path, ref, channel=channel, actor_id=actor)
 

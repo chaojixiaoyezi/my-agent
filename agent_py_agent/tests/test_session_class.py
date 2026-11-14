@@ -227,13 +227,13 @@ class TestSessionModels:
             "user_id": "user_def",
             "created_at": 1234567890.0,
             "updated_at": 1234567900.0,
-            "last_active_channel": "qq",
+            "last_active_channel": "web",
             "metadata": {},
         }
 
         session = Session.from_dict(data)
         assert session.session_id == "sess_abc"
-        assert session.last_active_channel == "qq"
+        assert session.last_active_channel == "web"
 
     def test_session_touch(self):
         """验证 touch 更新时间和通道。"""

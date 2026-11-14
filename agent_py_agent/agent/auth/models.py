@@ -62,7 +62,7 @@ def infer_role(channel: str, user_id: str, admin_user_id: str = "admin") -> Role
     - 其他外部通道 → USER
 
     Args:
-        channel: 通道名（如 feishu / qq / chat）
+        channel: 通道名（如 feishu / chat）
         user_id: 用户 ID
         admin_user_id: 管理员用户 ID（默认 admin）
 

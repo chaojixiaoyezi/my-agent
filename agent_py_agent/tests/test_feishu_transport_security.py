@@ -107,17 +107,15 @@ def test_send_message_keeps_verified_bytes_when_text_side_effect_replaces_path(t
     assert all(b'OWNED_FOREIGN_SENTINEL' not in body for body in uploads)
 
 
-@pytest.mark.parametrize('route', ['message', 'upload', 'resource', 'token', 'card', 'profile', 'reaction', 'qq_send', 'qq_token', 'qq_gateway', 'cloud'])
+@pytest.mark.parametrize('route', ['message', 'upload', 'resource', 'token', 'card', 'profile', 'reaction', 'cloud'])
 def test_all_fixed_provider_credential_routes_refuse_second_origin(monkeypatch, route):
     from types import SimpleNamespace
-    from urllib.request import Request
 
     from agent_py_agent.agent.adapter import (
         feishu_card,
         feishu_cloud,
         feishu_profile,
         feishu_typing,
-        qq,
     )
 
     token = 'OWNED_SYNTHETIC_TOKEN'
@@ -126,8 +124,6 @@ def test_all_fixed_provider_credential_routes_refuse_second_origin(monkeypatch, 
         monkeypatch.setattr(feishu_card, '_API_BASE', base)
         monkeypatch.setattr(feishu_profile, '_OPEN_BASE', {'feishu': base})
         monkeypatch.setattr(feishu_typing, '_FEISHU_API_BASE', base)
-        monkeypatch.setattr(qq, '_QQ_API_BASE', base)
-        monkeypatch.setattr(qq, '_QQ_TOKEN_URL', base + '/token')
         monkeypatch.setattr(feishu_cloud, 'API_BASE', base)
         adapter = FeishuAdapter({'feishu_session_lock_enabled': False, 'feishu_app_id': 'owned-app', 'feishu_app_secret': 'OWNED_APP_SECRET'})
         calls = {
@@ -138,9 +134,6 @@ def test_all_fixed_provider_credential_routes_refuse_second_origin(monkeypatch, 
             'card': lambda: feishu_card._post_json(base + '/card', {}, {'Authorization': 'Bearer ' + token}),
             'profile': lambda: feishu_profile.fetch_feishu_display_name('owned-app', 'OWNED_APP_SECRET', 'ou_owned'),
             'reaction': lambda: feishu_typing._add_reaction('om_owned', 'Typing', token),
-            'qq_send': lambda: qq._qq_send_request(Request(base + '/send', headers={'Authorization': 'QQBot ' + token})),
-            'qq_token': lambda: qq._qq_request_token('owned-app', 'OWNED_APP_SECRET'),
-            'qq_gateway': lambda: qq._qq_fetch_gateway_url(None, token),
             'cloud': lambda: feishu_cloud.request_cloud_api(SimpleNamespace(_get_tenant_access_token=lambda: token), 'GET', '/cloud'),
         }
         try:
@@ -156,23 +149,6 @@ def test_all_fixed_provider_credential_routes_refuse_second_origin(monkeypatch, 
             else:
                 assert result is None
         assert not received
-
-
-def test_qq_token_debug_and_send_failure_never_log_provider_secrets(monkeypatch, caplog):
-    import logging
-    from types import SimpleNamespace
-
-    from agent_py_agent.agent.adapter import qq
-    from agent_py_agent.agent.adapter.protocol import OutgoingMessage
-
-    caplog.set_level(logging.DEBUG)
-    monkeypatch.setattr(qq, '_qq_request_token', lambda *_: {'access_token': 'OWNED_SECRET_SENTINEL', 'expires_in': 7200})
-    owner = SimpleNamespace(_access_token=None, _token_expires_at=0, app_id='owned', app_secret='OWNED_APP_SECRET')
-    assert qq._qq_get_access_token(owner) == 'OWNED_SECRET_SENTINEL'
-    owner._get_access_token = lambda: 'OWNED_SECRET_SENTINEL'
-    monkeypatch.setattr(qq, '_qq_send_request', lambda *_: (False, {'code': 100, 'msg': 'OWNED_PRIVATE_SENTINEL', 'data': {'access_token': 'OWNED_SECRET_SENTINEL'}}))
-    assert not qq._qq_send_message(owner, 'owned', OutgoingMessage('qq', 'owned', '合成测试'))
-    assert 'OWNED_SECRET_SENTINEL' not in caplog.text and 'OWNED_PRIVATE_SENTINEL' not in caplog.text
 
 
 def test_gateway_submission_diagnostic_does_not_echo_raw_result(tmp_path, monkeypatch, caplog):

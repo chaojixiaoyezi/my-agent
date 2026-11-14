@@ -162,7 +162,7 @@ class AdminCrossChannelQuery:
 
     def _append_channel_summaries(self, user_id: str, lines: list[str]) -> None:
         """Append per-channel summaries to lines list."""
-        for channel in ["chat", "feishu", "qq", "web"]:
+        for channel in ["chat", "feishu", "web"]:
             summary = self.get_channel_summary(user_id, channel)
             append_admin_load_errors(lines, summary.get("load_errors", []))
             if not summary.get("session_count", 0):

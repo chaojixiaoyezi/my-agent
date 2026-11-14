@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..agent.adapter import ChannelManager, FeishuAdapter, QQAdapter
+from ..agent.adapter import ChannelManager, FeishuAdapter
 from ..agent.common.log_redaction import redact_sensitive_text
 from ..agent.gateway_parts import (
     AdapterPaths,
@@ -190,7 +190,7 @@ def cmd_adapter_start(args) -> int:
     return _run_adapter_foreground(agent, options, gpaths)
 
 
-# LLM: 飞书只借用原配置对象，入站按消息刷新；凭据和运输配置仍由原映射冻结，QQ接线不变。
+# LLM: 飞书只借用原配置对象，入站按消息刷新；凭据和运输配置仍由原映射冻结。
 # 函数用途: 将实时飞书开关与原通道服务绑定，不创建配置副本。
 def _register_channel_adapter(manager: ChannelManager, channel: str, agent) -> None:
     workspace_root = _adapter_workspace_root(agent)
@@ -200,11 +200,6 @@ def _register_channel_adapter(manager: ChannelManager, channel: str, agent) -> N
             callback_port=agent.config.feishu_callback_port or 8421,
             workspace_root=workspace_root,
             live_config=agent.config,
-        )
-    elif channel == "qq":
-        adapter = QQAdapter(
-            config=_qq_adapter_config(agent),
-            workspace_root=workspace_root,
         )
     else:
         return
@@ -253,17 +248,10 @@ def _feishu_adapter_config(agent) -> dict[str, object]:
     }
 
 
-def _qq_adapter_config(agent) -> dict[str, str]:
-    return {
-        "qq_app_id": agent.config.qq_app_id or "",
-        "qq_app_secret": agent.config.qq_app_secret or "",
-    }
-
-
 def _ensure_service_logging() -> None:
     """适配器是常驻服务进程,需要一个 stderr handler 让 INFO 级生命周期日志(适配器启动、连接建立、
     重连、心跳)可见。否则 agent_py_agent logger 无 handler,落到 WARNING-only 的 last-resort,
-    通道的 INFO 全静默丢失——QQ 当初"不在线"时日志里一行没有,排查无从下手。
+    通道的 INFO 全静默丢失,排查无从下手。
     已有 handler(测试/被嵌入调用)则不重复配置,避免重复打印。"""
     from ..agent.common.log_redaction import RedactingFormatter, install_log_redaction
 
@@ -340,8 +328,6 @@ def _error_record(exc: BaseException) -> dict[str, str]:
 def _register_requested_adapters(manager: ChannelManager, channel: str, agent) -> None:
     if channel in ("feishu", "all"):
         _register_channel_adapter(manager, "feishu", agent)
-    if channel in ("qq", "all"):
-        _register_channel_adapter(manager, "qq", agent)
 
 
 # LLM: 停止文件存在且未带异代PID时才视为当前进程的停止请求；若文件声明了旧代PID则立即清理并忽略，防止跨代误杀。

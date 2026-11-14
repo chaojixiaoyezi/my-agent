@@ -91,8 +91,8 @@ class TestBindSession:
             json.dumps({
                 "session_id": "session_xyz",
                 "user_id": "user_123",
-                "channels": {"qq": {"active": False, "last_active_at": 0}},
-                "primary_channel": "qq",
+                "channels": {"web": {"active": False, "last_active_at": 0}},
+                "primary_channel": "web",
             }),
             encoding="utf-8"
         )
@@ -126,7 +126,7 @@ class TestUnbindChannel:
                 "user_id": "user_123",
                 "channels": {
                     "feishu": {"active": True, "last_active_at": 1234567890.0},
-                    "qq": {"active": False, "last_active_at": 0},
+                    "web": {"active": False, "last_active_at": 0},
                 },
                 "primary_channel": "feishu",
             }),
@@ -161,7 +161,7 @@ class TestGetBoundSessions:
                 "user_id": "user_123",
                 "channels": {
                     "feishu": {"active": True, "last_active_at": 1234567890.0},
-                    "qq": {"active": False, "last_active_at": 0},
+                    "web": {"active": False, "last_active_at": 0},
                 },
             }),
             encoding="utf-8"
@@ -200,13 +200,13 @@ class TestTransferSession:
         )
 
         manager = CrossChannelSession(mock_config)
-        result = manager.transfer_session("session_transfer", "feishu", "qq")
+        result = manager.transfer_session("session_transfer", "feishu", "web")
 
         assert result is True
         data = json.loads(channels_file.read_text(encoding="utf-8"))
         assert data["channels"]["feishu"]["active"] is False
-        assert data["channels"]["qq"]["active"] is True
-        assert data["primary_channel"] == "qq"
+        assert data["channels"]["web"]["active"] is True
+        assert data["primary_channel"] == "web"
 
 
 class TestGetPrimaryChannel:

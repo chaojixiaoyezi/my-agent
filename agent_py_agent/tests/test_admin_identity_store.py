@@ -130,7 +130,7 @@ def test_binding_is_exact_private_and_logout_removes_it(tmp_path):
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert find_admin_channel_identity(tmp_path, "feishu", "ou_admin") == bound
     assert find_admin_channel_identity(tmp_path, "feishu", "OU_ADMIN") is None, "用户 ID 大小写敏感"
-    assert find_admin_channel_identity(tmp_path, "qq", "ou_admin") is None
+    assert find_admin_channel_identity(tmp_path, "web", "ou_admin") is None
     again = bind_admin_channel_identity(tmp_path, "feishu", "ou_admin", now=60.0)
     assert list_admin_channel_identities(tmp_path) == [again]
     assert remove_admin_channel_identity(tmp_path, "feishu", "ou_admin") is True

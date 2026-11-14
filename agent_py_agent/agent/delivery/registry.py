@@ -480,12 +480,6 @@ def build_default_channel_registry(
         ),
         configured=_configured_secret_fields(config, ("feishu_app_id", "feishu_app_secret")),
     )
-    registry.register_factory(
-        "qq",
-        lambda: _build_qq_adapter(config),
-        capabilities=ChannelCapabilities(text=True, reply=True, proactive=True),
-        configured=_configured_secret_fields(config, ("qq_app_id", "qq_app_secret")),
-    )
     return registry
 
 
@@ -501,19 +495,6 @@ def _build_feishu_adapter(config: Any) -> Any | None:
         return None
     return FeishuAdapter({'feishu_app_id': app_id, 'feishu_app_secret': app_secret,
         'config_generation': getattr(config, 'config_revision', '')})
-
-
-# LLM: QQ 与飞书共用 registry 工厂合同，缺凭据只返回 None，不尝试访问网络。
-# 函数用途: 从配置安全构建可出站 QQAdapter，缺凭据时保持不可用。
-def _build_qq_adapter(config: Any) -> Any | None:
-    from ..adapter.qq import QQAdapter
-    from ..settings.secret_ref import resolve_secret_ref
-
-    app_id = resolve_secret_ref(str(getattr(config, "qq_app_id", "") or ""))
-    app_secret = resolve_secret_ref(str(getattr(config, "qq_app_secret", "") or ""))
-    if not app_id or not app_secret:
-        return None
-    return QQAdapter({"qq_app_id": app_id, "qq_app_secret": app_secret})
 
 
 # LLM: configured 只表示 secret ref 可解析且非空；网络健康必须由独立 runtime health 提供。
