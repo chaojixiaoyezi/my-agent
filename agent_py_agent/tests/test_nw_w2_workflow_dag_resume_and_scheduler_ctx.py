@@ -817,3 +817,82 @@ def test_scheduled_tool_work_validates_and_propagates_business_context(tmp_path,
     parsed_resp = json.loads(row['response'])
     assert parsed_resp['effect_outcome'] == 'not_started'
     assert parsed_resp['next_action']
+
+
+def test_dag_pre_admission_non_agent_failure_settles_while_foreach_keeps_effect_started(tmp_path):
+    for idx, mode_spec in enumerate(
+        (
+            {'step_id': 'cond_only', 'mode': 'condition'},
+            {'step_id': 'xform_only', 'mode': 'script_transform'},
+            {'step_id': 'notify_only', 'mode': 'notification'},
+        ),
+        start=1,
+    ):
+        engine = WorkflowEngine(tmp_path / f'case_{idx}', workspace_root=tmp_path)
+        definition = _dag_definition([mode_spec], workflow_id=f'wf_pre_admit_{mode_spec["mode"]}')
+        first = engine.run_workflow(
+            definition,
+            workflow_run_id=f'run-{mode_spec["mode"]}-1',
+            concurrency_policy='skip_if_running',
+        )
+        assert first.status == 'failed'
+        assert first.steps[0].error_code == 'NODE_EXECUTOR_UNAVAILABLE'
+        assert first.steps[0].escalation_result.get('effect_started') is False
+        assert first.steps[0].escalation_result.get('effect_outcome') == 'not_started'
+        assert _concurrency_settled(first) is True
+
+        second = engine.run_workflow(
+            definition,
+            workflow_run_id=f'run-{mode_spec["mode"]}-2',
+            concurrency_policy='skip_if_running',
+        )
+        assert isinstance(second, WorkflowRunRecord)
+        assert second.workflow_run_id == f'run-{mode_spec["mode"]}-2'
+        assert second.status == 'failed'
+
+    exc_engine = WorkflowEngine(tmp_path / 'exc_pre_admit', workspace_root=tmp_path)
+    exc_def = _dag_definition(
+        [
+            {
+                'step_id': 'missing_input',
+                'mode': 'llm_skill_analysis',
+                'inputs_map': {'need': {'step_id': '$inputs', 'key': 'required_k'}},
+            }
+        ],
+        workflow_id='wf_pre_admit_exc',
+    )
+    exc_first = exc_engine.run_workflow(exc_def, {}, workflow_run_id='run-exc-1', concurrency_policy='skip_if_running')
+    assert exc_first.status == 'failed'
+    assert exc_first.steps[0].escalation_result.get('effect_started') is False
+    assert exc_first.steps[0].escalation_result.get('effect_outcome') == 'not_started'
+    assert _concurrency_settled(exc_first) is True
+    exc_second = exc_engine.run_workflow(exc_def, {}, workflow_run_id='run-exc-2', concurrency_policy='skip_if_running')
+    assert isinstance(exc_second, WorkflowRunRecord)
+    assert exc_second.workflow_run_id == 'run-exc-2'
+
+    def _failing_foreach_analyze(spec, context, skills):
+        raise ValueError('simulated batch processing error')
+
+    fe_engine = WorkflowEngine(
+        tmp_path / 'foreach_case',
+        workspace_root=tmp_path,
+        analysis_handler=_failing_foreach_analyze,
+    )
+    fe_definition = _dag_definition(
+        [
+            {
+                'step_id': 'fe_parent',
+                'mode': 'llm_skill_analysis',
+                'foreach': {
+                    'from': 'inputs.items',
+                    'batch_size': 1,
+                    'on_item_error': 'fail_fast',
+                    'as': 'batch',
+                },
+            }
+        ],
+        workflow_id='wf_dag_foreach_parent_obligation',
+    )
+    fe_run = fe_engine.run_workflow(fe_definition, {'items': ['x']}, workflow_run_id='run-fe-1')
+    assert fe_run.status == 'failed'
+    assert fe_run.steps[0].escalation_result.get('effect_started') is True

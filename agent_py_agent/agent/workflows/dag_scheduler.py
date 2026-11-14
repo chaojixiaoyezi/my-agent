@@ -194,6 +194,17 @@ def _is_blocked_by_skipped_upstream(
     return False
 
 
+def _clear_unadmitted_worker_effect(step, spec):
+    """未进入工作流效果准入即失败/取消的非 foreach 步骤，清除协调线程预标记的 effect_started。"""
+    if (
+        step.status in ('failed', 'cancelled')
+        and getattr(step, '_worker_effect_admitted', None) is False
+        and spec.get('foreach') is None  # foreach 父步骤自行维护批义务，不能清除预标记
+    ):
+        step.escalation_result['effect_started'] = False
+        step.escalation_result.setdefault('effect_outcome', 'not_started')
+
+
 # LLM: 纯计算工作线程函数；不写Store、不继承协调线程锁凭据，避免跨线程锁状态泄漏与死锁。
 # 函数用途: 在线程池内执行单步实际业务逻辑并返回结果。
 def _run_step_worker(engine, step, spec, local_outputs, definition, local_record):
@@ -207,6 +218,7 @@ def _run_step_worker(engine, step, spec, local_outputs, definition, local_record
         _check_stop()
         step.ended_at = time.time()
         step.duration_ms = (time.monotonic() - clock) * 1000
+        _clear_unadmitted_worker_effect(step, spec)
         return (step, None)
     except (KeyboardInterrupt, SystemExit, ToolCancelled, InterruptedError) as exc:
         step.ended_at = time.time()
@@ -221,6 +233,7 @@ def _run_step_worker(engine, step, spec, local_outputs, definition, local_record
         step.needs_repair = True
         step.ended_at = time.time()
         step.duration_ms = (time.monotonic() - clock) * 1000
+        _clear_unadmitted_worker_effect(step, spec)
         return (step, None)
 
 
