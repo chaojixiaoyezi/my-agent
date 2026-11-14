@@ -219,7 +219,18 @@ def execute_controlled_exec_tool(request: ControlledExecToolRequest) -> ToolHand
             )
         ok = bool(execution.executed and execution.exit_code == 0 and not execution.timed_out)
         return ToolHandlerOutcome("controlled_exec", ok, _execution_payload(execution, grant.id))
-    return ToolHandlerOutcome("controlled_exec", _plan_result_ok(plan), _plan_payload(plan, grant.id))
+    plan_ok = _plan_result_ok(plan)
+    plan_output = _plan_payload(plan, grant.id)
+    if not plan_ok:
+        return ToolHandlerOutcome(
+            "controlled_exec", False, plan_output, error_code="WRITE_FORBIDDEN",
+            effect_outcome="not_started", failure_stage="validation",
+            next_action=(
+                "Adjust command or cwd within the selected grant's command_allowlist and path_scope, "
+                "or submit capability_request for the missing scoped grant; do not retry unchanged."
+            ),
+        )
+    return ToolHandlerOutcome("controlled_exec", True, plan_output)
 
 
 def _select_controlled_exec_grant(
