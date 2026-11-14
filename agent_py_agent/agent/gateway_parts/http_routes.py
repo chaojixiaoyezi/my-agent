@@ -26,7 +26,6 @@ GATEWAY_HTTP_ROUTES = {
     "GET": (
         GatewayHTTPRoute("/client/requests/*/events", "handle_request_events", "credential", ".request_event_routes"),
         GatewayHTTPRoute("/v1/requests/*/events", "handle_request_events", "credential", ".request_event_routes"),
-        GatewayHTTPRoute("/api/admin/*", "handle_admin_api_get", "admin", ".admin_api"),
         *_BUSINESS_UI_ROUTES,
         GatewayHTTPRoute("/client/business/artifacts/*/content", "handle_business_artifact_content", "credential", ".business_artifacts_http"),
         GatewayHTTPRoute("/status", "_handle_status", "public"),
@@ -43,7 +42,6 @@ GATEWAY_HTTP_ROUTES = {
     "POST": (
         GatewayHTTPRoute("/v1/chat/completions", "handle_openai_chat_completions", "credential", ".openai_compat_routes"),
         GatewayHTTPRoute("/api/llm/test", "handle_llm_gateway_test", "credential", ".openai_compat_routes"),
-        GatewayHTTPRoute("/api/admin/*", "handle_admin_api_post", "admin", ".admin_api"),
         GatewayHTTPRoute("/client/business", "handle_client_business", "credential", ".business_api"),
         GatewayHTTPRoute("/client/business/stream", "handle_client_business_stream", "credential", ".business_api"),
         GatewayHTTPRoute("/client/business/artifacts", "handle_business_artifact_upload", "credential", ".business_artifacts_http"),
