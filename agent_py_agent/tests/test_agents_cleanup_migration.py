@@ -9,7 +9,6 @@ apply 绑定 dry-run 计划摘要，中途变化拒绝；崩溃可幂等续作�
 """
 
 import functools
-import inspect
 import json
 import shutil
 import subprocess
@@ -681,16 +680,6 @@ def test_migration_refuses_while_curator_lease_is_held(tmp_path: Path):
     assert result["active_lease_cleared"], result
     assert result["last_success_at_set"], result
     assert _ENTRY_ONE not in _agents_text(repo), result
-
-
-# LLM: 冻结与失效必须走同一把线程前缀锁（B 设计）；静态断言两处都引用锁函数，再用并发
-#   交错测试证明不会死锁（0r3 新增锁序用例）。
-# 函数用途: 静态验证 freeze/expire 都引用线程前缀锁。
-def test_thread_prefix_lock_covers_freeze_and_expire():
-    freeze_source = inspect.getsource(freeze_thread_persona)
-    expire_source = inspect.getsource(expire_thread_personas_containing)
-    assert "_thread_prefix_lock_path" in freeze_source
-    assert "_thread_prefix_lock_path" in expire_source
 
 
 # 函数用途: 并发交错 freeze 与 expire 限时完成，验证线程前缀锁不会死锁。

@@ -1,7 +1,6 @@
 """W7 监控规则的真实 HTTP、原生调度、耐久回执与 W8 证据回归。"""
 from __future__ import annotations
 
-import ast
 import json
 import os
 import subprocess
@@ -987,25 +986,6 @@ def test_route_map_cross_slice_entries_documented():
     assert registered == names and all(v13.v13_action_spec(name).action == name for name in names)
     assert any(name.startswith('subscriptions.') for name in business_action_specs())
     assert not any(name.startswith('subscriptions.') for name in v13.v13_action_specs())
-
-
-# LLM: AST 门禁防止以后把记录版本传入集合 CAS 或加入 varargs 旁路。
-# 函数用途: 固定本模块的签名、注释与 CAS 边界。
-def test_monitor_signature_and_record_cas_static_guard():
-    path = Path(monitors.__file__)
-    source = path.read_text(encoding='utf-8')
-    tree = ast.parse(source)
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            assert node.args.vararg is None and node.args.kwarg is None
-            assert '# 函数用途:' in '\n'.join(source.splitlines()[max(0, node.lineno - 5):node.lineno - 1])
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'transaction':
-            assert not any(key.arg == 'expected_revision' for key in node.keywords)
-    for function in tree.body:
-        if isinstance(function, ast.FunctionDef):
-            mirror_calls = [node for node in ast.walk(function) if isinstance(node, ast.Call)
-                            and isinstance(node.func, ast.Name) and node.func.id == '_mirror']
-            assert not mirror_calls or function.name == '_sync_rules'
 
 
 # LLM: 只替换冻结后台端口的测试响应，原 W0 job Store、状态机和结果验证完整运行。

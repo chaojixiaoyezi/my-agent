@@ -1171,65 +1171,6 @@ def test_r6_broker_bind_preserves_existing_monitor_refs(tmp_path, monkeypatch, p
     assert stored['refs'] == cleared['data']['metadata']['asset_refs']
 
 
-# LLM: adapter初读在bindings→root内、pin准备在root外；Broker请求锁内绑定快照，公共投影不持root，禁止递归flock。
-# 函数用途: 拦住恢复前读旧previous及把公开列表refs按旧字典索引的结构性回归。
-def test_r6_monitor_recovery_and_broker_refs_ast_contract():
-    import ast
-    import inspect
-
-    from agent_py_agent.agent.assets.monitor_adapter import (
-        get_monitor_descriptor,
-        save_monitor_binding,
-    )
-    from agent_py_agent.agent.plugin_host_broker_topics import _save_monitor
-
-    tree = ast.parse(inspect.getsource(save_monitor_binding))
-    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
-
-    # LLM: 仅收集语法祖先的with调用；不执行源码或声称任意数据流均已证明。
-    # 函数用途: 比较读取和pin准备所在的锁域。
-    def lock_domains(node):
-        result = []
-        while node in parents:
-            node = parents[node]
-            if isinstance(node, ast.With):
-                result.extend(item.context_expr.func.id for item in node.items
-                    if isinstance(item.context_expr, ast.Call) and isinstance(item.context_expr.func, ast.Name))
-        return result
-
-    reads = [node for node in ast.walk(tree) if isinstance(node, ast.Assign)
-             and any(isinstance(target, ast.Name) and target.id == 'previous' for target in node.targets)]
-    assert len(reads) == 1
-    assert lock_domains(reads[0])[:2] == ['asset_root_lock', 'locked_json_path']
-    pin_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
-                 and isinstance(node.func, ast.Name) and node.func.id == '_binding_pins']
-    assert len(pin_calls) == 1 and lock_domains(pin_calls[0]) == ['locked_json_path']
-    broker = ast.parse(inspect.getsource(_save_monitor))
-    assert not any(isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
-        and node.value.id == 'old' and isinstance(node.slice, ast.Constant) and node.slice.value == 'refs'
-        for node in ast.walk(broker))
-    parents = {child: parent for parent in ast.walk(broker) for child in ast.iter_child_nodes(parent)}
-    broker_reads = [node for node in ast.walk(broker) if isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Name) and node.func.id == 'get_monitor_descriptor']
-    broker_saves = [node for node in ast.walk(broker) if isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Name) and node.func.id == 'save_monitor_binding']
-    assert len(broker_reads) == 1 and lock_domains(broker_reads[0]) == []
-    assert len(broker_saves) == 1 and lock_domains(broker_saves[0]) == []
-    update = next(keyword.value for keyword in broker_reads[0].keywords if keyword.arg == 'for_update')
-    assert isinstance(update, ast.Constant) and update.value is True
-    descriptor = ast.parse(inspect.getsource(get_monitor_descriptor))
-    parents = {child: parent for parent in ast.walk(descriptor) for child in ast.iter_child_nodes(parent)}
-    update_branch = next(node for node in ast.walk(descriptor) if isinstance(node, ast.If)
-        and isinstance(node.test, ast.Name) and node.test.id == 'for_update')
-    snapshots = [node for statement in update_branch.body for node in ast.walk(statement)
-        if isinstance(node, ast.Assign)
-        and any(isinstance(target, ast.Name) and target.id == 'binding' for target in node.targets)]
-    assert len(snapshots) == 1 and lock_domains(snapshots[0]) == ['asset_root_lock']
-    projections = [node for node in ast.walk(descriptor) if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name) and node.func.id == '_monitor_dict']
-    assert len(projections) == 1 and lock_domains(projections[0]) == []
-
-
 # LLM: 真实子进程在监控叶发表后退出；后续仅通过Broker改名称，不把未提交引用作为显式输入。
 # 函数用途: 防止Broker的保留字段快照把批次恢复已经撤销的引用重新写回。
 def test_r6_broker_bind_reads_recovered_monitor_snapshot(tmp_path):

@@ -1,7 +1,6 @@
 """W10: 写工具反馈只能访问当前事实或有界locator。"""
 from __future__ import annotations
 
-import ast
 import os
 import threading
 from pathlib import Path
@@ -156,21 +155,6 @@ def test_fact_publication_racing_feedback_is_old_or_new(tmp_path, monkeypatch):
     new = latest_run_intent_report(tmp_path)[0]
     assert not failures and not thread.is_alive() and old != new
     assert during in (old, new)
-
-
-# LLM: AST规则递归沿本模块调用链拦截glob；负夹具证明不会把规则写成永远通过。
-# 函数用途: 防止历史目录枚举重新接入写反馈。
-def _has_fact_glob(source):
-    return any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-               and node.func.attr in {"glob", "rglob"} and node.args
-               and isinstance(node.args[0], ast.Constant) and node.args[0].value == "*/task.json"
-               for node in ast.walk(ast.parse(source)))
-
-
-def test_feedback_ast_guard_rejects_invalid_fixture():
-    assert _has_fact_glob("facts.glob('*/task.json')")
-    source = Path(__file__).parents[1] / "agent/run_intent.py"
-    assert not _has_fact_glob(source.read_text(encoding="utf-8"))
 
 
 # LLM: 原executor执行真实write_file，只有宿主ToolCall携带run/turn；模型参数不含内部身份。

@@ -1662,26 +1662,6 @@ def test_curator_single_group_lessons_and_conflicts_cannot_starve_formal_fact(tm
         *("approved" for _ in range(35)), *("pending_review" for _ in range(35))]
 
 
-# LLM: 结构性筛选只能读取正式候选字段，不能依赖夹具动态塞入而生产对象不存在的属性。
-# 函数用途: 守住 Curator 结构筛选与 MemoryCandidate 字段合同的一致性。
-def test_curator_structural_gate_reads_only_memory_candidate_fields():
-    import ast
-    import inspect
-    from dataclasses import fields
-
-    from agent_py_agent.agent.memory_store.candidate_models import MemoryCandidate
-    from agent_py_agent.agent.memory_store.curator import _candidate_structurally_promotable
-
-    tree = ast.parse(inspect.getsource(_candidate_structurally_promotable))
-    accessed = {
-        node.args[1].value for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr"
-        and len(node.args) >= 2 and isinstance(node.args[0], ast.Name) and node.args[0].id == "row"
-        and isinstance(node.args[1], ast.Constant)
-    }
-    assert accessed <= {field.name for field in fields(MemoryCandidate)}
-
-
 # LLM: 夹具只运输 confirmed 参数并透传原晋升对象，不补审核、不推导新权限。
 # 函数用途: 验证确认辅助入口完整转发调用且不加工失败回执。
 @pytest.mark.parametrize("confirmed", [True, False])

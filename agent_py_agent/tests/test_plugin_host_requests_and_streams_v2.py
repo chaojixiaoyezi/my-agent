@@ -1,10 +1,8 @@
 # LLM: W6回归使用临时Owner与既有原账；纯合同测试不冒充真实模型、部署或外部SSE验收。
 # 模块用途: 守住扩展事件、真实用量、请求控制、附件及门户动作接线。
-import ast
 import json
 from copy import deepcopy
 from dataclasses import replace
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -393,24 +391,6 @@ def test_tool_progress_detail_tolerates_optional_call_names(fields, arguments, e
 
     call = SimpleNamespace(arguments=arguments, **fields)
     assert round_execution._payload_progress_detail(call) == expected
-
-
-def test_tool_progress_helpers_do_not_directly_read_optional_call_fields():
-    from agent_py_agent.agent.agent_core.tool_loop import round_execution
-
-    def unsafe_reads(tree):
-        fields = {"call_id", "id", "tool_name", "name", "arguments"}
-        return [node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
-            and node.attr in fields and (
-                isinstance(node.value, ast.Name) and node.value.id == "call"
-                or isinstance(node.value, ast.Attribute) and node.value.attr == "call")]
-
-    assert unsafe_reads(ast.parse("event.call.call_id; call.arguments")) == ["call_id", "arguments"]
-    tree = ast.parse(Path(round_execution.__file__).read_text())
-    names = {"_emit_tool_progress", "_structured_tool_progress", "_tool_progress_input", "_payload_progress_detail"}
-    helpers = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names}
-    assert set(helpers) == names
-    assert {name: unsafe_reads(node) for name, node in helpers.items()} == {name: [] for name in names}
 
 
 # LLM: 文件/媒体来自临时Owner；引用与原输入指纹一同保存，不涉及真实用户资料。

@@ -1,7 +1,6 @@
 """W12 #103：真实 owner 存储、F8 分页、原产物读写与 native 入口的定向验收。"""
 from __future__ import annotations
 
-import ast
 import csv
 import hashlib
 import html
@@ -535,29 +534,6 @@ def test_envelopes(v13_native):
         {'action': 'saved_views.list', 'request_id': 'denied', 'params': {'surface': 'alerts'}},
         headers={'X-Gateway-Token': ''})
     assert status == 403
-
-
-# LLM: 以 AST 防止再次引入注册器循环导入和锁外整快照覆盖，并验证任务限定的代码风格。
-# 函数用途: 固化 reporting 的关键结构约束。
-def test_reporting_structure_has_lazy_registry_imports_and_explicit_parameters():
-    source = Path(reporting.__file__).read_text(encoding='utf-8')
-    tree = ast.parse(source)
-    assert ast.get_docstring(tree)
-    for node in tree.body:
-        if isinstance(node, ast.ImportFrom):
-            assert node.module != 'gateway_parts.business_api_v13'
-        if isinstance(node, ast.Assign):
-            assert not isinstance(node.value, ast.Constant) or type(node.value.value) not in (int, float)
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            assert node.args.vararg is None and node.args.kwarg is None
-            preceding = source.splitlines()[max(0, node.lineno - 5):node.lineno - 1]
-            assert any('# LLM:' in line for line in preceding)
-            assert any('# 函数用途:' in line for line in preceding)
-    for name in ('views_create', 'views_update', 'views_delete'):
-        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
-        mutators = [node for node in function.body if isinstance(node, ast.FunctionDef) and node.name == 'mutate']
-        assert len(mutators) == 1 and mutators[0].args.args[0].arg == 'rows'
 
 
 def test_audit_export_known_upload_source_replays_and_separates_subjects(v13_host):

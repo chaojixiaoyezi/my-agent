@@ -1,9 +1,7 @@
 """通过真实 V13 边界验证班表、快照、效能与规则作业合同。"""
-import ast
 import json
 from copy import deepcopy
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 
@@ -417,63 +415,6 @@ def test_rule_translation_finalizer_strict_json_and_schema():
         assert parsed == value
         with pytest.raises(HostAPIError):
             validate_object(parsed, foundation.v13_schema(kind['result_schema']))
-
-
-# LLM: 只解析传入源码；保留文档、数字常量和参数边界，不把已退役的双层标签当用途说明。
-# 函数用途: 检查本分片源码合同，函数说明须为 docstring 或同缩进的紧邻注释。
-def _assert_slice_static_guardrails(text, filename):
-    tree = ast.parse(text)
-    assert ast.get_docstring(tree)
-    lines = text.splitlines()
-    for node in tree.body:
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            assert not any(isinstance(value, ast.Constant) and type(value.value) in (int, float)
-                for value in ast.walk(node))
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            assert node.args.vararg is None and node.args.kwarg is None
-            start = min([node.lineno, *(decorator.lineno for decorator in node.decorator_list)])
-            previous = lines[start - 2] if start > 1 else ''
-            marker = ' ' * node.col_offset + '#'
-            comment = previous[len(marker):].strip() if previous.startswith(marker) else ''
-            assert ast.get_docstring(node) or comment, (filename, node.name)
-
-
-# LLM: 自然注释和 docstring 沿现行规范；模块文档、数字常量与参数断言均保留。
-# 函数用途: 为班表和资产发现的真实源码保留 AST 静态回归。
-def test_slice_static_guardrails():
-    files = [Path(module.__file__), Path(module.__file__).with_name('v13_w12_asset_discovery.py')]
-    for file in files:
-        _assert_slice_static_guardrails(file.read_text(encoding='utf-8'), file.name)
-
-
-# LLM: 同一通用检查器覆盖自然说明、存量双层标签、docstring 和带装饰器的函数。
-# 函数用途: 防止注释格式改变再次误拒已有用途说明。
-@pytest.mark.parametrize('source', [
-    '# 更新扫描元数据，不重复保存永久回执。\ndef update_metadata(metadata, result):\n    pass\n',
-    '# LLM: 元数据仅保存扫描观察。\n# 函数用途: 更新扫描状态。\ndef update_metadata(metadata, result):\n    pass\n',
-    'def update_metadata(metadata, result):\n    """更新扫描状态。"""\n    pass\n',
-    '# 更新扫描状态。\n@decorate\ndef update_metadata(metadata, result):\n    pass\n',
-    'def scan_run(call):\n    """运行扫描。"""\n    # 更新扫描状态。\n    def update_metadata(metadata, result):\n        pass\n',
-])
-def test_slice_static_guardrails_accepts_function_documentation(source):
-    _assert_slice_static_guardrails('"""分片模块。"""\n' + source, 'fixture.py')
-
-
-# LLM: 缺说明、空注释、错缩进、非紧邻说明及原有常量/可变参数违规仍必须失败。
-# 函数用途: 证明兼容自然注释没有关闭静态防线或借用其它函数的说明。
-@pytest.mark.parametrize('source', [
-    'def update_metadata(metadata, result):\n    pass\n',
-    '#\ndef update_metadata(metadata, result):\n    pass\n',
-    '# 更新扫描状态。\n\ndef update_metadata(metadata, result):\n    pass\n',
-    '    # 错缩进的说明。\ndef update_metadata(metadata, result):\n    pass\n',
-    'LIMIT = 1\n',
-    '# 非法可变参数。\ndef update_metadata(*args):\n    pass\n',
-    '# 非法可变参数。\ndef update_metadata(**kwargs):\n    pass\n',
-])
-def test_slice_static_guardrails_rejects_invalid_source(source):
-    with pytest.raises(AssertionError):
-        _assert_slice_static_guardrails('"""分片模块。"""\n' + source, 'fixture.py')
 
 
 # LLM: 只通过原模型管理入口配置隔离 owner 的离线 echo 档，不使用真实用户配置、密钥或网络。

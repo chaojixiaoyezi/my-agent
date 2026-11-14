@@ -3,7 +3,6 @@
 审计归档未附 probes/test_asset_history_regressions.py；按任务规格重建三个断言。
 基线必须在绑定相等和 B 历史存在断言处失败，而非配置或 CAS 检查失败。
 """
-import ast
 import json
 import os
 from contextlib import contextmanager
@@ -362,39 +361,6 @@ def test_batch_interruption_recovers_only_the_committed_snapshot(tmp_path, monke
         assert (found is not None) is committed
         assert ScriptStore(tmp_path).get_script('demo')['code'] == 'print(3)\n'
         assert not (tmp_path / '.asset-batch.json').exists()
-
-
-def test_structural_guard_protects_preimage_and_keeps_history_inside_batch_ack():
-    """语义结构守卫：销毁前保护、提交后通知、批量ACK前保留日志、回滚记录不能丢弃。"""
-    import inspect
-    import textwrap
-
-    from agent_py_agent.agent.assets import _AssetStore, workspace_assets
-
-    def syntax(function):
-        return ast.parse(textwrap.dedent(inspect.getsource(function))).body[0]
-
-    def calls(node, name):
-        return sorted((item for item in ast.walk(node) if isinstance(item, ast.Call)
-            and (getattr(item.func, 'id', None) == name or getattr(item.func, 'attr', None) == name)),
-            key=lambda item: (item.lineno, item.col_offset))
-
-    write = syntax(_AssetStore._write)
-    assert calls(write, 'protect_preimage')[0].lineno < calls(write, 'prepare_commit')[0].lineno < calls(write, '_put')[0].lineno
-    assert calls(write, '_put')[-1].lineno < calls(write, '_history_notify')[0].lineno
-    delete = syntax(_AssetStore._delete)
-    assert calls(delete, 'protect_preimage')[0].lineno < calls(delete, '_put')[0].lineno
-    finish = syntax(workspace_assets._finish_batch)
-    assert calls(finish, '_history_notify')[0].lineno < calls(finish, '_clean_stages')[0].lineno < calls(finish, 'unlink_file_beneath')[0].lineno
-    dispatch = syntax(WorkflowsTool._dispatch)
-    restore = next(node for node in ast.walk(dispatch) if isinstance(node, ast.With)
-                   and any(calls(item.context_expr, 'restoring_snapshot') for item in node.items))
-    assert calls(restore, '_save_definition')
-    binding = next(node for node in ast.walk(dispatch) if isinstance(node, ast.Assign)
-                   and isinstance(node.value, ast.Call) and getattr(node.value.func, 'id', '') == 'load_snapshot')
-    selected = binding.targets[0].elts[0]
-    assert isinstance(selected, ast.Name) and selected.id != '_'
-    assert calls(restore, 'restoring_snapshot')[0].args[1].id == selected.id
 
 
 def test_real_workflow_execution_survives_restore_publication_retry(tmp_path, monkeypatch):

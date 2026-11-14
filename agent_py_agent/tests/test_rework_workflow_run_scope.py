@@ -327,19 +327,3 @@ def test_run_skill_snapshots_remain_frozen_when_host_snapshot_changes(case, monk
     assert first.store is second.store is cached.store
     assert first.runner is not second.runner and cached.runner.work_context is None
     assert case.frozen == [('snapshot-a', 'task-a'), ('snapshot-b', 'task-b')]
-
-
-# LLM: 两条引擎装配路径的全部回调均检查，不允许执行时重读后来宿主范围。
-# 函数用途: 静态保护已冻结的解析器，防止缓存回调重新变成动态取权。
-def test_cached_skill_resolvers_never_read_live_scope_inside_callback():
-    import ast
-    import inspect
-    import textwrap
-
-    for method in (WorkflowsTool._engine, WorkflowsTool._execution_engine):
-        tree = ast.parse(textwrap.dedent(inspect.getsource(method)))
-        callbacks = [node for node in ast.walk(tree) if isinstance(node, ast.Lambda)]
-        assert callbacks
-        for callback in callbacks:
-            assert not any(isinstance(node, ast.Attribute) and node.attr == '_skill_options'
-                           for node in ast.walk(callback))

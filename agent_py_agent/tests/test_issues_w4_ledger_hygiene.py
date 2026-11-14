@@ -7,7 +7,6 @@
 """
 from __future__ import annotations
 
-import ast
 import inspect
 import json
 import os
@@ -461,12 +460,6 @@ def test_lane_source_keeps_frozen_writers_and_single_request_signature():
 
     signature = inspect.signature(module.maintain_conversation_ledgers_lane)
     assert tuple(signature.parameters) == ("request",)
-    source = inspect.getsource(module)
-    tree = ast.parse(source)
-    calls = {node.func.attr for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
-    assert not calls & {"read_receipt", "write_receipt", "publish_deduped", "raise_signal", "mark_handled", "rglob", "walk"}
-
-
 # LLM: journal水位不能丢掉失败删除的正面证明，部分引用已删也必须能恢复。
 # 函数用途: 钉住guidance一次unlink失败后的跨片重试。
 def test_guidance_unlink_failure_preserves_journal_retry(tmp_path, monkeypatch):

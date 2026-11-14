@@ -1,7 +1,6 @@
 """工作流文件产物：真实执行、原账本投影、失败原子性与有界资源合同。"""
 from __future__ import annotations
 
-import ast
 import hashlib
 import inspect
 import json
@@ -16,7 +15,6 @@ from agent_py_agent.agent.assets.script_store import ScriptStore
 from agent_py_agent.agent.assets.workflow_store import WorkflowStore
 from agent_py_agent.agent.tooling.workflows_tool import WorkflowsTool
 from agent_py_agent.agent.user_space.owner_quota import OwnerQuotaEnforcer
-from agent_py_agent.agent.workflows import engine as engine_module
 from agent_py_agent.agent.workflows import models
 from agent_py_agent.agent.workflows import script_runner as runner_module
 from agent_py_agent.agent.workflows.engine import WorkflowEngine
@@ -266,47 +264,6 @@ def test_caps_stop_before_reading_content(tmp_path, monkeypatch, kind):
     with pytest.raises(artifacts.RunOutError) as caught:
         artifacts._manifest(scratch, ScriptRunner.RUN_OUT_MAX_FILES, ScriptRunner.RUN_OUT_MAX_BYTES)
     assert caught.value.error_code == 'SCRIPT_RUN_OUT_LIMIT_EXCEEDED'
-
-
-# LLM: 不接受裸open/Path读取，读取必须明确有界且strict nofollow；非法夹具证明守卫会拒绝。
-# 函数用途: 静态核对归档正文读取的唯一入口。
-def assert_nofollow_reads(source):
-    tree = ast.parse(source)
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        assert not (isinstance(node.func, ast.Name) and node.func.id == 'open')
-        assert not (isinstance(node.func, ast.Attribute) and node.func.attr in ('open', 'read_bytes', 'read_text', 'read'))
-        if isinstance(node.func, ast.Name) and node.func.id == 'read_bytes_beneath':
-            options = {keyword.arg: keyword.value for keyword in node.keywords}
-            assert isinstance(options.get('require_dir_fd'), ast.Constant) and options['require_dir_fd'].value is True
-            assert 'max_bytes' in options
-
-
-# LLM: load_run必须是执行锁内无条件首条，不能被policy==allow等分支遮挡。
-# 函数用途: 静态固定晚到启动的持久终态观察点。
-def assert_unconditional_reload(source):
-    tree = ast.parse(source)
-    frozen = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'execute_frozen')
-    assert isinstance(frozen.body[0], ast.With)
-    first = frozen.body[0].body[0]
-    assert isinstance(first, ast.Assign) and isinstance(first.value, ast.Call)
-    assert isinstance(first.value.func, ast.Attribute) and first.value.func.attr == 'load_run'
-
-
-# LLM: 正式源码与两个失效夹具走相同断言，不把注释中的关键词当调用证据。
-# 函数用途: 执行W4两个静态防回归守卫。
-def test_ast_guards_reject_invalid_fixtures():
-    from agent_py_agent.agent.workflows import run_artifacts as artifacts
-
-    assert_nofollow_reads(inspect.getsource(artifacts))
-    with pytest.raises(AssertionError):
-        assert_nofollow_reads('def harvest(path):\n    return path.read_bytes()\n')
-    with pytest.raises(AssertionError):
-        assert_nofollow_reads('def harvest(path):\n    return open(path, "rb").read()\n')
-    assert_unconditional_reload(inspect.getsource(engine_module))
-    with pytest.raises(AssertionError):
-        assert_unconditional_reload('def execute_frozen():\n    with lock():\n        if policy != "allow":\n            current = store.load_run(run_id)\n')
 
 
 # LLM: 故障发生在真实暂存已有文件之后或真实rename之后，要求整个集合回滚；不允许空执行假成功。

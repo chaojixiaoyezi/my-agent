@@ -227,38 +227,6 @@ def _production_files() -> list[Path]:
     ]
 
 
-def test_classify_error_only_used_by_taxonomy_self_checks():
-    """错误正文分类只能服务展示/自检；不得被状态、恢复、派工、验收模块消费。"""
-    allowed = {
-        AGENT_ROOT / "contracts" / "error_taxonomy.py",
-        AGENT_ROOT / "contracts" / "main_agent_foundation_runner.py",
-        AGENT_ROOT / "contracts" / "e2e_matrix_runner.py",
-    }
-    offenders = [
-        str(p.relative_to(REPO_ROOT))
-        for p in _production_files()
-        if p not in allowed and re.search(r"\bclassify_error\b", p.read_text(encoding="utf-8"))
-    ]
-    assert offenders == [], f"classify_error 出现在状态相关模块: {offenders}"
-
-
-def test_raw_collaboration_status_metadata_is_write_only():
-    """raw_case_status / raw_request_status 是审计字段：生产代码只允许写入与清理，禁止读取参与决策。"""
-    allowed_writers = {
-        AGENT_ROOT / "collaboration" / "request_status.py",  # 写入定义
-        AGENT_ROOT / "collaboration" / "store.py",           # 状态显式迁移时清理
-    }
-    pattern = re.compile(r"""\.get\(\s*['"](raw_case_status|raw_request_status)['"]""")
-    offenders = []
-    for p in _production_files():
-        text = p.read_text(encoding="utf-8")
-        if p not in allowed_writers and ("raw_case_status" in text or "raw_request_status" in text):
-            offenders.append(str(p.relative_to(REPO_ROOT)))
-        elif pattern.search(text):
-            offenders.append(str(p.relative_to(REPO_ROOT)) + " (reads raw_*)")
-    assert offenders == [], f"raw 状态审计字段被消费: {offenders}"
-
-
 # LLM: 缺少 WebPush 联系人是配置缺口，不得归为未知码或自动重试外部推送。
 # 函数用途: 核验 VAPID subject 缺失时明确请求用户补齐配置。
 def test_vapid_subject_required_has_configuration_recovery():

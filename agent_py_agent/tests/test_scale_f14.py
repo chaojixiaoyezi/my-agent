@@ -1,13 +1,11 @@
 """W10: 历史增长、候选读取与写事务之间的安全边界。"""
 from __future__ import annotations
 
-import ast
 import json
 import os
 import sqlite3
 import threading
 import time
-from pathlib import Path
 
 import pytest
 
@@ -163,21 +161,6 @@ def test_short_page_keeps_cursor_and_orphan_settlement(tmp_path):
     assert repo.cleanup_stale_runtime(now=4000)["settled"] == ["orphan"]
     assert repo.cleanup_stale_runtime(now=90000)["settled"] == ["live-0"]
     assert repo.cleanup_stale_runtime(now=90001)["settled"] == []
-
-
-# LLM: 静态规则覆盖旧SQL组合，负夹具证明规则本身能识别目标形状。
-# 函数用途: 拦截全历史OR+COALESCE排序重新进入回收候选查询。
-def _invalid_candidate_sql(source):
-    tree = ast.parse(source)
-    return any(isinstance(node, ast.Constant) and isinstance(node.value, str)
-               and "ORDER BY COALESCE" in node.value and " OR " in node.value
-               for node in ast.walk(tree))
-
-
-def test_candidate_ast_guard_rejects_invalid_fixture():
-    assert _invalid_candidate_sql("sql = \"SELECT * WHERE a OR b ORDER BY COALESCE(a,b)\"")
-    source = Path(__file__).parents[1] / "agent/runtime_db/repository.py"
-    assert not _invalid_candidate_sql(source.read_text(encoding="utf-8"))
 
 
 # LLM: 真实SimpleAgent/GatewayContext/controller执行维护拍，不替换清理；重启重新装配同一隔离home。

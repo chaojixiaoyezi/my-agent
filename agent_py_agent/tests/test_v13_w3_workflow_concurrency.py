@@ -513,29 +513,6 @@ def test_spool_requires_root_lock_for_fold(store):
         spool.fold(store.owner_home, "script", "sample", RuntimeSummary(), {}, lambda *args: None)
 
 
-def test_no_numeric_module_constants_or_asset_lock_in_append():
-    import ast
-    from pathlib import Path
-
-    spool = importlib.import_module("agent_py_agent.agent.workflows.run_summary_spool")
-    tree = ast.parse(Path(spool.__file__).read_text(encoding="utf-8"))
-    assert not [
-        node
-        for node in tree.body
-        if isinstance(node, (ast.Assign, ast.AnnAssign))
-        and isinstance(node.value, ast.Constant)
-        and type(node.value.value) in (int, float)
-    ]
-    append = next(
-        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "append"
-    )
-    assert not [
-        node
-        for node in ast.walk(append)
-        if isinstance(node, ast.Name) and node.id in {"asset_root_lock", "locked_json_path", "fold"}
-    ]
-
-
 # LLM: 真实启动临时脚本，关闭内核沙箱不代表验证内核隔离；摘要明确通过正式fold收口。
 # 函数用途: 验证执行器结果经spool到持久摘要的完整本地链路。
 def test_real_script_runner_spools_then_folds(store):

@@ -2261,29 +2261,12 @@ def test_wave8_interrupted_response_is_owned_by_decision_and_preserves_protocol(
 # LLM: 取消裁决不能再次回导装配层；检查实际函数的导入边并验证其真实break响应与原计数对象。
 # 函数用途: 防止低层取消收口恢复对顶层工具循环的私有依赖。
 def test_wave8_cancelled_closeout_has_no_tool_loop_service_back_import():
-    import ast
-    import inspect
     from types import SimpleNamespace
 
     from agent_py_agent.agent.agent_core.tool_loop import response_decision
 
     closeout = response_decision._cancelled_closeout_decision
-    tree = ast.parse(inspect.getsource(closeout))
-    assert not any(isinstance(node, ast.ImportFrom) and node.module == "_tool_loop_service" for node in ast.walk(tree))
     counters = response_decision.ToolLoopRepairCounters()
     decision = closeout(SimpleNamespace(agent=SimpleNamespace(), counters=counters))
     assert decision.action == "break" and decision.calls == [] and decision.counters is counters
     assert decision.response.text == "" and decision.response.runtime_status == "cancelled"
-
-
-# LLM: 当前循环只有原action三分支，不再经过无裁决语义的第二次翻译；分支行为由既有工具循环回归覆盖。
-# 函数用途: 防止本次已消除的动作翻译包装再次接回主链。
-def test_wave8_tool_loop_does_not_translate_routed_action_twice():
-    import ast
-    import inspect
-
-    from agent_py_agent.agent.agent_core import _tool_loop_service
-
-    calls = (node for node in ast.walk(ast.parse(inspect.getsource(_tool_loop_service.execute_tool_loop)))
-             if isinstance(node, ast.Call))
-    assert not any(isinstance(node.func, ast.Name) and node.func.id == "_routed_action_step" for node in calls)

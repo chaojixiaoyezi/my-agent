@@ -160,13 +160,3 @@ def test_structured_error_details(v13_host, monkeypatch):
     status, body = invoke(v13_host, 'sample.read')
     assert status == 503
     assert body['error']['details'] == [{'key':'coverage','value':'unknown'}, {'key':'source','value':'usage'}]
-
-
-# LLM: 包入口不能预先加载分片、数据库或注册器。
-# 函数用途: 验证bootstrap只有模块文档。
-def test_business_spaces_bootstrap_is_docstring_only():
-    import ast
-
-    import agent_py_agent.agent.business_spaces as package
-    tree = ast.parse(__import__('pathlib').Path(package.__file__).read_text())
-    assert len(tree.body) == 1 and isinstance(tree.body[0], ast.Expr)

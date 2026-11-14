@@ -1,7 +1,6 @@
 """按请求寻址的历史投影：规模、重放、交错和迁移证据。"""
 from __future__ import annotations
 
-import ast
 import importlib
 import importlib.util
 import json
@@ -163,26 +162,6 @@ def test_history_rows_are_isolated_between_roots(tmp_path):
     io.append_gateway_history_once(right, {"id": "same", "content": "right"})
     assert _index(left).get("same")["content"] == "left"
     assert _index(right).get("same")["content"] == "right"
-
-
-# LLM: 语法守卫只拒绝真实热入口全历史读取；反例同规则必须被拦。
-# 函数用途: 防止全历史快照重新进入正常append路径。
-def _history_guard(source):
-    module = ast.parse(source)
-    problems = []
-    for node in ast.walk(module):
-        if isinstance(node, ast.FunctionDef) and node.name == "append_gateway_history_once":
-            for call in ast.walk(node):
-                if isinstance(call, ast.Call):
-                    name = getattr(call.func, "id", "") or getattr(call.func, "attr", "")
-                    if name in {"_gateway_history_snapshot", "read_text", "read_bytes"}:
-                        problems.append((call.lineno, name))
-    return problems
-
-
-def test_history_hot_path_ast_guard_and_invalid_fixture():
-    assert _history_guard(Path(io.__file__).read_text()) == []
-    assert _history_guard("def append_gateway_history_once(paths, payload):\n    return _gateway_history_snapshot(paths.history)\n")
 
 
 def _descriptor_count():

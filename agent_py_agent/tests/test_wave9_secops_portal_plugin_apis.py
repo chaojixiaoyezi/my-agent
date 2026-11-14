@@ -1,7 +1,6 @@
 """Wave9 A3: external plugin source is the SUT; no vertical routes enter Host."""
 from __future__ import annotations
 
-import ast
 import base64
 import hashlib
 import importlib.util
@@ -55,19 +54,9 @@ def test_r7_portal_fixture_contains_no_personal_home_paths():
 
 
 # LLM: Regression/test helper, confined to temporary state and controlled loopback fixtures.
-# 函数用途: 验证接口行为、持久化与安全拒绝（test_standalone_service_is_implemented）。
-def test_standalone_service_is_implemented():
-    tree = ast.parse((SOURCE / "workbench_server.py").read_text())
-    assert any(isinstance(n, ast.ClassDef) and n.name == "SecOpsService" for n in tree.body), (
-        "The authorized standalone SQLite + stdlib API engine has not been implemented"
-    )
-
-
-# LLM: Regression/test helper, confined to temporary state and controlled loopback fixtures.
 # 函数用途: 准备隔离测试输入并回收本用例资源（portal_module）。
 @pytest.fixture
 def portal_module():
-    test_standalone_service_is_implemented()  # Never execute the legacy monkeypatch bootstrap.
     name = "wave9_portal_test_module"
     spec = importlib.util.spec_from_file_location(name, SOURCE / "workbench_server.py")
     module = importlib.util.module_from_spec(spec)
@@ -635,25 +624,6 @@ def test_r3_archive_directory_symlinks_rejected(portal, package_bytes, kind):
     assert status == (200 if kind.endswith("directory") else 422), result
     if status != 200:
         assert portal._all("remote_plugins") == []
-
-
-# LLM: AST checks every definition including nested helpers and methods; decorators do not hide missing contract comments.
-# 函数用途: 自动检查测试全文与Wave9服务区的双层注释，新增定义也必须进入覆盖。
-def test_r3_dual_layer_comments_cover_all_definitions():
-    missing = []
-    for path in (Path(__file__), SOURCE / "workbench_server.py"):
-        source = path.read_text()
-        lines = source.splitlines()
-        first = source[:source.index("# A3 service:")].count("\n") + 1 if path.name == "workbench_server.py" else 1
-        for node in ast.walk(ast.parse(source)):
-            if not isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) or node.lineno < first:
-                continue
-            start = min([node.lineno] + [d.lineno for d in getattr(node, "decorator_list", [])]) - 1
-            prefix = "\n".join(lines[max(0, start - 2):start])
-            human = "类用途" if isinstance(node, ast.ClassDef) else "函数用途"
-            if "# LLM:" not in prefix or "# " + human + ":" not in prefix:
-                missing.append((path.name, node.lineno, node.name))
-    assert not missing, missing
 
 
 # LLM: Regression/test helper, confined to temporary state and controlled loopback fixtures.

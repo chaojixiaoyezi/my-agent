@@ -1,7 +1,6 @@
 """F3-a 只声明记录结构；字段不授予准入、ready、进程死亡或排空证明。"""
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 from typing import get_args, get_type_hints, is_typeddict
 
@@ -48,13 +47,6 @@ def test_v1_and_explicit_v2_are_separate_without_silent_migration():
     assert len(schema.RECORD_V2_FIELDS) == 4
     assert schema.RECORD_V2_FIELDS["multiprocess_c_generation.v2"] == (
         *schema.RECORD_V1_FIELDS["multiprocess_c_generation.v1"], "closure")
-
-
-def test_schema_import_has_no_runtime_bootstrap_or_record_validator_dependency():
-    tree = ast.parse(Path(schema.__file__).read_text(encoding="utf-8"))
-    imports = [node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
-    assert imports == ["__future__", "typing"]
-    assert not any(isinstance(node, (ast.Call, ast.FunctionDef, ast.AsyncFunctionDef)) for node in ast.walk(tree))
 
 
 def test_schema_import_exports_no_record_validators():

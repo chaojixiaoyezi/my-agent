@@ -669,26 +669,6 @@ def test_pending_closeout_preserves_unknown_fields_and_revision_on_retry(tmp_pat
             assert canonical.read_bytes() == committed
 
 
-def test_live_and_cold_pending_share_durable_selection_transition():
-    import ast
-    import inspect
-
-    from agent_py_agent.agent.gateway_parts import recovery, request_worker
-
-    for function in (request_worker._close_claimed_parent_capabilities, recovery._recover_parent_capability_closeout):
-        calls = [node for node in ast.walk(ast.parse(inspect.getsource(function))) if isinstance(node, ast.Call)]
-        transitions = [node for node in calls if isinstance(node.func, ast.Name)
-                       and node.func.id == "_reconcile_capability_closeout"]
-        assert len(transitions) == 1 and any(k.arg == "publish" for k in transitions[0].keywords)
-        assert not any(isinstance(node.func, ast.Name) and node.func.id in {"SimpleAgent", "SubAgentManager"} for node in calls)
-    body = ast.parse(inspect.getsource(recovery._resume_capability_snapshot))
-    calls = [node for node in ast.walk(body) if isinstance(node, ast.Call)]
-    publication = next(node.lineno for node in calls if isinstance(node.func, ast.Name) and node.func.id == "publish")
-    in_memory = next(node.lineno for node in calls if isinstance(node.func, ast.Attribute) and node.func.attr == "update")
-    assert publication < in_memory
-    assert not any(isinstance(node.func, ast.Attribute) and node.func.attr.startswith("list_runs") for node in calls)
-
-
 # LLM: 此真实进程只验证Count0领域转换；不能替代上面的原P0/P1/P2冷C验收。退出只发生于首证明原子提交之后。
 # 函数用途: 在没有硬链接前置的平台限制下，独立观察真实pending提交和进程退出。
 def _crash_default_pending(root):

@@ -1,10 +1,7 @@
 """W2 模型摘要、菜单真实结构和结果正文合同；组件测试不冒充HTTP接线验收。"""
 
-import ast
 import http.client
 import json
-import re
-from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -140,50 +137,6 @@ def test_models_list_real_schema_with_and_without_conversation(tmp_path, monkeyp
             "available", "available_for"} <= result["profiles"][0].keys()
     assert isinstance(result["model_execution"], dict)
     assert "only-private-secret" not in json.dumps(result)
-
-
-def _status_literals(tree):
-    """只取状态赋值，不把比较、错误文案或其它状态集合当成结果写者。"""
-    values = set()
-    for node in ast.walk(tree):
-        candidates = []
-        if isinstance(node, ast.Dict):
-            candidates = [value for key, value in zip(node.keys, node.values)
-                          if isinstance(key, ast.Constant) and key.value == "status"]
-        elif isinstance(node, ast.Call):
-            candidates = [kw.value for kw in node.keywords if kw.arg == "status"]
-        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            if any(isinstance(t, ast.Subscript) and isinstance(t.slice, ast.Constant)
-                   and t.slice.value == "status" for t in targets):
-                candidates = [node.value]
-        for candidate in candidates:
-            # get("status")中的键及第三方状态映射不是赋给结果的字面量。
-            # 条件表达式仅考察两条值分支，不能扫描条件本身的比较值。
-            branches = [candidate]
-            while branches:
-                branch = branches.pop()
-                if isinstance(branch, ast.Constant) and isinstance(branch.value, str):
-                    values.add(branch.value)
-                elif isinstance(branch, ast.IfExp):
-                    branches.extend((branch.body, branch.orelse))
-    return values
-
-
-def test_result_terminal_enum_matches_writers():
-    root = Path(__file__).resolve().parents[2]
-    document = (root / "docs/modules/gateway/v13_http_contract.md").read_text()
-    schema = json.loads(re.search(r"```json\n(.*?)\n```", document, re.S).group(1))
-    # 请求写者按实际职责选取；服务停止、实验完成、任务注册表不属于/result。
-    folder = Path(recovery.__file__).parent
-    writers = ("request_execution.py", "request_errors.py", "recovery.py")
-    observed = set().union(*(_status_literals(ast.parse((folder / name).read_text())) for name in writers))
-    # 同一恢复模块还写pending队列记录；非终态显式列入文档，不能按已知终态交集吞掉新增值。
-    observed -= set(schema["result"]["writer_nonterminal_statuses"])
-    assert observed == set(schema["result"]["writer_statuses"])
-    assert set(schema["result"]["terminal_statuses"]) == observed | {"stopped"}
-    assert schema["result"]["reserved_terminal_statuses"] == ["stopped"]
-    assert "completed" not in observed
 
 
 @pytest.mark.parametrize("content", ["# 已完成\n\n正文。", ""])

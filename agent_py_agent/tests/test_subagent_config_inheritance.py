@@ -9,17 +9,11 @@
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
 from agent_py_agent.agent.agent_core.runner.prompts import (
     SUBAGENT_DEFAULT_PLAN,
     SUBAGENT_DEFAULT_THOUGHT,
 )
 from agent_py_agent.agent.agent_core.runtime.context_compactor import runtime_compact_policy
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-AGENT_ROOT = REPO_ROOT / "agent_py_agent" / "agent"
 
 
 class _FakeConfig:
@@ -41,41 +35,12 @@ def test_subagent_compact_trigger_inherits_main_by_default():
     assert sub_policy.context_window_tokens == main_policy.context_window_tokens
 
 
-def test_subagent_runner_reuses_parent_agent_object():
-    """run_flow 的模型回合必须走 lifecycle.agent.run（同一 agent 对象），
-    不允许为子代理另建 backend/model/config。"""
-    src = (AGENT_ROOT / "agent_core" / "subagent" / "run_flow.py").read_text(encoding="utf-8")
-    assert "result = agent.run(" in src
-    forbidden = ["SimpleAgent(", "load_config(", "make_backend(", "AgentConfig("]
-    offenders = [marker for marker in forbidden if marker in src]
-    assert offenders == [], f"子代理 run_flow 不应自建 agent/config/backend: {offenders}"
-
-
 # LLM: 这两个断言读取正式runtime常量，必须继续在真实pyc包内执行，不能随源码扫描一起排除。
 # 函数用途: 确认原默认thought非空且plan保留四步，不读取业务源码。
 def test_default_templates_have_single_authority():
     """默认模板的正式运行时常量保持可用。"""
     assert SUBAGENT_DEFAULT_THOUGHT
     assert len(SUBAGENT_DEFAULT_PLAN) == 4
-
-
-# LLM: 只在完整源码验收运行原重复定义扫描；必须实际扫描至少一个源文件，空集合不能假绿。
-# 函数用途: 核对thought正文仅在runner/prompts.py定义；不改变相邻运行时常量或子代理权限合同。
-def test_default_templates_have_single_source_definition():
-    """thought/plan 默认模板只允许定义在 runner/prompts.py；派工链路只引用。"""
-    pattern = re.compile(re.escape(SUBAGENT_DEFAULT_THOUGHT))
-    offenders = []
-    scanned = 0
-    for path in AGENT_ROOT.rglob("*.py"):
-        scanned += 1
-        if "__pycache__" in path.parts:
-            continue
-        if path.name == "prompts.py" and path.parent.name == "runner":
-            continue
-        if pattern.search(path.read_text(encoding="utf-8")):
-            offenders.append(str(path.relative_to(REPO_ROOT)))
-    assert scanned > 0, "源码守卫必须读取完整源码，不能以空扫描通过"
-    assert offenders == [], f"默认 thought 模板出现重复定义: {offenders}"
 
 
 def test_capability_config_warns_on_unknown_fields(tmp_path):

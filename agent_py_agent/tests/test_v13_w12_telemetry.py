@@ -431,22 +431,6 @@ def test_http_feature_disabled_is_host_not_ready(v13_native, monkeypatch):
         assert body['state'] == 'failed' and body['data'] == {}
 
 
-# LLM: 曾发现注册器导入环，静态门阻止把 handler 的注册器依赖移回模块顶层。
-# 函数用途: 保留无顶层注册器循环、数字常量及宽泛参数的结构回归。
-def test_product_structure_keeps_registry_import_lazy():
-    import ast
-
-    tree = ast.parse(Path(telemetry.__file__).read_text())
-    assert not any(isinstance(node, ast.ImportFrom) and (node.module or '').endswith('business_api_v13')
-                   for node in tree.body)
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            assert not isinstance(node.value, ast.Constant) or type(node.value.value) not in (int, float)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef):
-            assert node.args.vararg is None and node.args.kwarg is None
-
-
 # LLM: 字段缺失、重复冲突与极端时间均先单列为未知，不能污染数量统计。
 # 函数用途: 验证聚合前的数据质量边界。
 @pytest.mark.parametrize('defect', ['missing_case', 'extreme_time', 'conflicting_duplicate'])

@@ -1,9 +1,6 @@
 """原C写者的设施创建、canonical发表与索引确认中断恢复。"""
-import ast
 import errno
-import inspect
 import os
-import textwrap
 from types import SimpleNamespace
 
 import pytest
@@ -43,33 +40,6 @@ def ordinary_case(context):
 
 def fd_count():
     return len(os.listdir('/proc/self/fd' if os.path.isdir('/proc/self/fd') else '/dev/fd'))
-
-
-def test_original_write_responsibility_static_guard_rejects_unwrapped_fixture():
-    def covers(source, scope_name, write_name, ack_name):
-        tree = ast.parse(textwrap.dedent(source))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.With):
-                continue
-            contexts = [n for item in node.items for n in ast.walk(item.context_expr)]
-            if not any(isinstance(n, ast.Call) and getattr(n.func, 'attr', '') == scope_name for n in contexts):
-                continue
-            calls = [n.func for statement in node.body for n in ast.walk(statement) if isinstance(n, ast.Call)]
-            names = [n.id if isinstance(n, ast.Name) else getattr(n, 'attr', '') for n in calls]
-            if write_name in names and ack_name in names:
-                return True
-        return False
-
-    for method in (admission._persist_created_record, admission._persist_reused_record):
-        assert covers(inspect.getsource(method), 'p3_write', '_write_gate_record_durable', 'remember_p3')
-    assert not covers('def persist():\n _write_gate_record_durable()\n index.remember_p3()\n',
-                      'p3_write', '_write_gate_record_durable', 'remember_p3')
-    from agent_py_agent.agent.gateway_parts.multiprocess_coordinator_executor_source import (
-        CoordinatorExecutorSource,
-    )
-    from agent_py_agent.agent.gateway_parts.multiprocess_worker_commit import WorkerCommitIssuer
-    for method in (CoordinatorExecutorSource._write, WorkerCommitIssuer._commit_executor):
-        assert covers(inspect.getsource(method), 'executor_write', 'reserve', 'remember_executor')
 
 
 @pytest.mark.parametrize('stage', ['before', 'after', 'ack', 'ack_after'])

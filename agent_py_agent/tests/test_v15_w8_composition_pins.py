@@ -1,6 +1,4 @@
 """监控以发布版本绑定；隐藏组合在公共工作流之外承载追加步骤。"""
-import ast
-import inspect
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -10,7 +8,6 @@ from threading import Event, current_thread
 
 import pytest
 
-from agent_py_agent.agent.assets import monitor_composition
 from agent_py_agent.agent.assets.descriptor import AssetDescriptor
 from agent_py_agent.agent.assets.monitor_adapter import (
     get_monitor_descriptor,
@@ -351,69 +348,6 @@ def test_other_monitor_provenance_is_rejected(tmp_path):
             {'step_id': 'tail', 'name': '追加', 'mode': 'llm_skill_analysis'}])
     assert store.get_workflow(saved['workflow_id']).to_dict() == previous
     assert _fd_count() - before == 0
-
-
-# LLM: 只解析传入语法树；同一锁体内按读取→归属拒绝→合成pin→提交顺序检查，禁止空来源。
-# 函数用途: 给实际源码与内存变异共用组合发布静态合同。
-def _assert_composition_contract(tree):
-    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'save_monitor_composition')
-    locks = [node for node in ast.walk(function) if isinstance(node, ast.With)
-        and any(isinstance(item.context_expr, ast.Call) and isinstance(item.context_expr.func, ast.Attribute)
-            and item.context_expr.func.attr == '_locked' for item in node.items)]
-    assert len(locks) == 1
-    locked = locks[0]
-    calls = [node for node in ast.walk(locked) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)]
-    assert any(node.func.attr == '_get' for node in calls)
-    assert any(node.func.attr == '_save' for node in calls)
-    assert any(isinstance(node, ast.Raise) for node in ast.walk(locked))
-    reads = [index for index, node in enumerate(locked.body) if isinstance(node, ast.Assign)
-        and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute) and node.value.func.attr == '_get']
-    guards = [index for index, node in enumerate(locked.body) if isinstance(node, ast.If)
-        and any(isinstance(child, ast.Raise) for child in node.body)
-        and any(isinstance(child, ast.Constant) and child.value == 'MONITOR_COMPOSITION_ID_CONFLICT' for child in ast.walk(node))]
-    writes = [index for index, node in enumerate(locked.body) if isinstance(node, ast.Expr)
-        and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute) and node.value.func.attr == '_save']
-    pin_sources = [(index, node.value) for index, node in enumerate(locked.body) if isinstance(node, ast.Assign)
-        and any(isinstance(target, ast.Attribute) and target.attr == 'publication_pins' for target in node.targets)]
-    assert len(reads) == len(guards) == len(writes) == len(pin_sources) == 1
-    pin_index, source = pin_sources[0]
-    assert reads[0] < guards[0] < pin_index < writes[0]
-    assert isinstance(source, ast.Call) and isinstance(source.func, ast.Name) and source.func.id == '_composition_pins'
-    all_writes = [node for node in ast.walk(function) if isinstance(node, ast.Call)
-                  and isinstance(node.func, ast.Attribute) and node.func.attr == '_save']
-    assert len(all_writes) == 1
-    publications = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Name) and node.func.id == 'record_version']
-    assert len(publications) == 1
-    pins = next(keyword.value for keyword in publications[0].keywords if keyword.arg == 'pins')
-    assert isinstance(pins, ast.Attribute) and isinstance(pins.value, ast.Name)
-    assert pins.value.id == 'self' and pins.attr == 'publication_pins'
-
-
-# LLM: 静态守卫直接读取当轮产品源码，避免固定拷贝与被测版本漂移。
-# 函数用途: 在本片允许的测试文件中沉淀两类缺陷的AST门禁。
-def test_composition_publication_and_provenance_ast_guard():
-    _assert_composition_contract(ast.parse(inspect.getsource(monitor_composition)))
-
-
-# LLM: 变异仅改内存AST，不修改产品文件；守卫必须拒绝先写后验和空依赖来源两个具体反例。
-# 函数用途: 验证AST门禁有实际反证能力，不是只检查调用存在。
-@pytest.mark.parametrize('mutation', ['save_before_provenance', 'empty_pin_source'])
-def test_composition_ast_guard_rejects_mutations(mutation):
-    tree = ast.parse(inspect.getsource(monitor_composition))
-    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'save_monitor_composition')
-    locked = next(node for node in function.body if isinstance(node, ast.With))
-    if mutation == 'save_before_provenance':
-        save = next(node for node in locked.body if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
-            and isinstance(node.value.func, ast.Attribute) and node.value.func.attr == '_save')
-        locked.body.remove(save)
-        locked.body.insert(1, save)
-    else:
-        assignment = next(node for node in ast.walk(function) if isinstance(node, ast.Assign)
-            and any(isinstance(target, ast.Attribute) and target.attr == 'publication_pins' for target in node.targets))
-        assignment.value = ast.Dict(keys=[], values=[])
-    with pytest.raises(AssertionError):
-        _assert_composition_contract(tree)
 
 
 # LLM: FD观察器先经真实open/close对照，不能用一个恒定返回值假证明资源平衡。

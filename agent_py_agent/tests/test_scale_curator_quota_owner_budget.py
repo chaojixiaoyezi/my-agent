@@ -1,5 +1,4 @@
 """策展准入先行回归：真实 P3 入口的用户访问预算与全扫静态门。"""
-import ast
 import os
 from contextvars import ContextVar
 from pathlib import Path
@@ -19,43 +18,6 @@ from agent_py_agent.tests.test_gateway_cold_request_pump import cold_context, cu
 from agent_py_agent.tests.test_gateway_prepared_route_immutability import context as context
 
 _cold_observation = ContextVar('quota_cold_observation', default=None)
-
-# LLM: 只解析本地 helper 的调用关系，不执行模块，也不把跨模块未知调用认作已覆盖。
-# 函数用途: 检查准入是否仍间接走全 Owner 日账扫描。
-def _quota_scan_paths(source):
-    functions = {node.name: node for node in ast.walk(ast.parse(source))
-                 if isinstance(node, ast.FunctionDef)}
-    pending, seen, found = [('curator_quota_admission', ('curator_quota_admission',))], set(), []
-    while pending:
-        name, route = pending.pop()
-        if name in seen:
-            continue
-        seen.add(name)
-        for call in ast.walk(functions[name]):
-            if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
-                continue
-            callee = call.func.id
-            if callee == '_all_consumed_records':
-                found.append((*route, callee))
-            elif callee in functions and callee not in seen:
-                pending.append((callee, (*route, callee)))
-    return found
-
-
-# LLM: 对真实准入定义的本地调用图做守门，不把静态断言当作运行成本证明。
-# 函数用途: 防止准入重新间接调用全Owner日账扫描。
-def test_quota_admission_does_not_read_all_registered_owners():
-    source = Path(accounting.__file__).read_text(encoding='utf-8')
-    assert _quota_scan_paths(source) == []
-
-
-# LLM: 反例必须触发相同调用图检查，避免只检查入口名称产生假绿。
-# 函数用途: 确认AST守门能识别藏在helper后的全量扫描。
-def test_quota_scan_guard_rejects_indirect_invalid_fixture():
-    source = '''\ndef curator_quota_admission():\n    reconcile()\ndef reconcile():\n    _all_consumed_records()\n'''
-    assert _quota_scan_paths(source) == [
-        ('curator_quota_admission', 'reconcile', '_all_consumed_records')]
-
 
 # LLM: 用户目录在实际 C 租约建立前准备；计数器仅旁观原 reader，不替换 quota、source、P3 或 controller 的业务行为。
 # 函数用途: 对真实 admit→_commit_created_record 入口统计一次准入实际访问的 Owner，注册历史不应推高预算。

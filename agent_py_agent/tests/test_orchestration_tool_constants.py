@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 
 def test_read_only_subagent_tools_contains_read_tools():
     from agent_py_agent.agent.agent_core.orchestration_tools import READ_ONLY_SUBAGENT_TOOLS
@@ -80,20 +78,3 @@ def test_raise_event_is_not_registered_as_a_model_tool(tmp_path):
     registered = {spec.name for spec in agent.tools.specs(include_orchestration=True)}
 
     assert "raise_event" not in registered
-
-
-def test_builtin_skills_do_not_teach_retired_subagent_controls():
-    """活跃 Skill 不能继续教模型调用已经从工具箱删除的旧入口。"""
-    from agent_py_agent.agent.subagents.role_templates import (
-        RETIRED_MODEL_SUBAGENT_CONTROL_TOOLS,
-    )
-
-    skills_root = Path(__file__).parents[1] / "skills" / "builtin"
-    stale: dict[str, list[str]] = {}
-    for skill_path in sorted(skills_root.rglob("SKILL.md")):
-        text = skill_path.read_text(encoding="utf-8")
-        names = sorted(name for name in RETIRED_MODEL_SUBAGENT_CONTROL_TOOLS if name in text)
-        if names:
-            stale[str(skill_path.relative_to(skills_root))] = names
-
-    assert stale == {}

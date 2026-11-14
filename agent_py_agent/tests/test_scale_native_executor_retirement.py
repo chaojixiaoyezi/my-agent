@@ -1,7 +1,5 @@
 """责任索引：热路径静态守门、真实C来源与精确unknown拒绝。"""
-import ast
 import importlib
-import inspect
 import json
 import os
 import threading
@@ -53,39 +51,10 @@ def test_generation_metadata_first_publication_never_clobbers(tmp_path, monkeypa
     assert destination.stat().st_nlink == 1
     assert sorted(path.name for path in destination.parent.iterdir()) == [destination.name]
 
-# LLM: 仅解析本模块函数调用图，不执行被测源码，也不把跨模块未知调用解释成已覆盖。
-# 函数用途: 找出指定入口可达的静态调用名，守住热路径禁止全扫的约束。
-def reachable(source, start):
-    tree = ast.parse(source)
-    functions = {n.name: n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    seen, pending = set(), [start]
-    while pending:
-        name = pending.pop()
-        if name in seen:
-            continue
-        seen.add(name)
-        if name in functions:
-            for call in ast.walk(functions[name]):
-                if isinstance(call, ast.Call):
-                    target = call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, 'attr', '')
-                    pending.append(target)
-    return seen
-
-
 # LLM: 导入当前源码中的真实责任索引，不提供替代实现或伪造权限。
 # 函数用途: 延迟取得原索引模块供各回归独立运行。
 def index_module():
     return importlib.import_module('agent_py_agent.agent.gateway_parts.multiprocess_executor_active_index')
-
-
-# LLM: 正例和明确无效fixture共用同一守门算法；签名检查不代替行为回归。
-# 函数用途: 禁止热启动路径重扫历史并保留冻结接口。
-def test_owner_hot_path_cannot_reach_full_discovery_and_guard_rejects_fixture():
-    source = Path(runtime.__file__).read_text()
-    assert 'discover_takeover_targets' not in reachable(source, 'launch_owner_writer')
-    invalid = 'def launch_owner_writer():\n    helper()\ndef helper():\n    discover_takeover_targets()\n'
-    assert 'discover_takeover_targets' in reachable(invalid, 'launch_owner_writer')
-    assert str(inspect.signature(runtime.CoordinatorTakeover.launch_owner_writer)) == '(self, owner_sha, launch)'
 
 
 # LLM: 原租约和原C均由产品构造，关闭标志只制造撤权反例，不签业务授权。

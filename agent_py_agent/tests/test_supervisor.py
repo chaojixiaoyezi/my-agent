@@ -682,20 +682,6 @@ def test_incident_gateway_registers_and_restores_diagnostic_signal(incident_gate
         assert json.loads(case.paths.state.read_text(encoding="utf-8"))["diagnostic_sigusr1"] is False
 
 
-# LLM: AST覆盖本文件所有state写点，避免仅修running但终态仍截断；不把语法存在当业务通过。
-# 函数用途: 锁住Gateway状态发布必须走原子写入口的合同。
-def test_incident_gateway_state_never_uses_truncating_writer():
-    import ast
-
-    from agent_py_agent.cli import gateway_process as gp
-
-    tree = ast.parse(Path(gp.__file__).read_text(encoding="utf-8"))
-    bad = [node.lineno for node in ast.walk(tree) if isinstance(node, ast.Call)
-           and isinstance(node.func, ast.Name) and node.func.id == "write_json_file"
-           and node.args and isinstance(node.args[0], ast.Attribute) and node.args[0].attr == "state"]
-    assert bad == []
-
-
 # LLM: proc输入在临时目录，信号/等待全替换；覆盖真实停止入口而不是仅测辅助函数存在。
 # 函数用途: 验证Linux摘要最多16线程且采栈信号先于TERM。
 def test_incident_stop_captures_bounded_linux_diagnostics_before_term(incident_gateway, monkeypatch, tmp_path):

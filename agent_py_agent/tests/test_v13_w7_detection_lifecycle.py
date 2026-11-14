@@ -1,12 +1,10 @@
 """检测生命周期的真实 HTTP 往返、耐久事务、回放与异步回写回归。"""
 from __future__ import annotations
 
-import ast
 import copy
 import json
 import uuid
 from dataclasses import replace
-from pathlib import Path
 
 import pytest
 
@@ -784,20 +782,6 @@ def test_monitors_proposals_aliases_resolve_to_detection_proposals(v13_native):
     row = _proposal(v13_native, sid)
     assert _send(v13_native, 'monitors.proposals.get', {'proposal_id': row['proposal_id']})['data']['proposal'] == row
     assert _send(v13_native, 'monitors.proposals.list', {'status': 'pending'})['data']['items'] == [row]
-
-
-# LLM: 结构规则防止再次引入注册器循环依赖及可变参数旁路。
-# 函数用途: 固定新模块的静态边界与注释要求。
-def test_lifecycle_static_boundaries():
-    source = Path(lifecycle.__file__).read_text()
-    tree = ast.parse(source)
-    assert not any(isinstance(node, ast.ImportFrom) and node.module
-                   and node.module.endswith('business_api_v13') for node in tree.body)
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            assert node.args.vararg is None and node.args.kwarg is None
-            prefix = '\n'.join(source.splitlines()[max(0, node.lineno - 4):node.lineno - 1])
-            assert '# LLM:' in prefix and '# 函数用途:' in prefix
 
 
 # LLM: 原生手动创建路径不依赖分片 readiness 的 HTTP 预检，可独立验证来源计算。

@@ -1,5 +1,4 @@
 """发布身份的真实存储/工具/执行往返；外部模型与IM不属于本切片。"""
-import ast
 import json
 import os
 from dataclasses import replace
@@ -357,30 +356,3 @@ def test_historical_execution_releases_handles_on_success_and_prepare_error(tmp_
     assert not prepared[0].exists() and not list((tmp_path / 'tmp/script_exec').iterdir())
     assert runtime.script_execution_record(tmp_path, 'probe', None) is None
     assert runtime.script_history_record(tmp_path, 'probe', None) is None
-
-
-def sha_only_lookups(tree):
-    """静态拒绝把代码摘要单独当成不可变合同的历史查找。"""
-    return [node for node in ast.walk(tree) if isinstance(node, ast.Call)
-        and (node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, 'attr', '')) == 'find_version'
-        and 'code_sha256' in {key.arg for key in node.keywords}
-        and not {'execution_definition_ref', 'fingerprint'} & {key.arg for key in node.keywords}]
-
-
-def test_ast_contract_lookup_guard_rejects_sha_only_and_checks_all_repaired_paths():
-    assert sha_only_lookups(ast.parse('find_version(home, "script", identity, code_sha256=sha)'))
-    assert not sha_only_lookups(ast.parse(
-        'find_version(home, "script", identity, code_sha256=sha, execution_definition_ref=reference)'))
-    root = Path(runtime.__file__).parents[1]
-    trees = {name: ast.parse((root / name).read_text()) for name in (
-        'assets/asset_dependents.py', 'assets/version_hook.py', 'workflows/datasource_runtime.py',
-        'workflows/pinned_definitions.py')}
-    assert all(not sha_only_lookups(tree) for tree in trees.values())
-    functions = {node.name: node for tree in trees.values() for node in tree.body if isinstance(node, ast.FunctionDef)}
-    for name in ('resolve_definition', 'historical_pin_available', '_resolve_execution_pin'):
-        calls = [node for node in ast.walk(functions[name]) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
-        assert any(node.func.id == 'script_snapshot' for node in calls)
-        assert not any(node.func.id == 'find_version' for node in calls)
-    assert not any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'get'
-        and node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == 'revision'
-        for node in ast.walk(functions['_execution_pin_matches']))

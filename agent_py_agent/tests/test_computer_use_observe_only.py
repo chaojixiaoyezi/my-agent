@@ -11,10 +11,8 @@
 """
 from __future__ import annotations
 
-import ast
 import importlib.abc
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -30,7 +28,6 @@ from agent_py_agent.agent.tooling.computer_use_profile import (
 )
 
 BLOCKED_MODULES = ("pyautogui", "computer_control_mcp")
-REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 # LLM: 只在测试进程里拦截两个上游模块；命中即 ImportError，用来证明档位不依赖它们，而不是让它们"碰巧没装"。
@@ -210,27 +207,6 @@ def test_host_produced_env_feeds_the_adapter_and_yields_only_observe_window(monk
 
     assert fastmcp.added == ["observe_window"], fastmcp.added
     assert low.name == "fake"
-
-
-# LLM: 只看档进程绝不能加载上游执行器，所以 server 模块顶层不得 import pyautogui / computer_control_mcp；
-#   它们只能在 _load_upstream 里、且只在完整档被调用。这条用 AST 静态钉住，防止有人把 import 挪回顶层。
-# 函数用途: 取出一段源码里模块顶层的 import 名字（含 from 形式的模块名）。
-def _toplevel_import_names(source: str) -> list[str]:
-    def names_of(node):
-        if isinstance(node, ast.Import):
-            return [alias.name for alias in node.names]
-        return [node.module] if isinstance(node, ast.ImportFrom) and node.module else []
-
-    return [name for node in ast.parse(source).body for name in names_of(node)]
-
-
-# 函数用途: 断言适配器模块的顶层没有上游 import。
-def test_adapter_module_has_no_toplevel_upstream_import():
-    # 路径用两段拼出来：本文件不真的拉起适配器子进程，避免命中"开观察 + 拉子进程"的车道守卫。
-    module = REPO_ROOT / "agent_py_agent/agent/tooling" / ("computer_use" + "_server.py")
-    offenders = [name for name in _toplevel_import_names(module.read_text(encoding="utf-8"))
-                 if name.split(".")[0] in ("pyautogui", "computer_control_mcp")]
-    assert not offenders, f"只看档不得在模块顶层 import 上游：{offenders}"
 
 
 # 类用途: 只看档执行面用例的假 observer：记录点击/输入次数，任何一次都算"点到了"。

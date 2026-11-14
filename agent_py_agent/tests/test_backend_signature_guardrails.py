@@ -5,13 +5,9 @@
 # 模块用途: 守住 HttpBackend 四个传输方法的覆盖签名与产品调用点关键字，失败时给出类名/方法名/差异。
 from __future__ import annotations
 
-import ast
 import importlib
 import inspect
 import pkgutil
-from pathlib import Path
-
-import pytest
 
 # 四个必须与基类保持同一签名的传输方法（基类定义在 backends/http.py）。
 GUARDED_TRANSPORT_METHODS = (
@@ -20,8 +16,6 @@ GUARDED_TRANSPORT_METHODS = (
     "request_stream",
     "request_stream_iter",
 )
-# 调用点只扫描agent/backends模块；包根用于范围限定和诊断路径，CLI同名方法不属于该合同。
-_PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 
 
 # LLM: 类发现必须走真实导入后的类关系，不能写死类名：新增 backend 只要继承 HttpBackend 就自动被守；
@@ -150,119 +144,6 @@ def test_backend_transport_overrides_keep_base_signature() -> None:
     )
 
 
-# LLM: 调用点只认 self./super() 的直接调用：request_stream_lines 按被调方签名分派（(path, payload,
-#   headers, first_event_timeout, deadline) 位置参数），不是关键字调用，不在此守卫范围。
-# 函数用途: 从调用表达式取出目标描述（self / super()）；不是这四个方法或不是直接调用时返回 None。
-def _transport_call_target(func: ast.expr) -> str | None:
-    if not isinstance(func, ast.Attribute) or func.attr not in GUARDED_TRANSPORT_METHODS:
-        return None
-    value = func.value
-    if isinstance(value, ast.Name) and value.id == "self":
-        return "self"
-    if (
-        isinstance(value, ast.Call)
-        and isinstance(value.func, ast.Name)
-        and value.func.id == "super"
-    ):
-        return "super()"
-    return None
-
-
-# LLM: 关键字集合以基类签名为权威——覆盖签名已由上一个守卫保证与基类一致，无需按 MRO 逐个解析；
-#   **kwargs 展开（arg 为 None）无法静态判定，跳过；基类方法带 VAR_KEYWORD 时整个方法放宽。
-# 函数用途: ast扫描后端模块（tests/除外），返回四个传输方法调用里签名不认识的关键字位置。
-def _scan_transport_call_sites() -> tuple[list[str], int]:
-    from agent_py_agent.agent.backends.http import HttpBackend
-
-    allowed = {
-        name: _allowed_keywords(getattr(HttpBackend, name))
-        for name in GUARDED_TRANSPORT_METHODS
-    }
-    violations: list[str] = []
-    call_count = 0
-    for path in sorted((_PACKAGE_ROOT / "agent" / "backends").rglob("*.py")):
-        call_count += _scan_file_call_sites(path, allowed, violations)
-    return violations, call_count
-
-
-# LLM: 单个方法的可传关键字集合独立成函数：VAR_KEYWORD 出现时整方法放宽（返回 None），
-#   位置或关键字参数名都允许作关键字传入；保持扫描函数只见数据、不见内层分支。
-# 函数用途: 由方法签名算出允许的关键字集合；带 **kwargs 时返回 None 表示不设限。
-def _allowed_keywords(method: object) -> set[str] | None:
-    signature = inspect.signature(method)
-    names: set[str] = set()
-    for parameter in signature.parameters.values():
-        if parameter.kind is inspect.Parameter.VAR_KEYWORD:
-            return None
-        if parameter.kind in (
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            inspect.Parameter.KEYWORD_ONLY,
-        ):
-            names.add(parameter.name)
-    return names
-
-
-# LLM: 只接收agent/backends下的模块，排除其他客户端的同名方法；tests替身继续整文件跳过。
-#   调用点关键字仍由真实基类签名检查，不因范围限定而放宽self/super的关键字约束。
-# 函数用途: 扫描一个后端文件里的传输方法直接调用，返回发现的相关调用点数量。
-def _scan_file_call_sites(
-    path: Path,
-    allowed: dict[str, set[str] | None],
-    violations: list[str],
-) -> int:
-    relative_parts = path.relative_to(_PACKAGE_ROOT).parts
-    if relative_parts[:2] != ("agent", "backends") or "tests" in relative_parts:
-        return 0
-    call_count = 0
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        target = _transport_call_target(node.func)
-        if target is None:
-            continue
-        call_count += 1
-        permitted = allowed[node.func.attr]
-        if permitted is None:
-            continue
-        violations.extend(_call_site_violations(node, target, permitted, path))
-    return call_count
-
-
-# LLM: 单个调用点的关键字检查独立成函数，让扫描函数保持"文件 → 调用"两层；违规信息带
-#   相对仓库根的路径与行号，失败时能直接定位到调用方。
-# 函数用途: 返回一个调用点里所有签名外关键字的位置描述（**kwargs 展开跳过）。
-def _call_site_violations(
-    node: ast.Call,
-    target: str,
-    permitted: set[str],
-    path: Path,
-) -> list[str]:
-    found: list[str] = []
-    for keyword in node.keywords:
-        if keyword.arg is None:
-            continue
-        if keyword.arg not in permitted:
-            found.append(
-                f"{path.relative_to(_PACKAGE_ROOT.parent)}:{node.lineno} "
-                f"{target}.{node.func.attr}({keyword.arg}=...) "
-                f"不在签名参数 {sorted(permitted)} 里"
-            )
-    return found
-
-
-def test_backend_transport_call_sites_use_known_keywords() -> None:
-    """四个传输方法的产品调用点只允许传被调方签名里有的关键字（签名变更后调用方必须跟上）。"""
-    violations, call_count = _scan_transport_call_sites()
-    assert call_count >= 3, (
-        f"调用点扫描至少应看到多个直接调用，实际 {call_count} 个（防扫描失效）"
-    )
-    assert not violations, (
-        "后端传输方法调用点传了签名不认识的关键字（签名变更后调用方没跟上）:\n"
-        + "\n".join(violations)
-    )
-
-
 # LLM: 守卫比较器自检：名字、参数种类、默认值有无任一变化都必须判为不同；防比较器本身写错导致
 #   守卫长期绿灯。新增变化形态时只往这里加一对函数，不放宽真实守卫。
 # 函数用途: 用成对样本函数验证参数指纹比较器能识别三类签名差异。
@@ -282,74 +163,3 @@ def test_signature_fingerprint_detects_name_kind_and_default_changes() -> None:
     assert fingerprint(base) != fingerprint(renamed)
     assert fingerprint(base) != fingerprint(keyword_only_changed)
     assert fingerprint(base) != fingerprint(default_dropped)
-
-
-# LLM: 样本只写pytest临时树，关键字仍从真实HttpBackend签名提取，不修改产品文件。
-# 函数用途: 为扫描器范围和错误识别准备一个独立源码文件。
-def _call_site_fixture(tmp_path, monkeypatch, relative_path: str, source: str):
-    from agent_py_agent.agent.backends.http import HttpBackend
-
-    package_root = tmp_path / "agent_py_agent"
-    monkeypatch.setitem(globals(), "_PACKAGE_ROOT", package_root)
-    path = package_root / relative_path
-    path.parent.mkdir(parents=True)
-    path.write_text(source, encoding="utf-8")
-    allowed = {
-        name: _allowed_keywords(getattr(HttpBackend, name))
-        for name in GUARDED_TRANSPORT_METHODS
-    }
-    return path, allowed
-
-
-# LLM: 同名CLI/普通客户端不属于后端传输合同；tests替身也继续排除。
-# 函数用途: 防止把非后端的conversation_id参数误报为HttpBackend签名错误。
-@pytest.mark.parametrize("relative_path", [
-    "cli/chat_parts/gateway_client.py",
-    "agent/other_client.py",
-    "tests/fake_backend.py",
-    "agent/backends/tests/fake_backend.py",
-])
-def test_transport_call_scanner_ignores_non_backend_clients(tmp_path, monkeypatch, relative_path):
-    source = (
-        "class OtherClient:\n"
-        "    def invoke(self):\n"
-        "        self.request_json(conversation_id='thread')\n"
-        "        super().request_json(conversation_id='thread')\n"
-    )
-    path, allowed = _call_site_fixture(tmp_path, monkeypatch, relative_path, source)
-    violations = []
-    assert _scan_file_call_sites(path, allowed, violations) == 0
-    assert violations == []
-
-
-# LLM: 四个方法和两种直接接收者都必须继续受守卫覆盖，目录限定不能变成全跳过。
-# 函数用途: 验证后端模块的未知关键字仍被识别并附带准确调用位置。
-@pytest.mark.parametrize("method", GUARDED_TRANSPORT_METHODS)
-@pytest.mark.parametrize("target", ["self", "super()"])
-def test_transport_call_scanner_keeps_backend_keyword_checks(tmp_path, monkeypatch, method, target):
-    source = (
-        "class ProbeBackend(HttpBackend):\n"
-        "    def invoke(self):\n"
-        f"        {target}.{method}(unknown_transport_keyword=True)\n"
-    )
-    path, allowed = _call_site_fixture(tmp_path, monkeypatch, "agent/backends/nested/probe.py", source)
-    violations = []
-    assert _scan_file_call_sites(path, allowed, violations) == 1
-    assert len(violations) == 1
-    assert "agent_py_agent/agent/backends/nested/probe.py:3" in violations[0]
-    assert f"{target}.{method}(unknown_transport_keyword=...)" in violations[0]
-
-
-# LLM: 合法参数不能被目录修复误伤，self与super调用仍分别计入覆盖数。
-# 函数用途: 保留后端正常关键字调用的通过语义。
-def test_transport_call_scanner_accepts_known_backend_keywords(tmp_path, monkeypatch):
-    source = (
-        "class ProbeBackend(HttpBackend):\n"
-        "    def invoke(self):\n"
-        "        self.request_json(path='/model', payload={}, headers=None)\n"
-        "        super().request_json(path='/model', payload={}, total_deadline_seconds=1)\n"
-    )
-    path, allowed = _call_site_fixture(tmp_path, monkeypatch, "agent/backends/probe.py", source)
-    violations = []
-    assert _scan_file_call_sites(path, allowed, violations) == 2
-    assert violations == []

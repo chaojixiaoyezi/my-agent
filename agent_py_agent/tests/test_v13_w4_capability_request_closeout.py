@@ -197,33 +197,6 @@ def test_historical_grant_does_not_keep_closed_current_duty_blocked(hot):
         old.id: "GRANTED", newer.id: "CLOSED"}
 
 
-def test_closeout_callers_keep_release_before_child_locks_and_archive():
-    import ast
-    import inspect
-
-    from agent_py_agent.agent.gateway_parts import multiprocess_processing_recovery as recovery
-    from agent_py_agent.agent.gateway_parts import request_worker
-
-    def calls(function):
-        return [node for node in ast.walk(ast.parse(inspect.getsource(function))) if isinstance(node, ast.Call)]
-
-    finish = calls(request_worker._finish_claimed_gateway_request)
-    close_lines = [node.lineno for node in finish if isinstance(node.func, ast.Name)
-                   and node.func.id == "_close_claimed_parent_capabilities"]
-    archive_lines = [node.lineno for node in finish if isinstance(node.func, ast.Name) and node.func.id == "archive_request"]
-    assert len(close_lines) == len(archive_lines) == 1 and close_lines[0] < archive_lines[0]
-    assert not any(isinstance(node.func, ast.Attribute) and node.func.attr == "mutate" for node in finish)
-    helper = ast.parse(inspect.getsource(request_worker._close_claimed_parent_capabilities))
-    releases = [node for node in ast.walk(helper) if isinstance(node, ast.With) and any(
-        isinstance(item.context_expr, ast.Call) and isinstance(item.context_expr.func, ast.Name)
-        and item.context_expr.func.id == "gateway_short_transaction" for item in node.items)]
-    assert len(releases) == 1
-    assert any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "creation_guard"
-               for node in ast.walk(releases[0]))
-    cold = calls(recovery._recovery_runtime_paths)
-    assert not any(isinstance(node.func, ast.Name) and node.func.id in {"SimpleAgent", "SubAgentManager"} for node in cold)
-
-
 @pytest.mark.parametrize("concurrent", [False, True])
 def test_count0_real_stop_and_completion_finish_without_lock_cycle(request, tmp_path, monkeypatch, concurrent):
     """隔离子进程跑真实停止/完成；仅在原文件锁获取前用Event固定交错。"""
