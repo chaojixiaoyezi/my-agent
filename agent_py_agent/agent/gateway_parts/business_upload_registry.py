@@ -52,6 +52,14 @@ class UploadLookup:
     record: object | None
     registry_size: int
     proof: RegistryRecordProof | None
+    pending: bool = False
+
+
+def _host_error(code: str, status: int, *, message: str, reason: str) -> HostAPIError:
+    """构造带结构化原因标识的宿主异常，避免上层解析异常文案做控制流判断。"""
+    error = HostAPIError(code, status, message=message)
+    error.registry_reason = reason
+    return error
 
 
 def _stamp(fd):
@@ -135,7 +143,7 @@ def _save(db, artifact_id, state):
                '(SELECT artifact_id FROM progress ORDER BY touched DESC LIMIT ?)', (_UPLOAD_PROGRESS_LIMIT_COUNT,))
 
 
-def _consume(state, chunk, *, eof):
+def _consume(state, chunk, *, eof, max_record_bytes=_MAX_RECORD_BYTES):
     previous = base64.b64decode(state['pending'])
     start = state['offset'] - len(previous)
     data = previous + chunk
@@ -145,31 +153,81 @@ def _consume(state, chunk, *, eof):
         if index == len(lines) - 1 and not line.endswith(b'\n') and not eof:
             pending = line
             break
-        if len(line) > _MAX_RECORD_BYTES:
-            raise HostAPIError('HOST_NOT_READY', 503, message=(
-                f'原登记单行超过{_MAX_RECORD_BYTES}字节核验上限（offset={start}）；未读取内容，请核对该行，不得盲重试。'))
+        if len(line) > max_record_bytes:
+            raise _host_error(
+                'HOST_NOT_READY',
+                503,
+                message=(
+                    f'原登记单行超过{max_record_bytes}字节核验上限（offset={start}）；未读取内容，请核对该行，不得盲重试。'
+                ),
+                reason='line_budget',
+            )
         if line.strip():
             try:
                 record = _record_from_payload(json.loads(line.decode('utf-8')))
                 if record is None:
                     raise ValueError('invalid record')
             except (UnicodeError, ValueError, TypeError) as error:
-                raise HostAPIError('STORE_UNAVAILABLE', 503, message=(
-                    f'原上传登记offset={start}含无效或未完成JSON行（{type(error).__name__}）；未读取内容，修复原登记后同参数重试。')) from error
+                raise _host_error(
+                    'STORE_UNAVAILABLE',
+                    503,
+                    message=(
+                        f'原上传登记offset={start}含无效或未完成JSON行（{type(error).__name__}）；未读取内容，修复原登记后同参数重试。'
+                    ),
+                    reason='unreadable',
+                ) from error
             if record.artifact_id == state['artifact_id']:
                 # 物理末行胜出；时间戳相等或回退均不改变权威行顺序。
                 state['latest'] = {'offset': start, 'raw': base64.b64encode(line).decode('ascii')}
         start += len(line)
-    if len(pending) > _MAX_RECORD_BYTES:
-        raise HostAPIError('HOST_NOT_READY', 503, message='原上传登记单行超过读取上限；未读取内容，请核对该行，不得盲重试。')
+    if len(pending) > max_record_bytes:
+        raise _host_error(
+            'HOST_NOT_READY',
+            503,
+            message='原上传登记单行超过读取上限；未读取内容，请核对该行，不得盲重试。',
+            reason='line_budget',
+        )
     state['pending'] = base64.b64encode(pending).decode('ascii')
 
 
-def lookup_business_upload(owner_home, artifact_id, *, max_bytes=2 * 1024 * 1024, writer_locked=False):
-    """每步不超原预算，单请求自动四步；无可信发布代时完整双遍，不抽样签latest。"""
+def lookup_business_upload(
+    owner_home,
+    artifact_id,
+    *,
+    max_bytes=2 * 1024 * 1024,
+    writer_locked=False,
+    max_steps=_UPLOAD_REGISTRY_STEPS_COUNT,
+    max_total_bytes=None,
+    return_pending=False,
+    max_record_bytes=None,
+):
+    """每步不超原预算，单请求按步数/总字节上限推进；无可信发布代时完整双遍，不抽样签latest。"""
     owner = Path(owner_home).absolute()
     if type(max_bytes) is not int or max_bytes < 1 or max_bytes > 2 * 1024 * 1024:
         raise ValueError('business registry block budget out of range')
+    if (
+        type(max_steps) is not int
+        or isinstance(max_steps, bool)
+        or not 1 <= max_steps <= _UPLOAD_REGISTRY_STEPS_COUNT
+    ):
+        raise ValueError('business registry step budget out of range')
+    if max_total_bytes is not None and (
+        type(max_total_bytes) is not int
+        or isinstance(max_total_bytes, bool)
+        or max_total_bytes < 1
+        or max_total_bytes > max_bytes * _UPLOAD_REGISTRY_STEPS_COUNT
+    ):
+        raise ValueError('business registry total byte budget out of range')
+    if type(return_pending) is not bool:
+        raise ValueError('invalid return_pending')
+    if max_record_bytes is not None and (
+        type(max_record_bytes) is not int
+        or isinstance(max_record_bytes, bool)
+        or max_record_bytes < 1
+        or max_record_bytes > _MAX_RECORD_BYTES
+    ):
+        raise ValueError('business registry record byte budget out of range')
+    record_limit = _MAX_RECORD_BYTES if max_record_bytes is None else max_record_bytes
     # 空Owner只确认原源缺失，不为只读查ID创建canonical业务目录。
     try:
         existing = open_readonly_file_beneath(owner, _SOURCE)
@@ -189,20 +247,41 @@ def lookup_business_upload(owner_home, artifact_id, *, max_bytes=2 * 1024 * 1024
             with _connection(owner) as db:
                 state = _load(db, owner, artifact_id, stamp, max_bytes)
                 progressed = 0
-                for _step in range(_UPLOAD_REGISTRY_STEPS_COUNT):
+                for _step in range(max_steps):
+                    next_len = min(max_bytes, max(0, stamp[2] - state['offset']))
+                    if max_total_bytes is not None and (
+                        (progressed > 0 and progressed + next_len > max_total_bytes)
+                        or (_step == 0 and next_len > max_total_bytes)
+                    ):
+                        break
                     if _stamp(fd) != stamp:
-                        raise HostAPIError('HOST_NOT_READY', 503, message='原上传登记在核验期间换代；未读取内容，请对同一ID重新核验，不得换ID重传。')
-                    chunk = _read(fd, state['offset'], min(max_bytes, stamp[2] - state['offset']))
+                        raise _host_error(
+                            'HOST_NOT_READY',
+                            503,
+                            message='原上传登记在核验期间换代；未读取内容，请对同一ID重新核验，不得换ID重传。',
+                            reason='source_changed',
+                        )
+                    chunk = _read(fd, state['offset'], next_len)
                     eof = state['offset'] + len(chunk) == stamp[2]
                     if not chunk and not eof:
-                        raise HostAPIError('HOST_NOT_READY', 503, message='原上传登记读取提前结束；未读取内容，请核对源文件后同参数重试。')
+                        raise _host_error(
+                            'HOST_NOT_READY',
+                            503,
+                            message='原上传登记读取提前结束；未读取内容，请核对源文件后同参数重试。',
+                            reason='short_read',
+                        )
                     if state['phase'] == 'collect':
-                        _consume(state, chunk, eof=eof)
+                        _consume(state, chunk, eof=eof, max_record_bytes=record_limit)
                     state['chain'] = _chain(state['chain'], chunk)
                     state['offset'] += len(chunk)
                     progressed += len(chunk)
                     if _stamp(fd) != stamp:
-                        raise HostAPIError('HOST_NOT_READY', 503, message='原上传登记在核验期间变化；未读取内容，请对同一ID继续核验。')
+                        raise _host_error(
+                            'HOST_NOT_READY',
+                            503,
+                            message='原上传登记在核验期间变化；未读取内容，请对同一ID继续核验。',
+                            reason='source_changed',
+                        )
                     if eof and state['phase'] == 'collect':
                         state.update(phase='verify', collected_chain=state['chain'], offset=0, chain='00' * 32)
                     elif eof:
@@ -219,10 +298,18 @@ def lookup_business_upload(owner_home, artifact_id, *, max_bytes=2 * 1024 * 1024
                                                     len(raw), hashlib.sha256(raw).hexdigest(), _SEAL)
                         return UploadLookup(record, stamp[2], proof)
                 _save(db, artifact_id, state)
+            if return_pending:
+                return UploadLookup(None, stamp[2], None, pending=True)
             # 返回进度前已提交派生checkpoint；503不是同一总量上限的永久拒绝。
-            raise HostAPIError('HOST_NOT_READY', 503, message=(
-                f'原上传登记核验可续：本次推进{progressed}字节，{state["phase"]} offset={state["offset"]}/{stamp[2]}；'
-                '未读取内容，请保持同一artifact_id原参数再次调用，宿主将继续原游标，不重传或换ID。'))
+            raise _host_error(
+                'HOST_NOT_READY',
+                503,
+                message=(
+                    f'原上传登记核验可续：本次推进{progressed}字节，{state["phase"]} offset={state["offset"]}/{stamp[2]}；'
+                    '未读取内容，请保持同一artifact_id原参数再次调用，宿主将继续原游标，不重传或换ID。'
+                ),
+                reason='scan_in_progress',
+            )
         finally:
             os.close(fd)
 

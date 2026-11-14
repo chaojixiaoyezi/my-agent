@@ -952,79 +952,279 @@ def test_fs_watch_control_ring_evicts_and_never_bricks(tmp_path, monkeypatch):
         epoch_repo.conn.close()
 
 
-def test_observation_readers_stream_media_registry_beyond_2_mib(tmp_path):
+def _count_open_fds() -> int:
+    import os
+
+    for fd_dir in ("/dev/fd", "/proc/self/fd"):
+        if os.path.isdir(fd_dir):
+            return len(os.listdir(fd_dir))
+    return -1
+
+
+def _run_with_registry_io_probe(monkeypatch, reg_path, fn):
+    import os
+
+    st = reg_path.stat()
+    target_key = (st.st_dev, st.st_ino)
+    real_read = os.read
+    totals = {"bytes": 0}
+
+    def _counting_read(fd: int, n: int) -> bytes:
+        chunk = real_read(fd, n)
+        try:
+            fst = os.fstat(fd)
+            if (fst.st_dev, fst.st_ino) == target_key:
+                totals["bytes"] += len(chunk)
+        except OSError:
+            pass
+        return chunk
+
+    fd_before = _count_open_fds()
+    monkeypatch.setattr(os, "read", _counting_read)
+    try:
+        result = fn()
+    finally:
+        monkeypatch.undo()
+    fd_after = _count_open_fds()
+    fd_delta = 0 if (fd_before < 0 or fd_after < 0) else (fd_after - fd_before)
+    return result, totals["bytes"], fd_delta
+
+
+def _probe_with_exception(monkeypatch, reg_path, fn):
+    import os
+
+    st = reg_path.stat()
+    target_key = (st.st_dev, st.st_ino)
+    real_read = os.read
+    totals = {"bytes": 0}
+
+    def _counting_read(fd: int, n: int) -> bytes:
+        chunk = real_read(fd, n)
+        try:
+            fst = os.fstat(fd)
+            if (fst.st_dev, fst.st_ino) == target_key:
+                totals["bytes"] += len(chunk)
+        except OSError:
+            pass
+        return chunk
+
+    fd_before = _count_open_fds()
+    monkeypatch.setattr(os, "read", _counting_read)
+    err = None
+    result = None
+    try:
+        result = fn()
+    except Exception as exc:
+        err = exc
+    finally:
+        monkeypatch.undo()
+    fd_after = _count_open_fds()
+    fd_delta = 0 if (fd_before < 0 or fd_after < 0) else (fd_after - fd_before)
+    return result, err, totals["bytes"], fd_delta
+
+
+def _make_media_row(
+    owner_home,
+    owner_id: str,
+    aid: str,
+    idx: int,
+    *,
+    display_name: str | None = None,
+    version_ref: str | None = None,
+    padding_len: int = 120,
+) -> str:
+    row_record = {
+        "schema_version": "artifact-registry.v1",
+        "artifact_id": aid,
+        "run_id": "",
+        "task_id": "",
+        "agent_id": "",
+        "kind": "document",
+        "mime_type": "text/plain",
+        "path": str(owner_home / "artifacts" / "business" / f"{aid}.blob"),
+        "sha256": hashlib.sha256(aid.encode()).hexdigest(),
+        "size_bytes": 128,
+        "status": "ready",
+        "source": "business_upload",
+        "created_by_tool": "business_upload",
+        "updated_at": float(idx),
+        "metadata": {
+            "owner_id": owner_id,
+            "space_id": "sp-media",
+            "version_ref": version_ref or f"ver-{idx:04d}",
+            "display_name": display_name or f"file-{idx:04d}.txt",
+            "padding": "p" * padding_len,
+        },
+    }
+    return json.dumps(row_record, separators=(",", ":"))
+
+
+def test_observation_readers_stream_media_registry_beyond_2_mib(tmp_path, monkeypatch):
     owner_home = tmp_path / "media-owner"
     reg_path = owner_home / "artifacts" / "business" / REGISTRY_RELATIVE_PATH
     reg_path.parent.mkdir(parents=True, exist_ok=True)
     owner_id = "local/media-test"
+    other_owner_id = "local/other-owner"
 
-    # 生成 6,000 行（> 2.5 MiB）业务上传登记，末行并含同一 ID 的最新版本覆盖。
-    lines = []
-    for idx in range(5999):
-        aid = f"artifact-{idx:040x}"
-        row_record = {
-            "schema_version": "artifact-registry.v1",
-            "artifact_id": aid,
-            "run_id": "",
-            "task_id": "",
-            "agent_id": "",
-            "kind": "document",
-            "mime_type": "text/plain",
-            "path": str(owner_home / "artifacts" / "business" / f"{aid}.blob"),
-            "sha256": hashlib.sha256(aid.encode()).hexdigest(),
-            "size_bytes": 128,
-            "status": "ready",
-            "source": "business_upload",
-            "created_by_tool": "business_upload",
-            "updated_at": float(idx),
-            "metadata": {
-                "owner_id": owner_id,
-                "space_id": "sp-media",
-                "version_ref": f"ver-{idx:04d}",
-                "display_name": f"file-{idx:04d}.txt",
-                "padding": "p" * 80,
-            },
-        }
-        lines.append(json.dumps(row_record, separators=(",", ":")))
+    # 生成 > 2.5 MiB（约 2.8 MiB）业务上传登记：首行含 target_aid，中间散布同 owner 记录与大量其它 owner 记录，末行含 target_aid 最新覆盖。
+    target_aid = f"artifact-{9000:040x}"
+    lines = [
+        _make_media_row(
+            owner_home,
+            owner_id,
+            target_aid,
+            0,
+            display_name="superseded-early.txt",
+            version_ref="ver-early",
+        )
+    ]
+    filler_template = _make_media_row(
+        owner_home,
+        other_owner_id,
+        f"artifact-{80000:040x}",
+        1,
+        padding_len=240,
+    )
+    owner_match_idx = 0
+    for seq in range(4200):
+        if seq % 800 == 400 and owner_match_idx < 5:
+            aid = f"artifact-{owner_match_idx:040x}"
+            lines.append(_make_media_row(owner_home, owner_id, aid, owner_match_idx + 1))
+            owner_match_idx += 1
+        else:
+            lines.append(filler_template)
 
-    target_aid = f"artifact-{5998:040x}"
-    superseded = json.loads(lines[-1])
-    superseded["metadata"]["display_name"] = "superseded-final.txt"
-    superseded["metadata"]["version_ref"] = "ver-superseded"
-    lines.append(json.dumps(superseded, separators=(",", ":")))
+    lines.append(
+        _make_media_row(
+            owner_home,
+            owner_id,
+            target_aid,
+            9000,
+            display_name="superseded-final.txt",
+            version_ref="ver-superseded",
+        )
+    )
     reg_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     assert reg_path.stat().st_size > int(2.5 * 1024 * 1024)
 
     readers = default_observation_readers(owner_home, owner_id, None, None)
-    page1 = readers["artifacts"](
-        {"limit": 25},
-        source_page=ObservationSourcePage(limit=25, position={"phase": "media", "after": ""}),
-    )
-    assert len(page1.records) == 25 and page1.next_position is not None
-    assert page1.coverage == "partial"
 
-    page2 = readers["artifacts"](
-        {"limit": 25},
-        source_page=ObservationSourcePage(limit=25, position=page1.next_position),
-    )
-    assert len(page2.records) == 25
-    assert page2.records[0].value["artifact_id"] > page1.records[-1].value["artifact_id"]
-
-    # 点查询超过 2.5 MiB 须正常返回末条覆盖后的记录。
-    detail = readers["artifacts.get"]({"artifact_id": target_aid})
+    # 先执行点查询：超过 2 MiB 单次预算时首轮应显式返回 SCAN_IN_PROGRESS，有限重试后返回末条覆盖记录，且每次读盘 <= 2 MiB。
+    detail = None
+    scan_in_progress_count = 0
+    for attempt in range(8):
+        res, err, attempt_bytes, attempt_fd_delta = _probe_with_exception(
+            monkeypatch,
+            reg_path,
+            lambda: readers["artifacts.get"]({"artifact_id": target_aid}),
+        )
+        assert attempt_bytes <= 2 * 1024 * 1024
+        assert attempt_fd_delta == 0
+        if err is not None:
+            assert isinstance(err, ObservationSourceError)
+            assert err.details["reason"] == "ARTIFACT_REGISTRY_SCAN_IN_PROGRESS"
+            assert err.details["next_action"]
+            scan_in_progress_count += 1
+            continue
+        detail = res
+        break
+    assert scan_in_progress_count >= 1
+    assert detail is not None
     assert len(detail.records) == 1
     assert detail.records[0].value["artifact"]["name"] == "superseded-final.txt"
     assert detail.records[0].value["version_ref"] == "ver-superseded"
 
+    # 游标分页从 phase=media 全量扫到 EOF，验证每跳 <= 2 MiB、零重复、末跳保留 unknown、无 FD 泄漏。
+    pos = {"phase": "media", "after": "", "source_coverage": "unknown"}
+    collected = []
+    saved_mid_pos = None
+    last_page = None
+    for step in range(80):
+        cur_pos = pos
+        page, step_bytes, step_fd_delta = _run_with_registry_io_probe(
+            monkeypatch,
+            reg_path,
+            lambda p=cur_pos: readers["artifacts"](
+                {"limit": 10},
+                source_page=ObservationSourcePage(
+                    limit=10,
+                    position=p,
+                ),
+            ),
+        )
+        assert step_bytes <= 2 * 1024 * 1024
+        assert step_fd_delta == 0
+        collected.extend(page.records)
+        last_page = page
+        if page.next_position is None:
+            break
+        if saved_mid_pos is None and step >= 1:
+            saved_mid_pos = page.next_position
+        assert page.coverage == "partial"
+        pos = page.next_position
+    else:
+        raise AssertionError("exceeded max pages walking >2.5 MiB test registry")
+
+    assert last_page is not None and last_page.next_position is None
+    assert last_page.coverage == "unknown"
+    assert saved_mid_pos is not None
+    collected_ids = [r.value["artifact_id"] for r in collected]
+    assert len(collected_ids) == 6
+    assert len(set(collected_ids)) == 6
+    target_rows = [r for r in collected if r.value["artifact_id"] == target_aid]
+    assert len(target_rows) == 1
+    assert target_rows[0].value["name"] == "superseded-final.txt"
+    assert target_rows[0].value["version_ref"] == "ver-superseded"
+
+    # 通过真实签名游标服务往返分页，校验 cursor 长度 <= 2048 且每跳读盘 <= 2 MiB。
+    from agent_py_agent.agent.conversation.business_access import BusinessActor
+    from agent_py_agent.agent.conversation.business_observability import (
+        BusinessObservationService,
+    )
+
+    service = BusinessObservationService(
+        owner_home,
+        owner_id=owner_id,
+        readers=default_observation_readers(owner_home, owner_id, None, None),
+        cursor_key=b"r" * 32,
+    )
+    actor = BusinessActor(owner_id, "u", service, lambda action, facts: True)
+    cursor = None
+    svc_ids = []
+    svc_last = None
+    for _ in range(80):
+        cur = cursor
+        qparams = {"limit": 10}
+        if cur is not None:
+            qparams["cursor"] = cur
+        res, svc_bytes, svc_fd_delta = _run_with_registry_io_probe(
+            monkeypatch,
+            reg_path,
+            lambda p=qparams: service.query("artifacts.list", p, actor=actor),
+        )
+        assert svc_bytes <= 2 * 1024 * 1024
+        assert svc_fd_delta == 0
+        svc_ids.extend(item["artifact_id"] for item in res["items"])
+        svc_last = res
+        next_cur = res["next_cursor"]
+        if next_cur is None:
+            break
+        assert len(next_cur) <= 2048
+        cursor = next_cur
+    else:
+        raise AssertionError("exceeded max service pages")
+    assert svc_last["coverage"] == "unknown"
+    assert set(svc_ids) == set(collected_ids) and len(svc_ids) == 6
+
     # 原文件变化后使用旧 media_revision 游标仍应准确触发 CURSOR_EXPIRED。
     with reg_path.open("a", encoding="utf-8") as fh:
-        extra = json.loads(lines[0])
+        extra = json.loads(lines[1])
         extra["artifact_id"] = f"artifact-{7000:040x}"
         fh.write(json.dumps(extra, separators=(",", ":")) + "\n")
     with pytest.raises(BusinessError) as exc_cursor:
         readers["artifacts"](
-            {"limit": 25},
-            source_page=ObservationSourcePage(limit=25, position=page1.next_position),
+            {"limit": 10},
+            source_page=ObservationSourcePage(limit=10, position=saved_mid_pos),
         )
     assert exc_cursor.value.code == "CURSOR_EXPIRED"
 
@@ -1046,3 +1246,224 @@ def test_observation_readers_stream_media_registry_beyond_2_mib(tmp_path):
     with pytest.raises(ObservationSourceError) as exc_bad_line:
         readers["artifacts.get"]({"artifact_id": target_aid})
     assert exc_bad_line.value.details["reason"] == "ARTIFACT_REGISTRY_UNREADABLE"
+    with pytest.raises(ObservationSourceError) as exc_list_bad_line:
+        readers["artifacts"](
+            {"limit": 10},
+            source_page=ObservationSourcePage(limit=10, position={"phase": "media", "after": ""}),
+        )
+    assert exc_list_bad_line.value.details["reason"] == "ARTIFACT_MEDIA_REGISTRY_UNREADABLE"
+
+    # 尾部无换行残缺行也必须严格报不可读，不静默丢弃。
+    oversized_path.write_text(
+        _make_media_row(owner_home, other_owner_id, f"artifact-{1:040x}", 1)
+        + '\n{"partial":"unterminated"',
+        encoding="utf-8",
+    )
+    with pytest.raises(ObservationSourceError) as exc_list_partial:
+        readers["artifacts"](
+            {"limit": 10},
+            source_page=ObservationSourcePage(limit=10, position={"phase": "media", "after": ""}),
+        )
+    assert exc_list_partial.value.details["reason"] == "ARTIFACT_MEDIA_REGISTRY_UNREADABLE"
+
+
+def test_observation_readers_large_100_mib_media_registry_bounded_2_mib(tmp_path, monkeypatch):
+    owner_home = tmp_path / "huge-media-owner"
+    reg_path = owner_home / "artifacts" / "business" / REGISTRY_RELATIVE_PATH
+    reg_path.parent.mkdir(parents=True, exist_ok=True)
+    owner_id = "local/huge-owner"
+    other_owner_id = "local/other-huge-owner"
+
+    first_aid = f"artifact-{1:040x}"
+    second_aid = f"artifact-{2:040x}"
+    early_match_1 = (_make_media_row(owner_home, owner_id, first_aid, 1) + "\n").encode("utf-8")
+    early_match_2 = (_make_media_row(owner_home, owner_id, second_aid, 2) + "\n").encode("utf-8")
+    filler_line = (
+        _make_media_row(
+            owner_home,
+            other_owner_id,
+            f"artifact-{99:040x}",
+            99,
+            padding_len=900,
+        )
+        + "\n"
+    ).encode("utf-8")
+    repeat_count = ((100 * 1024 * 1024) // len(filler_line)) + 1
+    with reg_path.open("wb") as fh:
+        fh.write(early_match_1)
+        fh.write(early_match_2)
+        chunk = filler_line * 256
+        written = 0
+        while written < repeat_count:
+            take = min(256, repeat_count - written)
+            fh.write(chunk if take == 256 else filler_line * take)
+            written += take
+
+    assert reg_path.stat().st_size >= 100 * 1024 * 1024
+
+    readers = default_observation_readers(owner_home, owner_id, None, None)
+
+    # 第 1 页命中首条匹配并停在 media_pending（读盘 <= 2 MiB，零泄漏）。
+    page1, bytes_p1, fd_p1 = _run_with_registry_io_probe(
+        monkeypatch,
+        reg_path,
+        lambda: readers["artifacts"](
+            {"limit": 10},
+            source_page=ObservationSourcePage(limit=10, position={"phase": "media", "after": ""}),
+        ),
+    )
+    assert bytes_p1 <= 2 * 1024 * 1024
+    assert fd_p1 == 0
+    assert page1.next_position is not None
+    assert page1.coverage == "partial"
+
+    # 第 2 页继续推进（读盘 <= 2 MiB，零泄漏）。
+    page2, bytes_p2, fd_p2 = _run_with_registry_io_probe(
+        monkeypatch,
+        reg_path,
+        lambda: readers["artifacts"](
+            {"limit": 10},
+            source_page=ObservationSourcePage(limit=10, position=page1.next_position),
+        ),
+    )
+    assert bytes_p2 <= 2 * 1024 * 1024
+    assert fd_p2 == 0
+    assert page2.next_position is not None
+
+    # 点查询在 100 MiB 文件上受 2 MiB 单次预算保护，首次读盘 <= 2 MiB 并报 SCAN_IN_PROGRESS。
+    import os
+
+    st = reg_path.stat()
+    target_key = (st.st_dev, st.st_ino)
+    real_read = os.read
+    get_read_bytes = 0
+
+    def _get_counting_read(fd: int, n: int) -> bytes:
+        nonlocal get_read_bytes
+        chunk = real_read(fd, n)
+        try:
+            fst = os.fstat(fd)
+            if (fst.st_dev, fst.st_ino) == target_key:
+                get_read_bytes += len(chunk)
+        except OSError:
+            pass
+        return chunk
+
+    monkeypatch.setattr(os, "read", _get_counting_read)
+    with pytest.raises(ObservationSourceError) as exc_huge_get:
+        readers["artifacts.get"]({"artifact_id": first_aid})
+    monkeypatch.undo()
+    assert exc_huge_get.value.details["reason"] == "ARTIFACT_REGISTRY_SCAN_IN_PROGRESS"
+    assert get_read_bytes <= 2 * 1024 * 1024
+
+
+def test_upload_lookup_step_budget_and_interleaved_progress(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import business_upload_registry
+
+    owner_home = tmp_path / "interleave-owner"
+    reg_path = owner_home / "artifacts" / "business" / REGISTRY_RELATIVE_PATH
+    reg_path.parent.mkdir(parents=True, exist_ok=True)
+    owner_id = "local/interleave-owner"
+    target_aid = f"artifact-{555:040x}"
+
+    target_line = (
+        _make_media_row(
+            owner_home,
+            owner_id,
+            target_aid,
+            1,
+            display_name="early-target.txt",
+            version_ref="ver-early-target",
+        )
+        + "\n"
+    ).encode("utf-8")
+    filler_line = (
+        _make_media_row(
+            owner_home,
+            "local/other-interleave",
+            f"artifact-{666:040x}",
+            2,
+            padding_len=900,
+        )
+        + "\n"
+    ).encode("utf-8")
+    repeat_count = (5 * 1024 * 1024 // len(filler_line)) + 1
+    with reg_path.open("wb") as fh:
+        fh.write(target_line)
+        chunk = filler_line * 128
+        written = 0
+        while written < repeat_count:
+            take = min(128, repeat_count - written)
+            fh.write(chunk if take == 128 else filler_line * take)
+            written += take
+
+    # 1. max_steps=1, max_total_bytes=1 MiB, return_pending=True 应显式返回 pending=True 且读盘 <= 1 MiB。
+    first_res, bytes_1, fd_1 = _run_with_registry_io_probe(
+        monkeypatch,
+        reg_path,
+        lambda: business_upload_registry.lookup_business_upload(
+            owner_home,
+            target_aid,
+            max_bytes=1024 * 1024,
+            max_steps=1,
+            max_total_bytes=1024 * 1024,
+            return_pending=True,
+        ),
+    )
+    assert first_res.pending is True
+    assert first_res.record is None
+    assert bytes_1 <= 1024 * 1024
+    assert fd_1 == 0
+
+    # 2. 交替调用观察受限 lookup（2 MiB）与默认 HTTP 4*2 MiB lookup，应平滑复用同份 SQLite 进度直到收敛。
+    mid_res, bytes_2, fd_2 = _run_with_registry_io_probe(
+        monkeypatch,
+        reg_path,
+        lambda: business_upload_registry.lookup_business_upload(
+            owner_home,
+            target_aid,
+            max_bytes=2 * 1024 * 1024,
+            max_steps=1,
+            max_total_bytes=2 * 1024 * 1024,
+            return_pending=True,
+        ),
+    )
+    assert mid_res.pending is True
+    assert bytes_2 <= 2 * 1024 * 1024
+    assert fd_2 == 0
+
+    http_mid_res, http_err, bytes_3, fd_3 = _probe_with_exception(
+        monkeypatch,
+        reg_path,
+        lambda: business_upload_registry.lookup_business_upload(
+            owner_home,
+            target_aid,
+            max_bytes=2 * 1024 * 1024,
+        ),
+    )
+    assert fd_3 == 0
+    assert bytes_3 > 0
+    if http_err is not None:
+        assert getattr(http_err, "registry_reason", None) == "scan_in_progress"
+        final_res, bytes_4, fd_4 = _run_with_registry_io_probe(
+            monkeypatch,
+            reg_path,
+            lambda: business_upload_registry.lookup_business_upload(
+                owner_home,
+                target_aid,
+                max_bytes=2 * 1024 * 1024,
+                max_steps=2,
+                max_total_bytes=2 * 1024 * 1024,
+                return_pending=True,
+            ),
+        )
+        assert fd_4 == 0
+        assert bytes_4 <= 2 * 1024 * 1024
+    else:
+        final_res = http_mid_res
+
+    assert final_res.pending is False
+    assert final_res.record is not None
+    assert final_res.record.artifact_id == target_aid
+    assert final_res.record.metadata["display_name"] == "early-target.txt"
+    assert final_res.proof is not None and final_res.proof.offset == 0

@@ -23,8 +23,9 @@ from typing import Any
 
 from ..artifacts.registry import REGISTRY_RELATIVE_PATH, _record_from_payload
 from ..artifacts.registry_reader import latest_records_from_lines
+from ..common.directory_lock import locked_private_directory
 from ..common.log_redaction import redact_sensitive_value
-from ..common.nofollow_fs import read_bytes_beneath, read_text_beneath
+from ..common.nofollow_fs import open_readonly_file_beneath, read_bytes_beneath, read_text_beneath
 from ..contracts.error_taxonomy import error_contract
 from ..conversation.background_team_lifecycle import background_identity
 from ..conversation.business_access import BusinessError
@@ -51,7 +52,9 @@ from ..conversation.display_archive import (
     read_display_archive_page,
 )
 from ..conversation.usage_sources import UsageSourcePlan
+from ..plugin_host.errors import HostAPIError
 from ..runtime_db.repository import RuntimeRepository
+from . import business_upload_registry
 
 
 # LLM: 指纹仅作只读分页版本，不建立第二事实库。
@@ -556,116 +559,92 @@ def default_observation_readers(owner_home, owner_id, store, runtime, *, resourc
     return readers
 
 
-class _OwnerMediaLatestTarget:
-    """只保留当前 owner 且在游标之后的 business_upload 最新记录，减少全量遍历内存占用。"""
-
-    def __init__(self, owner_id: str, after: str) -> None:
-        self.owner_id = owner_id
-        self.after = str(after)
-        self.items: dict = {}
-
-    def __setitem__(self, artifact_id: str, record) -> None:
-        if (artifact_id > self.after
-                and getattr(record, 'source', None) == 'business_upload'
-                and (getattr(record, 'metadata', None) or {}).get('owner_id') == self.owner_id):
-            self.items[artifact_id] = record
-        else:
-            self.items.pop(artifact_id, None)
-
-
-class _SingleArtifactLatestTarget:
-    """点查询时只保留目标 artifact_id 的最新记录，维持 O(1) 内存。"""
-
-    def __init__(self, target_artifact_id: str) -> None:
-        self.target_artifact_id = target_artifact_id
-        self.item = None
-
-    def __setitem__(self, artifact_id: str, record) -> None:
-        if artifact_id == self.target_artifact_id:
-            self.item = record
-
-
-def _stream_business_media_registry(
-    home: Path,
-    parts: tuple[str, ...],
+def _translate_media_lookup_error(
+    error: HostAPIError,
     *,
-    latest_target,
     budget_reason: str,
     budget_next_action: str,
     unreadable_reason: str,
     unreadable_next_action: str,
-    expected_media_revision: str | None = None,
     include_side_effect_none: bool = False,
 ):
-    from ..artifacts.registry_reader import RegistryReadContext, _read_registry_line
-    from ..common.nofollow_fs import open_readonly_file_beneath
-    from ..conversation.business_access import BusinessError
-    from ..conversation.business_observability import ObservationSourceError
+    """按结构化原因标识把上传核验异常映射为观察来源错误，并保留异常链。"""
+    reason_tag = getattr(error, 'registry_reason', '')
+    if reason_tag == 'line_budget':
+        reason, next_action = budget_reason, budget_next_action
+    elif reason_tag == 'unreadable' or error.code == 'STORE_UNAVAILABLE':
+        reason, next_action = unreadable_reason, unreadable_next_action
+    elif reason_tag == 'scan_in_progress':
+        reason, next_action = 'ARTIFACT_REGISTRY_SCAN_IN_PROGRESS', error.message
+    else:
+        reason, next_action = 'ARTIFACT_REGISTRY_SOURCE_CHANGED', error.message
+    details = {'reason': reason, 'next_action': next_action}
+    if include_side_effect_none:
+        details['side_effect_state'] = 'none'
+    raise ObservationSourceError('HOST_NOT_READY', details=details) from error
 
-    max_line_bytes = 1024 * 1024
+
+def _media_observation_record(owner: str, item) -> ObservationRecord:
+    """将业务媒体登记条目投影为统一的 ObservationRecord 视图。"""
+    meta = item.metadata
+    value = {
+        'artifact_id': item.artifact_id,
+        'version_ref': meta['version_ref'],
+        'name': meta['display_name'],
+        'mime_type': item.mime_type,
+        'size_bytes': item.size_bytes,
+        'content_sha256': item.sha256,
+        'task_id': item.task_id or None,
+        'space_id': meta['space_id'],
+        'available': item.status == 'ready',
+    }
+    return ObservationRecord(value, owner, meta['space_id'], task_id=item.task_id or None)
+
+
+def _parse_media_registry_line(raw_line: bytes):
+    """解码并验证单条媒体登记 JSONL 行；无效 UTF-8 或非法条目均按不可读拒绝。"""
+    if not raw_line.strip():
+        return None
     try:
-        fd = open_readonly_file_beneath(home, parts)
-    except FileNotFoundError:
-        if expected_media_revision is not None and expected_media_revision != 'missing':
-            raise BusinessError('CURSOR_EXPIRED') from None
-        return 'missing', False
-    except (OSError, ValueError) as error:
-        details = {'reason': unreadable_reason, 'next_action': unreadable_next_action}
-        if include_side_effect_none:
-            details['side_effect_state'] = 'none'
-        raise ObservationSourceError('HOST_NOT_READY', details=details) from error
+        text_line = raw_line.decode('utf-8')
+        record = _record_from_payload(json.loads(text_line))
+        if record is None:
+            raise ValueError('invalid artifact registry record')
+        return record
+    except (UnicodeError, ValueError, TypeError) as error:
+        raise ObservationSourceError('HOST_NOT_READY', details={
+            'reason': 'ARTIFACT_MEDIA_REGISTRY_UNREADABLE',
+            'next_action': '原媒体登记簿无法解析，修复来源后重试。',
+            'side_effect_state': 'none',
+        }) from error
 
-    digest = hashlib.sha256()
-    context = RegistryReadContext(
-        path=home.joinpath(*parts),
-        record_from_payload=_record_from_payload,
-        latest=latest_target,
-    )
-    decode_error = None
-    try:
-        with os.fdopen(fd, 'rb') as fh:
-            line_no = 0
-            while True:
-                raw_line = fh.readline(max_line_bytes + 1)
-                if not raw_line:
-                    break
-                digest.update(raw_line)
-                if len(raw_line) > max_line_bytes:
-                    details = {'reason': budget_reason, 'next_action': budget_next_action}
-                    if include_side_effect_none:
-                        details['side_effect_state'] = 'none'
-                    raise ObservationSourceError('HOST_NOT_READY', details=details)
-                line_no += 1
-                if decode_error is not None or context.errors:
-                    continue
-                try:
-                    text_line = raw_line.decode('utf-8')
-                except UnicodeDecodeError as error:
-                    decode_error = error
-                    continue
-                _read_registry_line(context, text_line, line_no=line_no)
-    except ObservationSourceError:
-        raise
-    except OSError as error:
-        details = {'reason': unreadable_reason, 'next_action': unreadable_next_action}
-        if include_side_effect_none:
-            details['side_effect_state'] = 'none'
-        raise ObservationSourceError('HOST_NOT_READY', details=details) from error
 
-    media_revision = digest.hexdigest()
-    if expected_media_revision is not None and expected_media_revision != media_revision:
+def _validate_media_cursor(after, media_stamp, media_pending) -> int:
+    """核验媒体登记分页游标中的物理偏移、文件指纹及待决候选结构。"""
+    if after == '':
+        offset = 0
+    elif type(after) is int and after >= 0:
+        offset = after
+    else:
         raise BusinessError('CURSOR_EXPIRED')
-    if decode_error is not None:
-        details = {'reason': unreadable_reason, 'next_action': unreadable_next_action}
-        if include_side_effect_none:
-            details['side_effect_state'] = 'none'
-        raise ObservationSourceError('HOST_NOT_READY', details=details) from decode_error
-    if context.errors:
-        details = {'reason': unreadable_reason, 'next_action': unreadable_next_action}
-        if include_side_effect_none:
-            details['side_effect_state'] = 'none'
-        raise ObservationSourceError('HOST_NOT_READY', details=details)
-    return media_revision, True
+    if media_stamp is not None:
+        if type(media_stamp) is not list or len(media_stamp) != 6 or any(type(x) is not int for x in media_stamp):
+            raise BusinessError('CURSOR_EXPIRED')
+    elif offset > 0:
+        raise BusinessError('CURSOR_EXPIRED')
+    if media_pending is not None:
+        if (media_stamp is None
+                or type(media_pending) is not dict
+                or set(media_pending) != {'id', 'offset', 'next'}
+                or type(media_pending['id']) is not str
+                or not media_pending['id']
+                or type(media_pending['offset']) is not int
+                or type(media_pending['next']) is not int
+                or media_pending['offset'] < 0
+                or media_pending['next'] <= media_pending['offset']
+                or offset != media_pending['offset']):
+            raise BusinessError('CURSOR_EXPIRED')
+    return offset
 
 
 class _OwnerReaders:
@@ -1151,33 +1130,291 @@ class _OwnerReaders:
                         else {'phase': 'media', 'after': ''})
                     return ObservationPage(tuple(records), 'partial', source_paged=True, next_position={**next_position, 'revision': revision, 'source_coverage': source_coverage})
             phase, after = 'media', ''
-        parts = ('artifacts', 'business', *REGISTRY_RELATIVE_PATH.parts)
-        target = _OwnerMediaLatestTarget(self.owner, after)
-        media_revision, exists = _stream_business_media_registry(
-            self.home,
-            parts,
-            latest_target=target,
-            budget_reason='ARTIFACT_MEDIA_REGISTRY_READ_BUDGET',
-            budget_next_action='原媒体登记簿单条记录超过有界读取预算，不能把截断内容当完整列表。',
-            unreadable_reason='ARTIFACT_MEDIA_REGISTRY_UNREADABLE',
-            unreadable_next_action='原媒体登记簿无法解析，修复来源后重试。',
-            expected_media_revision=position.get('media_revision'),
-            include_side_effect_none=True,
+        return self._artifacts_media_page(
+            request=request,
+            position=position,
+            after=after,
+            revision=revision,
+            source_coverage=source_coverage,
         )
-        if exists:
-            selected = sorted(target.items.values(), key=lambda item: item.artifact_id)
-            for item in selected[:request.limit]:
-                meta = item.metadata
-                value = {'artifact_id': item.artifact_id, 'version_ref': meta['version_ref'], 'name': meta['display_name'],
-                    'mime_type': item.mime_type, 'size_bytes': item.size_bytes, 'content_sha256': item.sha256,
-                    'task_id': item.task_id or None, 'space_id': meta['space_id'], 'available': item.status == 'ready'}
-                records.append(ObservationRecord(value, self.owner, meta['space_id'], task_id=item.task_id or None))
-            if len(selected) > request.limit:
-                next_position = {'phase': 'media', 'after': selected[request.limit - 1].artifact_id,
-                    'media_revision': media_revision}
-        # 末页沿所有已核验来源的覆盖证明；旧源未知或前页坏登记不能被媒体空页抹平。
-        return ObservationPage(tuple(records), 'partial' if next_position else source_coverage, source_paged=True,
-            next_position={**next_position, 'revision': revision, 'source_coverage': source_coverage} if next_position else None)
+
+    def _artifacts_media_page(self, *, request, position, after, revision, source_coverage):
+        """有界媒体登记分页：每请求严格不超过 2 MiB，物理偏移推进并按最新物理行去重。"""
+        media_call_budget = 2 * 1024 * 1024
+        max_line_bytes = 1024 * 1024
+        small_registry_limit = 512 * 1024
+        media_stamp = position.get('media_stamp')
+        media_pending = position.get('media_pending')
+        offset = _validate_media_cursor(after, media_stamp, media_pending)
+        parts = ('artifacts', 'business', *REGISTRY_RELATIVE_PATH.parts)
+        unreadable_details = {
+            'reason': 'ARTIFACT_MEDIA_REGISTRY_UNREADABLE',
+            'next_action': '原媒体登记簿无法解析，修复来源后重试。',
+            'side_effect_state': 'none',
+        }
+        budget_details = {
+            'reason': 'ARTIFACT_MEDIA_REGISTRY_READ_BUDGET',
+            'next_action': '原媒体登记簿单条记录超过有界读取预算，不能把截断内容当完整列表。',
+            'side_effect_state': 'none',
+        }
+        try:
+            probe_fd = open_readonly_file_beneath(self.home, parts)
+        except FileNotFoundError:
+            if media_stamp is not None:
+                raise BusinessError('CURSOR_EXPIRED') from None
+            return ObservationPage((), source_coverage, source_paged=True, next_position=None)
+        except (OSError, ValueError) as error:
+            raise ObservationSourceError('HOST_NOT_READY', details=unreadable_details) from error
+        else:
+            os.close(probe_fd)
+
+        with locked_private_directory(self.home, relative_parts=('artifacts', 'business'), lock_name='.business-artifacts.lock'):
+            fd = -1
+            try:
+                try:
+                    fd = open_readonly_file_beneath(self.home, parts)
+                except FileNotFoundError:
+                    if media_stamp is not None:
+                        raise BusinessError('CURSOR_EXPIRED') from None
+                    return ObservationPage((), source_coverage, source_paged=True, next_position=None)
+                except (OSError, ValueError) as error:
+                    raise ObservationSourceError('HOST_NOT_READY', details=unreadable_details) from error
+
+                stamp = list(business_upload_registry._stamp(fd))
+                if media_stamp is not None and media_stamp != stamp:
+                    raise BusinessError('CURSOR_EXPIRED')
+                size = stamp[2]
+                if offset > size or (media_pending is not None and media_pending['next'] > size):
+                    raise BusinessError('CURSOR_EXPIRED')
+
+                if media_pending is not None:
+                    os.close(fd)
+                    fd = -1
+                    try:
+                        res = business_upload_registry.lookup_business_upload(
+                            self.home,
+                            media_pending['id'],
+                            max_bytes=media_call_budget,
+                            writer_locked=True,
+                            max_steps=2,
+                            max_total_bytes=media_call_budget,
+                            return_pending=True,
+                            max_record_bytes=max_line_bytes,
+                        )
+                    except HostAPIError as error:
+                        _translate_media_lookup_error(
+                            error,
+                            budget_reason='ARTIFACT_MEDIA_REGISTRY_READ_BUDGET',
+                            budget_next_action=budget_details['next_action'],
+                            unreadable_reason='ARTIFACT_MEDIA_REGISTRY_UNREADABLE',
+                            unreadable_next_action=unreadable_details['next_action'],
+                            include_side_effect_none=True,
+                        )
+                    except (OSError, sqlite3.Error, ValueError) as error:
+                        raise ObservationSourceError('HOST_NOT_READY', details=unreadable_details) from error
+                    if res.pending:
+                        return ObservationPage(
+                            (),
+                            'partial',
+                            source_paged=True,
+                            next_position={
+                                'phase': 'media',
+                                'after': offset,
+                                'media_stamp': stamp,
+                                'media_pending': media_pending,
+                                'revision': revision,
+                                'source_coverage': source_coverage,
+                            },
+                        )
+                    if res.registry_size != size or (res.proof is not None and list(res.proof.source_stamp) != stamp):
+                        raise BusinessError('CURSOR_EXPIRED')
+                    records = []
+                    if (res.record is not None
+                            and res.proof is not None
+                            and res.proof.offset == media_pending['offset']
+                            and res.record.source == 'business_upload'
+                            and res.record.metadata.get('owner_id') == self.owner):
+                        records.append(_media_observation_record(self.owner, res.record))
+                    if media_pending['next'] >= size:
+                        return ObservationPage(tuple(records), source_coverage, source_paged=True, next_position=None)
+                    return ObservationPage(
+                        tuple(records),
+                        'partial',
+                        source_paged=True,
+                        next_position={
+                            'phase': 'media',
+                            'after': media_pending['next'],
+                            'media_stamp': stamp,
+                            'revision': revision,
+                            'source_coverage': source_coverage,
+                        },
+                    )
+
+                if offset >= size:
+                    return ObservationPage((), source_coverage, source_paged=True, next_position=None)
+
+                records = []
+                small_mode = size <= small_registry_limit
+                line_offset = offset
+                read_pos = offset
+                buf = b''
+                bytes_read = 0
+                lookup_budget_used = 0
+
+                def _resolve_inline_small(cand_id: str, row_offset: int, row_next: int):
+                    nonlocal lookup_budget_used
+                    if len(records) >= request.limit or bytes_read + lookup_budget_used + 2 * size > media_call_budget:
+                        return ObservationPage(
+                            tuple(records),
+                            'partial',
+                            source_paged=True,
+                            next_position={
+                                'phase': 'media',
+                                'after': row_offset,
+                                'media_stamp': stamp,
+                                'revision': revision,
+                                'source_coverage': source_coverage,
+                            },
+                        )
+                    try:
+                        res = business_upload_registry.lookup_business_upload(
+                            self.home,
+                            cand_id,
+                            max_bytes=media_call_budget,
+                            writer_locked=True,
+                            max_steps=2,
+                            max_total_bytes=media_call_budget - bytes_read - lookup_budget_used,
+                            return_pending=True,
+                            max_record_bytes=max_line_bytes,
+                        )
+                    except HostAPIError as error:
+                        _translate_media_lookup_error(
+                            error,
+                            budget_reason='ARTIFACT_MEDIA_REGISTRY_READ_BUDGET',
+                            budget_next_action=budget_details['next_action'],
+                            unreadable_reason='ARTIFACT_MEDIA_REGISTRY_UNREADABLE',
+                            unreadable_next_action=unreadable_details['next_action'],
+                            include_side_effect_none=True,
+                        )
+                    except (OSError, sqlite3.Error, ValueError) as error:
+                        raise ObservationSourceError('HOST_NOT_READY', details=unreadable_details) from error
+                    lookup_budget_used += 2 * size
+                    if res.pending:
+                        return ObservationPage(
+                            tuple(records),
+                            'partial',
+                            source_paged=True,
+                            next_position={
+                                'phase': 'media',
+                                'after': row_offset,
+                                'media_stamp': stamp,
+                                'media_pending': {'id': cand_id, 'offset': row_offset, 'next': row_next},
+                                'revision': revision,
+                                'source_coverage': source_coverage,
+                            },
+                        )
+                    if res.registry_size != size or (res.proof is not None and list(res.proof.source_stamp) != stamp):
+                        raise BusinessError('CURSOR_EXPIRED')
+                    if (res.record is not None
+                            and res.proof is not None
+                            and res.proof.offset == row_offset
+                            and res.record.source == 'business_upload'
+                            and res.record.metadata.get('owner_id') == self.owner):
+                        records.append(_media_observation_record(self.owner, res.record))
+                    return None
+
+                while True:
+                    buf_pos = 0
+                    while True:
+                        nl = buf.find(b'\n', buf_pos)
+                        if nl < 0:
+                            break
+                        raw_line = buf[buf_pos:nl + 1]
+                        row_offset = line_offset
+                        row_next = line_offset + len(raw_line)
+                        buf_pos = nl + 1
+                        line_offset = row_next
+                        if len(raw_line) > max_line_bytes:
+                            raise ObservationSourceError('HOST_NOT_READY', details=budget_details)
+                        record = _parse_media_registry_line(raw_line)
+                        if record is not None and record.source == 'business_upload' and record.metadata.get('owner_id') == self.owner:
+                            if small_mode:
+                                early = _resolve_inline_small(record.artifact_id, row_offset, row_next)
+                                if early is not None:
+                                    return early
+                            else:
+                                return ObservationPage(
+                                    (),
+                                    'partial',
+                                    source_paged=True,
+                                    next_position={
+                                        'phase': 'media',
+                                        'after': row_offset,
+                                        'media_stamp': stamp,
+                                        'media_pending': {'id': record.artifact_id, 'offset': row_offset, 'next': row_next},
+                                        'revision': revision,
+                                        'source_coverage': source_coverage,
+                                    },
+                                )
+
+                    buf = buf[buf_pos:]
+                    if len(buf) > max_line_bytes:
+                        raise ObservationSourceError('HOST_NOT_READY', details=budget_details)
+                    if read_pos >= size:
+                        if buf:
+                            row_offset = line_offset
+                            row_next = line_offset + len(buf)
+                            line_offset = row_next
+                            record = _parse_media_registry_line(buf)
+                            buf = b''
+                            if record is not None and record.source == 'business_upload' and record.metadata.get('owner_id') == self.owner:
+                                if small_mode:
+                                    early = _resolve_inline_small(record.artifact_id, row_offset, row_next)
+                                    if early is not None:
+                                        return early
+                                else:
+                                    return ObservationPage(
+                                        (),
+                                        'partial',
+                                        source_paged=True,
+                                        next_position={
+                                            'phase': 'media',
+                                            'after': row_offset,
+                                            'media_stamp': stamp,
+                                            'media_pending': {'id': record.artifact_id, 'offset': row_offset, 'next': row_next},
+                                            'revision': revision,
+                                            'source_coverage': source_coverage,
+                                        },
+                                    )
+                        return ObservationPage(tuple(records), source_coverage, source_paged=True, next_position=None)
+
+                    if bytes_read >= media_call_budget:
+                        return ObservationPage(
+                            tuple(records),
+                            'partial',
+                            source_paged=True,
+                            next_position={
+                                'phase': 'media',
+                                'after': line_offset,
+                                'media_stamp': stamp,
+                                'revision': revision,
+                                'source_coverage': source_coverage,
+                            },
+                        )
+
+                    to_read = min(65536, media_call_budget - bytes_read, size - read_pos)
+                    try:
+                        chunk = business_upload_registry._read(fd, read_pos, to_read)
+                    except OSError as error:
+                        raise ObservationSourceError('HOST_NOT_READY', details=unreadable_details) from error
+                    if not chunk:
+                        raise ObservationSourceError('HOST_NOT_READY', details=unreadable_details)
+                    bytes_read += len(chunk)
+                    read_pos += len(chunk)
+                    buf += chunk
+            finally:
+                if fd >= 0:
+                    os.close(fd)
 
     # LLM: 指定旧版本不回退latest，无安全内容运输口的runtime快照不暴露路径。
     # 函数用途: 返回精确产物版本和原业务媒体读取引用。
@@ -1237,25 +1474,30 @@ class _OwnerReaders:
             return ObservationPage(tuple(self.wrap({'artifact': row.value, 'version_ref': row.value['version_ref'],
                 'read_ref': row.value['artifact_id'], 'available': row.value['available']}, row)
                 for row in selected if params.get('version_ref', row.value['version_ref']) == row.value['version_ref']))
-        parts = ('artifacts', 'business', *REGISTRY_RELATIVE_PATH.parts)
-        target = _SingleArtifactLatestTarget(params['artifact_id'])
-        _, exists = _stream_business_media_registry(
-            self.home,
-            parts,
-            latest_target=target,
-            budget_reason='ARTIFACT_REGISTRY_READ_BUDGET',
-            budget_next_action='原媒体登记簿单条记录超过点查询只读预算，不能把截断记录当最新版本。',
-            unreadable_reason='ARTIFACT_REGISTRY_UNREADABLE',
-            unreadable_next_action='原媒体登记簿无法解析或存在坏记录，修复后重试。',
-        )
-        if exists:
-            item = target.item
-            if item is not None and item.metadata.get('owner_id') == self.owner and item.source == 'business_upload':
-                meta = item.metadata
-                value = {'artifact_id': item.artifact_id, 'version_ref': meta['version_ref'], 'name': meta['display_name'],
-                    'mime_type': item.mime_type, 'size_bytes': item.size_bytes, 'content_sha256': item.sha256,
-                    'task_id': item.task_id or None, 'space_id': meta['space_id'], 'available': item.status == 'ready'}
-                selected.append(ObservationRecord(value, self.owner, meta['space_id'], task_id=item.task_id or None))
+        try:
+            lookup = business_upload_registry.lookup_business_upload(
+                self.home,
+                params['artifact_id'],
+                max_steps=2,
+                max_total_bytes=2 * 1024 * 1024,
+                max_record_bytes=1024 * 1024,
+            )
+        except HostAPIError as error:
+            _translate_media_lookup_error(
+                error,
+                budget_reason='ARTIFACT_REGISTRY_READ_BUDGET',
+                budget_next_action='原媒体登记簿单条记录超过点查询只读预算，不能把截断记录当最新版本。',
+                unreadable_reason='ARTIFACT_REGISTRY_UNREADABLE',
+                unreadable_next_action='原媒体登记簿无法解析或存在坏记录，修复后重试。',
+            )
+        except (OSError, sqlite3.Error, ValueError) as error:
+            raise ObservationSourceError('HOST_NOT_READY', details={
+                'reason': 'ARTIFACT_REGISTRY_UNREADABLE',
+                'next_action': '原媒体登记簿无法解析或存在坏记录，修复后重试。',
+            }) from error
+        item = lookup.record
+        if item is not None and item.metadata.get('owner_id') == self.owner and item.source == 'business_upload':
+            selected.append(_media_observation_record(self.owner, item))
         for row in selected:
             value = row.value
             if params.get('version_ref', value['version_ref']) == value['version_ref']:
